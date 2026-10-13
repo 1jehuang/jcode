@@ -1632,6 +1632,33 @@ impl App {
             self.reset_tab_completion();
         }
 
+        #[cfg(windows)]
+        if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Right)) {
+            let right_clicked_input_cursor = input_area.and_then(|area| {
+                input_ui::input_cursor_pos_from_screen(
+                    self,
+                    area,
+                    input_ui::next_input_prompt_number(self),
+                    mouse.column,
+                    mouse.row,
+                )
+            });
+            let right_clicked_input_area = input_area.is_some_and(|area| {
+                super::super::layout_utils::point_in_rect(mouse.column, mouse.row, area)
+            });
+            if let Some(cursor_pos) = right_clicked_input_cursor {
+                self.cursor_pos = cursor_pos.min(self.input.len());
+                self.reset_tab_completion();
+                self.paste_from_clipboard();
+                finish_mouse_event!(false, "input_right_click_paste");
+            } else if right_clicked_input_area {
+                self.cursor_pos = self.input.len();
+                self.reset_tab_completion();
+                self.paste_from_clipboard();
+                finish_mouse_event!(false, "input_right_click_paste");
+            }
+        }
+
         if let Some(scroll_only) = self.handle_copy_selection_mouse(mouse) {
             finish_mouse_event!(scroll_only, "copy_selection");
         }

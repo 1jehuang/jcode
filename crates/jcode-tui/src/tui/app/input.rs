@@ -1094,12 +1094,28 @@ pub(super) fn handle_text_input(app: &mut App, text: &str) -> bool {
         }
     }
 
+    let mut chars = text.chars();
+    if let (Some(ch), None) = (chars.next(), chars.next()) {
+        paste_guard::note_raw_key_stream_char(ch);
+    }
+
     insert_input_text_with_undo(app, text, true);
     // A key stream may still be receiving the rest of a multi-file drop. Do not
     // strip quoting from a verified non-image prefix until submission, otherwise
     // later paths make its now-unquoted spaces ambiguous.
     attach_dropped_images(app);
     true
+}
+
+pub(in crate::tui::app) fn handle_paste_related_enter(app: &mut App) -> bool {
+    if paste_guard::consume_paste_trailing_enter() {
+        return true;
+    }
+    if paste_guard::consume_raw_paste_enter() {
+        insert_input_text(app, "\n");
+        return true;
+    }
+    false
 }
 
 fn visible_prompt_history(app: &mut App) -> Vec<String> {
@@ -3368,7 +3384,8 @@ impl App {
 
         if code == KeyCode::Enter {
             // Stray post-paste Enter from some terminals is not a submit (#544).
-            if paste_guard::consume_paste_trailing_enter() {
+            // Raw Windows key-stream paste newlines are content, not submit (#928).
+            if handle_paste_related_enter(self) {
                 return Ok(());
             }
             // During the onboarding model-selection phase, Enter on an empty

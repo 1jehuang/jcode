@@ -30,6 +30,89 @@ fn bare_enter_immediately_after_paste_does_not_submit() {
     assert!(app.input.is_empty(), "later Enter should submit normally");
 }
 
+#[test]
+fn raw_key_stream_multi_line_paste_inserts_newlines_not_submits() {
+    crate::tui::app::input::paste_guard_expire_for_test();
+    let mut app = create_test_app();
+
+    for c in "abcdefgh".chars() {
+        app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
+            .expect("paste char should be handled");
+    }
+    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+        .expect("pasted newline should be handled");
+
+    assert_eq!(app.input, "abcdefgh\n");
+    assert!(
+        app.display_messages().is_empty(),
+        "pasted newline must not submit the draft: {:?}",
+        app.display_messages()
+    );
+
+    for c in "ijklmnop".chars() {
+        app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
+            .expect("paste char should be handled");
+    }
+    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+        .expect("second pasted newline should be handled");
+
+    assert_eq!(app.input, "abcdefgh\nijklmnop\n");
+    assert!(
+        app.display_messages().is_empty(),
+        "second pasted newline must not submit the draft: {:?}",
+        app.display_messages()
+    );
+
+    crate::tui::app::input::paste_guard_expire_for_test();
+    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+        .expect("human Enter after paste should submit");
+    assert!(app.input.is_empty(), "later Enter should submit normally");
+}
+
+#[test]
+fn remote_raw_key_stream_multi_line_paste_inserts_newlines_not_submits() {
+    with_temp_jcode_home(|| {
+        crate::tui::app::input::paste_guard_expire_for_test();
+        let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        app.is_remote = true;
+
+        for c in "abcdefgh".chars() {
+            rt.block_on(app.handle_remote_key(KeyCode::Char(c), KeyModifiers::empty(), &mut remote))
+                .expect("remote paste char should be handled");
+        }
+        rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote))
+            .expect("remote pasted newline should be handled");
+
+        assert_eq!(app.input, "abcdefgh\n");
+        assert!(
+            app.display_messages().is_empty(),
+            "remote pasted newline must not submit the draft: {:?}",
+            app.display_messages()
+        );
+    });
+}
+
+#[test]
+fn short_typed_text_below_burst_threshold_still_submits_on_enter() {
+    crate::tui::app::input::paste_guard_expire_for_test();
+    let mut app = create_test_app();
+
+    for c in "abcdefg".chars() {
+        app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
+            .expect("typed char should be handled");
+    }
+    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+        .expect("plain Enter should be handled");
+
+    assert!(
+        app.input.is_empty(),
+        "text below the burst threshold should submit on Enter"
+    );
+}
+
 // Keymap-independent multi-line input: a trailing backslash makes Enter insert
 // a newline instead of submitting.
 //

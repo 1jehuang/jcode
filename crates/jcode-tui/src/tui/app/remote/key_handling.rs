@@ -1058,6 +1058,9 @@ async fn handle_remote_key_internal(
             app.autocomplete();
         }
         KeyCode::Enter => {
+            if input::handle_paste_related_enter(app) {
+                return Ok(());
+            }
             submit_remote_enter_input(app, remote).await?;
         }
         KeyCode::Up | KeyCode::PageUp => {
