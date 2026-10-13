@@ -526,8 +526,7 @@ async fn fetch_models_from_api(
     cache_namespace: Option<String>,
 ) -> Result<Vec<ModelInfo>> {
     let url = format!("{}/models", api_base);
-    let response =
-        apply_kimi_coding_agent_headers(auth.apply(client.get(&url)).await?, &api_base, None)
+    let response = apply_model_catalog_headers(auth.apply(client.get(&url)).await?, &api_base)
             .send()
             .await
             .with_context(|| {

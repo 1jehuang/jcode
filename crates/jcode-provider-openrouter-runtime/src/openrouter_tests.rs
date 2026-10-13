@@ -2704,6 +2704,37 @@ fn test_openrouter_kimi_chat_request_includes_compat_user_agent() {
 }
 
 #[test]
+fn anthropic_profile_model_catalog_request_sends_anthropic_version() {
+    let request = apply_model_catalog_headers(
+        Client::new()
+            .get("https://api.anthropic.com/v1/models")
+            .bearer_auth("test-key"),
+        "https://api.anthropic.com/v1",
+    )
+    .build()
+    .expect("build request");
+    assert_eq!(
+        request
+            .headers()
+            .get("anthropic-version")
+            .and_then(|value| value.to_str().ok()),
+        Some(jcode_base::provider_catalog::ANTHROPIC_VERSION_HEADER_VALUE),
+        "Anthropic /v1/models returns 400 without anthropic-version"
+    );
+}
+
+#[test]
+fn non_anthropic_model_catalog_request_omits_anthropic_version() {
+    let request = apply_model_catalog_headers(
+        Client::new().get("https://api.openai.com/v1/models"),
+        "https://api.openai.com/v1",
+    )
+    .build()
+    .expect("build request");
+    assert!(request.headers().get("anthropic-version").is_none());
+}
+
+#[test]
 fn test_parse_next_event_accepts_compact_sse_data_and_reasoning_content() {
     let bytes = Bytes::from_static(
         b"data:{\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking\"}}]}\n\n",

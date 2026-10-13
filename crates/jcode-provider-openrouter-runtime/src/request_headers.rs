@@ -45,6 +45,27 @@ pub(crate) fn apply_kimi_coding_agent_headers(
     }
 }
 
+/// Headers the `GET {base}/models` catalog request needs beyond auth.
+///
+/// Anthropic's OpenAI-compatible surface accepts Bearer auth for chat, but its
+/// native `/v1/models` endpoint rejects any request without `anthropic-version`
+/// (400 "anthropic-version: header is required"). Without this, the background
+/// catalog sweep for the `anthropic-api` profile fails on every run.
+pub(crate) fn apply_model_catalog_headers(
+    req: reqwest::RequestBuilder,
+    api_base: &str,
+) -> reqwest::RequestBuilder {
+    let req = apply_kimi_coding_agent_headers(req, api_base, None);
+    if jcode_base::provider_catalog::api_base_is_anthropic(api_base) {
+        req.header(
+            "anthropic-version",
+            jcode_base::provider_catalog::ANTHROPIC_VERSION_HEADER_VALUE,
+        )
+    } else {
+        req
+    }
+}
+
 /// Hosts that require the `x-opencode-session` header (issue #1167).
 pub(crate) fn is_opencode_api_base(api_base: &str) -> bool {
     let Ok(url) = reqwest::Url::parse(api_base) else {
