@@ -1,6 +1,29 @@
 // Per-window accounts in a local (standalone) TUI session: the provider must
 // act on what the window shows (failover toggle, pins restored on resume).
 
+#[test]
+fn inline_account_search_accepts_navigation_and_default_letters() {
+    let mut app = create_test_app();
+    let mut picker = model_browser_state(false);
+    picker.kind = crate::tui::PickerKind::Account;
+    picker.entries.truncate(1);
+    picker.filtered = vec![0];
+    picker.entries[0].name = "djk account".to_string();
+    picker.entries[0].action =
+        crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Switch {
+            provider_id: "claude".to_string(),
+            label: "djk account".to_string(),
+        });
+    app.inline_interactive_state = Some(picker);
+    type_into(&mut app, "djk");
+    let picker = app
+        .inline_interactive_state
+        .as_ref()
+        .expect("letters search, not default");
+    assert_eq!(picker.filter, "djk");
+    assert_eq!(picker.selected_entry().unwrap().name, "djk account");
+}
+
 /// Records `set_account_failover` and keeps its own pins, like the real
 /// multi-provider.
 #[derive(Clone, Default)]

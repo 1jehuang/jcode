@@ -2,6 +2,136 @@
 // switching to the first listed model. `@provider` tokens and Ctrl+P scope
 // the list to one provider. `/model <name>` still switches directly.
 
+#[test]
+fn clearing_model_search_preserves_selected_identity_and_route() {
+    let mut app = create_test_app();
+    app.inline_interactive_state = Some(model_browser_state(false));
+    type_into(&mut app, "opus");
+    {
+        let picker = app.inline_interactive_state.as_mut().unwrap();
+        let index = picker.selected_entry_index().unwrap();
+        picker.choose_route(index, 1);
+        picker.column = picker.max_navigable_column();
+    }
+    press(&mut app, KeyCode::Esc);
+    let picker = app.inline_interactive_state.as_ref().unwrap();
+    assert!(picker.filter.is_empty());
+    let selected = picker.selected_entry().unwrap();
+    assert_eq!(selected.name, "claude-opus-4-8");
+    assert_eq!(selected.active_option().unwrap().api_method, "openrouter");
+    assert_eq!(picker.column, picker.max_navigable_column());
+    assert!(app.pending_route_selection.is_none());
+}
+
+#[test]
+fn backspace_clearing_model_search_preserves_selected_identity() {
+    let mut app = create_test_app();
+    app.inline_interactive_state = Some(model_browser_state(false));
+    type_into(&mut app, "v");
+    assert_eq!(selected_row_name(&app), "deepseek-v4");
+    press(&mut app, KeyCode::Backspace);
+    assert_eq!(selected_row_name(&app), "deepseek-v4");
+    assert!(app.inline_interactive_state.as_ref().unwrap().filter.is_empty());
+}
+
+#[test]
+fn unavailable_model_enter_keeps_search_and_explains_why() {
+    let mut app = create_test_app();
+    let mut picker = model_browser_state(false);
+    picker.entries[0].options[0].available = false;
+    picker.entries[0].options[0].detail = "Sign in to OpenAI".to_string();
+    app.inline_interactive_state = Some(picker);
+    type_into(&mut app, "gpt");
+    press(&mut app, KeyCode::Enter);
+    let picker = app
+        .inline_interactive_state
+        .as_ref()
+        .expect("unavailable stays open");
+    assert_eq!(picker.filter, "gpt");
+    assert_eq!(picker.selected_entry().unwrap().name, "gpt-5.5");
+    assert!(picker.effort_step.is_none());
+    let notice = app.status_notice().unwrap();
+    assert!(notice.contains("unavailable"), "{notice}");
+    assert!(notice.contains("Sign in to OpenAI"), "{notice}");
+    assert!(app.pending_route_selection.is_none());
+}
+
+#[test]
+fn unavailable_model_cannot_be_saved_as_default() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let mut picker = model_browser_state(false);
+        picker.entries[0].options[0].available = false;
+        app.inline_interactive_state = Some(picker);
+        app.handle_key(KeyCode::Char('o'), KeyModifiers::CONTROL)
+            .unwrap();
+        let picker = app
+            .inline_interactive_state
+            .as_ref()
+            .expect("unavailable stays open");
+        assert!(picker.effort_step.is_none());
+        assert!(
+            crate::config::Config::load()
+                .provider
+                .default_model
+                .is_none()
+        );
+        assert!(app.status_notice().unwrap().contains("unavailable"));
+    });
+}
+
+#[test]
+fn initial_model_selection_prefers_current_then_available_default_then_available() {
+    let mut entries = model_browser_state(false).entries;
+    entries[0].options[0].available = false;
+    entries[0].is_default = true;
+    assert_eq!(
+        super::inline_interactive::model_picker_initial_selection(&entries),
+        1
+    );
+    entries[2].is_default = true;
+    assert_eq!(
+        super::inline_interactive::model_picker_initial_selection(&entries),
+        2
+    );
+    let mut preview = model_browser_state(true);
+    preview.entries = entries.clone();
+    preview.selected = 2;
+    assert!(super::inline_interactive::picker_enter_should_focus_model_browser(&preview));
+    entries[0].is_current = true;
+    assert_eq!(
+        super::inline_interactive::model_picker_initial_selection(&entries),
+        0
+    );
+    for entry in &mut entries {
+        entry.is_current = false;
+        for option in &mut entry.options {
+            option.available = false;
+        }
+    }
+    assert_eq!(
+        super::inline_interactive::model_picker_initial_selection(&entries),
+        0
+    );
+}
+
+/// These interaction tests need real, selectable routes. A names-only
+/// catalog is intentionally conservative about availability and cannot prove
+/// that Enter actually stages a switch.
+fn configure_available_model_browser_routes(app: &mut App) {
+    configure_test_remote_models(app);
+    app.remote_provider_name = Some("OpenAI".to_string());
+    app.remote_model_options = app.remote_available_entries.iter().map(|model| crate::provider::ModelRoute {
+        model: model.clone(),
+        provider: "OpenAI".to_string(),
+        api_method: "openai-oauth".to_string(),
+        available: true,
+        detail: String::new(),
+        usage: None,
+        cheapness: None,
+    }).collect();
+}
+
 fn model_browser_entry(name: &str, routes: &[(&str, &str)]) -> crate::tui::PickerEntry {
     crate::tui::PickerEntry {
         name: name.to_string(),
@@ -71,7 +201,7 @@ fn type_into(app: &mut App, text: &str) {
 #[test]
 fn bare_model_enter_opens_focused_browser_instead_of_switching() {
     let mut app = create_test_app();
-    configure_test_remote_models(&mut app);
+    configure_available_model_browser_routes(&mut app);
     let model_before = app.remote_provider_model.clone();
 
     type_into(&mut app, "/model");
@@ -92,7 +222,7 @@ fn bare_model_enter_opens_focused_browser_instead_of_switching() {
 #[test]
 fn focused_browser_typing_searches_and_enter_selects() {
     let mut app = create_test_app();
-    configure_test_remote_models(&mut app);
+    configure_available_model_browser_routes(&mut app);
 
     type_into(&mut app, "/model");
     app.handle_key(KeyCode::Enter, KeyModifiers::empty())
@@ -110,6 +240,7 @@ fn focused_browser_typing_searches_and_enter_selects() {
     );
 
     enter_and_confirm_level(&mut app);
+    assert!(app.pending_route_selection.is_some(), "Enter stages an available route");
     assert!(
         app.inline_interactive_state.is_none(),
         "Enter on a searched row selects it and closes the browser"
@@ -119,11 +250,12 @@ fn focused_browser_typing_searches_and_enter_selects() {
 #[test]
 fn model_with_name_still_previews_and_enter_selects() {
     let mut app = create_test_app();
-    configure_test_remote_models(&mut app);
+    configure_available_model_browser_routes(&mut app);
 
     type_into(&mut app, "/model g52c");
     enter_and_confirm_level(&mut app);
 
+    assert!(app.pending_route_selection.is_some(), "Enter stages an available route");
     assert!(app.inline_interactive_state.is_none());
     assert!(app.input().is_empty());
 }
@@ -131,12 +263,13 @@ fn model_with_name_still_previews_and_enter_selects() {
 #[test]
 fn preview_enter_after_arrow_navigation_selects_that_row() {
     let mut app = create_test_app();
-    configure_test_remote_models(&mut app);
+    configure_available_model_browser_routes(&mut app);
 
     type_into(&mut app, "/model");
     app.handle_key(KeyCode::Down, KeyModifiers::empty()).unwrap();
     enter_and_confirm_level(&mut app);
 
+    assert!(app.pending_route_selection.is_some(), "Enter stages an available route");
     assert!(
         app.inline_interactive_state.is_none(),
         "an explicit row choice is still selected by Enter"

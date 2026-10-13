@@ -14,7 +14,8 @@ pub(super) fn inline_ui_height(app: &dyn TuiState) -> u16 {
                 return 0;
             }
             let visible_rows = picker.filtered.len() as u16;
-            let rows_needed = visible_rows + 1 + 2; // header + rounded border
+            let hint_rows = u16::from(picker.kind == crate::tui::PickerKind::Account);
+            let rows_needed = visible_rows + 1 + 2 + hint_rows; // header + border + scope hint
             rows_needed.min(20)
         }
         Some(crate::tui::InlineUiStateRef::View(view)) => {

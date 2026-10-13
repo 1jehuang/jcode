@@ -250,6 +250,20 @@ fn effort_step_esc_returns_to_the_model_list_with_filter_kept() {
     assert_eq!(picker.filter, "opus");
     assert_eq!(picker.entries.len(), 4, "the full model list is back");
     assert_eq!(selected_row_name(&app), "claude-opus-4-8");
+    assert_eq!(
+        picker.column,
+        picker.max_navigable_column(),
+        "return keeps the parent navigation column"
+    );
+    assert_eq!(
+        picker
+            .selected_entry()
+            .unwrap()
+            .active_option()
+            .unwrap()
+            .api_method,
+        "claude-oauth"
+    );
     assert!(app.pending_route_selection.is_none());
 }
 
