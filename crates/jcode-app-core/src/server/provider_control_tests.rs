@@ -38,6 +38,32 @@ async fn invalidate_openai_usage_acknowledges_after_clearing_pinned_daemon_coold
     crate::auth::codex::set_active_account_override(None);
 }
 
+#[tokio::test]
+async fn invalidate_anthropic_usage_acknowledges_after_clearing_only_pinned_claude_cooldown() {
+    let _guard = crate::storage::lock_test_env();
+    let target = "daemon-claude-reset-target";
+    let other = "daemon-claude-reset-other";
+    crate::auth::claude::set_active_account_override(Some(target.to_string()));
+    crate::provider::record_provider_unavailable_for_account("claude", "target session limit");
+    crate::auth::claude::set_active_account_override(Some(other.to_string()));
+    crate::provider::record_provider_unavailable_for_account("claude", "other session limit");
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    // Repeating the request is harmless: it only touches local state.
+    for id in [61, 62] {
+        handle_invalidate_anthropic_usage(id, Some(target.to_string()), &tx).await;
+        assert!(matches!(rx.try_recv(), Ok(ServerEvent::Done { id: ack }) if ack == id));
+        assert!(rx.try_recv().is_err());
+        // The other login keeps its cooldown and stays the active account.
+        assert!(crate::provider::provider_unavailability_detail_for_account("claude").is_some());
+        crate::auth::claude::set_active_account_override(Some(target.to_string()));
+        assert!(crate::provider::provider_unavailability_detail_for_account("claude").is_none());
+        crate::auth::claude::set_active_account_override(Some(other.to_string()));
+    }
+    crate::provider::clear_claude_provider_unavailability_for_account_label(Some(other));
+    crate::auth::claude::set_active_account_override(None);
+}
+
 async fn recv_final_catalog_notification(rx: &mut mpsc::UnboundedReceiver<ServerEvent>) -> String {
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {

@@ -278,13 +278,12 @@ impl App {
         let action = match action {
             Action::Prepare(None) => {
                 // A pending review or in-flight check stays the target of a bare /reset.
-                let provider = if self.usage_reset.pending.is_some()
-                    || self.usage_reset.receiver.is_some()
-                {
-                    self.usage_reset.provider
-                } else {
-                    self.default_reset_provider()
-                };
+                let provider =
+                    if self.usage_reset.pending.is_some() || self.usage_reset.receiver.is_some() {
+                        self.usage_reset.provider
+                    } else {
+                        self.default_reset_provider()
+                    };
                 Action::Prepare(Some(provider))
             }
             action => action,
@@ -698,6 +697,55 @@ mod tests {
         assert!(!is_hard_openai_quota_error("429 too many requests"));
         assert!(!is_hard_openai_quota_error("tokens per minute rate limit"));
         assert!(!is_hard_openai_quota_error("TPM quota exceeded"));
+    }
+
+    #[test]
+    fn redeemed_claude_reset_invalidates_daemon_claude_state_for_pinned_account() {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let mut app = crate::tui::app::tests::create_test_app();
+        app.is_remote = true;
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            let peer = remote.take_dummy_peer().unwrap();
+            let (reader, _writer) = peer.into_split();
+            let mut reader = BufReader::new(reader);
+
+            // Simulate a confirmed Claude claim pinned to a stored login.
+            let (sender, receiver) = oneshot::channel();
+            app.usage_reset.provider = Provider::Claude;
+            app.usage_reset.receiver = Some(receiver);
+            app.usage_reset.redeeming = true;
+            app.usage_reset.redeem_account = Some("work".into());
+            sender
+                .send(Reply::Redeemed(Ok("Claude session limit reset.".into())))
+                .unwrap();
+
+            crate::tui::app::remote::handle_tick(&mut app, &mut remote).await;
+            assert!(app.usage_reset.invalidate_account.is_none());
+            let mut line = String::new();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                reader.read_line(&mut line),
+            )
+            .await
+            .expect("invalidation request sent")
+            .unwrap();
+            let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(value["type"], "invalidate_anthropic_usage", "{line}");
+            assert_eq!(value["account_label"], "work");
+            let id = value["id"].as_u64().unwrap();
+            assert!(app.usage_reset.invalidate_requests.contains_key(&id));
+
+            // The daemon acknowledgement refreshes usage and never ends a turn.
+            app.is_processing = true;
+            assert!(
+                app.handle_server_event(crate::protocol::ServerEvent::Done { id }, &mut remote)
+            );
+            assert!(app.is_processing);
+            assert!(app.usage_reset.invalidate_requests.is_empty());
+            assert!(app.usage_reset.refresh_usage);
+        });
     }
 
     #[test]
