@@ -5,6 +5,10 @@ use super::*;
 #[path = "browser_session_tests.rs"]
 mod browser_session_tests;
 
+#[cfg(unix)]
+#[path = "browser_user_browser_tests.rs"]
+mod browser_user_browser_tests;
+
 #[test]
 fn press_script_uses_selector_when_present() {
     let script = build_press_script(Some("Enter"), Some("#email")).unwrap();

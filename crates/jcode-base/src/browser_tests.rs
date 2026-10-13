@@ -647,3 +647,35 @@ fn update_stops_only_hosts_running_the_replaced_binary() {
     );
     assert!(new_running, "host running the new binary must be kept");
 }
+
+// #1743: readiness probes ran in the user's focused tab before every action.
+#[test]
+fn current_extensions_skip_the_per_action_probes() {
+    let ping = |v: &str| serde_json::json!({"pong": true, "extensionVersion": v});
+    assert!(ping_reports_current_extension(&ping("0.10.1")));
+    assert!(ping_reports_current_extension(&ping("1.0.0")));
+    assert!(!ping_reports_current_extension(&ping("0.9.7")));
+    assert!(!ping_reports_current_extension(
+        &serde_json::json!({"pong": true})
+    ));
+}
+
+#[test]
+fn capability_probes_do_not_move_the_users_page() {
+    for (action, params) in REQUIRED_BRIDGE_ACTION_PROBES {
+        let params: serde_json::Value = serde_json::from_str(params).unwrap();
+        if *action == "scroll" {
+            assert!(params.get("position").is_none(), "{params}");
+            assert!(params["selector"].as_str().unwrap().contains("jcode"));
+        }
+    }
+}
+
+#[test]
+fn stale_session_errors_are_recognized() {
+    assert!(is_stale_session_target_error("No tab with id: 1251116074."));
+    assert!(is_stale_session_target_error(
+        "Error: No active tab found in window 1251116073"
+    ));
+    assert!(!is_stale_session_target_error("Element not found: #save"));
+}

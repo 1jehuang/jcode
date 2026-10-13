@@ -121,7 +121,7 @@ async fn browser_session_reuses_daemon_across_five_tool_calls() {
     let mut responses = Vec::new();
     for _ in 0..5 {
         responses.push(
-            firefox_run_bridge_command("listTabs", json!({}), Some("chrome"), &ctx)
+            firefox_run_bridge_command("getActiveTab", json!({}), Some("chrome"), &ctx)
                 .await
                 .unwrap(),
         );
@@ -144,7 +144,7 @@ async fn browser_session_concurrent_calls_start_one_daemon() {
         let barrier = barrier.clone();
         calls.push(tokio::spawn(async move {
             barrier.wait().await;
-            firefox_run_bridge_command("listTabs", json!({}), Some("chrome"), &ctx).await
+            firefox_run_bridge_command("getActiveTab", json!({}), Some("chrome"), &ctx).await
         }));
     }
     barrier.wait().await;
@@ -165,7 +165,7 @@ async fn browser_session_concurrent_calls_start_one_daemon() {
 async fn browser_session_stalled_startup_keeps_healthy_calls_and_workers_responsive() {
     let fixture = BrowserFixture::new();
     let healthy_ctx = fixture.context("healthy");
-    firefox_run_bridge_command("listTabs", json!({}), Some("chrome"), &healthy_ctx)
+    firefox_run_bridge_command("getActiveTab", json!({}), Some("chrome"), &healthy_ctx)
         .await
         .unwrap();
 
@@ -185,7 +185,7 @@ async fn browser_session_stalled_startup_keeps_healthy_calls_and_workers_respons
         let browser_barrier = barrier.clone();
         browser_calls.push(tokio::spawn(async move {
             browser_barrier.wait().await;
-            firefox_run_bridge_command("listTabs", json!({}), Some("chrome"), &ctx).await
+            firefox_run_bridge_command("getActiveTab", json!({}), Some("chrome"), &ctx).await
         }));
         let ctx = fixture.context("blocked-bash");
         let bash_barrier = barrier.clone();
@@ -206,7 +206,7 @@ async fn browser_session_stalled_startup_keeps_healthy_calls_and_workers_respons
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     let healthy = tokio::spawn(async move {
-        firefox_run_bridge_command("listTabs", json!({}), Some("chrome"), &healthy_ctx).await
+        firefox_run_bridge_command("getActiveTab", json!({}), Some("chrome"), &healthy_ctx).await
     });
     let heartbeat = tokio::spawn(async {
         tokio::task::yield_now().await;

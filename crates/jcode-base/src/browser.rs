@@ -33,10 +33,14 @@ pub struct BrowserStatus {
     pub ready: bool,
 }
 
+/// Probes run against whatever tab the user has focused, so each one must be
+/// free of side effects. The scroll probe targets a selector that cannot exist:
+/// an extension that knows `scroll` answers "Element not found" without moving
+/// the page (it used to scroll the user's tab to the top before every action).
 const REQUIRED_BRIDGE_ACTION_PROBES: &[(&str, &str)] = &[
     ("evaluate", r#"{"script":"return 1"}"#),
     ("listFrames", "{}"),
-    ("scroll", r#"{"position":"top"}"#),
+    ("scroll", r##"{"selector":"#__jcode_capability_probe__"}"##),
     (
         "uploadFile",
         r#"{"selector":"input[type=file]","filePath":"/tmp/jcode-browser-capability-probe"}"#,
@@ -173,7 +177,8 @@ pub fn resolve_target_browser(requested: Option<&str>) -> Result<BrowserDetectio
 #[path = "browser_session.rs"]
 mod browser_session;
 pub use browser_session::{
-    ensure_browser_session, ensure_browser_session_for, ensure_browser_session_for_async,
+    browser_session_running, ensure_browser_session, ensure_browser_session_for,
+    ensure_browser_session_for_async, is_stale_session_target_error, reset_browser_session_for,
 };
 #[path = "browser_update.rs"]
 mod browser_update;
@@ -1105,6 +1110,21 @@ async fn probe_bridge_action_support(
     Ok(!combined.contains(&format!("Unknown action: {}", action)))
 }
 
+/// Oldest extension release that implements every required action.
+const MIN_PROBE_FREE_EXTENSION: (u64, u64, u64) = (0, 10, 0);
+
+/// Whether the ping came from an extension new enough to support every
+/// required action. Extensions report `extensionVersion` since 0.10, so for
+/// them the per-action probes are skipped. Those probes ran inside the user's
+/// focused tab before every browser action and could each wait out the 10s
+/// bridge timeout on a page whose content script was still loading.
+fn ping_reports_current_extension(info: &serde_json::Value) -> bool {
+    info.get("extensionVersion")
+        .and_then(|v| v.as_str())
+        .and_then(browser_update::parse_version)
+        .is_some_and(|v| v >= MIN_PROBE_FREE_EXTENSION)
+}
+
 async fn probe_bridge_missing_actions(kind: BrowserKind) -> Result<Vec<String>> {
     let mut missing = Vec::new();
     for (action, params_json) in REQUIRED_BRIDGE_ACTION_PROBES {
@@ -1134,13 +1154,14 @@ pub async fn inspect_browser_status_for(target: &BrowserDetection) -> Result<Bro
             .unwrap_or("firefox")
             .to_string()
     });
-    let missing_actions = if responding {
-        probe_bridge_missing_actions(target.kind)
-            .await
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
+    let missing_actions =
+        if responding && !ping.as_ref().is_some_and(ping_reports_current_extension) {
+            probe_bridge_missing_actions(target.kind)
+                .await
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
     let compatible = responding && missing_actions.is_empty();
     let ready = responding && compatible;
 

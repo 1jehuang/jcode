@@ -220,6 +220,9 @@ async fn sensitive_pages_never_reach_transport() {
             .unwrap()
             .contains("Never reset passwords")
     );
+    // #1743: the main agent must know to ask the user to sign in and resume.
+    assert_eq!(result["requested_help"], "user_login");
+    assert!(result["reason"].as_str().unwrap().contains("same tab_id"));
     assert!(transport.observed.lock().unwrap().is_empty());
 }
 #[tokio::test]
