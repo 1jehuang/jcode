@@ -202,6 +202,8 @@ impl ToolContext {
 }
 
 /// A tool that can be executed by the agent.
+// async_trait generates redundant must_use attributes on boxed Future methods.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Tool: Send + Sync {
     /// Tool name (must match what's sent to the API).
