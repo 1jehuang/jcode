@@ -474,7 +474,7 @@ pub(crate) enum Command {
         action: String,
 
         /// Browser to target: auto (default: detect your browser), firefox,
-        /// chrome, chromium, edge, brave, or safari
+        /// chrome, chromium, edge, brave, opera, or safari
         browser: Option<String>,
     },
 

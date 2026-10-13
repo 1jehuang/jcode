@@ -798,42 +798,39 @@ and hotkey-friendly dictation without requiring a bundled speech-to-text stack.
 
 ## Browser Automation
 
-jcode includes a first-class built-in `browser` tool for browser control inside agent sessions.
+jcode includes a built-in `browser` tool for browser control inside agent sessions.
 
-Current built-in backend:
-- Firefox via Firefox Agent Bridge
+On macOS, Brave, Chrome, Opera, and Firefox use Browser Agent Bridge. Safari uses the native `safari_applescript` backend, without Xcode or a Safari extension. Edge and Chromium also use the extension bridge.
 
-Current built-in tool actions include:
-- `status`
-- `setup`
-- `open`
-- `snapshot`
-- `get_content`
-- `interactables`
-- `click`
-- `type`
-- `fill_form`
-- `select`
-- `wait`
-- `screenshot`
-- `eval`
-- `scroll`
-- `upload`
-- `press`
-
-Quick setup:
+Choose a browser explicitly for setup and status:
 
 ```bash
-jcode browser status
-jcode browser setup
+jcode browser setup brave
+jcode browser setup chrome
+jcode browser setup opera
+jcode browser setup firefox
+jcode browser setup safari
+jcode browser status safari
+jcode browser detect
 ```
 
-Once setup is complete, the model can use the built-in `browser` tool directly. The UI also summarizes browser tool calls compactly, for example opening a URL, clicking a selector, or typing into a field without echoing sensitive typed text.
+Without a browser argument, jcode uses the saved preference, then browser detection. The tool's `browser` parameter can select a target for each call. A responding bridge is not enough: jcode verifies the connected browser's identity and refuses actions if a different browser answers. On macOS, it also verifies which managed native-host process owns the loopback listening port and which browser launched that process. This avoids stale registry routing and provides identity evidence for signed legacy Firefox extensions that omit their browser name. Explicit targets override inherited `FAB_BROWSER`, `FAB_WS_URL`, and `BROWSER_SESSION` routing.
 
-Notes:
-- the provider/tool architecture is in place for additional backends
-- Firefox is the wired built-in backend today
-- Chrome bridge / remote debugging style providers can be added on top of the same browser tool later
+### Extension browsers
+
+Setup installs the native host in each browser's macOS lookup directories, including the Chrome registration directory used by Brave and Opera. Finish the normal browser approval step: load the unpacked Chromium extension in Brave, Chrome, or Opera, or accept the signed extension installation in Firefox. Enable the extension in every browser you want to use. Running setup again repairs invalid native-host registrations.
+
+The bridge supports tab management, navigation, content and snapshots, element interaction, JavaScript, screenshots, scrolling, file upload, and frame targeting. Readiness checks verify the installed bridge's required actions. If another browser owns a shared bridge connection, status explains the mismatch instead of claiming the requested browser is ready.
+
+### Safari
+
+Explicitly authorize Automation access to Safari and enable **Allow JavaScript from Apple Events** in Safari's developer settings. Setup can request normal macOS consent, but jcode does not change security settings. macOS may ask for your account password when enabling JavaScript automation. Enter it only in the system dialog, never in a chat or command. Status checks do not request consent. An open normal webpage is needed to verify Safari's JavaScript permission.
+
+Safari actions operate only in dedicated single-tab windows created by `new_tab`, scoped to the current Jcode session. Existing user windows are listed for discovery but cannot be silently adopted. A changed window layout, unexpected URL, or lost document identity invalidates its handle rather than targeting another page. Same-URL reloads and delayed redirects can invalidate the handle too. In that case, create a new dedicated tab rather than reusing the stale handle.
+
+Safari supports navigation, content, DOM snapshots and interactables, JavaScript, clicks, form input, selection, waits, and scrolling in the top frame. Input uses synthetic DOM events, so pages requiring trusted native input may reject it. Screenshots, frame targeting, and file upload are not supported by this backend and return explicit errors.
+
+Direct browser actions do not require a separate browser-agent model credential. The optional `handoff` workflow does require its configured model provider to be authenticated.
 
 ---
 

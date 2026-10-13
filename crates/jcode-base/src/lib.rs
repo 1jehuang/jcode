@@ -24,6 +24,7 @@ pub mod auth;
 pub mod background;
 pub mod browser;
 pub mod browser_detect;
+pub mod browser_safari;
 pub mod bus;
 pub mod cache_invalidation;
 pub mod cache_tracker;

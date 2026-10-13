@@ -10,6 +10,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[path = "browser_fast.rs"]
 mod browser_fast;
+#[path = "browser_safari.rs"]
+mod safari_provider;
+static SAFARI_PROVIDER: safari_provider::SafariProvider = safari_provider::SafariProvider;
 
 pub struct BrowserTool;
 
@@ -165,7 +168,7 @@ impl BrowserProvider for FirefoxBridgeProvider {
 
     fn supported_browsers(&self) -> &'static [&'static str] {
         &[
-            "auto", "firefox", "chrome", "chromium", "edge", "brave", "safari",
+            "auto", "firefox", "chrome", "chromium", "edge", "brave", "opera", "safari",
         ]
     }
 
@@ -281,7 +284,7 @@ impl Tool for BrowserTool {
             "browser".into(),
             json!({
                 "type": "string",
-                "enum": ["auto", "firefox", "chrome", "chromium", "edge", "brave", "safari"],
+                "enum": ["auto", "firefox", "chrome", "chromium", "edge", "brave", "opera", "safari"],
                 "description": "Browser. Omit or use auto for the user's detected browser."
             }),
         );
@@ -456,6 +459,13 @@ fn attach_browser_metadata(
 
 fn resolve_provider(browser: Option<&str>) -> Result<&'static dyn BrowserProvider> {
     let browser = browser.unwrap_or("auto");
+    if browser == "safari"
+        || (browser == "auto"
+            && crate::browser::resolve_target_browser(None)
+                .is_ok_and(|target| target.kind == BrowserKind::Safari))
+    {
+        return Ok(&SAFARI_PROVIDER);
+    }
     if FIREFOX_PROVIDER.supported_browsers().contains(&browser) {
         return Ok(&FIREFOX_PROVIDER);
     }
@@ -511,6 +521,15 @@ async fn firefox_status(
     let status = crate::browser::ensure_browser_ready_noninteractive_for(target).await?;
     let mut metadata = status_metadata(provider, &status);
     let name = target.kind.display_name();
+    if status.responding && status.connected_browser.is_some() {
+        if let Err(error) = ready_in_requested_browser(&status, target.kind, true) {
+            metadata["ready"] = json!(false);
+            metadata["browser_mismatch"] = json!(true);
+            return Ok(ToolOutput::new(error.to_string())
+                .with_title("browser status")
+                .with_metadata(metadata));
+        }
+    }
 
     if status.ready {
         let answering = answering_browser_name(&status, target.kind);
@@ -615,6 +634,9 @@ async fn ensure_firefox_ready(
         crate::browser::auto_update_before_action(target.kind).await
     };
     let mut status = crate::browser::ensure_browser_ready_noninteractive_for(target).await?;
+    if status.responding && status.connected_browser.is_some() {
+        ready_in_requested_browser(&status, target.kind, explicit)?;
+    }
     if status.ready {
         return ready_in_requested_browser(&status, target.kind, explicit)
             .map(|note| note.or(update_note));
@@ -628,6 +650,9 @@ async fn ensure_firefox_ready(
         crate::browser::try_launch_browser_for_bridge_with(&status, target.kind).await?
     {
         launched = true;
+        if refreshed.responding && refreshed.connected_browser.is_some() {
+            ready_in_requested_browser(&refreshed, target.kind, explicit)?;
+        }
         if refreshed.ready {
             ready_in_requested_browser(&refreshed, target.kind, explicit)?;
             return Ok(Some(format!(
@@ -682,16 +707,14 @@ fn ready_in_requested_browser(
         .connected_browser
         .as_deref()
         .and_then(BrowserKind::parse)
-        .unwrap_or(BrowserKind::Firefox);
-    if answering == requested || answering.family() == requested.family() {
+        .ok_or_else(|| anyhow::anyhow!("The browser bridge did not report a recognizable browser identity. Refusing to control an unverified browser when browser='{}' was explicitly requested.", requested.id()))?;
+    if answering == requested {
         return Ok(None);
     }
     anyhow::bail!(
-        "The browser bridge is currently connected to {}, not {}. Only one browser can own the bridge at a time. Omit `browser` to use {}, or close {} and run action='setup' with browser='{}'.",
+        "The browser bridge is currently connected to {}, not {}. Refusing to control a different browser. Check action='status' with browser='{}' and repair that browser's integration only if needed. No unrelated browsers or tabs need to be closed.",
         answering.display_name(),
         requested.display_name(),
-        answering.display_name(),
-        answering.display_name(),
         requested.id()
     )
 }
@@ -1016,6 +1039,51 @@ fn build_press_script(key: Option<&str>, selector: Option<&str>) -> Result<Strin
     ))
 }
 
+/// An unavailable managed session must not turn a page action into a command
+/// against the user's current tab. Explicit concrete WebExtension IDs are a
+/// deliberate caller-selected scope for known atomic commands only. Composite
+/// and unknown raw commands may ignore outer scope and require a managed session.
+/// Negative current-window/tab sentinels,
+/// floats and malformed IDs are not a bound context.
+#[cfg(any(unix, test))]
+fn require_safe_bridge_session_fallback(action: &str, params: &Value) -> Result<()> {
+    let mut has_scope = false;
+    let mut all_concrete = true;
+    for key in ["tabId", "windowId"] {
+        if let Some(value) = params.get(key) {
+            has_scope = true;
+            all_concrete &= value
+                .as_i64()
+                .is_some_and(|id| id > 0 && id <= i32::MAX as i64);
+        }
+    }
+    let atomic = matches!(
+        action,
+        "navigate"
+            | "getContent"
+            | "getInteractables"
+            | "evaluate"
+            | "click"
+            | "type"
+            | "fillForm"
+            | "waitFor"
+            | "scroll"
+            | "uploadFile"
+            | "screenshot"
+            | "listFrames"
+            | "getActiveTab"
+            | "setActiveTab"
+    );
+    if params.get("fork").is_none()
+        && ((atomic && has_scope && all_concrete) || matches!(action, "newSession" | "listTabs"))
+    {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "Managed browser session could not be established. Refusing unscoped browser action '{action}' rather than falling back to the user's current tab. Create a dedicated tab with action='new_tab', then pass its explicit tab_id/window_id, or repair the managed session runtime path/startup. Raw provider fallback is limited to known atomic scope-honoring actions with concrete tabId/windowId. Composite, fork-routed and unknown raw commands require a managed session because outer target fields do not scope their effective commands."
+    )
+}
+
 async fn firefox_run_bridge_command(
     action: &str,
     params: Value,
@@ -1038,12 +1106,14 @@ async fn firefox_run_bridge_command(
     command.stderr(std::process::Stdio::piped());
     crate::browser::apply_bridge_browser_env(&mut command, browser);
 
-    #[cfg(not(windows))]
-    if std::env::var("BROWSER_SESSION").is_err()
-        && let Some(session_name) =
-            crate::browser::ensure_browser_session_for_async(&_ctx.session_id, browser).await
+    #[cfg(unix)]
+    if let Some(session_name) =
+        crate::browser::ensure_browser_session_for_async(&_ctx.session_id, browser).await
     {
         command.env("BROWSER_SESSION", session_name);
+    } else {
+        command.env_remove("BROWSER_SESSION");
+        require_safe_bridge_session_fallback(action, &params)?;
     }
 
     let output = command
@@ -1221,6 +1291,10 @@ fn format_interactables_result(result: &Value) -> String {
 #[cfg(test)]
 #[path = "browser_tests.rs"]
 mod browser_tests;
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "browser_macos_live_tests.rs"]
+mod browser_macos_live_tests;
 
 #[cfg(test)]
 mod task_contract_tests {
