@@ -1,3 +1,4 @@
+use super::issue_1056_tests::spawn_single_response_models_server;
 use super::*;
 use bytes::Bytes;
 use futures::StreamExt;
@@ -1446,6 +1447,7 @@ fn make_provider() -> OpenRouterProvider {
         static_image_input_support: HashMap::new(),
         send_openrouter_headers: true,
         conversation_id: new_conversation_id(),
+        extra_headers: ExtraHeaders::default(),
         models_cache: Arc::new(RwLock::new(ModelsCache::default())),
         model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
         endpoint_refresh: Arc::new(Mutex::new(EndpointRefreshTracker::default())),
@@ -1455,7 +1457,7 @@ fn make_provider() -> OpenRouterProvider {
     }
 }
 
-fn make_custom_compatible_provider() -> OpenRouterProvider {
+pub(crate) fn make_custom_compatible_provider() -> OpenRouterProvider {
     OpenRouterProvider {
         client: jcode_provider_core::shared_http_client(),
         model: Arc::new(RwLock::new(DEFAULT_MODEL.to_string())),
@@ -1480,6 +1482,7 @@ fn make_custom_compatible_provider() -> OpenRouterProvider {
         static_image_input_support: HashMap::new(),
         send_openrouter_headers: false,
         conversation_id: new_conversation_id(),
+        extra_headers: ExtraHeaders::default(),
         models_cache: Arc::new(RwLock::new(ModelsCache::default())),
         model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
         endpoint_refresh: Arc::new(Mutex::new(EndpointRefreshTracker::default())),
@@ -1487,34 +1490,6 @@ fn make_custom_compatible_provider() -> OpenRouterProvider {
         provider_pin: Arc::new(Mutex::new(None)),
         endpoints_cache: Arc::new(RwLock::new(HashMap::new())),
     }
-}
-
-fn spawn_single_response_models_server(body: &'static str) -> (String, mpsc::Receiver<String>) {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake provider server");
-    let addr = listener.local_addr().expect("fake provider addr");
-    let (request_tx, request_rx) = mpsc::channel();
-
-    std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("accept fake provider request");
-        stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .expect("set read timeout");
-        let mut request = vec![0u8; 8192];
-        let n = stream.read(&mut request).unwrap_or(0);
-        let request = String::from_utf8_lossy(&request[..n]).into_owned();
-        let _ = request_tx.send(request);
-
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            body.len(),
-            body
-        );
-        stream
-            .write_all(response.as_bytes())
-            .expect("write fake provider response");
-    });
-
-    (format!("http://{addr}/v1"), request_rx)
 }
 
 fn spawn_single_response_chat_server() -> (String, mpsc::Receiver<String>) {
@@ -3222,6 +3197,7 @@ fn midstream_transport_fault_emits_retry_rollback_before_replay() {
             },
             false,
             new_conversation_id(),
+            ExtraHeaders::default(),
             request,
             tx,
             Arc::new(Mutex::new(None)),
