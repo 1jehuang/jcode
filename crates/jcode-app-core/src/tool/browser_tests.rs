@@ -1,6 +1,108 @@
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 use super::*;
 
+#[test]
+fn missing_managed_session_allows_only_metadata_creation_or_concrete_scope() {
+    for action in ["newSession", "listTabs"] {
+        assert!(require_safe_bridge_session_fallback(action, &json!({})).is_ok());
+    }
+    for action in [
+        "evaluate",
+        "click",
+        "navigate",
+        "getContent",
+        "uploadFile",
+        "getInteractables",
+        "fillForm",
+        "waitFor",
+        "scroll",
+        "screenshot",
+        "listFrames",
+        "getActiveTab",
+        "setActiveTab",
+    ] {
+        assert!(
+            require_safe_bridge_session_fallback(action, &json!({"tabId":123})).is_ok(),
+            "{action}"
+        );
+        assert!(
+            require_safe_bridge_session_fallback(action, &json!({"windowId":456})).is_ok(),
+            "{action}"
+        );
+        let error = require_safe_bridge_session_fallback(action, &json!({})).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Refusing unscoped browser action"),
+            "{action}: {error}"
+        );
+    }
+}
+
+#[test]
+fn missing_managed_session_rejects_current_sentinels_and_malformed_scope() {
+    for value in [
+        json!(-2),
+        json!(-1),
+        json!(0),
+        Value::Null,
+        json!("123"),
+        json!(1.5),
+        json!(true),
+        json!(i64::MAX),
+    ] {
+        for key in ["tabId", "windowId"] {
+            let params = json!({(key):value.clone()});
+            assert!(
+                require_safe_bridge_session_fallback("getContent", &params).is_err(),
+                "{params}"
+            );
+            assert!(
+                require_safe_bridge_session_fallback("click", &params).is_err(),
+                "{params}"
+            );
+        }
+    }
+    // Snake-case raw params are not the bridge's actual target fields.
+    assert!(require_safe_bridge_session_fallback("evaluate", &json!({"tab_id":123})).is_err());
+    assert!(require_safe_bridge_session_fallback("navigate", &json!({"newTab":true})).is_err());
+    assert!(
+        require_safe_bridge_session_fallback("click", &json!({"tabId":-1,"windowId":123})).is_err()
+    );
+    assert!(
+        require_safe_bridge_session_fallback("getContent", &json!({"tabId":123,"windowId":-2}))
+            .is_err()
+    );
+}
+
+#[test]
+fn missing_managed_session_rejects_composite_unknown_and_fork_routed_commands() {
+    let batch = json!({"tabId":123,"commands":[{"action":"click","params":{"selector":"#x"}}]});
+    for action in [
+        "batch",
+        "executeBatch",
+        "parallel",
+        "fork",
+        "scout",
+        "unknownRawCommand",
+        "closeTab",
+    ] {
+        assert!(
+            require_safe_bridge_session_fallback(action, &batch).is_err(),
+            "{action}"
+        );
+    }
+    for fork in [json!("other"), json!("unknown"), Value::Null] {
+        for action in ["click", "evaluate", "getContent", "listTabs", "newSession"] {
+            assert!(
+                require_safe_bridge_session_fallback(action, &json!({"tabId":123,"fork":fork}))
+                    .is_err(),
+                "{action}"
+            );
+        }
+    }
+}
+
 #[cfg(unix)]
 #[path = "browser_session_tests.rs"]
 mod browser_session_tests;
@@ -183,7 +285,7 @@ fn schema_exposes_advanced_browser_fields() {
 #[test]
 fn resolve_provider_accepts_every_supported_browser() {
     for browser in [
-        "auto", "firefox", "chrome", "chromium", "edge", "brave", "safari",
+        "auto", "firefox", "chrome", "chromium", "edge", "brave", "opera", "safari",
     ] {
         assert!(resolve_provider(Some(browser)).is_ok(), "{browser}");
     }
@@ -195,6 +297,32 @@ fn resolve_provider_rejects_unknown_browser() {
         .err()
         .expect("unknown browsers must not resolve");
     assert!(err.to_string().contains("Unknown browser 'netscape'"));
+}
+
+#[test]
+fn safari_uses_native_backend_and_exposes_limits() {
+    assert_eq!(
+        resolve_provider(Some("safari")).unwrap().id(),
+        "safari_applescript"
+    );
+    assert_eq!(
+        resolve_provider(Some("opera")).unwrap().id(),
+        "firefox_agent_bridge"
+    );
+    let capabilities = crate::browser_safari::capabilities();
+    assert_eq!(capabilities["extension_required"], false);
+    assert!(
+        capabilities["unsupported"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("screenshot"))
+    );
+    assert!(
+        BrowserTool::new().parameters_schema()["properties"]["browser"]["enum"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("opera"))
+    );
 }
 
 #[test]
@@ -219,12 +347,43 @@ fn explicit_browser_request_refuses_a_different_connected_browser() {
     );
     // Auto mode drives whichever browser owns the bridge.
     assert!(ready_in_requested_browser(&status, BrowserKind::Chrome, false).is_ok());
-    // Chromium-family browsers share one extension build.
+    // Sharing an extension build does not make browser identities interchangeable.
     let edge = jcode_base::browser::BrowserStatus {
         connected_browser: Some("edge".into()),
         ..status
     };
-    assert!(ready_in_requested_browser(&edge, BrowserKind::Chrome, true).is_ok());
+    assert!(ready_in_requested_browser(&edge, BrowserKind::Chrome, true).is_err());
+    let brave = jcode_base::browser::BrowserStatus {
+        connected_browser: Some("brave".into()),
+        ..edge
+    };
+    assert!(ready_in_requested_browser(&brave, BrowserKind::Chrome, true).is_err());
+    assert!(ready_in_requested_browser(&brave, BrowserKind::Brave, true).is_ok());
+    let incompatible_wrong_browser = jcode_base::browser::BrowserStatus {
+        compatible: false,
+        ready: false,
+        ..brave
+    };
+    let message =
+        ready_in_requested_browser(&incompatible_wrong_browser, BrowserKind::Chrome, true)
+            .unwrap_err()
+            .to_string();
+    assert!(
+        message.contains("connected to Brave, not Google Chrome"),
+        "{message}"
+    );
+    assert!(!message.contains("missing required actions"));
+    assert!(!message.contains("Only one browser"));
+    let unidentified = jcode_base::browser::BrowserStatus {
+        connected_browser: None,
+        ..incompatible_wrong_browser
+    };
+    assert!(
+        ready_in_requested_browser(&unidentified, BrowserKind::Chrome, true)
+            .unwrap_err()
+            .to_string()
+            .contains("unverified browser")
+    );
 }
 
 #[test]
