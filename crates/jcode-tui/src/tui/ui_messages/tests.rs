@@ -39,6 +39,19 @@ fn render_system_message_forces_system_color_on_all_spans() {
 }
 
 #[test]
+fn render_system_message_drops_emoji_variation_selectors() {
+    let msg = DisplayMessage::system(
+        "⚠️ KV cache miss [harness: prefix changed] turn 13: ~336K tokens resent (an earlier message was modified). See KV_CACHE_USAGE in logs.",
+    );
+
+    let lines = render_system_message(&msg, 80, crate::config::DiffDisplayMode::Off);
+    let text: String = lines.iter().map(extract_line_text).collect();
+
+    assert!(text.contains("⚠ KV cache miss"), "got: {text}");
+    assert!(!text.contains('\u{FE0F}'), "VS16 must not reach the buffer");
+}
+
+#[test]
 fn render_cold_cache_warning_is_always_one_width_bounded_line() {
     let saved = crate::tui::markdown::center_code_blocks();
     let msg = DisplayMessage::system(

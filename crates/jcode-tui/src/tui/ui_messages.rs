@@ -35,7 +35,15 @@ fn width_stable_system_title<'a>(normal: &'a str, stable: &'a str) -> &'a str {
 }
 
 fn normalize_system_content_for_display(content: &str) -> Cow<'_, str> {
-    let sanitized = strip_ansi_escape_sequences(content);
+    // Emoji variation selectors (U+FE0F, as in "⚠️" or "ℹ️") make terminals
+    // render the base glyph two cells wide while ratatui may count it as one.
+    // That shifts the rest of the row and leaves stale cells behind (ghost
+    // characters at the right edge) on later diff repaints. Render the plain
+    // text-presentation glyph instead so widths always agree.
+    let mut sanitized = strip_ansi_escape_sequences(content);
+    if sanitized.contains('\u{FE0F}') {
+        sanitized.retain(|ch| ch != '\u{FE0F}');
+    }
     if !prefer_width_stable_system_glyphs() {
         return Cow::Owned(sanitized);
     }
