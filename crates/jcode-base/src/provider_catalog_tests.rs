@@ -103,6 +103,89 @@ impl Drop for EnvGuard {
     }
 }
 
+fn with_isolated_named_profile_availability(f: impl FnOnce()) {
+    let _lock = crate::storage::lock_test_env();
+    let keys = [
+        "JCODE_HOME",
+        "JCODE_NAMED_PROVIDER_PROFILE",
+        "JCODE_PROVIDER_PROFILE_ACTIVE",
+        "JCODE_OPENROUTER_API_KEY_NAME",
+        "JCODE_OPENROUTER_ENV_FILE",
+        "JCODE_OPENROUTER_API_BASE",
+        "JCODE_OPENROUTER_CACHE_NAMESPACE",
+        "JCODE_OPENROUTER_ALLOW_NO_AUTH",
+        "JCODE_OPENAI_COMPAT_API_BASE",
+        "JCODE_OPENAI_COMPAT_API_KEY_NAME",
+        "JCODE_OPENAI_COMPAT_ENV_FILE",
+        "JCODE_OPENAI_COMPAT_LOCAL_ENABLED",
+        "JCODE_TEST_NAMED_PROFILE_API_KEY",
+        "OPENAI_COMPAT_API_KEY",
+        "COMTEGRA_API_KEY",
+        "FPT_API_KEY",
+        "OLLAMA_API_KEY",
+    ];
+    let _guard = EnvGuard::save(&keys);
+    let home = tempfile::tempdir().expect("isolated provider credentials");
+    for key in keys {
+        crate::env::remove_var(key);
+    }
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::env::set_var("JCODE_NAMED_PROVIDER_PROFILE", "test-named-profile");
+    crate::env::set_var(
+        "JCODE_OPENROUTER_API_KEY_NAME",
+        "JCODE_TEST_NAMED_PROFILE_API_KEY",
+    );
+    crate::env::set_var("JCODE_OPENROUTER_ENV_FILE", "test-named-profile.env");
+    f();
+}
+
+#[test]
+fn unconfigured_named_generic_does_not_shadow_comtegra_credentials() {
+    with_isolated_named_profile_availability(|| {
+        assert!(!openai_compatible_profile_is_configured(
+            OPENAI_COMPAT_PROFILE
+        ));
+        crate::env::set_var("COMTEGRA_API_KEY", "test-comtegra-key");
+        assert!(openai_compatible_profile_is_configured(COMTEGRA_PROFILE));
+    });
+}
+
+#[test]
+fn unconfigured_named_generic_does_not_shadow_fpt_credentials() {
+    with_isolated_named_profile_availability(|| {
+        assert!(!openai_compatible_profile_is_configured(
+            OPENAI_COMPAT_PROFILE
+        ));
+        crate::env::set_var("FPT_API_KEY", "test-fpt-key");
+        assert!(openai_compatible_profile_is_configured(FPT_PROFILE));
+    });
+}
+
+#[test]
+fn unconfigured_named_generic_does_not_shadow_enabled_local_ollama() {
+    with_isolated_named_profile_availability(|| {
+        crate::env::set_var(OPENAI_COMPAT_LOCAL_ENABLED_ENV, "1");
+        // The active named generic endpoint still requires its own credential.
+        assert!(!openai_compatible_profile_is_configured(
+            OPENAI_COMPAT_PROFILE
+        ));
+        assert!(openai_compatible_profile_is_configured(OLLAMA_PROFILE));
+    });
+}
+
+#[test]
+fn configured_named_generic_does_not_enable_unconfigured_builtin_profiles() {
+    with_isolated_named_profile_availability(|| {
+        crate::env::set_var("JCODE_TEST_NAMED_PROFILE_API_KEY", "test-named-profile-key");
+        assert!(openai_compatible_profile_is_configured(
+            OPENAI_COMPAT_PROFILE
+        ));
+        assert!(!openai_compatible_profile_is_configured(COMTEGRA_PROFILE));
+        assert!(!openai_compatible_profile_is_configured(FPT_PROFILE));
+        assert!(!openai_compatible_profile_is_configured(OLLAMA_PROFILE));
+    });
+}
+
 #[test]
 fn anthropic_catalog_auth_uses_api_key_and_version_headers() {
     let request = apply_openai_compatible_catalog_auth(
@@ -387,6 +470,9 @@ fn auth_issue_runtime_display_name_tracks_direct_compatible_profiles() {
         "JCODE_PROVIDER_PROFILE_ACTIVE",
     ]);
 
+    // This fixture switches built-in profiles, not an inherited named profile.
+    crate::env::remove_var("JCODE_NAMED_PROVIDER_PROFILE");
+    crate::env::remove_var("JCODE_PROVIDER_PROFILE_ACTIVE");
     crate::env::set_var("JCODE_RUNTIME_PROVIDER", "azure-openai");
     assert_eq!(runtime_provider_display_name("openrouter"), "Azure OpenAI");
     crate::env::remove_var("JCODE_RUNTIME_PROVIDER");
@@ -1016,12 +1102,14 @@ fn matrix_openai_compatible_profile_overrides_read_from_env_file() {
 fn matrix_openai_compatible_localhost_override_allows_no_auth() {
     let _lock = crate::storage::lock_test_env();
     let _guard = EnvGuard::save(&[
+        "JCODE_NAMED_PROVIDER_PROFILE",
         "JCODE_OPENAI_COMPAT_API_BASE",
         "JCODE_OPENAI_COMPAT_API_KEY_NAME",
         "JCODE_OPENAI_COMPAT_ENV_FILE",
         "JCODE_OPENAI_COMPAT_LOCAL_ENABLED",
     ]);
 
+    crate::env::remove_var("JCODE_NAMED_PROVIDER_PROFILE");
     crate::env::set_var("JCODE_OPENAI_COMPAT_API_BASE", "http://localhost:11434/v1");
     crate::env::remove_var("JCODE_OPENAI_COMPAT_API_KEY_NAME");
     crate::env::remove_var("JCODE_OPENAI_COMPAT_ENV_FILE");

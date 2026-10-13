@@ -168,18 +168,31 @@ fn selected_route_notice_text(
 
 fn model_picker_top_hint(picker: &crate::tui::InlineInteractiveState) -> Option<&'static str> {
     if picker.kind == crate::tui::PickerKind::Account {
-        return Some(
-            if matches!(
-                picker.selected_entry().map(|entry| &entry.action),
-                Some(crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Switch {
-                    provider_id, ..
-                })) if provider_id == "claude-code"
-            ) {
+        use crate::tui::{AccountPickerAction, PickerAction};
+        return Some(match picker.selected_entry().map(|entry| &entry.action) {
+            Some(PickerAction::Account(AccountPickerAction::Switch { provider_id, .. }))
+                if provider_id == "claude-code" =>
+            {
                 " Enter use in this window · default: config.toml · type to search"
-            } else {
+            }
+            Some(PickerAction::Account(AccountPickerAction::Switch { .. })) => {
                 " Enter use in this window · Ctrl+D default for new windows · type to search"
-            },
-        );
+            }
+            Some(PickerAction::Account(AccountPickerAction::Add { .. })) => {
+                " Enter sign in to another account · type to search"
+            }
+            Some(PickerAction::Account(AccountPickerAction::Replace { .. })) => {
+                " Enter refresh this saved login · type to search"
+            }
+            Some(PickerAction::Account(AccountPickerAction::OpenCenter { .. })) => {
+                " Enter open account center · type to search"
+            }
+            Some(PickerAction::Account(AccountPickerAction::SetDefault { .. })) => {
+                " Enter default for new/unpinned windows · type to search"
+            }
+            None => " Type to search · Esc clear filter",
+            _ => " Enter open selected action · type to search",
+        });
     }
     let is_swarm_agent_model_picker = picker.kind == crate::tui::PickerKind::Model
         && picker.entries.iter().any(|entry| {
@@ -1585,6 +1598,42 @@ mod tests {
         let hint = model_picker_top_hint(&picker).expect("Claude Code instructions");
         assert!(hint.contains("default: config.toml"));
         assert!(!hint.contains("Ctrl+D"));
+    }
+
+    #[test]
+    fn account_picker_hint_describes_actions_without_offering_default_shortcut() {
+        use crate::tui::{AccountPickerAction, PickerAction};
+        let mut picker = sample_account_picker(false);
+        for (action, expected) in [
+            (
+                AccountPickerAction::Add {
+                    provider_id: "claude".to_string(),
+                },
+                "Enter sign in to another account",
+            ),
+            (
+                AccountPickerAction::Replace {
+                    provider_id: "claude".to_string(),
+                    label: "claude-otter".to_string(),
+                },
+                "Enter refresh this saved login",
+            ),
+            (
+                AccountPickerAction::OpenCenter {
+                    provider_filter: None,
+                },
+                "Enter open account center",
+            ),
+        ] {
+            picker.entries[0].action = PickerAction::Account(action);
+            let hint = model_picker_top_hint(&picker).unwrap();
+            assert!(hint.contains(expected), "{hint}");
+            assert!(!hint.contains("Ctrl+D"), "{hint}");
+        }
+        picker.filtered.clear();
+        let hint = model_picker_top_hint(&picker).unwrap();
+        assert!(hint.contains("Esc clear filter"));
+        assert!(!hint.contains("Enter"));
     }
 
     #[test]
