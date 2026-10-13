@@ -28,6 +28,7 @@ pub fn native_doctor_supports_provider(provider_id: &str) -> bool {
                 | "bedrock"
                 | "jcode"
                 | "azure-openai"
+                | "command-code"
         )
     )
 }

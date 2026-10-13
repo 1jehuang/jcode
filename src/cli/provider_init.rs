@@ -38,6 +38,8 @@ pub enum ProviderChoice {
     )]
     OpenaiApi,
     Openrouter,
+    #[value(alias = "commandcode")]
+    CommandCode,
     #[value(alias = "aws-bedrock", alias = "aws_bedrock")]
     Bedrock,
     #[value(alias = "azure-openai", alias = "aoai")]
@@ -154,6 +156,7 @@ impl ProviderChoice {
             Self::Openai => "openai",
             Self::OpenaiApi => "openai-api",
             Self::Openrouter => "openrouter",
+            Self::CommandCode => "command-code",
             Self::Bedrock => "bedrock",
             Self::Azure => "azure",
             Self::Opencode => "opencode",
@@ -232,6 +235,10 @@ const PROVIDER_CHOICE_LOGIN_PROVIDERS: &[(ProviderChoice, LoginProviderDescripto
     (
         ProviderChoice::Openrouter,
         crate::provider_catalog::OPENROUTER_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::CommandCode,
+        crate::provider_catalog::COMMAND_CODE_LOGIN_PROVIDER,
     ),
     (
         ProviderChoice::Bedrock,
@@ -1433,6 +1440,15 @@ pub async fn login_and_bootstrap_provider(
             crate::env::set_var("JCODE_ACTIVE_PROVIDER", "antigravity");
             Arc::new(jcode_provider_antigravity_runtime::AntigravityProvider::new())
         }
+        LoginProviderTarget::CommandCode => {
+            disable_subscription_runtime_mode();
+            clear_initial_model_provider();
+            crate::env::set_var("JCODE_ACTIVE_PROVIDER", "command-code");
+            crate::provider::external::instantiate_external_provider(
+                crate::provider::external::COMMAND_CODE_RUNTIME,
+            )
+            .ok_or_else(|| anyhow::anyhow!("Command Code credentials are unavailable"))?
+        }
         LoginProviderTarget::Google => {
             anyhow::bail!("Google login cannot be used as a model provider bootstrap");
         }
@@ -1623,6 +1639,20 @@ async fn init_provider_with_model_policy(
             init_notice("Using OpenRouter as the initial provider (use /model to switch)");
             select_initial_model_provider("openrouter");
             Arc::new(provider::MultiProvider::new_fast())
+        }
+        ProviderChoice::CommandCode => {
+            disable_subscription_runtime_mode();
+            init_notice("Using Command Code native provider");
+            clear_initial_model_provider();
+            crate::env::set_var("JCODE_ACTIVE_PROVIDER", "command-code");
+            crate::provider::external::instantiate_external_provider(
+                crate::provider::external::COMMAND_CODE_RUNTIME,
+            )
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Command Code credentials are unavailable; import ~/.commandcode/auth.json or complete Command Code login"
+                )
+            })?
         }
         ProviderChoice::Bedrock => {
             disable_subscription_runtime_mode();

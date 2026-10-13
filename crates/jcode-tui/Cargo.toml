@@ -22,6 +22,7 @@ path = "src/lib.rs"
 # Re-exported via `pub use jcode_app_core::*` in lib.rs. default-features=false
 # so this crate (and ultimately the root crate) controls app-core's features.
 jcode-app-core = { path = "../jcode-app-core", default-features = false }
+jcode-provider-command-code-runtime = { path = "../jcode-provider-command-code-runtime" }
 
 # Pure math kernels for the idle animations (3D samplers, glyph chooser,
 # HSV->RGB). Pinned to opt-level = 3 in all profiles via workspace Cargo.toml so

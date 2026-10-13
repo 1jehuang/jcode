@@ -34,6 +34,7 @@ jcode-provider-openrouter-runtime = { path = "../jcode-provider-openrouter-runti
 jcode-provider-cursor-runtime = { path = "../jcode-provider-cursor-runtime" }
 jcode-provider-antigravity-runtime = { path = "../jcode-provider-antigravity-runtime" }
 jcode-provider-copilot-runtime = { path = "../jcode-provider-copilot-runtime" }
+jcode-provider-command-code-runtime = { path = "../jcode-provider-command-code-runtime" }
 
 [dev-dependencies]
 # The auth-lifecycle driver tests run inside jcode-base's auth test sandbox.

@@ -2,6 +2,8 @@
 mod auth_account_commands;
 #[path = "auth_account_picker.rs"]
 mod auth_account_picker;
+#[path = "auth_command_code.rs"]
+mod auth_command_code;
 #[path = "auth_types.rs"]
 mod auth_types;
 pub(crate) use self::auth_account_commands::{
@@ -10,11 +12,9 @@ pub(crate) use self::auth_account_commands::{
     save_openai_fast_setting_local,
 };
 pub(super) use self::auth_types::{AccountCommand, PendingAccountInput, PendingLogin};
-
 use super::*;
 use crossterm::event::{KeyCode, KeyModifiers};
 use std::sync::Arc;
-
 impl App {
     pub(super) fn open_auth_browser(url: &str) -> bool {
         // Honors --no-browser/NO_BROWSER/JCODE_NO_BROWSER and never opens real
@@ -332,10 +332,7 @@ impl App {
                 crate::auth::gemini::clear_tokens()?;
                 Ok("Logged out of Gemini.".to_string())
             }
-            _ => Ok(format!(
-                "Logout for {} is not automated yet. Remove its saved API key or external CLI session from /account {} settings.",
-                provider.display_name, provider.id
-            )),
+            _ => auth_command_code::logout_fallback(provider),
         })();
 
         match result {
@@ -568,6 +565,9 @@ impl App {
             crate::provider_catalog::LoginProviderTarget::Gemini => self.start_gemini_login(),
             crate::provider_catalog::LoginProviderTarget::Antigravity => {
                 self.start_antigravity_login()
+            }
+            crate::provider_catalog::LoginProviderTarget::CommandCode => {
+                auth_command_code::start_login(self)
             }
             crate::provider_catalog::LoginProviderTarget::Google => {
                 crate::telemetry::record_auth_surface_blocked(

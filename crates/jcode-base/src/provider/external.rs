@@ -27,6 +27,9 @@ pub const CURSOR_RUNTIME: &str = "cursor";
 /// Registry key for the Antigravity provider runtime.
 pub const ANTIGRAVITY_RUNTIME: &str = "antigravity";
 
+/// Registry key for the Command Code provider runtime.
+pub const COMMAND_CODE_RUNTIME: &str = "command-code";
+
 /// Registry key for the GitHub Copilot provider runtime.
 pub const COPILOT_RUNTIME: &str = "copilot";
 
