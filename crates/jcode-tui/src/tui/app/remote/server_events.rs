@@ -1323,7 +1323,9 @@ pub(in crate::tui::app) fn handle_server_event(
             // account just because its reason includes quota/reset timing.
             let is_failover_prompt =
                 crate::provider::parse_failover_prompt_message(&message).is_some();
-            let reset_duration = if is_failover_prompt {
+            let is_permanent_refresh_rejection =
+                crate::auth::refresh_state::error_is_permanent_rejection(&message);
+            let reset_duration = if is_failover_prompt || is_permanent_refresh_rejection {
                 None
             } else {
                 retry_after_secs
@@ -1424,6 +1426,19 @@ pub(in crate::tui::app) fn handle_server_event(
                         App::AUTO_RETRY_MAX_ATTEMPTS
                     ),
                     "Paused: provider limit did not clear",
+                );
+                app.offer_fallback_after_error_with_payload(&message, failed_fallback_payload);
+                return false;
+            }
+            // A refresh token explicitly rejected or revoked by the provider
+            // cannot recover by resending. Stop on the first such error, even
+            // with auto-poke off, rather than spending the generic retry budget
+            // or scheduling a fresh todo continuation. Preserve the fallback
+            // payload so switching auth methods still requires user consent.
+            if is_permanent_refresh_rejection {
+                app.pause_exhausted_auto_resume(
+                    "Stopped automatic retries: the current OAuth refresh token is rejected or revoked. Your message is back in the input box. Run /login to sign in again, or use /model to choose a working route, then send again.".to_string(),
+                    "Stopped: OAuth login needs attention",
                 );
                 app.offer_fallback_after_error_with_payload(&message, failed_fallback_payload);
                 return false;

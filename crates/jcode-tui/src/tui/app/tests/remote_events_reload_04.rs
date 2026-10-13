@@ -2587,6 +2587,95 @@ fn test_credential_failure_breaker_trips_after_consecutive_auth_errors() {
 }
 
 #[test]
+fn test_rejected_refresh_token_stops_all_automatic_resends_immediately() {
+    with_temp_jcode_home(|| {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        for auto_poke in [false, true] {
+            for (auto_retry, retry_after_secs) in [(false, None), (true, None), (true, Some(1))] {
+                let mut app = create_test_app();
+                let mut remote = crate::tui::backend::RemoteConnection::dummy();
+                remote.mark_history_loaded();
+                app.is_remote = true;
+                app.remote_provider_name = Some("Claude".to_string());
+                app.remote_provider_model = Some("claude-sonnet-4".to_string());
+                app.remote_resolved_credential =
+                    Some(jcode_provider_core::ResolvedCredential::Oauth);
+                app.remote_model_options = vec![
+                    claude_oauth_route("claude-sonnet-4"),
+                    claude_oauth_route("claude-opus-4"),
+                    openai_oauth_route("gpt-5.5"),
+                ];
+                app.auto_poke_incomplete_todos = auto_poke;
+                // Even an inactive default-on scheduler must not re-arm after
+                // a terminal credential failure.
+                app.auto_poke_default_on = true;
+                crate::todo::save_todos(
+                    &app.session.id,
+                    &[crate::todo::TodoItem {
+                        id: "todo-1".to_string(),
+                        content: "Finish work".to_string(),
+                        status: "in_progress".to_string(),
+                        ..Default::default()
+                    }],
+                )
+                .unwrap();
+                app.queued_messages
+                    .push(crate::todo::TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE.to_string());
+                app.queued_messages
+                    .push("Keep my queued prompt".to_string());
+                app.rate_limit_pending_message = Some(PendingRemoteMessage {
+                    content: "keep going".to_string(),
+                    images: vec![],
+                    is_system: false,
+                    system_reminder: Some("preserve reminder".to_string()),
+                    auto_retry,
+                    retry_attempts: 0,
+                    retry_at: None,
+                });
+                app.last_submitted_input = Some("keep going".to_string());
+                app.is_processing = true;
+                app.status = ProcessingStatus::Streaming;
+                app.current_message_id = Some(30);
+
+                assert!(!app.handle_server_event(
+                    crate::protocol::ServerEvent::Error {
+                        id: 30,
+                        message: "Claude OAuth refresh token was previously rejected by Anthropic and cannot be refreshed. Run `jcode login --provider claude` to mint a fresh token.".to_string(),
+                        retry_after_secs,
+                    },
+                    &mut remote,
+                ));
+                assert!(app.rate_limit_pending_message.is_none());
+                assert!(app.rate_limit_reset.is_none());
+                assert!(!app.auto_poke_incomplete_todos);
+                assert!(!app.auto_poke_default_on);
+                assert!(app.overnight_auto_poke.is_none());
+                assert!(!app.is_processing);
+                assert_eq!(app.input, "keep going");
+                assert_eq!(app.queued_messages, vec!["Keep my queued prompt"]);
+                let offer = app
+                    .pending_fallback_offer
+                    .as_ref()
+                    .expect("manual fallback");
+                assert_eq!(offer.selection.provider_label, "OpenAI");
+                let resend = offer.remote_resend.as_ref().expect("saved payload");
+                assert_eq!(resend.content, "keep going");
+                assert_eq!(resend.system_reminder.as_deref(), Some("preserve reminder"));
+                assert_eq!(resend.raw_input.as_deref(), Some("keep going"));
+
+                app.queued_messages.clear();
+                app.pending_queued_dispatch = false;
+                assert!(!app.schedule_turn_end_followups());
+                // A late Done must not restart auto-poke either.
+                app.handle_server_event(crate::protocol::ServerEvent::Done { id: 30 }, &mut remote);
+                assert!(app.queued_messages.is_empty());
+            }
+        }
+    });
+}
+
+#[test]
 fn test_credential_failure_breaker_streak_resets_on_other_errors() {
     let mut app = create_test_app();
 
@@ -2599,6 +2688,42 @@ fn test_credential_failure_breaker_streak_resets_on_other_errors() {
     assert!(!app.note_error_for_credential_breaker("401 unauthorized"));
     assert!(!app.note_error_for_credential_breaker("token expired"));
     assert!(app.note_error_for_credential_breaker("unauthorized"));
+}
+
+#[test]
+fn test_local_rejected_refresh_token_stops_pokes_and_preserves_input() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.auto_poke_incomplete_todos = true;
+        app.auto_poke_default_on = true;
+        app.last_submitted_input = Some("keep going".to_string());
+        crate::todo::save_todos(
+            &app.session.id,
+            &[crate::todo::TodoItem {
+                id: "todo-1".to_string(),
+                content: "Finish work".to_string(),
+                status: "in_progress".to_string(),
+                ..Default::default()
+            }],
+        )
+        .unwrap();
+        app.handle_turn_error(
+            "Claude OAuth refresh token was previously rejected by Anthropic and cannot be refreshed. Run `jcode login --provider claude` to mint a fresh token.",
+        );
+        assert!(!app.auto_poke_incomplete_todos);
+        assert!(!app.auto_poke_default_on);
+        assert_eq!(app.input, "keep going");
+        assert!(!app.schedule_turn_end_followups());
+        assert!(app.queued_messages.is_empty());
+        // After repairing auth, /poke still allows the user to resume work.
+        assert!(matches!(
+            commands::activate_auto_poke(&mut app),
+            commands::PokeActivation::SendNow { .. }
+        ));
+        assert!(app.auto_poke_incomplete_todos);
+        assert!(app.schedule_auto_poke_followup_if_needed());
+        assert!(!app.queued_messages.is_empty());
+    });
 }
 
 #[test]
