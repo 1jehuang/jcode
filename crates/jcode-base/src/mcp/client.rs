@@ -52,6 +52,9 @@ impl Drop for PendingRequest {
 /// Default reply timeout when a server config does not set `timeout_secs`.
 pub const DEFAULT_MCP_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// A separate budget for the complete remote connection, including OAuth refresh.
+const REMOTE_MCP_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Resolve the per-request reply timeout for a server config.
 pub fn request_timeout_for(config: &McpServerConfig) -> std::time::Duration {
     config
@@ -371,11 +374,27 @@ impl McpClient {
         }
     }
 
+    /// Bound discovery, authentication refresh, initialization, fallback and
+    /// tool listing together. `timeout_secs` can extend legitimate tool calls,
+    /// but must not turn connecting to a remote server into an indefinite wait.
+    async fn connect_remote(
+        name: String,
+        config: &McpServerConfig,
+        transport: RemoteTransport,
+    ) -> Result<Self> {
+        tokio::time::timeout(
+            REMOTE_MCP_HANDSHAKE_TIMEOUT,
+            Self::connect_remote_handshake(&name, config, transport),
+        )
+        .await
+        .with_context(|| format!("MCP server '{name}' connection timed out after 30s"))?
+    }
+
     /// Connect to a remote (Streamable HTTP or legacy SSE) MCP server. A
     /// Streamable HTTP endpoint that rejects `initialize` with 400/404/405 is
     /// retried once as legacy SSE, mirroring the spec's backwards-compat rule.
-    async fn connect_remote(
-        name: String,
+    async fn connect_remote_handshake(
+        name: &str,
         config: &McpServerConfig,
         transport: RemoteTransport,
     ) -> Result<Self> {
@@ -384,14 +403,14 @@ impl McpClient {
             name,
             config.display_target()
         ));
-        match Self::connect_remote_once(&name, config, transport).await {
+        match Self::connect_remote_once(name, config, transport).await {
             Ok(client) => Ok(client),
             Err((err, wants_sse)) if wants_sse && transport == RemoteTransport::StreamableHttp => {
                 crate::logging::info(&format!(
                     "MCP: '{}' rejected Streamable HTTP ({:#}); retrying as legacy SSE",
                     name, err
                 ));
-                Self::connect_remote_once(&name, config, RemoteTransport::LegacySse)
+                Self::connect_remote_once(name, config, RemoteTransport::LegacySse)
                     .await
                     .map_err(|(sse_err, _)| {
                         sse_err.context(format!(
