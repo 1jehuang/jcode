@@ -86,6 +86,45 @@ pub(crate) fn ensure_model_allowed_for_subscription(model: &str) -> Result<()> {
 static CONTEXT_LIMIT_CACHE: std::sync::LazyLock<RwLock<HashMap<String, usize>>> =
     std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
 
+/// Isolate context-limit state for a hermetic test and restore it on drop.
+///
+/// Restoration also runs during panic unwinding.
+/// Callers must hold `storage::lock_test_env()` while this guard is alive.
+#[cfg(any(test, feature = "test-support"))]
+#[must_use]
+pub struct ContextLimitCacheGuardForTests {
+    saved: HashMap<String, usize>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl ContextLimitCacheGuardForTests {
+    pub fn new() -> Self {
+        let mut cache = CONTEXT_LIMIT_CACHE
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Self {
+            saved: std::mem::take(&mut *cache),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Default for ContextLimitCacheGuardForTests {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for ContextLimitCacheGuardForTests {
+    fn drop(&mut self) {
+        let mut cache = CONTEXT_LIMIT_CACHE
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *cache = std::mem::take(&mut self.saved);
+    }
+}
+
 #[derive(Debug, Clone)]
 struct RuntimeProviderUnavailability {
     generation: u64,

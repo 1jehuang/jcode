@@ -2244,6 +2244,56 @@ fn test_context_limit_dynamic_cache() {
     assert_eq!(context_limit_for_model("test-model-xyz"), Some(64_000));
 }
 
+#[test]
+fn test_context_limit_cache_guard_isolates_and_restores_custom_gpt_override() {
+    let _env_guard = crate::storage::lock_test_env();
+    let _original_cache = models::ContextLimitCacheGuardForTests::new();
+    let mut cfg = crate::config::Config::default();
+    cfg.providers.insert(
+        "test-custom-gpt-window".to_string(),
+        crate::config::NamedProviderConfig {
+            models: vec![crate::config::NamedProviderModelConfig {
+                id: "gpt-5.4".to_string(),
+                context_window: Some(200_000),
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+    );
+    models::populate_context_limits_from_config_value(&cfg);
+    assert_eq!(context_limit_for_model("gpt-5.4"), Some(200_000));
+
+    {
+        let _isolated_cache = models::ContextLimitCacheGuardForTests::new();
+        assert_eq!(models::cached_context_limit_for_model("gpt-5.4"), None);
+        assert_eq!(context_limit_for_model("gpt-5.4"), Some(1_000_000));
+        populate_context_limits(HashMap::from([("gpt-5.4".to_string(), 1_050_000)]));
+        assert_eq!(context_limit_for_model("gpt-5.4"), Some(1_050_000));
+    }
+
+    assert_eq!(context_limit_for_model("gpt-5.4"), Some(200_000));
+    assert_eq!(
+        context_limit_for_model("test-custom-gpt-window:gpt-5.4"),
+        Some(200_000)
+    );
+}
+
+#[test]
+fn test_context_limit_cache_guard_restores_after_panic() {
+    let _env_guard = crate::storage::lock_test_env();
+    let _original_cache = models::ContextLimitCacheGuardForTests::new();
+    populate_context_limits(HashMap::from([("gpt-5.4".to_string(), 200_000)]));
+
+    let result = std::panic::catch_unwind(|| {
+        let _isolated_cache = models::ContextLimitCacheGuardForTests::new();
+        populate_context_limits(HashMap::from([("gpt-5.4".to_string(), 1_050_000)]));
+        panic!("exercise context-cache restoration during unwinding");
+    });
+
+    assert!(result.is_err());
+    assert_eq!(context_limit_for_model("gpt-5.4"), Some(200_000));
+}
+
 // --- Migrated from the OpenRouter runtime tests: these exercise MultiProvider
 // --- routing/identity with a real OpenRouter runtime via the registry.
 
