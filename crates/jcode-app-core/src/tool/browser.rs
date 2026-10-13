@@ -105,6 +105,8 @@ struct ScrollTo {
     y: Option<f64>,
 }
 
+// async_trait generates redundant must_use attributes on boxed Future methods.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 trait BrowserProvider: Send + Sync {
     fn id(&self) -> &'static str;
