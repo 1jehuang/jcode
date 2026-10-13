@@ -14,6 +14,7 @@ enum RetryDecision {
 struct RouterCase {
     split: bool,
     exhaust_alternate: bool,
+    cached_first_rejection: bool,
 }
 
 // Exercise the real OAuth HTTP request and retry loop. A 60-second server
@@ -50,6 +51,7 @@ fn http_retry_decision(
         }
     }
     let keys = [
+        "HOME",
         "JCODE_HOME",
         "JCODE_SAME_PROVIDER_ACCOUNT_FAILOVER",
         "ANTHROPIC_API_KEY",
@@ -76,6 +78,7 @@ fn http_retry_decision(
     for key in keys {
         jcode_base::env::remove_var(key);
     }
+    jcode_base::env::set_var("HOME", home.path());
     jcode_base::env::set_var("JCODE_HOME", home.path());
     jcode_base::provider::models::reset_model_catalog_services_for_tests();
     let mut config = jcode_base::config::Config::default();
@@ -92,7 +95,13 @@ fn http_retry_decision(
                 label: label.into(),
                 access: format!("access-{label}"),
                 refresh: format!("refresh-{label}"),
-                expires: i64::MAX,
+                expires: if label == "first"
+                    && router_case.is_some_and(|case| case.cached_first_rejection)
+                {
+                    1
+                } else {
+                    i64::MAX
+                },
                 email: None,
                 subscription_type: None,
                 scopes: vec![],
@@ -102,6 +111,14 @@ fn http_retry_decision(
             &stored_label,
         ));
         account_labels.push(stored_label);
+    }
+    if router_case.is_some_and(|case| case.cached_first_rejection) {
+        jcode_base::auth::refresh_state::record_permanent_rejection(
+            "claude",
+            "refresh-first",
+            "invalid_grant",
+        )
+        .unwrap();
     }
     jcode_base::auth::claude::set_active_account(&account_labels[0]).unwrap();
     let previous_override = jcode_base::auth::claude::get_active_account_override();
@@ -136,7 +153,10 @@ fn http_retry_decision(
     let response = response.to_owned();
     listener.set_nonblocking(true).unwrap();
     let server = std::thread::spawn(move || {
-        for attempt in 0..if through_router { 2 } else { 1 } {
+        // Cached rejection must never send a request for the first account.
+        let first_attempt =
+            usize::from(router_case.is_some_and(|case| case.cached_first_rejection));
+        for attempt in first_attempt..if through_router { 2 } else { 1 } {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
             let (mut socket, _) = loop {
                 match listener.accept() {
@@ -324,6 +344,11 @@ fn http_retry_decision(
                 while let Some(event) = stream.next().await {
                     let event = event.expect("accepted stream must not expose first account error");
                     if matches!(event, StreamEvent::MessageEnd { .. }) {
+                        assert_eq!(
+                            jcode_base::auth::claude::active_account_label().as_ref(),
+                            Some(&account_labels[1]),
+                            "accepted alternate account must remain selected",
+                        );
                         return (RetryDecision::Complete, false);
                     }
                 }
@@ -416,6 +441,7 @@ fn oauth_account_failover_router_switches_http_429_to_second_account_200() {
             Some(RouterCase {
                 split,
                 exhaust_alternate: false,
+                cached_first_rejection: false,
             }),
             false,
         );
@@ -424,6 +450,26 @@ fn oauth_account_failover_router_switches_http_429_to_second_account_200() {
             requests, 2,
             "first and second accounts each receive one request"
         );
+        assert!(!rolled_back);
+    }
+}
+
+#[test]
+fn oauth_account_failover_router_recovers_cached_refresh_rejection() {
+    for split in [false, true] {
+        let (decision, requests, rolled_back) = http_retry_decision(
+            true,
+            true,
+            &rate_limit_http_response(),
+            Some(RouterCase {
+                split,
+                exhaust_alternate: false,
+                cached_first_rejection: true,
+            }),
+            false,
+        );
+        assert_eq!(decision, RetryDecision::Complete);
+        assert_eq!(requests, 1, "only the healthy alternate may reach HTTP");
         assert!(!rolled_back);
     }
 }
@@ -438,6 +484,7 @@ fn oauth_account_failover_router_reports_exhaustion_after_distinct_tokens_each_r
             Some(RouterCase {
                 split,
                 exhaust_alternate: true,
+                cached_first_rejection: false,
             }),
             false,
         );

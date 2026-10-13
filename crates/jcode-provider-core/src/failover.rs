@@ -121,6 +121,9 @@ pub fn classify_failover_error_message(message: &str) -> FailoverDecision {
         "credentials are not configured",
         "no credentials",
         "token exchange failed",
+        // Cached permanent refresh rejection no longer carries the original
+        // OAuth error code or HTTP status, but still needs account failover.
+        "refresh token was previously rejected",
         "authentication failed",
         "unauthorized",
         "forbidden",
@@ -162,6 +165,33 @@ mod tests {
             classify_failover_error_message("429 Too Many Requests"),
             FailoverDecision::RetryAndMarkUnavailable
         );
+    }
+
+    #[test]
+    fn classifier_marks_cached_refresh_rejection_unavailable() {
+        for message in [
+            "Claude OAuth refresh token was previously rejected by Anthropic and cannot be refreshed. Run `jcode login --provider claude` to mint a fresh token.",
+            "claude refresh token was previously rejected by the provider and cannot be refreshed. Run `jcode login`.",
+            "Failed to load credentials: REFRESH TOKEN WAS PREVIOUSLY REJECTED by the provider",
+        ] {
+            assert_eq!(
+                classify_failover_error_message(message),
+                FailoverDecision::RetryAndMarkUnavailable,
+                "cached permanent refresh rejection must permit account failover: {message}",
+            );
+        }
+        // Generic refresh failures are not evidence of invalid credentials.
+        for message in [
+            "Claude token refresh failed: 503 Service Unavailable",
+            "Claude token refresh failed: connection reset by peer",
+            "Claude token refresh failed: request timed out",
+        ] {
+            assert_eq!(
+                classify_failover_error_message(message),
+                FailoverDecision::None,
+                "transient refresh failure must not poison an account: {message}",
+            );
+        }
     }
 
     #[test]
