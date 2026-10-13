@@ -39,6 +39,7 @@ fn with_clean_provider_test_env<T>(f: impl FnOnce() -> T) -> T {
         "JCODE_ACTIVE_PROVIDER",
         "JCODE_INITIAL_PROVIDER_EXPLICIT",
         "JCODE_OPENAI_MODEL",
+        "JCODE_SAME_PROVIDER_ACCOUNT_FAILOVER",
         "JCODE_NAMED_PROVIDER_PROFILE",
         "JCODE_PROVIDER_PROFILE_ACTIVE",
         "JCODE_PROVIDER_PROFILE_NAME",
@@ -1204,6 +1205,7 @@ include!("tests/auth_refresh.rs");
 include!("tests/model_resolution.rs");
 include!("tests/issue_534_profile_preservation.rs");
 include!("tests/fallback_failover.rs");
+include!("tests/account_failover.rs");
 include!("tests/catalog_subscription.rs");
 
 /// Rendering the route catalog must never schedule network work.

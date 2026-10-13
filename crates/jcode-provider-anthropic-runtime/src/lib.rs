@@ -51,7 +51,7 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use tokio::sync::{RwLock, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
@@ -116,6 +116,8 @@ fn direct_auth_mode() -> String {
 #[derive(Clone)]
 struct DirectTransportConfig {
     api_url: String,
+    #[cfg(test)]
+    oauth_api_url: Option<String>,
     headers: std::result::Result<HeaderMap, String>,
     auth_mode: String,
     auth_header: String,
@@ -125,6 +127,8 @@ impl DirectTransportConfig {
     fn from_env() -> Self {
         Self {
             api_url: direct_api_url(),
+            #[cfg(test)]
+            oauth_api_url: None,
             headers: configured_direct_headers().map_err(|err| format!("{err:#}")),
             auth_mode: direct_auth_mode(),
             auth_header: std::env::var("JCODE_ANTHROPIC_AUTH_HEADER")
@@ -470,6 +474,9 @@ pub struct AnthropicProvider {
     /// Cached OAuth credentials (None if using API key)
     credentials: Arc<RwLock<Option<CachedCredentials>>>,
     credential_mode: Arc<RwLock<AnthropicCredentialMode>>,
+    /// Actual credential resolved for this runtime's latest request: unknown,
+    /// OAuth, or API key. Auto may fall back after a failed OAuth refresh.
+    request_credential: Arc<AtomicU8>,
     /// Explicit `JCODE_ANTHROPIC_MAX_TOKENS` override. When unset, the output
     /// budget is derived per model so newer generations are not clamped to the
     /// legacy 32K default.
@@ -663,6 +670,7 @@ impl AnthropicProvider {
             credential_mode: Arc::new(RwLock::new(AnthropicCredentialMode::from_runtime_env(
                 jcode_provider_core::DualAuthProvider::Anthropic,
             ))),
+            request_credential: Arc::new(AtomicU8::new(0)),
             max_tokens_override,
             oauth_session_id: Uuid::new_v4().to_string(),
             oauth_preflight_done: Arc::new(AtomicBool::new(false)),
@@ -978,6 +986,16 @@ impl AnthropicProvider {
     /// Supports both OAuth tokens and direct API keys
     /// Automatically refreshes OAuth tokens when expired
     async fn get_access_token(&self) -> Result<(String, bool)> {
+        self.request_credential.store(0, Ordering::Release);
+        let result = self.resolve_access_token().await;
+        if let Ok((_, is_oauth)) = &result {
+            self.request_credential
+                .store(if *is_oauth { 1 } else { 2 }, Ordering::Release);
+        }
+        result
+    }
+
+    async fn resolve_access_token(&self) -> Result<(String, bool)> {
         let mode = *self.credential_mode.read().await;
 
         // Explicit API-key mode: use the direct API key and surface an error if
@@ -1125,6 +1143,7 @@ impl AnthropicProvider {
             )
         })?;
         *mode_guard = mode;
+        self.request_credential.store(0, Ordering::Release);
         drop(mode_guard);
         if let Ok(mut cached) = self.credentials.try_write() {
             *cached = None;
@@ -1374,6 +1393,21 @@ impl Provider for AnthropicProvider {
         self.credential_mode_snapshot()
     }
 
+    fn active_resolved_credential(&self) -> Option<jcode_provider_core::ResolvedCredential> {
+        use jcode_provider_core::ResolvedCredential;
+        match self.credential_mode_snapshot() {
+            AnthropicCredentialMode::OAuth => Some(ResolvedCredential::Oauth),
+            AnthropicCredentialMode::ApiKey => Some(ResolvedCredential::ApiKey),
+            AnthropicCredentialMode::Auto => {
+                match self.request_credential.load(Ordering::Acquire) {
+                    1 => Some(ResolvedCredential::Oauth),
+                    2 => Some(ResolvedCredential::ApiKey),
+                    _ => None,
+                }
+            }
+        }
+    }
+
     fn set_credential_mode(&self, mode: jcode_provider_core::CredentialMode) -> Result<()> {
         AnthropicProvider::set_credential_mode(self, mode)
     }
@@ -1617,6 +1651,7 @@ impl Provider for AnthropicProvider {
             service_tier: Arc::new(std::sync::RwLock::new(self.service_tier())),
             credentials: Arc::new(RwLock::new(None)),
             credential_mode: Arc::clone(&self.credential_mode),
+            request_credential: Arc::new(AtomicU8::new(0)),
             max_tokens_override: self.max_tokens_override,
             oauth_session_id: self.oauth_session_id.clone(),
             oauth_preflight_done: Arc::new(AtomicBool::new(
@@ -1629,6 +1664,7 @@ impl Provider for AnthropicProvider {
     }
 
     async fn invalidate_credentials(&self) {
+        self.request_credential.store(0, Ordering::Release);
         let mut cached = self.credentials.write().await;
         *cached = None;
     }
@@ -1816,6 +1852,7 @@ async fn run_stream_with_retries(
             jcode_provider_core::fresh_transport_client()
         };
 
+        let mut response_accepted = false;
         match stream_response(
             attempt_client,
             token.clone(),
@@ -1825,6 +1862,7 @@ async fn run_stream_with_retries(
             &model_name,
             &oauth_session_id,
             &direct_transport,
+            &mut response_accepted,
         )
         .await
         {
@@ -1968,6 +2006,24 @@ async fn run_stream_with_retries(
                     continue;
                 }
 
+                // Account routing owns pre-output OAuth quota/auth failures when
+                // other pool members exist, even if they are cooling down. Let
+                // the router decide whether to rotate or report exhaustion.
+                // Waiting through this runtime's Retry-After backoff would hide
+                // the error for up to two minutes. Preserve refresh/model recovery
+                // above and retain transport and post-output retries below.
+                // WaitingForResponse commits routing to this runtime after HTTP
+                // success, so early SSE errors still belong to its inner retry.
+                if is_oauth
+                    && !saw_output
+                    && !response_accepted
+                    && (is_account_limit_error(&error_str) || is_oauth_auth_error(&error_str))
+                    && jcode_base::provider::has_alternate_account_in_pool("claude")
+                {
+                    let _ = tx.send(Err(e)).await;
+                    return;
+                }
+
                 // Check if this is a transient/retryable error
                 if is_retryable_error(&error_str) && attempt + 1 < MAX_RETRIES {
                     if saw_output {
@@ -2079,6 +2135,7 @@ async fn stream_response(
     model_name: &str,
     oauth_session_id: &str,
     direct_transport: &DirectTransportConfig,
+    response_accepted: &mut bool,
 ) -> Result<()> {
     use jcode_message_types::ConnectionPhase;
     let requested_model_base = strip_1m_suffix(&request.model).to_ascii_lowercase();
@@ -2103,6 +2160,14 @@ async fn stream_response(
         API_URL_OAUTH
     } else {
         direct_transport.api_url.as_str()
+    };
+    // Local HTTP regressions exercise the real OAuth retry loop without
+    // permitting a production environment override of the OAuth endpoint.
+    #[cfg(test)]
+    let url = if is_oauth {
+        direct_transport.oauth_api_url.as_deref().unwrap_or(url)
+    } else {
+        url
     };
 
     let mut req = client.post(url);
@@ -2193,6 +2258,7 @@ async fn stream_response(
         ));
     }
 
+    *response_accepted = true;
     let _ = tx
         .send(Ok(StreamEvent::ConnectionPhase {
             phase: ConnectionPhase::WaitingForResponse,
@@ -2266,6 +2332,25 @@ async fn stream_response(
     }
 
     Ok(())
+}
+
+/// Account-local limits can be escaped by selecting another OAuth pool member.
+/// Do not classify model/transport overload or arbitrary server failures here.
+fn is_account_limit_error(error: &str) -> bool {
+    [
+        "429 too many requests",
+        "rate limit",
+        "rate_limit",
+        "quota",
+        "usage exhausted",
+        "usage limit",
+        "limit reached",
+        "billing",
+        "credit balance",
+        "payment required",
+    ]
+    .iter()
+    .any(|needle| error.contains(needle))
 }
 
 /// Check if an error is transient and should be retried
@@ -2819,3 +2904,6 @@ mod tests;
 #[cfg(test)]
 #[path = "late_tool_result_tests.rs"]
 mod late_tool_result_tests;
+
+#[cfg(test)]
+mod account_failover_tests;

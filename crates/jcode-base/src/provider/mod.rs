@@ -27,6 +27,7 @@ mod routing;
 mod selection;
 mod startup;
 mod state;
+mod stream_start;
 mod stream_timeout;
 
 use crate::auth;
@@ -44,6 +45,7 @@ use registry::ProviderRegistry;
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
 
+pub use account_failover::{has_alternate_account_in_pool, has_eligible_alternate_account};
 pub use catalog_routes::{
     append_simplified_anthropic_model_routes, remote_current_openai_compatible_route_for_model,
     remote_model_is_server_copilot_only, remote_model_routes_fallback,
@@ -848,22 +850,14 @@ impl MultiProvider {
                 continue;
             }
 
-            if let Some(detail) = provider_unavailability_detail_for_account(key) {
-                let note = format!("{}: {}", label, detail);
-                if candidate == active {
-                    crate::logging::warn(&format!(
-                        "Failover{}: skipping active provider {} - {}",
-                        mode.log_suffix(),
-                        label,
-                        detail
-                    ));
-                    failover_reason = Some(detail.clone());
-                }
-                notes.push(note);
-                continue;
-            }
-
-            if let Some(reason) = self.provider_precheck_unavailable_reason(candidate) {
+            let cached_unavailability = self
+                .provider_uses_account_cooldown(candidate)
+                .then(|| provider_unavailability_detail_for_account(key))
+                .flatten();
+            if let Some(reason) = cached_unavailability
+                .clone()
+                .or_else(|| self.provider_precheck_unavailable_reason(candidate))
+            {
                 let note = format!("{}: {}", label, reason);
                 if candidate == active {
                     crate::logging::warn(&format!(
@@ -875,7 +869,18 @@ impl MultiProvider {
                     failover_reason = Some(reason.clone());
                 }
                 notes.push(note);
-                record_provider_unavailable_for_account(key, &reason);
+                if cached_unavailability.is_none() {
+                    record_provider_unavailable_for_account(key, &reason);
+                }
+                if candidate == active
+                    && let Some(stream) = self
+                        .try_same_provider_account_failover(
+                            candidate, messages, tools, mode, &reason, &mut notes,
+                        )
+                        .await?
+                {
+                    return Ok(stream);
+                }
                 continue;
             }
 
@@ -899,10 +904,13 @@ impl MultiProvider {
                     .await
                 }
             };
+            let attempt = self.await_account_stream_start(candidate, attempt).await;
 
             match attempt {
                 Ok(stream) => {
-                    clear_provider_unavailable_for_account(key);
+                    if self.provider_uses_account_cooldown(candidate) {
+                        clear_provider_unavailable_for_account(key);
+                    }
                     self.record_provider_activity(candidate);
                     if candidate != active {
                         self.set_active_provider(candidate);
@@ -925,8 +933,12 @@ impl MultiProvider {
                     return Ok(stream);
                 }
                 Err(err) => {
-                    let summary =
-                        maybe_annotate_limit_summary(candidate, Self::summarize_error(&err));
+                    let summary = Self::summarize_error(&err);
+                    let summary = if self.provider_uses_oauth_accounts(candidate) {
+                        maybe_annotate_limit_summary(candidate, summary)
+                    } else {
+                        summary
+                    };
                     let decision = Self::classify_failover_error(&err);
                     crate::logging::info(&format!(
                         "Provider {} failed{}: {} (failover={} decision={})",
@@ -938,10 +950,13 @@ impl MultiProvider {
                     ));
                     notes.push(format!("{}: {}", label, summary));
                     if decision.should_failover() {
-                        if decision.should_mark_provider_unavailable() {
+                        if decision.should_mark_provider_unavailable()
+                            && self.provider_uses_account_cooldown(candidate)
+                        {
                             record_provider_unavailable_for_account(key, &summary);
                         }
                         if candidate == active
+                            && decision.should_mark_provider_unavailable()
                             && let Some(stream) = self
                                 .try_same_provider_account_failover(
                                     candidate, messages, tools, mode, &summary, &mut notes,

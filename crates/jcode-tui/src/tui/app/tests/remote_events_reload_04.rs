@@ -506,6 +506,60 @@ fn claude_oauth_route(model: &str) -> crate::provider::ModelRoute {
     }
 }
 
+#[test]
+fn test_remote_account_failover_prompt_does_not_hold_or_retry_same_account() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.is_remote = true;
+    app.remote_provider_name = Some("Anthropic".to_string());
+    app.remote_provider_model = Some("claude-sonnet-4".to_string());
+    app.remote_model_options = vec![
+        claude_oauth_route("claude-sonnet-4"),
+        openai_oauth_route("gpt-5.5"),
+    ];
+    app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        content: "hi".to_string(),
+        images: vec![],
+        is_system: false,
+        system_reminder: None,
+        auto_retry: true,
+        retry_attempts: 0,
+        retry_at: None,
+    });
+    app.is_processing = true;
+    app.status = ProcessingStatus::Streaming;
+    let prompt = jcode_provider_core::ProviderFailoverPrompt {
+        from_provider: "claude".into(),
+        from_label: "Anthropic".into(),
+        to_provider: "openai".into(),
+        to_label: "OpenAI".into(),
+        reason: "429 rate limit exceeded; retry in 60 seconds".into(),
+        estimated_input_chars: 400,
+        estimated_input_tokens: 100,
+    };
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Error {
+            id: 21,
+            message: prompt.to_error_message(),
+            retry_after_secs: Some(60),
+        },
+        &mut remote,
+    );
+
+    assert!(app.rate_limit_reset.is_none());
+    let pending = app.rate_limit_pending_message.as_ref().unwrap();
+    assert_eq!(pending.retry_attempts, 0);
+    assert!(pending.retry_at.is_none());
+    assert!(!app.display_messages().iter().any(|message| {
+        message.role == "system"
+            && (message.content.contains("queued retry")
+                || message.content.contains("Rate limited"))
+    }));
+}
+
 /// The motivating scenario: a remote session's OpenAI OAuth session expires
 /// (token refresh fails, non-retryable), and a working Claude OAuth route
 /// exists. The terminal error should arm a one-keypress fallback offer that

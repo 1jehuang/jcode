@@ -1062,13 +1062,16 @@ pub fn clear_model_unavailable_for_scope(scope: &str, model: &str) {
 
 fn runtime_provider_unavailability(provider: &str) -> Option<RuntimeProviderUnavailability> {
     let key = current_provider_runtime_scope_key(provider);
+    runtime_provider_unavailability_for_key(&key)
+}
 
+fn runtime_provider_unavailability_for_key(key: &str) -> Option<RuntimeProviderUnavailability> {
     let mut unavailable = ACCOUNT_RUNTIME_UNAVAILABLE_PROVIDERS.write().ok()?;
-    if let Some(entry) = unavailable.get(&key) {
+    if let Some(entry) = unavailable.get(key) {
         if entry.recorded_at.elapsed() <= PROVIDER_RUNTIME_UNAVAILABLE_TTL {
             return Some(entry.clone());
         }
-        unavailable.remove(&key);
+        unavailable.remove(key);
     }
     None
 }
@@ -1137,6 +1140,20 @@ pub fn clear_all_provider_unavailability_for_account() {
 
 pub fn provider_unavailability_detail_for_account(provider: &str) -> Option<String> {
     let entry = runtime_provider_unavailability(provider)?;
+    Some(format_provider_unavailability_detail(entry))
+}
+
+/// Read another login's cooldown without changing the process-wide active login.
+pub fn provider_unavailability_detail_for_account_label(
+    provider: &str,
+    account_label: Option<&str>,
+) -> Option<String> {
+    let key = provider_runtime_scope_key(provider, account_label);
+    let entry = runtime_provider_unavailability_for_key(&key)?;
+    Some(format_provider_unavailability_detail(entry))
+}
+
+fn format_provider_unavailability_detail(entry: RuntimeProviderUnavailability) -> String {
     let mut detail = entry.reason;
     if let Ok(elapsed) = SystemTime::now().duration_since(entry.observed_at) {
         detail.push_str(&format!(
@@ -1145,7 +1162,7 @@ pub fn provider_unavailability_detail_for_account(provider: &str) -> Option<Stri
         ));
     }
 
-    Some(detail)
+    detail
 }
 
 pub fn model_unavailability_detail_for_account(model: &str) -> Option<String> {

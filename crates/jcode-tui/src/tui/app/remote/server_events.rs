@@ -1318,9 +1318,18 @@ pub(in crate::tui::app) fn handle_server_event(
                 return true;
             }
             // Clamp server hints so a bogus value cannot park the turn for days.
-            let reset_duration = retry_after_secs
-                .map(|secs| Duration::from_secs(secs.min(MAX_TURN_HOLD_SECS)))
-                .or_else(|| parse_rate_limit_error(&message));
+            // Account rotation already ran on the server. A structured offer
+            // to switch providers must not become another retry of the spent
+            // account just because its reason includes quota/reset timing.
+            let is_failover_prompt =
+                crate::provider::parse_failover_prompt_message(&message).is_some();
+            let reset_duration = if is_failover_prompt {
+                None
+            } else {
+                retry_after_secs
+                    .map(|secs| Duration::from_secs(secs.min(MAX_TURN_HOLD_SECS)))
+                    .or_else(|| parse_rate_limit_error(&message))
+            };
             // A stale reset or a limit that never clears must not resend the
             // same turn forever. Rate-limit holds share the per-turn retry
             // budget, which begin_remote_send carries across resends.
@@ -1354,8 +1363,6 @@ pub(in crate::tui::app) fn handle_server_event(
                 remote.reset_call_output_tokens_seen();
                 return false;
             }
-            let is_failover_prompt =
-                crate::provider::parse_failover_prompt_message(&message).is_some();
             // Snapshot the failed turn's payload before the cleanup below (and
             // the retry-budget bookkeeping) clears it, so a fallback offer
             // armed at a terminal no-retry point can resend it after the user

@@ -11,9 +11,14 @@ impl MultiProvider {
         provider: ActiveProvider,
     ) -> Option<String> {
         match provider {
-            ActiveProvider::Claude if self.is_claude_usage_exhausted() => Some(
-                crate::provider::account_failover::usage_exhausted_reason(provider),
-            ),
+            ActiveProvider::Claude
+                if self.provider_uses_oauth_accounts(provider)
+                    && self.is_claude_usage_exhausted() =>
+            {
+                Some(crate::provider::account_failover::usage_exhausted_reason(
+                    provider,
+                ))
+            }
             _ => None,
         }
     }
