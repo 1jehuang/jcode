@@ -73,6 +73,8 @@ use std::time::Duration;
 pub type EventStream = Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>;
 
 /// Provider trait for LLM backends.
+// async_trait adds must_use to methods returning an already must-use boxed Future.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Provider: Send + Sync {
     /// Prepare provider-specific request state before the foreground completion.
