@@ -118,6 +118,21 @@ pub const ORCAROUTER_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile 
     requires_api_key: true,
 };
 
+// Cheaper Inference is an OpenAI-compatible gateway with bare model ids. Its
+// `/v1/models` listing is authenticated, so the full catalog is discovered with
+// the account key after login; `default_model` keeps a model that exists on
+// Cheaper Inference selected until then.
+pub const CHEAPERINFERENCE_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
+    id: "cheaperinference",
+    display_name: "Cheaper Inference",
+    api_base: "https://api.cheaperinference.com/v1",
+    api_key_env: "CHEAPER_INFERENCE_API_KEY",
+    env_file: "cheaperinference.env",
+    setup_url: "https://cheaperinference.com/signup",
+    default_model: Some("gpt-5.4-mini"),
+    requires_api_key: true,
+};
+
 // Anthropic and OpenAI also expose OpenAI-compatible `/v1/chat/completions`
 // endpoints, so they can be driven by `provider-doctor` /
 // `provider-test-coverage` as OpenAI-compatible profiles. These profile ids
@@ -504,7 +519,7 @@ pub const OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfi
     requires_api_key: true,
 };
 
-pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 43] = [
+pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 44] = [
     OPENCODE_PROFILE,
     OPENCODE_GO_PROFILE,
     ZAI_PROFILE,
@@ -519,6 +534,7 @@ pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 43] = [
     CORTECS_PROFILE,
     OPENROUTER_OPENAI_COMPAT_PROFILE,
     ORCAROUTER_PROFILE,
+    CHEAPERINFERENCE_PROFILE,
     ANTHROPIC_OPENAI_COMPAT_PROFILE,
     OPENAI_NATIVE_OPENAI_COMPAT_PROFILE,
     GEMINI_OPENAI_COMPAT_PROFILE,
@@ -656,6 +672,19 @@ pub const ORCAROUTER_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDesc
     menu_detail: "API key, OpenAI-compatible gateway",
     recommended: false,
     target: LoginProviderTarget::OpenAiCompatible(ORCAROUTER_PROFILE),
+    order: LoginProviderSurfaceOrder::new(Some(39), Some(39), Some(39), Some(39), Some(39)),
+};
+
+pub const CHEAPERINFERENCE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
+    id: "cheaperinference",
+    display_name: "Cheaper Inference",
+    auth_kind: LoginProviderAuthKind::ApiKey,
+    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
+    auth_status_method: "API key",
+    aliases: &["cheaper-inference"],
+    menu_detail: "API key, OpenAI-compatible gateway",
+    recommended: false,
+    target: LoginProviderTarget::OpenAiCompatible(CHEAPERINFERENCE_PROFILE),
     order: LoginProviderSurfaceOrder::new(Some(39), Some(39), Some(39), Some(39), Some(39)),
 };
 
@@ -1283,7 +1312,7 @@ pub const GOOGLE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescript
     order: LoginProviderSurfaceOrder::new(Some(13), None, None, None, None),
 };
 
-pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 55] = [
+pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 56] = [
     AUTO_IMPORT_LOGIN_PROVIDER,
     CLAUDE_LOGIN_PROVIDER,
     ANTHROPIC_API_LOGIN_PROVIDER,
@@ -1292,6 +1321,7 @@ pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 55] = [
     JCODE_LOGIN_PROVIDER,
     OPENROUTER_LOGIN_PROVIDER,
     ORCAROUTER_LOGIN_PROVIDER,
+    CHEAPERINFERENCE_LOGIN_PROVIDER,
     BEDROCK_LOGIN_PROVIDER,
     AZURE_LOGIN_PROVIDER,
     OPENCODE_LOGIN_PROVIDER,

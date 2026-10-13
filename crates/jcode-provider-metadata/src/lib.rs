@@ -360,6 +360,21 @@ mod tests {
     }
 
     #[test]
+    fn cheaperinference_login_identifies_openai_compatible_endpoint() {
+        let provider = resolve_login_selection("cheaperinference", &cli_login_providers())
+            .expect("Cheaper Inference CLI login provider");
+        let LoginProviderTarget::OpenAiCompatible(profile) = provider.target else {
+            panic!("Cheaper Inference should use the OpenAI-compatible runtime");
+        };
+
+        assert_eq!(profile.id, "cheaperinference");
+        assert_eq!(profile.api_base, "https://api.cheaperinference.com/v1");
+        assert_eq!(profile.api_key_env, "CHEAPER_INFERENCE_API_KEY");
+        assert_eq!(profile.default_model, Some("gpt-5.4-mini"));
+        assert!(profile.requires_api_key);
+    }
+
+    #[test]
     fn normalize_api_base_accepts_private_http_hosts() {
         assert_eq!(
             normalize_api_base("http://192.168.1.25:8000/v1/").as_deref(),
