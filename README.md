@@ -1,5 +1,10 @@
 <div align="center">
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/brand/jcode-mark-inverse.svg">
+  <img src="assets/brand/jcode-mark.svg" alt="jcode halftone donut logo" width="160">
+</picture>
+
 # jcode
 
 [![Latest Release](https://badgen.net/github/release/1jehuang/jcode?icon=github)](https://github.com/1jehuang/jcode/releases)
