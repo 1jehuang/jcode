@@ -36,5 +36,5 @@ pub mod tool_name;
 
 // Re-export primary types at crate root for convenience.
 pub use description_cache::{DescriptionCache, DescriptionState};
-pub use keyword_search::{rank_results, search_tools, SearchResult, Tool, ToolEntry};
-pub use tool_name::{parse_tool_name, ParsedToolName};
+pub use keyword_search::{SearchResult, Tool, ToolEntry, rank_results, search_tools};
+pub use tool_name::{ParsedToolName, parse_tool_name};

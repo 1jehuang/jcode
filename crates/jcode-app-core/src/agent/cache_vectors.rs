@@ -37,20 +37,23 @@ impl CacheVectorsTracker {
         fast_mode: bool,
     ) {
         let snapshot = snapshot_current_state(
-            &system_prompt,                                        // system_prompt
-            &tools.iter().map(|t| t.input_schema.clone()).collect::<Vec<_>>(), // tool_schemas
-            &(),                                                   // cache_control
-            per_tool_hashes(tools),                                // per_tool_hashes
-            model.to_string(),                                     // model
-            fast_mode,                                             // fast_mode
-            String::new(),                                         // global_cache_strategy
-            Vec::new(),                                            // betas
-            false,                                                 // auto_mode_active
-            false,                                                 // is_using_overage
-            false,                                                 // cached_mc_enabled
-            None,                                                  // effort_value
-            &(),                                                   // extra_body
-            &(),                                                   // diffable_content
+            &system_prompt, // system_prompt
+            &tools
+                .iter()
+                .map(|t| t.input_schema.clone())
+                .collect::<Vec<_>>(), // tool_schemas
+            &(),            // cache_control
+            per_tool_hashes(tools), // per_tool_hashes
+            model.to_string(), // model
+            fast_mode,      // fast_mode
+            String::new(),  // global_cache_strategy
+            Vec::new(),     // betas
+            false,          // auto_mode_active
+            false,          // is_using_overage
+            false,          // cached_mc_enabled
+            None,           // effort_value
+            &(),            // extra_body
+            &(),            // diffable_content
         );
 
         if let Some(ref prev) = self.previous {
@@ -80,7 +83,12 @@ impl CacheVectorsTracker {
 fn per_tool_hashes(tools: &[ToolDefinition]) -> Vec<(String, u64)> {
     tools
         .iter()
-        .map(|t| (t.name.clone(), jcode_cache_vectors::compute_hash(&t.input_schema)))
+        .map(|t| {
+            (
+                t.name.clone(),
+                jcode_cache_vectors::compute_hash(&t.input_schema),
+            )
+        })
         .collect()
 }
 

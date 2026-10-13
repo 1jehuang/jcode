@@ -118,7 +118,6 @@ pub fn render_swarm_dock(
     out
 }
 
-
 /// Dock header: bee + active tally, then plan progress and attention count,
 /// dropped right-to-left when the width is too tight.
 fn dock_header(
@@ -168,8 +167,8 @@ fn dock_row(
     spinner_frame: usize,
     width: usize,
 ) -> Line<'static> {
-    let accent = role_color(member.role.as_deref())
-        .unwrap_or_else(|| status_accent(&member.status));
+    let accent =
+        role_color(member.role.as_deref()).unwrap_or_else(|| status_accent(&member.status));
     let active = is_active_status(&member.status);
     let marker = if selected { "▸ " } else { "  " };
     let glyph = role_glyph(member.role.as_deref())
@@ -215,10 +214,7 @@ fn dock_row(
     } else {
         Style::default().fg(rgb(110, 110, 125))
     };
-    spans.push(Span::styled(
-        status.to_string(),
-        status_style,
-    ));
+    spans.push(Span::styled(status.to_string(), status_style));
     if let Some(todo) = todo {
         spans.push(Span::styled(todo, Style::default().fg(rgb(130, 130, 140))));
     }
@@ -249,4 +245,3 @@ fn dock_tail_lines(member: &GalleryMember, width: usize, rows: usize) -> Vec<Lin
         })
         .collect()
 }
-

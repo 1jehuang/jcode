@@ -3,15 +3,15 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+pub mod auto_dream;
 mod directives;
 mod manager;
 mod paths;
 mod persistence;
-pub mod auto_dream;
-pub mod session_memory;
 mod prompt;
 pub mod runner;
 pub mod scheduler;
+pub mod session_memory;
 
 pub use directives::{
     UserDirective, add_directive, has_pending_directives, load_directives, take_pending_directives,
@@ -85,8 +85,7 @@ pub enum AmbientStatus {
 }
 
 /// Recurrence pattern for a scheduled item.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum Recurrence {
     /// Fire every N minutes, re-enqueue after each execution.
     Interval { every_minutes: u32 },
@@ -94,7 +93,6 @@ pub enum Recurrence {
     #[default]
     Once,
 }
-
 
 impl Recurrence {
     /// Returns `true` if this is the default `Once` recurrence (used for

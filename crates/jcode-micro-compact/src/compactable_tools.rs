@@ -55,7 +55,14 @@ mod tests {
     #[test]
     fn all_expected_tools_are_compactable() {
         for name in &[
-            "Read", "Bash", "Grep", "Glob", "WebSearch", "WebFetch", "Edit", "Write",
+            "Read",
+            "Bash",
+            "Grep",
+            "Glob",
+            "WebSearch",
+            "WebFetch",
+            "Edit",
+            "Write",
         ] {
             assert!(is_compactable(name), "{name} should be compactable");
         }

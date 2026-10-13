@@ -185,9 +185,10 @@ fn first_window_id_for(text: &str, owner: &str) -> Option<i64> {
         let id = parts.next()?.trim();
         let own = parts.next().unwrap_or("").trim();
         if own == owner
-            && let Ok(n) = id.parse::<i64>() {
-                return Some(n);
-            }
+            && let Ok(n) = id.parse::<i64>()
+        {
+            return Some(n);
+        }
     }
     None
 }

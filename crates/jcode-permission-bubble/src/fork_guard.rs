@@ -104,7 +104,10 @@ mod tests {
     #[test]
     fn root_can_fork() {
         let guard = ForkDepthGuard::root();
-        assert_eq!(guard.can_fork(), ForkDepthResult::Allowed { current_depth: 1 });
+        assert_eq!(
+            guard.can_fork(),
+            ForkDepthResult::Allowed { current_depth: 1 }
+        );
     }
 
     #[test]

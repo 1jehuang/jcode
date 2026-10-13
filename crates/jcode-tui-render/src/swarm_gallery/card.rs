@@ -18,8 +18,8 @@ pub fn render_swarm_chat_cards(members: &[GalleryMember], width: usize) -> Vec<L
 
     let mut out = Vec::new();
     for member in sort_members_for_display(members) {
-        let accent = role_color(member.role.as_deref())
-            .unwrap_or_else(|| status_accent(&member.status));
+        let accent =
+            role_color(member.role.as_deref()).unwrap_or_else(|| status_accent(&member.status));
         let lead = format!(
             "    {} {} ",
             member.icon.as_deref().unwrap_or("🐝"),
@@ -81,8 +81,8 @@ pub fn render_swarm_live_card(
         return Vec::new();
     }
 
-    let accent = role_color(member.role.as_deref())
-        .unwrap_or_else(|| status_accent(&member.status));
+    let accent =
+        role_color(member.role.as_deref()).unwrap_or_else(|| status_accent(&member.status));
     let mut metadata = Vec::new();
     if let Some(elapsed) = member.elapsed_secs {
         metadata.push(format_elapsed(elapsed));
@@ -144,4 +144,3 @@ pub fn render_swarm_live_card(
     }
     out
 }
-

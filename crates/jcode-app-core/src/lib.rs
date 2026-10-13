@@ -55,8 +55,8 @@ pub mod update;
 /// integration for jcode.  Delegates to `jcode-terminal-detect` and
 /// `jcode-shell-integration`.
 pub mod terminal {
-    pub use jcode_terminal_detect as detect;
     pub use jcode_shell_integration as shell;
+    pub use jcode_terminal_detect as detect;
 }
 
 use std::sync::Mutex;

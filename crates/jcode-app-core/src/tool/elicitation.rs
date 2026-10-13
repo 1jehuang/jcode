@@ -152,13 +152,11 @@ impl Tool for ElicitateMcpTool {
 
         // Wait for user response (with timeout)
         let timeout = params.timeout_secs.unwrap_or(600);
-        let response = tokio::time::timeout(
-            std::time::Duration::from_secs(timeout as u64),
-            response_rx,
-        )
-        .await
-        .map_err(|_| anyhow::anyhow!("elicitation timed out after {timeout}s"))?
-        .map_err(|_| anyhow::anyhow!("elicitation response channel closed"))?;
+        let response =
+            tokio::time::timeout(std::time::Duration::from_secs(timeout as u64), response_rx)
+                .await
+                .map_err(|_| anyhow::anyhow!("elicitation timed out after {timeout}s"))?
+                .map_err(|_| anyhow::anyhow!("elicitation response channel closed"))?;
 
         let output = json!({
             "action": response.action,

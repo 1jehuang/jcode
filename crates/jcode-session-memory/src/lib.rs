@@ -34,8 +34,8 @@ pub mod substitute;
 pub mod template;
 
 pub use budget::{
-    BudgetReport, MAX_SECTION_LENGTH, MAX_TOTAL_SESSION_MEMORY_TOKENS,
-    check_budget, check_budget_from_content, generate_budget_warnings, truncate_section,
+    BudgetReport, MAX_SECTION_LENGTH, MAX_TOTAL_SESSION_MEMORY_TOKENS, check_budget,
+    check_budget_from_content, generate_budget_warnings, truncate_section,
 };
 pub use section_analysis::{
     SectionAnalysis, SectionInfo, TokenCount, analyze_sections, find_oversized_sections,

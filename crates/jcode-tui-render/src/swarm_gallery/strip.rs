@@ -7,11 +7,9 @@ use jcode_tui_style::color::rgb;
 use super::hover::render_hovered_detail;
 use super::types::GalleryMember;
 use super::util::{
-    clamp_line_to_width, count_digits, disp_w,
-    is_active_status, role_color, sort_members_for_display, status_accent, status_glyph,
-    truncate_label,
+    clamp_line_to_width, count_digits, disp_w, is_active_status, role_color,
+    sort_members_for_display, status_accent, status_glyph, truncate_label,
 };
-
 
 /// Bounds for per-chip task labels on the strip: never wider than MAX (keeps
 /// one agent from dominating the line) and dropped entirely below MIN (a two-
@@ -26,7 +24,6 @@ pub struct SwarmStripHint {
     /// What it does, e.g. "select".
     pub label: String,
 }
-
 
 /// Render the compact swarm strip shown directly above the status line.
 ///
@@ -120,7 +117,11 @@ pub fn render_swarm_strip(
     let chip_w = |c: &Chip| -> usize {
         let prefix = if c.is_sel && focused { 2 } else { 0 }; // '▸ ' width
         let batch_pfx = if c.is_batch { 2 } else { 0 }; // '✓ ' width
-        prefix + batch_pfx + disp_w(&c.glyph) + 1 + disp_w(&c.name)
+        prefix
+            + batch_pfx
+            + disp_w(&c.glyph)
+            + 1
+            + disp_w(&c.name)
             + c.todo.as_ref().map(|t| disp_w(t) + 1).unwrap_or(0)
     };
 
@@ -234,10 +235,7 @@ pub fn render_swarm_strip(
         if c.is_batch {
             prefix.push_str("\u{2713} ");
         }
-        spans.push(Span::styled(
-            format!("{prefix}{} {}", c.glyph, name),
-            style,
-        ));
+        spans.push(Span::styled(format!("{prefix}{} {}", c.glyph, name), style));
         prefix_w + batch_pfx_w + disp_w(&c.glyph) + 1 + disp_w(&name)
     } else {
         for (i, chip) in chips.iter().take(shown).enumerate() {
@@ -253,8 +251,7 @@ pub fn render_swarm_strip(
                 style = style.bg(rgb(20, 30, 40));
             }
             if chip.is_sel && focused {
-                style = style
-                    .add_modifier(Modifier::REVERSED | Modifier::UNDERLINED);
+                style = style.add_modifier(Modifier::REVERSED | Modifier::UNDERLINED);
             } else if chip.is_sel {
                 style = style.add_modifier(Modifier::UNDERLINED);
             }
@@ -353,7 +350,11 @@ pub fn render_swarm_strip(
                 let prefix_w = prefix.chars().count();
                 let body = truncate_label(&detail, width.saturating_sub(prefix_w));
                 out.push(Line::from(vec![
-                    Span::styled(prefix, Style::default().fg(role_color(m.role.as_deref()).unwrap_or_else(|| status_accent(&m.status)))),
+                    Span::styled(
+                        prefix,
+                        Style::default().fg(role_color(m.role.as_deref())
+                            .unwrap_or_else(|| status_accent(&m.status))),
+                    ),
                     Span::styled(body, Style::default().fg(rgb(180, 180, 190))),
                 ]));
             }
@@ -398,4 +399,3 @@ pub fn render_swarm_strip(
 
     out
 }
-

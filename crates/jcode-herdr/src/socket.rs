@@ -9,9 +9,9 @@
 //! the rest of the workspace still compiles — purely a build fix; no
 //! behavior change on Unix.
 
-use anyhow::{Context, Result};
 #[cfg(not(unix))]
 use anyhow::anyhow;
+use anyhow::{Context, Result};
 use serde_json::Value;
 use std::path::Path;
 #[cfg(unix)]
@@ -23,21 +23,15 @@ use tokio::net::UnixStream;
 /// parsed response. Each request is one newline-terminated JSON line;
 /// the response is the first line from HERDR.
 #[cfg(unix)]
-pub async fn send_request(
-    socket_path: &Path,
-    request: &Value,
-) -> Result<Value> {
-    let mut stream = UnixStream::connect(socket_path)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to connect to HERDR socket at {}",
-                socket_path.display()
-            )
-        })?;
+pub async fn send_request(socket_path: &Path, request: &Value) -> Result<Value> {
+    let mut stream = UnixStream::connect(socket_path).await.with_context(|| {
+        format!(
+            "failed to connect to HERDR socket at {}",
+            socket_path.display()
+        )
+    })?;
 
-    let mut line = serde_json::to_string(request)
-        .context("failed to serialize HERDR request")?;
+    let mut line = serde_json::to_string(request).context("failed to serialize HERDR request")?;
     line.push('\n');
     stream
         .write_all(line.as_bytes())
@@ -62,10 +56,7 @@ pub async fn send_request(
 /// Windows stub. HERDR only ships on Unix; surface a clear error so
 /// the workspace still compiles.
 #[cfg(not(unix))]
-pub async fn send_request(
-    _socket_path: &Path,
-    _request: &Value,
-) -> Result<Value> {
+pub async fn send_request(_socket_path: &Path, _request: &Value) -> Result<Value> {
     Err(anyhow!(
         "HERDR is not supported on this platform (Unix-only)"
     ))
@@ -74,10 +65,7 @@ pub async fn send_request(
 /// Fire-and-forget: send a request and ignore the response.
 /// Used for non-critical state reports where latency matters more
 /// than confirmation.
-pub async fn send_fire_and_forget(
-    socket_path: &Path,
-    request: &Value,
-) {
+pub async fn send_fire_and_forget(socket_path: &Path, request: &Value) {
     #[cfg(unix)]
     {
         if let Err(e) = send_request(socket_path, request).await {

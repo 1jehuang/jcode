@@ -46,7 +46,10 @@ pub struct KeymapSnapshot {
 
 impl KeymapSnapshot {
     /// Bindings originating from a particular source.
-    pub fn bindings_from_source(&self, source: KeySource) -> impl Iterator<Item = &DiscoveredBinding> {
+    pub fn bindings_from_source(
+        &self,
+        source: KeySource,
+    ) -> impl Iterator<Item = &DiscoveredBinding> {
         self.bindings.iter().filter(move |b| b.source == source)
     }
 }

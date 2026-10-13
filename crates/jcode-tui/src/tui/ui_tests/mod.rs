@@ -367,10 +367,7 @@ impl crate::tui::TuiState for TestState {
                     .role
                     .as_deref()
                     .is_some_and(|r| r.to_ascii_lowercase().contains(&query));
-                let status_match = m
-                    .status
-                    .to_ascii_lowercase()
-                    .contains(&query);
+                let status_match = m.status.to_ascii_lowercase().contains(&query);
                 name_match || role_match || status_match
             })
             .collect()

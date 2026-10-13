@@ -1305,7 +1305,9 @@ pub enum ServerEvent {
 
     /// Usage delta for a route, independent of catalog availability or Agent locks.
     #[serde(rename = "model_usage_updated")]
-    ModelUsageUpdated { route: jcode_provider_core::ModelRoute },
+    ModelUsageUpdated {
+        route: jcode_provider_core::ModelRoute,
+    },
 
     /// Available models updated (pushed after auth changes)
     #[serde(rename = "available_models_updated")]

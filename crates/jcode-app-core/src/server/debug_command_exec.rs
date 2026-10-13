@@ -753,11 +753,7 @@ mod tests {
             // to the ack channel so `wait_for_reload_ack` (which `do_reload`
             // awaits synchronously) returns promptly.
             loop {
-                if reload_rx
-                    .changed()
-                    .await
-                    .is_err()
-                {
+                if reload_rx.changed().await.is_err() {
                     // Sender dropped; nothing to ack.
                     return;
                 }

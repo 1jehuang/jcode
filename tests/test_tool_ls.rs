@@ -1,7 +1,7 @@
 //! Tests for the `ls` tool (directory listing, schema validation).
 
-use jcode::tool::{Tool, ToolContext, ToolExecutionMode};
 use jcode::tool::ls::LsTool;
+use jcode::tool::{Tool, ToolContext, ToolExecutionMode};
 use serde_json::json;
 
 fn make_ctx(dir: &std::path::Path) -> ToolContext {

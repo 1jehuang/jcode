@@ -8,25 +8,33 @@ fn set_contains_all_17_commands() {
 #[test]
 fn is_zsh_dangerous_true_for_each_command() {
     let expected = [
-        "zmodload", "emulate", "sysopen", "ztcp", "exec", "eval", "source",
-        "builtin", "setopt", "unsetopt", "alias", "unalias", "functions",
-        "whence", "disable", "enable", "sched",
+        "zmodload",
+        "emulate",
+        "sysopen",
+        "ztcp",
+        "exec",
+        "eval",
+        "source",
+        "builtin",
+        "setopt",
+        "unsetopt",
+        "alias",
+        "unalias",
+        "functions",
+        "whence",
+        "disable",
+        "enable",
+        "sched",
     ];
     for cmd in expected {
-        assert!(
-            is_zsh_dangerous(cmd),
-            "expected {cmd} to be dangerous"
-        );
+        assert!(is_zsh_dangerous(cmd), "expected {cmd} to be dangerous");
     }
 }
 
 #[test]
 fn is_zsh_dangerous_false_for_safe_commands() {
     for cmd in ["ls", "echo", "cd", "pwd", "grep", "cat", "rm"] {
-        assert!(
-            !is_zsh_dangerous(cmd),
-            "expected {cmd} to be safe"
-        );
+        assert!(!is_zsh_dangerous(cmd), "expected {cmd} to be safe");
     }
 }
 

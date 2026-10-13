@@ -146,7 +146,9 @@ fn panel_never_panics_across_degenerate_inputs() {
             for max_height in 0..=16 {
                 for selected in [0usize, 1, 5, usize::MAX] {
                     for focused in [false, true] {
-                        let _ = render_swarm_panel(&members, selected, focused, width, max_height, None);
+                        let _ = render_swarm_panel(
+                            &members, selected, focused, width, max_height, None,
+                        );
                     }
                 }
             }
@@ -271,7 +273,10 @@ fn gallery_selected_first_and_beyond() {
 
     // selected=Some(0) -- first member highlighted
     let lines = render_gallery(&members, width, max_height, Some(0));
-    assert!(!lines.is_empty(), "gallery with selected=0 must produce lines");
+    assert!(
+        !lines.is_empty(),
+        "gallery with selected=0 must produce lines"
+    );
     for line in &lines {
         assert!(
             plain(line).as_str().width() <= width,
@@ -282,7 +287,10 @@ fn gallery_selected_first_and_beyond() {
 
     // selected=Some(5) -- mid-range
     let lines = render_gallery(&members, width, max_height, Some(5));
-    assert!(!lines.is_empty(), "gallery with selected=5 must produce lines");
+    assert!(
+        !lines.is_empty(),
+        "gallery with selected=5 must produce lines"
+    );
     for line in &lines {
         assert!(
             plain(line).as_str().width() <= width,
@@ -341,8 +349,16 @@ fn panel_focused_vs_unfocused() {
     }
 
     // Focused panel should include an interaction hint ("alt+w" or similar)
-    let focused_text: String = focused.iter().map(|l| plain(l)).collect::<Vec<_>>().join("\n");
-    let unfocused_text: String = unfocused.iter().map(|l| plain(l)).collect::<Vec<_>>().join("\n");
+    let focused_text: String = focused
+        .iter()
+        .map(|l| plain(l))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let unfocused_text: String = unfocused
+        .iter()
+        .map(|l| plain(l))
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(
         focused_text.len() >= unfocused_text.len(),
         "focused panel should have at least as much content as unfocused"
@@ -387,9 +403,7 @@ fn strip_selected_indices_no_panic() {
     }
 
     // Empty members returns empty
-    assert!(
-        render_swarm_strip(&[], 0, true, &hints(), None, 0, 80, 4, None).is_empty()
-    );
+    assert!(render_swarm_strip(&[], 0, true, &hints(), None, 0, 80, 4, None).is_empty());
 }
 
 #[test]

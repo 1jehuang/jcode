@@ -7,7 +7,7 @@ use jcode_tui_style::color::rgb;
 use super::render::members_to_tiles;
 use super::types::GalleryMember;
 use super::util::{
-    clamp_line_to_width, display_index_to_tile_index, disp_w, is_active_status, role_color,
+    clamp_line_to_width, disp_w, display_index_to_tile_index, is_active_status, role_color,
     role_glyph, sort_members_for_display, status_accent, truncate_label,
 };
 
@@ -77,10 +77,7 @@ pub fn render_swarm_panel(
         let cursor = "▌";
         let label = format!("Rename: {buffer}{cursor}");
         let label_w = unicode_width::UnicodeWidthStr::width(label.as_str());
-        let mut spans = vec![Span::styled(
-            label,
-            Style::default().fg(rgb(200, 200, 210)),
-        )];
+        let mut spans = vec![Span::styled(label, Style::default().fg(rgb(200, 200, 210)))];
         // Pad to width
         if label_w < width {
             spans.push(Span::styled(
@@ -99,7 +96,6 @@ pub fn render_swarm_panel(
 
     out
 }
-
 
 /// Render the compact swarm summary: at most two lines for the info-widget
 /// margins.
@@ -181,7 +177,6 @@ pub fn render_swarm_compact(
     out
 }
 
-
 /// The compact widget's plan bar: green = done, yellow = running, dim = the
 /// rest. Rendered as a low-profile underline (▁) rather than full-height
 /// blocks. Non-empty classes always get at least one cell so tiny progress is
@@ -225,7 +220,6 @@ fn plan_progress_bar(done: u32, running: u32, total: u32, width: usize) -> Line<
     Line::from(spans)
 }
 
-
 fn panel_header(total: usize, active: usize, focused: bool) -> Line<'static> {
     let agent_color = if focused {
         rgb(220, 220, 230) // bright white when focused
@@ -264,12 +258,11 @@ fn panel_header(total: usize, active: usize, focused: bool) -> Line<'static> {
     Line::from(spans)
 }
 
-
 /// One row in the agent list: a selection marker, optional role glyph, the
 /// label, a status badge, and an age hint, all bounded to `width`.
 fn list_row(member: &GalleryMember, selected: bool, focused: bool, width: usize) -> Line<'static> {
-    let accent = role_color(member.role.as_deref())
-        .unwrap_or_else(|| status_accent(&member.status));
+    let accent =
+        role_color(member.role.as_deref()).unwrap_or_else(|| status_accent(&member.status));
     let marker = if selected { "▸ " } else { "  " };
     let glyph = role_glyph(member.role.as_deref())
         .map(|g| format!("{g} "))
@@ -296,9 +289,7 @@ fn list_row(member: &GalleryMember, selected: bool, focused: bool, width: usize)
     let label_w = disp_w(&label);
 
     let label_style = if selected && focused {
-        Style::default()
-            .fg(accent)
-            .add_modifier(Modifier::BOLD)
+        Style::default().fg(accent).add_modifier(Modifier::BOLD)
     } else if selected {
         Style::default().fg(rgb(235, 235, 245))
     } else {
@@ -332,4 +323,3 @@ fn list_row(member: &GalleryMember, selected: bool, focused: bool, width: usize)
     }
     Line::from(spans)
 }
-

@@ -115,10 +115,7 @@ pub(crate) enum ContentBlockInfo {
         _text: String,
     },
     #[serde(rename = "tool_use")]
-    ToolUse {
-        id: String,
-        name: String,
-    },
+    ToolUse { id: String, name: String },
     #[serde(rename = "thinking")]
     Thinking {
         #[serde(rename = "thinking")]

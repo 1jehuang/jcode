@@ -31,16 +31,13 @@ pub fn gallery_header(total: usize, active: usize) -> Line<'static> {
     ])
 }
 
-
 pub fn members_to_tiles(members: &[GalleryMember]) -> Vec<SwarmTile> {
     sort_members_for_display(members)
         .into_iter()
         .map(|m| {
-            let accent = role_color(m.role.as_deref())
-                .unwrap_or_else(|| status_accent(&m.status));
+            let accent = role_color(m.role.as_deref()).unwrap_or_else(|| status_accent(&m.status));
             let mut tile =
-                SwarmTile::new(m.label.clone(), m.status.clone(), accent)
-                    .with_body(m.body.clone());
+                SwarmTile::new(m.label.clone(), m.status.clone(), accent).with_body(m.body.clone());
             if let Some(glyph) = role_glyph(m.role.as_deref()) {
                 tile = tile.with_role_glyph(glyph);
             }
@@ -51,7 +48,6 @@ pub fn members_to_tiles(members: &[GalleryMember]) -> Vec<SwarmTile> {
         })
         .collect()
 }
-
 
 pub fn render_gallery(
     members: &[GalleryMember],
@@ -81,4 +77,3 @@ pub fn render_gallery(
     }
     out
 }
-

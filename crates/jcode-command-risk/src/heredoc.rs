@@ -25,10 +25,7 @@ pub fn has_heredoc_substitution(command: &str) -> bool {
 /// Group 3: backslash-escaped delimiter
 fn heredoc_open_pattern() -> Regex {
     // SAFETY: the pattern is a compile-time constant; compilation cannot fail.
-    Regex::new(
-        r#"\$\(cat[ \t]*<<(-?)[ \t]*(?:'+([A-Za-z_]\w*)'+|\\([A-Za-z_]\w*))"#,
-    )
-    .unwrap()
+    Regex::new(r#"\$\(cat[ \t]*<<(-?)[ \t]*(?:'+([A-Za-z_]\w*)'+|\\([A-Za-z_]\w*))"#).unwrap()
 }
 
 /// A validated heredoc span (byte offsets into the original command string).
@@ -122,18 +119,13 @@ fn find_valid_heredocs(command: &str) -> Vec<HeredocSpan> {
                     } else {
                         0
                     };
-                    let spaces_before_paren = after_delim.len()
-                        - after_delim
-                            .trim_start_matches([' ', '\t'])
-                            .len();
-                    close_paren_col =
-                        tab_prefix_len + delimiter.len() + spaces_before_paren;
+                    let spaces_before_paren =
+                        after_delim.len() - after_delim.trim_start_matches([' ', '\t']).len();
+                    close_paren_col = tab_prefix_len + delimiter.len() + spaces_before_paren;
                     break;
                 }
                 // Starts with delimiter but has other content — reject.
-                if trimmed_after
-                    .starts_with([')', '}', '|', '&', ';', '<', '>'])
-                {
+                if trimmed_after.starts_with([')', '}', '|', '&', ';', '<', '>']) {
                     continue;
                 }
             }
@@ -165,9 +157,11 @@ fn find_valid_heredocs(command: &str) -> Vec<HeredocSpan> {
     // Stripping nested ranges corrupts indices: the outer range's end becomes
     // stale, silently dropping any suffix (e.g. `; rm -rf /`). Bail entirely.
     for (i, inner) in verified.iter().enumerate() {
-        if verified.iter().enumerate().any(|(j, outer)| {
-            i != j && inner.start > outer.start && inner.start < outer.end
-        }) {
+        if verified
+            .iter()
+            .enumerate()
+            .any(|(j, outer)| i != j && inner.start > outer.start && inner.start < outer.end)
+        {
             return Vec::new();
         }
     }

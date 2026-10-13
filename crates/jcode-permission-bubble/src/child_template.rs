@@ -74,7 +74,10 @@ impl ChildTemplate {
             format!("{}\n\n{}", self.system_message.trim_end(), body)
         };
 
-        ChildMessage { system_message, task_description: self.task_description }
+        ChildMessage {
+            system_message,
+            task_description: self.task_description,
+        }
     }
 }
 /// A fully-formed child message ready for a provider API call.
@@ -114,14 +117,24 @@ mod tests {
     fn all_ten_rules_present_and_numbered() {
         let msg = build_child_message("test");
         for (i, rule) in RULES.iter().enumerate() {
-            assert!(msg.contains(&format!("{}. {}", i + 1, rule)), "Rule {}: {rule}", i + 1);
+            assert!(
+                msg.contains(&format!("{}. {}", i + 1, rule)),
+                "Rule {}: {rule}",
+                i + 1
+            );
         }
     }
 
     #[test]
     fn output_format_section_present() {
         let msg = build_child_message("test");
-        for label in ["Scope:", "Result:", "Key files:", "Files changed:", "Issues:"] {
+        for label in [
+            "Scope:",
+            "Result:",
+            "Key files:",
+            "Files changed:",
+            "Issues:",
+        ] {
             assert!(msg.contains(label), "Missing label: {label}");
         }
     }

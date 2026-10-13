@@ -6,8 +6,8 @@
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
-use super::color_support::rgb;
 use super::TuiState;
+use super::color_support::rgb;
 
 /// Minimum terminal width to show the status bar.
 const MIN_WIDTH: u16 = 80;
@@ -87,37 +87,42 @@ fn build_status_line(data: &StatusBarData, width: usize) -> Line<'static> {
                 Style::default().fg(rgb(100, 160, 220)),
             ));
         } else {
-            spans.push(Span::styled(" \u{2502} ", Style::default().fg(separator_color)));
             spans.push(Span::styled(
-                format!("{} ", repo),
-                Style::default().fg(dim),
+                " \u{2502} ",
+                Style::default().fg(separator_color),
             ));
+            spans.push(Span::styled(format!("{} ", repo), Style::default().fg(dim)));
         }
     }
 
     // Mode indicator (only when non-default)
     if let Some(ref mode) = data.mode_label
-        && mode != "EXEC" {
-            spans.push(Span::styled(" \u{2502} ", Style::default().fg(separator_color)));
-            let mode_color = match mode.as_str() {
-                "MGR" => rgb(220, 160, 60),   // amber for manager
-                "RES" => rgb(120, 160, 220),  // blue for researcher
-                _ => dim,
-            };
-            spans.push(Span::styled(
-                format!("[{}] ", mode),
-                Style::default().fg(mode_color),
-            ));
-        }
+        && mode != "EXEC"
+    {
+        spans.push(Span::styled(
+            " \u{2502} ",
+            Style::default().fg(separator_color),
+        ));
+        let mode_color = match mode.as_str() {
+            "MGR" => rgb(220, 160, 60),  // amber for manager
+            "RES" => rgb(120, 160, 220), // blue for researcher
+            _ => dim,
+        };
+        spans.push(Span::styled(
+            format!("[{}] ", mode),
+            Style::default().fg(mode_color),
+        ));
+    }
 
     // Center: session name
     if let Some(ref session) = data.session_name
-        && spans.is_empty() {
-            spans.push(Span::styled(
-                format!(" {} ", session),
-                Style::default().fg(dim),
-            ));
-        }
+        && spans.is_empty()
+    {
+        spans.push(Span::styled(
+            format!(" {} ", session),
+            Style::default().fg(dim),
+        ));
+    }
 
     // Right side: agent stats
     let mut right_spans: Vec<Span<'static>> = Vec::new();

@@ -139,13 +139,9 @@ async fn queue_soft_interrupt_for_session_persists_when_live_queue_is_unavailabl
     // KCode fork: Session::save() suppresses blank sessions (persistence.rs),
     // so session_exists() would return false and the queued==true assertion below
     // would fail deterministically. Add a title so the fixture actually persists.
-    crate::session::Session::create_with_id(
-        session_id.clone(),
-        None,
-        Some("persist test".into()),
-    )
-    .save()
-    .expect("save session snapshot");
+    crate::session::Session::create_with_id(session_id.clone(), None, Some("persist test".into()))
+        .save()
+        .expect("save session snapshot");
 
     // KCode fork: surface persistence regressions explicitly instead of via the queued==false panic.
     assert!(

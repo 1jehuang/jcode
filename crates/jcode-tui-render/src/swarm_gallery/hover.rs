@@ -6,8 +6,8 @@ use jcode_tui_style::color::rgb;
 
 use super::types::{GalleryMember, GalleryToolIntent};
 use super::util::{
-    format_cost, format_elapsed_short, format_tokens, role_color, status_accent,
-    status_glyph, truncate_label,
+    format_cost, format_elapsed_short, format_tokens, role_color, status_accent, status_glyph,
+    truncate_label,
 };
 
 /// Render the expanded detail viewport for the hovered agent in the focused
@@ -31,8 +31,7 @@ pub(crate) fn render_hovered_detail(
     width: usize,
     budget: usize,
 ) -> Vec<Line<'static>> {
-    let accent = role_color(m.role.as_deref())
-        .unwrap_or_else(|| status_accent(&m.status));
+    let accent = role_color(m.role.as_deref()).unwrap_or_else(|| status_accent(&m.status));
     let dim = rgb(120, 120, 130);
     const GUTTER: &str = "   ";
 
@@ -69,7 +68,6 @@ pub(crate) fn render_hovered_detail(
     out
 }
 
-
 /// The body of the hovered-agent detail viewport: a tail of the agent's live
 /// transcript plus its todo list, gutter-indented, without the header row.
 /// Used directly by the vertical strip (where the selected agent's row already
@@ -98,91 +96,101 @@ pub(crate) fn hovered_detail_body(
     // lines above the todo card so they are always visible in the detail pane.
     let detail_fg = rgb(110, 110, 125);
     if let Some(secs) = m.elapsed_secs
-        && out.len() < budget {
-            out.push(Line::from(vec![
-                Span::raw(GUTTER),
-                Span::styled(
-                    if show_member_rail { BAR } else { "    " },
-                    Style::default().fg(gutter_fg),
-                ),
-                Span::styled("  ⏱ ", Style::default().fg(detail_fg)),
-                Span::raw(format_elapsed_short(secs)),
-            ]));
-        }
+        && out.len() < budget
+    {
+        out.push(Line::from(vec![
+            Span::raw(GUTTER),
+            Span::styled(
+                if show_member_rail { BAR } else { "    " },
+                Style::default().fg(gutter_fg),
+            ),
+            Span::styled("  ⏱ ", Style::default().fg(detail_fg)),
+            Span::raw(format_elapsed_short(secs)),
+        ]));
+    }
     if let Some(ref effort) = m.effort
-        && !effort.trim().is_empty() && out.len() < budget {
-            out.push(Line::from(vec![
-                Span::raw(GUTTER),
-                Span::styled(
-                    if show_member_rail { BAR } else { "    " },
-                    Style::default().fg(gutter_fg),
-                ),
-                Span::styled("  ⚡ ", Style::default().fg(detail_fg)),
-                Span::raw(format!("effort: {effort}")),
-            ]));
-        }
+        && !effort.trim().is_empty()
+        && out.len() < budget
+    {
+        out.push(Line::from(vec![
+            Span::raw(GUTTER),
+            Span::styled(
+                if show_member_rail { BAR } else { "    " },
+                Style::default().fg(gutter_fg),
+            ),
+            Span::styled("  ⚡ ", Style::default().fg(detail_fg)),
+            Span::raw(format!("effort: {effort}")),
+        ]));
+    }
     if let Some(ref auth) = m.auth_method
-        && !auth.trim().is_empty() && out.len() < budget {
-            out.push(Line::from(vec![
-                Span::raw(GUTTER),
-                Span::styled(
-                    if show_member_rail { BAR } else { "    " },
-                    Style::default().fg(gutter_fg),
-                ),
-                Span::styled("  🔑 ", Style::default().fg(detail_fg)),
-                Span::raw(format!("auth: {auth}")),
-            ]));
-        }
+        && !auth.trim().is_empty()
+        && out.len() < budget
+    {
+        out.push(Line::from(vec![
+            Span::raw(GUTTER),
+            Span::styled(
+                if show_member_rail { BAR } else { "    " },
+                Style::default().fg(gutter_fg),
+            ),
+            Span::styled("  🔑 ", Style::default().fg(detail_fg)),
+            Span::raw(format!("auth: {auth}")),
+        ]));
+    }
 
     // ---- Performance metrics ----
     if let Some(tokens) = m.input_tokens
-        && out.len() < budget {
-            out.push(Line::from(vec![
-                Span::raw(GUTTER),
-                Span::styled(
-                    if show_member_rail { BAR } else { "    " },
-                    Style::default().fg(gutter_fg),
-                ),
-                Span::styled("  📥 ", Style::default().fg(detail_fg)),
-                Span::raw(format_tokens(tokens)),
-            ]));
-        }
+        && out.len() < budget
+    {
+        out.push(Line::from(vec![
+            Span::raw(GUTTER),
+            Span::styled(
+                if show_member_rail { BAR } else { "    " },
+                Style::default().fg(gutter_fg),
+            ),
+            Span::styled("  📥 ", Style::default().fg(detail_fg)),
+            Span::raw(format_tokens(tokens)),
+        ]));
+    }
     if let Some(tokens) = m.output_tokens
-        && out.len() < budget {
-            out.push(Line::from(vec![
-                Span::raw(GUTTER),
-                Span::styled(
-                    if show_member_rail { BAR } else { "    " },
-                    Style::default().fg(gutter_fg),
-                ),
-                Span::styled("  📤 ", Style::default().fg(detail_fg)),
-                Span::raw(format_tokens(tokens)),
-            ]));
-        }
+        && out.len() < budget
+    {
+        out.push(Line::from(vec![
+            Span::raw(GUTTER),
+            Span::styled(
+                if show_member_rail { BAR } else { "    " },
+                Style::default().fg(gutter_fg),
+            ),
+            Span::styled("  📤 ", Style::default().fg(detail_fg)),
+            Span::raw(format_tokens(tokens)),
+        ]));
+    }
     if let Some(depth) = m.queue_depth
-        && depth > 0 && out.len() < budget {
-            out.push(Line::from(vec![
-                Span::raw(GUTTER),
-                Span::styled(
-                    if show_member_rail { BAR } else { "    " },
-                    Style::default().fg(gutter_fg),
-                ),
-                Span::styled("  ⚠️  ", Style::default().fg(rgb(255, 180, 50))),
-                Span::raw(format!("{depth} tasks queued")),
-            ]));
-        }
+        && depth > 0
+        && out.len() < budget
+    {
+        out.push(Line::from(vec![
+            Span::raw(GUTTER),
+            Span::styled(
+                if show_member_rail { BAR } else { "    " },
+                Style::default().fg(gutter_fg),
+            ),
+            Span::styled("  ⚠️  ", Style::default().fg(rgb(255, 180, 50))),
+            Span::raw(format!("{depth} tasks queued")),
+        ]));
+    }
     if let Some(cents) = m.cost_cents
-        && out.len() < budget {
-            out.push(Line::from(vec![
-                Span::raw(GUTTER),
-                Span::styled(
-                    if show_member_rail { BAR } else { "    " },
-                    Style::default().fg(gutter_fg),
-                ),
-                Span::styled("  💰 ", Style::default().fg(detail_fg)),
-                Span::raw(format_cost(cents)),
-            ]));
-        }
+        && out.len() < budget
+    {
+        out.push(Line::from(vec![
+            Span::raw(GUTTER),
+            Span::styled(
+                if show_member_rail { BAR } else { "    " },
+                Style::default().fg(gutter_fg),
+            ),
+            Span::styled("  💰 ", Style::default().fg(detail_fg)),
+            Span::raw(format_cost(cents)),
+        ]));
+    }
 
     // ---- Todo card ----
     // Show a sliding window of four item names. Tool activity belongs to the
@@ -347,4 +355,3 @@ pub(crate) fn hovered_detail_body(
 
     out
 }
-

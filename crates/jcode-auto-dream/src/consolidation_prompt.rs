@@ -127,8 +127,7 @@ mod tests {
     #[test]
     fn build_prompt_with_cluster_info() {
         let entries = vec![];
-        let prompt =
-            ConsolidationPrompt::build(entries, Some("Cluster: preferences"));
+        let prompt = ConsolidationPrompt::build(entries, Some("Cluster: preferences"));
         assert!(prompt.user_message.contains("Cluster: preferences"));
     }
 }

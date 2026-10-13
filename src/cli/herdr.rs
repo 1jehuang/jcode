@@ -49,7 +49,9 @@ pub(crate) fn run_herdr_status() -> Result<()> {
 
     if !env.is_valid() {
         println!();
-        println!("Not running inside a HERDR pane. Launch jcode from a HERDR session to enable integration.");
+        println!(
+            "Not running inside a HERDR pane. Launch jcode from a HERDR session to enable integration."
+        );
     }
 
     Ok(())
@@ -74,15 +76,17 @@ pub(crate) fn run_herdr_install() -> Result<()> {
 
     println!();
     println!("Screen manifests written to {}", dir.display());
-    println!("HERDR will use these rules to detect jcode and ForgeCode agent state from terminal output.");
+    println!(
+        "HERDR will use these rules to detect jcode and ForgeCode agent state from terminal output."
+    );
 
     Ok(())
 }
 
 /// Return the HERDR agent detection directory (~/.config/herdr/agent-detection/).
 fn herdr_agent_detection_dir() -> Result<PathBuf> {
-    let home = std::env::var("HOME")
-        .map_err(|_| anyhow::anyhow!("HOME environment variable not set"))?;
+    let home =
+        std::env::var("HOME").map_err(|_| anyhow::anyhow!("HOME environment variable not set"))?;
     Ok(PathBuf::from(home)
         .join(".config")
         .join("herdr")

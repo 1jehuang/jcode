@@ -1,9 +1,7 @@
 use jcode_message_types::StreamEvent;
 use serde_json::Value;
 
-use crate::parser::{
-    CliOutput, ContentBlockInfo, DeltaInfo, SdkContentBlock, SseEvent,
-};
+use crate::parser::{CliOutput, ContentBlockInfo, DeltaInfo, SdkContentBlock, SseEvent};
 use crate::to_internal_tool_name;
 
 // ---------------------------------------------------------------------------
@@ -25,17 +23,12 @@ impl ForgeCodeEventTranslator {
         }
     }
 
-    pub(crate) fn handle_event(
-        &mut self,
-        event: SseEvent,
-    ) -> Vec<StreamEvent> {
+    pub(crate) fn handle_event(&mut self, event: SseEvent) -> Vec<StreamEvent> {
         match event {
             SseEvent::MessageStart { message } => {
                 if let Some(usage) = message.get("usage") {
-                    let input_tokens =
-                        usage.get("input_tokens").and_then(|v| v.as_u64());
-                    let output_tokens =
-                        usage.get("output_tokens").and_then(|v| v.as_u64());
+                    let input_tokens = usage.get("input_tokens").and_then(|v| v.as_u64());
+                    let output_tokens = usage.get("output_tokens").and_then(|v| v.as_u64());
                     let cache_creation_input_tokens = usage
                         .get("cache_creation_input_tokens")
                         .and_then(|v| v.as_u64());
@@ -57,9 +50,7 @@ impl ForgeCodeEventTranslator {
                 }
                 Vec::new()
             }
-            SseEvent::ContentBlockStart {
-                content_block, ..
-            } => match content_block {
+            SseEvent::ContentBlockStart { content_block, .. } => match content_block {
                 ContentBlockInfo::Text { .. } => Vec::new(),
                 ContentBlockInfo::ToolUse { id, name } => {
                     self.in_tool_use_block = true;
@@ -101,18 +92,14 @@ impl ForgeCodeEventTranslator {
                 if let Some(usage) = usage
                     && (usage.input_tokens.is_some()
                         || usage.output_tokens.is_some()
-                        || usage
-                            .cache_creation_input_tokens
-                            .is_some()
+                        || usage.cache_creation_input_tokens.is_some()
                         || usage.cache_read_input_tokens.is_some())
                 {
                     return vec![StreamEvent::TokenUsage {
                         input_tokens: usage.input_tokens,
                         output_tokens: usage.output_tokens,
-                        cache_read_input_tokens: usage
-                            .cache_read_input_tokens,
-                        cache_creation_input_tokens: usage
-                            .cache_creation_input_tokens,
+                        cache_read_input_tokens: usage.cache_read_input_tokens,
+                        cache_creation_input_tokens: usage.cache_creation_input_tokens,
                     }];
                 }
                 Vec::new()
@@ -148,10 +135,7 @@ impl CliOutputParser {
         }
     }
 
-    pub(crate) fn handle_output(
-        &mut self,
-        output: CliOutput,
-    ) -> Vec<StreamEvent> {
+    pub(crate) fn handle_output(&mut self, output: CliOutput) -> Vec<StreamEvent> {
         match output {
             CliOutput::StreamEvent { event, .. } => {
                 self.saw_stream_events = true;
@@ -159,19 +143,17 @@ impl CliOutputParser {
                     Ok(parsed) => parsed,
                     Err(err) => {
                         return vec![StreamEvent::Error {
-                            message: format!(
-                                "Failed to parse ForgeCode CLI stream event: {}",
-                                err
-                            ),
+                            message: format!("Failed to parse ForgeCode CLI stream event: {}", err),
                             retry_after_secs: None,
                         }];
                     }
                 };
 
                 let events = self.translator.handle_event(parsed);
-                if events.iter().any(|event| {
-                    matches!(event, StreamEvent::MessageEnd { .. })
-                }) {
+                if events
+                    .iter()
+                    .any(|event| matches!(event, StreamEvent::MessageEnd { .. }))
+                {
                     self.saw_message_end = true;
                 }
                 events
@@ -186,17 +168,14 @@ impl CliOutputParser {
                                 events.push(StreamEvent::TextDelta(text));
                             }
                         }
-                        SdkContentBlock::ToolUse {
-                            id, name, input,
-                        } => {
+                        SdkContentBlock::ToolUse { id, name, input } => {
                             if !self.saw_stream_events {
                                 events.push(StreamEvent::ToolUseStart {
                                     id,
                                     name: to_internal_tool_name(&name),
                                 });
                                 events.push(StreamEvent::ToolInputDelta(
-                                    serde_json::to_string(&input)
-                                        .unwrap_or_default(),
+                                    serde_json::to_string(&input).unwrap_or_default(),
                                 ));
                                 events.push(StreamEvent::ToolUseEnd);
                             }
@@ -206,17 +185,15 @@ impl CliOutputParser {
                             content,
                             is_error,
                         } => {
-                            let content_str =
-                                content
-                                    .map(|v| {
-                                        if let Some(s) = v.as_str() {
-                                            s.to_string()
-                                        } else {
-                                            serde_json::to_string(&v)
-                                                .unwrap_or_default()
-                                        }
-                                    })
-                                    .unwrap_or_default();
+                            let content_str = content
+                                .map(|v| {
+                                    if let Some(s) = v.as_str() {
+                                        s.to_string()
+                                    } else {
+                                        serde_json::to_string(&v).unwrap_or_default()
+                                    }
+                                })
+                                .unwrap_or_default();
                             events.push(StreamEvent::ToolResult {
                                 tool_use_id,
                                 content: content_str,
@@ -229,9 +206,7 @@ impl CliOutputParser {
 
                 if !self.saw_message_end {
                     self.saw_message_end = true;
-                    events.push(StreamEvent::MessageEnd {
-                        stop_reason: None,
-                    });
+                    events.push(StreamEvent::MessageEnd { stop_reason: None });
                 }
 
                 events
@@ -246,17 +221,15 @@ impl CliOutputParser {
                         is_error,
                     } = block
                     {
-                        let content_str =
-                            content
-                                .map(|v| {
-                                    if let Some(s) = v.as_str() {
-                                        s.to_string()
-                                    } else {
-                                        serde_json::to_string(&v)
-                                            .unwrap_or_default()
-                                    }
-                                })
-                                .unwrap_or_default();
+                        let content_str = content
+                            .map(|v| {
+                                if let Some(s) = v.as_str() {
+                                    s.to_string()
+                                } else {
+                                    serde_json::to_string(&v).unwrap_or_default()
+                                }
+                            })
+                            .unwrap_or_default();
                         events.push(StreamEvent::ToolResult {
                             tool_use_id,
                             content: content_str,
@@ -275,18 +248,14 @@ impl CliOutputParser {
                 if let Some(usage) = usage
                     && (usage.input_tokens.is_some()
                         || usage.output_tokens.is_some()
-                        || usage
-                            .cache_creation_input_tokens
-                            .is_some()
+                        || usage.cache_creation_input_tokens.is_some()
                         || usage.cache_read_input_tokens.is_some())
                 {
                     events.push(StreamEvent::TokenUsage {
                         input_tokens: usage.input_tokens,
                         output_tokens: usage.output_tokens,
-                        cache_read_input_tokens: usage
-                            .cache_read_input_tokens,
-                        cache_creation_input_tokens: usage
-                            .cache_creation_input_tokens,
+                        cache_read_input_tokens: usage.cache_read_input_tokens,
+                        cache_creation_input_tokens: usage.cache_creation_input_tokens,
                     });
                 }
                 if let Some(sid) = session_id {
@@ -294,16 +263,13 @@ impl CliOutputParser {
                 }
                 if is_error {
                     events.push(StreamEvent::Error {
-                        message: "ForgeCode CLI reported an error"
-                            .to_string(),
+                        message: "ForgeCode CLI reported an error".to_string(),
                         retry_after_secs: None,
                     });
                 }
                 if !self.saw_message_end {
                     self.saw_message_end = true;
-                    events.push(StreamEvent::MessageEnd {
-                        stop_reason: None,
-                    });
+                    events.push(StreamEvent::MessageEnd { stop_reason: None });
                 }
                 events
             }
@@ -315,10 +281,7 @@ impl CliOutputParser {
                 retry_after_secs,
             }],
             CliOutput::System { session_id } => {
-                session_id
-                    .map(StreamEvent::SessionId)
-                    .into_iter()
-                    .collect()
+                session_id.map(StreamEvent::SessionId).into_iter().collect()
             }
             CliOutput::Other => Vec::new(),
         }
@@ -328,9 +291,7 @@ impl CliOutputParser {
 fn parse_content_blocks(content: &Value) -> Vec<SdkContentBlock> {
     match content {
         Value::String(text) => {
-            vec![SdkContentBlock::Text {
-                text: text.clone(),
-            }]
+            vec![SdkContentBlock::Text { text: text.clone() }]
         }
         Value::Array(items) => items
             .iter()
@@ -376,7 +337,15 @@ mod tests {
             _session_id: None,
         };
         let events = parser.handle_output(output);
-        assert!(events.iter().any(|e| matches!(e, StreamEvent::TextDelta(t) if t == "hello world")));
-        assert!(events.iter().any(|e| matches!(e, StreamEvent::MessageEnd { .. })));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, StreamEvent::TextDelta(t) if t == "hello world"))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, StreamEvent::MessageEnd { .. }))
+        );
     }
 }

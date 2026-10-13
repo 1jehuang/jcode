@@ -4,7 +4,9 @@ use super::*;
 
 #[test]
 fn detects_heredoc_pattern() {
-    assert!(has_heredoc_substitution("echo $(cat <<'EOF'\nhello\nEOF\n)"));
+    assert!(has_heredoc_substitution(
+        "echo $(cat <<'EOF'\nhello\nEOF\n)"
+    ));
 }
 
 #[test]

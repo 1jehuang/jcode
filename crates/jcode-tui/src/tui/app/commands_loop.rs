@@ -251,9 +251,7 @@ fn cancel_loop(app: &mut App, id: &str) -> bool {
         app.push_display_message(DisplayMessage::error(format!("Failed to save: {e}")));
         return true;
     }
-    app.push_display_message(DisplayMessage::system(format!(
-        "Loop {id} cancelled."
-    )));
+    app.push_display_message(DisplayMessage::system(format!("Loop {id} cancelled.")));
     true
 }
 
@@ -280,9 +278,7 @@ fn pause_loop(app: &mut App, id: &str) -> bool {
         app.push_display_message(DisplayMessage::error(format!("Failed to save: {e}")));
         return true;
     }
-    app.push_display_message(DisplayMessage::system(format!(
-        "Loop {id} paused."
-    )));
+    app.push_display_message(DisplayMessage::system(format!("Loop {id} paused.")));
     true
 }
 
@@ -309,9 +305,7 @@ fn resume_loop(app: &mut App, id: &str) -> bool {
         app.push_display_message(DisplayMessage::error(format!("Failed to save: {e}")));
         return true;
     }
-    app.push_display_message(DisplayMessage::system(format!(
-        "Loop {id} resumed."
-    )));
+    app.push_display_message(DisplayMessage::system(format!("Loop {id} resumed.")));
     true
 }
 

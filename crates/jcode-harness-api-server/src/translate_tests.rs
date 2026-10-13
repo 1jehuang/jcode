@@ -2472,17 +2472,26 @@ fn history_response_stats_cross_real_render_protocol_and_sdk_boundary() {
         {"id":"a","role":"assistant","content":[{"type":"text","text":"answer"}],
             "token_usage":{"input_tokens":123,"output_tokens":45,"cache_read_input_tokens":7,"cache_creation_input_tokens":8}}
     ])).unwrap();
-    let legacy: Vec<_> = jcode_base::session::render_messages(&session).into_iter()
+    let legacy: Vec<_> = jcode_base::session::render_messages(&session)
+        .into_iter()
         .map(|row| jcode_base::protocol::HistoryMessage {
-            role: row.role, content: row.content, tool_calls: None, tool_data: row.tool_data,
+            role: row.role,
+            content: row.content,
+            tool_calls: None,
+            tool_data: row.tool_data,
             response_stats: row.response_stats,
-        }).collect();
+        })
+        .collect();
     let mut state = state_with_session();
     let out = state.api_request_to_legacy(&json!({"req":"get_history", "id":46}));
-    let Outbound::Legacy(request) = &out[0] else { panic!("expected history request") };
+    let Outbound::Legacy(request) = &out[0] else {
+        panic!("expected history request")
+    };
     let frames = state.legacy_event_to_api(&json!({"type":"history", "id":request["id"],
         "messages":legacy,"activity":{"is_processing":false}}));
-    let ApiEvent::History { messages, .. } = &frames[0].event else { panic!("expected history") };
+    let ApiEvent::History { messages, .. } = &frames[0].event else {
+        panic!("expected history")
+    };
     let stats = messages[1].response_stats.as_ref().unwrap();
     assert_eq!(stats.input_tokens, Some(123));
     assert_eq!(stats.output_tokens, Some(45));

@@ -126,7 +126,10 @@ pub fn detect_breaks(
     );
 
     // Per-tool hashes: compare pairwise by position.
-    let max_len = previous.per_tool_hashes.len().max(current.per_tool_hashes.len());
+    let max_len = previous
+        .per_tool_hashes
+        .len()
+        .max(current.per_tool_hashes.len());
     for i in 0..max_len {
         let old = previous.per_tool_hashes.get(i).map(|(_, h)| *h);
         let new = current.per_tool_hashes.get(i).map(|(_, h)| *h);

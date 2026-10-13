@@ -195,10 +195,7 @@ pub async fn run_live_openai_compatible_smoke(
     let resolved = jcode_base::provider_catalog::resolve_openai_compatible_profile(profile);
     let use_responses = needs_responses_api(model, &resolved.api_base);
     let (url, body) = if use_responses {
-        let url = format!(
-            "{}/responses",
-            resolved.api_base.trim_end_matches('/')
-        );
+        let url = format!("{}/responses", resolved.api_base.trim_end_matches('/'));
         let body = serde_json::json!({
             "model": model,
             "input": [

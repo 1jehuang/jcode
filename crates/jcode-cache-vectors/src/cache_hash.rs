@@ -70,7 +70,9 @@ mod tests {
     #[test]
     fn compute_hash_different_data() {
         #[derive(serde::Serialize)]
-        struct S { x: i32 }
+        struct S {
+            x: i32,
+        }
         assert_ne!(compute_hash(&S { x: 1 }), compute_hash(&S { x: 2 }));
         assert_eq!(compute_hash(&S { x: 1 }), compute_hash(&S { x: 1 }));
     }

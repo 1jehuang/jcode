@@ -169,26 +169,29 @@ fn choose_grid(
 
 /// Render a single cell box of the given inner dimensions. `inner_w`/`inner_h`
 /// are the content area (excluding borders).
-fn render_cell(tile: &SwarmTile, inner_w: usize, inner_h: usize, selected: bool) -> Vec<Line<'static>> {
+fn render_cell(
+    tile: &SwarmTile,
+    inner_w: usize,
+    inner_h: usize,
+    selected: bool,
+) -> Vec<Line<'static>> {
     // --- Color palette based on selection state ---
     let (border_color, title_color, badge_color, text_color) = if selected {
         (
-            tile.accent,                                       // bright accent border
-            tile.accent,                                       // full brightness title
-            tile.accent,                                       // accent badge
-            Color::Rgb(170, 172, 180),                         // normal body text
+            tile.accent,               // bright accent border
+            tile.accent,               // full brightness title
+            tile.accent,               // accent badge
+            Color::Rgb(170, 172, 180), // normal body text
         )
     } else {
         // Use role_color for the title when available, giving a subtle
         // role hint even for unselected tiles.
-        let dim_title = tile
-            .role_color
-            .unwrap_or(Color::Rgb(130, 130, 145));
+        let dim_title = tile.role_color.unwrap_or(Color::Rgb(130, 130, 145));
         (
-            Color::Rgb(80, 80, 92),                            // dim border (default)
-            dim_title,                                         // role-tinted title
-            Color::Rgb(100, 100, 115),                         // dim badge
-            Color::Rgb(170, 170, 185),                         // slightly dimmed body text
+            Color::Rgb(80, 80, 92),    // dim border (default)
+            dim_title,                 // role-tinted title
+            Color::Rgb(100, 100, 115), // dim badge
+            Color::Rgb(170, 170, 185), // slightly dimmed body text
         )
     };
     let border_style = Style::default().fg(border_color);
@@ -379,7 +382,12 @@ fn truncate_w(s: &str, max_width: usize) -> String {
 /// `focused` controls whether the tile border uses the bright accent color
 /// (focused) or the dim default border (unfocused). Returns an empty vec when
 /// the area is too small to draw a bordered box.
-pub fn render_single_tile(tile: &SwarmTile, width: usize, height: usize, focused: bool) -> Vec<Line<'static>> {
+pub fn render_single_tile(
+    tile: &SwarmTile,
+    width: usize,
+    height: usize,
+    focused: bool,
+) -> Vec<Line<'static>> {
     if width < 4 || height < 3 {
         return Vec::new();
     }

@@ -913,13 +913,14 @@ pub(super) fn clipboard_image() -> Option<(String, String)> {
         {
             let result = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if result == "ok"
-                && let Ok(data) = std::fs::read(&temp_path) {
-                    let _ = std::fs::remove_file(&temp_path);
-                    if !data.is_empty() {
-                        let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
-                        return Some(("image/png".to_string(), b64));
-                    }
+                && let Ok(data) = std::fs::read(&temp_path)
+            {
+                let _ = std::fs::remove_file(&temp_path);
+                if !data.is_empty() {
+                    let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+                    return Some(("image/png".to_string(), b64));
                 }
+            }
         }
     }
 

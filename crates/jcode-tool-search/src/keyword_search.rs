@@ -90,7 +90,10 @@ pub fn search_tools(query: &str, tools: &[Tool]) -> Vec<SearchResult> {
         }];
     }
 
-    let tokens: Vec<&str> = query_lower.split_whitespace().filter(|t| !t.is_empty()).collect();
+    let tokens: Vec<&str> = query_lower
+        .split_whitespace()
+        .filter(|t| !t.is_empty())
+        .collect();
 
     let mut results: Vec<SearchResult> = tools
         .iter()
@@ -165,10 +168,7 @@ mod tests {
 
     #[test]
     fn exact_name_match_scores_highest() {
-        let tools = vec![
-            ToolEntry::new("WebSearch"),
-            ToolEntry::new("AgentGrep"),
-        ];
+        let tools = vec![ToolEntry::new("WebSearch"), ToolEntry::new("AgentGrep")];
         let results = search_tools("websearch", &tools);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].score, SCORE_EXACT_NAME);
@@ -232,14 +232,8 @@ mod tests {
     #[test]
     fn mcp_tool_server_name_match() {
         let tools = vec![
-            ToolEntry::with_description(
-                "mcp__slack__post_message",
-                "Send a message to Slack",
-            ),
-            ToolEntry::with_description(
-                "mcp__github__create_issue",
-                "Create a GitHub issue",
-            ),
+            ToolEntry::with_description("mcp__slack__post_message", "Send a message to Slack"),
+            ToolEntry::with_description("mcp__github__create_issue", "Create a GitHub issue"),
         ];
         let results = search_tools("slack", &tools);
         assert_eq!(results.len(), 1);
@@ -249,14 +243,8 @@ mod tests {
     #[test]
     fn mcp_tool_action_match() {
         let tools = vec![
-            ToolEntry::with_description(
-                "mcp__slack__post_message",
-                "Send a message to Slack",
-            ),
-            ToolEntry::with_description(
-                "mcp__slack__list_channels",
-                "List Slack channels",
-            ),
+            ToolEntry::with_description("mcp__slack__post_message", "Send a message to Slack"),
+            ToolEntry::with_description("mcp__slack__list_channels", "List Slack channels"),
         ];
         let results = search_tools("message", &tools);
         assert_eq!(results.len(), 1);
@@ -280,8 +268,14 @@ mod tests {
     #[test]
     fn rank_results_reorders() {
         let mut results = vec![
-            SearchResult { tool_name: "B".into(), score: 10 },
-            SearchResult { tool_name: "A".into(), score: 20 },
+            SearchResult {
+                tool_name: "B".into(),
+                score: 10,
+            },
+            SearchResult {
+                tool_name: "A".into(),
+                score: 20,
+            },
         ];
         rank_results(&mut results);
         assert_eq!(results[0].tool_name, "A");
