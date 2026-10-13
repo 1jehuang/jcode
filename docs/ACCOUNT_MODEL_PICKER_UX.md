@@ -31,7 +31,7 @@ The initial UX commit was rechecked against this interpretation. Its production 
 
 ## Validation
 
-Validation was run locally on macOS on October 13, 2026. The running Jcode daemon and installed launcher were not changed.
+Initial account/model validation was run locally on macOS on October 13, 2026. Those isolated runs did not change the running Jcode daemon or installed launcher. The later test-failure fix and requested installation are separate follow-up steps.
 
 ```bash
 JCODE_TELEMETRY=off JCODE_NO_TELEMETRY=1 DO_NOT_TRACK=1 \
@@ -63,16 +63,20 @@ git diff --check
 
 Account checks cover rendering, compact viewport and mouse mapping, removal confirmation, window/default scope, search, and local/remote shortcuts. Model checks cover unavailable routes, identity preservation, and reasoning-step navigation. Catalog and socket tests cover provider isolation and consistent persisted-pin metadata in events, catalog responses, and history.
 
-The final complete TUI suite passed 2,865 tests, with 2 failures and 18 ignored tests. Both remaining failures also reproduced in a complete run of the original commit `0b4ce4365`. The original run had 8 failures. At the first UX commit, the refined run had 6 failures. The provider-isolation fix and generic account fixture isolation eliminated four of those failures.
+Before the follow-up isolation fix, the complete TUI suite passed 2,865 tests, with 2 failures and 18 ignored tests. Both failures also reproduced in a complete run of the original commit `0b4ce4365`. The original run had 8 failures. At the first UX commit, the refined run had 6 failures. The provider-isolation fix and generic account fixture isolation eliminated four of those failures.
 
 Four new provider-isolation tests failed before the production fix and passed afterward. They check both directions: an unconfigured named profile cannot hide configured built-in providers, and a configured named profile cannot enable unconfigured built-ins. Failing-first checks also reproduced disappearing account rows, discarded empty-preview queries, Ctrl+D editing the preview instead of acting on the picker, selection jumps while broadening a shared-prefix model search, and persisted-pin metadata disagreement. The corresponding regression tests now pass.
 
-The remaining tests passed when rerun together in an isolated test process, but failed in both complete suites:
+The two context-widget tests passed in isolation but failed in the earlier complete suites:
 
 - `test_info_widget_remote_model_falls_back_to_model_provider_detection`
 - `test_info_widget_remote_openai_uses_remote_provider_for_usage_and_context`
 
-Their context lookup uses a process-global model context cache. The full-suite-only behavior is consistent with cache contamination. This change leaves model-context precedence untouched and does not claim those existing suite failures are fixed.
+The cause was confirmed by running just the auth-doctor fixture before these two tests: the same test executable changed from two passing widget tests to two failures with a cached 200,000 limit instead of the expected 1,000,000. The auth-doctor fixture initialized ambient configuration before temporary-home app fixtures, seeding custom GPT context limits into the process-global cache.
+
+Commit `213189d57` fixes the fixture isolation without changing production context-limit precedence or weakening the widget assertions. Both tests now use a temporary Jcode home and a test-support guard that snapshots, clears, and restores the context cache, including during panic unwinding. A failing-first regression verifies isolation and preservation of custom GPT limits. A second regression verifies restoration after panic.
+
+After the fix, the exact auth-doctor/widget sequence passed all three tests, the context/catalog run passed 54 tests, and the complete TUI suite passed **2,867 tests with zero failures and 18 ignored**. Logs are `context-contaminated-repro.log`, `context-guard-red.log`, `context-guard-green.log`, `context-contaminated-fixed.log`, `fixed-base-context-catalog.log`, and `fixed-full-tui.log` under `$JCODE_SCRATCH_DIR/account-model-ux`.
 
 Builds emitted nonfatal local Rust toolchain warnings about a missing `libLLVM.dylib` during debug stripping and a large linker unwind section. Test results above are from executed test binaries, not inferred from compiler success.
 
@@ -120,6 +124,6 @@ All 11 acceptance checks passed across 80×24, 50×14, and 110×32 terminal size
 
 The local harness and artifacts are under `$JCODE_SCRATCH_DIR/account-model-ux`. Each `pty-*` run records `result.json` with binary SHA-256, version metadata, source commit, checks, and process exit codes. Successful runs include numbered screen captures and `run/terminal.ansi`. The owned client and server both exited cleanly.
 
-The final whole-result rerun is `pty-6daf27mh/result.json`, with source commit `b58dfb58c` and binary SHA-256 `5d915ede412ac931239dd8e35aa33079f233b5f900e8b2885cd9c7164b387329`. Only documentation was changed after this code validation.
+The initial whole-result rerun is `pty-6daf27mh/result.json`, with source commit `b58dfb58c` and binary SHA-256 `5d915ede412ac931239dd8e35aa33079f233b5f900e8b2885cd9c7164b387329`. The later context-cache change is test support and test fixtures only, not production context resolution.
 
-This terminal run did not exercise real provider OAuth or token refresh. Unavailable-route handling and reasoning-column restoration are covered by regressions, not by the all-available loopback catalog. The installed launcher and shared daemon were left unchanged.
+This initial terminal run did not exercise real provider OAuth or token refresh. Unavailable-route handling and reasoning-column restoration are covered by regressions, not by the all-available loopback catalog. That run left the installed launcher and shared daemon unchanged.
