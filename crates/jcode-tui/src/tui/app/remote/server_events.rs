@@ -1411,10 +1411,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 // leave any cross-provider resend behind explicit user consent.
                 app.clear_pending_remote_retry();
                 app.handle_turn_error(message.clone());
-                app.offer_fallback_after_error_with_payload(
-                    &message,
-                    failed_fallback_payload,
-                );
+                app.offer_fallback_after_error_with_payload(&message, failed_fallback_payload);
                 return false;
             }
             if rate_limit_retry_exhausted {

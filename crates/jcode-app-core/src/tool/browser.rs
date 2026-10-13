@@ -596,6 +596,12 @@ async fn firefox_setup(
         .with_metadata(metadata))
 }
 
+async fn companion_updates_bridge() -> bool {
+    tokio::task::spawn_blocking(crate::companion_client::is_running)
+        .await
+        .unwrap_or(false)
+}
+
 async fn ensure_firefox_ready(
     target: &crate::browser_detect::BrowserDetection,
     explicit: bool,
@@ -604,8 +610,14 @@ async fn ensure_firefox_ready(
     // verify the live bridge before launching an action because the browser or
     // the extension may have stopped or become incompatible since then.
     let name = target.kind.display_name();
-    // Throttled (every few hours) check for a newer bridge release.
-    let update_note = crate::browser::auto_update_before_action(target.kind).await;
+    // Bridge updates are installer work that `jcode companion` does in the
+    // background. Only without a companion (headless/standalone) check here,
+    // still throttled to every few hours.
+    let update_note = if companion_updates_bridge().await {
+        None
+    } else {
+        crate::browser::auto_update_before_action(target.kind).await
+    };
     let mut status = crate::browser::ensure_browser_ready_noninteractive_for(target).await?;
     if status.ready {
         return ready_in_requested_browser(&status, target.kind, explicit)

@@ -146,6 +146,12 @@ timeout_secs = 90
 # A custom command must print raw mono 16 kHz signed 16-bit little-endian PCM.
 # recorder = "arecord -q -t raw -f S16_LE -r 16000 -c 1 -"
 
+# Copilot-key push-to-talk in `jcode companion` (Linux). List keyboard evdev
+# nodes to watch, e.g. ["/dev/input/by-id/usb-Foo-event-kbd"]. Holding the key
+# while a Jcode terminal is focused sends the transcript to that session, even
+# without Jcode Desktop. Empty disables it.
+# global_devices = []
+
 [display]
 # Diff display mode: "off", "inline" (default), "full-inline", or "file"
 diff_mode = "inline"

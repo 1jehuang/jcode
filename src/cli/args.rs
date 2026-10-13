@@ -4,9 +4,9 @@ use super::provider_init::ProviderChoice;
 
 mod google;
 mod mcp;
-pub(crate) use mcp::McpCommand;
 #[allow(unused_imports)]
 pub(crate) use google::{GoogleAccessTierArg, GoogleLoginArgs};
+pub(crate) use mcp::McpCommand;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 pub(crate) enum TranscriptModeArg {
@@ -382,6 +382,18 @@ pub(crate) enum Command {
         /// Target a specific live session instead of the active TUI
         #[arg(short = 'S', long)]
         session: Option<String>,
+    },
+
+    /// Run the desktop companion: opens URLs and terminals, global voice and
+    /// the lid override for the shared server, in this login session
+    Companion {
+        /// Report whether a companion is running and exit
+        #[arg(long)]
+        status: bool,
+
+        /// Do not run the global push-to-talk listener
+        #[arg(long)]
+        no_voice: bool,
     },
 
     /// Run configured dictation: send to last-focused jcode client or type raw text

@@ -251,7 +251,7 @@ impl GmailClient {
 
         let link = self.create_link(cfg, &auth_config_id, &user_id).await?;
         if open_browser {
-            let _ = open::that(&link.redirect_url);
+            let _ = crate::companion_client::open_url(&link.redirect_url);
         }
         eprintln!(
             "\nOpening Gmail authorization in your browser. If it did not open, visit:\n{}\n",

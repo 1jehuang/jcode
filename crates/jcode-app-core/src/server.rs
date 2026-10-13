@@ -1381,7 +1381,6 @@ impl Server {
                 use tokio::signal::unix::{SignalKind, signal};
                 if let Ok(mut sigterm) = signal(SignalKind::terminate()) {
                     sigterm.recv().await;
-                    crate::lid_override::release_for_exiting_process();
                     let _ = crate::registry::unregister_server(&sigterm_server_name).await;
                     lifecycle::drain_session_saves_before_exit().await;
                     std::process::exit(0);
@@ -1920,7 +1919,6 @@ impl Server {
                                     "Server idle for {} minutes with no clients. Shutting down.",
                                     idle_duration / 60
                                 ));
-                                crate::lid_override::release_for_exiting_process();
                                 let _ = crate::registry::unregister_server(&idle_server_name).await;
                                 std::process::exit(EXIT_IDLE_TIMEOUT);
                             }
@@ -1995,9 +1993,11 @@ impl Server {
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut last_active: Option<bool> = None;
             // macOS/Windows have no process-scoped lid lock, so lid-close
-            // blocking there changes a persistent setting that this journals
-            // and restores (including after a crash of a previous daemon).
-            let mut lid_override = crate::lid_override::LidOverride::for_current_platform();
+            // blocking changes a persistent OS setting. That belongs to the
+            // user's desktop session, not the agent runtime: tell `jcode
+            // companion`, which journals and restores it. No companion (a
+            // headless or remote server) means no lid override.
+            let mut lid_reported: Option<bool> = None;
             loop {
                 interval.tick().await;
 
@@ -2017,8 +2017,19 @@ impl Server {
                     last_active = Some(active);
                 }
                 inhibitor.set_active(active);
-                if let Some(lid) = lid_override.as_mut() {
-                    lid.set_active(active && block_lid);
+                let want_lid = active && block_lid;
+                // Re-send while active so a companion started mid-turn engages
+                // too. Idle state is sent once.
+                if want_lid || lid_reported != Some(false) {
+                    let reported = crate::companion_client::request_async(
+                        crate::companion_client::CompanionRequest::PowerActivity {
+                            active: want_lid,
+                        },
+                        Duration::from_secs(2),
+                    )
+                    .await
+                    .is_ok();
+                    lid_reported = reported.then_some(want_lid);
                 }
             }
         });

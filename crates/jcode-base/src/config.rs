@@ -849,6 +849,10 @@ pub struct DictationConfig {
     /// microphone and prints raw mono 16 kHz s16le PCM to stdout. Empty means
     /// auto-detect (pw-record, parecord, arecord, rec, ffmpeg).
     pub recorder: String,
+    /// Keyboards `jcode companion` watches for Copilot-key push-to-talk
+    /// (Linux evdev nodes, preferably stable `/dev/input/by-id/...` paths).
+    /// Empty disables the companion's global voice listener.
+    pub global_devices: Vec<std::path::PathBuf>,
 }
 
 impl Default for DictationConfig {
@@ -860,6 +864,7 @@ impl Default for DictationConfig {
             timeout_secs: 90,
             vocabulary: Vec::new(),
             recorder: String::new(),
+            global_devices: Vec::new(),
         }
     }
 }

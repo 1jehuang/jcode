@@ -480,6 +480,9 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
         }) => {
             commands::run_transcript_command(text, map_transcript_mode(mode), session).await?;
         }
+        Some(Command::Companion { status, no_voice }) => {
+            commands::run_companion_command(status, no_voice).await?;
+        }
         Some(Command::Dictate { r#type }) => {
             commands::run_dictate_command(r#type).await?;
         }
