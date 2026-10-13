@@ -1377,14 +1377,16 @@ pub(in crate::tui::app) fn handle_server_event(
                     raw_input: app.last_submitted_input.clone(),
                 }
             });
-            app.push_display_message(DisplayMessage {
-                role: "error".to_string(),
-                content: message.clone(),
-                tool_calls: vec![],
-                duration_secs: None,
-                title: None,
-                tool_data: None,
-            });
+            if !is_failover_prompt {
+                app.push_display_message(DisplayMessage {
+                    role: "error".to_string(),
+                    content: message.clone(),
+                    tool_calls: vec![],
+                    duration_secs: None,
+                    title: None,
+                    tool_data: None,
+                });
+            }
             app.is_processing = false;
             app.status = ProcessingStatus::Idle;
             app.stream_message_ended = false;
@@ -1401,6 +1403,18 @@ pub(in crate::tui::app) fn handle_server_event(
             }
             remote.clear_pending();
             remote.reset_call_output_tokens_seen();
+            if crate::provider::parse_failover_prompt_message(&message).is_some() {
+                // The server already exhausted the same-provider account pool.
+                // Decode the control payload instead of printing its JSON, and
+                // leave any cross-provider resend behind explicit user consent.
+                app.clear_pending_remote_retry();
+                app.handle_turn_error(message.clone());
+                app.offer_fallback_after_error_with_payload(
+                    &message,
+                    failed_fallback_payload,
+                );
+                return false;
+            }
             if rate_limit_retry_exhausted {
                 // Do not fall through to the generic retry or turn-end
                 // auto-poke: either would immediately restart the loop.

@@ -308,7 +308,8 @@ impl App {
         // the exclusion set: offering a sibling model on the same broken
         // credential would fail identically.
         let options = crate::provider::FallbackPickOptions {
-            credential_failure: crate::provider::error_looks_like_credential_failure(error),
+            credential_failure: crate::provider::error_looks_like_credential_failure(error)
+                || crate::provider::parse_failover_prompt_message(error).is_some(),
         };
         let Some(index) = crate::provider::pick_next_fallback_route_with_options(
             &routes,

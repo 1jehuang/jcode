@@ -517,6 +517,7 @@ fn test_remote_account_failover_prompt_does_not_hold_or_retry_same_account() {
     app.remote_provider_model = Some("claude-sonnet-4".to_string());
     app.remote_model_options = vec![
         claude_oauth_route("claude-sonnet-4"),
+        claude_oauth_route("claude-opus-4"),
         openai_oauth_route("gpt-5.5"),
     ];
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
@@ -528,6 +529,7 @@ fn test_remote_account_failover_prompt_does_not_hold_or_retry_same_account() {
         retry_attempts: 0,
         retry_at: None,
     });
+    app.last_submitted_input = Some("hi".to_string());
     app.is_processing = true;
     app.status = ProcessingStatus::Streaming;
     let prompt = jcode_provider_core::ProviderFailoverPrompt {
@@ -550,9 +552,30 @@ fn test_remote_account_failover_prompt_does_not_hold_or_retry_same_account() {
     );
 
     assert!(app.rate_limit_reset.is_none());
-    let pending = app.rate_limit_pending_message.as_ref().unwrap();
-    assert_eq!(pending.retry_attempts, 0);
-    assert!(pending.retry_at.is_none());
+    assert!(app.rate_limit_pending_message.is_none());
+    assert_eq!(app.input, "hi");
+    assert!(app.pending_provider_failover.is_none());
+    let offer = app
+        .pending_fallback_offer
+        .as_ref()
+        .expect("manual fallback offer");
+    assert_eq!(offer.selection.provider_label, "OpenAI");
+    let resend = offer
+        .remote_resend
+        .as_ref()
+        .expect("preserved failed payload");
+    assert_eq!(resend.content, "hi");
+    assert_eq!(resend.raw_input.as_deref(), Some("hi"));
+    assert!(app.display_messages().iter().any(|message| {
+        message.role == "system"
+            && message.content.contains("did not resend your prompt")
+            && message.content.contains("100 input tokens")
+    }));
+    assert!(
+        !app.display_messages()
+            .iter()
+            .any(|message| { message.content.contains("[jcode-provider-failover]") })
+    );
     assert!(!app.display_messages().iter().any(|message| {
         message.role == "system"
             && (message.content.contains("queued retry")
