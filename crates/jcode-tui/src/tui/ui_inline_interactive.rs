@@ -310,7 +310,13 @@ fn picker_render_width(picker: &crate::tui::InlineInteractiveState, max_width: u
 
         let state_width = (max_state_len + 1).clamp(7, 10);
         let min_title_width = max_title_len.clamp(8, 10);
-        let title_cap = if show_provider_badge { 42 } else { 34 };
+        let title_cap = if picker.kind == crate::tui::PickerKind::Account {
+            max_title_len
+        } else if show_provider_badge {
+            42
+        } else {
+            34
+        };
         let budget = max_width.saturating_sub(marker_width + state_width);
         let title_width = max_title_len
             .min(title_cap)
@@ -1535,6 +1541,20 @@ mod tests {
         let (single_title, _) = account_picker_entry_title(&single.entries[0], false);
         assert!(mixed_title.starts_with("Claude · "));
         assert_eq!(single_title, "work");
+    }
+
+    #[test]
+    fn account_picker_fits_full_email_and_clamps_to_narrow_terminals() {
+        for mixed in [false, true] {
+            let mut picker = sample_account_picker(mixed);
+            picker.entries[0].name = "Claude Otter · personal.account@example.com".to_string();
+            let (title, _) = account_picker_entry_title(&picker.entries[0], mixed);
+            let width = picker_render_width(&picker, 120);
+            assert!(width >= display_width(&title) + 3 + 7);
+            for available in [16, 24, 40] {
+                assert!(picker_render_width(&picker, available) <= available);
+            }
+        }
     }
 
     #[test]

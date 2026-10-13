@@ -298,6 +298,21 @@ pub(super) fn account_display_name(provider: &str, label: &str, account_count: u
     format!("{provider} {animal}")
 }
 
+/// Show the full login identity in the local picker so similarly named accounts
+/// can be distinguished without opening provider settings.
+pub(super) fn account_picker_display_name(
+    provider: &str,
+    label: &str,
+    account_count: usize,
+    email: Option<&str>,
+) -> String {
+    let name = account_display_name(provider, label, account_count);
+    match email.map(str::trim).filter(|email| !email.is_empty()) {
+        Some(email) => format!("{name} · {email}"),
+        None => format!("{name} · email unknown"),
+    }
+}
+
 /// Anthropic exposes the subscription kind but not an explicit work/personal
 /// flag. Team and enterprise plans are organizational; individual plans are
 /// personal. Unknown values stay unknown rather than being guessed from email.
@@ -341,6 +356,28 @@ fn format_account_table(headers: &[&str; 5], rows: &[[String; 5]]) -> Vec<String
 #[cfg(test)]
 mod account_display_tests {
     use super::*;
+
+    #[test]
+    fn picker_names_show_full_email_for_single_and_multiple_accounts() {
+        assert_eq!(
+            account_picker_display_name("Claude", "claude-otter", 1, Some("personal@example.com")),
+            "Claude · personal@example.com"
+        );
+        assert_eq!(
+            account_picker_display_name("OpenAI", "openai-fox", 2, Some("work@example.com")),
+            "OpenAI Fox · work@example.com"
+        );
+    }
+
+    #[test]
+    fn picker_names_handle_missing_and_blank_emails() {
+        for email in [None, Some(""), Some("  ")] {
+            assert_eq!(
+                account_picker_display_name("Claude", "claude-otter", 2, email),
+                "Claude Otter · email unknown"
+            );
+        }
+    }
 
     #[test]
     fn animals_only_distinguish_duplicate_provider_logins() {
