@@ -182,7 +182,9 @@ async fn resumed_session_keeps_turn_identity_until_new_input() {
         })
         .collect();
     assert!(
-        continuation_texts.iter().all(|text| !text.trim().is_empty()),
+        continuation_texts
+            .iter()
+            .all(|text| !text.trim().is_empty()),
         "a reminder-only turn must not persist a blank user message: {continuation_texts:?}"
     );
     assert!(
