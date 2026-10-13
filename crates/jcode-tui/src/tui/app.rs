@@ -1276,6 +1276,8 @@ pub struct App {
     remote_startup_phase: Option<RemoteStartupPhase>,
     remote_startup_phase_started: Option<Instant>,
     remote_reasoning_effort: Option<String>,
+    // Outer Some means a request is pending. Inner None is a confirmed default.
+    remote_reasoning_effort_before_request: Option<Option<String>>,
     remote_service_tier: Option<String>,
     remote_transport: Option<String>,
     remote_compaction_mode: Option<crate::config::CompactionMode>,

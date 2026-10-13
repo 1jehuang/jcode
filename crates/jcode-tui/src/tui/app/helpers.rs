@@ -681,6 +681,14 @@ pub(super) fn cycled_effort_index(
 #[path = "effort_followup_tests.rs"]
 mod effort_followup_tests;
 
+/// Display fallback only. Unset-effort stepping keeps its directional semantics.
+pub(super) fn default_effort_bar_index(efforts: &[&str]) -> Option<usize> {
+    efforts
+        .iter()
+        .rposition(|effort| !matches!(*effort, "swarm" | "swarm-deep"))
+        .or_else(|| efforts.len().checked_sub(1))
+}
+
 pub(super) fn effort_bar(index: usize, total: usize) -> String {
     let mut bar = String::new();
     for i in 0..total {

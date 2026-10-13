@@ -43,6 +43,47 @@ pub const DEEPSEEK_SELECTABLE_EFFORTS: &[&str] = &[
     "swarm-deep",
 ];
 
+/// Canonical reasoning rank, excluding the UI-only swarm sentinels.
+pub fn reasoning_effort_rank(effort: &str) -> Option<usize> {
+    OPENAI_SELECTABLE_EFFORTS
+        .iter()
+        .take_while(|candidate| !matches!(**candidate, "swarm" | "swarm-deep"))
+        .position(|candidate| *candidate == effort)
+}
+
+/// Sort advertised reasoning levels while retaining unknown values' order.
+pub fn sort_reasoning_efforts(efforts: &mut [&str]) {
+    efforts.sort_by_key(|effort| reasoning_effort_rank(effort).unwrap_or(usize::MAX));
+}
+
+#[cfg(test)]
+mod advertised_ladder_tests {
+    use super::*;
+
+    #[test]
+    fn canonical_sort_keeps_custom_values_stable_at_the_end() {
+        let mut efforts = ["custom-b", "max", "low", "custom-a", "minimal"];
+        sort_reasoning_efforts(&mut efforts);
+        assert_eq!(efforts, ["minimal", "low", "max", "custom-b", "custom-a"]);
+    }
+
+    #[test]
+    fn swarm_and_unknown_values_have_no_reasoning_rank() {
+        for effort in ["swarm", "swarm-deep", "custom"] {
+            assert_eq!(reasoning_effort_rank(effort), None);
+        }
+    }
+
+    #[test]
+    fn sorting_empty_and_singleton_ladders_is_safe() {
+        let mut empty = [];
+        sort_reasoning_efforts(&mut empty);
+        let mut singleton = ["high"];
+        sort_reasoning_efforts(&mut singleton);
+        assert_eq!(singleton, ["high"]);
+    }
+}
+
 /// Convert a provider-advertised OpenAI/OpenRouter effort into the canonical
 /// static value used by the provider trait.
 pub fn canonical_reasoning_effort(value: &str) -> Option<&'static str> {

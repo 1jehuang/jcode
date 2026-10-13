@@ -1971,6 +1971,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.status_detail = status_detail;
             }
             if session_changed || reasoning_effort.is_some() {
+                app.remote_reasoning_effort_before_request = None;
                 app.remote_reasoning_effort = reasoning_effort;
             }
             app.remote_service_tier = service_tier;
@@ -2586,6 +2587,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 // Always replace: the server reports the effort the new model
                 // runs with (`None` = cleared), so the chip must not keep the
                 // previous model's level.
+                app.remote_reasoning_effort_before_request = None;
                 app.remote_reasoning_effort = reasoning_effort;
                 app.invalidate_model_picker_cache();
                 app.persist_remote_header_hint();
@@ -2700,12 +2702,16 @@ pub(in crate::tui::app) fn handle_server_event(
         }
         ServerEvent::ReasoningEffortChanged { effort, error, .. } => {
             if let Some(err) = error {
+                app.restore_rejected_remote_effort();
+                app.set_status_notice("Effort switch failed");
                 app.push_display_message(DisplayMessage::error(format!(
                     "Failed to set effort: {}",
                     err
                 )));
             } else {
+                app.remote_reasoning_effort_before_request = None;
                 app.remote_reasoning_effort = effort.clone();
+                app.invalidate_model_picker_cache();
                 let label = effort
                     .as_deref()
                     .map(app_mod::effort_display_label)
