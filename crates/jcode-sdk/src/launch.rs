@@ -201,10 +201,11 @@ pub fn launch_instance(options: &LaunchOptions) -> Result<LaunchedInstance> {
         }
     };
     if options.inherit_logins
-        && let Err(error) = inherit_credentials(&user_jcode_home(), &jcode_home) {
-            cleanup_on_error();
-            return Err(error);
-        }
+        && let Err(error) = inherit_credentials(&user_jcode_home(), &jcode_home)
+    {
+        cleanup_on_error();
+        return Err(error);
+    }
 
     let binary = options
         .binary

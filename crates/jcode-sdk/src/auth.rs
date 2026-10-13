@@ -371,9 +371,10 @@ impl FlowInner {
             command.arg("-");
         }
         if operation == Operation::Begin
-            && let Some(account) = &self.account {
-                command.arg("--account").arg(account);
-            }
+            && let Some(account) = &self.account
+        {
+            command.arg("--account").arg(account);
+        }
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

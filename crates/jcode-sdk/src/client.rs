@@ -363,9 +363,10 @@ impl Clone for JcodeClient {
 impl Drop for JcodeClient {
     fn drop(&mut self) {
         if self.inner.client_handles.fetch_sub(1, Ordering::AcqRel) == 1
-            && let Some(shutdown) = &self.inner.shutdown {
-                shutdown();
-            }
+            && let Some(shutdown) = &self.inner.shutdown
+        {
+            shutdown();
+        }
     }
 }
 
