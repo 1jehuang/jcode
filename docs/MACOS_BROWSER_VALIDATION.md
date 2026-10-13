@@ -22,6 +22,46 @@ Earlier failures are not discarded: one repetition timed out before tests ran be
 
 Cleanup is ownership-limited. If an exact fixture identity cannot be found or verified, leave the tab intact rather than closing a possibly unrelated user page.
 
+## Native bridge scope policy
+
+The five workflows above passed with explicit tab IDs. They do not verify upstream macOS session isolation. On October 13, 2026, an isolated installed-client probe supplied a live synthetic PID and Unix socket through `BROWSER_SESSION`, with `FAB_WS_URL=ws://127.0.0.1:0`. The installed CLI reported `browser 1.0.0`, while its installation marker was `v0.10.1`. Both `ping {}` and a separate harmless `getContent {}` probe accepted no socket connection and failed a direct WebSocket connection with OS error 49. The page-read probe had a live listener before command launch and did not contact a real browser. In the exact upstream v0.10.1 source, `bound_window_id` is startup output only, not session state or outgoing target injection.
+
+Jcode's macOS native-bridge policy requires a concrete positive `tab_id` for page reads and mutations. Window-only scope is insufficient for legacy Firefox. Known creation and metadata commands `newSession`, `newWindow`, `listTabs`, and `getActiveTab` may run without page scope. Composite and unknown raw actions, and any `params.fork`, are rejected even with an outer ID. File upload is disabled because the tagged legacy CLI rebuilds upload parameters without `tabId`, even when an outer ID is supplied. Screenshots are also denied, including explicitly targeted requests, because the installed `captureVisibleTab` fallback can race the active tab. At outgoing serialization, `newSession` always receives `returnContent=false`, including raw caller `true`; its result is creation metadata and content requires a separate explicit-tab read. Null parameters normalize to an empty object. Nonobject parameters and creator fields outside the scalar creation allowlist are rejected before dispatch. Metadata commands accept only an empty object or valid `tabId` and `windowId` fields, never nested or unknown options. The native path skips managed bridge sessions and clears inherited `BROWSER_SESSION`. Safari retains its separate owned-window policy. Non-macOS session behavior is unchanged.
+
+The follow-up regressions passed on October 13, 2026 through `scripts/dev_cargo.sh` with the host-wide gate and `CARGO_TARGET_DIR=$HOME/.jcode/scratch/jcode-macos-browser-target`. Serialization tests cover forced content suppression, null normalization, malformed and nested creators, strict metadata shape, capture denial, and an unchanged explicit-tab read. The public-tool test uses only a synthetic live PID and socket, and checks that unscoped requests fail before readiness or dispatch without accessing a real page.
+
+The approved `live_macos_bridge_explicit_tab_ignores_selected_decoy` runs passed separately for Chrome and Firefox with `--ignored --nocapture`. Each run creates two fresh loopback fixture tabs and verifies their returned IDs, URL and nonce before interaction. Raw creation explicitly requests `returnContent=true` and checks that no implicit content is returned. With the owned decoy selected, read, type and eval address the first tab explicitly. The first-tab receipt is distinct, its input and dataset change, and the decoy snapshot must remain unchanged. Fixture tabs are retained with exact IDs printed. No existing user page, screenshot, upload, close command, credentials or service is used. The two runs are recorded below. They establish the tested explicit-tab behavior, not general upstream session isolation.
+
+### Follow-up execution record
+
+The production patch received independent read-only review with no remaining HIGH or MEDIUM findings. A later test-only correction received root review. The two task results are separate, not one successful aggregate.
+
+- Original aggregate `536862p3ea`, October 13, 2026, 11:38:56 to 11:40:46 UTC, exited **101**. Focused macOS regressions passed 10 tests with 1 ignored. App-core browser tests passed 96 with 8 ignored. Base browser tests passed 88. The CLI build completed. All five existing explicit-tab workflows passed one actual test each under hostile inherited `FAB_BROWSER`, `FAB_WS_URL` and `BROWSER_SESSION`, with auto-update disabled. Chrome's new decoy harness then failed at its first identity evaluation, which returned null because the script lacked an explicit `return`. No decoy mutation was reached, and Firefox's decoy test was not run in this aggregate.
+- Affected rerun `8223409k9x`, October 13, 2026, 11:43:42 to 11:44:25 UTC, exited **0**. Only test scripts and known-owned logging changed. Focused regressions again passed 10 with 1 ignored, app-core browser tests again passed 96 with 8 ignored, and the fresh CLI build completed. Chrome and Firefox each passed one real owned-decoy test. Production was unchanged, so the passed base suite and five-browser matrix were not repeated.
+
+Both rounds used the app-core test executable `debug/deps/jcode_app_core-22afdb72a4decbf5` in the coordinated target. Each round compiled its current source before live execution. The affected rerun retained the hostile inherited environment and disabled auto-update.
+
+| Original workflow | Exact owned tab | Receipt |
+| --- | --- | --- |
+| Brave | 1376646115 | macos-browser-1791891619189240000 |
+| Chrome | 2131965038 | macos-browser-1791891623303472000 |
+| Opera | 1060303086 | macos-browser-1791891627719397000 |
+| Firefox | 15 | macos-browser-1791891634556052000 |
+| Safari | 32517 | macos-browser-1791891637427360000 |
+
+Safari's exact owned fixture window was closed by the existing guarded workflow. The extension-browser fixture tabs were retained.
+
+| Affected decoy proof | First tab | Decoy tab | Nonce | Loopback endpoint |
+| --- | --- | --- | --- | --- |
+| Chrome | 2131965040 | 2131965041 | 1791891854338868000 | 127.0.0.1:49906 |
+| Firefox | 16 | 17 | 1791891859569549000 | 127.0.0.1:49996 |
+
+Both creations explicitly requested `returnContent=true` and returned no implicit content. The exact owned URL and nonce were verified before typing or document mutation. With the owned decoy selected, the explicit first-tab read returned its distinct receipt, typing and evaluation changed the first tab, and the decoy snapshot remained unchanged. These exact fixture tabs were left open. The failed preliminary Chrome fixture was also left untouched.
+
+This follow-up was validated on one macOS arm64 machine with its installed integrations. It does not certify Intel macOS or runtime behavior on non-macOS platforms. Safari's separate owned-window adapter and non-macOS dispatch policy were unchanged. No browser installation, reload, signing change, shared-daemon replacement, or master merge was performed.
+
+Nonfatal build warnings included the local toolchain's missing `libLLVM.dylib` during debug stripping, linker unwind-table size, unmatched profile package entries and the macOS-unused non-macOS fallback helper. They did not prevent successful test or build completion.
+
 ## Regression tests
 
 From your isolated checkout root, use a shared target directory only after acquiring the coordinated build slot. Replace the checkout placeholder with your own path:

@@ -401,6 +401,25 @@ impl Tool for BrowserTool {
         }
         let provider = resolve_provider(params.browser.as_deref())?;
 
+        #[cfg(target_os = "macos")]
+        if provider.id() == "firefox_agent_bridge"
+            && !matches!(params.action.as_str(), "status" | "setup")
+        {
+            // Deny before readiness probes, setup or any native-host dispatch.
+            let (action, scope) = if params.action == "handoff" {
+                let mut scope = json!({"tabId": params.tab_id});
+                if let Some(window_id) = params.window_id {
+                    scope["windowId"] = json!(window_id);
+                }
+                ("getContent".to_string(), scope)
+            } else {
+                let (action, scope, _) = bridge_request(&params.action, &params)?;
+                (action, scope)
+            };
+            let scope = if scope.is_null() { json!({}) } else { scope };
+            require_safe_macos_bridge_command(&action, &scope)?;
+        }
+
         match params.action.as_str() {
             "status" => provider.status_for(params.browser.as_deref(), &ctx).await,
             "setup" => provider.setup_for(params.browser.as_deref()).await,
@@ -1084,12 +1103,89 @@ fn require_safe_bridge_session_fallback(action: &str, params: &Value) -> Result<
     )
 }
 
+/// The installed macOS CLI can ignore BROWSER_SESSION. A live daemon and
+/// startup windowId therefore cannot authorize access to the user's page.
+/// Upload drops tabId. Screenshot's captureVisibleTab fallback races active tabs.
+#[cfg(any(target_os = "macos", test))]
+fn require_safe_macos_bridge_command(action: &str, params: &Value) -> Result<()> {
+    let concrete = |value: &Value| {
+        value
+            .as_i64()
+            .is_some_and(|id| id > 0 && id <= i32::MAX as i64)
+    };
+    let valid_ids = ["tabId", "windowId"]
+        .iter()
+        .all(|key| params.get(*key).is_none_or(concrete));
+    let page_action = matches!(
+        action,
+        "navigate"
+            | "getContent"
+            | "getInteractables"
+            | "evaluate"
+            | "click"
+            | "type"
+            | "fillForm"
+            | "waitFor"
+            | "scroll"
+            | "listFrames"
+            | "setActiveTab"
+    );
+    let creator = matches!(action, "newSession" | "newWindow");
+    let metadata = matches!(action, "listTabs" | "getActiveTab");
+    let safe_metadata = !metadata
+        || params.as_object().is_some_and(|map| {
+            map.keys()
+                .all(|key| matches!(key.as_str(), "tabId" | "windowId"))
+        });
+    let safe_creator = !creator
+        || params.as_object().is_some_and(|map| {
+            map.iter().all(|(key, value)| {
+                matches!(
+                    key.as_str(),
+                    "url" | "focus" | "timeoutMs" | "returnContent" | "tabId" | "windowId"
+                ) && !value.is_object()
+                    && !value.is_array()
+            })
+        });
+    if params.is_object()
+        && safe_creator
+        && safe_metadata
+        && params.get("fork").is_none()
+        && valid_ids
+        && (matches!(
+            action,
+            "newSession" | "newWindow" | "listTabs" | "getActiveTab"
+        ) || (page_action && params.get("tabId").is_some_and(concrete)))
+    {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "Refusing unscoped or unsafe macOS browser action '{action}'. Page actions require a concrete positive tabId, not windowId alone. Create a tab with action='new_tab' and pass its tab_id. Managed bridge sessions do not prove macOS page isolation. Composite, unknown and fork-routed commands are not allowed."
+    )
+}
+
+/// Build the actual outgoing native CLI argument, not just a preflight check.
+#[cfg(any(target_os = "macos", test))]
+fn macos_bridge_params_json(action: &str, mut params: Value) -> Result<String> {
+    if params.is_null() {
+        params = json!({});
+    }
+    require_safe_macos_bridge_command(action, &params)?;
+    if action == "newSession" {
+        params["returnContent"] = json!(false);
+    }
+    Ok(serde_json::to_string(&params)?)
+}
+
 async fn firefox_run_bridge_command(
     action: &str,
     params: Value,
     browser: Option<&str>,
     _ctx: &ToolContext,
 ) -> Result<Value> {
+    #[cfg(target_os = "macos")]
+    let params_json = macos_bridge_params_json(action, params.clone())?;
+
     let bin = crate::browser::browser_binary_path();
     if !bin.exists() {
         anyhow::bail!(
@@ -1097,6 +1193,7 @@ async fn firefox_run_bridge_command(
         );
     }
 
+    #[cfg(not(target_os = "macos"))]
     let params_json = serde_json::to_string(&params)?;
     let mut command = tokio::process::Command::new(&bin);
     command.arg(action).arg(&params_json);
@@ -1106,7 +1203,11 @@ async fn firefox_run_bridge_command(
     command.stderr(std::process::Stdio::piped());
     crate::browser::apply_bridge_browser_env(&mut command, browser);
 
-    #[cfg(unix)]
+    // macOS uses explicit native tab scope, not the CLI's broken session route.
+    #[cfg(target_os = "macos")]
+    command.env_remove("BROWSER_SESSION");
+
+    #[cfg(all(unix, not(target_os = "macos")))]
     if let Some(session_name) =
         crate::browser::ensure_browser_session_for_async(&_ctx.session_id, browser).await
     {
