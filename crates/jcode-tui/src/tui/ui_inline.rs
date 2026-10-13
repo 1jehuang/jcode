@@ -13,7 +13,8 @@ pub(super) fn inline_ui_height(app: &dyn TuiState) -> u16 {
             if picker.kind == crate::tui::PickerKind::Model {
                 return 0;
             }
-            let visible_rows = picker.filtered.len() as u16;
+            // The empty-state message also needs a row beneath the header.
+            let visible_rows = picker.filtered.len().max(1) as u16;
             let hint_rows = u16::from(picker.kind == crate::tui::PickerKind::Account);
             let rows_needed = visible_rows + 1 + 2 + hint_rows; // header + border + scope hint
             rows_needed.min(20)

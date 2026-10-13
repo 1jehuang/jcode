@@ -1164,3 +1164,38 @@ fn test_account_ux_single_filtered_account_stays_visible_in_full_frame() {
         );
     });
 }
+
+#[test]
+fn test_account_ux_empty_search_shows_no_matches_in_full_frame() {
+    with_temp_jcode_home(|| {
+        let _render_lock = crate::tui::ui::render_state_test_lock();
+        store_two_claude_accounts();
+        let mut app = create_test_app();
+        app.open_account_picker(Some("claude"));
+        for character in "zzzzzz".chars() {
+            app.handle_key(KeyCode::Char(character), KeyModifiers::empty())
+                .unwrap();
+        }
+        assert!(
+            app.inline_interactive_state
+                .as_ref()
+                .unwrap()
+                .filtered
+                .is_empty()
+        );
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| crate::tui::ui::draw(frame, &app))
+            .unwrap();
+        let text = buffer_to_text(&terminal);
+        assert!(
+            text.contains("no matches"),
+            "empty-state message missing:\n{text}"
+        );
+        assert!(
+            text.contains("Esc clear filter"),
+            "recovery hint missing:\n{text}"
+        );
+    });
+}

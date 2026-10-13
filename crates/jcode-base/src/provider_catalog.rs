@@ -1180,7 +1180,12 @@ pub fn openai_compatible_profile_is_configured(profile: OpenAiCompatibleProfile)
     // env vars set by `apply_named_provider_profile_env`, not the built-in
     // `openai-compatible.env`. Honor those first so auth-test does not report a
     // false `not_configured` for a correctly-configured named profile (#402).
-    if let Some(configured) = active_named_provider_profile_is_configured() {
+    // The active named profile runs through the generic compatible endpoint.
+    // Built-in profiles must keep their own credential sources and local
+    // enablement, rather than inheriting the named endpoint's availability.
+    if profile.id == OPENAI_COMPAT_PROFILE.id
+        && let Some(configured) = active_named_provider_profile_is_configured()
+    {
         return configured;
     }
 
