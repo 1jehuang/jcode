@@ -202,9 +202,18 @@ return (async () => {
   if (request.op === 'cancel') {
     if (typeof request.cancelKey !== 'string' || !request.cancelKey.startsWith('jcode-')) throw Error('ChatGPT cancellation lacks its owned turn key');
     (globalThis.__jcodeChatGptWebCancelled ??= {})[request.cancelKey] = true;
-    return { cancelled: true };
+    await until(() => globalThis.__jcodeChatGptWebSubmissions?.[request.cancelKey]?.active !== true, 'quiescing the cancelled submission');
+    return { cancelled: true, quiescent: true };
   }
   if (request.op === 'response') return responseState();
+  if (request.op === 'stop') {
+    const root = one('main');
+    if (!root) throw Error('ChatGPT owned conversation is unavailable for safe Stop');
+    const stop = all('button', root).filter(visible).find(e => /stop (generating|streaming|response)/i.test(e.getAttribute('aria-label') || '') || e.getAttribute('data-testid') === 'stop-button');
+    if (stop) stop.click();
+    await until(() => !responseState().busy, 'stopping the owned response');
+    return { stopped: !!stop, busy: false };
+  }
   if (request.op === 'prompt') return promptState();
   if (request.op === 'restore') return await restore(request.original);
   if (request.op === 'verify') {
@@ -218,17 +227,20 @@ return (async () => {
     const checkCancelled = () => {
       if (globalThis.__jcodeChatGptWebCancelled?.[request.cancelKey]) throw Error('ChatGPT submission was cancelled before Send');
     };
-    checkCancelled();
-    requireTemporary(true);
-    const current = await observation();
-    checkCancelled();
-    if (current.model !== request.label || current.effort !== request.effort) throw Error('ChatGPT exact model or effort changed before submission');
-    requireTemporary(true);
-    const prompt = promptState();
-    if (prompt.submitDisabled || prompt.length !== request.length || prompt.hash !== request.hash) throw Error('ChatGPT prompt fingerprint or submit state changed before submission');
-    checkBudget(); checkCancelled();
-    one(submitSelector).click();
-    return { submitted: true, ...current };
+    const pending = (globalThis.__jcodeChatGptWebSubmissions ??= {})[request.cancelKey] = { active: true };
+    try {
+      checkCancelled();
+      requireTemporary(true);
+      const current = await observation();
+      checkCancelled();
+      if (current.model !== request.label || current.effort !== request.effort) throw Error('ChatGPT exact model or effort changed before submission');
+      requireTemporary(true);
+      const prompt = promptState();
+      if (prompt.submitDisabled || prompt.length !== request.length || prompt.hash !== request.hash) throw Error('ChatGPT prompt fingerprint or submit state changed before submission');
+      checkBudget(); checkCancelled();
+      one(submitSelector).click();
+      return { submitted: true, ...current };
+    } finally { pending.active = false; }
   }
   if (request.op === 'prepare' || request.op === 'discover' || request.op === 'probe') {
     await until(() => temporary() || all('[role="dialog"]').filter(visible).some(e => /temporary chat/i.test(e.innerText || '')), 'loading Temporary Chat');

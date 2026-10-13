@@ -89,6 +89,18 @@ test('cancellation during asynchronous submission verification cannot click Send
   await assert.rejects(run(request,f,{globals,onDelay:g=>{g.__jcodeChatGptWebCancelled ??= {};g.__jcodeChatGptWebCancelled[request.cancelKey]=true;}}),/cancel/i);
   assert.equal(f.submits(),0);
 });
+test('cancellation acknowledges idle only after the pending submission finishes',async()=>{
+  const f=fixture();const key='jcode-test-pending';const globals={__jcodeChatGptWebSubmissions:{[key]:{active:true}}};
+  let waits=0;const result=await run({op:'cancel',cancelKey:key},f,{globals,onDelay:g=>{waits++;g.__jcodeChatGptWebSubmissions[key].active=false;}});
+  assert.equal(result.quiescent,true);assert.equal(waits,1);assert.equal(globals.__jcodeChatGptWebCancelled[key],true);assert.equal(f.submits(),0);
+});
+test('authorized exact-model submission clicks Send once and rejects altered prompts',async()=>{
+  const f=fixture();const prompt=await run({op:'prompt'},f);
+  const request={op:'submit',label:'GPT-6',effort:'medium',length:prompt.length,hash:prompt.hash,cancelKey:'jcode-test-authorized'};
+  const result=await run(request,f);assert.equal(result.submitted,true);assert.equal(f.submits(),1);
+  const changed=fixture();changed.editor.text='changed after verification';
+  await assert.rejects(run(request,changed),/fingerprint/i);assert.equal(changed.submits(),0);
+});
 test('evaluation deadline fails closed before delayed discovery can advertise models',async()=>{
   const f=fixture();
   await assert.rejects(run({op:'discover'},f,{elapsedPerDelay:10_000}),/deadline|time.*budget/i);
@@ -127,6 +139,11 @@ test('stale trigger effort cannot override independently observed slider state',
 });
 test('new composer fingerprint includes UTF-16 and verifies Send button',async()=>{
   const f=fixture();f.editor.text='🙂漢';const result=await run({op:'prompt'},f);assert.equal(result.length,3);assert.equal(result.submitDisabled,false);
+});
+test('stop cleanup waits for the owned generation to become idle without submitting',async()=>{
+  const f=fixture();const stop=new Element('button',{'aria-label':'Stop generating'});
+  let stops=0;stop.onClick=()=>{stops++;stop.hidden=true;};f.main.children.push(stop);stop.parentElement=f.main;
+  const result=await run({op:'stop'},f);assert.equal(result.stopped,true);assert.equal(result.busy,false);assert.equal(stops,1);assert.equal(f.submits(),0);
 });
 test('updated response markup returns complete assistant text, not user prompt',async()=>{
   const f=fixture(); const assistant=new Element('div',{'data-markdown-text-style':'assistant-message'},'JCODE_BRIDGE_OK'); const turn=new Element('div',{'data-talvt-turn-state':'complete'},'', [assistant,new Element('button',{'aria-label':'Copy'})]);f.main.children.push(turn);turn.parentElement=f.main;
