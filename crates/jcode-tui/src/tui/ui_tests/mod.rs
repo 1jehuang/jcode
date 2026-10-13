@@ -139,6 +139,7 @@ struct TestState {
     chat_native_scrollbar: bool,
     onboarding_preview: bool,
     suggestions: Vec<(String, String)>,
+    command_suggestions: Vec<(String, &'static str)>,
     compacted_hidden_user_prompts: usize,
     side_pane_images: Vec<crate::session::RenderedImage>,
     pin_images: bool,
@@ -255,7 +256,7 @@ impl crate::tui::TuiState for TestState {
         self.status.clone()
     }
     fn command_suggestions(&self) -> Vec<(String, &'static str)> {
-        Vec::new()
+        self.command_suggestions.clone()
     }
     fn active_skill(&self) -> Option<String> {
         self.active_skill.clone()
