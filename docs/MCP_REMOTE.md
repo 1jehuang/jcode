@@ -76,6 +76,67 @@ The MCP management tool accepts ad-hoc remote connections through `url`,
 `transport`, and `headers`, or connects a named configured server without those
 fields. `command`, `args`, and `env` remain the local stdio connection fields.
 
+## Startup, connection waits, and prompt caching
+
+Session tool registration does not await remote network traffic. Management,
+search, and dispatch tools are registered immediately. Valid cached tool schemas
+are advertised before background connections start. Each successful connection
+publishes its tools independently, so a slow server cannot hide a fast peer's
+tools or block management and calls to that peer.
+An empty live catalog also replaces obsolete cached schemas instead of
+advertising removed tools on the next startup.
+
+The entire remote handshake has a 30-second deadline, including credential
+refresh, initialization, legacy fallback, and tool listing. Individual tool
+requests also default to 30 seconds. `timeout_secs` can extend legitimately slow
+tool requests, but does not extend the total remote handshake deadline. A first
+call to an offline server waits at most 30 seconds for connection. Cancellation
+and shutdown remove waiters and stop owned response streams. No ordinary tool
+call or startup path waits for an interactive OAuth login.
+
+There is a separate, existing headless behavior: `jcode run` waits up to five
+seconds for enabled servers with no valid cached schemas before its first turn.
+Warm caches skip this wait. Set `JCODE_RUN_MCP_WAIT_MS=0` to disable it, or set a
+smaller millisecond budget. Disabled servers do not consume the budget, and
+readiness uses exact server identity rather than normalized tool-name prefixes.
+
+In `auto` and `deferred` MCP modes, connection, disconnection, and tool discovery
+keep the eager tool prefix and static system prompt stable. Provider-native
+deferred definitions are outside that prefix. KV-cache telemetry now hashes and
+counts the eager definitions only, so deferred catalog changes do not falsely
+appear as harness-induced cache misses. Explicit `eager` mode with a cold or
+changed schema cache can still intentionally rebuild its tool snapshot and cause
+a prompt-cache miss. Warm cached schemas avoid that rebuild when unchanged.
+
+### Verification performed on October 13, 2026
+
+- Real TCP tests gate a slow server's initialize response while asserting that
+  registration returns, a fast peer becomes discoverable, and management, search,
+  and fast tool calls remain usable. Both shared and owned connection paths are
+  covered, including a warm-cache restart in explicit eager mode.
+- The two-server registration measurements were 357/241 microseconds cold/warm
+  for owned connections, and 126/219 microseconds for shared connections
+  (`justrust` run `20261013-072941134-560607`). These measure registry work in the
+  test, not total application startup or Internet connection latency.
+- A later local run under heavy concurrent CPU load measured 7.159/0.565
+  milliseconds cold/warm for owned connections and 15.871/0.521 milliseconds
+  for shared connections (`20261013-074441115-730779`). Registration still
+  returned before the gated network responses. The different machines and load
+  conditions are not an implementation speedup or a universal latency bound.
+- Actual native Expo OAuth login succeeded in an isolated Jcode home. A native
+  initialize/list/shutdown smoke test returned 39 tools in 2.404 seconds. Without
+  credentials, the same endpoint returned a login instruction in 0.228 seconds,
+  without opening a browser.
+- Regression tests compare the real agent's eager schemas, static prompt,
+  conversation, cache tracker, and KV monitor before and after HTTP connect,
+  disconnect, and reconnect for native and fallback deferred providers. These
+  verify the cache-relevant request prefix, not a paid provider's cache-hit bill.
+- Passing suites included 113 base MCP tests, 54 app-core MCP tests, 78 broader
+  agent tests, and 11 root-library MCP CLI tests. Some suites overlap. CLI tests
+  cover disabled servers, cache fingerprint invalidation, and colliding normalized
+  aliases. The final local runs followed a verified hosted filesystem failure,
+  not an attempt to bypass hosted build accounting.
+
 ## Lifecycle and safety
 
 Remote requests preserve JSON-RPC request IDs, negotiated protocol versions,

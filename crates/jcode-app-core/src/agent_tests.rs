@@ -23,6 +23,9 @@ mod desktop_selfdev;
 #[path = "agent_tests/compile_remote.rs"]
 mod compile_remote;
 
+#[path = "agent_tests/mcp_remote_cache.rs"]
+mod mcp_remote_cache;
+
 struct DelayedProvider {
     open_delay: Duration,
     first_event_delay: Duration,

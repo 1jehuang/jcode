@@ -2676,17 +2676,25 @@ fn run_command_mcp_cold_wait() -> std::time::Duration {
 /// would otherwise miss the single-turn snapshot.
 fn cold_cache_mcp_servers() -> Vec<String> {
     let config = crate::mcp::McpConfig::load();
-    if config.servers.is_empty() {
-        return Vec::new();
-    }
     let cache = crate::mcp::McpSchemaCache::load();
+    uncached_enabled_mcp_servers(&config, &cache)
+}
+
+fn uncached_enabled_mcp_servers(
+    config: &crate::mcp::McpConfig,
+    cache: &crate::mcp::McpSchemaCache,
+) -> Vec<String> {
     config
         .servers
         .iter()
-        .filter(|(name, cfg)| cache.tools_for(name, cfg).is_none())
+        .filter(|(name, cfg)| cfg.is_enabled() && cache.tools_for(name, cfg).is_none())
         .map(|(name, _)| name.clone())
         .collect()
 }
+
+#[cfg(test)]
+#[path = "mcp_startup_tests.rs"]
+mod mcp_startup_tests;
 
 /// Bridge the cold-cache gap for `jcode run`: if any configured MCP server has
 /// no cached schema, briefly poll the registry until its `mcp__*` tools appear
@@ -2709,11 +2717,9 @@ async fn wait_for_cold_cache_mcp_tools(registry: &crate::tool::Registry) {
     ));
     let deadline = std::time::Instant::now() + budget;
     loop {
-        let names = registry.tool_names().await;
-        let covered = cold_servers.iter().all(|server| {
-            let prefix = format!("mcp__{}__", server);
-            names.iter().any(|name| name.starts_with(&prefix))
-        });
+        let covered = cold_servers
+            .iter()
+            .all(|server| registry.has_mcp_tools_for_server(server));
         if covered {
             crate::logging::info(
                 "jcode run: cold-cache MCP server(s) registered tools; proceeding",
