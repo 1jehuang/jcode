@@ -187,7 +187,17 @@ fn account_router_exhaustion_restores_original_login_and_requests_cross_provider
                 .await
                 .err()
                 .expect("all logins exhausted");
-            assert!(parse_failover_prompt_message(&err.to_string()).is_some());
+            let prompt = parse_failover_prompt_message(&err.to_string()).expect("failover consent");
+            assert!(
+                prompt
+                    .reason
+                    .contains("No alternate OpenAI accounts are ready")
+            );
+            assert!(
+                !prompt
+                    .reason
+                    .contains("Alternate OpenAI accounts in the auto-switch pool")
+            );
             assert_eq!(
                 *attempts.lock().unwrap(),
                 ["openai-otter", "openai-fox", "openai-panda"]
@@ -197,12 +207,26 @@ fn account_router_exhaustion_restores_original_login_and_requests_cross_provider
                 Some("openai-otter")
             );
             assert!(!has_eligible_alternate_account("openai"));
+            let cooldown = provider_unavailability_detail_for_account("openai")
+                .expect("original account cooldown retained");
+            assert!(!cooldown.contains("Alternate OpenAI accounts"));
+            assert!(!cooldown.contains("No alternate OpenAI accounts"));
             let err = provider
                 .complete(&[], &[], "system", None)
                 .await
                 .err()
                 .expect("cooldowns retained");
-            assert!(parse_failover_prompt_message(&err.to_string()).is_some());
+            let prompt = parse_failover_prompt_message(&err.to_string()).expect("failover consent");
+            assert!(
+                prompt
+                    .reason
+                    .contains("No alternate OpenAI accounts are ready")
+            );
+            assert!(
+                !prompt
+                    .reason
+                    .contains("Alternate OpenAI accounts in the auto-switch pool")
+            );
             assert_eq!(
                 attempts.lock().unwrap().len(),
                 3,

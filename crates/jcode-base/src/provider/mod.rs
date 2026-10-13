@@ -825,12 +825,21 @@ impl MultiProvider {
             let key = Self::provider_key(candidate);
 
             if candidate != active && failover_reason.is_some() {
+                // Account rotation may have exhausted the pool since the first
+                // error. Render guidance from current cooldowns, never from an
+                // annotation captured before alternate logins were attempted.
+                let reason = failover_reason
+                    .clone()
+                    .unwrap_or_else(|| "provider unavailable".to_string());
+                let reason = if self.provider_uses_oauth_accounts(active) {
+                    maybe_annotate_limit_summary(active, reason)
+                } else {
+                    reason
+                };
                 let prompt = self.build_failover_prompt(
                     active,
                     candidate,
-                    failover_reason
-                        .clone()
-                        .unwrap_or_else(|| "provider unavailable".to_string()),
+                    reason,
                     estimated_input_chars,
                     estimated_input_tokens,
                 );
@@ -934,21 +943,21 @@ impl MultiProvider {
                 }
                 Err(err) => {
                     let summary = Self::summarize_error(&err);
-                    let summary = if self.provider_uses_oauth_accounts(candidate) {
-                        maybe_annotate_limit_summary(candidate, summary)
+                    let display_summary = if self.provider_uses_oauth_accounts(candidate) {
+                        maybe_annotate_limit_summary(candidate, summary.clone())
                     } else {
-                        summary
+                        summary.clone()
                     };
                     let decision = Self::classify_failover_error(&err);
                     crate::logging::info(&format!(
                         "Provider {} failed{}: {} (failover={} decision={})",
                         label,
                         mode.log_suffix(),
-                        summary,
+                        display_summary,
                         decision.should_failover(),
                         decision.as_str()
                     ));
-                    notes.push(format!("{}: {}", label, summary));
+                    notes.push(format!("{}: {}", label, display_summary));
                     if decision.should_failover() {
                         if decision.should_mark_provider_unavailable()
                             && self.provider_uses_account_cooldown(candidate)

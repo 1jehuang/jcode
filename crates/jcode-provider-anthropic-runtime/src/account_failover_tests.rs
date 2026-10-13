@@ -10,6 +10,12 @@ enum RetryDecision {
     Complete,
 }
 
+#[derive(Clone, Copy)]
+struct RouterCase {
+    split: bool,
+    exhaust_alternate: bool,
+}
+
 // Exercise the real OAuth HTTP request and retry loop. A 60-second server
 // backoff makes a missed yield fail the short timeout instead of passing after
 // an ordinary exponential retry.
@@ -18,16 +24,17 @@ fn oauth_http_retry_decision(
     alternate: bool,
     response: &str,
 ) -> (RetryDecision, usize, bool) {
-    http_retry_decision(enabled, alternate, response, false, false)
+    http_retry_decision(enabled, alternate, response, None, false)
 }
 
 fn http_retry_decision(
     enabled: bool,
     alternate: bool,
     response: &str,
-    through_router: bool,
+    router_case: Option<RouterCase>,
     alternate_cooling_down: bool,
 ) -> (RetryDecision, usize, bool) {
+    let through_router = router_case.is_some();
     let _lock = jcode_base::storage::lock_test_env();
     let home = tempfile::TempDir::new().unwrap();
     struct RestoreEnvironment(Vec<(&'static str, Option<std::ffi::OsString>)>);
@@ -184,7 +191,7 @@ fn http_retry_decision(
                 }
             }
             server_requests.fetch_add(1, Ordering::SeqCst);
-            if attempt == 0 {
+            if attempt == 0 || router_case.is_some_and(|case| case.exhaust_alternate) {
                 socket.write_all(response.as_bytes()).unwrap();
             } else {
                 let body = concat!(
@@ -258,10 +265,62 @@ fn http_retry_decision(
     let (decision, rolled_back) = runtime.block_on(async {
         if let Some(router) = &router {
             tokio::time::timeout(std::time::Duration::from_secs(3), async {
-                let mut stream = router
-                    .complete(&[], &[], "Test", None)
-                    .await
-                    .expect("second account must succeed");
+                let result = if router_case.unwrap().split {
+                    router
+                        .complete_split(&[], &[], "Test", "dynamic", None)
+                        .await
+                } else {
+                    router.complete(&[], &[], "Test", None).await
+                };
+                if router_case.unwrap().exhaust_alternate {
+                    let error = result.err().expect("both accounts exhausted");
+                    let prompt =
+                        jcode_provider_core::parse_failover_prompt_message(&error.to_string())
+                            .expect("cross-provider consent only after both accounts fail");
+                    assert_eq!(prompt.from_provider, "claude");
+                    assert_eq!(prompt.to_provider, "openai");
+                    assert!(
+                        prompt
+                            .reason
+                            .contains("No alternate Anthropic accounts are ready")
+                    );
+                    assert!(
+                        !prompt
+                            .reason
+                            .contains("Alternate Anthropic accounts in the auto-switch pool")
+                    );
+                    assert_eq!(
+                        jcode_base::auth::claude::active_account_label().as_ref(),
+                        Some(&account_labels[0])
+                    );
+                    assert!(!jcode_base::provider::has_eligible_alternate_account(
+                        "claude"
+                    ));
+                    let next_error = if router_case.unwrap().split {
+                        router
+                            .complete_split(&[], &[], "Test", "dynamic", None)
+                            .await
+                    } else {
+                        router.complete(&[], &[], "Test", None).await
+                    }
+                    .err()
+                    .expect("cooldowns prevent another HTTP request");
+                    let next_prompt =
+                        jcode_provider_core::parse_failover_prompt_message(&next_error.to_string())
+                            .expect("cached exhaustion consent");
+                    assert!(
+                        next_prompt
+                            .reason
+                            .contains("No alternate Anthropic accounts are ready")
+                    );
+                    assert!(
+                        !next_prompt
+                            .reason
+                            .contains("Alternate Anthropic accounts in the auto-switch pool")
+                    );
+                    return (RetryDecision::Yield(prompt.reason), false);
+                }
+                let mut stream = result.expect("second account must succeed");
                 while let Some(event) = stream.next().await {
                     let event = event.expect("accepted stream must not expose first account error");
                     if matches!(event, StreamEvent::MessageEnd { .. }) {
@@ -349,20 +408,52 @@ fn oauth_account_failover_yields_http_429_before_sixty_second_retry() {
 
 #[test]
 fn oauth_account_failover_router_switches_http_429_to_second_account_200() {
-    let (decision, requests, rolled_back) =
-        http_retry_decision(true, true, &rate_limit_http_response(), true, false);
-    assert_eq!(decision, RetryDecision::Complete);
-    assert_eq!(
-        requests, 2,
-        "first and second accounts each receive one request"
-    );
-    assert!(!rolled_back);
+    for split in [false, true] {
+        let (decision, requests, rolled_back) = http_retry_decision(
+            true,
+            true,
+            &rate_limit_http_response(),
+            Some(RouterCase {
+                split,
+                exhaust_alternate: false,
+            }),
+            false,
+        );
+        assert_eq!(decision, RetryDecision::Complete);
+        assert_eq!(
+            requests, 2,
+            "first and second accounts each receive one request"
+        );
+        assert!(!rolled_back);
+    }
+}
+
+#[test]
+fn oauth_account_failover_router_reports_exhaustion_after_distinct_tokens_each_receive_429() {
+    for split in [false, true] {
+        let (decision, requests, rolled_back) = http_retry_decision(
+            true,
+            true,
+            &rate_limit_http_response(),
+            Some(RouterCase {
+                split,
+                exhaust_alternate: true,
+            }),
+            false,
+        );
+        assert!(matches!(decision, RetryDecision::Yield(_)));
+        assert_eq!(
+            requests, 2,
+            "each distinct OAuth token must be attempted exactly once"
+        );
+        assert!(!rolled_back);
+    }
 }
 
 #[test]
 fn oauth_account_failover_yields_http_429_when_alternate_is_cooling_down() {
     let (decision, requests, _) =
-        http_retry_decision(true, true, &rate_limit_http_response(), false, true);
+        http_retry_decision(true, true, &rate_limit_http_response(), None, true);
     assert!(
         matches!(decision, RetryDecision::Yield(ref error) if error.contains("429 Too Many Requests"))
     );

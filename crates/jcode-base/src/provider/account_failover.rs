@@ -162,15 +162,6 @@ pub(super) fn account_switch_guidance(provider: ActiveProvider) -> Option<String
     })
 }
 
-pub(super) fn usage_exhausted_reason(provider: ActiveProvider) -> String {
-    let mut reason = "OAuth usage exhausted".to_string();
-    if let Some(guidance) = account_switch_guidance(provider) {
-        reason.push_str(". ");
-        reason.push_str(&guidance);
-    }
-    reason
-}
-
 fn error_looks_like_usage_limit(summary: &str) -> bool {
     let lower = summary.to_ascii_lowercase();
     [

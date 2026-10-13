@@ -15,9 +15,7 @@ impl MultiProvider {
                 if self.provider_uses_oauth_accounts(provider)
                     && self.is_claude_usage_exhausted() =>
             {
-                Some(crate::provider::account_failover::usage_exhausted_reason(
-                    provider,
-                ))
+                Some("OAuth usage exhausted".to_string())
             }
             _ => None,
         }
