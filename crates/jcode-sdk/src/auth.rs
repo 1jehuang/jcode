@@ -370,11 +370,10 @@ impl FlowInner {
         if matches!(operation, Operation::Callback | Operation::Code) {
             command.arg("-");
         }
-        if operation == Operation::Begin {
-            if let Some(account) = &self.account {
+        if operation == Operation::Begin
+            && let Some(account) = &self.account {
                 command.arg("--account").arg(account);
             }
-        }
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

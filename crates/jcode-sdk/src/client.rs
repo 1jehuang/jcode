@@ -27,6 +27,11 @@ use std::sync::mpsc::{
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
+/// One active subscription: id, optional session-id filter, and the sink that
+/// receives matched events. Aliased so the `subscribers` field type stays readable
+/// (`clippy::type_complexity`).
+type SubscriberList = Vec<(u64, Option<String>, Sender<ApiEvent>)>;
+
 /// How a client reaches the harness.
 pub struct ConnectOptions {
     /// Defaults to the resolved harness API socket path.
@@ -106,9 +111,9 @@ impl Transport for UnixTransport {
         #[cfg(unix)]
         {
             let socket = self.0.try_clone().ok()?;
-            return Some(Arc::new(move || {
+            Some(Arc::new(move || {
                 let _ = socket.shutdown(std::net::Shutdown::Both);
-            }));
+            }))
         }
         #[cfg(windows)]
         {
@@ -312,7 +317,7 @@ struct Inner {
     /// Requests waiting for their `reply_to` frame.
     pending: Mutex<HashMap<u64, Sender<ServerFrame>>>,
     /// Live subscriptions: (id, session filter, sink).
-    subscribers: Mutex<Vec<(u64, Option<String>, Sender<ApiEvent>)>>,
+    subscribers: Mutex<SubscriberList>,
     next_id: AtomicU64,
     next_sub: AtomicU64,
     closed: AtomicBool,
@@ -357,11 +362,10 @@ impl Clone for JcodeClient {
 
 impl Drop for JcodeClient {
     fn drop(&mut self) {
-        if self.inner.client_handles.fetch_sub(1, Ordering::AcqRel) == 1 {
-            if let Some(shutdown) = &self.inner.shutdown {
+        if self.inner.client_handles.fetch_sub(1, Ordering::AcqRel) == 1
+            && let Some(shutdown) = &self.inner.shutdown {
                 shutdown();
             }
-        }
     }
 }
 
@@ -1477,6 +1481,7 @@ fn start_global_child(parent: &JcodeClient, control: &Arc<GlobalEventControl>, s
 }
 
 /// The reader thread: correlates replies, fans stream events out.
+#[allow(clippy::while_let_loop)]
 fn spawn_reader(inner: Arc<Inner>, mut reader: Box<dyn BufRead + Send>) {
     std::thread::spawn(move || {
         loop {

@@ -51,6 +51,7 @@ fn session(id: &str) -> SessionInfo {
 
 /// Start a fake harness on one end of a socket pair. `handle` is called for
 /// every client frame with a writer for replies.
+#[allow(clippy::while_let_loop)]
 fn fake_harness(handle: impl Fn(&ClientFrame, &mut dyn Write) + Send + 'static) -> JcodeClient {
     let (ours, theirs) = UnixStream::pair().expect("socket pair");
     std::thread::spawn(move || {
