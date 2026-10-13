@@ -532,3 +532,7 @@ impl Tool for BatchTool {
 #[cfg(test)]
 #[path = "batch_tests.rs"]
 mod batch_tests;
+
+#[cfg(all(test, unix))]
+#[path = "batch_mcp_tests.rs"]
+mod batch_mcp_tests;
