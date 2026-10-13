@@ -1026,6 +1026,11 @@ pub(super) async fn handle_notify_auth_changed(
             return;
         }
         let activation = crate::auth::lifecycle::activate_auth_change(&activation_request);
+        if let Some(provider_id) = activation.provider_id.as_deref() {
+            // A renewed login must get a real request instead of inheriting the
+            // previous credential's cached runtime failure.
+            crate::provider::clear_provider_unavailable_for_account(provider_id);
+        }
         // Snapshot which providers jcode now believes are configured right after
         // an auth change activates. This is the cornerstone for diagnosing
         // "logged in but model picker still empty / only OpenAI+Anthropic" and
@@ -1251,6 +1256,7 @@ pub(super) async fn handle_switch_anthropic_account(
             spawn_account_switch_refresh(
                 id,
                 "anthropic",
+                label,
                 Arc::clone(agent),
                 client_event_tx.clone(),
             );
@@ -1274,7 +1280,13 @@ pub(super) async fn handle_switch_openai_account(
     match crate::auth::codex::set_active_account(&label) {
         Ok(()) => {
             crate::auth::AuthStatus::invalidate_cache();
-            spawn_account_switch_refresh(id, "openai", Arc::clone(agent), client_event_tx.clone());
+            spawn_account_switch_refresh(
+                id,
+                "openai",
+                label,
+                Arc::clone(agent),
+                client_event_tx.clone(),
+            );
         }
         Err(e) => {
             let _ = client_event_tx.send(ServerEvent::Error {
@@ -1311,9 +1323,26 @@ pub(super) async fn handle_invalidate_anthropic_usage(
 fn spawn_account_switch_refresh(
     id: u64,
     provider_kind: &'static str,
+    account_label: String,
     agent: Arc<Mutex<Agent>>,
     client_event_tx: mpsc::UnboundedSender<ServerEvent>,
 ) {
+    // Clear the selected login's failure before waiting for a busy agent. The
+    // global active account can change while the asynchronous refresh waits.
+    match provider_kind {
+        "anthropic" => {
+            crate::provider::clear_claude_provider_unavailability_for_account_label(Some(
+                &account_label,
+            ));
+        }
+        "openai" => {
+            crate::provider::clear_openai_provider_unavailability_for_account_label(Some(
+                &account_label,
+            ));
+            crate::provider::clear_all_model_unavailability_for_account();
+        }
+        _ => {}
+    }
     tokio::spawn(async move {
         let started = Instant::now();
         crate::logging::event_info(
@@ -1338,9 +1367,6 @@ fn spawn_account_switch_refresh(
             provider
         };
         provider.invalidate_credentials().await;
-
-        crate::provider::clear_all_provider_unavailability_for_account();
-        crate::provider::clear_all_model_unavailability_for_account();
 
         match provider_kind {
             "anthropic" => {
