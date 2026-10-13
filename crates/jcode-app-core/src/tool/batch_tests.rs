@@ -6,6 +6,28 @@ struct EchoTool;
 
 struct McpRoutingProbe;
 
+struct DispatchCounter(Arc<std::sync::atomic::AtomicUsize>);
+
+#[async_trait::async_trait]
+impl Tool for DispatchCounter {
+    fn name(&self) -> &str {
+        "dispatch_counter"
+    }
+
+    fn description(&self) -> &str {
+        "Count child executions in batch tests"
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({"type": "object", "properties": {"tool": {"type": "string"}}})
+    }
+
+    async fn execute(&self, _input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(ToolOutput::new("dispatched"))
+    }
+}
+
 fn mcp_probe_schema() -> Value {
     json!({
         "type": "object",
@@ -177,6 +199,7 @@ fn batch_schema_exposes_collision_free_parameters() {
     let parameters = &schema["properties"]["tool_calls"]["items"]["properties"]["parameters"];
     assert_eq!(parameters["type"], "object");
     assert_eq!(parameters["additionalProperties"], true);
+    assert!(crate::util::estimate_tokens(parameters["description"].as_str().unwrap()) <= 25);
     assert!(BATCH_DESCRIPTION.contains(r#""parameters""#));
     assert!(BATCH_DESCRIPTION.contains(r#""tool":"mcp_call""#));
 }
@@ -265,6 +288,129 @@ async fn batch_nested_mcp_keeps_all_routing_fields() {
             .output
             .contains("fixture:probe:{\"id\":\"synthetic\"}")
     );
+    assert!(output.output.contains("Completed: 1 succeeded, 0 failed"));
+}
+
+#[tokio::test]
+async fn batch_rejects_ambiguous_selectors_before_dispatching_any_child() {
+    let registry = registry_with_batch_and_echo().await;
+    let executions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    registry.tools.write().await.insert(
+        "dispatch_counter".into(),
+        Arc::new(DispatchCounter(executions.clone())),
+    );
+    registry
+        .tools
+        .write()
+        .await
+        .insert("mcp_call".into(), Arc::new(McpRoutingProbe));
+
+    let error = registry
+        .execute(
+            "batch",
+            json!({"tool_calls": [
+                {
+                    "tool": "mcp_call",
+                    "name": "dispatch_counter",
+                    "server": "fixture",
+                    "arguments": {},
+                    "intent": "Ambiguous first call"
+                },
+                {
+                    "tool": "dispatch_counter",
+                    "parameters": {},
+                    "intent": "Must not run before batch validation"
+                }
+            ]}),
+            test_context(),
+        )
+        .await
+        .expect_err("two callable selectors must be rejected");
+
+    assert!(
+        error
+            .to_string()
+            .contains("Ambiguous batch tool/name selectors")
+    );
+    assert_eq!(executions.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn batch_preserves_alias_declared_by_session_custom_schema() {
+    use crate::protocol::{ServerEvent, SessionToolConfig, SessionToolDefinition};
+
+    struct Cleanup(String);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            crate::tool::sdk::remove_session(&self.0);
+            crate::tool::clear_session_tool_policy(&self.0);
+        }
+    }
+
+    let session = format!("batch-custom-schema-{}", uuid::Uuid::new_v4());
+    let _cleanup = Cleanup(session.clone());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    crate::tool::sdk::configure(
+        &session,
+        "batch-custom-schema-owner",
+        SessionToolConfig {
+            custom: vec![SessionToolDefinition {
+                name: "echo".into(),
+                description: "Custom echo schema".into(),
+                parameters: json!({"type": "object", "properties": {
+                    "arguments": {"type": "object"}
+                }}),
+            }],
+            ..Default::default()
+        },
+        tx,
+    )
+    .unwrap();
+
+    let registry = registry_with_batch_and_echo().await;
+    let call_session = session.clone();
+    let task = tokio::spawn(async move {
+        registry
+            .execute(
+                "batch",
+                json!({"tool_calls": [{
+                    "tool": "functions.echo",
+                    "arguments": {"id": "custom-schema"},
+                    "intent": "Preserve the custom tool's native arguments field"
+                }]}),
+                ToolContext {
+                    session_id: call_session,
+                    ..test_context()
+                },
+            )
+            .await
+    });
+
+    let ServerEvent::ToolCall {
+        call_id,
+        name,
+        input,
+        session_id: callback_session,
+    } = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        .await
+        .expect("custom tool callback should arrive")
+        .expect("callback channel should remain open")
+    else {
+        panic!("expected custom tool callback");
+    };
+    assert_eq!(callback_session, session);
+    assert_eq!(name, "echo");
+    assert_eq!(input["arguments"]["id"], "custom-schema");
+    crate::tool::sdk::complete(
+        "batch-custom-schema-owner",
+        &session,
+        &call_id,
+        "callback output".into(),
+        None,
+    )
+    .unwrap();
+    let output = task.await.unwrap().unwrap();
+    assert!(output.output.contains("callback output"));
     assert!(output.output.contains("Completed: 1 succeeded, 0 failed"));
 }
 
@@ -384,6 +530,40 @@ fn normalization_drops_only_redundant_non_native_name_selector() {
         let parameters = parsed.tool_calls[0].parameters.as_ref().unwrap();
         assert_eq!(parameters.get("name").is_some(), native_name);
         assert_eq!(parameters["text"], "retained");
+    }
+}
+
+#[test]
+fn normalization_keeps_native_name_that_matches_another_registered_route() {
+    let native_schema = json!({
+        "type": "object",
+        "properties": {"name": {"type": "string"}}
+    });
+    for schema in [
+        native_schema,
+        json!({"allOf": [{"properties": {"name": {"type": "string"}}}]}),
+        json!({
+            "$ref": "#/$defs/Input",
+            "$defs": {"Input": {"properties": {"name": {"type": "string"}}}}
+        }),
+    ] {
+        let schemas = HashMap::from([
+            ("native".into(), schema),
+            ("mcp_call".into(), mcp_probe_schema()),
+        ]);
+        let input = json!({"tool_calls": [{
+            "tool": "native",
+            "name": "mcp_call",
+            "payload": {"id": "fixture"}
+        }]});
+        let parsed: BatchInput =
+            serde_json::from_value(normalize_batch_input_with_schemas(input, &schemas).unwrap())
+                .unwrap();
+        let call = &parsed.tool_calls[0];
+        assert_eq!(call.tool, "native");
+        let parameters = call.parameters.as_ref().unwrap();
+        assert_eq!(parameters["name"], "mcp_call");
+        assert_eq!(parameters["payload"]["id"], "fixture");
     }
 }
 
