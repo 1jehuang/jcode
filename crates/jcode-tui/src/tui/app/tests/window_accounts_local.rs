@@ -24,6 +24,21 @@ fn inline_account_search_accepts_navigation_and_default_letters() {
     assert_eq!(picker.selected_entry().unwrap().name, "djk account");
 }
 
+#[test]
+fn account_help_matches_window_default_and_removal_safety() {
+    let app = create_test_app();
+    for topic in ["account", "accounts", "/account"] {
+        let help = app.command_help(topic).expect("public account command help");
+        assert!(help.contains("THIS window only"));
+        assert!(help.contains("In the picker press Ctrl+D"));
+        assert!(help.contains("Typing searches without changing the default"));
+        assert!(help.contains("Existing accounts are kept"));
+        assert!(help.contains("not the provider account"));
+        assert!(help.contains("account center asks for confirmation"));
+        assert!(!help.contains("In the picker press d."));
+    }
+}
+
 /// Records `set_account_failover` and keeps its own pins, like the real
 /// multi-provider.
 #[derive(Clone, Default)]
