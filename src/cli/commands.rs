@@ -1995,6 +1995,20 @@ pub async fn run_browser(action: &str, requested: Option<&str>) -> Result<()> {
             let target = browser::resolve_target_browser(requested)?;
             let name = target.kind.display_name();
             let status = browser::ensure_browser_ready_noninteractive_for(&target).await?;
+            if status.backend == "safari_applescript" {
+                println!("Browser automation");
+                println!("  backend: {}", status.backend);
+                println!("  browser: {} ({})", status.browser, status.detected_via);
+                println!("  ready: {}", status.ready);
+                println!("  extension: not required");
+                if status.ready {
+                    println!("\nBuilt-in browser tool is ready in dedicated Safari windows.");
+                } else {
+                    println!("\n{}", crate::browser_safari::SETUP_HELP);
+                    println!("Run `jcode browser setup safari` to check permissions.");
+                }
+                return Ok(());
+            }
             println!("Browser automation");
             println!("  backend: {}", status.backend);
             println!("  browser: {} ({})", status.browser, status.detected_via);
@@ -2039,6 +2053,17 @@ pub async fn run_browser(action: &str, requested: Option<&str>) -> Result<()> {
 
             if status.ready {
                 println!("\nBuilt-in browser tool is ready.");
+            } else if status
+                .connected_browser
+                .as_deref()
+                .is_some_and(|connected| connected != target.kind.id())
+            {
+                println!(
+                    "\nThe bridge is answering from {}, not {}. Run `jcode browser setup {}` and enable the extension in the requested browser. Jcode will not send actions to a different browser.",
+                    status.connected_browser.as_deref().unwrap_or("unknown"),
+                    name,
+                    target.kind.id()
+                );
             } else if status.responding && !status.compatible {
                 println!(
                     "\nThe browser bridge is connected, but the installed extension is out of date for this jcode build. Run `jcode browser setup` to repair or update it."
