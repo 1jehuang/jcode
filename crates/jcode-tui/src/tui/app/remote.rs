@@ -101,8 +101,14 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     let mut needs_redraw = crate::tui::periodic_redraw_required(app);
     needs_redraw |= app.retire_expired_status_notice();
     needs_redraw |= app.poll_usage_reset();
-    if let Some(account) = app.usage_reset.invalidate_account.take() {
-        match remote.invalidate_openai_usage(account).await {
+    if let Some((provider, account)) = app.usage_reset.invalidate_account.take() {
+        let sent = match provider {
+            super::usage_reset::Provider::OpenAi => remote.invalidate_openai_usage(account).await,
+            super::usage_reset::Provider::Claude => {
+                remote.invalidate_anthropic_usage(account).await
+            }
+        };
+        match sent {
             Ok(id) => {
                 app.usage_reset.invalidate_requests.insert(id, Some(Instant::now()));
             }
