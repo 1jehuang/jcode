@@ -3029,10 +3029,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
             );
             if app.swarm_filter_active() {
                 let filter_line = Line::from(vec![
-                    Span::styled(
-                        "/",
-                        Style::default().fg(Color::Rgb(100, 180, 255)),
-                    ),
+                    Span::styled("/", Style::default().fg(Color::Rgb(100, 180, 255))),
                     Span::styled(
                         app.swarm_filter_query().to_string(),
                         Style::default().fg(Color::Rgb(100, 180, 255)),
@@ -3069,10 +3066,9 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     // near-zero rows.  Clamp to at most available_height / 3 (min 1) so the
     // messages area always keeps at least 2/3 of the pane.
     let max_input_lines = (chat_area.height / 3).max(1);
-    let base_input_height =
-        input_ui::wrapped_input_line_count(app, chat_area.width, next_prompt)
-            .min(10)
-            .min(max_input_lines as usize) as u16;
+    let base_input_height = input_ui::wrapped_input_line_count(app, chat_area.width, next_prompt)
+        .min(10)
+        .min(max_input_lines as usize) as u16;
     // Add 1 line for command suggestions, shell mode hints, or the Ctrl+Enter hint.
     let hint_line_height = input_ui::input_hint_line_height(app);
     let inline_block_height: u16 = inline_ui_height(app);
@@ -3413,10 +3409,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         );
         if app.swarm_filter_active() {
             let filter_line = Line::from(vec![
-                Span::styled(
-                    "/",
-                    Style::default().fg(Color::Rgb(100, 180, 255)),
-                ),
+                Span::styled("/", Style::default().fg(Color::Rgb(100, 180, 255))),
                 Span::styled(
                     app.swarm_filter_query().to_string(),
                     Style::default().fg(Color::Rgb(100, 180, 255)),

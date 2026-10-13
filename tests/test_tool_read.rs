@@ -1,7 +1,7 @@
 //! Tests for the `read` tool (file reading, range parsing, schema validation).
 
-use jcode::tool::{Tool, ToolContext, ToolExecutionMode};
 use jcode::tool::read::ReadTool;
+use jcode::tool::{Tool, ToolContext, ToolExecutionMode};
 use serde_json::json;
 
 fn make_ctx(dir: &std::path::Path) -> ToolContext {
@@ -59,7 +59,10 @@ async fn read_text_file_returns_content() {
         "intent": "test"
     });
     let output = tool.execute(input, make_ctx(tmp.path())).await.unwrap();
-    assert!(output.output.contains("line1"), "should contain file content");
+    assert!(
+        output.output.contains("line1"),
+        "should contain file content"
+    );
     assert!(output.output.contains("line3"));
 }
 
@@ -81,8 +84,14 @@ async fn read_with_start_line_and_limit() {
     let output = tool.execute(input, make_ctx(tmp.path())).await.unwrap();
     assert!(output.output.contains("line 5"));
     assert!(output.output.contains("line 8"));
-    assert!(!output.output.contains("line 4"), "should not contain line 4");
-    assert!(!output.output.contains("line 9"), "should not contain line 9");
+    assert!(
+        !output.output.contains("line 4"),
+        "should not contain line 4"
+    );
+    assert!(
+        !output.output.contains("line 9"),
+        "should not contain line 9"
+    );
 }
 
 #[tokio::test]

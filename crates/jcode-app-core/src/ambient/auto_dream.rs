@@ -31,11 +31,7 @@ struct ConsolidationOp {
 /// `session_count` is the total number of ambient cycles completed
 /// (fed to the session gate).
 /// `provider` is the LLM provider used for the consolidation call.
-pub async fn maybe_dream(
-    data_dir: PathBuf,
-    session_count: u64,
-    provider: Arc<dyn Provider>,
-) {
+pub async fn maybe_dream(data_dir: PathBuf, session_count: u64, provider: Arc<dyn Provider>) {
     let mut coordinator = DreamCoordinator::new(data_dir);
 
     // Feed the session gate with the ambient cycle count.
@@ -55,24 +51,15 @@ pub async fn maybe_dream(
                 Ok(()) => {
                     logging::info("Auto-dream: lock acquired, running consolidation");
                     if let Err(e) = run_consolidation(&provider).await {
-                        logging::error(&format!(
-                            "Auto-dream: consolidation failed: {}",
-                            e
-                        ));
+                        logging::error(&format!("Auto-dream: consolidation failed: {}", e));
                     }
                     if let Err(e) = lock.release().await {
-                        logging::error(&format!(
-                            "Auto-dream: failed to release lock: {}",
-                            e
-                        ));
+                        logging::error(&format!("Auto-dream: failed to release lock: {}", e));
                     }
                     logging::info("Auto-dream: consolidation complete");
                 }
                 Err(e) => {
-                    logging::error(&format!(
-                        "Auto-dream: failed to acquire lock: {}",
-                        e
-                    ));
+                    logging::error(&format!("Auto-dream: failed to acquire lock: {}", e));
                 }
             }
         }
@@ -274,17 +261,11 @@ fn apply_consolidation_ops(
                     .with_id(format!("{}:promoted", id));
                     match manager.remember_global(entry) {
                         Ok(new_id) => {
-                            logging::info(&format!(
-                                "Auto-dream: promoted {} as {}",
-                                id, new_id
-                            ));
+                            logging::info(&format!("Auto-dream: promoted {} as {}", id, new_id));
                             applied += 1;
                         }
                         Err(e) => {
-                            logging::error(&format!(
-                                "Auto-dream: failed to promote {}: {}",
-                                id, e
-                            ));
+                            logging::error(&format!("Auto-dream: failed to promote {}: {}", id, e));
                         }
                     }
                 }
@@ -312,10 +293,7 @@ fn apply_consolidation_ops(
                         } else {
                             // Medium-value: tag for review.
                             let _ = manager.tag_memory(id, "decay-candidate");
-                            logging::info(&format!(
-                                "Auto-dream: tagged {} as decay-candidate",
-                                id
-                            ));
+                            logging::info(&format!("Auto-dream: tagged {} as decay-candidate", id));
                             applied += 1;
                         }
                     }
@@ -325,7 +303,8 @@ fn apply_consolidation_ops(
                 for id in &op.ids {
                     // Derive a tag from the reason (first word, lowercased,
                     // alphanumeric only).
-                    let tag = op.reason
+                    let tag = op
+                        .reason
                         .split_whitespace()
                         .next()
                         .unwrap_or("consolidated")
@@ -335,26 +314,17 @@ fn apply_consolidation_ops(
                         .collect::<String>();
                     match manager.tag_memory(id, &tag) {
                         Ok(()) => {
-                            logging::info(&format!(
-                                "Auto-dream: tagged {} with '{}'",
-                                id, tag
-                            ));
+                            logging::info(&format!("Auto-dream: tagged {} with '{}'", id, tag));
                             applied += 1;
                         }
                         Err(e) => {
-                            logging::error(&format!(
-                                "Auto-dream: failed to tag {}: {}",
-                                id, e
-                            ));
+                            logging::error(&format!("Auto-dream: failed to tag {}: {}", id, e));
                         }
                     }
                 }
             }
             other => {
-                logging::warn(&format!(
-                    "Auto-dream: unknown op '{}', skipping",
-                    other
-                ));
+                logging::warn(&format!("Auto-dream: unknown op '{}', skipping", other));
             }
         }
     }

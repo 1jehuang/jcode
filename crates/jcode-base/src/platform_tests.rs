@@ -164,11 +164,7 @@ fn ps_process_state(pid: u32) -> Option<String> {
         .output()
         .expect("run ps to inspect process state");
     let state = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if state.is_empty() {
-        None
-    } else {
-        Some(state)
-    }
+    if state.is_empty() { None } else { Some(state) }
 }
 
 /// Regression test for the zombie-child leak: detached children that were

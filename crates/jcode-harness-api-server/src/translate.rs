@@ -373,7 +373,10 @@ impl BridgeState {
                     .sessions
                     .insert(session_id.to_string(), Self::now_ms());
                 match Self::save_archive_state(&archive) {
-                    Ok(()) => vec![Outbound::Reply(Box::new(ServerFrame::reply(api_id, ApiEvent::Ok)))],
+                    Ok(()) => vec![Outbound::Reply(Box::new(ServerFrame::reply(
+                        api_id,
+                        ApiEvent::Ok,
+                    )))],
                     Err(message) => Self::error_reply(api_id, ErrorCode::Internal, &message),
                 }
             }
@@ -390,7 +393,10 @@ impl BridgeState {
                 let mut archive = Self::load_archive_state();
                 archive.sessions.remove(session_id);
                 match Self::save_archive_state(&archive) {
-                    Ok(()) => vec![Outbound::Reply(Box::new(ServerFrame::reply(api_id, ApiEvent::Ok)))],
+                    Ok(()) => vec![Outbound::Reply(Box::new(ServerFrame::reply(
+                        api_id,
+                        ApiEvent::Ok,
+                    )))],
                     Err(message) => Self::error_reply(api_id, ErrorCode::Internal, &message),
                 }
             }
@@ -412,7 +418,10 @@ impl BridgeState {
                 let mut archive = Self::load_archive_state();
                 archive.archive_after_days = days;
                 match Self::save_archive_state(&archive) {
-                    Ok(()) => vec![Outbound::Reply(Box::new(ServerFrame::reply(api_id, ApiEvent::Ok)))],
+                    Ok(()) => vec![Outbound::Reply(Box::new(ServerFrame::reply(
+                        api_id,
+                        ApiEvent::Ok,
+                    )))],
                     Err(message) => Self::error_reply(api_id, ErrorCode::Internal, &message),
                 }
             }
@@ -470,7 +479,9 @@ impl BridgeState {
                 vec![
                     Outbound::Legacy(subscribe),
                     Outbound::Legacy(json!({"type": "state", "id": state_id})),
-                    Outbound::Legacy(json!({"type": "get_model_catalog", "id": catalog_id, "subscribe_usage_updates": true})),
+                    Outbound::Legacy(
+                        json!({"type": "get_model_catalog", "id": catalog_id, "subscribe_usage_updates": true}),
+                    ),
                 ]
             }
             "send_message" => {
@@ -568,7 +579,10 @@ impl BridgeState {
             // liveness probe must never cost the caller its connection, and
             // reaching the bridge already proves the socket is alive.
             "ping" if self.session_id.is_none() => {
-                vec![Outbound::Reply(Box::new(ServerFrame::reply(api_id, ApiEvent::Pong)))]
+                vec![Outbound::Reply(Box::new(ServerFrame::reply(
+                    api_id,
+                    ApiEvent::Pong,
+                )))]
             }
             "ping" => {
                 let id = self.legacy_id();
@@ -807,16 +821,18 @@ impl BridgeState {
                     .unwrap_or(DEFAULT_FILE_BYTES)
                     .min(MAX_FILE_BYTES);
                 match Self::read_session_file(session_id, relative, max) {
-                    Ok((content, size, truncated)) => vec![Outbound::Reply(Box::new(ServerFrame::reply(
-                        api_id,
-                        ApiEvent::FileContent {
-                            session_id: session_id.to_string(),
-                            path: relative.to_string(),
-                            content,
-                            size,
-                            truncated,
-                        },
-                    )))],
+                    Ok((content, size, truncated)) => {
+                        vec![Outbound::Reply(Box::new(ServerFrame::reply(
+                            api_id,
+                            ApiEvent::FileContent {
+                                session_id: session_id.to_string(),
+                                path: relative.to_string(),
+                                content,
+                                size,
+                                truncated,
+                            },
+                        )))]
+                    }
                     Err((code, message)) => Self::error_reply(api_id, code, &message),
                 }
             }
@@ -1845,7 +1861,11 @@ impl BridgeState {
             .windows(needle.len())
             .enumerate()
             .filter_map(|(at, window)| (window == needle.as_bytes()).then_some(at + needle.len()));
-        let start = if last { starts.next_back()? } else { starts.next()? };
+        let start = if last {
+            starts.next_back()?
+        } else {
+            starts.next()?
+        };
         Option::<String>::deserialize(&mut serde_json::Deserializer::from_slice(&bytes[start..]))
             .ok()
             .flatten()

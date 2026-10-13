@@ -123,7 +123,10 @@ mod tests {
 
     #[test]
     fn no_redirections_unchanged() {
-        assert_eq!(strip_safe_redirections("echo hello world"), "echo hello world");
+        assert_eq!(
+            strip_safe_redirections("echo hello world"),
+            "echo hello world"
+        );
     }
 
     #[test]

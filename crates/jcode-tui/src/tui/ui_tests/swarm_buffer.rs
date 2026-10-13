@@ -395,8 +395,15 @@ fn swarm_strip_paragraph_never_writes_outside_target_area() {
         strip_member("s2", "reviewer-with-a-long-name", "completed"),
     ];
     let gallery_lines = crate::tui::info_widget::swarm_gallery::render_swarm_strip_lines(
-        &members, 0, true, "ctrl+t", 3, 80, 16,
-        &std::collections::HashSet::new(), false,
+        &members,
+        0,
+        true,
+        "ctrl+t",
+        3,
+        80,
+        16,
+        &std::collections::HashSet::new(),
+        false,
     );
     assert!(!gallery_lines.is_empty(), "expected focused strip lines");
 

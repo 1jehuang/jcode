@@ -165,8 +165,7 @@ impl ScheduledQueue {
     /// interval. Returns `true` if the item was re-enqueued.
     pub fn re_enqueue_recurring(&mut self, item: &mut ScheduledItem) -> bool {
         if let Some(minutes) = item.recurrence.interval_minutes() {
-            item.scheduled_for =
-                Utc::now() + chrono::Duration::minutes(minutes as i64);
+            item.scheduled_for = Utc::now() + chrono::Duration::minutes(minutes as i64);
             self.items.push(item.clone());
             let _ = self.save();
             true

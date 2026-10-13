@@ -22,7 +22,6 @@ pub fn status_accent(status: &str) -> Color {
     }
 }
 
-
 /// Optional glyph prefixed to a member's title based on its swarm role.
 pub fn role_glyph(role: Option<&str>) -> Option<&'static str> {
     match role {
@@ -31,18 +30,16 @@ pub fn role_glyph(role: Option<&str>) -> Option<&'static str> {
     }
 }
 
-
 /// Falls back to `None` for unknown roles so callers can use `status_accent()`.
 pub fn role_color(role: Option<&str>) -> Option<Color> {
     match role {
         Some("coordinator") => Some(rgb(255, 200, 100)), // gold/amber
         Some("worker") | Some("implementer") => Some(rgb(100, 160, 255)), // blue
-        Some("reviewer") => Some(rgb(130, 210, 130)), // green
-        Some("researcher") => Some(rgb(180, 140, 255)), // purple
+        Some("reviewer") => Some(rgb(130, 210, 130)),    // green
+        Some("researcher") => Some(rgb(180, 140, 255)),  // purple
         _ => None,
     }
 }
-
 
 /// Compact age formatting for member viewports (now/Ns/Nm/Nh).
 pub fn humanize_age(age: u64) -> String {
@@ -57,12 +54,10 @@ pub fn humanize_age(age: u64) -> String {
     }
 }
 
-
 /// Whether a status counts as "active" for the header's active-agent tally.
 pub fn is_active_status(status: &str) -> bool {
     matches!(status, "running" | "streaming" | "thinking")
 }
-
 
 ///
 /// Keep this aligned with the TUI redraw interval. 80 ms matches the primary
@@ -73,7 +68,6 @@ pub const STRIP_SPINNER_FPS: f32 = 1000.0 / STRIP_SPINNER_FRAME_MS as f32;
 
 /// Frames for the inline status spinner used by active agents on the strip.
 pub const STRIP_SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-
 
 /// A glyph summarizing a member's lifecycle status. Active members (running,
 /// thinking, streaming) animate via the spinner frame; terminal states get a
@@ -93,7 +87,6 @@ pub fn status_glyph(status: &str, spinner_frame: usize) -> &'static str {
     }
 }
 
-
 /// Calm lifecycle marker for transcript cards.
 ///
 /// Transcript content should remain stable while users read or scroll it. The
@@ -111,7 +104,6 @@ pub(crate) fn card_status_glyph(status: &str) -> &'static str {
     }
 }
 
-
 pub(crate) fn card_status_label(status: &str) -> &'static str {
     match status {
         "running" | "streaming" | "thinking" => "Working",
@@ -124,7 +116,6 @@ pub(crate) fn card_status_label(status: &str) -> &'static str {
     }
 }
 
-
 pub(crate) fn format_elapsed(seconds: u64) -> String {
     let hours = seconds / 3600;
     let minutes = (seconds % 3600) / 60;
@@ -136,7 +127,6 @@ pub(crate) fn format_elapsed(seconds: u64) -> String {
     }
 }
 
-
 /// Short elapsed-time formatting: "Xm Ys" or "Ys".
 pub fn format_elapsed_short(secs: u64) -> String {
     if secs < 60 {
@@ -145,7 +135,6 @@ pub fn format_elapsed_short(secs: u64) -> String {
         format!("{}m {}s", secs / 60, secs % 60)
     }
 }
-
 
 /// Format token counts with human-readable suffixes.
 pub fn format_tokens(tokens: u64) -> String {
@@ -158,7 +147,6 @@ pub fn format_tokens(tokens: u64) -> String {
     }
 }
 
-
 /// Format cost in USD cents with a dollar sign.
 pub fn format_cost(cents: u64) -> String {
     if cents >= 100 {
@@ -167,7 +155,6 @@ pub fn format_cost(cents: u64) -> String {
         format!("${:.3}", cents as f64 / 100.0)
     }
 }
-
 
 pub(crate) fn format_model(model: &str) -> String {
     let routed = model.rsplit([':', '/']).next().unwrap_or(model);
@@ -182,7 +169,6 @@ pub(crate) fn format_model(model: &str) -> String {
     }
 }
 
-
 pub(crate) fn format_route(provider: Option<&str>, auth_method: Option<&str>) -> Option<String> {
     let provider = provider.map(str::trim).filter(|p| !p.is_empty());
     let auth_method = auth_method.map(str::trim).filter(|m| !m.is_empty());
@@ -194,14 +180,12 @@ pub(crate) fn format_route(provider: Option<&str>, auth_method: Option<&str>) ->
     }
 }
 
-
 pub(crate) fn role_rank(role: Option<&str>) -> u8 {
     match role {
         Some("coordinator") => 0,
         _ => 2,
     }
 }
-
 
 pub(crate) fn status_rank(status: &str) -> u8 {
     match status {
@@ -212,7 +196,6 @@ pub(crate) fn status_rank(status: &str) -> u8 {
         _ => 2,
     }
 }
-
 
 /// Aggregate stats line shown below agent chips when the swarm strip is focused.
 ///
@@ -255,13 +238,9 @@ pub fn summary_line(
     if body_w < width {
         spans.push(Span::raw(" ".repeat(width - body_w)));
     }
-    spans.push(Span::styled(
-        body,
-        Style::default().fg(rgb(105, 105, 120)),
-    ));
+    spans.push(Span::styled(body, Style::default().fg(rgb(105, 105, 120))));
     Line::from(spans)
 }
-
 
 /// Summary line built directly from a `&[GalleryMember]` slice.
 ///
@@ -361,7 +340,6 @@ pub fn summary_line_from_members(members: &[GalleryMember], width: usize) -> Lin
     Line::from(spans)
 }
 
-
 /// Truncate a styled line so its display width never exceeds `max_width`.
 /// Splits mid-span if needed, dropping a trailing wide glyph that would
 /// straddle the boundary.
@@ -394,7 +372,6 @@ pub(crate) fn clamp_line_to_width(line: &mut Line<'static>, max_width: usize) {
     line.spans = clamped;
 }
 
-
 /// Indices of `members` in display order: coordinator first, then worktree
 /// manager, then everything else. Within a role bucket, still-working agents
 /// sort before blocked/failed ones, which sort before idle and then finished
@@ -416,7 +393,6 @@ pub fn display_order(members: &[GalleryMember]) -> Vec<usize> {
     idx
 }
 
-
 /// References to `members` in [`display_order`], for rendering.
 pub(crate) fn sort_members_for_display(members: &[GalleryMember]) -> Vec<&GalleryMember> {
     display_order(members)
@@ -424,7 +400,6 @@ pub(crate) fn sort_members_for_display(members: &[GalleryMember]) -> Vec<&Galler
         .map(|i| &members[i])
         .collect()
 }
-
 
 /// The tile index (in `members_to_tiles(members)` order) for a display row.
 /// Since both orderings use the same sort, the display index equals the tile
@@ -438,7 +413,6 @@ pub(crate) fn display_index_to_tile_index(
     let _ = ordered;
     display_idx
 }
-
 
 /// Truncate `s` to at most `max` display columns (wide glyphs count as 2),
 /// appending an ellipsis when truncated.
@@ -465,13 +439,11 @@ pub(crate) fn truncate_label(s: &str, max: usize) -> String {
     out
 }
 
-
 /// Terminal display width of a string (wide glyphs like 🐝 count as 2).
 pub(crate) fn disp_w(s: &str) -> usize {
     use unicode_width::UnicodeWidthStr;
     s.width()
 }
-
 
 /// Number of decimal digits in `n` (for budgeting "+N" markers).
 pub(crate) fn count_digits(n: usize) -> usize {
@@ -483,4 +455,3 @@ pub(crate) fn count_digits(n: usize) -> usize {
     }
     d
 }
-

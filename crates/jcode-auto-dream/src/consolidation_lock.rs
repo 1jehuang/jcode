@@ -62,8 +62,7 @@ impl ConsolidationLock {
             acquired_at: chrono::Utc::now().to_rfc3339(),
             reason: Some("memory consolidation".into()),
         };
-        let json =
-            serde_json::to_string_pretty(&info).context("failed to serialize lock info")?;
+        let json = serde_json::to_string_pretty(&info).context("failed to serialize lock info")?;
         tokio::fs::write(&self.lock_path, json)
             .await
             .context("failed to write lock file")?;
@@ -92,8 +91,7 @@ impl ConsolidationLock {
         let content = tokio::fs::read_to_string(&self.lock_path)
             .await
             .context("failed to read lock file")?;
-        let info: LockInfo =
-            serde_json::from_str(&content).context("failed to parse lock file")?;
+        let info: LockInfo = serde_json::from_str(&content).context("failed to parse lock file")?;
         Ok(Some(info))
     }
 }

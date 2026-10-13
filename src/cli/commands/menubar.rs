@@ -171,9 +171,10 @@ pub fn ensure_menubar_helper_running() {
     // If a recorded helper PID is still alive, do nothing.
     if let Ok(raw) = std::fs::read_to_string(&pid_path)
         && let Ok(pid) = raw.trim().parse::<u32>()
-            && crate::platform::is_process_running(pid) {
-                return;
-            }
+        && crate::platform::is_process_running(pid)
+    {
+        return;
+    }
 
     let Ok(exe) = std::env::current_exe() else {
         return;

@@ -18,7 +18,11 @@ const PAD_DEN: usize = 3;
 
 /// Estimate token count for raw text. ~4 chars per token, floor of 1.
 pub fn rough_token_count(text: &str) -> usize {
-    if text.is_empty() { 1 } else { (text.len() / CHARS_PER_TOKEN).max(1) }
+    if text.is_empty() {
+        1
+    } else {
+        (text.len() / CHARS_PER_TOKEN).max(1)
+    }
 }
 
 /// Legacy alias kept for backward compatibility with existing callers.
@@ -180,8 +184,14 @@ mod tests {
     #[test]
     fn mixed_blocks_sum_correctly() {
         let msg = assistant_msg(vec![
-            ContentBlock::Text { text: "a".repeat(80), cache_control: None }, // 20 tokens
-            ContentBlock::Image { media_type: "image/png".into(), data: "x".into() }, // 2000
+            ContentBlock::Text {
+                text: "a".repeat(80),
+                cache_control: None,
+            }, // 20 tokens
+            ContentBlock::Image {
+                media_type: "image/png".into(),
+                data: "x".into(),
+            }, // 2000
         ]);
         // raw=2020, padded=ceil(2020*4/3)=2694
         assert_eq!(estimate_message_tokens(&[msg]), 2694);

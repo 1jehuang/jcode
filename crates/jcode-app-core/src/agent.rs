@@ -1,12 +1,15 @@
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 
+mod cache_vectors;
 mod compaction;
 mod environment;
 mod inline_tail;
 mod interrupts;
 mod messages;
+mod micro_compact;
 #[cfg(test)]
 mod model_usage_tests;
+pub(crate) mod permission_bubble;
 mod prompting;
 mod provider;
 mod response_recovery;
@@ -16,9 +19,6 @@ mod tools;
 mod turn_execution;
 mod turn_loops;
 mod turn_streaming_mpsc;
-mod micro_compact;
-mod cache_vectors;
-pub(crate) mod permission_bubble;
 mod utils;
 
 use self::streaming::{send_stream_keepalive_mpsc, stream_keepalive_ticker};
@@ -30,7 +30,6 @@ use self::utils::trace_enabled;
 use crate::build;
 use crate::bus::{Bus, BusEvent, SubagentStatus, ToolEvent, ToolStatus};
 use crate::cache_tracker::CacheTracker;
-use cache_vectors::CacheVectorsTracker;
 use crate::compaction::CompactionEvent;
 use crate::id;
 use crate::logging;
@@ -43,6 +42,7 @@ use crate::session::{GitState, Session, SessionStatus, StoredDisplayRole, Stored
 use crate::skill::SkillRegistry;
 use crate::tool::{Registry, ToolContext, ToolExecutionMode};
 use anyhow::Result;
+use cache_vectors::CacheVectorsTracker;
 use futures::StreamExt;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};

@@ -64,8 +64,12 @@ pub fn run_pipeline(command: &str, ctx: &RiskContext) -> PipelineResult {
     let assessment = assess(command, ctx);
     match assessment.level {
         RiskLevel::Safe | RiskLevel::Low => PipelineResult::Continue,
-        RiskLevel::Confirm => PipelineResult::Ask { reason: assessment.explanation() },
-        RiskLevel::Catastrophic => PipelineResult::Block { reason: assessment.explanation() },
+        RiskLevel::Confirm => PipelineResult::Ask {
+            reason: assessment.explanation(),
+        },
+        RiskLevel::Catastrophic => PipelineResult::Block {
+            reason: assessment.explanation(),
+        },
     }
 }
 
@@ -74,13 +78,18 @@ pub fn run_pipeline(command: &str, ctx: &RiskContext) -> PipelineResult {
 // ---------------------------------------------------------------------------
 
 fn check_empty(cmd: &str) -> Option<PipelineResult> {
-    cmd.trim().is_empty().then_some(PipelineResult::Ask { reason: "Empty command".into() })
+    cmd.trim().is_empty().then_some(PipelineResult::Ask {
+        reason: "Empty command".into(),
+    })
 }
 
 fn check_incomplete(fully: &str) -> Option<PipelineResult> {
     let t = fully.trim_end();
-    (t.ends_with("&&") || t.ends_with("||") || t.ends_with('|') || t.ends_with(';'))
-        .then_some(PipelineResult::Ask { reason: "Incomplete command (trailing operator)".into() })
+    (t.ends_with("&&") || t.ends_with("||") || t.ends_with('|') || t.ends_with(';')).then_some(
+        PipelineResult::Ask {
+            reason: "Incomplete command (trailing operator)".into(),
+        },
+    )
 }
 
 fn check_control_chars(cmd: &str) -> Option<PipelineResult> {
@@ -157,10 +166,14 @@ fn check_obfuscated_flags(unquoted_kq: &str, fully: &str) -> Option<PipelineResu
 fn check_backslash_ws(cmd: &str) -> Option<PipelineResult> {
     scan_quotes(cmd, |cmd, i, in_sq, in_dq| {
         let bytes = cmd.as_bytes();
-        if bytes[i] == b'\\' && !in_sq
-            && !in_dq && i + 1 < bytes.len() && matches!(bytes[i + 1], b' ' | b'\t') {
-                return true;
-            }
+        if bytes[i] == b'\\'
+            && !in_sq
+            && !in_dq
+            && i + 1 < bytes.len()
+            && matches!(bytes[i + 1], b' ' | b'\t')
+        {
+            return true;
+        }
         false
     })
     .then_some(PipelineResult::Ask {
@@ -171,10 +184,14 @@ fn check_backslash_ws(cmd: &str) -> Option<PipelineResult> {
 fn check_backslash_ops(cmd: &str) -> Option<PipelineResult> {
     scan_quotes(cmd, |cmd, i, in_sq, in_dq| {
         let bytes = cmd.as_bytes();
-        if bytes[i] == b'\\' && !in_sq
-            && !in_dq && i + 1 < bytes.len() && matches!(bytes[i + 1], b';' | b'|' | b'&' | b'>' | b'<') {
-                return true;
-            }
+        if bytes[i] == b'\\'
+            && !in_sq
+            && !in_dq
+            && i + 1 < bytes.len()
+            && matches!(bytes[i + 1], b';' | b'|' | b'&' | b'>' | b'<')
+        {
+            return true;
+        }
         false
     })
     .then_some(PipelineResult::Ask {
@@ -216,10 +233,13 @@ where
 }
 
 fn check_brace_expansion(fully: &str) -> Option<PipelineResult> {
-    if let (Some(start), Some(end)) = (fully.find('{'), fully[start_after(fully, '{')..].find('}')) {
+    if let (Some(start), Some(end)) = (fully.find('{'), fully[start_after(fully, '{')..].find('}'))
+    {
         let inner = &fully[start + 1..start + 1 + end];
         if inner.contains(',') || inner.contains("..") {
-            return Some(PipelineResult::Ask { reason: "Brace expansion detected".into() });
+            return Some(PipelineResult::Ask {
+                reason: "Brace expansion detected".into(),
+            });
         }
     }
     None
@@ -232,7 +252,10 @@ fn start_after(s: &str, ch: char) -> usize {
 fn check_substitution(cmd: &str) -> Option<PipelineResult> {
     let sub = substitution::detect_substitution(cmd);
     sub.has_substitution.then_some(PipelineResult::Ask {
-        reason: format!("Shell substitution: {}", sub.pattern_name.unwrap_or_default()),
+        reason: format!(
+            "Shell substitution: {}",
+            sub.pattern_name.unwrap_or_default()
+        ),
     })
 }
 
@@ -243,7 +266,9 @@ fn check_zsh_dangerous(cmd: &str) -> Option<PipelineResult> {
     if zsh_dangerous::is_zsh_dangerous(&base) {
         let reason =
             zsh_dangerous::get_zsh_dangerous_reason(&base).unwrap_or("dangerous zsh built-in");
-        Some(PipelineResult::Ask { reason: format!("Zsh `{base}`: {reason}") })
+        Some(PipelineResult::Ask {
+            reason: format!("Zsh `{base}`: {reason}"),
+        })
     } else {
         None
     }
@@ -266,9 +291,18 @@ fn check_ifs(fully: &str) -> Option<PipelineResult> {
 }
 
 fn check_dangerous_vars(fully: &str) -> Option<PipelineResult> {
-    for var in ["PATH=", "LD_PRELOAD=", "LD_LIBRARY_PATH=", "ENV=", "BASH_ENV=", "HISTFILE="] {
+    for var in [
+        "PATH=",
+        "LD_PRELOAD=",
+        "LD_LIBRARY_PATH=",
+        "ENV=",
+        "BASH_ENV=",
+        "HISTFILE=",
+    ] {
         if fully.contains(var) {
-            return Some(PipelineResult::Ask { reason: format!("Sets dangerous variable `{var}`") });
+            return Some(PipelineResult::Ask {
+                reason: format!("Sets dangerous variable `{var}`"),
+            });
         }
     }
     None

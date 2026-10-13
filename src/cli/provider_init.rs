@@ -1642,9 +1642,10 @@ async fn init_provider_with_options(
                         &resolved.api_key_env,
                     )?;
                 }
-                runtime_model_hint = resolved.default_model.clone().or_else(|| {
-                    crate::config::config().provider.default_model.clone()
-                });
+                runtime_model_hint = resolved
+                    .default_model
+                    .clone()
+                    .or_else(|| crate::config::config().provider.default_model.clone());
                 resolved.display_name
             };
             init_notice(&format!(
@@ -1689,19 +1690,13 @@ async fn init_provider_with_options(
         }
         ProviderChoice::ForgeCode => {
             disable_subscription_runtime_mode();
-            init_notice(
-                "Using ForgeCode as the initial provider (use /model to switch)",
-            );
+            init_notice("Using ForgeCode as the initial provider (use /model to switch)");
             clear_initial_model_provider();
             crate::env::set_var("JCODE_ACTIVE_PROVIDER", "forgecode");
             crate::provider::external::instantiate_external_provider(
                 crate::provider::external::FORGECODE_RUNTIME,
             )
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "ForgeCode runtime is not registered"
-                )
-            })?
+            .ok_or_else(|| anyhow::anyhow!("ForgeCode runtime is not registered"))?
         }
         ProviderChoice::Auto => {
             disable_subscription_runtime_mode_preserving_active_provider_profile();
@@ -1894,13 +1889,14 @@ async fn init_provider_with_options(
             .or_else(|| crate::config::config().provider.default_model.clone());
         if let Some(default_model) = effective_default
             && provider.set_model(&default_model).is_ok()
-            && let Some(profile) = profile_for_choice(choice) {
-                let resolved = resolve_openai_compatible_profile(profile);
-                init_notice(&format!(
-                    "Using default model for {}: {}",
-                    resolved.display_name, default_model
-                ));
-            }
+            && let Some(profile) = profile_for_choice(choice)
+        {
+            let resolved = resolve_openai_compatible_profile(profile);
+            init_notice(&format!(
+                "Using default model for {}: {}",
+                resolved.display_name, default_model
+            ));
+        }
     }
 
     if let Some(model_name) = model {

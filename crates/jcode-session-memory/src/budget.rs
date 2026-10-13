@@ -3,7 +3,7 @@
 //! Enforces a total budget of 12K tokens and 2K per section,
 //! mirroring Claude Code's session memory constraints.
 
-use crate::section_analysis::{analyze_sections, find_oversized_sections, SectionAnalysis};
+use crate::section_analysis::{SectionAnalysis, analyze_sections, find_oversized_sections};
 
 /// Maximum total tokens for all session memory sections combined.
 pub const MAX_TOTAL_SESSION_MEMORY_TOKENS: usize = 12_000;

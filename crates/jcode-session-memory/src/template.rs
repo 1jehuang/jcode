@@ -107,7 +107,8 @@ mod tests {
 
     #[test]
     fn parse_template_with_sections() {
-        let raw = "## Summary\nThis is a {{project}} session.\n\n## Details\nWorking on {{feature}}.";
+        let raw =
+            "## Summary\nThis is a {{project}} session.\n\n## Details\nWorking on {{feature}}.";
         let tmpl = Template::parse(raw);
         assert_eq!(tmpl.sections.len(), 2);
         assert_eq!(tmpl.sections[0].name, "Summary");

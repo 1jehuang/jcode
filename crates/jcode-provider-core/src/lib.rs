@@ -14,8 +14,8 @@ pub mod retry_after;
 pub mod selection;
 pub mod transport;
 
-pub use transport::is_transient_transport_error;
 pub use jcode_usage_types::{ModelUsage, compare_model_usage};
+pub use transport::is_transient_transport_error;
 
 pub use anthropic::{
     ANTHROPIC_OAUTH_BETA_HEADERS, ANTHROPIC_OAUTH_BETA_HEADERS_1M, AnthropicContextMode,

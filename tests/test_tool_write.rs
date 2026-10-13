@@ -1,7 +1,7 @@
 //! Tests for the `write` tool (file creation, overwrite, diff output, schema validation).
 
-use jcode::tool::{Tool, ToolContext, ToolExecutionMode};
 use jcode::tool::write::WriteTool;
+use jcode::tool::{Tool, ToolContext, ToolExecutionMode};
 use serde_json::json;
 
 fn make_ctx(dir: &std::path::Path) -> ToolContext {

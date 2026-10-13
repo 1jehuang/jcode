@@ -24,8 +24,12 @@ pub fn render_report(cfg: &KeybindingsConfig, snapshot: &KeymapSnapshot) -> Stri
     out.push_str(&format!("OS: {}\n", snapshot.os));
 
     let term_count = snapshot.bindings_from_source(KeySource::Terminal).count();
-    let sys_count = snapshot.bindings_from_source(KeySource::MacosSystem).count();
-    let app_count = snapshot.bindings_from_source(KeySource::ExternalApp).count();
+    let sys_count = snapshot
+        .bindings_from_source(KeySource::MacosSystem)
+        .count();
+    let app_count = snapshot
+        .bindings_from_source(KeySource::ExternalApp)
+        .count();
     out.push_str(&format!(
         "Discovered bindings: {term_count} terminal, {sys_count} macOS system, {app_count} app\n",
     ));

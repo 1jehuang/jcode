@@ -60,7 +60,8 @@ fn convert_to_responses_format(mut request: Value) -> Value {
     // Map chat-completions `max_tokens` to Responses API `max_output_tokens`.
     // Preserve the caller's configured value instead of hardcoding a default.
     if let Some(obj) = request.as_object_mut() {
-        let max_tokens_value = obj.remove("max_tokens")
+        let max_tokens_value = obj
+            .remove("max_tokens")
             .and_then(|v| v.as_u64())
             .unwrap_or(16384);
         obj.remove("stream_options");
@@ -388,7 +389,9 @@ async fn stream_responses_api_response(
     let stream_idle_timeout = jcode_base::provider::stream_idle_timeout();
 
     loop {
-        let chunk_result = match tokio::time::timeout(stream_idle_timeout, bytes_stream.next()).await {
+        let chunk_result = match tokio::time::timeout(stream_idle_timeout, bytes_stream.next())
+            .await
+        {
             Ok(Some(result)) => result,
             Ok(None) => break, // stream ended
             Err(_) => {
@@ -409,7 +412,11 @@ async fn stream_responses_api_response(
 
         // Process complete SSE events (terminated by \n\n or \r\n\r\n)
         while let Some(newline_pos) = buffer.find("\n\n").or_else(|| buffer.find("\r\n\r\n")) {
-            let sep_len = if buffer[newline_pos..].starts_with("\r\n\r\n") { 4 } else { 2 };
+            let sep_len = if buffer[newline_pos..].starts_with("\r\n\r\n") {
+                4
+            } else {
+                2
+            };
             let event_block = buffer[..newline_pos].to_string();
             buffer = buffer[newline_pos + sep_len..].to_string();
 
@@ -419,9 +426,15 @@ async fn stream_responses_api_response(
 
             for line in event_block.lines() {
                 // Handle both "event: x" and "event:x" (no space after colon)
-                if let Some(etype) = line.strip_prefix("event: ").or_else(|| line.strip_prefix("event:")) {
+                if let Some(etype) = line
+                    .strip_prefix("event: ")
+                    .or_else(|| line.strip_prefix("event:"))
+                {
                     event_type = etype.trim().to_string();
-                } else if let Some(d) = line.strip_prefix("data: ").or_else(|| line.strip_prefix("data:")) {
+                } else if let Some(d) = line
+                    .strip_prefix("data: ")
+                    .or_else(|| line.strip_prefix("data:"))
+                {
                     data = d.to_string();
                 }
                 // Ignore comment lines (e.g. ": ping") and other fields
@@ -449,7 +462,9 @@ async fn stream_responses_api_response(
                 Err(e) => {
                     jcode_base::logging::warn(&format!(
                         "Responses API: malformed JSON in event '{}': {} -- data: {}",
-                        event_type, e, &data[..data.len().min(200)]
+                        event_type,
+                        e,
+                        &data[..data.len().min(200)]
                     ));
                     continue; // skip malformed blocks instead of ending the stream
                 }
@@ -463,13 +478,10 @@ async fn stream_responses_api_response(
                         in_thinking = false;
                     }
                     if let Some(delta) = json.get("delta").and_then(|d| d.as_str()) {
-                        let _ = tx
-                            .send(Ok(StreamEvent::TextDelta(delta.to_string())))
-                            .await;
+                        let _ = tx.send(Ok(StreamEvent::TextDelta(delta.to_string()))).await;
                     }
                 }
-                "response.reasoning.delta"
-                | "response.reasoning_summary_text.delta" => {
+                "response.reasoning.delta" | "response.reasoning_summary_text.delta" => {
                     if !in_thinking {
                         let _ = tx.send(Ok(StreamEvent::ThinkingStart)).await;
                         in_thinking = true;
@@ -488,11 +500,13 @@ async fn stream_responses_api_response(
                                 in_thinking = true;
                             }
                             Some("function_call") => {
-                                let id = item.get("call_id")
+                                let id = item
+                                    .get("call_id")
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("")
                                     .to_string();
-                                let name = item.get("name")
+                                let name = item
+                                    .get("name")
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("")
                                     .to_string();
@@ -519,20 +533,25 @@ async fn stream_responses_api_response(
                     }
                     // Emit token usage if present
                     if let Some(usage) = json.get("usage") {
-                        let _ = tx.send(Ok(StreamEvent::TokenUsage {
-                            input_tokens: usage.get("input_tokens").and_then(|v| v.as_u64()),
-                            output_tokens: usage.get("output_tokens").and_then(|v| v.as_u64()),
-                            cache_read_input_tokens: usage.get("input_tokens_cache_read").and_then(|v| v.as_u64()),
-                            cache_creation_input_tokens: usage.get("input_tokens_cache_creation").and_then(|v| v.as_u64()),
-                        })).await;
+                        let _ = tx
+                            .send(Ok(StreamEvent::TokenUsage {
+                                input_tokens: usage.get("input_tokens").and_then(|v| v.as_u64()),
+                                output_tokens: usage.get("output_tokens").and_then(|v| v.as_u64()),
+                                cache_read_input_tokens: usage
+                                    .get("input_tokens_cache_read")
+                                    .and_then(|v| v.as_u64()),
+                                cache_creation_input_tokens: usage
+                                    .get("input_tokens_cache_creation")
+                                    .and_then(|v| v.as_u64()),
+                            }))
+                            .await;
                     }
                     // Forward stop reason from response
-                    let stop_reason = json.get("stop_reason")
+                    let stop_reason = json
+                        .get("stop_reason")
                         .and_then(|r| r.as_str())
                         .map(|s| s.to_string());
-                    let _ = tx
-                        .send(Ok(StreamEvent::MessageEnd { stop_reason }))
-                        .await;
+                    let _ = tx.send(Ok(StreamEvent::MessageEnd { stop_reason })).await;
                     return Ok(());
                 }
                 "response.incomplete" => {
@@ -550,7 +569,8 @@ async fn stream_responses_api_response(
                     if in_thinking {
                         let _ = tx.send(Ok(StreamEvent::ThinkingEnd)).await;
                     }
-                    let error_msg = json.get("error")
+                    let error_msg = json
+                        .get("error")
                         .and_then(|e| e.get("message"))
                         .and_then(|m| m.as_str())
                         .unwrap_or("Response failed");
@@ -563,7 +583,8 @@ async fn stream_responses_api_response(
                     if in_thinking {
                         let _ = tx.send(Ok(StreamEvent::ThinkingEnd)).await;
                     }
-                    let error_msg = json.get("message")
+                    let error_msg = json
+                        .get("message")
                         .and_then(|m| m.as_str())
                         .unwrap_or("Stream error");
                     anyhow::bail!("Responses API stream error: {}", error_msg);
@@ -571,7 +592,8 @@ async fn stream_responses_api_response(
                 _ => {
                     // Unknown event type — log once for visibility, skip
                     jcode_base::logging::debug(&format!(
-                        "Responses API: unknown event type '{}'", event_type
+                        "Responses API: unknown event type '{}'",
+                        event_type
                     ));
                 }
             }

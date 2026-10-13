@@ -28,8 +28,8 @@
 use crate::env::HerdrEnv;
 use crate::socket;
 use crate::state::AgentState;
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use tokio::sync::Mutex;
 
 /// Parse a duration from an environment variable, falling back to default.
@@ -59,12 +59,7 @@ fn next_seq() -> i64 {
     loop {
         let prev = GLOBAL_SEQ.load(Ordering::Relaxed);
         let next = std::cmp::max(prev + 1, ts);
-        match GLOBAL_SEQ.compare_exchange_weak(
-            prev,
-            next,
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-        ) {
+        match GLOBAL_SEQ.compare_exchange_weak(prev, next, Ordering::Relaxed, Ordering::Relaxed) {
             Ok(_) => return next,
             Err(_) => continue,
         }
@@ -131,11 +126,7 @@ impl HerdrReporter {
     }
 
     /// Report a state transition with an optional message.
-    pub async fn set_state_with_message(
-        &self,
-        state: AgentState,
-        message: Option<String>,
-    ) {
+    pub async fn set_state_with_message(&self, state: AgentState, message: Option<String>) {
         if !self.is_active() {
             return;
         }
@@ -301,11 +292,7 @@ impl HerdrReporter {
         });
     }
 
-    async fn send_state_report(
-        &self,
-        state: AgentState,
-        message: Option<String>,
-    ) {
+    async fn send_state_report(&self, state: AgentState, message: Option<String>) {
         let mut params = serde_json::json!({
             "pane_id": self.env.pane_id(),
             "source": self.source,
@@ -321,12 +308,10 @@ impl HerdrReporter {
         {
             let inner = self.state.lock().await;
             if let Some(sid) = &inner.session_id {
-                params["agent_session_id"] =
-                    serde_json::Value::String(sid.clone());
+                params["agent_session_id"] = serde_json::Value::String(sid.clone());
             }
             if let Some(spath) = &inner.session_path {
-                params["agent_session_path"] =
-                    serde_json::Value::String(spath.clone());
+                params["agent_session_path"] = serde_json::Value::String(spath.clone());
             }
         }
 
@@ -384,8 +369,7 @@ mod tests {
     /// Spawn a mock Unix socket server that collects all received
     /// JSON-RPC requests. Returns the socket path and a channel
     /// receiver that yields each request as it arrives.
-    async fn start_mock_server(
-    ) -> (
+    async fn start_mock_server() -> (
         PathBuf,
         tokio::sync::mpsc::Receiver<serde_json::Value>,
         tempfile::TempDir,
@@ -414,20 +398,13 @@ mod tests {
                         }
                         buf.push(byte[0]);
                     }
-                    if let Ok(val) =
-                        serde_json::from_slice::<serde_json::Value>(&buf)
-                    {
+                    if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&buf) {
                         let _ = tx.send(val).await;
                     }
                     // Write response so client's read_line doesn't hang.
                     let resp = serde_json::json!({"ok": true});
-                    let resp_str =
-                        serde_json::to_string(&resp).unwrap();
-                    let _ = stream
-                        .write_all(
-                            format!("{resp_str}\n").as_bytes(),
-                        )
-                        .await;
+                    let resp_str = serde_json::to_string(&resp).unwrap();
+                    let _ = stream.write_all(format!("{resp_str}\n").as_bytes()).await;
                 });
             }
         });
@@ -466,10 +443,7 @@ mod tests {
         unsafe {
             std::env::set_var("HERDR_ENV", "1");
             std::env::set_var("HERDR_PANE_ID", "test-pane");
-            std::env::set_var(
-                "HERDR_SOCKET_PATH",
-                sock.to_str().unwrap(),
-            );
+            std::env::set_var("HERDR_SOCKET_PATH", sock.to_str().unwrap());
         }
         EnvGuard { vars }
     }
@@ -512,8 +486,7 @@ mod tests {
         let reporter = HerdrReporter::new("jcode");
         reporter.set_state(AgentState::Working).await;
 
-        tokio::time::sleep(std::time::Duration::from_millis(100))
-            .await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         let req = rx.recv().await.expect("expected a request");
         assert_eq!(req["method"], "pane.report_agent");
@@ -534,15 +507,13 @@ mod tests {
         // Default state is Idle, so set Working first to bypass
         // the dedup check, then set Idle to trigger a send.
         reporter.set_state(AgentState::Working).await;
-        tokio::time::sleep(std::time::Duration::from_millis(50))
-            .await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         // Drain the working request.
         let _ = rx.recv().await;
 
         reporter.set_state(AgentState::Idle).await;
 
-        tokio::time::sleep(std::time::Duration::from_millis(100))
-            .await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         let req = rx.recv().await.expect("expected idle request");
         assert_eq!(req["params"]["state"], "idle");
@@ -566,13 +537,10 @@ mod tests {
         assert_eq!(req["params"]["state"], "working");
 
         // Wait for the grace period task to fire blocked state.
-        let req = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            rx.recv(),
-        )
-        .await
-        .expect("timeout waiting for blocked request")
-        .expect("expected blocked request");
+        let req = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("timeout waiting for blocked request")
+            .expect("expected blocked request");
         assert_eq!(req["params"]["state"], "blocked");
         assert_eq!(req["params"]["message"], "permission denied");
 
@@ -586,12 +554,9 @@ mod tests {
         let _guard = set_herdr_env(&sock);
 
         let reporter = HerdrReporter::new("jcode");
-        reporter
-            .set_session_id("sess_abc123".to_string())
-            .await;
+        reporter.set_session_id("sess_abc123".to_string()).await;
 
-        tokio::time::sleep(std::time::Duration::from_millis(100))
-            .await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         let req = rx.recv().await.expect("expected session request");
         assert_eq!(req["method"], "pane.report_agent_session");
@@ -608,21 +573,16 @@ mod tests {
 
         let reporter = HerdrReporter::new("jcode");
         reporter.set_state(AgentState::Working).await;
-        tokio::time::sleep(std::time::Duration::from_millis(50))
-            .await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         reporter.set_state(AgentState::Idle).await;
-        tokio::time::sleep(std::time::Duration::from_millis(100))
-            .await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         let req1 = rx.recv().await.expect("req1");
         let req2 = rx.recv().await.expect("req2");
 
         let seq1 = req1["params"]["seq"].as_i64().unwrap();
         let seq2 = req2["params"]["seq"].as_i64().unwrap();
-        assert!(
-            seq2 > seq1,
-            "seq2 ({seq2}) should be > seq1 ({seq1})"
-        );
+        assert!(seq2 > seq1, "seq2 ({seq2}) should be > seq1 ({seq1})");
 
         reporter.release().await;
     }

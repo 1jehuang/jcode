@@ -107,8 +107,7 @@ pub(crate) use context::with_markdown_spacing_mode_override;
 pub use context::{
     center_code_blocks, get_diagram_mode_override, mermaid_rendering_enabled,
     set_center_code_blocks, set_diagram_mode_override, with_center_code_blocks,
-    with_deferred_mermaid_render_context,
-    with_diagram_mode_scope, with_mermaid_rendering_override,
+    with_deferred_mermaid_render_context, with_diagram_mode_scope, with_mermaid_rendering_override,
 };
 use context::{
     deferred_mermaid_render_context_enabled, effective_diagram_mode,

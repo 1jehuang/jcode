@@ -1,7 +1,7 @@
 //! Tests for the `bash` tool (shell execution, schema validation, stderr).
 
-use jcode::tool::{Tool, ToolContext, ToolExecutionMode};
 use jcode::tool::bash::BashTool;
+use jcode::tool::{Tool, ToolContext, ToolExecutionMode};
 use serde_json::json;
 
 fn make_ctx(dir: &std::path::Path) -> ToolContext {

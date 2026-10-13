@@ -105,13 +105,14 @@ pub(super) fn draw_elicit_overlay(frame: &mut Frame, area: Rect, state: &ElicitO
             }
             // Show default hint.
             if let Some(default_idx) = default_index
-                && let Some(default_opt) = options.get(*default_idx) {
-                    lines.push(Line::from(""));
-                    lines.push(Line::from(Span::styled(
-                        format!("  Default: {}", default_opt.label),
-                        Style::default().fg(dim_color()),
-                    )));
-                }
+                && let Some(default_opt) = options.get(*default_idx)
+            {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    format!("  Default: {}", default_opt.label),
+                    Style::default().fg(dim_color()),
+                )));
+            }
         }
         FieldSpec::Boolean { label, default } => {
             if !label.is_empty() {
@@ -161,11 +162,7 @@ pub(super) fn draw_elicit_overlay(frame: &mut Frame, area: Rect, state: &ElicitO
                 input_style,
             )));
         }
-        FieldSpec::LongText {
-            label,
-            default,
-            ..
-        } => {
+        FieldSpec::LongText { label, default, .. } => {
             if !label.is_empty() {
                 lines.push(Line::from(Span::styled(
                     label.clone(),
@@ -233,11 +230,7 @@ pub(super) fn draw_elicit_overlay(frame: &mut Frame, area: Rect, state: &ElicitO
                 )));
             }
         }
-        FieldSpec::DateTime {
-            label,
-            default,
-            ..
-        } => {
+        FieldSpec::DateTime { label, default, .. } => {
             if !label.is_empty() {
                 lines.push(Line::from(Span::styled(
                     label.clone(),
@@ -330,9 +323,7 @@ fn button_footer(request: &crate::tui::elicitation_types::ElicitRequest) -> Stri
         .unwrap_or(("Confirm", "Cancel"));
 
     match &request.field {
-        FieldSpec::Boolean { .. } => {
-            " Y = Yes · N = No · Tab to switch ".to_string()
-        }
+        FieldSpec::Boolean { .. } => " Y = Yes · N = No · Tab to switch ".to_string(),
         FieldSpec::Choice { .. } => {
             format!(" ↑↓ Select · Enter {} · Esc {} ", buttons.0, buttons.1)
         }
@@ -355,9 +346,7 @@ fn text_wrap(text: &str, max_width: usize) -> Vec<String> {
             let mut remaining = paragraph;
             while remaining.len() > max_width {
                 // Find last space within max_width.
-                let break_at = remaining[..max_width]
-                    .rfind(' ')
-                    .unwrap_or(max_width);
+                let break_at = remaining[..max_width].rfind(' ').unwrap_or(max_width);
                 result.push(remaining[..break_at].to_string());
                 remaining = remaining[break_at..].trim_start_matches(' ');
             }

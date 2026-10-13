@@ -19,12 +19,22 @@ fn pipe(cmd: &str) -> PipelineResult {
 
 #[test]
 fn empty_command_is_ask() {
-    assert_eq!(pipe(""), PipelineResult::Ask { reason: "Empty command".into() });
+    assert_eq!(
+        pipe(""),
+        PipelineResult::Ask {
+            reason: "Empty command".into()
+        }
+    );
 }
 
 #[test]
 fn whitespace_only_is_ask() {
-    assert_eq!(pipe("   "), PipelineResult::Ask { reason: "Empty command".into() });
+    assert_eq!(
+        pipe("   "),
+        PipelineResult::Ask {
+            reason: "Empty command".into()
+        }
+    );
 }
 
 #[test]
@@ -63,7 +73,10 @@ fn bell_char_is_ask() {
 
 #[test]
 fn cr_is_ask() {
-    assert!(matches!(pipe("echo hi\r\nrm -rf ~"), PipelineResult::Ask { .. }));
+    assert!(matches!(
+        pipe("echo hi\r\nrm -rf ~"),
+        PipelineResult::Ask { .. }
+    ));
 }
 
 // -- Newline + destructive --------------------------------------------------
@@ -78,22 +91,25 @@ fn multiline_destructive_is_ask() {
 
 #[test]
 fn multiline_safe_no_flag() {
-    assert_eq!(
-        pipe("echo hi\necho bye"),
-        PipelineResult::Continue,
-    );
+    assert_eq!(pipe("echo hi\necho bye"), PipelineResult::Continue,);
 }
 
 // -- Unicode whitespace -----------------------------------------------------
 
 #[test]
 fn nbsp_is_ask() {
-    assert!(matches!(pipe("echo\u{00A0}hello"), PipelineResult::Ask { .. }));
+    assert!(matches!(
+        pipe("echo\u{00A0}hello"),
+        PipelineResult::Ask { .. }
+    ));
 }
 
 #[test]
 fn em_space_is_ask() {
-    assert!(matches!(pipe("echo\u{2003}hello"), PipelineResult::Ask { .. }));
+    assert!(matches!(
+        pipe("echo\u{2003}hello"),
+        PipelineResult::Ask { .. }
+    ));
 }
 
 // -- Obfuscated flags -------------------------------------------------------
@@ -164,22 +180,34 @@ fn param_sub_is_ask() {
 
 #[test]
 fn zmodload_is_ask() {
-    assert!(matches!(pipe("zmodload zsh/zftp"), PipelineResult::Ask { .. }));
+    assert!(matches!(
+        pipe("zmodload zsh/zftp"),
+        PipelineResult::Ask { .. }
+    ));
 }
 
 #[test]
 fn ztcp_is_ask() {
-    assert!(matches!(pipe("ztcp example.com 80"), PipelineResult::Ask { .. }));
+    assert!(matches!(
+        pipe("ztcp example.com 80"),
+        PipelineResult::Ask { .. }
+    ));
 }
 
 #[test]
 fn eval_is_ask() {
-    assert!(matches!(pipe("eval 'rm -rf ~'"), PipelineResult::Ask { .. }));
+    assert!(matches!(
+        pipe("eval 'rm -rf ~'"),
+        PipelineResult::Ask { .. }
+    ));
 }
 
 #[test]
 fn source_is_ask() {
-    assert!(matches!(pipe("source /tmp/evil.sh"), PipelineResult::Ask { .. }));
+    assert!(matches!(
+        pipe("source /tmp/evil.sh"),
+        PipelineResult::Ask { .. }
+    ));
 }
 
 // -- Heredoc ----------------------------------------------------------------
@@ -192,7 +220,10 @@ fn safe_heredoc_is_continue() {
 #[test]
 fn unsafe_heredoc_is_ask() {
     // Unquoted delimiter means shell expansion inside heredoc body.
-    assert!(matches!(pipe("echo $(cat <<EOF\nhello\nEOF\n)"), PipelineResult::Ask { .. }));
+    assert!(matches!(
+        pipe("echo $(cat <<EOF\nhello\nEOF\n)"),
+        PipelineResult::Ask { .. }
+    ));
 }
 
 // -- IFS injection ----------------------------------------------------------
@@ -208,26 +239,38 @@ fn ifs_override_is_ask() {
 #[test]
 fn ifs_not_on_first_word() {
     // IFS= at the start only.
-    assert_eq!(pipe("IFS='x' echo hi"), PipelineResult::Ask {
-        reason: "Sets IFS, altering shell word splitting".into(),
-    });
+    assert_eq!(
+        pipe("IFS='x' echo hi"),
+        PipelineResult::Ask {
+            reason: "Sets IFS, altering shell word splitting".into(),
+        }
+    );
 }
 
 // -- Dangerous variables ----------------------------------------------------
 
 #[test]
 fn path_override_is_ask() {
-    assert!(matches!(pipe("PATH=/tmp:$PATH cmd"), PipelineResult::Ask { .. }));
+    assert!(matches!(
+        pipe("PATH=/tmp:$PATH cmd"),
+        PipelineResult::Ask { .. }
+    ));
 }
 
 #[test]
 fn ld_preload_is_ask() {
-    assert!(matches!(pipe("LD_PRELOAD=/tmp/evil.so cmd"), PipelineResult::Ask { .. }));
+    assert!(matches!(
+        pipe("LD_PRELOAD=/tmp/evil.so cmd"),
+        PipelineResult::Ask { .. }
+    ));
 }
 
 #[test]
 fn histfile_is_ask() {
-    assert!(matches!(pipe("HISTFILE=/dev/null"), PipelineResult::Ask { .. }));
+    assert!(matches!(
+        pipe("HISTFILE=/dev/null"),
+        PipelineResult::Ask { .. }
+    ));
 }
 
 // -- Brace expansion --------------------------------------------------------
@@ -256,7 +299,10 @@ fn rm_system_path_is_block() {
 
 #[test]
 fn rm_ssh_dir_is_block() {
-    assert!(matches!(pipe("rm -rf ~/.ssh"), PipelineResult::Block { .. }));
+    assert!(matches!(
+        pipe("rm -rf ~/.ssh"),
+        PipelineResult::Block { .. }
+    ));
 }
 
 // -- Safe commands pass through ---------------------------------------------
@@ -291,7 +337,10 @@ fn single_quoted_backtick_is_continue() {
 #[test]
 fn double_quoted_backtick_may_flag() {
     // Double-quoted backtick is expanded by bash, so this gets flagged.
-    assert!(matches!(pipe("echo \"`whoami`\""), PipelineResult::Ask { .. }));
+    assert!(matches!(
+        pipe("echo \"`whoami`\""),
+        PipelineResult::Ask { .. }
+    ));
 }
 
 // -- Integration: redirection stripping -------------------------------------
@@ -318,5 +367,8 @@ fn default_context_rm_home_is_block() {
     // in the process environment, rm ~ still blocks.
     let result = run_security_pipeline("rm -rf ~");
     // It either blocks (if HOME is set) or asks (if targets can't be resolved).
-    assert!(matches!(result, PipelineResult::Block { .. } | PipelineResult::Ask { .. }));
+    assert!(matches!(
+        result,
+        PipelineResult::Block { .. } | PipelineResult::Ask { .. }
+    ));
 }

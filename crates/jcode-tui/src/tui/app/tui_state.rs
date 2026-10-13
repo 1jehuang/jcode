@@ -1721,10 +1721,7 @@ impl crate::tui::TuiState for App {
         let m = &self.remote_swarm_members;
         crate::tui::SwarmStats {
             active: m.iter().filter(|x| x.status == "running").count() as u32,
-            completed: m
-                .iter()
-                .filter(|x| x.status == "completed")
-                .count() as u32,
+            completed: m.iter().filter(|x| x.status == "completed").count() as u32,
             failed: m.iter().filter(|x| x.status == "failed").count() as u32,
         }
     }
@@ -1838,10 +1835,7 @@ impl crate::tui::TuiState for App {
                     .role
                     .as_deref()
                     .is_some_and(|r| r.to_ascii_lowercase().contains(&query));
-                let status_match = m
-                    .status
-                    .to_ascii_lowercase()
-                    .contains(&query);
+                let status_match = m.status.to_ascii_lowercase().contains(&query);
                 let task_match = m
                     .task_label
                     .as_deref()
@@ -2167,7 +2161,13 @@ impl App {
         if !self.swarm_panel_focused || !self.inline_swarm_gallery_active() {
             return false;
         }
-        match swarm_panel_action_for_key(code, modifiers, self.swarm_filter_active, self.swarm_batch_mode, self.swarm_rename_active) {
+        match swarm_panel_action_for_key(
+            code,
+            modifiers,
+            self.swarm_filter_active,
+            self.swarm_batch_mode,
+            self.swarm_rename_active,
+        ) {
             Some(SwarmPanelAction::SelectNext) => {
                 self.move_swarm_panel_selection(1);
                 true
@@ -2206,8 +2206,7 @@ impl App {
             Some(SwarmPanelAction::BatchMode) => {
                 self.swarm_batch_mode = !self.swarm_batch_mode;
                 if self.swarm_batch_mode {
-                    self.swarm_selected_agents
-                        .insert(self.swarm_panel_selected);
+                    self.swarm_selected_agents.insert(self.swarm_panel_selected);
                     let count = self.swarm_selected_agents.len();
                     self.set_status_notice(format!(
                         "Batch mode on: {count} agent{} selected",
@@ -2296,15 +2295,19 @@ impl App {
                     self.swarm_rename_active = true;
                     self.swarm_rename_buffer.clear();
                     // Pre-fill with current label
-                    let ordered = crate::tui::info_widget::swarm_gallery::members_display_order(&members);
-                    let idx = self.swarm_panel_selected.min(ordered.len().saturating_sub(1));
+                    let ordered =
+                        crate::tui::info_widget::swarm_gallery::members_display_order(&members);
+                    let idx = self
+                        .swarm_panel_selected
+                        .min(ordered.len().saturating_sub(1));
                     if let Some(session_id) = ordered.get(idx)
-                        && let Some(member) = members.iter().find(|m| &m.session_id == session_id) {
-                            self.swarm_rename_buffer = member
-                                .friendly_name
-                                .clone()
-                                .unwrap_or_else(|| member.session_id.chars().take(8).collect());
-                        }
+                        && let Some(member) = members.iter().find(|m| &m.session_id == session_id)
+                    {
+                        self.swarm_rename_buffer = member
+                            .friendly_name
+                            .clone()
+                            .unwrap_or_else(|| member.session_id.chars().take(8).collect());
+                    }
                 }
                 true
             }
@@ -2435,8 +2438,9 @@ pub(crate) fn swarm_panel_action_for_key(
             KeyCode::Esc if modifiers.is_empty() => Some(SwarmPanelAction::FilterEscape),
             KeyCode::Enter if modifiers.is_empty() => Some(SwarmPanelAction::FilterConfirm),
             KeyCode::Backspace => Some(SwarmPanelAction::FilterBackspace),
-            KeyCode::Char(c) if !modifiers.contains(KeyModifiers::CONTROL)
-                && !modifiers.contains(KeyModifiers::ALT) =>
+            KeyCode::Char(c)
+                if !modifiers.contains(KeyModifiers::CONTROL)
+                    && !modifiers.contains(KeyModifiers::ALT) =>
             {
                 Some(SwarmPanelAction::FilterChar(c))
             }
@@ -2448,8 +2452,9 @@ pub(crate) fn swarm_panel_action_for_key(
             KeyCode::Esc if modifiers.is_empty() => Some(SwarmPanelAction::RenameEscape),
             KeyCode::Enter if modifiers.is_empty() => Some(SwarmPanelAction::RenameConfirm),
             KeyCode::Backspace => Some(SwarmPanelAction::RenameBackspace),
-            KeyCode::Char(c) if !modifiers.contains(KeyModifiers::CONTROL)
-                && !modifiers.contains(KeyModifiers::ALT) =>
+            KeyCode::Char(c)
+                if !modifiers.contains(KeyModifiers::CONTROL)
+                    && !modifiers.contains(KeyModifiers::ALT) =>
             {
                 Some(SwarmPanelAction::RenameChar(c))
             }
@@ -2613,7 +2618,13 @@ mod swarm_panel_key_tests {
     #[test]
     fn ctrl_a_selects_all() {
         assert_eq!(
-            swarm_panel_action_for_key(KeyCode::Char('a'), KeyModifiers::CONTROL, false, false, false),
+            swarm_panel_action_for_key(
+                KeyCode::Char('a'),
+                KeyModifiers::CONTROL,
+                false,
+                false,
+                false
+            ),
             Some(SwarmPanelAction::SelectAll)
         );
     }
@@ -2683,11 +2694,23 @@ mod swarm_panel_key_tests {
             Some(SwarmPanelAction::PopOut)
         );
         assert_eq!(
-            swarm_panel_action_for_key(KeyCode::Char('P'), KeyModifiers::ALT | KeyModifiers::SHIFT, false, false, false),
+            swarm_panel_action_for_key(
+                KeyCode::Char('P'),
+                KeyModifiers::ALT | KeyModifiers::SHIFT,
+                false,
+                false,
+                false
+            ),
             Some(SwarmPanelAction::OpenPrompt)
         );
         assert_eq!(
-            swarm_panel_action_for_key(KeyCode::Char('p'), KeyModifiers::ALT | KeyModifiers::SHIFT, false, false, false),
+            swarm_panel_action_for_key(
+                KeyCode::Char('p'),
+                KeyModifiers::ALT | KeyModifiers::SHIFT,
+                false,
+                false,
+                false
+            ),
             Some(SwarmPanelAction::OpenPrompt)
         );
         assert_eq!(

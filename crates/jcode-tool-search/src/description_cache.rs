@@ -39,9 +39,7 @@ impl DescriptionCache {
     /// Register a tool name with a pending (not yet loaded) description.
     pub fn register(&mut self, tool_name: impl Into<String>) {
         let name = tool_name.into();
-        self.inner
-            .entry(name)
-            .or_insert(DescriptionState::Pending);
+        self.inner.entry(name).or_insert(DescriptionState::Pending);
     }
 
     /// Register multiple tool names at once.
@@ -85,7 +83,10 @@ impl DescriptionCache {
         tool_name: &str,
         loader: impl FnOnce() -> Option<String>,
     ) -> Option<&str> {
-        let state = self.inner.entry(tool_name.to_string()).or_insert(DescriptionState::Pending);
+        let state = self
+            .inner
+            .entry(tool_name.to_string())
+            .or_insert(DescriptionState::Pending);
         match state {
             DescriptionState::Loaded(desc) => Some(desc.as_str()),
             DescriptionState::Pending => {
@@ -129,7 +130,8 @@ impl DescriptionCache {
 
     /// Evict all pending (unloaded) entries, keeping only loaded ones.
     pub fn evict_pending(&mut self) {
-        self.inner.retain(|_, state| matches!(state, DescriptionState::Loaded(d) if !d.is_empty()));
+        self.inner
+            .retain(|_, state| matches!(state, DescriptionState::Loaded(d) if !d.is_empty()));
     }
 
     /// Clear the entire cache.

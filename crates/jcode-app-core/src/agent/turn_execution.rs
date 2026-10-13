@@ -308,7 +308,7 @@ impl Agent {
             logging::info("Tool list unlocked — next request will pick up current tools");
             self.locked_tools = None;
             self.cache_tracker.reset();
-        self.cache_vectors.reset();
+            self.cache_vectors.reset();
         }
         // Allow the late-MCP-registration recheck to fire once for the next
         // snapshot (e.g. after an explicit `mcp` reload).
@@ -475,7 +475,7 @@ impl Agent {
                 self.mcp_late_register_resolved = true;
                 self.locked_tools = None;
                 self.cache_tracker.reset();
-        self.cache_vectors.reset();
+                self.cache_vectors.reset();
             } else {
                 // No MCP tools have appeared. They may still be connecting, so
                 // leave the guard unset and re-check on the next turn. Once they

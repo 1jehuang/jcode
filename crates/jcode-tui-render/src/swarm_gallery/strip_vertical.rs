@@ -289,8 +289,7 @@ pub fn render_swarm_strip_vertical(
             let mut hint_spans: Vec<Span<'static>> = vec![Span::raw(INDENT)];
             for (i, h) in hints.iter().enumerate() {
                 if i > 0 {
-                    hint_spans
-                        .push(Span::styled(" · ", Style::default().fg(rgb(80, 80, 90))));
+                    hint_spans.push(Span::styled(" · ", Style::default().fg(rgb(80, 80, 90))));
                 }
                 hint_spans.push(Span::styled(
                     h.key.clone(),

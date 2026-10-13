@@ -150,7 +150,9 @@ pub mod elicit_channel {
     }
 
     /// Try to send without blocking (returns Err if channel closed or not initialized).
-    pub fn try_send(msg: ElicitMessage) -> Result<(), tokio::sync::mpsc::error::SendError<Box<ElicitMessage>>> {
+    pub fn try_send(
+        msg: ElicitMessage,
+    ) -> Result<(), tokio::sync::mpsc::error::SendError<Box<ElicitMessage>>> {
         let Some(tx) = ELICIT_TX.get() else {
             return Err(tokio::sync::mpsc::error::SendError(Box::new(msg)));
         };

@@ -35,12 +35,8 @@ impl HerdrEnv {
         Self {
             active,
             pane_id: std::env::var("HERDR_PANE_ID").ok(),
-            socket_path: std::env::var("HERDR_SOCKET_PATH")
-                .ok()
-                .map(PathBuf::from),
-            bin_path: std::env::var("HERDR_BIN_PATH")
-                .ok()
-                .map(PathBuf::from),
+            socket_path: std::env::var("HERDR_SOCKET_PATH").ok().map(PathBuf::from),
+            bin_path: std::env::var("HERDR_BIN_PATH").ok().map(PathBuf::from),
             workspace_id: std::env::var("HERDR_WORKSPACE_ID").ok(),
             tab_id: std::env::var("HERDR_TAB_ID").ok(),
         }
@@ -48,9 +44,7 @@ impl HerdrEnv {
 
     /// Returns `true` if running inside a HERDR pane with valid identity.
     pub fn is_valid(&self) -> bool {
-        self.active
-            && self.pane_id.is_some()
-            && self.socket_path.is_some()
+        self.active && self.pane_id.is_some() && self.socket_path.is_some()
     }
 
     /// Returns the pane ID, panicking if not in a HERDR pane.

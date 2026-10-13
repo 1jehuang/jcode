@@ -166,8 +166,7 @@ mod tests {
         };
 
         let long_prompt = "a".repeat(500);
-        let diffable =
-            DiffableContent::from_snapshot(&snapshot, &long_prompt, &[], 10);
+        let diffable = DiffableContent::from_snapshot(&snapshot, &long_prompt, &[], 10);
         assert!(diffable.system_prompt_preview.ends_with("..."));
         assert!(diffable.system_prompt_preview.len() < 500);
     }
