@@ -334,6 +334,23 @@ fn next_model_favorite_after_current(picker: &InlineInteractiveState) -> Option<
         .map(|(_, filtered_pos, _)| *filtered_pos)
 }
 
+/// Keep the active route visible even when temporarily blocked. Without an
+/// active row, prefer an available saved default, then an available route.
+pub(super) fn model_picker_initial_selection(entries: &[PickerEntry]) -> usize {
+    let available =
+        |entry: &PickerEntry| entry.active_option().is_some_and(|route| route.available);
+    entries
+        .iter()
+        .position(|entry| entry.is_current)
+        .or_else(|| {
+            entries
+                .iter()
+                .position(|entry| entry.is_default && available(entry))
+        })
+        .or_else(|| entries.iter().position(available))
+        .unwrap_or(0)
+}
+
 fn picker_is_runtime_model_picker(picker: &InlineInteractiveState) -> bool {
     picker.kind == PickerKind::Model
         && picker.effort_step.is_none()
@@ -529,8 +546,14 @@ pub(super) fn step_scoped_route(
 /// Enter on a model picker with no search text and no explicit row choice
 /// opens the browser instead of switching to whatever model is listed first.
 pub(super) fn picker_enter_should_focus_model_browser(picker: &InlineInteractiveState) -> bool {
+    let initial = model_picker_initial_selection(&picker.entries);
     picker_is_runtime_model_picker(picker)
-        && picker.selected == 0
+        && picker.selected
+            == picker
+                .filtered
+                .iter()
+                .position(|&index| index == initial)
+                .unwrap_or(0)
         && split_model_picker_filter(&picker.filter).1.is_empty()
 }
 
@@ -1342,8 +1365,8 @@ impl App {
         self.inline_interactive_state = Some(InlineInteractiveState {
             kind: PickerKind::Model,
             filtered: (0..entry_count).collect(),
+            selected: model_picker_initial_selection(&entries),
             entries,
-            selected: 0,
             column: 0,
             filter: String::new(),
             preview: false,
@@ -2223,8 +2246,8 @@ impl App {
         self.inline_interactive_state = Some(InlineInteractiveState {
             kind: PickerKind::Model,
             filtered: (0..entries.len()).collect(),
+            selected: model_picker_initial_selection(&entries),
             entries,
-            selected: 0,
             column: 0,
             filter: String::new(),
             preview: false,
@@ -3582,6 +3605,20 @@ impl App {
         if !matches!(entry.action, PickerAction::Model) {
             return;
         }
+        if let Some(route) = entry.active_option()
+            && !route.available
+        {
+            let detail = if route.detail.trim().is_empty() {
+                "not available"
+            } else {
+                route.detail.as_str()
+            };
+            self.set_status_notice(format!(
+                "{} unavailable: {} · choose another model or route",
+                entry.name, detail
+            ));
+            return;
+        }
         let has_levels = entry
             .active_option()
             .is_some_and(|route| !model_route_effort_levels(&entry.name, route).is_empty());
@@ -3728,7 +3765,6 @@ impl App {
             self.input.clear();
             self.cursor_pos = 0;
         }
-        parent.column = 0;
         self.inline_interactive_state = Some(InlineInteractiveState {
             kind: PickerKind::Model,
             filtered: (0..entries.len()).collect(),
@@ -3972,14 +4008,12 @@ impl App {
             });
             return Ok(());
         }
-        // Account picker: `d` on a saved account makes it the default for
-        // new windows (Enter uses it in this window). Only with an empty
-        // filter, so `d` still types into the filter otherwise.
-        if matches!(code, KeyCode::Char('d'))
-            && !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        // Account picker: Ctrl+D on a saved account makes it the default for
+        // new windows (Enter uses it in this window). Bare letters search.
+        if key_char_eq_ignore_ascii_case(code, 'd')
+            && modifiers.contains(KeyModifiers::CONTROL)
             && let Some(picker) = self.inline_interactive_state.as_ref()
             && picker.kind == crate::tui::PickerKind::Account
-            && picker.filter.is_empty()
             && let Some(&idx) = picker.filtered.get(picker.selected)
             && let PickerAction::Account(AccountPickerAction::Switch { provider_id, label }) =
                 &picker.entries[idx].action
@@ -3997,8 +4031,17 @@ impl App {
                 if let Some(ref mut picker) = self.inline_interactive_state
                     && !picker.filter.is_empty()
                 {
+                    let selected_entry = picker.selected_entry_index();
                     picker.filter.clear();
                     Self::apply_inline_interactive_filter(picker);
+                    if let Some(selected_entry) = selected_entry
+                        && let Some(position) = picker
+                            .filtered
+                            .iter()
+                            .position(|&index| index == selected_entry)
+                    {
+                        picker.selected = position;
+                    }
                     return Ok(());
                 }
                 self.inline_interactive_state = None;
@@ -4007,7 +4050,9 @@ impl App {
                 let vim_nav = self
                     .inline_interactive_state
                     .as_ref()
-                    .map(|picker| picker.uses_compact_navigation())
+                    .map(|picker| {
+                        picker.uses_compact_navigation() && picker.kind != PickerKind::Account
+                    })
                     .unwrap_or(false);
                 if matches!(code, KeyCode::Char('k'))
                     && !modifiers.contains(KeyModifiers::CONTROL)
@@ -4033,7 +4078,9 @@ impl App {
                 let vim_nav = self
                     .inline_interactive_state
                     .as_ref()
-                    .map(|picker| picker.uses_compact_navigation())
+                    .map(|picker| {
+                        picker.uses_compact_navigation() && picker.kind != PickerKind::Account
+                    })
                     .unwrap_or(false);
                 if matches!(code, KeyCode::Char('j'))
                     && !modifiers.contains(KeyModifiers::CONTROL)
@@ -4198,8 +4245,15 @@ impl App {
                     } else {
                         route.detail.clone()
                     };
-                    self.inline_interactive_state = None;
-                    self.set_status_notice(format!("{} - {}", entry.name, detail));
+                    if matches!(entry.action, PickerAction::Model) {
+                        self.set_status_notice(format!(
+                            "{} unavailable: {} · choose another model or route",
+                            entry.name, detail
+                        ));
+                    } else {
+                        self.inline_interactive_state = None;
+                        self.set_status_notice(format!("{} - {}", entry.name, detail));
+                    }
                     return Ok(());
                 }
 
@@ -4339,10 +4393,20 @@ impl App {
                 }
             }
             KeyCode::Backspace => {
-                if let Some(ref mut picker) = self.inline_interactive_state
-                    && picker.filter.pop().is_some()
-                {
-                    Self::apply_inline_interactive_filter(picker);
+                if let Some(ref mut picker) = self.inline_interactive_state {
+                    let selected_entry = picker.selected_entry_index();
+                    if picker.filter.pop().is_some() {
+                        Self::apply_inline_interactive_filter(picker);
+                        if picker.filter.is_empty()
+                            && let Some(selected_entry) = selected_entry
+                            && let Some(position) = picker
+                                .filtered
+                                .iter()
+                                .position(|&index| index == selected_entry)
+                        {
+                            picker.selected = position;
+                        }
+                    }
                 }
             }
             KeyCode::Char(c) => {

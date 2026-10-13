@@ -482,7 +482,7 @@ fn test_model_picker_preview_stays_open_and_updates_filter() {
 #[test]
 fn test_model_picker_preview_enter_selects_model() {
     let mut app = create_test_app();
-    configure_test_remote_models(&mut app);
+    configure_available_model_browser_routes(&mut app);
 
     for c in "/model g52c".chars() {
         app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
@@ -491,7 +491,10 @@ fn test_model_picker_preview_enter_selects_model() {
     // A route with a reasoning ladder asks for the level first.
     enter_and_confirm_level(&mut app);
 
-    // Enter from preview mode selects the model and closes the picker
+    // Enter from preview mode stages the actual route and closes the picker.
+    let route = app.pending_route_selection.as_ref().expect("model switch staged");
+    assert_eq!(route.model, "gpt-5.2-codex");
+    assert_eq!(route.api_method, "openai-oauth");
     assert!(app.inline_interactive_state.is_none());
     assert!(app.input().is_empty());
     assert_eq!(app.cursor_pos(), 0);

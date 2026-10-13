@@ -178,7 +178,7 @@ impl App {
             items.push(crate::tui::account_picker::AccountPickerItem::action(
                 provider.id,
                 provider.display_name,
-                format!("Switch {display_name}"),
+                format!("Use {display_name} in this window"),
                 format!("{email} - {account_use} - {status} - plan {plan}{scope_suffix}"),
                 crate::tui::account_picker::AccountPickerCommand::Switch {
                     provider: crate::tui::account_picker::AccountProviderKind::Anthropic,
@@ -234,7 +234,7 @@ impl App {
                 crate::tui::account_picker::AccountPickerItem::action(
                     provider.id,
                     provider.display_name,
-                    format!("Switch {display_name}"),
+                    format!("Use {display_name} in this window"),
                     format!("{email} - {status} - acct {account_id}{scope_suffix}"),
                     crate::tui::account_picker::AccountPickerCommand::Switch {
                         provider: crate::tui::account_picker::AccountProviderKind::OpenAi,

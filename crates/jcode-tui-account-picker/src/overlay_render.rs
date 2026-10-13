@@ -110,13 +110,18 @@ fn extract_account_label(title: &str) -> Option<String> {
 
 pub(super) fn compact_item_title(item: &AccountPickerItem) -> String {
     match action_section(item) {
-        ActionSection::Switch => {
-            extract_account_label(&item.title).unwrap_or_else(|| item.title.clone())
-        }
+        ActionSection::Switch => extract_account_label(&item.title)
+            .or_else(|| {
+                item.title
+                    .strip_prefix("Use ")
+                    .and_then(|title| title.strip_suffix(" in this window"))
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| item.title.clone()),
         ActionSection::Add => item.title.clone(),
         ActionSection::Login => extract_account_label(&item.title)
             .map(|label| format!("Refresh {label}"))
-            .unwrap_or_else(|| "Login / refresh".to_string()),
+            .unwrap_or_else(|| item.title.clone()),
         ActionSection::Overview if !item.details.is_empty() || item.title.contains("Usage") => {
             item.title.clone()
         }
@@ -176,28 +181,28 @@ pub(super) fn action_kind_help(command: &AccountPickerCommand) -> &'static str {
             "Returns to the main account center with all provider and saved-auth actions."
         }
         AccountPickerCommand::OpenAddReplaceFlow { .. } => {
-            "Opens a focused chooser where you pick whether to add a new Claude/OpenAI account or replace an existing saved one."
+            "Opens a focused chooser to add another Claude/OpenAI login or refresh a saved login. Other saved accounts are kept."
         }
         AccountPickerCommand::SubmitInput(input) if input.ends_with(" settings") => {
             "Opens a detailed text summary for this provider, including the exact commands you can run manually."
         }
         AccountPickerCommand::SubmitInput(input) if input.contains(" remove ") => {
-            "Removes saved credentials for the selected account. Use this when an account is stale or should no longer be available in jcode."
+            "Removes saved credentials from Jcode, not the provider account. Enter reviews the target, then y confirms removal."
         }
         AccountPickerCommand::SubmitInput(input) if input.contains(" login") => {
             "Starts or refreshes authentication for this provider so it becomes usable again."
         }
         AccountPickerCommand::SubmitInput(input) if input.contains(" add") => {
-            "Starts the flow for adding the next numbered account, so you can keep multiple identities side by side."
+            "Signs in to a new account, or refreshes the saved account named in this action. Other saved accounts are kept."
         }
         AccountPickerCommand::SubmitInput(input) if input.contains(" switch ") => {
-            "Makes this account active so future requests use it immediately."
+            "Uses this account in this window only. Other windows keep their account."
         }
         AccountPickerCommand::PromptValue { .. } => {
             "Prompts for a new value, then saves the matching provider or global setting."
         }
         AccountPickerCommand::Switch { .. } => {
-            "Uses this account in this window only. Other windows keep their account. Press d to make it the default for new windows."
+            "Uses this account in this window only. Other windows keep their account. Press Ctrl+D to make it the default for new windows."
         }
         AccountPickerCommand::SetDefault { .. } => {
             "Makes this account the default for new and unpinned windows. This window's pin is unchanged."
@@ -212,10 +217,10 @@ pub(super) fn action_kind_help(command: &AccountPickerCommand) -> &'static str {
             "Refreshes the selected account by starting the provider login flow again."
         }
         AccountPickerCommand::Remove { .. } => {
-            "Deletes the saved account credentials from local storage."
+            "Removes saved credentials from Jcode, not the provider account. Enter reviews the target, then y confirms removal."
         }
         AccountPickerCommand::PromptNew { .. } => {
-            "Starts login for the next numbered account immediately."
+            "Signs in to another account. Existing saved accounts are kept."
         }
         AccountPickerCommand::SubmitInput(_) => {
             "Runs the selected account-management command immediately."

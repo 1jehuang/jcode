@@ -49,10 +49,14 @@ impl App {
                 _ => claude_accounts.len() + openai_accounts.len(),
             };
             let detail = if scoped_saved_accounts == 0 {
-                "choose provider, add a new account, or replace an existing saved one".to_string()
+                "Choose a provider to sign in. Existing saved accounts are kept.".to_string()
+            } else if provider_scope.is_some() {
+                format!(
+                    "{scoped_saved_accounts} saved logins. Add a new login or refresh a saved one."
+                )
             } else {
                 format!(
-                    "choose provider; {} Claude and {} OpenAI account(s) available",
+                    "Saved logins: Claude {}, OpenAI {}. Add or refresh an account.",
                     claude_accounts.len(),
                     openai_accounts.len()
                 )
@@ -115,19 +119,6 @@ impl App {
                 crate::auth::AuthState::NotConfigured => "setup needed",
             };
 
-            if !matches!(auth_state, crate::auth::AuthState::NotConfigured) {
-                items.push(AccountPickerItem::action(
-                    provider.id,
-                    provider.display_name,
-                    "Saved auth entry",
-                    format!(
-                        "{} - {} - {}",
-                        state_label, method_detail, validation_detail
-                    ),
-                    AccountPickerCommand::SubmitInput(format!("/account {} settings", provider.id)),
-                ));
-            }
-
             items.push(AccountPickerItem::action(
                 provider.id,
                 provider.display_name,
@@ -145,17 +136,23 @@ impl App {
             items.push(AccountPickerItem::action(
                 provider.id,
                 provider.display_name,
-                "Login / refresh",
+                if matches!(auth_state, crate::auth::AuthState::NotConfigured) {
+                    "Sign in"
+                } else {
+                    "Refresh login"
+                },
                 provider.menu_detail,
                 AccountPickerCommand::SubmitInput(format!("/account {} login", provider.id)),
             ));
-            items.push(AccountPickerItem::action(
-                provider.id,
-                provider.display_name,
-                "Diagnose login",
-                format!("{} - {}", state_label, validation_detail),
-                AccountPickerCommand::SubmitInput(format!("/account {} doctor", provider.id)),
-            ));
+            if provider_scope.is_none() {
+                items.push(AccountPickerItem::action(
+                    provider.id,
+                    provider.display_name,
+                    "Diagnose login",
+                    format!("{} - {}", state_label, validation_detail),
+                    AccountPickerCommand::SubmitInput(format!("/account {} doctor", provider.id)),
+                ));
+            }
 
             match provider.id {
                 "claude" => self.append_anthropic_account_picker_items(&mut items, provider),
@@ -344,7 +341,7 @@ impl App {
                 "claude",
                 "Claude",
                 "Add new account",
-                "Create the next numbered Claude account",
+                "Sign in to another Claude account. Existing saved accounts are kept.",
                 AccountPickerCommand::SubmitInput("/account claude add".to_string()),
             ));
             for account in crate::auth::claude::list_accounts().unwrap_or_default() {
@@ -352,8 +349,15 @@ impl App {
                 items.push(AccountPickerItem::action(
                     "claude",
                     "Claude",
-                    format!("Replace account {label}"),
-                    "Refresh this saved Claude account in place",
+                    format!("Refresh account {label}"),
+                    format!(
+                        "Sign in again as {}. Replaces the saved login for {label}.",
+                        account
+                            .email
+                            .as_deref()
+                            .map(mask_email)
+                            .unwrap_or_else(|| label.clone())
+                    ),
                     AccountPickerCommand::SubmitInput(format!("/account claude add {}", label)),
                 ));
             }
@@ -364,7 +368,7 @@ impl App {
                 "openai",
                 "OpenAI",
                 "Add new account",
-                "Create the next numbered OpenAI account",
+                "Sign in to another OpenAI account. Existing saved accounts are kept.",
                 AccountPickerCommand::SubmitInput("/account openai add".to_string()),
             ));
             for account in crate::auth::codex::list_accounts().unwrap_or_default() {
@@ -372,8 +376,15 @@ impl App {
                 items.push(AccountPickerItem::action(
                     "openai",
                     "OpenAI",
-                    format!("Replace account {label}"),
-                    "Refresh this saved OpenAI account in place",
+                    format!("Refresh account {label}"),
+                    format!(
+                        "Sign in again as {}. Replaces the saved login for {label}.",
+                        account
+                            .email
+                            .as_deref()
+                            .map(mask_email)
+                            .unwrap_or_else(|| label.clone())
+                    ),
                     AccountPickerCommand::SubmitInput(format!("/account openai add {}", label)),
                 ));
             }
@@ -405,7 +416,17 @@ impl App {
             return;
         };
 
+        let current_provider = if self.is_remote {
+            self.remote_provider_name.clone().unwrap_or_default()
+        } else {
+            self.provider.name().to_string()
+        };
+        let current_is_claude_code = super::window_account::account_family(&current_provider)
+            == Some(super::window_account::CLAUDE_CODE_FAMILY);
+        let include_claude_code =
+            current_is_claude_code || !crate::auth::claude_code::settings().instances.is_empty();
         let provider_label = match scope_key.as_str() {
+            "all" if include_claude_code => "Claude + OpenAI + Claude Code",
             "all" => "Claude + OpenAI",
             "claude" => "Claude",
             "openai" => "OpenAI",
@@ -415,13 +436,16 @@ impl App {
 
         let (models, selected) = match scope_key.as_str() {
             "all" => {
-                let (mut models, selected) = self.build_all_inline_account_picker();
-                // Claude Code instances join the overview only when configured
-                // explicitly, so users without the mode see no change.
-                if crate::auth::claude_code::settings().instances.is_empty() {
+                let (mut models, mut selected) = self.build_all_inline_account_picker();
+                // Include the implicit instance when this window uses Claude
+                // Code, and focus its current instance instead of another family.
+                if !include_claude_code {
                     (models, selected)
                 } else {
-                    let (cc, _) = self.build_claude_code_inline_account_picker();
+                    let (cc, cc_selected) = self.build_claude_code_inline_account_picker();
+                    if current_is_claude_code && !cc.is_empty() {
+                        selected = models.len() + cc_selected;
+                    }
                     models.extend(cc);
                     (models, selected)
                 }
@@ -449,7 +473,7 @@ impl App {
         self.input.clear();
         self.cursor_pos = 0;
         self.set_status_notice(format!(
-            "Account → {} (Enter: use in this window · d: make default)",
+            "Account → {} (Enter: use in this window · Ctrl+D: make default)",
             provider_label
         ));
     }

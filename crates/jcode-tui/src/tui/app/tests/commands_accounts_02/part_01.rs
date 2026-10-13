@@ -306,7 +306,7 @@ fn test_account_command_opens_account_picker() {
 }
 
 #[test]
-fn test_account_picker_supports_arrow_and_vim_navigation() {
+fn test_account_picker_arrows_navigate_and_bare_letters_search() {
     with_temp_jcode_home(|| {
         let now_ms = chrono::Utc::now().timestamp_millis();
 
@@ -361,15 +361,11 @@ fn test_account_picker_supports_arrow_and_vim_navigation() {
 
         app.handle_key(KeyCode::Char('j'), KeyModifiers::empty())
             .unwrap();
-        let after_vim = app.inline_interactive_state.as_ref().unwrap().selected;
-        assert_eq!(after_vim, after_arrow + 1);
+        assert_eq!(app.inline_interactive_state.as_ref().unwrap().filter, "j");
 
         app.handle_key(KeyCode::Char('k'), KeyModifiers::empty())
             .unwrap();
-        assert_eq!(
-            app.inline_interactive_state.as_ref().unwrap().selected,
-            after_arrow
-        );
+        assert_eq!(app.inline_interactive_state.as_ref().unwrap().filter, "jk");
     });
 }
 
@@ -558,8 +554,9 @@ fn test_account_switch_shorthand_switches_openai_account_by_label() {
         // switching to the account that is already active would pass even if the
         // `/account switch` command did nothing. The first insert stays active
         // and the switch below has to move it to the second.
-        let first = crate::auth::codex::upsert_account(open_account("acct_first", "first@example.com"))
-            .unwrap();
+        let first =
+            crate::auth::codex::upsert_account(open_account("acct_first", "first@example.com"))
+                .unwrap();
         let second =
             crate::auth::codex::upsert_account(open_account("acct_second", "second@example.com"))
                 .unwrap();
@@ -587,7 +584,10 @@ fn test_account_switch_shorthand_switches_openai_account_by_label() {
             assert_eq!(window.label.as_deref(), Some(second.as_str()));
             assert!(window.pinned);
             assert_eq!(
-                app.session.account_pins.get("openai").map(|pin| pin.label.as_str()),
+                app.session
+                    .account_pins
+                    .get("openai")
+                    .map(|pin| pin.label.as_str()),
                 Some(second.as_str()),
                 "the pin is persisted on the session"
             );
@@ -1004,7 +1004,8 @@ fn test_account_switch_short_form_runs_on_one_enter() {
         // The suggestion list offers `/account claude switch <label>`, a
         // different spelling of the same command. One Enter must run it.
         app.set_input_for_test(format!("/account switch {second}"));
-        app.handle_key(KeyCode::Enter, KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+            .unwrap();
         assert!(app.input.is_empty(), "command ran, input: {:?}", app.input);
         let window = app.window_account("claude").expect("window account");
         assert_eq!(window.label.as_deref(), Some(second.as_str()));
@@ -1012,8 +1013,154 @@ fn test_account_switch_short_form_runs_on_one_enter() {
 
         // A partial command still completes on Enter instead of running.
         app.set_input_for_test("/acc");
-        app.handle_key(KeyCode::Enter, KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+            .unwrap();
         assert!(app.input.starts_with("/account"), "{:?}", app.input);
         assert_ne!(app.input, "/acc");
+    });
+}
+
+#[test]
+fn test_account_ux_overview_focuses_current_claude_code_instance() {
+    with_temp_jcode_home(|| {
+        let home = crate::storage::jcode_dir().unwrap();
+        std::fs::write(
+            home.join("config.toml"),
+            format!(
+                "[provider.claude_code]\ndefault_instance = \"personal\"\n\
+                 [[provider.claude_code.instances]]\nid = \"personal\"\nhome = {:?}\n\
+                 [[provider.claude_code.instances]]\nid = \"work\"\nhome = {:?}\n",
+                home.join("personal").display().to_string(),
+                home.join("work").display().to_string(),
+            ),
+        )
+        .unwrap();
+        crate::config::invalidate_config_cache();
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.remote_provider_name = Some("Claude Code".to_string());
+        app.replace_window_accounts(vec![crate::protocol::SessionAccountInfo {
+            provider: "claude-code".to_string(),
+            label: Some("work".to_string()),
+            pinned: true,
+            is_default: false,
+        }]);
+
+        app.open_account_picker(None);
+        let state = app.inline_interactive_state.as_ref().unwrap();
+        assert!(matches!(
+            &state.selected_entry().unwrap().action,
+            crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Switch {
+                provider_id, label,
+            }) if provider_id == "claude-code" && label == "work"
+        ));
+        assert!(state.selected_entry().unwrap().is_current);
+    });
+}
+
+#[test]
+fn test_account_ux_overview_includes_implicit_current_claude_code_instance() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.remote_provider_name = Some("claude-code".to_string());
+        app.open_account_picker(None);
+        let state = app.inline_interactive_state.as_ref().unwrap();
+        assert!(matches!(
+            &state.selected_entry().unwrap().action,
+            crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Switch {
+                provider_id, label,
+            }) if provider_id == "claude-code" && label == "default"
+        ));
+    });
+}
+
+#[test]
+fn test_account_ux_center_does_not_duplicate_provider_settings() {
+    with_temp_jcode_home(|| {
+        crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
+            label: "openai-otter".to_string(),
+            access_token: "acc".into(),
+            refresh_token: "ref".into(),
+            id_token: None,
+            account_id: None,
+            expires_at: None,
+            email: None,
+        })
+        .unwrap();
+        let mut app = create_test_app();
+        app.open_account_center(Some("openai"));
+        let mut picker = app.account_picker_overlay.as_ref().unwrap().borrow_mut();
+        for character in "Saved auth entry".chars() {
+            picker
+                .handle_overlay_key(KeyCode::Char(character), KeyModifiers::empty())
+                .unwrap();
+        }
+        assert_eq!(picker.debug_memory_profile()["filtered_count"], 0);
+        assert!(!matches!(
+            picker
+                .handle_overlay_key(KeyCode::Enter, KeyModifiers::empty())
+                .unwrap(),
+            crate::tui::account_picker::OverlayAction::Execute(_)
+        ));
+    });
+}
+
+#[test]
+fn test_account_ux_saved_account_actions_explain_window_scope() {
+    with_temp_jcode_home(|| {
+        store_two_claude_accounts();
+        let app = create_test_app();
+        let provider = crate::provider_catalog::login_providers()
+            .iter()
+            .find(|provider| provider.id == "claude")
+            .copied()
+            .unwrap();
+        let mut items = Vec::new();
+        app.append_anthropic_account_picker_items(&mut items, provider);
+        let switches: Vec<_> = items
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item.command,
+                    crate::tui::account_picker::AccountPickerCommand::Switch { .. }
+                )
+            })
+            .collect();
+        assert_eq!(switches.len(), 2);
+        assert!(
+            switches
+                .iter()
+                .all(|item| item.title.contains("this window"))
+        );
+    });
+}
+
+#[test]
+fn test_account_ux_single_filtered_account_stays_visible_in_full_frame() {
+    with_temp_jcode_home(|| {
+        let _render_lock = crate::tui::ui::render_state_test_lock();
+        store_two_claude_accounts();
+        let mut app = create_test_app();
+        app.open_account_picker(Some("claude"));
+        for character in "Claude Otter".chars() {
+            app.handle_key(KeyCode::Char(character), KeyModifiers::empty())
+                .unwrap();
+        }
+        let picker = app.inline_interactive_state.as_ref().unwrap();
+        assert_eq!(picker.filtered.len(), 1);
+        assert_eq!(picker.selected_entry().unwrap().name, "Claude Otter");
+
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| crate::tui::ui::draw(frame, &app))
+            .unwrap();
+        let text = buffer_to_text(&terminal);
+        assert!(text.contains("Ctrl+D"), "account hint missing:\n{text}");
+        assert!(
+            text.contains("▸ Claude Otter"),
+            "selected account must stay visible alongside its hint:\n{text}"
+        );
     });
 }

@@ -167,6 +167,20 @@ fn selected_route_notice_text(
 }
 
 fn model_picker_top_hint(picker: &crate::tui::InlineInteractiveState) -> Option<&'static str> {
+    if picker.kind == crate::tui::PickerKind::Account {
+        return Some(
+            if matches!(
+                picker.selected_entry().map(|entry| &entry.action),
+                Some(crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Switch {
+                    provider_id, ..
+                })) if provider_id == "claude-code"
+            ) {
+                " Enter use in this window · default: config.toml · type to search"
+            } else {
+                " Enter use in this window · Ctrl+D default for new windows · type to search"
+            },
+        );
+    }
     let is_swarm_agent_model_picker = picker.kind == crate::tui::PickerKind::Model
         && picker.entries.iter().any(|entry| {
             matches!(
@@ -1553,6 +1567,24 @@ mod tests {
 
         assert!(hint.contains("Ctrl+O set default"));
         assert!(hint.contains("Ctrl+N favorite"));
+    }
+
+    #[test]
+    fn account_picker_hint_separates_window_choice_from_default() {
+        let mut picker = sample_account_picker(false);
+        let hint = model_picker_top_hint(&picker).expect("account instructions");
+        assert!(hint.contains("Enter use in this window"));
+        assert!(hint.contains("Ctrl+D default for new windows"));
+        assert!(hint.contains("type to search"));
+
+        picker.entries[0].action =
+            crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Switch {
+                provider_id: "claude-code".to_string(),
+                label: "work".to_string(),
+            });
+        let hint = model_picker_top_hint(&picker).expect("Claude Code instructions");
+        assert!(hint.contains("default: config.toml"));
+        assert!(!hint.contains("Ctrl+D"));
     }
 
     #[test]
