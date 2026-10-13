@@ -131,11 +131,17 @@ a prompt-cache miss. Warm cached schemas avoid that rebuild when unchanged.
   conversation, cache tracker, and KV monitor before and after HTTP connect,
   disconnect, and reconnect for native and fallback deferred providers. These
   verify the cache-relevant request prefix, not a paid provider's cache-hit bill.
-- Passing suites included 113 base MCP tests, 54 app-core MCP tests, 78 broader
-  agent tests, and 11 root-library MCP CLI tests. Some suites overlap. CLI tests
-  cover disabled servers, cache fingerprint invalidation, and colliding normalized
-  aliases. The final local runs followed a verified hosted filesystem failure,
-  not an attempt to bypass hosted build accounting.
+- A pinned final-tree hosted replay passed 113 base MCP tests, 54 app-core MCP
+  tests, 79 broader agent tests, 11 root-library MCP CLI tests, and the real
+  stdio collision integration. Some suites overlap. Earlier local verification
+  followed a verified hosted filesystem failure, not an attempt to bypass
+  hosted build accounting.
+- The freshly built pinned binary passed a ten-case public CLI HTTP/SSE/OAuth
+  replay and discovered 39 tools from the real Expo HTTPS MCP service. Five
+  safety fixes were removed in an isolated negative control, causing the
+  expected regression assertions to fail. Restoring them passed the same checks.
+  See `docs/MCP_REMOTE_ACCEPTANCE.md` for all 18 requirement observations, run
+  IDs, binary identity, measurements, reproduction commands and explicit limits.
 
 ## Lifecycle and safety
 
