@@ -312,7 +312,18 @@ private func event(_ line: String) -> ConnectionOutput {
     let calls = run([event(history)]).transcript[0].toolCalls
     #expect(calls.first?.status == .failed("Error: file not found"))
     #expect(calls.first?.output == "Error: file not found\nat /tmp/x")
-    #expect(calls.last?.status == .failed("--- Command finished with exit code: 2 ---"))
+    #expect(calls.last?.status == .failed("exit 2"))
+}
+
+@Test func historyExitCodeAfterOutputIsTheFailureReason() {
+    let history = """
+        {"type":"history","id":1,"session_id":"s","messages":[\
+        {"role":"assistant","content":"Testing.","tool_calls":["bash"]},\
+        {"role":"tool","content":"> app@1.0.0 test\\n1 failing\\n\\nExit code: 1","tool_data":\
+        {"id":"toolu_1","name":"bash","input":{"command":"npm test"}}}\
+        ]}
+        """
+    #expect(run([event(history)]).transcript[0].toolCalls.first?.status == .failed("exit 1"))
 }
 
 @Test func historyToolOutputMentioningErrorsIsSucceeded() {

@@ -499,16 +499,15 @@ public enum SessionReducer {
     }
 
     private static func historyToolStatus(output: String) -> TranscriptEntry.ToolCall.Status {
-        guard toolOutputLooksFailed(output) else { return .succeeded }
-        let reason = output.split(whereSeparator: \.isNewline)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .first { !$0.isEmpty }
-        return .failed(reason ?? "Failed")
+        historyFailureReason(output).map { .failed($0) } ?? .succeeded
     }
 
-    private static func toolOutputLooksFailed(_ output: String) -> Bool {
+    /// The TUI's `tool_output_looks_failed`, returning the line that failed it
+    /// (or `exit N`, like a live failure) so the reason names the failure
+    /// rather than the command's first line of ordinary output.
+    private static func historyFailureReason(_ output: String) -> String? {
         let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return false }
+        guard !trimmed.isEmpty else { return nil }
         var normalized = Substring(trimmed)
         if normalized.hasPrefix("["), let close = normalized.range(of: "] ") {
             let label = normalized[normalized.index(after: normalized.startIndex)..<close.lowerBound]
@@ -516,26 +515,32 @@ public enum SessionReducer {
                 normalized = normalized[close.upperBound...]
             }
         }
+        let lines = normalized.split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
         let lower = normalized.lowercased()
         if lower.hasPrefix("error:") || lower.hasPrefix("failed:") || normalized.hasPrefix("\u{2717}") {
-            return true
+            return lines.first
         }
-        return normalized.split(whereSeparator: \.isNewline).contains { rawLine in
-            let line = rawLine.trimmingCharacters(in: .whitespaces)
-            let lowerLine = line.lowercased()
-            return nonzeroExitCode(line, prefix: "Exit code:")
-                || nonzeroExitCode(line, prefix: "--- Command finished with exit code:")
-                || ["status: failed", "failed to start", "terminated"].contains(lowerLine)
+        for line in lines {
+            if let code = nonzeroExitCode(line, prefix: "Exit code:")
+                ?? nonzeroExitCode(line, prefix: "--- Command finished with exit code:")
+            {
+                return "exit \(code)"
+            }
+            if ["status: failed", "failed to start", "terminated"].contains(line.lowercased()) {
+                return line
+            }
         }
+        return nil
     }
 
-    private static func nonzeroExitCode(_ line: String, prefix: String) -> Bool {
-        guard line.hasPrefix(prefix) else { return false }
+    private static func nonzeroExitCode(_ line: String, prefix: String) -> Int32? {
+        guard line.hasPrefix(prefix) else { return nil }
         let code = line.dropFirst(prefix.count)
             .trimmingCharacters(in: .whitespaces)
             .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
             .trimmingCharacters(in: .whitespaces)
-        return Int32(code).map { $0 != 0 } ?? false
+        return Int32(code).flatMap { $0 != 0 ? $0 : nil }
     }
 
     // MARK: - Helpers
