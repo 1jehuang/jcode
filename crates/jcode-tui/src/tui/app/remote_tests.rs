@@ -1446,6 +1446,34 @@ fn remote_effort_rejection_after_model_switch_keeps_new_model_effort() {
     );
 }
 
+/// A change that never reaches the server must not leave the chip on the
+/// unsent level either.
+#[test]
+fn remote_effort_cycle_restores_previous_effort_when_send_fails() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.remote_provider_name = Some("openai".to_string());
+    app.remote_provider_model = Some("gpt-5-pro".to_string());
+    app.remote_reasoning_effort = Some("high".to_string());
+
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+    drop(remote.take_dummy_peer().expect("dummy peer"));
+
+    assert!(
+        rt.block_on(super::key_handling::apply_remote_effort_direction(
+            &mut app,
+            &mut remote,
+            1,
+        ))
+        .is_err()
+    );
+    assert_eq!(app.remote_reasoning_effort.as_deref(), Some("high"));
+    assert!(app.remote_reasoning_effort_before_request.is_none());
+}
+
 fn swarm_dm_notification(sender: &str, body: &str, tldr: Option<&str>) -> ServerEvent {
     ServerEvent::Notification {
         from_session: format!("session_{sender}_123"),

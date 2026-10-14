@@ -127,7 +127,11 @@ pub(super) async fn apply_remote_effort_direction(
             "Effort: {} (will apply to next request)",
             app_mod::effort_display_label(next_effort)
         ));
-        remote.set_reasoning_effort(next_effort).await?;
+        if let Err(error) = remote.set_reasoning_effort(next_effort).await {
+            app.restore_rejected_remote_effort();
+            app.set_status_notice("Effort switch failed");
+            return Err(error);
+        }
     }
     Ok(())
 }
@@ -1450,7 +1454,11 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
                     app_mod::effort_display_label(level)
                 ));
             }
-            remote.set_reasoning_effort(level).await?;
+            if let Err(error) = remote.set_reasoning_effort(level).await {
+                app.restore_rejected_remote_effort();
+                app.set_status_notice("Effort switch failed");
+                return Err(error);
+            }
             return Ok(());
         }
 

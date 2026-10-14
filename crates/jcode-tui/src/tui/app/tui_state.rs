@@ -124,6 +124,15 @@ impl App {
         }
     }
 
+    /// Undo an optimistic remote effort change the server rejected or that
+    /// never reached it.
+    pub(super) fn restore_rejected_remote_effort(&mut self) {
+        if let Some(confirmed) = self.remote_reasoning_effort_before_request.take() {
+            self.remote_reasoning_effort = confirmed;
+            self.invalidate_model_picker_cache();
+        }
+    }
+
     /// Best-known current reasoning effort for the remote session. Falls back
     /// to the configured provider-family default when the server has not
     /// reported one yet, so pre-settle effort cycling starts from the value the
