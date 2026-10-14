@@ -305,7 +305,7 @@ A broader scan for `quinn-proto < 0.11.18`, `h2 < 0.4.16`, `rustls < 0.23.45` in
 
 | Repo | Status | Action taken |
 |---|---|---|
-| **zz-merge-unk-PhenoJourneys** | VULN: q=0.11.14, h2=0.4.14, rustls=0.23.40 (transitive) | Created `security/quinn-proto-0.11.19-rustls-0.23.45-p30` @ `62f323a` — Cargo.lock fix committed; 3 unrelated RUSTSEC advisories remain (crossbeam-epoch 0.9.18, quick-xml 0.39.4 x2) — these are not P30 and require separate update decisions. |
+| **zz-merge-unk-PhenoJourneys** | VULN: q=0.11.14, h2=0.4.14, rustls=0.23.40 (transitive) | Created `security/quinn-proto-0.11.19-rustls-0.23.45-p30` @ `62f323a` — Cargo.lock fix committed; 3 unrelated RUSTSEC advisories remain (crossbeam-epoch 0.9.18, quick-xml 0.39.4 x2) — these are not P30 and require separate update decisions. Build verification: cargo check fails on security branch AND main with the same macOS tapi linker / aws-lc-sys / libc toolchain error — pre-existing build env issue unrelated to P30. |
 | **tooling-clone** | VULN: q=0.11.16, h2=0.4.15, rustls=0.23.42 (transitive) | **BLOCKED — broken WIP state.** 250+ missing `workspace.dependencies` entries (e.g. `jsonschema`, `schemars`, `hex`, `clap-ext` path-deps) prevent `cargo update` from running. This is a stale development snapshot of `phenotype-tooling`; the actual `phenotype-tooling` is already fixed on its security branch. **No security branch created.** Recommend operator either re-clone from now-fixed phenotype-tooling or fix the missing workspace.dependencies first. |
 | `phenotype-tooling-mergify/` | (worktree of `phenotype-tooling`) | No action — stale worktree, parent is fixed |
 | `agileplus-a-plus-completion-WP01.bak/` | (worktree of `AgilePlus`) | No action — `.bak` archive dir, no git |
