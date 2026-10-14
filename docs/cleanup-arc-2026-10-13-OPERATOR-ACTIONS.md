@@ -16,7 +16,7 @@
 | Master push (4 follow-up docs) | **DONE 03:29** | `2387b8014..6a2b3cb7f` (4 more commits, 51 total) |
 | `feature/upstream-0.88-sync` push | **DONE 03:17** | `545d6d7f4..c2e4e91bd` (1 cherry-pick commit) |
 | `instinct/win-herdr-inline-anchor` push | **DONE 03:27** | Added `fork` remote pointing to `KooshaPari/Jcode` (preserves `origin` for upstream tracking); new branch at `0473d4b30` |
-| `chore/cargo-fmt-cleanup-2026-10-13-p30` push | **DONE 03:37** | Clean rebase onto current master (was 64-behind, 32 commits reapplied, 0 conflicts); new-branch push at `a14509a8e`. The 'destructive' label was wrong — this is a NEW-branch push, not a force-push. |
+| `chore/cargo-fmt-cleanup-2026-10-13-p30` push | **DONE 03:37** | Clean rebase onto current master (was 64-behind, 32 commits reapplied, 0 conflicts); new-branch push at `a14509a8e`. The 'destructive' label was wrong — this is a NEW-branch push, not a force-push. `cargo check` on post-rebase HEAD: PASS (14.95s incremental). PR #3 (combined P30 fix) is now openable from this branch. |
 | 2 cherry-picks (`b3130e026`) | **DONE** | Both branches had the quinn-proto fix already applied (jcode-upstream-sync HEAD `c2e4e91bd`, jcode-win-anchor HEAD `0473d4b30`); only pushes were needed |
 | P26 sync resolution | **RESOLVED** | Strategy C rebase executed 03:00 (local `master` now linear on origin) |
 | P30 cross-repo branches | **DONE** | 14/16 repos at 0 active P30 vulns; 2 BLOCKED (tooling-clone, _full_HexaKit) need operator action on broken upstream |
