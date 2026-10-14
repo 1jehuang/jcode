@@ -93,6 +93,9 @@ pub use session_lease::{
     session_leases_dir, write_session_lease,
 };
 
+pub mod remove;
+pub use remove::{remove_durable_state_file, remove_state_file};
+
 /// Serialize this crate's tests that mutate `JCODE_HOME`.
 #[cfg(test)]
 pub(crate) fn test_jcode_home_lock() -> std::sync::MutexGuard<'static, ()> {
