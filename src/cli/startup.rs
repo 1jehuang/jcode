@@ -24,17 +24,12 @@ pub async fn run() -> Result<()> {
     super::login::install_terminal_login_presenter();
     // Snapshot user-supplied provider env before provider init rewrites it.
     super::provider_init::capture_user_openrouter_model_env();
-    // Credential import, installer publication and explicit MCP management do
-    // not need normal agent startup hardening, migrations, telemetry, or
-    // provider discovery.
+    // Credential import and explicit MCP management do not need normal agent
+    // startup hardening, migrations, telemetry, or provider discovery.
     if args.ssh.is_none()
         && matches!(
             args.command,
-            Some(
-                Command::Auth(super::args::AuthCommand::Import { .. })
-                    | Command::Mcp { .. }
-                    | Command::PublishBuild(_)
-            )
+            Some(Command::Auth(super::args::AuthCommand::Import { .. }) | Command::Mcp { .. })
         )
     {
         if let Some(cwd) = &args.cwd {
@@ -502,8 +497,6 @@ fn should_spawn_background_update_check_with_config(args: &Args, check_updates: 
         && !matches!(
             args.command,
             Some(Command::Update)
-                | Some(Command::PruneBuilds { .. })
-                | Some(Command::PublishBuild(_))
                 | Some(Command::Serve { .. })
                 | Some(Command::Server { .. })
                 | Some(Command::Acp)
@@ -535,36 +528,6 @@ mod tests {
 
     fn parse_args(argv: &[&str]) -> Args {
         Args::parse_from(argv)
-    }
-
-    #[test]
-    fn build_store_maintenance_never_starts_background_update_check() {
-        for argv in [
-            vec!["jcode", "prune-builds"],
-            vec!["jcode", "prune-builds", "--keep", "0"],
-            vec!["jcode", "prune-builds", "--dry-run"],
-            vec![
-                "jcode",
-                "publish-build",
-                "--source",
-                "prepared",
-                "--version",
-                "test",
-                "--launcher",
-                "launcher",
-                "--channel",
-                "stable",
-            ],
-        ] {
-            let args = parse_args(&argv);
-            assert!(!should_spawn_background_update_check_with_config(
-                &args, true
-            ));
-        }
-        let args = parse_args(&["jcode"]);
-        assert!(should_spawn_background_update_check_with_config(
-            &args, true
-        ));
     }
 
     #[test]

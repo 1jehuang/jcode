@@ -394,7 +394,6 @@ pub fn launcher_binary_path() -> Result<PathBuf> {
 }
 
 fn update_launcher_symlink(target: &Path) -> Result<PathBuf> {
-    let _store_lock = crate::acquire_build_store_lock()?;
     let launcher = launcher_binary_path()?;
 
     if let Some(parent) = launcher.parent() {

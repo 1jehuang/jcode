@@ -177,10 +177,10 @@ GITHUB_RELEASE_BASE="https://github.com/$REPO/releases/download/$VERSION"
 
 if [ "$IS_WINDOWS" = true ]; then
   EXE=".exe"
-  builds_dir="${JCODE_HOME:-$LOCALAPPDATA/jcode}/builds"
+  builds_dir="$LOCALAPPDATA/jcode/builds"
 else
   EXE=""
-  builds_dir="${JCODE_HOME:-$HOME/.jcode}/builds"
+  builds_dir="$HOME/.jcode/builds"
 fi
 stable_dir="$builds_dir/stable"
 current_dir="$builds_dir/current"
@@ -255,10 +255,11 @@ if [ -n "$download_mode" ]; then
 fi
 
 INSTALL_STAGE="binary_install"
+mkdir -p "$INSTALL_DIR" "$stable_dir" "$current_dir" "$version_dir"
+
 version="${VERSION#v}"
 dest_version_dir="$version_dir/$version"
-prepared_dir="$tmpdir/prepared"
-mkdir -p "$prepared_dir"
+mkdir -p "$dest_version_dir"
 
 bin_name="jcode${EXE}"
 
@@ -267,10 +268,10 @@ if [ "$download_mode" = "tar" ]; then
   src_bin="$tmpdir/${ARTIFACT}${EXE}"
   [ -f "$src_bin" ] || err "Downloaded archive did not contain expected binary: ${ARTIFACT}${EXE}"
   find "$tmpdir" -maxdepth 1 -type f \( -name "${ARTIFACT}${EXE}.bin" -o -name 'libssl.so*' -o -name 'libcrypto.so*' \) \
-    -exec cp -f {} "$prepared_dir/" \;
-  mv "$src_bin" "$prepared_dir/$bin_name"
+    -exec cp -f {} "$dest_version_dir/" \;
+  mv "$src_bin" "$dest_version_dir/$bin_name"
 elif [ "$download_mode" = "bin" ]; then
-  mv "$tmpdir/jcode.download" "$prepared_dir/$bin_name"
+  mv "$tmpdir/jcode.download" "$dest_version_dir/$bin_name"
 else
   info "No prebuilt asset found for $ARTIFACT in $VERSION; building from source..."
   command -v git >/dev/null 2>&1 || err "git is required to build from source"
@@ -284,10 +285,10 @@ else
 
   src_bin="$src_dir/target/release/$bin_name"
   [ -f "$src_bin" ] || err "Built binary not found at $src_bin"
-  cp "$src_bin" "$prepared_dir/$bin_name"
+  cp "$src_bin" "$dest_version_dir/$bin_name"
 fi
 
-chmod +x "$prepared_dir/$bin_name" 2>/dev/null || true
+chmod +x "$dest_version_dir/$bin_name" 2>/dev/null || true
 
 if [ "$IS_TERMUX" = true ] && [ "$IS_WINDOWS" = false ]; then
   termux_glibc_dir="/data/data/com.termux/files/usr/glibc/lib"
@@ -299,7 +300,7 @@ if [ "$IS_TERMUX" = true ] && [ "$IS_WINDOWS" = false ]; then
   if [ "$OS" = "Linux" ] && [ -n "$termux_glibc_linker" ]; then
     if [ -x "$termux_glibc_linker" ]; then
       if command -v patchelf >/dev/null 2>&1; then
-        patchelf --set-interpreter "$termux_glibc_linker" "$prepared_dir/$bin_name" \
+        patchelf --set-interpreter "$termux_glibc_linker" "$dest_version_dir/$bin_name" \
           || err "Failed to patch jcode ELF interpreter for Termux glibc"
         info "Patched Termux glibc ELF interpreter: $termux_glibc_linker"
       else
@@ -311,16 +312,24 @@ if [ "$IS_TERMUX" = true ] && [ "$IS_WINDOWS" = false ]; then
   fi
 fi
 
-# The prepared binary owns the store lock for the entire copy/channel/marker/
-# launcher transaction. Older binaries without this helper must fail closed:
-# publishing directly from this shell would reintroduce the prune race.
-publish_args=(--no-update publish-build --source "$prepared_dir" --version "$version"
-  --channel stable --launcher "$launcher_path")
-if [ "$IS_TERMUX" = true ] && [ "$IS_WINDOWS" = false ]; then
-  publish_args+=(--termux-launcher)
-fi
-if ! "$prepared_dir/$bin_name" "${publish_args[@]}"; then
-  err "Publication failed. This installer requires a binary with publish-build support for safe, locked installation."
+if [ "$IS_WINDOWS" = true ]; then
+  cp -f "$dest_version_dir/$bin_name" "$stable_dir/$bin_name"
+  printf '%s\n' "$version" > "$builds_dir/stable-version"
+  cp -f "$stable_dir/$bin_name" "$launcher_path"
+else
+  ln -sfn "$dest_version_dir/$bin_name" "$stable_dir/$bin_name"
+  printf '%s\n' "$version" > "$builds_dir/stable-version"
+  if [ "$IS_TERMUX" = true ]; then
+    rm -f "$launcher_path"
+    cat > "$launcher_path" <<EOF
+#!/usr/bin/env bash
+unset LD_PRELOAD
+exec "$stable_dir/$bin_name" "\$@"
+EOF
+    chmod +x "$launcher_path"
+  else
+    ln -sfn "$stable_dir/$bin_name" "$launcher_path"
+  fi
 fi
 
 if [ "$(uname -s)" = "Darwin" ]; then
@@ -358,15 +367,6 @@ if [ "${JCODE_SKIP_SERVER_RELOAD:-}" != "1" ]; then
     if "$reload_bin" server reload </dev/null >/dev/null 2>&1; then
       info "Reloaded the running jcode server onto $VERSION (if one was active)."
     fi
-  fi
-fi
-
-# Delete old builds from the version store, keeping the newest few
-# (JCODE_KEEP_BUILD_VERSIONS, 0 disables) and anything still in use. Best-effort.
-INSTALL_STAGE="prune_builds"
-if [ "${JCODE_KEEP_BUILD_VERSIONS:-}" != "0" ] && [ -x "$launcher_path" ]; then
-  if ! "$launcher_path" --no-update prune-builds </dev/null; then
-    info "Warning: build pruning failed. Installation succeeded, but old builds may remain." >&2
   fi
 fi
 
