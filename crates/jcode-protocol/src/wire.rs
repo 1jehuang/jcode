@@ -186,6 +186,9 @@ pub enum Request {
         /// Opt in to PDF panel payloads. Older clients only accept Markdown.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         supports_pdf_panels: bool,
+        /// Desktop can render user_response tool calls as inline answers.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        supports_user_response: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         working_dir: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1385,6 +1388,9 @@ pub enum ServerEvent {
         native_ssh_protocol: Option<u32>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         capabilities: Vec<String>,
+        /// Authoritative connected non-headless users. None on older daemons.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user_connected_session_ids: Option<Vec<String>>,
     },
 
     /// Current state (debug)

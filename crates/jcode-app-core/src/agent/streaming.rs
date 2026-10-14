@@ -24,5 +24,6 @@ pub(super) fn send_stream_keepalive_mpsc(event_tx: &mpsc::UnboundedSender<Server
         id: STREAM_KEEPALIVE_PONG_ID,
         native_ssh_protocol: None,
         capabilities: Vec::new(),
+        user_connected_session_ids: None,
     });
 }

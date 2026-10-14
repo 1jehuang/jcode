@@ -261,10 +261,10 @@ impl DecisionTransport for FailingDecisionTransport {
         "typesafe/jev-1.13"
     }
     async fn decide(&self, request: &DecisionRequest) -> Result<Decision> {
-        if let Some(first) = &self.first {
-            if !first.decisions.lock().unwrap().is_empty() {
-                return first.decide(request).await;
-            }
+        if let Some(first) = &self.first
+            && !first.decisions.lock().unwrap().is_empty()
+        {
+            return first.decide(request).await;
         }
         anyhow::bail!(self.error)
     }

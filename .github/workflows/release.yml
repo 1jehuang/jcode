@@ -714,10 +714,15 @@ jobs:
             export JCODE_CI_BUILD=1
             export JCODE_BUILD_SEMVER="${{ env.RELEASE_TAG }}"
 
+            # VM source sync omits .git. Keep the baseline outside the source tree.
+            lock_snapshot=$(mktemp /tmp/jcode-release-Cargo.lock.XXXXXX)
+            trap 'rm -f "$lock_snapshot"' EXIT
+            cp Cargo.lock "$lock_snapshot"
+
             echo "::group::cargo build (jcode binary)"
             # justrust has no FreeBSD client or hosted worker yet.
             cargo build --locked --release -p jcode --bin jcode
-            git diff --exit-code -- Cargo.lock
+            cmp "$lock_snapshot" Cargo.lock
             echo "::endgroup::"
 
             echo "::group::Verify binary launches"

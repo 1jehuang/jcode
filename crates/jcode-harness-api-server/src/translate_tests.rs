@@ -1939,6 +1939,61 @@ fn unattached_list_sessions_handles_no_session_candidates() {
 }
 
 #[test]
+fn user_connections_are_global_independent_and_fresh_in_list_metadata() {
+    let home = ScopedJcodeHome::new("global-user-presence");
+    for id in [
+        "connected-idle",
+        "connected-busy",
+        "loaded-history",
+        "headless",
+    ] {
+        write_session_record(&home.path, id, &home.path);
+    }
+    let mut state = BridgeState {
+        user_connected_sessions: ["connected-idle".into(), "connected-busy".into()]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+    let ApiEvent::Sessions { sessions } =
+        only_reply_event(state.api_request_to_legacy(&json!({"req":"list_sessions","id":7})))
+    else {
+        panic!("expected list");
+    };
+    for session in sessions {
+        assert_eq!(
+            session.user_connected,
+            session.session_id.starts_with("connected-")
+        );
+        assert_eq!(
+            session.status, "idle",
+            "connection truth must not overwrite lifecycle/attachment status"
+        );
+    }
+    let ApiEvent::Sessions { sessions: limited } = only_reply_event(
+        state.api_request_to_legacy(&json!({"req":"list_sessions","id":9,"limit":0})),
+    ) else {
+        panic!("expected list");
+    };
+    assert_eq!(
+        limited.len(),
+        2,
+        "connected idle users survive an empty recency page"
+    );
+    assert!(limited.iter().all(|session| session.user_connected));
+    state.user_connected_sessions.clear();
+    let ApiEvent::Sessions { sessions } =
+        only_reply_event(state.api_request_to_legacy(&json!({"req":"list_sessions","id":8})))
+    else {
+        panic!("expected list");
+    };
+    assert!(sessions.iter().all(|session| !session.user_connected));
+    let legacy: SessionInfo =
+        serde_json::from_value(json!({"session_id":"legacy","status":"idle"})).unwrap();
+    assert!(!legacy.user_connected);
+}
+
+#[test]
 fn unattached_list_sessions_discovers_all_persisted_records() {
     let home = ScopedJcodeHome::new("persisted-discovery");
     let first_root = home.path.join("first-project");
@@ -2090,6 +2145,46 @@ fn runtime_info_reports_the_active_provider_and_complete_route_catalog() {
     assert_eq!(routes.len(), 2);
     assert_eq!(routes[1].provider, "gemini");
     assert!(!routes[1].available);
+}
+
+#[test]
+fn retention_never_archives_users_connected_in_other_windows() {
+    let home = ScopedJcodeHome::new("connected-retention");
+    let old_time = SystemTime::now() - std::time::Duration::from_secs(3 * 86_400);
+    for id in ["old-connected", "old-disconnected"] {
+        let path = write_session_record(&home.path, id, &home.path);
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(old_time))
+            .unwrap();
+    }
+    let mut state = BridgeState {
+        user_connected_sessions: ["old-connected".into()].into_iter().collect(),
+        ..Default::default()
+    };
+    only_reply_event(state.api_request_to_legacy(
+        &json!({"req":"set_retention_policy","id":1,"archive_after_days":1}),
+    ));
+    let ApiEvent::Sessions { sessions } = only_reply_event(
+        state.api_request_to_legacy(&json!({"req":"list_sessions","id":2,"include_archived":true})),
+    ) else {
+        panic!("expected list");
+    };
+    let connected = sessions
+        .iter()
+        .find(|session| session.session_id == "old-connected")
+        .unwrap();
+    assert!(connected.user_connected);
+    assert!(!connected.archived);
+    assert!(
+        sessions
+            .iter()
+            .find(|session| session.session_id == "old-disconnected")
+            .unwrap()
+            .archived
+    );
 }
 
 #[test]

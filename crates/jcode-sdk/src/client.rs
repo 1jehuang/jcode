@@ -40,6 +40,8 @@ pub struct ConnectOptions {
     /// On by default: an app that only works once the user has launched two
     /// daemons by hand is indistinguishable from a broken one.
     pub ensure_runtime: bool,
+    /// Desktop inline Markdown response renderer. Other clients leave false.
+    pub supports_user_response: bool,
 }
 
 impl Default for ConnectOptions {
@@ -49,6 +51,7 @@ impl Default for ConnectOptions {
             client_name: concat!("jcode-sdk-rs/", env!("CARGO_PKG_VERSION")).to_string(),
             request_timeout: Some(Duration::from_secs(30)),
             ensure_runtime: true,
+            supports_user_response: false,
         }
     }
 }
@@ -410,6 +413,7 @@ impl JcodeClient {
         let connect = ConnectOptions {
             socket_path: None,
             client_name: options.client_name.clone(),
+            supports_user_response: options.supports_user_response,
             request_timeout: options.request_timeout,
             ensure_runtime: false,
         };
@@ -458,6 +462,7 @@ impl JcodeClient {
         let instance = Arc::new(launch_instance(&options)?);
         let connect = ConnectOptions {
             socket_path: Some(instance.socket_path.clone()),
+            supports_user_response: false,
             client_name: options.client_name.clone(),
             request_timeout: options.request_timeout,
             ensure_runtime: false,
@@ -539,6 +544,7 @@ impl JcodeClient {
                 min_version: API_VERSION_MAJOR,
                 max_version: API_VERSION_MAJOR,
                 client: options.client_name.clone(),
+                supports_user_response: options.supports_user_response,
             },
             hello_timeout,
         )?;
@@ -1840,6 +1846,7 @@ fn start_global_child(parent: &JcodeClient, control: &Arc<GlobalEventControl>, s
         JcodeClient::connect_ssh(options)
     } else {
         JcodeClient::connect(ConnectOptions {
+            supports_user_response: false,
             socket_path: Some(parent.inner.socket_path.clone()),
             client_name: format!("{}/global-events", parent.inner.client_name),
             request_timeout: parent.inner.request_timeout,

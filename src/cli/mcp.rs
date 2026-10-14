@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use super::args::McpCommand;
 use crate::mcp::{McpConfig, McpServerConfig, oauth};
 
-fn remote_server<'a>(config: &'a McpConfig, name: &str) -> Result<&'a McpServerConfig> {
+fn remote_server<'a>(config: &'a McpConfig, name: &str) -> Result<(&'a McpServerConfig, &'a str)> {
     let server = config.servers.get(name).with_context(|| {
         format!(
             "MCP server '{name}' is not configured. Run `jcode mcp list` to see configured names."
@@ -17,14 +17,12 @@ fn remote_server<'a>(config: &'a McpConfig, name: &str) -> Result<&'a McpServerC
             "MCP server '{name}' uses stdio. OAuth login/logout is only supported for remote HTTP/SSE servers."
         );
     }
-    if server
+    let url = server
         .url
         .as_deref()
-        .is_none_or(|url| url.trim().is_empty())
-    {
-        bail!("Remote MCP server '{name}' has no URL configured.");
-    }
-    Ok(server)
+        .filter(|url| !url.trim().is_empty())
+        .with_context(|| format!("Remote MCP server '{name}' has no URL configured."))?;
+    Ok((server, url))
 }
 
 fn static_auth(server: &McpServerConfig) -> bool {
@@ -128,7 +126,7 @@ pub(crate) async fn run(action: McpCommand) -> Result<()> {
             server: name,
             no_browser,
         } => {
-            let server = remote_server(&config, &name)?;
+            let (server, url) = remote_server(&config, &name)?;
             if static_auth(server) {
                 bail!(
                     "MCP server '{name}' has a static Authorization header, which takes precedence over OAuth. Remove that header from MCP config before using `jcode mcp login {name}`."
@@ -140,7 +138,7 @@ pub(crate) async fn run(action: McpCommand) -> Result<()> {
                 oauth::BrowserMode::Open
             };
             eprintln!("Discovering OAuth configuration for MCP server '{name}'...");
-            oauth::login(server.url.as_deref().expect("validated remote URL"), mode, |url| {
+            oauth::login(url, mode, |url| {
                 eprintln!("Open this URL to authorize MCP access:\n{url}\nWaiting for the browser callback (up to five minutes). Keep this command running.");
                 if no_browser {
                     eprintln!("The callback must reach this machine's loopback listener. Over SSH, forward the callback port shown in redirect_uri or run login on the browser's machine.");
@@ -151,8 +149,8 @@ pub(crate) async fn run(action: McpCommand) -> Result<()> {
             );
         }
         McpCommand::Logout { server: name } => {
-            let server = remote_server(&config, &name)?;
-            let removed = oauth::logout(server.url.as_deref().expect("validated remote URL"))?;
+            let (_, url) = remote_server(&config, &name)?;
+            let removed = oauth::logout(url)?;
             println!(
                 "{} for MCP server '{name}'.",
                 if removed {
@@ -183,8 +181,10 @@ mod tests {
 
     #[test]
     fn mcp_cli_resolves_configured_remote_server_and_actionable_errors() {
-        let config = config();
-        assert!(remote_server(&config, "remote").is_ok());
+        let mut config = config();
+        let (server, url) = remote_server(&config, "remote").unwrap();
+        assert!(std::ptr::eq(server, &config.servers["remote"]));
+        assert_eq!(url, "https://example.com/mcp?secret=token");
         assert!(
             remote_server(&config, "missing")
                 .unwrap_err()
@@ -203,6 +203,15 @@ mod tests {
                 .to_string()
                 .contains("no URL")
         );
+        for url in ["", " \t\n"] {
+            config.servers.get_mut("broken").unwrap().url = Some(url.into());
+            assert!(
+                remote_server(&config, "broken")
+                    .unwrap_err()
+                    .to_string()
+                    .contains("no URL")
+            );
+        }
     }
 
     #[test]
