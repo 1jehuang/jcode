@@ -53,3 +53,30 @@ fn prune_due(dir: &Path) -> bool {
 fn mark_pruned(dir: &Path) {
     let _ = std::fs::write(dir.join(PRUNE_MARKER), b"");
 }
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod tests {
+    use super::*;
+    use crate::tests::with_temp_jcode_home;
+
+    #[test]
+    fn daily_pass_prunes_with_the_shared_pruner_once_per_interval() {
+        with_temp_jcode_home(|| {
+            let versions = builds_dir().unwrap().join("versions");
+            let installed = || std::fs::read_dir(&versions).unwrap().count();
+            for index in 0..DEFAULT_KEEP_RECENT_VERSIONS + 2 {
+                let dir = versions.join(format!("v{index}"));
+                std::fs::create_dir_all(&dir).unwrap();
+                std::fs::write(dir.join(crate::binary_name()), b"old build").unwrap();
+            }
+
+            prune_old_versions();
+            assert_eq!(installed(), DEFAULT_KEEP_RECENT_VERSIONS);
+
+            // Within the interval the completion marker suppresses another pass.
+            std::fs::create_dir_all(versions.join("later")).unwrap();
+            prune_old_versions();
+            assert_eq!(installed(), DEFAULT_KEEP_RECENT_VERSIONS + 1);
+        });
+    }
+}
