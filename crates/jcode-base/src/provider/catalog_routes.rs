@@ -2,16 +2,16 @@ use crate::auth::{AuthState, AuthStatus};
 
 use super::pricing::cheapness_for_route;
 use super::{
-    ALL_OPENAI_MODELS, AccountModelAvailabilityState, CHATGPT_WEB_MODEL, GROK_BUILD_PROFILE_ID,
-    ModelRoute, MultiProvider, Provider, ProviderRegistry, anthropic_api_key_route_availability,
+    ALL_OPENAI_MODELS, AccountModelAvailabilityState, GROK_BUILD_PROFILE_ID, ModelRoute,
+    MultiProvider, Provider, ProviderRegistry, anthropic_api_key_route_availability,
     anthropic_oauth_route_availability, bedrock, build_anthropic_oauth_route,
     build_chatgpt_web_route, build_copilot_route, build_openai_api_key_route,
     build_openai_oauth_route, build_openrouter_auto_route, build_openrouter_endpoint_route,
     build_openrouter_fallback_provider_route, configured_standard_openrouter_profile_routes,
     copilot, dedupe_model_routes, direct_openai_compatible_profile_routes,
-    format_account_model_availability_detail, is_listable_model_name, known_anthropic_model_ids,
-    known_openai_model_ids_for_scope, model_availability_for_account, model_availability_for_scope,
-    openrouter, openrouter_catalog_model_id, provider_for_model,
+    format_account_model_availability_detail, is_chatgpt_web_model, is_listable_model_name,
+    known_anthropic_model_ids, known_openai_model_ids_for_scope, model_availability_for_account,
+    model_availability_for_scope, openrouter, openrouter_catalog_model_id, provider_for_model,
     standard_openrouter_profile_configured,
 };
 
@@ -30,8 +30,8 @@ pub fn simplified_model_routes_for_picker(
     let mut routes = Vec::new();
 
     for model in display_models {
-        if model == CHATGPT_WEB_MODEL {
-            routes.push(build_chatgpt_web_route());
+        if is_chatgpt_web_model(&model) {
+            routes.push(build_chatgpt_web_route(&model));
             continue;
         }
         if !model.contains('/') && provider_for_model(&model) == Some("openai") {
@@ -431,8 +431,8 @@ fn append_openai_routes(
     };
 
     for model in openai_models {
-        if model == CHATGPT_WEB_MODEL {
-            routes.push(build_chatgpt_web_route());
+        if is_chatgpt_web_model(&model) {
+            routes.push(build_chatgpt_web_route(&model));
             continue;
         }
         // GPT Pro models are platform-API-only: never offer an OAuth route

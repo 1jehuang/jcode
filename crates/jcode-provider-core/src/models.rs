@@ -32,6 +32,68 @@ pub const ALL_CLAUDE_MODELS: &[&str] = &[
 /// The list is curated best-first; position 0 is the quality-first default.
 pub const CHATGPT_WEB_MODEL: &str = "gpt-5.6-pro[web]";
 
+/// A ChatGPT model driven through the logged-in browser session.
+pub struct ChatGptWebModel {
+    /// jcode model id; the `[web]` suffix keeps it apart from API models.
+    pub id: &'static str,
+    /// chatgpt.com `?model=` slug that opens it.
+    pub slug: &'static str,
+    /// What ChatGPT's model picker shows once it is selected.
+    pub picker_label: &'static str,
+    pub title: &'static str,
+}
+
+/// Models ChatGPT's picker opens by URL (checked 2026-10-14). GPT-6 Instant
+/// opens via `gpt-6`; ChatGPT ignores `gpt-6-instant` after another model was
+/// used. Left out: `gpt-5-6` (ignored) and GPT-5.5, retired on 2026-10-14.
+pub const CHATGPT_WEB_MODELS: &[ChatGptWebModel] = &[
+    ChatGptWebModel {
+        id: "gpt-6-pro[web]",
+        slug: "gpt-6-pro",
+        picker_label: "Pro",
+        title: "GPT-6 Pro",
+    },
+    ChatGptWebModel {
+        id: "gpt-6-thinking[web]",
+        slug: "gpt-6-thinking",
+        picker_label: "Medium",
+        title: "GPT-6 Thinking",
+    },
+    ChatGptWebModel {
+        id: "gpt-6-instant[web]",
+        slug: "gpt-6",
+        picker_label: "Instant",
+        title: "GPT-6 Instant",
+    },
+    ChatGptWebModel {
+        id: CHATGPT_WEB_MODEL,
+        slug: "gpt-5-6-pro",
+        picker_label: "5.6 Pro",
+        title: "GPT-5.6 Pro",
+    },
+    ChatGptWebModel {
+        id: "gpt-5.6-thinking[web]",
+        slug: "gpt-5-6-thinking",
+        picker_label: "5.6 Medium",
+        title: "GPT-5.6 Thinking",
+    },
+    ChatGptWebModel {
+        id: "gpt-5.6-instant[web]",
+        slug: "gpt-5-6-instant",
+        picker_label: "5.6 Instant",
+        title: "GPT-5.6 Instant",
+    },
+];
+
+pub fn chatgpt_web_model(model: &str) -> Option<&'static ChatGptWebModel> {
+    let model = model.trim();
+    CHATGPT_WEB_MODELS.iter().find(|web| web.id == model)
+}
+
+pub fn is_chatgpt_web_model(model: &str) -> bool {
+    chatgpt_web_model(model).is_some()
+}
+
 /// GPT Pro reasoning models. These are exposed only on the OpenAI platform
 /// API (`api.openai.com` with an `OPENAI_API_KEY`); the ChatGPT/Codex OAuth
 /// backend rejects them ("not supported when using Codex with a ChatGPT
@@ -66,10 +128,15 @@ pub const ALL_OPENAI_MODELS: &[&str] = &[
     DEFAULT_OPENAI_MODEL,
     "gpt-5.6-sol",
     "gpt-5.6-pro",
-    // ChatGPT web-only route. The `[web]` suffix is intentionally part of the
-    // jcode model id so it can never be mistaken for an API/Codex model with
-    // the same upstream slug.
+    // ChatGPT web-only routes (`CHATGPT_WEB_MODELS`). The `[web]` suffix is
+    // intentionally part of the jcode model id so it can never be mistaken
+    // for an API/Codex model with the same upstream slug.
+    "gpt-6-pro[web]",
+    "gpt-6-thinking[web]",
+    "gpt-6-instant[web]",
     CHATGPT_WEB_MODEL,
+    "gpt-5.6-thinking[web]",
+    "gpt-5.6-instant[web]",
     "gpt-5.6",
     "gpt-5.6-terra",
     "gpt-5.6-luna",
@@ -116,6 +183,20 @@ mod gpt_5_6_catalog_tests {
         }
         assert!(is_openai_api_only_pro_model("gpt-5.6-pro"));
         assert!(!is_openai_api_only_pro_model("gpt-5.6-sol"));
+        for web in CHATGPT_WEB_MODELS {
+            assert!(ALL_OPENAI_MODELS.contains(&web.id), "missing {}", web.id);
+            assert!(
+                !is_openai_api_only_pro_model(web.id),
+                "{} is a web route",
+                web.id
+            );
+            assert_eq!(provider_for_model(web.id), Some("openai"), "{}", web.id);
+            assert_eq!(
+                chatgpt_web_model(web.id).map(|found| found.slug),
+                Some(web.slug)
+            );
+        }
+        assert!(!is_chatgpt_web_model("gpt-6-pro"));
         assert_eq!(DEFAULT_OPENAI_MODEL, "gpt-6-astra");
         assert_eq!(ALL_OPENAI_MODELS[0], "gpt-6-astra");
     }

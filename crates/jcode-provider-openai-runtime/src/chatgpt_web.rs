@@ -8,10 +8,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 
-use super::CHATGPT_WEB_MODEL;
+use jcode_provider_core::{CHATGPT_WEB_MODEL, ChatGptWebModel, chatgpt_web_model};
 
-const CHATGPT_WEB_URL: &str = "https://chatgpt.com/?model=gpt-5-6-pro&temporary-chat=true";
-const EDITOR_SELECTOR: &str = "[contenteditable=true][aria-label='Chat with ChatGPT']";
+// ChatGPT renamed its composer, send button, model picker and turn markup.
+// Every selector below matches both generations of the page.
+const EDITOR_SELECTOR: &str = "[contenteditable=true][aria-label='Chat with ChatGPT'], [contenteditable=true][aria-label='Ask ChatGPT']";
+const SUBMIT_SELECTOR: &str = "#composer-submit-button, button[aria-label='Send']";
 const TOOL_CALL_START: &str = "<jcode_tool_call>";
 const TOOL_CALL_END: &str = "</jcode_tool_call>";
 const PROMPT_CHUNK_BYTES: usize = 24_000;
@@ -43,6 +45,7 @@ impl ChatGptWebState {
         model: &str,
     ) -> Result<EventStream> {
         let prompt = build_web_prompt(messages, tools, system)?;
+        let title = chatgpt_web_model(model).map_or("ChatGPT", |web| web.title);
         let model = model.to_string();
         let advertised_tools: Vec<String> = tools.iter().map(|tool| tool.name.clone()).collect();
         let (tx, rx) = mpsc::channel(128);
@@ -59,8 +62,7 @@ impl ChatGptWebState {
             }
             if tx
                 .send(Ok(StreamEvent::StatusDetail {
-                    detail: "Using GPT-5.6 Pro through your logged-in ChatGPT web session"
-                        .to_string(),
+                    detail: format!("Using {title} through your logged-in ChatGPT web session"),
                 }))
                 .await
                 .is_err()
@@ -89,9 +91,9 @@ impl ChatGptWebState {
         model: &str,
         tx: &mpsc::Sender<Result<StreamEvent>>,
     ) -> Result<String> {
-        if model != CHATGPT_WEB_MODEL {
+        let Some(web) = chatgpt_web_model(model) else {
             anyhow::bail!("Unsupported ChatGPT web model: {model}");
-        }
+        };
         if tx.is_closed() {
             anyhow::bail!("ChatGPT web response consumer was closed before browser setup");
         }
@@ -108,12 +110,12 @@ impl ChatGptWebState {
         }
 
         let _turn_guard = self.turn_lock.lock().await;
-        let (tab_id, fork_name) = open_chatgpt_tab().await?;
+        let (tab_id, fork_name) = open_chatgpt_tab(web).await?;
         let result = async {
             send_phase(tx, jcode_message_types::ConnectionPhase::Authenticating).await?;
 
             wait_for_editor(tab_id).await?;
-            prepare_chatgpt_page(tab_id).await?;
+            prepare_chatgpt_page(tab_id, web).await?;
             insert_prompt(tab_id, prompt).await?;
             if tx.is_closed() {
                 anyhow::bail!("ChatGPT web response consumer was closed before submission");
@@ -126,23 +128,24 @@ impl ChatGptWebState {
 
             bridge_command(
                 "click",
-                json!({ "tabId": tab_id, "selector": "#composer-submit-button" }),
+                json!({ "tabId": tab_id, "selector": SUBMIT_SELECTOR }),
             )
             .await
             .context("Failed to submit the prompt in ChatGPT")?;
 
             send_phase(tx, jcode_message_types::ConnectionPhase::WaitingForResponse).await?;
 
-            poll_for_response(tab_id, tx).await
+            poll_for_response(tab_id, tx, web).await
         }
         .await;
         let cleanup = close_chatgpt_tab(tab_id, &fork_name).await;
         match (result, cleanup) {
             (Ok(response), Ok(())) => Ok(response),
             (Err(err), Ok(())) => Err(err),
-            (Ok(_), Err(cleanup_err)) => Err(cleanup_err.context(
-                "GPT-5.6 Pro answered, but jcode could not securely close its browser tab",
-            )),
+            (Ok(_), Err(cleanup_err)) => Err(cleanup_err.context(format!(
+                "{} answered, but jcode could not securely close its browser tab",
+                web.title
+            ))),
             (Err(err), Err(cleanup_err)) => {
                 Err(err.context(format!("Browser tab cleanup also failed: {cleanup_err:#}")))
             }
@@ -159,7 +162,7 @@ async fn send_phase(
         .map_err(|_| anyhow::anyhow!("ChatGPT web response consumer was closed"))
 }
 
-async fn open_chatgpt_tab() -> Result<(u64, String)> {
+async fn open_chatgpt_tab(web: &ChatGptWebModel) -> Result<(u64, String)> {
     let source = bridge_command("getActiveTab", json!({}))
         .await
         .context("Failed to find a Firefox tab to duplicate for ChatGPT")?;
@@ -186,7 +189,11 @@ async fn open_chatgpt_tab() -> Result<(u64, String)> {
 
     if let Err(err) = bridge_command(
         "navigate",
-        json!({ "tabId": tab_id, "url": CHATGPT_WEB_URL, "wait": true }),
+        json!({
+            "tabId": tab_id,
+            "url": format!("https://chatgpt.com/?model={}&temporary-chat=true", web.slug),
+            "wait": true
+        }),
     )
     .await
     {
@@ -242,7 +249,7 @@ async fn wait_for_editor(tab_id: u64) -> Result<()> {
     Ok(())
 }
 
-async fn prepare_chatgpt_page(tab_id: u64) -> Result<()> {
+async fn prepare_chatgpt_page(tab_id: u64, web: &ChatGptWebModel) -> Result<()> {
     // Temporary chat has a one-time explanatory screen. It is safe to dismiss,
     // but workspace migration/onboarding is deliberately never auto-confirmed.
     let preparation = evaluate(
@@ -264,13 +271,15 @@ const continueButton = Array.from(document.querySelectorAll('button')).find(b =>
   return false;
 });
 if (continueButton) continueButton.click();
-const model = Array.from(document.querySelectorAll('button.__composer-pill'))
+const pills = Array.from(document.querySelectorAll('button.__composer-pill'));
+const legacy = pills.length > 0;
+const model = (legacy ? pills : Array.from(document.querySelectorAll('button[aria-label="Select ChatGPT model"]')))
   .map(b => b.innerText.trim()).find(Boolean) || '';
 const temporary = !!document.querySelector('button[aria-label="Turn off temporary chat"]')
   || document.body.innerText.includes("This chat won't appear your conversation history");
 const signedOut = Array.from(document.querySelectorAll('button,a'))
   .some(e => /^(log in|sign up)$/i.test(e.innerText.trim()));
-return { onboarding: false, model, temporary, signedOut };
+return { onboarding: false, model, legacy, temporary, signedOut };
 "#,
     )
     .await?;
@@ -294,32 +303,36 @@ return { onboarding: false, model, temporary, signedOut };
             let current = evaluate(
                 tab_id,
                 r#"
-const model = Array.from(document.querySelectorAll('button.__composer-pill'))
+const pills = Array.from(document.querySelectorAll('button.__composer-pill'));
+const legacy = pills.length > 0;
+const model = (legacy ? pills : Array.from(document.querySelectorAll('button[aria-label="Select ChatGPT model"]')))
   .map(b => b.innerText.trim()).find(Boolean) || '';
 const temporary = !!document.querySelector('button[aria-label="Turn off temporary chat"]')
   || document.body.innerText.includes("This chat won't appear your conversation history");
-return { model, temporary };
+return { model, legacy, temporary };
 "#,
             )
             .await?;
-            if page_verification_ready(&current) || Instant::now() >= deadline {
+            if page_verification_ready(&current, web) || Instant::now() >= deadline {
                 break current;
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
     };
-    let selected_model = verification
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    if selected_model != "Pro" {
+    if !picker_shows(&verification, web) {
+        let selected_model = verification
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         anyhow::bail!(
-            "ChatGPT did not select GPT-5.6 Pro (model picker showed '{}'). Confirm this workspace has GPT-5.6 Pro access",
+            "ChatGPT did not select {} (model picker showed '{}'). Confirm this workspace has {} access",
+            web.title,
             if selected_model.is_empty() {
                 "unknown"
             } else {
                 selected_model
-            }
+            },
+            web.title
         );
     }
     if verification.get("temporary").and_then(Value::as_bool) != Some(true) {
@@ -330,9 +343,21 @@ return { model, temporary };
     Ok(())
 }
 
-fn page_verification_ready(verification: &Value) -> bool {
-    verification.get("model").and_then(Value::as_str) == Some("Pro")
+fn page_verification_ready(verification: &Value, web: &ChatGptWebModel) -> bool {
+    picker_shows(verification, web)
         && verification.get("temporary").and_then(Value::as_bool) == Some(true)
+}
+
+fn picker_shows(verification: &Value, web: &ChatGptWebModel) -> bool {
+    let label = verification
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    // The older page had only a "Pro" pill, and it meant GPT-5.6 Pro.
+    if verification.get("legacy").and_then(Value::as_bool) == Some(true) {
+        return web.id == CHATGPT_WEB_MODEL && label == "Pro";
+    }
+    label == web.picker_label
 }
 
 async fn insert_prompt(tab_id: u64, prompt: &str) -> Result<()> {
@@ -369,8 +394,8 @@ async fn insert_prompt(tab_id: u64, prompt: &str) -> Result<()> {
     let verification = evaluate(
         tab_id,
         r#"
-const editor = document.querySelector('[contenteditable=true][aria-label="Chat with ChatGPT"]');
-const submit = document.querySelector('#composer-submit-button');
+const editor = document.querySelector('[contenteditable=true][aria-label="Chat with ChatGPT"], [contenteditable=true][aria-label="Ask ChatGPT"]');
+const submit = document.querySelector('#composer-submit-button, button[aria-label="Send"]');
 const text = editor
   ? (editor.children.length > 0
       ? Array.from(editor.children).map(child => child.textContent || '').join('\n')
@@ -404,7 +429,11 @@ return { length: text.length, hash: hash >>> 0, submitDisabled: !submit || submi
     Ok(())
 }
 
-async fn poll_for_response(tab_id: u64, tx: &mpsc::Sender<Result<StreamEvent>>) -> Result<String> {
+async fn poll_for_response(
+    tab_id: u64,
+    tx: &mpsc::Sender<Result<StreamEvent>>,
+    web: &ChatGptWebModel,
+) -> Result<String> {
     let timeout_secs = std::env::var("JCODE_CHATGPT_WEB_TIMEOUT_SECS")
         .ok()
         .and_then(|raw| raw.parse::<u64>().ok())
@@ -434,7 +463,8 @@ return true;
         }
         if Instant::now() >= deadline {
             anyhow::bail!(
-                "GPT-5.6 Pro web response timed out after {} seconds (override with JCODE_CHATGPT_WEB_TIMEOUT_SECS)",
+                "{} web response timed out after {} seconds (override with JCODE_CHATGPT_WEB_TIMEOUT_SECS)",
+                web.title,
                 timeout_secs
             );
         }
@@ -442,9 +472,9 @@ return true;
         let state = evaluate(
             tab_id,
             r#"
-const sections = Array.from(document.querySelectorAll('section[data-turn="assistant"]'));
+const sections = Array.from(document.querySelectorAll('section[data-turn="assistant"], [data-turn-key]'));
 const section = sections.at(-1) || null;
-const messages = section ? Array.from(section.querySelectorAll('[data-message-author-role="assistant"]')) : [];
+const messages = section ? Array.from(section.querySelectorAll('[data-message-author-role="assistant"], [data-markdown-text-style="assistant-message"]')) : [];
 const visible = messages.filter(e => { const r=e.getBoundingClientRect(); return r.width > 0 && r.height > 0; });
 const message = visible.at(-1) || messages.at(-1) || null;
 const markdowns = message ? Array.from(message.querySelectorAll('.markdown')) : [];
@@ -452,13 +482,15 @@ const markdown = markdowns.at(-1) || null;
 const text = markdown ? markdown.innerText : (message ? message.innerText : '');
 const busy = Array.from(document.querySelectorAll('button')).some(b => {
   const label = b.getAttribute('aria-label') || '';
-  return /stop (generating|streaming|response)/i.test(label) || b.dataset.testid === 'stop-button';
+  return /^stop$|stop (generating|streaming|response)/i.test(label) || b.dataset.testid === 'stop-button';
 });
 const alert = Array.from(document.querySelectorAll('[role="alert"]')).map(e => e.innerText.trim()).filter(Boolean).at(-1) || '';
 const terminal = !!section && !busy && !!section.querySelector(
   '[data-testid="copy-turn-action-button"], button[aria-label="Copy"], button[aria-label*="Good response"], button[aria-label*="Bad response"]'
 );
-return { text, busy, terminal, alert, model: message ? message.dataset.messageModelSlug || '' : '' };
+// The new page has no per-message model slug; its picker is the only signal.
+const picker = ((document.querySelector('button[aria-label="Select ChatGPT model"]') || {}).innerText || '').trim();
+return { text, busy, terminal, alert, picker, model: message ? message.dataset.messageModelSlug || '' : '' };
 "#,
         )
         .await
@@ -501,14 +533,24 @@ return { text, busy, terminal, alert, model: message ? message.dataset.messageMo
                 .get("model")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            if upstream_model != "gpt-5-6-pro" {
+            let picker = state
+                .get("picker")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let answered_by_requested = if upstream_model.is_empty() {
+                picker == web.picker_label
+            } else {
+                upstream_model == web.slug
+            };
+            if !answered_by_requested {
+                let seen = [upstream_model, picker]
+                    .into_iter()
+                    .find(|seen| !seen.is_empty())
+                    .unwrap_or("unknown");
                 anyhow::bail!(
-                    "ChatGPT answered with model '{}' instead of gpt-5-6-pro",
-                    if upstream_model.is_empty() {
-                        "unknown"
-                    } else {
-                        upstream_model
-                    }
+                    "ChatGPT answered with model '{}' instead of {}",
+                    seen,
+                    web.slug
                 );
             }
             return Ok(text);
@@ -519,7 +561,7 @@ return { text, busy, terminal, alert, model: message ? message.dataset.messageMo
             last_status_second = elapsed;
             let _ = tx
                 .send(Ok(StreamEvent::StatusDetail {
-                    detail: format!("GPT-5.6 Pro is working in ChatGPT web ({}s)", elapsed),
+                    detail: format!("{} is working in ChatGPT web ({}s)", web.title, elapsed),
                 }))
                 .await;
         }
@@ -859,17 +901,40 @@ mod tests {
 
     #[test]
     fn page_verification_requires_exact_pro_and_temporary_chat() {
+        let pro = chatgpt_web_model(CHATGPT_WEB_MODEL).unwrap();
+        let gpt6_pro = chatgpt_web_model("gpt-6-pro[web]").unwrap();
+        // New picker: "Pro" alone is GPT-6 Pro, GPT-5.6 Pro reads "5.6 Pro".
         assert!(page_verification_ready(
-            &json!({ "model": "Pro", "temporary": true })
+            &json!({ "model": "5.6 Pro", "legacy": false, "temporary": true }),
+            pro
         ));
         assert!(!page_verification_ready(
-            &json!({ "model": "", "temporary": true })
+            &json!({ "model": "Pro", "legacy": false, "temporary": true }),
+            pro
+        ));
+        assert!(page_verification_ready(
+            &json!({ "model": "Pro", "legacy": false, "temporary": true }),
+            gpt6_pro
         ));
         assert!(!page_verification_ready(
-            &json!({ "model": "Instant", "temporary": true })
+            &json!({ "model": "Pro", "legacy": true, "temporary": true }),
+            gpt6_pro
+        ));
+        assert!(page_verification_ready(
+            &json!({ "model": "Pro", "legacy": true, "temporary": true }),
+            pro
         ));
         assert!(!page_verification_ready(
-            &json!({ "model": "Pro", "temporary": false })
+            &json!({ "model": "", "temporary": true }),
+            pro
+        ));
+        assert!(!page_verification_ready(
+            &json!({ "model": "5.6 Instant", "temporary": true }),
+            pro
+        ));
+        assert!(!page_verification_ready(
+            &json!({ "model": "5.6 Pro", "temporary": false }),
+            pro
         ));
     }
 
