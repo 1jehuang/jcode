@@ -219,6 +219,8 @@ return (async () => {
     for (let index=0; index<text.length; index++) hash = Math.imul(hash ^ text.charCodeAt(index), 16777619);
     return { length: text.length, hash: hash >>> 0, submitDisabled: !submit || unavailable(submit) };
   }
+  // The current page labels the button just "Stop"; older pages said "Stop generating".
+  const isStopButton = e => /^stop( generating| streaming| response)?$/i.test((e.getAttribute('aria-label') || '').trim()) || e.getAttribute('data-testid') === 'stop-button';
   function responseState() {
     const root = one('main') || document;
     const current = all('[data-markdown-text-style="assistant-message"]', root).filter(visible).at(-1);
@@ -226,11 +228,14 @@ return (async () => {
     const message = current || legacy;
     const markdown = current || legacy?.querySelector('.markdown') || legacy;
     const turn = message?.closest('[data-talvt-turn-state], section[data-turn="assistant"]');
-    const busy = all('button', root).filter(visible).some(e => /stop (generating|streaming|response)/i.test(e.getAttribute('aria-label') || '') || e.getAttribute('data-testid') === 'stop-button');
-    const explicitComplete = turn?.getAttribute('data-talvt-turn-state') === 'complete';
-    const legacyComplete = !current && !!turn?.querySelector('[data-testid="copy-turn-action-button"], button[aria-label="Copy"], button[aria-label*="Good response"], button[aria-label*="Bad response"]');
-    return { text: markdown?.innerText || '', busy, terminal: !busy && (explicitComplete || legacyComplete),
+    const busy = all('button', root).filter(visible).some(isStopButton);
+    // data-talvt-turn-state reads "complete" while a reasoning model is still
+    // thinking, so a turn is finished only once its answer action bar renders.
+    const answered = !!turn?.querySelector('[data-testid="copy-turn-action-button"], button[aria-label="Copy"], button[aria-label="Rate response"], button[aria-label="Regenerate response"], button[aria-label*="Good response"], button[aria-label*="Bad response"]');
+    const text = markdown?.innerText || '';
+    return { text, busy, terminal: !busy && answered,
       alert: all('[role="alert"]', root).filter(visible).map(e => (e.innerText || '').trim()).filter(Boolean).at(-1) || '',
+      snippet: text ? '' : ((turn || root).innerText || '').trim().slice(-300),
       model: message?.getAttribute('data-message-model-slug') || '' };
   }
 
@@ -245,7 +250,7 @@ return (async () => {
   if (request.op === 'stop') {
     const root = one('main');
     if (!root) throw Error('ChatGPT owned conversation is unavailable for safe Stop');
-    const stop = all('button', root).filter(visible).find(e => /stop (generating|streaming|response)/i.test(e.getAttribute('aria-label') || '') || e.getAttribute('data-testid') === 'stop-button');
+    const stop = all('button', root).filter(visible).find(isStopButton);
     if (stop) stop.click();
     await until(() => !responseState().busy, 'stopping the owned response');
     return { stopped: !!stop, busy: false };

@@ -418,6 +418,7 @@ async fn poll_for_response(
     let deadline = started + Duration::from_secs(timeout_secs);
     let mut last_status_second = 0u64;
     let mut streaming_emitted = false;
+    let mut empty_finished_polls = 0usize;
     loop {
         if tx.is_closed() {
             anyhow::bail!("ChatGPT web response consumer was closed");
@@ -451,10 +452,20 @@ async fn poll_for_response(
             streaming_emitted = true;
         }
         // Quiet text alone is not completion. Thinking pauses must not truncate answers.
-        if terminal {
-            if text.is_empty() {
-                anyhow::bail!("ChatGPT completed the turn without an assistant response");
+        if terminal && text.is_empty() {
+            // The answer can render a moment after its action bar.
+            empty_finished_polls += 1;
+            if empty_finished_polls >= 8 {
+                let snippet = state
+                    .get("snippet")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                anyhow::bail!(
+                    "ChatGPT completed the turn without an assistant response (page showed: {:?})",
+                    if alert.is_empty() { snippet } else { alert }
+                );
             }
+        } else if terminal {
             let upstream_model = state
                 .get("model")
                 .and_then(Value::as_str)
@@ -494,25 +505,34 @@ async fn emit_response(
     response: &str,
     advertised_tools: &[String],
 ) -> Result<()> {
-    if let Some(parsed) = parse_tool_call(response)? {
-        if !advertised_tools.iter().any(|name| name == &parsed.name) {
+    let reply = parse_reply(response)?;
+    if !reply.calls.is_empty() {
+        if let Some(unknown) = reply
+            .calls
+            .iter()
+            .find(|call| !advertised_tools.iter().any(|name| name == &call.name))
+        {
             anyhow::bail!(
                 "ChatGPT requested unknown jcode tool '{}'; advertised tools were: {}",
-                parsed.name,
+                unknown.name,
                 advertised_tools.join(", ")
             );
         }
-        let id = next_tool_call_id();
-        tx.send(Ok(StreamEvent::ToolUseStart {
-            id,
-            name: parsed.name,
-        }))
-        .await
-        .ok();
-        tx.send(Ok(StreamEvent::ToolInputDelta(parsed.input.to_string())))
+        if !reply.text.is_empty() {
+            tx.send(Ok(StreamEvent::TextDelta(reply.text))).await.ok();
+        }
+        for call in reply.calls {
+            tx.send(Ok(StreamEvent::ToolUseStart {
+                id: next_tool_call_id(),
+                name: call.name,
+            }))
             .await
             .ok();
-        tx.send(Ok(StreamEvent::ToolUseEnd)).await.ok();
+            tx.send(Ok(StreamEvent::ToolInputDelta(call.input.to_string())))
+                .await
+                .ok();
+            tx.send(Ok(StreamEvent::ToolUseEnd)).await.ok();
+        }
         tx.send(Ok(StreamEvent::MessageEnd {
             stop_reason: Some("tool_use".to_string()),
         }))
@@ -537,19 +557,57 @@ struct ParsedToolCall {
     input: Value,
 }
 
-fn parse_tool_call(response: &str) -> Result<Option<ParsedToolCall>> {
-    let trimmed = response.trim();
-    if !trimmed.contains(TOOL_CALL_START) {
-        return Ok(None);
+struct ParsedReply {
+    text: String,
+    calls: Vec<ParsedToolCall>,
+}
+
+/// Split a ChatGPT reply into prose and the jcode tool calls that end it. The
+/// protocol asks for one bare envelope, but models add a lead-in sentence, emit
+/// several calls, or use a code fence (rendered with a "Copy code" header).
+/// Calls come only from envelopes that end the reply. An envelope quoted
+/// mid-text leaves the whole reply as an ordinary answer.
+fn parse_reply(response: &str) -> Result<ParsedReply> {
+    let mut calls = Vec::new();
+    let mut rest = trim_fence_chrome(response);
+    while rest.ends_with(TOOL_CALL_END) {
+        let body = &rest[..rest.len() - TOOL_CALL_END.len()];
+        // Try the nearest opener first: the marker may also occur in JSON strings.
+        let Some((start, payload)) = body
+            .rmatch_indices(TOOL_CALL_START)
+            .map(|(start, _)| (start, &body[start + TOOL_CALL_START.len()..]))
+            .find_map(|(start, payload)| {
+                serde_json::from_str::<Value>(payload.trim())
+                    .ok()
+                    .map(|payload| (start, payload))
+            })
+        else {
+            break;
+        };
+        calls.push(tool_call_from_payload(payload)?);
+        rest = trim_fence_chrome(&rest[..start]);
     }
-    if !trimmed.starts_with(TOOL_CALL_START) || !trimmed.ends_with(TOOL_CALL_END) {
-        anyhow::bail!(
-            "ChatGPT mentioned a jcode tool-call envelope without emitting it as the entire response"
-        );
+    if calls.is_empty() {
+        let trimmed = response.trim_end();
+        if trimmed.rfind(TOOL_CALL_START) > trimmed.rfind(TOOL_CALL_END) {
+            anyhow::bail!("ChatGPT's jcode tool call was cut off before its closing marker");
+        }
+        if rest.ends_with(TOOL_CALL_END) {
+            anyhow::bail!("ChatGPT emitted a jcode tool call whose payload is not valid JSON");
+        }
+        return Ok(ParsedReply {
+            text: response.to_string(),
+            calls,
+        });
     }
-    let payload_text = &trimmed[TOOL_CALL_START.len()..trimmed.len() - TOOL_CALL_END.len()];
-    let payload: Value = serde_json::from_str(payload_text.trim())
-        .context("ChatGPT emitted invalid JSON in a jcode tool-call envelope")?;
+    calls.reverse();
+    Ok(ParsedReply {
+        text: rest.trim().to_string(),
+        calls,
+    })
+}
+
+fn tool_call_from_payload(payload: Value) -> Result<ParsedToolCall> {
     let name = payload
         .get("name")
         .and_then(Value::as_str)
@@ -561,7 +619,33 @@ fn parse_tool_call(response: &str) -> Result<Option<ParsedToolCall>> {
     if !input.is_object() {
         anyhow::bail!("jcode tool-call envelope input must be a JSON object");
     }
-    Ok(Some(ParsedToolCall { name, input }))
+    Ok(ParsedToolCall { name, input })
+}
+
+/// Drop trailing code-fence lines and ChatGPT's code-block header text.
+fn trim_fence_chrome(text: &str) -> &str {
+    let mut text = text.trim_end();
+    loop {
+        let (head, last) = text.rsplit_once('\n').unwrap_or(("", text));
+        let line = last.trim();
+        let chrome = line.starts_with("```") && !line[3..].contains(char::is_whitespace)
+            || [
+                "copy code",
+                "copy",
+                "code",
+                "xml",
+                "json",
+                "html",
+                "text",
+                "plaintext",
+            ]
+            .iter()
+            .any(|word| line.eq_ignore_ascii_case(word));
+        if !chrome || text.is_empty() {
+            return text;
+        }
+        text = head.trim_end();
+    }
 }
 
 fn next_tool_call_id() -> String {
@@ -754,56 +838,94 @@ async fn bridge_command(action: &str, params: Value) -> Result<Value> {
 mod tests {
     use super::*;
 
+    fn calls(response: &str) -> (String, Vec<(String, Value)>) {
+        let reply = parse_reply(response).unwrap();
+        let calls = reply.calls.into_iter().map(|c| (c.name, c.input)).collect();
+        (reply.text, calls)
+    }
+
     #[test]
     fn tool_call_parser_accepts_valid_exact_envelope() {
-        let parsed = parse_tool_call(
+        let (text, calls) = calls(
             "  <jcode_tool_call>{\"name\":\"bash\",\"input\":{\"command\":\"pwd\",\"intent\":\"Check cwd\"}}</jcode_tool_call>\n",
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(parsed.name, "bash");
-        assert_eq!(parsed.input["command"], "pwd");
+        );
+        assert_eq!(text, "");
+        assert_eq!(calls[0].0, "bash");
+        assert_eq!(calls[0].1["command"], "pwd");
     }
 
     #[test]
-    fn tool_call_parser_rejects_incomplete_envelope() {
-        let err = parse_tool_call("<jcode_tool_call>{\"name\":\"bash\"}")
-            .err()
-            .expect("incomplete marker should fail");
-        assert!(err.to_string().contains("entire response"));
+    fn tool_call_parser_keeps_a_lead_in_sentence_as_text() {
+        let (text, calls) = calls(
+            "I'll check the active workers first.\n\n<jcode_tool_call>{\"name\":\"swarm\",\"input\":{\"action\":\"list\"}}</jcode_tool_call>",
+        );
+        assert_eq!(text, "I'll check the active workers first.");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "swarm");
     }
 
     #[test]
-    fn tool_call_parser_rejects_quoted_or_suffixed_envelope() {
+    fn tool_call_parser_takes_every_trailing_call_in_order() {
+        let (text, calls) = calls(concat!(
+            "<jcode_tool_call>{\"name\":\"read\",\"input\":{\"file_path\":\"a\"}}</jcode_tool_call>\n",
+            "<jcode_tool_call>{\"name\":\"read\",\"input\":{\"file_path\":\"b\"}}</jcode_tool_call>",
+        ));
+        assert_eq!(text, "");
+        let paths: Vec<_> = calls.iter().map(|c| c.1["file_path"].clone()).collect();
+        assert_eq!(paths, ["a", "b"]);
+    }
+
+    #[test]
+    fn tool_call_parser_ignores_rendered_code_fence_chrome() {
+        // ChatGPT renders a fenced envelope with a language label and "Copy code".
         for response in [
-            "Example: <jcode_tool_call>{\"name\":\"bash\",\"input\":{}}</jcode_tool_call>",
-            "<jcode_tool_call>{\"name\":\"bash\",\"input\":{}}</jcode_tool_call> done",
+            "Running it now.\nxml\nCopy code\n<jcode_tool_call>{\"name\":\"bash\",\"input\":{}}</jcode_tool_call>",
+            "```xml\n<jcode_tool_call>{\"name\":\"bash\",\"input\":{}}</jcode_tool_call>\n```",
         ] {
-            let err = parse_tool_call(response)
-                .err()
-                .expect("non-exact tool envelope should fail closed");
-            assert!(err.to_string().contains("entire response"));
+            let (text, calls) = calls(response);
+            assert_eq!(calls.len(), 1, "{response}");
+            assert!(
+                !text.contains("Copy code") && !text.contains("```"),
+                "{text}"
+            );
         }
     }
 
     #[test]
-    fn tool_call_parser_rejects_non_object_input() {
-        let err = parse_tool_call(
-            "<jcode_tool_call>{\"name\":\"bash\",\"input\":[\"not\",\"an\",\"object\"]}</jcode_tool_call>",
-        )
-        .err()
-        .expect("array tool input should fail");
-        assert!(err.to_string().contains("JSON object"));
+    fn tool_call_parser_treats_a_mid_text_envelope_as_an_answer() {
+        let response = "Use <jcode_tool_call>{\"name\":\"bash\",\"input\":{}}</jcode_tool_call> to run commands.";
+        let (text, calls) = calls(response);
+        assert!(calls.is_empty());
+        assert_eq!(text, response);
+    }
+
+    #[test]
+    fn tool_call_parser_rejects_cut_off_or_malformed_trailing_calls() {
+        for (response, expected) in [
+            ("<jcode_tool_call>{\"name\":\"bash\"}", "cut off"),
+            (
+                "<jcode_tool_call>{\"name\":\"bash\",</jcode_tool_call>",
+                "not valid JSON",
+            ),
+            (
+                "<jcode_tool_call>{\"name\":\"bash\",\"input\":[\"not\",\"an\",\"object\"]}</jcode_tool_call>",
+                "JSON object",
+            ),
+        ] {
+            let err = parse_reply(response).err().expect(response);
+            assert!(err.to_string().contains(expected), "{err}");
+        }
     }
 
     #[test]
     fn tool_call_parser_allows_marker_text_inside_json_string_values() {
-        let parsed = parse_tool_call(
-            "<jcode_tool_call>{\"name\":\"bash\",\"input\":{\"command\":\"printf '</jcode_tool_call>'\"}}</jcode_tool_call>",
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(parsed.input["command"], "printf '</jcode_tool_call>'");
+        let (_, calls) = calls(
+            "<jcode_tool_call>{\"name\":\"bash\",\"input\":{\"command\":\"printf '<jcode_tool_call></jcode_tool_call>'\"}}</jcode_tool_call>",
+        );
+        assert_eq!(
+            calls[0].1["command"],
+            "printf '<jcode_tool_call></jcode_tool_call>'"
+        );
     }
 
     #[test]

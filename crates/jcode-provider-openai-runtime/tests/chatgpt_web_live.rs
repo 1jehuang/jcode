@@ -115,3 +115,84 @@ async fn chatgpt_web_live_public_provider_all_available_models() -> anyhow::Resu
     );
     Ok(())
 }
+
+/// Opt-in: an agentic turn must come back as a jcode tool call, not text or an
+/// error. JCODE_CHATGPT_WEB_LIVE_MODEL / _EFFORT pick the route (default the
+/// first discovered model at max Power, the slowest and most verbose case).
+#[tokio::test]
+#[ignore = "requires JCODE_CHATGPT_WEB_LIVE=1, an existing connected logged-in bridge, and permission to send tiny temporary diagnostics"]
+async fn chatgpt_web_live_agentic_turn_returns_a_tool_call() -> anyhow::Result<()> {
+    anyhow::ensure!(
+        std::env::var("JCODE_CHATGPT_WEB_LIVE").as_deref() == Ok("1"),
+        "Explicit live-test authorization is required"
+    );
+    let provider = OpenAIProvider::new_browser_only();
+    provider.prefetch_models().await?;
+    let model = match std::env::var("JCODE_CHATGPT_WEB_LIVE_MODEL") {
+        Ok(model) => model,
+        Err(_) => jcode_base::provider::chatgpt_web::cached_models()
+            .into_iter()
+            .find(|model| model.available)
+            .map(|model| model.model)
+            .ok_or_else(|| anyhow::anyhow!("No available ChatGPT models were discovered"))?,
+    };
+    let effort = std::env::var("JCODE_CHATGPT_WEB_LIVE_EFFORT").unwrap_or_else(|_| "max".into());
+    provider.set_model(&model)?;
+    provider.set_reasoning_effort(&effort)?;
+    let tools = vec![jcode_message_types::ToolDefinition {
+        name: "read".to_string(),
+        description: "Read a text file from the local workspace.".to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "file_path": {"type": "string"},
+                "intent": {"type": "string"}
+            },
+            "required": ["file_path", "intent"]
+        }),
+        defer_loading: false,
+    }];
+    let messages = vec![Message {
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: "What does the file notes/JCODE_LIVE.txt say? You have not read it yet."
+                .to_string(),
+            cache_control: None,
+        }],
+        timestamp: None,
+        tool_duration_ms: None,
+    }];
+    println!("JCODE_PROGRESS {{\"message\":\"Agentic turn on {model} at {effort}\"}}");
+    let mut stream = provider
+        .complete(
+            &messages,
+            &tools,
+            "You are a coding agent. Use tools to inspect files before answering.",
+            None,
+        )
+        .await?;
+    let (mut tool, mut input, mut text) = (None, String::new(), String::new());
+    while let Some(event) = stream.next().await {
+        match event? {
+            StreamEvent::ToolUseStart { name, .. } => tool = Some(name),
+            StreamEvent::ToolInputDelta(delta) => input.push_str(&delta),
+            StreamEvent::TextDelta(delta) => text.push_str(&delta),
+            StreamEvent::StatusDetail { detail } => println!(
+                "JCODE_PROGRESS {{\"message\":{}}}",
+                serde_json::to_string(&detail)?
+            ),
+            _ => {}
+        }
+    }
+    assert_eq!(
+        tool.as_deref(),
+        Some("read"),
+        "expected a read tool call, got text: {text}"
+    );
+    assert!(input.contains("JCODE_LIVE.txt"), "tool input: {input}");
+    println!(
+        "JCODE_CHECKPOINT {{\"message\":\"{model} {effort}: tool call read {input} (lead-in text: {:?})\"}}",
+        text.trim()
+    );
+    Ok(())
+}
