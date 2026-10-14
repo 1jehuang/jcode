@@ -74,6 +74,7 @@ echo "Embedding git metadata: hash=${git_hash:-<none>} tag=${git_tag:-<none>} di
 
 docker run --rm \
   -e CARGO_TERM_COLOR=always \
+  -e CARGO_PROFILE_RELEASE_OPT_LEVEL \
   -e JCODE_RELEASE_BUILD="${JCODE_RELEASE_BUILD:-1}" \
   -e JCODE_BUILD_SEMVER="${JCODE_BUILD_SEMVER:-}" \
   -e JCODE_BUILD_METADATA_FILE=/jcode-build-meta \

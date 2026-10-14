@@ -8,6 +8,8 @@ env:
   CARGO_TERM_COLOR: always
   SCCACHE_GHA_ENABLED: "true"
   CARGO_INCREMENTAL: "0"
+  # Optimize published binaries fully without changing local/selfdev profiles.
+  CARGO_PROFILE_RELEASE_OPT_LEVEL: "3"
 
 on:
   push:
@@ -495,6 +497,8 @@ jobs:
             echo "::endgroup::"
 
             export CARGO_TERM_COLOR=always
+            # The VM does not inherit the runner's workflow environment.
+            export CARGO_PROFILE_RELEASE_OPT_LEVEL="${{ env.CARGO_PROFILE_RELEASE_OPT_LEVEL }}"
             # CARGO_BUILD_JOBS keeps memory in check; aws-lc-sys is memory hungry.
             export CARGO_BUILD_JOBS=3
             export JCODE_RELEASE_BUILD=1
