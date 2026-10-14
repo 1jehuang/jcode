@@ -6,6 +6,30 @@
 
 ---
 
+## Final state (2026-10-14 03:30Z)
+
+**Autonomous push phase COMPLETE.** All non-operator-gated work is on `KooshaPari/Jcode`.
+
+| Item | Status | Notes |
+|------|--------|-------|
+| Master push (47 commits) | **DONE 03:17** | `09b0afba6..2387b8014` (47 commits, clean fast-forward) |
+| Master push (4 follow-up docs) | **DONE 03:29** | `2387b8014..6a2b3cb7f` (4 more commits, 51 total) |
+| `feature/upstream-0.88-sync` push | **DONE 03:17** | `545d6d7f4..c2e4e91bd` (1 cherry-pick commit) |
+| `instinct/win-herdr-inline-anchor` push | **DONE 03:27** | Added `fork` remote pointing to `KooshaPari/Jcode` (preserves `origin` for upstream tracking); new branch at `0473d4b30` |
+| 2 cherry-picks (`b3130e026`) | **DONE** | Both branches had the quinn-proto fix already applied (jcode-upstream-sync HEAD `c2e4e91bd`, jcode-win-anchor HEAD `0473d4b30`); only pushes were needed |
+| P26 sync resolution | **RESOLVED** | Strategy C rebase executed 03:00 (local `master` now linear on origin) |
+| P30 cross-repo branches | **DONE** | 14/16 repos at 0 active P30 vulns; 2 BLOCKED (tooling-clone, _full_HexaKit) need operator action on broken upstream |
+| Stash snapshot (t11) | **PRESERVED** | `/tmp/playcua-stash-snapshot-2026-10-14.patch` (15 KB, 359 lines) — stash is recoverable from snapshot if dropped |
+
+**Remaining operator-gated items (5):**
+1. **t11** — Drop PlayCua `stash@{0}` (now reversible via snapshot)
+2. **P11 disk cleanup** — `rm -rf target/` for 122 GB (destructive)
+3. **P25c rescue branches** — Pick disposition A/B/C/D for 3 orphan branches
+4. **P30 PR opens** — 3 PRs pre-drafted in `docs/cleanup-arc-2026-10-13-PR-CONTENT.md`; browser-only
+5. **P30 combined fix branch** — `chore/cargo-fmt-cleanup-2026-10-13-p30` (local-only, now 59-behind) needs rebase + force-push (destructive)
+
+---
+
 ## P11 — Disk pressure URGENT (12 GB free, 99% used)
 
 ### Current state
