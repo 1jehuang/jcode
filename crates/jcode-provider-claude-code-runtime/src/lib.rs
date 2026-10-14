@@ -87,12 +87,8 @@ pub async fn probe_instance(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
-    for (k, v) in settings::instance_env(instance)
-        .into_iter()
-        .chain(settings::probe_env_extras())
-    {
-        command.env(k, v);
-    }
+    settings::apply_instance_env(&mut command, instance);
+    command.envs(settings::probe_env_extras());
     tokio::time::timeout(PROBE_TIMEOUT, async move {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         let mut child = command.spawn().context("start Claude Code probe")?;
@@ -338,6 +334,7 @@ impl ClaudeCodeProvider {
         tools: &[ToolDefinition],
         cwd: Option<PathBuf>,
         resume_hint: Option<&str>,
+        append_system_prompt: &str,
     ) -> Result<Arc<ChildHandle>> {
         let instance = self.active_instance();
         let model = settings::normalize_model_id(&read(&self.model));
@@ -352,7 +349,8 @@ impl ClaudeCodeProvider {
                 && launch.instance.launch_args == instance.launch_args;
             let same_shape = launch.spec.expose_mcp == expose_mcp
                 && launch.spec.effort == effort
-                && launch.cwd == cwd;
+                && launch.cwd == cwd
+                && launch.append_system_prompt == append_system_prompt;
             let mut reusable = child.is_alive() && same_home && same_shape;
             if reusable && child.model() != model {
                 let request = serde_json::json!({"subtype": "set_model", "model": model});
@@ -410,7 +408,7 @@ impl ClaudeCodeProvider {
                 launch_args: launch_args.clone(),
             },
             cwd: cwd.clone(),
-            append_system_prompt: prompt::JCODE_APPEND_SYSTEM_PROMPT.to_string(),
+            append_system_prompt: append_system_prompt.to_string(),
         };
 
         let child = match resume {
@@ -456,6 +454,7 @@ impl ClaudeCodeProvider {
         tools: Vec<ToolDefinition>,
         cwd: Option<PathBuf>,
         resume_hint: Option<String>,
+        append_system_prompt: String,
         out: mpsc::Sender<Result<StreamEvent>>,
     ) {
         let _turn_guard = self.turn_lock.lock().await;
@@ -471,7 +470,13 @@ impl ClaudeCodeProvider {
         for attempt in 0..2 {
             let mut state = self.state.lock().await;
             let child = match self
-                .ensure_child(&mut state, &tools, cwd.clone(), resume_hint.as_deref())
+                .ensure_child(
+                    &mut state,
+                    &tools,
+                    cwd.clone(),
+                    resume_hint.as_deref(),
+                    &append_system_prompt,
+                )
                 .await
             {
                 Ok(child) => child,
@@ -585,13 +590,15 @@ impl Provider for ClaudeCodeProvider {
         resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
         let cwd = prompt::working_dir_from_system(system).or_else(|| std::env::current_dir().ok());
+        let append_system_prompt = prompt::append_system_prompt(system);
         let (tx, rx) = mpsc::channel(256);
         let this = self.fork_shared();
         let messages = messages.to_vec();
         let tools = tools.to_vec();
         let resume = resume_session_id.map(str::to_string);
         tokio::spawn(async move {
-            this.run_turn(messages, tools, cwd, resume, tx).await;
+            this.run_turn(messages, tools, cwd, resume, append_system_prompt, tx)
+                .await;
         });
         Ok(Box::pin(ReceiverStream::new(rx)))
     }
@@ -673,6 +680,10 @@ impl Provider for ClaudeCodeProvider {
         true
     }
 
+    fn uses_own_system_prompt(&self) -> bool {
+        true
+    }
+
     fn account_pin(&self, kind: AccountProviderKind) -> Option<AccountPin> {
         (kind == AccountProviderKind::ClaudeCode)
             .then(|| self.pin.get())
@@ -739,9 +750,7 @@ impl Provider for ClaudeCodeProvider {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
-        for (k, v) in settings::instance_env(&instance) {
-            command.env(k, v);
-        }
+        settings::apply_instance_env(&mut command, &instance);
         let output = tokio::time::timeout(ONESHOT_TIMEOUT, async {
             use tokio::io::AsyncWriteExt;
             let mut child = command.spawn().context("start Claude Code")?;

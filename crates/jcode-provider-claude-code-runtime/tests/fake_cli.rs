@@ -7,6 +7,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use jcode_message_types::{Message, StreamEvent, ToolDefinition};
 use jcode_provider_claude_code_runtime::ClaudeCodeProvider;
+use jcode_provider_claude_code_runtime::prompt::JCODE_APPEND_SYSTEM_PROMPT;
 use jcode_provider_claude_code_runtime::settings::{ClaudeCodeInstance, ClaudeCodeSettings};
 use jcode_provider_core::{AccountPin, AccountProviderKind, NativeToolResult, Provider};
 use serde_json::{Value, json};
@@ -90,8 +91,17 @@ async fn run_turn(
     messages: &[Message],
     answer: Option<ToolAnswer<'_>>,
 ) -> Vec<StreamEvent> {
+    run_turn_with_system(provider, SYSTEM, messages, answer).await
+}
+
+async fn run_turn_with_system(
+    provider: &ClaudeCodeProvider,
+    system: &str,
+    messages: &[Message],
+    answer: Option<ToolAnswer<'_>>,
+) -> Vec<StreamEvent> {
     let mut stream = provider
-        .complete(messages, &tools(), SYSTEM, None)
+        .complete(messages, &tools(), system, None)
         .await
         .unwrap();
     let mut events = Vec::new();
@@ -586,6 +596,69 @@ async fn model_switch_uses_set_model_and_instance_switch_restarts() {
         provider.resolved_account_label(AccountProviderKind::ClaudeCode),
         Some("personal".into())
     );
+    provider.shutdown().await;
+}
+
+#[tokio::test]
+async fn supplied_system_prompt_reaches_claude_and_a_change_restarts_with_resume() {
+    let fake = Fake::new();
+    let provider = fake.provider();
+    let french = "Answer in French.";
+    let events = run_turn_with_system(&provider, french, &[Message::user("system")], None).await;
+    let reply = text(&events);
+    assert!(
+        reply.starts_with("system:You are running inside jcode"),
+        "{reply}"
+    );
+    assert!(reply.ends_with("\n\nAnswer in French."), "{reply}");
+
+    run_turn_with_system(&provider, french, &[Message::user("text")], None).await;
+    assert_eq!(
+        fake.launches().len(),
+        1,
+        "same instructions reuse the child"
+    );
+
+    let events = run_turn_with_system(
+        &provider,
+        "Answer in German.",
+        &[Message::user("system")],
+        None,
+    )
+    .await;
+    assert!(
+        text(&events).ends_with("\n\nAnswer in German."),
+        "{events:?}"
+    );
+    let launches = fake.launches();
+    assert_eq!(launches.len(), 2, "new instructions restart the child");
+    assert!(
+        launches[1]["argv"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a.as_str().unwrap().starts_with("--resume=")),
+        "the restarted child keeps the Claude session"
+    );
+    provider.shutdown().await;
+}
+
+#[tokio::test]
+async fn session_working_dir_becomes_the_child_cwd_and_is_not_appended() {
+    let fake = Fake::new();
+    let provider = fake.provider();
+    let dir = tempfile::tempdir().unwrap();
+    let system = format!(
+        "{}\n\nAnswer in French.",
+        jcode_base::prompt::own_prompt_session_context(&dir.path().display().to_string())
+    );
+    let events = run_turn_with_system(&provider, &system, &[Message::user("system")], None).await;
+    assert_eq!(
+        text(&events),
+        format!("system:{JCODE_APPEND_SYSTEM_PROMPT}\n\nAnswer in French.")
+    );
+    let cwd = fake.launches()[0]["cwd"].as_str().unwrap().to_string();
+    assert_eq!(Path::new(&cwd), dir.path().canonicalize().unwrap());
     provider.shutdown().await;
 }
 
