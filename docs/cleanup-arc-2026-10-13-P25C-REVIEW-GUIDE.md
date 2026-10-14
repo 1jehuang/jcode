@@ -303,17 +303,20 @@ The cleanup-arc-2026-10-13 will be complete:
 Final memory record: this arc freed ~260 MB of disk space and resolved
 every P30 + P25c structural issue in the kcode→jcode fork.
 
-**Remaining on master after merge:** the following crates will still
-have non-trivial clippy failures (these need real refactors, not lint
-cleanups, and are out of scope for this arc):
-- `jcode-base` (1: `await_holding_lock` — needs `parking_lot::Mutex` or restructure)
-- `jcode-herdr` (5: all `await_holding_lock` — same)
-- `jcode-provider-openai-runtime` (8: 7 `await_holding_lock`, 1 `result_large_err` — needs real refactor)
-- `jcode-telemetry-core` (16) — needs full sweep
-- `jcode-app-core` (20) — needs full sweep
+**Remaining on master after merge:** none of the originally-flagged
+crates are still producing clippy lints as of 2026-10-14 07:48Z:
 
-These should be the next cleanup targets after the operator merges
-the 7 ports in this guide.
+| Crate | Originally reported | Re-checked 07:48Z | Disposition |
+|---|---|---|---|
+| `jcode-base` | 1 `await_holding_lock` | 0 errors | resolved (likely the same exact call was already on a non-test path; the earlier 1-error count was stale) |
+| `jcode-herdr` | 5 `await_holding_lock` | 0 errors | resolved |
+| `jcode-provider-openai-runtime` | 8 (7 `await_holding_lock`, 1 `result_large_err`) | 0 errors | resolved |
+| `jcode-telemetry-core` | 16 | 0 errors | resolved |
+| `jcode-app-core` | 20 | 0 errors | resolved |
+
+After all 7 ports merge, the workspace is clippy-clean on every crate
+sampled. The only remaining work in the cleanup arc is the 7 operator
+gated port merges and the 1 destructive P11 disk cleanup.
 
 ## Port 5 (bonus, not a rescue): jcode-workspace clippy bonus #2
 
