@@ -1108,6 +1108,46 @@ fn test_side_panel_close_in_file_mode_without_edits_restores_composer() {
 }
 
 #[test]
+fn test_side_panel_close_keeps_visible_file_diff_focused_and_scrollable() {
+    let _render_lock = scroll_render_test_lock();
+    let (mut app, _) = make_edit_badge_test_app(30);
+    // The File diff cache is process-global and keyed by path and message
+    // index. Sibling tests render shorter `demo.txt` edits at the same index,
+    // so use a path of our own to always render this 30-line diff.
+    if let Some(tool) = app.display_messages[1].tool_data.as_mut() {
+        tool.input["file_path"] = serde_json::json!("side-close-file-diff.txt");
+    }
+    app.bump_display_messages_version();
+    app.diagram_mode = crate::config::DiagramDisplayMode::None;
+    app.diff_mode = crate::config::DiffDisplayMode::File;
+    app.side_panel = test_side_panel_snapshot("plan", "Plan");
+    app.diff_pane_focus = true;
+
+    let backend = ratatui::backend::TestBackend::new(80, 16);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    render_and_snap(&app, &mut terminal);
+    let pane = crate::tui::ui::last_layout_snapshot()
+        .unwrap()
+        .diff_pane_area
+        .unwrap();
+
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: pane.right() - 2,
+        row: pane.y,
+        modifiers: KeyModifiers::empty(),
+    });
+
+    assert!(app.side_panel.focused_page().is_none());
+    assert!(app.diff_pane_visible(), "File diff should remain visible");
+    assert!(app.diff_pane_focus, "visible File diff should retain focus");
+    render_and_snap(&app, &mut terminal);
+    app.handle_key(KeyCode::Char('j'), KeyModifiers::empty())
+        .unwrap();
+    assert!(app.diff_pane_scroll > 0, "j should still scroll the File diff");
+}
+
+#[test]
 fn test_drag_release_over_side_panel_close_does_not_hide_page() {
     let _render_lock = scroll_render_test_lock();
     let mut app = create_test_app();
