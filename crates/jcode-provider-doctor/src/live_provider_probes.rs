@@ -775,6 +775,13 @@ async fn consume_native_stream(
                     outcome.chunk_count += 1;
                     outcome.text.push_str(&text);
                 }
+                StreamEvent::TextSuffixReplace { old_text, new_text } => {
+                    jcode_base::message::replace_text_suffix(
+                        &mut outcome.text,
+                        &old_text,
+                        &new_text,
+                    );
+                }
                 StreamEvent::ThinkingDelta(text) => {
                     outcome.thinking_chunk_count += 1;
                     outcome.reasoning_text_len += text.len();

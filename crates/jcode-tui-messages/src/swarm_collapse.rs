@@ -58,9 +58,76 @@ pub fn toggle_collapsible_swarm_content(content: &str) -> Option<String> {
     ))
 }
 
+/// Longest body (in chars) a swarm notification may show inline without being
+/// collapsed behind a one-row preview.
+pub const SWARM_INLINE_BODY_MAX_CHARS: usize = 120;
+
+/// One-row preview of `text`: first non-empty line, whitespace collapsed,
+/// truncated to `max_chars` with an ellipsis.
+pub fn swarm_preview_line(text: &str, max_chars: usize) -> String {
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("");
+    let collapsed = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    let max_chars = max_chars.max(1);
+    if collapsed.chars().count() <= max_chars {
+        return collapsed;
+    }
+    let mut out: String = collapsed.chars().take(max_chars - 1).collect();
+    out = out.trim_end().to_string();
+    out.push('…');
+    out
+}
+
+/// Ensure swarm content renders as at most one row by default. Content that is
+/// already collapsible, or a short single line, is returned unchanged. Anything
+/// longer or multi-line is collapsed behind a derived one-row preview so the
+/// full body is only shown on explicit expand.
+pub fn collapse_long_swarm_content(content: &str) -> String {
+    if parse_collapsible_swarm_content(content).is_some() {
+        return content.to_string();
+    }
+    let trimmed = content.trim();
+    let single_line = !trimmed.contains('\n');
+    if single_line && trimmed.chars().count() <= SWARM_INLINE_BODY_MAX_CHARS {
+        return trimmed.to_string();
+    }
+    let preview = swarm_preview_line(trimmed, SWARM_INLINE_BODY_MAX_CHARS);
+    encode_collapsible_swarm_content(&preview, trimmed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn short_single_line_stays_plain() {
+        assert_eq!(collapse_long_swarm_content("  quick note "), "quick note");
+    }
+
+    #[test]
+    fn long_or_multiline_content_collapses_to_one_row_preview() {
+        let long = "word ".repeat(80);
+        let collapsed = collapse_long_swarm_content(&long);
+        let parsed = parse_collapsible_swarm_content(&collapsed).expect("collapsible");
+        assert!(!parsed.expanded);
+        assert!(parsed.tldr.chars().count() <= SWARM_INLINE_BODY_MAX_CHARS);
+        assert!(parsed.tldr.ends_with('…'));
+        assert!(!parsed.tldr.contains('\n'));
+
+        let multi = collapse_long_swarm_content("first line\n\nsecond line");
+        let parsed = parse_collapsible_swarm_content(&multi).expect("collapsible");
+        assert_eq!(parsed.tldr, "first line");
+        assert_eq!(parsed.body, "first line\n\nsecond line");
+    }
+
+    #[test]
+    fn already_collapsible_content_is_untouched() {
+        let encoded = encode_collapsible_swarm_content("tldr", "body\nmore");
+        assert_eq!(collapse_long_swarm_content(&encoded), encoded);
+    }
 
     #[test]
     fn roundtrip_collapsed_then_toggle() {

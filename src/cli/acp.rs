@@ -1485,6 +1485,11 @@ impl EventMapper {
         match event {
             ServerEvent::TextDelta { text } => vec![agent_message_chunk(text)],
             ServerEvent::TextReplace { text } => vec![agent_message_chunk(text)],
+            // ACP chunks cannot retract prior output. Surface the corrected
+            // source links rather than silently discarding provider metadata.
+            ServerEvent::TextSuffixReplace { new_text, .. } => {
+                vec![agent_message_chunk(format!("\n{new_text}"))]
+            }
             ServerEvent::ToolStart { id, name } => {
                 self.current_tool_id = Some(id.clone());
                 self.tool_inputs.entry(id.clone()).or_default();

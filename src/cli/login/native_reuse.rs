@@ -45,8 +45,19 @@ pub(super) fn reuse_claude_code_native_snapshot(
         auth::claude::trust_native_source()?;
     }
     if !credentials.refresh_token.trim().is_empty() {
-        let label = auth::claude::import_native_credentials_into_account_from(credentials)?;
-        auth::claude::set_active_account(&label)?;
+        let imported = auth::claude::import_native_credentials_into_account_from(credentials)
+            .and_then(|label| auth::claude::set_active_account(&label));
+        if let Err(err) = imported {
+            // A failed login must not leave behind an approval it granted, or a
+            // later CLAUDE_CODE_OAUTH_TOKEN would be used without a prompt.
+            if native_newly_trusted {
+                crate::config::Config::revoke_external_auth_source(
+                    auth::claude::CLAUDE_CODE_NATIVE_AUTH_SOURCE_ID,
+                )?;
+                auth::AuthStatus::invalidate_cache();
+            }
+            return Err(err);
+        }
     }
     Ok(true)
 }
