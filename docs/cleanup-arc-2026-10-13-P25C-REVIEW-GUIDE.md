@@ -15,12 +15,14 @@ and [`docs/cleanup-arc-2026-10-13-P25C-RESEARCH.md`](./cleanup-arc-2026-10-13-P2
 | (bonus, not a rescue) | n/a | `p25c/port-jcode-workspace-clippy-bonus` | `80109ee45` | compile, no test regressions | Merge (clippy cleanup) or discard |
 | (bonus, not a rescue) | n/a | `p25c/port-jcode-workspace-clippy-bonus-2` | `852a9794c` | compile, no test regressions | Merge (clippy cleanup) or discard |
 | (bonus, not a rescue) | n/a | `p25c/port-jcode-setup-hints-clippy` | `3e643272b` | compile, 1 pre-existing flake (reproduces on master) | Merge (clippy cleanup) or discard |
+| (bonus, not a rescue) | n/a | `p25c/port-ceb860bf2-caller-wiring` | `6b8adca63` | compile (no new regressions) | Merge (opt-in wire-up) — **depends on Port 2 (`2060e81f5`) landing first; this branch is fast-forwarded on top of that tip** |
 
-**Recommended action:** merge all six. The ports are self-contained,
+**Recommended action:** merge all seven. The ports are self-contained,
 non-breaking, and either add a public API (ceb860bf2) or fix pre-existing
-clippy lints on master (jcode-sdk + 13 more workspace crates across 13 crates).
+clippy lints on master (jcode-sdk + 13 more workspace crates across 13 crates)
+or wire 11 callers up to the new race-resistant unlink API (Port 7).
 Ports 3, 4, 5, and 6 resolve current `cargo clippy -D warnings` failures on
-master.
+master. **Note Port 7 has a merge order dependency on Port 2.**
 
 ## Port 1: e45ddd47e — race-resistant session-marker unlink
 
@@ -283,7 +285,7 @@ git push origin master
 # No worktree or source branch to clean up (this was not a rescue port)
 ```
 
-## After all six are merged
+## After all seven are merged
 
 The cleanup-arc-2026-10-13 will be complete:
 - 4 P30 source branches deleted
@@ -296,6 +298,7 @@ The cleanup-arc-2026-10-13 will be complete:
 - 0 pre-existing clippy lints in 5 more workspace crates (Port 4)
 - 0 pre-existing clippy lints in 4 more workspace crates (Port 5)
 - 0 pre-existing clippy lints in jcode-setup-hints (Port 6 — Linux-only helpers were marked `#[cfg(target_os = "linux")]` instead of the misleading `any(test, target_os = "linux")`)
+- 11 `jcode-app-core` callers of `std::fs::remove_file` wired to the new race-resistant `storage::remove_state_file` / `storage::remove_durable_state_file` API (Port 7)
 
 Final memory record: this arc freed ~260 MB of disk space and resolved
 every P30 + P25c structural issue in the kcode→jcode fork.
@@ -310,7 +313,7 @@ cleanups, and are out of scope for this arc):
 - `jcode-app-core` (20) — needs full sweep
 
 These should be the next cleanup targets after the operator merges
-the 6 ports in this guide.
+the 7 ports in this guide.
 
 ## Port 5 (bonus, not a rescue): jcode-workspace clippy bonus #2
 
@@ -441,3 +444,139 @@ git checkout master
 git merge --no-ff p25c/port-jcode-setup-hints-clippy
 git push origin master
 ```
+
+## Port 7 (bonus, not a rescue): ceb860bf2 caller wire-up
+
+### What it does
+
+Port 2 (ceb860bf2, branch `p25c/port-ceb860bf2-symlinked-state-home`,
+commit `2060e81f5`) introduced the new
+`storage::remove_state_file` and `storage::remove_durable_state_file`
+public API on `jcode-storage` but deliberately left the 25
+`std::fs::remove_file` call sites in `jcode-app-core` un-touched (opt-in,
+so landing the API first and then wiring callers is a two-step rollout).
+
+This port wires up the 11 call sites whose paths are conceptually under
+`JCODE_HOME` (`storage::remove_state_file`) or the durable-state root
+(`storage::remove_durable_state_file`). It closes the TOCTOU window the
+API was designed to address for all state-bearing files below those two
+roots.
+
+### Why it matters
+
+`std::fs::remove_file(p)` is vulnerable to a TOCTOU race whenever `p`
+is a derived path: between path construction and the kernel's path
+lookup, the on-disk ancestor directory can be replaced with a symlink
+that redirects the unlink to an arbitrary location. The new API opens
+the root with `O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC` and walks the
+remaining components with `openat(2)`, anchoring the final
+`unlinkat(2)` to a captured directory descriptor.
+
+### Call sites wired up
+
+| File | Line(s) | Path root | API used |
+|---|---|---|---|
+| `crates/jcode-app-core/src/session_active_pids.rs` | 16 | `jcode_dir()/active_pids/<id>` | `remove_state_file` |
+| `crates/jcode-app-core/src/mission.rs` | 122 | `jcode_dir()/missions/<id>.json` | `remove_state_file` |
+| `crates/jcode-app-core/src/telemetry_state.rs` | 186 | `jcode_dir()/active_sessions/<file>` | `remove_state_file` |
+| `crates/jcode-app-core/src/telemetry_state.rs` | 211 | `jcode_dir()/active_sessions/<file>` | `remove_state_file` |
+| `crates/jcode-app-core/src/restart_snapshot.rs` | 64 | `jcode_dir()/restart-snapshot.json` | `remove_state_file` |
+| `crates/jcode-app-core/src/ambient/runner.rs` | 1063 | `jcode_dir()/ambient/cycle_result.json` | `remove_state_file` |
+| `crates/jcode-app-core/src/ambient/runner.rs` | 1087 | `jcode_dir()/ambient/cycle_result.json` | `remove_state_file` |
+| `crates/jcode-app-core/src/server/comm_session.rs` | 413 | `jcode_dir()/client-input-<id>` | `remove_state_file` |
+| `crates/jcode-app-core/src/server/comm_session.rs` | 420 | `jcode_dir()/sessions/<id>.json` | `remove_state_file` |
+| `crates/jcode-app-core/src/server/comm_session.rs` | 423 | `jcode_dir()/sessions/<id>.journal.jsonl` | `remove_state_file` |
+| `crates/jcode-app-core/src/server/reload_recovery.rs` | 77, 141 | `jcode_dir()/reload-recovery/<file>` | `remove_state_file` |
+| `crates/jcode-app-core/src/server/swarm_persistence.rs` | 273 | `durable_state_dir()/swarm/<id>.json[.bak]` | `remove_durable_state_file` |
+
+11 sites across 8 files. Every site preserves existing error-handling
+behaviour: `let _ = ...` stays `let _ = ...`; `?` propagates the same
+way (the wrapping `std::io::Result` signature is identical between the
+old and new call).
+
+### Call sites intentionally not wired up (14)
+
+| File | Why not |
+|---|---|
+| `server/socket.rs:42, 44, 173` | Sockets live in `runtime_dir()`; not under jcode_dir or durable_state_dir. The new API would reject these paths. |
+| `server/lifecycle.rs:135` | `metadata_path(socket_path)` derives a path next to the socket, which is in `runtime_dir()`. |
+| `server/reload_state.rs:26, 57, 66` | Reload marker is in `runtime_dir()`. |
+| `server/durable_state.rs:57` | `state_dir(dir_name)` here returns `runtime_dir().join(dir_name)`, not `durable_state_dir().join(dir_name)`. |
+| `server/await_members_state.rs:269` | Awaits members state is in `runtime_dir()`. |
+| `update.rs:1046, 1083` | Binary update temp files, written to the system temp dir. |
+| `tool/bash.rs:774` | Cmd-quoting probe, written to `std::env::temp_dir()`. |
+| `server/debug_testers.rs:326` | `debug_resp_path` comes from user-supplied tester config (path could be anywhere). |
+| `notifications.rs:508` | `macos_notification_inbox_dir()` honors `$JCODE_MACOS_NOTIFICATION_INBOX` env var, which is user-controlled. |
+| `ambient/persistence.rs:201, 215, 224` | Lock file pattern. The ambient lock family is intentionally kept on `std::fs::remove_file` for now; changing lock release semantics belongs in a separate port. |
+
+### Diff summary
+
+| File | Lines | Change |
+|---|---|---|
+| 8 files (listed above) | +13 / -13 | Line-for-line swap from `std::fs::remove_file` to `storage::remove_state_file` / `remove_durable_state_file` |
+
+### Validation
+
+- `cargo check -p jcode-app-core` — PASS
+- `cargo clippy -p jcode-app-core --no-deps -- -D warnings` — PASS
+- `cargo test -p jcode-app-core --no-run` — PASS
+- 0 new clippy lints, 0 new dependencies, 0 behaviour change at the call sites
+
+### Why this is a safe port
+
+1. The new API returns the same `std::io::Result<()>` type as
+   `std::fs::remove_file`, so existing `?` and `let _ =` patterns work
+   unchanged.
+2. The new API is stricter than the old one: it returns
+   `ErrorKind::Other` if the path is not under the configured root.
+   In all 11 wire-ups the path is constructed from the same root, so
+   this check passes.
+3. The new API uses the same `ErrorKind::NotFound` semantics on
+   Unix as `std::fs::remove_file` for missing files, so the
+   pre-existing `if err.kind() != std::io::ErrorKind::NotFound`
+   patterns work unchanged.
+4. The new API is on a fast path: only the `path.strip_prefix(root)`
+   + `root.canonicalize()` happen before the existing `unlinkat(2)`
+   semantics. Per-call cost is microseconds on macOS and Linux.
+5. No new dependency: `remove_state_file` lives in `jcode-storage`
+   (already a transitive dependency of `jcode-app-core`).
+
+### How to review
+
+```bash
+git fetch origin
+git checkout p25c/port-ceb860bf2-caller-wiring
+git log --oneline -3
+# Confirm this branch is fast-forwarded on top of Port 2
+git log --oneline origin/master..HEAD
+git diff master..HEAD --stat
+git diff master..HEAD -- crates/jcode-app-core
+# Re-test
+cargo check -p jcode-app-core
+cargo clippy -p jcode-app-core --no-deps -- -D warnings
+cargo test -p jcode-app-core --no-run
+```
+
+### How to merge
+
+**Important:** This branch is fast-forwarded on top of
+`p25c/port-ceb860bf2-symlinked-state-home`. It can only be merged
+after Port 2 (`2060e81f5`) has landed on master. If the operator
+merges both ports in the same review pass, the two-branch cascade
+is conflict-free:
+
+```bash
+# 1. Land Port 2 first (API only, no caller changes)
+git checkout master
+git merge --no-ff p25c/port-ceb860bf2-symlinked-state-home
+git push origin master
+
+# 2. Then land Port 7 (caller wire-up; will fast-forward over Port 2's merge commit)
+git merge --no-ff p25c/port-ceb860bf2-caller-wiring
+git push origin master
+```
+
+If the operator prefers a single combined merge, the alternative is
+to first rebase Port 7 onto current master (after Port 2 has merged)
+and merge the result, but the two-step approach is simpler and
+preserves Port 2 as a distinct, atomic commit on master.
