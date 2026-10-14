@@ -1356,6 +1356,14 @@ fn swarm_dock_shows_current_todo_and_fills_width() {
         .iter()
         .map(|s| s.content.as_ref())
         .collect();
+    assert!(
+        row.contains(crate::id::session_icon("blowfish")),
+        "agent icon: {row}"
+    );
+    assert!(
+        !row.contains("blowfish"),
+        "no spelled-out agent name: {row}"
+    );
     assert!(row.contains("Build the per-step"), "current todo: {row}");
     assert!(!row.contains("..."), "single-char ellipsis: {row}");
     // Truncated text fills the row instead of backing off to a word boundary.

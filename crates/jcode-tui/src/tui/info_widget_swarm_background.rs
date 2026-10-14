@@ -411,6 +411,10 @@ fn dock_activity(member: &SwarmMemberStatus) -> String {
 /// │✓ research  map the swarm code      5m│
 /// ╰ +2 more ──────────── nodes 4/9 ▰▰▰▱▱ ╯
 /// ```
+fn dock_member_label(member: &SwarmMemberStatus) -> String {
+    super::swarm_gallery::member_icon(member).unwrap_or_else(|| swarm_member_label(member))
+}
+
 fn render_swarm_dock(info: &SwarmInfo, inner: Rect) -> Framed {
     use jcode_tui_render::swarm_gallery::{humanize_age, status_accent, status_glyph};
     let members = &info.managed_members;
@@ -453,7 +457,7 @@ fn render_swarm_dock(info: &SwarmInfo, inner: Rect) -> Framed {
             } else {
                 0
             };
-            UnicodeWidthStr::width(swarm_member_label(m).as_str()) + star
+            UnicodeWidthStr::width(dock_member_label(m).as_str()) + star
         })
         .max()
         .unwrap_or(0)
@@ -477,8 +481,8 @@ fn render_swarm_dock(info: &SwarmInfo, inner: Rect) -> Framed {
         };
 
         let star = member.role.as_deref() == Some("coordinator");
-        let label_budget = name_w - if star { 2 } else { 0 };
-        let label = truncate_task_label(&swarm_member_label(member), label_budget.max(1));
+        let label_budget = name_w.saturating_sub(if star { 2 } else { 0 });
+        let label = truncate_task_label(&dock_member_label(member), label_budget.max(1));
         let label_pad = name_w
             .saturating_sub(UnicodeWidthStr::width(label.as_str()) + if star { 2 } else { 0 });
 
