@@ -362,9 +362,9 @@ if [ "${JCODE_SKIP_SERVER_RELOAD:-}" != "1" ]; then
 fi
 
 # Delete old builds from the version store, keeping the newest few
-# (JCODE_KEEP_BUILDS, 0 disables) and anything still in use. Best-effort.
+# (JCODE_KEEP_BUILD_VERSIONS, 0 disables) and anything still in use. Best-effort.
 INSTALL_STAGE="prune_builds"
-if [ "${JCODE_KEEP_BUILDS:-}" != "0" ] && [ -x "$launcher_path" ]; then
+if [ "${JCODE_KEEP_BUILD_VERSIONS:-}" != "0" ] && [ -x "$launcher_path" ]; then
   if ! "$launcher_path" --no-update prune-builds </dev/null; then
     info "Warning: build pruning failed. Installation succeeded, but old builds may remain." >&2
   fi

@@ -1,6 +1,6 @@
 pub use jcode_build_support::{
     BinaryChoice, BinaryVersionReport, BuildInfo, BuildManifest, CanaryStatus, CrashInfo,
-    DEFAULT_KEEP_VERSIONS, DevBinarySourceMetadata, KEEP_VERSIONS_ENV, MigrationContext,
+    DEFAULT_KEEP_RECENT_VERSIONS, DevBinarySourceMetadata, KEEP_VERSIONS_ENV, MigrationContext,
     PendingActivation, PreparedBuildChannel, PruneReport, PublishedBuild, SELFDEV_CARGO_PROFILE,
     SelfDevBuildCommand, SelfDevBuildTarget, SharedServerRepair, SourceState,
     advance_shared_server_if_tracking_stable, binary_name, binary_stem, build_log_path,
@@ -13,7 +13,7 @@ pub use jcode_build_support::{
     install_local_release, install_version, is_jcode_repo, is_working_tree_dirty,
     keep_versions_setting, launcher_binary_path, launcher_dir, load_migration_context,
     manifest_path, migration_context_path, preferred_reload_candidate,
-    promote_version_to_shared_server, prune_old_versions, prune_old_versions_after_install,
+    promote_version_to_shared_server, prune_builds, prune_old_versions, prune_old_versions_after_install,
     publish_local_current_build, publish_local_current_build_for_source, publish_prepared_build,
     read_build_progress, read_current_version, read_shared_server_version, read_stable_version,
     release_binary_path, repair_stale_shared_server_channel, repo_build_version, repo_scope_key,

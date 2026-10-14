@@ -6,6 +6,7 @@ mod prune;
 mod source_state;
 mod storage_helpers;
 mod store_lock;
+mod version_gc;
 
 pub use paths::{
     SELFDEV_CARGO_PROFILE, binary_name, binary_stem, client_update_candidate,
@@ -17,8 +18,8 @@ pub use paths::{
     update_launcher_symlink_to_stable, version_matches_installed_channel,
 };
 pub use prune::{
-    DEFAULT_KEEP_VERSIONS, KEEP_VERSIONS_ENV, PruneReport, keep_versions_setting,
-    prune_old_versions, prune_old_versions_after_install, run_prune_builds_command,
+    PruneReport, keep_versions_setting, prune_builds, prune_old_versions_after_install,
+    run_prune_builds_command,
 };
 pub use source_state::{
     current_build_info, current_git_diff, current_git_hash, current_git_hash_full,
@@ -32,6 +33,10 @@ pub use storage_helpers::{
     read_shared_server_version, read_stable_version, save_migration_context,
     shared_server_binary_path, shared_server_version_file, stable_binary_path, stable_version_file,
     version_binary_path, write_build_progress,
+};
+pub use version_gc::{
+    DEFAULT_KEEP_RECENT_VERSIONS, KEEP_VERSIONS_ENV, VersionPruneReport, prune_old_versions,
+    prune_old_versions_in,
 };
 
 pub use store_lock::{BuildStoreLock, acquire_build_store_lock};

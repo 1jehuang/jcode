@@ -136,10 +136,10 @@ if [ "${JCODE_SKIP_SERVER_RELOAD:-}" != "1" ]; then
 fi
 
 # Delete old builds from ~/.jcode/builds/versions. The newest few (set with
-# JCODE_KEEP_BUILDS, 0 disables) and every build a channel, the launcher or a
+# JCODE_KEEP_BUILD_VERSIONS, 0 disables) and every build a channel, the launcher or a
 # running process still uses are kept. Runs after the reload so the old server
 # binary is already released.
-if [ "${JCODE_KEEP_BUILDS:-}" != "0" ]; then
+if [ "${JCODE_KEEP_BUILD_VERSIONS:-}" != "0" ]; then
   if ! "$install_dir/jcode" --no-update prune-builds </dev/null; then
     echo "Warning: build pruning failed. Installation succeeded, but old builds may remain." >&2
   fi

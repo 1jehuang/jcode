@@ -127,7 +127,7 @@ sys.exit(22)
                         JCODE_INSTALL_DIR=str(self.home / "bin space"),
                         CARGO_TARGET_DIR=str(self.repo / "target"),
                         JCODE_VERSION="v1.2.3", JCODE_NO_TELEMETRY="1",
-                        JCODE_KEEP_BUILDS="3", JCODE_SKIP_SERVER_RELOAD="1",
+                        JCODE_KEEP_BUILD_VERSIONS="3", JCODE_SKIP_SERVER_RELOAD="1",
                         JCODE_SKIP_TARGET_SWEEP="1", FIXTURE_REPO=str(self.repo),
                         FIXTURE_PAYLOAD=str(self.payload), FIXTURE_LOG=str(self.log),
                         TMPDIR=str(self.root))
@@ -181,7 +181,7 @@ sys.exit(22)
         self.assertEqual((result.returncode, builds[0][3]), (0, "release"))
 
     def test_disabled_pruning_is_not_invoked(self):
-        self.env["JCODE_KEEP_BUILDS"] = "0"
+        self.env["JCODE_KEEP_BUILD_VERSIONS"] = "0"
         result = self.run_installer("install_release.sh")
         self.assertEqual((result.returncode, any("prune-builds" in args for args in self.commands())), (0, False))
 

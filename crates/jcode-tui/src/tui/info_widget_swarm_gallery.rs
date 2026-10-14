@@ -27,7 +27,7 @@ fn member_label(member: &SwarmMemberStatus) -> String {
 /// Session icon (emoji) for a member, derived from its friendly name (session
 /// names come from the shared `SESSION_NAMES` word list, e.g. "fox" -> 🦊).
 /// Falls back to `None` when the name is unknown so the strip shows the name.
-fn member_icon(member: &SwarmMemberStatus) -> Option<String> {
+pub(super) fn member_icon(member: &SwarmMemberStatus) -> Option<String> {
     let name = member.friendly_name.as_deref()?;
     let icon = crate::id::session_icon(name);
     if icon == "💫" {

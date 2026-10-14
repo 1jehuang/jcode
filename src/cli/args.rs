@@ -1,18 +1,20 @@
-use super::provider_init::ProviderChoice;
 use clap::{Parser, Subcommand, ValueEnum};
+
+use super::provider_init::ProviderChoice;
+
 mod build_store;
+mod google;
+mod mcp;
+#[allow(unused_imports)]
+pub(crate) use google::{GoogleAccessTierArg, GoogleLoginArgs};
+pub(crate) use mcp::McpCommand;
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 pub(crate) enum TranscriptModeArg {
     Insert,
     Append,
     Replace,
     Send,
-}
-
-#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
-pub(crate) enum GoogleAccessTierArg {
-    Full,
-    Readonly,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
@@ -86,9 +88,8 @@ pub(crate) struct Args {
     #[arg(long, global = true)]
     pub(crate) no_selfdev: bool,
 
-    /// Start the onboarding simulator on launch (same as `/onboarding-sim`).
-    /// Steps through every first-run onboarding screen with synthetic data;
-    /// never touches real auth state.
+    /// Rehearse first-run onboarding on launch: the real flow, as if jcode
+    /// were new on this machine (same as `/onboarding-sim`).
     #[arg(long = "onboarding-sim")]
     pub(crate) onboarding_sim: bool,
 
@@ -97,7 +98,13 @@ pub(crate) struct Args {
     #[arg(long = "update-sim")]
     pub(crate) update_sim: bool,
 
-    /// Custom socket path for server/client communication
+    /// Custom socket path for server/client communication.
+    ///
+    /// Clients dial this path instead of the shared daemon socket. A headless
+    /// `run` hosts its agent in-process, so nothing binds the path until a
+    /// tool needs a server (today: `swarm`); the first such tool starts a
+    /// temporary server here that exits with the run, leaving no daemon
+    /// behind on a one-off socket.
     #[arg(long, global = true)]
     pub(crate) socket: Option<String>,
 
@@ -144,6 +151,12 @@ pub(crate) struct Args {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum Command {
+    /// List configured MCP servers or manage remote-server OAuth credentials
+    Mcp {
+        #[command(subcommand)]
+        action: McpCommand,
+    },
+
     /// Start the agent server (background daemon)
     Serve {
         /// Internal: mark this server as temporary so it can self-clean when its owner exits.
@@ -243,9 +256,8 @@ pub(crate) enum Command {
         #[arg(long)]
         no_validate: bool,
 
-        /// Gmail/Google access tier for non-interactive flows. Defaults to full.
-        #[arg(long, value_enum)]
-        google_access_tier: Option<GoogleAccessTierArg>,
+        #[command(flatten)]
+        google: GoogleLoginArgs,
 
         /// OpenAI-compatible API base URL. Used with --provider openai-compatible/custom profiles.
         #[arg(long)]
@@ -280,7 +292,7 @@ pub(crate) enum Command {
     },
     /// Delete old installed builds, keeping recent, referenced and running ones
     PruneBuilds {
-        /// Unreferenced builds to keep, newest first (default: JCODE_KEEP_BUILDS or 3)
+        /// Unreferenced builds to keep, newest first (default: JCODE_KEEP_BUILD_VERSIONS or 5)
         #[arg(long)]
         keep: Option<usize>,
         /// Show what would be removed without deleting anything
@@ -297,7 +309,7 @@ pub(crate) enum Command {
         json: bool,
     },
 
-    /// Inspect or change anonymous telemetry settings
+    /// Inspect or change usage telemetry settings
     #[command(subcommand)]
     Telemetry(TelemetryCommand),
 
@@ -382,6 +394,18 @@ pub(crate) enum Command {
         /// Target a specific live session instead of the active TUI
         #[arg(short = 'S', long)]
         session: Option<String>,
+    },
+
+    /// Run the desktop companion: opens URLs and terminals, global voice and
+    /// the lid override for the shared server, in this login session
+    Companion {
+        /// Report whether a companion is running and exit
+        #[arg(long)]
+        status: bool,
+
+        /// Do not run the global push-to-talk listener
+        #[arg(long)]
+        no_voice: bool,
     },
 
     /// Run configured dictation: send to last-focused jcode client or type raw text
@@ -608,13 +632,13 @@ pub(crate) enum Command {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum TelemetryCommand {
-    /// Show the current telemetry state without creating an anonymous ID
+    /// Show the current telemetry state without creating an installation ID
     Status {
         /// Emit JSON instead of human-readable text
         #[arg(long)]
         json: bool,
     },
-    /// Enable anonymous usage telemetry
+    /// Enable usage telemetry, including provider OAuth account emails
     Enable,
     /// Disable all telemetry persistently
     Disable,

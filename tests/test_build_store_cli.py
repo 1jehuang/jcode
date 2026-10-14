@@ -53,7 +53,7 @@ class BuildStoreCliTests(unittest.TestCase):
             "JCODE_INSTALL_DIR": str(self.launcher.parent),
             "JCODE_RUNTIME_DIR": str(self.root / "runtime"),
             "JCODE_NON_INTERACTIVE": "1",
-            "JCODE_KEEP_BUILDS": "0",
+            "JCODE_KEEP_BUILD_VERSIONS": "0",
             "JCODE_SKIP_SERVER_RELOAD": "1",
             "XDG_CONFIG_HOME": str(self.root / "config"),
             "XDG_CACHE_HOME": str(self.root / "cache"),

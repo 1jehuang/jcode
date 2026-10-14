@@ -19,13 +19,22 @@ pub async fn run() -> Result<()> {
     // Parse once, before startup side effects. Invalid arguments and --help
     // must not harden credential files or create configuration/telemetry state.
     let args = Args::parse();
-    // Credential import and installer publication must run without normal
-    // startup hardening, migrations, telemetry, or provider discovery.
+    // Interactive login prompts (masked secrets, QR codes) are a terminal
+    // concern. The shared auth flows reach them through this presenter.
+    super::login::install_terminal_login_presenter();
+    // Snapshot user-supplied provider env before provider init rewrites it.
+    super::provider_init::capture_user_openrouter_model_env();
+    // Credential import, installer publication and explicit MCP management do
+    // not need normal agent startup hardening, migrations, telemetry, or
+    // provider discovery.
     if args.ssh.is_none()
         && matches!(
             args.command,
-            Some(Command::Auth(super::args::AuthCommand::Import { .. }))
-                | Some(Command::PublishBuild(_))
+            Some(
+                Command::Auth(super::args::AuthCommand::Import { .. })
+                    | Command::Mcp { .. }
+                    | Command::PublishBuild(_)
+            )
         )
     {
         if let Some(cwd) = &args.cwd {

@@ -390,7 +390,7 @@ esac
                 .env("JCODE_TEST_HELPER", std::env::current_exe().unwrap())
                 .env("JCODE_TEST_PUBLICATION_SOCKET", &publication_socket)
                 .env("JCODE_SKIP_SERVER_RELOAD", "1")
-                .env("JCODE_KEEP_BUILDS", "0")
+                .env("JCODE_KEEP_BUILD_VERSIONS", "0")
                 .stdin(Stdio::null())
                 .spawn()
                 .unwrap(),

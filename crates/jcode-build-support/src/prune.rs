@@ -1,21 +1,16 @@
 //! Retention for the immutable version store (`builds/versions/<label>`).
 //!
 //! Every install, self-dev publish and `/update` adds a full binary under a new
-//! label, and nothing removed old ones, so the store grew without bound.
-//! [`prune_old_versions`] keeps the newest few installs plus every version that
-//! is still referenced or running, and deletes the rest.
+//! label. [`prune_builds`] keeps the newest few installs plus every version that
+//! is still referenced or running, and deletes the rest. Installers run it after
+//! each install and the daemon runs it daily (see `version_gc`).
 
+use crate::version_gc::{DEFAULT_KEEP_RECENT_VERSIONS, KEEP_VERSIONS_ENV};
 use crate::{BuildManifest, binary_name, builds_dir, launcher_binary_path};
 use anyhow::Result;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
-
-/// Unreferenced installs kept by default, newest first, for manual rollback.
-pub const DEFAULT_KEEP_VERSIONS: usize = 3;
-/// Environment override for [`DEFAULT_KEEP_VERSIONS`]. `0` turns automatic
-/// pruning off.
-pub const KEEP_VERSIONS_ENV: &str = "JCODE_KEEP_BUILDS";
 
 /// Channels whose targets must survive: `builds/<channel>/<binary>` links and
 /// `builds/<channel>-version` markers. Markers matter on Windows, where channel
@@ -76,12 +71,12 @@ pub fn keep_versions_setting() -> Option<usize> {
 
 fn parse_keep(raw: Option<&str>) -> Option<usize> {
     let Some(value) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
-        return Some(DEFAULT_KEEP_VERSIONS);
+        return Some(DEFAULT_KEEP_RECENT_VERSIONS);
     };
     match value.parse::<usize>() {
         Ok(0) => None,
         Ok(keep) => Some(keep),
-        Err(_) => Some(DEFAULT_KEEP_VERSIONS),
+        Err(_) => Some(DEFAULT_KEEP_RECENT_VERSIONS),
     }
 }
 
@@ -95,8 +90,8 @@ pub fn prune_old_versions_after_install() {
 pub fn run_prune_builds_command(keep: Option<usize>, dry_run: bool) -> Result<()> {
     let keep = keep
         .or_else(keep_versions_setting)
-        .unwrap_or(DEFAULT_KEEP_VERSIONS);
-    print!("{}", prune_old_versions(keep, dry_run)?.render(dry_run));
+        .unwrap_or(DEFAULT_KEEP_RECENT_VERSIONS);
+    print!("{}", prune_builds(keep, dry_run)?.render(dry_run));
     Ok(())
 }
 
@@ -123,7 +118,7 @@ pub(crate) fn prune_after_install_keeping(rollback: Option<&str>) {
 
 /// Delete installed versions except the `keep` newest and every version that a
 /// channel, marker, launcher, pending activation or running process uses.
-pub fn prune_old_versions(keep: usize, dry_run: bool) -> Result<PruneReport> {
+pub fn prune_builds(keep: usize, dry_run: bool) -> Result<PruneReport> {
     let _store_lock = crate::acquire_build_store_lock()?;
     let Some(running) = running_executable_ids() else {
         return Ok(PruneReport {
@@ -420,11 +415,11 @@ mod tests {
 
     #[test]
     fn keep_setting_defaults_disables_on_zero_and_ignores_junk() {
-        assert_eq!(parse_keep(None), Some(DEFAULT_KEEP_VERSIONS));
-        assert_eq!(parse_keep(Some("  ")), Some(DEFAULT_KEEP_VERSIONS));
+        assert_eq!(parse_keep(None), Some(DEFAULT_KEEP_RECENT_VERSIONS));
+        assert_eq!(parse_keep(Some("  ")), Some(DEFAULT_KEEP_RECENT_VERSIONS));
         assert_eq!(parse_keep(Some("5")), Some(5));
         assert_eq!(parse_keep(Some("0")), None);
-        assert_eq!(parse_keep(Some("lots")), Some(DEFAULT_KEEP_VERSIONS));
+        assert_eq!(parse_keep(Some("lots")), Some(DEFAULT_KEEP_RECENT_VERSIONS));
     }
 
     #[test]

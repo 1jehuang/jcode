@@ -31,6 +31,22 @@ fn static_chrome_state(notice: Option<&str>) -> TestState {
     }
 }
 
+#[test]
+fn oauth_notice_owns_the_rendered_status_line_while_processing() {
+    let _guard = viewport_snapshot_test_lock();
+    let notice = crate::telemetry::OAUTH_ACCOUNT_NOTICE_TEXT;
+    let mut state = static_chrome_state(Some(notice));
+    state.status = ProcessingStatus::Sending;
+    let backend = ratatui::backend::TestBackend::new(80, 1);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    crate::tui::app::oauth_telemetry::begin_frame();
+    terminal.draw(|frame| crate::tui::ui::input_ui::draw_status(frame, &state, frame.area(), 3)).unwrap();
+    let text = terminal.backend().buffer().content.iter()
+        .map(|cell| cell.symbol()).collect::<String>();
+    assert!(text.contains(notice), "{text}");
+    assert!(!text.contains("Sending"), "{text}");
+}
+
 fn full_tier_policy() -> crate::perf::TuiPerfPolicy {
     // Build from the real policy so a new field cannot silently drift, then pin
     // the parts these assertions depend on. The host's load average must not
