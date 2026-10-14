@@ -154,7 +154,12 @@ fn schema_property_declaration(schema: &Value, property: &str) -> Option<bool> {
         {
             return Some(true);
         }
-        let mut unknown = match schema.get("patternProperties") {
+        // Explicitly open schemas may use native fields not listed in properties.
+        // Preserve those fields rather than guessing that they are batch aliases.
+        let mut unknown = matches!(
+            schema.get("additionalProperties"),
+            Some(Value::Bool(true) | Value::Object(_))
+        ) || match schema.get("patternProperties") {
             Some(Value::Object(patterns)) => !patterns.is_empty(),
             Some(_) => true,
             None => false,
