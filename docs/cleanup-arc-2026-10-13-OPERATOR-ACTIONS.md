@@ -153,6 +153,45 @@ Executed **Strategy C** with rebase variant (not pure merge): `git pull --rebase
 
 **The only remaining push blocker is operator sign-off** (pre_tool blocks `git push`).
 
+### Post-rebase validation (2026-10-14 03:02-03:06)
+
+| Check | Result | Notes |
+|---|---|---|
+| `cargo check --workspace` | **PASS** (77s, exit 0) | All 116 rustfmt-touched .rs files compile clean |
+| `cargo audit` on rebased master | **7 P30 RUSTSEC** (matches documented baseline) | h2 0.4.13 ✗, quinn-proto 0.11.15 ✗, rustls 0.23.37 ✗ — same as pre-rebase and as origin/master |
+| `cargo audit` on `chore/cargo-fmt-cleanup-2026-10-13-p30` (cleanup-arc-p30 worktree) | **0 P30 RUSTSEC** (10 allowed warnings) | The canonical jcode P30 fix is here, not on master |
+
+**The rebase did not change the P30 state of jcode master.** The documented baseline is "jcode master is intentionally vulnerable; the P30 fix lives in separate branches." The post-rebase state matches this:
+- `jcode` master rebased HEAD: `46d676315` (this turn's commit documenting the rebase)
+- jcode security split: `security/rustsec-2026-0258-0285` (h2 + rustls) + `security/quinn-proto-0.11.19` (quinn-proto)
+- jcode P30 combined fix: `chore/cargo-fmt-cleanup-2026-10-13-p30` @ `1101c3b42` (h2 0.4.19 + quinn-proto 0.11.19 + rustls 0.23.45)
+
+**For the operator's push (HIGH priority, when ready):**
+
+```bash
+# 1. Push the 42 jcode master docs commits to origin
+cd /Users/kooshapari/CodeProjects/Phenotype/repos/jcode
+git push origin master  # 42 ahead / 0 behind, safe
+
+# 2. Push the 2 jcode-upstream-sync + jcode-win-anchor cherry-picks (also local-only)
+cd /Users/kooshapari/CodeProjects/Phenotype/repos/jcode-upstream-sync
+git push origin feature/upstream-0.88-sync  # c2e4e91bd
+
+cd /Users/kooshapari/CodeProjects/Phenotype/repos/jcode-win-anchor
+git push origin instinct/win-herdr-inline-anchor  # 0473d4b30
+
+# 3. Open 2 PRs for the jcode P30 fix (combined or split)
+#    - source: chore/cargo-fmt-cleanup-2026-10-13-p30 (combined fix)
+#    - OR: security/rustsec-2026-0258-0285 + security/quinn-proto-0.11.19 (split fix)
+```
+
+**Pre-rebase recovery (if ever needed):**
+```bash
+# Reset master to pre-rebase state (only if the new commits are bad)
+git update-ref refs/heads/master $(cat /tmp/jcode-master-pre-rebase.ref)
+# OR: git reset --hard $(cat /tmp/jcode-master-pre-rebase.ref)  # BLOCKED by pre_tool
+```
+
 ---
 
 ## Summary: 4 actions, all blocked on operator
