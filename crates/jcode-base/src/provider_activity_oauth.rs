@@ -1,6 +1,7 @@
 //! Recorded ChatGPT usage, deliberately separate from the API-key spend ledger.
 //! A stable sidecar lock serializes read/modify/atomic-replace across processes.
 use chrono::{DateTime, Local, Utc};
+use jcode_core::util::format_number_u64;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fs::OpenOptions, path::Path};
 
@@ -40,7 +41,8 @@ impl Totals {
         } else if self.unpriced_requests > 0 {
             format!(
                 "${:.4} known + unknown cost ({} unpriced responses)",
-                self.known_usd, self.unpriced_requests
+                self.known_usd,
+                format_number_u64(self.unpriced_requests)
             )
         } else {
             format!("${:.4}", self.known_usd)
@@ -52,7 +54,11 @@ impl Totals {
         };
         format!(
             "{} input / {} output tokens ({} cached input), {} API-equivalent estimate, not a bill; recorded only{}",
-            self.input, self.output, self.cached, cost, partial
+            format_number_u64(self.input),
+            format_number_u64(self.output),
+            format_number_u64(self.cached),
+            cost,
+            partial
         )
     }
 }
@@ -242,6 +248,32 @@ fn summary(store: &Store, label: &str, now: DateTime<Local>) -> Vec<(String, Str
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn display_groups_large_usage_counts_without_rounding() {
+        let totals = Totals {
+            requests: 12_346,
+            input: 12_345_678,
+            output: 999,
+            cached: 1_234_567,
+            known_usd: 12.3456,
+            unpriced_requests: 12_345,
+            incomplete_requests: 1,
+        };
+        assert_eq!(
+            totals.display(),
+            "12,345,678 input / 999 output tokens (1,234,567 cached input), $12.3456 known + unknown cost (12,345 unpriced responses) API-equivalent estimate, not a bill; recorded only; partial token counts"
+        );
+        let max = Totals {
+            requests: 1,
+            input: u64::MAX,
+            ..Totals::default()
+        };
+        assert!(
+            max.display()
+                .starts_with("18,446,744,073,709,551,615 input / 0 output")
+        );
+    }
 
     #[test]
     fn cached_input_discount_and_output_semantics() {
