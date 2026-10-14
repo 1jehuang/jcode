@@ -9,11 +9,22 @@ use super::{
     build_openai_oauth_route, build_openrouter_auto_route, build_openrouter_endpoint_route,
     build_openrouter_fallback_provider_route, configured_standard_openrouter_profile_routes,
     copilot, dedupe_model_routes, direct_openai_compatible_profile_routes,
-    format_account_model_availability_detail, is_chatgpt_web_model, is_listable_model_name,
-    known_anthropic_model_ids, known_openai_model_ids_for_scope, model_availability_for_account,
-    model_availability_for_scope, openrouter, openrouter_catalog_model_id, provider_for_model,
+    format_account_model_availability_detail, is_listable_model_name, known_anthropic_model_ids,
+    known_openai_model_ids_for_scope, model_availability_for_account, model_availability_for_scope,
+    openrouter, openrouter_catalog_model_id, provider_for_model,
     standard_openrouter_profile_configured,
 };
+
+fn chatgpt_web_route_for_model(model: &str) -> ModelRoute {
+    match super::chatgpt_web::find_model(model) {
+        Some(entry) => build_chatgpt_web_route(model, entry.available, entry.detail),
+        None => build_chatgpt_web_route(
+            model,
+            false,
+            "not observed in the current ChatGPT browser session",
+        ),
+    }
+}
 
 /// Build the fast local route snapshot used by the TUI model picker while the
 /// full provider catalog is hydrating.
@@ -30,8 +41,8 @@ pub fn simplified_model_routes_for_picker(
     let mut routes = Vec::new();
 
     for model in display_models {
-        if is_chatgpt_web_model(&model) {
-            routes.push(build_chatgpt_web_route(&model));
+        if jcode_provider_core::is_chatgpt_web_model(&model) {
+            routes.push(chatgpt_web_route_for_model(&model));
             continue;
         }
         if !model.contains('/') && provider_for_model(&model) == Some("openai") {
@@ -153,6 +164,21 @@ pub fn simplified_model_routes_for_picker(
         });
     }
 
+    for model in super::chatgpt_web::cached_models() {
+        if !routes
+            .iter()
+            .any(|route| route.model == model.model && route.api_method == "chatgpt-web")
+        {
+            routes.push(build_chatgpt_web_route(
+                &model.model,
+                model.available,
+                model.detail,
+            ));
+        }
+    }
+    if routes.is_empty() && jcode_provider_core::is_chatgpt_web_model(current_model) {
+        routes.push(chatgpt_web_route_for_model(current_model));
+    }
     if routes.is_empty() && !current_model.is_empty() && current_model != "unknown" {
         routes.push(ModelRoute {
             model: current_model.to_string(),
@@ -235,6 +261,13 @@ pub(super) fn multiprovider_model_routes(provider: &MultiProvider) -> Vec<ModelR
 
     append_anthropic_routes(provider, &mut routes, has_oauth, has_api_key);
     append_openai_routes(provider, &mut routes, &openai_auth);
+    for model in super::chatgpt_web::cached_models() {
+        routes.push(build_chatgpt_web_route(
+            &model.model,
+            model.available,
+            model.detail,
+        ));
+    }
     let added_direct_openai_compatible_routes =
         append_openai_compatible_profile_routes(provider, &mut routes);
     append_copilot_routes(provider, &mut routes);
@@ -431,8 +464,7 @@ fn append_openai_routes(
     };
 
     for model in openai_models {
-        if is_chatgpt_web_model(&model) {
-            routes.push(build_chatgpt_web_route(&model));
+        if jcode_provider_core::is_chatgpt_web_model(&model) {
             continue;
         }
         // GPT Pro models are platform-API-only: never offer an OAuth route
@@ -986,6 +1018,11 @@ pub fn remote_model_routes_fallback(
             continue;
         }
 
+        if jcode_provider_core::is_chatgpt_web_model(model) {
+            routes.push(chatgpt_web_route_for_model(model));
+            continue;
+        }
+
         let openrouter_catalog_model = openrouter_catalog_model_id(model);
         let openrouter_cached = openrouter_catalog_model
             .as_deref()
@@ -1177,6 +1214,10 @@ pub fn remote_model_routes_lightweight_fallback(
         if !is_listable_model_name(model) {
             continue;
         }
+        if jcode_provider_core::is_chatgpt_web_model(model) {
+            routes.push(chatgpt_web_route_for_model(model));
+            continue;
+        }
         routes.push(ModelRoute {
             model: model.clone(),
             provider: provider.clone(),
@@ -1196,6 +1237,9 @@ pub fn remote_model_routes_lightweight_fallback(
         });
     }
 
+    if routes.is_empty() && jcode_provider_core::is_chatgpt_web_model(current_model) {
+        routes.push(chatgpt_web_route_for_model(current_model));
+    }
     if routes.is_empty() && !current_model.is_empty() && current_model != "unknown" {
         routes.push(ModelRoute {
             model: current_model.to_string(),
@@ -1383,6 +1427,31 @@ pub fn remote_model_is_server_copilot_only(model: &str) -> bool {
 mod tests {
     use super::*;
     use crate::auth::{AuthState, ProviderAuth};
+
+    #[test]
+    fn chatgpt_web_unknown_routes_never_use_oauth_api_or_openrouter() {
+        let _guard = EnvGuard::new();
+        crate::auth::AuthStatus::invalidate_cache();
+        let ids = vec![
+            "gpt-6[web]".to_string(),
+            "gpt-5.6-sol[web]".to_string(),
+            "gpt-5.5[web]".to_string(),
+            "o3[web]".to_string(),
+            "o4-mini[web]".to_string(),
+        ];
+        for routes in [
+            simplified_model_routes_for_picker("OpenAI", "gpt-6[web]", ids.clone()),
+            remote_model_routes_fallback(Some("OpenAI"), &ids),
+        ] {
+            for id in &ids {
+                let matching = routes.iter().filter(|r| r.model == *id).collect::<Vec<_>>();
+                assert_eq!(matching.len(), 1, "{id}: {matching:?}");
+                assert_eq!(matching[0].api_method, "chatgpt-web");
+                assert!(!matching[0].available);
+            }
+        }
+        crate::auth::AuthStatus::invalidate_cache();
+    }
 
     struct EnvGuard {
         vars: Vec<(&'static str, Option<std::ffi::OsString>)>,

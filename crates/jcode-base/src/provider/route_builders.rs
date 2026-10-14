@@ -95,7 +95,7 @@ pub fn model_name_is_likely_non_chat(model: &str) -> bool {
 
 pub fn openrouter_catalog_model_id(model: &str) -> Option<String> {
     let trimmed = model.trim();
-    if trimmed.is_empty() {
+    if trimmed.is_empty() || jcode_provider_core::is_chatgpt_web_model(trimmed) {
         return None;
     }
 
@@ -150,13 +150,17 @@ pub fn build_openai_api_key_route(
     build_openai_route(model, "openai-api-key", available, detail)
 }
 
-pub fn build_chatgpt_web_route(model: &str) -> ModelRoute {
+pub fn build_chatgpt_web_route(
+    model: &str,
+    available: bool,
+    detail: impl Into<String>,
+) -> ModelRoute {
     ModelRoute {
         model: model.to_string(),
         provider: "OpenAI".to_string(),
         api_method: "chatgpt-web".to_string(),
-        available: true,
-        detail: "logged-in ChatGPT web session".to_string(),
+        available,
+        detail: detail.into(),
         usage: None,
         cheapness: None,
     }

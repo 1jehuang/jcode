@@ -8,20 +8,17 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 
-use jcode_provider_core::{CHATGPT_WEB_MODEL, ChatGptWebModel, chatgpt_web_model};
+use jcode_base::provider::chatgpt_web::{self as web_catalog, ChatGptWebModel};
 
-// ChatGPT renamed its composer, send button, model picker and turn markup.
-// Every selector below matches both generations of the page.
-const EDITOR_SELECTOR: &str = "[contenteditable=true][aria-label='Chat with ChatGPT'], [contenteditable=true][aria-label='Ask ChatGPT']";
-const SUBMIT_SELECTOR: &str = "#composer-submit-button, button[aria-label='Send']";
+const CHATGPT_WEB_URL: &str = "https://chatgpt.com/?temporary-chat=true";
+const EDITOR_SELECTOR: &str = "[contenteditable=true][data-composer-markdown], [contenteditable=true][aria-label='Chat with ChatGPT']";
 const TOOL_CALL_START: &str = "<jcode_tool_call>";
 const TOOL_CALL_END: &str = "</jcode_tool_call>";
 const PROMPT_CHUNK_BYTES: usize = 24_000;
 const POLL_INTERVAL: Duration = Duration::from_millis(750);
-const REQUIRED_STABLE_POLLS: usize = 8;
-const MODEL_SELECTION_TIMEOUT: Duration = Duration::from_secs(15);
 
 static TOOL_CALL_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+tokio::task_local! { static WEB_BROWSER: String; }
 
 /// Per-provider browser state. A single provider instance serializes turns that
 /// each run in an isolated, temporary browser fork. Provider forks get a fresh
@@ -43,10 +40,11 @@ impl ChatGptWebState {
         tools: &[ToolDefinition],
         system: &str,
         model: &str,
+        effort: Option<&str>,
     ) -> Result<EventStream> {
         let prompt = build_web_prompt(messages, tools, system)?;
-        let title = chatgpt_web_model(model).map_or("ChatGPT", |web| web.title);
         let model = model.to_string();
+        let effort = effort.map(str::to_string);
         let advertised_tools: Vec<String> = tools.iter().map(|tool| tool.name.clone()).collect();
         let (tx, rx) = mpsc::channel(128);
 
@@ -62,7 +60,7 @@ impl ChatGptWebState {
             }
             if tx
                 .send(Ok(StreamEvent::StatusDetail {
-                    detail: format!("Using {title} through your logged-in ChatGPT web session"),
+                    detail: format!("Using {model} through your logged-in ChatGPT web session"),
                 }))
                 .await
                 .is_err()
@@ -70,7 +68,7 @@ impl ChatGptWebState {
                 return;
             }
 
-            match self.run_turn(&prompt, &model, &tx).await {
+            match self.run_turn(&prompt, &model, effort.as_deref(), &tx).await {
                 Ok(response) => {
                     if let Err(err) = emit_response(&tx, &response, &advertised_tools).await {
                         let _ = tx.send(Err(err)).await;
@@ -89,67 +87,124 @@ impl ChatGptWebState {
         &self,
         prompt: &str,
         model: &str,
+        effort: Option<&str>,
         tx: &mpsc::Sender<Result<StreamEvent>>,
     ) -> Result<String> {
-        let Some(web) = chatgpt_web_model(model) else {
+        if !super::is_chatgpt_web_model(model) {
             anyhow::bail!("Unsupported ChatGPT web model: {model}");
-        };
+        }
         if tx.is_closed() {
             anyhow::bail!("ChatGPT web response consumer was closed before browser setup");
         }
-
-        let status = jcode_base::browser::ensure_browser_ready_noninteractive()
-            .await
-            .context(
-                "ChatGPT web transport needs the Firefox Browser Agent Bridge. Run `jcode browser status`, start Firefox, and log in at chatgpt.com",
-            )?;
-        if !status.ready {
-            anyhow::bail!(
-                "Firefox Browser Agent Bridge is not ready. Run `jcode browser status`, start Firefox, and log in at chatgpt.com"
-            );
+        if !web_catalog::find_model(model).is_some_and(|model| model.available) {
+            web_catalog::refresh_models()
+                .await
+                .context("Failed to refresh the connected account's ChatGPT web models")?;
         }
-
+        let selected = web_catalog::find_model(model).filter(|model| model.available)
+            .ok_or_else(|| anyhow::anyhow!("ChatGPT web model '{model}' was not observed as selectable in this browser account. Refresh /model and choose an available [web] route"))?;
+        let ping = bridge_command("ping", json!({})).await.context("ChatGPT web transport needs the connected Browser Agent Bridge. Run `jcode browser status` and log in at chatgpt.com in that browser")?;
+        let browser = ping
+            .get("browser")
+            .and_then(Value::as_str)
+            .filter(|browser| !browser.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!("Connected browser bridge did not identify its browser")
+            })?
+            .to_string();
+        WEB_BROWSER.scope(browser, async {
         let _turn_guard = self.turn_lock.lock().await;
-        let (tab_id, fork_name) = open_chatgpt_tab(web).await?;
+        let _session_guard = web_catalog::lock_session().await;
+        if tx.is_closed() {
+            anyhow::bail!("ChatGPT web response consumer was closed before creating its owned tab");
+        }
+        let (tab_id, fork_name) = open_chatgpt_tab().await?;
+        let mut original = None;
+        let mut submission_started = false;
+        let mut restoration_allowed = true;
+        let mut tab_closed = false;
+        let mut early_cleanup_error = None;
+        let cancel_key = format!("{fork_name}-submit");
         let result = async {
             send_phase(tx, jcode_message_types::ConnectionPhase::Authenticating).await?;
-
             wait_for_editor(tab_id).await?;
-            prepare_chatgpt_page(tab_id, web).await?;
+            bridge_command("setActiveTab", json!({"tabId":tab_id,"focus":true})).await
+                .context("Failed to activate the owned Temporary Chat fork")?;
+            let browser = WEB_BROWSER.try_with(Clone::clone)
+                .context("Connected browser context was lost before UI verification")?;
+            web_catalog::wait_for_ui_execution(tab_id, &browser).await?;
+            let selection = ui_request(tab_id, json!({"op":"prepare", "label":selected.label, "effort":effort})).await?;
+            original = selection.get("original").cloned();
+            let effective_effort = selection.get("effort").and_then(Value::as_str)
+                .filter(|value| !value.is_empty()).ok_or_else(|| anyhow::anyhow!("ChatGPT did not return a verified thinking effort"))?;
+            if !page_verification_ready(&selection, &selected.label, effective_effort) {
+                anyhow::bail!("ChatGPT did not verify the exact model, effort, and Temporary Chat before prompt insertion");
+            }
             insert_prompt(tab_id, prompt).await?;
-            if tx.is_closed() {
-                anyhow::bail!("ChatGPT web response consumer was closed before submission");
-            }
-
+            if tx.is_closed() { anyhow::bail!("ChatGPT web response consumer was closed before submission"); }
             send_phase(tx, jcode_message_types::ConnectionPhase::SendingRequest).await?;
-            if tx.is_closed() {
-                anyhow::bail!("ChatGPT web response consumer was closed before submission");
+            let (length, hash) = utf16_fingerprint(prompt);
+            submission_started = true;
+            let submission = ui_request(tab_id, json!({"op":"submit", "label":selected.label, "effort":effective_effort, "length":length, "hash":hash,"cancelKey":cancel_key}));
+            tokio::pin!(submission);
+            tokio::select! {
+                biased;
+                _ = tx.closed() => {
+                    // Dropping a CLI future does not stop JavaScript already executing.
+                    // Await a successfully cancelled evaluation before restoration.
+                    if let Err(error) = cancel_submission(tab_id, &cancel_key).await {
+                        restoration_allowed = false;
+                        match close_chatgpt_tab(tab_id, &fork_name).await {
+                            Ok(()) => tab_closed = true,
+                            Err(cleanup) => early_cleanup_error = Some(cleanup),
+                        }
+                        return Err(error.context("Pending submission could not be cancelled, so its owned tab was closed or cleared before any preference restoration"));
+                    }
+                    let _ = submission.await;
+                    anyhow::bail!("ChatGPT web response consumer was closed before submission");
+                },
+                response = &mut submission => { response.context("Failed to verify and submit the temporary ChatGPT prompt")?; }
             }
-
-            bridge_command(
-                "click",
-                json!({ "tabId": tab_id, "selector": SUBMIT_SELECTOR }),
-            )
-            .await
-            .context("Failed to submit the prompt in ChatGPT")?;
-
             send_phase(tx, jcode_message_types::ConnectionPhase::WaitingForResponse).await?;
-
-            poll_for_response(tab_id, tx, web).await
+            poll_for_response(tab_id, &selected, effective_effort, tx).await
+        }.await;
+        // Every post-submit failure, including a dropped stream at a phase send,
+        // must quiesce generation before changing account-wide preferences.
+        if result.is_err() && submission_started && !tab_closed && restoration_allowed {
+            let quiescence = async {
+                cancel_submission(tab_id, &cancel_key).await?;
+                let stopped = ui_request(tab_id, json!({"op":"stop"})).await?;
+                anyhow::ensure!(stopped.get("busy").and_then(Value::as_bool) == Some(false), "ChatGPT did not acknowledge idle generation");
+                Ok::<_, anyhow::Error>(())
+            }.await;
+            if let Err(error) = quiescence {
+                restoration_allowed = false;
+                early_cleanup_error = Some(error.context("Could not confirm submission and generation stopped before closing the owned tab"));
+            }
         }
-        .await;
-        let cleanup = close_chatgpt_tab(tab_id, &fork_name).await;
+        let restoration = match original {
+            Some(original) if restoration_allowed => ui_request(tab_id, json!({"op":"restore", "original":original})).await.map(|_| ()),
+            Some(_) => Err(anyhow::anyhow!("Original preferences were not restored because pending browser execution could not be safely quiesced")),
+            None => Ok(()),
+        };
+        let close = if tab_closed { Ok(()) } else { close_chatgpt_tab(tab_id, &fork_name).await };
+        let close = match (close, early_cleanup_error) {
+            (Ok(()), Some(error)) => Err(error),
+            (Err(error), Some(earlier)) => Err(error.context(format!("Earlier browser cleanup failed: {earlier:#}"))),
+            (result, None) => result,
+        };
+        let cleanup = match (restoration, close) {
+            (Ok(()), result) => result,
+            (Err(error), Ok(())) => Err(error.context("The owned ChatGPT tab was closed, but original model/effort preferences could not be restored")),
+            (Err(error), Err(close_error)) => Err(error.context(format!("Browser cleanup also failed: {close_error:#}"))),
+        };
         match (result, cleanup) {
             (Ok(response), Ok(())) => Ok(response),
-            (Err(err), Ok(())) => Err(err),
-            (Ok(_), Err(cleanup_err)) => Err(cleanup_err.context(format!(
-                "{} answered, but jcode could not securely close its browser tab",
-                web.title
-            ))),
-            (Err(err), Err(cleanup_err)) => {
-                Err(err.context(format!("Browser tab cleanup also failed: {cleanup_err:#}")))
-            }
+            (Err(error), Ok(())) => Err(error),
+            (Ok(_), Err(error)) => Err(error.context("ChatGPT answered, but its owned browser state could not be cleaned up safely")),
+            (Err(error), Err(cleanup_error)) => Err(error.context(format!("Browser cleanup also failed: {cleanup_error:#}"))),
         }
+        }).await
     }
 }
 
@@ -162,43 +217,63 @@ async fn send_phase(
         .map_err(|_| anyhow::anyhow!("ChatGPT web response consumer was closed"))
 }
 
-async fn open_chatgpt_tab(web: &ChatGptWebModel) -> Result<(u64, String)> {
+async fn open_chatgpt_tab() -> Result<(u64, String)> {
     let source = bridge_command("getActiveTab", json!({}))
         .await
-        .context("Failed to find a Firefox tab to duplicate for ChatGPT")?;
+        .context("Failed to find a connected browser tab to duplicate for ChatGPT")?;
     let source_tab_id = source
         .get("tabId")
         .and_then(Value::as_u64)
         .ok_or_else(|| anyhow::anyhow!("Browser bridge did not return an active tab id"))?;
     let fork_name = next_owned_tab_name();
-    let fork = bridge_command(
+    let fork = match bridge_command(
         "fork",
-        json!({ "tabId": source_tab_id, "paths": [{ "name": fork_name }] }),
+        json!({"tabId":source_tab_id,"paths":[{"name":fork_name}]}),
     )
     .await
-    .context("Failed to create a temporary Firefox tab for ChatGPT")?;
+    {
+        Ok(fork) => fork,
+        Err(error) => {
+            let cleanup = bridge_command("killFork", json!({"fork":fork_name})).await;
+            return Err(error.context(format!(
+                "Failed to create owned ChatGPT fork. Cleanup result: {}",
+                cleanup
+                    .err()
+                    .map(|error| format!("{error:#}"))
+                    .unwrap_or_else(|| "closed".to_string())
+            )));
+        }
+    };
     let tab_id = fork
         .get("forks")
         .and_then(Value::as_array)
         .and_then(|forks| forks.first())
         .and_then(|fork| fork.get("tabId"))
-        .and_then(Value::as_u64)
-        .ok_or_else(|| {
-            anyhow::anyhow!("Browser bridge did not return the forked ChatGPT tab id")
-        })?;
-
-    if let Err(err) = bridge_command(
+        .and_then(Value::as_u64);
+    let Some(tab_id) = tab_id else {
+        let cleanup = bridge_command("killFork", json!({"fork":fork_name})).await;
+        anyhow::bail!(
+            "Browser bridge returned no owned ChatGPT tab id. Cleanup result: {}",
+            cleanup
+                .err()
+                .map(|error| format!("{error:#}"))
+                .unwrap_or_else(|| "closed".to_string())
+        );
+    };
+    if let Err(error) = bridge_command(
         "navigate",
-        json!({
-            "tabId": tab_id,
-            "url": format!("https://chatgpt.com/?model={}&temporary-chat=true", web.slug),
-            "wait": true
-        }),
+        json!({"tabId":tab_id,"url":CHATGPT_WEB_URL,"wait":true}),
     )
     .await
     {
-        let _ = bridge_command("killFork", json!({ "fork": fork_name })).await;
-        return Err(err).context("Failed to open ChatGPT in the temporary Firefox tab");
+        let cleanup = close_chatgpt_tab(tab_id, &fork_name).await;
+        return Err(error.context(format!(
+            "Failed to open the owned Temporary Chat. Cleanup result: {}",
+            cleanup
+                .err()
+                .map(|error| format!("{error:#}"))
+                .unwrap_or_else(|| "closed".to_string())
+        )));
     }
     Ok((tab_id, fork_name))
 }
@@ -244,120 +319,30 @@ async fn wait_for_editor(tab_id: u64) -> Result<()> {
     )
     .await
     .context(
-        "ChatGPT composer did not load. Confirm Firefox is logged in at chatgpt.com and the workspace is active",
+        "ChatGPT composer did not load. Confirm connected browser is logged in at chatgpt.com and the workspace is active",
     )?;
     Ok(())
 }
 
-async fn prepare_chatgpt_page(tab_id: u64, web: &ChatGptWebModel) -> Result<()> {
-    // Temporary chat has a one-time explanatory screen. It is safe to dismiss,
-    // but workspace migration/onboarding is deliberately never auto-confirmed.
-    let preparation = evaluate(
-        tab_id,
-        r#"
-const onboarding = document.querySelector('[role="dialog"]');
-if (onboarding && onboarding.innerText.includes('Business workspace is ready')) {
-  return { onboarding: true };
+async fn ui_request(tab_id: u64, request: Value) -> Result<Value> {
+    let script = format!("const request={request};\n{}", web_catalog::UI_SCRIPT);
+    evaluate(tab_id, &script).await
 }
-const continueButton = Array.from(document.querySelectorAll('button')).find(b => {
-  if (b.innerText.trim() !== 'Continue') return false;
-  let node = b.parentElement;
-  for (let depth = 0; node && depth < 8; depth++, node = node.parentElement) {
-    const text = node.innerText || '';
-    if (/temporary chat/i.test(text) && /(won't appear|not appear).*(history|conversation)/i.test(text)) {
-      return true;
-    }
-  }
-  return false;
-});
-if (continueButton) continueButton.click();
-const pills = Array.from(document.querySelectorAll('button.__composer-pill'));
-const legacy = pills.length > 0;
-const model = (legacy ? pills : Array.from(document.querySelectorAll('button[aria-label="Select ChatGPT model"]')))
-  .map(b => b.innerText.trim()).find(Boolean) || '';
-const temporary = !!document.querySelector('button[aria-label="Turn off temporary chat"]')
-  || document.body.innerText.includes("This chat won't appear your conversation history");
-const signedOut = Array.from(document.querySelectorAll('button,a'))
-  .some(e => /^(log in|sign up)$/i.test(e.innerText.trim()));
-return { onboarding: false, model, legacy, temporary, signedOut };
-"#,
-    )
-    .await?;
 
-    if preparation.get("onboarding").and_then(Value::as_bool) == Some(true) {
-        anyhow::bail!(
-            "ChatGPT is waiting for a workspace onboarding choice. Open chatgpt.com in Firefox and finish onboarding; jcode will not merge or move your personal chat history automatically"
-        );
-    }
-    if preparation.get("signedOut").and_then(Value::as_bool) == Some(true) {
-        anyhow::bail!(
-            "Firefox is not logged in to ChatGPT. Log in at chatgpt.com, then retry the jcode turn"
-        );
-    }
-
-    // Dismissing the temporary-chat explainer can remount the composer.
-    wait_for_editor(tab_id).await?;
-    let verification = {
-        let deadline = Instant::now() + MODEL_SELECTION_TIMEOUT;
-        loop {
-            let current = evaluate(
-                tab_id,
-                r#"
-const pills = Array.from(document.querySelectorAll('button.__composer-pill'));
-const legacy = pills.length > 0;
-const model = (legacy ? pills : Array.from(document.querySelectorAll('button[aria-label="Select ChatGPT model"]')))
-  .map(b => b.innerText.trim()).find(Boolean) || '';
-const temporary = !!document.querySelector('button[aria-label="Turn off temporary chat"]')
-  || document.body.innerText.includes("This chat won't appear your conversation history");
-return { model, legacy, temporary };
-"#,
-            )
-            .await?;
-            if page_verification_ready(&current, web) || Instant::now() >= deadline {
-                break current;
-            }
-            tokio::time::sleep(Duration::from_millis(250)).await;
-        }
-    };
-    if !picker_shows(&verification, web) {
-        let selected_model = verification
-            .get("model")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        anyhow::bail!(
-            "ChatGPT did not select {} (model picker showed '{}'). Confirm this workspace has {} access",
-            web.title,
-            if selected_model.is_empty() {
-                "unknown"
-            } else {
-                selected_model
-            },
-            web.title
-        );
-    }
-    if verification.get("temporary").and_then(Value::as_bool) != Some(true) {
-        anyhow::bail!(
-            "ChatGPT did not enter Temporary Chat. Refusing to send the jcode system prompt into persistent web history"
-        );
-    }
+async fn cancel_submission(tab_id: u64, cancel_key: &str) -> Result<()> {
+    let state = ui_request(tab_id, json!({"op":"cancel","cancelKey":cancel_key})).await?;
+    anyhow::ensure!(
+        state.get("cancelled").and_then(Value::as_bool) == Some(true)
+            && state.get("quiescent").and_then(Value::as_bool) == Some(true),
+        "ChatGPT did not acknowledge a cancelled, quiescent submission"
+    );
     Ok(())
 }
 
-fn page_verification_ready(verification: &Value, web: &ChatGptWebModel) -> bool {
-    picker_shows(verification, web)
+fn page_verification_ready(verification: &Value, label: &str, effort: &str) -> bool {
+    verification.get("model").and_then(Value::as_str) == Some(label)
+        && verification.get("effort").and_then(Value::as_str) == Some(effort)
         && verification.get("temporary").and_then(Value::as_bool) == Some(true)
-}
-
-fn picker_shows(verification: &Value, web: &ChatGptWebModel) -> bool {
-    let label = verification
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    // The older page had only a "Pro" pill, and it meant GPT-5.6 Pro.
-    if verification.get("legacy").and_then(Value::as_bool) == Some(true) {
-        return web.id == CHATGPT_WEB_MODEL && label == "Pro";
-    }
-    label == web.picker_label
 }
 
 async fn insert_prompt(tab_id: u64, prompt: &str) -> Result<()> {
@@ -391,24 +376,7 @@ async fn insert_prompt(tab_id: u64, prompt: &str) -> Result<()> {
         .context("Failed while appending a chunk to the ChatGPT composer")?;
     }
 
-    let verification = evaluate(
-        tab_id,
-        r#"
-const editor = document.querySelector('[contenteditable=true][aria-label="Chat with ChatGPT"], [contenteditable=true][aria-label="Ask ChatGPT"]');
-const submit = document.querySelector('#composer-submit-button, button[aria-label="Send"]');
-const text = editor
-  ? (editor.children.length > 0
-      ? Array.from(editor.children).map(child => child.textContent || '').join('\n')
-      : editor.innerText)
-  : '';
-let hash = 2166136261;
-for (let index = 0; index < text.length; index++) {
-  hash = Math.imul(hash ^ text.charCodeAt(index), 16777619);
-}
-return { length: text.length, hash: hash >>> 0, submitDisabled: !submit || submit.disabled };
-"#,
-    )
-    .await?;
+    let verification = ui_request(tab_id, json!({"op":"prompt"})).await?;
     let actual_len = verification
         .get("length")
         .and_then(Value::as_u64)
@@ -431,71 +399,32 @@ return { length: text.length, hash: hash >>> 0, submitDisabled: !submit || submi
 
 async fn poll_for_response(
     tab_id: u64,
+    selected: &ChatGptWebModel,
+    effort: &str,
     tx: &mpsc::Sender<Result<StreamEvent>>,
-    web: &ChatGptWebModel,
 ) -> Result<String> {
     let timeout_secs = std::env::var("JCODE_CHATGPT_WEB_TIMEOUT_SECS")
         .ok()
-        .and_then(|raw| raw.parse::<u64>().ok())
+        .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(900)
         .max(30);
     let started = Instant::now();
     let deadline = started + Duration::from_secs(timeout_secs);
-    let mut last_text = String::new();
-    let mut stable_polls = 0usize;
     let mut last_status_second = 0u64;
     let mut streaming_emitted = false;
-
     loop {
         if tx.is_closed() {
-            let _ = evaluate(
-                tab_id,
-                r#"
-const stop = Array.from(document.querySelectorAll('button')).find(b =>
-  /stop/i.test(b.getAttribute('aria-label') || '') || b.dataset.testid === 'stop-button'
-);
-if (stop) stop.click();
-return true;
-"#,
-            )
-            .await;
             anyhow::bail!("ChatGPT web response consumer was closed");
         }
         if Instant::now() >= deadline {
             anyhow::bail!(
-                "{} web response timed out after {} seconds (override with JCODE_CHATGPT_WEB_TIMEOUT_SECS)",
-                web.title,
-                timeout_secs
+                "{} web response timed out after {timeout_secs} seconds (override with JCODE_CHATGPT_WEB_TIMEOUT_SECS)",
+                selected.label
             );
         }
-
-        let state = evaluate(
-            tab_id,
-            r#"
-const sections = Array.from(document.querySelectorAll('section[data-turn="assistant"], [data-turn-key]'));
-const section = sections.at(-1) || null;
-const messages = section ? Array.from(section.querySelectorAll('[data-message-author-role="assistant"], [data-markdown-text-style="assistant-message"]')) : [];
-const visible = messages.filter(e => { const r=e.getBoundingClientRect(); return r.width > 0 && r.height > 0; });
-const message = visible.at(-1) || messages.at(-1) || null;
-const markdowns = message ? Array.from(message.querySelectorAll('.markdown')) : [];
-const markdown = markdowns.at(-1) || null;
-const text = markdown ? markdown.innerText : (message ? message.innerText : '');
-const busy = Array.from(document.querySelectorAll('button')).some(b => {
-  const label = b.getAttribute('aria-label') || '';
-  return /^stop$|stop (generating|streaming|response)/i.test(label) || b.dataset.testid === 'stop-button';
-});
-const alert = Array.from(document.querySelectorAll('[role="alert"]')).map(e => e.innerText.trim()).filter(Boolean).at(-1) || '';
-const terminal = !!section && !busy && !!section.querySelector(
-  '[data-testid="copy-turn-action-button"], button[aria-label="Copy"], button[aria-label*="Good response"], button[aria-label*="Bad response"]'
-);
-// The new page has no per-message model slug; its picker is the only signal.
-const picker = ((document.querySelector('button[aria-label="Select ChatGPT model"]') || {}).innerText || '').trim();
-return { text, busy, terminal, alert, picker, model: message ? message.dataset.messageModelSlug || '' : '' };
-"#,
-        )
-        .await
-        .context("Failed to read the ChatGPT response from Firefox")?;
-
+        let state = ui_request(tab_id, json!({"op":"response"}))
+            .await
+            .context("Failed to read the owned ChatGPT web response")?;
         let text = state
             .get("text")
             .and_then(Value::as_str)
@@ -504,7 +433,6 @@ return { text, busy, terminal, alert, picker, model: message ? message.dataset.m
             .to_string();
         let busy = state.get("busy").and_then(Value::as_bool) == Some(true);
         let terminal = state.get("terminal").and_then(Value::as_bool) == Some(true);
-
         let alert = state
             .get("alert")
             .and_then(Value::as_str)
@@ -512,20 +440,12 @@ return { text, busy, terminal, alert, picker, model: message ? message.dataset.m
         if !busy && !alert.is_empty() && started.elapsed() > Duration::from_secs(3) {
             anyhow::bail!("ChatGPT web rejected the request: {alert}");
         }
-
         if !text.is_empty() && !streaming_emitted {
             send_phase(tx, jcode_message_types::ConnectionPhase::Streaming).await?;
             streaming_emitted = true;
         }
-
-        if !text.is_empty() && text == last_text && !busy {
-            stable_polls += 1;
-        } else {
-            stable_polls = 0;
-            last_text = text.clone();
-        }
-
-        if terminal || stable_polls >= REQUIRED_STABLE_POLLS {
+        // Quiet text alone is not completion. Thinking pauses must not truncate answers.
+        if terminal {
             if text.is_empty() {
                 anyhow::bail!("ChatGPT completed the turn without an assistant response");
             }
@@ -533,39 +453,32 @@ return { text, busy, terminal, alert, picker, model: message ? message.dataset.m
                 .get("model")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            let picker = state
-                .get("picker")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let answered_by_requested = if upstream_model.is_empty() {
-                picker == web.picker_label
-            } else {
-                upstream_model == web.slug
-            };
-            if !answered_by_requested {
-                let seen = [upstream_model, picker]
-                    .into_iter()
-                    .find(|seen| !seen.is_empty())
-                    .unwrap_or("unknown");
+            if !upstream_model.is_empty()
+                && !selected
+                    .expected_upstream_models
+                    .iter()
+                    .any(|model| model == upstream_model)
+            {
                 anyhow::bail!(
-                    "ChatGPT answered with model '{}' instead of {}",
-                    seen,
-                    web.slug
+                    "ChatGPT reported unverified upstream model '{upstream_model}' for {}",
+                    selected.label
                 );
             }
+            // Current ChatGPT markup exposes no upstream slug. Require independent
+            // checked-radio and power-slider evidence again instead of inventing one.
+            ui_request(tab_id, json!({"op":"verify", "label":selected.label, "effort":effort, "requireTemporary":false})).await
+                .context("The requested ChatGPT model or thinking effort changed during the response")?;
             return Ok(text);
         }
-
         let elapsed = started.elapsed().as_secs();
         if elapsed >= last_status_second + 10 {
             last_status_second = elapsed;
             let _ = tx
                 .send(Ok(StreamEvent::StatusDetail {
-                    detail: format!("{} is working in ChatGPT web ({}s)", web.title, elapsed),
+                    detail: format!("{} is working in ChatGPT web ({elapsed}s)", selected.label),
                 }))
                 .await;
         }
-
         tokio::time::sleep(POLL_INTERVAL).await;
     }
 }
@@ -578,7 +491,7 @@ async fn emit_response(
     if let Some(parsed) = parse_tool_call(response)? {
         if !advertised_tools.iter().any(|name| name == &parsed.name) {
             anyhow::bail!(
-                "GPT-5.6 Pro requested unknown jcode tool '{}'; advertised tools were: {}",
+                "ChatGPT requested unknown jcode tool '{}'; advertised tools were: {}",
                 parsed.name,
                 advertised_tools.join(", ")
             );
@@ -625,12 +538,12 @@ fn parse_tool_call(response: &str) -> Result<Option<ParsedToolCall>> {
     }
     if !trimmed.starts_with(TOOL_CALL_START) || !trimmed.ends_with(TOOL_CALL_END) {
         anyhow::bail!(
-            "GPT-5.6 Pro mentioned a jcode tool-call envelope without emitting it as the entire response"
+            "ChatGPT mentioned a jcode tool-call envelope without emitting it as the entire response"
         );
     }
     let payload_text = &trimmed[TOOL_CALL_START.len()..trimmed.len() - TOOL_CALL_END.len()];
     let payload: Value = serde_json::from_str(payload_text.trim())
-        .context("GPT-5.6 Pro emitted invalid JSON in a jcode tool-call envelope")?;
+        .context("ChatGPT emitted invalid JSON in a jcode tool-call envelope")?;
     let name = payload
         .get("name")
         .and_then(Value::as_str)
@@ -792,7 +705,7 @@ async fn bridge_command(action: &str, params: Value) -> Result<Value> {
     let binary = jcode_base::browser::browser_binary_path();
     if !binary.exists() {
         anyhow::bail!(
-            "Browser bridge binary is not installed. Run `jcode browser setup` once, then log in at chatgpt.com in Firefox"
+            "Browser bridge binary is not installed. Run `jcode browser setup` once, then log in at chatgpt.com in connected browser"
         );
     }
 
@@ -805,13 +718,16 @@ async fn bridge_command(action: &str, params: Value) -> Result<Value> {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
+    if let Ok(browser) = WEB_BROWSER.try_with(Clone::clone) {
+        jcode_base::browser::apply_bridge_browser_env(&mut command, Some(&browser));
+    }
 
     let output = tokio::time::timeout(Duration::from_secs(45), command.output())
         .await
         .with_context(|| format!("Browser bridge action '{action}' timed out"))?
         .with_context(|| format!("Failed to run browser bridge action '{action}'"))?;
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stderr = web_catalog::bridge_error_detail(&String::from_utf8_lossy(&output.stderr));
     if !output.status.success() {
         let detail = match (stdout.is_empty(), stderr.is_empty()) {
             (false, false) => format!("{stderr}\n{stdout}"),
@@ -900,42 +816,29 @@ mod tests {
     }
 
     #[test]
-    fn page_verification_requires_exact_pro_and_temporary_chat() {
-        let pro = chatgpt_web_model(CHATGPT_WEB_MODEL).unwrap();
-        let gpt6_pro = chatgpt_web_model("gpt-6-pro[web]").unwrap();
-        // New picker: "Pro" alone is GPT-6 Pro, GPT-5.6 Pro reads "5.6 Pro".
-        assert!(page_verification_ready(
-            &json!({ "model": "5.6 Pro", "legacy": false, "temporary": true }),
-            pro
-        ));
-        assert!(!page_verification_ready(
-            &json!({ "model": "Pro", "legacy": false, "temporary": true }),
-            pro
-        ));
-        assert!(page_verification_ready(
-            &json!({ "model": "Pro", "legacy": false, "temporary": true }),
-            gpt6_pro
-        ));
-        assert!(!page_verification_ready(
-            &json!({ "model": "Pro", "legacy": true, "temporary": true }),
-            gpt6_pro
-        ));
-        assert!(page_verification_ready(
-            &json!({ "model": "Pro", "legacy": true, "temporary": true }),
-            pro
-        ));
-        assert!(!page_verification_ready(
-            &json!({ "model": "", "temporary": true }),
-            pro
-        ));
-        assert!(!page_verification_ready(
-            &json!({ "model": "5.6 Instant", "temporary": true }),
-            pro
-        ));
-        assert!(!page_verification_ready(
-            &json!({ "model": "5.6 Pro", "temporary": false }),
-            pro
-        ));
+    fn page_verification_requires_exact_model_effort_and_temporary_chat() {
+        for label in ["GPT-6", "GPT-5.6 Sol", "GPT-5.5"] {
+            assert!(page_verification_ready(
+                &json!({"model":label,"effort":"medium","temporary":true}),
+                label,
+                "medium"
+            ));
+            assert!(!page_verification_ready(
+                &json!({"model":"other","effort":"medium","temporary":true}),
+                label,
+                "medium"
+            ));
+            assert!(!page_verification_ready(
+                &json!({"model":label,"effort":"none","temporary":true}),
+                label,
+                "medium"
+            ));
+            assert!(!page_verification_ready(
+                &json!({"model":label,"effort":"medium","temporary":false}),
+                label,
+                "medium"
+            ));
+        }
     }
 
     #[test]

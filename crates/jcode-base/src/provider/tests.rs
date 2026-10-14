@@ -450,9 +450,10 @@ fn openai_model_routes_cover_oauth_api_and_no_auth_state_space() {
             .iter()
             .filter(|route| route.model == CHATGPT_WEB_MODEL)
             .collect::<Vec<_>>();
-        assert_eq!(web_routes.len(), 1, "routes: {web_routes:?}");
-        assert_eq!(web_routes[0].api_method, "chatgpt-web");
-        assert!(web_routes[0].available);
+        assert!(
+            web_routes.is_empty(),
+            "unobserved legacy route must not be advertised: {web_routes:?}"
+        );
 
         crate::env::remove_var("OPENAI_API_KEY");
         crate::auth::AuthStatus::invalidate_cache();

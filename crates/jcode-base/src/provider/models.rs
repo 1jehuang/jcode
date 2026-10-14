@@ -16,10 +16,9 @@ pub use catalog::{
 };
 use catalog_service::{ModelCatalogService, RuntimeModelUnavailability};
 use jcode_provider_core::{
-    ALL_CLAUDE_MODELS, ALL_OPENAI_MODELS, CHATGPT_WEB_MODELS, ModelCapabilities,
-    OPENAI_API_ONLY_PRO_MODELS, context_limit_for_model_with_provider_and_cache,
-    core_provider_for_model_with_hint, is_openai_api_only_pro_model, provider_key_from_hint,
-    shared_http_client,
+    ALL_CLAUDE_MODELS, ALL_OPENAI_MODELS, ModelCapabilities, OPENAI_API_ONLY_PRO_MODELS,
+    context_limit_for_model_with_provider_and_cache, core_provider_for_model_with_hint,
+    is_openai_api_only_pro_model, provider_key_from_hint, shared_http_client,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -884,9 +883,10 @@ pub fn known_openai_model_ids_for_scope(scope: &str) -> Vec<String> {
 }
 
 fn finish_known_openai_model_ids(mut models: Vec<String>) -> Vec<String> {
-    for web in CHATGPT_WEB_MODELS {
-        if !models.iter().any(|model| model == web.id) {
-            models.push(web.id.to_string());
+    models.retain(|model| !jcode_provider_core::is_chatgpt_web_model(model));
+    for model in super::chatgpt_web::cached_models() {
+        if !models.contains(&model.model) {
+            models.push(model.model);
         }
     }
     // GPT Pro models never appear in the ChatGPT/Codex OAuth catalog (they are
@@ -1323,9 +1323,23 @@ pub fn model_availability_for_account(model: &str) -> AccountModelAvailability {
 /// [`openai_catalog_scope_for_credential`]).
 pub fn model_availability_for_scope(scope: &str, model: &str) -> AccountModelAvailability {
     if jcode_provider_core::is_chatgpt_web_model(model) {
+        let entry = super::chatgpt_web::find_model(model);
+        let available = entry.as_ref().is_some_and(|entry| entry.available);
         return AccountModelAvailability {
-            state: AccountModelAvailabilityState::Unknown,
-            reason: Some("requires a logged-in ChatGPT web session".to_string()),
+            state: if available {
+                AccountModelAvailabilityState::Available
+            } else {
+                AccountModelAvailabilityState::Unknown
+            },
+            reason: if available {
+                None
+            } else {
+                Some(
+                    entry
+                        .map(|entry| entry.detail)
+                        .unwrap_or_else(|| "requires verified ChatGPT browser session".to_string()),
+                )
+            },
             source: "browser-session",
             observed_at: None,
         };
