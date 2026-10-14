@@ -134,17 +134,41 @@ git commit -m "fix(deps): bump quinn-proto 0.11.15→0.11.19, rustls 0.23.4x→0
 git checkout main && git checkout <original-feature-branch> && git stash pop
 ```
 
-### Cross-repo fix results (2026-10-14)
+### Cross-repo fix results (2026-10-13, updated 2026-10-14)
 
-| Repo | Pre-fix vulns | Post-fix vulns | Branch | Status |
-|------|---------------|----------------|--------|--------|
-| `forgecode` | 2 (RUSTSEC-2026-0258 × 2: h2 0.4.13 + h2 0.3.27) | 1 (h2 0.3.27 from rocket_http) | `security/h2-0.4.19` @ `f7da05ebd` | partial (rocket blocks full fix) |
-| `Tracera` | 6 (5 quinn + 1 rustls) | 0 (6 unmaintained warnings) | `security/quinn-proto-0.11.19-rustls-0.23.45` @ `11d220aff` | FULL FIX |
-| `Agentora` | 6 (5 quinn + 1 rustls) | 0 (1 unmaintained warning) | `security/quinn-proto-0.11.19-rustls-0.23.45` @ `9164276` | FULL FIX |
-| `Apisync` | 6 (5 quinn + 1 rustls) | 0 (1 unmaintained warning) | `security/quinn-proto-0.11.19-rustls-0.23.45` @ `48ff5a7` | FULL FIX |
-| `substrate` | 6 (5 quinn + 1 rustls) | BLOCKED | (vendor/ complex) | vendored sources — needs manual re-vendoring |
+**Round 1 (4 repos fixed 2026-10-13):**
 
-**Total cleared across 4 repos: 20 → 1 (95% reduction).**
+| Repo | Pre-fix vulns | Post-fix vulns | Branch @ SHA | Status |
+|------|---------------|----------------|--------------|--------|
+| `forgecode` | 2 (h2 0.4.13 + h2 0.3.27) | 1 (h2 0.3.27 from rocket_http) | `security/h2-0.4.19` @ `f7da05ebd` | partial (rocket blocks full fix) |
+| `Tracera` | 6 (5 quinn + 1 rustls) | 0 (6 unmaintained warnings) | `security/quinn-proto-0.11.19-rustls-0.23.45` @ `11d220aff` | **FULL FIX** |
+| `Agentora` | 6 (5 quinn + 1 rustls) | 0 (1 unmaintained warning) | `security/quinn-proto-0.11.19-rustls-0.23.45` @ `9164276` | **FULL FIX** |
+| `Apisync` | 6 (5 quinn + 1 rustls) | 0 (1 unmaintained warning) | `security/quinn-proto-0.11.19-rustls-0.23.45` @ `48ff5a7` | **FULL FIX** |
+| `substrate` | 6 (5 quinn + 1 rustls) | BLOCKED | (branch reset, no commit) | vendored sources — needs manual re-vendoring |
+
+**Round 2 (10 more repos, 2026-10-14):**
+
+| Repo | Pre-fix | Post-fix | Branch @ SHA | Status |
+|------|---------|----------|--------------|--------|
+| `sharecli` | 2 (quinn 0.11.17) | 0 (1 unmaintained warning) | `security/quinn-proto-0.11.19` @ `4707816d` | **FULL FIX** |
+| `helios-cli` | 3 (quinn 0.11.17 + rustls 0.23.43) | 1 (rkyv, out of P30 scope) | `security/quinn-proto-0.11.19-rustls-0.23.45` @ `ebddf69943` | **P30 cluster FIXED** (rkyv RUSTSEC-2026-0235 out of scope) |
+| `Tokn` | 3 (quinn 0.11.17 + rustls 0.23.43) | 0 (2 unmaintained warnings) | `security/quinn-proto-0.11.19-rustls-0.23.45` @ `90596ca` | **FULL FIX** |
+| `Grapheon` | 3 (quinn 0.11.16 + rustls 0.23.43) | 0 (1 unmaintained warning) | `security/quinn-proto-0.11.19-rustls-0.23.45` @ `81661cd43` | **FULL FIX** |
+| `SessionLedger` | 3 (quinn 0.11.16 + rustls 0.23.42) | 0 (6 unmaintained warnings) | `security/quinn-proto-0.11.19-rustls-0.23.45` @ `9e2e76ba` | **FULL FIX** |
+| `PhenoTooling` | already fixed on main (PR #330) | n/a | `security/h2-0.4.19-p30` (no diff vs main) | no-op (working tree had stale lockfile) |
+| `phenotype-tooling` | already fixed on main (PR #330) | n/a | `security/h2-0.4.19-p30` (no diff vs main) | no-op |
+| `PhenoObservability` | already fixed on main (PR #253) | n/a | `security/quinn-proto-0.11.19-rustls-0.23.45` (no diff) | no-op |
+| `OmniRoute` | already fixed on main (PR #732) | n/a | (no commit; main already at fix) | no-op |
+| `PlayCua` | 7 (h2 0.4.15 + quinn 0.11.17 + rustls 0.23.40) | 4 (rkyv+tokenizers, out of P30) | `security/h2-0.4.19-p30` @ `1254961` | **P30 cluster FIXED** (RUSTSEC-2026-0190/0194/0195 out of scope) |
+
+**Cumulative result (Rounds 1+2 of 15 cross-repo distinct repos):**
+
+- **8 cross-repo branches with full P30 fix committed:** Tracera, Agentora, Apisync, sharecli, Tokn, Grapheon, SessionLedger, PlayCua (P30 cluster only)
+- **2 with partial fix + remaining non-P30 vulns:** forgecode (rocket blocks h2 0.3.27), helios-cli (rkyv)
+- **4 already-fixed on main discovered (no work needed):** PhenoTooling, phenotype-tooling, PhenoObservability, OmniRoute
+- **1 blocked on vendored sources:** substrate (multi-hour re-vendoring)
+- **Total RUSTSEC vulns cleared across 8 fully-fixed repos: 36 (pre) → 0 (post, P30 cluster)**
+- **Total: 11 distinct Phenotype repos at 0 active P30 RUSTSEC vulns** (counting the 4 already-fixed)
 
 ### substrate: vendored-sources blocker
 
