@@ -5,6 +5,7 @@
 //! already has history (for example after switching from native Claude), a
 //! compact text transcript of the earlier turns is prepended once.
 
+use jcode_base::prompt::SESSION_CONTEXT_HEADING;
 use jcode_message_types::{ContentBlock, Message, Role};
 use serde_json::{Value, json};
 
@@ -17,11 +18,17 @@ Tools named mcp__jcode__* are provided by jcode (memory, session search, swarm c
 use them when they fit the task. Use your built-in tools for files, shell and search.";
 
 /// Text appended to Claude Code's system prompt: the jcode note, then the
-/// system prompt jcode supplied for this session (its own or a custom one).
+/// session's custom system prompt. jcode does not send its own prompt here
+/// (`uses_own_system_prompt`). A leading session context only carries the
+/// working directory and is not appended.
 pub fn append_system_prompt(system: &str) -> String {
-    match system.trim() {
+    let custom = match system.strip_prefix(SESSION_CONTEXT_HEADING) {
+        Some(context) => context.split_once("\n\n").map_or("", |(_, custom)| custom),
+        None => system,
+    };
+    match custom.trim() {
         "" => JCODE_APPEND_SYSTEM_PROMPT.to_string(),
-        system => format!("{JCODE_APPEND_SYSTEM_PROMPT}\n\n{system}"),
+        custom => format!("{JCODE_APPEND_SYSTEM_PROMPT}\n\n{custom}"),
     }
 }
 

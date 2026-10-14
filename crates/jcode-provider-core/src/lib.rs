@@ -353,6 +353,13 @@ pub trait Provider: Send + Sync {
         false
     }
 
+    /// Returns true if the provider runs its own agent loop and system prompt
+    /// (Claude Code). jcode then sends only the session's custom system prompt
+    /// and working directory instead of its own prompt.
+    fn uses_own_system_prompt(&self) -> bool {
+        false
+    }
+
     /// Invalidate any cached credentials.
     async fn invalidate_credentials(&self) {}
 
