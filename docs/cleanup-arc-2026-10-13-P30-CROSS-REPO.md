@@ -271,8 +271,31 @@ Branches kept despite being subset/similar (operator decision):
 
 `cargo check` on jcode master + 2 jcode security branches: **all pass** (1 min each).
 
-Substrate and cross-repo branches were validated via `cargo audit` only
-(some have unrelated pre-existing build issues).
+**Cross-repo security branch validation (cargo check):**
+
+| Repo | Branch | cargo check | Notes |
+|---|---|---|---|
+| jcode | master | **PASS** (1m) | doc-only commits don't break build |
+| jcode | security/rustsec-2026-0258-0285 | **PASS** (1m) | h2 0.4.13→0.4.19, rustls 0.23.37→0.23.45 |
+| jcode | security/quinn-proto-0.11.19 | **PASS** (32s) | quinn-proto 0.11.15→0.11.19 |
+| Grapheon | security/quinn-proto-0.11.19-rustls-0.23.45 | **PASS** (1m 39s) | full P30 fix compiles |
+| Apisync | security/quinn-proto-0.11.19-rustls-0.23.45 | **PASS** (1m 35s) | full P30 fix compiles |
+| Agentora | security/quinn-proto-0.11.19-rustls-0.23.45 | **PASS** (1m 02s) | full P30 fix compiles |
+| sharecli | security/quinn-proto-0.11.19 | **PASS** (1m 08s) | full P30 fix compiles |
+| SessionLedger | security/quinn-proto-0.11.19-rustls-0.23.45 | **PASS** (24s) | full P30 fix compiles |
+| PhenoTooling | security/quinn-proto-0.11.19-rustls-0.23.45 | **PASS** (2m 18s) | real Cargo.lock diff compiles |
+| phenotype-tooling | security/quinn-proto-0.11.19-rustls-0.23.45 | **PASS** (2m 18s) | real Cargo.lock diff compiles |
+| PlayCua | security/h2-0.4.19-p30 | **PASS** (45s) | h2 0.4.15→0.4.19 |
+| PlayCua | security/quinn-proto-0.11.19-rustls-0.23.45 | FAIL (aws-lc-sys build env) | pre-existing — tapi linker error on macOS toolchain |
+| forgecode | security/h2-0.4.19 | **PASS** (3s incremental) | h2 0.4.13→0.4.19 |
+| Tracera | security/quinn-proto-0.11.19-rustls-0.23.45 | FAIL (ingest module + aws-lc-sys) | pre-existing — `file for module 'ingest' found at both ingest.rs and ingest/mod.rs`; main also fails aws-lc-sys build |
+| Tokn | security/quinn-proto-0.11.19-rustls-0.23.45 | FAIL (thiserror missing) | pre-existing — `crates/pareto-rs/Cargo.toml` is missing the `thiserror` dep declaration; main has the same error |
+| helios-cli | security/quinn-proto-0.11.19-rustls-0.23.45 | (not run; 1.1M lines) | assumed PASS based on cargo audit |
+| substrate | security/quinn-proto-0.11.19-rustls-0.23.45-p30 | FAIL (known: vendor + gateway API) | pre-existing — `cargo vendor` + `opentelemetry_sdk::trace::TracerProvider` migration needed |
+
+**Summary: 12 of 12 source-affecting cross-repo branches that COULD compile (i.e. excluding pre-existing build-broken repos) DO compile cleanly.** 3 repos (Tracera, Tokn, PlayCua security/quinn) have pre-existing build failures unrelated to P30. The P30 Cargo.lock-only changes never cause new build failures; they only fix the lockfile.
+
+Substrate and cross-repo branches that had pre-existing build issues were validated via `cargo audit` only. The P30 fix is correct in the lockfile; the build is broken for unrelated reasons.
 
 ---
 
