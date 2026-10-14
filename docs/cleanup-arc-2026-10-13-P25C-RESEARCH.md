@@ -52,26 +52,32 @@ Plus 90+ lines of tests for `removes_a_state_file_when_normal_home_is_a_symlink`
 | Property | Value |
 |---|---|
 | Tip commit | `d6f2d20916fd669e6f70204b1851dbe3a28d739b` |
-| Target crate | `crates/kcode-session-memory/...` |
-| Does target exist on jcode master? | **YES** — `crates/jcode-session-memory/Cargo.toml` + `src/` |
-| Patch surface | Empty `git diff --name-only` for the tip commit; 2 unique commits exist but tip changes are absorbed into the merge base |
-| Change summary | `chore(session-memory): record validation metadata` — no actual code changes in the tip commit (per `git diff`); likely metadata-only |
-| Cargo.lock impact | NONE |
-| tx-validated (per trailer) | `lint` |
-| Code generic? | **YES** — session memory is a common concept across both forks |
-| **Port effort to jcode** | **LOW** — if metadata-only, the fix may already be effective or trivially portable |
+| Target crate | `crates/kcode-app-core/src/ambient/session_memory.rs` (via adjacent commit `a4649a32e`) |
+| Does target exist on jcode master? | **NO** — completely refactored |
+| The actual fix commit | `a4649a32e fix(session-memory): preserve adjacent headings` (NOT on master) |
+| Patch surface | 47 lines in `kcode-app-core/src/ambient/session_memory.rs` — fixes `render_session_template` to add trailing newline when body is empty |
+| Code generic? | **YES** — the trailing-newline logic is generic, but the call site doesn't exist anymore |
+| jcode equivalent | `crates/jcode-session-memory/src/substitute.rs::VariableSubstitutor::substitute` — uses `String::replace`, NOT `replace_range`. **The bug doesn't apply** because the new implementation doesn't iterate over section bodies |
+| **Port effort to jcode** | **ZERO** — the bug is structurally impossible in the new implementation (uses `str::replace` instead of `replace_range` on section bodies) |
 
-### Detailed diff
-```bash
-$ git show d6f2d2091 --stat
-# (empty diff stat)
-$ git log -1 d6f2d2091
-chore(session-memory): record validation metadata
-# tx-agent: codex
-# tx-validated: lint
+### Detailed diff (a4649a32e)
+```rust
+// ADDED to kcode-app-core/src/ambient/session_memory.rs::render_session_template:
+let replacement = if body.trim().is_empty() && body_end == body_start && body_end < rendered.len() {
+    format!("{value}\n")  // ← The fix: trailing newline to prevent heading merge
+} else {
+    value.clone()
+};
+rendered.replace_range(replacement_range, &replacement);
 ```
 
-The tip commit appears to be metadata-only (changelog or commit-message update). The "real" work happened in adjacent commits (`a4649a32e fix(session-memory): preserve adjacent headings`) that may or may not be on master.
+### Why this fix is NOT applicable to jcode
+- The old code did `rendered.replace_range(replacement_range, &replacement)` where `body` was a section body (could be empty)
+- The new code does `result = result.replace(&placeholder, value)` which is a simple text substitution
+- `String::replace` doesn't have the "empty body" boundary issue because it operates on the whole text, not on a specific section
+- The test case `session_template_replaces_empty_section_before_adjacent_heading` would still pass in the new implementation because the placeholder `{{Summary}}` is fully replaced, not just a section body
+
+**This branch is essentially obsolete** — the bug it fixed doesn't exist in the new jcode implementation. **Recommendation: Option B (delete) — no value in porting because the bug is structurally impossible.**
 
 ---
 
@@ -132,14 +138,21 @@ fn remove_marker(dir: &Path, session_id: &str) -> std::io::Result<()> {
 
 ## Recommendation rationale
 
-- **ceb860bf2 and e45ddd47e** contain valuable, generic Rust fixes (symlink handling, directory-handle unlink) that improve security/robustness. They should be **ported to jcode** (Option C) for the storage crate, even though the file paths differ.
-- **d6f2d2091** is metadata-only at the tip — the actual code work happened in adjacent commits (`a4649a32e fix(session-memory): preserve adjacent headings`). If that adjacent commit isn't on master, it should be cherry-picked; otherwise this branch is a no-op.
-- **Option C with prioritization**:
-  1. First, check if `a4649a32e` (the session-memory adjacent headings fix) is reachable from master — if not, cherry-pick that one commit (1 minute).
-  2. Then port `ceb860bf2` to `crates/jcode-storage/src/lib.rs` — add the canonicalize-root logic + tests (1-2 hours).
-  3. Then port `e45ddd47e` to `crates/jcode-storage/src/active_pids.rs` — add `remove_marker` + tests (1-2 hours).
-  4. After all 3 ports, delete the rescue branches (Option B equivalent for the ported content).
-- **If port work is not feasible right now**: Option A (keep) preserves the work; Option D (archive) is also valid.
+- **ceb860bf2 (symlink)** — valuable generic fix; should be ported to `jcode-storage/src/lib.rs` (Option C, medium effort)
+- **e45ddd47e (active_pids)** — valuable generic fix; should be ported to `jcode-storage/src/active_pids.rs` (Option C, medium-high effort)
+- **d6f2d2091 (session-memory)** — **OBSOLETE due to refactor** (see Branch 2 analysis). The bug it fixed is structurally impossible in the new `VariableSubstitutor` implementation. **Recommended: Option B (delete) — no porting needed.**
+
+### Mixed strategy (most efficient)
+1. **Delete d6f2d2091** (obsolete) — `git push origin --delete rescue/d6f2d20-choresession-memory-record-validation-metadata` + remove local worktree `/Users/kooshapari/wt-kcode-heading-boundary`
+2. **Port ceb860bf2** to `crates/jcode-storage/src/lib.rs` — add canonicalize-root logic + tests (1-2 hours)
+3. **Port e45ddd47e** to `crates/jcode-storage/src/active_pids.rs` — add `remove_marker` + tests (1-2 hours)
+4. **Delete ceb860bf2 and e45ddd47e rescue branches** after porting (Option B equivalent for the ported content)
+5. **Total: 2-4 hours of port work, then delete all 3 rescue branches**
+
+### If port work is not feasible right now
+- Option A (keep all 3) — preserves work but leaves 3 orphan branches
+- Option D (archive) — clean namespace but same cost as A
+- Note: d6f2d2091 is **safe to delete at any time** because the fix is obsolete
 
 ---
 
