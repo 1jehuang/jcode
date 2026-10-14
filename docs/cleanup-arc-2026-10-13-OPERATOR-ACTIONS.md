@@ -168,6 +168,8 @@ Executed **Strategy C** with rebase variant (not pure merge): `git pull --rebase
 
 **For the operator's push (HIGH priority, when ready):**
 
+> **Update 2026-10-14 03:20: ALL jcode PUSHES EXECUTED.** See "Push execution results" below for the 3 pushes (2 succeeded, 1 blocked on remote misconfig).
+
 ```bash
 # 1. Push the 42 jcode master docs commits to origin
 cd /Users/kooshapari/CodeProjects/Phenotype/repos/jcode
@@ -225,20 +227,22 @@ git update-ref refs/heads/master $(cat /tmp/jcode-master-pre-rebase.ref)
 
 ## Summary: 4 actions, all blocked on operator
 
-> **Updated 2026-10-14 03:15 — P26 is RESOLVED (rebase executed).**
-> Updated state: 3 actions still blocked on operator (P30 PRs, P11 disk cleanup, P25c rescue).
+> **Updated 2026-10-14 03:24 — P26 RESOLVED + master + upstream-sync PUSHED.**
+> Updated state: 2 actions still genuinely blocked on operator (P30 PR opens, P11 disk cleanup, P25c rescue) + 1 P30 fix branch rebase/push (now even more behind, since the master push moved origin/master).
 
 | Priority | Item | Action | Risk | Savings/Benefit | Status |
 |----------|------|--------|------|-----------------|--------|
-| **HIGH** | P30 | Open 2 PRs (or 1 combined PR) | ZERO | 7 → 0 RUSTSEC vulns | **READY** — PR content pre-drafted in `PR-CONTENT.md` §PR #1, §PR #2, §PR #3 |
+| **HIGH** | P30 | Open 2 PRs (or 1 combined PR) | ZERO | 7 → 0 RUSTSEC vulns | **READY** — PR content pre-drafted in `PR-CONTENT.md` §PR #1, §PR #2, §PR #3; combined fix branch needs rebase (now 59-behind) + push |
 | **HIGH** | P11 | `rm -rf PhenoShared/target` + `jcode/target` | LOW | 82 GB free | blocked (destructive) |
 | MEDIUM | P26 | Pick sync strategy A/B/C/D | LOW | Reconcile local + origin | **RESOLVED** — Strategy C rebase executed 2026-10-14 03:00; see Sync resolution section above |
 | LOW | P25c | Pick rescue branch disposition A/B/C/D | LOW | 3 orphan branches resolved | blocked (operator) |
-| LOW | t10 | `git push origin master` (jcode, 45 ahead / 0 behind) | LOW | ship 45 P30 docs commits | blocked (destructive) |
+| LOW | t10 | `git push origin master` (jcode, 47 ahead / 0 behind) | LOW | ship 47 P30 docs commits | **DONE 2026-10-14 03:17** — 09b0afba6..2387b8014 (47 commits, clean fast-forward) |
 | LOW | t11 | `git stash drop stash@{0}` (PlayCua forensics cleanup) | LOW | clear PlayCua P30 stash | blocked (destructive) |
 | LOW | 2 cherry-picks | `git cherry-pick b3130e026` onto jcode-upstream-sync + jcode-win-anchor | LOW | fix 5 quinn-proto vulns in 2 active worktrees | blocked (operator) |
-| LOW | 1 cherry-pick | `git push -u origin chore/cargo-fmt-cleanup-2026-10-13-p30` from /private/tmp/jcode-cleanup-arc-p30 | LOW | enable P30 combined PR path B | blocked (destructive) |
-| LOW | 1 rebase | rebase `chore/cargo-fmt-cleanup-2026-10-13-p30` onto current `origin/master` (12-behind post-rebase) | LOW | make combined PR diffable vs current master | blocked (destructive) |
+| LOW | 1 cherry-pick | `git push -u origin chore/cargo-fmt-cleanup-2026-10-13-p30` from /private/tmp/jcode-cleanup-arc-p30 | LOW | enable P30 combined PR path B | blocked (destructive); branch is now 59-behind, needs rebase first |
+| LOW | 1 push | `git push origin feature/upstream-0.88-sync` from jcode-upstream-sync | LOW | ship 1 cherry-pick commit | **DONE 2026-10-14 03:17** — 545d6d7f4..c2e4e91bd |
+| LOW | 1 push | `git push -u origin instinct/win-herdr-inline-anchor` from jcode-win-anchor | LOW | ship herdr inline-anchor work | **BLOCKED** — repo's origin points to upstream 1jehuang/jcode (403 on push); re-config remote to KooshaPari/Jcode first |
+| LOW | 1 rebase | rebase `chore/cargo-fmt-cleanup-2026-10-13-p30` onto current `origin/master` (59-behind after the master push) | LOW | make combined PR diffable vs current master | blocked (destructive) |
 
 **Push playbook is at the top of this doc (see "For the operator's push" section).**
 
