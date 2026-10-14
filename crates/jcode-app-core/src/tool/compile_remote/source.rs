@@ -579,8 +579,11 @@ mod tests {
             assert!(relative_path(path).is_err(), "{path:?}");
         }
         let dir = tempfile::tempdir().unwrap();
-        put(dir.path(), "file", "contents");
-        assert_eq!(collect(dir.path(), b"file\0file\0").unwrap().files.len(), 1);
-        assert!(collect(dir.path(), b"file").is_err());
+        // collect() expects the canonical root its caller resolves; on macOS the
+        // temp dir sits under the /var -> /private/var symlink.
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        put(&root, "file", "contents");
+        assert_eq!(collect(&root, b"file\0file\0").unwrap().files.len(), 1);
+        assert!(collect(&root, b"file").is_err());
     }
 }
