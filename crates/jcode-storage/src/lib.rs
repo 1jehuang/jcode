@@ -4,6 +4,9 @@ use serde::de::DeserializeOwned;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+mod remove;
+pub use remove::{remove_durable_state_file, remove_state_file};
+
 #[cfg(windows)]
 use std::collections::{HashMap, HashSet};
 #[cfg(windows)]
@@ -762,6 +765,16 @@ mod windows_hardening_tests {
         assert!(!state.enqueue(&file, false, now));
         assert!(state.pending_files.is_empty());
     }
+}
+
+/// Serialize tests that mutate `JCODE_HOME` (or any other process-wide env
+/// var the storage layer reads). Shared by `active_pids` and `remove` test
+/// modules so they cannot race when both touch the env.
+#[cfg(test)]
+pub(crate) fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+    use std::sync::Mutex;
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[cfg(test)]
