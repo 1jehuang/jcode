@@ -23,7 +23,7 @@
 [![GitHub Downloads](https://img.shields.io/github/downloads/1jehuang/jcode/total?style=flat-square)](https://github.com/1jehuang/jcode/releases)
 [![Discord](https://img.shields.io/badge/Discord-Join%20Community-5865F2?style=flat-square&logo=discord&logoColor=white)](https://discord.gg/nBe9vGyK9a)
 
-[Website](https://jcode.sh) · [Docs](https://jcode.sh/docs) · [SDK](https://jcode.sh/sdk) · [Benchmarks](https://jcode.sh/bench) · [Screenshots](#screenshots) · [Install](#installation) · [Quick Start](#quick-start) · [Further Reading](#further-reading) · [Contributing](CONTRIBUTING.md)
+[Website](https://jcode.sh) · [Docs](https://jcode.sh/docs) · [SDK](https://jcode.sh/sdk) · [Benchmarks](https://jcode.sh/bench) · [Screenshots](#screenshots) · [Install](#installation) · [Contributing](CONTRIBUTING.md)
 
 </div>
 
@@ -361,55 +361,6 @@ Resume sessions from different harnesses. Claude code broke on you? Resume the s
 
 Skills are not all loaded on startup. The conversation is embedded as a semantic vector, and will automatically inject a skill if there is an embedding hit similar to memories. The agent has a skill tool for you to manually activate a skill at anytime. You may also activate via slash commands. 
 
-## iOS Application / Native OpenClaw
-
-A native iOS application version of jcode is coming soon. This will allow you to work with jcode on your personal machine's environment from your phone, via Tailscale. Openclaw like features will be bundled with this iOS application. 
-
-## Other planned features
-
-Agents dont like to commit in dirty git state with active changes. Git was clearly not built for multi-agent workflows, and git worktrees is not a good solution. Given this, I believe that is an opporunity for a new git like primitive to be born. 
-
-Build speed improvements: An incremental debug cargo build with cache enabled takes about 1 minute on my machine. The goal is 5-20 seconds. Refactors and crates seams should be able to make this happen. 
-
-<!-- Add iOS / native OpenClaw preview and fuller writeup here. -->
-
-<div align="center">
-
-## Quick Start
-
-</div>
-
-```bash
-# Launch the TUI
-jcode
-
-# Run a single command non-interactively
-jcode run "say hello"
-
-# Resume a previous session by memorable name
-jcode --resume fox
-
-# Run as a persistent background server, then attach more clients
-jcode serve
-jcode connect
-
-# Send voice input from your configured STT command
-jcode dictate
-```
-
-jcode supports interactive TUI use, non-interactive runs, persistent server/client workflows,
-and hotkey-friendly dictation without requiring a bundled speech-to-text stack.
-
-<div align="center">
-
-  <a href="https://github.com/1jehuang/jcode/releases/download/readme-assets/workflow.mp4">
-    <img src="https://github.com/1jehuang/jcode/releases/download/readme-assets/jcode-workflow-demonstration.webp" alt="jcode workflow demonstration" width="900">
-  </a>
-
-  <p><em>jcode workflow demonstration</em></p>
-
-</div>
-
 ## Browser Automation
 
 The built-in `browser` tool lets agents navigate pages, fill forms, upload files,
@@ -417,20 +368,3 @@ and capture screenshots through Firefox Agent Bridge. Ask your agent to set it
 up and handle browser tasks directly.
 
 See [Browser Provider Protocol](docs/BROWSER_PROVIDER_PROTOCOL.md) for details.
-
-## Further Reading
-
-- [jcode.sh/docs](https://jcode.sh/docs) — install, providers, configuration, keybindings
-- [jcode.sh/swarm](https://jcode.sh/swarm) — many coding agents in one repository
-- [jcode.sh/sdk](https://jcode.sh/sdk) — TypeScript SDK: drive jcode sessions from your own program
-- [jcode.sh/bench](https://jcode.sh/bench) — benchmark methodology and results
-- [Ambient Mode / OpenClaw](docs/AMBIENT_MODE.md)
-- [Browser Provider Protocol](docs/BROWSER_PROVIDER_PROTOCOL.md)
-- [Memory Architecture](docs/MEMORY_ARCHITECTURE.md)
-- [Swarm Architecture](docs/SWARM_ARCHITECTURE.md)
-- [Server Architecture](docs/SERVER_ARCHITECTURE.md)
-- [Safety System](docs/SAFETY_SYSTEM.md)
-- [Sponsored Discovery Sponsor Onboarding](docs/SPONSORED_DISCOVERY_SPONSOR_ONBOARDING.md)
-- [Windows Notes](docs/WINDOWS.md)
-- [Wrappers and Shell Integration](docs/WRAPPERS.md)
-- [Refactoring Notes](docs/REFACTORING.md)
