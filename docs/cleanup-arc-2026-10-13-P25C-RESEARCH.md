@@ -155,6 +155,18 @@ git show ceb860bf2 > /tmp/ceb860bf2.patch   # Full commit as patch
 
 After 30 days, the commits are unrecoverable from the local repo (they remain on origin if the branches still exist, but the operator said these branches may be deleted).
 
+## Worktree mapping (verified 2026-10-14 04:16Z)
+
+Each rescue branch tip has a corresponding worktree in detached HEAD state:
+
+| Rescue branch tip | Worktree path | State |
+|---|---|---|
+| `ceb860bf2` (symlink) | `/Users/kooshapari/wt-kcode-home-symlink` | detached HEAD at ceb860bf2 |
+| `d6f2d2091` (session-memory) | `/Users/kooshapari/wt-kcode-heading-boundary` | detached HEAD at d6f2d2091 |
+| `e45ddd47e` (active_pids) | `/Users/kooshapari/wt-kcode-active-pids-race` | detached HEAD at e45ddd47e |
+
+These 3 worktrees are the original development worktrees that produced the commits later saved as `rescue/*` branches. Removing the worktrees does NOT lose the commits (they remain reachable via master or reflog); it only frees disk space.
+
 ---
 
 tx-agent: jcode
