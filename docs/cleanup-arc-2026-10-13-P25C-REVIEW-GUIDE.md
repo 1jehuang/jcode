@@ -1,7 +1,7 @@
 # P25c: P25c rescue-branch port review guide
 
-This document is the operator-facing review guide for the two P25c
-ports staged on draft branches in origin. It complements
+This document is the operator-facing review guide for the P25c ports
+staged on draft branches in origin. It complements
 [`docs/cleanup-arc-2026-10-13-OPERATOR-ACTIONS.md`](./cleanup-arc-2026-10-13-OPERATOR-ACTIONS.md)
 and [`docs/cleanup-arc-2026-10-13-P25C-RESEARCH.md`](./cleanup-arc-2026-10-13-P25C-RESEARCH.md).
 
@@ -11,10 +11,12 @@ and [`docs/cleanup-arc-2026-10-13-P25C-RESEARCH.md`](./cleanup-arc-2026-10-13-P2
 |---|---|---|---|---|---|
 | `rescue/e45ddd47e-...` | `e45ddd47e` | `p25c/port-e45ddd47e-active-pids-race` | `f6e55881f` | 5/5 pass | Merge or discard |
 | `rescue/ceb860bf2-...` | `ceb860bf2` | `p25c/port-ceb860bf2-symlinked-state-home` | `2060e81f5` | 8/8 pass | Merge (API opt-in) or discard |
+| (bonus, not a rescue) | n/a | `p25c/port-jcode-sdk-clippy-cleanup` | `90cea21ba` | compile, 1+4 pre-existing flakes | Merge (clippy cleanup) or discard |
 
-**Recommended action:** merge both. The ports are self-contained,
-non-breaking, and add a public API. No callers are touched in the ceb860bf2
-port, so the merge is zero-risk for existing behavior.
+**Recommended action:** merge all three. The ports are self-contained,
+non-breaking, and either add a public API (ceb860bf2) or fix pre-existing
+clippy lints on master (jcode-sdk). The clippy port is the only one that
+resolves a current `cargo clippy -D warnings` failure on master.
 
 ## Port 1: e45ddd47e — race-resistant session-marker unlink
 
@@ -142,14 +144,92 @@ git push origin --delete rescue/ceb860bf2-allow-symlinked-state-home
 git worktree remove /Users/kooshapari/wt-kcode-home-symlink
 ```
 
-## After both are merged
+## After all three are merged
 
 The cleanup-arc-2026-10-13 will be complete:
 - 4 P30 source branches deleted
 - 3 P25c rescue branches either deleted (d6f2d2091) or ported (e45ddd47e + ceb860bf2)
+- 2 stale `chore/cargo-fmt-cleanup-2026-10-13*` branches deleted
 - 3 stale worktrees removed
 - 0 P30 RUSTSEC vulnerabilities
 - 0 P25c structural divergence (other than the dev-isolation feature that doesn't exist in jcode)
+- 0 pre-existing clippy lints in jcode-sdk (the bonus port)
 
 Final memory record: this arc freed ~260 MB of disk space and resolved
 every P30 + P25c structural issue in the kcode→jcode fork.
+
+## Port 3 (bonus, not a rescue): jcode-sdk clippy cleanup
+
+### What it does
+Fixes 11 pre-existing clippy lints in `jcode-sdk` that have been on master
+since before the rustfmt drift cleanup at `f0a4a63bd`. `cargo clippy -p
+jcode-sdk --all-targets -- -D warnings` currently fails with 11 errors;
+this commit brings it to clean.
+
+### Lints addressed
+| Lint | Count | Resolution |
+|---|---|---|
+| `clippy::collapsible_if` | 6 | Collapse nested ifs into `&&`-chains (auth.rs, client.rs, launch.rs, ssh.rs). **One case** (`auth.rs::command()`) rustfmt-nightly reformats the `&& let` chain back to nested, so a `#[allow(clippy::collapsible_if)]` is applied to that function. The allow is scoped to the smallest possible function. |
+| `clippy::needless_return` | 2 | Remove redundant `return` from tail-position expressions (client.rs, launch.rs). |
+| `clippy::unnecessary_sort_by` | 1 | Replace `sort_by(|(l, _), (r, _)| l.cmp(r))` with `sort_by_key(|(k, _)| *k)` (structured.rs). |
+| `clippy::while_let_loop` | 2 | Add `#[allow(clippy::while_let_loop)]` on `spawn_reader` and `fake_harness`; the loop bodies use `continue`/`break`/early-return that doesn't translate cleanly to `while let`. |
+| `clippy::type_complexity` | 1 | Extract `type SubscriberList = Vec<(u64, Option<String>, Sender<ApiEvent>)>`; aliased on the `subscribers` field. |
+
+### Diff summary
+| File | Lines | Change |
+|---|---|---|
+| `crates/jcode-sdk/src/auth.rs` | +1 / -0 | `#[allow(clippy::collapsible_if)]` on `command()` |
+| `crates/jcode-sdk/src/client.rs` | +14 / -6 | `SubscriberList` type alias; 2 `needless_return`; 1 `while_let_loop` allow |
+| `crates/jcode-sdk/src/launch.rs` | +6 / -6 | 1 `needless_return`; 1 `collapsible_if` |
+| `crates/jcode-sdk/src/ssh.rs` | +17 / -17 | 4 `collapsible_if` |
+| `crates/jcode-sdk/src/structured.rs` | +1 / -1 | `unnecessary_sort_by` |
+| `crates/jcode-sdk/tests/client_behavior.rs` | +1 / -0 | `#[allow(clippy::while_let_loop)]` on `fake_harness` |
+| **Total** | **+39 / -31** | **11 lints fixed** |
+
+### Validation
+- `cargo clippy -p jcode-sdk --all-targets -- -D warnings` — PASS (0 warnings)
+- `cargo fmt -p jcode-sdk -- --check` — PASS (0 dirty)
+- `cargo check --workspace` — PASS
+- `cargo test -p jcode-sdk` — 29 pass, 1 fail, 2 ignored
+  - 1 flake: `auth::tests::processes::timeout_reaps_process_and_unique_ids_isolate_cancellation` — also fails on master, pre-existing
+  - 4 fails: `lifecycle_events` test suite — requires a running harness, also fails on master
+- `cargo test -p jcode-sdk --no-run` — all 4 test binaries compile
+
+### Important: no behavior change
+This is a pure lint-cleanup commit. No runtime behavior is changed; the
+public API of `jcode-sdk` is unchanged.
+
+### Why this exists as a draft branch
+The work was originally committed on
+`chore/cargo-fmt-cleanup-2026-10-13-rebased` at `1272dde5c` (2026-10-12,
+`jcode-test` author) as part of a prior arc attempt. That branch had 3
+commits:
+1. `2baa858b2 chore(fmt): apply cargo fmt --all` — 116 files, +2811/-2285 — **already on master** via `f0a4a63bd style(ci): clear workspace rustfmt drift`
+2. `1272dde5c fix(jcode-sdk): clean up 11 pre-existing clippy lints` — **NEW value, ported here**
+3. `4dde942b1 chore(fmt): fix chained-if-let reformat` — **already on master** (auth.rs is in the nested form)
+
+So the only commit with new value on current master is `1272dde5c`. The
+`chore/cargo-fmt-cleanup-2026-10-13*` branches are now DELETED from origin
+because their work is subsumed by other master commits.
+
+### How to review
+```bash
+git fetch origin
+git checkout p25c/port-jcode-sdk-clippy-cleanup
+git log --oneline -3
+git diff master..HEAD --stat
+# Read the actual diff
+git diff master..HEAD -- crates/jcode-sdk
+# Re-test
+cargo clippy -p jcode-sdk --all-targets -- -D warnings
+cargo fmt -p jcode-sdk --check
+cargo test -p jcode-sdk --no-run
+```
+
+### How to merge
+```bash
+git checkout master
+git merge --no-ff p25c/port-jcode-sdk-clippy-cleanup
+git push origin master
+# No worktree or source branch to clean up (this was not a rescue port)
+```
