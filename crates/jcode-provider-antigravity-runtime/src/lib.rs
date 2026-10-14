@@ -815,28 +815,39 @@ impl Provider for AntigravityProvider {
     fn model_routes(&self) -> Vec<jcode_provider_core::ModelRoute> {
         let catalog = self.fetched_catalog();
         if !catalog.is_empty() {
-            let mut seen: std::collections::HashSet<String> =
-                catalog.iter().map(|model| model.id.clone()).collect();
-            let mut routes: Vec<jcode_provider_core::ModelRoute> = catalog
-                .into_iter()
-                .map(|model| jcode_provider_core::ModelRoute {
-                    model: model.id.clone(),
+            let unavailable_canonical_ids: std::collections::HashSet<String> = catalog
+                .iter()
+                .filter(|model| !model.available)
+                .map(|model| remap_unsupported_model(model.id.trim()).to_string())
+                .collect();
+            let mut seen = std::collections::HashSet::new();
+            let mut routes: Vec<jcode_provider_core::ModelRoute> = Vec::new();
+            for model in catalog {
+                let id = model.id.trim().to_string();
+                if id.is_empty() || !seen.insert(id.clone()) {
+                    continue;
+                }
+                let canonical_id = remap_unsupported_model(&id);
+                let available =
+                    model.available && !unavailable_canonical_ids.contains(canonical_id);
+                routes.push(jcode_provider_core::ModelRoute {
+                    model: id,
                     provider: "Antigravity".to_string(),
                     api_method: "https".to_string(),
-                    available: model.available,
+                    available,
                     detail: catalog_model_detail(&model),
                     usage: None,
                     cheapness: None,
-                })
-                .collect();
+                });
+            }
             for fallback in AVAILABLE_MODELS {
                 if seen.insert((*fallback).to_string()) {
                     routes.push(jcode_provider_core::ModelRoute {
                         model: (*fallback).to_string(),
                         provider: "Antigravity".to_string(),
                         api_method: "https".to_string(),
-                        available: true,
-                        detail: "fallback catalog".to_string(),
+                        available: false,
+                        detail: "fallback catalog (unverified)".to_string(),
                         usage: None,
                         cheapness: None,
                     });

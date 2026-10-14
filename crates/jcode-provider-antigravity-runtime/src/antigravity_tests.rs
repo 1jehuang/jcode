@@ -747,3 +747,154 @@ fn set_model_stores_bare_id_for_prefixed_session_restore_spec() {
     );
     assert!(provider.set_model("   ").is_err());
 }
+
+#[test]
+fn model_routes_marks_omitted_static_fallbacks_unverified_in_sparse_catalog_and_preserves_false() {
+    let provider = AntigravityProvider::new();
+    *provider.fetched_catalog.write().expect("catalog lock") = vec![
+        CatalogModel {
+            id: "gemini-3-flash".to_string(),
+            display_name: Some("Gemini 3 Flash".to_string()),
+            reset_time: None,
+            tag_title: None,
+            model_provider: Some("MODEL_PROVIDER_GOOGLE".to_string()),
+            max_tokens: None,
+            max_output_tokens: None,
+            recommended: true,
+            available: true,
+            remaining_fraction_milli: Some(1000),
+        },
+        CatalogModel {
+            id: "claude-sonnet-4-6".to_string(),
+            display_name: Some("Claude Sonnet 4.6".to_string()),
+            reset_time: Some("2026-10-15T00:00:00Z".to_string()),
+            tag_title: None,
+            model_provider: Some("MODEL_PROVIDER_ANTHROPIC".to_string()),
+            max_tokens: None,
+            max_output_tokens: None,
+            recommended: false,
+            available: false,
+            remaining_fraction_milli: Some(0),
+        },
+        // Duplicate entry in fetched_catalog must be deduplicated, keeping first entry.
+        CatalogModel {
+            id: "claude-sonnet-4-6".to_string(),
+            display_name: Some("Duplicate Claude Sonnet".to_string()),
+            reset_time: None,
+            tag_title: None,
+            model_provider: None,
+            max_tokens: None,
+            max_output_tokens: None,
+            recommended: false,
+            available: true,
+            remaining_fraction_milli: Some(1000),
+        },
+    ];
+
+    let routes = provider.model_routes();
+
+    let flash_routes: Vec<_> = routes
+        .iter()
+        .filter(|route| route.model == "gemini-3-flash")
+        .collect();
+    assert_eq!(flash_routes.len(), 1, "gemini-3-flash must not duplicate");
+    assert!(flash_routes[0].available);
+    assert!(flash_routes[0].detail.contains("Gemini 3 Flash"));
+
+    let claude_routes: Vec<_> = routes
+        .iter()
+        .filter(|route| route.model == "claude-sonnet-4-6")
+        .collect();
+    assert_eq!(
+        claude_routes.len(),
+        1,
+        "claude-sonnet-4-6 must be deduplicated across catalog and fallback list"
+    );
+    assert!(
+        !claude_routes[0].available,
+        "explicit available:false in fetched catalog must be preserved"
+    );
+    assert!(claude_routes[0].detail.contains("quota 0.0%"));
+
+    // Static fallback models absent from the sparse fetched catalog must be
+    // present as unverified fallbacks (available: false), not marked verified.
+    for omitted in [
+        "gemini-4-argon-medium",
+        "gemini-4-argon-high",
+        "gemini-4-argon-low",
+        "gemini-3.8-flash-medium",
+    ] {
+        let matching: Vec<_> = routes
+            .iter()
+            .filter(|route| route.model == omitted)
+            .collect();
+        assert_eq!(matching.len(), 1, "{omitted} should appear once in routes");
+        assert!(
+            !matching[0].available,
+            "omitted static fallback {omitted} must not be marked verified available when catalog is non-empty"
+        );
+        assert_eq!(matching[0].detail, "fallback catalog (unverified)");
+    }
+}
+
+#[test]
+fn model_routes_reconciles_alias_availability_by_canonical_request_id() {
+    let provider = AntigravityProvider::new();
+    // Synthetic sparse fixture: bare alias `gemini-4-argon` is explicitly
+    // unavailable while `gemini-3-flash` is available, and `gemini-4-argon-medium`
+    // is either omitted or present with contradictory availability.
+    *provider.fetched_catalog.write().expect("catalog lock") = vec![
+        CatalogModel {
+            id: "gemini-4-argon".to_string(),
+            display_name: Some("Gemini 4 Argon".to_string()),
+            reset_time: None,
+            tag_title: None,
+            model_provider: None,
+            max_tokens: None,
+            max_output_tokens: None,
+            recommended: false,
+            available: false,
+            remaining_fraction_milli: Some(0),
+        },
+        CatalogModel {
+            id: "gemini-4-argon-medium".to_string(),
+            display_name: Some("Gemini 4 Argon Medium".to_string()),
+            reset_time: None,
+            tag_title: None,
+            model_provider: None,
+            max_tokens: None,
+            max_output_tokens: None,
+            recommended: false,
+            available: true,
+            remaining_fraction_milli: Some(1000),
+        },
+        CatalogModel {
+            id: "gemini-3-flash".to_string(),
+            display_name: None,
+            reset_time: None,
+            tag_title: None,
+            model_provider: None,
+            max_tokens: None,
+            max_output_tokens: None,
+            recommended: true,
+            available: true,
+            remaining_fraction_milli: Some(1000),
+        },
+    ];
+
+    let routes = provider.model_routes();
+    let bare_argon = routes
+        .iter()
+        .find(|route| route.model == "gemini-4-argon")
+        .expect("bare argon route");
+    let medium_argon = routes
+        .iter()
+        .find(|route| route.model == "gemini-4-argon-medium")
+        .expect("medium argon route");
+
+    assert!(!bare_argon.available);
+    assert!(
+        !medium_argon.available,
+        "canonical target must not be marked available when its alias is unavailable"
+    );
+}

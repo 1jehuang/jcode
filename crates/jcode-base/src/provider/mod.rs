@@ -1516,7 +1516,7 @@ impl MultiProvider {
 
         let already_has_gemini = self.gemini_provider().is_some();
         if !already_has_gemini
-            && crate::auth::gemini::load_tokens().is_ok()
+            && (crate::auth::gemini::load_tokens().is_ok() || crate::auth::gemini::has_api_key())
             && let Some(gemini) =
                 external::instantiate_expected_external_provider(external::GEMINI_RUNTIME)
         {
@@ -2164,7 +2164,7 @@ impl Provider for MultiProvider {
         if let Some(target_provider) = target_provider
             && let Some(target) = provider_from_model_key(target_provider)
         {
-            if !self.provider_slot_available(target)
+            if !self.reconcile_auth_if_provider_missing(target)
                 && self.antigravity_provider().is_some()
                 && crate::provider::antigravity::is_known_model(model)
             {

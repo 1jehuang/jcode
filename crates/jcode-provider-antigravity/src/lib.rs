@@ -205,14 +205,20 @@ pub fn metadata_platform() -> &'static str {
 pub fn antigravity_version() -> String {
     std::env::var(VERSION_ENV)
         .ok()
-        .map(|value| value.trim().to_string())
+        .map(|value| {
+            let trimmed = value.trim();
+            trimmed
+                .strip_prefix("cli/")
+                .unwrap_or(trimmed)
+                .trim()
+                .to_string()
+        })
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| ANTIGRAVITY_VERSION.to_string())
 }
 
 pub fn antigravity_user_agent() -> String {
-    let raw_version = antigravity_version();
-    let version = raw_version.strip_prefix("cli/").unwrap_or(&raw_version);
+    let version = antigravity_version();
     if cfg!(target_os = "windows") {
         format!("antigravity/cli/{version} windows/amd64")
     } else if cfg!(target_arch = "aarch64") {
@@ -827,6 +833,83 @@ mod endpoint_tests {
         ))));
         unsafe {
             std::env::remove_var(ENDPOINT_ENV);
+        }
+    }
+
+    fn expected_platform_suffix() -> &'static str {
+        if cfg!(target_os = "windows") {
+            "windows/amd64"
+        } else if cfg!(target_arch = "aarch64") {
+            "darwin/arm64"
+        } else {
+            "darwin/amd64"
+        }
+    }
+
+    #[test]
+    fn antigravity_user_agent_defaults_to_cli_version_with_platform_suffix() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::remove_var(VERSION_ENV);
+        }
+        assert_eq!(antigravity_version(), ANTIGRAVITY_VERSION);
+        assert_eq!(
+            antigravity_user_agent(),
+            format!(
+                "antigravity/cli/{ANTIGRAVITY_VERSION} {}",
+                expected_platform_suffix()
+            )
+        );
+    }
+
+    #[test]
+    fn antigravity_user_agent_ignores_empty_and_whitespace_overrides() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let expected_ua = format!(
+            "antigravity/cli/{ANTIGRAVITY_VERSION} {}",
+            expected_platform_suffix()
+        );
+        for blank in ["", "   ", "\t\n", "cli/", "  cli/   "] {
+            unsafe {
+                std::env::set_var(VERSION_ENV, blank);
+            }
+            assert_eq!(
+                antigravity_version(),
+                ANTIGRAVITY_VERSION,
+                "blank override {blank:?} must fall back to default version"
+            );
+            assert_eq!(
+                antigravity_user_agent(),
+                expected_ua,
+                "blank override {blank:?} must produce default User-Agent"
+            );
+        }
+        unsafe {
+            std::env::remove_var(VERSION_ENV);
+        }
+    }
+
+    #[test]
+    fn antigravity_user_agent_normalizes_custom_and_cli_prefixed_overrides() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let expected_ua = format!("antigravity/cli/1.4.2 {}", expected_platform_suffix());
+        for raw in ["1.4.2", "  1.4.2  ", "cli/1.4.2", "  cli/1.4.2  "] {
+            unsafe {
+                std::env::set_var(VERSION_ENV, raw);
+            }
+            assert_eq!(
+                antigravity_version(),
+                "1.4.2",
+                "override {raw:?} must normalize to bare version"
+            );
+            assert_eq!(
+                antigravity_user_agent(),
+                expected_ua,
+                "override {raw:?} must produce exact cli-prefixed User-Agent without double prefix"
+            );
+        }
+        unsafe {
+            std::env::remove_var(VERSION_ENV);
         }
     }
 }

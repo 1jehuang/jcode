@@ -35,6 +35,8 @@ fn with_clean_provider_test_env<T>(f: impl FnOnce() -> T) -> T {
         "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_AUTH_TOKEN",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
         "JCODE_RUNTIME_PROVIDER",
         "JCODE_ACTIVE_PROVIDER",
         "JCODE_INITIAL_PROVIDER_EXPLICIT",
@@ -852,6 +854,10 @@ impl StubExternalRuntime {
     fn openai() -> Self {
         Self::new("openai", "OpenAI", "https", ALL_OPENAI_MODELS)
     }
+
+    fn gemini() -> Self {
+        Self::new("gemini", "Gemini", "code-assist", gemini::AVAILABLE_MODELS)
+    }
 }
 
 #[async_trait::async_trait]
@@ -883,7 +889,10 @@ impl Provider for StubExternalRuntime {
         // process-global, so hot-init can hand this stub to tests that expect
         // cross-provider models to be rejected (e.g. a Claude model under a
         // forced-OpenAI selection).
-        if !self.models.contains(&trimmed) {
+        let is_supported = self.models.contains(&trimmed)
+            || (self.name == "antigravity" && antigravity::is_known_model(trimmed))
+            || (self.name == "gemini" && gemini::is_gemini_model_id(trimmed));
+        if !is_supported {
             anyhow::bail!(
                 "Unsupported {} model '{}'. Use /model to choose from the models available to your account.",
                 self.provider_label,
@@ -950,6 +959,10 @@ fn test_antigravity_runtime() -> Arc<dyn Provider> {
     Arc::new(StubExternalRuntime::antigravity())
 }
 
+fn test_gemini_runtime() -> Arc<dyn Provider> {
+    Arc::new(StubExternalRuntime::gemini())
+}
+
 fn test_copilot_runtime() -> Arc<dyn Provider> {
     Arc::new(StubExternalRuntime::copilot())
 }
@@ -974,6 +987,7 @@ fn register_test_external_runtimes() {
     });
     external::register_external_provider(external::CURSOR_RUNTIME, test_cursor_runtime);
     external::register_external_provider(external::ANTIGRAVITY_RUNTIME, test_antigravity_runtime);
+    external::register_external_provider(external::GEMINI_RUNTIME, test_gemini_runtime);
     external::register_external_provider(external::COPILOT_RUNTIME, test_copilot_runtime);
     // OpenRouter tests exercise the real runtime (profile-scoped catalogs,
     // transport identities), so register the real factory like the binary's
