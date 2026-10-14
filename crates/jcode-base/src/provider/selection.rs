@@ -495,18 +495,19 @@ impl MultiProvider {
         {
             return model.to_string();
         }
-        if let Some((prefix, rest)) = model.split_once(':') {
-            if !prefix.trim().is_empty() && !rest.trim().is_empty() {
-                // Named profiles own their exact keys, including catalog aliases.
-                // Runtime profile lookup requires a canonical catalog id.
-                if crate::config::config().providers.contains_key(prefix) {
-                    return model.to_string();
-                }
-                if let Some(profile) =
-                    crate::provider_catalog::resolve_openai_compatible_profile_selection(prefix)
-                {
-                    return format!("{}:{}", profile.id, rest.trim());
-                }
+        if let Some((prefix, rest)) = model.split_once(':')
+            && !prefix.trim().is_empty()
+            && !rest.trim().is_empty()
+        {
+            // Named profiles own their exact keys, including catalog aliases.
+            // Runtime profile lookup requires a canonical catalog id.
+            if crate::config::config().providers.contains_key(prefix) {
+                return model.to_string();
+            }
+            if let Some(profile) =
+                crate::provider_catalog::resolve_openai_compatible_profile_selection(prefix)
+            {
+                return format!("{}:{}", profile.id, rest.trim());
             }
         }
         if model.contains('@') {

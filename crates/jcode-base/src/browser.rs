@@ -386,20 +386,19 @@ fn lsof_loopback_listeners(output: &str) -> Vec<RegisteredBridgeHost> {
                 .parse::<u32>()
                 .ok()
                 .filter(|pid| *pid > 0 && *pid <= i32::MAX as u32);
-        } else if let (Some(pid), Some(address)) = (pid, line.strip_prefix('n')) {
-            if let Some(port) = address
+        } else if let (Some(pid), Some(address)) = (pid, line.strip_prefix('n'))
+            && let Some(port) = address
                 .strip_prefix("127.0.0.1:")
                 .and_then(|port| port.parse::<u16>().ok())
-            {
-                if (8766..8776).contains(&port) && port != BRIDGE_RELAY_PORT {
-                    listeners.push(RegisteredBridgeHost {
-                        port,
-                        pid,
-                        browser: None,
-                        process: None,
-                    });
-                }
-            }
+            && (8766..8776).contains(&port)
+            && port != BRIDGE_RELAY_PORT
+        {
+            listeners.push(RegisteredBridgeHost {
+                port,
+                pid,
+                browser: None,
+                process: None,
+            });
         }
     }
     listeners.sort_by_key(|entry| (entry.port, entry.pid));
@@ -783,10 +782,11 @@ pub async fn ensure_browser_setup_for(target: BrowserDetection) -> Result<String
         );
     }
 
-    if kind.family() == BrowserFamily::Chromium && extension_package_present(kind) {
-        if repair_chromium_browser_identity(&chromium_extension_dir())? {
-            log.push_str("Repaired Chromium bridge browser detection for Opera. Reload Browser Agent Bridge in each browser using this unpacked extension, then re-check status.\n");
-        }
+    if kind.family() == BrowserFamily::Chromium
+        && extension_package_present(kind)
+        && repair_chromium_browser_identity(&chromium_extension_dir())?
+    {
+        log.push_str("Repaired Chromium bridge browser detection for Opera. Reload Browser Agent Bridge in each browser using this unpacked extension, then re-check status.\n");
     }
 
     match update_bridge_if_newer(kind, true).await {
