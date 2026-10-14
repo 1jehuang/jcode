@@ -1064,10 +1064,9 @@ impl ModelRouteApiMethod {
 
     pub fn parse(value: &str) -> Self {
         let trimmed = value.trim();
-        let trimmed = if oauth_account_label(trimmed).is_some() {
-            trimmed.split_once('@').unwrap().0
-        } else {
-            trimmed
+        let trimmed = match (oauth_account_label(trimmed), trimmed.split_once('@')) {
+            (Some(_), Some((base, _))) => base,
+            _ => trimmed,
         };
         let lower = trimmed.to_ascii_lowercase();
         // Dual-auth (Anthropic/OpenAI OAuth-vs-API) tokens share one canonical
