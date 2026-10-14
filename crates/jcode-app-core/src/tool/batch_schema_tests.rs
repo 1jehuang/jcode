@@ -98,6 +98,23 @@ async fn unknown_custom_schema_keeps_name_and_runs_independent_sdk_sibling() {
 }
 
 async fn sdk_unknown_schema_case(schema: Value) {
+    sdk_native_name_case(schema, "mcp_call").await;
+}
+
+#[tokio::test]
+async fn explicitly_open_schemas_preserve_native_names_in_sdk_callbacks() {
+    for additional in [json!(true), json!({"type":"string"})] {
+        for native_name in ["mcp_call", "opaque"] {
+            sdk_native_name_case(
+                json!({"type":"object", "additionalProperties":additional}),
+                native_name,
+            )
+            .await;
+        }
+    }
+}
+
+async fn sdk_native_name_case(schema: Value, native_name: &'static str) {
     use crate::protocol::{ServerEvent, SessionToolConfig, SessionToolDefinition};
     struct Cleanup(String);
     impl Drop for Cleanup {
@@ -151,7 +168,7 @@ async fn sdk_unknown_schema_case(schema: Value) {
             .execute(
                 "batch",
                 json!({"tool_calls":[
-                    {"tool":"opaque", "name":"mcp_call", "value":"kept"},
+                    {"tool":"opaque", "name":native_name, "value":"kept"},
                     {"tool":"probe", "parameters":{"value":"sibling"}}
                 ]}),
                 context(session_for_call),
@@ -181,7 +198,7 @@ async fn sdk_unknown_schema_case(schema: Value) {
     };
     assert_eq!(name, "opaque");
     assert_eq!(session_id, session);
-    assert_eq!(input["name"], "mcp_call");
+    assert_eq!(input["name"], native_name);
     assert_eq!(input["value"], "kept");
     crate::tool::sdk::complete(
         "batch-schema-tests",
@@ -239,6 +256,21 @@ async fn canonical_and_namespaced_aliases_for_same_tool_are_not_ambiguous() {
 
 #[tokio::test]
 async fn pattern_properties_preserve_full_native_arguments_in_sdk_callback() {
+    sdk_native_arguments_case(
+        json!({"type":"object", "patternProperties":{"^arguments$":{"type":"object"}}}),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn explicitly_open_schemas_preserve_native_arguments_in_sdk_callbacks() {
+    for additional in [json!(true), json!({"type":"object"})] {
+        sdk_native_arguments_case(json!({"type":"object", "additionalProperties":additional}))
+            .await;
+    }
+}
+
+async fn sdk_native_arguments_case(schema: Value) {
     use crate::protocol::{ServerEvent, SessionToolConfig, SessionToolDefinition};
     struct Cleanup(String);
     impl Drop for Cleanup {
@@ -251,12 +283,20 @@ async fn pattern_properties_preserve_full_native_arguments_in_sdk_callback() {
     let session = format!("batch-pattern-schema-{}", uuid::Uuid::new_v4());
     let _cleanup = Cleanup(session.clone());
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    crate::tool::sdk::configure(&session, "batch-pattern-tests", SessionToolConfig {
-        custom: vec![SessionToolDefinition {
-            name: "pattern_tool".into(), description: "Pattern schema probe".into(),
-            parameters: json!({"type":"object", "patternProperties":{"^arguments$":{"type":"object"}}}),
-        }], ..Default::default()
-    }, tx).unwrap();
+    crate::tool::sdk::configure(
+        &session,
+        "batch-pattern-tests",
+        SessionToolConfig {
+            custom: vec![SessionToolDefinition {
+                name: "pattern_tool".into(),
+                description: "Pattern schema probe".into(),
+                parameters: schema,
+            }],
+            ..Default::default()
+        },
+        tx,
+    )
+    .unwrap();
     let registry = registry().await;
     let call_session = session.clone();
     let task = tokio::spawn(async move {
