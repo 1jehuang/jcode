@@ -1913,6 +1913,12 @@ fn render_swarm_message_collapsed_shows_tldr_and_expand_badge_only() {
 
     assert!(plain.contains("fixed the flaky test"), "{plain}");
     assert!(plain.contains(super::SWARM_EXPAND_BADGE), "{plain}");
+    let preview = lines
+        .iter()
+        .flat_map(|line| &line.spans)
+        .find(|span| span.content.contains("fixed the flaky test"))
+        .expect("DM preview span");
+    assert_eq!(preview.style.fg, Some(rgb(130, 130, 140)));
     assert!(
         !plain.contains("race in the setup helper"),
         "collapsed card must hide the full body: {plain}"
