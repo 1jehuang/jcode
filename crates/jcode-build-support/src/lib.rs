@@ -2,6 +2,7 @@ mod paths;
 mod platform_support;
 mod source_state;
 mod storage_helpers;
+mod version_gc;
 
 pub use paths::{
     SELFDEV_CARGO_PROFILE, binary_name, binary_stem, client_update_candidate,
@@ -24,6 +25,10 @@ pub use storage_helpers::{
     read_shared_server_version, read_stable_version, save_migration_context,
     shared_server_binary_path, shared_server_version_file, stable_binary_path, stable_version_file,
     version_binary_path, write_build_progress,
+};
+pub use version_gc::{
+    DEFAULT_KEEP_RECENT_VERSIONS, KEEP_VERSIONS_ENV, VersionPruneReport, prune_old_versions,
+    prune_old_versions_in,
 };
 
 use anyhow::Result;

@@ -354,9 +354,15 @@ pub(super) fn draw_messages(
         height: render_area.height,
     };
     let wrapped_user_indices = &prepared.wrapped_user_indices;
-    let wrapped_user_prompt_starts = &prepared.wrapped_user_prompt_starts;
-    let wrapped_user_prompt_ends = &prepared.wrapped_user_prompt_ends;
-    let user_prompt_texts = &prepared.user_prompt_texts;
+    let clear_start = super::terminal_clear_start(app, &prepared);
+    let preview_start = clear_start.map_or(0, |start| {
+        prepared
+            .wrapped_user_prompt_starts
+            .partition_point(|line| *line < start)
+    });
+    let wrapped_user_prompt_starts = &prepared.wrapped_user_prompt_starts[preview_start..];
+    let wrapped_user_prompt_ends = &prepared.wrapped_user_prompt_ends[preview_start..];
+    let user_prompt_texts = &prepared.user_prompt_texts[preview_start..];
 
     let total_lines = prepared.total_wrapped_lines();
     let viewport_height = render_area.height as usize;
@@ -369,6 +375,7 @@ pub(super) fn draw_messages(
         user_prompt_texts,
         text_render_area,
         pinned_todo_band.height(),
+        preview_start + app.compacted_hidden_user_prompts(),
     );
 
     super::set_last_max_scroll(max_scroll);
@@ -407,7 +414,14 @@ pub(super) fn draw_messages(
         super::set_tail_catchup_active(false);
         user_scroll.min(max_scroll)
     } else {
-        resolve_tail_follow_scroll(max_scroll, viewport_height)
+        // A clear is an explicit viewport boundary, not a jump to animate
+        // through old history. Never show rows preceding it while tailing.
+        if let Some(start) = clear_start {
+            super::set_tail_catchup_active(false);
+            max_scroll.max(start)
+        } else {
+            resolve_tail_follow_scroll(max_scroll, viewport_height)
+        }
     };
 
     // Publish the resolved geometry so scroll handlers and the anchor-reconcile
@@ -425,6 +439,7 @@ pub(super) fn draw_messages(
             user_prompt_texts,
             scroll,
             text_render_area.width,
+            preview_start + app.compacted_hidden_user_prompts(),
         )
     } else {
         0u16
@@ -518,6 +533,9 @@ pub(super) fn draw_messages(
         // prompt preview) is synthetic (not part of the scrolled transcript), so
         // offset by it to keep the content rows aligned.
         scroll_top: scroll.saturating_sub(top_band_lines as usize),
+        content_churning: app.is_processing()
+            || !app.streaming_text().is_empty()
+            || app.has_pending_mouse_scroll_animation(),
         ..Default::default()
     };
     margins
@@ -1000,6 +1018,16 @@ pub(super) fn draw_messages(
             let total_height = region.height;
             let image_end = region.end_line;
             let is_fit = region.render == jcode_tui_messages::ImageRegionRender::Fit;
+            // Scale fit images into the exact box layout reserved for them
+            // (`region.width` cols x `region.height` rows). Fitting into the
+            // full content width instead let the rounded-up row count upscale
+            // the picture a few cells wider than the margin carve assumed, so
+            // it drew over info widgets docked beside it.
+            let fit_cols = if region.width == 0 {
+                content_area.width
+            } else {
+                region.width.min(content_area.width)
+            };
 
             if let Some(native_latex) = crate::tui::markdown::handterm_native_latex_for_hash(hash) {
                 // Native math writes real terminal cells rather than an overlay,
@@ -1038,7 +1066,7 @@ pub(super) fn draw_messages(
             // the ones actually on screen get decoded/scaled, and a cold image
             // schedules background prep instead of stalling this frame.
             let fit_ready = if is_fit && image_end > scroll && abs_idx < visible_end {
-                super::inline_image_ui::ensure_drawable(hash, content_area.width, total_height)
+                super::inline_image_ui::ensure_drawable(hash, fit_cols, total_height)
             } else {
                 true
             };
@@ -1073,7 +1101,7 @@ pub(super) fn draw_messages(
                                 hash,
                                 image_area,
                                 frame.buffer_mut(),
-                                content_area.width,
+                                fit_cols,
                                 total_height,
                                 0,
                                 centered,
@@ -1130,7 +1158,7 @@ pub(super) fn draw_messages(
                                 hash,
                                 image_area,
                                 frame.buffer_mut(),
-                                content_area.width,
+                                fit_cols,
                                 total_height,
                                 skip_rows,
                                 centered,
@@ -1191,7 +1219,12 @@ pub(super) fn draw_messages(
                 if on_screen {
                     continue;
                 }
-                super::inline_image_ui::prefetch(region.hash, content_area.width, region.height);
+                let fit_cols = if region.width == 0 {
+                    content_area.width
+                } else {
+                    region.width.min(content_area.width)
+                };
+                super::inline_image_ui::prefetch(region.hash, fit_cols, region.height);
             }
         }
     }
@@ -1248,7 +1281,8 @@ pub(super) fn draw_messages(
         {
             let prompt_text = prompt_text.trim();
             if !prompt_text.is_empty() {
-                let prompt_num = prompt_order + 1 + app.compacted_hidden_user_prompts();
+                let prompt_num =
+                    preview_start + prompt_order + 1 + app.compacted_hidden_user_prompts();
                 let num_str = format!("{}", prompt_num);
                 let prefix_len = num_str.len() + 2;
                 let content_width =
@@ -1380,74 +1414,57 @@ fn windowed_min(widths: &[u16], window: usize) -> Vec<u16> {
     out
 }
 
-/// Pinned status band: an optional bordered todo card followed by exactly one
-/// compact row per relevant background task (unboxed, below the card).
+/// Pinned todo band: the todo card inside a rounded border with a
+/// ` Todos done/total ` title. Background tasks render in the `background`
+/// info widget, not here.
 #[derive(Default)]
-struct PinnedTodoBand {
+pub(crate) struct PinnedTodoBand {
     /// Todo rows drawn inside the rounded border. Empty means no box.
-    card: Vec<Line<'static>>,
+    pub(crate) card: Vec<Line<'static>>,
     title: String,
     /// Index of the `… +N more` row within `card`.
     more_line: Option<usize>,
-    tasks: Vec<Line<'static>>,
 }
 
 impl PinnedTodoBand {
-    fn card_height(&self) -> u16 {
+    /// Rows the band occupies, including both border rows.
+    pub(crate) fn height(&self) -> u16 {
         if self.card.is_empty() {
             0
         } else {
             self.card.len() as u16 + 2
         }
     }
-
-    fn height(&self) -> u16 {
-        self.card_height() + self.tasks.len() as u16
-    }
 }
 
 fn render_pinned_todo_band(frame: &mut Frame, area: Rect, band: PinnedTodoBand) {
-    let card_height = band.card_height().min(area.height);
-    if card_height > 0 {
-        let border_style = Style::default().fg(super::messages::todo_border_color());
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(border_style)
-            .padding(ratatui::widgets::Padding::horizontal(1))
-            .title(Span::styled(
-                band.title,
-                border_style.add_modifier(Modifier::BOLD),
-            ));
-        let card_area = Rect {
-            height: card_height,
-            ..area
-        };
-        frame.render_widget(Paragraph::new(band.card).block(block), card_area);
+    if band.card.is_empty() {
+        return;
     }
-    if !band.tasks.is_empty() && area.height > card_height {
-        let tasks_area = Rect {
-            y: area.y + card_height,
-            height: area.height - card_height,
-            ..area
-        };
-        frame.render_widget(Paragraph::new(band.tasks), tasks_area);
-    }
+    let border_style = Style::default().fg(super::messages::todo_border_color());
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(border_style)
+        .padding(ratatui::widgets::Padding::horizontal(1))
+        .title(Span::styled(
+            band.title,
+            border_style.add_modifier(Modifier::BOLD),
+        ));
+    frame.render_widget(Paragraph::new(band.card).block(block), area);
 }
 
-/// Build the pinned status band. Todos are shown briefly as a bordered card;
-/// completed tasks are shown briefly as confirmation, while running and failed
-/// tasks remain actionable.
-fn pinned_todo_band_lines(app: &dyn TuiState, width: u16, viewport_height: u16) -> PinnedTodoBand {
+/// Build the pinned todo band. The card spans the full width (no transcript
+/// readability cap) because the band owns its rows.
+pub(crate) fn pinned_todo_band_lines(
+    app: &dyn TuiState,
+    width: u16,
+    viewport_height: u16,
+) -> PinnedTodoBand {
     if width < 16 || viewport_height < 3 {
         return PinnedTodoBand::default();
     }
 
-    let tasks: Vec<_> = app
-        .background_task_rows()
-        .iter()
-        .map(|task| active_background_task_line(task, width))
-        .collect();
     // Card content lives inside the border plus one column of padding per side.
     let inner_width = width.saturating_sub(4);
     let mut title = String::from(" Todos ");
@@ -1457,18 +1474,17 @@ fn pinned_todo_band_lines(app: &dyn TuiState, width: u16, viewport_height: u16) 
                 if let Some((done, total)) = super::messages::todo_payload_counts(payload) {
                     title = format!(" Todos {}/{} ", done, total);
                 }
-                // Unboxed body: the band draws its own border below. Go through
-                // the shared message-line cache so an unchanged list is not
-                // re-rendered on every frame. The distinct title keeps this
-                // entry apart from the boxed inline card for the same payload.
-                let msg = crate::tui::DisplayMessage::todos(payload.to_string())
-                    .with_title("Todos (pinned body)");
+                // Unboxed body: the band draws its own border. The distinct
+                // title keeps the line cache from sharing entries with the
+                // boxed, width-capped inline transcript card.
+                let mut msg = crate::tui::DisplayMessage::todos(payload.to_string());
+                msg.title = Some("Pinned todos".to_string());
                 super::messages::get_cached_message_lines(
                     &msg,
                     inner_width,
                     app.diff_mode(),
                     |msg, width, _| {
-                        super::messages::render_todo_card_body(&msg.content, width)
+                        super::messages::render_todo_card_body(&msg.content, width, false)
                             .unwrap_or_default()
                     },
                 )
@@ -1479,9 +1495,9 @@ fn pinned_todo_band_lines(app: &dyn TuiState, width: u16, viewport_height: u16) 
     };
 
     // Band budget: about a third of the viewport, including the two border
-    // rows around the card and the task rows below it.
+    // rows around the card.
     let budget = ((viewport_height as usize) / 3).clamp(2, 12);
-    let content_budget = budget.saturating_sub(tasks.len()).saturating_sub(2).max(2);
+    let content_budget = budget.saturating_sub(2).max(2);
     let mut card: Vec<Line<'static>> = Vec::new();
     let has_more = card_lines.len() > content_budget && !app.pinned_todos_expanded();
     let mut more_line = None;
@@ -1501,85 +1517,7 @@ fn pinned_todo_band_lines(app: &dyn TuiState, width: u16, viewport_height: u16) 
         card,
         title,
         more_line,
-        tasks,
     }
-}
-
-fn active_background_task_line(task: &crate::tui::BackgroundTaskRow, width: u16) -> Line<'static> {
-    const BAR_WIDTH: usize = 6;
-    let (icon, task_color, percent) = match task.status {
-        crate::tui::BackgroundTaskRowStatus::Running => (
-            "◌",
-            accent_color(),
-            task.percent.unwrap_or(0.0).clamp(0.0, 100.0),
-        ),
-        crate::tui::BackgroundTaskRowStatus::Completed => ("✓", Color::Green, 100.0),
-        crate::tui::BackgroundTaskRowStatus::Failed => (
-            "×",
-            Color::Red,
-            task.percent.unwrap_or(0.0).clamp(0.0, 100.0),
-        ),
-    };
-    let rounded_percent = percent.round() as u8;
-    let status_label = if task.status == crate::tui::BackgroundTaskRowStatus::Failed {
-        "failed".to_string()
-    } else {
-        format!("{}%", rounded_percent)
-    };
-    let filled = ((percent / 100.0) * BAR_WIDTH as f32).round() as usize;
-    let (active_bar, remaining_bar) = if task.status == crate::tui::BackgroundTaskRowStatus::Failed
-    {
-        (
-            "━".repeat(filled.min(BAR_WIDTH)),
-            "─".repeat(BAR_WIDTH.saturating_sub(filled)),
-        )
-    } else if filled >= BAR_WIDTH {
-        ("━".repeat(BAR_WIDTH), String::new())
-    } else {
-        (
-            format!("{}╺", "━".repeat(filled)),
-            "─".repeat(BAR_WIDTH.saturating_sub(filled + 1)),
-        )
-    };
-
-    let fixed_width = UnicodeWidthStr::width(
-        format!("◌ bg   {} {}{}", active_bar, remaining_bar, status_label).as_str(),
-    );
-    let max_label_width = (width as usize).saturating_sub(fixed_width).max(1);
-    let label = truncate_background_task_label(&task.label, max_label_width);
-
-    Line::from(vec![
-        Span::styled(icon, Style::default().fg(task_color)),
-        Span::styled(" bg ", Style::default().fg(dim_color())),
-        Span::raw(label),
-        Span::raw("  "),
-        Span::styled(active_bar, Style::default().fg(task_color)),
-        Span::styled(remaining_bar, Style::default().fg(dim_color())),
-        Span::styled(
-            format!(" {}", status_label),
-            Style::default().fg(dim_color()),
-        ),
-    ])
-}
-
-fn truncate_background_task_label(label: &str, max_width: usize) -> String {
-    let label = label.replace(['\r', '\n'], " ");
-    if UnicodeWidthStr::width(label.as_str()) <= max_width {
-        return label;
-    }
-    if max_width <= 1 {
-        return "…".to_string();
-    }
-    let mut truncated = String::new();
-    for ch in label.chars() {
-        let candidate = format!("{}{}…", truncated, ch);
-        if UnicodeWidthStr::width(candidate.as_str()) > max_width {
-            break;
-        }
-        truncated.push(ch);
-    }
-    truncated.push('…');
-    truncated
 }
 
 static PINNED_TODO_MORE_AREA: std::sync::Mutex<Option<Rect>> = std::sync::Mutex::new(None);
@@ -1604,6 +1542,7 @@ fn compute_prompt_preview_line_count(
     user_prompt_texts: &[String],
     scroll: usize,
     area_width: u16,
+    prompt_number_offset: usize,
 ) -> u16 {
     let last_offscreen = lower_bound(wrapped_user_prompt_starts, scroll).checked_sub(1);
     let Some(prompt_order) = last_offscreen else {
@@ -1616,7 +1555,7 @@ fn compute_prompt_preview_line_count(
     if prompt_text.is_empty() {
         return 0;
     }
-    let num_str = format!("{}", prompt_order + 1);
+    let num_str = format!("{}", prompt_number_offset + prompt_order + 1);
     let prefix_len = num_str.len() + 2;
     let content_width = area_width.saturating_sub(prefix_len as u16 + 2) as usize;
     let text_flat = prompt_text.replace('\n', " ");
@@ -1630,8 +1569,10 @@ fn compute_max_scroll_with_prompt_preview(
     user_prompt_texts: &[String],
     area: Rect,
     pinned_todo_lines: u16,
+    prompt_number_offset: usize,
 ) -> usize {
-    let mut max_scroll = total_lines.saturating_sub(area.height as usize);
+    let mut max_scroll =
+        total_lines.saturating_sub(area.height.saturating_sub(pinned_todo_lines) as usize);
     let preview_enabled = crate::config::config().display.prompt_preview;
     if max_scroll == 0 || (!preview_enabled && pinned_todo_lines == 0) {
         return max_scroll;
@@ -1644,6 +1585,7 @@ fn compute_max_scroll_with_prompt_preview(
                 user_prompt_texts,
                 max_scroll,
                 area.width,
+                prompt_number_offset,
             )
         } else {
             0
@@ -1663,6 +1605,37 @@ fn compute_max_scroll_with_prompt_preview(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pinned_todos_scroll_when_only_the_band_causes_overflow() {
+        let area = ratatui::layout::Rect::new(0, 0, 80, 10);
+        // The transcript alone fits, but the pinned band leaves only seven rows.
+        assert_eq!(
+            super::compute_max_scroll_with_prompt_preview(9, &[], &[], area, 3, 0),
+            2
+        );
+        assert_eq!(
+            super::compute_max_scroll_with_prompt_preview(7, &[], &[], area, 3, 0),
+            0
+        );
+        assert_eq!(
+            super::compute_max_scroll_with_prompt_preview(9, &[], &[], area, 0, 0),
+            0
+        );
+    }
+
+    #[test]
+    fn ctrl_l_preview_measurement_keeps_global_prompt_number_width() {
+        let prompts = vec!["x".repeat(15)];
+        assert_eq!(
+            super::compute_prompt_preview_line_count(&[0], &prompts, 1, 20, 0),
+            1
+        );
+        assert_eq!(
+            super::compute_prompt_preview_line_count(&[0], &prompts, 1, 20, 9),
+            2
+        );
+    }
+
     #[test]
     fn handterm_native_latex_cell_symbol_moves_invokes_and_restores_cursor() {
         assert_eq!(

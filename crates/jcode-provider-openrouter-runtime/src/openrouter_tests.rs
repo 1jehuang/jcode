@@ -1,4 +1,84 @@
 use super::*;
+
+#[tokio::test]
+async fn catalog_request_headers_follow_provider_auth_rules() {
+    for base in [
+        "https://api.anthropic.com/v1",
+        "https://API.ANTHROPIC.COM/v1",
+    ] {
+        for auth in [
+            ProviderAuth::AuthorizationBearer {
+                token: "test-key".into(),
+                label: "test".into(),
+            },
+            ProviderAuth::HeaderValue {
+                header_name: HeaderName::from_static("x-api-key"),
+                value: "test-key".into(),
+                label: "test".into(),
+            },
+        ] {
+            let request = auth
+                .apply_catalog(Client::new().get(format!("{base}/models")), base)
+                .await
+                .unwrap()
+                .build()
+                .unwrap();
+            assert_eq!(request.method(), reqwest::Method::GET);
+            assert_eq!(request.url().path(), "/v1/models");
+            assert_eq!(request.headers()["anthropic-version"], "2023-06-01");
+            assert_eq!(request.headers()["x-api-key"], "test-key");
+            assert!(request.headers().get("authorization").is_none());
+            assert_eq!(request.headers().get_all("x-api-key").iter().count(), 1);
+        }
+    }
+
+    for base in [
+        "https://openrouter.ai/api/v1",
+        "https://api.openai.com/v1",
+        "http://localhost:11434/v1",
+    ] {
+        for (auth, expected_header, expected_value) in [
+            (
+                ProviderAuth::AuthorizationBearer {
+                    token: "test-key".into(),
+                    label: "test".into(),
+                },
+                Some("authorization"),
+                "Bearer test-key",
+            ),
+            (
+                ProviderAuth::HeaderValue {
+                    header_name: HeaderName::from_static("api-key"),
+                    value: "test-key".into(),
+                    label: "test".into(),
+                },
+                Some("api-key"),
+                "test-key",
+            ),
+            (
+                ProviderAuth::None {
+                    label: "test".into(),
+                },
+                None,
+                "",
+            ),
+        ] {
+            let request = auth
+                .apply_catalog(Client::new().get(format!("{base}/models")), base)
+                .await
+                .unwrap()
+                .build()
+                .unwrap();
+            assert!(request.headers().get("anthropic-version").is_none());
+            assert!(request.headers().get("x-api-key").is_none());
+            if let Some(header) = expected_header {
+                assert_eq!(request.headers()[header], expected_value);
+            } else {
+                assert!(request.headers().is_empty());
+            }
+        }
+    }
+}
 use bytes::Bytes;
 use futures::StreamExt;
 use jcode_provider_openrouter::stream::OpenRouterStream;
@@ -1436,6 +1516,7 @@ fn make_provider() -> OpenRouterProvider {
         supports_provider_features: true,
         supports_model_catalog: true,
         profile_id: None,
+        builtin_azure: false,
         reasoning_effort_support: None,
         disable_reasoning_heuristics: false,
         static_reasoning_config: HashMap::new(),
@@ -1470,6 +1551,7 @@ fn make_custom_compatible_provider() -> OpenRouterProvider {
         supports_provider_features: false,
         supports_model_catalog: true,
         profile_id: None,
+        builtin_azure: false,
         reasoning_effort_support: None,
         disable_reasoning_heuristics: false,
         static_reasoning_config: HashMap::new(),
@@ -3223,9 +3305,11 @@ fn midstream_transport_fault_emits_retry_rollback_before_replay() {
             false,
             new_conversation_id(),
             request,
+            false,
             tx,
             Arc::new(Mutex::new(None)),
             "test-model".to_string(),
+            false,
         )
         .await;
 

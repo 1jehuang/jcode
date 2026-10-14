@@ -1110,3 +1110,26 @@ fn pending_external_auth_review_candidates_include_shared_and_legacy_sources() {
         crate::env::remove_var("JCODE_HOME");
     }
 }
+
+#[test]
+fn env_model_for_choice_only_targets_openrouter_slot_runtimes() {
+    let env = Some("mistralai/mistral-large-4-0");
+    assert_eq!(
+        env_model_for_choice_from(&ProviderChoice::Openrouter, env),
+        env
+    );
+    assert_eq!(
+        env_model_for_choice_from(&ProviderChoice::Deepseek, env),
+        env
+    );
+    assert_eq!(
+        env_model_for_choice_from(&ProviderChoice::Claude, env),
+        None
+    );
+    assert_eq!(env_model_for_choice_from(&ProviderChoice::Auto, env), None);
+    assert_eq!(env_model_for_choice_from(&ProviderChoice::Jcode, env), None);
+    assert_eq!(
+        env_model_for_choice_from(&ProviderChoice::Openrouter, None),
+        None
+    );
+}
