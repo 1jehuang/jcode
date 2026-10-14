@@ -1546,7 +1546,11 @@ async fn refresh_models_emits_available_models_updated_after_prefetch() {
 
 #[tokio::test]
 async fn notify_auth_changed_broadcasts_credentials_changed_to_all_sessions() {
-    let _guard = EnvGuard::save(&[]);
+    let _guard = EnvGuard::save(&[
+        "JCODE_RUNTIME_PROVIDER",
+        "JCODE_ACTIVE_PROVIDER",
+        "JCODE_INITIAL_PROVIDER_EXPLICIT",
+    ]);
     crate::bus::reset_models_updated_publish_state_for_tests();
     // Subscribe before the request: every connected client's bus forwarder
     // turns this into ServerEvent::CredentialsChanged (client_lifecycle.rs).
@@ -1591,7 +1595,11 @@ async fn notify_auth_changed_broadcasts_credentials_changed_to_all_sessions() {
 /// once idle, and must not auto-switch any session's model.
 #[tokio::test]
 async fn one_shot_auth_change_refreshes_every_session_without_model_switch() {
-    let _guard = EnvGuard::save(&[]);
+    let _guard = EnvGuard::save(&[
+        "JCODE_RUNTIME_PROVIDER",
+        "JCODE_ACTIVE_PROVIDER",
+        "JCODE_INITIAL_PROVIDER_EXPLICIT",
+    ]);
     crate::bus::reset_models_updated_publish_state_for_tests();
     let template: Arc<dyn Provider> = Arc::new(AuthChangeMockProvider::new());
     let idle_provider = Arc::new(AuthChangeMockProvider::new());
