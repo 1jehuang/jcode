@@ -154,6 +154,19 @@ fn swarm_spawn_mode_defaults_to_inline() {
 }
 
 #[test]
+fn swarm_stall_watchdog_defaults_and_parses() {
+    let defaults = Config::default().agents;
+    assert_eq!(defaults.swarm_stall_after_secs, 600);
+    assert!(!defaults.swarm_stall_nudge);
+
+    let cfg: Config =
+        toml::from_str("[agents]\nswarm_stall_after_secs = 0\nswarm_stall_nudge = true\n")
+            .expect("stall watchdog settings should parse");
+    assert_eq!(cfg.agents.swarm_stall_after_secs, 0);
+    assert!(cfg.agents.swarm_stall_nudge);
+}
+
+#[test]
 fn swarm_max_concurrent_agents_defaults_to_safe_live_worker_budget() {
     // Keep enough parallelism for deep fan-out without allowing recursive ad hoc
     // spawns to grow until the 1000-member hard cap exhausts machine memory.

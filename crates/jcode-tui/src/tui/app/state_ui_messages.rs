@@ -20,6 +20,11 @@ fn display_message_from_stored_message(
     if is_background_task_lifecycle_message(&text) {
         return None;
     }
+    if !matches!(message.role, Role::Assistant)
+        && let Some(swarm) = super::remote_notifications::swarm_delivery_display_message(&text)
+    {
+        return Some(swarm);
+    }
     match message.display_role {
         Some(crate::session::StoredDisplayRole::System) => Some(DisplayMessage::system(text)),
         Some(crate::session::StoredDisplayRole::BackgroundTask) => None,
@@ -100,18 +105,9 @@ impl App {
             return;
         }
         compact_display_message_tool_data(&mut message);
-        // A trailing Ctrl+L spacer only exists to keep the screen clear while
-        // idle. The moment real content arrives, drop it so the transcript
-        // stays contiguous instead of keeping a screenful of blank rows
-        // embedded in the scrollback.
-        if message.role != "spacer"
-            && self
-                .display_messages
-                .last()
-                .is_some_and(|last| last.role == "spacer")
-        {
-            self.display_messages.pop();
-        }
+        // Keep Ctrl+L's spacer as a clear boundary when new content arrives.
+        // The renderer packs only the content after it while following the tail,
+        // so sending a prompt does not restore the pre-clear conversation.
         if self.try_coalesce_repeated_display_message(&message) {
             return;
         }
@@ -209,9 +205,9 @@ impl App {
     }
 
     fn retain_latest_background_tasks(&mut self) {
-        const MAX_PINNED_BACKGROUND_TASKS: usize = 2;
-        if self.background_task_rows.len() > MAX_PINNED_BACKGROUND_TASKS {
-            let stale = self.background_task_rows.len() - MAX_PINNED_BACKGROUND_TASKS;
+        const MAX_TRACKED_BACKGROUND_TASKS: usize = 8;
+        if self.background_task_rows.len() > MAX_TRACKED_BACKGROUND_TASKS {
+            let stale = self.background_task_rows.len() - MAX_TRACKED_BACKGROUND_TASKS;
             self.background_task_rows.drain(..stale);
         }
     }
@@ -313,7 +309,7 @@ impl App {
     }
 
     /// Successful tasks are useful as short-lived confirmation, but should not
-    /// permanently consume the pinned todo band's limited space. Failures stay
+    /// permanently consume the background widget's limited space. Failures stay
     /// until acted on, and running tasks always stay visible.
     pub(super) fn prune_irrelevant_background_tasks(&mut self) -> bool {
         const COMPLETED_TASK_VISIBILITY: std::time::Duration = std::time::Duration::from_secs(12);

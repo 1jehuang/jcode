@@ -251,6 +251,18 @@ pub const KEYBINDING_DEFAULTS: &[KeybindingDefault] = &[
         other: PlatformDefault::dev("alt+left"),
     },
     KeybindingDefault {
+        id: "speed_increase",
+        description: "Increase speed tier (Standard -> Fast -> Ultrafast)",
+        macos: PlatformDefault::dev("alt+up"),
+        other: PlatformDefault::dev("alt+up"),
+    },
+    KeybindingDefault {
+        id: "speed_decrease",
+        description: "Decrease speed tier (Ultrafast -> Fast -> Standard)",
+        macos: PlatformDefault::dev("alt+down"),
+        other: PlatformDefault::dev("alt+down"),
+    },
+    KeybindingDefault {
         id: "centered_toggle",
         description: "Toggle centered mode",
         macos: PlatformDefault::dev("alt+c"),

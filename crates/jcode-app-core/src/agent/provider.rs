@@ -64,7 +64,74 @@ impl Agent {
         self.session.model_usage_turn_id.clone().unwrap()
     }
 
-    pub(super) fn record_model_turn_usage(&self, turn_id: &str) {
+    pub(super) fn sync_bound_account_route(&mut self) {
+        let Some(label) = self.provider.oauth_account_label() else {
+            return;
+        };
+        if self
+            .session
+            .route_api_method
+            .as_deref()
+            .and_then(jcode_provider_core::oauth_account_label)
+            .is_some_and(|selected| selected != label)
+        {
+            logging::warn(
+                "Refusing to replace an explicit saved-account route with a different observed account",
+            );
+            return;
+        }
+        let method = match self.provider.name().to_ascii_lowercase().as_str() {
+            "openai" => "openai-oauth",
+            "claude" | "anthropic" => "claude-oauth",
+            _ => return,
+        };
+        let route = format!("{method}@{label}");
+        if self.session.route_api_method.as_deref() == Some(route.as_str()) {
+            return;
+        }
+        self.session.route_api_method = Some(route);
+        self.session.provider_key = Some(method.to_string());
+        self.session.model = Some(self.provider_model());
+        self.persist_session_best_effort("observed saved account route");
+    }
+
+    pub(super) fn record_failed_account_route(&mut self, error: &str) {
+        self.sync_bound_account_route();
+        if !jcode_provider_core::classify_failover_error_message(error)
+            .should_mark_provider_unavailable()
+        {
+            return;
+        }
+        let provider = self.provider.name().to_ascii_lowercase();
+        let provider = match provider.as_str() {
+            "openai" => "openai",
+            "claude" | "anthropic" => "claude",
+            _ => return,
+        };
+        let label = self.provider.oauth_account_label();
+        let (key, label) = match (
+            provider,
+            self.provider.active_resolved_credential(),
+            label.as_deref(),
+        ) {
+            (_, Some(jcode_provider_core::ResolvedCredential::Oauth), Some(label)) => {
+                (provider, Some(label))
+            }
+            ("openai", Some(jcode_provider_core::ResolvedCredential::ApiKey), _) => {
+                ("openai-api", None)
+            }
+            ("claude", Some(jcode_provider_core::ResolvedCredential::ApiKey), _) => {
+                ("anthropic-api", None)
+            }
+            _ => return,
+        };
+        if crate::provider::provider_unavailability_detail_for_account_label(key, label).is_none() {
+            crate::provider::record_provider_unavailable_for_account_label(key, label, error);
+        }
+    }
+
+    pub(super) fn record_model_turn_usage(&mut self, turn_id: &str) {
+        self.sync_bound_account_route();
         if self.session.is_debug {
             return;
         }
@@ -200,6 +267,21 @@ impl Agent {
                 self.provider.name(),
                 self.session.provider_key.as_deref(),
             );
+        if let Some(label) = self.provider.oauth_account_label() {
+            let method = if self.provider.name().eq_ignore_ascii_case("openai") {
+                "openai-oauth"
+            } else {
+                "claude-oauth"
+            };
+            self.session.route_api_method = Some(format!("{method}@{label}"));
+        } else if self
+            .session
+            .route_api_method
+            .as_deref()
+            .is_some_and(|method| jcode_provider_core::oauth_account_label(method).is_some())
+        {
+            self.session.route_api_method = None;
+        }
         self.session.model = Some(self.provider_model());
         let event = crate::provider::ProviderStateEvent::selected_model(source, resolved_model);
         self.provider_runtime_state.apply(event);
@@ -248,6 +330,11 @@ impl Agent {
         Ok(current)
     }
 
+    pub fn set_agent_model_override(&mut self, target: &str, model: Option<String>) -> Result<()> {
+        self.session.save_prepared()?;
+        self.session.set_agent_model_override(target, model)
+    }
+
     pub fn subagent_model(&self) -> Option<String> {
         self.session.subagent_model.clone()
     }
@@ -268,6 +355,14 @@ impl Agent {
     /// swarm agents inherit this so they reconstruct the coordinator's exact
     /// auth route instead of falling back to the config default.
     pub fn session_route_api_method(&self) -> Option<String> {
+        if let Some(label) = self.provider.oauth_account_label() {
+            let method = if self.provider.name().eq_ignore_ascii_case("openai") {
+                "openai-oauth"
+            } else {
+                "claude-oauth"
+            };
+            return Some(format!("{method}@{label}"));
+        }
         self.session.route_api_method.clone()
     }
 

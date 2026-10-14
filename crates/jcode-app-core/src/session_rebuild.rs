@@ -22,7 +22,7 @@ pub fn hot_rebuild(session_id: &str) -> Result<()> {
         anyhow::bail!("Binary not found at {:?}", exe);
     }
 
-    update::print_centered(&format!("Restarting with session {}...", session_id));
+    eprintln!("Restarting with session {}...", session_id);
     exec_rebuilt_session(&exe, session_id, &cwd, is_selfdev)
 }
 

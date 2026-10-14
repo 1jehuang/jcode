@@ -234,6 +234,9 @@ pub fn error_is_permanent_rejection(error: &str) -> bool {
     [
         "invalid_grant",
         "refresh_token_invalidated",
+        // Our cached rejection guard is just as permanent as the original
+        // provider response, even though it no longer carries an OAuth code.
+        "refresh token was previously rejected",
         "refresh token not found",
         "invalid refresh token",
         "token has been revoked",
@@ -314,6 +317,8 @@ mod tests {
             "code: refresh_token_invalidated",
             "Invalid refresh token",
             "token has been revoked",
+            "Claude OAuth refresh token was previously rejected by Anthropic and cannot be refreshed. Run `jcode login --provider claude` to mint a fresh token.",
+            "openai refresh token was previously rejected by the provider and cannot be refreshed.",
         ] {
             assert!(
                 error_is_permanent_rejection(permanent),
@@ -325,6 +330,7 @@ mod tests {
             "error sending request for url (https://claude.com): connection reset",
             "503 Service Unavailable",
             "operation timed out",
+            "Claude token refresh failed: 503 Service Unavailable",
         ] {
             assert!(
                 !error_is_permanent_rejection(transient),

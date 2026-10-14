@@ -1,3 +1,5 @@
+include!("agent_failover.rs");
+
 #[test]
 fn test_fallback_sequence_includes_all_providers() {
     assert_eq!(

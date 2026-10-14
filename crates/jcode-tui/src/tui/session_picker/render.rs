@@ -185,7 +185,10 @@ impl SessionPicker {
         let accent: Color = rgb(186, 139, 255);
         let batch_restore: Color = rgb(255, 140, 140);
 
-        let created_ago = format_time_ago(session.created_at);
+        // The list is ordered by last activity, so show that instead of the
+        // creation time (a day-old session active a minute ago sits on top).
+        let active_ago =
+            format_time_ago(session.last_active_at.unwrap_or(session.last_message_time));
         let in_batch_restore = self.crashed_session_ids.contains(&session.id);
         let is_marked = self.selected_session_ids.contains(&session.id);
         let same_dir = self.session_in_current_dir(session);
@@ -355,21 +358,7 @@ impl SessionPicker {
         };
 
         let dir_part = if let Some(ref dir) = session.working_dir {
-            let dir_display = if dir.chars().count() > 28 {
-                let chars: Vec<char> = dir.chars().collect();
-                let suffix: String = chars
-                    .iter()
-                    .rev()
-                    .take(25)
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .rev()
-                    .collect();
-                format!("...{}", suffix)
-            } else {
-                dir.clone()
-            };
-            format!("  📁 {}", dir_display)
+            format!("  📁 {}", compact_dir(dir))
         } else {
             String::new()
         };
@@ -377,7 +366,7 @@ impl SessionPicker {
         let mut line3_spans = vec![
             Span::styled("     ", Style::default()),
             Span::styled(
-                format!("created: {}", created_ago),
+                format!("active {}", active_ago),
                 Style::default().fg(dimmer),
             ),
         ];
@@ -758,4 +747,41 @@ impl SessionPicker {
             .wrap(Wrap { trim: false });
         frame.render_widget(block, area);
     }
+}
+
+/// Short, recognizable form of a session directory: `~` for home and, when
+/// still long, the trailing path components that fit (never a cut-off name).
+pub(super) fn compact_dir(dir: &str) -> String {
+    const MAX: usize = 28;
+    let dir = dir.trim_end_matches('/');
+    let dir = match dirs::home_dir() {
+        Some(home) => {
+            let home = home.to_string_lossy();
+            match dir.strip_prefix(home.as_ref()) {
+                Some(rest) if rest.is_empty() || rest.starts_with('/') => format!("~{rest}"),
+                _ => dir.to_string(),
+            }
+        }
+        None => dir.to_string(),
+    };
+    if dir.chars().count() <= MAX {
+        return dir;
+    }
+    let mut tail: Vec<&str> = Vec::new();
+    let mut len = 2; // leading "…/"
+    for component in dir.rsplit('/').filter(|c| !c.is_empty()) {
+        let extra = component.chars().count() + usize::from(!tail.is_empty());
+        if !tail.is_empty() && len + extra > MAX {
+            break;
+        }
+        tail.push(component);
+        len += extra;
+    }
+    tail.reverse();
+    let joined = tail.join("/");
+    if joined.chars().count() + 2 > MAX {
+        let head: String = joined.chars().take(MAX - 3).collect();
+        return format!("…/{head}…");
+    }
+    format!("…/{joined}")
 }

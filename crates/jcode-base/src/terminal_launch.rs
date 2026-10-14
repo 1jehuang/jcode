@@ -28,12 +28,47 @@ pub fn configured_spawn_hook() -> Option<String> {
 /// herd, window managers) control where and how the session appears. If the
 /// hook cannot be started, jcode falls back to its built-in terminal detection.
 pub fn spawn_command_in_new_terminal(command: &TerminalCommand, cwd: &Path) -> Result<bool> {
+    // The user's desktop session owns terminal windows. A running `jcode
+    // companion` spawns there, which is right even when this process is a
+    // daemon started from another session. Without one, spawn locally.
+    if try_spawn_via_companion(command, cwd) {
+        return Ok(true);
+    }
     if try_spawn_via_configured_hook(command, cwd) {
         return Ok(true);
     }
     jcode_terminal_launch::spawn_command_in_new_terminal_with(command, cwd, |cmd| {
         crate::platform::spawn_detached(cmd).map(|_| ())
     })
+}
+
+/// Ask `jcode companion` to open the terminal. `false` when no companion is
+/// running (or it is this process, see `JCODE_COMPANION`), so callers fall back.
+fn try_spawn_via_companion(command: &TerminalCommand, cwd: &Path) -> bool {
+    // Tests must never reach a real companion on the developer's desktop.
+    if std::env::var_os("JCODE_COMPANION").is_some() || crate::auth::running_in_test_harness() {
+        return false;
+    }
+    let request = crate::companion_client::CompanionRequest::SpawnTerminal {
+        program: command.program.clone(),
+        args: command.args.clone(),
+        cwd: cwd.to_path_buf(),
+        title: command.title.clone(),
+        kind: command.kind.clone(),
+        session_id: command.session_id.clone(),
+        env: command.extra_env.clone(),
+        client_terminal_env: command.client_terminal_env.clone(),
+    };
+    match crate::companion_client::request(&request, std::time::Duration::from_secs(10)) {
+        Ok(_) => true,
+        Err(crate::companion_client::CompanionError::Unavailable) => false,
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "jcode companion could not spawn a terminal ({error}); spawning locally"
+            ));
+            false
+        }
+    }
 }
 
 /// Try launching via the configured spawn hook.

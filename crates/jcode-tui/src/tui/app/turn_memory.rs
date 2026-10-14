@@ -220,7 +220,8 @@ impl App {
             .filter(|e| e.active)
             .map(|e| e.content)
             .collect();
-        let sidecar = crate::sidecar::Sidecar::new();
+        // Honor this session's `/agents memory` choice, like server-side extraction.
+        let sidecar = crate::sidecar::Sidecar::for_session(&self.session);
         match sidecar
             .extract_memories_with_existing(&transcript, &existing)
             .await

@@ -25,6 +25,38 @@ fn system_glyph_env_lock() -> std::sync::MutexGuard<'static, ()> {
 }
 
 #[test]
+fn transient_system_notices_are_single_line_without_changing_content() {
+    let notices = [
+        "[auto] Your session was interrupted by a server reload while a tool was running. The\ntool was aborted and results may be incomplete. Continue exactly where you left off.",
+        "Reload complete - continuing because a recovery directive was pending.",
+        "Stream read timeout: no data received for 180 seconds",
+        "📡 Network appears offline - waiting to retry automatically. listening for Linux\nnetlink changes via `ip monitor`; also verifying with reconnect probes",
+        "✓ Retrying continuation... (system message)",
+        "An ordinary status notice that should never wrap even in a narrow terminal.",
+        "[auto] Continue the task.\nKeep the todo up to date.",
+    ];
+    for content in notices {
+        let msg = DisplayMessage::system(content);
+        for width in [1, 10, 30, 80, 120] {
+            let lines = render_system_message(&msg, width, crate::config::DiffDisplayMode::Off);
+            assert_eq!(lines.len(), 1, "{content:?} at width {width}");
+            assert!(lines[0].width() <= width as usize);
+            assert!(!extract_line_text(&lines[0]).contains('\n'));
+        }
+        assert_eq!(
+            msg.content, content,
+            "display must not rewrite agent instructions"
+        );
+    }
+    let msg = DisplayMessage::system(notices[0]);
+    let lines = render_system_message(&msg, 80, crate::config::DiffDisplayMode::Off);
+    assert_eq!(
+        extract_line_text(&lines[0]).trim(),
+        "Server reloaded; resuming interrupted work."
+    );
+}
+
+#[test]
 fn render_system_message_forces_system_color_on_all_spans() {
     let msg = DisplayMessage::system("**Reload complete** - continuing.");
 
@@ -36,6 +68,19 @@ fn render_system_message_forces_system_color_on_all_spans() {
             assert_eq!(span.style.fg, Some(system_message_color()));
         }
     }
+}
+
+#[test]
+fn render_system_message_drops_emoji_variation_selectors() {
+    let msg = DisplayMessage::system(
+        "⚠️ KV cache miss [harness: prefix changed] turn 13: ~336K tokens resent (an earlier message was modified). See KV_CACHE_USAGE in logs.",
+    );
+
+    let lines = render_system_message(&msg, 80, crate::config::DiffDisplayMode::Off);
+    let text: String = lines.iter().map(extract_line_text).collect();
+
+    assert!(text.contains("⚠ KV cache miss"), "got: {text}");
+    assert!(!text.contains('\u{FE0F}'), "VS16 must not reach the buffer");
 }
 
 #[test]
@@ -283,8 +328,8 @@ fn render_system_message_uses_width_stable_titles_on_kitty() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(plain.contains("reconnecting"));
-    assert!(!plain.contains("⚡ reconnecting"));
+    assert!(plain.contains("Connection lost - retrying"));
+    assert!(!plain.contains('⚡'));
 
     match prev_term_program {
         Some(value) => crate::env::set_var("TERM_PROGRAM", value),
@@ -879,6 +924,52 @@ fn render_todos_message_wraps_goal_scores_at_narrow_widths() {
         lines.iter().all(|line| line.width() <= 38),
         "card exceeded its 38-column content budget: {plain}"
     );
+}
+
+#[test]
+fn render_todos_message_packs_multiple_goal_gates_per_row() {
+    let todos = vec![crate::todo::TodoItem {
+        id: "1".to_string(),
+        content: "Render the card".to_string(),
+        status: "in_progress".to_string(),
+        priority: "high".to_string(),
+        group: Some("todo rendering".to_string()),
+        confidence: Some(crate::todo::ConfidenceState::from_legacy_score(85)),
+        completion_confidence: None,
+        confidence_history: Vec::new(),
+        blocked_by: Vec::new(),
+        assigned_to: None,
+    }];
+    let goals = vec![crate::todo::TodoGoal {
+        group: Some("todo rendering".to_string()),
+        closed_feedback_loop: Some(crate::todo::FeedbackLoopState::Usable),
+        feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
+        feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
+        delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
+        ..Default::default()
+    }];
+    let msg =
+        DisplayMessage::todos(serde_json::json!({ "todos": todos, "goals": goals }).to_string());
+
+    let lines = render_todos_message(&msg, 80, crate::config::DiffDisplayMode::Off);
+    let rendered: Vec<String> = lines.iter().map(extract_line_text).collect();
+    let gate_rows: Vec<&String> = rendered
+        .iter()
+        .filter(|line| {
+            ["Closed feedback loop", "Relevance", "Coverage", "Delivery"]
+                .iter()
+                .any(|label| line.contains(label))
+        })
+        .collect();
+    assert!(
+        gate_rows.len() < 4,
+        "gates should share rows instead of one per line: {rendered:#?}"
+    );
+    assert!(
+        gate_rows.iter().any(|line| line.contains(" · ")),
+        "{rendered:#?}"
+    );
+    assert!(lines.iter().all(|line| line.width() <= 78), "{rendered:#?}");
 }
 
 #[test]
@@ -1636,122 +1727,35 @@ fn split_plan_segments_returns_none_without_plan_block() {
 }
 
 #[test]
-fn render_assistant_message_truncates_tool_calls_to_single_line() {
-    let saved = crate::tui::markdown::center_code_blocks();
-    crate::tui::markdown::set_center_code_blocks(false);
-    let msg = DisplayMessage {
+fn transcript_assistant_message_omits_tool_summary_restored_from_history() {
+    // History restore fills `tool_calls`, live turns do not. The transcript
+    // must look the same either way, so no `tool:` line in the chat view.
+    let restored = DisplayMessage {
         role: "assistant".to_string(),
-        content: "Done.".to_string(),
-        tool_calls: vec![
-            "read".to_string(),
-            "grep".to_string(),
-            "apply_patch".to_string(),
-            "batch".to_string(),
-        ],
+        content: "Formatting touched 2 extra files.".to_string(),
+        tool_calls: vec!["bash".to_string(), "todo".to_string()],
         duration_secs: None,
         title: None,
         tool_data: None,
     };
-
-    let lines = render_assistant_message(&msg, 20, crate::config::DiffDisplayMode::Off);
-    assert_eq!(extract_line_text(&lines[1]), "");
-    let tool_lines: Vec<String> = lines
-        .iter()
-        .skip(2)
-        .map(|line| {
-            line.spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect()
-        })
-        .collect();
-
-    assert!(
-        tool_lines.len() == 1,
-        "expected single-line tool-call summary: {tool_lines:?}"
-    );
-    assert!(
-        tool_lines[0].contains("tools:"),
-        "expected tool summary label on first line: {tool_lines:?}"
-    );
-    assert!(
-        tool_lines.iter().all(|line| line.width() <= 20),
-        "tool-call summary line should respect available width: {tool_lines:?}"
-    );
-    crate::tui::markdown::set_center_code_blocks(saved);
-}
-
-#[test]
-fn render_assistant_message_centers_single_line_tool_summary() {
-    let saved = crate::tui::markdown::center_code_blocks();
-    crate::tui::markdown::set_center_code_blocks(true);
-    let msg = DisplayMessage {
-        role: "assistant".to_string(),
-        content: "Done.".to_string(),
-        tool_calls: vec![
-            "read".to_string(),
-            "grep".to_string(),
-            "apply_patch".to_string(),
-            "batch".to_string(),
-        ],
-        duration_secs: None,
-        title: None,
-        tool_data: None,
+    let live = DisplayMessage {
+        tool_calls: Vec::new(),
+        ..restored.clone()
     };
-
-    let lines = render_assistant_message(&msg, 28, crate::config::DiffDisplayMode::Off);
-    assert_eq!(extract_line_text(&lines[1]), "");
-    let tool_lines: Vec<String> = lines
-        .iter()
-        .skip(2)
-        .map(|line| {
-            line.spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect()
-        })
-        .collect();
-
-    assert!(
-        tool_lines.len() == 1,
-        "expected single-line tool-call summary: {tool_lines:?}"
-    );
-    let first_pad = tool_lines[0].chars().take_while(|c| *c == ' ').count();
-    assert!(
-        first_pad > 0,
-        "tool summary should still be padded/centered as a block: {tool_lines:?}"
-    );
-    assert!(
-        lines
+    let render = |msg: &DisplayMessage| -> Vec<String> {
+        render_assistant_message(msg, 80, crate::config::DiffDisplayMode::Off)
             .iter()
-            .skip(2)
-            .all(|line| line.alignment == Some(ratatui::layout::Alignment::Left)),
-        "centered tool summary should use a shared left-aligned block pad"
-    );
-
-    crate::tui::markdown::set_center_code_blocks(saved);
-}
-
-#[test]
-fn render_assistant_message_without_body_does_not_add_extra_blank_line_before_tool_summary() {
-    let saved = crate::tui::markdown::center_code_blocks();
-    crate::tui::markdown::set_center_code_blocks(false);
-    let msg = DisplayMessage {
-        role: "assistant".to_string(),
-        content: String::new(),
-        tool_calls: vec!["read".to_string()],
-        duration_secs: None,
-        title: None,
-        tool_data: None,
+            .map(extract_line_text)
+            .collect()
     };
-
-    let lines = render_assistant_message(&msg, 28, crate::config::DiffDisplayMode::Off);
-    let rendered: Vec<String> = lines.iter().map(extract_line_text).collect();
-
-    assert_eq!(rendered.len(), 1, "rendered={rendered:?}");
-    assert!(rendered[0].contains("tool:"), "rendered={rendered:?}");
-
-    crate::tui::markdown::set_center_code_blocks(saved);
+    let restored_lines = render(&restored);
+    assert!(
+        restored_lines
+            .iter()
+            .all(|line| !line.contains("tool:") && !line.contains("tools:")),
+        "{restored_lines:?}"
+    );
+    assert_eq!(restored_lines, render(&live));
 }
 
 #[test]
@@ -1873,7 +1877,7 @@ fn render_system_message_uses_minimal_inline_style_for_reload_title() {
 }
 
 #[test]
-fn render_system_message_uses_connection_card_for_reconnect_status() {
+fn render_system_message_uses_one_line_for_reconnect_status() {
     let msg = DisplayMessage::system(
         "⚡ Connection lost - retrying (attempt 2, 7s) - connection reset by server · resume: jcode --resume koala",
     )
@@ -1886,13 +1890,10 @@ fn render_system_message_uses_connection_card_for_reconnect_status() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(
-        plain.contains("reconnecting"),
-        "expected reconnect card title: {plain}"
-    );
-    assert!(plain.contains("Retrying · attempt 2 · 7s"));
-    assert!(plain.contains("connection reset by server"));
-    assert!(plain.contains("jcode --resume koala"));
+    assert_eq!(lines.len(), 1);
+    assert!(lines[0].width() <= 80);
+    assert!(plain.contains("Connection lost - retrying (attempt 2, 7s)"));
+    assert!(!plain.contains('╭'));
 }
 
 #[test]
@@ -1941,6 +1942,12 @@ fn render_swarm_message_collapsed_shows_tldr_and_expand_badge_only() {
 
     assert!(plain.contains("fixed the flaky test"), "{plain}");
     assert!(plain.contains(super::SWARM_EXPAND_BADGE), "{plain}");
+    let preview = lines
+        .iter()
+        .flat_map(|line| &line.spans)
+        .find(|span| span.content.contains("fixed the flaky test"))
+        .expect("DM preview span");
+    assert_eq!(preview.style.fg, Some(rgb(130, 130, 140)));
     assert!(
         !plain.contains("race in the setup helper"),
         "collapsed card must hide the full body: {plain}"

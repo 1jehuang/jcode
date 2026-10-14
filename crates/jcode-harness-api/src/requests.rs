@@ -77,6 +77,10 @@ pub enum ApiRequest {
     /// Clone an attached session's transcript into a new, idle session.
     ForkSession { session_id: String },
 
+    /// Create a fresh session containing a runtime-compacted handoff.
+    /// The parent remains unchanged. Replies with `SessionForked`.
+    TransferSession { session_id: String },
+
     /// Detach from the currently attached session.
     DetachSession { session_id: String },
 
@@ -125,6 +129,11 @@ pub enum ApiRequest {
         images: Vec<(String, String)>,
         #[serde(default)]
         urgent: bool,
+        /// Opaque caller id. Echoed in `soft_interrupt_injected` and accepted
+        /// by `cancel_soft_interrupts { client_ids }`. Requires the
+        /// `soft_interrupt_ids` capability; older bridges ignore it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_id: Option<String>,
     },
 
     /// Fetch conversation history.
@@ -170,6 +179,15 @@ pub enum ApiRequest {
 
     /// Provider routes and active runtime identity for the attached session.
     GetRuntimeInfo { session_id: String },
+
+    /// Execute a runtime-backed command without a model turn. Requires
+    /// `runtime_commands`. Invalid or unavailable actions return an error.
+    RuntimeCommand {
+        session_id: String,
+        command: crate::RuntimeCommand,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        args: Vec<String>,
+    },
 
     /// Persist an API-key credential in jcode's owner-only provider store and
     /// notify the daemon to reload it. OAuth tokens are intentionally excluded.
@@ -220,6 +238,19 @@ pub enum ApiRequest {
 
     /// Read safe filesystem metadata for a path under the session root.
     FileStatus { session_id: String, path: String },
+
+    /// Read the session's todo state (todos, plan, goals, deferred gate
+    /// observations, long-session review clock) for client-side auto-poke and
+    /// quality gates. Replies with `TodoState`. Requires `todo_state`.
+    GetTodoState { session_id: String },
+
+    /// Apply the persistent effects of a follow-up decision made with
+    /// `jcode_todo_policy::FollowUpPolicy` (consume the gate observation log,
+    /// mark the long-session review delivered). Replies with `Ok`.
+    AckTodoFollowUp {
+        session_id: String,
+        effects: jcode_todo_policy::TodoEffects,
+    },
 
     /// Switch the session to a different model.
     ///
@@ -284,11 +315,20 @@ pub enum ApiRequest {
     ///
     /// The counterpart to `SoftInterrupt`: a client that lets a user queue a
     /// follow-up must also let them take it back before it lands.
-    CancelSoftInterrupts { session_id: String },
+    ///
+    /// Without `client_ids`, clears the whole queue and replies `Ok`. With
+    /// `client_ids`, removes only those and replies `SoftInterruptsCancelled`,
+    /// decided atomically against injection.
+    CancelSoftInterrupts {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_ids: Option<Vec<String>>,
+    },
 
     /// Move the currently running tool call to the background so the turn can
-    /// continue without waiting for it. The TUI's Alt+B. Acknowledged with
-    /// `Ok` whether or not a tool was running.
+    /// continue without waiting for it. The TUI's Alt+B. Replies
+    /// `BackgroundToolResult` when the bridge advertises
+    /// `background_tool_result`, otherwise `Ok` whether or not a tool ran.
     BackgroundTool { session_id: String },
 
     /// Liveness check.

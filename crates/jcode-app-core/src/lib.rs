@@ -39,6 +39,7 @@ pub mod overnight;
 pub mod perf;
 pub mod replay;
 pub mod restart_snapshot;
+pub mod running_tool_registry;
 pub mod server;
 pub mod server_spawn;
 pub mod session_effort;

@@ -68,6 +68,8 @@ impl Tool for McpTool {
         if !server_declares_intent && let Some(object) = input.as_object_mut() {
             object.remove("intent");
         }
+        // The escape hatch is jcode's, not the server's: read it, never forward it.
+        let accept_large_output = take_accept_large_output(&mut input);
         let manager = self.manager.read().await;
         let result = manager
             .call_tool(&self.server_name, &self.tool_def.name, input)
@@ -108,6 +110,11 @@ impl Tool for McpTool {
         }
 
         let output = output_parts.join("\n");
+        let output = if accept_large_output {
+            output
+        } else {
+            super::budget::fit_to_budget(&output, super::budget::MCP_RESULT_TOKEN_BUDGET)
+        };
         let title = format!("mcp:{}:{}", self.server_name, self.tool_def.name);
 
         if result.is_error {
@@ -115,6 +122,19 @@ impl Tool for McpTool {
         } else {
             Ok(ToolOutput::new(output).with_title(title))
         }
+    }
+}
+
+/// Remove jcode's `accept_large_output` flag from MCP arguments, returning
+/// whether the caller opted in. Accepts `true` or the string `"true"`.
+pub fn take_accept_large_output(input: &mut Value) -> bool {
+    let Some(object) = input.as_object_mut() else {
+        return false;
+    };
+    match object.remove(jcode_tool_core::ACCEPT_LARGE_OUTPUT_KEY) {
+        Some(Value::Bool(accepted)) => accepted,
+        Some(Value::String(raw)) => raw.trim().eq_ignore_ascii_case("true"),
+        _ => false,
     }
 }
 

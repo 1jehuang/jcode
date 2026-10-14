@@ -229,6 +229,7 @@ impl SshConnectOptions {
     ) -> Result<Command> {
         self.validate()?;
         let mut command = Command::new("ssh");
+        crate::process::no_console_window(&mut command);
         if self.isolated_config {
             command.args(["-F", "/dev/null"]);
         }

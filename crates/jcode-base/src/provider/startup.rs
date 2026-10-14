@@ -194,7 +194,7 @@ impl MultiProvider {
         };
 
         let bedrock_provider = if has_bedrock_creds {
-            Some(Arc::new(bedrock::BedrockProvider::new()))
+            Some(Arc::new(new_bedrock_provider()))
         } else {
             None
         };

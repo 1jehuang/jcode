@@ -75,7 +75,9 @@ pub fn next_account_label() -> Result<String> {
     let auth = load_auth_file()?;
     Ok(crate::auth::account_store::next_account_label(
         ACCOUNT_LABEL_PREFIX,
-        auth.openai_accounts.len(),
+        auth.openai_accounts
+            .iter()
+            .map(|account| account.label.as_str()),
     ))
 }
 

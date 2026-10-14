@@ -1,5 +1,5 @@
 use super::{Tool, ToolContext, ToolOutput};
-use crate::config::WebSearchEngine;
+use crate::config::{CustomWebSearchConfig, CustomWebSearchMethod, WebSearchEngine};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -69,8 +69,8 @@ impl Tool for WebSearchTool {
                 },
                 "engine": {
                     "type": "string",
-                    "enum": ["duckduckgo", "bing", "searxng"],
-                    "description": "Engine. Defaults to duckduckgo; bing uses JCODE_BING_API_KEY, searxng uses JCODE_SEARXNG_URL."
+                    "enum": ["duckduckgo", "bing", "searxng", "custom"],
+                    "description": "Engine. Defaults to configured engine; custom uses websearch.custom."
                 },
                 "bing_market": {
                     "type": "string",
@@ -133,10 +133,9 @@ impl Tool for WebSearchTool {
                 "No results found for: {}\n\n\
                  If results are consistently empty on this machine, the default \
                  DuckDuckGo/Bing engines may be blocked here by TLS fingerprinting \
-                 or IP reputation (common on Linux/servers). Workarounds:\n\
+                 or IP reputation (common on Linux/servers). Workaround:\n\
                  - Point at a SearXNG instance: set `websearch.searxng_url` (or \
-                 JCODE_SEARXNG_URL) and use engine \"searxng\".\n\
-                 - Or provide a Bing Search API key via JCODE_BING_API_KEY.",
+                 JCODE_SEARXNG_URL) and use engine \"searxng\".",
                 params.query
             )));
         }
@@ -173,6 +172,13 @@ impl WebSearchTool {
                     .await
             }
             WebSearchEngine::Searxng => self.search_searxng(query, num_results).await,
+            WebSearchEngine::Custom => {
+                let config = crate::config::config();
+                let custom = config.websearch.custom.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("Custom search requires [websearch.custom] configuration")
+                })?;
+                search_custom(custom, query, num_results).await
+            }
             // Provider-native search never reaches the local tool: engine order
             // filters it out. Kept for exhaustiveness.
             WebSearchEngine::Native => Ok(Vec::new()),
@@ -384,6 +390,200 @@ impl WebSearchTool {
 
         Ok(parse_searxng_results(parsed, num_results))
     }
+}
+
+fn validate_custom(config: &CustomWebSearchConfig) -> Result<reqwest::Url> {
+    let url = reqwest::Url::parse(&config.endpoint)
+        .map_err(|_| anyhow::anyhow!("Custom search endpoint must be an absolute HTTP(S) URL"))?;
+    anyhow::ensure!(
+        matches!(url.scheme(), "http" | "https") && url.host_str().is_some(),
+        "Custom search endpoint must be an absolute HTTP(S) URL"
+    );
+    anyhow::ensure!(
+        url.username().is_empty() && url.password().is_none(),
+        "Custom search endpoint must not contain userinfo; use headers or header_env"
+    );
+    anyhow::ensure!(
+        url.fragment().is_none(),
+        "Custom search endpoint must not contain a fragment"
+    );
+    anyhow::ensure!(
+        !config.query_param.trim().is_empty(),
+        "Custom search query_param must not be empty"
+    );
+    if let Some(count) = &config.count_param {
+        anyhow::ensure!(
+            !count.trim().is_empty() && count != &config.query_param,
+            "Custom search count_param must be nonempty and different from query_param"
+        );
+    }
+    anyhow::ensure!(
+        config.body.is_object(),
+        "Custom search body must be a JSON object"
+    );
+    for (name, pointer) in [
+        ("results_pointer", &config.results_pointer),
+        ("title_pointer", &config.title_pointer),
+        ("url_pointer", &config.url_pointer),
+        ("snippet_pointer", &config.snippet_pointer),
+    ] {
+        let mut chars = pointer.chars();
+        let mut valid = pointer.is_empty() || pointer.starts_with('/');
+        while let Some(c) = chars.next() {
+            if c == '~' && !matches!(chars.next(), Some('0' | '1')) {
+                valid = false;
+            }
+        }
+        anyhow::ensure!(valid, "Custom search {name} must be a valid JSON pointer");
+    }
+    Ok(url)
+}
+
+fn custom_request(
+    client: &reqwest::Client,
+    config: &CustomWebSearchConfig,
+    query: &str,
+    count: usize,
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<reqwest::Request> {
+    use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+    let mut url = validate_custom(config)?;
+    let mut params = config.params.clone();
+    let mut body = config.body.clone();
+    match config.method {
+        CustomWebSearchMethod::Get => {
+            params.insert(config.query_param.clone(), query.into());
+            if let Some(name) = &config.count_param {
+                params.insert(name.clone(), count.to_string());
+            }
+        }
+        CustomWebSearchMethod::Post => {
+            body[&config.query_param] = json!(query);
+            if let Some(name) = &config.count_param {
+                body[name] = json!(count);
+            }
+        }
+    }
+    // Configured parameters replace endpoint query keys, rather than producing
+    // ambiguous duplicate keys. Preserve other endpoint parameters.
+    let existing: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(k, _)| !params.contains_key(k.as_ref()))
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    url.set_query(None);
+    if !existing.is_empty() || !params.is_empty() {
+        url.query_pairs_mut()
+            .extend_pairs(existing)
+            .extend_pairs(params);
+    }
+    let mut headers = HeaderMap::new();
+    for (name, value) in &config.headers {
+        let name = HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+            anyhow::anyhow!("Custom search headers contains an invalid header name")
+        })?;
+        let mut value = HeaderValue::from_str(value).map_err(|_| {
+            anyhow::anyhow!("Custom search headers contains an invalid header value")
+        })?;
+        value.set_sensitive(true);
+        headers.insert(name, value);
+    }
+    for (name, variable) in &config.header_env {
+        let name = HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+            anyhow::anyhow!("Custom search header_env contains an invalid header name")
+        })?;
+        anyhow::ensure!(
+            !variable.is_empty() && !variable.contains(['=', '\0']),
+            "Custom search header_env contains an invalid environment variable name"
+        );
+        let value = env(variable)
+            .filter(|v| !v.trim().is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!("Custom search header_env variable {variable} is missing or empty")
+            })?;
+        let mut value = HeaderValue::from_str(&value).map_err(|_| {
+            anyhow::anyhow!("Custom search header_env contains an invalid header value")
+        })?;
+        value.set_sensitive(true);
+        headers.insert(name, value);
+    }
+    let builder = match config.method {
+        CustomWebSearchMethod::Get => client.get(url),
+        CustomWebSearchMethod::Post => client.post(url).json(&body),
+    };
+    builder
+        .headers(headers)
+        .build()
+        .map_err(|e| anyhow::anyhow!("Custom search request failed: {}", e.without_url()))
+}
+
+async fn search_custom(
+    config: &CustomWebSearchConfig,
+    query: &str,
+    count: usize,
+) -> Result<Vec<SearchResult>> {
+    // Never forward user-configured credentials to redirect destinations.
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|_| anyhow::anyhow!("Custom search HTTP client initialization failed"))?;
+    let request = custom_request(&client, config, query, count, |name| {
+        std::env::var(name).ok()
+    })?;
+    let response = client
+        .execute(request)
+        .await
+        .map_err(|e| anyhow::anyhow!("Custom search request failed: {}", e.without_url()))?;
+    anyhow::ensure!(
+        response.status().is_success(),
+        "Custom search failed with HTTP status {}",
+        response.status()
+    );
+    let body: Value = response.json().await.map_err(|e| {
+        anyhow::anyhow!(
+            "Custom search response is not valid JSON: {}",
+            e.without_url()
+        )
+    })?;
+    parse_custom_results(&body, config, count)
+}
+
+fn parse_custom_results(
+    body: &Value,
+    config: &CustomWebSearchConfig,
+    count: usize,
+) -> Result<Vec<SearchResult>> {
+    let items = body
+        .pointer(&config.results_pointer)
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            anyhow::anyhow!("Custom search results_pointer must resolve to a JSON array")
+        })?;
+    Ok(items
+        .iter()
+        .filter_map(|item| {
+            let url = item.pointer(&config.url_pointer)?.as_str()?.trim();
+            if url.is_empty() {
+                return None;
+            }
+            let title = item
+                .pointer(&config.title_pointer)
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or(url);
+            let snippet = item
+                .pointer(&config.snippet_pointer)
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            Some(SearchResult {
+                title: title.into(),
+                url: url.into(),
+                snippet: snippet.into(),
+            })
+        })
+        .take(count)
+        .collect())
 }
 
 /// Map a parsed SearXNG JSON response to `SearchResult`s, dropping entries with
@@ -667,6 +867,237 @@ fn local_engine_order(
 
 #[cfg(test)]
 mod tests {
+    fn custom_config() -> CustomWebSearchConfig {
+        CustomWebSearchConfig {
+            endpoint: "https://example.test/search?keep=yes&q=old".into(),
+            count_param: Some("count".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn custom_get_encodes_query_and_resolves_env_headers() {
+        let mut config = custom_config();
+        config.params.insert("format".into(), "json".into());
+        config.headers.insert("authorization".into(), "old".into());
+        config
+            .header_env
+            .insert("Authorization".into(), "SEARCH_TOKEN".into());
+        let request = custom_request(&reqwest::Client::new(), &config, "rust & c++", 3, |name| {
+            assert_eq!(name, "SEARCH_TOKEN");
+            Some("Bearer secret".into())
+        })
+        .unwrap();
+        assert_eq!(request.method(), reqwest::Method::GET);
+        let pairs: std::collections::BTreeMap<_, _> = request.url().query_pairs().collect();
+        assert_eq!(pairs["q"], "rust & c++");
+        assert_eq!(pairs["count"], "3");
+        assert_eq!(pairs["keep"], "yes");
+        assert_eq!(
+            request
+                .url()
+                .query_pairs()
+                .filter(|(k, _)| k == "q")
+                .count(),
+            1
+        );
+        assert!(request.url().as_str().contains("%26"));
+        assert_eq!(request.headers()["authorization"], "Bearer secret");
+        assert!(request.headers()["authorization"].is_sensitive());
+    }
+
+    #[test]
+    fn custom_post_merges_body_and_optional_count() {
+        let mut config = custom_config();
+        config.method = CustomWebSearchMethod::Post;
+        config.query_param = "search".into();
+        config.count_param = None;
+        config.body = json!({"search": "old", "options": {"safe": true}});
+        let request = custom_request(&reqwest::Client::new(), &config, "new", 4, |_| None).unwrap();
+        assert_eq!(request.method(), reqwest::Method::POST);
+        let body: Value =
+            serde_json::from_slice(request.body().unwrap().as_bytes().unwrap()).unwrap();
+        assert_eq!(body, json!({"search": "new", "options": {"safe": true}}));
+        config.count_param = Some("limit".into());
+        config.params.insert("static".into(), "yes".into());
+        let request = custom_request(&reqwest::Client::new(), &config, "new", 4, |_| None).unwrap();
+        let body: Value =
+            serde_json::from_slice(request.body().unwrap().as_bytes().unwrap()).unwrap();
+        assert_eq!(body["limit"], json!(4));
+        assert!(
+            request
+                .url()
+                .query_pairs()
+                .any(|(k, v)| k == "static" && v == "yes")
+        );
+    }
+
+    #[test]
+    fn custom_maps_nested_and_escaped_pointers() {
+        let mut config = custom_config();
+        config.results_pointer = "/data/hits".into();
+        config.url_pointer = "/link/href".into();
+        config.title_pointer = "/a~1b/~0title".into();
+        let body = json!({"data": {"hits": [
+            {"link": {"href": ""}},
+            {"link": {"href": "https://one.test"}, "a/b": {"~title": "One"}},
+            {"link": {"href": "https://two.test"}, "snippet": "Two"}
+        ]}});
+        let results = parse_custom_results(&body, &config, 2).unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].title, "One");
+        assert_eq!(results[1].title, "https://two.test");
+        assert_eq!(results[1].snippet, "Two");
+        assert_eq!(parse_custom_results(&body, &config, 0).unwrap().len(), 0);
+        assert!(parse_custom_results(&json!({}), &config, 2).is_err());
+        config.results_pointer.clear();
+        config.url_pointer = "/url".into();
+        let results = parse_custom_results(
+            &json!([{ "url": 7 }, { "url": null }, { "url": " " }, { "url": "https://root.test" }]),
+            &config,
+            2,
+        )
+        .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].url, "https://root.test");
+    }
+
+    #[test]
+    fn custom_validation_errors_do_not_expose_credentials() {
+        let client = reqwest::Client::new();
+        let mut config = custom_config();
+        config.endpoint = "https://user:secret@example.test".into();
+        let error = custom_request(&client, &config, "q", 1, |_| None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("userinfo"));
+        assert!(!error.contains("secret"));
+        config = custom_config();
+        config
+            .headers
+            .insert("authorization".into(), "secret\ninvalid".into());
+        let error = custom_request(&client, &config, "q", 1, |_| None)
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains("secret"));
+        config.headers.clear();
+        config
+            .header_env
+            .insert("authorization".into(), "SEARCH_TOKEN".into());
+        assert!(custom_request(&client, &config, "q", 1, |_| None).is_err());
+        config.header_env.clear();
+        config.results_pointer = "/invalid~2escape".into();
+        assert!(validate_custom(&config).is_err());
+        config.results_pointer = "/results".into();
+        config.body = json!([]);
+        assert!(validate_custom(&config).is_err());
+    }
+
+    #[tokio::test]
+    async fn custom_local_http_and_redirect_safety() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for redirect in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut received = Vec::new();
+                loop {
+                    let mut buffer = [0; 1024];
+                    let n = stream.read(&mut buffer).await.unwrap();
+                    assert!(n > 0);
+                    received.extend_from_slice(&buffer[..n]);
+                    if received.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let request = String::from_utf8(received).unwrap();
+                assert!(
+                    request
+                        .starts_with("GET /search?token=secret&count=2&q=rust+%26+json HTTP/1.1")
+                );
+                assert!(
+                    request
+                        .to_ascii_lowercase()
+                        .contains("authorization: bearer secret")
+                );
+                let body =
+                    r#"{"results":[{"title":"Rust","url":"https://rust.test","snippet":"JSON"}]}"#;
+                let response = if redirect {
+                    format!(
+                        "HTTP/1.1 302 Found\r\nLocation: http://{address}/leak\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    )
+                } else {
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                };
+                stream.write_all(response.as_bytes()).await.unwrap();
+                if redirect {
+                    assert!(
+                        tokio::time::timeout(
+                            std::time::Duration::from_millis(200),
+                            listener.accept()
+                        )
+                        .await
+                        .is_err()
+                    );
+                }
+            });
+            let mut config = custom_config();
+            config.endpoint = format!("http://{address}/search?token=secret");
+            config
+                .headers
+                .insert("Authorization".into(), "Bearer secret".into());
+            let result = search_custom(&config, "rust & json", 2).await;
+            if redirect {
+                let error = result.unwrap_err().to_string();
+                assert!(error.contains("302"));
+                assert!(!error.contains("secret"));
+            } else {
+                let results = result.unwrap();
+                assert_eq!(results[0].title, "Rust");
+                assert_eq!(results[0].snippet, "JSON");
+            }
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn custom_transport_and_json_errors_hide_url_secrets() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut config = custom_config();
+        config.endpoint = format!("http://{address}/secret-path?token=credential-sentinel");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut bytes = [0; 4096];
+            stream.read(&mut bytes).await.unwrap();
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 19\r\nConnection: close\r\n\r\ncredential-sentinel").await.unwrap();
+        });
+        let error = format!(
+            "{:#}",
+            search_custom(&config, "private-query", 1)
+                .await
+                .unwrap_err()
+        );
+        assert!(!error.contains("credential-sentinel"));
+        assert!(!error.contains("secret-path"));
+        assert!(!error.contains("private-query"));
+        server.await.unwrap();
+        let error = format!(
+            "{:#}",
+            search_custom(&config, "private-query", 1)
+                .await
+                .unwrap_err()
+        );
+        assert!(!error.contains("credential-sentinel"));
+        assert!(!error.contains("secret-path"));
+        assert!(!error.contains("private-query"));
+    }
+
     #[test]
     fn native_engine_falls_back_to_local_engines() {
         use super::local_engine_order;

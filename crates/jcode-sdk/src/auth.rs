@@ -475,6 +475,7 @@ impl FlowInner {
 
     fn command(&self, operation: Operation) -> Command {
         let mut command = Command::new(&self.options.binary);
+        crate::process::no_console_window(&mut command);
         command.args(["--no-update", "--no-selfdev"]);
         if let Some(socket) = &self.options.socket {
             command.arg("--socket").arg(socket);

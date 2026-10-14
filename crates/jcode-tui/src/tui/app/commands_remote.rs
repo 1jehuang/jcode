@@ -147,7 +147,7 @@ fn show_pairing_invite(app: &mut App) {
                 invite.dial_address
             ));
 
-            if let Ok(qr) = crate::login_qr::render_unicode_qr(&invite.uri) {
+            if let Ok(qr) = jcode_terminal_prompt::qr::render_unicode_qr(&invite.uri) {
                 body.push_str("\n```\n");
                 body.push_str(&qr);
                 body.push_str("\n```\n");

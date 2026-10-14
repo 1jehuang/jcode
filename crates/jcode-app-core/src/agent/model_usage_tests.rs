@@ -170,6 +170,29 @@ async fn resumed_session_keeps_turn_identity_until_new_input() {
         .run_once_streaming_mpsc("", vec![], Some("Continue after reload".into()), tx)
         .await
         .unwrap();
+    let continuation_texts: Vec<String> = resumed
+        .session
+        .messages
+        .iter()
+        .filter(|message| message.role == crate::message::Role::User)
+        .flat_map(|message| message.content.iter())
+        .filter_map(|block| match block {
+            crate::message::ContentBlock::Text { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        continuation_texts
+            .iter()
+            .all(|text| !text.trim().is_empty()),
+        "a reminder-only turn must not persist a blank user message: {continuation_texts:?}"
+    );
+    assert!(
+        continuation_texts
+            .iter()
+            .any(|text| text.contains("Continue after reload")),
+        "the reminder must be carried by the turn's message"
+    );
     let count = |agent: &Agent| {
         agent
             .model_routes()
