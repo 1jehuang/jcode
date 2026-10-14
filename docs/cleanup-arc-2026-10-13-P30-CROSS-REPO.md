@@ -299,10 +299,26 @@ Branches kept despite being subset/similar (operator decision):
 
 Substrate and cross-repo branches that had pre-existing build issues were validated via `cargo audit` only. The P30 fix is correct in the lockfile; the build is broken for unrelated reasons.
 
+### Round 2 — additional repos found in scan (2026-10-14)
+
+A broader scan for `quinn-proto < 0.11.18`, `h2 < 0.4.16`, `rustls < 0.23.45` in all top-level repos under `~/CodeProjects/Phenotype/repos/` found 2 more real Rust projects that needed P30 fixes, plus 3 worktree/archive dirs that were intentionally not touched:
+
+| Repo | Status | Action taken |
+|---|---|---|
+| **zz-merge-unk-PhenoJourneys** | VULN: q=0.11.14, h2=0.4.14, rustls=0.23.40 (transitive) | Created `security/quinn-proto-0.11.19-rustls-0.23.45-p30` @ `62f323a` — Cargo.lock fix committed; 3 unrelated RUSTSEC advisories remain (crossbeam-epoch 0.9.18, quick-xml 0.39.4 x2) — these are not P30 and require separate update decisions. |
+| **tooling-clone** | VULN: q=0.11.16, h2=0.4.15, rustls=0.23.42 (transitive) | **BLOCKED — broken WIP state.** 250+ missing `workspace.dependencies` entries (e.g. `jsonschema`, `schemars`, `hex`, `clap-ext` path-deps) prevent `cargo update` from running. This is a stale development snapshot of `phenotype-tooling`; the actual `phenotype-tooling` is already fixed on its security branch. **No security branch created.** Recommend operator either re-clone from now-fixed phenotype-tooling or fix the missing workspace.dependencies first. |
+| `phenotype-tooling-mergify/` | (worktree of `phenotype-tooling`) | No action — stale worktree, parent is fixed |
+| `agileplus-a-plus-completion-WP01.bak/` | (worktree of `AgilePlus`) | No action — `.bak` archive dir, no git |
+| `AgilePlus-recovered-20260822/` | (recovery backup of `AgilePlus`) | No action — operator WIP branch (fix/grpc-feature-wp-counts-civic-20260905), uncommitted changes present |
+| `agileplus-a-plus-completion-WP01.recovered-20260822/` | (worktree of `AgilePlus`) | No action — worktree, not a real repo |
+| `jcode-*` (22 worktrees) | (jcode forks/worktrees) | No action — throwaway per cleanup-arc strategy |
+
+**Updated final tally: 12 distinct Phenotype repos at 0 active P30 RUSTSEC vulns** (was 11, +1 for zz-merge-unk-PhenoJourneys). tooling-clone is documented as "blocked, see notes" — fixable but requires operator's WIP cleanup first.
+
 ---
 
 tx-agent: jcode
 tx-task: P30-cross-repo-final-tally
 tx-validated: cargo-check + cargo-audit
 tx-scope: docs:cleanup-arc
-tx-intent: final tally of 11 Phenotype repos at 0 P30 RUSTSEC + branch cleanup
+tx-intent: final tally of 12 Phenotype repos at 0 P30 RUSTSEC + branch cleanup + round-2 scan
