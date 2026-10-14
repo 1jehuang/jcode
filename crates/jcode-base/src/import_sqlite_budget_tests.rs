@@ -320,3 +320,104 @@ fn sqlite_budget_invalid_limits_fail_before_opening_database() {
         );
     }
 }
+
+fn opencode_text_messages(session: &Session) -> Vec<(Role, String)> {
+    session
+        .messages
+        .iter()
+        .map(|m| {
+            let text = m
+                .content
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text { text, .. } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            (m.role.clone(), text)
+        })
+        .collect()
+}
+
+#[test]
+fn test_import_opencode_sqlite_session() {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = HomeGuard::set(temp.path());
+    let db = temp
+        .path()
+        .join("external/.local/share/opencode/opencode.db");
+    drop(crate::opencode_db::fixture::standard(&db));
+
+    let imported = import_opencode_session("ses_main").unwrap();
+    assert_eq!(imported.id, imported_opencode_session_id("ses_main"));
+    assert_eq!(imported.provider_key.as_deref(), Some("anthropic"));
+    assert_eq!(imported.model.as_deref(), Some("claude-x"));
+    assert_eq!(imported.working_dir.as_deref(), Some("/tmp/oc-main"));
+    assert_eq!(imported.title.as_deref(), Some("Main task"));
+    assert_eq!(
+        opencode_text_messages(&imported),
+        vec![
+            (Role::User, "hello opencode".to_string()),
+            (Role::Assistant, "hi from assistant".to_string()),
+        ]
+    );
+
+    // Resume targets pointing at the database path route to the DB loader.
+    let target = jcode_session_types::ResumeTarget::OpenCodeSession {
+        session_id: "ses_old".to_string(),
+        session_path: db.to_string_lossy().to_string(),
+    };
+    let resolved = resolve_resume_target_to_jcode(&target).unwrap();
+    assert_eq!(
+        resolved,
+        jcode_session_types::ResumeTarget::JcodeSession {
+            session_id: imported_opencode_session_id("ses_old")
+        }
+    );
+    assert_eq!(
+        import_external_resume_id("ses_main").unwrap(),
+        Some(imported_opencode_session_id("ses_main"))
+    );
+}
+
+#[test]
+fn unreadable_opencode_db_does_not_block_other_stores() {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = HomeGuard::set(temp.path());
+    let external = temp.path().join("external");
+    let db = external.join(".local/share/opencode/opencode.db");
+    std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+    std::fs::write(&db, b"not a sqlite database").unwrap();
+    let session_id = "22222222-3333-4444-5555-666666666666";
+    let transcript = external.join(format!(
+        ".cursor/projects/tmp-demo/agent-transcripts/{session_id}/{session_id}.jsonl"
+    ));
+    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    std::fs::write(
+        &transcript,
+        "{\"role\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"hi\"}]}}\n",
+    )
+    .unwrap();
+
+    assert_eq!(
+        import_external_resume_id(session_id).unwrap(),
+        Some(imported_cursor_session_id(session_id))
+    );
+    let legacy = external.join(".local/share/opencode/storage/session/global");
+    std::fs::create_dir_all(&legacy).unwrap();
+    std::fs::write(
+        legacy.join("ses_legacy.json"),
+        r#"{"id":"ses_legacy","directory":"/tmp/demo","title":"Legacy"}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        import_opencode_session("ses_legacy").unwrap().id,
+        imported_opencode_session_id("ses_legacy")
+    );
+    // With no other match, the database error still surfaces.
+    assert!(import_external_resume_id("ses_missing").is_err());
+    assert!(import_opencode_session("ses_missing").is_err());
+}
