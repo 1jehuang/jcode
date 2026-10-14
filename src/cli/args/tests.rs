@@ -1375,13 +1375,13 @@ fn publish_build_parses_paths_and_validates_channels() {
     ])
     .unwrap();
     match args.command {
-        Some(Command::PublishBuild {
+        Some(Command::PublishBuild(build_store::PublishBuildArgs {
             source,
             version,
             launcher,
             channel,
             termux_launcher,
-        }) => {
+        })) => {
             assert_eq!(source, std::path::PathBuf::from("/prepared payload"));
             assert_eq!(version, "v-test");
             assert_eq!(launcher, std::path::PathBuf::from("/bin path/jcode"));
