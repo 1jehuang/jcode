@@ -395,11 +395,13 @@ fn resume_invocation_args_omits_blank_socket() {
 /// `launch_client_executable()` resolves deterministically, independent of
 /// whether the developer machine has a published local build channel and of
 /// other tests mutating JCODE_HOME in parallel. Returns the guards that keep
-/// the environment pinned for the duration of the test.
+/// the environment pinned for the duration of the test. Tuple fields drop
+/// first to last, so the lock must come last: JCODE_HOME is restored while it
+/// is still held, never inside another test's scoped home.
 fn pinned_resume_test_home() -> (
-    std::sync::MutexGuard<'static, ()>,
-    tempfile::TempDir,
     EnvVarGuard,
+    tempfile::TempDir,
+    std::sync::MutexGuard<'static, ()>,
 ) {
     let env_lock = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
@@ -407,7 +409,7 @@ fn pinned_resume_test_home() -> (
     std::fs::create_dir_all(&current).expect("create builds/current");
     std::fs::write(current.join("jcode"), b"#!/bin/sh\n").expect("write fake jcode binary");
     let home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
-    (env_lock, temp, home)
+    (home, temp, env_lock)
 }
 
 #[test]
