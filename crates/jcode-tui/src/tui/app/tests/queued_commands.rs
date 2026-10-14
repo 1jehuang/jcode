@@ -97,14 +97,16 @@ fn test_ctrl_up_recalls_queued_command_for_editing() {
 
 #[test]
 fn test_reload_round_trip_preserves_queued_commands() {
-    let mut app = create_test_app();
-    let session_id = format!("test-queued-commands-reload-{}", std::process::id());
-    app.queued_commands.push("/compact".to_string());
-    app.save_input_for_reload(&session_id);
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let session_id = format!("test-queued-commands-reload-{}", std::process::id());
+        app.queued_commands.push("/compact".to_string());
+        app.save_input_for_reload(&session_id);
 
-    let restored = App::new_for_remote(Some(session_id));
-    assert_eq!(restored.queued_commands, vec!["/compact"]);
-    assert!(!restored.is_processing);
+        let restored = App::new_for_remote(Some(session_id));
+        assert_eq!(restored.queued_commands, vec!["/compact"]);
+        assert!(!restored.is_processing);
+    });
 }
 
 #[test]
