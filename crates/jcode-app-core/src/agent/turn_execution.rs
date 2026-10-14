@@ -732,7 +732,7 @@ impl Agent {
                     self.session.provider_key.as_deref(),
                     self.session.route_api_method.as_deref(),
                 );
-            if let Err(e) =
+            if let Err(_e) =
                 crate::provider::set_model_with_auth_refresh(self.provider.as_ref(), &model_request)
             {
                 let fallback = self.provider_model();
