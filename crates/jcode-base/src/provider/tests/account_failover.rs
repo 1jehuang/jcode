@@ -35,8 +35,7 @@ fn openai_rotation_rechecks_a_marked_alternative_live() {
         let rt = enter_test_runtime();
         let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let _endpoint = crate::usage::override_openai_usage_url_for_tests(serve_openai_usage(&rt,
-            r#"{"rate_limit":{"allowed":true,"limit_reached":false,"primary_window":{"used_percent":3,"limit_window_seconds":18000},"secondary_window":{"used_percent":10,"limit_window_seconds":604800}}}"#,
-            Arc::clone(&hits)));
+            OPENAI_USAGE_OPEN_BODY, Arc::clone(&hits)));
         let far = chrono::Utc::now().timestamp() + 5 * 3600;
         for label in ["openai-otter", "openai-fox"] {
             crate::provider::account_failover::record_account_exhausted(AccountProviderKind::OpenAi, label, Some(far));
@@ -48,6 +47,31 @@ fn openai_rotation_rechecks_a_marked_alternative_live() {
         assert_eq!(world.labels_for("A"), ["openai-fox"]);
         assert!(hits.load(std::sync::atomic::Ordering::SeqCst) >= 1, "live usage fetch must occur");
         assert_eq!(a.account_pin(AccountProviderKind::OpenAi).unwrap().label, "openai-fox");
+    });
+}
+
+const OPENAI_USAGE_OPEN_BODY: &str = r#"{"rate_limit":{"allowed":true,"limit_reached":false,"primary_window":{"used_percent":3,"limit_window_seconds":18000},"secondary_window":{"used_percent":10,"limit_window_seconds":604800}}}"#;
+
+/// The live recheck path end to end: the session's own marked account is
+/// rechecked against the (mock) usage endpoint, and the resume is sent.
+#[test]
+fn openai_marked_account_is_rechecked_live_and_the_resume_is_sent() {
+    with_account_failover_env(|| {
+        crate::usage::reset_openai_exhaustion_revalidation_for_tests();
+        store_openai_accounts(1);
+        let world = Arc::new(FakeAccountWorld::default());
+        let a = account_session(&world, "A", ActiveProvider::OpenAI, false);
+        let rt = enter_test_runtime();
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let _endpoint = crate::usage::override_openai_usage_url_for_tests(serve_openai_usage(&rt,
+            OPENAI_USAGE_OPEN_BODY, Arc::clone(&hits)));
+        let far = chrono::Utc::now().timestamp() + 5 * 3600;
+        crate::provider::account_failover::record_account_exhausted(AccountProviderKind::OpenAi, "openai-otter", Some(far));
+        record_provider_unavailable_for_label("openai", "openai-otter", "openai-otter is out of usage");
+        let text = complete_text(&rt, &a);
+        crate::usage::forget_openai_usage_for_label_for_tests("openai-otter");
+        assert_eq!(text.expect("resume is sent"), "hi from openai-otter");
+        assert!(hits.load(std::sync::atomic::Ordering::SeqCst) >= 1, "usage was fetched live");
     });
 }
 

@@ -15,6 +15,8 @@ use crate::provider_catalog::save_named_api_key;
 mod existing_key_notice;
 mod google;
 mod jcode_device;
+mod native_reuse;
+use native_reuse::reuse_claude_code_native_snapshot;
 mod next_step;
 mod scriptable;
 use google::*;
@@ -752,7 +754,22 @@ fn validate_claude_code_method(
     Ok(())
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only answer for the Claude Code reuse prompt.
+    static CLAUDE_CODE_REUSE_TEST_APPROVAL: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
 fn confirm_claude_code_reuse(native: bool) -> Result<()> {
+    #[cfg(test)]
+    if let Some(approved) = CLAUDE_CODE_REUSE_TEST_APPROVAL.with(std::cell::Cell::get) {
+        anyhow::ensure!(
+            approved,
+            "Claude Code signed in, but Jcode was not granted access to its credentials."
+        );
+        return Ok(());
+    }
     eprintln!(
         "\nClaude Code signed in. Jcode makes direct Anthropic requests, so it needs permission to reuse the CLI's OAuth credentials."
     );
@@ -808,7 +825,15 @@ fn reuse_claude_code_file(
     if !already_trusted {
         auth::claude::trust_external_auth_source(source)?;
     }
-    ensure_claude_code_credentials_selected(&credentials)?;
+    if let Err(err) = ensure_claude_code_credentials_selected(&credentials) {
+        // Do not leave a file trusted by a login that did not take effect: a
+        // later update could otherwise make Jcode select it without approval.
+        if !already_trusted {
+            crate::config::Config::revoke_external_auth_source_for_path(source.source_id(), path)?;
+            auth::AuthStatus::invalidate_cache();
+        }
+        return Err(err);
+    }
     Ok(true)
 }
 
@@ -827,55 +852,6 @@ fn reuse_claude_code_native(file_path: &Path) -> Result<bool> {
     };
 
     reuse_claude_code_native_snapshot(file_path, credentials, || {})
-}
-
-fn reuse_claude_code_native_snapshot(
-    file_path: &Path,
-    credentials: auth::claude::ClaudeCredentials,
-    before_validation: impl FnOnce(),
-) -> Result<bool> {
-    let file_source = auth::claude::ExternalClaudeAuthSource::ClaudeCode;
-    if crate::config::Config::external_auth_source_allowed_for_path(
-        file_source.source_id(),
-        file_path,
-    ) && auth::claude::load_claude_code_credentials().is_ok_and(|file| {
-        file.expires_at > chrono::Utc::now().timestamp_millis()
-            || credentials.expires_at <= chrono::Utc::now().timestamp_millis()
-    }) {
-        anyhow::bail!(
-            "A previously trusted Claude Code credentials file takes precedence over the native login. Revoke that file's trust in Jcode's external auth settings, or use its existing login instead. No trust was changed."
-        );
-    }
-
-    // Validate precedence using an in-memory candidate. A rejected attempt must
-    // not import an account, activate it, or change persistent native trust.
-    before_validation();
-    let selected = auth::claude::load_credentials_with_staged_native(&credentials)?;
-    anyhow::ensure!(
-        selected.access_token == credentials.access_token
-            && selected.refresh_token == credentials.refresh_token,
-        "Another trusted Claude credential source is taking precedence over this login. Review Jcode's trusted external auth sources before retrying."
-    );
-
-    if credentials.refresh_token.trim().is_empty() {
-        anyhow::ensure!(
-            std::env::var("CLAUDE_CODE_OAUTH_TOKEN")
-                .ok()
-                .is_some_and(|token| !token.trim().is_empty()),
-            "Claude Code's Keychain credential has no refresh token and cannot be imported."
-        );
-        eprintln!(
-            "Using the Claude Code environment token without copying it; it must remain configured for future sessions."
-        );
-    }
-    if !auth::claude::native_source_allowed() {
-        auth::claude::trust_native_source()?;
-    }
-    if !credentials.refresh_token.trim().is_empty() {
-        let label = auth::claude::import_native_credentials_into_account_from(credentials)?;
-        auth::claude::set_active_account(&label)?;
-    }
-    Ok(true)
 }
 
 fn configured_claude_file_is_unambiguous(
