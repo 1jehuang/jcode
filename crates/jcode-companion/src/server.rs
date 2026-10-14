@@ -166,6 +166,10 @@ pub async fn run(options: CompanionOptions) -> Result<()> {
     jcode_base::env::set_var("JCODE_COMPANION", "1");
 
     let listener = bind(&options.socket)?;
+    // Named-pipe accept takes `&mut self`. Unix sockets accept through `&self`,
+    // so the binding stays immutable there and does not trip `unused_mut`.
+    #[cfg(windows)]
+    let mut listener = listener;
     let mut capabilities = vec![
         "open".to_string(),
         "reveal".to_string(),

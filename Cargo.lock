@@ -3335,6 +3335,7 @@ dependencies = [
  "jcode-provider-core",
  "jcode-provider-cursor-runtime",
  "jcode-provider-doctor",
+ "jcode-provider-extensions",
  "jcode-provider-gemini-runtime",
  "jcode-provider-grok-build-runtime",
  "jcode-provider-openai-runtime",
@@ -4032,6 +4033,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "jcode-provider-extensions"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "dirs",
+ "jcode-provider-protocol",
+ "jcode-provider-subprocess",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "toml",
+]
+
+[[package]]
 name = "jcode-provider-gemini"
 version = "0.1.0"
 dependencies = [
@@ -4167,6 +4184,26 @@ dependencies = [
  "tokio-stream",
  "toml",
  "uuid",
+]
+
+[[package]]
+name = "jcode-provider-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "jcode-provider-subprocess"
+version = "0.1.0"
+dependencies = [
+ "jcode-provider-protocol",
+ "landlock",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
 ]
 
 [[package]]
@@ -4398,6 +4435,7 @@ dependencies = [
  "jcode-logging",
  "jcode-productivity-core",
  "jcode-provider-core",
+ "jcode-provider-extensions",
  "jcode-selfdev-types",
  "jcode-session-types",
  "jcode-terminal-image",
@@ -4830,6 +4868,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf36173d4167ed999940f804952e6b08197cae5ad5d572eb4db150ce8ad5d58f"
 
 [[package]]
+name = "landlock"
+version = "0.4.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4cca98e95f35b29d469dade6724c6f96cec9236640f745a0e99b0334ec320ab1"
+dependencies = [
+ "enumflags2",
+ "libc",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4870,9 +4919,9 @@ dependencies = [
 
 [[package]]
 name = "libc"
-version = "0.2.180"
+version = "0.2.190"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bcc35a38544a891a5f7c865aca548a982ccb3b8650a5b06d0fd33a10283c56fc"
+checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
 
 [[package]]
 name = "libloading"
@@ -6401,15 +6450,16 @@ dependencies = [
 
 [[package]]
 name = "quinn-proto"
-version = "0.11.15"
+version = "0.11.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4fcb935c5bec503c2f0e306bdd3e58bb9029dcb14fa8d9ac76e3a5256ac0763e"
+checksum = "0e750cca55fe4f0439a15d0bb529da9651e79993e8e72c61a899a36d462befbe"
 dependencies = [
  "aws-lc-rs",
  "bytes",
- "getrandom 0.3.4",
+ "getrandom 0.4.1",
  "lru-slab",
- "rand 0.9.3",
+ "rand 0.10.1",
+ "rand_pcg",
  "ring",
  "rustc-hash",
  "rustls",
@@ -6546,6 +6596,15 @@ checksum = "4d431c2703ccf129de4d45253c03f49ebb22b97d6ad79ee3ecfc7e3f4862c1d8"
 dependencies = [
  "num-traits",
  "rand 0.10.1",
+]
+
+[[package]]
+name = "rand_pcg"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "caa0f4137e1c0a72f4c651489402276c8e8e1cf081f3b0ba156d2cbeef09e86a"
+dependencies = [
+ "rand_core 0.10.1",
 ]
 
 [[package]]
