@@ -89,8 +89,14 @@ installations and provider adoption. Email addresses are personal information:
 these records are not anonymous and can link installation usage to account identity.
 
 This collection is part of default usage telemetry, not a separate opt-in program.
-All telemetry opt-outs apply. Before the first email upload, the client must show
-a clear collection notice and the opt-out option, including for existing users.
+All telemetry opt-outs apply. The TUI shows a one-time status-line notice when
+the telemetry database already knows the installation, an OAuth account email
+upload is imminent, and that provider/email is not already tracked for the
+installation. The notice points to `/telemetry` to disable collection. It is
+recorded persistently after display and never repeats for that installation,
+even when a different provider account is used later. Installations not yet known
+to the database and already-tracked emails do not trigger this notice. A failed
+database check must not trigger a notice or an email upload.
 
 This permission does not extend to unrelated Gmail, Calendar, MCP, or other
 connected-service identities, or scanning unused credential stores. Never send
@@ -100,10 +106,25 @@ telemetry access is restricted to authorized maintainers and infrastructure
 providers operating the pipeline. Emails must not be sold, published, or included
 in investor summaries.
 
-**Implementation status:** This documentation change permits collection but does
-not implement or enable it. Before rollout, implement the notice and opt-out
-checks, define and document email retention and deletion behavior, and document
-the implemented event schema here. Transcript sharing remains separately opt-in.
+The client first checks database state using a SHA-256 digest of the normalized
+email, not the raw email. Digests are still identifying data and are handled as
+private account telemetry. Membership checks are scoped to the installation so
+they do not reveal whether another installation has registered an email. An
+eligible notice is acknowledged only after its complete text is rendered in the
+status line, before sending the raw email. The notice remains readable briefly
+and its acknowledgment survives restarts and account changes.
+
+| Endpoint | Fields | Purpose |
+|----------|--------|---------|
+| `POST /v1/oauth-account/check` | `id`, `provider`, `email_hash` | Check installation presence and whether that installation/provider/email is tracked |
+| `POST /v1/oauth-account` | `id`, `provider`, `email` | Store the provider OAuth identity separately from ordinary usage events |
+
+**Rollout:** Collection requires the matching telemetry Worker deployment and
+D1 migration `0030_oauth_accounts.sql`. Until the preflight endpoint is
+available, checks fail closed and no email is uploaded. Current identity
+resolution covers Anthropic and OpenAI OAuth runtimes; accounts without a
+safely resolved email are skipped rather than inferred from unrelated logins.
+Transcript sharing remains separately opt-in.
 
 ### Onboarding Step Event
 
@@ -461,8 +482,8 @@ collect conversation content, or to sell telemetry or share it beyond aggregate 
 and the confidential, de-identified investor summaries described above, that will require
 a separate opt-in rather than a quiet edit here. Changes to this document are visible in its
 git history. Provider OAuth email telemetry is part of ordinary, opt-out telemetry,
-but requires a clear in-client notice before the first email upload. Updating this
-policy alone does not activate collection.
+with the conditional, one-time TUI status-line notice described above. Updating
+this policy alone does not activate collection.
 
 ### Schema v5 deployment note
 
@@ -500,6 +521,15 @@ When opted out, zero network requests are made. The telemetry module short-circu
 This is open source. The telemetry implementation is in [`crates/jcode-telemetry-core/src/`](./crates/jcode-telemetry-core/src/) - you can read exactly what gets sent. There are no other network calls related to telemetry anywhere in the codebase.
 
 ## Data Retention
+
+Provider OAuth emails and their digests are stored in the private D1
+`oauth_accounts` table, not in ordinary event rows or Analytics Engine. They
+are retained for 90 days from record creation and pruned nightly. Duplicate
+uploads do not extend that retention window. Maintainers can delete these
+records, including their digests, by installation telemetry ID. To request
+deletion, contact the maintainers with your installation telemetry ID from
+`jcode telemetry status`, never OAuth credentials. Disabling telemetry stops
+future collection but does not itself delete previously uploaded records.
 
 Telemetry data is used in aggregate (install count, active users, provider distribution, session success/crash rates, feature-level counts), and in the de-identified investor summaries described under [How We Use and Share Data](#how-we-use-and-share-data). Individual event records are retained for up to 12 months and then deleted.
 

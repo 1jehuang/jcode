@@ -297,7 +297,7 @@ pub(crate) enum Command {
         json: bool,
     },
 
-    /// Inspect or change anonymous telemetry settings
+    /// Inspect or change usage telemetry settings
     #[command(subcommand)]
     Telemetry(TelemetryCommand),
 
@@ -620,13 +620,13 @@ pub(crate) enum Command {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum TelemetryCommand {
-    /// Show the current telemetry state without creating an anonymous ID
+    /// Show the current telemetry state without creating an installation ID
     Status {
         /// Emit JSON instead of human-readable text
         #[arg(long)]
         json: bool,
     },
-    /// Enable anonymous usage telemetry
+    /// Enable usage telemetry, including provider OAuth account emails
     Enable,
     /// Disable all telemetry persistently
     Disable,

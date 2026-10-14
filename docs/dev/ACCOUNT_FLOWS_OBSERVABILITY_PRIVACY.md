@@ -36,9 +36,10 @@ support bundles, at any log level:
 - `device_code`, magic-link tokens, approval URL query params.
 - Raw email addresses except the scoped provider OAuth telemetry collection
   permitted by `TELEMETRY.md`. That exception applies only to model-provider
-  accounts actually used through OAuth, after a clear collection notice and
-  subject to all telemetry opt-outs. It does not cover subscription device-flow
-  emails, unrelated connected-service identities, or unused credential stores.
+  accounts actually used through OAuth, with the conditional one-time TUI
+  status-line notice described below and subject to all telemetry opt-outs. It
+  does not cover subscription device-flow emails, unrelated connected-service
+  identities, or unused credential stores.
   Do not add collected emails to app logs, traces, or support bundles. Backend
   audit email remains confined to the audit table.
 - Stripe secrets: webhook signing secret, customer payment details, full
@@ -93,11 +94,18 @@ reasons restricted to `AuthFailureReason::label` values. Additions:
 Policy updated October 14, 2026: `TELEMETRY.md` permits provider OAuth account
 emails alongside provider and installation ID in default, opt-out telemetry.
 These records are identifiable, not anonymous. No separate opt-in is required,
-but the client must disclose collection and provide the opt-out before the first
-email upload, including for existing users. This permission does not enable
-collection or change the current `AuthEvent` schema. Before rollout, document
-retention and deletion, implement notice and opt-out enforcement, and restrict
-access to authorized maintainers and pipeline infrastructure providers. Do not
+and the TUI must show a status-line notice only when the installation is already
+known to the telemetry database, an email upload is imminent, and the provider
+email is not already tracked for that installation. Persist acknowledgment after
+actual display so
+the notice never repeats for the installation. Installations not yet known to
+the database and already tracked emails do not trigger it. Database check failures
+defer upload. Ordinary `AuthEvent` rows do not carry these emails. Private
+`/v1/oauth-account/check` and `/v1/oauth-account` endpoints use the separate
+`oauth_accounts` table, with installation-scoped digest lookups that cannot reveal
+another installation's email membership. Rollout requires migration
+`0030_oauth_accounts.sql` and the matching Worker deployment. Access remains
+restricted to authorized maintainers and pipeline infrastructure providers. Do not
 sell or publish emails or include them in investor summaries. Never transmit
 OAuth tokens or other authentication secrets. Transcript sharing stays opt-in.
 
@@ -144,7 +152,7 @@ login flow use the daily log with the flow outcome only.
 | Traces | backend | 7-14 days |
 | Stripe webhook payload archive | backend (encrypted) | 90 days |
 | Client usage telemetry | telemetry-worker D1 | per TELEMETRY.md; provider OAuth email linkage permitted only under its scoped exception |
-| Provider OAuth email telemetry (not yet implemented) | Future telemetry storage | Retention and deletion must be documented before rollout |
+| Provider OAuth email telemetry | Private `oauth_accounts` D1 table | 90 days from creation, pruned nightly; deletion by installation ID |
 | Local client logs | `~/.jcode/logs/` | user-owned; must satisfy never-log list |
 | Support bundles | created on demand | delete after case close (<= 90 days) |
 
