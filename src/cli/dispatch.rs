@@ -91,6 +91,12 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
         };
         return super::mcp::run(action).await;
     }
+    // The standalone picker is the entire command, not a resume ID lookup.
+    // In particular, cancelling it must not continue into provider/agent startup
+    // with an empty session ID.
+    if args.resume.as_deref() == Some("") {
+        return tui_launch::list_sessions();
+    }
     resolve_resume_arg(&mut args)?;
 
     // One-time config migration: users whose config.toml still carries the old
@@ -701,10 +707,6 @@ fn auth_doctor_provider_arg<'a>(
 
 fn resolve_resume_arg(args: &mut Args) -> Result<()> {
     if let Some(ref resume_id) = args.resume {
-        if resume_id.is_empty() {
-            return tui_launch::list_sessions();
-        }
-
         let resume_id = resume_id.clone();
         match resolve_resume_id(&resume_id) {
             Ok(full_id) => {

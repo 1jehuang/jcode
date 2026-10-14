@@ -100,6 +100,106 @@ fn make_session_with_flags(
 }
 
 #[test]
+fn standalone_resume_renders_before_list_load_finishes() {
+    let mut picker = SessionPicker::loading();
+    let (_sender, receiver) = std::sync::mpsc::channel::<SessionListUpdate>();
+    let mut terminal =
+        ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).expect("test terminal");
+    terminal
+        .draw(|frame| picker.render(frame))
+        .expect("loading frame");
+    assert!(matches!(
+        receiver.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
+    assert!(picker.loading_message.is_some());
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(text.contains("Loading sessions"));
+}
+
+#[test]
+fn standalone_resume_refresh_preserves_cached_selection_and_search() {
+    let mut picker = SessionPicker::loading();
+    let first = make_session("first", "first", false, SessionStatus::Closed);
+    let second = make_session("second", "second", false, SessionStatus::Closed);
+    assert!(
+        !picker
+            .apply_session_list_update(SessionListUpdate::Cached((
+                Vec::new(),
+                vec![first.clone(), second.clone()],
+            )))
+            .expect("cached list")
+    );
+    assert!(picker.loading_message.is_none());
+    let index = picker
+        .find_item_index_for_session_id("second")
+        .expect("second item");
+    picker.list_state.select(Some(index));
+    picker.search_query = "test".to_string();
+    picker.search_active = true;
+    picker.filter_mode_user_chosen = true;
+    assert!(
+        picker
+            .apply_session_list_update(SessionListUpdate::Fresh(Ok((
+                Vec::new(),
+                vec![second, first],
+            ))))
+            .expect("fresh list")
+    );
+    assert_eq!(
+        picker.selected_session().map(|s| s.id.as_str()),
+        Some("second")
+    );
+    assert_eq!(picker.search_query, "test");
+    assert!(picker.search_active);
+    assert!(picker.filter_mode_user_chosen);
+}
+
+#[test]
+fn standalone_resume_load_error_preserves_existing_list() {
+    let mut picker = SessionPicker::loading();
+    picker
+        .apply_session_list_update(SessionListUpdate::Cached((
+            Vec::new(),
+            vec![make_session(
+                "cached",
+                "cached",
+                false,
+                SessionStatus::Closed,
+            )],
+        )))
+        .expect("cached list");
+    let err = picker
+        .apply_session_list_update(SessionListUpdate::Fresh(Err(anyhow::anyhow!(
+            "scan failed"
+        ))))
+        .expect_err("report loader failure");
+    assert_eq!(err.to_string(), "scan failed");
+    assert_eq!(
+        picker.selected_session().map(|s| s.id.as_str()),
+        Some("cached")
+    );
+}
+
+#[test]
+fn standalone_resume_empty_refresh_finishes_loading() {
+    let mut picker = SessionPicker::loading();
+    assert!(
+        picker
+            .apply_session_list_update(SessionListUpdate::Fresh(Ok((Vec::new(), Vec::new(),))))
+            .expect("empty list")
+    );
+    assert!(picker.loading_message.is_none());
+    assert!(picker.selected_session().is_none());
+}
+
+#[test]
 #[ignore = "developer benchmark: profiles real /resume through first rendered picker frame"]
 fn benchmark_real_resume_first_render_reports_timings() {
     invalidate_session_list_cache();

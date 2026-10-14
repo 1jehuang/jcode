@@ -49,6 +49,13 @@ const DEFAULT_SESSION_SCAN_LIMIT: usize = 400;
 const MIN_SESSION_SCAN_LIMIT: usize = 50;
 const MAX_SESSION_SCAN_LIMIT: usize = 10_000;
 
+type GroupedSessionList = (Vec<ServerGroup>, Vec<SessionInfo>);
+
+enum SessionListUpdate {
+    Cached(GroupedSessionList),
+    Fresh(Result<GroupedSessionList>),
+}
+
 #[derive(Clone, Debug)]
 pub enum PickerResult {
     Selected(Vec<ResumeTarget>),
@@ -2446,7 +2453,24 @@ impl SessionPicker {
     }
 
     /// Run the interactive picker, returns selected session ID or None if cancelled
-    pub fn run(mut self) -> Result<Option<PickerResult>> {
+    pub fn run(self) -> Result<Option<PickerResult>> {
+        self.run_with_session_updates(None)
+    }
+
+    fn apply_session_list_update(&mut self, update: SessionListUpdate) -> Result<bool> {
+        let (sessions, finished) = match update {
+            SessionListUpdate::Cached(sessions) => (sessions, false),
+            SessionListUpdate::Fresh(sessions) => (sessions?, true),
+        };
+        self.reseed_grouped(sessions.0, sessions.1);
+        self.apply_resume_project_scope_default();
+        Ok(finished)
+    }
+
+    fn run_with_session_updates(
+        mut self,
+        mut updates: Option<std::sync::mpsc::Receiver<SessionListUpdate>>,
+    ) -> Result<Option<PickerResult>> {
         if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
             anyhow::bail!(
                 "session picker requires an interactive terminal (stdin/stdout must be a TTY)"
@@ -2479,7 +2503,8 @@ impl SessionPicker {
             crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
         }
 
-        let result = loop {
+        let mut no_sessions_found = false;
+        let result = 'picker: loop {
             // Keep live working/ready badges current while the picker idles.
             self.maybe_refresh_live_presence();
             terminal.draw(|frame| {
@@ -2489,6 +2514,35 @@ impl SessionPicker {
                 jcode_tui_style::adapt_buffer_for_display(frame.buffer_mut());
                 crate::tui::ui::adapt_buffer_for_emoji_preference(frame.buffer_mut());
             })?;
+            // Always paint before polling, including on a cold cache. Neither
+            // disk-cache parsing nor the full transcript scan may hold up the
+            // first frame or prevent Escape from cancelling the picker.
+            if let Some(receiver) = updates.as_ref() {
+                match receiver.try_recv() {
+                    Ok(update) => match self.apply_session_list_update(update) {
+                        Ok(finished) => {
+                            if finished {
+                                updates = None;
+                                if self.all_sessions.is_empty()
+                                    && self.all_server_groups.iter().all(|g| g.sessions.is_empty())
+                                    && self.all_orphan_sessions.is_empty()
+                                {
+                                    no_sessions_found = true;
+                                    break 'picker Ok(None);
+                                }
+                            }
+                            continue;
+                        }
+                        Err(err) => break 'picker Err(err),
+                    },
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        break 'picker Err(anyhow::anyhow!(
+                            "session list loader stopped unexpectedly"
+                        ));
+                    }
+                }
+            }
             if event::poll(Duration::from_millis(100))? {
                 match event::read()? {
                     Event::Key(key) if key.kind == KeyEventKind::Press => {
@@ -2520,6 +2574,10 @@ impl SessionPicker {
         jcode_tui_style::restore_terminal_quietly();
         super::mermaid::clear_image_state();
 
+        if no_sessions_found {
+            eprintln!("No sessions found.");
+        }
+
         result
     }
 }
@@ -2534,29 +2592,34 @@ pub fn pick_session() -> Result<Option<PickerResult>> {
         );
     }
 
-    // Load sessions grouped by server
-    let (server_groups, orphan_sessions) = load_sessions_grouped()?;
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("jcode-session-list-loader".to_string())
+        .spawn(move || {
+            // Even the cache can be tens of MB on long-lived installations.
+            // Read it off the UI thread, then refresh without resetting the
+            // user's selection, search, or explicitly chosen filter.
+            if let Some(cached) = load_cached_sessions_grouped()
+                && sender.send(SessionListUpdate::Cached(cached)).is_err()
+            {
+                return;
+            }
+            if sender
+                .send(SessionListUpdate::Fresh(load_sessions_grouped()))
+                .is_err()
+            {
+                crate::logging::debug("Session picker closed before session scan finished");
+            }
+        })?;
 
-    // Check if there are any sessions at all
-    let total_sessions: usize = server_groups
-        .iter()
-        .map(|g| g.sessions.len())
-        .sum::<usize>()
-        + orphan_sessions.len();
-
-    if total_sessions == 0 {
-        eprintln!("No sessions found.");
-        return Ok(None);
-    }
-
-    let mut picker = SessionPicker::new_grouped(server_groups, orphan_sessions);
+    let mut picker = SessionPicker::loading();
     picker.set_current_dir(
         std::env::current_dir()
             .ok()
             .map(|dir| dir.to_string_lossy().into_owned()),
     );
     picker.apply_resume_project_scope_default();
-    picker.run()
+    picker.run_with_session_updates(Some(receiver))
 }
 
 #[cfg(test)]
