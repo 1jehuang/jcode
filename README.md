@@ -335,48 +335,7 @@ switcher shows the configured root level. These settings do not change worker
 
 ## OAuth and Providers
 
-jcode works with subscription-backed OAuth flows and many provider integrations, so you can use the models you already pay for and still fall back to direct API providers when needed.
-
-### Supported built-in login flows
-
-- **Claude** (`jcode login --provider claude`)
-- **OpenAI / ChatGPT / Codex** (`jcode login --provider openai`)
-- **Google Gemini** (`jcode login --provider gemini`)
-- **GitHub Copilot** (`jcode login --provider copilot`)
-- **Azure OpenAI** (`jcode login --provider azure`)
-- **Alibaba Cloud Coding Plan** (`jcode login --provider alibaba-coding-plan`)
-- **Fireworks** (`jcode login --provider fireworks`)
-- **Novita AI** (`jcode login --provider novita`, API key)
-- **MiniMax** (`jcode login --provider minimax`)
-- **Meta Model API / Muse** (`jcode login --provider meta-muse`)
-- **LM Studio** (`jcode login --provider lmstudio`)
-- **Ollama** (`jcode login --provider ollama`)
-- **Custom OpenAI-compatible endpoint** (`jcode login --provider openai-compatible`)
-
-For custom OpenAI-compatible endpoints, jcode now prompts for the API base and supports local localhost servers without requiring an API key.
-
-Azure OpenAI accepts a resource URL or a base URL ending in `/openai/v1`, a
-deployment name, and either an API key or Microsoft Entra ID. Agent turns use
-`/openai/v1/responses`, including tool calls with reasoning enabled. The
-Responses route carries encrypted reasoning and tool results between turns;
-`/chat/completions` cannot combine function tools with reasoning on GPT-5.6
-and later Azure deployments. The saved Azure credentials remain in
-`~/.config/jcode/azure-openai.env`. Azure omits reasoning effort unless you
-set `AZURE_OPENAI_REASONING_EFFORT` for a deployment that supports it; this
-avoids sending the global OpenAI default to non-reasoning deployments.
-See the [Azure reasoning model guide](https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/reasoning#tool-calling-with-reasoning-models).
-
-The native OpenAI providers use Responses WebSocket v2 with opportunistic
-background prewarming and HTTPS fallback. See [OpenAI WebSocket transport](docs/OPENAI_WEBSOCKET.md)
-for behavior, controls, and verification.
-
-### Supported providers
-
-- **Native / first-party style providers:** `claude`, `openai`, `copilot`, `gemini`, `azure`, `alibaba-coding-plan`
-- **Aggregator / compatibility providers:** `openrouter`, `orcarouter`, `yolo-auto`, `openai-compatible`
-- **Additional provider integrations:** `opencode`, `opencode-go`, `zai` / `kimi`, `302ai`, `baseten`, `cortecs`, `deepseek`, `firmware`, `huggingface`, `moonshotai`, `nebius`, `scaleway`, `stackit`, `groq`, `mistral`, `perplexity`, `togetherai`, `deepinfra`, `fireworks`, `novita`, `minimax`, `xai`, `lmstudio`, `ollama`, `chutes`, `cerebras`, `cursor`, `antigravity`, `google`
-
-Jcode also supports easy multi-account switching. Ran out of tokens on your first ChatGPT Pro subscription? /account and quickly switch to your second. 
+Supports a [wide range of providers](https://jcode.sh/docs#providers), including Claude OAuth and OpenAI Codex OAuth.
 
 ## Customizability / Self-Dev
 
