@@ -505,11 +505,8 @@ mod tests {
 
         // unlinkat against the captured handle must remove the original file
         // (now under `moved`), not the unrelated sentinel under `stable`.
-        remove_marker_in_directory(
-            &directory,
-            CString::new("session").unwrap().as_c_str(),
-        )
-        .expect("unlinkat");
+        remove_marker_in_directory(&directory, CString::new("session").unwrap().as_c_str())
+            .expect("unlinkat");
         assert!(!moved.join("session").exists());
         assert_eq!(std::fs::read(&sentinel).unwrap(), b"STABLE");
     }
