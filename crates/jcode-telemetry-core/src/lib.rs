@@ -3,6 +3,11 @@ use jcode_storage as storage;
 mod concurrency;
 mod desktop;
 pub use desktop::{record_desktop_active, record_desktop_update};
+mod oauth_account;
+pub use oauth_account::{
+    OAUTH_ACCOUNT_NOTICE_TEXT, OAuthAccountNotice, acknowledge_oauth_account_notice_displayed,
+    enqueue_oauth_account, pending_oauth_account_notice,
+};
 mod lifecycle;
 pub use concurrency::{ConcurrencySession, begin_concurrency_session};
 pub mod onboarding_trace;
