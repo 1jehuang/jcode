@@ -34,6 +34,7 @@ impl MultiProvider {
             from_label: Self::provider_label(from).to_string(),
             to_provider: Self::provider_key(to).to_string(),
             to_label: Self::provider_label(to).to_string(),
+            target_route: None,
             reason,
             estimated_input_chars,
             estimated_input_tokens,

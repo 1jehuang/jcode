@@ -1382,7 +1382,7 @@ pub(in crate::tui::app) fn handle_server_event(
             if !is_failover_prompt {
                 app.push_display_message(DisplayMessage {
                     role: "error".to_string(),
-                    content: message.clone(),
+                    content: App::compact_provider_failure(&message),
                     tool_calls: vec![],
                     duration_secs: None,
                     title: None,
@@ -1409,7 +1409,6 @@ pub(in crate::tui::app) fn handle_server_event(
                 // The server already exhausted the same-provider account pool.
                 // Decode the control payload instead of printing its JSON, and
                 // leave any cross-provider resend behind explicit user consent.
-                app.clear_pending_remote_retry();
                 app.handle_turn_error(message.clone());
                 app.offer_fallback_after_error_with_payload(&message, failed_fallback_payload);
                 return false;
@@ -2445,6 +2444,7 @@ pub(in crate::tui::app) fn handle_server_event(
             false
         }
         ServerEvent::ModelChanged {
+            id,
             model,
             provider_name,
             error,
@@ -2453,20 +2453,23 @@ pub(in crate::tui::app) fn handle_server_event(
             context_window,
             ..
         } => {
+            if app
+                .pending_automatic_failover_request_id
+                .is_some_and(|expected| expected != id)
+            {
+                return false;
+            }
+            app.pending_automatic_failover_request_id = None;
             app.remote_model_switch_in_flight = false;
+            let automatic_route = app.pending_automatic_failover_route.take();
             if let Some(err) = error {
                 if let Some(prepared) = app.pending_prompt_after_model_switch.take() {
                     super::input_dispatch::restore_prepared_remote_input(app, prepared);
                 }
                 // A fallback-offer resend cannot go out on the failed switch;
                 // drop it and put the prompt back in the input box instead.
-                if let Some(payload) = app.pending_fallback_resend.take()
-                    && let Some(raw_input) = payload.raw_input
-                    && !raw_input.trim().is_empty()
-                    && app.input.is_empty()
-                {
-                    app.input = raw_input;
-                    app.cursor_pos = app.input.len();
+                if let Some(payload) = app.pending_fallback_resend.take() {
+                    app.restore_failover_payload(payload);
                 }
                 app.push_display_message(DisplayMessage::error(
                     crate::tui::app::model_context::model_switch_failure_message(&err, true),
@@ -2486,6 +2489,9 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.clear_remote_startup_phase();
                 if let Some(ref pname) = provider_name {
                     app.remote_provider_name = Some(pname.clone());
+                }
+                if let Some(selection) = automatic_route {
+                    app.session.route_api_method = Some(selection.api_method);
                 }
                 // Always replace: a switch to a provider with no OAuth/API
                 // distinction must clear the previous route's credential too.

@@ -1093,6 +1093,19 @@ fn runtime_provider_unavailability_for_key(key: &str) -> Option<RuntimeProviderU
 
 pub fn record_provider_unavailable_for_account(provider: &str, reason: &str) {
     let key = current_provider_runtime_scope_key(provider);
+    record_provider_unavailable_for_key(key, reason);
+}
+
+/// Record a session-bound login failure without changing global auth selection.
+pub fn record_provider_unavailable_for_account_label(
+    provider: &str,
+    label: Option<&str>,
+    reason: &str,
+) {
+    record_provider_unavailable_for_key(provider_runtime_scope_key(provider, label), reason);
+}
+
+fn record_provider_unavailable_for_key(key: String, reason: &str) {
     if key.trim().is_empty() {
         return;
     }

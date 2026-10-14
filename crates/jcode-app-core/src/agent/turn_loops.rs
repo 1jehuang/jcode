@@ -201,7 +201,7 @@ impl Agent {
             let send_messages = stamped.as_deref().unwrap_or(&messages_with_memory);
             let prompt_has_recent_tool_result = Self::messages_end_with_tool_result(send_messages);
             self.last_status_detail = None;
-            let mut stream = match self
+            let completion = self
                 .provider
                 .complete_split(
                     send_messages,
@@ -210,10 +210,12 @@ impl Agent {
                     &split_prompt.dynamic_part,
                     self.provider_session_id.as_deref(),
                 )
-                .await
-            {
+                .await;
+            self.sync_bound_account_route();
+            let mut stream = match completion {
                 Ok(stream) => stream,
                 Err(e) => {
+                    self.record_failed_account_route(&e.to_string());
                     if self.try_auto_compact_after_context_limit(&e.to_string()) {
                         context_limit_retries += 1;
                         if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
@@ -293,6 +295,7 @@ impl Agent {
                     Ok(event) => event,
                     Err(e) => {
                         let err_str = e.to_string();
+                        self.record_failed_account_route(&err_str);
                         if self.try_auto_compact_after_context_limit(&err_str) {
                             log_agent_provider_stream_lifecycle(
                                 logging::LogLevel::Warn,

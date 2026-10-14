@@ -36,7 +36,6 @@ use crate::message::{Message, ToolDefinition};
 use account_failover::{
     account_usage_probe, active_account_label_for_provider, maybe_annotate_limit_summary,
     same_provider_account_candidates, same_provider_account_failover_enabled,
-    set_account_override_for_provider,
 };
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -484,8 +483,9 @@ pub use self::models::{
     populate_account_models, populate_anthropic_models, populate_anthropic_models_for_scope,
     populate_context_limits, populate_context_limits_from_config,
     populate_context_limits_from_config_value, provider_for_model, provider_for_model_with_hint,
-    provider_unavailability_detail_for_account, record_model_unavailable_for_account,
-    record_provider_unavailable_for_account, refresh_openai_model_catalog_in_background,
+    provider_unavailability_detail_for_account, provider_unavailability_detail_for_account_label,
+    record_model_unavailable_for_account, record_provider_unavailable_for_account,
+    record_provider_unavailable_for_account_label, refresh_openai_model_catalog_in_background,
     resolve_model_capabilities, should_refresh_anthropic_model_catalog,
     should_refresh_anthropic_model_catalog_for_scope, should_refresh_openai_model_catalog,
 };
@@ -786,6 +786,7 @@ impl MultiProvider {
         mode: CompletionMode<'_>,
         resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
+        self.bind_auto_account_for_request(self.active_provider())?;
         self.spawn_anthropic_catalog_refresh_if_needed();
         self.spawn_openai_catalog_refresh_if_needed();
 
@@ -816,9 +817,44 @@ impl MultiProvider {
             };
 
         let active = self.active_provider();
-        // Explicit account picks are a billing boundary. Do not inspect another
-        // login's cooldown or automatically rotate onto its credentials.
-        if self.selected_account_for_provider(active).is_some() {
+        // Saved account requests remain session-local. Only configured pool
+        // members may propose another exact account after a startup failure.
+        if let Some(bound_label) = self.selected_account_for_provider(active) {
+            let key = Self::provider_key(active);
+            let exists = match active {
+                ActiveProvider::OpenAI => crate::auth::codex::list_accounts()?
+                    .iter()
+                    .any(|a| a.label == bound_label),
+                ActiveProvider::Claude => crate::auth::claude::list_accounts()?
+                    .iter()
+                    .any(|a| a.label == bound_label),
+                _ => false,
+            };
+            if !exists {
+                anyhow::bail!(
+                    "Saved account '{}' no longer exists. Select an account with /model.",
+                    bound_label
+                );
+            }
+            if let Some(reason) =
+                models::provider_unavailability_detail_for_account_label(key, Some(&bound_label))
+            {
+                self.try_same_provider_account_failover(
+                    active,
+                    messages,
+                    tools,
+                    mode,
+                    &reason,
+                    &mut Vec::new(),
+                )
+                .await?;
+                anyhow::bail!(
+                    "{} ({}) is unavailable: {}",
+                    Self::provider_label(active),
+                    bound_label,
+                    reason
+                );
+            }
             let attempt = match mode {
                 CompletionMode::Unified { system } => {
                     self.complete_on_provider(active, messages, tools, system, resume_session_id)
@@ -839,7 +875,48 @@ impl MultiProvider {
                     .await
                 }
             };
-            return self.await_account_stream_start(active, attempt).await;
+            let attempt = self.await_account_stream_start(active, attempt).await;
+            match attempt {
+                Ok(stream) => {
+                    match active {
+                        ActiveProvider::OpenAI => {
+                            models::clear_openai_provider_unavailability_for_account_label(Some(
+                                &bound_label,
+                            ))
+                        }
+                        ActiveProvider::Claude => {
+                            models::clear_claude_provider_unavailability_for_account_label(Some(
+                                &bound_label,
+                            ))
+                        }
+                        _ => {}
+                    }
+                    return Ok(stream);
+                }
+                Err(err) => {
+                    let decision = Self::classify_failover_error(&err);
+                    if decision.should_failover() {
+                        let reason = Self::summarize_error(&err);
+                        if decision.should_mark_provider_unavailable() {
+                            models::record_provider_unavailable_for_account_label(
+                                key,
+                                Some(&bound_label),
+                                &reason,
+                            );
+                        }
+                        self.try_same_provider_account_failover(
+                            active,
+                            messages,
+                            tools,
+                            mode,
+                            &reason,
+                            &mut Vec::new(),
+                        )
+                        .await?;
+                    }
+                    return Err(err);
+                }
+            }
         }
         let sequence = Self::fallback_sequence(active);
         let mut notes: Vec<String> = Vec::new();
@@ -849,9 +926,9 @@ impl MultiProvider {
 
         for candidate in sequence {
             let label = Self::provider_label(candidate);
-            let key = Self::provider_key(candidate);
+            let key = self.provider_runtime_cooldown_key(candidate);
 
-            if candidate != active && failover_reason.is_some() {
+            if candidate != active {
                 // Account rotation may have exhausted the pool since the first
                 // error. Render guidance from current cooldowns, never from an
                 // annotation captured before alternate logins were attempted.
@@ -863,14 +940,16 @@ impl MultiProvider {
                 } else {
                     reason
                 };
-                let prompt = self.build_failover_prompt(
+                if let Some(prompt) = self.cross_provider_pool_prompt(
                     active,
                     candidate,
                     reason,
                     estimated_input_chars,
                     estimated_input_tokens,
-                );
-                return Err(anyhow::anyhow!(prompt.to_error_message()));
+                ) {
+                    return Err(anyhow::anyhow!(prompt.to_error_message()));
+                }
+                continue;
             }
 
             if !self.provider_is_configured(candidate) {
@@ -886,10 +965,7 @@ impl MultiProvider {
                 continue;
             }
 
-            let cached_unavailability = self
-                .provider_uses_account_cooldown(candidate)
-                .then(|| provider_unavailability_detail_for_account(key))
-                .flatten();
+            let cached_unavailability = provider_unavailability_detail_for_account(key);
             if let Some(reason) = cached_unavailability
                 .clone()
                 .or_else(|| self.provider_precheck_unavailable_reason(candidate))
@@ -944,9 +1020,7 @@ impl MultiProvider {
 
             match attempt {
                 Ok(stream) => {
-                    if self.provider_uses_account_cooldown(candidate) {
-                        clear_provider_unavailable_for_account(key);
-                    }
+                    clear_provider_unavailable_for_account(key);
                     self.record_provider_activity(candidate);
                     if candidate != active {
                         self.set_active_provider(candidate);
@@ -986,9 +1060,7 @@ impl MultiProvider {
                     ));
                     notes.push(format!("{}: {}", label, display_summary));
                     if decision.should_failover() {
-                        if decision.should_mark_provider_unavailable()
-                            && self.provider_uses_account_cooldown(candidate)
-                        {
+                        if decision.should_mark_provider_unavailable() {
                             record_provider_unavailable_for_account(key, &summary);
                         }
                         if candidate == active

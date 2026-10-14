@@ -1,6 +1,60 @@
 use super::*;
 
 impl MultiProvider {
+    /// Auto prefers saved subscriptions, but provider-level Auto can silently
+    /// fall back to an API key when refresh fails. Bind the subscription before
+    /// sending anything so only the pool/countdown router may change billing.
+    pub(super) fn bind_auto_account_for_request(&self, target: ActiveProvider) -> Result<()> {
+        if target == ActiveProvider::Claude
+            && std::env::var("CLAUDE_CODE_OAUTH_TOKEN").is_ok_and(|token| !token.trim().is_empty())
+        {
+            // External OAuth tokens retain their existing precedence and identity.
+            return Ok(());
+        }
+        let runtime = match target {
+            ActiveProvider::Claude => self.anthropic_provider(),
+            ActiveProvider::OpenAI => self.openai_provider(),
+            _ => return Ok(()),
+        };
+        let Some(runtime) =
+            runtime.filter(|runtime| runtime.credential_mode() == CredentialMode::Auto)
+        else {
+            return Ok(());
+        };
+        let Some(label) = active_account_label_for_provider(target) else {
+            return Ok(());
+        };
+        let saved = match target {
+            ActiveProvider::Claude => crate::auth::claude::list_accounts()?
+                .iter()
+                .any(|account| account.label == label),
+            ActiveProvider::OpenAI => crate::auth::codex::list_accounts()?
+                .iter()
+                .any(|account| account.label == label),
+            _ => false,
+        };
+        if !saved {
+            return Ok(());
+        }
+        let replacement = runtime.fork();
+        replacement.set_oauth_account(Some(&label))?;
+        replacement.set_credential_mode(CredentialMode::OAuth)?;
+        let slot = match target {
+            ActiveProvider::Claude => &self.anthropic,
+            ActiveProvider::OpenAI => &self.openai,
+            _ => unreachable!(),
+        };
+        let mut current = slot.write().unwrap_or_else(|p| p.into_inner());
+        if current
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, &runtime))
+        {
+            *current = Some(replacement);
+            self.invalidate_routes_memo();
+        }
+        Ok(())
+    }
+
     /// Select a saved login without rewriting the process-wide account preference.
     /// Build the replacement off to the side so validation errors leave the old
     /// runtime, model and account untouched.

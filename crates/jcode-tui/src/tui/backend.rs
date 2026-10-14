@@ -788,9 +788,29 @@ impl RemoteConnection {
         selection: crate::provider::RouteSelection,
     ) -> Result<u64> {
         let id = self.next_request_id;
-        let request = Request::SetRoute { id, selection };
+        let request = Request::SetRoute {
+            id,
+            selection,
+            automatic_failover: false,
+        };
         self.next_request_id += 1;
         self.send_request(request).await?;
+        Ok(id)
+    }
+
+    /// Apply an automatic target only if the daemon still approves its pool membership.
+    pub async fn set_route_selection_for_failover(
+        &mut self,
+        selection: crate::provider::RouteSelection,
+    ) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::SetRoute {
+            id,
+            selection,
+            automatic_failover: true,
+        })
+        .await?;
         Ok(id)
     }
 
@@ -1557,6 +1577,36 @@ impl RemoteEventState for ReplayRemoteState {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn route_selection_wire_marks_only_automatic_failover() {
+        let mut remote = RemoteConnection::dummy();
+        let peer = remote.take_dummy_peer().unwrap();
+        let (reader, _writer) = peer.into_split();
+        let mut reader = BufReader::new(reader);
+        let selection = crate::provider::RouteSelection {
+            model: "gpt-test".into(),
+            runtime_key: jcode_provider_core::RuntimeKey::OpenAIOAuth,
+            api_method: "openai-oauth@openai-fox".into(),
+            provider_label: "OpenAI".into(),
+            detail: String::new(),
+        };
+        remote.set_route_selection(selection.clone()).await.unwrap();
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let manual: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(manual["type"], "set_route");
+        assert!(manual.get("automatic_failover").is_none());
+        remote
+            .set_route_selection_for_failover(selection)
+            .await
+            .unwrap();
+        line.clear();
+        reader.read_line(&mut line).await.unwrap();
+        let automatic: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(automatic["type"], "set_route");
+        assert_eq!(automatic["automatic_failover"], true);
+    }
 
     #[tokio::test]
     async fn detached_auth_changed_notification_does_not_wait_for_writer_lock() {

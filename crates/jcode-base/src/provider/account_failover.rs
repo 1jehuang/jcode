@@ -27,9 +27,14 @@ impl super::MultiProvider {
         }
     }
 
-    pub(super) fn provider_uses_account_cooldown(&self, provider: ActiveProvider) -> bool {
-        multi_account_provider_kind(provider).is_none()
-            || self.provider_uses_oauth_accounts(provider)
+    pub(super) fn provider_runtime_cooldown_key(&self, provider: ActiveProvider) -> &'static str {
+        match provider {
+            ActiveProvider::OpenAI if !self.provider_uses_oauth_accounts(provider) => "openai-api",
+            ActiveProvider::Claude if !self.provider_uses_oauth_accounts(provider) => {
+                "anthropic-api"
+            }
+            _ => Self::provider_key(provider),
+        }
     }
 }
 
@@ -61,14 +66,6 @@ pub(super) fn active_account_label_for_provider(provider: ActiveProvider) -> Opt
         ActiveProvider::Claude => crate::auth::claude::active_account_label(),
         ActiveProvider::OpenAI => crate::auth::codex::active_account_label(),
         _ => None,
-    }
-}
-
-pub(super) fn set_account_override_for_provider(provider: ActiveProvider, label: Option<String>) {
-    match provider {
-        ActiveProvider::Claude => crate::auth::claude::set_active_account_override(label),
-        ActiveProvider::OpenAI => crate::auth::codex::set_active_account_override(label),
-        _ => {}
     }
 }
 

@@ -346,6 +346,7 @@ struct PreparedTransferSession {
 struct PendingProviderFailover {
     prompt: crate::provider::ProviderFailoverPrompt,
     deadline: Instant,
+    remote_resend: Option<FallbackResendPayload>,
 }
 
 /// An interactive "switch to the next best model/method and resend" offer shown
@@ -1498,6 +1499,8 @@ pub struct App {
     // Pending model switch from picker (for remote mode async processing)
     pending_model_switch: Option<String>,
     pending_route_selection: Option<crate::provider::RouteSelection>,
+    pending_automatic_failover_route: Option<crate::provider::RouteSelection>,
+    pending_automatic_failover_request_id: Option<u64>,
     // Reasoning-effort variant chosen together with a model in the picker
     // (e.g. "gpt-5.5 (high)"), staged for remote mode alongside the model
     // switch. Without forwarding this to the server, it keeps its configured

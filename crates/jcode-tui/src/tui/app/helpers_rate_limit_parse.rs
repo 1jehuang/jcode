@@ -134,6 +134,7 @@ mod rate_limit_parse_tests {
             from_label: "Anthropic".into(),
             to_provider: "openai".into(),
             to_label: "OpenAI".into(),
+            target_route: None,
             reason: "429 rate limit exceeded; retry in 60 seconds".into(),
             estimated_input_chars: 400,
             estimated_input_tokens: 100,

@@ -2059,8 +2059,8 @@ pub(super) async fn handle_client(
                 handle_set_model(id, model, &agent, &client_event_tx).await;
             }
 
-            Request::SetRoute { id, selection } => {
-                handle_set_route(id, selection, &agent, &client_event_tx).await;
+            Request::SetRoute { id, selection, automatic_failover } => {
+                handle_set_route(id, selection, automatic_failover, &agent, &client_event_tx).await;
             }
 
             Request::SetAgentModel { id, target, model, global } => {

@@ -334,6 +334,9 @@ pub enum Request {
     SetRoute {
         id: u64,
         selection: jcode_provider_core::RouteSelection,
+        /// Automatic retries must revalidate the server's current account pool.
+        #[serde(default, skip_serializing_if = "is_false")]
+        automatic_failover: bool,
     },
 
     /// Set or clear the session-scoped subagent model preference.

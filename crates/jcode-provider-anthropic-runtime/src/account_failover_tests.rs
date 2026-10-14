@@ -10,6 +10,54 @@ enum RetryDecision {
     Complete,
 }
 
+#[derive(Clone)]
+struct ExhaustionApiTarget;
+
+#[async_trait::async_trait]
+impl jcode_provider_core::Provider for ExhaustionApiTarget {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume: Option<&str>,
+    ) -> anyhow::Result<EventStream> {
+        panic!("exhaustion target must only be proposed, never requested");
+    }
+    fn name(&self) -> &str {
+        "OpenAI"
+    }
+    fn model(&self) -> String {
+        "gpt-5.4".into()
+    }
+    fn credential_mode(&self) -> jcode_provider_core::CredentialMode {
+        jcode_provider_core::CredentialMode::ApiKey
+    }
+    fn set_credential_mode(
+        &self,
+        _mode: jcode_provider_core::CredentialMode,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn set_model(&self, model: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            model == "gpt-5.4",
+            "unexpected exhaustion target model: {model}"
+        );
+        Ok(())
+    }
+    fn fork(&self) -> Arc<dyn jcode_provider_core::Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+struct ExhaustionTargetGuard(Arc<std::sync::atomic::AtomicBool>);
+impl Drop for ExhaustionTargetGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
 #[derive(Clone, Copy)]
 struct RouterCase {
     split: bool,
@@ -111,6 +159,43 @@ fn http_retry_decision(
             &stored_label,
         ));
         account_labels.push(stored_label);
+    }
+    let mut _exhaustion_target_guard = None;
+    if router_case.is_some_and(|case| case.exhaust_alternate) {
+        // A cross-provider prompt must name a configured, explicitly enrolled
+        // billing identity. The test never applies this final target.
+        jcode_base::env::set_var("OPENAI_API_KEY", "sk-test-exhaustion-target");
+        let previous = jcode_base::provider::external::instantiate_external_provider(
+            jcode_base::provider::external::OPENAI_RUNTIME,
+        );
+        let active = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let factory_active = active.clone();
+        jcode_base::provider::external::register_external_provider_fallible(
+            jcode_base::provider::external::OPENAI_RUNTIME,
+            move || {
+                if factory_active.load(Ordering::SeqCst) {
+                    Some(Arc::new(ExhaustionApiTarget) as Arc<dyn jcode_provider_core::Provider>)
+                } else {
+                    previous.as_ref().map(|runtime| runtime.fork())
+                }
+            },
+        );
+        _exhaustion_target_guard = Some(ExhaustionTargetGuard(active));
+        let scope = jcode_base::provider::openai_catalog_scope_for_credential(
+            false,
+            "sk-test-exhaustion-target",
+        );
+        jcode_base::provider::populate_account_models_for_scope(&scope, vec!["gpt-5.4".into()]);
+        jcode_base::auth::account_pool::AccountPool {
+            members: account_labels
+                .iter()
+                .map(|label| format!("claude:{label}"))
+                .chain(std::iter::once("openai-api".into()))
+                .collect(),
+            excluded: Vec::new(),
+        }
+        .save()
+        .unwrap();
     }
     if router_case.is_some_and(|case| case.cached_first_rejection) {
         jcode_base::auth::refresh_state::record_permanent_rejection(
@@ -250,6 +335,11 @@ fn http_retry_decision(
         }
     }
     let mut restore_initial_provider = None;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let _runtime_guard = runtime.enter();
     let router = if through_router {
         restore_initial_provider = Some(RestoreRouterEnv(
             std::env::var_os("JCODE_ACTIVE_PROVIDER"),
@@ -273,50 +363,145 @@ fn http_retry_decision(
         let router = jcode_base::provider::MultiProvider::from_auth_status(
             jcode_base::auth::AuthStatus::default(),
         );
+        if router_case.is_some_and(|case| case.exhaust_alternate) {
+            router
+                .set_model("openai-api:gpt-5.4")
+                .expect("construct configured exhaustion target runtime");
+        }
         router.set_model("claude:claude-sonnet-4-6").unwrap();
+        if router_case.is_some_and(|case| case.exhaust_alternate) {
+            assert!(
+                router.model_routes().iter().any(|route| route.available
+                    && route.model == "gpt-5.4"
+                    && route.api_method == "openai-api-key"),
+                "exhaustion fixture requires an available exact OpenAI API model"
+            );
+        }
         Some(router)
     } else {
         None
     };
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
     let (decision, rolled_back) = runtime.block_on(async {
         if let Some(router) = &router {
             tokio::time::timeout(std::time::Duration::from_secs(3), async {
-                let result = if router_case.unwrap().split {
+                let case = router_case.unwrap();
+                let initial_result = if case.split {
                     router
                         .complete_split(&[], &[], "Test", "dynamic", None)
                         .await
                 } else {
                     router.complete(&[], &[], "Test", None).await
                 };
-                if router_case.unwrap().exhaust_alternate {
-                    let error = result.err().expect("both accounts exhausted");
+                let initial_error = initial_result
+                    .err()
+                    .expect("first account returns a pre-switch prompt");
+                let initial_prompt =
+                    jcode_provider_core::parse_failover_prompt_message(&initial_error.to_string())
+                        .expect("exact account fallback prompt");
+                assert_eq!(initial_prompt.from_provider, "claude");
+                assert_eq!(initial_prompt.to_provider, "claude");
+                let target_route = initial_prompt
+                    .target_route
+                    .expect("account-qualified target route");
+                assert_eq!(
+                    target_route,
+                    format!("claude-oauth@{}:claude-sonnet-4-6", account_labels[1])
+                );
+                let initial_requests = usize::from(!case.cached_first_rejection);
+                assert_eq!(
+                    requests.load(Ordering::SeqCst),
+                    initial_requests,
+                    "no alternate HTTP request before accepting the prompt"
+                );
+                assert_eq!(
+                    router.oauth_account_label().as_ref(),
+                    Some(&account_labels[0])
+                );
+                assert_eq!(
+                    jcode_base::auth::claude::active_account_label().as_ref(),
+                    Some(&account_labels[0]),
+                    "prompt must not mutate global account preference"
+                );
+                assert!(
+                    jcode_base::provider::provider_unavailability_detail_for_account_label(
+                        "claude",
+                        Some(&account_labels[0])
+                    )
+                    .is_some()
+                );
+                assert!(
+                    jcode_base::provider::provider_unavailability_detail_for_account_label(
+                        "claude",
+                        Some(&account_labels[1])
+                    )
+                    .is_none()
+                );
+                tokio::task::yield_now().await;
+                assert_eq!(requests.load(Ordering::SeqCst), initial_requests);
+                assert!(
+                    jcode_base::provider::MultiProvider::is_failover_route_pool_approved(
+                        &target_route
+                    )
+                );
+                router
+                    .set_model(&target_route)
+                    .expect("explicitly accept exact account route");
+                assert_eq!(
+                    router.oauth_account_label().as_ref(),
+                    Some(&account_labels[1])
+                );
+                assert_eq!(
+                    jcode_base::auth::claude::active_account_label().as_ref(),
+                    Some(&account_labels[0]),
+                    "session-local selection must not rewrite global preference"
+                );
+                let result = if case.split {
+                    router
+                        .complete_split(&[], &[], "Test", "dynamic", None)
+                        .await
+                } else {
+                    router.complete(&[], &[], "Test", None).await
+                };
+                if case.exhaust_alternate {
+                    let error = result.err().expect("second account exhausted");
                     let prompt =
                         jcode_provider_core::parse_failover_prompt_message(&error.to_string())
-                            .expect("cross-provider consent only after both accounts fail");
+                            .expect("configured cross-provider target after both accounts fail");
                     assert_eq!(prompt.from_provider, "claude");
                     assert_eq!(prompt.to_provider, "openai");
+                    let cross_route = prompt
+                        .target_route
+                        .as_ref()
+                        .expect("exact enrolled API target");
+                    assert!(cross_route.starts_with("openai-api:"), "exhaustion target must retain explicitly enrolled API billing identity: {cross_route}");
                     assert!(
-                        prompt
-                            .reason
-                            .contains("No alternate Anthropic accounts are ready")
+                        jcode_base::provider::MultiProvider::is_failover_route_pool_approved(
+                            cross_route
+                        )
                     );
-                    assert!(
-                        !prompt
-                            .reason
-                            .contains("Alternate Anthropic accounts in the auto-switch pool")
+                    assert_eq!(requests.load(Ordering::SeqCst), 2);
+                    assert_eq!(
+                        router.oauth_account_label().as_ref(),
+                        Some(&account_labels[1])
                     );
                     assert_eq!(
                         jcode_base::auth::claude::active_account_label().as_ref(),
                         Some(&account_labels[0])
                     );
+                    for label in &account_labels {
+                        assert!(
+                            jcode_base::provider::provider_unavailability_detail_for_account_label(
+                                "claude",
+                                Some(label)
+                            )
+                            .is_some(),
+                            "each failed token retains its own cooldown"
+                        );
+                    }
                     assert!(!jcode_base::provider::has_eligible_alternate_account(
                         "claude"
                     ));
-                    let next_error = if router_case.unwrap().split {
+                    let next_error = if case.split {
                         router
                             .complete_split(&[], &[], "Test", "dynamic", None)
                             .await
@@ -324,31 +509,29 @@ fn http_retry_decision(
                         router.complete(&[], &[], "Test", None).await
                     }
                     .err()
-                    .expect("cooldowns prevent another HTTP request");
+                    .expect("cached exhaustion must not make another HTTP request");
                     let next_prompt =
                         jcode_provider_core::parse_failover_prompt_message(&next_error.to_string())
-                            .expect("cached exhaustion consent");
-                    assert!(
-                        next_prompt
-                            .reason
-                            .contains("No alternate Anthropic accounts are ready")
-                    );
-                    assert!(
-                        !next_prompt
-                            .reason
-                            .contains("Alternate Anthropic accounts in the auto-switch pool")
-                    );
+                            .expect("cached exhaustion retains exact cross-provider prompt");
+                    assert_eq!(next_prompt.target_route, prompt.target_route);
+                    assert_eq!(requests.load(Ordering::SeqCst), 2);
                     return (RetryDecision::Yield(prompt.reason), false);
                 }
-                let mut stream = result.expect("second account must succeed");
+                let mut stream = result.expect("explicitly selected second account must succeed");
                 while let Some(event) = stream.next().await {
                     let event = event.expect("accepted stream must not expose first account error");
                     if matches!(event, StreamEvent::MessageEnd { .. }) {
                         assert_eq!(
-                            jcode_base::auth::claude::active_account_label().as_ref(),
+                            router.oauth_account_label().as_ref(),
                             Some(&account_labels[1]),
-                            "accepted alternate account must remain selected",
+                            "accepted alternate remains session-bound"
                         );
+                        assert_eq!(
+                            jcode_base::auth::claude::active_account_label().as_ref(),
+                            Some(&account_labels[0]),
+                            "accepted alternate never changes another session's preference"
+                        );
+                        assert_eq!(requests.load(Ordering::SeqCst), initial_requests + 1);
                         return (RetryDecision::Complete, false);
                     }
                 }
