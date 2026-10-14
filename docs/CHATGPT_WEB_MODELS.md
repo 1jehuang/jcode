@@ -19,20 +19,22 @@ browser** that jcode controls. Your own browser windows and tabs are never used.
 
 ## Signing in
 
-A visible browser window opens **only** when the private profile is signed out:
+jcode reuses the ChatGPT session from **your main browser**. When the private
+profile is signed out (first use, or after the session expires), jcode asks
+the jcode browser bridge (`jcode browser setup`) to open chatgpt.com in a
+background tab of your browser, reads the session there, closes that tab, and
+copies the session into its private browser. No window opens and no password
+is entered. The session never leaves your machine and is not logged.
 
-- the first time you send a message to a `[web]` model, or
-- when you run `jcode browser chatgpt-login`.
-
-Sign in normally (including MFA). jcode detects the signed-in chat page, closes
-the window, and continues invisibly. Background model-list refreshes never open
-a window. If the session expires, the next `[web]` message opens the window
-again.
+Only if no bridge is connected, or your browser is not signed in to ChatGPT,
+jcode falls back to a one-time visible sign-in window for its private profile,
+for a `[web]` message or `jcode browser chatgpt-login`. Background model-list
+refreshes never show a window.
 
 Before any `[web]` route appears in `/model`, run once:
 
 ```bash
-jcode browser chatgpt-login
+jcode browser chatgpt-login    # copies your browser's ChatGPT session
 jcode browser chatgpt-status   # browser, profile, display and session check
 ```
 
@@ -48,17 +50,18 @@ jcode browser chatgpt-status   # browser, profile, display and session check
   - `npx playwright install chromium` (no root needed), or
   - the Google Chrome `.deb`: `sudo apt install ./google-chrome-stable_current_amd64.deb`.
 
-  Signing in needs a display for the one-time window. WSLg on Windows 11
-  provides one automatically (`DISPLAY`/`WAYLAND_DISPLAY` are set). On WSL
-  without WSLg, use an X server, or sign in once from a session that has one.
-  After sign-in, prompts need no display.
+  With the browser bridge connected to your Windows browser, the session is
+  copied from there and no display is needed. Without the bridge, the
+  fallback sign-in window needs a display: WSLg on Windows 11 provides one
+  (`DISPLAY`/`WAYLAND_DISPLAY` are set). Prompts never need a display.
 - **Native Windows** is not supported yet. Use WSL2.
 
 ## Troubleshooting
 
 | Symptom | Fix |
 | --- | --- |
-| `[web]` models missing from `/model` | Run `jcode browser chatgpt-login`, then `/model refresh`. |
+| `[web]` models missing from `/model` | Sign in to chatgpt.com in your browser, run `jcode browser chatgpt-login`, then `/model refresh`. |
+| "ChatGPT is not signed in in your main browser" | Sign in to chatgpt.com in the browser the bridge is connected to (`jcode browser status`). |
 | "no display is available for the sign-in window" | Run `jcode browser chatgpt-login` from a desktop session (WSLg, X11, Wayland). |
 | "needs Google Chrome or Chromium" | Install one as above, or set `JCODE_CHATGPT_WEB_CHROME`. |
 | Session keeps expiring | Run `jcode browser chatgpt-status`. Sign in again with `jcode browser chatgpt-login`. |

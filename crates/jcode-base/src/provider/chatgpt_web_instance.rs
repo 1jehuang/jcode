@@ -730,12 +730,275 @@ pub enum SignIn {
     Never,
 }
 
+/// ChatGPT session read from the user's main browser. Held only in memory.
+pub struct ExportedSession {
+    session_token: String,
+    expires_unix: Option<i64>,
+    cookies: Vec<(String, String)>,
+}
+
+impl std::fmt::Debug for ExportedSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExportedSession")
+            .field("session_token", &"<redacted>")
+            .field("expires_unix", &self.expires_unix)
+            .field(
+                "cookies",
+                &self
+                    .cookies
+                    .iter()
+                    .map(|(name, _)| name)
+                    .collect::<Vec<_>>(),
+            )
+            .finish()
+    }
+}
+
+/// Non-secret ChatGPT cookies copied alongside the session token so the
+/// private browser uses the same workspace, region and device identity.
+const COPIED_COOKIES: &[&str] = &[
+    "oai-did",
+    "_account",
+    "_account_is_fedramp",
+    "_account_residency_region",
+];
+
+/// Runs in a chatgpt.com page of the user's main browser. Returns the session
+/// token and the copied cookies, or `signedIn: false`.
+pub const EXPORT_SESSION_SCRIPT: &str = r#"return (async () => {
+  if (location.hostname !== 'chatgpt.com') return { signedIn: false, reason: 'not chatgpt.com' };
+  const response = await fetch('/api/auth/session', { credentials: 'include', cache: 'no-store' });
+  if (!response.ok) return { signedIn: false, reason: 'session ' + response.status };
+  const session = await response.json();
+  if (!session || !session.user || typeof session.sessionToken !== 'string' || !session.sessionToken) {
+    return { signedIn: false, reason: 'signed out' };
+  }
+  const names = ['oai-did', '_account', '_account_is_fedramp', '_account_residency_region'];
+  const cookies = {};
+  for (const part of document.cookie.split(';')) {
+    const index = part.indexOf('=');
+    const name = part.slice(0, index).trim();
+    if (index > 0 && names.includes(name)) cookies[name] = part.slice(index + 1).trim();
+  }
+  return { signedIn: true, sessionToken: session.sessionToken, expires: session.expires || null, cookies };
+})();"#;
+
+impl ExportedSession {
+    /// Parses [`EXPORT_SESSION_SCRIPT`] output.
+    pub fn parse(value: &Value) -> Result<Self> {
+        anyhow::ensure!(
+            value.get("signedIn").and_then(Value::as_bool) == Some(true),
+            "ChatGPT is not signed in in your main browser ({})",
+            value
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+        );
+        let session_token = value
+            .get("sessionToken")
+            .and_then(Value::as_str)
+            .filter(|token| !token.is_empty() && token.len() < 64 * 1024)
+            .context("Main browser returned no ChatGPT session token")?
+            .to_string();
+        anyhow::ensure!(
+            session_token.chars().all(|c| c.is_ascii_graphic()),
+            "Main browser returned a malformed ChatGPT session token"
+        );
+        let expires_unix = value
+            .get("expires")
+            .and_then(Value::as_str)
+            .and_then(|expires| chrono::DateTime::parse_from_rfc3339(expires).ok())
+            .map(|expires| expires.timestamp());
+        let cookies = value
+            .get("cookies")
+            .and_then(Value::as_object)
+            .into_iter()
+            .flatten()
+            .filter(|(name, _)| COPIED_COOKIES.contains(&name.as_str()))
+            .filter_map(|(name, value)| Some((name.clone(), value.as_str()?.to_string())))
+            .filter(|(_, value)| value.len() < 4096 && value.chars().all(|c| c.is_ascii_graphic()))
+            .collect();
+        Ok(Self {
+            session_token,
+            expires_unix,
+            cookies,
+        })
+    }
+
+    /// CDP `Storage.setCookies` entries. Long tokens are split like next-auth
+    /// does (`...session-token.0`, `.1`, ...) to stay under cookie size limits.
+    pub fn cdp_cookies(&self, now_unix: i64) -> Vec<Value> {
+        const CHUNK: usize = 3800;
+        let expires = self
+            .expires_unix
+            .filter(|expires| *expires > now_unix)
+            .unwrap_or(now_unix + 30 * 24 * 60 * 60);
+        let cookie = |name: String, value: &str, http_only: bool| {
+            json!({
+                "name": name, "value": value, "domain": ".chatgpt.com", "path": "/",
+                "secure": true, "httpOnly": http_only, "sameSite": "Lax", "expires": expires
+            })
+        };
+        let base = "__Secure-next-auth.session-token";
+        let mut cookies: Vec<Value> = if self.session_token.len() <= CHUNK {
+            vec![cookie(base.to_string(), &self.session_token, true)]
+        } else {
+            self.session_token
+                .as_bytes()
+                .chunks(CHUNK)
+                .enumerate()
+                .map(|(index, chunk)| {
+                    // The token is ASCII (checked in `parse`).
+                    cookie(
+                        format!("{base}.{index}"),
+                        std::str::from_utf8(chunk).unwrap_or_default(),
+                        true,
+                    )
+                })
+                .collect()
+        };
+        cookies.extend(
+            self.cookies
+                .iter()
+                .map(|(name, value)| cookie(name.clone(), value, false)),
+        );
+        cookies
+    }
+}
+
+/// Reads the ChatGPT session from the user's main browser through the
+/// installed Browser Agent Bridge, in an owned background tab that is closed
+/// again. Returns `Ok(None)` when no bridge is installed or connected.
+pub async fn export_session_from_main_browser() -> Result<Option<ExportedSession>> {
+    let binary = crate::browser::browser_binary_path();
+    if !binary.is_file() {
+        return Ok(None);
+    }
+    let bridge = |action: &'static str, params: Value| {
+        let binary = binary.clone();
+        async move {
+            let output = tokio::time::timeout(
+                Duration::from_secs(45),
+                tokio::process::Command::new(&binary)
+                    .arg(action)
+                    .arg(params.to_string())
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .kill_on_drop(true)
+                    .output(),
+            )
+            .await
+            .with_context(|| format!("Browser bridge {action} timed out"))??;
+            if !output.status.success() {
+                // Only the last stderr line: never echo page content.
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let detail = stderr
+                    .lines()
+                    .rev()
+                    .find(|line| !line.trim().is_empty() && !line.contains(": weak version `"))
+                    .unwrap_or("failed")
+                    .trim()
+                    .to_string();
+                anyhow::bail!("Browser bridge {action}: {detail}");
+            }
+            serde_json::from_slice::<Value>(&output.stdout)
+                .with_context(|| format!("Browser bridge {action} returned invalid JSON"))
+        }
+    };
+    let Ok(ping) = bridge("ping", json!({})).await else {
+        return Ok(None);
+    };
+    if ping.get("pong").is_none() {
+        return Ok(None);
+    }
+    let source = bridge("getActiveTab", json!({})).await?;
+    let source_tab = source
+        .get("tabId")
+        .and_then(Value::as_u64)
+        .context("Browser bridge did not return an active tab")?;
+    let fork_name = format!("jcode-chatgpt-auth-{}", uuid::Uuid::new_v4());
+    let result = async {
+        let fork = bridge(
+            "fork",
+            json!({"tabId": source_tab, "paths": [{"name": fork_name}]}),
+        )
+        .await?;
+        let tab_id = fork
+            .pointer("/forks/0/tabId")
+            .and_then(Value::as_u64)
+            .context("Browser bridge did not return the owned tab")?;
+        bridge(
+            "navigate",
+            json!({"tabId": tab_id, "url": SIGN_IN_URL, "wait": true}),
+        )
+        .await?;
+        // A fresh tab can briefly reject evaluation (CSP fallback race).
+        let mut last_error = None;
+        for _ in 0..20 {
+            match bridge(
+                "evaluate",
+                json!({"tabId": tab_id, "script": EXPORT_SESSION_SCRIPT}),
+            )
+            .await
+            {
+                Ok(value) => {
+                    return ExportedSession::parse(value.get("result").unwrap_or(&Value::Null));
+                }
+                Err(error) => last_error = Some(error),
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Browser bridge evaluate failed")))
+    }
+    .await;
+    let closed = bridge("killFork", json!({"fork": fork_name})).await;
+    if let Err(error) = closed {
+        crate::logging::warn(&format!(
+            "Failed to close the ChatGPT auth tab in the main browser: {error:#}"
+        ));
+    }
+    result.map(Some)
+}
+
+/// Copies the main browser's ChatGPT session into the private instance.
+pub async fn import_session(instance: &Instance, session: &ExportedSession) -> Result<()> {
+    instance
+        .cdp
+        .send(
+            "Storage.setCookies",
+            json!({"cookies": session.cdp_cookies(chrono::Utc::now().timestamp())}),
+            None,
+        )
+        .await
+        .context("Failed to copy the ChatGPT session into jcode's private browser")?;
+    Ok(())
+}
+
+/// Signs the private instance in by copying the session from the user's main
+/// browser. Returns `false` when no connected bridge is available.
+async fn sign_in_from_main_browser() -> Result<bool> {
+    let Some(session) = export_session_from_main_browser().await? else {
+        return Ok(false);
+    };
+    let instance = headless().await?;
+    import_session(&instance, &session).await?;
+    crate::logging::info(
+        "Copied the ChatGPT session from the main browser into jcode's private browser",
+    );
+    Ok(true)
+}
+
 /// Opens an owned, signed-in Temporary Chat page in the invisible instance.
-/// When signed out and allowed, shows the sign-in window once, then retries.
+/// When signed out, first copies the session from the user's main browser
+/// through the bridge (no window). Only if that is impossible, and the caller
+/// allows it, shows the private sign-in window once.
 pub async fn open_signed_in_page(
     sign_in: SignIn,
 ) -> Result<(tokio::sync::MappedMutexGuard<'static, Instance>, Page)> {
-    for attempt in 0..2 {
+    let mut imported = false;
+    let mut shown_window = false;
+    loop {
         let instance = headless().await?;
         let page = instance.open_page(CHATGPT_WEB_URL).await?;
         match wait_for_access(&instance, &page, PAGE_ACCESS_TIMEOUT).await {
@@ -743,10 +1006,21 @@ pub async fn open_signed_in_page(
             PageAccess::SignedOut => {
                 let _ = instance.close_page(&page).await;
                 drop(instance);
+                if !imported {
+                    imported = true;
+                    match sign_in_from_main_browser().await {
+                        Ok(true) => continue,
+                        Ok(false) => {}
+                        Err(error) => crate::logging::info(&format!(
+                            "Could not copy the ChatGPT session from the main browser: {error:#}"
+                        )),
+                    }
+                }
                 anyhow::ensure!(
-                    sign_in == SignIn::Interactive && attempt == 0,
-                    "ChatGPT is signed out in jcode's private browser. Send a [web] message or run `jcode browser chatgpt-login` to sign in"
+                    sign_in == SignIn::Interactive && !shown_window,
+                    "ChatGPT is signed out. Sign in to chatgpt.com in your browser (with the jcode browser bridge connected), or run `jcode browser chatgpt-login`"
                 );
+                shown_window = true;
                 sign_in_interactively().await?;
             }
             PageAccess::Loading => {
@@ -758,7 +1032,6 @@ pub async fn open_signed_in_page(
             }
         }
     }
-    unreachable!("the sign-in loop returns or fails")
 }
 
 /// Reports whether the private profile is signed in, without showing anything.
@@ -894,6 +1167,73 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn exported_session_parses_redacts_and_splits_long_tokens_like_next_auth() {
+        let token = "a".repeat(4649);
+        let probe = json!({
+            "signedIn": true, "sessionToken": token, "expires": "2027-01-12T08:43:44.404Z",
+            "cookies": {"oai-did": "device", "_account": "workspace", "evil": "x", "_account_residency_region": "bad value"}
+        });
+        let session = ExportedSession::parse(&probe).unwrap();
+        assert!(
+            !format!("{session:?}").contains("aaaa"),
+            "Debug must never show the token"
+        );
+        // "Now" is before the token's 2027 expiry, so the real expiry is used.
+        let cookies = session.cdp_cookies(1_790_000_000);
+        let names: Vec<&str> = cookies
+            .iter()
+            .map(|c| c["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "__Secure-next-auth.session-token.0",
+                "__Secure-next-auth.session-token.1",
+                "_account",
+                "oai-did"
+            ]
+        );
+        let joined: String = cookies[..2]
+            .iter()
+            .map(|c| c["value"].as_str().unwrap())
+            .collect();
+        assert_eq!(joined, token);
+        for cookie in &cookies {
+            assert_eq!(cookie["domain"], ".chatgpt.com");
+            assert_eq!(cookie["secure"], true);
+            assert_eq!(cookie["expires"], 1_799_743_424);
+        }
+        assert_eq!(cookies[0]["httpOnly"], true);
+        assert_eq!(cookies[2]["httpOnly"], false);
+
+        let short =
+            ExportedSession::parse(&json!({"signedIn": true, "sessionToken": "short"})).unwrap();
+        let cookies = short.cdp_cookies(1_800_000_000);
+        assert_eq!(cookies.len(), 1);
+        assert_eq!(cookies[0]["name"], "__Secure-next-auth.session-token");
+        // Missing or past expiry falls back to 30 days.
+        assert_eq!(cookies[0]["expires"], 1_800_000_000 + 30 * 24 * 60 * 60);
+    }
+
+    #[test]
+    fn exported_session_rejects_signed_out_and_malformed_tokens() {
+        assert!(
+            ExportedSession::parse(&json!({"signedIn": false, "reason": "signed out"})).is_err()
+        );
+        assert!(ExportedSession::parse(&json!({"signedIn": true})).is_err());
+        assert!(ExportedSession::parse(&json!({"signedIn": true, "sessionToken": ""})).is_err());
+        assert!(
+            ExportedSession::parse(&json!({"signedIn": true, "sessionToken": "has space"}))
+                .is_err()
+        );
+        assert!(
+            ExportedSession::parse(&json!({"signedIn": true, "sessionToken": "x".repeat(70_000)}))
+                .is_err()
+        );
+        assert!(ExportedSession::parse(&Value::Null).is_err());
     }
 
     #[test]

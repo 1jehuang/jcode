@@ -2038,19 +2038,12 @@ pub async fn run_browser(action: &str, requested: Option<&str>) -> Result<()> {
             println!("ChatGPT web sign-in");
             println!("  browser: {}", chrome.display());
             println!("  private profile: {}", web::profile_dir()?.display());
-            match web::signed_in_status().await? {
-                web::PageAccess::SignedIn => {
-                    println!("\nAlready signed in. [web] models run invisibly.")
-                }
-                _ => {
-                    println!(
-                        "\nA browser window opens for sign-in. jcode closes it when ChatGPT is ready."
-                    );
-                    web::sign_in_interactively().await?;
-                    println!("Signed in. [web] models now run invisibly.");
-                }
-            }
-            web::shutdown().await;
+            // Copies the session from your main browser through the bridge
+            // when possible. A private sign-in window is the last resort.
+            let (instance, page) = web::open_signed_in_page(web::SignIn::Interactive).await?;
+            let _ = instance.close_page(&page).await;
+            drop(instance);
+            println!("\nSigned in. [web] models run invisibly.");
             let models = crate::provider::chatgpt_web::refresh_models().await?;
             let available: Vec<_> = models
                 .iter()
@@ -2065,7 +2058,7 @@ pub async fn run_browser(action: &str, requested: Option<&str>) -> Result<()> {
                     available.join(", ")
                 }
             );
-            crate::provider::chatgpt_web_instance::shutdown().await;
+            web::shutdown().await;
         }
         "chatgpt-status" => {
             use crate::provider::chatgpt_web_instance as web;
