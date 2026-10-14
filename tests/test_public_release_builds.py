@@ -46,7 +46,11 @@ class PublicReleaseTests(unittest.TestCase):
                 command.chmod(0o755)
             for ci in ('0', '1'):
                 with self.subTest(ci=ci):
-                    env = dict(os.environ, PATH=f"{directory}:{os.environ['PATH']}",
+                    # Stubbed commands must not be shadowed by a caller's
+                    # exported self-dev Cargo function or BASH_ENV startup file.
+                    env = {key: value for key, value in os.environ.items()
+                           if not key.startswith('BASH_FUNC_') and key != 'BASH_ENV'}
+                    env.update(PATH=f"{directory}:{os.environ['PATH']}",
                                JCODE_CI_BUILD=ci, JCODE_COMPAT_PROFILE='release',
                                JCODE_COMPAT_TARGET='x86_64-unknown-linux-gnu',
                                CARGO_PROFILE_RELEASE_OPT_LEVEL='3')
