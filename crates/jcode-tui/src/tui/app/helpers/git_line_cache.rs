@@ -19,9 +19,18 @@ impl Fingerprint {
         if !meta.is_file() {
             return None;
         }
+        let modified = match meta.modified() {
+            Ok(modified) => modified,
+            Err(error) => {
+                crate::logging::debug(&format!(
+                    "Git line-count probe has no modification time: {error}"
+                ));
+                return None;
+            }
+        };
         Some(Self {
             len: meta.len(),
-            modified: meta.modified().ok()?,
+            modified,
             #[cfg(unix)]
             identity: {
                 use std::os::unix::fs::MetadataExt;
@@ -95,11 +104,23 @@ fn count_text_lines(path: &Path) -> Option<usize> {
     use std::io::Read;
     // Bound the read too: a file can grow after the metadata probe.
     let mut bytes = Vec::new();
-    std::fs::File::open(path)
-        .ok()?
-        .take(2 * 1024 * 1024 + 1)
-        .read_to_end(&mut bytes)
-        .ok()?;
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) => {
+            crate::logging::debug(&format!(
+                "Could not open git line-count probe {}: {error}",
+                path.display()
+            ));
+            return None;
+        }
+    };
+    if let Err(error) = file.take(2 * 1024 * 1024 + 1).read_to_end(&mut bytes) {
+        crate::logging::debug(&format!(
+            "Could not read git line-count probe {}: {error}",
+            path.display()
+        ));
+        return None;
+    }
     if bytes.len() > 2 * 1024 * 1024 || bytes.contains(&0) {
         return None;
     }
