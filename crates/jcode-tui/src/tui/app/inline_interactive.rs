@@ -995,6 +995,9 @@ impl App {
         &mut self,
         snapshot: jcode_provider_core::ModelCatalogSnapshot,
     ) -> CatalogReplaceOutcome {
+        if !snapshot.model_routes.is_empty() {
+            self.remote_model_routes_stale = false;
+        }
         let mut provider_meta_changed = false;
         let mut provider_name_changed = false;
         if let Some(name) = snapshot.provider_name
@@ -1487,6 +1490,21 @@ impl App {
         if picker_open && !self.auth_catalog_refresh_pending {
             self.open_model_picker_preserving_input();
         }
+    }
+
+    /// Whether the remote loop should fetch full catalog routes now: a names-only
+    /// update left them stale and the user is looking at `/model`. Fetching only
+    /// then keeps the server's oversized-frame protection for idle clients.
+    pub(super) fn take_stale_model_routes_fetch(&mut self) -> bool {
+        let picker_open = self
+            .inline_interactive_state
+            .as_ref()
+            .is_some_and(picker_is_runtime_model_picker);
+        if !picker_open || !self.remote_model_routes_stale {
+            return false;
+        }
+        self.remote_model_routes_stale = false;
+        true
     }
 
     /// Apply a completed auth-driven catalog refresh to an already-open picker.
