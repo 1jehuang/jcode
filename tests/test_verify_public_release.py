@@ -46,6 +46,20 @@ class PublicReleaseTests(unittest.TestCase):
     def test_complete_release_passes(self):
         self.verify()
 
+    def test_workflow_verifies_before_announcements_and_package_updates(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        publish = workflow.index("      - name: Publish completed release")
+        verify = workflow.index("      - name: Verify public assets and exact source provenance")
+        announce = workflow.index("      - name: Queue Discord release announcement")
+        packages = workflow.index("      - name: Update Homebrew formula")
+        self.assertLess(publish, verify)
+        self.assertLess(verify, announce)
+        self.assertLess(verify, packages)
+        step = workflow[verify:announce]
+        self.assertNotIn("continue-on-error", step)
+        self.assertIn('--sha "$TAG_SHA"', step)
+        self.assertIn('git show "$WORKFLOW_SHA:scripts/verify_public_release.py"', step)
+
     def test_incomplete_metadata_rejected(self):
         for field, value in (("draft", True), ("prerelease", True), ("tag_name", "v0.98.0")):
             with self.subTest(field=field):
