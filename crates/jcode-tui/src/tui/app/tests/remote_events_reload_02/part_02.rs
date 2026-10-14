@@ -274,7 +274,6 @@ fn test_handle_remote_disconnect_retryable_pending_schedules_retry() {
         auto_retry: true,
         retry_attempts: 0,
         retry_at: None,
-        overload_attempts: 0,
     });
 
     let mut state = remote::RemoteRunState::default();

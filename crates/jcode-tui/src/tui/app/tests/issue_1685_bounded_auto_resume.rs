@@ -14,7 +14,6 @@ fn issue_1685_user_turn(
         auto_retry,
         retry_attempts,
         retry_at: None,
-        overload_attempts: 0,
     }
 }
 

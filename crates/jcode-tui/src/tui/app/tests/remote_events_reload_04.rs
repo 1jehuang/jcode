@@ -97,7 +97,6 @@ fn test_remote_error_without_retry_recovers_pending_followups() {
         auto_retry: false,
         retry_attempts: 0,
         retry_at: None,
-        overload_attempts: 0,
     });
     app.is_processing = true;
     app.status = ProcessingStatus::Streaming;
@@ -164,7 +163,6 @@ fn test_remote_error_with_retryable_pending_schedules_retry() {
         auto_retry: true,
         retry_attempts: 0,
         retry_at: None,
-        overload_attempts: 0,
     });
     app.is_processing = true;
     app.status = ProcessingStatus::Streaming;
@@ -220,7 +218,6 @@ fn test_remote_non_retryable_error_gets_short_auto_poke_retry() {
         auto_retry: true,
         retry_attempts: 0,
         retry_at: None,
-        overload_attempts: 0,
     });
     app.is_processing = true;
     app.status = ProcessingStatus::Streaming;
@@ -288,7 +285,6 @@ fn test_remote_non_retryable_error_stops_auto_poke_after_short_retry_budget() {
         auto_retry: true,
         retry_attempts: 2,
         retry_at: None,
-        overload_attempts: 0,
     });
     app.is_processing = true;
     app.status = ProcessingStatus::Streaming;
@@ -334,7 +330,6 @@ fn test_remote_fatal_model_endpoint_error_fails_fast_without_retry_budget() {
         auto_retry: true,
         retry_attempts: 0,
         retry_at: None,
-        overload_attempts: 0,
     });
     app.is_processing = true;
     app.status = ProcessingStatus::Streaming;
@@ -390,7 +385,6 @@ fn test_remote_connectivity_error_waits_for_network_with_bounded_retry_budget() 
         auto_retry: true,
         retry_attempts: 0,
         retry_at: None,
-        overload_attempts: 0,
     });
     app.is_processing = true;
     app.status = ProcessingStatus::Streaming;
@@ -453,7 +447,6 @@ fn test_remote_connectivity_error_without_auto_retry_still_waits_for_network() {
         auto_retry: false,
         retry_attempts: 0,
         retry_at: None,
-        overload_attempts: 0,
     });
     app.is_processing = true;
     app.status = ProcessingStatus::Streaming;
@@ -541,7 +534,6 @@ fn test_remote_account_failover_prompt_does_not_hold_or_retry_same_account() {
         auto_retry: true,
         retry_attempts: 0,
         retry_at: None,
-        overload_attempts: 0,
     });
     app.last_submitted_input = Some("hi".to_string());
     app.is_processing = true;
@@ -621,7 +613,6 @@ fn remote_exact_failover_fixture() -> (App, crate::tui::backend::RemoteConnectio
         auto_retry: false,
         retry_attempts: 0,
         retry_at: None,
-        overload_attempts: 0,
     });
     app.last_submitted_input = Some("hi".into());
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
@@ -991,7 +982,6 @@ fn test_remote_auth_error_arms_fallback_offer_with_resend_payload() {
         auto_retry: false,
         retry_attempts: 0,
         retry_at: None,
-        overload_attempts: 0,
     });
     app.last_submitted_input = Some("hi".to_string());
     app.is_processing = true;
@@ -1053,7 +1043,6 @@ fn test_remote_fallback_offer_accept_stages_switch_and_resends() {
         auto_retry: false,
         retry_attempts: 0,
         retry_at: None,
-        overload_attempts: 0,
     });
     app.last_submitted_input = Some("hi".to_string());
     app.is_processing = true;
@@ -1166,7 +1155,6 @@ fn test_schedule_pending_remote_retry_respects_retry_limit() {
         auto_retry: true,
         retry_attempts: App::AUTO_RETRY_MAX_ATTEMPTS,
         retry_at: None,
-        overload_attempts: 0,
     });
 
     assert!(!app.schedule_pending_remote_retry("⚠ failed."));
@@ -1205,7 +1193,6 @@ fn test_provider_guardrail_event_offers_opus_reroute_with_resend_payload() {
         auto_retry: false,
         retry_attempts: 0,
         retry_at: None,
-        overload_attempts: 0,
     });
     app.last_submitted_input = Some("please help".to_string());
 
@@ -2947,7 +2934,6 @@ fn test_credential_failure_breaker_trips_after_consecutive_auth_errors() {
             auto_retry: true,
             retry_attempts: 0,
             retry_at: None,
-            overload_attempts: 0,
         });
         app.is_processing = true;
         app.status = ProcessingStatus::Streaming;
@@ -3025,7 +3011,6 @@ fn test_rejected_refresh_token_stops_all_automatic_resends_immediately() {
                     auto_retry,
                     retry_attempts: 0,
                     retry_at: None,
-                    overload_attempts: 0,
                 });
                 app.last_submitted_input = Some("keep going".to_string());
                 app.is_processing = true;
