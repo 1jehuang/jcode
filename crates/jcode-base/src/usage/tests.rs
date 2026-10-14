@@ -980,6 +980,25 @@ fn kimi_usage_limits_shape_parses_windowed_quotas() {
     assert!((limits[1].usage_percent - 72.0).abs() < 0.01);
     assert_eq!(limits[2].name, "Monthly");
     assert!((limits[2].usage_percent - 45.0).abs() < f32::EPSILON);
+    assert_eq!(limits[0].window_seconds, Some(5 * 3600));
+    assert_eq!(limits[1].window_seconds, Some(7 * 86400));
+    assert_eq!(limits[2].window_seconds, Some(30 * 86400));
+}
+
+#[test]
+fn kimi_usage_keeps_reported_window_length_behind_monthly_label() {
+    let json = serde_json::json!({
+        "limits": [
+            {"window": {"duration": 31, "timeUnit": "DAY"},
+             "detail": {"limit": 100.0, "used": 40.0, "resetTime": "2026-11-01T00:00:00Z"}}
+        ],
+        "usage": {"limit": 100.0, "used": 12.0}
+    });
+    let limits = api_keys::parse_kimi_usage_limits(&json);
+    assert_eq!(limits[0].name, "Weekly");
+    assert_eq!(limits[0].window_seconds, None);
+    assert_eq!(limits[1].name, "Monthly");
+    assert_eq!(limits[1].window_seconds, Some(31 * 86400));
 }
 
 #[test]

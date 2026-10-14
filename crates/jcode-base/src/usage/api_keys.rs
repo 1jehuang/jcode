@@ -447,7 +447,10 @@ pub(super) fn parse_kimi_usage_limits(json: &serde_json::Value) -> Vec<UsageLimi
             let fallback = format!("Limit {}", limits.len() + 1);
             let label = kimi_window_label(minutes, &fallback);
             let detail = raw.get("detail").unwrap_or(raw);
-            if let Some(limit) = kimi_parse_row(detail, &label) {
+            let window_seconds = minutes
+                .filter(|m| m.is_finite() && *m > 0.0)
+                .map(|m| (m * 60.0).round() as u64);
+            if let Some(limit) = kimi_parse_row(detail, &label, window_seconds) {
                 limits.push(limit);
             }
         }
@@ -474,7 +477,7 @@ pub(super) fn parse_kimi_usage_limits(json: &serde_json::Value) -> Vec<UsageLimi
                     name: label,
                     usage_percent,
                     resets_at,
-                    window_seconds: None,
+                    window_seconds: minutes.map(|m| (m * 60.0) as u64),
                 });
             }
         }
@@ -483,7 +486,7 @@ pub(super) fn parse_kimi_usage_limits(json: &serde_json::Value) -> Vec<UsageLimi
     // The summary row only fills in Weekly when no explicit window reported
     // it; dedup below keeps the first occurrence, so this must come last.
     if let Some(usage) = json.get("usage")
-        && let Some(limit) = kimi_parse_row(usage, "Weekly")
+        && let Some(limit) = kimi_parse_row(usage, "Weekly", None)
     {
         limits.push(limit);
     }
@@ -501,7 +504,11 @@ pub(super) fn parse_kimi_usage_limits(json: &serde_json::Value) -> Vec<UsageLimi
     limits
 }
 
-fn kimi_parse_row(raw: &serde_json::Value, label: &str) -> Option<UsageLimit> {
+fn kimi_parse_row(
+    raw: &serde_json::Value,
+    label: &str,
+    window_seconds: Option<u64>,
+) -> Option<UsageLimit> {
     let limit = raw.get("limit").and_then(|v| v.as_f64());
     let used = raw.get("used").and_then(|v| v.as_f64()).or_else(|| {
         match (limit, raw.get("remaining").and_then(|v| v.as_f64())) {
@@ -527,7 +534,7 @@ fn kimi_parse_row(raw: &serde_json::Value, label: &str) -> Option<UsageLimit> {
         name: label.to_string(),
         usage_percent,
         resets_at,
-        window_seconds: None,
+        window_seconds,
     })
 }
 
