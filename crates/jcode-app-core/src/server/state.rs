@@ -449,6 +449,36 @@ pub(super) async fn fanout_live_client_event(
     delivered
 }
 
+/// Deliver `event` to every live attachment of `session_id` except the
+/// connection that caused it.
+pub(super) async fn fanout_peer_client_event(
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    session_id: &str,
+    exclude_connection_id: &str,
+    event: ServerEvent,
+) -> usize {
+    let targets = {
+        let mut members = swarm_members.write().await;
+        let Some(member) = members.get_mut(session_id) else {
+            return 0;
+        };
+        member.event_txs.retain(|_, tx| !tx.is_closed());
+        member
+            .event_txs
+            .iter()
+            .filter(|(connection_id, _)| connection_id.as_str() != exclude_connection_id)
+            .map(|(_, tx)| tx.clone())
+            .collect::<Vec<_>>()
+    };
+    let mut delivered = 0;
+    for tx in targets {
+        if tx.send(event.clone()).is_ok() {
+            delivered += 1;
+        }
+    }
+    delivered
+}
+
 pub(super) fn session_event_fanout_sender(
     session_id: String,
     swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
@@ -485,6 +515,17 @@ pub(super) fn enqueue_soft_interrupt(
     urgent: bool,
     source: SoftInterruptSource,
 ) -> bool {
+    enqueue_soft_interrupt_with_id(queue, content, images, urgent, source, None)
+}
+
+pub(super) fn enqueue_soft_interrupt_with_id(
+    queue: &SoftInterruptQueue,
+    content: String,
+    images: Vec<(String, String)>,
+    urgent: bool,
+    source: SoftInterruptSource,
+    client_id: Option<String>,
+) -> bool {
     let content_bytes = content.len();
     let content_chars = content.chars().count();
     if let Ok(mut pending) = queue.lock() {
@@ -494,6 +535,7 @@ pub(super) fn enqueue_soft_interrupt(
             images,
             urgent,
             source,
+            client_id,
         });
         crate::logging::info(&format!(
             "SOFT_INTERRUPT_QUEUE_PUSH source={:?} urgent={} content_bytes={} content_chars={} pending_before={} pending_after={}",
@@ -570,6 +612,79 @@ impl SessionControlHandle {
         source: SoftInterruptSource,
     ) -> bool {
         enqueue_soft_interrupt(&self.soft_interrupt_queue, content, images, urgent, source)
+    }
+
+    pub fn queue_soft_interrupt_with_id(
+        &self,
+        content: String,
+        images: Vec<(String, String)>,
+        urgent: bool,
+        source: SoftInterruptSource,
+        client_id: Option<String>,
+    ) -> bool {
+        enqueue_soft_interrupt_with_id(
+            &self.soft_interrupt_queue,
+            content,
+            images,
+            urgent,
+            source,
+            client_id,
+        )
+    }
+
+    /// Soft interrupts queued and not yet injected.
+    pub fn pending_soft_interrupt_count(&self) -> usize {
+        self.soft_interrupt_queue
+            .lock()
+            .map(|queue| queue.len())
+            .unwrap_or(0)
+    }
+
+    /// Remove the queued interrupts whose caller id is in `client_ids`.
+    ///
+    /// Injection drains the queue under the same lock, so each requested id is
+    /// reported exactly once: in `cancelled` if it was still queued, otherwise
+    /// in `not_queued` (already injected, or never queued here). Order follows
+    /// the request, and duplicate requested ids are reported once.
+    pub fn cancel_soft_interrupts_by_id(
+        &self,
+        client_ids: &[String],
+    ) -> (Vec<String>, Vec<String>) {
+        let mut requested: Vec<String> = Vec::new();
+        for id in client_ids {
+            if !requested.contains(id) {
+                requested.push(id.clone());
+            }
+        }
+        let removed: Vec<String> = match self.soft_interrupt_queue.lock() {
+            Ok(mut queue) => {
+                let mut removed = Vec::new();
+                queue.retain(|message| match &message.client_id {
+                    Some(id) if requested.contains(id) => {
+                        removed.push(id.clone());
+                        false
+                    }
+                    _ => true,
+                });
+                removed
+            }
+            Err(_) => {
+                crate::logging::warn(&format!(
+                    "SOFT_INTERRUPT_QUEUE_CANCEL_BY_ID_FAILED session={} reason=queue_lock_poisoned",
+                    self.session_id
+                ));
+                Vec::new()
+            }
+        };
+        let (cancelled, not_queued): (Vec<String>, Vec<String>) =
+            requested.into_iter().partition(|id| removed.contains(id));
+        crate::logging::info(&format!(
+            "SOFT_INTERRUPT_QUEUE_CANCEL_BY_ID session={} cancelled={} not_queued={}",
+            self.session_id,
+            cancelled.len(),
+            not_queued.len()
+        ));
+        (cancelled, not_queued)
     }
 
     pub fn clear_soft_interrupts(&self) {
@@ -748,6 +863,7 @@ pub(super) async fn queue_soft_interrupt_for_session(
                 images: Vec::new(),
                 urgent,
                 source,
+                client_id: None,
             },
         )
         .map(|_| true)

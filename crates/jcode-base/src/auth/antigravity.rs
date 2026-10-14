@@ -237,7 +237,7 @@ pub async fn login(no_browser: bool) -> Result<AntigravityTokens> {
     {
         eprintln!("\nOpening browser for Antigravity login...\n");
         eprintln!("If the browser didn't open, visit:\n{}\n", auth_url);
-        if let Some(qr) = crate::login_qr::indented_section(
+        if let Some(qr) = crate::auth::login_ui::qr_section(
             &auth_url,
             "Scan this QR on another device if this machine has no browser:",
             "    ",
@@ -246,7 +246,7 @@ pub async fn login(no_browser: bool) -> Result<AntigravityTokens> {
             eprintln!("{qr}\n");
         }
 
-        let browser_opened = open::that(&auth_url).is_ok();
+        let browser_opened = crate::companion_client::open_url(&auth_url);
         if browser_opened {
             eprintln!(
                 "Waiting up to 300s for automatic callback on {}",
@@ -300,7 +300,7 @@ async fn manual_login(
 
     eprintln!("\nManual Antigravity auth required.\n");
     eprintln!("Open this URL in your browser:\n\n{}\n", auth_url);
-    if let Some(qr) = crate::login_qr::indented_section(
+    if let Some(qr) = crate::auth::login_ui::qr_section(
         auth_url,
         "Scan this QR on another device if needed:",
         "    ",
@@ -309,7 +309,7 @@ async fn manual_login(
         eprintln!("{qr}\n");
     }
     if !crate::auth::browser_suppressed(no_browser) {
-        let _ = open::that(auth_url);
+        let _ = crate::companion_client::open_url(auth_url);
     }
     eprintln!(
         "After approving access, paste the full callback URL (or query string) here so jcode can verify the login state.\n"
@@ -319,7 +319,7 @@ async fn manual_login(
     );
     eprint!("Callback URL: ");
     io::stdout().flush()?;
-    let input = crate::secret_input::read_secret_line()?;
+    let input = crate::auth::login_ui::read_secret_line()?;
     if input.trim().is_empty() {
         anyhow::bail!("No callback URL provided.");
     }
