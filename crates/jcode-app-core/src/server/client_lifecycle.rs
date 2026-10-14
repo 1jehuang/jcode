@@ -3546,7 +3546,7 @@ async fn record_processing_completion(
                 )
                 .await;
             }
-            let retry_after_secs = super::usage_limit_resume::error_retry_after_secs(&e);
+            let retry_after_secs = super::usage_limit_resume::error_retry_after_secs(e);
             if retry_after_secs.is_some() {
                 crate::telemetry::record_error(crate::telemetry::ErrorCategory::RateLimited);
             } else {

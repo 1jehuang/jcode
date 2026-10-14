@@ -100,14 +100,14 @@ async fn chatgpt_web_live_public_provider_all_available_models() -> anyhow::Resu
         };
         response(&provider, &model.model, effort).await?;
     }
-    if std::env::var("JCODE_CHATGPT_WEB_TEST_MAX").as_deref() == Ok("1") {
-        if let Some(model) = models.iter().find(|model| {
+    if std::env::var("JCODE_CHATGPT_WEB_TEST_MAX").as_deref() == Ok("1")
+        && let Some(model) = models.iter().find(|model| {
             jcode_base::provider::chatgpt_web::cached_reasoning_options(&model.model)
                 .iter()
                 .any(|effort| effort.available && effort.value == "max")
-        }) {
-            response(&provider, &model.model, "max").await?;
-        }
+        })
+    {
+        response(&provider, &model.model, "max").await?;
     }
     assert!(
         provider.set_model("gpt-5.6-sol").is_err(),
