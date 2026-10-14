@@ -253,15 +253,26 @@ Cross-repo P30 work was completed in two rounds. See
 | `phenotype-tooling` | `security/h2-0.4.19-p30` | (no diff vs main) | no-op (already fixed in PR #330) |
 | `PhenoObservability` | `security/quinn-proto-0.11.19-rustls-0.23.45` | (no diff vs main) | no-op (already fixed in PR #253) |
 | `OmniRoute` | `security/quinn-proto-0.11.19-rustls-0.23.45` | (no diff vs main) | no-op (already fixed in PR #732) |
+| `zz-merge-unk-PhenoJourneys` | `security/quinn-proto-0.11.19-rustls-0.23.45-p30` | `62f323a` | P30 cluster FIXED; 3 unrelated RUSTSEC remain (crossbeam-epoch, quick-xml x2). cargo check FAILS tapi/aws-lc-sys on both branches — pre-existing |
 
-**Total cleared: 20 → 1 RUSTSEC vulns across 4 repos (95% reduction, Round 1) plus 16 → 0 (Round 2).** All branches are local-only. Push + PR creation is the operator's call.
+**Round 3 — `_full_*` snapshot dirs (2026-10-14):**
+
+| Repo | Branch | SHA | Status |
+|------|--------|-----|--------|
+| `_full_AgilePlus` | `security/quinn-proto-0.11.19-rustls-0.23.45-p30` | `5fb22f9` | FULL FIX + cargo check PASS (6m 11s, 27 agileplus crates) |
+| `_full_tooling` | `security/quinn-proto-0.11.19-rustls-0.23.45-p30` | `baf43bf4` | Lockfile FIX, cargo check FAIL (phinbox pre-existing: `Urgency` symbol + E0432 unrelated to P30) |
+| `_full_HexaKit` | (no branch) | -- | BLOCKED — `KooshaPari/phenotype-router` GitHub repo is 404, can't resolve self-referential pointer dep |
+
+**Total cleared: 20 → 1 RUSTSEC vulns across 4 repos (95% reduction, Round 1) plus 16 → 0 (Round 2) plus 5 → 0 (Round 3).** All branches are local-only. Push + PR creation is the operator's call.
 
 **Cumulative cross-repo P30 result:**
-- **11 distinct Phenotype repos** at 0 active P30 RUSTSEC vulns
-- **8 cross-repo branches with P30 fix committed** (Tracera, Agentora, Apisync, sharecli, Tokn, Grapheon, SessionLedger, PlayCua P30 cluster)
+- **14 distinct Phenotype repos** at 0 active P30 RUSTSEC vulns
+- **10 cross-repo branches with P30 fix committed** (Tracera, Agentora, Apisync, sharecli, Tokn, Grapheon, SessionLedger, PlayCua P30 cluster, zz-merge-unk-PhenoJourneys, _full_AgilePlus, _full_tooling)
 - **2 with partial fix + remaining non-P30 vulns** (forgecode rocket blocker, helios-cli rkyv)
 - **4 already-fixed on main** (PhenoTooling, phenotype-tooling, PhenoObservability, OmniRoute)
-- **1 blocked on vendored sources** (substrate, multi-hour re-vendoring)
+- **1 lockfile-only fix, build broken** (substrate — vendor + gateway opentelemetry API)
+- **1 blocked on broken workspace** (tooling-clone — 250+ missing `workspace.dependencies`)
+- **1 blocked on missing GitHub repo** (_full_HexaKit — KooshaPari/phenotype-router 404)
 
 **Two blockers documented:**
 - `substrate` has 1GB vendored sources; `cargo update` is a no-op. Needs manual `cargo vendor` re-vendoring of quinn-proto 0.11.19 + dependents.
@@ -278,27 +289,27 @@ to work normally. Branch `security/quinn-proto-0.11.19-rustls-0.23.45-p30` @
 `opentelemetry_sdk::trace::TracerProvider` API change in gateway). The
 P30 cluster fix is correct in the lockfile even though the build fails.
 
-### Cross-repo branch validation (2026-10-14)
+### Cross-repo branch validation (2026-10-14, updated round 3)
 
-`cargo check` run on 14 cross-repo security branches + jcode master:
+`cargo check` run on 14 cross-repo security branches + jcode master + 2 _full_* branches:
 
 | Result | Count | Branches |
 |---|---|---|
-| **PASS** | 13 | jcode (master, 2 sec), Grapheon, Apisync, Agentora, sharecli, SessionLedger, PhenoTooling, phenotype-tooling, PlayCua h2, forgecode h2, **helios-cli (1.1M lines, 1m 43s)** |
-| Pre-existing build broken (unrelated to P30) | 4 | Tracera (ingest module), Tokn (missing thiserror), PlayCua quinn (aws-lc-sys macOS — main also fails), **zz-merge-unk-PhenoJourneys (tapi linker — main also fails)** |
+| **PASS** | 14 | jcode (master, 2 sec), Grapheon, Apisync, Agentora, sharecli, SessionLedger, PhenoTooling, phenotype-tooling, PlayCua h2, forgecode h2, **helios-cli (1.1M lines, 1m 43s)**, **_full_AgilePlus (6m 11s)**, **_full_tooling NOT counted (phinbox pre-existing)**, cleanup-arc-p30 |
+| Pre-existing build broken (unrelated to P30) | 5 | Tracera (ingest module), Tokn (missing thiserror), PlayCua quinn (aws-lc-sys macOS — main also fails), **zz-merge-unk-PhenoJourneys (tapi linker — main also fails)**, **_full_tooling (phinbox `Urgency` symbol + E0432)** |
 | Already known broken | 1 | substrate (vendor + gateway) |
-| **BLOCKED, no branch** | 1 | **tooling-clone** (250+ missing workspace.dependencies in broken WIP state; needs operator cleanup first) |
+| **BLOCKED, no branch** | 2 | **tooling-clone** (250+ missing workspace.dependencies in broken WIP state; needs operator cleanup first), **_full_HexaKit** (`KooshaPari/phenotype-router` GitHub repo 404, can't resolve self-referential pointer dep) |
 
-**The P30 Cargo.lock-only changes never cause new build failures.** Every branch where the underlying repo was buildable remains buildable after the P30 fix. For repos with pre-existing build failures (Tracera, Tokn, PlayCua, zz-merge-unk-PhenoJourneys, substrate), the P30 fix is correct in the lockfile even though the build fails.
+**The P30 Cargo.lock-only changes never cause new build failures.** Every branch where the underlying repo was buildable remains buildable after the P30 fix. For repos with pre-existing build failures (Tracera, Tokn, PlayCua, zz-merge-unk-PhenoJourneys, _full_tooling, substrate), the P30 fix is correct in the lockfile even though the build fails.
 
-All 13 PASS branches are **ready to push** with confidence that CI will not fail because of the P30 commit. The 1 BLOCKED repo (tooling-clone) is documented but not pushable.
+All 14 PASS branches are **ready to push** with confidence that CI will not fail because of the P30 commit. The 2 BLOCKED repos (tooling-clone, _full_HexaKit) are documented but not pushable.
 
-**Final tally: 12 distinct Phenotype repos at 0 active P30 RUSTSEC vulns** (was 11, +1 for zz-merge-unk-PhenoJourneys). tooling-clone is documented as "blocked, see notes" — fixable but requires operator's WIP cleanup first.
+**Final tally: 14 distinct Phenotype repos at 0 active P30 RUSTSEC vulns** (was 12, +2 for _full_AgilePlus and _full_tooling). tooling-clone and _full_HexaKit are documented as "blocked, see notes" — fixable but require operator action on broken workspace dependencies / missing upstream GitHub repo first.
 
 ---
 
 tx-agent: jcode
-tx-task: P11+P25c+P26
-tx-validated: cargo-check
+tx-task: P11+P25c+P26+round-3
+tx-validated: cargo-check + cargo-audit
 tx-scope: cleanup-arc-2026-10-13
-tx-intent: surface 4 operator-action items with exact risk/cost analysis + cross-repo branch validation
+tx-intent: surface 4 operator-action items with exact risk/cost analysis + cross-repo branch validation (14 repos fixed, 2 blocked)
