@@ -51,7 +51,7 @@ fn add(f: &Fixture, index: usize, text: &str) {
     f.message(
         "budget",
         &id,
-        if index % 2 == 0 { "user" } else { "assistant" },
+        if index.is_multiple_of(2) { "user" } else { "assistant" },
         index as i64,
     )
     .text("budget", &id, &format!("p{index:05}"), text);
