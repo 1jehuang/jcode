@@ -1,7 +1,7 @@
 {
-  "total": 3785,
+  "total": 3787,
   "totals_by_pattern": {
-    "dot_ok": 1458,
+    "dot_ok": 1460,
     "let_underscore": 1388,
     "unwrap_or_default": 939
   },
@@ -2677,7 +2677,7 @@
       "unwrap_or_default": 0
     },
     "src/cli/login.rs": {
-      "dot_ok": 0,
+      "dot_ok": 2,
       "let_underscore": 1,
       "unwrap_or_default": 1
     },
