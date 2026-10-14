@@ -27,6 +27,7 @@ All 3 rescue branches modify **KCode-specific crate paths** (`crates/kcode-stora
 | tx-scope (per commit trailer) | `dev-isolation` |
 | Code generic? | **YES** — the symlink-handling logic is generic Rust, not KCode-specific |
 | **Port effort to jcode** | **MEDIUM** — must add `remove_file_beneath` (or equivalent) to `jcode-storage/src/lib.rs` and port the KCODE_DEV_NAMESPACE check (would become JCODE_DEV_NAMESPACE) |
+| **Port status (2026-10-14 04:33Z)** | **DRAFT DONE** on branch `p25c/port-ceb860bf2-symlinked-state-home` @ `0070e98a8`. New `crates/jcode-storage/src/remove.rs` (183 lines) exposes `remove_state_file` and `remove_durable_state_file`. The `KCODE_DEV_NAMESPACE` branch is dropped (jcode has no dev-isolation feature). No callers wired up in this commit; the new API is opt-in. |
 
 ### Detailed diff
 ```rust
