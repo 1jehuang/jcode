@@ -410,17 +410,17 @@ fn persist_headed_startup_message(session_id: &str, message: &str) {
 fn clear_headed_startup_message(session_id: &str) {
     if let Ok(jcode_dir) = crate::storage::jcode_dir() {
         let path = jcode_dir.join(format!("client-input-{}", session_id));
-        let _ = std::fs::remove_file(path);
+        let _ = crate::storage::remove_state_file(&path);
     }
 }
 
 fn cleanup_prepared_visible_spawn_session(session_id: &str) {
     clear_headed_startup_message(session_id);
     if let Ok(path) = crate::session::session_path(session_id) {
-        let _ = std::fs::remove_file(path);
+        let _ = crate::storage::remove_state_file(&path);
     }
     if let Ok(path) = crate::session::session_journal_path(session_id) {
-        let _ = std::fs::remove_file(path);
+        let _ = crate::storage::remove_state_file(&path);
     }
 }
 

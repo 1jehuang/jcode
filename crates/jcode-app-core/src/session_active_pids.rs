@@ -13,7 +13,7 @@ pub(super) fn register_active_pid(session_id: &str, pid: u32) {
 
 pub(super) fn unregister_active_pid(session_id: &str) {
     if let Some(dir) = active_pids_dir() {
-        let _ = std::fs::remove_file(dir.join(session_id));
+        let _ = storage::remove_state_file(&dir.join(session_id));
     }
 }
 
