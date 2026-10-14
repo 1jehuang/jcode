@@ -384,8 +384,10 @@ fn menubar_helper_pids_skips_self_before_reading_identity() {
 #[cfg(target_os = "macos")]
 #[test]
 fn menubar_helper_discovery_finds_disposable_executable_with_spaces() {
-    // This is a disposable copy of cat, never Jcode or an AppKit helper.
+    // This is a disposable link to cat, never Jcode or an AppKit helper.
     // It reads a private stdin pipe via a symlink named menubar and exits on EOF.
+    // A copy of /bin/cat is sometimes SIGKILLed at launch by macOS, so link to it:
+    // the kernel records the linked path, which is all discovery inspects.
     struct FixtureChild(std::process::Child);
     impl Drop for FixtureChild {
         fn drop(&mut self) {
@@ -398,7 +400,7 @@ fn menubar_helper_discovery_finds_disposable_executable_with_spaces() {
         .tempdir()
         .unwrap();
     let exe = dir.path().join("jcode-discovery-fixture");
-    std::fs::copy("/bin/cat", &exe).unwrap();
+    std::os::unix::fs::symlink("/bin/cat", &exe).unwrap();
     std::os::unix::fs::symlink("/dev/stdin", dir.path().join("menubar")).unwrap();
     let child = FixtureChild(
         std::process::Command::new(&exe)
@@ -410,7 +412,15 @@ fn menubar_helper_discovery_finds_disposable_executable_with_spaces() {
             .spawn()
             .unwrap(),
     );
-    assert!(live_menubar_helper_pids().contains(&child.0.id()));
+    // The process listing can trail the spawn slightly.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !live_menubar_helper_pids().contains(&child.0.id()) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "fixture helper never appeared in the process listing"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
 }
 
 const PASSWD_PROBE_ENV: &str = "JCODE_MENUBAR_PASSWD_PROBE";
