@@ -1684,6 +1684,7 @@ pub(in crate::tui::app) fn handle_server_event(
             status_detail,
             upstream_provider,
             resolved_credential,
+            provider_oauth_email,
             reasoning_effort,
             service_tier,
             compaction_mode,
@@ -1693,6 +1694,13 @@ pub(in crate::tui::app) fn handle_server_event(
             ..
         } => {
             let prev_session_id = app.remote_session_id.clone();
+            app.remote_provider_oauth_email = provider_oauth_email.clone();
+            if resolved_credential == Some(jcode_provider_core::ResolvedCredential::Oauth)
+                && let Some(email) = provider_oauth_email
+                && let Some(provider) = provider_name.as_deref()
+            {
+                crate::telemetry::enqueue_oauth_account(provider, email.as_str());
+            }
             let history_message_count = messages.len();
             let history_mcp_count = mcp_servers.len();
             let history_model = provider_model.clone();
@@ -2462,6 +2470,7 @@ pub(in crate::tui::app) fn handle_server_event(
             provider_name,
             error,
             resolved_credential,
+            provider_oauth_email,
             reasoning_effort,
             context_window,
             ..
@@ -2489,6 +2498,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 ));
                 app.set_status_notice("Model switch failed");
             } else {
+                app.remote_provider_oauth_email = provider_oauth_email;
                 // The server also re-sends ModelChanged on resume so the client
                 // learns the server-resolved context window. That is not a
                 // user-visible switch, so only announce an actual model change.
