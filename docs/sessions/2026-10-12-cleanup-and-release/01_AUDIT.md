@@ -2498,3 +2498,42 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1301 filtered out; f
 8. **Fix the unused `e` warning** at `turn_execution.rs:735:24` — trivial cleanup.
 9. **Dependabot triage** — review 3 OPEN alerts (cmov, tar, rand) and either fix or accept the risk.
 
+---
+
+**B.8.73 EXECUTED 2026-10-14T23:53Z — Operator's parallel `e` → `_e` warning fix picked up, all 3 restore_session tests still pass**
+
+After the server reload recovery scan, found an uncommitted working-tree change in the master worktree:
+```
+diff --git a/crates/jcode-app-core/src/agent/turn_execution.rs b/crates/jcode-app-core/src/agent/turn_execution.rs
+@@ -732,7 +732,7 @@ impl Agent {
+-            if let Err(e) =
++            if let Err(_e) =
+```
+This is **the operator (or a peer agent)** addressing the B.8.72-next item #8: the `warning: unused variable: e` at `turn_execution.rs:735:24`. The change is uncommitted (operator's parallel-work style — make the change in working dir, run cargo check, then commit).
+
+Orchestrator policy: **do NOT commit operator-side changes.** This is the operator's work in the operator's flow.
+
+**Re-verified the prebuilt test binary** (which contains my `6eb00b35d` fix but NOT the operator's `_e` change yet, since the binary was compiled at 16:49 before the operator's edit):
+
+```
+$ target/debug/deps/jcode_app_core-18c3f595e78cd6e1 --test agent::tests::restore_session
+running 3 tests
+test agent::tests::restore_session_falls_back_to_provider_default_when_saved_model_is_rejected ... ok
+test agent::tests::restore_session_rehydrates_injected_memory_ids ... ok
+test agent::tests::restore_session_resets_runtime_interrupt_and_queue_state ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 1299 filtered out; finished in 3.19s
+```
+
+All 3 `agent::tests::restore_session_*` tests PASS. The `e` → `_e` change is purely cosmetic and does not affect the test outcomes (the `Err` branch still enters the fallback path; the `_e` is just to silence the warning).
+
+**Operator's `cargo check --workspace`** (PID 6254, started 23:51Z, 1m 50s elapsed at 23:53Z, STAT S = sleeping on child rustc) is currently compiling the workspace to validate the change across all crates. Will complete in a few minutes.
+
+**State at 23:53Z (B.8.73 exit)**:
+- Master HEAD: `83c068021` (5 ratchets + lion fix + B.8.66-B.8.72 audit)
+- Working tree: 1 uncommitted change (`turn_execution.rs:735` `e` → `_e` warning fix, operator's work)
+- Master CI: still silent 12+ hours
+- Cargo processes: 1 running (PID 6254 `cargo check --workspace`, operator's validation)
+- All my B.8.66-B.8.72 work is preserved
+
+
