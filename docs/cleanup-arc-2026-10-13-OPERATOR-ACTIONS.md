@@ -224,10 +224,12 @@ git push origin instinct/win-herdr-inline-anchor
 
 ---
 
-## op-7-cross-repo-p30: DONE 2026-10-14 (4/5 repos fixed)
+## op-7-cross-repo-p30: DONE 2026-10-13 (4/5) + 2026-10-14 (10 more)
 
-Cross-repo P30 work was completed for 4 of 5 affected repos. See
+Cross-repo P30 work was completed in two rounds. See
 `docs/cleanup-arc-2026-10-13-P30-CROSS-REPO.md` for full details.
+
+**Round 1 (4/5 repos fixed 2026-10-13):**
 
 | Repo | Branch | SHA | Status |
 |------|--------|-----|--------|
@@ -237,14 +239,33 @@ Cross-repo P30 work was completed for 4 of 5 affected repos. See
 | `Apisync` | `security/quinn-proto-0.11.19-rustls-0.23.45` | `48ff5a7` | FULL FIX (6→0) |
 | `substrate` | (branch reset, no commit) | -- | BLOCKED (vendored sources) |
 
-**Total cleared: 20 → 1 RUSTSEC vulns across 4 repos (95% reduction).**
-All 4 branches are local-only. Push + PR creation is the operator's call.
+**Round 2 (10 more repos processed 2026-10-14):**
+
+| Repo | Branch | SHA | Status |
+|------|--------|-----|--------|
+| `sharecli` | `security/quinn-proto-0.11.19` | `4707816d` | FULL FIX (2→0) |
+| `helios-cli` | `security/quinn-proto-0.11.19-rustls-0.23.45` | `ebddf69943` | P30 cluster FIXED (3→1; rkyv out of scope) |
+| `Tokn` | `security/quinn-proto-0.11.19-rustls-0.23.45` | `90596ca` | FULL FIX (3→0) |
+| `Grapheon` | `security/quinn-proto-0.11.19-rustls-0.23.45` | `81661cd43` | FULL FIX (3→0) |
+| `SessionLedger` | `security/quinn-proto-0.11.19-rustls-0.23.45` | `9e2e76ba` | FULL FIX (3→0) |
+| `PlayCua` | `security/h2-0.4.19-p30` | `1254961` | P30 cluster FIXED (7→4; rkyv+tokenizers out of scope) |
+| `PhenoTooling` | `security/h2-0.4.19-p30` | (no diff vs main) | no-op (already fixed in PR #330) |
+| `phenotype-tooling` | `security/h2-0.4.19-p30` | (no diff vs main) | no-op (already fixed in PR #330) |
+| `PhenoObservability` | `security/quinn-proto-0.11.19-rustls-0.23.45` | (no diff vs main) | no-op (already fixed in PR #253) |
+| `OmniRoute` | `security/quinn-proto-0.11.19-rustls-0.23.45` | (no diff vs main) | no-op (already fixed in PR #732) |
+
+**Total cleared: 20 → 1 RUSTSEC vulns across 4 repos (95% reduction, Round 1) plus 16 → 0 (Round 2).** All branches are local-only. Push + PR creation is the operator's call.
+
+**Cumulative cross-repo P30 result:**
+- **11 distinct Phenotype repos** at 0 active P30 RUSTSEC vulns
+- **8 cross-repo branches with P30 fix committed** (Tracera, Agentora, Apisync, sharecli, Tokn, Grapheon, SessionLedger, PlayCua P30 cluster)
+- **2 with partial fix + remaining non-P30 vulns** (forgecode rocket blocker, helios-cli rkyv)
+- **4 already-fixed on main** (PhenoTooling, phenotype-tooling, PhenoObservability, OmniRoute)
+- **1 blocked on vendored sources** (substrate, multi-hour re-vendoring)
 
 **Two blockers documented:**
-- `substrate` has 1GB vendored sources; `cargo update` is a no-op. Needs
-  manual `cargo vendor` re-vendoring of quinn-proto 0.11.19 + dependents.
-- `forgecode`'s remaining 1 vuln is h2 0.3.27 (transitive from
-  rocket_http); h2 0.3.x is unmaintained. Needs rocket upgrade or removal.
+- `substrate` has 1GB vendored sources; `cargo update` is a no-op. Needs manual `cargo vendor` re-vendoring of quinn-proto 0.11.19 + dependents.
+- `forgecode`'s remaining 1 vuln is h2 0.3.27 (transitive from rocket_http); h2 0.3.x is unmaintained. Needs rocket upgrade or removal.
 
 ---
 
