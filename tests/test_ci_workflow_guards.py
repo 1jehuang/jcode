@@ -10,6 +10,22 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class WorkflowGuardTests(unittest.TestCase):
+    def test_arm64_release_graph_is_a_mandatory_native_windows_check(self):
+        workflow = (ROOT / '.github/workflows/ci.yml').read_text()
+        arm64 = workflow.split('  windows-arm64-check:\n', 1)[1].split(
+            '\n  windows-cross-check:', 1)[0]
+        self.assertIn('runs-on: windows-latest', arm64)
+        self.assertIn('arch: amd64_arm64', arm64)
+        self.assertIn('targets: aarch64-pc-windows-msvc', arm64)
+        self.assertIn('JUSTRUST_TOOLCHAIN: system', arm64)
+        self.assertIn('JUSTRUST_DISABLE: "1"', arm64)
+        self.assertIn('& justrust check --local --locked -p jcode --bins '
+                      '--target aarch64-pc-windows-msvc '
+                      '--no-default-features --features pdf', arm64)
+        self.assertIn('if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }', arm64)
+        self.assertNotIn('continue-on-error:', arm64)
+        self.assertNotIn('if:', arm64)
+
     def test_quality_gates_report_failures_without_weakening_them(self):
         workflow = (ROOT / '.github/workflows/ci.yml').read_text()
         quality = workflow.split('  quality:\n', 1)[1].split('\n  release-automation:', 1)[0]

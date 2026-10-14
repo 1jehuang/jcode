@@ -655,6 +655,47 @@ jobs:
         run: |
           & ./scripts/check_powershell_syntax.ps1
 
+  windows-arm64-check:
+    name: Windows ARM64 Release Configuration
+    runs-on: windows-latest
+    timeout-minutes: 35
+    env:
+      # Native Windows hosted routing is unsupported. Keep execution on the
+      # runner and bypass alpha.17's sampler until a fixed client is validated.
+      JUSTRUST_TOOLCHAIN: system
+      JUSTRUST_SLOTS: "0"
+      JUSTRUST_NO_TELEMETRY: "1"
+      JUSTRUST_DISABLE: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64_arm64
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-arm64-release-check
+          cache-all-crates: "true"
+
+      - name: Install pinned justrust
+        shell: bash
+        run: bash scripts/install_justrust_ci.sh
+
+      - name: Check full Windows ARM64 release configuration
+        shell: pwsh
+        # Unlike the advisory Linux cross-check, this uses the native MSVC
+        # toolchain and the release feature graph, including the companion.
+        run: |
+          & justrust check --local --locked -p jcode --bins --target aarch64-pc-windows-msvc --no-default-features --features pdf
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
   windows-cross-check:
     name: Windows Cross-Target Check (Linux)
     runs-on: ubuntu-latest
