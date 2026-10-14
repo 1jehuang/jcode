@@ -19,7 +19,10 @@ pub struct Skill {
     pub allowed_tools: Option<Vec<String>>,
     pub content: String,
     pub path: PathBuf,
-    search_text: String,
+    /// Normalized search text, built on first use. Normalizing every skill
+    /// body eagerly dominated `load_global` (the TUI loads it before its first
+    /// frame), yet only memory-entry conversion ever reads it.
+    search_text: std::sync::OnceLock<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -530,15 +533,13 @@ impl SkillRegistry {
                 .collect(),
             AllowedTools::Sequence(tools) => tools,
         });
-        let search_text = build_skill_search_text(&name, &description, &body);
-
         Ok(Skill {
             name,
             description,
             allowed_tools,
             content: body,
             path: path.to_path_buf(),
-            search_text,
+            search_text: std::sync::OnceLock::new(),
         })
     }
 
@@ -952,7 +953,10 @@ impl Skill {
         .with_trust(crate::memory::TrustLevel::Medium)
         .with_timestamps(now, now);
         // Use the precomputed skill search text rather than the tag-derived one.
-        entry.search_text = self.search_text.clone();
+        entry.search_text = self
+            .search_text
+            .get_or_init(|| build_skill_search_text(&self.name, &self.description, &self.content))
+            .clone();
         entry
     }
 }
@@ -962,19 +966,22 @@ fn build_skill_search_text(name: &str, description: &str, content: &str) -> Stri
 }
 
 fn normalize_skill_search_text(text: &str) -> String {
-    text.to_lowercase()
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c.is_whitespace() {
-                c
-            } else {
-                ' '
+    // Single pass: lowercase, map non-alphanumerics to separators, and
+    // collapse whitespace runs. Equivalent to lowercase -> map -> split -> join.
+    let mut out = String::with_capacity(text.len());
+    let mut pending_space = false;
+    for c in text.chars().flat_map(char::to_lowercase) {
+        if c.is_ascii_alphanumeric() {
+            if pending_space && !out.is_empty() {
+                out.push(' ');
             }
-        })
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
+            pending_space = false;
+            out.push(c);
+        } else {
+            pending_space = true;
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -988,7 +995,11 @@ mod tests {
             allowed_tools: None,
             content: content.to_string(),
             path: PathBuf::from(format!("/tmp/{name}/SKILL.md")),
-            search_text: build_skill_search_text(name, description, content),
+            search_text: std::sync::OnceLock::from(build_skill_search_text(
+                name,
+                description,
+                content,
+            )),
         }
     }
 

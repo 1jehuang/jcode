@@ -2,9 +2,29 @@
 //! OAuth, opening a browser, or touching saved credentials.
 use std::process::{Command, Stdio};
 
+/// Same wiring as the CLI's terminal presenter.
+struct TerminalPresenter;
+
+impl jcode_base::auth::login_ui::LoginPresenter for TerminalPresenter {
+    fn qr_section(
+        &self,
+        data: &str,
+        heading: &str,
+        indent: &str,
+        browser_suppressed: bool,
+    ) -> Option<String> {
+        jcode_terminal_prompt::qr_indented_section(data, heading, indent, browser_suppressed)
+    }
+
+    fn read_secret_line(&self) -> anyhow::Result<String> {
+        jcode_terminal_prompt::read_secret_line()
+    }
+}
+
 #[test]
 fn openai_browserless_login_prints_qr() {
     if std::env::var_os("JCODE_QR_LOGIN_TEST_CHILD").is_some() {
+        jcode_base::auth::login_ui::install(Box::new(TerminalPresenter));
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
