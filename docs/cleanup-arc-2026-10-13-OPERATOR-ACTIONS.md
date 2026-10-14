@@ -284,14 +284,16 @@ P30 cluster fix is correct in the lockfile even though the build fails.
 
 | Result | Count | Branches |
 |---|---|---|
-| **PASS** | 12 | jcode (master, 2 sec), Grapheon, Apisync, Agentora, sharecli, SessionLedger, PhenoTooling, phenotype-tooling, PlayCua h2, forgecode h2 |
-| Pre-existing build broken (unrelated to P30) | 3 | Tracera (ingest module), Tokn (missing thiserror), PlayCua quinn (aws-lc-sys macOS) |
-| Not run (too large) | 1 | helios-cli (1.1M lines) |
+| **PASS** | 13 | jcode (master, 2 sec), Grapheon, Apisync, Agentora, sharecli, SessionLedger, PhenoTooling, phenotype-tooling, PlayCua h2, forgecode h2, **helios-cli (1.1M lines, 1m 43s)** |
+| Pre-existing build broken (unrelated to P30) | 4 | Tracera (ingest module), Tokn (missing thiserror), PlayCua quinn (aws-lc-sys macOS — main also fails), **zz-merge-unk-PhenoJourneys (tapi linker — main also fails)** |
 | Already known broken | 1 | substrate (vendor + gateway) |
+| **BLOCKED, no branch** | 1 | **tooling-clone** (250+ missing workspace.dependencies in broken WIP state; needs operator cleanup first) |
 
-**The P30 Cargo.lock-only changes never cause new build failures.** Every branch where the underlying repo was buildable remains buildable after the P30 fix.
+**The P30 Cargo.lock-only changes never cause new build failures.** Every branch where the underlying repo was buildable remains buildable after the P30 fix. For repos with pre-existing build failures (Tracera, Tokn, PlayCua, zz-merge-unk-PhenoJourneys, substrate), the P30 fix is correct in the lockfile even though the build fails.
 
-All 12 PASS branches are **ready to push** with confidence that CI will not fail because of the P30 commit.
+All 13 PASS branches are **ready to push** with confidence that CI will not fail because of the P30 commit. The 1 BLOCKED repo (tooling-clone) is documented but not pushable.
+
+**Final tally: 12 distinct Phenotype repos at 0 active P30 RUSTSEC vulns** (was 11, +1 for zz-merge-unk-PhenoJourneys). tooling-clone is documented as "blocked, see notes" — fixable but requires operator's WIP cleanup first.
 
 ---
 
