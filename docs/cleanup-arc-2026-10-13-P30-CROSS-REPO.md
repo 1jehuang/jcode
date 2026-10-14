@@ -385,28 +385,31 @@ aws-lc-rs:    1.17.3  → 1.18.2  (auto-bumped by rustls 0.23.45)
 - The cargo audit results above ARE the acceptance test. The fix is purely a lockfile bump, no code changes; CI can re-run `cargo audit` and reproduce these results.
 - Push is operator-gated (pre_tool blocks `git push`). All 10 cross-repo security branches remain local.
 
-### Cross-repo lockfile-diff audit (concrete evidence, 2026-10-14)
+### Cross-repo lockfile-diff audit (concrete evidence, 2026-10-14, re-verified 2026-10-14 02:25)
 
-Run on all 10 P30-fixed branches to verify each one has a real Cargo.lock diff (not a phantom identical-to-default-branch):
+Re-verified by computing the actual changed-package count via `comm -23` / `comm -13` on sorted `name version` pairs. This is more meaningful than raw `diff | wc -l` line counts because it ignores context lines.
 
-| Repo | Security SHA | Default SHA | Diff lines | Notes |
+| Repo | Security SHA | Default SHA | Δpkgs (-removed +added) | P30 cluster on security |
 |---|---|---|---|---|
-| Tracera | `11d220aff` | `191551f04` | 67 | real P30 diff |
-| Agentora | `9164276` | `3f98ef7` | 69 | real P30 diff |
-| Apisync | `48ff5a7` | `6f6fe80` | 71 | real P30 diff |
-| sharecli | `4707816d` | `86e08b55` | 12 | minimal diff (was close to fixed) |
-| Tokn | `90596ca` | `8334572` | 16 | real P30 diff |
-| Grapheon | `81661cd43` | `6c03c6f3f` | 40 | real P30 diff |
-| SessionLedger | `9e2e76ba` | `8ee673bd` | 44 | real P30 diff |
-| PlayCua | `4382fee` (phantom) | `4382fee` | 0 | **PHANTOM** — no commit, identical to master; real fix is on `security/h2-0.4.19-p30` @ `1254961`; phantom branch deleted via `git update-ref -d` |
-| PlayCua (clean) | `a4731a5` (security/p30-cluster-clean) | `4382fee` | 1 file (Cargo.lock, 115451→115614 bytes) | **CLEAN RE-COMMIT** — replaces the contaminated security/h2-0.4.19-p30 branch (see PlayCua contamination section below) |
-| zz-merge-unk-PhenoJourneys | `62f323a` | `87d4eb8` | 139 | real P30 diff (large because main had old lockfile) |
-| _full_AgilePlus | `5fb22f9` | `eef93db` | 84 | real P30 diff |
-| _full_tooling | `baf43bf4` | `26f8bef1` | 56 | real P30 diff |
+| Tracera | `11d220aff` | `191551f04` (main) | 11 (-5 +6) | quinn+rustls (h2 not bumped) |
+| Agentora | `9164276` | `3f98ef7` (main) | 11 (-5 +6) | quinn+rustls (h2 not bumped) |
+| Apisync | `48ff5a7` | `6f6fe80` (main) | 13 (-6 +7) | quinn+rustls (h2 not bumped) |
+| sharecli | `4707816d` | `86e08b55` (main) | 2 (-1 +1) | full 0.11.19/0.4.19/0.23.45 |
+| Tokn | `90596ca` | `8334572` (main) | 4 (-2 +2) | quinn+rustls (h2 not bumped) |
+| Grapheon | `81661cd43` | `6c03c6f3f` (main) | 10 (-5 +5) | quinn+rustls (h2 not bumped) |
+| SessionLedger | `9e2e76ba` | `8ee673bd` (main) | 6 (-3 +3) | quinn+rustls (h2 not bumped) |
+| PlayCua (clean) | `a4731a5` | `4382fee` (master) | 13 (-6 +7) | full 0.11.19/0.4.19/0.23.45 |
+| PlayCua (old) | `1254961` | `4382fee` (master) | 13 (-6 +7) | TAINTED — same lockfile, but 16 unrelated files |
+| zz-merge-unk-PhenoJourneys | `62f323a` | `87d4eb8` (main) | 17 (-6 +11) | full 0.11.19/0.4.19/0.23.45 |
+| _full_AgilePlus | `5fb22f9` | `eef93db` (main) | 6 (-3 +3) | full 0.11.19/0.4.19/0.23.45 |
+| _full_tooling | `baf43bf4` | `26f8bef1` (main) | 12 (-6 +6) | full 0.11.19/0.4.19/0.23.45 |
 
-**9 of 10 security branches have real Cargo.lock diffs (12-139 lines).** PlayCua's `security/quinn-proto-0.11.19-rustls-0.23.45` was a phantom (same SHA as master); the real PlayCua P30 fix is on `security/h2-0.4.19-p30` which has all three P30 crates at the fixed versions.
+**All 12 security branches have real Cargo.lock diffs (2-17 changed packages).** The `quinn+rustls (h2 not bumped)` cluster is correct: those repos had h2 already at >=0.4.16 on main (the fix threshold for RUSTSEC-2026-0258), so the P30 commit only needed to bump quinn-proto and rustls. The `full 0.11.19/0.4.19/0.23.45` cluster also had h2 below 0.4.16 on main, so all three P30 crates needed bumping. Default branch detection via `git symbolic-ref refs/remotes/origin/HEAD` (fallback: `main`, then `master`).
 
-**Diff sizes are consistent with the scope:** 3 (or 3 + 3 transitive) lockfile changes for a clean P30 fix. Larger diffs (e.g. zz-merge-unk-PhenoJourneys at 139 lines) are due to the source main having an old lockfile that pulled in many transitive changes.
+**Cross-repo `cargo audit` validation (re-run 2026-10-14 02:27):**
+- _full_AgilePlus (`security/quinn-proto-0.11.19-rustls-0.23.45-p30`): 0 errors, 7 allowed warnings (backoff, instant, paste, rustls-pemfile, unsafe-libyaml, faster-hex, chacha20) — all pre-existing, non-P30
+- _full_tooling (`security/quinn-proto-0.11.19-rustls-0.23.45-p30`): 0 errors, 3 allowed warnings (unsafe-libyaml, lru, chacha20) — all pre-existing, non-P30
+- PlayCua (`security/p30-cluster-clean` @ `a4731a5`): 4 errors (4× quick-xml pre-existing) + 3 allowed warnings (anyhow, event-listener, chacha20) — all non-P30
 
 ### PlayCua branch contamination discovered (2026-10-14)
 
