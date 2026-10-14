@@ -1,0 +1,25 @@
+[package]
+name = "jcode-desktop-open"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Open URLs/files and reveal paths with the desktop's own tools (xdg-open, open, explorer), with niri browser raising"
+
+# Client/companion-side only. Must not depend on jcode-base so the shared
+# runtime cannot reach a desktop directly.
+[lib]
+name = "jcode_desktop_open"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["time", "rt"] }
+url = "2"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+open = "5"

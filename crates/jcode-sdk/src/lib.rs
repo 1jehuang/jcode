@@ -139,11 +139,14 @@
 
 mod auth;
 mod client;
+pub mod collections;
 mod diagnostics;
 mod errors;
 mod launch;
+mod process;
 mod ssh;
 mod structured;
+pub mod turn_retry;
 pub mod worktrees;
 
 #[cfg(test)]
@@ -166,6 +169,11 @@ pub use jcode_harness_api::{
     SessionEditStats, enrich_sessions_from_edit_stats, enrich_sessions_from_local_edit_stats,
     enrich_sessions_from_local_swarm_state, enrich_sessions_from_swarm_state,
 };
+/// Auto-poke and todo quality-gate policy, identical to the TUI's. Fetch a
+/// snapshot with [`JcodeClient::todo_state`], run
+/// [`todo::FollowUpPolicy::decide`] at turn end, send the follow-up, and apply
+/// its effects with [`JcodeClient::ack_todo_follow_up`].
+pub use jcode_todo_policy as todo;
 pub use launch::{
     LaunchOptions, LaunchedInstance, WakeMode, ensure_runtime, inherit_credentials,
     launch_instance, socket_accepts, user_app_config_dir, user_jcode_home, wait_for_socket,
@@ -178,6 +186,7 @@ pub use structured::{
     StructuredOutputError, StructuredOutputSchema, StructuredSchemaError, StructuredTurnResult,
     StructuredValidationIssue,
 };
+pub use turn_retry::{FailureKind, RetryDecision, RetryPolicy, TurnRetry, classify_failure};
 
 /// The protocol types, re-exported so a client needs one dependency, not two.
 pub use jcode_harness_api as api;
@@ -187,4 +196,6 @@ pub use jcode_harness_api::{
     SidePanelPage, SidePanelPageFormat, SidePanelPageSource, SidePanelSnapshot, TextMatch,
     ToolConfiguration, TurnStopReason, api_socket_path,
 };
-pub use jcode_harness_api::{ModelUsage, compare_model_usage};
+pub use jcode_harness_api::{
+    ModelUsage, RuntimeCommand, RuntimeCommandOutput, compare_model_usage,
+};
