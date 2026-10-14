@@ -481,6 +481,10 @@ pub enum BusEvent {
     AppletsUpdated(AppletsUpdated),
     /// Deferred Mermaid rendering completed and cached content may now be visible
     MermaidRenderCompleted,
+    /// The TUI's background git-status probe produced a value that differs
+    /// from the cached one, so the branch/dirty/commit chrome needs a repaint
+    /// now rather than at the next unrelated redraw.
+    GitInfoRefreshed,
     /// Productivity report finished generating off the UI thread
     ProductivityReportReady(ProductivityReportReady),
 }

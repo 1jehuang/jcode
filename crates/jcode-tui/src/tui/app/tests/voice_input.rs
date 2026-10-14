@@ -113,3 +113,22 @@ fn voice_input_help_and_command_are_registered() {
     let last = app.display_messages().last().expect("usage shown");
     assert!(last.content.contains("Usage: /voice"), "{}", last.content);
 }
+
+#[test]
+fn korean_jamo_voice_chord_is_normalized_before_voice_interception() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    // Every terminal read site (local, remote, disconnected, turn loops) normalizes first,
+    // so a Korean-layout Ctrl+ㅠ reaches the voice and shortcut handlers as Ctrl+b.
+    let key = jcode_tui_core::korean_input::normalize_key_event(KeyEvent::new(
+        KeyCode::Char('ㅠ'),
+        KeyModifiers::CONTROL,
+    ));
+    assert_eq!(key.code, KeyCode::Char('b'));
+    assert_eq!(key.modifiers, KeyModifiers::CONTROL);
+
+    let plain = jcode_tui_core::korean_input::normalize_key_event(KeyEvent::new(
+        KeyCode::Char('ㅠ'),
+        KeyModifiers::NONE,
+    ));
+    assert_eq!(plain.code, KeyCode::Char('ㅠ'), "plain Korean typing is untouched");
+}
