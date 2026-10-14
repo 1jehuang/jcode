@@ -599,6 +599,7 @@ pub struct AwaitedMemberStatus {
 impl Request {
     pub fn id(&self) -> u64 {
         match self {
+            Request::RuntimeCommand { id, .. } => *id,
             Request::ConfigureTools { id, .. }
             | Request::ListTools { id }
             | Request::ToolResult { id, .. } => *id,

@@ -1,5 +1,61 @@
 use super::*;
 
+#[test]
+fn runtime_commands_are_capability_gated_and_never_send_a_prompt() {
+    let request = json!({"id": 501, "req": "runtime_command", "session_id": "s1", "command": "memory", "args": ["status"]});
+    let mut state = BridgeState {
+        session_id: Some("s1".into()),
+        ..Default::default()
+    };
+    let output = state.api_request_to_legacy(&request);
+    assert!(matches!(
+        &output[..],
+        [Outbound::Reply(ServerFrame {
+            event: ApiEvent::Error { .. },
+            ..
+        })]
+    ));
+    state.runtime_commands_supported = true;
+    let output = state.api_request_to_legacy(&request);
+    let [Outbound::Legacy(legacy)] = &output[..] else {
+        panic!("expected native runtime command")
+    };
+    assert_eq!(legacy["type"], "runtime_command");
+    assert_eq!(legacy["command"], "memory");
+    assert_eq!(legacy["args"], json!(["status"]));
+    assert!(legacy.get("content").is_none());
+    let frames = state.legacy_event_to_api(&json!({"type": "runtime_command_result", "id": legacy["id"], "command": "memory", "data": {"enabled": true}, "message": "Memory on"}));
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].reply_to, Some(501));
+    assert!(
+        matches!(&frames[0].event, ApiEvent::RuntimeCommandResult { session_id, command: jcode_harness_api::RuntimeCommand::Memory, .. } if session_id == "s1")
+    );
+}
+
+#[test]
+fn runtime_commands_reject_wrong_session_unknown_commands_and_malformed_args() {
+    let mut state = BridgeState {
+        session_id: Some("s1".into()),
+        runtime_commands_supported: true,
+        ..Default::default()
+    };
+    for request in [
+        json!({"id": 1, "req": "runtime_command", "session_id": "s2", "command": "memory"}),
+        json!({"id": 2, "req": "runtime_command", "session_id": "s1", "command": "nonexistent"}),
+        json!({"id": 3, "req": "runtime_command", "session_id": "s1", "command": "memory", "args": "on"}),
+    ] {
+        let output = state.api_request_to_legacy(&request);
+        assert!(matches!(
+            &output[..],
+            [Outbound::Reply(ServerFrame {
+                event: ApiEvent::Error { .. },
+                ..
+            })]
+        ));
+    }
+    assert!(state.pending_simple.is_empty());
+}
+
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::MutexGuard;

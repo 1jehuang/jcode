@@ -389,6 +389,15 @@ pub enum Request {
     #[serde(rename = "set_transport")]
     SetTransport { id: u64, transport: String },
 
+    /// Non-presentation command executed against the attached live runtime.
+    #[serde(rename = "runtime_command")]
+    RuntimeCommand {
+        id: u64,
+        command: String,
+        #[serde(default)]
+        args: Vec<String>,
+    },
+
     /// Set Copilot premium request conservation mode (0=normal, 1=one-per-session, 2=zero)
     #[serde(rename = "set_premium_mode")]
     SetPremiumMode { id: u64, mode: u8 },
@@ -892,6 +901,13 @@ pub enum Request {
     reason = "wire protocol prioritizes straightforward serde payloads over boxing every larger event variant"
 )]
 pub enum ServerEvent {
+    #[serde(rename = "runtime_command_result")]
+    RuntimeCommandResult {
+        id: u64,
+        command: String,
+        data: serde_json::Value,
+        message: String,
+    },
     #[serde(rename = "tools")]
     Tools {
         id: u64,

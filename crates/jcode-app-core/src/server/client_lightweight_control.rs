@@ -279,7 +279,11 @@ pub(super) async fn handle_lightweight_control_request(
             &ServerEvent::Pong {
                 id,
                 native_ssh_protocol: Some(1),
-                capabilities: vec!["session_tools".into(), "soft_interrupt_ids".into()],
+                capabilities: vec![
+                    "session_tools".into(),
+                    "soft_interrupt_ids".into(),
+                    "runtime_commands".into(),
+                ],
             },
         )
         .await?;

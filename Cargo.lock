@@ -3417,6 +3417,7 @@ dependencies = [
  "jcode-overnight-core",
  "jcode-pdf",
  "jcode-plan",
+ "jcode-productivity-core",
  "jcode-provider-core",
  "jcode-schema-dialect",
  "jcode-selfdev-types",

@@ -43,6 +43,8 @@ mod reload_recovery;
 mod reload_state;
 mod reload_trace;
 mod runtime;
+mod runtime_commands;
+mod runtime_special_commands;
 mod socket;
 mod swarm;
 mod swarm_channels;
