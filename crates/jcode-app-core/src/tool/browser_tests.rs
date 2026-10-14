@@ -5,6 +5,10 @@ use super::*;
 #[path = "browser_session_tests.rs"]
 mod browser_session_tests;
 
+#[cfg(unix)]
+#[path = "browser_user_browser_tests.rs"]
+mod browser_user_browser_tests;
+
 #[test]
 fn press_script_uses_selector_when_present() {
     let script = build_press_script(Some("Enter"), Some("#email")).unwrap();
@@ -434,3 +438,8 @@ fn nested_scroll_uses_container_delta_without_escaping_scope() {
     assert!(script.contains("top:600"));
     assert!(script.contains("return {scrolled:true"));
 }
+
+// #1743 live acceptance (ignored by default; see the module docs).
+#[cfg(unix)]
+#[path = "browser_live_1743_tests.rs"]
+mod browser_live_1743_tests;

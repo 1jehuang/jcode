@@ -20,6 +20,9 @@ fn structured_retry_after_seconds(error: &str) -> Option<u64> {
 /// Parse rate limit reset time from error message
 /// Returns the Duration until rate limit resets, if this is a rate limit error
 pub(crate) fn parse_rate_limit_error(error: &str) -> Option<Duration> {
+    if crate::provider::parse_failover_prompt_message(error).is_some() {
+        return None;
+    }
     let error_lower = error.to_lowercase();
 
     if !error_lower.contains("rate limit")
@@ -123,6 +126,25 @@ pub(crate) fn parse_rate_limit_error(error: &str) -> Option<Duration> {
 mod rate_limit_parse_tests {
     use super::parse_rate_limit_error;
     use std::time::Duration;
+
+    #[test]
+    fn account_pool_failover_prompt_never_schedules_same_account_retry() {
+        let prompt = jcode_provider_core::ProviderFailoverPrompt {
+            from_provider: "claude".into(),
+            from_label: "Anthropic".into(),
+            to_provider: "openai".into(),
+            to_label: "OpenAI".into(),
+            target_route: None,
+            reason: "429 rate limit exceeded; retry in 60 seconds".into(),
+            estimated_input_chars: 400,
+            estimated_input_tokens: 100,
+        };
+        assert_eq!(parse_rate_limit_error(&prompt.to_error_message()), None);
+        assert_eq!(
+            parse_rate_limit_error("429 rate limit exceeded; retry in 60 seconds"),
+            Some(Duration::from_secs(60)),
+        );
+    }
 
     #[test]
     fn usage_limit_reset_in_days_does_not_schedule_bogus_short_retry() {

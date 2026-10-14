@@ -118,6 +118,16 @@ fn transient_server_error_remains_retryable_for_auto_poke() {
 }
 
 #[test]
+fn rejected_refresh_token_is_non_retryable_for_auto_poke() {
+    assert!(super::is_non_retryable_auto_poke_error(
+        "Claude OAuth refresh token was previously rejected by Anthropic and cannot be refreshed. Run `jcode login --provider claude` to mint a fresh token."
+    ));
+    assert!(!super::is_non_retryable_auto_poke_error(
+        "Claude token refresh failed: 503 Service Unavailable"
+    ));
+}
+
+#[test]
 fn openai_usage_limit_reached_is_non_retryable() {
     use super::is_non_retryable_auto_poke_error;
     assert!(is_non_retryable_auto_poke_error(

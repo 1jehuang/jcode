@@ -3312,7 +3312,7 @@ checksum = "92ecc6618181def0457392ccd0ee51198e065e016d1d527a7ac1b6dc7c1f09d2"
 
 [[package]]
 name = "jcode"
-version = "0.95.0"
+version = "0.97.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3417,6 +3417,7 @@ dependencies = [
  "jcode-overnight-core",
  "jcode-pdf",
  "jcode-plan",
+ "jcode-productivity-core",
  "jcode-provider-core",
  "jcode-schema-dialect",
  "jcode-selfdev-types",
@@ -4158,6 +4159,7 @@ dependencies = [
  "jcode-message-types",
  "jcode-provider-core",
  "jcode-provider-metadata",
+ "jcode-provider-openai",
  "jcode-provider-openrouter",
  "reqwest 0.12.28",
  "serde",
@@ -4302,6 +4304,7 @@ dependencies = [
  "jcode-usage-types",
  "reqwest 0.12.28",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
  "uuid",

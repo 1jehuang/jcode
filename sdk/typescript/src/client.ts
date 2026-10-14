@@ -30,6 +30,7 @@ import {
   type ModelRouteInfo,
   type PermissionDecision,
   type RenderedImage,
+  type RuntimeCommand,
   type ServerFrame,
   type SessionInfo,
   type SessionToolDefinition,
@@ -780,6 +781,23 @@ export class JcodeClient extends EventEmitter {
   }
 
   /** Runtime identity, route catalog, protocol metadata, and a live health check. */
+  async runtimeCommand(sessionId: string, command: RuntimeCommand, args: string[] = []): Promise<{
+    session_id: string; command: RuntimeCommand; data: unknown; message: string;
+  }> {
+    if (!this.capabilities.includes("runtime_commands")) {
+      throw new HarnessError("unknown_request", "This runtime does not support structured commands. Update and restart the daemon and bridge.");
+    }
+    const frame = await this.expectReply(
+      { req: "runtime_command", session_id: sessionId, command, args }, "runtime_command_result",
+    );
+    return { session_id: frame.session_id, command: frame.command, data: frame.data, message: frame.message };
+  }
+
+  async transferSession(sessionId: string): Promise<SessionInfo> {
+    const frame = await this.expectReply({ req: "transfer_session", session_id: sessionId }, "session_forked");
+    return frame.session;
+  }
+
   async getRuntimeInfo(sessionId: string): Promise<RuntimeInfo> {
     await this.ping();
     const frame = await this.expectReply(

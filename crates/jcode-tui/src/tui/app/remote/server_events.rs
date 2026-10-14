@@ -579,6 +579,7 @@ pub(in crate::tui::app) fn handle_server_event(
             &event,
             ServerEvent::TextDelta { .. }
                 | ServerEvent::TextReplace { .. }
+                | ServerEvent::TextSuffixReplace { .. }
                 | ServerEvent::ReasoningDelta { .. }
                 | ServerEvent::ReasoningDone { .. }
                 | ServerEvent::ToolStart { .. }
@@ -604,6 +605,7 @@ pub(in crate::tui::app) fn handle_server_event(
         &event,
         ServerEvent::TextDelta { .. }
             | ServerEvent::TextReplace { .. }
+            | ServerEvent::TextSuffixReplace { .. }
             | ServerEvent::ReasoningDelta { .. }
             | ServerEvent::ReasoningDone { .. }
             | ServerEvent::ToolStart { .. }
@@ -662,6 +664,17 @@ pub(in crate::tui::app) fn handle_server_event(
             app.apply_stream_ops(ops);
             app.replace_streaming_text(text);
             app.resume_streaming_tps();
+            true
+        }
+        ServerEvent::TextSuffixReplace { old_text, new_text } => {
+            // Flush paced deltas first, otherwise they would append the old
+            // marker again. Preserve retained reasoning and earlier messages.
+            let ops = app.stream_buffer.flush();
+            app.apply_stream_ops(ops);
+            let mut corrected = app.streaming.streaming_text.clone();
+            if crate::message::replace_text_suffix(&mut corrected, &old_text, &new_text).is_some() {
+                app.replace_streaming_text(corrected);
+            }
             true
         }
         ServerEvent::ReasoningDelta { text } => {
@@ -1318,9 +1331,20 @@ pub(in crate::tui::app) fn handle_server_event(
                 return true;
             }
             // Clamp server hints so a bogus value cannot park the turn for days.
-            let reset_duration = retry_after_secs
-                .map(|secs| Duration::from_secs(secs.min(MAX_TURN_HOLD_SECS)))
-                .or_else(|| parse_rate_limit_error(&message));
+            // Account rotation already ran on the server. A structured offer
+            // to switch providers must not become another retry of the spent
+            // account just because its reason includes quota/reset timing.
+            let is_failover_prompt =
+                crate::provider::parse_failover_prompt_message(&message).is_some();
+            let is_permanent_refresh_rejection =
+                crate::auth::refresh_state::error_is_permanent_rejection(&message);
+            let reset_duration = if is_failover_prompt || is_permanent_refresh_rejection {
+                None
+            } else {
+                retry_after_secs
+                    .map(|secs| Duration::from_secs(secs.min(MAX_TURN_HOLD_SECS)))
+                    .or_else(|| parse_rate_limit_error(&message))
+            };
             // A stale reset or a limit that never clears must not resend the
             // same turn forever. Rate-limit holds share the per-turn retry
             // budget, which begin_remote_send carries across resends.
@@ -1354,8 +1378,6 @@ pub(in crate::tui::app) fn handle_server_event(
                 remote.reset_call_output_tokens_seen();
                 return false;
             }
-            let is_failover_prompt =
-                crate::provider::parse_failover_prompt_message(&message).is_some();
             // Snapshot the failed turn's payload before the cleanup below (and
             // the retry-budget bookkeeping) clears it, so a fallback offer
             // armed at a terminal no-retry point can resend it after the user
@@ -1370,14 +1392,16 @@ pub(in crate::tui::app) fn handle_server_event(
                     raw_input: app.last_submitted_input.clone(),
                 }
             });
-            app.push_display_message(DisplayMessage {
-                role: "error".to_string(),
-                content: message.clone(),
-                tool_calls: vec![],
-                duration_secs: None,
-                title: None,
-                tool_data: None,
-            });
+            if !is_failover_prompt {
+                app.push_display_message(DisplayMessage {
+                    role: "error".to_string(),
+                    content: App::compact_provider_failure(&message),
+                    tool_calls: vec![],
+                    duration_secs: None,
+                    title: None,
+                    tool_data: None,
+                });
+            }
             app.is_processing = false;
             app.status = ProcessingStatus::Idle;
             app.stream_message_ended = false;
@@ -1394,6 +1418,14 @@ pub(in crate::tui::app) fn handle_server_event(
             }
             remote.clear_pending();
             remote.reset_call_output_tokens_seen();
+            if crate::provider::parse_failover_prompt_message(&message).is_some() {
+                // The server already exhausted the same-provider account pool.
+                // Decode the control payload instead of printing its JSON, and
+                // leave any cross-provider resend behind explicit user consent.
+                app.handle_turn_error(message.clone());
+                app.offer_fallback_after_error_with_payload(&message, failed_fallback_payload);
+                return false;
+            }
             if rate_limit_retry_exhausted {
                 // Do not fall through to the generic retry or turn-end
                 // auto-poke: either would immediately restart the loop.
@@ -1403,6 +1435,19 @@ pub(in crate::tui::app) fn handle_server_event(
                         App::AUTO_RETRY_MAX_ATTEMPTS
                     ),
                     "Paused: provider limit did not clear",
+                );
+                app.offer_fallback_after_error_with_payload(&message, failed_fallback_payload);
+                return false;
+            }
+            // A refresh token explicitly rejected or revoked by the provider
+            // cannot recover by resending. Stop on the first such error, even
+            // with auto-poke off, rather than spending the generic retry budget
+            // or scheduling a fresh todo continuation. Preserve the fallback
+            // payload so switching auth methods still requires user consent.
+            if is_permanent_refresh_rejection {
+                app.pause_exhausted_auto_resume(
+                    "Stopped automatic retries: the current OAuth refresh token is rejected or revoked. Your message is back in the input box. Run /login to sign in again, or use /model to choose a working route, then send again.".to_string(),
+                    "Stopped: OAuth login needs attention",
                 );
                 app.offer_fallback_after_error_with_payload(&message, failed_fallback_payload);
                 return false;
@@ -1639,6 +1684,7 @@ pub(in crate::tui::app) fn handle_server_event(
             status_detail,
             upstream_provider,
             resolved_credential,
+            provider_oauth_email,
             reasoning_effort,
             service_tier,
             compaction_mode,
@@ -1648,6 +1694,13 @@ pub(in crate::tui::app) fn handle_server_event(
             ..
         } => {
             let prev_session_id = app.remote_session_id.clone();
+            app.remote_provider_oauth_email = provider_oauth_email.clone();
+            if resolved_credential == Some(jcode_provider_core::ResolvedCredential::Oauth)
+                && let Some(email) = provider_oauth_email
+                && let Some(provider) = provider_name.as_deref()
+            {
+                crate::telemetry::enqueue_oauth_account(provider, email.as_str());
+            }
             let history_message_count = messages.len();
             let history_mcp_count = mcp_servers.len();
             let history_model = provider_model.clone();
@@ -2038,7 +2091,7 @@ pub(in crate::tui::app) fn handle_server_event(
                         ));
                         drop(messages);
                     } else {
-                        let restored_messages = messages
+                        let mut restored_messages: Vec<DisplayMessage> = messages
                             .into_iter()
                             .map(|msg| DisplayMessage {
                                 role: msg.role,
@@ -2049,6 +2102,9 @@ pub(in crate::tui::app) fn handle_server_event(
                                 tool_data: msg.tool_data,
                             })
                             .collect();
+                        super::super::remote_notifications::normalize_swarm_delivery_messages(
+                            &mut restored_messages,
+                        );
                         app.replace_display_messages(restored_messages);
                         // A same-session forced re-apply (rewind / rewind-undo
                         // truncation, or a deferred bootstrap) rebuilds the
@@ -2409,34 +2465,40 @@ pub(in crate::tui::app) fn handle_server_event(
             false
         }
         ServerEvent::ModelChanged {
+            id,
             model,
             provider_name,
             error,
             resolved_credential,
+            provider_oauth_email,
             reasoning_effort,
             context_window,
             ..
         } => {
+            if app
+                .pending_automatic_failover_request_id
+                .is_some_and(|expected| expected != id)
+            {
+                return false;
+            }
+            app.pending_automatic_failover_request_id = None;
             app.remote_model_switch_in_flight = false;
+            let automatic_route = app.pending_automatic_failover_route.take();
             if let Some(err) = error {
                 if let Some(prepared) = app.pending_prompt_after_model_switch.take() {
                     super::input_dispatch::restore_prepared_remote_input(app, prepared);
                 }
                 // A fallback-offer resend cannot go out on the failed switch;
                 // drop it and put the prompt back in the input box instead.
-                if let Some(payload) = app.pending_fallback_resend.take()
-                    && let Some(raw_input) = payload.raw_input
-                    && !raw_input.trim().is_empty()
-                    && app.input.is_empty()
-                {
-                    app.input = raw_input;
-                    app.cursor_pos = app.input.len();
+                if let Some(payload) = app.pending_fallback_resend.take() {
+                    app.restore_failover_payload(payload);
                 }
                 app.push_display_message(DisplayMessage::error(
                     crate::tui::app::model_context::model_switch_failure_message(&err, true),
                 ));
                 app.set_status_notice("Model switch failed");
             } else {
+                app.remote_provider_oauth_email = provider_oauth_email;
                 // The server also re-sends ModelChanged on resume so the client
                 // learns the server-resolved context window. That is not a
                 // user-visible switch, so only announce an actual model change.
@@ -2450,6 +2512,9 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.clear_remote_startup_phase();
                 if let Some(ref pname) = provider_name {
                     app.remote_provider_name = Some(pname.clone());
+                }
+                if let Some(selection) = automatic_route {
+                    app.session.route_api_method = Some(selection.api_method);
                 }
                 // Always replace: a switch to a provider with no OAuth/API
                 // distinction must clear the previous route's credential too.
@@ -2675,6 +2740,14 @@ pub(in crate::tui::app) fn handle_server_event(
                         completed.display_name.as_deref(),
                     );
                     app.finish_background_task(completed.task_id, label, status);
+                }
+            } else if let Some(swarm) =
+                super::super::remote_notifications::swarm_delivery_display_message(&content)
+            {
+                // A delivered swarm message: the notification card already
+                // shows it as one row. Never dump the full model-facing text.
+                if !recent_swarm_card_matches(app, &swarm) {
+                    app.push_display_message(swarm);
                 }
             } else {
                 app.push_display_message(DisplayMessage {
@@ -3073,8 +3146,24 @@ pub(in crate::tui::app) fn handle_server_event(
             app.set_status_notice("⌨ Interactive terminal detected (command will timeout)");
             false
         }
+        ServerEvent::PeerUserMessage { content } => {
+            app.handle_peer_user_message(&content);
+            true
+        }
         _ => false,
     }
+}
+
+/// True when one of the recent transcript rows is already the swarm card for
+/// the same delivered message (same title and full body).
+fn recent_swarm_card_matches(app: &App, candidate: &DisplayMessage) -> bool {
+    use super::super::remote_notifications::swarm_display_full_body;
+    let body = swarm_display_full_body(&candidate.content);
+    app.display_messages().iter().rev().take(40).any(|message| {
+        message.role == "swarm"
+            && message.title == candidate.title
+            && swarm_display_full_body(&message.content) == body
+    })
 }
 
 fn runtime_activity_status_notice(message: &str) -> String {

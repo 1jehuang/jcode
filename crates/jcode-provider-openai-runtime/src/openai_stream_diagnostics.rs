@@ -14,6 +14,7 @@ fn is_output_event(event: &StreamEvent) -> bool {
     matches!(
         event,
         StreamEvent::TextDelta(_)
+            | StreamEvent::TextSuffixReplace { .. }
             | StreamEvent::ThinkingDelta(_)
             | StreamEvent::ToolUseStart { .. }
             | StreamEvent::ToolInputDelta(_)

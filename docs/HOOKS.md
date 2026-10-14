@@ -10,6 +10,7 @@ sessions appear*); lifecycle hooks tell you *what is happening inside them*.
 ```toml
 # ~/.jcode/config.toml
 [hooks]
+turn_start    = "~/bin/jcode-turn-busy"       # observer
 turn_end      = "~/bin/jcode-turn-notify"     # observer
 session_start = ""                            # observer
 session_end   = ""                            # observer
@@ -20,10 +21,30 @@ pre_tool_timeout_ms = 5000
 post_tool_feedback_timeout_ms = 10000
 ```
 
+All eight command keys (`pre_tool_transform`, `turn_start`, `turn_end`,
+`session_start`, `session_end`, `pre_tool`, `post_tool`, and
+`post_tool_feedback`) accept either a command string or an array of strings.
+Independent plugins can share an event without a dispatcher:
+
+```toml
+[hooks]
+turn_end = ["~/bin/jcode-turn-notify", "~/bin/jcode-event-log"]
+pre_tool = ["~/bin/jcode-tool-policy", "~/bin/jcode-audit-policy"]
+```
+
+Empty or whitespace-only commands are skipped. Observer commands are spawned
+in declaration order but run independently, so completion order is unspecified.
+Gate commands run sequentially in declaration order, even after a block, and
+the first blocking result is returned. Transformers and feedback hooks also
+run sequentially in declaration order, as described below.
+
 Env overrides (always win; empty value disables a config hook):
-`JCODE_HOOK_TURN_END`, `JCODE_HOOK_SESSION_START`, `JCODE_HOOK_SESSION_END`,
+`JCODE_HOOK_TURN_START`, `JCODE_HOOK_TURN_END`, `JCODE_HOOK_SESSION_START`, `JCODE_HOOK_SESSION_END`,
 `JCODE_HOOK_PRE_TOOL`, `JCODE_HOOK_POST_TOOL`, `JCODE_HOOK_PRE_TOOL_TIMEOUT_MS`,
-`JCODE_HOOK_POST_TOOL_FEEDBACK`, `JCODE_HOOK_POST_TOOL_FEEDBACK_TIMEOUT_MS`.
+`JCODE_HOOK_POST_TOOL_FEEDBACK`, `JCODE_HOOK_POST_TOOL_FEEDBACK_TIMEOUT_MS`,
+`JCODE_HOOK_PRE_TOOL_TRANSFORM`, `JCODE_HOOK_PRE_TOOL_TRANSFORM_TIMEOUT_MS`.
+Command overrides accept a command string or a TOML array of strings, for
+example `JCODE_HOOK_TURN_END='["notify-one", "notify-two"]'`.
 
 ## Common contract
 
@@ -35,7 +56,7 @@ Env overrides (always win; empty value disables a config hook):
 
 | Variable | Meaning |
 | --- | --- |
-| `JCODE_HOOK_EVENT` | `turn_end`, `session_start`, `session_end`, `pre_tool`, `post_tool` |
+| `JCODE_HOOK_EVENT` | `turn_start`, `turn_end`, `session_start`, `session_end`, `pre_tool`, `post_tool`, `post_tool_feedback`, `pre_tool_transform` |
 | `JCODE_HOOK_SESSION_ID` | Session the event belongs to |
 | `JCODE_HOOK_CWD` | Session working directory |
 | `JCODE_HOOK_PAYLOAD` | JSON object mirroring all fields (capped at 16 KB) |
@@ -43,9 +64,19 @@ Env overrides (always win; empty value disables a config hook):
 
 ## Observer hooks
 
-`turn_end`, `session_start`, `session_end`, and `post_tool` are
-**observers**: spawned detached, fire-and-forget. They can never block or slow
-the agent; failures are only logged.
+`turn_start`, `turn_end`, `session_start`, `session_end`, and `post_tool` are
+**observers**: spawned detached, fire-and-forget. The agent does not wait for
+their completion; failures are only logged.
+
+### `turn_start`
+
+Fires before model generation and the first tool call in the `chat` entrypoint
+(which uses the streaming turn loop) and one-shot `run` path. Extra fields:
+`JCODE_HOOK_MODEL` and `JCODE_HOOK_SOURCE` (`chat` or `run`, respectively).
+
+There are no distinct `resume` or `ambient` source values dispatched by the
+current implementation. Those labels in older config comments are not a
+runtime guarantee.
 
 ### `turn_end`
 

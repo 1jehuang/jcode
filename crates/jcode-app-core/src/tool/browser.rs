@@ -25,7 +25,7 @@ fn browser_tool_description_text() -> &'static str {
     if browser_handoff_disabled() {
         return "Control the browser using direct actions. Check action='status' first; run setup only if not ready. Browser handoff is disabled for this process. Complete browser tasks with direct actions in the requested tab.";
     }
-    "Control the browser. Check action='status' first; run setup only if not ready. Use action='handoff' by default for browser tasks: the fast Jev browser agent owns the entire task in an explicit tab through an iterative observation/action/results loop until done or genuinely blocked. Supply a goal, tab_id, and optional trusted context with background and completion criteria. A hand_back with requested_help=script/text asks the main agent to supply exact executable script candidates or exact text_values and resume the same task. Navigation alone is not completion unless it satisfies the entire goal. Reserve direct actions for setup, tab discovery/creation, or when handoff cannot complete the task."
+    "Control the browser. Check action='status' first; run setup only if not ready. Use action='handoff' by default for browser tasks: the fast Jev browser agent owns the entire task in an explicit tab through an iterative observation/action/results loop until done or genuinely blocked. Supply a goal, tab_id, and optional trusted context with background and completion criteria. A hand_back with requested_help=script/text asks the main agent to supply exact executable script candidates or exact text_values and resume the same task. Navigation alone is not completion unless it satisfies the entire goal. Reserve direct actions for setup, tab discovery/creation, or when handoff cannot complete the task. list_tabs shows every window, including the user's already signed-in tabs; pass tab_id to work in one. requested_help=user_login means ask the user to sign in or finish 2FA in that tab, wait for them, then re-run the same handoff."
 }
 
 /// Opt-in process-local control for direct-only benchmark arms. Normal sessions
@@ -547,11 +547,15 @@ async fn firefox_status(
         metadata["browser_running"] = json!(running);
         metadata["firefox_running"] = json!(crate::browser::is_firefox_running());
         let body = if running {
+            let diagnosis = crate::browser::diagnose_silent_chromium_bridge(target.kind)
+                .map(|d| format!(" {d}"))
+                .unwrap_or_default();
             format!(
-                "Browser bridge binaries are installed and {} is running, but the live bridge is not responding. Check that the Browser Agent Bridge extension is enabled in {} ({}). Use action='setup' only if you want to repair the existing install. You do not need to run setup before every browser task.",
+                "Browser bridge binaries are installed and {} is running, but the live bridge is not responding. Check that the Browser Agent Bridge extension is enabled in {} ({}).{} Use action='setup' only if you want to repair the existing install. You do not need to run setup before every browser task.",
                 name,
                 name,
-                target.kind.extensions_page()
+                target.kind.extensions_page(),
+                diagnosis
             )
         } else {
             format!(
@@ -659,6 +663,10 @@ async fn ensure_firefox_ready(
         message.push_str(&format!("{} was not running, so it was launched automatically, but the browser bridge is still not responding. The Browser Agent Bridge extension may be disabled or missing in this {} profile. This is not fixed by re-running setup unless the extension is actually missing.\n", name, name));
     } else if crate::browser::is_browser_running(target.kind) {
         message.push_str(&format!("{} is running, but the browser bridge extension is not responding. Check that the Browser Agent Bridge extension is installed and enabled ({}). Do not re-run setup just because the bridge is silent.\n", name, target.kind.extensions_page()));
+        if let Some(diagnosis) = crate::browser::diagnose_silent_chromium_bridge(target.kind) {
+            message.push_str(&diagnosis);
+            message.push('\n');
+        }
     } else {
         message.push_str(&format!("{} is not running, so the browser bridge is not responding. Start {}, then retry the browser action. Setup is one-time and is not needed again.\n", name, name));
     }
@@ -713,8 +721,58 @@ async fn execute_firefox_action(
         return screenshot_via_bridge(&bridge_params, title, browser, ctx).await;
     }
 
-    let result = firefox_run_bridge_command(&bridge_action, bridge_params, browser, ctx).await?;
+    let result =
+        match firefox_run_bridge_command(&bridge_action, bridge_params.clone(), browser, ctx).await
+        {
+            Ok(result) => result,
+            Err(error)
+                if bridge_action == "navigate"
+                    && format!("{error:#}").contains("Timed out waiting for page load") =>
+            {
+                recover_slow_navigation(&bridge_params, browser, ctx)
+                    .await
+                    .ok_or(error)?
+            }
+            Err(error) => return Err(error),
+        };
     Ok(render_browser_output(action, title, result))
+}
+
+/// SaaS dashboards often keep a request open forever, so the tab never reports
+/// "complete" and navigate fails after 15s even though the page rendered
+/// (#1743, Zoom Marketplace). Read the page instead: if it has the requested
+/// URL and content, report success with a note.
+async fn recover_slow_navigation(
+    params: &Value,
+    browser: Option<&str>,
+    ctx: &ToolContext,
+) -> Option<Value> {
+    let mut read = Map::new();
+    read.insert("format".into(), json!("annotated"));
+    if let Some(tab) = params.get("tabId") {
+        read.insert("tabId".into(), tab.clone());
+    }
+    let content = firefox_run_bridge_command("getContent", Value::Object(read), browser, ctx)
+        .await
+        .ok()?;
+    let text = content
+        .get("content")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    if text.trim().is_empty() {
+        return None;
+    }
+    // Never report the previous page as the navigation result.
+    let host = |u: &str| url::Url::parse(u).ok()?.host_str().map(str::to_owned);
+    let landed = content.get("url").and_then(|v| v.as_str()).and_then(host);
+    if landed.is_none() || landed != params["url"].as_str().and_then(host) {
+        return None;
+    }
+    Some(json!({
+        "url": content.get("url").cloned().unwrap_or_else(|| params["url"].clone()),
+        "content": content,
+        "loadWarning": "The page did not finish loading within the timeout (it may keep network requests open), but it has rendered content, shown here. Verify the expected elements are present before acting.",
+    }))
 }
 
 fn bridge_request(action: &str, input: &BrowserInput) -> Result<(String, Value, String)> {
@@ -938,11 +996,13 @@ fn bridge_request(action: &str, input: &BrowserInput) -> Result<(String, Value, 
                 .path
                 .as_deref()
                 .ok_or_else(|| anyhow::anyhow!("path is required for upload"))?;
-            // The native messaging host reads the file from `filePath`, base64-encodes
-            // it, and forwards it to the content script. It also accepts an optional
-            // `fileName` override. (Previously this sent `path`, which the host ignored,
-            // producing a "Missing filePath" error.)
+            // Two readers, two keys. Through a session daemon the native host
+            // reads `filePath`. Without one (Windows, or when the daemon could not
+            // start) the bridge CLI encodes the file itself and requires `path`,
+            // failing with "uploadFile requires 'path' param" otherwise (#1743).
+            // Each reader ignores the other's key, so send both.
             params.insert("filePath".into(), json!(path));
+            params.insert("path".into(), json!(path));
             if let Some(file_name) = std::path::Path::new(path)
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -1030,8 +1090,135 @@ async fn firefox_run_bridge_command(
     }
 
     let params_json = serde_json::to_string(&params)?;
-    let mut command = tokio::process::Command::new(&bin);
-    command.arg(action).arg(&params_json);
+    // jcode manages the session daemon unless the user pinned BROWSER_SESSION.
+    let managed_session = cfg!(not(windows)) && std::env::var("BROWSER_SESSION").is_err();
+    // A session bound to its own window scopes untargeted listings to that
+    // window, which hid every tab the user already had open (and logged in)
+    // from the agent (#1743). List all windows instead. Explicit tab_id
+    // targets still go through the session afterwards.
+    let unscoped_listing = action == "listTabs" && params.get("windowId").is_none();
+    let use_session = managed_session && !unscoped_listing;
+
+    let first = run_bridge_cli(&bin, action, &params_json, browser, use_session, _ctx).await?;
+    let result = match first {
+        Err(details)
+            if use_session
+                && params.get("tabId").is_none()
+                && crate::browser::is_stale_session_target_error(&details) =>
+        {
+            // The user closed the agent's window or tab. The daemon would keep
+            // targeting it forever, so start a fresh one and retry once.
+            reset_session_off_worker(&_ctx.session_id, browser).await;
+            run_bridge_cli(&bin, action, &params_json, browser, use_session, _ctx).await?
+        }
+        other => other,
+    };
+    let stdout = match result {
+        Ok(stdout) => stdout,
+        Err(details) => {
+            if details.contains("Unknown action:") {
+                anyhow::bail!(
+                    "The connected browser bridge extension is missing required support for action '{}'. This usually means the installed extension is older than the browser CLI expected by jcode. Use browser action='status' to confirm, then action='setup' to repair or update the extension.\n\nOriginal bridge error: {}",
+                    action,
+                    details
+                );
+            }
+            anyhow::bail!(explain_bridge_error(action, &details));
+        }
+    };
+
+    if stdout.is_empty() {
+        return Ok(json!({ "ok": true }));
+    }
+
+    let mut value: Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|_| json!({ "raw": stdout }));
+    if unscoped_listing
+        && managed_session
+        && let Some(window) = agent_window_id(&bin, browser, _ctx).await
+        && let Some(map) = value.as_object_mut()
+    {
+        map.insert("agentWindowId".into(), json!(window));
+        map.insert(
+            "note".into(),
+            json!("All browser windows are listed, including tabs the user already has open and signed in. agentWindowId is the agent's own window. Pass tab_id to act on one of the user's tabs."),
+        );
+    }
+    Ok(value)
+}
+
+async fn reset_session_off_worker(session_id: &str, browser: Option<&str>) {
+    let session_id = session_id.to_owned();
+    let browser = browser.map(str::to_owned);
+    let _ = tokio::task::spawn_blocking(move || {
+        crate::browser::reset_browser_session_for(&session_id, browser.as_deref())
+    })
+    .await;
+}
+
+/// Window the agent's session daemon is bound to. Never starts a daemon (that
+/// would open a window just to list tabs).
+async fn agent_window_id(
+    bin: &std::path::Path,
+    browser: Option<&str>,
+    ctx: &ToolContext,
+) -> Option<i64> {
+    let (session_id, owned_browser) = (ctx.session_id.clone(), browser.map(str::to_owned));
+    let running = tokio::task::spawn_blocking(move || {
+        crate::browser::browser_session_running(&session_id, owned_browser.as_deref())
+    })
+    .await
+    .unwrap_or(false);
+    if !running {
+        return None;
+    }
+    let out = run_bridge_cli(bin, "getActiveTab", "{}", browser, true, ctx)
+        .await
+        .ok()?
+        .ok()?;
+    serde_json::from_str::<Value>(&out).ok()?["windowId"].as_i64()
+}
+
+/// Turn bare bridge failures into errors the agent can act on.
+fn explain_bridge_error(action: &str, details: &str) -> String {
+    let lower = details.to_ascii_lowercase();
+    if lower.contains("timed out waiting for page load") {
+        return format!(
+            "{details}\nThe page started loading but never reported complete, which is common on dashboards that keep network requests open. It is usually usable already: read it with action='snapshot' or action='get_content' before retrying, or pass wait=false to open."
+        );
+    }
+    if lower.contains("websocket error") || lower.contains("connection refused") {
+        return format!(
+            "Could not reach the browser bridge for action '{action}': {details}\nThe browser may have closed or the extension may be disabled. Check action='status'."
+        );
+    }
+    if lower.contains("cannot access a chrome://")
+        || lower.contains("cannot access contents of")
+        || lower.contains("extensions gallery cannot be scripted")
+    {
+        return format!(
+            "{details}\nBrowsers do not let extensions script their own internal pages (chrome://, about:, the extension store). Open a normal web page or target another tab_id."
+        );
+    }
+    if lower.contains("receiving end does not exist") {
+        return format!(
+            "{details}\nThe page's content script is not loaded yet (the tab may still be loading, or it was open before the extension started). Wait briefly and retry, or reload the tab with action='open'."
+        );
+    }
+    details.to_string()
+}
+
+/// Run one bridge CLI call. `Ok(Err(details))` is a bridge-reported failure.
+async fn run_bridge_cli(
+    bin: &std::path::Path,
+    action: &str,
+    params_json: &str,
+    browser: Option<&str>,
+    use_session: bool,
+    ctx: &ToolContext,
+) -> Result<std::result::Result<String, String>> {
+    let mut command = tokio::process::Command::new(bin);
+    command.arg(action).arg(params_json);
     command.kill_on_drop(true);
     command.stdin(std::process::Stdio::null());
     command.stdout(std::process::Stdio::piped());
@@ -1039,12 +1226,14 @@ async fn firefox_run_bridge_command(
     crate::browser::apply_bridge_browser_env(&mut command, browser);
 
     #[cfg(not(windows))]
-    if std::env::var("BROWSER_SESSION").is_err()
+    if use_session
         && let Some(session_name) =
-            crate::browser::ensure_browser_session_for_async(&_ctx.session_id, browser).await
+            crate::browser::ensure_browser_session_for_async(&ctx.session_id, browser).await
     {
         command.env("BROWSER_SESSION", session_name);
     }
+    #[cfg(windows)]
+    let _ = (use_session, ctx);
 
     let output = command
         .output()
@@ -1062,21 +1251,12 @@ async fn firefox_run_bridge_command(
         } else {
             format!("{}\n{}", stderr, stdout)
         };
-        if details.contains("Unknown action:") {
-            anyhow::bail!(
-                "The connected Firefox browser bridge is missing required support for action '{}'. This usually means the installed extension is older than the browser CLI expected by jcode. Use browser action='status' to confirm, then action='setup' to repair or update the extension.\n\nOriginal bridge error: {}",
-                action,
-                details
-            );
-        }
-        anyhow::bail!(details);
+        return Ok(Err(details
+            .strip_prefix("Error: ")
+            .unwrap_or(&details)
+            .to_string()));
     }
-
-    if stdout.is_empty() {
-        return Ok(json!({ "ok": true }));
-    }
-
-    serde_json::from_str(&stdout).or_else(|_| Ok(json!({ "raw": stdout })))
+    Ok(Ok(stdout))
 }
 
 async fn screenshot_via_bridge(

@@ -976,6 +976,15 @@ impl crate::tui::TuiState for App {
     }
 
     fn status_notice(&self) -> Option<String> {
+        // This priority notice is owned by the telemetry handshake, not the
+        // expiring general status slot. Other notices cannot clobber it.
+        if crate::telemetry::pending_oauth_account_notice().is_some()
+            || self
+                .oauth_notice_displayed_at
+                .is_some_and(super::oauth_telemetry::readable_notice_active)
+        {
+            return Some(crate::telemetry::OAUTH_ACCOUNT_NOTICE_TEXT.to_string());
+        }
         if !self.is_remote
             && self.provider.uses_jcode_compaction()
             && let Ok(manager) = self.registry.compaction().try_read()

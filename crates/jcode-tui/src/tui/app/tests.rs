@@ -27,6 +27,7 @@ include!("tests/remote_events_reload_02/part_02.rs");
 include!("tests/remote_events_reload_03/part_01.rs");
 include!("tests/remote_events_reload_03/part_02.rs");
 include!("tests/remote_events_reload_04.rs");
+include!("tests/native_citations.rs");
 include!("tests/remote_events_reload_05.rs");
 include!("tests/swarm_plan_no_inline_graph.rs");
 include!("tests/remote_model_picker_hotkeys.rs");
@@ -36,6 +37,7 @@ include!("tests/scroll_copy_02/part_01.rs");
 include!("tests/scroll_copy_02/part_02.rs");
 include!("tests/scroll_copy_03.rs");
 include!("tests/resize_viewport.rs");
+include!("tests/issue_1642_panel_dismiss.rs");
 include!("tests/resize_anchor.rs");
 include!("tests/input_copy_selection.rs");
 include!("tests/onboarding_flow.rs");
@@ -1220,6 +1222,7 @@ fn stale_server_history_is_deferred_before_remote_state_is_applied() {
             connection_type: Some("stale-connection".to_string()),
             status_detail: Some("stale-status".to_string()),
             upstream_provider: Some("stale-upstream".to_string()),
+            provider_oauth_email: None,
             resolved_credential: None,
             reasoning_effort: Some("high".to_string()),
             service_tier: Some("stale-tier".to_string()),
@@ -1315,6 +1318,7 @@ fn deferred_stale_server_history_captures_session_id_for_reload_handoff() {
             connection_type: None,
             status_detail: None,
             upstream_provider: None,
+            provider_oauth_email: None,
             resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,
@@ -1400,6 +1404,7 @@ fn ancient_server_history_is_deferred_via_client_side_release_check() {
             connection_type: Some("ancient-connection".to_string()),
             status_detail: Some("ancient-status".to_string()),
             upstream_provider: Some("ancient-upstream".to_string()),
+            provider_oauth_email: None,
             resolved_credential: None,
             reasoning_effort: Some("high".to_string()),
             service_tier: Some("ancient-tier".to_string()),
@@ -1484,6 +1489,7 @@ fn older_server_reporting_no_update_is_still_deferred_via_client_check() {
             connection_type: Some("websocket".to_string()),
             status_detail: None,
             upstream_provider: None,
+            provider_oauth_email: None,
             resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,
@@ -1588,6 +1594,7 @@ fn older_server_history_repairs_stale_shared_server_channel_end_to_end() {
             connection_type: Some("websocket".to_string()),
             status_detail: None,
             upstream_provider: None,
+            provider_oauth_email: None,
             resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,
@@ -1666,6 +1673,7 @@ fn current_release_server_history_is_not_deferred_by_client_check() {
             connection_type: Some("websocket".to_string()),
             status_detail: None,
             upstream_provider: None,
+            provider_oauth_email: None,
             resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,

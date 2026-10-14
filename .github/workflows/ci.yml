@@ -113,6 +113,12 @@ jobs:
       - name: Test Discord release announcements
         run: python3 -m unittest -v scripts/test_post_discord_release.py
 
+      - name: Test justrust release installation and routing
+        run: |
+          python3 tests/test_install_justrust_ci.py
+          python3 tests/test_public_release_builds.py
+          bash -n scripts/install_justrust_ci.sh scripts/build_linux_compat.sh
+
       - name: Compile release automation scripts
         run: python3 -m py_compile scripts/post_discord_release.py scripts/test_post_discord_release.py
 

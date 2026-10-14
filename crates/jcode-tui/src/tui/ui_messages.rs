@@ -35,7 +35,15 @@ fn width_stable_system_title<'a>(normal: &'a str, stable: &'a str) -> &'a str {
 }
 
 fn normalize_system_content_for_display(content: &str) -> Cow<'_, str> {
-    let sanitized = strip_ansi_escape_sequences(content);
+    // Emoji variation selectors (U+FE0F, as in "⚠️" or "ℹ️") make terminals
+    // render the base glyph two cells wide while ratatui may count it as one.
+    // That shifts the rest of the row and leaves stale cells behind (ghost
+    // characters at the right edge) on later diff repaints. Render the plain
+    // text-presentation glyph instead so widths always agree.
+    let mut sanitized = strip_ansi_escape_sequences(content);
+    if sanitized.contains('\u{FE0F}') {
+        sanitized.retain(|ch| ch != '\u{FE0F}');
+    }
     if !prefer_width_stable_system_glyphs() {
         return Cow::Owned(sanitized);
     }
@@ -55,13 +63,41 @@ fn render_single_line_system_notice(
     let is_update_divergence_notice = msg.content.starts_with("Update diverged. Press ")
         || msg.content.starts_with("Local and upstream have diverged");
     let is_cold_cache_notice = msg.content.starts_with("🧊 Prompt cache went cold");
-    if !is_cold_cache_notice && !is_launch_hotkey_notice && !is_update_divergence_notice {
+    let is_status_notice = msg.title.as_deref() == Some("Connection")
+        || msg.content.starts_with("📡 Network appears offline")
+        || msg
+            .content
+            .starts_with("⚡ Server reload in progress - waiting for handoff")
+        || msg.content.starts_with("⚡ Connection lost - retrying")
+        || msg.content.starts_with("[auto] ")
+        || (!msg.content.contains('\n') && !content_has_markdown_formatting(&msg.content));
+    if !is_cold_cache_notice
+        && !is_launch_hotkey_notice
+        && !is_update_divergence_notice
+        && !is_status_notice
+    {
         return None;
     }
 
     let centered = markdown::center_code_blocks();
     let line_width = centered_wrap_width(width.saturating_sub(4), centered, 96);
-    let display_content = normalize_system_content_for_display(&msg.content);
+    // Summarize internal recovery directives only for display. The stored
+    // message and the model's instructions must retain their full semantics.
+    let content = if msg
+        .content
+        .starts_with("[auto] Your session was interrupted by a server reload")
+    {
+        "Server reloaded; resuming interrupted work."
+    } else if msg.content.starts_with("Reload complete - continuing") {
+        "Reload complete - continuing."
+    } else if msg.content.starts_with("📡 Network appears offline") {
+        "📡 Network appears offline - waiting to retry automatically."
+    } else if msg.content.starts_with("✓ Retrying continuation...") {
+        "✓ Retrying continuation..."
+    } else {
+        &msg.content
+    };
+    let display_content = normalize_system_content_for_display(content);
     let compact = display_content
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -452,6 +488,14 @@ pub(crate) fn render_system_message(
     width: u16,
     _diff_mode: crate::config::DiffDisplayMode,
 ) -> Vec<Line<'static>> {
+    if let Some(lines) = render_scheduled_session_message(msg, width) {
+        return lines;
+    }
+    // Routine status messages occupy one row, including connection notices.
+    // Authored multiline help and structured reports keep their full layout.
+    if let Some(lines) = render_single_line_system_notice(msg, width) {
+        return lines;
+    }
     if let Some(title) = msg.title.as_deref()
         && title == "Connection"
     {
@@ -464,16 +508,6 @@ pub(crate) fn render_system_message(
         || msg.content.starts_with("⚡ Connection lost - retrying")
     {
         return render_connection_system_message(msg, width);
-    }
-
-    // Compact notices are transient status summaries. Keep them scannable and
-    // prevent a narrow viewport from turning one notice into a paragraph.
-    if let Some(lines) = render_single_line_system_notice(msg, width) {
-        return lines;
-    }
-
-    if let Some(lines) = render_scheduled_session_message(msg, width) {
-        return lines;
     }
 
     let centered = markdown::center_code_blocks();
@@ -1007,6 +1041,26 @@ pub(crate) fn render_todos_message(
     width: u16,
     diff_mode: crate::config::DiffDisplayMode,
 ) -> Vec<Line<'static>> {
+    render_todos_message_with_cap(msg, width, diff_mode, true)
+}
+
+/// Todo card for the pinned band at the top of the viewport. The band owns
+/// its full rows (info widgets never dock beside it), so the card spans the
+/// whole available width instead of the transcript's readability cap.
+pub(crate) fn render_pinned_todos_message(
+    msg: &DisplayMessage,
+    width: u16,
+    diff_mode: crate::config::DiffDisplayMode,
+) -> Vec<Line<'static>> {
+    render_todos_message_with_cap(msg, width, diff_mode, false)
+}
+
+fn render_todos_message_with_cap(
+    msg: &DisplayMessage,
+    width: u16,
+    diff_mode: crate::config::DiffDisplayMode,
+    cap_width: bool,
+) -> Vec<Line<'static>> {
     let Ok(payload) = serde_json::from_str::<TodoCardPayload>(&msg.content) else {
         return render_system_message(msg, width, diff_mode);
     };
@@ -1014,10 +1068,11 @@ pub(crate) fn render_todos_message(
 
     let centered = markdown::center_code_blocks();
     let meta_style = Style::default().fg(todo_meta_color());
-    let card_width = if centered {
-        (width.saturating_sub(4) as usize).min(120)
-    } else {
-        (width.saturating_sub(2) as usize).min(100)
+    let card_width = match (centered, cap_width) {
+        (true, true) => (width.saturating_sub(4) as usize).min(120),
+        (true, false) => width.saturating_sub(4) as usize,
+        (false, true) => (width.saturating_sub(2) as usize).min(100),
+        (false, false) => width.saturating_sub(2) as usize,
     }
     .max(1);
     let base_indent = if centered { "" } else { "  " };
@@ -2831,7 +2886,7 @@ struct CompactSwarmNotification<'a> {
 fn compact_swarm_notification(title: &str) -> Option<CompactSwarmNotification<'_>> {
     let (sender, marker, marker_before_icon, text_color, file_activity) =
         if let Some(sender) = title.strip_prefix("DM from ") {
-            (sender, String::new(), false, rgb(214, 232, 255), false)
+            (sender, String::new(), false, rgb(130, 130, 140), false)
         } else if let Some(sender) = title.strip_prefix("Task · ") {
             (sender, String::new(), false, rgb(220, 236, 255), false)
         } else if let Some((channel, sender)) = title
@@ -2874,7 +2929,10 @@ fn render_compact_agent_notification(
 ) -> Option<Vec<Line<'static>>> {
     let notification = compact_swarm_notification(title)?;
     let icon = crate::id::session_icon(notification.sender);
-    let collapsible = jcode_tui_messages::parse_collapsible_swarm_content(content);
+    // Plain (legacy or unencoded) long content renders as a collapsed preview
+    // too, so nothing agent-authored is ever dumped inline by default.
+    let normalized = jcode_tui_messages::collapse_long_swarm_content(content);
+    let collapsible = jcode_tui_messages::parse_collapsible_swarm_content(&normalized);
     let (body, badge) = match collapsible {
         Some(parsed) if parsed.expanded => (
             format!("{}\n{}", parsed.tldr, parsed.body.trim()),
@@ -2903,6 +2961,47 @@ fn render_compact_agent_notification(
     let icon_style = Style::default().fg(rgb(255, 200, 100));
     let body_style = Style::default().fg(text_color);
     let max_width = width.max(1) as usize;
+
+    // Collapsed (or plain) content is always exactly one row: the preview is
+    // truncated with an ellipsis so the badge stays the trailing token.
+    let expanded = collapsible.is_some_and(|parsed| parsed.expanded);
+    if !expanded {
+        let preview = jcode_tui_messages::swarm_preview_line(&body, usize::MAX);
+        let mut prefix = if notification.marker_before_icon {
+            vec![Span::styled(
+                format!("{}{} ", notification.marker, icon),
+                body_style,
+            )]
+        } else {
+            let mut spans = vec![Span::styled(format!("{} ", icon), icon_style)];
+            if !notification.marker.is_empty() {
+                spans.push(Span::styled(notification.marker.clone(), body_style));
+            }
+            spans
+        };
+        let badge_text = badge.map(|badge| format!("  {badge}"));
+        let badge_width = badge_text
+            .as_deref()
+            .map(UnicodeWidthStr::width)
+            .unwrap_or(0);
+        prefix.push(Span::styled(preview, body_style));
+        let mut line = super::truncate_line_with_ellipsis_to_width(
+            &Line::from(prefix),
+            max_width.saturating_sub(badge_width).max(1),
+        );
+        if let Some(badge_text) = badge_text {
+            line.spans.push(Span::styled(
+                badge_text,
+                Style::default().fg(text_color).dim(),
+            ));
+        }
+        let mut lines = vec![line];
+        if markdown::center_code_blocks() {
+            left_pad_lines_for_centered_mode(&mut lines, width);
+        }
+        return Some(lines);
+    }
+
     let body_width = max_width.saturating_sub(3).max(1);
     let mut rendered_body = if body.is_empty() {
         vec![Line::from(Span::styled(String::new(), body_style))]
@@ -3096,14 +3195,23 @@ pub(crate) fn render_swarm_message(
         } else {
             SWARM_EXPAND_BADGE
         };
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(tldr.clone(), body_style),
-            Span::styled(
-                format!("  {}", badge),
-                Style::default().fg(rail_color).dim(),
-            ),
-        ]));
+        let badge_text = format!("  {}", badge);
+        let badge_width = UnicodeWidthStr::width(badge_text.as_str());
+        let mut line = super::truncate_line_with_ellipsis_to_width(
+            &Line::from(vec![
+                Span::raw("  "),
+                Span::styled(
+                    jcode_tui_messages::swarm_preview_line(tldr, usize::MAX),
+                    body_style,
+                ),
+            ]),
+            (width.max(1) as usize).saturating_sub(badge_width).max(1),
+        );
+        line.spans.push(Span::styled(
+            badge_text,
+            Style::default().fg(rail_color).dim(),
+        ));
+        lines.push(line);
     }
 
     let mut body_lines = if content.is_empty() {

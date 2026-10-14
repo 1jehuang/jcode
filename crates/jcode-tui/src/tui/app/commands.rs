@@ -3946,10 +3946,10 @@ pub(super) fn handle_telemetry_command(app: &mut App, trimmed: &str) -> bool {
             let current = TelemetryLevel::current();
             let detail = match current {
                 TelemetryLevel::Everything => {
-                    "Sending everything, including prompts and transcripts. Thank you."
+                    "Sending usage stats, provider account email, crash reports, prompts, and transcripts. Thank you."
                 }
                 TelemetryLevel::NoContent => {
-                    "Sending usage stats and crash reports only. No prompts or transcripts."
+                    "Sending usage stats, provider account email, and crash reports. No prompts or transcripts."
                 }
                 TelemetryLevel::Nothing => "Sending nothing.",
             };

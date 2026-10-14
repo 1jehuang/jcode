@@ -976,6 +976,21 @@ pub fn refresh_openai_model_catalog_in_background(
     context: &'static str,
 ) {
     let scope = openai_catalog_scope_for_credential(is_chatgpt_mode, &access_token);
+    refresh_openai_model_catalog_in_background_for_scope(
+        access_token,
+        is_chatgpt_mode,
+        context,
+        scope,
+    );
+}
+
+/// Refresh a catalog for a captured credential scope, never the global active login.
+pub fn refresh_openai_model_catalog_in_background_for_scope(
+    access_token: String,
+    is_chatgpt_mode: bool,
+    context: &'static str,
+    scope: String,
+) {
     if access_token.trim().is_empty() {
         finish_openai_model_catalog_refresh_for_scope(&scope);
         return;
@@ -1062,19 +1077,35 @@ pub fn clear_model_unavailable_for_scope(scope: &str, model: &str) {
 
 fn runtime_provider_unavailability(provider: &str) -> Option<RuntimeProviderUnavailability> {
     let key = current_provider_runtime_scope_key(provider);
+    runtime_provider_unavailability_for_key(&key)
+}
 
+fn runtime_provider_unavailability_for_key(key: &str) -> Option<RuntimeProviderUnavailability> {
     let mut unavailable = ACCOUNT_RUNTIME_UNAVAILABLE_PROVIDERS.write().ok()?;
-    if let Some(entry) = unavailable.get(&key) {
+    if let Some(entry) = unavailable.get(key) {
         if entry.recorded_at.elapsed() <= PROVIDER_RUNTIME_UNAVAILABLE_TTL {
             return Some(entry.clone());
         }
-        unavailable.remove(&key);
+        unavailable.remove(key);
     }
     None
 }
 
 pub fn record_provider_unavailable_for_account(provider: &str, reason: &str) {
     let key = current_provider_runtime_scope_key(provider);
+    record_provider_unavailable_for_key(key, reason);
+}
+
+/// Record a session-bound login failure without changing global auth selection.
+pub fn record_provider_unavailable_for_account_label(
+    provider: &str,
+    label: Option<&str>,
+    reason: &str,
+) {
+    record_provider_unavailable_for_key(provider_runtime_scope_key(provider, label), reason);
+}
+
+fn record_provider_unavailable_for_key(key: String, reason: &str) {
     if key.trim().is_empty() {
         return;
     }
@@ -1137,6 +1168,20 @@ pub fn clear_all_provider_unavailability_for_account() {
 
 pub fn provider_unavailability_detail_for_account(provider: &str) -> Option<String> {
     let entry = runtime_provider_unavailability(provider)?;
+    Some(format_provider_unavailability_detail(entry))
+}
+
+/// Read another login's cooldown without changing the process-wide active login.
+pub fn provider_unavailability_detail_for_account_label(
+    provider: &str,
+    account_label: Option<&str>,
+) -> Option<String> {
+    let key = provider_runtime_scope_key(provider, account_label);
+    let entry = runtime_provider_unavailability_for_key(&key)?;
+    Some(format_provider_unavailability_detail(entry))
+}
+
+fn format_provider_unavailability_detail(entry: RuntimeProviderUnavailability) -> String {
     let mut detail = entry.reason;
     if let Ok(elapsed) = SystemTime::now().duration_since(entry.observed_at) {
         detail.push_str(&format!(
@@ -1145,7 +1190,7 @@ pub fn provider_unavailability_detail_for_account(provider: &str) -> Option<Stri
         ));
     }
 
-    Some(detail)
+    detail
 }
 
 pub fn model_unavailability_detail_for_account(model: &str) -> Option<String> {
@@ -1317,6 +1362,38 @@ pub fn resolve_model_capabilities(model: &str, provider_hint: Option<&str>) -> M
     }
 }
 
+/// Automatic agent failover is narrower than manual model selection. A model
+/// appearing in an account's catalog is not evidence that it can run an agent
+/// turn: platform catalogs also advertise video, audio and embedding models.
+/// Accept curated/frontier agent models, plus versioned GPT variants so an
+/// explicitly configured new release need not wait for the bundled order.
+/// Unrecognized catalogs remain available for manual selection, not failover.
+pub(super) fn is_agent_model_for_failover(model: &str, provider: &str) -> bool {
+    let normalized = normalize_model_id(model);
+    if !super::is_listable_model_name(&normalized) || normalized.contains("[web]") {
+        return false;
+    }
+    if provider == "bedrock" {
+        return super::bedrock::BedrockProvider::model_supports_tools(model);
+    }
+    let base = jcode_provider_core::model_id::slash_base(&normalized);
+    // These GPT specializations do not implement the normal agent tool API.
+    if base
+        .split('-')
+        .any(|token| matches!(token, "instruct" | "search" | "research"))
+    {
+        return false;
+    }
+    if crate::auth::lifecycle::ranked_flagship_for_provider(provider, &[model]).is_some() {
+        return true;
+    }
+    matches!(provider, "openai" | "copilot" | "cursor" | "openrouter")
+        && base
+            .strip_prefix("gpt-")
+            .and_then(|version| version.chars().next())
+            .is_some_and(|first| first.is_ascii_digit())
+}
+
 /// Detect which provider a model belongs to
 pub fn provider_for_model_with_hint(
     model: &str,
@@ -1357,4 +1434,29 @@ pub fn provider_for_model_with_hint(
 /// Detect which provider a model belongs to
 pub fn provider_for_model(model: &str) -> Option<&'static str> {
     provider_for_model_with_hint(model, None)
+}
+
+#[cfg(test)]
+mod scoped_refresh_tests {
+    use super::*;
+
+    #[test]
+    fn saved_account_background_refresh_uses_captured_scope() {
+        let scope = format!(
+            "captured-refresh-test-{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        );
+        assert!(!OPENAI_MODEL_CATALOG_SERVICE.refresh_throttled(&scope));
+        assert!(begin_openai_model_catalog_refresh_for_scope(&scope));
+        refresh_openai_model_catalog_in_background_for_scope(
+            String::new(),
+            true,
+            "scope-test",
+            scope.clone(),
+        );
+        assert!(
+            OPENAI_MODEL_CATALOG_SERVICE.refresh_throttled(&scope),
+            "completion must apply retry throttling to the captured scope, not the active login"
+        );
+    }
 }
