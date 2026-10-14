@@ -735,10 +735,13 @@ impl Agent {
             if let Err(e) =
                 crate::provider::set_model_with_auth_refresh(self.provider.as_ref(), &model_request)
             {
-                logging::error(&format!(
-                    "Failed to restore session model '{}' via '{}': {}",
-                    model, model_request, e
+                let fallback = self.provider_model();
+                logging::warn(&format!(
+                    "Saved session model '{}' not available, falling back to provider default '{}'",
+                    model, fallback
                 ));
+                self.session.model = Some(fallback);
+                self.persist_session_best_effort("model fallback");
             } else {
                 self.reconcile_explicit_provider_pin_route();
             }
