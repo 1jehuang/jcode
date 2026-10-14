@@ -476,6 +476,40 @@ impl ProviderAuth {
         }
     }
 
+    async fn apply_catalog(
+        &self,
+        req: reqwest::RequestBuilder,
+        api_base: &str,
+    ) -> Result<reqwest::RequestBuilder> {
+        // Reuse key-probe rules without changing other providers' auth modes.
+        if jcode_base::provider_catalog::api_base_is_anthropic(api_base) {
+            match self {
+                Self::AuthorizationBearer { token, .. } => {
+                    return Ok(
+                        jcode_base::provider_catalog::apply_openai_compatible_catalog_auth(
+                            req, api_base, token,
+                        ),
+                    );
+                }
+                Self::HeaderValue {
+                    header_name, value, ..
+                } if header_name.as_str() == "x-api-key" => {
+                    return Ok(
+                        jcode_base::provider_catalog::apply_openai_compatible_catalog_auth(
+                            req, api_base, value,
+                        ),
+                    );
+                }
+                _ => {}
+            }
+            return Ok(self.apply(req).await?.header(
+                "anthropic-version",
+                jcode_base::provider_catalog::ANTHROPIC_VERSION_HEADER_VALUE,
+            ));
+        }
+        self.apply(req).await
+    }
+
     fn label(&self) -> &str {
         match self {
             Self::AuthorizationBearer { label, .. } => label,
@@ -526,8 +560,8 @@ async fn fetch_models_from_api(
     cache_namespace: Option<String>,
 ) -> Result<Vec<ModelInfo>> {
     let url = format!("{}/models", api_base);
-    let response =
-        apply_kimi_coding_agent_headers(auth.apply(client.get(&url)).await?, &api_base, None)
+    let request = auth.apply_catalog(client.get(&url), &api_base).await?;
+    let response = apply_kimi_coding_agent_headers(request, &api_base, None)
             .send()
             .await
             .with_context(|| {
