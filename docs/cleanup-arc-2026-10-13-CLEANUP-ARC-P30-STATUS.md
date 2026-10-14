@@ -66,6 +66,28 @@ git push
 # Open PR
 ```
 
+#### Option 2 — VERIFIED 2026-10-14
+
+Done in a new worktree at `/private/tmp/jcode-cleanup-arc-p30` on branch
+`chore/cargo-fmt-cleanup-2026-10-13-p30` @ `1101c3b42`. Both cherry-picks
+applied cleanly with auto-merge of Cargo.lock (0 manual conflicts).
+`cargo audit --no-fetch` on the resulting branch: **0 active vulns**
+(10 unmaintained warnings, baseline). Versions confirmed:
+- quinn-proto: 0.11.15 → 0.11.19
+- h2: 0.4.13 → 0.4.19
+- rustls: 0.23.37 → 0.23.45
+
+The branch is local-only. Push is the operator's decision:
+```bash
+git -C /private/tmp/jcode-cleanup-arc-p30 push origin chore/cargo-fmt-cleanup-2026-10-13-p30
+```
+
+Note: a related but different branch also exists,
+`chore/cargo-fmt-cleanup-2026-10-13-p30-syn` @ `86aca259e`. That branch
+is **master + 2 P30 fixes** (no fmt cleanup commits). It was an early
+attempt that went to the wrong base. The `-p30` branch (without `-syn`)
+is the correct one with the fmt cleanup included.
+
 ### Option 3: open the 2 security PRs first, then rebase cleanup-arc
 
 The cleanest order. Land `security/rustsec-2026-0258-0285` and
