@@ -212,12 +212,22 @@ git update-ref refs/heads/master $(cat /tmp/jcode-master-pre-rebase.ref)
 
 ## Summary: 4 actions, all blocked on operator
 
-| Priority | Item | Action | Risk | Savings/Benefit |
-|----------|------|--------|------|-----------------|
-| **HIGH** | P30 | Open 2 PRs (URLs in P30 doc) | ZERO | 7 → 0 RUSTSEC vulns |
-| **HIGH** | P11 | `rm -rf PhenoShared/target` + `jcode/target` | LOW | 82 GB free |
-| MEDIUM | P26 | Pick sync strategy A/B/C/D | LOW | Reconcile local + origin |
-| LOW | P25c | Pick rescue branch disposition A/B/C/D | LOW | 3 orphan branches resolved |
+> **Updated 2026-10-14 03:15 — P26 is RESOLVED (rebase executed).**
+> Updated state: 3 actions still blocked on operator (P30 PRs, P11 disk cleanup, P25c rescue).
+
+| Priority | Item | Action | Risk | Savings/Benefit | Status |
+|----------|------|--------|------|-----------------|--------|
+| **HIGH** | P30 | Open 2 PRs (or 1 combined PR) | ZERO | 7 → 0 RUSTSEC vulns | **READY** — PR content pre-drafted in `PR-CONTENT.md` §PR #1, §PR #2, §PR #3 |
+| **HIGH** | P11 | `rm -rf PhenoShared/target` + `jcode/target` | LOW | 82 GB free | blocked (destructive) |
+| MEDIUM | P26 | Pick sync strategy A/B/C/D | LOW | Reconcile local + origin | **RESOLVED** — Strategy C rebase executed 2026-10-14 03:00; see Sync resolution section above |
+| LOW | P25c | Pick rescue branch disposition A/B/C/D | LOW | 3 orphan branches resolved | blocked (operator) |
+| LOW | t10 | `git push origin master` (jcode, 45 ahead / 0 behind) | LOW | ship 45 P30 docs commits | blocked (destructive) |
+| LOW | t11 | `git stash drop stash@{0}` (PlayCua forensics cleanup) | LOW | clear PlayCua P30 stash | blocked (destructive) |
+| LOW | 2 cherry-picks | `git cherry-pick b3130e026` onto jcode-upstream-sync + jcode-win-anchor | LOW | fix 5 quinn-proto vulns in 2 active worktrees | blocked (operator) |
+| LOW | 1 cherry-pick | `git push -u origin chore/cargo-fmt-cleanup-2026-10-13-p30` from /private/tmp/jcode-cleanup-arc-p30 | LOW | enable P30 combined PR path B | blocked (destructive) |
+| LOW | 1 rebase | rebase `chore/cargo-fmt-cleanup-2026-10-13-p30` onto current `origin/master` (12-behind post-rebase) | LOW | make combined PR diffable vs current master | blocked (destructive) |
+
+**Push playbook is at the top of this doc (see "For the operator's push" section).**
 
 ---
 
