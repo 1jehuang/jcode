@@ -114,6 +114,11 @@ fn test_ctrl_l_keeps_fresh_view_after_new_prompt_and_output() {
         );
     }
 
+    // At 100x20 the header can leave one transcript row, which the
+    // "Jump to bottom" pill covers once scrolled up. Check history in a
+    // terminal tall enough to show it.
+    terminal.backend_mut().resize(100, 40);
+    terminal.autoresize().unwrap();
     app.scroll_up(usize::MAX);
     let history = render_and_snap(&app, &mut terminal);
     assert!(history.contains("OLD PROMPT MARKER"), "{history}");
