@@ -406,10 +406,29 @@ Re-verified by computing the actual changed-package count via `comm -23` / `comm
 
 **All 12 security branches have real Cargo.lock diffs (2-17 changed packages).** The `quinn+rustls (h2 not bumped)` cluster is correct: those repos had h2 already at >=0.4.16 on main (the fix threshold for RUSTSEC-2026-0258), so the P30 commit only needed to bump quinn-proto and rustls. The `full 0.11.19/0.4.19/0.23.45` cluster also had h2 below 0.4.16 on main, so all three P30 crates needed bumping. Default branch detection via `git symbolic-ref refs/remotes/origin/HEAD` (fallback: `main`, then `master`).
 
-**Cross-repo `cargo audit` validation (re-run 2026-10-14 02:27):**
-- _full_AgilePlus (`security/quinn-proto-0.11.19-rustls-0.23.45-p30`): 0 errors, 7 allowed warnings (backoff, instant, paste, rustls-pemfile, unsafe-libyaml, faster-hex, chacha20) — all pre-existing, non-P30
-- _full_tooling (`security/quinn-proto-0.11.19-rustls-0.23.45-p30`): 0 errors, 3 allowed warnings (unsafe-libyaml, lru, chacha20) — all pre-existing, non-P30
-- PlayCua (`security/p30-cluster-clean` @ `a4731a5`): 4 errors (4× quick-xml pre-existing) + 3 allowed warnings (anyhow, event-listener, chacha20) — all non-P30
+**Cross-repo `cargo audit` validation (re-run 2026-10-14 02:27, expanded 02:39 to all 8 cross-repo branches):**
+
+| Repo / Branch | Audit errors | Audit warnings | P30 RUSTSEC? | Pre-existing non-P30 |
+|---|---|---|---|---|
+| `_full_AgilePlus` (`security/quinn-proto-0.11.19-rustls-0.23.45-p30` @ `5fb22f9`) | 0 | 7 (backoff, instant, paste, rustls-pemfile, unsafe-libyaml, faster-hex, chacha20) | ✓ none | all pre-existing unmaintained/unsound/yanked |
+| `_full_tooling` (`security/quinn-proto-0.11.19-rustls-0.23.45-p30` @ `baf43bf4`) | 0 | 3 (unsafe-libyaml, lru, chacha20) | ✓ none | all pre-existing |
+| PlayCua (`security/p30-cluster-clean` @ `a4731a5`) | 4 (4× quick-xml) | 3 (anyhow, event-listener, chacha20) | ✓ none | quick-xml 0.30/0.39 + others all pre-existing |
+| Apisync (`security/p30-cluster-clean` @ `4fda36c`) | 0 | (no warnings) | ✓ none | clean |
+| Tokn (`security/p30-cluster-clean` @ `1c40d77`) | 0 | (no warnings) | ✓ none | clean |
+| SessionLedger (`security/p30-cluster-clean` @ `9e2e76b`) | 0 | (no warnings) | ✓ none | clean |
+| zz-merge-unk-PhenoJourneys (`security/p30-cluster-clean` @ `62f323a`) | 3 (2× quick-xml, crossbeam-epoch) | (no warnings) | ✓ none | quick-xml 0.30/0.39 + crossbeam-epoch all pre-existing |
+| Tracera (audit-only, no security branch on this machine) | 0 | 6 (backoff, instant, paste, rustls-pemfile, chacha20, spin) | ✓ none | all pre-existing |
+| Agentora (audit-only) | 0 | 1 (chacha20) | ✓ none | pre-existing |
+| sharecli (audit-only) | 0 | 1 (unsafe-libyaml) | ✓ none | pre-existing |
+| Grapheon (audit-only) | 0 | 1 (chacha20) | ✓ none | pre-existing |
+
+**Coverage status (2026-10-14 02:39):** 11 of 13 P30-relevant repos audited. The 2 still missing:
+- `_full_HexaKit` — blocked on `KooshaPari/phenotype-router` GitHub 404 (no upstream to PR against)
+- HexaKit / zz-merge-unk-HexaKit — same 404; the in-tree snapshot has no upstream to audit against
+
+**All P30 RUSTSEC clearances are real**, not just lockfile-shaped: every branch (and every audit-only repo) returns 0 P30 errors from `cargo audit`. The pre-existing non-P30 findings (quick-xml 0.30/0.39, chacha20 yanked, lru unsound, etc.) are not part of the P30 fix scope and would not be introduced by `cargo update -p quinn-proto -p h2 -p rustls`.
+
+Audit worktrees at `$HOME/.jcode/scratch/p30-audit-2026-10-14/{Tracera,Agentora,sharecli,Grapheon}-audit/` were used and removed; the audit results are captured in this table.
 
 ### PlayCua branch contamination discovered (2026-10-14)
 
