@@ -19,7 +19,7 @@ pub(super) fn render_annotated_text(text: &str, annotations: Option<&Value>) -> 
         if annotation.get("type").and_then(Value::as_str) != Some("url_citation") {
             continue;
         }
-        let Some((start, end, link)) = (|| {
+        let Some((start, end, link, destination)) = (|| {
             let start = usize::try_from(annotation.get("start_index")?.as_u64()?).ok()?;
             let end = usize::try_from(annotation.get("end_index")?.as_u64()?).ok()?;
             let start = *boundaries.get(start)?;
@@ -59,10 +59,24 @@ pub(super) fn render_annotated_text(text: &str, annotations: Option<&Value>) -> 
                 .replace('<', "%3C")
                 .replace('>', "%3E")
                 .replace('\\', "%5C");
-            Some((start, end, format!("[{label}](<{destination}>)")))
+            Some((
+                start,
+                end,
+                format!("[{label}](<{destination}>)"),
+                destination,
+            ))
         })() else {
             continue;
         };
+        // The OAuth backend can already return a Markdown citation covering
+        // the annotation's URL. Keep that source rather than appending a
+        // second link to the same destination (observed in a live smoke test).
+        let cited = &text[start..end];
+        if cited.contains(&format!("]({destination})"))
+            || cited.contains(&format!("](<{destination}>)"))
+        {
+            continue;
+        }
         citations.push((start, end, link));
     }
     // Stable ordering preserves multiple sources sharing the same citation span.
@@ -168,6 +182,23 @@ mod tests {
             render_annotated_text(text, Some(&annotations)),
             "A sourced claim. [Source](<https://a.example>) Next sentence."
         );
+    }
+
+    #[test]
+    fn provider_rendered_markdown_citations_are_not_duplicated() {
+        for source in [
+            "([rust-lang.org](https://rust-lang.org/tools/install/))",
+            "[Install Rust](<https://rust-lang.org/tools/install/>)",
+        ] {
+            let text = format!("A sourced claim. {source}");
+            let annotations = json!([citation(
+                &text,
+                source,
+                "https://rust-lang.org/tools/install/",
+                "Install Rust"
+            )]);
+            assert_eq!(render_annotated_text(&text, Some(&annotations)), text);
+        }
     }
 
     #[test]
