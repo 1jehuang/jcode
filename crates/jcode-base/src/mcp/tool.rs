@@ -59,15 +59,7 @@ impl Tool for McpTool {
         // `intent` is a jcode-injected display-only parameter (see
         // ensure_intent_in_schema). Strip it before forwarding unless the
         // MCP server's own schema declares an `intent` property.
-        let server_declares_intent = self
-            .tool_def
-            .input_schema
-            .get("properties")
-            .and_then(|p| p.as_object())
-            .is_some_and(|p| p.contains_key("intent"));
-        if !server_declares_intent && let Some(object) = input.as_object_mut() {
-            object.remove("intent");
-        }
+        let _ = take_stray_intent(&mut input, Some(&self.tool_def.input_schema));
         // The escape hatch is jcode's, not the server's: read it, never forward it.
         let accept_large_output = take_accept_large_output(&mut input);
         let manager = self.manager.read().await;
@@ -136,6 +128,30 @@ pub fn take_accept_large_output(input: &mut Value) -> bool {
         Some(Value::String(raw)) => raw.trim().eq_ignore_ascii_case("true"),
         _ => false,
     }
+}
+
+/// Remove jcode's wrapper-injected `intent` note from MCP arguments, returning
+/// the removed value, if any.
+///
+/// jcode asks every tool for a display-only `intent` (see
+/// `ensure_intent_in_schema`), and small models sometimes copy that wrapper
+/// note into `arguments` instead of the wrapper level. Strict servers reject
+/// the whole call over the undeclared key, so both MCP dispatch surfaces
+/// (per-tool `mcp__server__tool` and the `mcp_call` wrapper) strip it here.
+///
+/// `server_schema` is the tool's own input schema from the MCP server, when
+/// known. An `intent` declared there is a real server parameter, so it is kept
+/// untouched; an unknown schema (`None`) means the field cannot be a declared
+/// one, so a present `intent` is treated as the stray wrapper note.
+pub fn take_stray_intent(arguments: &mut Value, server_schema: Option<&Value>) -> Option<Value> {
+    let declares_intent = server_schema
+        .and_then(|schema| schema.get("properties"))
+        .and_then(|properties| properties.as_object())
+        .is_some_and(|properties| properties.contains_key("intent"));
+    if declares_intent {
+        return None;
+    }
+    arguments.as_object_mut()?.remove("intent")
 }
 
 /// Longest tool name every supported provider accepts (OpenAI caps at 64,
@@ -291,9 +307,70 @@ pub fn create_mcp_tools_from_cached_many(
 
 #[cfg(test)]
 mod tests {
-    use super::{dispatch_name, dispatch_names};
+    use super::{dispatch_name, dispatch_names, take_stray_intent};
     use crate::mcp::protocol::McpToolDef;
     use serde_json::json;
+
+    #[test]
+    fn take_stray_intent_removes_stray_notes_from_strict_server_arguments() {
+        // A strict tool: `intent` is not a declared parameter, so the wrapper
+        // note must never reach the server.
+        let strict = json!({
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+            "additionalProperties": false
+        });
+        let mut args = json!({"query": "rustdoc", "intent": "look up std docs"});
+        let removed = take_stray_intent(&mut args, Some(&strict));
+        assert_eq!(removed, Some(json!("look up std docs")));
+        assert_eq!(args, json!({"query": "rustdoc"}));
+
+        // Any value shape counts as the note; the wrapper only asks for text.
+        let mut args = json!({"query": "rustdoc", "intent": {"goal": "docs"}});
+        assert_eq!(
+            take_stray_intent(&mut args, Some(&strict)),
+            Some(json!({"goal": "docs"}))
+        );
+        assert_eq!(args, json!({"query": "rustdoc"}));
+
+        // No note, no change.
+        let mut args = json!({"query": "rustdoc"});
+        assert_eq!(take_stray_intent(&mut args, Some(&strict)), None);
+        assert_eq!(args, json!({"query": "rustdoc"}));
+
+        // Non-object arguments pass through untouched.
+        let mut args = json!("just a string");
+        assert_eq!(take_stray_intent(&mut args, Some(&strict)), None);
+        assert_eq!(args, json!("just a string"));
+    }
+
+    #[test]
+    fn take_stray_intent_keeps_server_declared_intent() {
+        let declaring = json!({
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "intent": {"type": "string", "description": "custom"}
+            }
+        });
+        let mut args = json!({"query": "rustdoc", "intent": "real parameter"});
+        assert_eq!(take_stray_intent(&mut args, Some(&declaring)), None);
+        assert_eq!(
+            args,
+            json!({"query": "rustdoc", "intent": "real parameter"})
+        );
+    }
+
+    #[test]
+    fn take_stray_intent_with_unknown_schema_still_strips() {
+        // Without the server's schema the field cannot be a declared one, so
+        // a present `intent` is the stray note.
+        let mut args = json!({"query": "rustdoc", "intent": 7});
+        assert_eq!(take_stray_intent(&mut args, None), Some(json!(7)));
+        assert_eq!(args, json!({"query": "rustdoc"}));
+        assert_eq!(take_stray_intent(&mut json!({}), None), None);
+    }
 
     #[test]
     fn hyphenated_mcp_names_are_safe_for_the_standard_dispatcher() {

@@ -366,10 +366,11 @@ impl Tool for McpCallTool {
         // by spelling the original server/tool pair through mcp_call.
         let catalog = self.manager.read().await.searchable_tools().await;
         let names = crate::mcp::dispatch_names(&catalog);
-        let alias = catalog
+        let matched = catalog
             .iter()
             .zip(&names)
-            .find(|((server, tool), _)| server == &params.server && tool.name == params.tool)
+            .find(|((server, tool), _)| server == &params.server && tool.name == params.tool);
+        let alias = matched
             .map(|(_, alias)| alias.as_str())
             .unwrap_or(&dispatched_name);
         let allowed = self
@@ -425,6 +426,14 @@ impl Tool for McpCallTool {
         }
 
         let manager = self.manager.read().await;
+        // The wrapper asks the model for a display-only `intent` note (see
+        // ensure_intent_in_schema), and small models copy it into `arguments`.
+        // Mirror the per-tool path: never forward it to the MCP server unless
+        // the server's own schema declares `intent` as a real parameter. The
+        // SDK-override branch above keeps receiving arguments untouched, since
+        // in-process tools read the note themselves.
+        let server_schema = matched.map(|((_, tool_def), _)| &tool_def.input_schema);
+        let _ = crate::mcp::take_stray_intent(&mut params.arguments, server_schema);
         let result = manager
             .call_tool(&params.server, &params.tool, params.arguments)
             .await?;
@@ -1293,6 +1302,149 @@ mod tests {
         assert_eq!(
             compatible["properties"]["arguments"]["additionalProperties"],
             true
+        );
+    }
+
+    /// A minimal fake stdio MCP server (mirrors the pattern in jcode-base's
+    /// client tests) exposing two tools: a strict `echo_args` whose schema
+    /// does not declare `intent`, and an `intent_args` whose schema does.
+    /// Both echo the raw tools/call request back inside the result text, so
+    /// tests can assert exactly which arguments crossed the wire.
+    fn echo_server_config() -> crate::mcp::McpServerConfig {
+        let script = r#"
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"initialize"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"echo-srv","version":"0"}}}\n' "$id"
+      ;;
+    *'"tools/list"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"echo_args","description":"Echo arguments back","inputSchema":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"],"additionalProperties":false}},{"name":"intent_args","description":"Echo arguments back, accepting intent","inputSchema":{"type":"object","properties":{"query":{"type":"string"},"intent":{"type":"string"}},"required":["query"]}}]}}\n' "$id"
+      ;;
+    *'"tools/call"'*)
+      escaped=$(printf '%s' "$line" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":"REQ %s"}]}}\n' "$id" "$escaped"
+      ;;
+  esac
+done
+"#;
+        crate::mcp::McpServerConfig {
+            command: "/bin/sh".to_string(),
+            args: vec!["-c".to_string(), script.to_string()],
+            env: HashMap::new(),
+            shared: false,
+            transport: None,
+            url: None,
+            headers: HashMap::new(),
+            enabled: None,
+            disabled: None,
+            timeout_secs: Some(20),
+        }
+    }
+
+    fn echo_call_pair() -> (Arc<RwLock<crate::mcp::McpManager>>, McpCallTool) {
+        let mut config = crate::mcp::McpConfig::default();
+        config
+            .servers
+            .insert("echo-srv".to_string(), echo_server_config());
+        let manager = Arc::new(RwLock::new(crate::mcp::McpManager::with_config(config)));
+        let tool = McpCallTool::new(Arc::clone(&manager));
+        (manager, tool)
+    }
+
+    #[tokio::test]
+    async fn mcp_call_strips_the_stray_wrapper_intent_before_strict_servers() {
+        let (_manager, tool) = echo_call_pair();
+        const CALL_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+
+        // Cold call: the catalog is empty before the server has ever been
+        // connected; the note must still not cross the wire.
+        let cold = tokio::time::timeout(
+            CALL_BUDGET,
+            tool.execute(
+                json!({
+                    "server": "echo-srv",
+                    "tool": "echo_args",
+                    "arguments": {"query": "crates", "intent": "search the crates"}
+                }),
+                create_test_context(),
+            ),
+        )
+        .await
+        .expect("cold mcp_call must return, not hang")
+        .expect("cold mcp_call should succeed");
+        assert!(
+            cold.output.contains("crates"),
+            "echo must show the real arguments: {}",
+            cold.output
+        );
+        assert!(
+            !cold.output.contains("search the crates"),
+            "stray wrapper intent must not reach the server: {}",
+            cold.output
+        );
+
+        // Warm call: the server is connected, so the catalog carries the
+        // tool's own schema — which declares no `intent` property either.
+        let warm = tokio::time::timeout(
+            CALL_BUDGET,
+            tool.execute(
+                json!({
+                    "server": "echo-srv",
+                    "tool": "echo_args",
+                    "arguments": {"query": "manual", "intent": "read the manual"}
+                }),
+                create_test_context(),
+            ),
+        )
+        .await
+        .expect("warm mcp_call must return, not hang")
+        .expect("warm mcp_call should succeed");
+        assert!(
+            warm.output.contains("manual"),
+            "echo must show the real arguments: {}",
+            warm.output
+        );
+        assert!(
+            !warm.output.contains("read the manual"),
+            "cataloged strict tool must not receive the note: {}",
+            warm.output
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_call_keeps_intent_when_the_server_schema_declares_it() {
+        let (manager, tool) = echo_call_pair();
+        // Connect up front so the catalog carries the server's own schemas.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            manager
+                .read()
+                .await
+                .ensure_server_connected("echo-srv", std::time::Duration::from_secs(20)),
+        )
+        .await
+        .expect("connect must return, not hang")
+        .expect("echo server should connect");
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            tool.execute(
+                json!({
+                    "server": "echo-srv",
+                    "tool": "intent_args",
+                    "arguments": {"query": "rustdoc", "intent": "declared on purpose"}
+                }),
+                create_test_context(),
+            ),
+        )
+        .await
+        .expect("mcp_call must return, not hang")
+        .expect("mcp_call should succeed");
+        assert!(
+            result.output.contains("declared on purpose"),
+            "a server-declared `intent` is a real argument and must be forwarded: {}",
+            result.output
         );
     }
 
