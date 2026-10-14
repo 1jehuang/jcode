@@ -1,6 +1,8 @@
 # Cleanup-arc branch P30 status (2026-10-14)
 
-## Critical finding
+**STATUS 2026-10-14 04:00Z: SUPERSEDED.** The P30 fix is now on `master` (commits `7e773ef3f` and `3c2479126`, fast-forwarded and pushed). All 3 options below are now historical; the PRs they describe are no longer needed.
+
+## Critical finding (historical)
 
 **`chore/cargo-fmt-cleanup-2026-10-13` is NOT P30-clean.**
 
