@@ -131,7 +131,7 @@ fn novita_cli_aliases_select_the_builtin_profile() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[expect(
+#[allow(
     clippy::await_holding_lock,
     reason = "test env locks intentionally stay held across provider init to isolate process-global auth env"
 )]
@@ -201,7 +201,7 @@ async fn explicit_anthropic_api_choice_pins_api_key_over_available_oauth() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[expect(
+#[allow(
     clippy::await_holding_lock,
     reason = "test env locks intentionally stay held across provider init to isolate process-global auth env"
 )]
@@ -810,7 +810,7 @@ fn apply_login_provider_profile_env_preserves_compatible_profile_for_auto_spawn(
 }
 
 #[tokio::test]
-#[expect(
+#[allow(
     clippy::await_holding_lock,
     reason = "test env locks intentionally stay held across provider init to isolate process-global runtime env"
 )]
@@ -894,7 +894,7 @@ async fn init_provider_for_ollama_reapplies_local_compat_runtime_env_after_disab
 }
 
 #[tokio::test]
-#[expect(
+#[allow(
     clippy::await_holding_lock,
     reason = "test env locks intentionally stay held across provider init to isolate process-global runtime env"
 )]
@@ -992,7 +992,7 @@ id = "llama3.1:8b"
 }
 
 #[tokio::test]
-#[expect(
+#[allow(
     clippy::await_holding_lock,
     reason = "test env locks intentionally stay held across provider init to isolate process-global auth env"
 )]

@@ -540,14 +540,15 @@ async fn firefox_status(
     let status = crate::browser::ensure_browser_ready_noninteractive_for(target).await?;
     let mut metadata = status_metadata(provider, &status);
     let name = target.kind.display_name();
-    if status.responding && status.connected_browser.is_some() {
-        if let Err(error) = ready_in_requested_browser(&status, target.kind, true) {
-            metadata["ready"] = json!(false);
-            metadata["browser_mismatch"] = json!(true);
-            return Ok(ToolOutput::new(error.to_string())
-                .with_title("browser status")
-                .with_metadata(metadata));
-        }
+    if status.responding
+        && status.connected_browser.is_some()
+        && let Err(error) = ready_in_requested_browser(&status, target.kind, true)
+    {
+        metadata["ready"] = json!(false);
+        metadata["browser_mismatch"] = json!(true);
+        return Ok(ToolOutput::new(error.to_string())
+            .with_title("browser status")
+            .with_metadata(metadata));
     }
 
     if status.ready {

@@ -235,7 +235,7 @@ pub(super) async fn complete_live_turn(
             match result {
                 Ok(()) => {
                     update_member_status_with_report(
-                        &session_id,
+                        session_id,
                         "ready",
                         None,
                         completion_report,
@@ -254,7 +254,7 @@ pub(super) async fn complete_live_turn(
                         session_id, error
                     ));
                     update_member_status(
-                        &session_id,
+                        session_id,
                         "failed",
                         Some(truncate_detail(&error.to_string(), 120)),
                         &swarm.members,
