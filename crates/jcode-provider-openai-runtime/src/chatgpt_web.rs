@@ -75,6 +75,15 @@ impl ChatGptWebState {
                     }
                 }
                 Err(err) => {
+                    // The browser is only shown when ChatGPT needs the user to log in.
+                    let err = if web_catalog::needs_user_attention(&err) {
+                        let _ = web_catalog::show_chatgpt_for_login().await;
+                        err.context(
+                            "jcode opened chatgpt.com in your browser: log in there, then retry",
+                        )
+                    } else {
+                        err
+                    };
                     let _ = tx.send(Err(err)).await;
                 }
             }
@@ -128,8 +137,6 @@ impl ChatGptWebState {
         let result = async {
             send_phase(tx, jcode_message_types::ConnectionPhase::Authenticating).await?;
             wait_for_editor(tab_id).await?;
-            bridge_command("setActiveTab", json!({"tabId":tab_id,"focus":true})).await
-                .context("Failed to activate the owned Temporary Chat fork")?;
             let browser = WEB_BROWSER.try_with(Clone::clone)
                 .context("Connected browser context was lost before UI verification")?;
             web_catalog::wait_for_ui_execution(tab_id, &browser).await?;
@@ -218,13 +225,12 @@ async fn send_phase(
 }
 
 async fn open_chatgpt_tab() -> Result<(u64, String)> {
-    let source = bridge_command("getActiveTab", json!({}))
-        .await
-        .context("Failed to find a connected browser tab to duplicate for ChatGPT")?;
-    let source_tab_id = source
-        .get("tabId")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| anyhow::anyhow!("Browser bridge did not return an active tab id"))?;
+    // Fork jcode's own unfocused window, never the user's active tab: a fork is
+    // activated in its source's window.
+    let browser = WEB_BROWSER
+        .try_with(Clone::clone)
+        .context("Connected browser context was lost before opening ChatGPT")?;
+    let source_tab_id = web_catalog::background_anchor_tab(&browser).await?;
     let fork_name = next_owned_tab_name();
     let fork = match bridge_command(
         "fork",

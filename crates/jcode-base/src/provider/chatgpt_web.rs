@@ -269,7 +269,7 @@ pub fn cached_reasoning_options(model: &str) -> Vec<ChatGptWebReasoningOption> {
 /// Refresh through an existing installed bridge only. The spawned task owns
 /// the session lock and cleanup even if the caller drops its prefetch future.
 pub async fn refresh_models() -> Result<Vec<ChatGptWebModel>> {
-    tokio::spawn(async {
+    let result = tokio::spawn(async {
         let _session = lock_session().await;
         record_refresh(async {
             let initial = InstalledBridge { browser: None };
@@ -291,7 +291,13 @@ pub async fn refresh_models() -> Result<Vec<ChatGptWebModel>> {
         .await
     })
     .await
-    .context("ChatGPT catalog discovery task failed")?
+    .context("ChatGPT catalog discovery task failed")?;
+    if let Err(error) = &result
+        && needs_user_attention(error)
+    {
+        let _ = show_chatgpt_for_login().await;
+    }
+    result
 }
 
 /// Store a successful observation, or annotate the previous one with the
@@ -371,10 +377,95 @@ impl BridgeTransport for InstalledBridge {
     }
 }
 
+/// Marker URL of the unfocused window jcode keeps for ChatGPT web work. Forks
+/// of this tab are created and activated inside that window, so turns never
+/// switch or raise a tab in the user's own windows.
+pub const BACKGROUND_ANCHOR_URL: &str = "about:blank#jcode-chatgpt-web";
+
+async fn background_anchor_with_bridge(bridge: &impl BridgeTransport) -> Result<u64> {
+    use serde_json::{Value, json};
+    let listing = bridge.command("listTabs", json!({})).await?;
+    let existing = listing
+        .get("windows")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|window| window.get("tabs").and_then(Value::as_array))
+        .flatten()
+        .find(|tab| tab.get("url").and_then(Value::as_str) == Some(BACKGROUND_ANCHOR_URL))
+        .and_then(|tab| tab.get("tabId").and_then(Value::as_u64));
+    if let Some(tab_id) = existing {
+        return Ok(tab_id);
+    }
+    let created = bridge
+        .command(
+            "newSession",
+            json!({"url": BACKGROUND_ANCHOR_URL, "window": true, "focus": false, "wait": false}),
+        )
+        .await
+        .context("Failed to open jcode's background ChatGPT window")?;
+    // newSession makes its tab the bridge's default target; hand that back.
+    if let Some(previous) = listing.get("activeTabId").and_then(Value::as_u64) {
+        let _ = bridge
+            .command("setActiveTab", json!({"tabId": previous}))
+            .await;
+    }
+    created
+        .get("tabId")
+        .and_then(Value::as_u64)
+        .context("Browser bridge did not return the background ChatGPT tab")
+}
+
+/// Tab that ChatGPT web turns fork from, in jcode's own unfocused window.
+pub async fn background_anchor_tab(browser: &str) -> Result<u64> {
+    background_anchor_with_bridge(&InstalledBridge {
+        browser: Some(browser.to_string()),
+    })
+    .await
+}
+
+/// True when ChatGPT is waiting on the user (signed out, or an access or
+/// onboarding prompt), the only time jcode shows the browser.
+pub fn needs_user_attention(error: &anyhow::Error) -> bool {
+    let text = format!("{error:#}");
+    text.contains("ChatGPT is signed out")
+        || text.contains("waiting for an onboarding or access choice")
+}
+
+static LOGIN_SHOWN_AT: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+/// Bring chatgpt.com to the front so the user can log in. At most once every
+/// five minutes, so retries do not keep opening tabs.
+pub async fn show_chatgpt_for_login() -> Result<()> {
+    {
+        let mut shown = LOGIN_SHOWN_AT.lock().unwrap_or_else(|p| p.into_inner());
+        if shown.is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(300)) {
+            return Ok(());
+        }
+        *shown = Some(std::time::Instant::now());
+    }
+    let bridge = InstalledBridge { browser: None };
+    let opened = bridge
+        .command(
+            "newSession",
+            serde_json::json!({"url": "https://chatgpt.com/", "focus": true}),
+        )
+        .await?;
+    if let Some(tab_id) = opened.get("tabId").and_then(serde_json::Value::as_u64) {
+        bridge
+            .command(
+                "setActiveTab",
+                serde_json::json!({"tabId": tab_id, "focus": true}),
+            )
+            .await?;
+    }
+    Ok(())
+}
+
 const UI_EXECUTION_READINESS_SCRIPT: &str =
     "return {hostname:location.hostname, ready:document.readyState === 'complete'};";
 
-/// Prove read-only execution readiness in an already focused, owned ChatGPT tab.
+/// Prove read-only execution readiness in an owned ChatGPT tab.
 pub async fn wait_for_ui_execution(tab_id: u64, browser: &str) -> Result<()> {
     wait_for_ui_execution_with_bridge(
         &InstalledBridge {
@@ -443,11 +534,7 @@ async fn wait_for_ui_execution_with_bridge(
 
 async fn discover_with_bridge(bridge: &impl BridgeTransport) -> Result<Snapshot> {
     use serde_json::json;
-    let source = bridge.command("getActiveTab", json!({})).await?;
-    let source_id = source
-        .get("tabId")
-        .and_then(serde_json::Value::as_u64)
-        .context("Browser bridge did not return an active tab ID")?;
+    let source_id = background_anchor_with_bridge(bridge).await?;
     let fork_name = format!("jcode-chatgpt-catalog-{}", uuid::Uuid::new_v4());
     let mut owned_tab = None;
     let result = async {
@@ -462,10 +549,6 @@ async fn discover_with_bridge(bridge: &impl BridgeTransport) -> Result<Snapshot>
             "selector":"[contenteditable=true][data-composer-markdown], [contenteditable=true][aria-label='Chat with ChatGPT']",
             "timeout":20_000
         })).await.context("ChatGPT composer did not load in the owned temporary fork")?;
-        // Chromium's existing bridge execution capability may require an
-        // active target. Never focus or activate the source/user tab here.
-        bridge.command("setActiveTab", json!({"tabId":tab_id,"focus":true})).await
-            .context("Failed to activate the owned temporary ChatGPT fork")?;
         wait_for_ui_execution_with_bridge(bridge, tab_id).await?;
         let script = format!("const request={};\n{}", json!({"op":"discover"}), UI_SCRIPT);
         let evaluated = bridge.command("evaluate", json!({"tabId":tab_id,"script":script})).await?;
@@ -637,8 +720,18 @@ mod tests {
                 anyhow::bail!("injected {action} failure");
             }
             Ok(match action {
-                "getActiveTab" => json!({"tabId":7}),
-                "fork" => json!({"forks":[{"tabId":8}]}),
+                "listTabs" => json!({"activeTabId":3,"windows":[{"windowId":1,"focused":true,
+                    "tabs":[{"tabId":3,"url":"https://example.com/","active":true}]}]}),
+                "newSession" => {
+                    assert_eq!(params["url"], BACKGROUND_ANCHOR_URL);
+                    assert_eq!(params["window"], true);
+                    assert_eq!(params["focus"], false);
+                    json!({"tabId":7})
+                }
+                "fork" => {
+                    assert_eq!(params["tabId"], 7, "turns fork jcode's background tab");
+                    json!({"forks":[{"tabId":8}]})
+                }
                 "waitFor" => {
                     assert_eq!(params["timeout"], 20_000);
                     assert!(
@@ -650,9 +743,10 @@ mod tests {
                     json!({"ok":true})
                 }
                 "setActiveTab" => {
-                    assert_eq!(params["tabId"], 8);
-                    assert_eq!(params["focus"], true);
-                    json!({"tabId":8})
+                    // Only restores the bridge's default tab, never raises a window.
+                    assert_eq!(params["tabId"], 3);
+                    assert!(params.get("focus").is_none());
+                    json!({"tabId":3})
                 }
                 "navigate" => {
                     assert!(
@@ -728,13 +822,39 @@ mod tests {
         assert_eq!(bridge.actions.lock().unwrap().last().unwrap(), "killFork");
     }
 
+    struct ListingBridge(serde_json::Value, std::sync::Mutex<Vec<String>>);
+
+    #[async_trait::async_trait]
+    impl BridgeTransport for ListingBridge {
+        async fn command(&self, action: &str, _: serde_json::Value) -> Result<serde_json::Value> {
+            self.1.lock().unwrap().push(action.to_string());
+            match action {
+                "listTabs" => Ok(self.0.clone()),
+                _ => anyhow::bail!("unexpected {action}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn chatgpt_web_reuses_its_background_window_instead_of_opening_another() {
+        let bridge = ListingBridge(
+            json!({"activeTabId":3,"windows":[
+                {"windowId":1,"tabs":[{"tabId":3,"url":"https://example.com/"}]},
+                {"windowId":2,"tabs":[{"tabId":9,"url":BACKGROUND_ANCHOR_URL}]}]}),
+            Default::default(),
+        );
+        assert_eq!(background_anchor_with_bridge(&bridge).await.unwrap(), 9);
+        assert_eq!(*bridge.1.lock().unwrap(), ["listTabs"]);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn chatgpt_web_discovery_always_cleans_owned_fork() {
         for fail in [
             "",
             "navigate",
             "waitFor",
-            "setActiveTab",
+            "listTabs",
+            "newSession",
             "evaluate",
             "killFork",
         ] {
@@ -744,15 +864,20 @@ mod tests {
             };
             let result = discover_with_bridge(&bridge).await;
             let actions = bridge.actions.lock().unwrap();
-            assert!(
-                actions.iter().any(|a| a == "killFork"),
-                "{fail}: {actions:?}"
-            );
+            if matches!(fail, "listTabs" | "newSession") {
+                // No background tab, so no fork was created and none can leak.
+                assert!(!actions.iter().any(|a| a == "fork"), "{fail}: {actions:?}");
+            } else {
+                assert!(
+                    actions.iter().any(|a| a == "killFork"),
+                    "{fail}: {actions:?}"
+                );
+            }
             assert_eq!(result.is_ok(), fail.is_empty());
             if fail.is_empty() {
                 assert!(
-                    actions.iter().position(|a| a == "setActiveTab").unwrap()
-                        < actions.iter().position(|a| a == "evaluate").unwrap()
+                    actions.iter().position(|a| a == "newSession").unwrap()
+                        < actions.iter().position(|a| a == "fork").unwrap()
                 );
             }
             if fail == "killFork" {
