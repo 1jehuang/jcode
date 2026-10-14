@@ -432,7 +432,49 @@ impl Tool for McpCallTool {
         // the server's own schema declares `intent` as a real parameter. The
         // SDK-override branch above keeps receiving arguments untouched, since
         // in-process tools read the note themselves.
+        //
+        // A catalog miss on a server that has not connected yet is NOT
+        // evidence about the schema: `searchable_tools` only sees live handles
+        // and the on-disk cache, while `call_tool` below still performs the
+        // connect-on-first-call. Stripping on that miss would delete a real
+        // `intent` the server requires and reject an otherwise valid first
+        // call (review round 1, P1). So resolve the schema BEFORE stripping —
+        // the same bounded connect the call below would spend anyway — and
+        // re-read the catalog. A server that cannot be reached keeps the
+        // strip fallback; the call below surfaces the connect error either
+        // way, so no failure mode is masked.
         let server_schema = matched.map(|((_, tool_def), _)| &tool_def.input_schema);
+        // Hoisted so the re-read schema can borrow them past the branch that
+        // fills them.
+        let (cold_catalog, cold_names);
+        let server_schema = match server_schema {
+            Some(schema) => Some(schema),
+            None => {
+                if manager
+                    .ensure_server_connected(
+                        &params.server,
+                        // Matches the manager's private CONNECT_ON_CALL_TIMEOUT:
+                        // never wait longer for the schema than the real call
+                        // would wait for the connect itself.
+                        std::time::Duration::from_secs(30),
+                    )
+                    .await
+                    .is_ok()
+                {
+                    cold_catalog = manager.searchable_tools().await;
+                    cold_names = crate::mcp::dispatch_names(&cold_catalog);
+                    cold_catalog
+                        .iter()
+                        .zip(&cold_names)
+                        .find(|((server, tool), _)| {
+                            server == &params.server && tool.name == params.tool
+                        })
+                        .map(|((_, tool_def), _)| &tool_def.input_schema)
+                } else {
+                    None
+                }
+            }
+        };
         let _ = crate::mcp::take_stray_intent(&mut params.arguments, server_schema);
         let result = manager
             .call_tool(&params.server, &params.tool, params.arguments)
@@ -1306,10 +1348,14 @@ mod tests {
     }
 
     /// A minimal fake stdio MCP server (mirrors the pattern in jcode-base's
-    /// client tests) exposing two tools: a strict `echo_args` whose schema
-    /// does not declare `intent`, and an `intent_args` whose schema does.
-    /// Both echo the raw tools/call request back inside the result text, so
-    /// tests can assert exactly which arguments crossed the wire.
+    /// client tests) exposing three tools: a strict `echo_args` whose schema
+    /// does not declare `intent`, an `intent_args` whose schema declares it
+    /// optional, and a `strict_intent` whose schema REQUIRES it (the fake
+    /// answers a -32602 error when the note is missing, like a real strict
+    /// server would). Echoing tools return the raw tools/call request inside
+    /// the result text, so tests can assert exactly which arguments crossed
+    /// the wire.
+    #[cfg(unix)]
     fn echo_server_config() -> crate::mcp::McpServerConfig {
         let script = r#"
 while IFS= read -r line; do
@@ -1319,11 +1365,26 @@ while IFS= read -r line; do
       printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"echo-srv","version":"0"}}}\n' "$id"
       ;;
     *'"tools/list"'*)
-      printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"echo_args","description":"Echo arguments back","inputSchema":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"],"additionalProperties":false}},{"name":"intent_args","description":"Echo arguments back, accepting intent","inputSchema":{"type":"object","properties":{"query":{"type":"string"},"intent":{"type":"string"}},"required":["query"]}}]}}\n' "$id"
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"echo_args","description":"Echo arguments back","inputSchema":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"],"additionalProperties":false}},{"name":"intent_args","description":"Echo arguments back, accepting intent","inputSchema":{"type":"object","properties":{"query":{"type":"string"},"intent":{"type":"string"}},"required":["query"]}},{"name":"strict_intent","description":"Echo arguments back, requiring intent","inputSchema":{"type":"object","properties":{"query":{"type":"string"},"intent":{"type":"string"}},"required":["query","intent"]}}]}}\n' "$id"
       ;;
     *'"tools/call"'*)
-      escaped=$(printf '%s' "$line" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')
-      printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":"REQ %s"}]}}\n' "$id" "$escaped"
+      case "$line" in
+        *'"strict_intent"'*)
+          case "$line" in
+            *'"intent"'*)
+              escaped=$(printf '%s' "$line" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')
+              printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":"REQ %s"}]}}\n' "$id" "$escaped"
+              ;;
+            *)
+              printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32602,"message":"missing required parameter: intent"}}\n' "$id"
+              ;;
+          esac
+          ;;
+        *)
+          escaped=$(printf '%s' "$line" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')
+          printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":"REQ %s"}]}}\n' "$id" "$escaped"
+          ;;
+      esac
       ;;
   esac
 done
@@ -1342,6 +1403,7 @@ done
         }
     }
 
+    #[cfg(unix)]
     fn echo_call_pair() -> (Arc<RwLock<crate::mcp::McpManager>>, McpCallTool) {
         let mut config = crate::mcp::McpConfig::default();
         config
@@ -1352,6 +1414,7 @@ done
         (manager, tool)
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn mcp_call_strips_the_stray_wrapper_intent_before_strict_servers() {
         let (_manager, tool) = echo_call_pair();
@@ -1412,6 +1475,7 @@ done
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn mcp_call_keeps_intent_when_the_server_schema_declares_it() {
         let (manager, tool) = echo_call_pair();
@@ -1445,6 +1509,40 @@ done
             result.output.contains("declared on purpose"),
             "a server-declared `intent` is a real argument and must be forwarded: {}",
             result.output
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mcp_call_resolves_a_cold_servers_declared_intent_before_stripping() {
+        // Review round 1, P1: a server that has never connected has an empty
+        // catalog, and stripping on that miss deleted `arguments.intent`
+        // before the connect-on-first-call ever fetched the server's own
+        // schema — a tool that declares `intent` rejected its first, otherwise
+        // valid call. The strict_intent fake answers -32602 when the note is
+        // missing, so the old behavior fails this test instead of passing
+        // vacuously.
+        let (_manager, tool) = echo_call_pair();
+        const CALL_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
+
+        let cold = tokio::time::timeout(
+            CALL_BUDGET,
+            tool.execute(
+                json!({
+                    "server": "echo-srv",
+                    "tool": "strict_intent",
+                    "arguments": {"query": "crates", "intent": "cold but declared"}
+                }),
+                create_test_context(),
+            ),
+        )
+        .await
+        .expect("cold mcp_call must return, not hang")
+        .expect("a first call whose intent the server declares should succeed");
+        assert!(
+            cold.output.contains("cold but declared"),
+            "the declared intent must cross the wire on the first call: {}",
+            cold.output
         );
     }
 
