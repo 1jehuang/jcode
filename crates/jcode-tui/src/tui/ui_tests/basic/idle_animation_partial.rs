@@ -370,6 +370,10 @@ fn a_full_screen_overlay_stops_the_decorative_animation_cadence() {
 /// shrinks to zero rows, so nothing animates there either.
 #[test]
 fn animation_cadence_implies_the_renderer_published_animated_rows() {
+    // Render and cadence both read JCODE_IDLE_ANIMATION via config; siblings
+    // flip it under the env lock, so hold it too (env before render lock).
+    let _env = crate::storage::lock_test_env();
+    crate::config::invalidate_config_cache();
     let _lock = viewport_snapshot_test_lock();
     pin_full_tier();
     clear_flicker_frame_history_for_tests();
