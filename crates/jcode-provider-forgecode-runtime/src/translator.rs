@@ -304,6 +304,7 @@ fn parse_content_blocks(content: &Value) -> Vec<SdkContentBlock> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::CliMessage;
     use serde_json::json;
 
     #[test]
@@ -318,11 +319,27 @@ mod tests {
 
     #[test]
     fn test_parse_content_blocks_array() {
+        // The `SdkContentBlock` enum has a `#[serde(other)] Other` variant
+        // that catches any content type not explicitly modelled (added when
+        // the parser was made permissive to ignore unknown CLI output types
+        // like `thinking`, `redacted_thinking`, image blocks, etc.). The
+        // previous assertion (len == 1) predated the `Other` variant and
+        // was masked because the test crate failed to compile (E0422
+        // `CliMessage` not in scope) — see the CliMessage import fix that
+        // unblocks the test build.
         let blocks = parse_content_blocks(&json!([
             {"type": "text", "text": "hi"},
             {"type": "other_thing"}
         ]));
-        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks.len(), 2);
+        match &blocks[0] {
+            SdkContentBlock::Text { text } => assert_eq!(text, "hi"),
+            _ => panic!("Expected Text block at index 0"),
+        }
+        match &blocks[1] {
+            SdkContentBlock::Other => {}
+            _ => panic!("Expected Other block at index 1"),
+        }
     }
 
     #[test]
