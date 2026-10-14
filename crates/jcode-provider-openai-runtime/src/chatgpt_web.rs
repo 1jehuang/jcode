@@ -43,8 +43,11 @@ impl ChatGptWebState {
         effort: Option<&str>,
     ) -> Result<EventStream> {
         let prompt = build_web_prompt(messages, tools, system)?;
-        let model = model.to_string();
-        let effort = effort.map(str::to_string);
+        // Sessions saved with a pre-discovery fixed ID keep their model and Power.
+        let (model, effort) = match web_catalog::legacy_web_alias(model) {
+            Some((family, power)) => (family.to_string(), Some(power.to_string())),
+            None => (model.to_string(), effort.map(str::to_string)),
+        };
         let advertised_tools: Vec<String> = tools.iter().map(|tool| tool.name.clone()).collect();
         let (tx, rx) = mpsc::channel(128);
 

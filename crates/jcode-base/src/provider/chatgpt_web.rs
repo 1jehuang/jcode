@@ -416,6 +416,21 @@ async fn background_anchor_with_bridge(bridge: &impl BridgeTransport) -> Result<
         .context("Browser bridge did not return the background ChatGPT tab")
 }
 
+/// Fixed web IDs jcode used before model discovery (gpt-5.6-pro[web] since the
+/// first web route, the others briefly on 2026-10-14), mapped to the
+/// discovered model family and its Power level so saved sessions keep working.
+pub fn legacy_web_alias(model: &str) -> Option<(&'static str, &'static str)> {
+    Some(match model.trim() {
+        "gpt-6-pro[web]" => ("gpt-6[web]", "max"),
+        "gpt-6-thinking[web]" => ("gpt-6[web]", "medium"),
+        "gpt-6-instant[web]" => ("gpt-6[web]", "none"),
+        "gpt-5.6-pro[web]" => ("gpt-5.6-sol[web]", "max"),
+        "gpt-5.6-thinking[web]" => ("gpt-5.6-sol[web]", "medium"),
+        "gpt-5.6-instant[web]" => ("gpt-5.6-sol[web]", "none"),
+        _ => return None,
+    })
+}
+
 /// Tab that ChatGPT web turns fork from, in jcode's own unfocused window.
 pub async fn background_anchor_tab(browser: &str) -> Result<u64> {
     background_anchor_with_bridge(&InstalledBridge {
@@ -832,6 +847,37 @@ mod tests {
                 "listTabs" => Ok(self.0.clone()),
                 _ => anyhow::bail!("unexpected {action}"),
             }
+        }
+    }
+
+    #[test]
+    fn chatgpt_web_legacy_fixed_ids_map_to_their_family_and_power() {
+        assert_eq!(
+            legacy_web_alias("gpt-6-thinking[web]"),
+            Some(("gpt-6[web]", "medium"))
+        );
+        assert_eq!(
+            legacy_web_alias(crate::provider::CHATGPT_WEB_MODEL),
+            Some(("gpt-5.6-sol[web]", "max"))
+        );
+        assert_eq!(legacy_web_alias("gpt-6[web]"), None);
+        for (legacy, (family, _)) in [
+            "gpt-6-pro[web]",
+            "gpt-6-instant[web]",
+            "gpt-5.6-thinking[web]",
+            "gpt-5.6-instant[web]",
+        ]
+        .into_iter()
+        .filter_map(|id| legacy_web_alias(id).map(|alias| (id, alias)))
+        {
+            assert!(jcode_provider_core::is_chatgpt_web_model(legacy));
+            assert_eq!(
+                jcode_provider_core::normalize_chatgpt_web_model_label(
+                    family.trim_end_matches("[web]")
+                )
+                .as_deref(),
+                Some(family)
+            );
         }
     }
 
