@@ -775,6 +775,87 @@ pub fn strip_large_images_in_contents(
     stripped
 }
 
+/// Inline tool-result images (computer-use and browser screenshots) are decayed
+/// once the transcript holds more than this many of them. See
+/// [`decay_old_tool_images_in_contents`].
+pub const TOOL_IMAGE_DECAY_TRIGGER_COUNT: usize = 12;
+
+/// Inline tool-result images are also decayed once their combined base64
+/// payload exceeds this many characters.
+pub const TOOL_IMAGE_DECAY_TRIGGER_CHARS: usize = 48 * 1024 * 1024;
+
+/// After decay, at most this many of the newest tool-result images keep their
+/// inline data. The gap to the trigger count is hysteresis: decay rewrites
+/// older messages (invalidating provider prompt caches and forcing a full
+/// snapshot write), so it only runs every few screenshots instead of on each.
+pub const TOOL_IMAGE_DECAY_KEEP_COUNT: usize = 6;
+
+/// After decay, the retained tool-result images fit within this many base64
+/// characters, except that the newest image is always kept regardless of size.
+pub const TOOL_IMAGE_DECAY_KEEP_CHARS: usize = 24 * 1024 * 1024;
+
+/// Bound the inline image payload that tool results (screenshots from the
+/// computer and browser tools) accumulate in a transcript.
+///
+/// Only images in messages that carry a `ToolResult` are considered, so images
+/// the user pasted are untouched. Nothing happens until the tool images exceed
+/// [`TOOL_IMAGE_DECAY_TRIGGER_COUNT`] or [`TOOL_IMAGE_DECAY_TRIGGER_CHARS`].
+/// Then every tool image except the newest [`TOOL_IMAGE_DECAY_KEEP_COUNT`]
+/// (that also fit within [`TOOL_IMAGE_DECAY_KEEP_CHARS`]) is replaced with a
+/// short text marker. The newest image always survives so the model still sees
+/// the screenshot it just asked for.
+///
+/// Returns the number of images replaced.
+pub fn decay_old_tool_images_in_contents(contents: &mut [&mut Vec<ContentBlock>]) -> usize {
+    let mut images: Vec<(usize, usize, usize)> = Vec::new();
+    let mut total: usize = 0;
+    for (ci, content) in contents.iter().enumerate() {
+        if !content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
+        {
+            continue;
+        }
+        for (bi, block) in content.iter().enumerate() {
+            if let ContentBlock::Image { data, .. } = block {
+                images.push((ci, bi, data.len()));
+                total = total.saturating_add(data.len());
+            }
+        }
+    }
+
+    if images.len() <= TOOL_IMAGE_DECAY_TRIGGER_COUNT && total <= TOOL_IMAGE_DECAY_TRIGGER_CHARS {
+        return 0;
+    }
+
+    let mut kept_count = 0usize;
+    let mut kept_chars = 0usize;
+    let mut stripped = 0usize;
+    for (ci, bi, payload_len) in images.into_iter().rev() {
+        let keep = kept_count == 0
+            || (kept_count < TOOL_IMAGE_DECAY_KEEP_COUNT
+                && kept_chars.saturating_add(payload_len) <= TOOL_IMAGE_DECAY_KEEP_CHARS);
+        if keep {
+            kept_count += 1;
+            kept_chars = kept_chars.saturating_add(payload_len);
+            continue;
+        }
+        let block = &mut contents[ci][bi];
+        if let ContentBlock::Image { media_type, data } = block {
+            let text = format!(
+                "[Older tool screenshot omitted from history to bound transcript size: media_type={media_type}, original_base64_chars={}. Rely on adjacent tool text, or take a new screenshot if visual details are needed.]",
+                data.len()
+            );
+            *block = ContentBlock::Text {
+                text,
+                cache_control: None,
+            };
+            stripped += 1;
+        }
+    }
+    stripped
+}
+
 pub fn emergency_truncated_tool_result(content: &str, max_chars: usize) -> String {
     let original_len = content.len();
     let keep_head = max_chars / 2;
@@ -1143,6 +1224,100 @@ mod tests {
             assert!(text.contains("Image omitted during request-size recovery"));
             assert!(text.contains("original_base64_chars=1000"));
         }
+    }
+
+    fn tool_image_msg(data_len: usize) -> Message {
+        Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: "call".to_string(),
+                    content: "Captured main display".to_string(),
+                    is_error: None,
+                },
+                ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: "a".repeat(data_len),
+                },
+            ],
+            timestamp: None,
+            tool_duration_ms: None,
+        }
+    }
+
+    fn decay(messages: &mut [Message]) -> usize {
+        let mut contents: Vec<&mut Vec<ContentBlock>> =
+            messages.iter_mut().map(|m| &mut m.content).collect();
+        decay_old_tool_images_in_contents(&mut contents)
+    }
+
+    fn is_image(message: &Message) -> bool {
+        message
+            .content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::Image { .. }))
+    }
+
+    #[test]
+    fn tool_image_decay_waits_for_trigger_then_keeps_newest() {
+        let mut messages: Vec<Message> = (0..TOOL_IMAGE_DECAY_TRIGGER_COUNT)
+            .map(|_| tool_image_msg(10))
+            .collect();
+        assert_eq!(
+            decay(&mut messages),
+            0,
+            "at the trigger count nothing decays"
+        );
+
+        messages.push(tool_image_msg(10));
+        let total = messages.len();
+        assert_eq!(decay(&mut messages), total - TOOL_IMAGE_DECAY_KEEP_COUNT);
+        for (index, message) in messages.iter().enumerate() {
+            assert_eq!(
+                is_image(message),
+                index >= total - TOOL_IMAGE_DECAY_KEEP_COUNT
+            );
+            // The tool_result itself is preserved for tool_use pairing.
+            assert!(matches!(
+                message.content[0],
+                ContentBlock::ToolResult { .. }
+            ));
+        }
+        let ContentBlock::Text { text, .. } = &messages[0].content[1] else {
+            panic!("decayed image must become a text marker");
+        };
+        assert!(text.contains("Older tool screenshot omitted"));
+        assert!(text.contains("original_base64_chars=10"));
+        // Stable after decay: nothing more to do until the trigger is hit again.
+        assert_eq!(decay(&mut messages), 0);
+    }
+
+    #[test]
+    fn tool_image_decay_bounds_bytes_but_keeps_newest_huge_image() {
+        let huge = TOOL_IMAGE_DECAY_KEEP_CHARS + 1;
+        let mut messages = vec![
+            tool_image_msg(huge),
+            tool_image_msg(huge),
+            tool_image_msg(huge),
+        ];
+        assert_eq!(decay(&mut messages), 2);
+        assert!(!is_image(&messages[0]));
+        assert!(!is_image(&messages[1]));
+        assert!(
+            is_image(&messages[2]),
+            "newest screenshot must still be sent"
+        );
+    }
+
+    #[test]
+    fn tool_image_decay_ignores_user_pasted_images() {
+        let mut messages = vec![image_msg(10)];
+        messages.extend((0..TOOL_IMAGE_DECAY_TRIGGER_COUNT + 5).map(|_| tool_image_msg(10)));
+        decay(&mut messages);
+        assert!(
+            is_image(&messages[0]),
+            "user images are not tool screenshots"
+        );
     }
 
     #[test]

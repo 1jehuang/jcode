@@ -1845,6 +1845,7 @@ async fn auto_mode_falls_back_to_api_key_when_oauth_is_expired() {
         provider.credential_mode_snapshot(),
         AnthropicCredentialMode::Auto
     );
+    assert_eq!(provider.active_resolved_credential(), None);
 
     let (token, is_oauth) = provider.get_access_token().await.unwrap();
     assert_eq!(token, "test-anthropic-api-key");
@@ -1852,6 +1853,14 @@ async fn auto_mode_falls_back_to_api_key_when_oauth_is_expired() {
         !is_oauth,
         "automatic fallback must use API-key request semantics"
     );
+    assert_eq!(
+        provider.active_resolved_credential(),
+        Some(jcode_provider_core::ResolvedCredential::ApiKey),
+        "Auto must expose the actual API fallback rather than credential presence"
+    );
+    assert_eq!(provider.fork().active_resolved_credential(), None);
+    provider.invalidate_credentials().await;
+    assert_eq!(provider.active_resolved_credential(), None);
 }
 
 #[tokio::test]
@@ -1877,6 +1886,10 @@ async fn explicit_oauth_mode_does_not_silently_fall_back_to_api_key() {
     assert_eq!(
         provider.credential_mode_snapshot(),
         AnthropicCredentialMode::OAuth
+    );
+    assert_eq!(
+        provider.active_resolved_credential(),
+        Some(jcode_provider_core::ResolvedCredential::Oauth)
     );
 
     let error = provider.get_access_token().await.unwrap_err().to_string();
@@ -2705,21 +2718,6 @@ async fn spawn_fake_messages_api(
     (format!("http://{addr}/v1/messages?beta=true"), seen)
 }
 
-struct OAuthUrlOverride;
-
-impl OAuthUrlOverride {
-    fn set(url: &str) -> Self {
-        *OAUTH_API_URL_OVERRIDE.lock().unwrap() = Some(url.to_string());
-        Self
-    }
-}
-
-impl Drop for OAuthUrlOverride {
-    fn drop(&mut self) {
-        *OAUTH_API_URL_OVERRIDE.lock().unwrap() = None;
-    }
-}
-
 fn minimal_oauth_request() -> ApiRequest {
     ApiRequest {
         model: "claude-opus-4-8".to_string(),
@@ -2737,10 +2735,15 @@ fn minimal_oauth_request() -> ApiRequest {
 }
 
 /// Start `run_stream_with_retries` exactly as `complete()` does, on the
-/// token currently stored.
-async fn start_oauth_stream(provider: &AnthropicProvider) -> mpsc::Receiver<Result<StreamEvent>> {
+/// token currently stored, against the fake OAuth endpoint `url`.
+async fn start_oauth_stream(
+    provider: &AnthropicProvider,
+    url: &str,
+) -> mpsc::Receiver<Result<StreamEvent>> {
     let (token, is_oauth) = provider.get_access_token().await.unwrap();
     assert!(is_oauth);
+    let mut transport = provider.direct_transport.clone();
+    transport.oauth_api_url = Some(url.to_string());
     let (tx, rx) = mpsc::channel(100);
     tokio::spawn(run_stream_with_retries(
         provider.client.clone(),
@@ -2749,10 +2752,11 @@ async fn start_oauth_stream(provider: &AnthropicProvider) -> mpsc::Receiver<Resu
         minimal_oauth_request(),
         tx,
         Arc::clone(&provider.credentials),
+        provider.oauth_account_label(),
         "claude-opus-4-8".to_string(),
         provider.oauth_session_id.clone(),
         Arc::clone(&provider.model),
-        provider.direct_transport.clone(),
+        transport,
         reasoning_request::RetrySettings::from_provider(provider),
     ));
     rx
@@ -2782,7 +2786,6 @@ async fn held_retry_wakes_on_credential_swap_and_finishes_on_new_account() {
     let _runtime = EnvVarGuard::set("JCODE_RUNTIME_PROVIDER", "claude");
     jcode_base::auth::claude::set_active_account_override(None);
     let (url, seen) = spawn_fake_messages_api(60).await;
-    let _url = OAuthUrlOverride::set(&url);
 
     let label = jcode_base::auth::claude::upsert_account(oauth_account(
         "claude-1",
@@ -2791,7 +2794,7 @@ async fn held_retry_wakes_on_credential_swap_and_finishes_on_new_account() {
     ))
     .unwrap();
     let provider = AnthropicProvider::new();
-    let mut rx = start_oauth_stream(&provider).await;
+    let mut rx = start_oauth_stream(&provider, &url).await;
 
     // Let the first attempt hit the 429 and enter the retry sleep.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -2831,7 +2834,6 @@ async fn far_usage_limit_reset_fails_fast_with_reset_time() {
     jcode_base::auth::claude::set_active_account_override(None);
     let reset_in = 3 * 3600 + 17 * 60;
     let (url, seen) = spawn_fake_messages_api(reset_in).await;
-    let _url = OAuthUrlOverride::set(&url);
 
     jcode_base::auth::claude::upsert_account(oauth_account(
         "claude-1",
@@ -2841,7 +2843,7 @@ async fn far_usage_limit_reset_fails_fast_with_reset_time() {
     .unwrap();
     let provider = AnthropicProvider::new();
     let started = std::time::Instant::now();
-    let mut rx = start_oauth_stream(&provider).await;
+    let mut rx = start_oauth_stream(&provider, &url).await;
 
     let (_, error) =
         tokio::time::timeout(std::time::Duration::from_secs(10), drain_stream(&mut rx))
@@ -2975,6 +2977,7 @@ async fn claude_refresh_finishing_after_account_switch_keeps_new_login() {
     jcode_base::auth::claude::set_active_account(&second).unwrap();
     let bearer = commit_claude_refresh(
         &credentials,
+        None,
         source,
         refreshed_claude_tokens("first-account-refreshed", "first-account-rotated"),
     )
@@ -3015,6 +3018,7 @@ async fn claude_refresh_without_account_switch_updates_cache() {
     // External-style: the store still holds the source credential.
     let bearer = commit_claude_refresh(
         &credentials,
+        None,
         source.clone(),
         refreshed_claude_tokens("account-refreshed-1", "account-rotated-1"),
     )
@@ -3030,6 +3034,7 @@ async fn claude_refresh_without_account_switch_updates_cache() {
     .unwrap();
     let bearer = commit_claude_refresh(
         &credentials,
+        None,
         source,
         refreshed_claude_tokens("account-refreshed-2", "account-rotated-2"),
     )

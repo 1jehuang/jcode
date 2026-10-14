@@ -207,7 +207,7 @@ async fn live_openai_catalog() -> Result<Option<jcode_base::provider::OpenAIMode
         return Ok(None);
     }
 
-    let token = openai_access_token(&Arc::new(RwLock::new(creds))).await?;
+    let token = openai_access_token(None, &Arc::new(RwLock::new(creds))).await?;
     Ok(Some(
         jcode_base::provider::fetch_openai_model_catalog(&token).await?,
     ))
@@ -575,3 +575,5 @@ async fn openai_refresh_without_account_switch_updates_cache() {
     assert_eq!(cached.refresh_token, "same-account-rotated-refresh");
     assert_eq!(cached.account_id.as_deref(), Some("same-account-id"));
 }
+
+include!("openai_tests/persistent_cancellation.rs");

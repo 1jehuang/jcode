@@ -466,6 +466,7 @@ fn send_model_changed_result(
                 context_window: Some(agent.provider_context_window() as u64),
                 error: None,
                 resolved_credential,
+                provider_oauth_email: super::provider_oauth_email(agent.provider_handle().as_ref()),
                 reasoning_effort,
             });
         }
@@ -485,6 +486,7 @@ fn send_model_changed_result(
                 context_window: Some(agent.provider_context_window() as u64),
                 error: Some(error.to_string()),
                 resolved_credential: None,
+                provider_oauth_email: None,
                 reasoning_effort: None,
             });
         }
@@ -506,6 +508,7 @@ fn apply_cycle_model(
             context_window: Some(agent.provider_context_window() as u64),
             error: Some("Model switching is not available for this provider.".to_string()),
             resolved_credential: None,
+            provider_oauth_email: None,
             reasoning_effort: None,
         });
         return;
@@ -655,9 +658,66 @@ fn apply_set_model(
     send_model_changed_result(id, result, current, agent, client_event_tx);
 }
 
+fn automatic_failover_source_is_pool_member(agent: &Agent) -> bool {
+    let provider = agent.provider_handle();
+    let name = provider.name().to_ascii_lowercase();
+    let name = match name.as_str() {
+        "anthropic" | "claude" => "claude",
+        "openai" => "openai",
+        "copilot" | "gemini" | "cursor" | "antigravity" | "bedrock" | "openrouter" => name.as_str(),
+        _ => return false,
+    };
+    let key = match (name, provider.active_resolved_credential()) {
+        ("claude" | "openai", Some(jcode_provider_core::ResolvedCredential::Oauth)) => {
+            let Some(label) = provider.oauth_account_label() else {
+                return false;
+            };
+            let exists = if name == "openai" {
+                crate::auth::codex::list_accounts()
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|account| account.label == label)
+            } else {
+                crate::auth::claude::list_accounts()
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|account| account.label == label)
+            };
+            if !exists {
+                return false;
+            }
+            crate::auth::account_pool::account_key(name, Some(&label))
+        }
+        ("claude", Some(jcode_provider_core::ResolvedCredential::ApiKey)) => {
+            "anthropic-api".to_string()
+        }
+        ("openai", Some(jcode_provider_core::ResolvedCredential::ApiKey)) => {
+            "openai-api".to_string()
+        }
+        ("claude" | "openai", _) => return false,
+        _ => name.to_string(),
+    };
+    let api_key = key.ends_with("-api")
+        || provider.active_resolved_credential()
+            == Some(jcode_provider_core::ResolvedCredential::ApiKey)
+        || crate::provider_catalog::login_providers()
+            .iter()
+            .any(|login| {
+                login.id == key
+                    && login.auth_kind == crate::provider_catalog::LoginProviderAuthKind::ApiKey
+            });
+    let pool = crate::auth::account_pool::AccountPool::load();
+    !pool.excluded.contains(&key)
+        && pool.is_member(
+            &key,
+            crate::auth::account_pool::default_member(&key, api_key),
+        )
+}
+
 fn apply_set_route(
     id: u64,
     selection: crate::provider::RouteSelection,
+    automatic_failover: bool,
     agent: &mut Agent,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
@@ -675,7 +735,21 @@ fn apply_set_route(
 
     let current = agent.provider_model();
     let result = {
-        let result = agent.set_route_selection(&selection);
+        let result = if automatic_failover
+            && (crate::config::Config::load()
+                .provider
+                .cross_provider_failover
+                != crate::config::CrossProviderFailoverMode::Countdown
+                || !automatic_failover_source_is_pool_member(agent)
+                || !crate::provider::MultiProvider::is_failover_route_pool_approved(
+                    &selection.routed_model_spec(),
+                )) {
+            Err(anyhow::anyhow!(
+                "Auto-switch canceled: target account is no longer eligible in your auto-switch group."
+            ))
+        } else {
+            agent.set_route_selection(&selection)
+        };
         if result.is_ok() {
             agent.reset_provider_session();
         }
@@ -715,11 +789,18 @@ pub(super) async fn handle_set_model(
 pub(super) async fn handle_set_route(
     id: u64,
     selection: crate::provider::RouteSelection,
+    automatic_failover: bool,
     agent: &Arc<Mutex<Agent>>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
     if let Ok(mut agent_guard) = agent.try_lock() {
-        apply_set_route(id, selection, &mut agent_guard, client_event_tx);
+        apply_set_route(
+            id,
+            selection,
+            automatic_failover,
+            &mut agent_guard,
+            client_event_tx,
+        );
     } else {
         spawn_deferred_agent_mutation(
             "set_route",
@@ -727,7 +808,13 @@ pub(super) async fn handle_set_route(
             Arc::clone(agent),
             client_event_tx.clone(),
             move |agent_guard, client_event_tx| {
-                apply_set_route(id, selection, agent_guard, client_event_tx);
+                apply_set_route(
+                    id,
+                    selection,
+                    automatic_failover,
+                    agent_guard,
+                    client_event_tx,
+                );
             },
         );
     }
@@ -1091,9 +1178,13 @@ pub(super) async fn handle_notify_auth_changed(
         }
         let activation = crate::auth::lifecycle::activate_auth_change(&activation_request);
         // A relogin can put a different account under the same label. Do not
-        // let the old login's usage snapshot or usage-limit marker gate it.
+        // let the old login's usage snapshot gate it.
         crate::usage::invalidate_active_anthropic_usage();
-        crate::provider::clear_all_provider_unavailability_for_account();
+        if let Some(provider_id) = activation.provider_id.as_deref() {
+            // A renewed login must get a real request instead of inheriting the
+            // previous credential's cached runtime failure.
+            crate::provider::clear_provider_unavailable_for_account(provider_id);
+        }
         // Snapshot which providers jcode now believes are configured right after
         // an auth change activates. This is the cornerstone for diagnosing
         // "logged in but model picker still empty / only OpenAI+Anthropic" and
@@ -1324,6 +1415,7 @@ pub(super) async fn handle_switch_anthropic_account(
             spawn_account_switch_refresh(
                 id,
                 "anthropic",
+                label,
                 Arc::clone(agent),
                 client_event_tx.clone(),
             );
@@ -1348,7 +1440,13 @@ pub(super) async fn handle_switch_openai_account(
     match crate::auth::codex::set_active_account(&label) {
         Ok(()) => {
             crate::auth::AuthStatus::invalidate_cache();
-            spawn_account_switch_refresh(id, "openai", Arc::clone(agent), client_event_tx.clone());
+            spawn_account_switch_refresh(
+                id,
+                "openai",
+                label,
+                Arc::clone(agent),
+                client_event_tx.clone(),
+            );
         }
         Err(e) => {
             let _ = client_event_tx.send(ServerEvent::Error {
@@ -1386,9 +1484,26 @@ pub(super) async fn handle_invalidate_anthropic_usage(
 fn spawn_account_switch_refresh(
     id: u64,
     provider_kind: &'static str,
+    account_label: String,
     agent: Arc<Mutex<Agent>>,
     client_event_tx: mpsc::UnboundedSender<ServerEvent>,
 ) {
+    // Clear the selected login's failure before waiting for a busy agent. The
+    // global active account can change while the asynchronous refresh waits.
+    match provider_kind {
+        "anthropic" => {
+            crate::provider::clear_claude_provider_unavailability_for_account_label(Some(
+                &account_label,
+            ));
+        }
+        "openai" => {
+            crate::provider::clear_openai_provider_unavailability_for_account_label(Some(
+                &account_label,
+            ));
+            crate::provider::clear_all_model_unavailability_for_account();
+        }
+        _ => {}
+    }
     tokio::spawn(async move {
         let started = Instant::now();
         crate::logging::event_info(
@@ -1414,8 +1529,6 @@ fn spawn_account_switch_refresh(
         };
         provider.invalidate_credentials().await;
 
-        crate::provider::clear_all_provider_unavailability_for_account();
-        crate::provider::clear_all_model_unavailability_for_account();
         crate::bus::Bus::global().publish(crate::bus::BusEvent::CredentialsChanged {
             provider: Some(provider_kind.to_string()),
         });
@@ -1631,6 +1744,97 @@ mod tests {
                 error: None,
             }) if effort == "low"
         ));
+    }
+
+    #[tokio::test]
+    async fn automatic_failover_revalidates_after_waiting_for_agent_lock() {
+        let _guard = crate::storage::lock_test_env();
+        let _runtime = IsolatedRuntimeDir::new();
+        let (provider, agent, tx, mut rx) = test_agent("session_rejected_auto_route").await;
+        let selection = crate::provider::RouteSelection {
+            model: "gpt-6.1-sol".to_string(),
+            runtime_key: jcode_provider_core::RuntimeKey::OpenAIOAuth,
+            api_method: "openai-oauth@nonexistent-failover-test-account".to_string(),
+            provider_label: "OpenAI".to_string(),
+            detail: String::new(),
+        };
+        let lock = agent.lock().await;
+        timeout(
+            Duration::from_millis(100),
+            handle_set_route(29, selection, true, &agent, &tx),
+        )
+        .await
+        .expect("route request must not block on the agent lock");
+        assert!(rx.try_recv().is_err());
+        drop(lock);
+        let event = timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(event, ServerEvent::ModelChanged { id: 29, error: Some(error), .. }
+            if error.contains("Auto-switch canceled"))
+        );
+        assert_eq!(provider.model(), "test-model-a");
+    }
+
+    #[tokio::test]
+    async fn automatic_failover_source_respects_current_api_pool_membership() {
+        let _guard = crate::storage::lock_test_env();
+        let _runtime = IsolatedRuntimeDir::new();
+        let home = tempfile::tempdir().unwrap();
+        struct RestoreHome(Option<std::ffi::OsString>);
+        impl Drop for RestoreHome {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(home) => crate::env::set_var("JCODE_HOME", home),
+                    None => crate::env::remove_var("JCODE_HOME"),
+                }
+                crate::config::Config::invalidate_cache();
+            }
+        }
+        let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+        crate::env::set_var("JCODE_HOME", home.path());
+        struct ApiSource;
+        #[async_trait]
+        impl Provider for ApiSource {
+            async fn complete(
+                &self,
+                _: &[Message],
+                _: &[ToolDefinition],
+                _: &str,
+                _: Option<&str>,
+            ) -> anyhow::Result<EventStream> {
+                panic!("must not send")
+            }
+            fn name(&self) -> &str {
+                "OpenAI"
+            }
+            fn active_resolved_credential(
+                &self,
+            ) -> Option<jcode_provider_core::ResolvedCredential> {
+                Some(jcode_provider_core::ResolvedCredential::ApiKey)
+            }
+            fn fork(&self) -> Arc<dyn Provider> {
+                Arc::new(Self)
+            }
+        }
+        let agent = Agent::new(Arc::new(ApiSource), crate::tool::Registry::empty());
+        assert!(
+            !automatic_failover_source_is_pool_member(&agent),
+            "metered keys stay manual by default"
+        );
+        let mut pool = crate::auth::account_pool::AccountPool::default();
+        pool.members.push("openai-api".to_string());
+        pool.save().unwrap();
+        assert!(automatic_failover_source_is_pool_member(&agent));
+        pool.members.clear();
+        pool.excluded.push("openai-api".to_string());
+        pool.save().unwrap();
+        assert!(
+            !automatic_failover_source_is_pool_member(&agent),
+            "a source moved below the boundary must stay manual"
+        );
     }
 
     #[tokio::test]

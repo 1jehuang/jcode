@@ -62,6 +62,20 @@ pub fn extract_copy_targets_from_rendered_lines(lines: &[Line<'static>]) -> Vec<
                 }
                 idx += 1;
             }
+            // Unicode display-math frames copy their LaTeX source, not the
+            // terminal approximation that is drawn.
+            if label == "math"
+                && let Some(source) = math_copy::display_math_source(&content_lines)
+            {
+                targets.push(RawCopyTarget {
+                    kind: CopyTargetKind::Math { display: true },
+                    content: format!("$$\n{source}\n$$"),
+                    start_raw_line: start,
+                    end_raw_line: idx,
+                    badge_raw_line: badge_line,
+                });
+                continue;
+            }
             targets.push(RawCopyTarget {
                 kind: CopyTargetKind::CodeBlock { language },
                 content: content_lines.join("\n"),

@@ -19,6 +19,7 @@ include!("tests/remote_startup_input_03/part_02.rs");
 include!("tests/remote_startup_input_04.rs");
 include!("tests/image_placeholder_commands.rs");
 include!("tests/interleave_images_guard.rs");
+include!("tests/queued_commands.rs");
 include!("tests/remote_events_reload_01/part_01.rs");
 include!("tests/remote_events_reload_01/part_02.rs");
 include!("tests/remote_events_reload_02/part_01.rs");
@@ -26,6 +27,7 @@ include!("tests/remote_events_reload_02/part_02.rs");
 include!("tests/remote_events_reload_03/part_01.rs");
 include!("tests/remote_events_reload_03/part_02.rs");
 include!("tests/remote_events_reload_04.rs");
+include!("tests/native_citations.rs");
 include!("tests/remote_events_reload_05.rs");
 include!("tests/swarm_plan_no_inline_graph.rs");
 include!("tests/remote_model_picker_hotkeys.rs");
@@ -35,6 +37,7 @@ include!("tests/scroll_copy_02/part_01.rs");
 include!("tests/scroll_copy_02/part_02.rs");
 include!("tests/scroll_copy_03.rs");
 include!("tests/resize_viewport.rs");
+include!("tests/issue_1642_panel_dismiss.rs");
 include!("tests/resize_anchor.rs");
 include!("tests/input_copy_selection.rs");
 include!("tests/onboarding_flow.rs");
@@ -54,10 +57,12 @@ include!("tests/issue_699_ctrl_d_delete.rs");
 include!("tests/issue_832_remote_ctrl_k.rs");
 include!("tests/voice_input.rs");
 include!("tests/issue_998_model_status_overlay.rs");
+include!("tests/issue_1685_bounded_auto_resume.rs");
 include!("tests/spinner_slash_commands.rs");
 include!("tests/command_suggestions_cache.rs");
 include!("tests/merge_command.rs");
 include!("tests/skill_invocation_multi_word.rs");
+include!("tests/remote_header_hint_facts.rs");
 include!("tests/slash_command_boundaries.rs");
 include!("tests/prompt_history_cross_session.rs");
 include!("tests/ssh_remote.rs");
@@ -1198,6 +1203,7 @@ fn stale_server_history_is_deferred_before_remote_state_is_applied() {
             provider_name: Some("stale-provider".to_string()),
             provider_model: Some("stale-model".to_string()),
             subagent_model: Some("stale-subagent".to_string()),
+            agent_model_overrides: Default::default(),
             autoreview_enabled: Some(true),
             autojudge_enabled: Some(true),
             available_models: vec!["stale-model".to_string()],
@@ -1218,6 +1224,7 @@ fn stale_server_history_is_deferred_before_remote_state_is_applied() {
             connection_type: Some("stale-connection".to_string()),
             status_detail: Some("stale-status".to_string()),
             upstream_provider: Some("stale-upstream".to_string()),
+            provider_oauth_email: None,
             resolved_credential: None,
             reasoning_effort: Some("high".to_string()),
             service_tier: Some("stale-tier".to_string()),
@@ -1290,6 +1297,7 @@ fn deferred_stale_server_history_captures_session_id_for_reload_handoff() {
             provider_name: Some("stale-provider".to_string()),
             provider_model: Some("stale-model".to_string()),
             subagent_model: None,
+            agent_model_overrides: Default::default(),
             autoreview_enabled: None,
             autojudge_enabled: None,
             available_models: vec![],
@@ -1312,6 +1320,7 @@ fn deferred_stale_server_history_captures_session_id_for_reload_handoff() {
             connection_type: None,
             status_detail: None,
             upstream_provider: None,
+            provider_oauth_email: None,
             resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,
@@ -1374,6 +1383,7 @@ fn ancient_server_history_is_deferred_via_client_side_release_check() {
             provider_name: Some("ancient-provider".to_string()),
             provider_model: Some("ancient-model".to_string()),
             subagent_model: Some("ancient-subagent".to_string()),
+            agent_model_overrides: Default::default(),
             autoreview_enabled: Some(true),
             autojudge_enabled: Some(true),
             available_models: vec!["ancient-model".to_string()],
@@ -1396,6 +1406,7 @@ fn ancient_server_history_is_deferred_via_client_side_release_check() {
             connection_type: Some("ancient-connection".to_string()),
             status_detail: Some("ancient-status".to_string()),
             upstream_provider: Some("ancient-upstream".to_string()),
+            provider_oauth_email: None,
             resolved_credential: None,
             reasoning_effort: Some("high".to_string()),
             service_tier: Some("ancient-tier".to_string()),
@@ -1457,6 +1468,7 @@ fn older_server_reporting_no_update_is_still_deferred_via_client_check() {
             provider_name: Some("p".to_string()),
             provider_model: Some("m".to_string()),
             subagent_model: None,
+            agent_model_overrides: Default::default(),
             autoreview_enabled: None,
             autojudge_enabled: None,
             available_models: vec!["m".to_string()],
@@ -1479,6 +1491,7 @@ fn older_server_reporting_no_update_is_still_deferred_via_client_check() {
             connection_type: Some("websocket".to_string()),
             status_detail: None,
             upstream_provider: None,
+            provider_oauth_email: None,
             resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,
@@ -1562,6 +1575,7 @@ fn older_server_history_repairs_stale_shared_server_channel_end_to_end() {
             provider_name: Some("p".to_string()),
             provider_model: Some("m".to_string()),
             subagent_model: None,
+            agent_model_overrides: Default::default(),
             autoreview_enabled: None,
             autojudge_enabled: None,
             available_models: vec!["m".to_string()],
@@ -1582,6 +1596,7 @@ fn older_server_history_repairs_stale_shared_server_channel_end_to_end() {
             connection_type: Some("websocket".to_string()),
             status_detail: None,
             upstream_provider: None,
+            provider_oauth_email: None,
             resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,
@@ -1639,6 +1654,7 @@ fn current_release_server_history_is_not_deferred_by_client_check() {
             provider_name: Some("p".to_string()),
             provider_model: Some("m".to_string()),
             subagent_model: None,
+            agent_model_overrides: Default::default(),
             autoreview_enabled: None,
             autojudge_enabled: None,
             available_models: vec!["m".to_string()],
@@ -1659,6 +1675,7 @@ fn current_release_server_history_is_not_deferred_by_client_check() {
             connection_type: Some("websocket".to_string()),
             status_detail: None,
             upstream_provider: None,
+            provider_oauth_email: None,
             resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,

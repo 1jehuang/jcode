@@ -42,6 +42,9 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
+mod openai_stream_cancellation;
+mod openai_stream_diagnostics;
+
 const CHATGPT_API_BASE: &str = "https://chatgpt.com/backend-api/codex";
 const RESPONSES_PATH: &str = "responses";
 const DEFAULT_MODEL: &str = jcode_provider_core::DEFAULT_OPENAI_MODEL;
@@ -506,6 +509,25 @@ async fn ensure_persistent_ws_is_healthy(
     state: &mut PersistentWsState,
     verbose: bool,
 ) -> Result<PersistentWsHealth, String> {
+    // Include ping readiness/flush and server-ping replies in the same budget.
+    // Otherwise a background keepalive can hold the state mutex indefinitely.
+    tokio::time::timeout(
+        Duration::from_millis(WEBSOCKET_PERSISTENT_HEALTHCHECK_TIMEOUT_MS),
+        persistent_ws_healthcheck(state, verbose),
+    )
+    .await
+    .map_err(|_| {
+        format!(
+            "healthcheck timeout after {}ms",
+            WEBSOCKET_PERSISTENT_HEALTHCHECK_TIMEOUT_MS
+        )
+    })?
+}
+
+async fn persistent_ws_healthcheck(
+    state: &mut PersistentWsState,
+    verbose: bool,
+) -> Result<PersistentWsHealth, String> {
     let response_idle_for = state.last_response_completed_at.elapsed();
     if persistent_ws_idle_requires_reconnect(response_idle_for) {
         jcode_base::logging::info(&format!(
@@ -639,10 +661,11 @@ fn spawn_persistent_ws_keepalive_with_interval(
                 return;
             };
             let mut guard = persistent_ws.lock().await;
-            let Some(state) = guard.as_mut() else {
+            let Some(mut state) = guard.take() else {
                 return;
             };
             if state.connected_at != connection_started_at {
+                *guard = Some(state);
                 return;
             }
 
@@ -688,8 +711,8 @@ fn spawn_persistent_ws_keepalive_with_interval(
             // used before foreground reuse while holding the state mutex. This
             // keeps one reader at a time and gives server control frames a
             // bounded opportunity to be processed.
-            match ensure_persistent_ws_is_healthy(state, false).await {
-                Ok(PersistentWsHealth::Healthy) => {}
+            match ensure_persistent_ws_is_healthy(&mut state, false).await {
+                Ok(PersistentWsHealth::Healthy) => *guard = Some(state),
                 Ok(PersistentWsHealth::Reconnect {
                     reset_reason,
                     detail,
@@ -738,6 +761,7 @@ pub struct OpenAIProvider {
     client: Client,
     credentials: Arc<RwLock<CodexCredentials>>,
     credential_mode: Arc<RwLock<OpenAICredentialMode>>,
+    oauth_account: StdRwLock<Option<String>>,
     model: Arc<RwLock<String>>,
     prompt_cache_key: Option<String>,
     prompt_cache_retention: Option<String>,
@@ -806,6 +830,7 @@ impl OpenAIProvider {
         };
 
         // Check for model override from environment
+        let catalog_scope = Self::catalog_scope_for(&credentials);
         let mut model = if browser_only {
             CHATGPT_WEB_MODEL.to_string()
         } else {
@@ -815,7 +840,7 @@ impl OpenAIProvider {
                 .to_string()
         };
         if !is_chatgpt_web_model(&model)
-            && !jcode_base::provider::known_openai_model_ids()
+            && !jcode_base::provider::known_openai_model_ids_for_scope(&catalog_scope)
                 .iter()
                 .any(|known| known == &model)
         {
@@ -869,12 +894,14 @@ impl OpenAIProvider {
             .openai_native_compaction_threshold_tokens
             .max(1000);
         let model_reasoning_efforts =
-            jcode_base::provider::cached_openai_reasoning_efforts().unwrap_or_default();
+            jcode_base::provider::cached_openai_reasoning_efforts_for_scope(&catalog_scope)
+                .unwrap_or_default();
 
         let provider = Self {
             client: jcode_provider_core::shared_http_client(),
             credentials: Arc::new(RwLock::new(credentials)),
             credential_mode: Arc::new(RwLock::new(credential_mode)),
+            oauth_account: StdRwLock::new(None),
             model: Arc::new(RwLock::new(model)),
             prompt_cache_key,
             prompt_cache_retention,
@@ -900,13 +927,27 @@ impl OpenAIProvider {
         self.browser_only.load(AtomicOrdering::Acquire)
     }
 
+    fn load_selected_credentials(&self, mode: OpenAICredentialMode) -> Result<CodexCredentials> {
+        match (mode, self.oauth_account_label()) {
+            (OpenAICredentialMode::Auto | OpenAICredentialMode::OAuth, Some(label)) => {
+                jcode_base::auth::codex::load_credentials_for_account(&label)
+            }
+            _ => load_credentials_for_mode(mode),
+        }
+    }
+
+    fn refresh_account_label(&self) -> Option<String> {
+        self.oauth_account_label()
+            .or_else(jcode_base::auth::codex::active_account_label)
+    }
+
     pub(crate) fn reload_credentials_now(&self) {
         let mode = self
             .credential_mode
             .try_read()
             .map(|mode| *mode)
             .unwrap_or(OpenAICredentialMode::Auto);
-        if let Ok(credentials) = load_credentials_for_mode(mode) {
+        if let Ok(credentials) = self.load_selected_credentials(mode) {
             match self.credentials.try_write() {
                 Ok(mut guard) => {
                     *guard = credentials;
@@ -936,7 +977,7 @@ impl OpenAIProvider {
     }
 
     pub(crate) fn set_credential_mode(&self, mode: OpenAICredentialMode) -> Result<()> {
-        let credentials = load_credentials_for_mode(mode)?;
+        let credentials = self.load_selected_credentials(mode)?;
         match self.credentials.try_write() {
             Ok(mut guard) => {
                 *guard = credentials;
@@ -975,7 +1016,9 @@ impl OpenAIProvider {
     }
 
     fn reload_cached_reasoning_efforts(&self) {
-        let cached = jcode_base::provider::cached_openai_reasoning_efforts().unwrap_or_default();
+        let cached =
+            jcode_base::provider::cached_openai_reasoning_efforts_for_scope(&self.catalog_scope())
+                .unwrap_or_default();
         match self.model_reasoning_efforts.write() {
             Ok(mut efforts) => *efforts = cached,
             Err(poisoned) => *poisoned.into_inner() = cached,
@@ -1015,11 +1058,47 @@ impl OpenAIProvider {
     /// Access token the next request from this session would send.
     #[cfg(test)]
     async fn resolve_access_token(&self) -> Result<String> {
-        openai_access_token(&self.credentials).await
+        openai_access_token(self.oauth_account_label(), &self.credentials).await
     }
 
     fn is_chatgpt_mode(credentials: &CodexCredentials) -> bool {
         !credentials.refresh_token.is_empty() || credentials.id_token.is_some()
+    }
+
+    /// Model-catalog scope for the credential this runtime will actually send.
+    /// ChatGPT/Codex OAuth and platform API keys expose different model lists,
+    /// so validation, availability, and refresh must all use the loaded
+    /// credential's own catalog instead of one shared per-account slot.
+    pub(crate) fn catalog_scope_for(credentials: &CodexCredentials) -> String {
+        jcode_base::provider::openai_catalog_scope_for_credential(
+            Self::is_chatgpt_mode(credentials),
+            &credentials.access_token,
+        )
+    }
+
+    fn selected_catalog_scope_for(&self, credentials: &CodexCredentials) -> String {
+        if Self::is_chatgpt_mode(credentials)
+            && let Some(label) = self.oauth_account_label()
+        {
+            label
+        } else {
+            Self::catalog_scope_for(credentials)
+        }
+    }
+
+    pub(crate) fn catalog_scope(&self) -> String {
+        match self.credentials.try_read() {
+            Ok(credentials) => self.selected_catalog_scope_for(&credentials),
+            // Writers hold this lock only briefly (token refresh / mode swap).
+            // Fall back to the account scope rather than blocking.
+            Err(_) => self.oauth_account_label().unwrap_or_else(|| {
+                jcode_base::provider::openai_catalog_scope_for_credential(true, "")
+            }),
+        }
+    }
+
+    async fn catalog_scope_async(&self) -> String {
+        self.selected_catalog_scope_for(&*self.credentials.read().await)
     }
 
     fn catalog_credential_identity(credentials: &CodexCredentials) -> String {
@@ -1178,10 +1257,11 @@ impl OpenAIProvider {
 
         match value.as_str() {
             "fast" | "priority" => Ok(Some("priority".to_string())),
+            "ultrafast" | "ultra" | "ultra-fast" => Ok(Some("ultrafast".to_string())),
             "flex" => Ok(Some("flex".to_string())),
             "default" | "auto" | "none" | "off" | "standard" => Ok(None),
             other => anyhow::bail!(
-                "Unsupported OpenAI service tier '{}'; expected priority|fast|flex|standard|default|off",
+                "Unsupported OpenAI service tier '{}'; expected priority|fast|ultrafast|flex|standard|default|off",
                 other
             ),
         }
@@ -1387,7 +1467,8 @@ impl OpenAIProvider {
 
     async fn model_id(&self) -> String {
         let current = self.model.read().await.clone();
-        let availability = jcode_base::provider::model_availability_for_account(&current);
+        let scope = self.catalog_scope_async().await;
+        let availability = jcode_base::provider::model_availability_for_scope(&scope, &current);
 
         match availability.state {
             jcode_base::provider::AccountModelAvailabilityState::Unavailable => {
@@ -1397,7 +1478,8 @@ impl OpenAIProvider {
                         current, detail
                     ));
                 }
-                if let Some(fallback) = jcode_base::provider::get_best_available_openai_model()
+                if let Some(fallback) =
+                    jcode_base::provider::get_best_available_openai_model_for_scope(&scope)
                     && fallback != current
                 {
                     jcode_base::logging::info(&format!(
@@ -1416,8 +1498,8 @@ impl OpenAIProvider {
                 }
             }
             jcode_base::provider::AccountModelAvailabilityState::Unknown => {
-                if jcode_base::provider::should_refresh_openai_model_catalog()
-                    && jcode_base::provider::begin_openai_model_catalog_refresh()
+                if jcode_base::provider::should_refresh_openai_model_catalog_for_scope(&scope)
+                    && jcode_base::provider::begin_openai_model_catalog_refresh_for_scope(&scope)
                 {
                     let is_chatgpt_mode = {
                         let creds = self.credentials.read().await;
@@ -1428,14 +1510,19 @@ impl OpenAIProvider {
                     // the catalog request instead of guaranteeing a 401. Fall
                     // back to the raw snapshot if refresh fails; the fetch
                     // will then fail and finish the in-flight marker.
-                    let token = match openai_access_token(&self.credentials).await {
-                        Ok(token) => token,
-                        Err(_) => self.credentials.read().await.access_token.clone(),
-                    };
-                    jcode_base::provider::refresh_openai_model_catalog_in_background(
+                    let token =
+                        match openai_access_token(self.oauth_account_label(), &self.credentials)
+                            .await
+                        {
+                            Ok(token) => token,
+                            Err(_) if self.oauth_account_label().is_some() => String::new(),
+                            Err(_) => self.credentials.read().await.access_token.clone(),
+                        };
+                    jcode_base::provider::refresh_openai_model_catalog_in_background_for_scope(
                         token,
                         is_chatgpt_mode,
                         "openai-request-setup",
+                        scope.clone(),
                     );
                 }
             }
@@ -1509,3 +1596,6 @@ use self::websocket_health::{
 #[cfg(test)]
 #[path = "openai_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod account_binding_tests;

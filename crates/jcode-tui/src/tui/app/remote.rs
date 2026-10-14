@@ -1,8 +1,8 @@
 #![cfg_attr(test, allow(clippy::items_after_test_module))]
 
 use super::{
-    App, DisplayMessage, PendingReloadReconnectStatus, ProcessingStatus, RemoteResumeActivity,
-    SendAction, ctrl_bracket_fallback_to_esc, input, parse_rate_limit_error,
+    App, DisplayMessage, MAX_TURN_HOLD_SECS, PendingReloadReconnectStatus, ProcessingStatus,
+    RemoteResumeActivity, SendAction, ctrl_bracket_fallback_to_esc, input, parse_rate_limit_error,
     remote_notifications::present_swarm_notification, spawn_in_new_terminal,
 };
 use crate::bus::BusEvent;
@@ -99,9 +99,16 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
             .is_some_and(|state| state.kind == crate::tui::PickerKind::Model),
     });
     let mut needs_redraw = crate::tui::periodic_redraw_required(app);
+    needs_redraw |= app.retire_expired_status_notice();
     needs_redraw |= app.poll_usage_reset();
-    if let Some(account) = app.usage_reset.invalidate_account.take() {
-        match remote.invalidate_openai_usage(account).await {
+    if let Some((provider, account)) = app.usage_reset.invalidate_account.take() {
+        let sent = match provider {
+            super::usage_reset::Provider::OpenAi => remote.invalidate_openai_usage(account).await,
+            super::usage_reset::Provider::Claude => {
+                remote.invalidate_anthropic_usage(account).await
+            }
+        };
+        match sent {
             Ok(id) => {
                 app.usage_reset.invalidate_requests.insert(id, Some(Instant::now()));
             }
@@ -126,6 +133,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         needs_redraw = true;
     }
     needs_redraw |= app.poll_ssh_login(remote).await;
+    needs_redraw |= app.poll_oauth_account_telemetry();
     needs_redraw |= app.poll_ssh_login_onboarding();
     needs_redraw |= app.flush_pending_resize_redraw();
     app.maybe_capture_runtime_memory_heartbeat();
@@ -172,6 +180,42 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     needs_redraw |= app.refresh_keybindings_if_config_reloaded();
 
     let _ = check_debug_command(app, remote).await;
+
+    let had_failover_countdown = app.pending_provider_failover.is_some();
+    needs_redraw |= app.maybe_progress_provider_failover_countdown();
+    if had_failover_countdown {
+        if let Some(selection) = app.pending_automatic_failover_route.take() {
+            app.pending_model_switch = None;
+            match remote
+                .set_route_selection_for_failover(selection.clone())
+                .await
+            {
+                Ok(id) => {
+                    app.pending_automatic_failover_request_id = Some(id);
+                    app.pending_automatic_failover_route = Some(selection);
+                    app.remote_model_switch_in_flight = true;
+                    forward_pending_reasoning_effort(app, remote).await;
+                }
+                Err(error) => {
+                    if let Some(payload) = app.pending_fallback_resend.take() {
+                        app.restore_failover_payload(payload);
+                    }
+                    app.push_display_message(DisplayMessage::error(format!(
+                        "Auto-switch failed: {}",
+                        App::compact_provider_failure(&error.to_string())
+                    )));
+                    app.set_status_notice("Model switch failed");
+                }
+            }
+        }
+        // No queued continuation or retry may race the cancellable countdown
+        // or the route acknowledgement that must precede its resend.
+        return true;
+    }
+
+    if app.remote_model_switch_in_flight && app.pending_fallback_resend.is_some() {
+        return needs_redraw;
+    }
 
     if !app.is_processing {
         if let Some(request) = app.take_pending_catchup_resume() {
@@ -284,7 +328,12 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         return needs_redraw;
     }
 
-    if !app.is_processing && !app.queued_messages.is_empty() {
+    if !app.is_processing && !app.queued_commands.is_empty() {
+        // Commands queued with Ctrl+Enter run before queued prompts. Hand them
+        // to the follow-up dispatcher, which runs them one at a time.
+        app.pending_queued_dispatch = true;
+        needs_redraw = true;
+    } else if !app.is_processing && !app.queued_messages.is_empty() {
         let queued_messages = std::mem::take(&mut app.queued_messages);
         let hidden_reminders = std::mem::take(&mut app.hidden_queued_system_messages);
         let (messages, reminder, display_system_messages) =
@@ -415,9 +464,9 @@ pub(super) async fn handle_terminal_event(
     Ok(needs_redraw)
 }
 
-async fn apply_terminal_event(
+async fn apply_terminal_event<B: Backend>(
     app: &mut App,
-    _terminal: &mut DefaultTerminal,
+    _terminal: &mut Terminal<B>,
     remote: &mut RemoteConnection,
     event: Option<std::result::Result<Event, std::io::Error>>,
 ) -> Result<bool> {
@@ -442,8 +491,8 @@ async fn apply_terminal_event(
             app.set_client_focused(false);
         }
         Some(Ok(Event::Key(key))) => {
-            // Start the key-to-paint clock at the moment the key is read, which is
-            // the only point that corresponds to the user's press.
+            let key = jcode_tui_core::korean_input::normalize_key_event(key);
+            // Start key-to-paint timing at the key read, not at dispatch.
             crate::tui::ui::note_key_event_read();
             input_attribution.event = Some(if app.remote_login.is_some() {
                 "ssh_login_key".to_string()
@@ -454,11 +503,12 @@ async fn apply_terminal_event(
             app.note_client_interaction();
             app.update_copy_badge_key_event(key);
             app.observe_voice_key_release(&key);
-            if app.handle_voice_key_event(&key) {
-                // Voice keys work from every screen and never type.
-            } else if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+            if !app.handle_voice_key_event(&key)
+                && matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+            {
                 handle_remote_key_event(app, key, remote).await?;
                 if let Some(selection) = app.pending_route_selection.take() {
+                    app.cancel_pending_provider_failover("Provider auto-switch canceled");
                     app.pending_model_switch = None;
                     match remote.set_route_selection(selection).await {
                         Ok(_) => {
@@ -467,8 +517,6 @@ async fn apply_terminal_event(
                         }
                         Err(error) => {
                             app.pending_reasoning_effort = None;
-                            // A fallback-offer resend must not fire without its
-                            // route switch; drop it with the failed request.
                             app.pending_fallback_resend = None;
                             app.push_display_message(DisplayMessage::error(format!(
                                 "Failed to request model switch: {}",
@@ -478,6 +526,7 @@ async fn apply_terminal_event(
                         }
                     }
                 } else if let Some(spec) = app.pending_model_switch.take() {
+                    app.cancel_pending_provider_failover("Provider auto-switch canceled");
                     match remote.set_model(&spec).await {
                         Ok(_) => {
                             app.remote_model_switch_in_flight = true;
@@ -653,6 +702,7 @@ pub(super) async fn handle_bus_event(
             true
         }
         Ok(BusEvent::MermaidRenderCompleted) => true,
+        Ok(BusEvent::GitInfoRefreshed) => true,
         Ok(BusEvent::UsageReportProgress(progress)) => {
             app.handle_usage_report_progress(progress);
             true
@@ -827,11 +877,14 @@ pub(super) async fn check_debug_command(
     None
 }
 
-fn handle_terminal_event_while_disconnected(
+fn handle_terminal_event_while_disconnected<B: Backend>(
     app: &mut App,
-    terminal: &mut DefaultTerminal,
+    terminal: &mut Terminal<B>,
     event: Option<std::result::Result<Event, std::io::Error>>,
-) -> Result<bool> {
+) -> Result<bool>
+where
+    B::Error: Send + Sync + 'static,
+{
     let mut needs_redraw = false;
 
     match event {
@@ -844,12 +897,13 @@ fn handle_terminal_event_while_disconnected(
             app.set_client_focused(false);
         }
         Some(Ok(Event::Key(key))) => {
+            let key = jcode_tui_core::korean_input::normalize_key_event(key);
             app.note_client_interaction();
             app.update_copy_badge_key_event(key);
             app.observe_voice_key_release(&key);
-            if app.handle_voice_key_event(&key) {
-                // Voice keys work from every screen and never type.
-            } else if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+            if !app.handle_voice_key_event(&key)
+                && matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+            {
                 handle_disconnected_key_event(app, key)?;
             }
             needs_redraw = true;
@@ -870,9 +924,7 @@ fn handle_terminal_event_while_disconnected(
             needs_redraw = app.should_redraw_after_resize();
         }
         None => {
-            // Input EOF: if the controlling terminal is gone this client is an
-            // orphan (window died without a deliverable SIGHUP). Quit instead
-            // of reconnect-looping forever with no way to ever receive input.
+            // Exit orphaned clients when input closes and the terminal is gone.
             if super::terminal_liveness::terminal_abandoned() {
                 crate::logging::warn(
                     "Terminal input closed and controlling terminal is gone while disconnected; exiting orphaned client",
@@ -1262,6 +1314,11 @@ async fn dispatch_pending_server_reload(app: &mut App, remote: &mut RemoteConnec
 }
 
 pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteConnection) {
+    if app.pending_provider_failover.is_some()
+        || (app.remote_model_switch_in_flight && app.pending_fallback_resend.is_some())
+    {
+        return;
+    }
     // A pending *server* reload must be dispatched even when the bootstrap
     // History payload was intentionally deferred. The runtime-identity /
     // stale-binary guard in the History handler sets `pending_server_reload =
@@ -1547,6 +1604,11 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
         return;
     }
 
+    if !app.queued_commands.is_empty() {
+        run_next_queued_remote_command(app, remote).await;
+        return;
+    }
+
     if let Some(interleave_msg) = app.interleave_message.take() {
         // Carry the staged attachments through. A local revert of #627 had this
         // passing `vec![]`, which silently dropped every image on an interleaved
@@ -1648,6 +1710,26 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
             );
             app.hidden_queued_system_messages.insert(0, combined);
         }
+    }
+}
+
+/// Run the oldest command queued with Ctrl+Enter through the same path as a
+/// plain Enter, so it behaves exactly as if the user typed it now. One per
+/// call: if it starts a turn, the rest wait for that turn to end.
+async fn run_next_queued_remote_command(app: &mut App, remote: &mut RemoteConnection) {
+    if app.queued_commands.is_empty() {
+        return;
+    }
+    let command = app.queued_commands.remove(0);
+    crate::logging::info(&format!("Running queued command: {}", command));
+    let draft = input::swap_in_queued_command(app, command.clone());
+    let result = key_handling::submit_remote_enter_input(app, remote).await;
+    input::restore_composer_draft(app, draft);
+    if let Err(error) = result {
+        app.push_display_message(DisplayMessage::error(format!(
+            "Queued command {} failed: {}",
+            command, error
+        )));
     }
 }
 
