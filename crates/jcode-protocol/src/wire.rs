@@ -961,6 +961,12 @@ pub enum ServerEvent {
     #[serde(rename = "text_replace")]
     TextReplace { text: String },
 
+    /// Source-aware correction of a completed provider message. Unlike the
+    /// legacy response-wide replacement, preserve everything before an exact
+    /// trailing old_text match (including already committed messages).
+    #[serde(rename = "text_suffix_replace")]
+    TextSuffixReplace { old_text: String, new_text: String },
+
     /// Tool call started
     #[serde(rename = "tool_start")]
     ToolStart { id: String, name: String },

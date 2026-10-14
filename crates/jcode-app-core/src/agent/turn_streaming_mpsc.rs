@@ -638,6 +638,20 @@ impl Agent {
                     StreamEvent::TextDone => {
                         let _ = event_tx.send(ServerEvent::TextDone);
                     }
+                    StreamEvent::TextSuffixReplace { old_text, new_text } => {
+                        if provider_native_items.replace_text_suffix(
+                            &mut text_content,
+                            &old_text,
+                            &new_text,
+                        ) {
+                            if inline_output_tap {
+                                self.inline_tail.set_live(&text_content);
+                                self.publish_inline_tail();
+                            }
+                            let _ = event_tx
+                                .send(ServerEvent::TextSuffixReplace { old_text, new_text });
+                        }
+                    }
                     StreamEvent::ProviderNative { provider, item } => {
                         if reasoning_open {
                             reasoning_open = false;

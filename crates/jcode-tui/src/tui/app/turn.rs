@@ -611,6 +611,23 @@ impl App {
                                             }
                                         }
                                     }
+                                    StreamEvent::TextSuffixReplace { old_text, new_text } => {
+                                        if provider_native_items.replace_text_suffix(
+                                            &mut text_content, &old_text, &new_text,
+                                        ) {
+                                            let ops = self.stream_buffer.flush();
+                                            self.apply_stream_ops(ops);
+                                            let mut corrected = self.streaming.streaming_text.clone();
+                                            if crate::message::replace_text_suffix(
+                                                &mut corrected, &old_text, &new_text,
+                                            ).is_some() {
+                                                self.replace_streaming_text(corrected);
+                                            }
+                                            if eager_stream_redraw {
+                                                status_spinner_renderer.draw_full(self, terminal)?;
+                                            }
+                                        }
+                                    }
                                     StreamEvent::ToolUseStart { id, name } => {
                                         // Tool input JSON is still provider-generated output and is
                                         // included in provider output-token usage. Keep the TPS timer

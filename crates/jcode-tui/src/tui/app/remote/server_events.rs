@@ -579,6 +579,7 @@ pub(in crate::tui::app) fn handle_server_event(
             &event,
             ServerEvent::TextDelta { .. }
                 | ServerEvent::TextReplace { .. }
+                | ServerEvent::TextSuffixReplace { .. }
                 | ServerEvent::ReasoningDelta { .. }
                 | ServerEvent::ReasoningDone { .. }
                 | ServerEvent::ToolStart { .. }
@@ -604,6 +605,7 @@ pub(in crate::tui::app) fn handle_server_event(
         &event,
         ServerEvent::TextDelta { .. }
             | ServerEvent::TextReplace { .. }
+            | ServerEvent::TextSuffixReplace { .. }
             | ServerEvent::ReasoningDelta { .. }
             | ServerEvent::ReasoningDone { .. }
             | ServerEvent::ToolStart { .. }
@@ -662,6 +664,17 @@ pub(in crate::tui::app) fn handle_server_event(
             app.apply_stream_ops(ops);
             app.replace_streaming_text(text);
             app.resume_streaming_tps();
+            true
+        }
+        ServerEvent::TextSuffixReplace { old_text, new_text } => {
+            // Flush paced deltas first, otherwise they would append the old
+            // marker again. Preserve retained reasoning and earlier messages.
+            let ops = app.stream_buffer.flush();
+            app.apply_stream_ops(ops);
+            let mut corrected = app.streaming.streaming_text.clone();
+            if crate::message::replace_text_suffix(&mut corrected, &old_text, &new_text).is_some() {
+                app.replace_streaming_text(corrected);
+            }
             true
         }
         ServerEvent::ReasoningDelta { text } => {

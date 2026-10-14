@@ -537,6 +537,9 @@ pub async fn collect_simple_completion<P: Provider + ?Sized>(
     while let Some(event) = response.next().await {
         match event {
             Ok(StreamEvent::TextDelta(text)) => result.push_str(&text),
+            Ok(StreamEvent::TextSuffixReplace { old_text, new_text }) => {
+                jcode_message_types::replace_text_suffix(&mut result, &old_text, &new_text);
+            }
             Ok(StreamEvent::TokenUsage {
                 input_tokens,
                 output_tokens,

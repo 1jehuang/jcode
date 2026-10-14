@@ -3311,6 +3311,15 @@ fn emit_ndjson_event(
                 &serde_json::json!({ "type": "text_replace", "text": text }),
             )
         }
+        ServerEvent::TextSuffixReplace { old_text, new_text } => {
+            crate::message::replace_text_suffix(&mut state.text, &old_text, &new_text);
+            write_json_line(
+                stdout,
+                &serde_json::json!({
+                    "type": "text_suffix_replace", "old_text": old_text, "new_text": new_text,
+                }),
+            )
+        }
         ServerEvent::ToolStart { id, name } => write_json_line(
             stdout,
             &serde_json::json!({ "type": "tool_start", "id": id, "name": name }),

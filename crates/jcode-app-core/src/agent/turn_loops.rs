@@ -376,6 +376,19 @@ impl Agent {
                         }
                         text_content.push_str(&text);
                     }
+                    StreamEvent::TextSuffixReplace { old_text, new_text } => {
+                        if provider_native_items.replace_text_suffix(
+                            &mut text_content,
+                            &old_text,
+                            &new_text,
+                        ) && print_output
+                        {
+                            // Plain stdout cannot retract already printed deltas.
+                            // Still surface the real source links to CLI users.
+                            crate::terminal_print!("\n{}", new_text);
+                            io::stdout().flush()?;
+                        }
+                    }
                     StreamEvent::ToolUseStart { id, name } => {
                         if streaming_tools.contains_key(&id)
                             || tool_calls.iter().any(|tool: &ToolCall| tool.id == id)
