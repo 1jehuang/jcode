@@ -507,3 +507,32 @@ fn test_input_history_recall_drops_stale_selection() {
         .unwrap();
     assert_eq!(app.input, "an older prompt!");
 }
+
+/// With the info box docked beside the composer rows (120x36), a double-click
+/// on a composer word must still select it, and Ctrl+X cut only that word.
+#[test]
+fn test_input_double_click_selects_word_with_info_dock_drawn() {
+    let _render_lock = scroll_render_test_lock();
+    let clipboard = CapturedClipboard::new();
+    let mut app = create_test_app();
+    app.input = "hello big world".to_string();
+    app.cursor_pos = app.input.len();
+    let (width, height) = (120, 36);
+    let backend = ratatui::backend::TestBackend::new(width, height);
+    let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
+    let screen = render_and_snap(&app, &mut terminal);
+    assert!(
+        screen.lines().any(|line| line.trim_end().ends_with('╮')),
+        "the docked info box must be drawn for this test to cover it:\n{screen}"
+    );
+
+    let cell = composer_cell_for(&app, width, height, 7);
+    left_click(&mut app, cell);
+    left_click(&mut app, cell);
+    assert_eq!(app.input_selection_text().as_deref(), Some("big"));
+
+    app.handle_key(KeyCode::Char('x'), KeyModifiers::CONTROL)
+        .unwrap();
+    assert_eq!(app.input, "hello  world");
+    assert_eq!(clipboard.text().as_deref(), Some("big"));
+}
