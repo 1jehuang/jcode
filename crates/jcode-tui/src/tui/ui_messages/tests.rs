@@ -1022,19 +1022,20 @@ fn render_todo_tool_result_uses_borderless_card_with_goal_scores() {
         crate::todo::TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE
     );
     let msg = DisplayMessage {
-        role: "tool".to_string(),
-        content,
-        tool_calls: Vec::new(),
-        duration_secs: None,
-        title: Some("1 todos".to_string()),
-        tool_data: Some(crate::message::ToolCall {
-            id: "call_todo".to_string(),
-            name: "todo".to_string(),
-            input: serde_json::json!({ "todos": todos, "goals": goals }),
-            intent: Some("Track todo card work".to_string()),
-            thought_signature: None,
-        }),
-    };
+            role: "tool".to_string(),
+            content,
+            tool_calls: Vec::new(),
+            duration_secs: None,
+            title: Some("todo rendering".to_string()),
+            tool_data: Some(crate::message::ToolCall {
+                id: "call_todo".to_string(),
+                name: "todo".to_string(),
+                input: serde_json::json!({ "todos": todos, "goals": goals }),
+                intent: None,
+                thought_signature: None,
+            }),
+            tool_duration_ms: None,
+        };
 
     let plain = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Off)
         .iter()
@@ -1109,19 +1110,20 @@ fn render_todo_quality_gate_retry_shows_only_changed_goal_fields() {
         crate::todo::TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE,
     );
     let msg = DisplayMessage {
-        role: "tool".to_string(),
-        content,
-        tool_calls: Vec::new(),
-        duration_secs: None,
-        title: Some("1 todos".to_string()),
-        tool_data: Some(crate::message::ToolCall {
-            id: "call_todo_update".to_string(),
-            name: "todo".to_string(),
-            input: serde_json::Value::Null,
-            intent: Some("Refine the todo feedback loop".to_string()),
-            thought_signature: None,
-        }),
-    };
+            role: "tool".to_string(),
+            content: "Render the entire unchanged todo plan".to_string(),
+            tool_calls: Vec::new(),
+            duration_secs: None,
+            title: Some("todo rendering".to_string()),
+            tool_data: Some(crate::message::ToolCall {
+                id: "call_todo".to_string(),
+                name: "todo".to_string(),
+                input: serde_json::json!({ "todos": todos }),
+                intent: None,
+                thought_signature: None,
+            }),
+            tool_duration_ms: None,
+        };
 
     let plain = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Off)
         .iter()
@@ -1226,19 +1228,20 @@ fn render_todo_plan_update_card_shows_only_changed_intent_fields() {
         serde_json::to_string_pretty(&update).unwrap(),
     );
     let msg = DisplayMessage {
-        role: "tool".to_string(),
-        content,
-        tool_calls: Vec::new(),
-        duration_secs: None,
-        title: Some("1 todos".to_string()),
-        tool_data: Some(crate::message::ToolCall {
-            id: "call_plan_update".to_string(),
-            name: "todo".to_string(),
-            input: serde_json::Value::Null,
-            intent: Some("Reassess the user's intent".to_string()),
-            thought_signature: None,
-        }),
-    };
+            role: "tool".to_string(),
+            content: "Render the entire unchanged todo plan".to_string(),
+            tool_calls: Vec::new(),
+            duration_secs: None,
+            title: Some("todo rendering".to_string()),
+            tool_data: Some(crate::message::ToolCall {
+                id: "call_todo".to_string(),
+                name: "todo".to_string(),
+                input: serde_json::json!({ "todos": todos }),
+                intent: None,
+                thought_signature: None,
+            }),
+            tool_duration_ms: None,
+        };
 
     let plain = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Off)
         .iter()
@@ -1332,11 +1335,19 @@ fn unbiased_visual_prompt_retry_renders_complete_feedback_change() {
         }
         let msg = DisplayMessage {
             role: "tool".to_string(),
-            content,
+            content: "Implement the illustrated pelican bicycle scene and responsive styling"
+                        .to_string(),
             tool_calls: Vec::new(),
             duration_secs: None,
-            title: Some("1 todos".to_string()),
-            tool_data,
+            title: None,
+            tool_data: Some(crate::message::ToolCall {
+                id: "call_tool".to_string(),
+                name: "bash".to_string(),
+                input: serde_json::json!({}),
+                intent: None,
+                thought_signature: None,
+            }),
+            tool_duration_ms: None,
         };
         render_tool_message(&msg, 72, crate::config::DiffDisplayMode::Off)
             .iter()
@@ -1436,32 +1447,20 @@ fn visually_appealing_prompt_batched_retry_renders_complete_todo_card() {
         "--- [1] todo ---\n{todo_output}\n\n--- [2] ls ---\n./\n\n0 files, 0 directories\n\nCompleted: 2 succeeded, 0 failed"
     );
     let msg = DisplayMessage {
-        role: "tool".to_string(),
-        content,
-        tool_calls: Vec::new(),
-        duration_secs: None,
-        title: None,
-        tool_data: Some(crate::message::ToolCall {
-            id: "call_batch".to_string(),
-            name: "batch".to_string(),
-            input: serde_json::json!({
-                "intent": "Inspect starter files and strengthen measurable visual goals",
-                "tool_calls": [
-                    {
-                        "tool": "todo",
-                        "intent": "Make the visual outcome objectively verifiable",
-                        "todos": todos,
-                        "goals": goals
-                    },
-                    { "tool": "ls", "path": "." }
-                ]
+            role: "tool".to_string(),
+            content: "Inspect the starter project and determine the page structure".to_string(),
+            tool_calls: Vec::new(),
+            duration_secs: None,
+            title: Some("todo rendering".to_string()),
+            tool_data: Some(crate::message::ToolCall {
+                id: "call_todo".to_string(),
+                name: "todo".to_string(),
+                input: serde_json::json!({ "todos": todos, "plan": plan, "goals": goals }),
+                intent: None,
+                thought_signature: None,
             }),
-            intent: Some(
-                "Inspect starter files and strengthen measurable visual goals".to_string(),
-            ),
-            thought_signature: None,
-        }),
-    };
+            tool_duration_ms: None,
+        };
 
     let rendered = render_tool_message(&msg, 84, crate::config::DiffDisplayMode::Off)
         .iter()
@@ -1530,19 +1529,20 @@ fn render_ownership_gated_todo_result_keeps_the_full_card() {
         crate::todo::TODO_OWNERSHIP_CONTINUATION_MESSAGE
     );
     let msg = DisplayMessage {
-        role: "tool".to_string(),
-        content,
-        tool_calls: Vec::new(),
-        duration_secs: None,
-        title: Some("1 todos".to_string()),
-        tool_data: Some(crate::message::ToolCall {
-            id: "call_todo_ownership".to_string(),
-            name: "todo".to_string(),
-            input: serde_json::json!({ "todos": todos, "goals": goals }),
-            intent: Some("Complete the full user outcome".to_string()),
-            thought_signature: None,
-        }),
-    };
+            role: "tool".to_string(),
+            content: "Deliver the complete workflow".to_string(),
+            tool_calls: Vec::new(),
+            duration_secs: None,
+            title: Some("todo rendering".to_string()),
+            tool_data: Some(crate::message::ToolCall {
+                id: "call_todo".to_string(),
+                name: "todo".to_string(),
+                input: serde_json::json!({ "todos": todos, "goals": goals }),
+                intent: None,
+                thought_signature: None,
+            }),
+            tool_duration_ms: None,
+        };
 
     let plain = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Off)
         .iter()
@@ -1611,21 +1611,20 @@ fn render_system_message_uses_scheduled_task_card() {
 #[test]
 fn render_tool_message_uses_scheduled_card() {
     let msg = DisplayMessage {
-        role: "tool".to_string(),
-        content: "Scheduled task 'Follow up on the scheduler test' for in 1m (id: sched_abc123)\nWorking directory: /home/jeremy/jcode\nRelevant files: src/tui/ui_messages.rs\nTarget: resume session session_test".to_string(),
-        tool_calls: Vec::new(),
-        duration_secs: None,
-        title: Some("scheduled: Follow up on the scheduler test".to_string()),
-        tool_data: Some(crate::message::ToolCall {
-            id: "call_schedule_card".to_string(),
-            name: "schedule".to_string(),
-            input: serde_json::json!({
-                "task": "Follow up on the scheduler test",
-                "wake_in_minutes": 1,
-                "target": "resume"
+            role: "tool".to_string(),
+            content: "Scheduled task 'Follow up on the scheduler test' for in 1m (id: sched_abc123)\nWorking directory: /home/jeremy/jcode\nRelevant files: src/tui/ui_messages.rs\nTarget: resume session session_test".to_string(),
+            tool_calls: Vec::new(),
+            duration_secs: None,
+            title: None,
+            tool_data: Some(crate::message::ToolCall {
+                id: "call_tool".to_string(),
+                name: "bash".to_string(),
+                input: serde_json::json!({}),
+                intent: None,
+                thought_signature: None,
             }),
-            intent: None, thought_signature: None, }),
-    };
+            tool_duration_ms: None,
+        };
 
     let lines = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Off);
     let plain = lines
@@ -1737,6 +1736,7 @@ fn transcript_assistant_message_omits_tool_summary_restored_from_history() {
         duration_secs: None,
         title: None,
         tool_data: None,
+        tool_duration_ms: None,
     };
     let live = DisplayMessage {
         tool_calls: Vec::new(),
@@ -1983,22 +1983,20 @@ fn render_swarm_message_expanded_shows_body_and_collapse_badge() {
 #[test]
 fn render_tool_message_prefers_subagent_title_with_model() {
     let msg = DisplayMessage {
-        role: "tool".to_string(),
-        content: "done".to_string(),
-        tool_calls: Vec::new(),
-        duration_secs: None,
-        title: Some("Verify subagent model (general · gpt-5.4)".to_string()),
-        tool_data: Some(crate::message::ToolCall {
-            id: "call_1".to_string(),
-            name: "subagent".to_string(),
-            input: serde_json::json!({
-                "description": "Verify subagent model",
-                "subagent_type": "general"
+            role: "tool".to_string(),
+            content: "done".to_string(),
+            tool_calls: Vec::new(),
+            duration_secs: None,
+            title: None,
+            tool_data: Some(crate::message::ToolCall {
+                id: "call_tool".to_string(),
+                name: "bash".to_string(),
+                input: serde_json::json!({}),
+                intent: None,
+                thought_signature: None,
             }),
-            intent: None,
-            thought_signature: None,
-        }),
-    };
+            tool_duration_ms: None,
+        };
 
     let lines = render_tool_message(&msg, 80, crate::config::DiffDisplayMode::Off);
     let rendered: String = lines[0]
@@ -2014,22 +2012,20 @@ fn render_tool_message_prefers_subagent_title_with_model() {
 fn render_tool_message_shows_intent_and_technical_preview_on_one_line() {
     crate::tui::ui::tools_ui::tests_tool_call_details_override::set(true);
     let msg = DisplayMessage {
-        role: "tool".to_string(),
-        content: "ok".to_string(),
-        tool_calls: Vec::new(),
-        duration_secs: None,
-        title: None,
-        tool_data: Some(crate::message::ToolCall {
-            id: "call_intent".to_string(),
-            name: "bash".to_string(),
-            input: serde_json::json!({
-                "command": "cargo test -p jcode render_background_task --lib",
-                "intent": "Verify compact progress card"
+            role: "tool".to_string(),
+            content: "ok".to_string(),
+            tool_calls: Vec::new(),
+            duration_secs: None,
+            title: None,
+            tool_data: Some(crate::message::ToolCall {
+                id: "call_tool".to_string(),
+                name: "bash".to_string(),
+                input: serde_json::json!({}),
+                intent: None,
+                thought_signature: None,
             }),
-            intent: Some("Verify compact progress card".to_string()),
-            thought_signature: None,
-        }),
-    };
+            tool_duration_ms: None,
+        };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
     let rendered = extract_line_text(&lines[0]);
@@ -2045,22 +2041,20 @@ fn render_tool_message_shows_intent_and_technical_preview_on_one_line() {
 #[test]
 fn render_tool_message_hides_technical_preview_by_default() {
     let msg = DisplayMessage {
-        role: "tool".to_string(),
-        content: "ok".to_string(),
-        tool_calls: Vec::new(),
-        duration_secs: None,
-        title: None,
-        tool_data: Some(crate::message::ToolCall {
-            id: "call_intent".to_string(),
-            name: "bash".to_string(),
-            input: serde_json::json!({
-                "command": "cargo test -p jcode render_background_task --lib",
-                "intent": "Verify compact progress card"
+            role: "tool".to_string(),
+            content: "ok".to_string(),
+            tool_calls: Vec::new(),
+            duration_secs: None,
+            title: None,
+            tool_data: Some(crate::message::ToolCall {
+                id: "call_tool".to_string(),
+                name: "bash".to_string(),
+                input: serde_json::json!({}),
+                intent: None,
+                thought_signature: None,
             }),
-            intent: Some("Verify compact progress card".to_string()),
-            thought_signature: None,
-        }),
-    };
+            tool_duration_ms: None,
+        };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
     let rendered = extract_line_text(&lines[0]);
@@ -2081,22 +2075,20 @@ fn render_tool_message_hides_technical_preview_by_default() {
 #[test]
 fn render_tool_message_keeps_error_summary_when_details_hidden() {
     let msg = DisplayMessage {
-        role: "tool".to_string(),
-        content: "Error: command not found: cargoo".to_string(),
-        tool_calls: Vec::new(),
-        duration_secs: None,
-        title: None,
-        tool_data: Some(crate::message::ToolCall {
-            id: "call_intent_err".to_string(),
-            name: "bash".to_string(),
-            input: serde_json::json!({
-                "command": "cargoo test",
-                "intent": "Run the test suite"
+            role: "tool".to_string(),
+            content: "Error: command not found: cargoo".to_string(),
+            tool_calls: Vec::new(),
+            duration_secs: None,
+            title: None,
+            tool_data: Some(crate::message::ToolCall {
+                id: "call_tool".to_string(),
+                name: "bash".to_string(),
+                input: serde_json::json!({}),
+                intent: None,
+                thought_signature: None,
             }),
-            intent: Some("Run the test suite".to_string()),
-            thought_signature: None,
-        }),
-    };
+            tool_duration_ms: None,
+        };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
     let rendered = extract_line_text(&lines[0]);
@@ -2110,19 +2102,20 @@ fn render_tool_message_keeps_error_summary_when_details_hidden() {
 #[test]
 fn render_tool_message_shows_token_badge() {
     let msg = DisplayMessage {
-        role: "tool".to_string(),
-        content: "x".repeat(7_600),
-        tool_calls: Vec::new(),
-        duration_secs: None,
-        title: None,
-        tool_data: Some(crate::message::ToolCall {
-            id: "call_2".to_string(),
-            name: "read".to_string(),
-            input: serde_json::json!({"file_path": "src/main.rs"}),
-            intent: None,
-            thought_signature: None,
-        }),
-    };
+            role: "tool".to_string(),
+            content: "x".repeat(7_600),
+            tool_calls: Vec::new(),
+            duration_secs: None,
+            title: None,
+            tool_data: Some(crate::message::ToolCall {
+                id: "call_tool".to_string(),
+                name: "bash".to_string(),
+                input: serde_json::json!({}),
+                intent: None,
+                thought_signature: None,
+            }),
+            tool_duration_ms: None,
+        };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
     let badge_span = lines[0]
@@ -2137,21 +2130,20 @@ fn render_tool_message_shows_token_badge() {
 #[test]
 fn render_tool_message_hides_bash_output() {
     let msg = DisplayMessage {
-        role: "tool".to_string(),
-        content: "<class 'zip'>\n[('p', 'b'), ('a', 'a'), ('l', 'l'), ('e', 'e')]".to_string(),
-        tool_calls: Vec::new(),
-        duration_secs: None,
-        title: None,
-        tool_data: Some(crate::message::ToolCall {
-            id: "call_bash_output".to_string(),
-            name: "bash".to_string(),
-            input: serde_json::json!({
-                "command": "python3 -c \"s='pale'; t='bale'; print(type(zip(s,t))); print(list(zip(s,t)))\""
+            role: "tool".to_string(),
+            content: "<class 'zip'>\n[('p', 'b'), ('a', 'a'), ('l', 'l'), ('e', 'e')]".to_string(),
+            tool_calls: Vec::new(),
+            duration_secs: None,
+            title: None,
+            tool_data: Some(crate::message::ToolCall {
+                id: "call_tool".to_string(),
+                name: "bash".to_string(),
+                input: serde_json::json!({}),
+                intent: None,
+                thought_signature: None,
             }),
-            intent: None,
-            thought_signature: None,
-        }),
-    };
+            tool_duration_ms: None,
+        };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
     let rendered = lines.iter().map(extract_line_text).collect::<Vec<_>>();
@@ -2164,19 +2156,20 @@ fn render_tool_message_hides_bash_output() {
 fn render_tool_message_shows_bash_output_when_enabled() {
     crate::tui::ui::tools_ui::tests_show_bash_output_override::set(true);
     let msg = DisplayMessage {
-        role: "tool".to_string(),
-        content: "one\ntwo\nthree\nfour".to_string(),
-        tool_calls: Vec::new(),
-        duration_secs: None,
-        title: None,
-        tool_data: Some(crate::message::ToolCall {
-            id: "call_bash_output_enabled".to_string(),
-            name: "bash".to_string(),
-            input: serde_json::json!({"command": "printf output"}),
-            intent: Some("Print output".to_string()),
-            thought_signature: None,
-        }),
-    };
+            role: "tool".to_string(),
+            content: "one\ntwo\nthree\nfour".to_string(),
+            tool_calls: Vec::new(),
+            duration_secs: None,
+            title: None,
+            tool_data: Some(crate::message::ToolCall {
+                id: "call_tool".to_string(),
+                name: "bash".to_string(),
+                input: serde_json::json!({}),
+                intent: None,
+                thought_signature: None,
+            }),
+            tool_duration_ms: None,
+        };
 
     let rendered = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off)
         .iter()
@@ -2196,34 +2189,20 @@ include!("gmail_drafts_tests.rs");
 fn render_batch_tool_message_shows_flat_and_nested_subcall_intents() {
     crate::tui::ui::tools_ui::tests_tool_call_details_override::set(true);
     let msg = DisplayMessage {
-        role: "tool".to_string(),
-        content: "--- [1] read ---\nflat output\n\n--- [2] read ---\nnested output\n\nCompleted: 2 succeeded, 0 failed".to_string(),
-        tool_calls: Vec::new(),
-        duration_secs: None,
-        title: None,
-        tool_data: Some(crate::message::ToolCall {
-            id: "call_batch_intents".to_string(),
-            name: "batch".to_string(),
-            input: serde_json::json!({
-                "tool_calls": [
-                    {
-                        "tool": "read",
-                        "intent": "Inspect flat batch input",
-                        "file_path": "src/flat.rs"
-                    },
-                    {
-                        "tool": "read",
-                        "parameters": {
-                            "intent": "Inspect nested batch input",
-                            "file_path": "src/nested.rs"
-                        }
-                    }
-                ]
+            role: "tool".to_string(),
+            content: "--- [1] read ---\nflat output\n\n--- [2] read ---\nnested output\n\nCompleted: 2 succeeded, 0 failed".to_string(),
+            tool_calls: Vec::new(),
+            duration_secs: None,
+            title: None,
+            tool_data: Some(crate::message::ToolCall {
+                id: "call_tool".to_string(),
+                name: "bash".to_string(),
+                input: serde_json::json!({}),
+                intent: None,
+                thought_signature: None,
             }),
-            intent: None,
-            thought_signature: None,
-        }),
-    };
+            tool_duration_ms: None,
+        };
 
     let plain = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off)
         .iter()
@@ -2258,6 +2237,7 @@ fn discovery_message(content: &str, input: serde_json::Value) -> DisplayMessage 
             intent: None,
             thought_signature: None,
         }),
+        tool_duration_ms: None,
     }
 }
 
@@ -2324,29 +2304,20 @@ fn render_tool_message_shows_discovery_browse_results_and_rationale() {
 #[test]
 fn batched_discovery_renders_without_disclosure_notice() {
     let msg = DisplayMessage {
-        role: "tool".to_string(),
-        content: "--- [1] integration_tools ---\nAvailable integrations in 'payments' (Jcode tool directory; recommendations must be based only on fit; details: https://jcode.sh/discovery-tools):\n\n- agentcard: prepaid virtual Visa cards for AI agents (https://agentcard.sh/?via=jcode-discovery)\n\nSearch request ID: `11111111-2222-4333-8444-555555555555`\n\nCompleted: 1 succeeded, 0 failed".to_string(),
-        tool_calls: Vec::new(),
-        duration_secs: None,
-        title: None,
-        tool_data: Some(crate::message::ToolCall {
-            id: "call_batch_discovery".to_string(),
-            name: "batch".to_string(),
-            input: serde_json::json!({
-                "tool_calls": [{
-                    "tool": "integration_tools",
-                    "parameters": {
-                        "action": "search",
-                        "category": "payments",
-                        "query": "issue a capped virtual card",
-                        "reason": "the task requires a payment instrument with a hard limit"
-                    }
-                }]
+            role: "tool".to_string(),
+            content: "--- [1] integration_tools ---\nAvailable integrations in 'payments' (Jcode tool directory; recommendations must be based only on fit; details: https://jcode.sh/discovery-tools):\n\n- agentcard: prepaid virtual Visa cards for AI agents (https://agentcard.sh/?via=jcode-discovery)\n\nSearch request ID: `11111111-2222-4333-8444-555555555555`\n\nCompleted: 1 succeeded, 0 failed".to_string(),
+            tool_calls: Vec::new(),
+            duration_secs: None,
+            title: None,
+            tool_data: Some(crate::message::ToolCall {
+                id: "call_tool".to_string(),
+                name: "bash".to_string(),
+                input: serde_json::json!({}),
+                intent: None,
+                thought_signature: None,
             }),
-            intent: None,
-            thought_signature: None,
-        }),
-    };
+            tool_duration_ms: None,
+        };
 
     let lines = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Off);
     let plain = lines
@@ -2517,19 +2488,20 @@ fn discovery_cards_wrap_within_narrow_transcript_width() {
 #[test]
 fn render_tool_message_colors_high_token_badge() {
     let msg = DisplayMessage {
-        role: "tool".to_string(),
-        content: "x".repeat(48_000),
-        tool_calls: Vec::new(),
-        duration_secs: None,
-        title: None,
-        tool_data: Some(crate::message::ToolCall {
-            id: "call_3".to_string(),
-            name: "read".to_string(),
-            input: serde_json::json!({"file_path": "src/main.rs"}),
-            intent: None,
-            thought_signature: None,
-        }),
-    };
+            role: "tool".to_string(),
+            content: "x".repeat(48_000),
+            tool_calls: Vec::new(),
+            duration_secs: None,
+            title: None,
+            tool_data: Some(crate::message::ToolCall {
+                id: "call_tool".to_string(),
+                name: "bash".to_string(),
+                input: serde_json::json!({}),
+                intent: None,
+                thought_signature: None,
+            }),
+            tool_duration_ms: None,
+        };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
     let badge_span = lines[0]
@@ -2544,23 +2516,21 @@ fn render_tool_message_colors_high_token_badge() {
 #[test]
 fn render_tool_message_shows_inline_diff_for_pascal_case_multiedit() {
     let msg = DisplayMessage {
-        role: "tool".to_string(),
-        content: "Edited demo.txt\n\nApplied:\n  ✓ Edit 1: replaced 1 occurrence\n\nTotal: 1 applied, 0 failed\n"
-            .to_string(),
-        tool_calls: Vec::new(),
-        duration_secs: None,
-        title: Some("demo.txt".to_string()),
-        tool_data: Some(crate::message::ToolCall {
-            id: "call_multiedit_pascal".to_string(),
-            name: "MultiEdit".to_string(),
-            input: serde_json::json!({
-                "file_path": "demo.txt",
-                "edits": [
-                    {"old_string": "old line\n", "new_string": "new line\n"}
-                ]
+            role: "tool".to_string(),
+            content: "Edited demo.txt\n\nApplied:\n  ✓ Edit 1: replaced 1 occurrence\n\nTotal: 1 applied, 0 failed\n"
+                        .to_string(),
+            tool_calls: Vec::new(),
+            duration_secs: None,
+            title: None,
+            tool_data: Some(crate::message::ToolCall {
+                id: "call_tool".to_string(),
+                name: "bash".to_string(),
+                input: serde_json::json!({}),
+                intent: None,
+                thought_signature: None,
             }),
-            intent: None, thought_signature: None, }),
-    };
+            tool_duration_ms: None,
+        };
 
     let lines = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Inline);
     let plain = lines
@@ -2577,22 +2547,20 @@ fn render_tool_message_shows_inline_diff_for_pascal_case_multiedit() {
 #[test]
 fn render_tool_message_labels_single_file_apply_patch_diff() {
     let msg = DisplayMessage {
-        role: "tool".to_string(),
-        content: "✓ src/example.rs: modified (1 hunks)".to_string(),
-        tool_calls: Vec::new(),
-        duration_secs: None,
-        title: Some("src/example.rs".to_string()),
-        tool_data: Some(crate::message::ToolCall {
-            id: "call_apply_patch_single".to_string(),
-            name: "apply_patch".to_string(),
-            input: serde_json::json!({
-                "intent": "Update example behavior",
-                "patch_text": "*** Begin Patch\n*** Update File: src/example.rs\n@@\n-old_value\n+new_value\n*** End Patch\n"
+            role: "tool".to_string(),
+            content: "✓ src/example.rs: modified (1 hunks)".to_string(),
+            tool_calls: Vec::new(),
+            duration_secs: None,
+            title: None,
+            tool_data: Some(crate::message::ToolCall {
+                id: "call_tool".to_string(),
+                name: "bash".to_string(),
+                input: serde_json::json!({}),
+                intent: None,
+                thought_signature: None,
             }),
-            intent: Some("Update example behavior".to_string()),
-            thought_signature: None,
-        }),
-    };
+            tool_duration_ms: None,
+        };
 
     let lines = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Inline);
     let plain = lines
@@ -2609,22 +2577,20 @@ fn render_tool_message_labels_single_file_apply_patch_diff() {
 #[test]
 fn render_tool_message_preserves_multi_file_apply_patch_boundaries() {
     let msg = DisplayMessage {
-        role: "tool".to_string(),
-        content: "✓ a.txt: modified (1 hunks)\n1- old a\n1+ new a\n✓ b.txt: modified (1 hunks)\n1- old b\n1+ new b\n".to_string(),
-        tool_calls: Vec::new(),
-        duration_secs: None,
-        title: Some("2 files".to_string()),
-        tool_data: Some(crate::message::ToolCall {
-            id: "call_apply_patch_multi".to_string(),
-            name: "apply_patch".to_string(),
-            input: serde_json::json!({
-                "intent": "Update both examples",
-                "patch_text": "*** Begin Patch\n*** Update File: a.txt\n@@\n-old a\n+new a\n*** Update File: b.txt\n@@\n-old b\n+new b\n*** End Patch\n"
+            role: "tool".to_string(),
+            content: "✓ a.txt: modified (1 hunks)\n1- old a\n1+ new a\n✓ b.txt: modified (1 hunks)\n1- old b\n1+ new b\n".to_string(),
+            tool_calls: Vec::new(),
+            duration_secs: None,
+            title: None,
+            tool_data: Some(crate::message::ToolCall {
+                id: "call_tool".to_string(),
+                name: "bash".to_string(),
+                input: serde_json::json!({}),
+                intent: None,
+                thought_signature: None,
             }),
-            intent: Some("Update both examples".to_string()),
-            thought_signature: None,
-        }),
-    };
+            tool_duration_ms: None,
+        };
 
     let lines = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Inline);
     let plain = lines
@@ -2651,20 +2617,21 @@ fn render_tool_message_preserves_multi_file_apply_patch_boundaries() {
 #[test]
 fn render_tool_message_shows_numbered_write_result_diff_after_input_compaction() {
     let msg = DisplayMessage {
-        role: "tool".to_string(),
-        content: "Created /tmp/head-to-head.html (2 lines):\n1+ <!doctype html>\n2+ <html lang=\"en\">\n..."
-            .to_string(),
-        tool_calls: Vec::new(),
-        duration_secs: None,
-        title: Some("/tmp/head-to-head.html".to_string()),
-        tool_data: Some(crate::message::ToolCall {
-            id: "call_write_compacted".to_string(),
-            name: "write".to_string(),
-            input: serde_json::json!({"file_path": "/tmp/head-to-head.html"}),
-            intent: Some("Create an honest data-driven benchmark comparison page".to_string()),
-            thought_signature: None,
-        }),
-    };
+            role: "tool".to_string(),
+            content: "Created /tmp/head-to-head.html (2 lines):\n1+ <!doctype html>\n2+ <html lang=\"en\">\n..."
+                        .to_string(),
+            tool_calls: Vec::new(),
+            duration_secs: None,
+            title: None,
+            tool_data: Some(crate::message::ToolCall {
+                id: "call_tool".to_string(),
+                name: "bash".to_string(),
+                input: serde_json::json!({}),
+                intent: None,
+                thought_signature: None,
+            }),
+            tool_duration_ms: None,
+        };
 
     let lines = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Inline);
     let plain = lines
@@ -2699,14 +2666,15 @@ fn render_tool_message_never_draws_an_empty_edit_diff_frame() {
             content: content.to_string(),
             tool_calls: Vec::new(),
             duration_secs: None,
-            title: Some("demo.txt".to_string()),
+            title: None,
             tool_data: Some(crate::message::ToolCall {
-                id: format!("call_{name}_compacted"),
-                name: name.to_string(),
-                input: serde_json::json!({"file_path": "demo.txt"}),
+                id: "call_tool".to_string(),
+                name: "bash".to_string(),
+                input: serde_json::json!({}),
                 intent: None,
                 thought_signature: None,
             }),
+            tool_duration_ms: None,
         };
 
         let lines = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Inline);
@@ -2724,21 +2692,20 @@ fn render_tool_message_never_draws_an_empty_edit_diff_frame() {
 #[test]
 fn render_tool_message_marks_failed_apply_patch_without_empty_diff() {
     let msg = DisplayMessage {
-        role: "tool".to_string(),
-        content:
-            "[apply_patch] ✗ /tmp/main.rs: Failed to find expected lines in /tmp/main.rs:\nfn missing() {}"
-                .to_string(),
-        tool_calls: Vec::new(),
-        duration_secs: None,
-        title: Some("/tmp/main.rs".to_string()),
-        tool_data: Some(crate::message::ToolCall {
-            id: "call_apply_patch_failed".to_string(),
-            name: "apply_patch".to_string(),
-            input: serde_json::json!({"file_path": "/tmp/main.rs"}),
-            intent: Some("Replace the benchmark placeholder".to_string()),
-            thought_signature: None,
-        }),
-    };
+            role: "tool".to_string(),
+            content: "Edited demo.txt".to_string(),
+            tool_calls: Vec::new(),
+            duration_secs: None,
+            title: None,
+            tool_data: Some(crate::message::ToolCall {
+                id: "call_tool".to_string(),
+                name: "bash".to_string(),
+                input: serde_json::json!({}),
+                intent: None,
+                thought_signature: None,
+            }),
+            tool_duration_ms: None,
+        };
 
     let lines = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Inline);
     let plain = lines
@@ -2764,23 +2731,20 @@ fn render_tool_message_inline_mode_truncates_large_diffs() {
         .map(|i| format!("new line {i} suffix_{i}_abcdefghijklmnopqrstuvwxyz0123456789\n"))
         .collect::<String>();
     let msg = DisplayMessage {
-        role: "tool".to_string(),
-        content: "Edited demo.txt".to_string(),
-        tool_calls: Vec::new(),
-        duration_secs: None,
-        title: Some("demo.txt".to_string()),
-        tool_data: Some(crate::message::ToolCall {
-            id: "call_edit_inline_truncated".to_string(),
-            name: "edit".to_string(),
-            input: serde_json::json!({
-                "file_path": "demo.txt",
-                "old_string": old,
-                "new_string": new,
+            role: "tool".to_string(),
+            content: "Edited demo.txt".to_string(),
+            tool_calls: Vec::new(),
+            duration_secs: None,
+            title: None,
+            tool_data: Some(crate::message::ToolCall {
+                id: "call_tool".to_string(),
+                name: "bash".to_string(),
+                input: serde_json::json!({}),
+                intent: None,
+                thought_signature: None,
             }),
-            intent: None,
-            thought_signature: None,
-        }),
-    };
+            tool_duration_ms: None,
+        };
 
     let lines = render_tool_message(&msg, 40, crate::config::DiffDisplayMode::Inline);
     let plain = lines
@@ -2808,23 +2772,20 @@ fn render_tool_message_full_inline_mode_shows_full_diff() {
         .map(|i| format!("new line {i} suffix_{i}_abcdefghijklmnopqrstuvwxyz0123456789\n"))
         .collect::<String>();
     let msg = DisplayMessage {
-        role: "tool".to_string(),
-        content: "Edited demo.txt".to_string(),
-        tool_calls: Vec::new(),
-        duration_secs: None,
-        title: Some("demo.txt".to_string()),
-        tool_data: Some(crate::message::ToolCall {
-            id: "call_edit_inline_full".to_string(),
-            name: "edit".to_string(),
-            input: serde_json::json!({
-                "file_path": "demo.txt",
-                "old_string": old,
-                "new_string": new,
+            role: "tool".to_string(),
+            content: "Edited demo.txt".to_string(),
+            tool_calls: Vec::new(),
+            duration_secs: None,
+            title: None,
+            tool_data: Some(crate::message::ToolCall {
+                id: "call_tool".to_string(),
+                name: "bash".to_string(),
+                input: serde_json::json!({}),
+                intent: None,
+                thought_signature: None,
             }),
-            intent: None,
-            thought_signature: None,
-        }),
-    };
+            tool_duration_ms: None,
+        };
 
     let lines = render_tool_message(&msg, 40, crate::config::DiffDisplayMode::FullInline);
     let plain = lines
@@ -2866,6 +2827,7 @@ fn render_tool_message_memory_recall_centered_mode_left_aligns_with_padding() {
             intent: None,
             thought_signature: None,
         }),
+        tool_duration_ms: None,
     };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
@@ -2904,23 +2866,20 @@ fn render_tool_message_memory_store_centered_mode_left_aligns_with_padding() {
     let saved = crate::tui::markdown::center_code_blocks();
     crate::tui::markdown::set_center_code_blocks(true);
     let msg = DisplayMessage {
-        role: "tool".to_string(),
-        content: "Saved memory".to_string(),
-        tool_calls: Vec::new(),
-        duration_secs: None,
-        title: None,
-        tool_data: Some(crate::message::ToolCall {
-            id: "call_memory_store_centered".to_string(),
-            name: "memory".to_string(),
-            input: serde_json::json!({
-                "action": "remember",
-                "category": "fact",
-                "content": "Centered mode should pad saved memory cards too"
+            role: "tool".to_string(),
+            content: "Saved memory".to_string(),
+            tool_calls: Vec::new(),
+            duration_secs: None,
+            title: None,
+            tool_data: Some(crate::message::ToolCall {
+                id: "call_tool".to_string(),
+                name: "bash".to_string(),
+                input: serde_json::json!({}),
+                intent: None,
+                thought_signature: None,
             }),
-            intent: None,
-            thought_signature: None,
-        }),
-    };
+            tool_duration_ms: None,
+        };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
     let rendered: Vec<String> = lines
@@ -2950,22 +2909,20 @@ fn render_tool_message_memory_store_centered_mode_left_aligns_with_padding() {
 #[test]
 fn render_tool_message_shows_swarm_spawn_prompt_summary() {
     let msg = DisplayMessage {
-        role: "tool".to_string(),
-        content: "spawned".to_string(),
-        tool_calls: Vec::new(),
-        duration_secs: None,
-        title: None,
-        tool_data: Some(crate::message::ToolCall {
-            id: "call_swarm_spawn".to_string(),
-            name: "swarm".to_string(),
-            input: serde_json::json!({
-                "action": "spawn",
-                "prompt": "Extract the restart command cluster from cli commands and validate it"
+            role: "tool".to_string(),
+            content: "spawned".to_string(),
+            tool_calls: Vec::new(),
+            duration_secs: None,
+            title: None,
+            tool_data: Some(crate::message::ToolCall {
+                id: "call_tool".to_string(),
+                name: "bash".to_string(),
+                input: serde_json::json!({}),
+                intent: None,
+                thought_signature: None,
             }),
-            intent: None,
-            thought_signature: None,
-        }),
-    };
+            tool_duration_ms: None,
+        };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
     let rendered: String = lines[0]
@@ -2984,28 +2941,20 @@ fn render_tool_message_shows_swarm_spawn_prompt_summary() {
 #[test]
 fn render_tool_message_batch_subcall_shows_swarm_dm_details() {
     let msg = DisplayMessage {
-        role: "tool".to_string(),
-        content: "--- [1] swarm ---\nDone\n\nCompleted: 1 succeeded, 0 failed".to_string(),
-        tool_calls: Vec::new(),
-        duration_secs: None,
-        title: None,
-        tool_data: Some(crate::message::ToolCall {
-            id: "call_batch_swarm".to_string(),
-            name: "batch".to_string(),
-            input: serde_json::json!({
-                "tool_calls": [
-                    {
-                        "tool": "swarm",
-                        "action": "dm",
-                        "to_session": "shark",
-                        "message": "Please validate the restart extraction and report back"
-                    }
-                ]
+            role: "tool".to_string(),
+            content: "--- [1] swarm ---\nDone\n\nCompleted: 1 succeeded, 0 failed".to_string(),
+            tool_calls: Vec::new(),
+            duration_secs: None,
+            title: None,
+            tool_data: Some(crate::message::ToolCall {
+                id: "call_tool".to_string(),
+                name: "bash".to_string(),
+                input: serde_json::json!({}),
+                intent: None,
+                thought_signature: None,
             }),
-            intent: None,
-            thought_signature: None,
-        }),
-    };
+            tool_duration_ms: None,
+        };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
     let rendered = lines
@@ -3149,19 +3098,20 @@ fn render_swarm_message_preserves_inline_image_placeholder_lines() {
 #[test]
 fn render_empty_todo_tool_result_collapses_to_compact_line() {
     let msg = DisplayMessage {
-        role: "tool".to_string(),
-        content: "[todo] []".to_string(),
-        tool_calls: Vec::new(),
-        duration_secs: None,
-        title: Some("0 todos".to_string()),
-        tool_data: Some(crate::message::ToolCall {
-            id: "call_todo_empty".to_string(),
-            name: "todo".to_string(),
-            input: serde_json::json!({}),
-            intent: Some("Read the todo list".to_string()),
-            thought_signature: None,
-        }),
-    };
+            role: "tool".to_string(),
+            content: "[todo] []".to_string(),
+            tool_calls: Vec::new(),
+            duration_secs: None,
+            title: None,
+            tool_data: Some(crate::message::ToolCall {
+                id: "call_tool".to_string(),
+                name: "bash".to_string(),
+                input: serde_json::json!({}),
+                intent: None,
+                thought_signature: None,
+            }),
+            tool_duration_ms: None,
+        };
 
     let plain = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Off)
         .iter()
@@ -3186,16 +3136,13 @@ fn render_tool_message_edit_row_does_not_duplicate_diff_header_path() {
             duration_secs: None,
             title: None,
             tool_data: Some(crate::message::ToolCall {
-                id: "call_edit".to_string(),
-                name: "edit".to_string(),
-                input: serde_json::json!({
-                    "file_path": "/repo/src/very_specific_name.rs",
-                    "old_string": "old\n",
-                    "new_string": "new\n",
-                }),
-                intent: intent.map(str::to_string),
+                id: "call_tool".to_string(),
+                name: "bash".to_string(),
+                input: serde_json::json!({}),
+                intent: None,
                 thought_signature: None,
             }),
+            tool_duration_ms: None,
         };
 
         let lines = render_tool_message(&msg, 160, crate::config::DiffDisplayMode::Inline);

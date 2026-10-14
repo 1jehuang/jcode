@@ -558,6 +558,7 @@ fn send_native_search_row(
             name: "web_search".to_string(),
             output: "1. Rust\n   https://www.rust-lang.org/".to_string(),
             error: None,
+            duration_ms: None,
         },
         remote,
     );
@@ -601,6 +602,7 @@ fn test_retry_rollback_discards_native_search_rows_from_aborted_attempt() {
             name: "bash".to_string(),
             output: "ok".to_string(),
             error: None,
+            duration_ms: None,
         },
         &mut remote,
     );
@@ -672,6 +674,7 @@ fn test_native_search_rows_from_completed_attempt_survive_later_rollback() {
             name: "bash".to_string(),
             output: "ok".to_string(),
             error: None,
+            duration_ms: None,
         },
         &mut remote,
     );

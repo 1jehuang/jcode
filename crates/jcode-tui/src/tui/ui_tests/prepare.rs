@@ -1069,7 +1069,6 @@ fn test_prepare_messages_centered_streaming_recenters_structured_markdown_like_f
 #[test]
 fn test_render_tool_message_batch_nested_subcall_params_still_render() {
     let msg = DisplayMessage {
-        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "--- [1] grep ---\nok\n\nCompleted: 1 succeeded, 0 failed".to_string(),
         tool_calls: vec![],
@@ -1086,6 +1085,7 @@ fn test_render_tool_message_batch_nested_subcall_params_still_render() {
             intent: None,
             thought_signature: None,
         }),
+        tool_duration_ms: None,
     };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
@@ -1107,7 +1107,6 @@ fn test_render_tool_message_batch_nested_subcall_params_still_render() {
 #[test]
 fn test_render_tool_message_batch_flat_grep_subcall_uses_pattern_and_path() {
     let msg = DisplayMessage {
-        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "--- [1] grep ---\nok\n\nCompleted: 1 succeeded, 0 failed".to_string(),
         tool_calls: vec![],
@@ -1124,6 +1123,7 @@ fn test_render_tool_message_batch_flat_grep_subcall_uses_pattern_and_path() {
             intent: None,
             thought_signature: None,
         }),
+        tool_duration_ms: None,
     };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
@@ -1145,7 +1145,6 @@ fn test_render_tool_message_batch_flat_grep_subcall_uses_pattern_and_path() {
 #[test]
 fn test_render_tool_message_batch_subcall_lines_alignment_unset() {
     let msg = DisplayMessage {
-        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "--- [1] read ---\nok\n\n--- [2] grep ---\nok\n\nCompleted: 2 succeeded, 0 failed"
             .to_string(),
@@ -1164,6 +1163,7 @@ fn test_render_tool_message_batch_subcall_lines_alignment_unset() {
             intent: None,
             thought_signature: None,
         }),
+        tool_duration_ms: None,
     };
 
     // In non-centered mode, lines have no alignment set
@@ -1320,6 +1320,7 @@ fn test_prepare_messages_restored_history_matches_live_tool_rows() {
             intent: Some("Check repo state".to_string()),
             thought_signature: None,
         }),
+        tool_duration_ms: None,
     };
     let assistant = |tool_calls: Vec<String>| DisplayMessage {
         role: "assistant".to_string(),
@@ -1328,6 +1329,7 @@ fn test_prepare_messages_restored_history_matches_live_tool_rows() {
         duration_secs: None,
         title: None,
         tool_data: None,
+        tool_duration_ms: None,
     };
     let render = |messages: Vec<DisplayMessage>| {
         let state = TestState {
