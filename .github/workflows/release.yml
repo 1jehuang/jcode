@@ -529,7 +529,10 @@ jobs:
     runs-on: windows-latest
     needs: [create-release, build-windows]
     # Signing failures keep the complete release draft, including recovery runs.
-    if: needs.create-release.result == 'success' && needs.build-windows.result == 'success'
+    # The optional recovery-preflight ancestor is skipped for normal releases.
+    # Override implicit success() so that skip does not suppress signing, while
+    # still requiring both direct dependencies to succeed.
+    if: always() && needs.create-release.result == 'success' && needs.build-windows.result == 'success'
     timeout-minutes: 30
     permissions:
       contents: write

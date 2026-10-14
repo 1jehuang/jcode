@@ -140,6 +140,16 @@ Before announcing Defender or SmartScreen remediation, download both public Wind
 
 Normal retries still require successful CI on the existing tag's exact SHA. A newer green master commit does not authorize an older failed tag. Reviewed source recovery is a separate, explicitly constrained workflow-dispatch path with provenance, not a bypass available in `quick-release.sh`. Do not retag an existing version or broaden recovery permissions as part of a routine release.
 
+For a **workflow-only defect** with an unpublished draft and already-green exact tagged source, commit and review the workflow fix on `master`, then dispatch the corrected workflow against the unchanged tag with `recovery=none`:
+
+```bash
+gh workflow run release.yml --ref master -f tag=v0.98.1 -f recovery=none
+```
+
+This rebuilds all platforms from the original tag, repeats the exact-tag-SHA CI check, and records the separate workflow commit in provenance. It refuses a public release or a version older than an already-public successor. A rerun of the old failed run uses its old workflow definition, so it cannot pick up a committed workflow fix. Wait for signing, complete assets, public downloads, and installer checks before calling the retry successful.
+
+The optional `recovery-preflight` job is intentionally skipped for unpatched releases. Every downstream job that must still run needs an explicit status-check expression. In particular, Windows signing uses `always()` plus successful direct dependency results, preventing a skipped recovery ancestor from suppressing signing without allowing failed Windows builds through.
+
 ## Local cross-compilation prerequisites
 
 The default local mode needs Docker for the portable Linux build and osxcross for macOS, plus `cargo`, `file`, and `rcodesign`. The current osxcross setup uses the macOS 14.5 SDK at `~/.osxcross/`, with the `aarch64-apple-darwin23.5-clang` linker. Install the Rust `aarch64-apple-darwin` target and configure `~/.cargo/config.toml`:

@@ -111,6 +111,27 @@ class RecoveryTests(unittest.TestCase):
                                         cwd=self.repo, env=env, capture_output=True, text=True)
                 self.assertEqual(result.returncode == 0, succeeds, result.stderr)
 
+    def test_windows_signing_handles_skipped_recovery_ancestor(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        signing = workflow.split("  publish-windows:\n", 1)[1].split("  build-freebsd:\n", 1)[0]
+        condition = next(line.strip()[4:] for line in signing.splitlines()
+                         if line.startswith("    if: "))
+        self.assertEqual(condition, "always() && needs.create-release.result == 'success' && needs.build-windows.result == 'success'")
+        self.assertIn("needs: [create-release, build-windows]", signing)
+        # Exercise the checked-in predicate independently of ancestor status.
+        # A skipped optional preflight must not skip successful signing inputs,
+        # but failed/cancelled/skipped direct dependencies must stay blocked.
+        for ancestor in ("success", "skipped"):
+            for create in ("success", "failure", "cancelled", "skipped"):
+                for build in ("success", "failure", "cancelled", "skipped"):
+                    with self.subTest(ancestor=ancestor, create=create, build=build):
+                        expression = condition.replace("always()", "True")
+                        expression = expression.replace("needs.create-release.result", repr(create))
+                        expression = expression.replace("needs.build-windows.result", repr(build))
+                        expression = expression.replace("&&", "and")
+                        self.assertEqual(eval(expression, {"__builtins__": {}}),
+                                         create == "success" and build == "success")
+
     def test_workflow_identity_and_publication_gates(self):
         workflow = (ROOT / ".github/workflows/release.yml").read_text()
         self.assertNotIn("GITHUB_REF_NAME", workflow)
