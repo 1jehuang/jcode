@@ -49,6 +49,108 @@ fn test_handle_server_event_available_models_updated_replaces_remote_model_catal
 }
 
 #[test]
+fn test_names_only_catalog_update_refetches_routes_when_model_picker_opens() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    let route = |provider: &str| crate::provider::ModelRoute {
+        model: "glm-5.3".to_string(),
+        provider: provider.to_string(),
+        api_method: format!("openai-compatible:{provider}"),
+        available: true,
+        detail: String::new(),
+        usage: None,
+        cheapness: None,
+    };
+
+    app.is_remote = true;
+    app.remote_available_entries = vec!["glm-5.3".to_string()];
+    app.remote_model_options = vec![route("old-gateway")];
+
+    // A new gateway serving an already-listed model id arrives names-only.
+    app.handle_server_event(
+        crate::protocol::ServerEvent::AvailableModelsUpdated {
+            provider_name: None,
+            provider_model: None,
+            available_models: vec!["glm-5.3".to_string()],
+            available_model_routes: Vec::new(),
+        },
+        &mut remote,
+    );
+    assert!(
+        !app.take_stale_model_routes_fetch(),
+        "idle clients must not fetch the full catalog"
+    );
+
+    app.open_model_picker();
+    assert!(app.take_stale_model_routes_fetch());
+    assert!(
+        !app.take_stale_model_routes_fetch(),
+        "one fetch per names-only update"
+    );
+
+    // The GetModelCatalog reply carries full routes and rebuilds the open picker.
+    app.remote_model_routes_stale = true;
+    app.handle_server_event(
+        crate::protocol::ServerEvent::AvailableModelsUpdated {
+            provider_name: None,
+            provider_model: None,
+            available_models: vec!["glm-5.3".to_string()],
+            available_model_routes: vec![route("old-gateway"), route("new-gateway")],
+        },
+        &mut remote,
+    );
+    assert!(!app.remote_model_routes_stale);
+    let picker = app.inline_interactive_state.as_ref().expect("picker open");
+    assert!(picker.entries.iter().any(|entry| {
+        entry
+            .options
+            .iter()
+            .any(|option| option.provider == "new-gateway")
+    }));
+}
+
+#[test]
+fn test_model_catalog_history_reply_keeps_session_settings() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.is_remote = true;
+    let history = |extra: serde_json::Value| {
+        let mut event = serde_json::json!({
+            "type": "history",
+            "id": 1,
+            "session_id": "session_catalog_reply",
+            "messages": [],
+        });
+        event
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        serde_json::from_value(event).expect("history fixture")
+    };
+
+    app.handle_server_event(
+        history(serde_json::json!({
+            "server_name": "maple",
+            "subagent_model": "glm-5.3",
+            "autoreview_enabled": true,
+        })),
+        &mut remote,
+    );
+    assert_eq!(app.session.subagent_model.as_deref(), Some("glm-5.3"));
+    assert!(app.autoreview_enabled);
+
+    // A mid-session GetModelCatalog reply carries no server identity or settings.
+    app.handle_server_event(history(serde_json::json!({})), &mut remote);
+    assert_eq!(app.session.subagent_model.as_deref(), Some("glm-5.3"));
+    assert_eq!(app.session.autoreview_enabled, Some(true));
+    assert!(app.autoreview_enabled);
+}
+
+#[test]
 fn test_refresh_model_list_command_shows_summary_and_status_notice() {
     let mut app = create_refresh_summary_test_app(crate::provider::ModelCatalogRefreshSummary {
         model_count_before: 12,
