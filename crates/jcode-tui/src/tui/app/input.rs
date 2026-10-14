@@ -3046,12 +3046,11 @@ impl App {
             if matches!(
                 event.kind,
                 crossterm::event::KeyEventKind::Press | crossterm::event::KeyEventKind::Repeat
-            ) {
-                if let Err(error) = self.handle_key_press_event(event) {
-                    self.push_display_message(DisplayMessage::error(format!(
-                        "Could not handle key input: {error}"
-                    )));
-                }
+            ) && let Err(error) = self.handle_key_press_event(event)
+            {
+                self.push_display_message(DisplayMessage::error(format!(
+                    "Could not handle key input: {error}"
+                )));
             }
             return;
         }
@@ -3080,12 +3079,11 @@ impl App {
         if matches!(
             event.kind,
             crossterm::event::KeyEventKind::Press | crossterm::event::KeyEventKind::Repeat
-        ) {
-            if let Err(error) = self.handle_key_press_event(event) {
-                self.push_display_message(DisplayMessage::error(format!(
-                    "Could not handle key input: {error}"
-                )));
-            }
+        ) && let Err(error) = self.handle_key_press_event(event)
+        {
+            self.push_display_message(DisplayMessage::error(format!(
+                "Could not handle key input: {error}"
+            )));
         }
     }
 
