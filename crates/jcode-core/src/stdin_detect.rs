@@ -285,7 +285,7 @@ mod macos {
                 pid,
                 PROC_PIDLISTFDS,
                 0,
-                buf.as_mut_ptr() as *mut libc::c_void,
+                buf.as_mut_ptr().cast::<libc::c_void>(),
                 buf_size,
             )
         };
@@ -296,7 +296,7 @@ mod macos {
 
         let num_fds = ret / fd_size;
         let fds = unsafe {
-            std::slice::from_raw_parts(buf.as_ptr() as *const proc_fdinfo, num_fds as usize)
+            std::slice::from_raw_parts(buf.as_ptr().cast::<proc_fdinfo>(), num_fds as usize)
         };
 
         // Check if fd 0 exists and is a pipe or vnode (pty)
@@ -318,7 +318,7 @@ mod macos {
                 pid,
                 PROC_PIDLISTTHREADS,
                 0,
-                thread_ids.as_mut_ptr() as *mut libc::c_void,
+                thread_ids.as_mut_ptr().cast::<libc::c_void>(),
                 (thread_ids.len() * mem::size_of::<u64>()) as i32,
             )
         };
@@ -337,7 +337,7 @@ mod macos {
                     pid,
                     PROC_PIDTHREADINFO,
                     thread_id,
-                    &mut tinfo as *mut _ as *mut libc::c_void,
+                    (&mut tinfo as *mut proc_threadinfo).cast::<libc::c_void>(),
                     mem::size_of::<proc_threadinfo>() as i32,
                 )
             };
