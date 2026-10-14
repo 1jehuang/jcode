@@ -274,58 +274,64 @@ fn test_disconnect_recovers_interleave_image_without_touching_composer() {
 
 #[test]
 fn test_reload_empty_queue_discards_orphan_images() {
-    let mut app = local_image_redirect_app();
-    let session_id = format!("test-queued-image-orphan-{}", std::process::id());
-    app.save_input_for_reload(&session_id);
-    let mut restored = App::restore_input_for_reload(&session_id).unwrap();
-    restored.queued_messages.clear();
-    app.apply_restored_reload_input(restored);
-    assert!(app.queued_message_images.is_empty());
+    with_temp_jcode_home(|| {
+        let mut app = local_image_redirect_app();
+        let session_id = format!("test-queued-image-orphan-{}", std::process::id());
+        app.save_input_for_reload(&session_id);
+        let mut restored = App::restore_input_for_reload(&session_id).unwrap();
+        restored.queued_messages.clear();
+        app.apply_restored_reload_input(restored);
+        assert!(app.queued_message_images.is_empty());
+    });
 }
 
 #[test]
 fn test_reload_orphan_images_do_not_attach_to_recovered_soft_interrupt() {
-    let app = local_image_redirect_app();
-    let session_id = format!("test-queued-image-unrelated-{}", std::process::id());
-    app.save_input_for_reload(&session_id);
-    let path = crate::storage::jcode_dir()
-        .unwrap()
-        .join(format!("client-input-{session_id}"));
-    let mut data: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-    data["queued_messages"] = serde_json::json!([]);
-    data["pending_soft_interrupt_resend"] = serde_json::json!(["unrelated recovered prompt"]);
-    std::fs::write(path, data.to_string()).unwrap();
-    let restored = App::restore_input_for_reload(&session_id).unwrap();
-    let mut reloaded = create_test_app();
-    reloaded.apply_restored_reload_input(restored);
-    reloaded.prepare_queued_local_turn();
-    assert!(
-        matches!(reloaded.session.messages.last().unwrap().content.as_slice(),
-        [ContentBlock::Text { text, .. }] if text == "unrelated recovered prompt")
-    );
+    with_temp_jcode_home(|| {
+        let app = local_image_redirect_app();
+        let session_id = format!("test-queued-image-unrelated-{}", std::process::id());
+        app.save_input_for_reload(&session_id);
+        let path = crate::storage::jcode_dir()
+            .unwrap()
+            .join(format!("client-input-{session_id}"));
+        let mut data: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        data["queued_messages"] = serde_json::json!([]);
+        data["pending_soft_interrupt_resend"] = serde_json::json!(["unrelated recovered prompt"]);
+        std::fs::write(path, data.to_string()).unwrap();
+        let restored = App::restore_input_for_reload(&session_id).unwrap();
+        let mut reloaded = create_test_app();
+        reloaded.apply_restored_reload_input(restored);
+        reloaded.prepare_queued_local_turn();
+        assert!(
+            matches!(reloaded.session.messages.last().unwrap().content.as_slice(),
+            [ContentBlock::Text { text, .. }] if text == "unrelated recovered prompt")
+        );
+    });
 }
 
 #[test]
 fn test_reload_legacy_queue_without_images_restores_text() {
-    let app = local_image_redirect_app();
-    let session_id = format!("test-queued-image-legacy-{}", std::process::id());
-    app.save_input_for_reload(&session_id);
-    let path = crate::storage::jcode_dir()
-        .unwrap()
-        .join(format!("client-input-{session_id}"));
-    let mut data: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-    data.as_object_mut()
-        .unwrap()
-        .remove("queued_message_images");
-    data.as_object_mut().unwrap().remove("interleave_images");
-    std::fs::write(path, data.to_string()).unwrap();
-    let restored = App::restore_input_for_reload(&session_id).unwrap();
-    let mut reloaded = create_test_app();
-    reloaded.apply_restored_reload_input(restored);
-    assert_eq!(
-        (reloaded.queued_messages, reloaded.queued_message_images),
-        (vec!["describe this image".to_string()], vec![])
-    );
+    with_temp_jcode_home(|| {
+        let app = local_image_redirect_app();
+        let session_id = format!("test-queued-image-legacy-{}", std::process::id());
+        app.save_input_for_reload(&session_id);
+        let path = crate::storage::jcode_dir()
+            .unwrap()
+            .join(format!("client-input-{session_id}"));
+        let mut data: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        data.as_object_mut()
+            .unwrap()
+            .remove("queued_message_images");
+        data.as_object_mut().unwrap().remove("interleave_images");
+        std::fs::write(path, data.to_string()).unwrap();
+        let restored = App::restore_input_for_reload(&session_id).unwrap();
+        let mut reloaded = create_test_app();
+        reloaded.apply_restored_reload_input(restored);
+        assert_eq!(
+            (reloaded.queued_messages, reloaded.queued_message_images),
+            (vec!["describe this image".to_string()], vec![])
+        );
+    });
 }
