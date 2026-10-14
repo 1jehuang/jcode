@@ -610,6 +610,12 @@ mod tests {
 
     const FUTURE: i64 = 4_102_444_800_000;
 
+    // secure_publish refuses symlinked ancestors by design, and macOS keeps the
+    // temp dir under the /var -> /private/var symlink, so start from its real path.
+    fn tempdir() -> tempfile::TempDir {
+        tempfile::tempdir_in(fs::canonicalize(std::env::temp_dir()).unwrap()).unwrap()
+    }
+
     fn fixture(provider: TransferProvider, token: &str) -> Vec<u8> {
         let credential = match provider {
             TransferProvider::OpenAi => json!({
@@ -648,8 +654,8 @@ mod tests {
     #[test]
     fn round_trip_only_active_account_leaves_source_and_other_stores_unchanged() {
         for provider in [TransferProvider::OpenAi, TransferProvider::Claude] {
-            let local = tempfile::tempdir().unwrap();
-            let remote = tempfile::tempdir().unwrap();
+            let local = tempdir();
+            let remote = tempdir();
             let home = remote.path().join("jcode");
             fs::create_dir(&home).unwrap();
             let original = source(local.path(), provider);
@@ -700,7 +706,7 @@ mod tests {
     #[test]
     fn explicit_selection_is_respected_and_missing_selection_never_falls_back() {
         for provider in [TransferProvider::OpenAi, TransferProvider::Claude] {
-            let local = tempfile::tempdir().unwrap();
+            let local = tempdir();
             source(local.path(), provider);
             let chosen = export_account_at(local.path(), provider, Some("first")).unwrap();
             assert!(
@@ -717,7 +723,7 @@ mod tests {
 
     #[test]
     fn availability_never_discovers_external_or_unrelated_credentials() {
-        let local = tempfile::tempdir().unwrap();
+        let local = tempdir();
         for (directory, filename) in [
             (".codex", "auth.json"),
             (".claude", ".credentials.json"),
@@ -768,7 +774,7 @@ mod tests {
             );
         }
         for provider in [TransferProvider::OpenAi, TransferProvider::Claude] {
-            let remote = tempfile::tempdir().unwrap();
+            let remote = tempdir();
             let mut payload: Value =
                 serde_json::from_slice(&fixture(provider, "synthetic")).unwrap();
             let expiry = match provider {
@@ -818,8 +824,8 @@ mod tests {
             (jwt(1), Some(FUTURE), Some(FUTURE)),
             ("synthetic-opaque-token".to_string(), None, None),
         ] {
-            let local = tempfile::tempdir().unwrap();
-            let remote = tempfile::tempdir().unwrap();
+            let local = tempdir();
+            let remote = tempdir();
             let source = serde_json::to_vec(&json!({
                 "openai_accounts": [{
                     "label": "active", "access_token": token,
@@ -869,7 +875,7 @@ mod tests {
 
     #[test]
     fn legacy_claude_export_does_not_migrate_the_source() {
-        let local = tempfile::tempdir().unwrap();
+        let local = tempdir();
         let bytes = serde_json::to_vec(&json!({"anthropic":{"access":"legacy-access","refresh":"legacy-refresh","expires":FUTURE}})).unwrap();
         fs::write(local.path().join("auth.json"), &bytes).unwrap();
         let payload = export_at(local.path(), TransferProvider::Claude).unwrap();
@@ -891,7 +897,7 @@ mod tests {
                 b"{\"other_provider\":{\"access\":\"untouched\"}}",
                 b"{\"OPENAI_API_KEY\":\"untouched\"}",
             ] {
-                let remote = tempfile::tempdir().unwrap();
+                let remote = tempdir();
                 let path = remote.path().join(provider.store_name());
                 fs::write(&path, existing).unwrap();
                 fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
@@ -909,7 +915,7 @@ mod tests {
 
     #[test]
     fn payload_validation_precedes_all_filesystem_writes_and_errors_are_static() {
-        let remote = tempfile::tempdir().unwrap();
+        let remote = tempdir();
         let home = remote.path().join("not-created");
         let provider = TransferProvider::OpenAi;
         let valid: Value =
@@ -966,7 +972,7 @@ mod tests {
 
     #[test]
     fn source_bounds_malformed_and_expired_stores_fail_closed() {
-        let local = tempfile::tempdir().unwrap();
+        let local = tempdir();
         for provider in [TransferProvider::OpenAi, TransferProvider::Claude] {
             assert!(matches!(
                 export_at(local.path(), provider),
@@ -1014,7 +1020,7 @@ mod tests {
 
     #[test]
     fn symlink_and_nonregular_destinations_cannot_be_followed() {
-        let root = tempfile::tempdir().unwrap();
+        let root = tempdir();
         let remote = root.path().join("remote");
         fs::create_dir(&remote).unwrap();
         let target = root.path().join("unrelated");
@@ -1052,7 +1058,7 @@ mod tests {
 
     #[test]
     fn racing_imports_have_exactly_one_winner_and_no_partial_or_leftover_files() {
-        let remote = tempfile::tempdir().unwrap();
+        let remote = tempdir();
         let home = Arc::new(remote.path().join("jcode"));
         let barrier = Arc::new(Barrier::new(8));
         let threads: Vec<_> = (0..8)
