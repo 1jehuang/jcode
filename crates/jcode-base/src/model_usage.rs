@@ -13,6 +13,66 @@ use std::{collections::HashMap, path::Path, time::Duration};
 
 type RouteKey = (String, String, String);
 
+static USAGE_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Cheap invalidation token for enriched catalogs, including other processes'
+/// SQLite WAL writes and legacy picker selections. This never opens SQLite.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CatalogUsageRevision {
+    generation: u64,
+    files: Vec<(std::path::PathBuf, Option<UsageFileStamp>)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct UsageFileStamp {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(unix)]
+    changed: (i64, i64),
+}
+
+fn usage_file_stamp(path: &Path) -> Option<UsageFileStamp> {
+    let metadata = std::fs::metadata(path).ok()?;
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
+    Some(UsageFileStamp {
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+        #[cfg(unix)]
+        inode: metadata.ino(),
+        #[cfg(unix)]
+        changed: (metadata.ctime(), metadata.ctime_nsec()),
+    })
+}
+
+pub fn catalog_usage_revision() -> CatalogUsageRevision {
+    let mut paths = Vec::new();
+    if let Ok(db) = path() {
+        let mut wal = db.as_os_str().to_os_string();
+        wal.push("-wal");
+        paths.extend([db, wal.into()]);
+    }
+    if let Ok(dir) = crate::storage::app_config_dir() {
+        paths.push(dir.join("model_picker_usage.json"));
+    }
+    usage_revision_for_paths(paths)
+}
+
+fn usage_revision_for_paths(paths: Vec<std::path::PathBuf>) -> CatalogUsageRevision {
+    CatalogUsageRevision {
+        generation: USAGE_GENERATION.load(std::sync::atomic::Ordering::Acquire),
+        files: paths
+            .into_iter()
+            .map(|path| {
+                let stamp = usage_file_stamp(&path);
+                (path, stamp)
+            })
+            .collect(),
+    }
+}
+
 fn key(model: &str, provider: &str, api_method: &str) -> RouteKey {
     let provider = jcode_provider_core::normalize_model_route_provider_label(provider);
     let provider = match provider.as_str() {
@@ -242,6 +302,7 @@ pub fn serving_route(provider: &dyn Provider, selected_method: Option<&str>) -> 
 pub fn record_turn(turn_id: &str, route: &ModelRoute) -> Result<ModelUsage> {
     let timestamp = now();
     let mut usage = record_at(&open(&path()?, timestamp)?, turn_id, route, timestamp)?;
+    USAGE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Release);
     if let Some(selection) = legacy().get(&key(&route.model, &route.provider, &route.api_method)) {
         usage.selection_count = selection.selection_count;
         usage.last_selected_unix_secs = selection.last_selected_unix_secs;
@@ -252,6 +313,32 @@ pub fn record_turn(turn_id: &str, route: &ModelRoute) -> Result<ModelUsage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn catalog_usage_revision_detects_wal_legacy_and_scope_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("usage.sqlite3");
+        let wal_path = dir.path().join("usage.sqlite3-wal");
+        let legacy_path = dir.path().join("model_picker_usage.json");
+        let paths = vec![db_path.clone(), wal_path.clone(), legacy_path.clone()];
+        let absent = usage_revision_for_paths(paths.clone());
+        assert_eq!(absent, usage_revision_for_paths(paths.clone()));
+        let db = open(&db_path, 1).unwrap();
+        let initialized = usage_revision_for_paths(paths.clone());
+        assert_ne!(absent, initialized);
+        record_at(&db, "external-turn", &route("openai-oauth"), 2).unwrap();
+        let written = usage_revision_for_paths(paths.clone());
+        assert_ne!(initialized, written, "WAL write must invalidate enrichment");
+        std::fs::write(&legacy_path, "{}").unwrap();
+        let legacy = usage_revision_for_paths(paths.clone());
+        assert_ne!(written, legacy);
+        std::fs::remove_file(&legacy_path).unwrap();
+        assert_ne!(legacy, usage_revision_for_paths(paths));
+        assert_ne!(
+            absent,
+            usage_revision_for_paths(vec![dir.path().join("other.sqlite3")])
+        );
+    }
 
     fn route(method: &str) -> ModelRoute {
         ModelRoute {

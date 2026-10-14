@@ -58,13 +58,9 @@ fn available_models_snapshot_into_event(snapshot: ModelCatalogSnapshot) -> Serve
     }
 }
 
-fn available_models_updated_event_from_agent(agent: &Agent) -> ServerEvent {
-    available_models_snapshot_into_event(agent.model_catalog_snapshot())
-}
-
 async fn available_models_snapshot(agent: &Arc<Mutex<Agent>>) -> ModelCatalogSnapshot {
     let agent_guard = agent.lock().await;
-    agent_guard.model_catalog_snapshot()
+    super::available_models_cache::for_agent(&agent_guard).snapshot()
 }
 
 fn available_models_snapshot_from_provider(provider: &Arc<dyn Provider>) -> ModelCatalogSnapshot {
@@ -75,12 +71,16 @@ fn available_models_snapshot_from_provider(provider: &Arc<dyn Provider>) -> Mode
 
 pub(super) async fn available_models_updated_event(agent: &Arc<Mutex<Agent>>) -> ServerEvent {
     let agent_guard = agent.lock().await;
-    available_models_updated_event_from_agent(&agent_guard)
+    super::available_models_cache::for_agent(&agent_guard)
+        .event
+        .clone()
 }
 
-pub(super) fn try_available_models_updated_event(agent: &Arc<Mutex<Agent>>) -> Option<ServerEvent> {
+pub(super) fn try_available_models_catalog(
+    agent: &Arc<Mutex<Agent>>,
+) -> Option<Arc<super::available_models_cache::Catalog>> {
     let agent_guard = agent.try_lock().ok()?;
-    Some(available_models_updated_event_from_agent(&agent_guard))
+    Some(super::available_models_cache::for_agent(&agent_guard))
 }
 
 fn format_auth_catalog_refresh_complete(
@@ -1078,7 +1078,7 @@ pub(super) async fn handle_notify_auth_changed(
     let (session_id, before_snapshot) = if let Ok(agent_guard) = agent.try_lock() {
         (
             agent_guard.session_id().to_string(),
-            agent_guard.model_catalog_snapshot(),
+            super::available_models_cache::for_agent(&agent_guard).snapshot(),
         )
     } else {
         crate::logging::event_warn(

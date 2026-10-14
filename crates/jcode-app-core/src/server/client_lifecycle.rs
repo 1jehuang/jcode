@@ -1,4 +1,3 @@
-use super::available_models_dedup::available_models_dedup_key;
 use super::client_actions::{
     AgentTaskContext, NotifySessionContext, handle_agent_task, handle_compact, handle_input_shell,
     handle_notify_session, handle_rename_session, handle_run_subagent, handle_set_feature,
@@ -44,7 +43,7 @@ use super::provider_control::{
     handle_notify_auth_changed, handle_refresh_models, handle_set_compaction_mode,
     handle_set_model, handle_set_premium_mode, handle_set_reasoning_effort, handle_set_route,
     handle_set_service_tier, handle_set_transport, handle_switch_anthropic_account,
-    handle_switch_openai_account, try_available_models_updated_event,
+    handle_switch_openai_account, try_available_models_catalog,
 };
 use super::{
     AwaitMembersRuntime, ClientConnectionInfo, ClientDebugState, FileTouchService,
@@ -598,8 +597,7 @@ pub(super) async fn handle_client(
     let registry_ms = t0.elapsed().as_millis();
 
     let mut swarm_enabled = crate::config::config().features.swarm;
-    let mut last_available_models_snapshot: Option<String> = None;
-    const MAX_LIVE_AVAILABLE_MODELS_UPDATE_BYTES: usize = 64 * 1024;
+    let mut last_available_models_snapshot: Option<Arc<str>> = None;
 
     // Create a new session for this client
     let t0 = std::time::Instant::now();
@@ -889,56 +887,27 @@ pub(super) async fn handle_client(
                         }
                     }
                     Ok(BusEvent::ModelsUpdated) => {
-                        let Some(event) = try_available_models_updated_event(&agent) else {
-                            crate::logging::info(&format!(
-                                "Skipping ModelsUpdated push for busy connection {}",
-                                client_connection_id
-                            ));
+                        let Some(catalog) = try_available_models_catalog(&agent) else {
                             continue;
                         };
-                        // Compare on an age-insensitive key: route details carry
-                        // cosmetic "12m ago" cache ages that tick on their own,
-                        // and a raw byte compare treated that drift as a real
-                        // catalog change, fanning a full repaint out to every
-                        // connected client.
-                        let dedup_key = available_models_dedup_key(&event);
-                        if last_available_models_snapshot.as_ref() == Some(&dedup_key) {
+                        // Equivalent clients share the snapshot, normalized key,
+                        // and size/downgrade decision. Pointer equality makes an
+                        // unchanged shared catalog a constant-time fast path.
+                        if last_available_models_snapshot.as_ref().is_some_and(|previous| {
+                            Arc::ptr_eq(previous, &catalog.dedup_key)
+                                || previous.as_ref() == catalog.dedup_key.as_ref()
+                        }) {
                             continue;
                         }
-                        let encoded_len = crate::protocol::encode_event(&event).len();
-                        if encoded_len > MAX_LIVE_AVAILABLE_MODELS_UPDATE_BYTES {
-                            // Don't drop the catalog update entirely: clients still
-                            // need fresh model names for the picker. Strip the heavy
-                            // route expansion and ship a names-only snapshot; the TUI
-                            // rebuilds fallback routes for missing models locally.
-                            let slim_event = names_only_available_models_event(&event);
-                            let slim_encoded =
-                                slim_event.as_ref().map(crate::protocol::encode_event);
-                            match (slim_event, slim_encoded) {
-                                (Some(slim_event), Some(slim_encoded))
-                                    if slim_encoded.len()
-                                        <= MAX_LIVE_AVAILABLE_MODELS_UPDATE_BYTES =>
-                                {
-                                    crate::logging::info(&format!(
-                                        "Downgrading oversized bus AvailableModelsUpdated frame to names-only for connection {} ({} -> {} bytes)",
-                                        client_connection_id,
-                                        encoded_len,
-                                        slim_encoded.len()
-                                    ));
-                                    let _ = client_event_tx.send(slim_event);
-                                }
-                                _ => {
-                                    crate::logging::warn(&format!(
-                                        "Skipping oversized bus AvailableModelsUpdated frame for connection {} ({} bytes)",
-                                        client_connection_id, encoded_len
-                                    ));
-                                }
-                            }
-                            last_available_models_snapshot = Some(dedup_key);
-                            continue;
+                        if let Some(event) = catalog.live_event() {
+                            let _ = client_event_tx.send(event.clone());
+                        } else {
+                            crate::logging::warn(&format!(
+                                "Skipping oversized catalog for connection {} ({} bytes)",
+                                client_connection_id, catalog.encoded_len
+                            ));
                         }
-                        let _ = client_event_tx.send(event);
-                        last_available_models_snapshot = Some(dedup_key);
+                        last_available_models_snapshot = Some(Arc::clone(&catalog.dedup_key));
                     }
                     Ok(BusEvent::BatchProgress(progress)) => {
                         if progress.session_id == client_session_id {
@@ -3908,30 +3877,8 @@ async fn cancel_processing_message(
     }
 }
 
-fn try_available_models_snapshot(agent: &Arc<Mutex<Agent>>) -> Option<String> {
-    let event = try_available_models_updated_event(agent)?;
-    Some(available_models_dedup_key(&event))
-}
-
-/// Build a names-only copy of an `AvailableModelsUpdated` event by dropping the
-/// per-model route expansion. Used when the fully-routed frame exceeds the live
-/// update size cap so clients still receive fresh model names.
-fn names_only_available_models_event(event: &ServerEvent) -> Option<ServerEvent> {
-    let ServerEvent::AvailableModelsUpdated {
-        provider_name,
-        provider_model,
-        available_models,
-        ..
-    } = event
-    else {
-        return None;
-    };
-    Some(ServerEvent::AvailableModelsUpdated {
-        provider_name: provider_name.clone(),
-        provider_model: provider_model.clone(),
-        available_models: available_models.clone(),
-        available_model_routes: Vec::new(),
-    })
+fn try_available_models_snapshot(agent: &Arc<Mutex<Agent>>) -> Option<Arc<str>> {
+    Some(Arc::clone(&try_available_models_catalog(agent)?.dedup_key))
 }
 
 fn queue_soft_interrupt(

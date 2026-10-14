@@ -1061,6 +1061,7 @@ pub fn record_model_unavailable_for_scope(scope: &str, model: &str, reason: &str
         return;
     }
     OPENAI_MODEL_CATALOG_SERVICE.record_runtime_model_unavailable(scope, &model, reason);
+    super::bump_catalog_generation();
 }
 
 pub fn clear_model_unavailable_for_account(model: &str) {
@@ -1073,6 +1074,7 @@ pub fn clear_model_unavailable_for_scope(scope: &str, model: &str) {
         return;
     }
     OPENAI_MODEL_CATALOG_SERVICE.clear_runtime_model_unavailable(scope, &model);
+    super::bump_catalog_generation();
 }
 
 fn runtime_provider_unavailability(provider: &str) -> Option<RuntimeProviderUnavailability> {
@@ -1119,6 +1121,7 @@ fn record_provider_unavailable_for_key(key: String, reason: &str) {
                 observed_at: SystemTime::now(),
             },
         );
+        super::bump_catalog_generation();
     }
 }
 
@@ -1128,8 +1131,10 @@ pub fn clear_provider_unavailable_for_account(provider: &str) {
         return;
     }
 
-    if let Ok(mut unavailable) = ACCOUNT_RUNTIME_UNAVAILABLE_PROVIDERS.write() {
-        unavailable.remove(&key);
+    if let Ok(mut unavailable) = ACCOUNT_RUNTIME_UNAVAILABLE_PROVIDERS.write()
+        && unavailable.remove(&key).is_some()
+    {
+        super::bump_catalog_generation();
     }
 }
 
@@ -1138,8 +1143,10 @@ pub fn clear_provider_unavailable_for_account(provider: &str) {
 /// `None` refers to the default scope, not the current active account.
 pub fn clear_openai_provider_unavailability_for_account_label(account_label: Option<&str>) {
     let key = provider_runtime_scope_key("openai", account_label);
-    if let Ok(mut unavailable) = ACCOUNT_RUNTIME_UNAVAILABLE_PROVIDERS.write() {
-        unavailable.remove(&key);
+    if let Ok(mut unavailable) = ACCOUNT_RUNTIME_UNAVAILABLE_PROVIDERS.write()
+        && unavailable.remove(&key).is_some()
+    {
+        super::bump_catalog_generation();
     }
 }
 
@@ -1147,8 +1154,10 @@ pub fn clear_openai_provider_unavailability_for_account_label(account_label: Opt
 /// `None` refers to the active (or default) login.
 pub fn clear_claude_provider_unavailability_for_account_label(account_label: Option<&str>) {
     let key = provider_runtime_scope_key("claude", account_label);
-    if let Ok(mut unavailable) = ACCOUNT_RUNTIME_UNAVAILABLE_PROVIDERS.write() {
-        unavailable.remove(&key);
+    if let Ok(mut unavailable) = ACCOUNT_RUNTIME_UNAVAILABLE_PROVIDERS.write()
+        && unavailable.remove(&key).is_some()
+    {
+        super::bump_catalog_generation();
     }
 }
 
@@ -1156,13 +1165,18 @@ pub fn clear_claude_provider_unavailability_for_account_label(account_label: Opt
 pub fn clear_all_model_unavailability_for_account() {
     let scope = current_openai_account_scope();
     OPENAI_MODEL_CATALOG_SERVICE.clear_runtime_model_unavailable_scope(&scope);
+    super::bump_catalog_generation();
 }
 
 /// Clear all runtime provider unavailability markers.
 pub fn clear_all_provider_unavailability_for_account() {
     let scope = current_openai_account_scope();
     if let Ok(mut unavailable) = ACCOUNT_RUNTIME_UNAVAILABLE_PROVIDERS.write() {
+        let before = unavailable.len();
         unavailable.retain(|key, _| !key.starts_with(&format!("openai::{}", scope)));
+        if unavailable.len() != before {
+            super::bump_catalog_generation();
+        }
     }
 }
 
