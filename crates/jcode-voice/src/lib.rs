@@ -237,7 +237,8 @@ fn validate_wav(bytes: &[u8]) -> Result<(), VoiceError> {
     {
         return Err(invalid());
     }
-    let u32_at = |pos| u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap());
+    let u32_at =
+        |pos| u32::from_le_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]]);
     if u32_at(4) as usize != bytes.len() - 8 {
         return Err(invalid());
     }
@@ -944,9 +945,11 @@ mod tests {
             encode_wav(&vec![0; MAX_AUDIO_BYTES / 2], 48000),
             Err(VoiceError::InvalidAudio)
         );
-        let mut bad = bytes.clone();
-        bad[40..44].copy_from_slice(&u32::MAX.to_le_bytes());
-        assert_eq!(validate_wav(&bad), Err(VoiceError::InvalidAudio));
+        for offset in [4, 16, 40] {
+            let mut bad = bytes.clone();
+            bad[offset..offset + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+            assert_eq!(validate_wav(&bad), Err(VoiceError::InvalidAudio));
+        }
         let mut bad = bytes;
         bad[22] = 2;
         assert_eq!(validate_wav(&bad), Err(VoiceError::InvalidAudio));
