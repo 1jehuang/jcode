@@ -41,10 +41,6 @@ fn test_openai_switching_models_include_dynamic_catalog_entries() {
     let _guard = jcode_base::storage::lock_test_env();
     let dynamic_model = "gpt-5.9-switching-test";
     jcode_base::auth::codex::set_active_account_override(Some("switching-test".to_string()));
-    jcode_base::provider::populate_account_models(vec![
-        "gpt-5.4".to_string(),
-        dynamic_model.to_string(),
-    ]);
 
     let provider = OpenAIProvider::new(CodexCredentials {
         access_token: "test".to_string(),
@@ -53,6 +49,11 @@ fn test_openai_switching_models_include_dynamic_catalog_entries() {
         account_id: None,
         expires_at: None,
     });
+    // The catalog is scoped to the credential the runtime holds.
+    jcode_base::provider::populate_account_models_for_scope(
+        &provider.catalog_scope(),
+        vec!["gpt-5.4".to_string(), dynamic_model.to_string()],
+    );
 
     let models = provider.available_models_for_switching();
     assert!(models.contains(&"gpt-5.4".to_string()));
@@ -253,8 +254,6 @@ async fn test_set_model_clears_persistent_ws_state() {
     jcode_base::auth::codex::set_active_account_override(Some(
         "openai-set-model-clears-ws".to_string(),
     ));
-    jcode_base::provider::populate_account_models(vec!["gpt-5.3-codex".to_string()]);
-
     let provider = OpenAIProvider::new(CodexCredentials {
         access_token: "test".to_string(),
         refresh_token: String::new(),
@@ -262,6 +261,10 @@ async fn test_set_model_clears_persistent_ws_state() {
         account_id: None,
         expires_at: None,
     });
+    jcode_base::provider::populate_account_models_for_scope(
+        &provider.catalog_scope(),
+        vec!["gpt-5.3-codex".to_string()],
+    );
     let (state, server) = test_persistent_ws_state().await;
     *provider.persistent_ws.lock().await = Some(state);
 
@@ -484,4 +487,112 @@ fn resolve_api_base_precedence_and_validation() {
     // Non-URL values are ignored, falling through to the next candidate.
     let _p5 = EnvVarGuard::set("JCODE_OPENAI_API_BASE", "not-a-url");
     assert_eq!(OpenAIProvider::resolve_api_base(), "https://b.example/v1");
+}
+
+#[test]
+fn test_ultrafast_service_tier_round_trips_into_request_payload() {
+    let provider = OpenAIProvider::new(CodexCredentials {
+        access_token: "test".to_string(),
+        refresh_token: String::new(),
+        id_token: None,
+        account_id: None,
+        expires_at: None,
+    });
+    // Write the model directly: set_model validates against the machine's
+    // cached account catalog, which is not what this test is about.
+    *provider.model.try_write().unwrap() = "gpt-6-astra".to_string();
+    assert_eq!(
+        provider.available_service_tiers(),
+        vec!["priority", "ultrafast", "flex"]
+    );
+
+    for alias in ["ultrafast", "ultra", "Ultra-Fast"] {
+        provider.set_service_tier(alias).unwrap();
+        assert_eq!(provider.service_tier().as_deref(), Some("ultrafast"));
+    }
+    let request = provider.response_request_for_model("gpt-6-astra", &[], &[], "sys", true);
+    assert_eq!(request["service_tier"], serde_json::json!("ultrafast"));
+
+    provider.set_service_tier("off").unwrap();
+    assert_eq!(provider.service_tier(), None);
+    let request = provider.response_request_for_model("gpt-6-astra", &[], &[], "sys", true);
+    assert!(request.get("service_tier").is_none());
+
+    *provider.model.try_write().unwrap() = "gpt-5.5".to_string();
+    assert_eq!(provider.available_service_tiers(), vec!["priority", "flex"]);
+}
+
+fn api_key_creds(key: &str) -> CodexCredentials {
+    CodexCredentials {
+        access_token: key.to_string(),
+        refresh_token: String::new(),
+        id_token: None,
+        account_id: None,
+        expires_at: None,
+    }
+}
+
+fn oauth_creds() -> CodexCredentials {
+    CodexCredentials {
+        access_token: "oauth-access".to_string(),
+        refresh_token: "oauth-refresh".to_string(),
+        id_token: None,
+        account_id: Some("acct".to_string()),
+        expires_at: None,
+    }
+}
+
+/// Regression: the ChatGPT/Codex OAuth catalog and the platform API-key
+/// catalog used to share one per-account scope. Whichever refresh landed last
+/// overwrote the other, so selecting `openai-api:<api-only model>` failed with
+/// "Unsupported OpenAI model" right after an OAuth catalog refresh.
+#[test]
+fn oauth_catalog_refresh_does_not_clobber_api_key_catalog() {
+    let _guard = jcode_base::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    jcode_base::auth::codex::set_active_account_override(Some("split-scope".to_string()));
+
+    let api = OpenAIProvider::new(api_key_creds("sk-split-scope-test"));
+    let oauth = OpenAIProvider::new(oauth_creds());
+    let api_scope = api.catalog_scope();
+    let oauth_scope = oauth.catalog_scope();
+    assert_ne!(api_scope, oauth_scope);
+    assert!(!api_scope.contains("sk-split-scope-test"), "raw key leaked into scope");
+
+    // API-key refresh lists an API-only model, then an OAuth refresh lands.
+    jcode_base::provider::populate_account_models_for_scope(
+        &api_scope,
+        vec!["gpt-5.5".into(), "gpt-split-api-only".into()],
+    );
+    jcode_base::provider::populate_account_models_for_scope(
+        &oauth_scope,
+        vec!["gpt-5.5".into(), "gpt-split-oauth-only".into()],
+    );
+
+    api.set_model("gpt-split-api-only")
+        .expect("API-key runtime must validate against its own catalog");
+    let err = api.set_model("gpt-split-oauth-only").unwrap_err().to_string();
+    assert!(err.contains("Unsupported OpenAI model"), "{err}");
+
+    oauth
+        .set_model("gpt-split-oauth-only")
+        .expect("OAuth runtime must validate against its own catalog");
+    let err = oauth.set_model("gpt-split-api-only").unwrap_err().to_string();
+    assert!(err.contains("Unsupported OpenAI model"), "{err}");
+
+    // A runtime unavailability marker on one route must not hide the model on
+    // the other route.
+    jcode_base::provider::record_model_unavailable_for_scope(&oauth_scope, "gpt-5.5", "denied");
+    assert!(api.set_model("gpt-5.5").is_ok());
+
+    jcode_base::auth::codex::set_active_account_override(None);
+}
+
+#[test]
+fn openai_api_key_scope_is_per_key() {
+    let a = OpenAIProvider::catalog_scope_for(&api_key_creds("sk-key-a"));
+    let b = OpenAIProvider::catalog_scope_for(&api_key_creds("sk-key-b"));
+    assert_ne!(a, b);
+    assert_eq!(a, OpenAIProvider::catalog_scope_for(&api_key_creds(" sk-key-a ")));
 }
