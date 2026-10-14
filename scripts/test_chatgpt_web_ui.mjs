@@ -41,7 +41,7 @@ class Element {
   dispatchEvent(e) { this.onKey?.(e); return true; }
 }
 
-function fixture({ temporary=true, hiddenDuplicate=false, locked=false, wrongSelection=false, clickCannotClose=false } = {}) {
+function fixture({ temporary=true, hiddenDuplicate=false, locked=false, wrongSelection=false, clickCannotClose=false, ignoreTriggerClicks=0 } = {}) {
   const labels = ['GPT-6', 'GPT-5.6 Sol', 'GPT-5.5'];
   let selected = 'GPT-6';
   let index = 1;
@@ -64,7 +64,8 @@ function fixture({ temporary=true, hiddenDuplicate=false, locked=false, wrongSel
   const update = active => { for(const [e,on] of [[simple,active==='simple'],[advanced,active==='advanced']]) { e.setAttribute('aria-hidden', String(!on)); e.setAttribute('data-active',String(on)); if(on)delete e.attrs.inert;else e.attrs.inert=''; } };
   const close = () => { menu.hidden=true; trigger.setAttribute('aria-expanded','false'); simple.setAttribute('data-active','false');advanced.setAttribute('data-active','false'); };
   menu.onKey=e=>{ if(e.key==='Escape')close(); };
-  trigger.onClick=() => { if(menu.hidden){ menu.hidden=false;trigger.setAttribute('aria-expanded','true');update('simple'); } else if(!clickCannotClose)close(); };
+  let triggerClicks = 0;
+  trigger.onClick=() => { triggerClicks++; if(triggerClicks<=ignoreTriggerClicks) return; if(menu.hidden){ menu.hidden=false;trigger.setAttribute('aria-expanded','true');update('simple'); } else if(!clickCannotClose)close(); };
   toggle.onClick=()=>update('advanced');
   const editor = new Element('div', {contenteditable:'true',role:'textbox','data-composer-markdown':''}, 'diagnostic');
   const submit = new Element('button', {type:'submit','aria-label':'Send'});
@@ -73,7 +74,7 @@ function fixture({ temporary=true, hiddenDuplicate=false, locked=false, wrongSel
   const extra = hiddenDuplicate ? [new Element('div', {'aria-hidden':'true'}, '', [new Element('div',{role:'menuitemradio','aria-checked':'true'},'GPT-999')])] : [];
   const body = new Element('body', {}, '', [main,menu,new Element('span',{id:'locked'},'Locked, opens access options'), ...extra]);
   const document = { body, querySelectorAll: sel => body.querySelectorAll(sel), querySelector: sel=>body.querySelector(sel), getElementById:id=>body.querySelector(`#${id}`), addEventListener() {} };
-  return { document, rows, power, thumb, trigger, main, menu, editor, submit, close, selected:()=>selected, submits:()=>submits };
+  return { document, rows, power, thumb, trigger, main, menu, editor, submit, close, selected:()=>selected, submits:()=>submits, triggerClicks:()=>triggerClicks };
 }
 
 async function run(request, f, options = {}) {
@@ -122,6 +123,15 @@ test('discovers actual visible models and all labeled efforts, restores preferen
 test('requires exact checked model and effort, then closes the picker',async()=>{
   const f=fixture(); const result=await run({op:'prepare',label:'GPT-5.6 Sol',effort:'xhigh'},f);
   assert.equal(result.model,'GPT-5.6 Sol');assert.equal(result.effort,'xhigh');assert.equal(result.temporary,true);assert.equal(f.submits(),0);assert.equal(f.menu.hidden,true);
+});
+test('a fresh page that ignores the first picker click is retried while verifiably closed',async()=>{
+  const f=fixture({ignoreTriggerClicks:1}); const result=await run({op:'prepare',label:'GPT-5.6 Sol',effort:'medium'},f);
+  assert.equal(result.model,'GPT-5.6 Sol');assert.equal(result.effort,'medium');assert.equal(f.submits(),0);assert.equal(f.menu.hidden,true);
+});
+test('a picker that never opens fails closed after a bounded number of clicks',async()=>{
+  const f=fixture({ignoreTriggerClicks:1000});
+  await assert.rejects(run({op:'verify',label:'GPT-6',effort:'medium'},f),/opening the model picker/);
+  assert.equal(f.triggerClicks(),3);assert.equal(f.submits(),0);
 });
 test('persistent history is rejected before selecting or submitting',async()=>{
   const f=fixture({temporary:false}); await assert.rejects(run({op:'prepare',label:'GPT-5.6 Sol',effort:'medium'},f),/Temporary Chat/i);assert.equal(f.selected(),'GPT-6');assert.equal(f.submits(),0);
