@@ -12,11 +12,12 @@ and [`docs/cleanup-arc-2026-10-13-P25C-RESEARCH.md`](./cleanup-arc-2026-10-13-P2
 | `rescue/e45ddd47e-...` | `e45ddd47e` | `p25c/port-e45ddd47e-active-pids-race` | `f6e55881f` | 5/5 pass | Merge or discard |
 | `rescue/ceb860bf2-...` | `ceb860bf2` | `p25c/port-ceb860bf2-symlinked-state-home` | `2060e81f5` | 8/8 pass | Merge (API opt-in) or discard |
 | (bonus, not a rescue) | n/a | `p25c/port-jcode-sdk-clippy-cleanup` | `90cea21ba` | compile, 1+4 pre-existing flakes | Merge (clippy cleanup) or discard |
+| (bonus, not a rescue) | n/a | `p25c/port-jcode-workspace-clippy-bonus` | `80109ee45` | compile, no test regressions | Merge (clippy cleanup) or discard |
 
-**Recommended action:** merge all three. The ports are self-contained,
+**Recommended action:** merge all four. The ports are self-contained,
 non-breaking, and either add a public API (ceb860bf2) or fix pre-existing
-clippy lints on master (jcode-sdk). The clippy port is the only one that
-resolves a current `cargo clippy -D warnings` failure on master.
+clippy lints on master (jcode-sdk + 5 workspace crates). Ports 3 and 4
+resolve current `cargo clippy -D warnings` failures on master.
 
 ## Port 1: e45ddd47e — race-resistant session-marker unlink
 
@@ -144,19 +145,64 @@ git push origin --delete rescue/ceb860bf2-allow-symlinked-state-home
 git worktree remove /Users/kooshapari/wt-kcode-home-symlink
 ```
 
-## After all three are merged
+## Port 4 (bonus, not a rescue): jcode-workspace clippy cleanup
 
-The cleanup-arc-2026-10-13 will be complete:
-- 4 P30 source branches deleted
-- 3 P25c rescue branches either deleted (d6f2d2091) or ported (e45ddd47e + ceb860bf2)
-- 2 stale `chore/cargo-fmt-cleanup-2026-10-13*` branches deleted
-- 3 stale worktrees removed
-- 0 P30 RUSTSEC vulnerabilities
-- 0 P25c structural divergence (other than the dev-isolation feature that doesn't exist in jcode)
-- 0 pre-existing clippy lints in jcode-sdk (the bonus port)
+Sweeps all 88 jcode-* workspace crates with `cargo clippy --all-targets
+-- -D warnings`. After Port 3 (jcode-sdk) is merged, 5 more crates have
+single-error clippy failures. This commit fixes them all with the
+smallest possible change in each file.
 
-Final memory record: this arc freed ~260 MB of disk space and resolved
-every P30 + P25c structural issue in the kcode→jcode fork.
+### Lints addressed
+| Crate | Lint | Count | Resolution |
+|---|---|---|---|
+| `jcode-core` | `clippy::unused_imports` | 1 | Gate `use std::process::{Command, Stdio};` to `#[cfg(target_os = "linux")]` — the imports are only used in Linux-gated tests; on macOS / Windows they were flagged as unused. |
+| `jcode-transport` | `clippy::needless_mut` | 1 | Drop `mut` on `let mut listener = ...` in `unix.rs::tests`. The variable is never mutated. |
+| `jcode-build-support` | `clippy::items_after_test_module` | 1 | Move the `mod tests` block from the middle of `storage_helpers.rs` to the very end of the file. |
+| `jcode-auto-dream` | `clippy::manual_range_contains` | 1 | Replace `h >= 0.0 && h < 0.001` with `(0.0..0.001).contains(&h)` in `time_gate.rs::tests`. |
+| `jcode-provider-metadata` | `clippy::assertions_on_constants` | 2 | Remove 2 `assert!(<CONSTANT>);` lines where the asserted expression is a compile-time constant. |
+
+### Diff summary
+| File | Lines | Change |
+|---|---|---|
+| `crates/jcode-core/src/stdin_detect_tests.rs` | +1 / -0 | `#[cfg(target_os = "linux")]` on the `Command, Stdio` import line |
+| `crates/jcode-transport/src/unix.rs` | +1 / -1 | drop `mut` |
+| `crates/jcode-build-support/src/storage_helpers.rs` | +42 / -42 | move `mod tests` from middle to end (no semantic change) |
+| `crates/jcode-auto-dream/src/time_gate.rs` | +1 / -1 | `Range::contains` |
+| `crates/jcode-provider-metadata/src/lib.rs` | +0 / -2 | remove 2 constant asserts |
+| **Total** | **+45 / -46** | **5 lints fixed** |
+
+### Validation
+- `cargo clippy -p <each> --all-targets -- -D warnings` — PASS on all 5
+- `cargo fmt -p <each> -- --check` — PASS on all 5
+- `cargo test -p <each> --no-run` — PASS on all 5
+- `cargo check --workspace` — PASS
+
+### Important: no behavior change
+This is a pure lint-cleanup commit. No runtime behavior is changed; no
+public API is changed. The build-support `mod tests` move is a pure
+reorder; tests still reference the same `super::` symbols.
+
+### How to review
+```bash
+git fetch origin
+git checkout p25c/port-jcode-workspace-clippy-bonus
+git log --oneline -3
+git diff master..HEAD --stat
+# Read the actual diff
+git diff master..HEAD -- crates/jcode-core crates/jcode-transport crates/jcode-build-support crates/jcode-auto-dream crates/jcode-provider-metadata
+# Re-test (per crate)
+for c in jcode-core jcode-transport jcode-build-support jcode-auto-dream jcode-provider-metadata; do
+  cargo clippy -p "$c" --all-targets -- -D warnings
+done
+```
+
+### How to merge
+```bash
+git checkout master
+git merge --no-ff p25c/port-jcode-workspace-clippy-bonus
+git push origin master
+# No worktree or source branch to clean up (this was not a rescue port)
+```
 
 ## Port 3 (bonus, not a rescue): jcode-sdk clippy cleanup
 
@@ -233,3 +279,18 @@ git merge --no-ff p25c/port-jcode-sdk-clippy-cleanup
 git push origin master
 # No worktree or source branch to clean up (this was not a rescue port)
 ```
+
+## After all four are merged
+
+The cleanup-arc-2026-10-13 will be complete:
+- 4 P30 source branches deleted
+- 3 P25c rescue branches either deleted (d6f2d2091) or ported (e45ddd47e + ceb860bf2)
+- 2 stale `chore/cargo-fmt-cleanup-2026-10-13*` branches deleted
+- 3 stale worktrees removed
+- 0 P30 RUSTSEC vulnerabilities
+- 0 P25c structural divergence (other than the dev-isolation feature that doesn't exist in jcode)
+- 0 pre-existing clippy lints in jcode-sdk (Port 3)
+- 0 pre-existing clippy lints in 5 more workspace crates (Port 4)
+
+Final memory record: this arc freed ~260 MB of disk space and resolved
+every P30 + P25c structural issue in the kcode→jcode fork.
