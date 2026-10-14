@@ -191,6 +191,37 @@ branches (not dead/archived). They have REAL upstream-sync and
 Win-anchor work. Leaving them with 5 active RUSTSEC vulns is a
 security exposure if those branches ever get built or merged.
 
+### STATUS (2026-10-14T00:33Z): cherry-picks DONE locally, NOT pushed
+
+Both cherry-picks have been applied to the local branches and
+validated with cargo audit. The changes are LOCAL ONLY — the
+operator must explicitly push them when ready.
+
+| Worktree | Before | After | Vulns before | Vulns after | Pushed? |
+|----------|--------|-------|--------------|-------------|---------|
+| `jcode-upstream-sync` | `545d6d7f4` | `c2e4e91bd` | 5 | 0 | NO |
+| `jcode-win-anchor` | `9948f0e8c` | `0473d4b30` | 5 | 0 | NO |
+
+**Validation (post-cherry-pick, on the new tip):**
+- `cargo audit --no-fetch` on jcode-upstream-sync: 0 active vulns (10 unmaintained warnings, baseline)
+- `cargo audit --no-fetch` on jcode-win-anchor: 0 active vulns (9 unmaintained warnings, baseline)
+
+**Note for jcode-win-anchor:** the cherry-pick required adding a
+temporary `jcode-fork` remote (https://github.com/KooshaPari/Jcode.git)
+to fetch `b3130e026`. The remote and the remote-tracking branch were
+cleaned up after the cherry-pick. The worktree's actual `origin` is
+still `https://github.com/1jehuang/jcode.git` (upstream).
+
+**To push (operator decision):**
+```bash
+# Per worktree, when ready:
+cd /Users/kooshapari/CodeProjects/Phenotype/repos/jcode-upstream-sync
+git push origin feature/upstream-0.88-sync
+
+cd /Users/kooshapari/CodeProjects/Phenotype/repos/jcode-win-anchor
+git push origin instinct/win-herdr-inline-anchor
+```
+
 tx-agent: jcode
 tx-task: P11+P25c+P26
 tx-validated: manual
