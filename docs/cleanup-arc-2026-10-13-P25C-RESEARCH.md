@@ -144,10 +144,11 @@ fn remove_marker(dir: &Path, session_id: &str) -> std::io::Result<()> {
 
 ### Mixed strategy (most efficient)
 1. **Delete d6f2d2091** (obsolete) — `git push origin --delete rescue/d6f2d20-choresession-memory-record-validation-metadata` + remove local worktree `/Users/kooshapari/wt-kcode-heading-boundary`
+   - **DONE 2026-10-14 04:21Z** — remote branch deleted, worktree removed (206 MB freed). Commits remain reachable via reflog for ~30 days.
 2. **Port ceb860bf2** to `crates/jcode-storage/src/lib.rs` — add canonicalize-root logic + tests (1-2 hours)
 3. **Port e45ddd47e** to `crates/jcode-storage/src/active_pids.rs` — add `remove_marker` + tests (1-2 hours)
 4. **Delete ceb860bf2 and e45ddd47e rescue branches** after porting (Option B equivalent for the ported content)
-5. **Total: 2-4 hours of port work, then delete all 3 rescue branches**
+5. **Total: 2-4 hours of port work, then delete all 3 rescue branches** (1 already done)
 
 ### If port work is not feasible right now
 - Option A (keep all 3) — preserves work but leaves 3 orphan branches
