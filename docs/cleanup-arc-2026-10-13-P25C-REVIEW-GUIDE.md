@@ -16,15 +16,11 @@ and [`docs/cleanup-arc-2026-10-13-P25C-RESEARCH.md`](./cleanup-arc-2026-10-13-P2
 | (bonus, not a rescue) | n/a | `p25c/port-jcode-workspace-clippy-bonus-2` | `852a9794c` | compile, no test regressions | Merge (clippy cleanup) or discard |
 | (bonus, not a rescue) | n/a | `p25c/port-jcode-setup-hints-clippy` | `3e643272b` | compile, 1 pre-existing flake (reproduces on master) | Merge (clippy cleanup) or discard |
 | (bonus, not a rescue) | n/a | `p25c/port-ceb860bf2-caller-wiring` | `6b8adca63` | compile (no new regressions) | Merge (opt-in wire-up) — **depends on Port 2 (`2060e81f5`) landing first; this branch is fast-forwarded on top of that tip** |
-| (bonus, not a rescue) | n/a | `p25c/port-jcode-core-pedantic-raw-ptr` | `262bcb3a5` | compile, 0 pedantic raw-ptr-cast warnings | Merge (mechanical lint cleanup) or discard |
+| (bonus, not a rescue) | n/a | `p25c/port-jcode-core-pedantic-raw-ptr` | `b24ad8322` (rebased; merged `b0e495553`) | compile, 0 pedantic raw-ptr-cast warnings | **MERGED** (mechanical lint cleanup) — 4 `as *mut T` → `.cast::<T>()` in jcode-core/src/stdin_detect.rs |
 
-**Recommended action:** merge all eight. The ports are self-contained,
-non-breaking, and either add a public API (ceb860bf2) or fix pre-existing
-clippy lints on master (jcode-sdk + 13 more workspace crates across 13 crates)
-or wire 11 callers up to the new race-resistant unlink API (Port 7) or do
-a pedantic-clippy raw-pointer cleanup (Port 8).
-Ports 3, 4, 5, and 6 resolve current `cargo clippy -D warnings` failures on
-master. **Note Port 7 has a merge order dependency on Port 2.**
+**Final state (all 8 ports landed):** master HEAD is `b0e495553` (after Port 8 merge at 2026-10-14 08:39Z). All ports are self-contained, non-breaking, and either add a public API (ceb860bf2) or fix pre-existing clippy lints on master (jcode-sdk + 13 more workspace crates across 13 crates) or wire 11 callers up to the new race-resistant unlink API (Port 7) or do a pedantic-clippy raw-pointer cleanup (Port 8).
+Ports 3, 4, 5, and 6 resolved current `cargo clippy -D warnings` failures on
+master. **Note Port 7 had a merge order dependency on Port 2 (resolved cleanly via two-step merge).**
 
 ## Port 1: e45ddd47e — race-resistant session-marker unlink
 
@@ -287,9 +283,9 @@ git push origin master
 # No worktree or source branch to clean up (this was not a rescue port)
 ```
 
-## After all eight are merged
+## After all eight are merged (now: DONE 2026-10-14 08:39Z)
 
-The cleanup-arc-2026-10-13 will be complete:
+The cleanup-arc-2026-10-13 is complete:
 - 4 P30 source branches deleted
 - 3 P25c rescue branches either deleted (d6f2d2091) or ported (e45ddd47e + ceb860bf2)
 - 2 stale `chore/cargo-fmt-cleanup-2026-10-13*` branches deleted
@@ -317,9 +313,10 @@ crates are still producing clippy lints as of 2026-10-14 07:48Z:
 | `jcode-telemetry-core` | 16 | 0 errors | resolved |
 | `jcode-app-core` | 20 | 0 errors | resolved |
 
-After all 8 ports merge, the workspace is clippy-clean on every crate
-sampled. The only remaining work in the cleanup arc is the 8 operator
-gated port merges and the 1 destructive P11 disk cleanup.
+After all 8 ports merged (2026-10-14 08:39Z, master HEAD `b0e495553`), the workspace is clippy-clean on every crate sampled. The only remaining work in the cleanup arc is:
+- 1 destructive P11 disk cleanup (operator-gated, requires explicit approval)
+
+The 8 port merges that were operator-gated are all done.
 
 ## Port 5 (bonus, not a rescue): jcode-workspace clippy bonus #2
 
@@ -630,10 +627,11 @@ cast was performing. Semantically identical.
 
 ### Validation
 
-- `cargo clippy -p jcode-core --all-targets` — PASS (0 errors)
-- `cargo clippy -p jcode-core --all-targets -- -W clippy::pedantic` — raw-pointer-cast warnings now 0 (was 4)
-- `cargo test -p jcode-core --no-run` — PASS (test compile only)
+- `cargo clippy -p jcode-core --all-targets -- -D warnings` — PASS (0 errors, post-rebase)
+- `cargo fmt --check -p jcode-core` — PASS (clean, post-rebase)
+- `cargo test -p jcode-core` — **39/0 pass** (post-rebase; was previously validated only with `--no-run`)
 - 0 new clippy lints, 0 new dependencies, 0 behaviour change
+- 0 pedantic raw-ptr-cast warnings in jcode-core (was 4)
 
 ### How to review
 
@@ -650,10 +648,18 @@ cargo test -p jcode-core --no-run
 cargo clippy -p jcode-core --all-targets -- -W clippy::pedantic 2>&1 | grep "casting between raw pointers"
 ```
 
-### How to merge
+### How to merge (now historical)
 
 ```bash
+git fetch origin
 git checkout master
+git rebase origin/master p25c/port-jcode-core-pedantic-raw-ptr   # apply the rebase onto current master
 git merge --no-ff p25c/port-jcode-core-pedantic-raw-ptr
 git push origin master
 ```
+
+(Note: this branch was rebased to `b24ad8322` before merge because the
+branch's original tip `262bcb3a5` was based on an older master. The
+rebased commit is byte-for-byte equivalent; only the parent SHA changed.
+`git push --force-with-lease` is BLOCKED by the pre_tool hook, so the
+rebase-then-merge workflow is the standard fallback.)
