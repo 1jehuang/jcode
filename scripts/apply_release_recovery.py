@@ -38,6 +38,10 @@ def apply(tag, repair, workflow_sha):
         raise ValueError("Tag does not match the package version")
     provenance = {"tag": tag, "tag_commit": commit, "workflow_commit": workflow_sha,
                   "repair": repair, "run_url": os.environ.get('RELEASE_RUN_URL', '')}
+    provenance["eligibility_policy"] = (
+        "exact-sha-main-ci" if repair == "none"
+        else "allowlisted-repair-native-companion-preflight"
+    )
     if repair != "none":
         if repair != REPAIR or tag not in ("v0.96.0", "v0.97.0"):
             raise ValueError("Repair is not allowlisted for this tag")
@@ -60,11 +64,12 @@ def apply(tag, repair, workflow_sha):
         provenance.update(fix_commit=FIX_COMMIT, path=PATH, original_sha256=ORIGINAL_SHA256, repaired_sha256=REPAIRED_SHA256)
     # Release-only tooling comes from the reviewed workflow commit, not a branch
     # tip. Older tags predate this helper. It is not Rust application source.
-    helper = "scripts/install_justrust_ci.sh"
-    content = subprocess.check_output(["git", "show", f"{workflow_sha}:{helper}"])
-    Path(helper).write_bytes(content)
-    Path(helper).chmod(0o755)
-    provenance["release_helpers"] = {helper: hashlib.sha256(content).hexdigest()}
+    provenance["release_helpers"] = {}
+    for helper in ("scripts/install_justrust_ci.sh", "scripts/build_linux_compat.sh"):
+        content = subprocess.check_output(["git", "show", f"{workflow_sha}:{helper}"])
+        Path(helper).write_bytes(content)
+        Path(helper).chmod(0o755)
+        provenance["release_helpers"][helper] = hashlib.sha256(content).hexdigest()
     Path(os.environ.get("RELEASE_PROVENANCE_PATH", "release-provenance.json")).write_text(json.dumps(provenance, indent=2) + "\n")
     return provenance
 

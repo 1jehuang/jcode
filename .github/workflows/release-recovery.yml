@@ -7,6 +7,9 @@ on:
       - '.github/workflows/release-recovery.yml'
       - 'scripts/apply_release_recovery.py'
       - 'scripts/install_justrust_ci.sh'
+      - 'scripts/build_linux_compat.sh'
+      - 'scripts/check_release_ci.py'
+      - 'tests/test_release_ci.py'
       - 'tests/test_release_recovery.py'
   push:
     branches: [master]
@@ -15,6 +18,9 @@ on:
       - '.github/workflows/release-recovery.yml'
       - 'scripts/apply_release_recovery.py'
       - 'scripts/install_justrust_ci.sh'
+      - 'scripts/build_linux_compat.sh'
+      - 'scripts/check_release_ci.py'
+      - 'tests/test_release_ci.py'
       - 'tests/test_release_recovery.py'
   workflow_dispatch:
 
@@ -31,3 +37,5 @@ jobs:
           fetch-depth: 0
       - name: Test real-tag recovery and publication guards
         run: python3 tests/test_release_recovery.py
+      - name: Test exact-commit CI authorization
+        run: python3 tests/test_release_ci.py

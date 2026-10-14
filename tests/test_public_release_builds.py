@@ -17,7 +17,7 @@ class PublicReleaseTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/release.yml").read_text()
         self.assertIn('CARGO_PROFILE_RELEASE_OPT_LEVEL: "3"', workflow)
         self.assertIn("JUSTRUST_TOOLCHAIN: system", workflow)
-        self.assertIn("RUSTUP_TOOLCHAIN=nightly justrust build --local -Z build-std=std,panic_abort", workflow)
+        self.assertIn("RUSTUP_TOOLCHAIN=nightly justrust build --local --locked -Z build-std=std,panic_abort", workflow)
         self.assertIn('& justrust @cargoArgs', workflow)
         self.assertIn('if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }', workflow)
         cargo = (ROOT / "Cargo.toml").read_text()
@@ -57,6 +57,7 @@ class PublicReleaseTests(unittest.TestCase):
                     result = subprocess.run(['/bin/bash', '-eu', '-c', fragment],
                                             env=env, capture_output=True, text=True)
                     self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn('<--locked>', result.stdout)
                     self.assertIn('<--profile> <release> <--target> <x86_64-unknown-linux-gnu>', result.stdout)
                     self.assertIn('<linux-compat-vendored-openssl>', result.stdout)
                     if ci == '1':

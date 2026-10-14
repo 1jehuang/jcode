@@ -47,6 +47,35 @@ or signing credentials to build workers. No hosted speedup is claimed here.
 
 ## Recovery of an existing draft without moving its tag
 
+### Release authorization and frozen dependencies
+
+Normal tag pushes and unpatched dispatches require a successful main CI run on
+the **exact resolved tag commit**, not a green moving branch or another SHA.
+The authorization step waits up to three hours for pending CI, and rejects
+failed, cancelled, missing or incomplete approval at the deadline. Quality
+Guardrails, Linux/macOS/Windows Build & Test, and Windows ARM64 Release
+Configuration are mandatory successful jobs. A pushed tag must also still match
+the triggering event SHA. This gate can deliberately block releases while old
+quality debt remains unresolved. It does not reset budgets or waive CI failures.
+
+All platform build commands use `--locked`; dependency metadata is checked
+before building and every platform checks that `Cargo.lock` remains unchanged.
+The Linux compatibility helper, like the installer, comes from the immutable
+workflow commit, so old recovery tags receive the same locked build behavior.
+Both helper hashes are recorded in provenance. The glibc 2.17 baseline remains
+unchanged. Intel macOS receives a 90-minute build budget because v0.97.0 took
+59 minutes 17 seconds against the former 60-minute cap.
+
+Allowlisted source recovery has a separate, explicit eligibility policy: the
+original known-red tag's CI is **not** presented as approval of a repaired tree.
+New recovery workflows check and run companion unit tests on both native Windows
+targets against the exact pinned tag plus verified repair before platform builds
+may start. Full native builds, smoke checks and the complete asset/signing/checksum
+gates still apply. This is not an arbitrary CI waiver. The first v0.96.0 recovery
+run predates these additional preflight/lockfile gates and retains its original
+immutable workflow snapshot. Its outcome must be reported on that evidence,
+without claiming whole main CI approval. Later recoveries use the stronger gates.
+
 For a failed tagged release, commit the reviewed source fix and recovery workflow
 on `master`, then dispatch the workflow from `master` with the existing tag:
 
@@ -73,10 +102,9 @@ commit must be an ancestor of the workflow commit.
 
 Every downstream job checks out the same resolved tag commit, preserving HEAD,
 Cargo version and tag identity. The repair script and release-only justrust
-installer are loaded from the immutable workflow commit, never a moving branch
-tip. Older tags lack that installer, so it is materialized with executable
-permissions and its digest recorded. The tag's historical Linux compatibility
-helper remains in use. A recovery therefore deliberately produces patched tag
+installer and compatibility helper are loaded from the immutable workflow commit,
+never a moving branch tip. Older tags lack that installer, so it is materialized
+with executable permissions and its digest recorded. A recovery deliberately produces patched tag
 source, not the exact tagged tree. Release notes disclose this distinction and
 `release-provenance.json` records tag/workflow/fix commits, file hashes, release
 helper hashes and the Actions run. Provenance is generated outside the checkout
@@ -119,6 +147,13 @@ not a hosted billing bypass. Linux and macOS measurement remain enabled. No
 compile, smoke, signing, checksum or complete-platform publication gate is
 bypassed. Remove the setting after a pinned client fixes the Windows crash and
 passes native acceptance. Successful remote rebuilds are still required.
+
+The sampler's process traversal was repaired upstream in justrust commit
+`8e60305` with cycle and PID-reuse regression tests. Its unbounded traversal was
+consistent with the exact allocation size in the incident. The original Windows
+process snapshot was unavailable, so native reproduction is not claimed. The
+pinned alpha.17 client still needs the temporary mitigation until a fixed public
+client has passed native Windows acceptance.
 
 ## Validation
 

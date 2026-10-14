@@ -40,6 +40,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
+  actions: read
   contents: write
 
 jobs:
@@ -54,7 +55,8 @@ jobs:
     # dependency skips its dependents.
     if: github.repository == '1jehuang/jcode'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Exact-commit CI includes a native Windows test job with a 150-minute cap.
+    timeout-minutes: 190
     outputs:
       tag_sha: ${{ steps.source.outputs.tag_sha }}
     steps:
@@ -78,6 +80,9 @@ jobs:
             echo "Recovery must use the reviewed workflow on master" >&2; exit 1
           fi
           tag_sha=$(git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")
+          if [ "$EVENT_NAME" = push ] && [ "$tag_sha" != "$WORKFLOW_SHA" ]; then
+            echo "Release tag no longer matches the triggering commit" >&2; exit 1
+          fi
           echo "tag_sha=$tag_sha" >> "$GITHUB_OUTPUT"
           git show "$WORKFLOW_SHA:scripts/apply_release_recovery.py" > "$RUNNER_TEMP/recovery.py"
           git checkout --detach "$tag_sha"
@@ -85,6 +90,26 @@ jobs:
           if [ "$EVENT_NAME" = workflow_dispatch ]; then
             python3 "$RUNNER_TEMP/recovery.py" --check-public-state "$RELEASE_TAG"
           fi
+
+      - name: Require successful exact-commit CI for unpatched source
+        if: env.RELEASE_REPAIR == 'none'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW_SHA: ${{ github.sha }}
+          TAG_SHA: ${{ steps.source.outputs.tag_sha }}
+        run: |
+          set -euo pipefail
+          git show "$WORKFLOW_SHA:scripts/check_release_ci.py" > "$RUNNER_TEMP/check-release-ci.py"
+          python3 "$RUNNER_TEMP/check-release-ci.py" "$TAG_SHA" --repo "$GITHUB_REPOSITORY" --timeout 10800
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify frozen dependency resolution
+        shell: bash
+        run: |
+          cargo metadata --locked --format-version 1 > "$RUNNER_TEMP/release-cargo-metadata.json"
+          git diff --exit-code -- Cargo.lock
 
       # Render a human-readable changelog for the release body (issue #435):
       # changelog/v<version>.json when present, otherwise grouped commit
@@ -119,14 +144,72 @@ jobs:
           fi
           gh release edit "${RELEASE_TAG}" --notes-file release_notes.md
 
+  recovery-preflight:
+    name: Recovery companion preflight (${{ matrix.target }})
+    needs: create-release
+    if: github.event_name == 'workflow_dispatch' && inputs.recovery == 'windows-listener'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    env:
+      JUSTRUST_DISABLE: "1"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            arch: amd64
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            arch: amd64_arm64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.create-release.outputs.tag_sha }}
+          fetch-depth: 0
+      - name: Apply reviewed release source recovery
+        shell: bash
+        env:
+          WORKFLOW_SHA: ${{ github.sha }}
+          RELEASE_PROVENANCE_PATH: ${{ runner.temp }}/release-provenance.json
+        run: |
+          set -euo pipefail
+          git show "$WORKFLOW_SHA:scripts/apply_release_recovery.py" > "$RUNNER_TEMP/recovery.py"
+          python3 "$RUNNER_TEMP/recovery.py" "$RELEASE_TAG" "$RELEASE_REPAIR" "$WORKFLOW_SHA"
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.arch }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: recovery-companion-${{ matrix.target }}
+      - name: Install pinned justrust
+        shell: bash
+        run: bash scripts/install_justrust_ci.sh
+      - name: Check and test exact repaired companion source
+        shell: pwsh
+        run: |
+          & justrust check --local --locked -p jcode-companion --target ${{ matrix.target }}
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & justrust test --local --locked -p jcode-companion --lib --target ${{ matrix.target }}
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify preflight preserved Cargo.lock
+        shell: bash
+        run: git diff --exit-code -- Cargo.lock
+
   build-linux-macos:
     name: Build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
-    needs: create-release
+    needs: [create-release, recovery-preflight]
+    if: ${{ always() && needs.create-release.result == 'success' && (needs.recovery-preflight.result == 'success' || needs.recovery-preflight.result == 'skipped') }}
     # Each matrix architecture is independent. A failed Linux or macOS target
     # must not suppress assets produced by the other successful targets.
     continue-on-error: true
-    timeout-minutes: 60
+    # v0.97.0 Intel macOS took 59m17s at optimization level 3. Keep headroom
+    # for healthy cold-cache builds without changing any acceptance checks.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -232,9 +315,9 @@ jobs:
           if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
             # Rebuild std with emulated TLS too; see the nightly install step
             # above for why Termux needs this.
-            RUSTUP_TOOLCHAIN=nightly justrust build --local -Z build-std=std,panic_abort --release --target ${{ matrix.target }}
+            RUSTUP_TOOLCHAIN=nightly justrust build --local --locked -Z build-std=std,panic_abort --release --target ${{ matrix.target }}
           else
-            justrust build --local --release --target ${{ matrix.target }}
+            justrust build --local --locked --release --target ${{ matrix.target }}
           fi
         env:
           JCODE_RELEASE_BUILD: "1"
@@ -250,6 +333,10 @@ jobs:
           JCODE_CI_BUILD: "1"
           JCODE_BUILD_SEMVER: ${{ env.RELEASE_TAG }}
           JCODE_COMPAT_ARTIFACT: ${{ matrix.artifact }}
+
+      - name: Verify release build preserved Cargo.lock
+        shell: bash
+        run: git diff --exit-code -- Cargo.lock
 
       - name: Package binary
         if: matrix.compat_container != true
@@ -287,7 +374,8 @@ jobs:
   build-windows:
     name: Build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
-    needs: create-release
+    needs: [create-release, recovery-preflight]
+    if: ${{ always() && needs.create-release.result == 'success' && (needs.recovery-preflight.result == 'success' || needs.recovery-preflight.result == 'skipped') }}
     env:
       # Pinned alpha.17 measurement crashed on Windows x64 requesting 30 GiB.
       # Disable measurement only: the CLI still executes local Cargo and returns
@@ -371,7 +459,7 @@ jobs:
             }
           }
 
-          $cargoArgs = @("build", "--local", "--release", "--target", "${{ matrix.target }}")
+          $cargoArgs = @("build", "--local", "--locked", "--release", "--target", "${{ matrix.target }}")
           $extraArgs = "${{ matrix.cargo_args }}"
           if (-not [string]::IsNullOrWhiteSpace($extraArgs)) {
             $cargoArgs += $extraArgs -split ' '
@@ -383,6 +471,10 @@ jobs:
           JCODE_RELEASE_BUILD: "1"
           JCODE_CI_BUILD: "1"
           JCODE_BUILD_SEMVER: ${{ env.RELEASE_TAG }}
+
+      - name: Verify release build preserved Cargo.lock
+        shell: bash
+        run: git diff --exit-code -- Cargo.lock
 
       - name: Verify built Windows binary launches
         shell: pwsh
@@ -568,7 +660,8 @@ jobs:
   build-freebsd:
     name: Build (x86_64-unknown-freebsd)
     runs-on: ubuntu-latest
-    needs: create-release
+    needs: [create-release, recovery-preflight]
+    if: ${{ always() && needs.create-release.result == 'success' && (needs.recovery-preflight.result == 'success' || needs.recovery-preflight.result == 'skipped') }}
     # GitHub has no native FreeBSD runners, so build inside a FreeBSD VM
     # (QEMU via vmactions), same approach as freebsd-smoke.yml (issues #416,
     # #433). Best-effort: a flaky VM build must not block the rest of the
@@ -624,6 +717,7 @@ jobs:
             echo "::group::cargo build (jcode binary)"
             # justrust has no FreeBSD client or hosted worker yet.
             cargo build --locked --release -p jcode --bin jcode
+            git diff --exit-code -- Cargo.lock
             echo "::endgroup::"
 
             echo "::group::Verify binary launches"
