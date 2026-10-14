@@ -767,6 +767,16 @@ mod windows_hardening_tests {
     }
 }
 
+/// Serialize tests that mutate `JCODE_HOME` (or any other process-wide env
+/// var the storage layer reads). Shared by `active_pids` and `remove` test
+/// modules so they cannot race when both touch the env.
+#[cfg(test)]
+pub(crate) fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+    use std::sync::Mutex;
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[cfg(test)]
 mod env_file_tests {
     use super::*;
@@ -789,14 +799,4 @@ mod env_file_tests {
             "SAFE_KEY=safe-value\n"
         );
     }
-}
-
-/// Serialize tests that mutate `JCODE_HOME` (or any other process-wide env
-/// var the storage layer reads). Shared by `active_pids` and `remove` test
-/// modules so they cannot race when both touch the env.
-#[cfg(test)]
-pub(crate) fn lock_env() -> std::sync::MutexGuard<'static, ()> {
-    use std::sync::{Mutex, MutexGuard};
-    static LOCK: Mutex<()> = Mutex::new(());
-    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }

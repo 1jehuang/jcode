@@ -142,7 +142,10 @@ mod tests {
         jcode_core::env::remove_var("JCODE_HOME");
 
         result.expect("remove through symlink");
-        assert!(!state_file.exists(), "real file must be removed via symlink");
+        assert!(
+            !state_file.exists(),
+            "real file must be removed via symlink"
+        );
     }
 
     #[test]
@@ -158,7 +161,10 @@ mod tests {
 
         let err = err.expect_err("must refuse outside path");
         assert_eq!(err.kind(), std::io::ErrorKind::Other);
-        assert!(outside.exists(), "file outside the home must not be removed");
+        assert!(
+            outside.exists(),
+            "file outside the home must not be removed"
+        );
     }
 
     #[test]
