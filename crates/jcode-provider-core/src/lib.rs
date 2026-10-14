@@ -185,6 +185,13 @@ pub trait Provider: Send + Sync {
         None
     }
 
+    /// Email belonging to this runtime's actual cached OAuth credential.
+    /// Return `None` for API keys, unknown credentials, or unknown identity.
+    /// Implementations must not fall back to the globally active saved account.
+    fn active_oauth_account_email(&self) -> Option<String> {
+        None
+    }
+
     /// Whether this provider path can safely receive `ContentBlock::Image` inputs.
     fn supports_image_input(&self) -> bool {
         false

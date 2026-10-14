@@ -1467,6 +1467,25 @@ impl Provider for AnthropicProvider {
             .clone()
     }
 
+    fn active_oauth_account_email(&self) -> Option<String> {
+        if self.active_resolved_credential() != Some(jcode_provider_core::ResolvedCredential::Oauth)
+        {
+            return None;
+        }
+        let cached = self.credentials.try_read().ok()?;
+        let cached = cached.as_ref()?;
+        auth::claude::list_accounts()
+            .ok()?
+            .into_iter()
+            .find_map(|account| {
+                let matches = (!cached.access_token.is_empty()
+                    && account.access == cached.access_token)
+                    || (!cached.refresh_token.is_empty()
+                        && account.refresh == cached.refresh_token);
+                matches.then_some(account.email).flatten()
+            })
+    }
+
     fn set_credential_mode(&self, mode: jcode_provider_core::CredentialMode) -> Result<()> {
         AnthropicProvider::set_credential_mode(self, mode)
     }

@@ -55,6 +55,49 @@ fn save_account(label: &str, token: &str, refresh: &str) -> String {
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
+async fn active_oauth_email_follows_cached_unbound_credentials_not_global_account() {
+    let _lock = jcode_base::storage::lock_test_env();
+    let _sandbox = AccountSandbox::new();
+    let personal = save_account("new-personal", "personal-access", "personal-refresh");
+    let work = save_account("new-work", "work-access", "work-refresh");
+    auth::claude::update_account_profile(&personal, Some("personal@example.com".into())).unwrap();
+    auth::claude::update_account_profile(&work, Some("work@example.com".into())).unwrap();
+    auth::claude::set_active_account(&personal).unwrap();
+    let provider = AnthropicProvider::new();
+    provider
+        .set_credential_mode(AnthropicCredentialMode::Auto)
+        .unwrap();
+    assert_eq!(provider.oauth_account_label(), None);
+    assert_eq!(provider.active_oauth_account_email(), None);
+    provider.get_access_token().await.unwrap();
+    auth::claude::set_active_account(&work).unwrap();
+    assert_eq!(
+        provider.active_oauth_account_email().as_deref(),
+        Some("personal@example.com")
+    );
+
+    // A concurrently rotated access token still matches the held refresh identity.
+    auth::claude::update_account_tokens(
+        &personal,
+        "rotated-access",
+        "personal-refresh",
+        chrono::Utc::now().timestamp_millis() + 3_600_000,
+    )
+    .unwrap();
+    assert_eq!(
+        provider.active_oauth_account_email().as_deref(),
+        Some("personal@example.com")
+    );
+
+    // Auto falling back to a direct key must not expose the old OAuth cache.
+    provider.request_credential.store(2, Ordering::Release);
+    assert_eq!(provider.active_oauth_account_email(), None);
+    provider.request_credential.store(0, Ordering::Release);
+    assert_eq!(provider.active_oauth_account_email(), None);
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn oauth_account_binding_survives_global_switch_refresh_and_fork() {
     let _lock = jcode_base::storage::lock_test_env();
     let _sandbox = AccountSandbox::new();

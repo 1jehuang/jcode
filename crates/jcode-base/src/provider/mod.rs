@@ -2226,6 +2226,20 @@ impl Provider for MultiProvider {
         self.selected_account_for_provider(self.active_provider())
     }
 
+    fn active_oauth_account_email(&self) -> Option<String> {
+        let runtime = match self.active_provider() {
+            ActiveProvider::Claude => self.anthropic_provider(),
+            ActiveProvider::OpenAI => self.openai_provider(),
+            ActiveProvider::Copilot => self.copilot_provider(),
+            ActiveProvider::Antigravity => self.antigravity_provider(),
+            ActiveProvider::Gemini => self.gemini_provider(),
+            ActiveProvider::Cursor => self.cursor_provider(),
+            ActiveProvider::Bedrock => self.bedrock_provider().map(|p| p as Arc<dyn Provider>),
+            ActiveProvider::OpenRouter => self.active_openrouter_execution_provider(),
+        }?;
+        runtime.active_oauth_account_email()
+    }
+
     fn set_oauth_account(&self, label: Option<&str>) -> Result<()> {
         let active = self.active_provider();
         if let Some(label) = label {

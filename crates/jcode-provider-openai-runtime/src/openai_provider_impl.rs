@@ -41,6 +41,30 @@ impl Provider for OpenAIProvider {
             .clone()
     }
 
+    fn active_oauth_account_email(&self) -> Option<String> {
+        let credentials = self.credentials.try_read().ok()?;
+        if !Self::is_chatgpt_mode(&credentials) || self.is_browser_only() {
+            return None;
+        }
+        jcode_base::auth::codex::list_accounts()
+            .ok()
+            .and_then(|accounts| {
+                accounts.into_iter().find_map(|account| {
+                    let matches = (!credentials.access_token.is_empty()
+                        && account.access_token == credentials.access_token)
+                        || (!credentials.refresh_token.is_empty()
+                            && account.refresh_token == credentials.refresh_token);
+                    matches.then_some(account.email).flatten()
+                })
+            })
+            .or_else(|| {
+                credentials
+                    .id_token
+                    .as_deref()
+                    .and_then(jcode_base::auth::codex::extract_email)
+            })
+    }
+
     fn reload_credentials(&self) {
         self.reload_credentials_now();
     }

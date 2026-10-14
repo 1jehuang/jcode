@@ -54,6 +54,63 @@ fn save_account(label: &str, token: &str, refresh: &str, identity: &str) -> Stri
 }
 
 #[tokio::test]
+async fn active_oauth_email_follows_cached_unbound_credentials_not_global_account() {
+    let _lock = jcode_base::storage::lock_test_env();
+    let _sandbox = AccountSandbox::new();
+    let personal = save_account(
+        "new-personal",
+        "personal-access",
+        "personal-refresh",
+        "personal-id",
+    );
+    let work = save_account("new-work", "work-access", "work-refresh", "work-id");
+    jcode_base::auth::codex::update_account_profile(&personal, Some("personal@example.com".into()))
+        .unwrap();
+    jcode_base::auth::codex::update_account_profile(&work, Some("work@example.com".into()))
+        .unwrap();
+    jcode_base::auth::codex::set_active_account(&personal).unwrap();
+    let provider = OpenAIProvider::new(
+        jcode_base::auth::codex::load_credentials_for_account(&personal).unwrap(),
+    );
+    assert_eq!(provider.oauth_account_label(), None);
+    jcode_base::auth::codex::set_active_account(&work).unwrap();
+    assert_eq!(
+        provider.active_oauth_account_email().as_deref(),
+        Some("personal@example.com")
+    );
+    provider.credentials.write().await.access_token = "rotated-access".into();
+    assert_eq!(
+        provider.active_oauth_account_email().as_deref(),
+        Some("personal@example.com")
+    );
+
+    // An actual API-key credential excludes saved identities even if access matches.
+    {
+        let mut credentials = provider.credentials.write().await;
+        credentials.access_token = "personal-access".into();
+        credentials.refresh_token.clear();
+        credentials.id_token = None;
+    }
+    assert_eq!(provider.active_oauth_account_email(), None);
+    {
+        let mut credentials = provider.credentials.write().await;
+        credentials.access_token = "unknown-access".into();
+        credentials.refresh_token = "unknown-refresh".into();
+    }
+    assert_eq!(provider.active_oauth_account_email(), None);
+    {
+        let mut credentials = provider.credentials.write().await;
+        // JWT payload: {"email":"id@example.com"}. No saved-account match.
+        credentials.id_token = Some("header.eyJlbWFpbCI6ImlkQGV4YW1wbGUuY29tIn0.signature".into());
+        assert_eq!(provider.active_oauth_account_email(), None);
+    }
+    assert_eq!(
+        provider.active_oauth_account_email().as_deref(),
+        Some("id@example.com")
+    );
+}
+
+#[tokio::test]
 async fn oauth_account_binding_survives_global_switch_refresh_and_fork() {
     let _lock = jcode_base::storage::lock_test_env();
     let _sandbox = AccountSandbox::new();
