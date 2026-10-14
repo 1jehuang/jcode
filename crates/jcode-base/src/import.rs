@@ -722,8 +722,11 @@ pub fn import_external_resume_id(resume_id: &str) -> Result<Option<String>> {
         return Ok(Some(session.id));
     }
 
-    if let Some(db) = opencode_db_with_session(resume_id)? {
-        let session = import_opencode_db_session(&db, resume_id)?;
+    // An unreadable opencode.db must not hide a match in the other stores, so
+    // its error is only returned when nothing else matched.
+    let opencode_db = opencode_db_with_session(resume_id);
+    if let Ok(Some(db)) = &opencode_db {
+        let session = import_opencode_db_session(db, resume_id)?;
         return Ok(Some(session.id));
     }
 
@@ -743,7 +746,7 @@ pub fn import_external_resume_id(resume_id: &str) -> Result<Option<String>> {
         return Ok(Some(session.id));
     }
 
-    Ok(None)
+    opencode_db.map(|_| None)
 }
 
 /// Import a Claude Code session from a file path
@@ -1329,11 +1332,15 @@ fn find_opencode_session_file(session_id: &str) -> Result<PathBuf> {
 }
 
 pub fn import_opencode_session(session_id: &str) -> Result<Session> {
-    if let Some(db) = opencode_db_with_session(session_id)? {
-        return import_opencode_db_session(&db, session_id);
+    let db = opencode_db_with_session(session_id);
+    if let Ok(Some(db)) = &db {
+        return import_opencode_db_session(db, session_id);
     }
-    let session_path = find_opencode_session_file(session_id)?;
-    import_opencode_session_from_path(&session_path, Some(session_id))
+    // A legacy session still imports when opencode.db is unreadable.
+    match find_opencode_session_file(session_id) {
+        Ok(path) => import_opencode_session_from_path(&path, Some(session_id)),
+        Err(not_found) => Err(db.err().unwrap_or(not_found)),
+    }
 }
 
 /// The OpenCode database path, if it exists and contains `session_id`.
