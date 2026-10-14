@@ -14,11 +14,12 @@ and [`docs/cleanup-arc-2026-10-13-P25C-RESEARCH.md`](./cleanup-arc-2026-10-13-P2
 | (bonus, not a rescue) | n/a | `p25c/port-jcode-sdk-clippy-cleanup` | `90cea21ba` | compile, 1+4 pre-existing flakes | Merge (clippy cleanup) or discard |
 | (bonus, not a rescue) | n/a | `p25c/port-jcode-workspace-clippy-bonus` | `80109ee45` | compile, no test regressions | Merge (clippy cleanup) or discard |
 | (bonus, not a rescue) | n/a | `p25c/port-jcode-workspace-clippy-bonus-2` | `852a9794c` | compile, no test regressions | Merge (clippy cleanup) or discard |
+| (bonus, not a rescue) | n/a | `p25c/port-jcode-setup-hints-clippy` | `3e643272b` | compile, 1 pre-existing flake (reproduces on master) | Merge (clippy cleanup) or discard |
 
-**Recommended action:** merge all five. The ports are self-contained,
+**Recommended action:** merge all six. The ports are self-contained,
 non-breaking, and either add a public API (ceb860bf2) or fix pre-existing
-clippy lints on master (jcode-sdk + 9 more workspace crates across 9 crates).
-Ports 3, 4, and 5 resolve current `cargo clippy -D warnings` failures on
+clippy lints on master (jcode-sdk + 13 more workspace crates across 13 crates).
+Ports 3, 4, 5, and 6 resolve current `cargo clippy -D warnings` failures on
 master.
 
 ## Port 1: e45ddd47e — race-resistant session-marker unlink
@@ -282,7 +283,7 @@ git push origin master
 # No worktree or source branch to clean up (this was not a rescue port)
 ```
 
-## After all five are merged
+## After all six are merged
 
 The cleanup-arc-2026-10-13 will be complete:
 - 4 P30 source branches deleted
@@ -294,6 +295,7 @@ The cleanup-arc-2026-10-13 will be complete:
 - 0 pre-existing clippy lints in jcode-sdk (Port 3)
 - 0 pre-existing clippy lints in 5 more workspace crates (Port 4)
 - 0 pre-existing clippy lints in 4 more workspace crates (Port 5)
+- 0 pre-existing clippy lints in jcode-setup-hints (Port 6 — Linux-only helpers were marked `#[cfg(target_os = "linux")]` instead of the misleading `any(test, target_os = "linux")`)
 
 Final memory record: this arc freed ~260 MB of disk space and resolved
 every P30 + P25c structural issue in the kcode→jcode fork.
@@ -303,13 +305,12 @@ have non-trivial clippy failures (these need real refactors, not lint
 cleanups, and are out of scope for this arc):
 - `jcode-base` (1: `await_holding_lock` — needs `parking_lot::Mutex` or restructure)
 - `jcode-herdr` (5: all `await_holding_lock` — same)
-- `jcode-setup-hints` (7: 6 dead code, 1 type_complexity — needs real usage or removal)
 - `jcode-provider-openai-runtime` (8: 7 `await_holding_lock`, 1 `result_large_err` — needs real refactor)
 - `jcode-telemetry-core` (16) — needs full sweep
 - `jcode-app-core` (20) — needs full sweep
 
 These should be the next cleanup targets after the operator merges
-the 5 ports in this guide.
+the 6 ports in this guide.
 
 ## Port 5 (bonus, not a rescue): jcode-workspace clippy bonus #2
 
@@ -375,4 +376,68 @@ git checkout master
 git merge --no-ff p25c/port-jcode-workspace-clippy-bonus-2
 git push origin master
 # No worktree or source branch to clean up (this was not a rescue port)
+```
+
+## Port 6 (bonus, not a rescue): jcode-setup-hints clippy cleanup
+
+### What it does
+The `jcode-setup-hints` crate is the Linux desktop integration layer
+(Niri/Hyprland/Sway/I3 hotkey setup, macOS equivalents, etc.). After
+Port 5, it still had 7 clippy failures when checked with
+`cargo clippy --all-targets -- -D warnings`. They are all small,
+mechanical fixes that do not change any user-visible behavior.
+
+### Lints addressed
+| File | Lint | Count | Resolution |
+|---|---|---|---|
+| `crates/jcode-setup-hints/src/lib.rs` (5 fns) | `clippy::dead_code` | 5 | The 5 Linux-only helper functions (`niri_config_path`, `xdg_config_home`, `linux_launch_terminal`, `binary_on_path`, `resolve_linux_hotkeys`) carried `#[cfg(any(test, target_os = "linux"))]`. Their only call sites are inside `#[cfg(target_os = "linux")]` blocks, and no test file references them, so the `any(test, ...)` half was misleading. Dropped to `#[cfg(target_os = "linux")]` so the functions are not even defined on macOS. |
+| `crates/jcode-setup-hints/src/linux_env.rs` (impl) | `clippy::dead_code` | 1 | `LinuxCompositor::name` method was on an un-gated `impl` block, but every call site is in a `#[cfg(target_os = "linux")]` block. Added `#[cfg(target_os = "linux")]` to the method. |
+| `crates/jcode-setup-hints/src/linux_env.rs` (test) | `clippy::type_complexity` | 1 | In `detects_compositors_from_sockets_and_desktop_names`, the `Vec<(Vec<(&str, &str)>, Option<LinuxCompositor>)>` literal is now `Vec<EnvExpectation>` after introducing `type EnvPairs = (&'static str, &'static str);` and `type EnvExpectation = (Vec<EnvPairs>, Option<LinuxCompositor>);` aliases at the top of the test body. |
+
+### Diff summary
+| File | Lines | Change |
+|---|---|---|
+| `crates/jcode-setup-hints/src/lib.rs` | +5 / -5 | 5 `any(test, target_os = "linux")` -> `target_os = "linux"` |
+| `crates/jcode-setup-hints/src/linux_env.rs` | +4 / -1 | method cfg + test type aliases |
+| **Total** | **+9 / -6** | **7 lints fixed** |
+
+### Validation
+- `cargo clippy -p jcode-setup-hints --all-targets -- -D warnings` — PASS (0 errors)
+- `cargo fmt -p jcode-setup-hints -- --check` — PASS
+- `cargo test -p jcode-setup-hints --no-run` — PASS
+- `cargo check --workspace` — PASS
+- `cargo test -p jcode-setup-hints` — 146/147 pass. The one failing test
+  (`setup_hints_tests::first_three_launches_can_include_hotkey_notice_too`)
+  was ALREADY failing on master before this change. Confirmed by stashing
+  this branch and running the test on master. This commit does not
+  introduce or fix that pre-existing failure.
+
+### Important: no behavior change
+- Dropping the `any(test, ...)` half of a `cfg` gate only changes when
+  the function is *defined*, not what it does. On Linux the behavior is
+  identical. On macOS the function is now not even compiled, but it was
+  unreachable there anyway (all call sites are `#[cfg(target_os = "linux")]`).
+- Adding `#[cfg(target_os = "linux")]` to `LinuxCompositor::name` is the
+  same kind of compile-time-only change.
+- The type aliases inside the test are mechanical: clippy can verify
+  they are equivalent.
+
+### How to review
+```bash
+git fetch origin
+git checkout p25c/port-jcode-setup-hints-clippy
+git log --oneline -3
+git diff master..HEAD --stat
+git diff master..HEAD -- crates/jcode-setup-hints
+# Re-test
+cargo clippy -p jcode-setup-hints --all-targets -- -D warnings
+cargo fmt -p jcode-setup-hints -- --check
+cargo test -p jcode-setup-hints --no-run
+```
+
+### How to merge
+```bash
+git checkout master
+git merge --no-ff p25c/port-jcode-setup-hints-clippy
+git push origin master
 ```
