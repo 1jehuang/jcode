@@ -689,5 +689,8 @@ fn a_bridge_answered_by_another_browser_is_not_the_requested_one() {
     assert!(!status_answered_by(&status, BrowserKind::Chrome));
     assert!(status_answered_by(&status, BrowserKind::Firefox));
     status.connected_browser = Some("chrome".into());
-    assert!(status_answered_by(&status, BrowserKind::Brave), "same Chromium family");
+    assert!(
+        status_answered_by(&status, BrowserKind::Brave),
+        "same Chromium family"
+    );
 }

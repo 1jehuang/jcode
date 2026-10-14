@@ -69,8 +69,7 @@ fn image_placeholder_extracts_math_copy_target_with_source_delimiters() {
     ));
     lines.push(super::super::mermaid::text_image_fallback_note_line());
 
-    let targets =
-        super::super::render_support::extract_copy_targets_from_rendered_lines(&lines);
+    let targets = super::super::render_support::extract_copy_targets_from_rendered_lines(&lines);
     assert_eq!(targets.len(), 1);
     let target = &targets[0];
     assert_eq!(

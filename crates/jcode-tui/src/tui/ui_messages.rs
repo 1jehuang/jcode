@@ -65,7 +65,9 @@ fn render_single_line_system_notice(
     let is_cold_cache_notice = msg.content.starts_with("🧊 Prompt cache went cold");
     let is_status_notice = msg.title.as_deref() == Some("Connection")
         || msg.content.starts_with("📡 Network appears offline")
-        || msg.content.starts_with("⚡ Server reload in progress - waiting for handoff")
+        || msg
+            .content
+            .starts_with("⚡ Server reload in progress - waiting for handoff")
         || msg.content.starts_with("⚡ Connection lost - retrying")
         || msg.content.starts_with("[auto] ")
         || (!msg.content.contains('\n') && !content_has_markdown_formatting(&msg.content));
