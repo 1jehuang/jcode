@@ -109,8 +109,24 @@ fn window_is_desktop(window: &NiriFocusedWindow) -> bool {
         || process_exe_name(window.pid).is_some_and(|name| name.starts_with("jcode-desktop"))
 }
 
+fn process_read<T>(result: std::io::Result<T>, pid: u32, field: &str) -> Option<T> {
+    match result {
+        Ok(value) => Some(value),
+        // Processes may exit between enumeration and inspection.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            jcode_base::logging::debug(&format!("Cannot inspect process {pid} {field}: {error}"));
+            None
+        }
+    }
+}
+
 fn process_exe_name(pid: u32) -> Option<String> {
-    let exe = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+    let exe = process_read(
+        std::fs::read_link(format!("/proc/{pid}/exe")),
+        pid,
+        "executable",
+    )?;
     let name = exe.file_name()?.to_string_lossy();
     Some(name.trim_end_matches(" (deleted)").to_string())
 }
@@ -234,7 +250,15 @@ fn focused_window_niri() -> Result<Option<NiriFocusedWindow>> {
 }
 
 fn resolve_session_for_window(window: &NiriFocusedWindow) -> Option<String> {
-    let children = proc_children_map().ok();
+    let children = match proc_children_map() {
+        Ok(children) => Some(children),
+        Err(error) => {
+            jcode_base::logging::warn(&format!(
+                "Cannot inspect foreground process tree, falling back to window title: {error:#}"
+            ));
+            None
+        }
+    };
     let mut tree = Vec::new();
     if let Some(children) = children.as_ref() {
         let mut queue = VecDeque::from([window.pid]);
@@ -274,9 +298,15 @@ fn resolve_session_for_window(window: &NiriFocusedWindow) -> Option<String> {
     // this window. The TUI records its session on focus, so the last-focused
     // session belongs to it.
     if tree.iter().any(|&pid| is_jcode_client_process(pid)) {
-        return jcode_base::client_focus::last_focused_session()
-            .ok()
-            .flatten();
+        return match jcode_base::client_focus::last_focused_session() {
+            Ok(session) => session,
+            Err(error) => {
+                jcode_base::logging::warn(&format!(
+                    "Cannot read last-focused CLI session: {error:#}"
+                ));
+                None
+            }
+        };
     }
     None
 }
@@ -337,7 +367,11 @@ fn inspect_client_process(pid: u32) -> Option<ClientCandidate> {
         });
     }
 
-    let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
+    let comm = process_read(
+        std::fs::read_to_string(format!("/proc/{pid}/comm")),
+        pid,
+        "command name",
+    )?;
     let comm = comm.trim();
     let short_name = CLIENT_TITLE_PREFIXES
         .iter()
@@ -356,7 +390,11 @@ fn inspect_client_process(pid: u32) -> Option<ClientCandidate> {
 }
 
 fn read_resumed_session_id(pid: u32) -> Option<String> {
-    let bytes = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    let bytes = process_read(
+        std::fs::read(format!("/proc/{pid}/cmdline")),
+        pid,
+        "command arguments",
+    )?;
     let args: Vec<String> = bytes
         .split(|b| *b == 0)
         .filter(|part| !part.is_empty())
@@ -411,8 +449,20 @@ fn proc_children_map() -> Result<HashMap<u32, Vec<u32>>> {
     for entry in proc_dir {
         let entry = entry?;
         let file_name = entry.file_name();
-        let Some(pid) = file_name.to_str().and_then(|s| s.parse::<u32>().ok()) else {
+        let Some(name) = file_name
+            .to_str()
+            .filter(|name| !name.is_empty() && name.bytes().all(|byte| byte.is_ascii_digit()))
+        else {
             continue;
+        };
+        let pid = match name.parse::<u32>() {
+            Ok(pid) => pid,
+            Err(error) => {
+                jcode_base::logging::debug(&format!(
+                    "Ignoring out-of-range process directory: {error}"
+                ));
+                continue;
+            }
         };
 
         let status_path = entry.path().join("status");
@@ -431,7 +481,13 @@ fn proc_children_map() -> Result<HashMap<u32, Vec<u32>>> {
 fn parse_ppid(status: &str) -> Option<u32> {
     status.lines().find_map(|line| {
         let value = line.strip_prefix("PPid:")?;
-        value.trim().parse::<u32>().ok()
+        match value.trim().parse::<u32>() {
+            Ok(ppid) => Some(ppid),
+            Err(error) => {
+                jcode_base::logging::debug(&format!("Cannot parse process parent PID: {error}"));
+                None
+            }
+        }
     })
 }
 
