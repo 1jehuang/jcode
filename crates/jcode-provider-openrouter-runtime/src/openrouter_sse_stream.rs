@@ -1137,18 +1137,12 @@ mod tests {
             or temporary unavailability. we're working on adding more capacity, please try \
             again in a moment.\",\"type\":\"server_error\"}}data: [done]";
         assert!(is_retryable_error(err));
-        for status in [500u16, 501, 502, 503, 504, 520, 529, 599] {
-            let err = format!("chat request failed\n  status: {status} whatever\n  response: {{}}");
-            assert!(is_retryable_error(&err), "status {status} should retry");
-        }
-        // The same wording inside a stream error (no HTTP status) retries too.
+        // Other 5xx statuses and the 5xx hint are covered by upstream's
+        // every_5xx_status_including_529_is_retryable. The same wording
+        // inside a stream error (no HTTP status) retries too.
         assert!(is_retryable_error(
             "openai-compatible stream error\n  error: we're experiencing heavy usage right now"
         ));
-        // Hint names the provider, not the network.
-        let hint = http_status_hint(529, "https://api.openference.com/v1", "glm-5.3");
-        assert!(hint.contains("overloaded"), "{hint}");
-        assert!(!hint.contains("network connectivity"), "{hint}");
         // Local servers keep their own advice for a 5xx.
         assert!(
             http_status_hint(503, "http://localhost:11434/v1", "llama3.2").contains("ollama serve")
