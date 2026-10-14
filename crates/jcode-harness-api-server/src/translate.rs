@@ -1397,6 +1397,32 @@ impl BridgeState {
         })]
     }
 
+    fn replace_text_suffix(&mut self, old_text: &str, new_text: &str) -> Vec<ServerFrame> {
+        // Citation annotations arrive at output_item.done, immediately before
+        // TextDone. Correct only the active message, never redistribute text
+        // across earlier messages using their pre-correction byte lengths.
+        let Some(id) = self.text_message_id.as_ref() else {
+            return vec![];
+        };
+        let Some((_, text, _)) = self.text_attempt.iter_mut().find(|(key, _, _)| key == id) else {
+            return vec![];
+        };
+        let Some(prefix) = text.strip_suffix(old_text) else {
+            return vec![];
+        };
+        if old_text == new_text {
+            return vec![];
+        }
+        let prefix_len = prefix.len();
+        text.truncate(prefix_len);
+        text.push_str(new_text);
+        vec![ServerFrame::event(ApiEvent::TextReplace {
+            session_id: self.session_id.clone().unwrap_or_default(),
+            message_id: Some(id.clone()),
+            text: text.clone(),
+        })]
+    }
+
     fn replace_text(&mut self, replacement: &str) -> Vec<ServerFrame> {
         // Legacy replacements cover the entire provider response, including
         // text messages already closed by output_item.done. Distribute the
@@ -1700,6 +1726,14 @@ impl BridgeState {
                 frames
             }
             "text_replace" => self.replace_text(event["text"].as_str().unwrap_or("")),
+            "text_suffix_replace" => {
+                match (event["old_text"].as_str(), event["new_text"].as_str()) {
+                    (Some(old_text), Some(new_text)) => {
+                        self.replace_text_suffix(old_text, new_text)
+                    }
+                    _ => vec![],
+                }
+            }
             "retry_rollback" => {
                 let frames = self.replace_text("");
                 self.text_message_id = None;
