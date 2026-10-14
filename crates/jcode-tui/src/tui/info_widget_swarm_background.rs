@@ -355,9 +355,20 @@ fn dock_is_attention(status: &str) -> bool {
     dock_status_rank(status) == 0
 }
 
+/// The todo step the agent is currently on, if it keeps a todo list.
+fn dock_current_todo(member: &SwarmMemberStatus) -> Option<String> {
+    member
+        .todo_items
+        .iter()
+        .find(|item| item.status == "in_progress")
+        .map(|item| item.content.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 /// What the agent is doing, in the fewest words available: the error or
-/// blocker when it needs attention, otherwise the latest status detail, the
-/// last line it streamed, or the task it was spawned for.
+/// blocker when it needs attention, otherwise the todo step it is on, the
+/// latest status detail, the last line it streamed, or the task it was
+/// spawned for.
 fn dock_activity(member: &SwarmMemberStatus) -> String {
     let nonempty = |s: &Option<String>| {
         s.as_deref()
@@ -372,28 +383,38 @@ fn dock_activity(member: &SwarmMemberStatus) -> String {
         .map(str::to_string);
     let detail = nonempty(&member.detail);
     let task = nonempty(&member.task_label);
+    let todo = dock_current_todo(member);
     let picked = if dock_is_finished(&member.status) {
         task.or(detail)
     } else if dock_is_attention(&member.status) {
-        detail.or(task).or(tail)
+        detail.or(todo).or(task).or(tail)
     } else {
-        detail.or(tail).or(task)
+        todo.or(detail).or(tail).or(task)
     };
-    picked.unwrap_or_else(|| member.status.clone())
+    picked
+        .unwrap_or_else(|| member.status.clone())
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
-/// Swarm dock. Border layout: `🐝 Swarm 2/4 active` top-left, attention count
+/// Swarm dock. Border layout: `🐝 2/4 active` top-left, attention count
 /// top-right, overflow bottom-left, task-graph meter bottom-right. Body: one
-/// row per agent, attention first, then working, idle, and finished.
+/// row per agent, attention first, then working, idle, and finished. Working
+/// agents with a todo list show the step they are on.
 ///
 /// ```text
-/// ╭ 🐝 Swarm 2/4 active ──────────── ⚠ 1 ╮
+/// ╭ 🐝 2/4 active ────────────────── ⚠ 1 ╮
 /// │✗ reviewer  cargo test failed: 3 …    │
 /// │⠋ builder   wiring commits widget  2/5│
 /// │⠋ ★ lead    waiting on reviewer    1/3│
 /// │✓ research  map the swarm code      5m│
 /// ╰ +2 more ──────────── nodes 4/9 ▰▰▰▱▱ ╯
 /// ```
+fn dock_member_label(member: &SwarmMemberStatus) -> String {
+    super::swarm_gallery::member_icon(member).unwrap_or_else(|| swarm_member_label(member))
+}
+
 fn render_swarm_dock(info: &SwarmInfo, inner: Rect) -> Framed {
     use jcode_tui_render::swarm_gallery::{humanize_age, status_accent, status_glyph};
     let members = &info.managed_members;
@@ -436,7 +457,7 @@ fn render_swarm_dock(info: &SwarmInfo, inner: Rect) -> Framed {
             } else {
                 0
             };
-            UnicodeWidthStr::width(swarm_member_label(m).as_str()) + star
+            UnicodeWidthStr::width(dock_member_label(m).as_str()) + star
         })
         .max()
         .unwrap_or(0)
@@ -460,8 +481,8 @@ fn render_swarm_dock(info: &SwarmInfo, inner: Rect) -> Framed {
         };
 
         let star = member.role.as_deref() == Some("coordinator");
-        let label_budget = name_w - if star { 2 } else { 0 };
-        let label = truncate_smart(&swarm_member_label(member), label_budget.max(1));
+        let label_budget = name_w.saturating_sub(if star { 2 } else { 0 });
+        let label = truncate_task_label(&dock_member_label(member), label_budget.max(1));
         let label_pad = name_w
             .saturating_sub(UnicodeWidthStr::width(label.as_str()) + if star { 2 } else { 0 });
 
@@ -486,7 +507,7 @@ fn render_swarm_dock(info: &SwarmInfo, inner: Rect) -> Framed {
             }),
         ));
         let activity = if activity_w >= 4 {
-            truncate_smart(&dock_activity(member), activity_w)
+            truncate_task_label(&dock_activity(member), activity_w)
         } else {
             String::new()
         };
@@ -512,10 +533,7 @@ fn render_swarm_dock(info: &SwarmInfo, inner: Rect) -> Framed {
         });
     }
 
-    let mut title = vec![
-        Span::styled("🐝 ", Style::default().fg(rgb(255, 200, 100))),
-        frame::label("Swarm "),
-    ];
+    let mut title = vec![Span::styled("🐝 ", Style::default().fg(rgb(255, 200, 100)))];
     if active > 0 {
         title.push(Span::styled(
             format!("{active}/{} active", members.len()),

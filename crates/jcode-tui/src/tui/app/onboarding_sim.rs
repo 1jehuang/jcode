@@ -101,6 +101,7 @@ impl App {
         self.changelog_scroll = None;
         self.help_scroll = None;
         self.model_status_scroll = None;
+        self.commit_log_overlay = None;
         self.session_picker_overlay = None;
         self.session_picker_mode = SessionPickerMode::Resume;
         self.pending_session_picker_load = None;
@@ -126,7 +127,9 @@ impl App {
         // A brand-new install has no jcode logins yet, so the real flow starts
         // at the login step, where it detects logins from other tools.
         self.begin_onboarding_flow_at_login();
-        self.force_full_redraw = true;
+        // Repaint every cell in place. A hard clear (ED2) blanks the whole
+        // terminal for a frame before redrawing, which reads as a flash.
+        self.request_full_repaint();
     }
 
     /// Leave the rehearsal and return to the normal session screen.
@@ -143,7 +146,9 @@ impl App {
         self.session_picker_overlay = None;
         self.session_picker_mode = SessionPickerMode::Resume;
         self.onboarding_preview_mode = false;
-        self.force_full_redraw = true;
+        // Repaint every cell in place. A hard clear (ED2) blanks the whole
+        // terminal for a frame before redrawing, which reads as a flash.
+        self.request_full_repaint();
         self.set_status_notice("Onboarding rehearsal: off");
     }
 }

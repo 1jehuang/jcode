@@ -1290,6 +1290,131 @@ pub(super) async fn remove_session_from_swarm(
     broadcast_swarm_status(swarm_id, swarm_members, swarms_by_id).await;
 }
 
+/// Whether `member` is an idle headless worker a restart stopped and whose
+/// owner has not yet been told (issue #1651).
+fn member_awaits_unrestored_notice(member: &SwarmMember) -> bool {
+    member.is_headless
+        && member.status == "stopped"
+        && member.detail.as_deref().is_some_and(|detail| {
+            detail.contains(super::swarm_persistence::IDLE_WORKER_NOT_RESTORED_NOTE)
+                && !detail.contains(super::swarm_persistence::OWNER_NOTIFIED_NOTE)
+        })
+}
+
+/// Tell `owner_session_id` about idle headless workers that the last server
+/// restart stopped (issue #1651).
+///
+/// No headless process survives a restart, so an idle worker loads as
+/// `stopped`. A TUI member re-marks itself ready on subscribe, but a headless
+/// worker has nothing to re-attach, so without this its coordinator only
+/// learns it is gone by polling the member list. Called when a session attaches
+/// (subscribe or resume): workers that report back to it, or whose swarm it
+/// coordinates, are listed in one swarm notification and marked notified so
+/// the notice is delivered once. Returns the number of workers reported.
+pub(super) async fn notify_owner_of_unrestored_idle_workers(
+    owner_session_id: &str,
+    swarm_state: &SwarmState,
+) -> usize {
+    let coordinated_swarms: HashSet<String> = {
+        let coordinators = swarm_state.coordinators.read().await;
+        coordinators
+            .iter()
+            .filter(|(_, coordinator)| coordinator.as_str() == owner_session_id)
+            .map(|(swarm_id, _)| swarm_id.clone())
+            .collect()
+    };
+    let (owner_name, reported) = {
+        let mut members = swarm_state.members.write().await;
+        let owner_name = members
+            .get(owner_session_id)
+            .and_then(|member| member.friendly_name.clone());
+        let mut reported: Vec<(String, String, Option<String>)> = Vec::new();
+        for member in members.values_mut() {
+            if member.session_id == owner_session_id || !member_awaits_unrestored_notice(member) {
+                continue;
+            }
+            let owned_by_report_back =
+                member.report_back_to_session_id.as_deref() == Some(owner_session_id);
+            let owned_by_coordination = member.report_back_to_session_id.is_none()
+                && member
+                    .swarm_id
+                    .as_ref()
+                    .is_some_and(|swarm_id| coordinated_swarms.contains(swarm_id));
+            if !(owned_by_report_back || owned_by_coordination) {
+                continue;
+            }
+            member.detail = Some(format!(
+                "{} ({})",
+                member.detail.as_deref().unwrap_or_default(),
+                super::swarm_persistence::OWNER_NOTIFIED_NOTE
+            ));
+            reported.push((
+                member.session_id.clone(),
+                member
+                    .friendly_name
+                    .clone()
+                    .unwrap_or_else(|| member.session_id.clone()),
+                member.swarm_id.clone(),
+            ));
+        }
+        reported.sort();
+        (owner_name, reported)
+    };
+    if reported.is_empty() {
+        return 0;
+    }
+
+    let names = reported
+        .iter()
+        .map(|(_, name, _)| name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let count = reported.len();
+    let message = if count == 1 {
+        format!(
+            "Idle headless worker {names} was stopped by the server restart and not restored. \
+             It had no work in flight. Spawn a replacement if you still need it."
+        )
+    } else {
+        format!(
+            "{count} idle headless workers were stopped by the server restart and not restored: {names}. \
+             They had no work in flight. Spawn replacements if you still need them."
+        )
+    };
+    crate::logging::info(&format!(
+        "Notifying {owner_session_id} of {count} idle headless worker(s) not restored after restart: {names}"
+    ));
+    let (first_session, _, _) = &reported[0];
+    let _ = fanout_session_event(
+        &swarm_state.members,
+        owner_session_id,
+        ServerEvent::Notification {
+            from_session: first_session.clone(),
+            from_name: owner_name,
+            notification_type: NotificationType::Message {
+                scope: Some("swarm".to_string()),
+                channel: None,
+                tldr: Some(format!(
+                    "{count} idle worker{} not restored after restart",
+                    if count == 1 { "" } else { "s" }
+                )),
+            },
+            message,
+        },
+    )
+    .await;
+
+    let swarms: HashSet<String> = reported
+        .iter()
+        .filter_map(|(_, _, swarm_id)| swarm_id.clone())
+        .collect();
+    for swarm_id in swarms {
+        persist_swarm_state_for(&swarm_id, swarm_state).await;
+        broadcast_swarm_status(&swarm_id, &swarm_state.members, &swarm_state.swarms_by_id).await;
+    }
+    count
+}
+
 /// Set a member's stable task label, derived from its spawn prompt or task
 /// assignment. Unlike `detail` (transient status text), the label survives
 /// status churn so UIs can always answer "what was this agent for?". A later
@@ -2598,6 +2723,73 @@ mod tests {
                 .get("child")
                 .and_then(|member| member.report_back_to_session_id.as_deref()),
             Some("coord")
+        );
+    }
+
+    #[tokio::test]
+    async fn owner_is_notified_once_of_idle_headless_workers_stopped_by_restart() {
+        // Issue #1651: an idle headless worker loads as stopped after a restart
+        // and has no re-attach path. Its owner must hear about it once.
+        let note = crate::server::swarm_persistence::IDLE_WORKER_NOT_RESTORED_NOTE;
+        let (coord, mut coord_rx) = swarm_member("coord", "coordinator", false);
+        let (mut butterfly, _rx1) = swarm_member("butterfly", "agent", true);
+        butterfly.status = "stopped".to_string();
+        butterfly.detail = Some(note.to_string());
+        butterfly.report_back_to_session_id = Some("coord".to_string());
+        let (mut stranger, _rx2) = swarm_member("stranger", "agent", true);
+        stranger.status = "stopped".to_string();
+        stranger.detail = Some(note.to_string());
+        stranger.report_back_to_session_id = Some("someone-else".to_string());
+        let (mut tui_client, _rx3) = swarm_member("tui", "agent", false);
+        tui_client.status = "stopped".to_string();
+        tui_client.detail = Some("client not attached after server restart".to_string());
+        tui_client.report_back_to_session_id = Some("coord".to_string());
+        let swarm_state = crate::server::SwarmState::new(
+            HashMap::from([
+                ("coord".to_string(), coord),
+                ("butterfly".to_string(), butterfly),
+                ("stranger".to_string(), stranger),
+                ("tui".to_string(), tui_client),
+            ]),
+            HashMap::from([(
+                "swarm-1".to_string(),
+                HashSet::from([
+                    "coord".to_string(),
+                    "butterfly".to_string(),
+                    "stranger".to_string(),
+                    "tui".to_string(),
+                ]),
+            )]),
+            HashMap::new(),
+            HashMap::from([("swarm-1".to_string(), "coord".to_string())]),
+        );
+
+        assert_eq!(
+            super::notify_owner_of_unrestored_idle_workers("coord", &swarm_state).await,
+            1
+        );
+        let notices: Vec<String> = std::iter::from_fn(|| coord_rx.try_recv().ok())
+            .filter_map(|event| match event {
+                ServerEvent::Notification { message, .. } => Some(message),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].contains("butterfly"), "{}", notices[0]);
+        assert!(!notices[0].contains("stranger"), "{}", notices[0]);
+
+        // Delivered once: a later reattach does not repeat it.
+        assert_eq!(
+            super::notify_owner_of_unrestored_idle_workers("coord", &swarm_state).await,
+            0
+        );
+        let members = swarm_state.members.read().await;
+        assert_eq!(members.get("butterfly").unwrap().status, "stopped");
+        assert!(
+            members
+                .get("stranger")
+                .and_then(|m| m.detail.as_deref())
+                .is_some_and(|d| !d.contains("owner notified"))
         );
     }
 

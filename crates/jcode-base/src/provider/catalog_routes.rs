@@ -165,7 +165,128 @@ pub fn simplified_model_routes_for_picker(
         });
     }
 
-    routes
+    expand_saved_account_routes(routes)
+}
+
+/// Replace implicit OAuth routes with every saved account's own catalog.
+/// API-key and other provider routes stay unchanged. The account-qualified API
+/// method is carried through RPC, deduplication, selection, and restoration.
+fn expand_saved_account_routes(mut routes: Vec<ModelRoute>) -> Vec<ModelRoute> {
+    let claude = crate::auth::claude::list_accounts().unwrap_or_default();
+    let openai = crate::auth::codex::list_accounts().unwrap_or_default();
+    if !claude.is_empty() {
+        routes.retain(|route| route.api_method != "claude-oauth");
+        for account in claude {
+            let scope = format!("oauth::{}", account.label);
+            for model in super::known_anthropic_model_ids_for_scope(&scope) {
+                let cached = super::cached_anthropic_model_ids_for_scope(&scope).is_some();
+                let pro_plan = account
+                    .subscription_type
+                    .as_deref()
+                    .is_some_and(|plan| plan.eq_ignore_ascii_case("pro"));
+                let is_active = crate::auth::claude::active_account_label().as_deref()
+                    == Some(account.label.as_str());
+                let extra_usage_allowed = if is_active {
+                    crate::usage::has_extra_usage()
+                } else {
+                    cached
+                };
+                let (available, detail) = if model.ends_with("[1m]") && !extra_usage_allowed {
+                    (false, "requires extra usage".to_string())
+                } else if !cached && model.contains("opus") && pro_plan {
+                    (false, "requires Max subscription".to_string())
+                } else {
+                    (true, String::new())
+                };
+                let mut route = build_anthropic_oauth_route(&model, available, detail);
+                apply_saved_account_status(
+                    &mut route,
+                    "claude",
+                    &account.label,
+                    !account.access.is_empty(),
+                    !account.refresh.is_empty(),
+                    account.expires <= chrono::Utc::now().timestamp_millis(),
+                );
+                qualify_saved_account_route(&mut route, &account.label, account.email.as_deref());
+                routes.push(route);
+            }
+        }
+    }
+    if !openai.is_empty() {
+        routes.retain(|route| route.api_method != "openai-oauth");
+        for account in openai {
+            for model in known_openai_model_ids_for_scope(&account.label) {
+                if !is_listable_model_name(&model)
+                    || model == CHATGPT_WEB_MODEL
+                    || jcode_provider_core::is_openai_api_only_pro_model(&model)
+                {
+                    continue;
+                }
+                let availability = model_availability_for_scope(&account.label, &model);
+                let mut route = build_openai_oauth_route(
+                    &model,
+                    availability.state != AccountModelAvailabilityState::Unavailable,
+                    format_account_model_availability_detail(&availability).unwrap_or_default(),
+                );
+                apply_saved_account_status(
+                    &mut route,
+                    "openai",
+                    &account.label,
+                    !account.access_token.is_empty(),
+                    !account.refresh_token.is_empty(),
+                    account
+                        .expires_at
+                        .is_some_and(|expires| expires <= chrono::Utc::now().timestamp_millis()),
+                );
+                qualify_saved_account_route(&mut route, &account.label, account.email.as_deref());
+                routes.push(route);
+            }
+        }
+    }
+    dedupe_model_routes(routes)
+}
+
+fn apply_saved_account_status(
+    route: &mut ModelRoute,
+    provider: &str,
+    label: &str,
+    has_access: bool,
+    has_refresh: bool,
+    expired: bool,
+) {
+    let status = if (!has_access || expired) && !has_refresh {
+        route.available = false;
+        Some("saved login expired or missing credentials; run /login".to_string())
+    } else if let Some(detail) =
+        super::models::provider_unavailability_detail_for_account_label(provider, Some(label))
+    {
+        route.available = false;
+        Some(detail)
+    } else if expired {
+        Some("expired access token; refresh on selection".to_string())
+    } else {
+        None
+    };
+    if let Some(status) = status {
+        route.detail = if route.detail.is_empty() {
+            status
+        } else {
+            format!("{} · {status}", route.detail)
+        };
+    }
+}
+
+fn qualify_saved_account_route(route: &mut ModelRoute, label: &str, email: Option<&str>) {
+    route.api_method = format!("{}@{label}", route.api_method);
+    let identity = match email {
+        Some(email) => format!("account {label} · {email}"),
+        None => format!("account {label}"),
+    };
+    route.detail = if route.detail.is_empty() {
+        identity
+    } else {
+        format!("{identity} · {}", route.detail)
+    };
 }
 
 pub fn append_simplified_anthropic_model_routes(
@@ -323,7 +444,7 @@ pub(super) fn multiprovider_model_routes(provider: &MultiProvider) -> Vec<ModelR
             }
         }
     }
-    routes
+    expand_saved_account_routes(routes)
 }
 
 /// Anthropic models via OAuth and/or API key.
@@ -1306,6 +1427,153 @@ pub fn remote_model_is_server_copilot_only(model: &str) -> bool {
 mod tests {
     use super::*;
     use crate::auth::{AuthState, ProviderAuth};
+
+    #[test]
+    fn saved_account_catalogs_keep_work_personal_and_named_accounts_separate() {
+        let _guard = EnvGuard::new();
+        let home = crate::storage::jcode_dir().unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        let accounts: Vec<_> = ["work", "personal", "research"].into_iter().map(|label| {
+            serde_json::json!({"label": label, "access": "test-access", "refresh": "test-refresh",
+                "expires": i64::MAX, "email": format!("{label}@example.test"), "subscription_type": "max"})
+        }).collect();
+        std::fs::write(
+            home.join("auth.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "anthropic_accounts": accounts, "active_anthropic_account": "work"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        crate::auth::codex::save_auth_file(&crate::auth::codex::JcodeOpenAiAuthFile {
+            openai_accounts: ["work", "personal", "research"]
+                .into_iter()
+                .map(|label| crate::auth::codex::OpenAiAccount {
+                    label: label.into(),
+                    access_token: "test-access".into(),
+                    refresh_token: "test-refresh".into(),
+                    id_token: None,
+                    account_id: None,
+                    expires_at: Some(i64::MAX),
+                    email: Some(format!("{label}@example.test")),
+                })
+                .collect(),
+            active_openai_account: Some("work".into()),
+        })
+        .unwrap();
+        let routes = expand_saved_account_routes(vec![
+            build_anthropic_oauth_route("claude-sonnet-4-6", true, ""),
+            ModelRoute {
+                model: "claude-sonnet-4-6".into(),
+                provider: "Anthropic".into(),
+                api_method: "claude-api".into(),
+                available: true,
+                detail: String::new(),
+                usage: None,
+                cheapness: None,
+            },
+        ]);
+        assert!(routes.iter().any(|r| r.api_method == "claude-api"));
+        assert!(!routes.iter().any(|r| r.api_method == "claude-oauth"));
+        for label in ["work", "personal", "research"] {
+            let route = routes
+                .iter()
+                .find(|r| {
+                    r.model == "claude-sonnet-4-6"
+                        && r.api_method == format!("claude-oauth@{label}")
+                })
+                .unwrap();
+            assert!(route.detail.contains(&format!("account {label}")));
+            assert_eq!(
+                super::super::RouteSelection::from_model_route(route).account_label(),
+                Some(label)
+            );
+        }
+        for label in ["work", "personal", "research"] {
+            assert!(routes.iter().any(|route| route.model == "gpt-5.5"
+                && route.api_method == format!("openai-oauth@{label}")));
+            assert!(
+                !routes
+                    .iter()
+                    .any(|route| route.api_method == format!("openai-oauth@{label}")
+                        && jcode_provider_core::is_openai_api_only_pro_model(&route.model))
+            );
+        }
+        let fast = simplified_model_routes_for_picker(
+            "Anthropic",
+            "claude-sonnet-4-6",
+            ["claude-sonnet-4-6".into()],
+        );
+        for label in ["work", "personal", "research"] {
+            assert!(
+                fast.iter()
+                    .any(|r| r.api_method == format!("claude-oauth@{label}"))
+            );
+        }
+        super::super::models::populate_anthropic_models_for_scope(
+            "oauth::work",
+            vec!["claude-work-only".into()],
+        );
+        super::super::models::populate_anthropic_models_for_scope(
+            "oauth::personal",
+            vec!["claude-personal-only".into()],
+        );
+        super::super::models::populate_account_models_for_scope(
+            "work",
+            vec!["gpt-work-only".into()],
+        );
+        super::super::models::populate_account_models_for_scope(
+            "personal",
+            vec!["gpt-personal-only".into()],
+        );
+        let scoped = expand_saved_account_routes(Vec::new());
+        for (method, own, other) in [
+            (
+                "claude-oauth@work",
+                "claude-work-only",
+                "claude-personal-only",
+            ),
+            (
+                "claude-oauth@personal",
+                "claude-personal-only",
+                "claude-work-only",
+            ),
+            ("openai-oauth@work", "gpt-work-only", "gpt-personal-only"),
+            (
+                "openai-oauth@personal",
+                "gpt-personal-only",
+                "gpt-work-only",
+            ),
+        ] {
+            assert!(
+                scoped
+                    .iter()
+                    .any(|r| r.api_method == method && r.model == own)
+            );
+            assert!(
+                !scoped
+                    .iter()
+                    .any(|r| r.api_method == method && r.model == other)
+            );
+        }
+        super::super::models::reset_model_catalog_services_for_tests();
+    }
+
+    #[test]
+    fn saved_account_expiry_requires_login_only_without_refresh_credentials() {
+        let _guard = EnvGuard::new();
+        let mut expired = build_openai_oauth_route("gpt-5.5", true, "");
+        apply_saved_account_status(&mut expired, "openai", "expired-test", true, false, true);
+        assert!(!expired.available);
+        assert!(expired.detail.contains("expired"));
+        let mut refreshable = build_openai_oauth_route("gpt-5.5", true, "");
+        apply_saved_account_status(&mut refreshable, "openai", "refresh-test", true, true, true);
+        assert!(refreshable.available);
+        assert!(refreshable.detail.contains("refresh on selection"));
+        let mut missing = build_anthropic_oauth_route("claude-sonnet-4-6", true, "");
+        apply_saved_account_status(&mut missing, "claude", "missing-test", false, false, false);
+        assert!(!missing.available);
+    }
 
     struct EnvGuard {
         vars: Vec<(&'static str, Option<std::ffi::OsString>)>,

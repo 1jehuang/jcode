@@ -186,8 +186,11 @@ pub fn format_comm_members(current_session_id: &str, members: &[AgentInfo]) -> S
             // Last observed activity (tokens/tools/heartbeats). status_age only
             // tracks lifecycle transitions, so a worker mid-turn for minutes
             // looks stale without this even while it streams tokens.
-            let activity_age_suffix = match member.last_activity_age_secs {
-                Some(age) if status == "running" || status == "queued" => {
+            let activity_age_suffix = match (member.stalled_secs, member.last_activity_age_secs) {
+                (Some(stalled), _) => {
+                    format!(" · ⚠ STALLED (no activity for {})", format_secs(stalled))
+                }
+                (None, Some(age)) if status == "running" || status == "queued" => {
                     format!(" · active {} ago", format_secs(age))
                 }
                 _ => String::new(),
@@ -401,6 +404,9 @@ pub fn format_comm_status_snapshot(snapshot: &AgentStatusSnapshot) -> String {
     }
     if let Some(age_secs) = snapshot.last_activity_age_secs {
         meta.push(format!("active={} ago", format_secs(age_secs)));
+    }
+    if let Some(stalled) = snapshot.stalled_secs {
+        meta.push(format!("STALLED={}", format_secs(stalled)));
     }
     if let Some(age_secs) = snapshot.status_age_secs {
         meta.push(format!("status_age={}s", age_secs));

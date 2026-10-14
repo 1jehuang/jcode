@@ -328,7 +328,7 @@ pub async fn login(
 
     eprintln!("\nOpening browser for Google login...\n");
     eprintln!("If the browser didn't open, visit:\n{}\n", auth_url);
-    if let Some(qr) = crate::login_qr::indented_section(
+    if let Some(qr) = crate::auth::login_ui::qr_section(
         &auth_url,
         "Scan this QR on another device if this machine has no browser:",
         "    ",
@@ -340,7 +340,7 @@ pub async fn login(
     let browser_opened = if crate::auth::browser_suppressed(no_browser) {
         false
     } else {
-        open::that(&auth_url).is_ok()
+        crate::companion_client::open_url(&auth_url)
     };
 
     let code = if browser_opened {

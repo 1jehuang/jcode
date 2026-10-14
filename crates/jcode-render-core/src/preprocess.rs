@@ -732,6 +732,33 @@ fn delimited_content_looks_like_prose(rest: &str, close_delimiter: &str) -> bool
     }) {
         return false;
     }
+    // A single-line body with any run of four or more letters and no LaTeX
+    // command or operator is escaped Markdown brackets around words, e.g. a
+    // TOML table header like `\[workspace\]`, or a placeholder like
+    // `\[pasted N lines\]`. Real math would typeset that as an italic product
+    // of variables. Multiline `\[ ... \]` blocks stay math.
+    if !body.contains('\n')
+        && body
+            .split(|ch: char| !ch.is_alphabetic())
+            .any(|run| run.chars().count() >= 4)
+    {
+        return true;
+    }
+    // Short prose lists like `\[old, new\]` have no four-letter word.
+    // Preserve them without changing mathematical tuples like `\[x, y\]`.
+    if !body.contains('\n')
+        && body.contains(',')
+        && body
+            .split(',')
+            .filter(|entry| {
+                let entry = entry.trim();
+                entry.chars().count() >= 3 && entry.chars().all(char::is_alphabetic)
+            })
+            .count()
+            >= 2
+    {
+        return true;
+    }
     body.split_whitespace()
         .filter(|word| word.chars().filter(|ch| ch.is_alphabetic()).count() >= 2)
         .count()
@@ -1004,5 +1031,22 @@ mod tests {
             r"$$\text{area} = \pi r^2$$"
         );
         assert_eq!(normalize_latex_math(r"\(x\)"), r"$x$");
+    }
+
+    #[test]
+    fn escaped_single_word_brackets_are_not_math() {
+        for input in [
+            r"the nested directory's own \[workspace\] declaration",
+            r"even though I added \[workspace\] to make this a root",
+            r"set \[package.metadata\] keys",
+            r"see \(optional\) here",
+            r"collapsed into a placeholder like \[pasted N lines\] by jcode",
+            r"\[image 1\]",
+        ] {
+            assert_eq!(normalize_latex_math(input), input);
+        }
+        assert_eq!(normalize_latex_math(r"\[xy\]"), r"$$xy$$");
+        assert_eq!(normalize_latex_math(r"\[x+y\]"), r"$$x+y$$");
+        assert_eq!(normalize_latex_math(r"\[\alpha\]"), r"$$\alpha$$");
     }
 }

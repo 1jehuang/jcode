@@ -1,6 +1,5 @@
 use super::*;
 use crate::tui::core;
-use std::path::PathBuf;
 
 #[derive(Clone, Copy)]
 struct RegisteredCommand {
@@ -157,7 +156,10 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/version", "Show current version"),
     RegisteredCommand::public("/changelog", "Show recent changes in this build"),
     RegisteredCommand::public("/info", "Show session info and tokens"),
-    RegisteredCommand::public("/reset", "Review and confirm a banked OpenAI usage reset"),
+    RegisteredCommand::public(
+        "/reset",
+        "Review and confirm an OpenAI or Claude usage limit reset",
+    ),
     RegisteredCommand::public("/usage", "Show connected provider usage limits"),
     RegisteredCommand::public(
         "/productivity",
@@ -575,6 +577,18 @@ impl App {
                         "/reset usage limits openai cancel".into(),
                         "Clear the pending reset confirmation",
                     ),
+                    (
+                        "/reset usage limits claude".into(),
+                        "Review the Claude session-limit reset (read-only)",
+                    ),
+                    (
+                        "/reset usage limits claude confirm".into(),
+                        "Spend the pending Claude session-limit reset",
+                    ),
+                    (
+                        "/reset usage limits claude cancel".into(),
+                        "Clear the pending Claude reset confirmation",
+                    ),
                 ],
             );
         }
@@ -609,7 +623,18 @@ impl App {
                         "/agents memory".into(),
                         "Configure optional memory extraction model",
                     ),
-                    ("/agents ambient".into(), "Configure ambient model"),
+                    (
+                        "/agents ambient".into(),
+                        "Configure ambient model [session]",
+                    ),
+                    (
+                        "/agents default".into(),
+                        "Configure saved global agent defaults",
+                    ),
+                    (
+                        "/agents global".into(),
+                        "Configure saved global agent defaults",
+                    ),
                 ],
             );
         }

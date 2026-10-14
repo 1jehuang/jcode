@@ -353,9 +353,15 @@ pub(super) fn draw_messages(
         height: render_area.height,
     };
     let wrapped_user_indices = &prepared.wrapped_user_indices;
-    let wrapped_user_prompt_starts = &prepared.wrapped_user_prompt_starts;
-    let wrapped_user_prompt_ends = &prepared.wrapped_user_prompt_ends;
-    let user_prompt_texts = &prepared.user_prompt_texts;
+    let clear_start = super::terminal_clear_start(app, &prepared);
+    let preview_start = clear_start.map_or(0, |start| {
+        prepared
+            .wrapped_user_prompt_starts
+            .partition_point(|line| *line < start)
+    });
+    let wrapped_user_prompt_starts = &prepared.wrapped_user_prompt_starts[preview_start..];
+    let wrapped_user_prompt_ends = &prepared.wrapped_user_prompt_ends[preview_start..];
+    let user_prompt_texts = &prepared.user_prompt_texts[preview_start..];
 
     let total_lines = prepared.total_wrapped_lines();
     let viewport_height = render_area.height as usize;
@@ -369,6 +375,7 @@ pub(super) fn draw_messages(
         user_prompt_texts,
         text_render_area,
         pinned_todo_band.len() as u16,
+        preview_start + app.compacted_hidden_user_prompts(),
     );
 
     super::set_last_max_scroll(max_scroll);
@@ -407,7 +414,14 @@ pub(super) fn draw_messages(
         super::set_tail_catchup_active(false);
         user_scroll.min(max_scroll)
     } else {
-        resolve_tail_follow_scroll(max_scroll, viewport_height)
+        // A clear is an explicit viewport boundary, not a jump to animate
+        // through old history. Never show rows preceding it while tailing.
+        if let Some(start) = clear_start {
+            super::set_tail_catchup_active(false);
+            max_scroll.max(start)
+        } else {
+            resolve_tail_follow_scroll(max_scroll, viewport_height)
+        }
     };
 
     // Publish the resolved geometry so scroll handlers and the anchor-reconcile
@@ -425,6 +439,7 @@ pub(super) fn draw_messages(
             user_prompt_texts,
             scroll,
             text_render_area.width,
+            preview_start + app.compacted_hidden_user_prompts(),
         )
     } else {
         0u16
@@ -515,6 +530,9 @@ pub(super) fn draw_messages(
         // prompt preview) is synthetic (not part of the scrolled transcript), so
         // offset by it to keep the content rows aligned.
         scroll_top: scroll.saturating_sub(top_band_lines as usize),
+        content_churning: app.is_processing()
+            || !app.streaming_text().is_empty()
+            || app.has_pending_mouse_scroll_animation(),
         ..Default::default()
     };
     margins
@@ -997,6 +1015,16 @@ pub(super) fn draw_messages(
             let total_height = region.height;
             let image_end = region.end_line;
             let is_fit = region.render == jcode_tui_messages::ImageRegionRender::Fit;
+            // Scale fit images into the exact box layout reserved for them
+            // (`region.width` cols x `region.height` rows). Fitting into the
+            // full content width instead let the rounded-up row count upscale
+            // the picture a few cells wider than the margin carve assumed, so
+            // it drew over info widgets docked beside it.
+            let fit_cols = if region.width == 0 {
+                content_area.width
+            } else {
+                region.width.min(content_area.width)
+            };
 
             if let Some(native_latex) = crate::tui::markdown::handterm_native_latex_for_hash(hash) {
                 // Native math writes real terminal cells rather than an overlay,
@@ -1035,7 +1063,7 @@ pub(super) fn draw_messages(
             // the ones actually on screen get decoded/scaled, and a cold image
             // schedules background prep instead of stalling this frame.
             let fit_ready = if is_fit && image_end > scroll && abs_idx < visible_end {
-                super::inline_image_ui::ensure_drawable(hash, content_area.width, total_height)
+                super::inline_image_ui::ensure_drawable(hash, fit_cols, total_height)
             } else {
                 true
             };
@@ -1070,7 +1098,7 @@ pub(super) fn draw_messages(
                                 hash,
                                 image_area,
                                 frame.buffer_mut(),
-                                content_area.width,
+                                fit_cols,
                                 total_height,
                                 0,
                                 centered,
@@ -1127,7 +1155,7 @@ pub(super) fn draw_messages(
                                 hash,
                                 image_area,
                                 frame.buffer_mut(),
-                                content_area.width,
+                                fit_cols,
                                 total_height,
                                 skip_rows,
                                 centered,
@@ -1188,7 +1216,12 @@ pub(super) fn draw_messages(
                 if on_screen {
                     continue;
                 }
-                super::inline_image_ui::prefetch(region.hash, content_area.width, region.height);
+                let fit_cols = if region.width == 0 {
+                    content_area.width
+                } else {
+                    region.width.min(content_area.width)
+                };
+                super::inline_image_ui::prefetch(region.hash, fit_cols, region.height);
             }
         }
     }
@@ -1245,7 +1278,8 @@ pub(super) fn draw_messages(
         {
             let prompt_text = prompt_text.trim();
             if !prompt_text.is_empty() {
-                let prompt_num = prompt_order + 1 + app.compacted_hidden_user_prompts();
+                let prompt_num =
+                    preview_start + prompt_order + 1 + app.compacted_hidden_user_prompts();
                 let num_str = format!("{}", prompt_num);
                 let prefix_len = num_str.len() + 2;
                 let content_width =
@@ -1379,7 +1413,7 @@ fn windowed_min(widths: &[u16], window: usize) -> Vec<u16> {
 
 /// Lines for the pinned todo band. Background tasks render in the
 /// `background` info widget, not here.
-fn pinned_todo_band_lines(
+pub(crate) fn pinned_todo_band_lines(
     app: &dyn TuiState,
     width: u16,
     viewport_height: u16,
@@ -1391,12 +1425,15 @@ fn pinned_todo_band_lines(
     let card_lines = if crate::config::config().display.pin_todos {
         app.pinned_todos_payload()
             .map(|payload| {
-                let msg = crate::tui::DisplayMessage::todos(payload.to_string());
+                // Distinct title keeps the line cache from sharing entries with
+                // the width-capped inline transcript card.
+                let mut msg = crate::tui::DisplayMessage::todos(payload.to_string());
+                msg.title = Some("Pinned todos".to_string());
                 super::messages::get_cached_message_lines(
                     &msg,
                     width,
                     app.diff_mode(),
-                    super::messages::render_todos_message,
+                    super::messages::render_pinned_todos_message,
                 )
             })
             .unwrap_or_default()
@@ -1450,6 +1487,7 @@ fn compute_prompt_preview_line_count(
     user_prompt_texts: &[String],
     scroll: usize,
     area_width: u16,
+    prompt_number_offset: usize,
 ) -> u16 {
     let last_offscreen = lower_bound(wrapped_user_prompt_starts, scroll).checked_sub(1);
     let Some(prompt_order) = last_offscreen else {
@@ -1462,7 +1500,7 @@ fn compute_prompt_preview_line_count(
     if prompt_text.is_empty() {
         return 0;
     }
-    let num_str = format!("{}", prompt_order + 1);
+    let num_str = format!("{}", prompt_number_offset + prompt_order + 1);
     let prefix_len = num_str.len() + 2;
     let content_width = area_width.saturating_sub(prefix_len as u16 + 2) as usize;
     let text_flat = prompt_text.replace('\n', " ");
@@ -1476,8 +1514,10 @@ fn compute_max_scroll_with_prompt_preview(
     user_prompt_texts: &[String],
     area: Rect,
     pinned_todo_lines: u16,
+    prompt_number_offset: usize,
 ) -> usize {
-    let mut max_scroll = total_lines.saturating_sub(area.height as usize);
+    let mut max_scroll =
+        total_lines.saturating_sub(area.height.saturating_sub(pinned_todo_lines) as usize);
     let preview_enabled = crate::config::config().display.prompt_preview;
     if max_scroll == 0 || (!preview_enabled && pinned_todo_lines == 0) {
         return max_scroll;
@@ -1490,6 +1530,7 @@ fn compute_max_scroll_with_prompt_preview(
                 user_prompt_texts,
                 max_scroll,
                 area.width,
+                prompt_number_offset,
             )
         } else {
             0
@@ -1509,6 +1550,37 @@ fn compute_max_scroll_with_prompt_preview(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pinned_todos_scroll_when_only_the_band_causes_overflow() {
+        let area = ratatui::layout::Rect::new(0, 0, 80, 10);
+        // The transcript alone fits, but the pinned band leaves only seven rows.
+        assert_eq!(
+            super::compute_max_scroll_with_prompt_preview(9, &[], &[], area, 3, 0),
+            2
+        );
+        assert_eq!(
+            super::compute_max_scroll_with_prompt_preview(7, &[], &[], area, 3, 0),
+            0
+        );
+        assert_eq!(
+            super::compute_max_scroll_with_prompt_preview(9, &[], &[], area, 0, 0),
+            0
+        );
+    }
+
+    #[test]
+    fn ctrl_l_preview_measurement_keeps_global_prompt_number_width() {
+        let prompts = vec!["x".repeat(15)];
+        assert_eq!(
+            super::compute_prompt_preview_line_count(&[0], &prompts, 1, 20, 0),
+            1
+        );
+        assert_eq!(
+            super::compute_prompt_preview_line_count(&[0], &prompts, 1, 20, 9),
+            2
+        );
+    }
+
     #[test]
     fn handterm_native_latex_cell_symbol_moves_invokes_and_restores_cursor() {
         assert_eq!(

@@ -2,6 +2,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod build_inputs;
+
 // Build metadata generator for the jcode workspace.
 //
 // This is the single source of truth for the JCODE_* compile-time values that
@@ -175,6 +177,10 @@ fn main() {
     println!("cargo:rerun-if-env-changed=JCODE_BUILD_GIT_DATE");
     println!("cargo:rerun-if-env-changed=JCODE_BUILD_GIT_DIRTY");
     println!("cargo:rerun-if-env-changed=JCODE_BUILD_GIT_TAG");
+    let metadata_path = std::env::var_os("JCODE_BUILD_METADATA_FILE");
+    for directive in build_inputs::metadata_rerun_inputs(metadata_path.as_deref()) {
+        println!("{directive}");
+    }
 }
 
 /// Workspace root, derived from this crate's manifest dir (`crates/jcode-build-meta`).

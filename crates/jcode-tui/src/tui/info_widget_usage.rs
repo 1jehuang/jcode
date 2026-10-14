@@ -42,7 +42,11 @@ pub(super) fn render_usage_widget(data: &InfoWidgetData, inner: Rect) -> Framed 
         return Framed::default();
     };
     if !info.available {
-        return Framed::default();
+        return if matches!(info.provider, UsageProvider::Anthropic) {
+            Framed::body(vec![usage_unavailable_line()]).title(frame::label("Anthropic limits"))
+        } else {
+            Framed::default()
+        };
     }
 
     match info.provider {
@@ -138,6 +142,13 @@ pub(super) fn render_usage_widget(data: &InfoWidgetData, inner: Rect) -> Framed 
     }
 }
 
+fn usage_unavailable_line() -> Line<'static> {
+    Line::from(Span::styled(
+        "Usage unavailable (refresh pending or failed)",
+        Style::default().fg(rgb(255, 190, 80)),
+    ))
+}
+
 pub(super) fn render_usage_compact(
     info: &UsageInfo,
     width: u16,
@@ -145,7 +156,11 @@ pub(super) fn render_usage_compact(
     usage_display_elapsed: bool,
 ) -> Vec<Line<'static>> {
     if !info.available {
-        return Vec::new();
+        return if matches!(info.provider, UsageProvider::Anthropic) {
+            vec![usage_unavailable_line()]
+        } else {
+            Vec::new()
+        };
     }
 
     if matches!(info.provider, UsageProvider::CostBased) {
@@ -408,6 +423,22 @@ mod tests {
         assert!(!text.contains("0% left"));
         assert!(!text.contains("100% used"));
         assert!(UnicodeWidthStr::width(text.as_str()) <= 24);
+    }
+
+    #[test]
+    fn unavailable_anthropic_usage_is_explicit_not_silently_hidden() {
+        let info = UsageInfo {
+            provider: UsageProvider::Anthropic,
+            available: false,
+            ..Default::default()
+        };
+
+        let text = render_usage_compact(&info, 50, false, false)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Usage unavailable"));
     }
 
     #[test]

@@ -504,9 +504,9 @@ fn preferred_model_rank(orders: &[&'static [&'static str]], model: &str) -> usiz
 /// Curated orders are `&'static` constants, so the slice address identifies
 /// them.
 fn normalized_preference_order(order: &'static [&'static str]) -> std::sync::Arc<Vec<String>> {
-    static CACHE: std::sync::LazyLock<
-        std::sync::Mutex<std::collections::HashMap<(usize, usize), std::sync::Arc<Vec<String>>>>,
-    > = std::sync::LazyLock::new(Default::default);
+    type OrderCache =
+        std::sync::Mutex<std::collections::HashMap<(usize, usize), std::sync::Arc<Vec<String>>>>;
+    static CACHE: std::sync::LazyLock<OrderCache> = std::sync::LazyLock::new(Default::default);
     let key = (order.as_ptr() as usize, order.len());
     if let Ok(cache) = CACHE.lock()
         && let Some(hit) = cache.get(&key)
@@ -1310,7 +1310,35 @@ fn apply_auth_provider_runtime(provider_id: Option<&str>) -> Option<String> {
 }
 
 fn direct_provider_activation(provider_id: &str) -> Option<ProviderActivation> {
-    let (runtime_id, active) = match normalized_login_provider_id(provider_id)? {
+    let (runtime_id, active) = direct_provider_runtime_ids(provider_id)?;
+    // A login must not override an explicit configured default for every
+    // future session. Selecting the initial provider writes process-global env
+    // (JCODE_ACTIVE_PROVIDER + JCODE_INITIAL_PROVIDER_EXPLICIT), and in the
+    // shared daemon that env outranks `[provider] default_model`, so logging
+    // into OpenAI once made every new session start on GPT instead of the
+    // configured Claude default. The session that performed the login still
+    // switches models through the session-local auth-change path.
+    if config_has_explicit_default_provider() {
+        return Some(ProviderActivation::new(
+            runtime_id,
+            crate::provider::activation::RuntimeSelection::Unchanged,
+        ));
+    }
+    Some(ProviderActivation::initial(runtime_id, active))
+}
+
+fn config_has_explicit_default_provider() -> bool {
+    let provider_config = &crate::config::config().provider;
+    let non_empty = |value: &Option<String>| {
+        value
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+    };
+    non_empty(&provider_config.default_provider) || non_empty(&provider_config.default_model)
+}
+
+fn direct_provider_runtime_ids(provider_id: &str) -> Option<(RuntimeProviderId, ActiveProvider)> {
+    Some(match normalized_login_provider_id(provider_id)? {
         "claude" => (RuntimeProviderId::Claude, ActiveProvider::Claude),
         "claude-api" => (RuntimeProviderId::ClaudeApiKey, ActiveProvider::Claude),
         "openai" => (RuntimeProviderId::OpenAi, ActiveProvider::OpenAI),
@@ -1324,8 +1352,7 @@ fn direct_provider_activation(provider_id: &str) -> Option<ProviderActivation> {
         "antigravity" => (RuntimeProviderId::Antigravity, ActiveProvider::Antigravity),
         "grok-build" => (RuntimeProviderId::GrokBuild, ActiveProvider::OpenRouter),
         _ => return None,
-    };
-    Some(ProviderActivation::initial(runtime_id, active))
+    })
 }
 
 pub fn model_switch_request_for_provider_id(
@@ -1673,6 +1700,36 @@ mod tests {
                 "grok-build:grok-4.6"
             );
         }
+    }
+
+    #[test]
+    fn login_does_not_override_configured_default_provider_for_new_sessions() {
+        let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().expect("sandbox");
+        std::fs::write(
+            sandbox.root().join("config.toml"),
+            "[provider]\ndefault_model = \"claude-oauth:claude-opus-5-5\"\ndefault_provider = \"claude-oauth\"\n",
+        )
+        .expect("write config");
+        crate::config::invalidate_config_cache();
+        crate::env::set_var("JCODE_RUNTIME_PROVIDER", "claude");
+        crate::env::set_var("JCODE_ACTIVE_PROVIDER", "claude");
+        crate::env::remove_var("JCODE_INITIAL_PROVIDER_EXPLICIT");
+
+        let activation = activate_auth_change(&AuthActivationRequest::new(
+            None,
+            Some(AuthChanged::new("openai")),
+        ));
+
+        assert_eq!(activation.provider_id.as_deref(), Some("openai"));
+        assert_eq!(
+            std::env::var("JCODE_ACTIVE_PROVIDER").as_deref(),
+            Ok("claude"),
+            "logging into OpenAI must not retarget the daemon-wide initial provider"
+        );
+        assert!(std::env::var("JCODE_INITIAL_PROVIDER_EXPLICIT").is_err());
+
+        std::fs::remove_file(sandbox.root().join("config.toml")).ok();
+        crate::config::invalidate_config_cache();
     }
 
     #[test]

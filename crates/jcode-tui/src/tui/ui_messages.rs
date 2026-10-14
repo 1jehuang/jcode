@@ -35,7 +35,15 @@ fn width_stable_system_title<'a>(normal: &'a str, stable: &'a str) -> &'a str {
 }
 
 fn normalize_system_content_for_display(content: &str) -> Cow<'_, str> {
-    let sanitized = strip_ansi_escape_sequences(content);
+    // Emoji variation selectors (U+FE0F, as in "⚠️" or "ℹ️") make terminals
+    // render the base glyph two cells wide while ratatui may count it as one.
+    // That shifts the rest of the row and leaves stale cells behind (ghost
+    // characters at the right edge) on later diff repaints. Render the plain
+    // text-presentation glyph instead so widths always agree.
+    let mut sanitized = strip_ansi_escape_sequences(content);
+    if sanitized.contains('\u{FE0F}') {
+        sanitized.retain(|ch| ch != '\u{FE0F}');
+    }
     if !prefer_width_stable_system_glyphs() {
         return Cow::Owned(sanitized);
     }
@@ -79,6 +87,12 @@ fn render_single_line_system_notice(
     Some(lines)
 }
 
+/// Assistant message text.
+///
+/// Restored history fills `tool_calls` with the turn's tool names, while live
+/// turns leave it empty. Those names are deliberately not rendered: the chat
+/// already shows a full row per tool, and a summary line would only appear
+/// after a reload.
 pub(crate) fn render_assistant_message(
     msg: &DisplayMessage,
     width: u16,
@@ -93,20 +107,6 @@ pub(crate) fn render_assistant_message(
     };
     if centered {
         markdown::recenter_structured_blocks_for_display(&mut lines, width as usize);
-    }
-    if !msg.tool_calls.is_empty() {
-        if lines.iter().any(|line| {
-            line.spans
-                .iter()
-                .any(|span| !span.content.trim().is_empty())
-        }) {
-            lines.push(Line::default().alignment(ratatui::layout::Alignment::Left));
-        }
-        lines.extend(render_assistant_tool_call_lines(
-            &msg.tool_calls,
-            wrap_width,
-            centered,
-        ));
     }
     lines
 }
@@ -311,87 +311,6 @@ pub(crate) fn render_reasoning_message(
     if centered {
         left_pad_lines_for_centered_mode(&mut lines, width);
     }
-    lines
-}
-
-fn render_assistant_tool_call_lines(
-    tool_calls: &[String],
-    width: usize,
-    centered: bool,
-) -> Vec<Line<'static>> {
-    if tool_calls.is_empty() {
-        return Vec::new();
-    }
-
-    const TOOL_SEPARATOR: &str = " · ";
-
-    let label = if tool_calls.len() == 1 {
-        "tool:"
-    } else {
-        "tools:"
-    };
-    let prefix = format!("  {} ", label);
-    let prefix_width = prefix.width();
-    let available_width = width.max(prefix_width.saturating_add(1));
-
-    let prefix_style = Style::default().fg(tool_color()).dim();
-    let separator_style = Style::default().fg(dim_color()).dim();
-    let name_style = Style::default().fg(accent_color()).dim();
-
-    let max_width = available_width.saturating_sub(1).max(prefix_width + 1);
-    let mut spans = vec![Span::styled(prefix.clone(), prefix_style)];
-    let mut current_width = prefix_width;
-    let mut shown = 0usize;
-
-    for (idx, tool_name) in tool_calls.iter().enumerate() {
-        let separator_width = if shown == 0 {
-            0
-        } else {
-            TOOL_SEPARATOR.width()
-        };
-        let more_remaining = tool_calls.len().saturating_sub(idx + 1);
-        let more_label = if more_remaining > 0 {
-            format!("{}+{} more", TOOL_SEPARATOR, more_remaining)
-        } else {
-            String::new()
-        };
-        let required = separator_width + tool_name.width() + more_label.width();
-
-        if current_width.saturating_add(required) <= max_width {
-            if shown > 0 {
-                spans.push(Span::styled(TOOL_SEPARATOR, separator_style));
-                current_width = current_width.saturating_add(separator_width);
-            }
-            spans.push(Span::styled(tool_name.clone(), name_style));
-            current_width = current_width.saturating_add(tool_name.width());
-            shown += 1;
-        } else {
-            break;
-        }
-    }
-
-    if shown < tool_calls.len() {
-        let remaining = tool_calls.len() - shown;
-        let more_text = if shown == 0 {
-            format!("+{} more", remaining)
-        } else {
-            format!("{}+{} more", TOOL_SEPARATOR, remaining)
-        };
-        spans.push(Span::styled(more_text, separator_style));
-    }
-
-    let mut lines = vec![super::truncate_line_with_ellipsis_to_width(
-        &Line::from(spans),
-        max_width,
-    )];
-
-    if centered {
-        left_pad_lines_for_centered_mode(&mut lines, width as u16);
-        if let Some(line) = lines.first_mut() {
-            *line = super::truncate_line_with_ellipsis_to_width(line, max_width);
-        }
-    }
-
     lines
 }
 
@@ -1096,6 +1015,26 @@ pub(crate) fn render_todos_message(
     width: u16,
     diff_mode: crate::config::DiffDisplayMode,
 ) -> Vec<Line<'static>> {
+    render_todos_message_with_cap(msg, width, diff_mode, true)
+}
+
+/// Todo card for the pinned band at the top of the viewport. The band owns
+/// its full rows (info widgets never dock beside it), so the card spans the
+/// whole available width instead of the transcript's readability cap.
+pub(crate) fn render_pinned_todos_message(
+    msg: &DisplayMessage,
+    width: u16,
+    diff_mode: crate::config::DiffDisplayMode,
+) -> Vec<Line<'static>> {
+    render_todos_message_with_cap(msg, width, diff_mode, false)
+}
+
+fn render_todos_message_with_cap(
+    msg: &DisplayMessage,
+    width: u16,
+    diff_mode: crate::config::DiffDisplayMode,
+    cap_width: bool,
+) -> Vec<Line<'static>> {
     let Ok(payload) = serde_json::from_str::<TodoCardPayload>(&msg.content) else {
         return render_system_message(msg, width, diff_mode);
     };
@@ -1103,10 +1042,11 @@ pub(crate) fn render_todos_message(
 
     let centered = markdown::center_code_blocks();
     let meta_style = Style::default().fg(todo_meta_color());
-    let card_width = if centered {
-        (width.saturating_sub(4) as usize).min(120)
-    } else {
-        (width.saturating_sub(2) as usize).min(100)
+    let card_width = match (centered, cap_width) {
+        (true, true) => (width.saturating_sub(4) as usize).min(120),
+        (true, false) => width.saturating_sub(4) as usize,
+        (false, true) => (width.saturating_sub(2) as usize).min(100),
+        (false, false) => width.saturating_sub(2) as usize,
     }
     .max(1);
     let base_indent = if centered { "" } else { "  " };
@@ -2920,7 +2860,7 @@ struct CompactSwarmNotification<'a> {
 fn compact_swarm_notification(title: &str) -> Option<CompactSwarmNotification<'_>> {
     let (sender, marker, marker_before_icon, text_color, file_activity) =
         if let Some(sender) = title.strip_prefix("DM from ") {
-            (sender, String::new(), false, rgb(214, 232, 255), false)
+            (sender, String::new(), false, rgb(130, 130, 140), false)
         } else if let Some(sender) = title.strip_prefix("Task · ") {
             (sender, String::new(), false, rgb(220, 236, 255), false)
         } else if let Some((channel, sender)) = title
@@ -2963,7 +2903,10 @@ fn render_compact_agent_notification(
 ) -> Option<Vec<Line<'static>>> {
     let notification = compact_swarm_notification(title)?;
     let icon = crate::id::session_icon(notification.sender);
-    let collapsible = jcode_tui_messages::parse_collapsible_swarm_content(content);
+    // Plain (legacy or unencoded) long content renders as a collapsed preview
+    // too, so nothing agent-authored is ever dumped inline by default.
+    let normalized = jcode_tui_messages::collapse_long_swarm_content(content);
+    let collapsible = jcode_tui_messages::parse_collapsible_swarm_content(&normalized);
     let (body, badge) = match collapsible {
         Some(parsed) if parsed.expanded => (
             format!("{}\n{}", parsed.tldr, parsed.body.trim()),
@@ -2992,6 +2935,47 @@ fn render_compact_agent_notification(
     let icon_style = Style::default().fg(rgb(255, 200, 100));
     let body_style = Style::default().fg(text_color);
     let max_width = width.max(1) as usize;
+
+    // Collapsed (or plain) content is always exactly one row: the preview is
+    // truncated with an ellipsis so the badge stays the trailing token.
+    let expanded = collapsible.is_some_and(|parsed| parsed.expanded);
+    if !expanded {
+        let preview = jcode_tui_messages::swarm_preview_line(&body, usize::MAX);
+        let mut prefix = if notification.marker_before_icon {
+            vec![Span::styled(
+                format!("{}{} ", notification.marker, icon),
+                body_style,
+            )]
+        } else {
+            let mut spans = vec![Span::styled(format!("{} ", icon), icon_style)];
+            if !notification.marker.is_empty() {
+                spans.push(Span::styled(notification.marker.clone(), body_style));
+            }
+            spans
+        };
+        let badge_text = badge.map(|badge| format!("  {badge}"));
+        let badge_width = badge_text
+            .as_deref()
+            .map(UnicodeWidthStr::width)
+            .unwrap_or(0);
+        prefix.push(Span::styled(preview, body_style));
+        let mut line = super::truncate_line_with_ellipsis_to_width(
+            &Line::from(prefix),
+            max_width.saturating_sub(badge_width).max(1),
+        );
+        if let Some(badge_text) = badge_text {
+            line.spans.push(Span::styled(
+                badge_text,
+                Style::default().fg(text_color).dim(),
+            ));
+        }
+        let mut lines = vec![line];
+        if markdown::center_code_blocks() {
+            left_pad_lines_for_centered_mode(&mut lines, width);
+        }
+        return Some(lines);
+    }
+
     let body_width = max_width.saturating_sub(3).max(1);
     let mut rendered_body = if body.is_empty() {
         vec![Line::from(Span::styled(String::new(), body_style))]
@@ -3185,14 +3169,23 @@ pub(crate) fn render_swarm_message(
         } else {
             SWARM_EXPAND_BADGE
         };
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(tldr.clone(), body_style),
-            Span::styled(
-                format!("  {}", badge),
-                Style::default().fg(rail_color).dim(),
-            ),
-        ]));
+        let badge_text = format!("  {}", badge);
+        let badge_width = UnicodeWidthStr::width(badge_text.as_str());
+        let mut line = super::truncate_line_with_ellipsis_to_width(
+            &Line::from(vec![
+                Span::raw("  "),
+                Span::styled(
+                    jcode_tui_messages::swarm_preview_line(tldr, usize::MAX),
+                    body_style,
+                ),
+            ]),
+            (width.max(1) as usize).saturating_sub(badge_width).max(1),
+        );
+        line.spans.push(Span::styled(
+            badge_text,
+            Style::default().fg(rail_color).dim(),
+        ));
+        lines.push(line);
     }
 
     let mut body_lines = if content.is_empty() {

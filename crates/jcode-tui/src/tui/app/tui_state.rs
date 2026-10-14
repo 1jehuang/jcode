@@ -65,7 +65,7 @@ impl App {
             .filter(|model| !model.is_empty() && !model.eq_ignore_ascii_case("unknown"))
     }
 
-    fn configured_remote_provider_hint(&self) -> Option<String> {
+    pub(super) fn configured_remote_provider_hint(&self) -> Option<String> {
         if crate::tui::is_ssh_remote() {
             return None;
         }
@@ -668,6 +668,10 @@ impl crate::tui::TuiState for App {
 
     fn queued_messages(&self) -> &[String] {
         &self.queued_messages
+    }
+
+    fn queued_commands(&self) -> &[String] {
+        &self.queued_commands
     }
 
     fn interleave_message(&self) -> Option<&str> {
@@ -1974,6 +1978,10 @@ impl crate::tui::TuiState for App {
     fn model_status_overlay(&self) -> Option<(usize, &str)> {
         self.model_status_scroll
             .map(|scroll| (scroll, self.model_status_content.as_str()))
+    }
+
+    fn commit_log_overlay(&self) -> Option<&crate::tui::app::CommitLogOverlay> {
+        self.commit_log_overlay.as_ref()
     }
 
     fn session_picker_overlay(

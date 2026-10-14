@@ -51,6 +51,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::{RwLock, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 
+mod catalog_fetch;
+use catalog_fetch::fetch_models_from_api;
+
 mod request_headers;
 use request_headers::*;
 
@@ -516,73 +519,6 @@ fn add_cache_breakpoint(messages: &mut [Message]) -> bool {
     }
 
     false
-}
-
-async fn fetch_models_from_api(
-    client: Client,
-    api_base: String,
-    auth: ProviderAuth,
-    models_cache: Arc<RwLock<ModelsCache>>,
-    cache_namespace: Option<String>,
-) -> Result<Vec<ModelInfo>> {
-    let url = format!("{}/models", api_base);
-    let response =
-        apply_kimi_coding_agent_headers(auth.apply(client.get(&url)).await?, &api_base, None)
-            .send()
-            .await
-            .with_context(|| {
-                format!(
-                    "Failed to send OpenAI-compatible model catalog request\n  endpoint: {}\n  auth: {}\nHint: check network connectivity, DNS/TLS, and that the base URL includes the API version (usually /v1).",
-                    url,
-                    auth.label()
-                )
-            })?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = jcode_base::util::http_error_body(response, "HTTP error").await;
-        anyhow::bail!(
-            "OpenAI-compatible model catalog request failed\n  endpoint: {}\n  auth: {}\n  status: {}\n  response: {}\nHint: verify the base URL includes the API version (usually /v1), the key is valid for this endpoint, and the provider supports GET /models.",
-            url,
-            auth.label(),
-            status,
-            body
-        );
-    }
-
-    let raw_body = response
-        .text()
-        .await
-        .with_context(|| format!("Failed to read model catalog response body from {}", url))?;
-    let mut models = parse_openai_compatible_models_response(&raw_body).with_context(|| {
-            format!(
-                "Failed to parse OpenAI-compatible model catalog response\n  endpoint: {}\n  auth: {}\n  expected: JSON object with a `data` or `models` array, or a top-level array, with model objects containing at least `id` or `name`\n  response: {}",
-                url,
-                auth.label(),
-                jcode_base::util::truncate_str(&raw_body.trim().replace('\n', "\\n"), 1200)
-            )
-        })?;
-
-    let ns = cache_namespace.as_deref();
-    ollama_context::maybe_enrich(&client, &api_base, ns, &mut models).await;
-    if let Some(namespace) = ns {
-        save_disk_cache_with_source_for_namespace(namespace, &models, Some(&api_base));
-    } else {
-        save_disk_cache_with_source(&models, Some(&api_base));
-    }
-
-    if let Some(now) = current_unix_secs() {
-        let mut cache = models_cache.write().await;
-        cache.models = models.clone();
-        cache.fetched = true;
-        cache.cached_at = Some(now);
-    } else {
-        let mut cache = models_cache.write().await;
-        cache.models = models.clone();
-        cache.fetched = true;
-    }
-
-    Ok(models)
 }
 
 fn models_fingerprint(models: &[ModelInfo]) -> String {
@@ -2919,6 +2855,7 @@ impl OpenRouterProvider {
 
 mod models_catalog_parse;
 mod ollama_context;
+mod opencode_go_responses;
 #[path = "openrouter_provider_impl.rs"]
 mod openrouter_provider_impl;
 #[path = "openrouter_sse_stream.rs"]

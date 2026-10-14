@@ -130,7 +130,7 @@ impl Tool for GmailTool {
                 },
                 "bcc": {
                     "type": "string",
-                    "description": "Comma-separated Bcc addresses, hidden from other recipients. On update_draft, omit to keep, \"\" to clear."
+                    "description": "Comma-separated Bcc addresses. On update_draft, omit to keep, \"\" to clear."
                 },
                 "subject": { "type": "string" },
                 "body": { "type": "string" },

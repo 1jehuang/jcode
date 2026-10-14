@@ -376,8 +376,8 @@ fn fence_like_content_does_not_end_a_generic_code_fence() {
     }
 
     assert_eq!(
-        normalize_latex_math("```text\n\\(literal\\)\n```\n\n\\(real math\\)"),
-        "```text\n\\(literal\\)\n```\n\n$real math$"
+        normalize_latex_math("```text\n\\(literal\\)\n```\n\n\\(x^2 + y\\)"),
+        "```text\n\\(literal\\)\n```\n\n$x^2 + y$"
     );
 }
 

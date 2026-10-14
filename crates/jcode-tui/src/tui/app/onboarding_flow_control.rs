@@ -623,8 +623,12 @@ impl App {
                     | KeyCode::Char('N') => review.set_current(false),
                     // Space toggles the highlighted row between Yes and No.
                     KeyCode::Char(' ') => review.toggle_current(),
-                    // Enter commits the whole list (import all chosen logins).
-                    KeyCode::Enter => finished = true,
+                    // Enter on a login row selects/deselects that row, so
+                    // "picking an option" never commits the whole import out
+                    // from under the user. Only Enter on the Continue pill
+                    // (or `c`) commits.
+                    KeyCode::Enter if !review.continue_focused => review.toggle_current(),
+                    KeyCode::Enter | KeyCode::Char('c') | KeyCode::Char('C') => finished = true,
                     _ => return false,
                 }
             }
@@ -633,10 +637,7 @@ impl App {
             self.onboarding_telemetry_choice_made = true;
             if self.onboarding_sim_active() {
                 // A rehearsal must leave this machine's real settings alone.
-                self.set_status_notice(format!(
-                    "{} (rehearsal, not saved)",
-                    level.status_label()
-                ));
+                self.set_status_notice(format!("{} (rehearsal, not saved)", level.status_label()));
             } else {
                 level.persist();
                 self.set_status_notice(level.status_label().to_string());
@@ -804,7 +805,7 @@ impl App {
                 }
             } else {
                 format!(
-                    "Import {checked} of {total} login{} - Space toggles, arrows move, Enter imports (auto in {secs}s)",
+                    "Import {checked} of {total} login{} - Enter/Space toggles, arrows move, Continue imports",
                     if total == 1 { "" } else { "s" },
                 )
             };
@@ -874,19 +875,19 @@ impl App {
                     &approved,
                 )
                 .await
-            {
-                Ok(outcome) => outcome,
-                Err(err) => {
-                    crate::bus::Bus::global().publish(crate::bus::BusEvent::LoginCompleted(
-                        crate::bus::LoginCompleted {
-                            provider: "auto-import".to_string(),
-                            success: false,
-                            message: format!("Auto import failed: {}", err),
-                        },
-                    ));
-                    return;
-                }
-            };
+                {
+                    Ok(outcome) => outcome,
+                    Err(err) => {
+                        crate::bus::Bus::global().publish(crate::bus::BusEvent::LoginCompleted(
+                            crate::bus::LoginCompleted {
+                                provider: "auto-import".to_string(),
+                                success: false,
+                                message: format!("Auto import failed: {}", err),
+                            },
+                        ));
+                        return;
+                    }
+                };
             // Auto-import bypasses the manual `pending_login` path, so record
             // `auth_success` here for each imported provider. Without this the
             // onboarding activation funnel undercounts every imported login
@@ -922,6 +923,7 @@ impl App {
     /// later through `/resume`, but first run stays focused on two clear paths.
     pub(super) fn onboarding_open_start_choice(&mut self) {
         let mut picker = SessionPicker::new(Vec::new());
+        picker.set_current_dir(self.session.working_dir.clone());
         picker.activate_onboarding_banner(Self::onboarding_start_choice_banner_lines());
         self.session_picker_overlay = Some(RefCell::new(picker));
         self.session_picker_mode = SessionPickerMode::Onboarding;

@@ -232,6 +232,12 @@ jobs:
             "$(rustup which cargo)" test --target ${{ matrix.target }} \
             -p jcode-base --lib secret_input -- --nocapture
 
+      - name: Run browser session liveness and reuse regressions
+        shell: bash
+        run: |
+          cargo test --target ${{ matrix.target }} -p jcode-base --lib browser_session -- --nocapture
+          cargo test --target ${{ matrix.target }} -p jcode-app-core --lib browser_session -- --nocapture
+
       - name: Run embedding numeric-stability cohort (Linux only)
         if: runner.os == 'Linux'
         shell: bash

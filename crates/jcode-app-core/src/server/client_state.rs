@@ -112,6 +112,7 @@ pub(super) async fn handle_get_state(
     id: u64,
     client_session_id: &str,
     client_is_processing: bool,
+    pending_soft_interrupts: usize,
     sessions: &SessionAgents,
     writer: &Arc<Mutex<WriteHalf>>,
 ) -> Result<()> {
@@ -128,6 +129,7 @@ pub(super) async fn handle_get_state(
             message_count: session_count,
             is_processing: client_is_processing
                 || crate::turn_cancel_registry::has_active_turn(client_session_id),
+            pending_soft_interrupts: Some(pending_soft_interrupts),
         },
     )
     .await
@@ -310,6 +312,7 @@ pub(super) async fn handle_get_model_catalog(
         // authoritative. Omitting it falsely turns off /fast status and its badge.
         service_tier,
         subagent_model: None,
+        agent_model_overrides: Default::default(),
         autoreview_enabled: None,
         autojudge_enabled: None,
         compaction_mode: Default::default(),
@@ -601,6 +604,9 @@ async fn send_history_from_persisted_session(
         provider_name,
         provider_model,
         subagent_model,
+        agent_model_overrides: crate::session::Session::load_startup_stub(session_id)
+            .map(|session| session.agent_model_overrides)
+            .unwrap_or_default(),
         autoreview_enabled,
         autojudge_enabled,
         available_models: Vec::new(),
@@ -635,6 +641,36 @@ async fn send_history_from_persisted_session(
     write_event(writer, &history_event).await
 }
 
+/// How long the bootstrap History payload may wait on the model-name catalog.
+///
+/// The catalog is a memo hit most of the time (~5ms), but a cold or
+/// invalidated memo rebuilds every provider's routes, which measured p90 667ms
+/// and up to 7s on a busy shared server. History gates the client's first
+/// real frame (session name, transcript, model facts), while the catalog only
+/// feeds the model picker, and the client already requests the full catalog
+/// right after History. So History never waits long for it.
+const HISTORY_MODEL_CATALOG_BUDGET: Duration = Duration::from_millis(30);
+
+/// Model names for the History payload, bounded by
+/// [`HISTORY_MODEL_CATALOG_BUDGET`]. On timeout the build keeps running in the
+/// background (warming the shared routes memo for the follow-up
+/// `GetModelCatalog`) and History ships without names. Clients treat an empty
+/// list as "not loaded yet" and fill it from that follow-up.
+async fn available_models_for_history(provider: Arc<dyn Provider>) -> Vec<String> {
+    let build = tokio::task::spawn_blocking(move || provider.available_models_display());
+    match tokio::time::timeout(HISTORY_MODEL_CATALOG_BUDGET, build).await {
+        Ok(Ok(models)) => models,
+        Ok(Err(_)) => Vec::new(),
+        Err(_) => {
+            crate::logging::info(&format!(
+                "History model catalog not ready within {}ms; deferring to GetModelCatalog",
+                HISTORY_MODEL_CATALOG_BUDGET.as_millis()
+            ));
+            Vec::new()
+        }
+    }
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "history payload assembly includes agent state, sessions, counts, writer, activity, payload mode, and server identity"
@@ -655,6 +691,7 @@ async fn send_history_with_guard(
     supports_pdf_panels: bool,
 ) -> Result<()> {
     let history_start = Instant::now();
+    let catalog_provider = include_model_catalog.then(|| agent_guard.provider_handle());
     let (
         messages,
         images,
@@ -664,7 +701,6 @@ async fn send_history_with_guard(
         subagent_model,
         autoreview_enabled,
         autojudge_enabled,
-        available_models,
         available_model_routes,
         skills,
         tool_names,
@@ -679,7 +715,6 @@ async fn send_history_with_guard(
         history_snapshot_ms,
         image_render_ms,
         tool_names_ms,
-        available_models_ms,
         model_routes_ms,
         skills_ms,
         provider_meta_ms,
@@ -693,19 +728,10 @@ async fn send_history_with_guard(
         let image_render_ms = 0;
 
         let tool_names_start = Instant::now();
-        let tool_names = agent_guard.tool_names().await;
+        // Only the `mcp__*` names are consumed below (the header's `mcp:`
+        // inventory); avoid materializing every tool definition.
+        let tool_names = agent_guard.visible_mcp_tool_names().await;
         let tool_names_ms = tool_names_start.elapsed().as_millis();
-
-        let (available_models, available_models_ms) = if include_model_catalog {
-            let available_models_start = Instant::now();
-            let available_models = agent_guard.available_models_display();
-            (
-                available_models,
-                available_models_start.elapsed().as_millis(),
-            )
-        } else {
-            (Vec::new(), 0)
-        };
 
         // Model-route expansion can be relatively expensive (provider/account routing,
         // endpoint cache reads, etc.). The TUI already supports later
@@ -736,7 +762,6 @@ async fn send_history_with_guard(
             agent_guard.subagent_model(),
             agent_guard.autoreview_enabled(),
             agent_guard.autojudge_enabled(),
-            available_models,
             available_model_routes,
             skills,
             tool_names,
@@ -751,7 +776,6 @@ async fn send_history_with_guard(
             history_snapshot_ms,
             image_render_ms,
             tool_names_ms,
-            available_models_ms,
             model_routes_ms,
             skills_ms,
             provider_meta_ms,
@@ -762,6 +786,19 @@ async fn send_history_with_guard(
     // Only snapshot preparation needs the agent. Never hold it across session
     // metadata locks or socket backpressure.
     drop(agent_guard);
+
+    // The model-name catalog is fetched after the agent is released: on a
+    // cold memo it can take far longer than the rest of the snapshot, and it
+    // must neither block a racing turn nor (beyond a short budget) the client's
+    // first real frame.
+    let (available_models, available_models_ms) = match catalog_provider {
+        Some(provider) => {
+            let start = Instant::now();
+            let models = available_models_for_history(provider).await;
+            (models, start.elapsed().as_millis())
+        }
+        None => (Vec::new(), 0),
+    };
 
     let side_panel_start = Instant::now();
     let side_panel = super::client_writer::side_panel_for_client(
@@ -819,6 +856,9 @@ async fn send_history_with_guard(
         provider_name: Some(provider_name),
         provider_model: Some(provider_model),
         subagent_model,
+        agent_model_overrides: crate::session::Session::load_startup_stub(session_id)
+            .map(|session| session.agent_model_overrides)
+            .unwrap_or_default(),
         autoreview_enabled,
         autojudge_enabled,
         available_models,

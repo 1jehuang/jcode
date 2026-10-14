@@ -272,6 +272,90 @@ fn parse_next_event_ignores_malformed_json_chunks() {
     assert!(stream.tool_call_accumulators.is_empty());
 }
 
+fn drain_reasoning(stream: &mut OpenRouterStream) -> String {
+    let mut reasoning = String::new();
+    while let Some(event) = stream.parse_next_event() {
+        match event {
+            StreamEvent::ThinkingDelta(delta) => reasoning.push_str(&delta),
+            StreamEvent::MessageEnd { .. } => break,
+            _ => {}
+        }
+    }
+    reasoning
+}
+
+/// Feed `chunks` as one reasoning SSE event each and return the assembled
+/// stream, ready to drain.
+fn reasoning_stream(model: &str, field: &str, chunks: &[&str]) -> OpenRouterStream {
+    let mut stream = OpenRouterStream::new(
+        futures::stream::empty(),
+        model.to_string(),
+        Arc::new(std::sync::Mutex::new(None)),
+    );
+    let mut sse = String::new();
+    for chunk in chunks {
+        let event = serde_json::json!({"choices": [{"delta": {field: chunk}}]});
+        sse.push_str(&format!("data: {event}\n\n"));
+    }
+    sse.push_str("data: [DONE]\n\n");
+    stream.buffer = sse;
+    stream
+}
+
+/// Issue #1779: incremental reasoning backends (llama.cpp, Qwen tokenizers)
+/// emit each token as its own delta. A delta equal to the previous one must
+/// still be appended; the unguarded snapshot strip silently emptied it, so
+/// "9","4","4","0" was stored as "940".
+#[test]
+fn reasoning_deltas_keep_adjacent_identical_chunks() {
+    let mut stream = reasoning_stream("qwen3", "reasoning_content", &["9", "4", "4", "0"]);
+    assert_eq!(drain_reasoning(&mut stream), "9440");
+}
+
+#[test]
+fn reasoning_deltas_keep_repeated_words() {
+    // The reported "that that" and "had had" corruptions.
+    let mut stream = reasoning_stream(
+        "qwen3",
+        "reasoning_content",
+        &["I", " knew", " that", " that", " would", " fail", "."],
+    );
+    assert_eq!(drain_reasoning(&mut stream), "I knew that that would fail.");
+
+    let mut stream = reasoning_stream(
+        "qwen3",
+        "reasoning_content",
+        &["She", " had", " had", " enough", "."],
+    );
+    assert_eq!(drain_reasoning(&mut stream), "She had had enough.");
+}
+
+#[test]
+fn reasoning_alias_deltas_keep_adjacent_identical_chunks() {
+    let mut stream = reasoning_stream("test-model", "reasoning", &["1", "0", "0", "0"]);
+    assert_eq!(drain_reasoning(&mut stream), "1000");
+}
+
+#[test]
+fn reasoning_delta_that_extends_the_previous_one_is_appended_verbatim() {
+    // "abc" starts with "ab" but is an incremental delta, not a snapshot.
+    let mut stream = reasoning_stream("qwen3", "reasoning_content", &["ab", "abc"]);
+    assert_eq!(drain_reasoning(&mut stream), "ababc");
+}
+
+/// Kimi endpoints are the only known senders of cumulative reasoning
+/// snapshots (every chunk repeats the full text so far). The snapshot strip
+/// must stay enabled there; only the other backends stream plain deltas.
+#[test]
+fn kimi_reasoning_snapshots_are_still_prefix_stripped() {
+    let mut stream = reasoning_stream(
+        "moonshotai/kimi-k2.5",
+        "reasoning_content",
+        &["94", "944", "9440"],
+    );
+    assert_eq!(drain_reasoning(&mut stream), "9440");
+}
+
 #[test]
 fn parse_next_event_accepts_reasoning_delta_alias() {
     let provider_pin = Arc::new(std::sync::Mutex::new(None));
