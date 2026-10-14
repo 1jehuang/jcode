@@ -803,6 +803,7 @@ impl Provider for AntigravityProvider {
             catalog
                 .into_iter()
                 .map(|model| model.id)
+                .chain(AVAILABLE_MODELS.iter().map(|model| (*model).to_string()))
                 .chain(std::iter::once(self.model())),
         )
     }
@@ -814,7 +815,9 @@ impl Provider for AntigravityProvider {
     fn model_routes(&self) -> Vec<jcode_provider_core::ModelRoute> {
         let catalog = self.fetched_catalog();
         if !catalog.is_empty() {
-            return catalog
+            let mut seen: std::collections::HashSet<String> =
+                catalog.iter().map(|model| model.id.clone()).collect();
+            let mut routes: Vec<jcode_provider_core::ModelRoute> = catalog
                 .into_iter()
                 .map(|model| jcode_provider_core::ModelRoute {
                     model: model.id.clone(),
@@ -826,6 +829,20 @@ impl Provider for AntigravityProvider {
                     cheapness: None,
                 })
                 .collect();
+            for fallback in AVAILABLE_MODELS {
+                if seen.insert((*fallback).to_string()) {
+                    routes.push(jcode_provider_core::ModelRoute {
+                        model: (*fallback).to_string(),
+                        provider: "Antigravity".to_string(),
+                        api_method: "https".to_string(),
+                        available: true,
+                        detail: "fallback catalog".to_string(),
+                        usage: None,
+                        cheapness: None,
+                    });
+                }
+            }
+            return routes;
         }
 
         self.available_models_display()

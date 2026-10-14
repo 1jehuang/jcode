@@ -2153,11 +2153,23 @@ impl Provider for MultiProvider {
             );
         }
 
+        if self.active_provider() == ActiveProvider::Antigravity
+            && crate::provider::antigravity::is_known_model(model)
+        {
+            return self.set_model_on_provider(ActiveProvider::Antigravity, model);
+        }
+
         // Detect which provider an unprefixed model belongs to.
         let target_provider = provider_for_model(model);
         if let Some(target_provider) = target_provider
             && let Some(target) = provider_from_model_key(target_provider)
         {
+            if !self.provider_slot_available(target)
+                && self.antigravity_provider().is_some()
+                && crate::provider::antigravity::is_known_model(model)
+            {
+                return self.set_model_on_provider(ActiveProvider::Antigravity, model);
+            }
             self.set_model_on_provider(target, model)
         } else if let Some(profile) = self.openai_compatible_profile_owning_model(model) {
             // Bare ids from an OpenAI-compatible catalog (`celeris-1`,

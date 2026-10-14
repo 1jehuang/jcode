@@ -11,6 +11,12 @@ pub const DEFAULT_FALLBACK_MODEL: &str = "gemini-3-flash";
 pub const AVAILABLE_MODELS: &[&str] = &[
     "claude-opus-4-6-thinking",
     "claude-sonnet-4-6",
+    "gemini-4-argon-high",
+    "gemini-4-argon-medium",
+    "gemini-4-argon-low",
+    "gemini-3.8-flash-high",
+    "gemini-3.8-flash-medium",
+    "gemini-3.8-flash-low",
     "gemini-3.1-pro-high",
     "gemini-3.1-pro-low",
     "gemini-3-flash",
@@ -32,7 +38,7 @@ pub const DEFAULT_ENDPOINT: &str = "https://daily-cloudcode-pa.googleapis.com";
 /// environments that need a different Cloud Code host.
 pub const ENDPOINT_ENV: &str = "JCODE_ANTIGRAVITY_ENDPOINT";
 const VERSION_ENV: &str = "JCODE_ANTIGRAVITY_VERSION";
-pub const ANTIGRAVITY_VERSION: &str = "1.18.3";
+pub const ANTIGRAVITY_VERSION: &str = "1.3.5";
 pub const X_GOOG_API_CLIENT: &str = "google-cloud-sdk vscode_cloudshelleditor/0.1";
 const CATALOG_REFRESH_TTL_HOURS: i64 = 6;
 
@@ -205,12 +211,14 @@ pub fn antigravity_version() -> String {
 }
 
 pub fn antigravity_user_agent() -> String {
+    let raw_version = antigravity_version();
+    let version = raw_version.strip_prefix("cli/").unwrap_or(&raw_version);
     if cfg!(target_os = "windows") {
-        format!("antigravity/{} windows/amd64", antigravity_version())
+        format!("antigravity/cli/{version} windows/amd64")
     } else if cfg!(target_arch = "aarch64") {
-        format!("antigravity/{} darwin/arm64", antigravity_version())
+        format!("antigravity/cli/{version} darwin/arm64")
     } else {
-        format!("antigravity/{} darwin/amd64", antigravity_version())
+        format!("antigravity/cli/{version} darwin/amd64")
     }
 }
 
@@ -257,7 +265,9 @@ pub fn merge_antigravity_model_ids(models: impl IntoIterator<Item = String>) -> 
 
 pub fn is_known_model(model: &str) -> bool {
     let normalized = model.trim();
-    !normalized.is_empty() && AVAILABLE_MODELS.contains(&normalized)
+    !normalized.is_empty()
+        && (AVAILABLE_MODELS.contains(&normalized)
+            || AVAILABLE_MODELS.contains(&remap_unsupported_model(normalized)))
 }
 
 pub fn parse_fetch_available_models_response(
@@ -543,6 +553,7 @@ pub fn is_pseudo_tool_call_turn(response: &CodeAssistGenerateResponse) -> bool {
 pub fn remap_unsupported_model(model: &str) -> &str {
     match model {
         "gemini-3.1-pro-high" => "gemini-pro-agent",
+        "gemini-4-argon" => "gemini-4-argon-medium",
         other => other,
     }
 }

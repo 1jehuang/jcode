@@ -219,15 +219,43 @@ fn resolve_model_for_request_maps_default_alias_to_real_model() {
         provider.resolve_model_for_request("gemini-3.1-pro-low"),
         "gemini-3.1-pro-low"
     );
+    // Bare `gemini-4-argon` alias resolves to the default medium tier served
+    // by the Cloud Code backend, while explicit tier variants pass through.
+    assert_eq!(
+        provider.resolve_model_for_request("gemini-4-argon"),
+        "gemini-4-argon-medium"
+    );
+    assert_eq!(
+        provider.resolve_model_for_request("gemini-4-argon-medium"),
+        "gemini-4-argon-medium"
+    );
+    assert_eq!(
+        provider.resolve_model_for_request("gemini-4-argon-high"),
+        "gemini-4-argon-high"
+    );
+    assert_eq!(
+        provider.resolve_model_for_request("gemini-4-argon-low"),
+        "gemini-4-argon-low"
+    );
 }
 
 #[test]
-fn remap_unsupported_model_only_touches_broken_pro_high() {
+fn remap_unsupported_model_only_touches_broken_pro_high_and_bare_argon_alias() {
     assert_eq!(
         remap_unsupported_model("gemini-3.1-pro-high"),
         "gemini-pro-agent"
     );
+    assert_eq!(
+        remap_unsupported_model("gemini-4-argon"),
+        "gemini-4-argon-medium"
+    );
     for model in [
+        "gemini-4-argon-medium",
+        "gemini-4-argon-high",
+        "gemini-4-argon-low",
+        "gemini-3.8-flash-high",
+        "gemini-3.8-flash-medium",
+        "gemini-3.8-flash-low",
         "gemini-3.1-pro-low",
         "gemini-pro-agent",
         "gemini-3-flash",
@@ -237,6 +265,25 @@ fn remap_unsupported_model_only_touches_broken_pro_high() {
     ] {
         assert_eq!(remap_unsupported_model(model), model);
     }
+    assert!(jcode_provider_antigravity::is_known_model("gemini-4-argon"));
+    assert!(jcode_provider_antigravity::is_known_model(
+        "gemini-4-argon-medium"
+    ));
+    assert!(jcode_provider_antigravity::is_known_model(
+        "gemini-4-argon-high"
+    ));
+    assert!(jcode_provider_antigravity::is_known_model(
+        "gemini-4-argon-low"
+    ));
+}
+
+#[test]
+fn antigravity_user_agent_uses_cli_product_prefix_required_for_argon() {
+    let ua = antigravity_user_agent();
+    assert!(
+        ua.starts_with("antigravity/cli/"),
+        "expected antigravity/cli/<version> User-Agent, got: {ua}"
+    );
 }
 
 #[test]
