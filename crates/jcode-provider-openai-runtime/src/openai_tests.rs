@@ -207,7 +207,7 @@ async fn live_openai_catalog() -> Result<Option<jcode_base::provider::OpenAIMode
         return Ok(None);
     }
 
-    let token = openai_access_token(&Arc::new(RwLock::new(creds))).await?;
+    let token = openai_access_token(None, &Arc::new(RwLock::new(creds))).await?;
     Ok(Some(
         jcode_base::provider::fetch_openai_model_catalog(&token).await?,
     ))
@@ -363,3 +363,5 @@ fn catalog_credential_identity_survives_token_refresh_but_changes_accounts() {
 include!("openai_tests/persistent_terminal.rs");
 
 include!("openai_tests/persistent_prefix.rs");
+
+include!("openai_tests/persistent_cancellation.rs");

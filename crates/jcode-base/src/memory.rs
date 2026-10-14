@@ -969,7 +969,9 @@ impl MemoryManager {
             return Ok(Vec::new());
         }
 
-        let sidecar = Sidecar::new();
+        let sidecar = crate::session::Session::load_startup_stub(session_id)
+            .map(|session| Sidecar::for_session(&session))
+            .unwrap_or_else(|_| Sidecar::new());
         let extracted = sidecar.extract_memories(transcript).await?;
 
         let mut ids = Vec::new();

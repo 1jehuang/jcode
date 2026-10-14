@@ -1,9 +1,12 @@
 #[test]
-fn test_agents_review_picker_saves_config_override() {
+fn test_agents_review_picker_saves_session_override_without_global_write() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         configure_test_remote_models(&mut app);
+        let config_path = crate::storage::jcode_dir().unwrap().join("config.toml");
+        let config_before = std::fs::read(&config_path).ok();
         app.open_agent_model_picker(crate::tui::AgentModelTarget::Review);
+        app.is_remote = false;
 
         let selected = app
             .inline_interactive_state
@@ -16,7 +19,7 @@ fn test_agents_review_picker_saves_config_override() {
                             target: crate::tui::AgentModelTarget::Review,
                             clear_override: false,
                         }
-                    )
+                    ) && picker.entries[idx].name != "inherit coordinator"
                 })
             })
             .expect("review picker should include at least one model option");
@@ -65,8 +68,259 @@ fn test_agents_review_picker_saves_config_override() {
             .expect("save agent model override");
 
         let cfg = crate::config::Config::load();
-        assert_eq!(cfg.autoreview.model.as_deref(), Some(expected.as_str()));
+        assert_eq!(cfg.autoreview.model, None);
+        assert_eq!(
+            app.session
+                .agent_model_overrides
+                .get("review")
+                .map(String::as_str),
+            Some(expected.as_str())
+        );
+        assert_eq!(std::fs::read(config_path).ok(), config_before);
         assert!(app.inline_interactive_state.is_none());
+    });
+}
+
+/// Ctrl+G in an `/agents` view switches scope in place, and Enter then
+/// writes only that scope: global changes config, session changes the
+/// session override.
+#[test]
+fn test_agents_ctrl_g_toggles_scope_and_saves_to_the_chosen_scope() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        configure_test_remote_models(&mut app);
+        app.input = "/agents review".into();
+        app.submit_input();
+        assert!(!app.agent_models_global_scope);
+
+        // Toggle to the global default and pick "inherit coordinator". The
+        // reopen reads the remote catalog configured above.
+        app.handle_inline_interactive_key(KeyCode::Char('g'), KeyModifiers::CONTROL)
+            .unwrap();
+        assert!(app.agent_models_global_scope);
+        app.is_remote = false;
+        let picker = app.inline_interactive_state.as_mut().expect("still open");
+        assert!(
+            picker.entries.iter().any(|entry| entry
+                .options
+                .iter()
+                .any(|option| option.detail.starts_with("[global]"))),
+            "reopened in global scope"
+        );
+        picker.selected = picker
+            .filtered
+            .iter()
+            .position(|idx| picker.entries[*idx].name == "inherit coordinator")
+            .unwrap();
+        app.handle_inline_interactive_key(KeyCode::Enter, KeyModifiers::NONE)
+            .unwrap();
+        assert_eq!(
+            crate::config::Config::load().autoreview.model.as_deref(),
+            Some("inherit")
+        );
+        assert!(app.session.agent_model_overrides.is_empty());
+
+        // The role list toggles too, and the next save stays in session scope.
+        app.input = "/agents default".into();
+        app.submit_input();
+        assert!(app.agent_models_global_scope);
+        app.handle_inline_interactive_key(KeyCode::Char('g'), KeyModifiers::CONTROL)
+            .unwrap();
+        assert!(!app.agent_models_global_scope);
+        let roles = app.inline_interactive_state.as_ref().expect("role list");
+        assert!(roles.is_agent_target_picker());
+        assert!(roles.entries.iter().all(|entry| entry.name.ends_with("[session]")));
+        configure_test_remote_models(&mut app);
+        app.open_agent_model_picker(crate::tui::AgentModelTarget::Review);
+        app.is_remote = false;
+        let picker = app.inline_interactive_state.as_mut().unwrap();
+        picker.selected = picker
+            .filtered
+            .iter()
+            .position(|idx| picker.entries[*idx].name == "inherit coordinator")
+            .unwrap();
+        app.handle_inline_interactive_key(KeyCode::Enter, KeyModifiers::NONE)
+            .unwrap();
+        assert_eq!(
+            app.session
+                .agent_model_overrides
+                .get("review")
+                .map(String::as_str),
+            Some("inherit")
+        );
+    });
+}
+
+#[test]
+fn test_agents_global_scope_and_distinct_session_clear_and_inherit() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        configure_test_remote_models(&mut app);
+        // Remote global changes belong to the server: this client must not
+        // write its own config (the server write is sent by key handling).
+        app.input = "/agents default review".into();
+        app.submit_input();
+        assert!(app.agent_models_global_scope);
+        let picker = app.inline_interactive_state.as_mut().unwrap();
+        picker.selected = picker
+            .filtered
+            .iter()
+            .position(|idx| picker.entries[*idx].name == "inherit coordinator")
+            .unwrap();
+        app.handle_inline_interactive_key(KeyCode::Enter, KeyModifiers::NONE)
+            .unwrap();
+        assert_eq!(crate::config::Config::load().autoreview.model, None);
+        assert!(app.session.agent_model_overrides.is_empty());
+
+        // Locally, the global scope still saves this machine's config.
+        app.input = "/agents default review".into();
+        app.submit_input();
+        app.is_remote = false;
+        let picker = app.inline_interactive_state.as_mut().unwrap();
+        picker.selected = picker
+            .filtered
+            .iter()
+            .position(|idx| picker.entries[*idx].name == "inherit coordinator")
+            .unwrap();
+        app.handle_inline_interactive_key(KeyCode::Enter, KeyModifiers::NONE)
+            .unwrap();
+        assert_eq!(
+            crate::config::Config::load().autoreview.model.as_deref(),
+            Some("inherit")
+        );
+        assert!(app.session.agent_model_overrides.is_empty());
+        configure_test_remote_models(&mut app);
+
+        app.input = "/agents review".into();
+        app.submit_input();
+        assert!(!app.agent_models_global_scope);
+        app.is_remote = false;
+        let picker = app.inline_interactive_state.as_mut().unwrap();
+        picker.selected = picker
+            .filtered
+            .iter()
+            .position(|idx| picker.entries[*idx].name == "inherit coordinator")
+            .unwrap();
+        app.handle_inline_interactive_key(KeyCode::Enter, KeyModifiers::NONE)
+            .unwrap();
+        assert_eq!(
+            app.session
+                .agent_model_overrides
+                .get("review")
+                .map(String::as_str),
+            Some("inherit")
+        );
+        configure_test_remote_models(&mut app);
+        app.open_agent_model_picker(crate::tui::AgentModelTarget::Review);
+        app.is_remote = false;
+        let picker = app.inline_interactive_state.as_mut().unwrap();
+        picker.selected = picker
+            .filtered
+            .iter()
+            .position(|idx| {
+                matches!(
+                    picker.entries[*idx].action,
+                    crate::tui::PickerAction::AgentModelChoice {
+                        clear_override: true,
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        app.handle_inline_interactive_key(KeyCode::Enter, KeyModifiers::NONE)
+            .unwrap();
+        assert!(app.session.agent_model_overrides.is_empty());
+        assert_eq!(
+            crate::config::Config::load().autoreview.model.as_deref(),
+            Some("inherit")
+        );
+    });
+}
+
+#[test]
+fn test_agents_remote_feedback_honors_session_global_and_inherit() {
+    with_temp_jcode_home(|| {
+        let auth_path = crate::storage::jcode_dir()
+            .unwrap()
+            .join("openai-auth.json");
+        std::fs::write(
+            auth_path,
+            serde_json::json!({
+                "openai_accounts": [{
+                    "label": "review-test", "access_token": "at_test",
+                    "refresh_token": "rt_test", "account_id": "acct_test"
+                }],
+                "active_openai_account": "review-test"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(super::commands::preferred_one_shot_review_override().is_some());
+        let mut config = crate::config::Config::load();
+        config.autoreview.model = Some("claude-api:global-review".into());
+        config.autojudge.model = Some("claude-api:global-judge".into());
+        config.save().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        for (command, role, global) in [
+            ("/review", "review", "claude-api:global-review"),
+            ("/judge", "judge", "claude-api:global-judge"),
+            ("/autoreview now", "review", "claude-api:global-review"),
+            ("/autojudge now", "judge", "claude-api:global-judge"),
+        ] {
+            for (override_model, expected) in [
+                (
+                    Some("openai-api:session-worker"),
+                    Some("openai-api:session-worker"),
+                ),
+                (Some("inherit"), None),
+                (None, Some(global)),
+            ] {
+                let mut app = create_test_app();
+                app.session
+                    .set_agent_model_override(role, override_model.map(str::to_string))
+                    .unwrap();
+                app.is_remote = true;
+                app.is_processing = true;
+                app.input = command.to_string();
+                app.cursor_pos = app.input.len();
+                let mut remote = crate::tui::backend::RemoteConnection::dummy();
+                rt.block_on(app.handle_remote_key(
+                    KeyCode::Enter,
+                    KeyModifiers::empty(),
+                    &mut remote,
+                ))
+                .unwrap();
+                assert_eq!(
+                    app.pending_split_model_override.as_deref(),
+                    expected,
+                    "{command} with {override_model:?}"
+                );
+                assert!(
+                    app.pending_split_provider_key_override.is_none(),
+                    "configured routing must not acquire the legacy preferred reviewer pin"
+                );
+            }
+        }
+        config.autoreview.model = Some("inherit".into());
+        config.autojudge.model = Some("inherit".into());
+        config.save().unwrap();
+        for (command, role) in [("/review", "review"), ("/judge", "judge")] {
+            let mut app = create_test_app();
+            app.session.set_agent_model_override(role, None).unwrap();
+            app.is_remote = true;
+            app.is_processing = true;
+            app.input = command.to_string();
+            app.cursor_pos = app.input.len();
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote))
+                .unwrap();
+            assert!(
+                app.pending_split_model_override.is_none(),
+                "{command} must honor global inherit"
+            );
+            assert!(app.pending_split_provider_key_override.is_none());
+        }
     });
 }
 

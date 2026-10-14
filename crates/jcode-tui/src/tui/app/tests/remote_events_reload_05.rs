@@ -1202,3 +1202,53 @@ fn completed_cycle_rearms_auto_poke_only_when_default_on() {
         );
     });
 }
+
+#[test]
+fn peer_auto_poke_is_shown_and_suppresses_duplicate_local_poke() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.auto_poke_incomplete_todos = true;
+        app.auto_poke_default_on = true;
+        crate::todo::save_todos(
+            &app.session.id,
+            &[crate::todo::TodoItem {
+                id: "todo-1".to_string(),
+                content: "Send the email".to_string(),
+                status: "pending".to_string(),
+                priority: "high".to_string(),
+                confidence: Some(crate::todo::ConfidenceState::from_legacy_score(80)),
+                ..Default::default()
+            }],
+        )
+        .expect("save incomplete todo");
+
+        let poke = crate::todo::build_auto_poke_message(1);
+        app.handle_peer_user_message(&poke);
+
+        assert!(
+            app.display_messages()
+                .iter()
+                .any(|msg| msg.role == "system" && msg.content.contains("1 incomplete todo")),
+            "a poke sent by another window must be shown here too"
+        );
+        assert!(
+            !app.display_messages().iter().any(|msg| msg.role == "user"),
+            "a peer poke must not render as a user prompt"
+        );
+        assert!(
+            !app.schedule_auto_poke_followup_if_needed(),
+            "this window must not re-poke the same open work a peer already poked"
+        );
+    });
+}
+
+#[test]
+fn peer_user_prompt_renders_as_user_message() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.handle_peer_user_message("can you show me what he sent?");
+        assert!(app.display_messages().iter().any(
+            |msg| msg.role == "user" && msg.content == "can you show me what he sent?"
+        ));
+    });
+}

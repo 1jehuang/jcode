@@ -8,6 +8,7 @@ fn test_cancel_pending_provider_failover_clears_countdown() {
             from_label: "Anthropic".to_string(),
             to_provider: "openai".to_string(),
             to_label: "OpenAI".to_string(),
+            target_route: Some("openai-oauth@openai-fox:gpt-5.4".to_string()),
             reason: "OAuth usage exhausted".to_string(),
             estimated_input_chars: 16_000,
             estimated_input_tokens: 4_000,
@@ -21,17 +22,118 @@ fn test_cancel_pending_provider_failover_clears_countdown() {
         assert!(app.pending_provider_failover.is_none());
         let last = app.display_messages.last().expect("display message");
         assert_eq!(last.role, "system");
-        assert!(last.content.contains("Canceled provider auto-switch"));
-        assert!(
-            last.content
-                .contains("cross_provider_failover = \"manual\"")
-        );
+        assert!(last.content.contains("Auto-switch canceled"));
+        assert!(!last.content.contains("cross_provider_failover"));
     });
 }
 
 #[derive(Clone)]
 struct FastMockProvider {
     service_tier: StdArc<StdMutex<Option<String>>>,
+}
+
+#[test]
+fn test_local_failover_revalidates_pool_after_countdown() {
+    with_temp_jcode_home(|| {
+        write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
+        let (mut app, active_provider) = create_switchable_test_app("claude");
+        let prompt = crate::provider::ProviderFailoverPrompt {
+            from_provider: "claude".into(),
+            from_label: "Anthropic".into(),
+            to_provider: "openai".into(),
+            to_label: "OpenAI fox".into(),
+            target_route: Some("openai-oauth@openai-fox:gpt-5.4".into()),
+            reason: "OAuth usage exhausted".into(),
+            estimated_input_chars: 400,
+            estimated_input_tokens: 100,
+        };
+        app.handle_turn_error(failover_error_message(&prompt));
+        assert!(app.pending_provider_failover.is_some());
+        let mut pool = crate::auth::account_pool::AccountPool::load();
+        pool.excluded.push("openai:openai-fox".into());
+        pool.save().unwrap();
+        app.pending_provider_failover.as_mut().unwrap().deadline =
+            Instant::now() - Duration::from_secs(1);
+        app.maybe_progress_provider_failover_countdown();
+        assert_eq!(active_provider.lock().unwrap().as_str(), "claude");
+        assert!(!app.pending_turn);
+        assert!(app.pending_provider_failover.is_none());
+    });
+}
+
+#[test]
+fn test_provider_failure_extracts_json_message_and_retains_full_diagnostics() {
+    let mut app = create_test_app();
+    let error = r#"Anthropic API error (400): {"type":"error","error":{"type":"invalid_request_error","message":"Invalid encrypted_content in search_result"},"request_id":"request-123"}"#;
+    app.handle_turn_error(error);
+    assert_eq!(app.last_stream_error.as_deref(), Some(error));
+    let visible = &app
+        .display_messages
+        .iter()
+        .rev()
+        .find(|message| message.role == "error")
+        .expect("provider error display message")
+        .content;
+    assert!(
+        visible.contains("Anthropic API error (400): Invalid encrypted_content in search_result")
+    );
+    assert!(!visible.contains("request_id"));
+    assert!(!visible.contains("invalid_request_error"));
+}
+
+#[test]
+fn test_local_quota_failure_records_only_exhausted_account_cooldown() {
+    with_temp_jcode_home(|| {
+        seed_failover_openai_fox();
+        crate::provider::clear_openai_provider_unavailability_for_account_label(Some(
+            "openai-otter",
+        ));
+        let mut app = create_test_app();
+        app.session.route_api_method = Some("openai-oauth@openai-otter".into());
+        app.offer_fallback_after_error("429 usage limit reached; quota exhausted");
+        let exhausted = crate::provider::models::provider_unavailability_detail_for_account_label(
+            "openai",
+            Some("openai-otter"),
+        );
+        let sibling = crate::provider::models::provider_unavailability_detail_for_account_label(
+            "openai",
+            Some("openai-fox"),
+        );
+        crate::provider::clear_openai_provider_unavailability_for_account_label(Some(
+            "openai-otter",
+        ));
+        assert!(exhausted.is_some());
+        assert!(sibling.is_none());
+    });
+}
+
+#[test]
+fn test_failover_without_exact_target_is_manual_even_in_countdown_mode() {
+    with_temp_jcode_home(|| {
+        write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
+        let mut app = create_test_app();
+        app.handle_turn_error(failover_error_message(
+            &crate::provider::ProviderFailoverPrompt {
+                from_provider: "claude".into(),
+                from_label: "Anthropic".into(),
+                to_provider: "openai".into(),
+                to_label: "OpenAI".into(),
+                target_route: None,
+                reason: "OAuth usage exhausted".into(),
+                estimated_input_chars: 4_000,
+                estimated_input_tokens: 1_000,
+            },
+        ));
+        assert!(app.pending_provider_failover.is_none());
+        assert!(!app.pending_turn);
+        assert!(
+            app.display_messages
+                .last()
+                .unwrap()
+                .content
+                .contains("/model")
+        );
+    });
 }
 
 #[async_trait::async_trait]
@@ -87,12 +189,31 @@ impl Provider for SwitchableMockProvider {
     }
 
     fn name(&self) -> &str {
-        "switchable-mock"
+        if self.active_provider.lock().unwrap().as_str() == "openai" {
+            "OpenAI"
+        } else {
+            "Claude"
+        }
+    }
+
+    fn active_resolved_credential(&self) -> Option<jcode_provider_core::ResolvedCredential> {
+        Some(
+            if self.active_provider.lock().unwrap().as_str() == "openai" {
+                jcode_provider_core::ResolvedCredential::Oauth
+            } else {
+                jcode_provider_core::ResolvedCredential::ApiKey
+            },
+        )
+    }
+
+    fn oauth_account_label(&self) -> Option<String> {
+        (self.active_provider.lock().unwrap().as_str() == "openai")
+            .then(|| "openai-otter".to_string())
     }
 
     fn model(&self) -> String {
         match self.active_provider.lock().unwrap().as_str() {
-            "openai" => "gpt-test".to_string(),
+            "openai" => "gpt-5.4".to_string(),
             _ => "claude-test".to_string(),
         }
     }
@@ -101,14 +222,48 @@ impl Provider for SwitchableMockProvider {
         Arc::new(self.clone())
     }
 
-    fn switch_active_provider_to(&self, provider: &str) -> Result<()> {
-        *self.active_provider.lock().unwrap() = provider.to_string();
+    fn set_model(&self, route: &str) -> Result<()> {
+        anyhow::ensure!(
+            route == "openai-oauth@openai-fox:gpt-5.4",
+            "unexpected route: {route}"
+        );
+        *self.active_provider.lock().unwrap() = "openai".to_string();
         Ok(())
     }
+
+    fn switch_active_provider_to(&self, _provider: &str) -> Result<()> {
+        anyhow::bail!("generic provider failover is not account-safe")
+    }
+}
+
+fn seed_failover_openai_fox() {
+    for label in ["openai-otter", "openai-fox"] {
+        let refresh = format!("tui-failover-fixture-refresh-{label}");
+        let saved = crate::auth::codex::upsert_account_from_tokens(
+            label,
+            "fake-access",
+            &refresh,
+            None,
+            None,
+        )
+        .expect("save countdown fixture login");
+        assert_eq!(saved, label);
+        crate::provider::populate_account_models_for_scope(
+            label,
+            vec!["gpt-5.4".into(), "gpt-5.2".into()],
+        );
+        crate::provider::clear_openai_provider_unavailability_for_account_label(Some(label));
+    }
+    crate::provider::clear_openai_provider_unavailability_for_account_label(Some("openai-fox"));
 }
 
 fn create_switchable_test_app(initial_provider: &str) -> (App, StdArc<StdMutex<String>>) {
     ensure_test_jcode_home_if_unset();
+    seed_failover_openai_fox();
+    // The Claude test source is explicitly enrolled as a metered API route.
+    let mut pool = crate::auth::account_pool::AccountPool::load();
+    pool.members.push("anthropic-api".into());
+    pool.save().unwrap();
     clear_persisted_test_ui_state();
     crate::tui::ui::clear_test_render_state_for_tests();
 
@@ -524,6 +679,7 @@ fn write_test_config(contents: &str) {
     let path = crate::config::Config::path().expect("config path");
     std::fs::create_dir_all(path.parent().expect("config dir")).expect("config dir");
     std::fs::write(path, contents).expect("write config");
+    crate::config::invalidate_config_cache();
 }
 
 fn failover_error_message(prompt: &crate::provider::ProviderFailoverPrompt) -> String {
@@ -832,130 +988,99 @@ fn test_fallback_remote_without_credential_preserves_route_metadata() {
     });
 }
 
-fn remote_profile_failover_prompt() -> crate::provider::ProviderFailoverPrompt {
-    crate::provider::ProviderFailoverPrompt {
-        from_provider: "prof-a:glm-5.3".to_string(),
-        from_label: "prof-a".to_string(),
-        to_provider: "prof-b:glm-5.3".to_string(),
-        to_label: "prof-b (glm-5.3)".to_string(),
-        reason: "out of credit (HTTP 402: Insufficient credits)".to_string(),
-        estimated_input_chars: 400,
-        estimated_input_tokens: 100,
+#[test]
+fn test_local_failover_revalidates_runtime_source_pool_at_expiry() {
+    for (initial_provider, source_key, exclude) in [
+        ("claude", "anthropic-api", false),
+        ("openai", "openai:openai-otter", true),
+    ] {
+        with_temp_jcode_home(|| {
+            write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
+            let (mut app, active_provider) = create_switchable_test_app(initial_provider);
+            // Deliberately stale metadata must not override runtime identity.
+            app.session.route_api_method = Some("claude-oauth@stale-account".into());
+            let prompt = crate::provider::ProviderFailoverPrompt {
+                from_provider: "stale-provider".into(),
+                from_label: "Previous account".into(),
+                to_provider: "openai".into(),
+                to_label: "OpenAI fox".into(),
+                target_route: Some("openai-oauth@openai-fox:gpt-5.4".into()),
+                reason: "OAuth usage exhausted".into(),
+                estimated_input_chars: 400,
+                estimated_input_tokens: 100,
+            };
+            app.handle_turn_error(failover_error_message(&prompt));
+            assert!(app.pending_provider_failover.is_some());
+            let mut pool = crate::auth::account_pool::AccountPool::load();
+            pool.members.retain(|member| member != source_key);
+            if exclude {
+                pool.excluded.push(source_key.into());
+            }
+            pool.save().unwrap();
+            app.pending_provider_failover.as_mut().unwrap().deadline =
+                Instant::now() - Duration::from_secs(1);
+            app.maybe_progress_provider_failover_countdown();
+            assert_eq!(active_provider.lock().unwrap().as_str(), initial_provider);
+            assert!(!app.pending_turn);
+            assert!(app.pending_provider_failover.is_none());
+            assert!(app.display_messages.iter().any(|message| {
+                message
+                    .content
+                    .contains("Source is no longer in the auto-switch pool")
+            }));
+        });
     }
 }
 
-fn remote_app_with_failed_turn() -> App {
-    let mut app = create_test_app();
-    app.is_remote = true;
-    app.last_submitted_input = Some("say hi".to_string());
-    app.rate_limit_pending_message = Some(PendingRemoteMessage {
-        content: "say hi".to_string(),
-        images: vec![],
-        is_system: false,
-        system_reminder: None,
-        auto_retry: false,
-        retry_attempts: 0,
-        retry_at: None,
-    });
-    app
-}
-
+/// An out-of-credit offer between OpenAI-compatible profiles has no
+/// pool-approved target route, so it never auto-switches to another metered
+/// profile. Countdown mode shows the same manual offer as manual mode.
 #[test]
-fn remote_out_of_credit_prompt_runs_countdown_then_switches_and_resends() {
+fn remote_out_of_credit_profile_offer_never_arms_countdown() {
     with_temp_jcode_home(|| {
         write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
         let rt = tokio::runtime::Runtime::new().expect("runtime");
         let _guard = rt.enter();
         let mut remote = crate::tui::backend::RemoteConnection::dummy();
-        let mut app = remote_app_with_failed_turn();
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.last_submitted_input = Some("say hi".to_string());
+        app.rate_limit_pending_message = Some(PendingRemoteMessage {
+            content: "say hi".to_string(),
+            images: vec![],
+            is_system: false,
+            system_reminder: None,
+            auto_retry: false,
+            retry_attempts: 0,
+            retry_at: None,
+        });
+        let prompt = crate::provider::ProviderFailoverPrompt {
+            from_provider: "prof-a:glm-5.3".to_string(),
+            from_label: "prof-a".to_string(),
+            to_provider: "prof-b:glm-5.3".to_string(),
+            to_label: "prof-b (glm-5.3)".to_string(),
+            reason: "out of credit (HTTP 402: Insufficient credits)".to_string(),
+            estimated_input_chars: 400,
+            estimated_input_tokens: 100,
+            target_route: None,
+        };
 
         app.handle_server_event(
             crate::protocol::ServerEvent::Error {
                 id: 1,
-                message: failover_error_message(&remote_profile_failover_prompt()),
+                message: failover_error_message(&prompt),
                 retry_after_secs: None,
             },
             &mut remote,
         );
-        let pending = app
-            .pending_provider_failover
-            .as_ref()
-            .expect("remote session must arm the countdown");
-        assert_eq!(pending.prompt.to_provider, "prof-b:glm-5.3");
-        assert!(app.pending_model_switch.is_none(), "nothing sent before the deadline");
-        assert!(app.pending_fallback_resend.is_none());
+
+        assert!(app.pending_provider_failover.is_none());
+        assert!(app.pending_automatic_failover_route.is_none());
         assert!(
-            app.rate_limit_pending_message.is_none(),
-            "no blind retry to the out-of-credit profile"
+            app.display_messages
+                .iter()
+                .any(|message| message.content.contains("Use /model to switch to prof-b (glm-5.3)")),
+            "manual offer names the sibling profile"
         );
-
-        if let Some(pending) = app.pending_provider_failover.as_mut() {
-            pending.deadline = Instant::now() - Duration::from_secs(1);
-        }
-        app.maybe_progress_provider_failover_countdown();
-        assert!(app.pending_provider_failover.is_none());
-        assert_eq!(app.pending_model_switch.as_deref(), Some("prof-b:glm-5.3"));
-        let resend = app
-            .pending_fallback_resend
-            .as_ref()
-            .expect("failed turn staged for resend after the switch");
-        assert_eq!(resend.content, "say hi");
-    });
-}
-
-#[test]
-fn remote_out_of_credit_countdown_esc_cancels_without_sending() {
-    with_temp_jcode_home(|| {
-        write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
-        let rt = tokio::runtime::Runtime::new().expect("runtime");
-        let _guard = rt.enter();
-        let mut remote = crate::tui::backend::RemoteConnection::dummy();
-        let mut app = remote_app_with_failed_turn();
-
-        app.handle_server_event(
-            crate::protocol::ServerEvent::Error {
-                id: 1,
-                message: failover_error_message(&remote_profile_failover_prompt()),
-                retry_after_secs: None,
-            },
-            &mut remote,
-        );
-        assert!(app.pending_provider_failover.is_some());
-        rt.block_on(app.handle_remote_key(KeyCode::Esc, KeyModifiers::NONE, &mut remote))
-            .expect("esc");
-        assert!(app.pending_provider_failover.is_none());
-        assert!(app.pending_model_switch.is_none());
-        assert!(app.pending_fallback_resend.is_none());
-        assert_eq!(app.input, "say hi", "the prompt goes back to the input box");
-        let last = app.display_messages.last().expect("message");
-        assert!(last.content.contains("Canceled provider auto-switch"), "{}", last.content);
-
-        // The deadline passing later must not switch anything.
-        app.maybe_progress_provider_failover_countdown();
-        assert!(app.pending_model_switch.is_none());
-    });
-}
-
-#[test]
-fn remote_out_of_credit_prompt_in_manual_mode_only_explains() {
-    with_temp_jcode_home(|| {
-        write_test_config("[provider]\ncross_provider_failover = \"manual\"\n");
-        let rt = tokio::runtime::Runtime::new().expect("runtime");
-        let _guard = rt.enter();
-        let mut remote = crate::tui::backend::RemoteConnection::dummy();
-        let mut app = remote_app_with_failed_turn();
-        app.handle_server_event(
-            crate::protocol::ServerEvent::Error {
-                id: 1,
-                message: failover_error_message(&remote_profile_failover_prompt()),
-                retry_after_secs: None,
-            },
-            &mut remote,
-        );
-        assert!(app.pending_provider_failover.is_none());
-        assert!(app.pending_model_switch.is_none());
-        assert!(app.pending_fallback_resend.is_none());
-        let last = app.display_messages.last().expect("message");
-        assert!(last.content.contains("did not resend"), "{}", last.content);
     });
 }

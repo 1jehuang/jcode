@@ -73,11 +73,13 @@ pub(super) async fn handoff(
         }
         Err(error) => Ok(outcome(
             "hand_back",
-            &format!("Decision transport unavailable: {error}"),
+            &format!(
+                "The fast browser agent (handoff) is unavailable: {error}. The browser itself still works: complete this task with direct browser actions (snapshot, click, type, open) in the same tab."
+            ),
             &[],
             &Value::Null,
             "typesafe/jev-1.13",
-            Some("uncertain"),
+            Some("direct_actions"),
         )),
     }
 }
@@ -171,8 +173,8 @@ async fn bounded<T>(
     };
     tokio::select! {
         biased;
-        _ = cancel => anyhow::bail!("Handoff cancelled. An in-flight browser action may already have taken effect."),
-        result = tokio::time::timeout(timeout, future) => result.context("Handoff operation timed out; an in-flight action may already have taken effect")?,
+        _ = cancel => anyhow::bail!("Handoff cancelled."),
+        result = tokio::time::timeout(timeout, future) => result.context("Handoff operation timed out")?,
     }
 }
 
@@ -401,7 +403,8 @@ async fn observe_page(
     timeout: Duration,
     deadline: tokio::time::Instant,
 ) -> Result<Value> {
-    let deadline = deadline.min(tokio::time::Instant::now() + Duration::from_secs(8));
+    let deadline = deadline.min(tokio::time::Instant::now() + timeout.min(Duration::from_secs(8)));
+    let mut last_disconnect = None;
     loop {
         let remaining =
             timeout.min(deadline.saturating_duration_since(tokio::time::Instant::now()));
@@ -410,7 +413,8 @@ async fn observe_page(
             Err(error)
                 if transition_disconnect(&error) && tokio::time::Instant::now() < deadline =>
             {
-                bounded(
+                last_disconnect = Some(error);
+                if let Err(error) = bounded(
                     ctx,
                     deadline.saturating_duration_since(tokio::time::Instant::now()),
                     async {
@@ -418,9 +422,17 @@ async fn observe_page(
                         Ok(())
                     },
                 )
-                .await?;
+                .await {
+                    return Err(error.context(format!(
+                        "Page observation could not reconnect; last connection error: {:#}. The page may have no content script; navigate to a supported page first",
+                        last_disconnect.as_ref().unwrap()
+                    )));
+                }
             }
-            Err(error) => return Err(error),
+            Err(error) => return Err(match last_disconnect {
+                Some(last) => error.context(format!("Page observation could not reconnect; last connection error: {last:#}. The page may have no content script; navigate to a supported page first")),
+                None => error,
+            }),
         }
     }
 }
@@ -618,7 +630,13 @@ pub(super) async fn run(
                 // than aborting the whole task or reusing them on another page.
                 used_exact.extend(0..input.candidates.len());
             }
-            if observation["sensitive"]==true {return Ok(("hand_back","Credential material, password, OTP, CAPTCHA, or account recovery requires the main agent/user. Never reset passwords.".into()));}
+            if observation["sensitive"]==true {
+                // Login, 2FA and CAPTCHA screens are the user's to complete in
+                // their own browser. Say so explicitly so the main agent asks the
+                // user, waits, and re-runs the same handoff on the same tab.
+                requested_help=Some("user_login");
+                return Ok(("hand_back","The page needs the user: sign-in, one-time code, CAPTCHA, or account recovery. Ask the user to complete it in this browser tab (their saved session and password manager apply), wait for them to confirm, then re-run this same handoff with the same tab_id to continue. Never type credentials. Never reset passwords.".into()));
+            }
             if stale>=3 {return Ok(("hand_back","Browser stalled: repeated unchanged observations".into()));}
             if trace.len()==budget {return Ok(("hand_back","Action step budget exhausted; final action has been observed".into()));}
             let choices:Vec<_>=candidates(input,&observation)?.into_iter().filter(|c| c.exact_index.is_none_or(|i|!used_exact.contains(&i))).filter(|c|!explore_only || (c.exact_index.is_none() && matches!(c.input.action.as_str(),"scroll"|"wait"))).collect();
@@ -680,7 +698,7 @@ pub(super) async fn run(
             if let Some(index)=chosen.exact_index {used_exact.insert(index);}
             trace.push(json!({"step":trace.len()+1,"id":decision.choice,"action":chosen.input.action,"label":chosen.label,"confidence":decision.confidence,"status":"started","before":page_evidence(&observation)}));
             let navigation=chosen.input.action=="open" || (chosen.input.action=="click" && chosen.input.url.is_some()) || chosen.input.submit==Some(true) || chosen.input.provider_action.as_deref()==Some("navigate");
-            let executed=bounded(ctx,timeout.min(deadline.saturating_duration_since(tokio::time::Instant::now())),provider.execute(&chosen.input.action,&chosen.input,ctx)).await;
+            let executed=bounded(ctx,timeout.min(deadline.saturating_duration_since(tokio::time::Instant::now())),provider.execute(&chosen.input.action,&chosen.input,ctx)).await.context("An in-flight browser action may already have taken effect; inspect current state before retrying");
             let executed=match executed {
                 Ok(output) => Ok(output),
                 // Only ordinary navigation/search can be verified this way. Never

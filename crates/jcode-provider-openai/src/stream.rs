@@ -739,10 +739,8 @@ pub fn handle_openai_output_item(
             });
         }
         "message" => {
-            if *saw_text_delta {
-                return None;
-            }
             let mut text = String::new();
+            let mut rendered = String::new();
             if let Some(content) = item.get("content").and_then(|v| v.as_array()) {
                 for entry in content {
                     let entry_type = entry.get("type").and_then(|v| v.as_str());
@@ -750,10 +748,22 @@ pub fn handle_openai_output_item(
                         && let Some(t) = entry.get("text").and_then(|v| v.as_str())
                     {
                         text.push_str(t);
+                        rendered.push_str(&crate::citations::render_annotated_text(
+                            t,
+                            entry.get("annotations"),
+                        ));
                     }
                 }
             }
-            return stream_text_or_recovered_tool_call(&text, pending);
+            if *saw_text_delta {
+                // URL annotations arrive after raw deltas. Correct only this
+                // completed message, before TextDone closes its render frame.
+                return (rendered != text).then_some(StreamEvent::TextSuffixReplace {
+                    old_text: text,
+                    new_text: rendered,
+                });
+            }
+            return stream_text_or_recovered_tool_call(&rendered, pending);
         }
         "reasoning" => {
             let id = item
@@ -1335,6 +1345,10 @@ mod tests {
 #[cfg(test)]
 #[path = "stream_tool_tests.rs"]
 mod stream_tool_tests;
+
+#[cfg(test)]
+#[path = "stream_citation_tests.rs"]
+mod stream_citation_tests;
 
 #[cfg(test)]
 mod text_framing_tests {

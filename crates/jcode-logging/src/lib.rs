@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 static LOGGER: Mutex<Option<Logger>> = Mutex::new(None);
 static CLEANUP_STARTED: AtomicBool = AtomicBool::new(false);
-static TASK_LOG_CONTEXTS: OnceLock<Mutex<HashMap<String, LogContext>>> = OnceLock::new();
+static TASK_LOG_CONTEXTS: OnceLock<Mutex<HashMap<String, TaskLogContext>>> = OnceLock::new();
 static RATE_LIMITS: OnceLock<Mutex<HashMap<String, RateLimitState>>> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -125,19 +125,46 @@ fn with_task_context_mut(update: impl FnOnce(&mut LogContext)) -> bool {
 
     let store = TASK_LOG_CONTEXTS.get_or_init(|| Mutex::new(HashMap::new()));
     if let Ok(mut contexts) = store.lock() {
-        let ctx = contexts.entry(task_id).or_default();
-        update(ctx);
+        if contexts.len() >= MAX_TASK_LOG_CONTEXTS && !contexts.contains_key(&task_id) {
+            evict_stale_task_contexts(&mut contexts);
+        }
+        let entry = contexts.entry(task_id).or_insert_with(|| TaskLogContext {
+            context: LogContext::default(),
+            last_used: Instant::now(),
+        });
+        entry.last_used = Instant::now();
+        update(&mut entry.context);
         true
     } else {
         false
     }
 }
 
+/// Per-task log contexts are keyed by tokio task id. Task ids are never
+/// reused and nothing observes task exit, so every finished turn task used to
+/// leave its context behind for the server's lifetime. Bound the map and drop
+/// the least recently used half when it fills.
+const MAX_TASK_LOG_CONTEXTS: usize = 1024;
+
+struct TaskLogContext {
+    context: LogContext,
+    last_used: Instant,
+}
+
+fn evict_stale_task_contexts(contexts: &mut HashMap<String, TaskLogContext>) {
+    let mut ages: Vec<Instant> = contexts.values().map(|entry| entry.last_used).collect();
+    ages.sort_unstable();
+    let cutoff = ages[ages.len() / 2];
+    contexts.retain(|_, entry| entry.last_used > cutoff);
+}
+
 fn task_context_snapshot() -> Option<LogContext> {
     let task_id = current_task_id()?;
     let store = TASK_LOG_CONTEXTS.get()?;
-    let contexts = store.lock().ok()?;
-    contexts.get(&task_id).cloned()
+    let mut contexts = store.lock().ok()?;
+    let entry = contexts.get_mut(&task_id)?;
+    entry.last_used = Instant::now();
+    Some(entry.context.clone())
 }
 
 /// Snapshot the current logging context for diagnostics that need stable,
@@ -659,6 +686,37 @@ fn redact_url_queries(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn evicting_task_contexts_keeps_most_recent_half() {
+        let base = Instant::now();
+        let mut contexts: HashMap<String, TaskLogContext> = (0..10)
+            .map(|i| {
+                (
+                    i.to_string(),
+                    TaskLogContext {
+                        context: LogContext::default(),
+                        last_used: base + Duration::from_millis(i),
+                    },
+                )
+            })
+            .collect();
+        evict_stale_task_contexts(&mut contexts);
+        assert!(contexts.len() < 10 && !contexts.is_empty());
+        assert!(contexts.contains_key("9"));
+        assert!(!contexts.contains_key("0"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn finished_task_contexts_do_not_accumulate() {
+        for i in 0..(MAX_TASK_LOG_CONTEXTS * 3) {
+            tokio::spawn(async move { set_session(&format!("s{i}")) })
+                .await
+                .unwrap();
+        }
+        let len = TASK_LOG_CONTEXTS.get().unwrap().lock().unwrap().len();
+        assert!(len <= MAX_TASK_LOG_CONTEXTS, "{len}");
+    }
 
     #[test]
     fn auth_log_redacts_secret_like_fields() {

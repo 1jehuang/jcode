@@ -4,7 +4,6 @@ use super::{Tool, ToolContext, ToolOutput};
 use crate::bus::{Bus, BusEvent, FileOp, FileTouch};
 use anyhow::Result;
 use async_trait::async_trait;
-use jcode_terminal_image::{ImageDisplayParams, ImageProtocol, display_image};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::Path;
@@ -342,10 +341,10 @@ fn is_image_file(path: &Path) -> bool {
     }
 }
 
-/// Handle reading an image file - display in terminal if supported AND return base64 for model vision
+/// Handle reading an image file: return it base64-encoded for model vision.
+/// Clients render the attached image themselves. The server never writes
+/// terminal escape sequences, since it may have no terminal (daemon, remote).
 fn handle_image_file(path: &Path, file_path: &str) -> Result<ToolOutput> {
-    let protocol = ImageProtocol::detect();
-
     let data = std::fs::read(path)?;
     let file_size = data.len() as u64;
 
@@ -363,27 +362,8 @@ fn handle_image_file(path: &Path, file_path: &str) -> Result<ToolOutput> {
         format!("{:.1} MB", file_size as f64 / 1024.0 / 1024.0)
     };
 
-    let mut terminal_displayed = false;
-    if protocol.is_supported() {
-        let params = ImageDisplayParams::from_terminal();
-        match display_image(path, &params) {
-            Ok(true) => {
-                terminal_displayed = true;
-            }
-            Ok(false) => {}
-            Err(e) => {
-                crate::logging::info(&format!("Warning: Failed to display image: {}", e));
-            }
-        }
-    }
-
     const MAX_IMAGE_SIZE: u64 = 20 * 1024 * 1024;
     let mut output = if file_size <= MAX_IMAGE_SIZE {
-        let display_note = if terminal_displayed {
-            "Displayed in terminal. "
-        } else {
-            ""
-        };
         // Detect the format from the bytes and only ever attach a format every
         // provider accepts. A stored BMP/ICO block used to 400 every later
         // request in the session (#1712).
@@ -396,25 +376,20 @@ fn handle_image_file(path: &Path, file_path: &str) -> Result<ToolOutput> {
                 let b64 =
                     base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &image.data);
                 ToolOutput::new(format!(
-                    "Image: {} ({})\nDimensions: {}\n{}{}Image sent to model for vision analysis.",
-                    file_path, size_str, dim_str, display_note, converted_note
+                    "Image: {} ({})\nDimensions: {}\n{}Image sent to model for vision analysis.",
+                    file_path, size_str, dim_str, converted_note
                 ))
                 .with_labeled_image(image.media_type, b64, file_path.to_string())
             }
             Err(reason) => ToolOutput::new(format!(
-                "Image: {} ({})\nDimensions: {}\n{}Not sent to the model: {}.",
-                file_path, size_str, dim_str, display_note, reason
+                "Image: {} ({})\nDimensions: {}\nNot sent to the model: {}.",
+                file_path, size_str, dim_str, reason
             )),
         }
     } else {
-        let display_note = if terminal_displayed {
-            "\nDisplayed in terminal."
-        } else {
-            ""
-        };
         ToolOutput::new(format!(
-            "Image: {} ({})\nDimensions: {}\nImage too large for vision (max 20MB).{}",
-            file_path, size_str, dim_str, display_note
+            "Image: {} ({})\nDimensions: {}\nImage too large for vision (max 20MB).",
+            file_path, size_str, dim_str
         ))
     };
 

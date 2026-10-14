@@ -471,7 +471,10 @@ pub(super) fn pending_prompt_count(app: &dyn TuiState) -> usize {
             .interleave_message()
             .map(|msg| !msg.is_empty())
             .unwrap_or(false);
-    app.queued_messages().len() + pending_count + if interleave { 1 } else { 0 }
+    app.queued_messages().len()
+        + app.queued_commands().len()
+        + pending_count
+        + if interleave { 1 } else { 0 }
 }
 
 pub(super) fn pending_queue_preview(app: &dyn TuiState) -> Vec<String> {
@@ -496,6 +499,13 @@ pub(super) fn pending_queue_preview(app: &dyn TuiState) -> Vec<String> {
             ));
         }
     }
+    for msg in app.queued_commands() {
+        let normalized = normalize_repaint_sensitive_notice_text(msg);
+        previews.push(format!(
+            "⏳ {}",
+            normalized.chars().take(100).collect::<String>()
+        ));
+    }
     for msg in app.queued_messages() {
         let normalized = normalize_repaint_sensitive_notice_text(msg);
         previews.push(format!(
@@ -519,6 +529,9 @@ pub(super) fn draw_queued(frame: &mut Frame, app: &dyn TuiState, area: Rect, sta
         {
             items.push((QueuedMsgType::Interleave, msg));
         }
+    }
+    for msg in app.queued_commands() {
+        items.push((QueuedMsgType::Queued, msg.as_str()));
     }
     for msg in app.queued_messages() {
         items.push((QueuedMsgType::Queued, msg.as_str()));
@@ -772,6 +785,15 @@ fn append_batch_progress_spans(
 }
 
 pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pending_count: usize) {
+    if app.status_notice().as_deref() == Some(crate::telemetry::OAUTH_ACCOUNT_NOTICE_TEXT) {
+        crate::tui::app::oauth_telemetry::note_status_render(area);
+        frame.render_widget(
+            Paragraph::new(crate::telemetry::OAUTH_ACCOUNT_NOTICE_TEXT)
+                .style(Style::default().fg(accent_color())),
+            area,
+        );
+        return;
+    }
     let elapsed = app.elapsed().map(|d| d.as_secs_f32()).unwrap_or(0.0);
     let stale_secs = app.time_since_activity().map(|d| d.as_secs_f32());
     let (cache_read, cache_creation) = app.streaming_cache_tokens();

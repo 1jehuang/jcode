@@ -1,0 +1,27 @@
+{
+  "version": "0.96.0",
+  "date": "2026-10-13",
+  "highlights": [
+    "Connect to remote MCP servers over HTTP or SSE, including OAuth sign-in and command-line management",
+    "Choose saved OAuth accounts per session from the model and login pickers, with email labels and cancelable account-switch countdowns",
+    "SDK clients can organize sessions into collections and attach hidden reminders to individual turns"
+  ],
+  "improvements": [
+    "Swarm messages use compact, expandable one-row previews, while the activity dock shows session icons and each worker's current todo step",
+    "Pinned todos span the full terminal width",
+    "The /reset usage limits claude command supports resetting Claude session limits",
+    "Prompts and pokes appear in every window attached to a session",
+    "New-model usage costs receive estimates before published pricing becomes available"
+  ],
+  "fixes": [
+    "The first pinned todo update no longer hides the original session prompt, and hidden todo updates preserve transcript cache boundaries",
+    "OpenAI native web citations render source links reliably without losing links already shown",
+    "Provider failover honors account pools and model preferences, rotates rejected OAuth accounts, and stops retrying permanently rejected sessions",
+    "Stale Anthropic usage is marked unavailable instead of showing misleading limits",
+    "Browser control identifies the correct browser bridge and explains silent Chrome extension connections",
+    "Remote MCP handshakes are bounded so unresponsive servers do not hold up startup indefinitely",
+    "Copy-selection Enter and Y shortcuts work in client mode, and Ctrl+L keeps the fresh view when new messages arrive",
+    "Escaped short prose lists no longer render as math, and system-notice emoji no longer leave ghost terminal cells",
+    "SDK-launched sessions no longer flash console windows inside Windows GUI applications"
+  ]
+}

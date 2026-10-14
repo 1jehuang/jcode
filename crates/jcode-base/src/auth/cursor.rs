@@ -196,6 +196,15 @@ pub fn read_vscdb_machine_id() -> Result<String> {
     read_vscdb_key(&db_path, "storage.serviceMachineId")
 }
 
+/// The email Cursor IDE is signed in with, read from its local state. Only
+/// the address is read, never a token.
+pub fn vscdb_cached_email() -> Option<String> {
+    let path = cursor_vscdb_paths()
+        .into_iter()
+        .find(|path| path.exists())?;
+    read_vscdb_key(&path, "cursorAuth/cachedEmail").ok()
+}
+
 /// Find the Cursor vscdb file on this platform.
 fn find_cursor_vscdb() -> Result<PathBuf> {
     let candidates = cursor_vscdb_paths();

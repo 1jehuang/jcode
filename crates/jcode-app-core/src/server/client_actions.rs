@@ -288,6 +288,40 @@ pub(super) fn handle_input_shell(
     });
 }
 
+/// Routing for future workers is metadata, so it can be updated during a turn.
+pub(super) async fn set_session_agent_model(
+    agent: &Arc<Mutex<Agent>>,
+    session_id: &str,
+    target: &str,
+    model: Option<String>,
+) -> anyhow::Result<crate::session::AgentModelOverrides> {
+    if let Ok(mut guard) = agent.try_lock() {
+        guard.set_agent_model_override(target, model)?;
+        Ok(guard.session_for_split().agent_model_overrides.clone())
+    } else {
+        let mut session = Session::load_startup_stub(session_id)?;
+        session.set_agent_model_override(target, model)?;
+        Ok(session.agent_model_overrides)
+    }
+}
+
+/// Save a worker-model default in the server's own configuration, so remote
+/// clients change the default that server-side workers actually use.
+pub(super) async fn set_global_agent_model(
+    agent: &Arc<Mutex<Agent>>,
+    session_id: &str,
+    target: &str,
+    model: Option<String>,
+) -> anyhow::Result<crate::session::AgentModelOverrides> {
+    crate::config::Config::set_agent_model_default(target, model.as_deref())?;
+    // Report the session's current overrides so the client view stays exact.
+    if let Ok(guard) = agent.try_lock() {
+        Ok(guard.session_for_split().agent_model_overrides.clone())
+    } else {
+        Ok(Session::load_startup_stub(session_id)?.agent_model_overrides)
+    }
+}
+
 pub(super) async fn handle_set_subagent_model(
     id: u64,
     model: Option<String>,

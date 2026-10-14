@@ -1,8 +1,6 @@
 // Integration tests for the first-run onboarding flow control logic.
 
-use super::onboarding_flow::{
-    ExternalCli, ImportReview, OnboardingFlow, OnboardingPhase, SummaryPill,
-};
+use super::onboarding_flow::{ExternalCli, OnboardingFlow, OnboardingPhase};
 
 #[derive(Clone)]
 struct QualityFirstOpenAiProvider {
@@ -243,10 +241,10 @@ fn import_review_collects_checked_logins() {
         ExternalAuthReviewCandidate::fixture("Gemini", "Gemini CLI"),
     ])
     .unwrap();
-    // The default is the summary screen with Jcode subscription preselected.
+    // The default is the summary screen with Import preselected.
     assert!(!review.choosing);
-    assert!(!review.continue_focused);
-    assert_eq!(review.summary_pill, crate::tui::app::onboarding_flow::SummaryPill::Subscription);
+    assert!(review.continue_focused);
+    assert_eq!(review.summary_pill, crate::tui::app::onboarding_flow::SummaryPill::Continue);
     assert_eq!(review.total(), 3);
     // All candidates remain pre-checked when the user chooses an import action.
     assert_eq!(review.approved_indices(), vec![0, 1, 2]);
@@ -460,33 +458,6 @@ fn login_phase_enter_opens_login_picker() {
 }
 
 #[test]
-fn subscription_choice_exposes_the_canonical_pricing_page() {
-    with_temp_jcode_home(|| {
-        let mut app = create_test_app();
-        let mut review = ImportReview::new(vec![
-            crate::external_auth::ExternalAuthReviewCandidate::fixture("OpenAI", "Codex"),
-        ])
-        .unwrap();
-        review.focus_summary_pill(SummaryPill::Subscription);
-        app.onboarding_flow = Some(OnboardingFlow {
-            phase: OnboardingPhase::Login {
-                import: Some(review),
-            },
-        });
-
-        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Enter));
-        assert_eq!(
-            app.status_notice(),
-            Some(format!(
-                "Open Jcode pricing: {}",
-                crate::subscription_catalog::JCODE_PRICING_URL
-            ))
-        );
-        assert!(app.pending_login.is_none());
-    });
-}
-
-#[test]
 fn pending_login_entry_is_not_intercepted_by_onboarding_login_phase() {
     // Regression for the OpenRouter (and any API-key provider) login loop:
     // after selecting a provider during onboarding, the Login phase stays
@@ -661,7 +632,7 @@ fn import_review_decline_all_falls_back_to_manual_login() {
         // checked we don't spawn an import, the list clears, and the card falls
         // back to the manual-login prompt.
         assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Char('n')));
-        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Enter));
+        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Char('c')));
         assert!(matches!(
             app.onboarding_phase(),
             Some(OnboardingPhase::Login { import: None })
@@ -673,7 +644,7 @@ fn import_review_decline_all_falls_back_to_manual_login() {
 }
 
 #[test]
-fn answering_no_on_continue_prompt_shows_suggestions() {
+fn answering_no_on_continue_prompt_lands_on_regular_session() {
     with_temp_jcode_home(|| {
         let mut app = onboarding_test_app();
         if let Some(flow) = app.onboarding_flow.as_mut() {
@@ -684,10 +655,17 @@ fn answering_no_on_continue_prompt_shows_suggestions() {
             };
         }
         app.onboarding_answer_continue(false);
-        assert!(matches!(
-            app.onboarding_phase(),
-            Some(OnboardingPhase::Suggestions)
-        ));
+        // "No" lands on the regular new-session screen: no starter prompts.
+        // The only welcome body left is the unauthenticated "log in" hint,
+        // which appears on hosts without credentials (CI runners).
+        assert!(!app.onboarding_flow_active());
+        assert!(
+            app.suggestion_prompts()
+                .iter()
+                .all(|(_, prompt)| prompt == "/login"),
+            "{:?}",
+            app.suggestion_prompts()
+        );
         // No session picker overlay opened on the "No" path.
         assert!(app.session_picker_overlay.is_none());
     });
@@ -1166,7 +1144,9 @@ fn liveness_import_review_decline_all_then_enter_escapes() {
         }
         assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Char('n')));
         assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Down));
+        // Down past the last row focuses Continue; Enter there commits.
         assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Char('n')));
+        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Down));
         assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Enter));
         // No async import was spawned (declined all), so we are not stuck on the
         // progress screen; we are on the recovery screen.
@@ -1682,10 +1662,56 @@ fn recent_project_review_falls_back_cleanly_when_no_repo_is_known() {
 
     assert!(!app.pending_turn);
     assert!(app.queued_messages.is_empty());
-    assert!(matches!(app.onboarding_phase(), Some(OnboardingPhase::Suggestions)));
+    assert!(!app.onboarding_flow_active());
     assert!(app.status_notice.as_ref().is_some_and(|(notice, _)| {
         notice.contains("No active Git repository found")
     }));
 }
 
 include!("onboarding_flow_telemetry.rs");
+
+#[test]
+fn import_less_enter_on_row_toggles_instead_of_committing() {
+    use crate::external_auth::ExternalAuthReviewCandidate;
+    use crate::tui::app::onboarding_flow::ImportReview;
+
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.onboarding_flow = None;
+        app.begin_onboarding_flow_at_login();
+        let review = ImportReview::new(vec![
+            ExternalAuthReviewCandidate::fixture("OpenAI/Codex", "Codex auth.json"),
+            ExternalAuthReviewCandidate::fixture("Claude", "Claude Code"),
+            ExternalAuthReviewCandidate::fixture("Cursor", "Cursor auth.json"),
+        ])
+        .unwrap();
+        if let Some(flow) = app.onboarding_flow.as_mut() {
+            flow.phase = OnboardingPhase::Login {
+                import: Some(review),
+            };
+        }
+        // Summary -> Import less.
+        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Right));
+        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Enter));
+        // Move to the second row and press Enter: it must only deselect it.
+        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Down));
+        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Enter));
+        match app.onboarding_phase() {
+            Some(OnboardingPhase::Login {
+                import: Some(review),
+            }) => {
+                assert!(review.choosing, "still on the Import less list");
+                assert_eq!(review.checked, vec![true, false, true]);
+                // The auto-commit countdown is paused while choosing.
+                let mut stale = review.clone();
+                stale.shown_at = std::time::Instant::now()
+                    - crate::tui::app::onboarding_flow::DECISION_TIMEOUT
+                    - std::time::Duration::from_secs(1);
+                assert!(!stale.timed_out());
+            }
+            other => panic!("Enter on a row must not leave the import list: {other:?}"),
+        }
+        assert!(app.onboarding_import_in_progress.is_none());
+        assert!(app.session_picker_overlay.is_none());
+    });
+}

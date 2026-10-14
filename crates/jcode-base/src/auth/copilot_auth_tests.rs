@@ -366,6 +366,73 @@ fn choose_default_model_with_opus() {
     assert_eq!(choose_default_model(&models), "claude-opus-4.6");
 }
 
+fn copilot_models(ids: &[&str]) -> Vec<CopilotModelInfo> {
+    ids.iter()
+        .map(|id| CopilotModelInfo {
+            id: id.to_string(),
+            name: String::new(),
+            vendor: String::new(),
+            version: String::new(),
+            model_picker_enabled: true,
+            capabilities: Default::default(),
+        })
+        .collect()
+}
+
+#[test]
+fn choose_default_model_prefers_newest_claude_flagship() {
+    let models = copilot_models(&[
+        "claude-sonnet-4.6",
+        "claude-opus-4.6",
+        "claude-opus-4.8",
+        "claude-opus-5.5",
+        "gpt-5.5",
+    ]);
+    assert_eq!(choose_default_model(&models), "claude-opus-5.5");
+}
+
+#[test]
+fn choose_default_model_auto_promotes_unlisted_newer_opus() {
+    let models = copilot_models(&["claude-opus-4.6", "claude-opus-5.5", "claude-opus-5.9"]);
+    assert_eq!(choose_default_model(&models), "claude-opus-5.9");
+}
+
+#[test]
+fn choose_default_model_realistic_catalog_no_longer_pins_opus_4_6() {
+    // Shape of a real paid-tier /models response: the shipped fallback list,
+    // newer flagships, and non-picker entries such as embeddings.
+    let mut models = copilot_models(jcode_provider_copilot::FALLBACK_MODELS);
+    models.extend(copilot_models(&[
+        "claude-opus-4.8",
+        "claude-opus-5.5",
+        "gpt-5.6",
+    ]));
+    models.push(CopilotModelInfo {
+        id: "claude-opus-9".to_string(),
+        name: String::new(),
+        vendor: String::new(),
+        version: String::new(),
+        model_picker_enabled: false,
+        capabilities: Default::default(),
+    });
+    let chosen = choose_default_model(&models);
+    assert_ne!(
+        chosen, "claude-opus-4.6",
+        "regression: stale Opus 4.6 default"
+    );
+    assert_eq!(chosen, "claude-opus-5.5");
+}
+
+#[test]
+fn choose_default_model_ignores_fast_and_cheap_variants() {
+    let models = copilot_models(&[
+        "claude-haiku-4.5",
+        "claude-opus-4.6-fast",
+        "claude-opus-4.8",
+    ]);
+    assert_eq!(choose_default_model(&models), "claude-opus-4.8");
+}
+
 #[test]
 fn choose_default_model_without_opus() {
     let models = vec![CopilotModelInfo {

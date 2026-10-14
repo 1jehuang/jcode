@@ -283,7 +283,17 @@ pub(super) async fn maybe_handle_server_state_command(
                     .map(|member| &member.session_id),
             )
         };
-        let member_count = swarm_members.read().await.len();
+        let (member_count, live_swarm_member_count) = {
+            let members = swarm_members.read().await;
+            (
+                members.len(),
+                members
+                    .keys()
+                    .filter(|session_id| live_session_ids.contains(*session_id))
+                    .count(),
+            )
+        };
+        let swarm_count = swarms_by_id.read().await.len();
         let has_update = super::server_has_newer_binary();
         return Ok(Some(
             serde_json::json!({
@@ -296,6 +306,8 @@ pub(super) async fn maybe_handle_server_state_command(
                 "session_count": session_count,
                 "spawned_swarm_agent_count": spawned_swarm_agent_count,
                 "swarm_member_count": member_count,
+                "live_swarm_member_count": live_swarm_member_count,
+                "swarm_count": swarm_count,
                 "has_update": has_update,
                 "debug_control_enabled": super::debug_control_allowed(),
             })

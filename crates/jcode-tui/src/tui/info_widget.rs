@@ -306,6 +306,17 @@ pub struct BackgroundInfo {
     pub memory_agent_active: bool,
     /// Memory agent turn count
     pub memory_agent_turns: usize,
+    /// Session-scoped task rows (running, recently completed, failed) tracked
+    /// by the client from task events. Preferred over `running_tasks` because
+    /// it works when tasks run in the server process.
+    pub rows: Vec<crate::tui::BackgroundTaskRow>,
+}
+
+impl BackgroundInfo {
+    /// Whether there is anything worth rendering.
+    pub fn has_content(&self) -> bool {
+        self.running_count > 0 || !self.rows.is_empty()
+    }
 }
 
 /// Which provider the usage info is for
@@ -551,7 +562,7 @@ impl MemoryInfo {
 pub use jcode_tui_mermaid::DiagramInfo;
 
 /// Git repository status for the info widget
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct GitInfo {
     pub branch: String,
     pub modified: usize,
@@ -767,7 +778,7 @@ impl InfoWidgetData {
                 if self
                     .background_info
                     .as_ref()
-                    .map(|b| b.running_count > 0)
+                    .map(|b| b.has_content())
                     .unwrap_or(false)
                 {
                     sections += 1;
@@ -814,7 +825,7 @@ impl InfoWidgetData {
             WidgetKind::BackgroundTasks => self
                 .background_info
                 .as_ref()
-                .map(|b| b.running_count > 0)
+                .map(|b| b.has_content())
                 .unwrap_or(false),
             WidgetKind::Compaction => self.compaction_info.is_some(),
             WidgetKind::AmbientMode => false,
@@ -895,6 +906,18 @@ impl InfoWidgetData {
                     .unwrap_or(false);
                 if managing { 3 } else { kind.priority() }
             }
+            WidgetKind::BackgroundTasks => {
+                // This widget is the only place task progress shows, so a
+                // running or failed task must outrank passive stat widgets.
+                let actionable = self.background_info.as_ref().is_some_and(|info| {
+                    info.running_count > 0
+                        || info
+                            .rows
+                            .iter()
+                            .any(|row| row.status != crate::tui::BackgroundTaskRowStatus::Completed)
+                });
+                if actionable { 4 } else { kind.priority() }
+            }
             _ => kind.priority(),
         }
     }
@@ -942,6 +965,11 @@ struct WidgetsState {
     /// of popping back for a few frames (which resizes the bottom chrome and
     /// bounces the transcript).
     swarm_dock_last_engaged: Option<Instant>,
+    /// `scroll_top` of the previous placement pass and when it last changed.
+    /// A scroll moves content under resident widgets just like streaming does,
+    /// so it counts as churn for a short grace period.
+    last_scroll_top: Option<usize>,
+    last_scroll_change: Option<Instant>,
 }
 
 impl Default for WidgetsState {
@@ -954,6 +982,8 @@ impl Default for WidgetsState {
             settlement: super::info_widget_settle::SettlementTracker::default(),
             anchors_area_width: 0,
             swarm_dock_last_engaged: None,
+            last_scroll_top: None,
+            last_scroll_change: None,
         }
     }
 }
@@ -1003,6 +1033,27 @@ pub fn apply_settlement(margins: &mut Margins, area_width: u16) {
         state.anchors_area_width = area_width;
     }
     let settled = state.settlement.observe(margins, area_width);
+    // A scroll moves content under resident widgets just like streaming does,
+    // so it counts as churn for a short grace period after the last change.
+    if state.last_scroll_top != Some(margins.scroll_top) {
+        if state.last_scroll_top.is_some() {
+            state.last_scroll_change = Some(Instant::now());
+        }
+        state.last_scroll_top = Some(margins.scroll_top);
+    }
+    margins.content_churning |= state
+        .last_scroll_change
+        .is_some_and(|at| at.elapsed() < SCROLL_CHURN_GRACE);
+    // Settlement exists to keep new widgets off content that is still
+    // re-rendering. It counts frames, but an idle client draws only one frame
+    // per state change, so a layout change while idle (History adding the
+    // `mcp:` header row) never accumulated the frames to settle: the free
+    // space stayed "unsettled" and the Overview could not be re-homed until
+    // some unrelated activity redrew a few times. When nothing is churning,
+    // the current widths are already final.
+    if !margins.content_churning {
+        return;
+    }
     intersect_widths(&mut margins.right_reliable, &settled.right);
     if margins.centered {
         intersect_widths(&mut margins.left_reliable, &settled.left);
@@ -1048,6 +1099,11 @@ pub fn calculate_placements(
     }
     outcome.visible
 }
+
+/// How long after a scroll the transcript still counts as moving for resident
+/// widgets: a covered slot during or just after a scroll is waited out in
+/// place rather than re-homed.
+const SCROLL_CHURN_GRACE: Duration = Duration::from_millis(1500);
 
 /// How long the inline swarm strip keeps standing down after the SwarmStatus
 /// dock disengages. The dock's placement naturally churns while content
@@ -1152,7 +1208,21 @@ pub(crate) fn calculate_widget_height(
             let inner_h = max_height.saturating_sub(border_height);
             let layout = compute_page_layout(&overview, inner_width, inner_h);
             if layout.max_page_height == 0 {
-                return 0;
+                // Taller than the pocket even as a compact page. Rather than
+                // dropping the Overview (and with it usage limits and changes,
+                // which it merges in place of their own widgets), take the
+                // pocket and let the renderer truncate the compact page. The
+                // sections are ordered by importance, so the tail is what goes.
+                let full = compute_page_layout(&overview, inner_width, u16::MAX);
+                if full.max_page_height == 0
+                    || inner_h
+                        < WidgetKind::Overview
+                            .min_height()
+                            .saturating_sub(border_height)
+                {
+                    return 0;
+                }
+                return max_height;
             }
             layout.max_page_height
         }
@@ -1215,6 +1285,28 @@ pub fn render_all(frame: &mut Frame, placements: &[WidgetPlacement], data: &Info
     }
 }
 
+/// Shrink a text widget's box so its bottom border hugs the rendered body.
+/// The slot can be taller than the body (Overview reserves its tallest page,
+/// and resident slots never shrink), which used to leave blank rows inside the
+/// border. The top edge stays put so the widget does not jump.
+fn tight_rects(rect: Rect, inner: Rect, body_lines: usize) -> (Rect, Rect) {
+    let body = (body_lines.min(inner.height as usize)) as u16;
+    if body == 0 || body >= inner.height {
+        return (rect, inner);
+    }
+    let trim = inner.height - body;
+    (
+        Rect {
+            height: rect.height - trim,
+            ..rect
+        },
+        Rect {
+            height: body,
+            ..inner
+        },
+    )
+}
+
 /// Render a single widget at its placement
 fn render_single_widget(frame: &mut Frame, placement: &WidgetPlacement, data: &InfoWidgetData) {
     let rect = placement.rect;
@@ -1240,6 +1332,7 @@ fn render_single_widget(frame: &mut Frame, placement: &WidgetPlacement, data: &I
         let Some(framed) = render_overview_framed(data, inner) else {
             return;
         };
+        let (rect, inner) = tight_rects(rect, inner, framed.lines.len());
         frame.render_widget(framed.apply(block, rect.width), rect);
         frame.render_widget(Paragraph::new(framed.lines), inner);
         return;
@@ -1262,6 +1355,7 @@ fn render_single_widget(frame: &mut Frame, placement: &WidgetPlacement, data: &I
     if framed.is_empty() {
         return;
     }
+    let (rect, inner) = tight_rects(rect, inner, framed.lines.len());
     frame.render_widget(framed.apply(block, rect.width), rect);
     frame.render_widget(Paragraph::new(framed.lines), inner);
 }
@@ -1293,7 +1387,25 @@ fn render_overview_framed(data: &InfoWidgetData, inner: Rect) -> Option<Framed> 
     overview.memory_info = None;
     overview.diagrams.clear();
 
-    let layout = compute_page_layout(&overview, inner.width as usize, inner.height);
+    let mut layout = compute_page_layout(&overview, inner.width as usize, inner.height);
+    if layout.pages.is_empty() {
+        // The slot is shorter than even the compact page (its content grew
+        // after placement and there was no room to grow the slot). Show the
+        // compact page truncated rather than nothing: an anchored widget that
+        // renders empty also keeps its slot, so it would stay invisible.
+        let full = compute_page_layout(&overview, inner.width as usize, u16::MAX);
+        if let Some(compact) = full
+            .pages
+            .iter()
+            .find(|page| page.kind == InfoPageKind::CompactOnly)
+            .copied()
+            .or_else(|| full.pages.first().copied())
+        {
+            layout.pages = vec![compact];
+            layout.max_page_height = inner.height;
+            layout.show_dots = false;
+        }
+    }
     if layout.pages.is_empty() || layout.max_page_height == 0 {
         return None;
     }
@@ -2000,9 +2112,9 @@ fn render_sections(
 
     // Background tasks info
     if let Some(info) = &data.background_info
-        && info.running_count > 0
+        && info.has_content()
     {
-        lines.extend(render_background_compact(info));
+        lines.extend(render_background_compact(info, inner.width as usize));
     }
 
     // Usage info (subscription limits)
@@ -2127,5 +2239,29 @@ fn format_event_for_expanded(
             ("📋", format!("{} memories", count), rgb(140, 140, 150))
         }
         _ => ("·", String::new(), rgb(100, 100, 110)),
+    }
+}
+
+#[cfg(test)]
+mod tight_rect_tests {
+    use super::tight_rects;
+    use ratatui::layout::Rect;
+
+    #[test]
+    fn border_hugs_shorter_body() {
+        let rect = Rect::new(10, 5, 30, 12);
+        let inner = Rect::new(11, 6, 28, 10);
+        let (outer, body) = tight_rects(rect, inner, 4);
+        assert_eq!(outer, Rect::new(10, 5, 30, 6));
+        assert_eq!(body, Rect::new(11, 6, 28, 4));
+    }
+
+    #[test]
+    fn full_or_overflowing_body_keeps_slot() {
+        let rect = Rect::new(0, 0, 30, 12);
+        let inner = Rect::new(1, 1, 28, 10);
+        assert_eq!(tight_rects(rect, inner, 10), (rect, inner));
+        assert_eq!(tight_rects(rect, inner, 25), (rect, inner));
+        assert_eq!(tight_rects(rect, inner, 0), (rect, inner));
     }
 }
