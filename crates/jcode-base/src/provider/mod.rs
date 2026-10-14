@@ -7,6 +7,7 @@ pub mod antigravity;
 pub mod bedrock;
 mod catalog_routes;
 pub mod catalog_scheduler;
+pub mod chatgpt_web;
 pub mod copilot;
 pub mod cursor;
 mod dispatch;
@@ -62,8 +63,9 @@ pub use jcode_provider_core::{
     PremiumMode, Provider, RouteBillingKind, RouteCheapnessEstimate, RouteCostConfidence,
     RouteCostSource, RouteSelection, RuntimeKey, dedupe_model_routes,
     explicit_model_provider_prefix, fresh_transport_client, grok_build_model_spec,
-    inferred_reasoning_efforts, model_name_for_provider, normalize_copilot_model_name,
-    provider_from_model_key, shared_http_client, summarize_model_catalog_refresh,
+    inferred_reasoning_efforts, is_chatgpt_web_model, model_name_for_provider,
+    normalize_copilot_model_name, provider_from_model_key, shared_http_client,
+    summarize_model_catalog_refresh,
 };
 pub use jcode_provider_core::{
     FallbackPickOptions, error_looks_like_credential_failure, model_route_provider_labels_match,
@@ -965,7 +967,17 @@ impl MultiProvider {
                 continue;
             }
 
-            let cached_unavailability = provider_unavailability_detail_for_account(key);
+            // The ChatGPT web route runs in the browser session, not on the
+            // stored OpenAI account, so that account's usage must not gate it.
+            let browser_session = candidate == ActiveProvider::OpenAI
+                && self
+                    .openai_provider()
+                    .is_some_and(|provider| is_chatgpt_web_model(&provider.model()));
+            let cached_unavailability = if browser_session {
+                None
+            } else {
+                provider_unavailability_detail_for_account(key)
+            };
             if let Some(reason) = cached_unavailability
                 .clone()
                 .or_else(|| self.provider_precheck_unavailable_reason(candidate))
@@ -2017,6 +2029,19 @@ impl Default for MultiProvider {
     }
 }
 
+async fn prefetch_openai_or_web_catalog<F>(
+    openai: Option<Arc<dyn Provider>>,
+    browser_refresh: F,
+) -> Result<()>
+where
+    F: std::future::Future<Output = Result<()>>,
+{
+    match openai {
+        Some(provider) => provider.prefetch_models().await,
+        None => browser_refresh.await,
+    }
+}
+
 #[async_trait]
 impl Provider for MultiProvider {
     async fn prewarm(&self, tools: &[ToolDefinition], system_static: &str) {
@@ -2641,10 +2666,10 @@ impl Provider for MultiProvider {
                 }
             },
             async {
-                match openai {
-                    Some(provider) => provider.prefetch_models().await,
-                    None => Ok(()),
-                }
+                prefetch_openai_or_web_catalog(openai, async {
+                    chatgpt_web::refresh_models().await.map(|_| ())
+                })
+                .await
             },
             async {
                 match openrouter {
