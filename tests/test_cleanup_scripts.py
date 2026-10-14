@@ -15,7 +15,8 @@ class CleanupScriptTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="jcode-cleanup-")
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        # resolve(): clean_target.sh prints the canonical path (macOS /var -> /private/var).
+        self.root = Path(self.temp.name).resolve()
         self.target = self.root / "cache space" / "target"
         self.target.mkdir(parents=True)
         self.sibling = self.root / "cache"
