@@ -407,6 +407,19 @@ Run on all 10 P30-fixed branches to verify each one has a real Cargo.lock diff (
 
 **Diff sizes are consistent with the scope:** 3 (or 3 + 3 transitive) lockfile changes for a clean P30 fix. Larger diffs (e.g. zz-merge-unk-PhenoJourneys at 139 lines) are due to the source main having an old lockfile that pulled in many transitive changes.
 
+### Note on `cleanup-and-release-2026-10-12` session
+
+The session doc at `docs/sessions/2026-10-12-cleanup-and-release/` is a **separate operator-managed WIP** with its own phasing plan (merge branches → compress worktrees → release). It is NOT part of the P30 cross-repo workstream and I have not been autonomously driving it. The session itself documents:
+
+- 5 surface areas: local jcode, remote node (kooshapari-desk), GitHub cloud (12 open PRs + 20 open issues), GitHub cloud (KCode fork, 3 open PRs), release pipeline
+- 9 phases estimated at 8-12 hours across 1-2 days
+- Explicit coordination with active panes (w8:pT, w8:p18, w7:p1E, etc.)
+- Destructive ops gated on operator sign-off (`git push --force`, `git reset --hard`, `git clean -fd`, `git branch -D`, `gh repo delete`)
+
+I treat this session as **operator-only territory** — I do not touch worktrees, branches, or panes flagged in the session's collision check. The 33 jcode master doc commits accumulated this cleanup-arc are pending operator push, which is the natural handoff to the release session.
+
+If operator wants me to drive any phase of the cleanup-and-release work, that needs explicit go-ahead per the session's phase plan.
+
 ---
 
 tx-agent: jcode
