@@ -943,3 +943,36 @@ fn model_routes_reconciles_alias_availability_by_canonical_request_id() {
         "exact-ID deduplication is keep-first and must retain the first row's availability"
     );
 }
+
+#[test]
+fn antigravity_context_window_resolves_argon_default_and_catalog_fallback() {
+    let provider = AntigravityProvider {
+        client: reqwest::Client::new(),
+        model: Arc::new(RwLock::new(DEFAULT_MODEL.to_string())),
+        fetched_catalog: Arc::new(RwLock::new(vec![CatalogModel {
+            id: "chat_20706".to_string(),
+            display_name: None,
+            reset_time: None,
+            tag_title: None,
+            model_provider: None,
+            max_tokens: Some(16_384),
+            max_output_tokens: None,
+            recommended: false,
+            available: true,
+            remaining_fraction_milli: Some(1000),
+        }])),
+        backend_default_model: Arc::new(RwLock::new(Some("gemini-4-argon".to_string()))),
+    };
+
+    assert_eq!(
+        provider.resolve_model_for_request("default"),
+        "gemini-4-argon-medium"
+    );
+    assert_eq!(provider.context_window(), 1_000_000);
+    provider.set_model("gemini-4-argon").unwrap();
+    assert_eq!(provider.context_window(), 1_000_000);
+    provider.set_model("gemini-4-argon-high").unwrap();
+    assert_eq!(provider.context_window(), 1_000_000);
+    provider.set_model("chat_20706").unwrap();
+    assert_eq!(provider.context_window(), 16_384);
+}

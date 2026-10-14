@@ -196,7 +196,7 @@ impl AntigravityProvider {
             .map(|id| id.trim().to_string())
             .filter(|id| !id.is_empty() && id != DEFAULT_MODEL)
         {
-            return backend_default;
+            return remap_unsupported_model(&backend_default).to_string();
         }
 
         // No backend-advertised default: pick a usable catalog model. Prefer a
@@ -212,14 +212,14 @@ impl AntigravityProvider {
                     && model.id.trim() != DEFAULT_MODEL
                     && model.id.starts_with("gemini-")
             })
-            .map(|model| model.id.clone())
+            .map(|model| remap_unsupported_model(model.id.trim()).to_string())
         {
             return gemini_model;
         }
         if let Some(catalog_model) = catalog
             .iter()
             .find(|model| model.available && model.id.trim() != DEFAULT_MODEL)
-            .map(|model| model.id.clone())
+            .map(|model| remap_unsupported_model(model.id.trim()).to_string())
         {
             return catalog_model;
         }
@@ -937,6 +937,29 @@ impl Provider for AntigravityProvider {
         }
 
         Ok(())
+    }
+
+    fn context_window(&self) -> usize {
+        let raw_model = self.model();
+        let resolved = self.resolve_model_for_request(&raw_model);
+        if let Some(limit) = jcode_base::provider::context_limit_for_model_with_provider(
+            &resolved,
+            Some(self.name()),
+        ) {
+            return limit;
+        }
+        let raw_trimmed = raw_model.trim();
+        if let Some(limit) = self
+            .fetched_catalog()
+            .into_iter()
+            .find(|entry| entry.id.trim() == resolved || entry.id.trim() == raw_trimmed)
+            .and_then(|entry| entry.max_tokens)
+            .and_then(|tokens| usize::try_from(tokens).ok())
+            .filter(|tokens| *tokens > 0)
+        {
+            return limit;
+        }
+        jcode_provider_core::DEFAULT_CONTEXT_LIMIT
     }
 
     fn supports_compaction(&self) -> bool {
