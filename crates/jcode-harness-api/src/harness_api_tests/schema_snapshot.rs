@@ -336,10 +336,10 @@ fn enum_variant_fields(file: &str, enum_name: &str) -> Vec<(String, Vec<String>)
         };
         if rest.starts_with(' ') {
             // A field line inside the variant currently being collected.
-            if let Some((_, fields)) = out.last_mut() {
-                if let Some(name) = field_name(rest) {
-                    fields.push(name);
-                }
+            if let Some((_, fields)) = out.last_mut()
+                && let Some(name) = field_name(rest)
+            {
+                fields.push(name);
             }
             continue;
         }

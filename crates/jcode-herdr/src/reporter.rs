@@ -464,9 +464,8 @@ mod tests {
         unsafe { std::env::remove_var("HERDR_ENV") };
         let reporter = HerdrReporter::new("test-agent");
         assert!(!reporter.is_active());
-        match saved {
-            Some(v) => unsafe { std::env::set_var("HERDR_ENV", v) },
-            None => {}
+        if let Some(v) = saved {
+            unsafe { std::env::set_var("HERDR_ENV", v) };
         }
     }
 
