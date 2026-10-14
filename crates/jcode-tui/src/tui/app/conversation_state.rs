@@ -422,6 +422,25 @@ impl App {
         self.status_notice = Some((text.into(), Instant::now()));
     }
 
+    /// Drop a status notice whose display window has passed and report whether
+    /// that changed the screen.
+    ///
+    /// The renderer already hides expired notices, but nothing else asks for a
+    /// frame at that moment. A freshly reloaded client counts as deep idle (no
+    /// stream activity, no keypress yet), so periodic redraws are skipped and
+    /// the last painted notice, e.g. "Waiting for reload handoff...", stayed on
+    /// screen until the user pressed a key.
+    pub(super) fn retire_expired_status_notice(&mut self) -> bool {
+        let expired = self
+            .status_notice
+            .as_ref()
+            .is_some_and(|(_, at)| at.elapsed() > STATUS_NOTICE_TTL);
+        if expired {
+            self.status_notice = None;
+        }
+        expired
+    }
+
     /// Stash a persistent startup notice card and show it immediately.
     ///
     /// The card is also re-applied once the remote History bootstrap clears the

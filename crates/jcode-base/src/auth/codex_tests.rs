@@ -396,7 +396,7 @@ fn load_credentials_reads_legacy_oauth_without_changing_external_permissions() {
 }
 
 #[test]
-fn load_auth_file_renames_existing_labels_to_animal_scheme() {
+fn load_auth_file_preserves_existing_named_labels() {
     let _lock = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().unwrap();
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
@@ -429,7 +429,7 @@ fn load_auth_file_renames_existing_labels_to_animal_scheme() {
             .iter()
             .map(|account| account.label.as_str())
             .collect::<Vec<_>>(),
-        vec!["openai-otter", "openai-fox"]
+        vec!["personal", "work"]
     );
-    assert_eq!(auth.active_openai_account.as_deref(), Some("openai-fox"));
+    assert_eq!(auth.active_openai_account.as_deref(), Some("work"));
 }

@@ -51,6 +51,7 @@ const LEDGER: &[(&str, Disposition)] = &[
     // Create/attach session bootstrap requests state through the API bridge.
     ("GetState", Covered),
     ("InputShell", ClientInternal),
+    ("InvalidateAnthropicUsage", Covered),
     ("Message", Covered),
     ("NotifyAuthChanged", Covered),
     ("RefreshModels", ClientInternal),
@@ -62,6 +63,7 @@ const LEDGER: &[(&str, Disposition)] = &[
     ("RewindUndo", Covered),
     ("RunSubagent", ClientInternal),
     ("SetCompactionMode", ClientInternal),
+    ("SetAgentModel", Covered),
     ("SetFeature", ClientInternal),
     ("SetModel", Covered),
     ("SetPremiumMode", ClientInternal),
@@ -78,6 +80,7 @@ const LEDGER: &[(&str, Disposition)] = &[
     ("SwitchAnthropicAccount", ClientInternal),
     ("SwitchOpenAiAccount", ClientInternal),
     ("InvalidateOpenAiUsage", Covered),
+    ("InvalidateAnthropicUsage", Covered),
     ("Transcript", ClientInternal),
     ("Transfer", ClientInternal),
     ("TriggerMemoryExtraction", ClientInternal),
