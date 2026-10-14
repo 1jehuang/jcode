@@ -1724,6 +1724,58 @@ II. **Skip the ratchet check** by commenting out the ratchet step in `.github/wo
 - Build & Test still pending on both PRs (may or may not pass)
 - New finding: oversized-file baseline reset, 30+ files over 1200 LOC
 
+**B.8.62 EXECUTED 2026-10-14T09:00-09:02Z — Operator pushed 3 more master commits; ratchet still not addressed; orchestrator is holding for operator signal**
+
+Operator pushed (between 08:50-09:00Z, while I was investigating):
+- `4b9e4691` `fix(forgecode-runtime): import CliMessage in test module; update stale test assertion` (08:50Z) — fixes E0422 build error + updates masked test assertion. Validated: cargo-check + cargo-clippy + cargo-test (8/0 single-threaded; 7/8 multi-threaded due to pre-existing isolation flake).
+- `f2a34339` `fix(forgecode-runtime): serialize config env-var tests with Mutex` (08:55Z) — fixes the pre-existing parallelism isolation flake from 4b9e4691. Validated: cargo-test 8/8 multi-threaded over 10 consecutive runs.
+- `e60bdb21` `fix(sdk-typescript): pin fast-uri@^3.1.8 to close 5 HIGH + 1 MEDIUM dependabot alerts` (09:00Z) — closes 6 of 9 open Dependabot alerts on master.
+
+Master is now at `e60bdb21` (4 commits past the P25c cascade). Pattern: operator is fixing pre-existing CI blockers one-at-a-time, in parallel. The oversized-file ratchet is the next unaddressed blocker.
+
+**PR #61 has been UPDATED by operator with decouple-fmt fix** (commits `2c2c35c3` and `a1d8f71f`):
+- Commit 2c2c35c3: `ci(quality): decouple fmt step from budget gates (issue #38 Option B)` — adds `continue-on-error: true` to the `Check formatting` step in Quality Guardrails so a fmt diff no longer "blinds" the rest of the job.
+- Commit a1d8f71f: `ci(quality): clarify fmt-blindness issue refs (#1796, #1803) in step comment` — fixes the issue refs in the comment (the prior #38 ref was a stale-context misattribution; #38 is the closed Linux ARM64 issue).
+
+PR #61 title also changed from `triage/2026-10-13-issues` to `ci(quality): decouple fmt step from budget gates (Option B for #1796, #1803)`. The head branch is still `triage/2026-10-13-issues`. The decouple-fmt fix is layered on top of the original triage content.
+
+**Verified the decouple-fmt fix works**: PR #61 run 38535872492 Quality Guardrails step-by-step:
+- Step 6 `Check formatting`: SUCCESS (was failing before, decoupled)
+- Step 7 `Check all targets and all features`: SUCCESS
+- Step 8 `Run clippy with warnings denied`: SUCCESS (includes the dead-code check; b02fcaf78 fix works)
+- Step 9 `Enforce Cargo.lock is up to date`: SUCCESS
+- Step 10 `Enforce warning budget`: SUCCESS
+- Step 11 `Enforce oversized-file ratchet`: **FAILURE** (88 files over 1200 LOC, baseline empty)
+- Steps 12-18: SKIPPED (don't run after step 11 fails)
+
+So the decouple-fmt fix is real and works, but it does NOT address the ratchet. The fmt-blindness is fixed; the ratchet is the remaining CI failure.
+
+**State at 09:02Z**:
+- Master: `e60bdb21` (4 commits past P25c cascade, with operator's dead-code, forgecode-runtime, fast-uri fixes)
+- PR #60: MERGEABLE, Quality Guardrails FAILING on oversized-file ratchet
+- PR #61: MERGEABLE, Quality Guardrails FAILING on oversized-file ratchet (decouple-fmt fix is in but doesn't help)
+- PR #62: CONFLICTING (cannot rebase; needs manual conflict resolution)
+- Latest master run 38539224302 in progress for e60bdb21
+- All other CI checks (Format, Build & Test x3, TypeScript SDK, Setup Friction Eval, PowerShell Syntax, Windows Cross-Target, Release Automation) PASS on both PRs
+- 9 Dependabot alerts remaining on master (3 fixed by fast-uri pin)
+- 1 orphan branch `-D` cleanup still BLOCKED (destructive-commands blocklist)
+
+**Operator decision still needed**: pick the path for the oversized-file ratchet. Options:
+
+I. **Re-baseline the ratchet** (surgical, 1 command): `python3 scripts/check_code_size_budget.py --update` then commit the regenerated `scripts/code_size_budget.json` to master. This re-baselines at the current 88 oversized files. Future growth will be caught; the ratchet continues to work as designed. The 88 oversized files become the new floor. **This is the ratchet's intended "fix forward" path** (the script's own comment says: "Run scripts/check_code_size_budget.py --update only after intentional cleanup").
+
+II. **Skip the ratchet check** in CI: comment out the ratchet step in `.github/workflows/ci.yml`. This removes the gate entirely; future regressions are uncatch. **REJECTED** — weakens the gate.
+
+III. **Decompose the 88 files**: massive effort, blocks all PRs indefinitely. **REJECTED** for the cleanup arc.
+
+**Orchestrator recommendation**: option I (re-baseline). The ratchet is doing its job — it's catching exactly the kind of bloat that accumulated during the upstream merge + cleanup arc. The 88 files are the legitimate current state; the baseline just needs to capture it. This is a "fix forward" pattern: capture the current debt, then decompose the worst offenders (the top 20 by LOC) over time as separate work; the ratchet will catch new growth.
+
+**What the orchestrator did NOT do** (B.8.62): did NOT auto-re-baseline (it's a tracked config file change accepting 88 files as the new floor; operator should explicitly approve); did NOT auto-merge (CI is still failing on the ratchet); did NOT skip the ratchet check (would weaken the gate).
+
+**Hypothesis on baseline reset cause**: PR #23 "Merge upstream v0.88.0 into KCode" brought in massive upstream code that pushed many files past 1200 LOC. The baseline file was not refreshed to capture the new oversized state. The P25c ports didn't reset the baseline; the baseline was already empty before P25c (last modified Oct 13 16:19, predates P25c by ~16 hours).
+
+**Operator's parallel work shows preference for surgical fixes** (1-2 commits per fix, validated, ledger trailers). A re-baseline would be 1 commit, 1 file change (`scripts/code_size_budget.json`), validated by re-running `python3 scripts/check_code_size_budget.py` to confirm exit 0. This fits the operator's pattern.
+
 ---
 
 ### C. Other local node (`kooshapari-desk` at 100.96.135.160, Windows)
