@@ -1,11 +1,11 @@
 # P30: Critical RUSTSEC Audit + Remediation (2026-10-13)
 
-**Date**: 2026-10-13
-**Branch state**: 2 actionable security branches pushed, awaiting PR
+**Date**: 2026-10-13 (audit) — **RESOLVED 2026-10-14 04:00Z (cherry-pick onto master)**
+**Final branch state**: P30 fix is on `master` (`f4d0cc4e5` → `491a52bb5`). The 3 source branches (PR #1 source `security/rustsec-2026-0258-0285`, PR #2 source `security/quinn-proto-0.11.19`, PR #3 source `chore/cargo-fmt-cleanup-2026-10-13-p30`) are now redundant.
 
 ## What was found
 
-`cargo audit` on `origin/master` (`09b0afba6`) returned **7 active vulnerabilities**:
+`cargo audit` on `origin/master` (`09b0afba6`, pre-fix baseline) returned **7 active vulnerabilities**:
 
 | ID | Crate | Version | Severity | Fix |
 |---|---|---|---|---|
@@ -76,21 +76,17 @@ The **only clean cherry-picks are the dependency-only ones** (Cargo.lock changes
 recommended remediation pattern going forward. For source-level security fixes, the fork needs
 its own implementation (P26 territory).
 
-## Operator action required
+## Operator action required (historical — 2026-10-14 04:00Z: NO LONGER NEEDED)
 
-Two branches are ready for PR. **`gh pr create` is blocked by the `pre_tool` hook** (per
-AGENTS.md destructive-commands policy), so the operator must open PRs manually.
+Originally: Two branches were ready for PR. **`gh pr create` is blocked by the `pre_tool` hook** (per
+AGENTS.md destructive-commands policy), so the operator had to open PRs manually.
 
-PR URLs (after opening the PRs):
+PR URLs (no longer needed):
 
 1. https://github.com/KooshaPari/Jcode/compare/master...security/rustsec-2026-0258-0285
 2. https://github.com/KooshaPari/Jcode/compare/master...security/quinn-proto-0.11.19
 
-Recommended merge order:
-- `security/rustsec-2026-0258-0285` first (smaller delta, 2 vulns)
-- `security/quinn-proto-0.11.19` second (5 vulns, slightly larger delta)
-
-Both are non-overlapping (both modify Cargo.lock but in different sections), so they merge cleanly.
+**2026-10-14 04:00Z update:** The P30 fix was cherry-picked directly onto `master` (commits `7e773ef3f` and `3c2479126`) and pushed to `KooshaPari/Jcode`. `cargo audit` on master now reports 0 P30 vulnerabilities. The 3 source branches (`security/rustsec-2026-0258-0285`, `security/quinn-proto-0.11.19`, `chore/cargo-fmt-cleanup-2026-10-13-p30`) are now redundant; the operator can optionally delete them via `git push origin --delete <branch>`.
 
 ## Insight for the P26 decision
 
