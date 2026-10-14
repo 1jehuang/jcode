@@ -868,8 +868,8 @@ pub fn render_swarm_strip(
 /// agent per row, capped to `max_rows` agent lines with a `+N more` overflow
 /// marker on the last row.
 ///
-/// Each row is `<status glyph> <icon> · <task>` with a right-aligned todo
-/// counter when present. The first row carries the leading "🐝" swarm marker;
+/// Each row is `<icon> <status glyph> · <task>` with a right-aligned todo
+/// counter when present. The worker icon occupies the left-edge slot;
 /// the header tally (`M/N active`) and the enter hint live on the first row's
 /// right side, mirroring the horizontal strip.
 ///
@@ -880,11 +880,11 @@ pub fn render_swarm_strip(
 ///   bounded by `max_height` total lines.
 ///
 /// ```text
-/// 🐝 ⠙ 🦊 · wire the auth flow 3/9            2/3 active · alt+n controls
-///  ▸ ⠹ 🐝 bee · audit the webhook path
+/// 🦊 ⠙ · wire the auth flow 3/9               2/3 active · alt+n controls
+/// 🐝 ▸ ⠹ · audit the webhook path
 ///    │ checking the signing secret path
 ///    │ ▸ verify replay protection
-///    ✓ 🐅 · support/contact page
+/// 🐅 ✓ · support/contact page
 ///    alt+↑/↓ select · alt+o open · alt+shift+p prompt · esc exit
 /// ```
 #[allow(clippy::too_many_arguments)]
@@ -934,7 +934,6 @@ pub fn render_swarm_strip_vertical(
 
     const LEAD: &str = "🐝 ";
     const INDENT: &str = "   ";
-    let lead_w = disp_w(LEAD);
 
     let mut out: Vec<Line<'static>> = Vec::new();
     // Where the selected agent's row landed in `out` (focused accordion).
@@ -946,15 +945,19 @@ pub fn render_swarm_strip_vertical(
         let glyph = status_glyph(&m.status, spinner_frame);
         let todo = m.todo.map(|(done, total)| format!("{done}/{total}"));
 
-        let mut spans: Vec<Span<'static>> = Vec::new();
-        if first {
-            spans.push(Span::styled(
-                LEAD.to_string(),
-                Style::default().fg(rgb(255, 200, 100)),
-            ));
-        } else {
-            spans.push(Span::raw(INDENT));
-        }
+        let icon = m.icon.as_deref().filter(|icon| !icon.is_empty());
+        let row_lead = icon.map(|icon| format!("{icon} ")).unwrap_or_else(|| {
+            if first {
+                LEAD.to_string()
+            } else {
+                INDENT.to_string()
+            }
+        });
+        let lead_w = disp_w(&row_lead);
+        let mut spans: Vec<Span<'static>> = vec![Span::styled(
+            row_lead,
+            Style::default().fg(rgb(255, 200, 100)),
+        )];
 
         // Right tail only on the first row; degrade by dropping hint first.
         let (row_tail_w, show_hint) = if first {
@@ -1019,19 +1022,23 @@ pub fn render_swarm_strip_vertical(
         if is_sel && focused {
             style = style.add_modifier(Modifier::BOLD);
         }
-        // The assigned animal icon already identifies the worker. Keep compact
-        // strip rows emoji-only so names such as "sauropod" do not consume the
-        // task-label space; the expanded chat card carries the full identity.
-        let ident = match m.icon.as_deref().filter(|i| !i.is_empty()) {
-            Some(icon) => icon.to_string(),
-            None => m.label.clone(),
+        // The worker icon occupies the left-edge slot before the spinner.
+        // Only workers without an icon need a textual identity in the body.
+        let ident = if icon.is_some() {
+            String::new()
+        } else {
+            m.label.clone()
         };
         let marker = if focused {
             if is_sel { "▸ " } else { "  " }
         } else {
             ""
         };
-        let head = format!("{marker}{glyph} {ident}");
+        let head = if ident.is_empty() {
+            format!("{marker}{glyph}")
+        } else {
+            format!("{marker}{glyph} {ident}")
+        };
         let head_w = disp_w(&head);
         let todo_w = todo.as_ref().map(|t| disp_w(t) + 1).unwrap_or(0);
         let mut used = head_w;
@@ -2210,8 +2217,8 @@ mod tests {
         let row0 = plain_line(&lines[0]);
         let row1 = plain_line(&lines[1]);
         assert!(
-            row0.contains("🐝"),
-            "first row carries the swarm marker: {row0:?}"
+            row0.starts_with(&format!("🦊 {}", status_glyph("running", 0))),
+            "worker icon replaces the left-edge swarm marker before the spinner: {row0:?}"
         );
         assert!(row0.contains("🦊"), "icon replaces the name: {row0:?}");
         assert!(
@@ -2443,7 +2450,7 @@ mod tests {
     #[test]
     fn vertical_strip_unfocused_keeps_live_card_details_in_chat() {
         let mut worker = member("reviewer", "running", None, &[]);
-        worker.icon = Some("🐝".to_string());
+        worker.icon = Some("🦌".to_string());
         worker.task = Some("review authentication changes".to_string());
         worker.todo = Some((2, 4));
         worker.todo_items = vec![GalleryTodo {
@@ -2465,7 +2472,12 @@ mod tests {
         );
         let all = lines.iter().map(plain_line).collect::<Vec<_>>().join("\n");
         assert_eq!(lines.len(), 1, "unfocused strip stays compact: {all}");
-        assert!(all.contains("🐝"), "assigned icon missing: {all}");
+        assert!(
+            all.starts_with(&format!("🦌 {}", status_glyph("running", 2))),
+            "worker icon must occupy the left edge before the spinner: {all}"
+        );
+        assert_eq!(all.matches("🦌").count(), 1, "duplicate icon: {all}");
+        assert!(!all.contains("🐝"), "generic swarm icon remains: {all}");
         assert!(
             !all.contains("reviewer"),
             "compact strip should not repeat the animal name: {all}"
