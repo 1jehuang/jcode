@@ -38,11 +38,12 @@
 
 ---
 
-## P11 — Disk pressure URGENT (14 GB free, 99% used) [verified 2026-10-14 04:14Z]
+## P11 — Disk pressure URGENT (17 GB free, 99% used) [verified 2026-10-14 04:16Z]
 
-### Current state (verified 2026-10-14 04:14Z)
+### Current state (verified 2026-10-14 04:16Z)
 
-- Filesystem `/dev/disk3s1s1` (926 GB total, 855 GB used, **14 GB free = 1.5%**) — trending up from 12 GB earlier
+- Filesystem `/dev/disk3s1s1` (926 GB total, 852 GB used, **17 GB free = 1.8%**) — up from 14 GB after cleanup-arc-p30 worktree removal
+- Stale worktree `/private/tmp/jcode-cleanup-arc-p30` (2.5 GB) **REMOVED 2026-10-14 04:16Z** (clean working tree, no stashes, no untracked files; commits preserved in master history)
 - Jcode `/target` now **33 GB** (was 29 GB at doc time, grew due to recent cargo check + cargo audit runs)
 
 ### Exact cleanup targets (ranked by size, low risk first)
