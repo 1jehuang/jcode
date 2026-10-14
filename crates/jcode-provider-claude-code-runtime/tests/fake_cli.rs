@@ -90,8 +90,17 @@ async fn run_turn(
     messages: &[Message],
     answer: Option<ToolAnswer<'_>>,
 ) -> Vec<StreamEvent> {
+    run_turn_with_system(provider, SYSTEM, messages, answer).await
+}
+
+async fn run_turn_with_system(
+    provider: &ClaudeCodeProvider,
+    system: &str,
+    messages: &[Message],
+    answer: Option<ToolAnswer<'_>>,
+) -> Vec<StreamEvent> {
     let mut stream = provider
-        .complete(messages, &tools(), SYSTEM, None)
+        .complete(messages, &tools(), system, None)
         .await
         .unwrap();
     let mut events = Vec::new();
@@ -585,6 +594,50 @@ async fn model_switch_uses_set_model_and_instance_switch_restarts() {
     assert_eq!(
         provider.resolved_account_label(AccountProviderKind::ClaudeCode),
         Some("personal".into())
+    );
+    provider.shutdown().await;
+}
+
+#[tokio::test]
+async fn supplied_system_prompt_reaches_claude_and_a_change_restarts_with_resume() {
+    let fake = Fake::new();
+    let provider = fake.provider();
+    let french = "Answer in French.";
+    let events = run_turn_with_system(&provider, french, &[Message::user("system")], None).await;
+    let reply = text(&events);
+    assert!(
+        reply.starts_with("system:You are running inside jcode"),
+        "{reply}"
+    );
+    assert!(reply.ends_with("\n\nAnswer in French."), "{reply}");
+
+    run_turn_with_system(&provider, french, &[Message::user("text")], None).await;
+    assert_eq!(
+        fake.launches().len(),
+        1,
+        "same instructions reuse the child"
+    );
+
+    let events = run_turn_with_system(
+        &provider,
+        "Answer in German.",
+        &[Message::user("system")],
+        None,
+    )
+    .await;
+    assert!(
+        text(&events).ends_with("\n\nAnswer in German."),
+        "{events:?}"
+    );
+    let launches = fake.launches();
+    assert_eq!(launches.len(), 2, "new instructions restart the child");
+    assert!(
+        launches[1]["argv"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a.as_str().unwrap().starts_with("--resume=")),
+        "the restarted child keeps the Claude session"
     );
     provider.shutdown().await;
 }

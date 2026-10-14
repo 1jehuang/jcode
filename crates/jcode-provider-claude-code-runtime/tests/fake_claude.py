@@ -14,6 +14,7 @@ first word of each user prompt:
   crash       -> exit(3) before answering (only once per FAKE_CLAUDE_STATE dir)
   slow        -> park until interrupted
   session     -> reply with the argv session flags it was started with
+  system      -> reply with the appendSystemPrompt from `initialize`
 
 Every invocation's argv is appended to $FAKE_CLAUDE_LOG.
 """
@@ -123,6 +124,8 @@ def handle_host_control(msg):
     sub = req.get("subtype")
     rid = msg["request_id"]
     if sub == "initialize":
+        global append_system_prompt
+        append_system_prompt = req.get("appendSystemPrompt", "")
         if req.get("sdkMcpServers") and expose_mcp:
             # The real CLI handshakes with the SDK server before answering.
             r = control_request({"subtype": "mcp_message", "server_name": "jcode",
@@ -162,6 +165,7 @@ def handle_host_control(msg):
 
 
 mcp_tools = []
+append_system_prompt = ""
 
 
 def assistant_text(text, msg_id=None):
@@ -292,6 +296,9 @@ def turn(msg):
     elif cmd == "echo-prompt":
         # Reply with the full text the host sent (checks transcript seeding).
         assistant_text(json.dumps(last_prompt))
+        result(user_uuid)
+    elif cmd == "system":
+        assistant_text("system:" + append_system_prompt)
         result(user_uuid)
     elif cmd == "model":
         assistant_text("model:" + model)
