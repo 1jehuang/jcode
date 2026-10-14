@@ -124,6 +124,8 @@ pub struct BridgeState {
     pending_soft_interrupts_at_done: Option<u32>,
     /// Whether an unannounced transport loss should crash the attached session.
     pub crash_on_disconnect: bool,
+    /// Client-side inline response renderer, negotiated in Hello.
+    pub supports_user_response: bool,
     /// Session id assigned by the daemon for this connection.
     pub session_id: Option<String>,
     /// Legacy id of the in-flight `message` request, so `done` maps to
@@ -598,6 +600,7 @@ impl BridgeState {
                     "type": "subscribe",
                     "id": id,
                     "supports_pdf_panels": true,
+                    "supports_user_response": self.supports_user_response,
                 });
                 if self.crash_on_disconnect {
                     subscribe["crash_on_disconnect"] = json!(true);
@@ -3779,3 +3782,7 @@ impl BridgeState {
 #[cfg(test)]
 #[path = "translate_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "user_response_capability_tests.rs"]
+mod user_response_capability_tests;

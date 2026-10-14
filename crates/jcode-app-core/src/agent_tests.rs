@@ -35,6 +35,42 @@ struct NativeAutoCompactionProvider;
 
 struct BoundSavedAccountProvider;
 
+#[tokio::test]
+async fn user_response_capability_updates_locked_tool_surface() {
+    let mut agent = Agent::new(Arc::new(BoundSavedAccountProvider), Registry::empty());
+    assert!(
+        !agent
+            .tool_definitions()
+            .await
+            .iter()
+            .any(|d| d.name == "user_response")
+    );
+    assert!(agent.locked_tools.is_some());
+    agent.set_desktop_response_capability(true).await;
+    assert!(agent.locked_tools.is_none());
+    assert!(
+        agent
+            .tool_definitions()
+            .await
+            .iter()
+            .any(|d| d.name == "user_response")
+    );
+    agent.set_desktop_response_capability(true).await;
+    assert!(
+        agent.locked_tools.is_some(),
+        "unchanged capability preserves the cache"
+    );
+    agent.set_desktop_response_capability(false).await;
+    assert!(agent.locked_tools.is_none());
+    assert!(
+        !agent
+            .tool_definitions()
+            .await
+            .iter()
+            .any(|d| d.name == "user_response")
+    );
+}
+
 #[async_trait]
 impl Provider for BoundSavedAccountProvider {
     async fn complete(

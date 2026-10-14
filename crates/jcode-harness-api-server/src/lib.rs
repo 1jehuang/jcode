@@ -375,6 +375,7 @@ where
     let mut state =
         translate::BridgeState::with_crash_on_disconnect(client_name.starts_with("jcode-desktop-"));
     state.session_tools_supported = session_tools_supported;
+    state.supports_user_response = hello["supports_user_response"].as_bool().unwrap_or(false);
     state.runtime_commands_supported = runtime_commands_supported;
     state.soft_interrupt_ids_supported = soft_interrupt_ids_supported;
 

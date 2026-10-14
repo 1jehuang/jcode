@@ -152,7 +152,7 @@ export interface ToolConfiguration {
 }
 
 export type ApiRequest =
-  | { req: "hello"; min_version: number; max_version: number; client: string }
+  | { req: "hello"; min_version: number; max_version: number; client: string; supports_user_response?: boolean }
   | { req: "list_sessions"; include_archived?: boolean; limit?: number }
   | { req: "archive_session"; session_id: string }
   | { req: "restore_session"; session_id: string }

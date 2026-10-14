@@ -169,6 +169,9 @@ pub enum Request {
         /// Opt in to PDF panel payloads. Older clients only accept Markdown.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         supports_pdf_panels: bool,
+        /// Desktop can render user_response tool calls as inline answers.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        supports_user_response: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         working_dir: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
