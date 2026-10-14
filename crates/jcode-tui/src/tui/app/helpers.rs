@@ -576,7 +576,8 @@ pub(super) fn inferred_reasoning_efforts(
 /// Mirrors the OpenRouter runtime's `available_efforts()` for a named profile
 /// (explicit per-model and per-profile settings first, then the profile id,
 /// then model-family heuristics), so the TUI never offers a level that
-/// `set_reasoning_effort` rejects.
+/// `set_reasoning_effort` rejects. It also hides conifer's levels when the
+/// config disables reasoning, which the runtime does not check.
 pub(super) fn named_profile_reasoning_efforts(
     config: &crate::config::Config,
     provider_name: Option<&str>,
@@ -621,7 +622,10 @@ pub(super) fn named_profile_reasoning_efforts(
     if openai_style {
         return Some(jcode_provider_core::OPENAI_SELECTABLE_EFFORTS.to_vec());
     }
-    if unified {
+    // An explicit `reasoning = false` or `supports_reasoning_effort = false`
+    // also turns off conifer's unified levels.
+    if unified && model_reasoning != Some(false) && profile.supports_reasoning_effort != Some(false)
+    {
         return Some(jcode_provider_core::OPENROUTER_SELECTABLE_EFFORTS.to_vec());
     }
     Some(Vec::new())

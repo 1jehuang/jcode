@@ -309,6 +309,34 @@ fn named_profile_effort_off_still_honors_model_that_enables_it() {
 }
 
 #[test]
+fn conifer_profile_honors_both_reasoning_disables() {
+    // Greptile #1689: conifer's unified levels ignored explicit disables.
+    let levels = |profile| {
+        let mut config = crate::config::Config::default();
+        config.providers.insert("conifer".into(), profile);
+        named_profile_reasoning_efforts(&config, Some("conifer"), Some("grok-4.6")).unwrap()
+    };
+    assert!(
+        levels(crate::config::NamedProviderConfig {
+            models: vec![named_model("grok-4.6", Some(false))],
+            ..Default::default()
+        })
+        .is_empty()
+    );
+    assert!(
+        levels(crate::config::NamedProviderConfig {
+            supports_reasoning_effort: Some(false),
+            ..Default::default()
+        })
+        .is_empty()
+    );
+    assert_eq!(
+        levels(crate::config::NamedProviderConfig::default()),
+        jcode_provider_core::OPENROUTER_SELECTABLE_EFFORTS.to_vec()
+    );
+}
+
+#[test]
 fn swarm_effort_display_labels_use_configured_root_and_preserve_modes() {
     for (level, title) in [
         ("none", "None"),
