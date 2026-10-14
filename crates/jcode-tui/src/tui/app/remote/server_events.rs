@@ -632,21 +632,6 @@ pub(in crate::tui::app) fn handle_server_event(
 
     let call_output_tokens_seen = remote.call_output_tokens_seen();
 
-    // Remember that this send already put model output on screen, so an
-    // overload failure after it is not answered with a full-turn resend.
-    // Reasoning only counts when it is displayed: hidden reasoning shows the
-    // user nothing, so a resend cannot duplicate anything on screen.
-    let shows_output = match &event {
-        ServerEvent::TextDelta { .. }
-        | ServerEvent::TextReplace { .. }
-        | ServerEvent::ToolStart { .. } => true,
-        ServerEvent::ReasoningDelta { .. } => crate::config::config().display.reasoning_enabled(),
-        _ => false,
-    };
-    if shows_output {
-        app.remote_turn_streamed_output = true;
-    }
-
     match event {
         ServerEvent::TextDelta { text } => {
             if let Some(thought_line) = App::extract_thought_line(&text) {
@@ -1052,8 +1037,6 @@ pub(in crate::tui::app) fn handle_server_event(
                 attempt, max
             ));
             app.rollback_streaming_attempt();
-            // The partial output is gone, so the retried attempt starts clean.
-            app.remote_turn_streamed_output = false;
             remote.clear_pending();
             app.connection_phase_started = Some(Instant::now());
             app.status = ProcessingStatus::Connecting(crate::message::ConnectionPhase::Retrying {
@@ -1496,19 +1479,6 @@ pub(in crate::tui::app) fn handle_server_event(
                     "Paused: provider connection did not recover",
                 );
                 app.offer_fallback_after_error_with_payload(&message, failed_fallback_payload);
-                return false;
-            }
-            // Provider overload (5xx, 529 "heavy usage, try again in a
-            // moment"): the provider answered, so this is not a connectivity
-            // problem, but the same request usually succeeds a little later.
-            // Hold the turn and resend it, also for turns the user typed,
-            // before any path below can fail it or stop auto-poke.
-            // A turn that already streamed output or ran tools is continued
-            // from the server's saved history instead of resent in full.
-            if !is_connectivity_error
-                && crate::tui::app::commands::is_provider_overload_error(&message)
-                && app.schedule_pending_remote_overload_retry(&message)
-            {
                 return false;
             }
             // Credential-failure circuit breaker: repeated auth failures mean

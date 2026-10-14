@@ -2,25 +2,7 @@ use super::Agent;
 use crate::logging;
 use crate::message::{Message, ToolDefinition};
 
-#[cfg(test)]
-#[path = "prompting_recovery_tests.rs"]
-mod recovery_tests;
-
 impl Agent {
-    /// Speculatively prewarm the provider while a newly created session is idle.
-    ///
-    /// This deliberately bypasses `tool_definitions`, whose cache lock is only
-    /// appropriate once an actual turn starts. Late MCP registration or user
-    /// customization can therefore still change the foreground tool snapshot;
-    /// the provider is responsible for discarding an incompatible warmup.
-    pub(crate) async fn prewarm_provider_idle(&self) {
-        let tools = self.tool_definitions_for_debug().await;
-        let split_prompt = self.build_system_prompt_split(None);
-        self.provider
-            .prewarm(&tools, &split_prompt.static_part)
-            .await;
-    }
-
     pub(crate) fn runtime_skills_snapshot(&self) -> serde_json::Value {
         let registry = self.current_skills_snapshot();
         let mut loaded = registry.list();
@@ -170,12 +152,10 @@ impl Agent {
         memory_prompt: Option<&str>,
     ) -> crate::prompt::SplitSystemPrompt {
         if let Some(ref override_prompt) = self.session.system_prompt {
-            let mut split = crate::prompt::SplitSystemPrompt {
+            return crate::prompt::SplitSystemPrompt {
                 static_part: override_prompt.clone(),
                 dynamic_part: String::new(),
             };
-            self.append_current_turn_system_reminder(&mut split);
-            return split;
         }
 
         let skills = self.current_skills_snapshot();
