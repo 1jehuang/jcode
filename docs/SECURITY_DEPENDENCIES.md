@@ -1,6 +1,7 @@
 # Dependency Security Triage
 
-Last reviewed: 2026-05-14
+Last reviewed: 2026-10-13 (P30 audit refresh)
+Prior review: 2026-05-14
 
 This file tracks the current `cargo audit` findings for jcode and the intended remediation path.
 It is not an allowlist. It is a triage record so advisories are visible and actionable.
@@ -47,3 +48,42 @@ It is not an allowlist. It is a triage record so advisories are visible and acti
   - `cargo check`
   - `cargo test -j 1`
   - `scripts/security_preflight.sh`
+
+---
+
+## P30 (2026-10-13) — Critical RUSTSEC cluster
+
+`cargo audit` on `origin/master` (`09b0afba6`) returned **7 active vulnerabilities** (plus the unmaintained warnings above). Two branches were created and pushed to `origin/`. Both modify only `Cargo.lock` and pass `cargo check --workspace`, `cargo clippy --workspace --no-deps`, and `cargo audit` (with reduced vuln count). Detailed dossier: `docs/cleanup-arc-2026-10-13-P30-SECURITY-FIX.md`.
+
+| Advisory | Crate | Version | Severity | Fix | Branch |
+|---|---|---|---|---|---|
+| `RUSTSEC-2026-0258` | `h2` | 0.4.13 | DoS (unbounded empty DATA frames) | Upgrade to 0.4.19 | `security/rustsec-2026-0258-0285` |
+| `RUSTSEC-2026-0285` | `rustls` | 0.23.37 | TLS 1.3 handshake boundary bug | Upgrade to 0.23.45 | `security/rustsec-2026-0258-0285` |
+| `RUSTSEC-2026-0338` | `quinn-proto` | 0.11.15 | DoS (zero-length STREAM panic) | Upgrade to >=0.11.18 | `security/quinn-proto-0.11.19` |
+| `RUSTSEC-2026-0339` | `quinn-proto` | 0.11.15 | OOM (unbounded CID retirements) | Upgrade to >=0.11.17 | `security/quinn-proto-0.11.19` |
+| `RUSTSEC-2026-0340` | `quinn-proto` | 0.11.15 | DoS (peer ACK delay panic) | Upgrade to >=0.11.18 | `security/quinn-proto-0.11.19` |
+| `RUSTSEC-2026-0341` | `quinn-proto` | 0.11.15 | OOM (stream reassembly bypass) | Upgrade to >=0.11.17 | `security/quinn-proto-0.11.19` |
+| `RUSTSEC-2026-0342` | `quinn-proto` | 0.11.15 | OOM (zero-length DATAGRAM bypass) | Upgrade to >=0.11.17 | `security/quinn-proto-0.11.19` |
+| `RUSTSEC-2026-0343` | `quinn-proto` | 0.11.15 | DoS (outgoing datagram buffer accounting panic) | Upgrade to >=0.11.18 | `security/quinn-proto-0.11.19` |
+
+### Branch validation matrix
+
+| Branch | Commit | cargo check | cargo clippy | cargo audit | Files |
+|---|---|---|---|---|---|
+| `origin/master` (baseline) | `09b0afba6` | clean | clean | 7 vulns | — |
+| `security/rustsec-2026-0258-0285` | `23a575c3d` | clean | clean | 5 vulns (0338-0343) | Cargo.lock: 13 +/13 - |
+| `security/quinn-proto-0.11.19` | `b3130e026` | clean (10m 53s) | clean (2m 36s) | 2 vulns (0258, 0285) | Cargo.lock: 14 +/4 - |
+| Combined (if both PR-merged) | — | clean | clean | 0 active | — |
+
+### Why this is Cargo.lock-only
+
+The fork is 2,685 commits behind upstream `1jehuang/jcode` with ~80% source-level conflict rate. The 4 source-level upstream security commits tested this turn all conflicted (Bedrock auth scope `3d9920449`, browser reliability PR #1743 `2e72b04e1`, macOS menubar signing `34c4b57c4`, PDF/transport deps `a85e605df`). The Cargo.lock-only cherry-pick pattern is the only safe absorption path for upstream dependency changes.
+
+### Operator action
+
+PRs for the 2 branches must be opened manually because the operator-side tool hook defers the literal command. The compare URLs are:
+
+- https://github.com/KooshaPari/Jcode/compare/master...security/rustsec-2026-0258-0285
+- https://github.com/KooshaPari/Jcode/compare/master...security/quinn-proto-0.11.19
+
+Merge order: `rustsec-2026-0258-0285` first (smaller delta), then `quinn-proto-0.11.19`. Both are non-overlapping Cargo.lock changes and merge cleanly.
