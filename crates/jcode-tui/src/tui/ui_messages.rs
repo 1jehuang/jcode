@@ -63,13 +63,39 @@ fn render_single_line_system_notice(
     let is_update_divergence_notice = msg.content.starts_with("Update diverged. Press ")
         || msg.content.starts_with("Local and upstream have diverged");
     let is_cold_cache_notice = msg.content.starts_with("🧊 Prompt cache went cold");
-    if !is_cold_cache_notice && !is_launch_hotkey_notice && !is_update_divergence_notice {
+    let is_status_notice = msg.title.as_deref() == Some("Connection")
+        || msg.content.starts_with("📡 Network appears offline")
+        || msg.content.starts_with("⚡ Server reload in progress - waiting for handoff")
+        || msg.content.starts_with("⚡ Connection lost - retrying")
+        || msg.content.starts_with("[auto] ")
+        || (!msg.content.contains('\n') && !content_has_markdown_formatting(&msg.content));
+    if !is_cold_cache_notice
+        && !is_launch_hotkey_notice
+        && !is_update_divergence_notice
+        && !is_status_notice
+    {
         return None;
     }
 
     let centered = markdown::center_code_blocks();
     let line_width = centered_wrap_width(width.saturating_sub(4), centered, 96);
-    let display_content = normalize_system_content_for_display(&msg.content);
+    // Summarize internal recovery directives only for display. The stored
+    // message and the model's instructions must retain their full semantics.
+    let content = if msg
+        .content
+        .starts_with("[auto] Your session was interrupted by a server reload")
+    {
+        "Server reloaded; resuming interrupted work."
+    } else if msg.content.starts_with("Reload complete - continuing") {
+        "Reload complete - continuing."
+    } else if msg.content.starts_with("📡 Network appears offline") {
+        "📡 Network appears offline - waiting to retry automatically."
+    } else if msg.content.starts_with("✓ Retrying continuation...") {
+        "✓ Retrying continuation..."
+    } else {
+        &msg.content
+    };
+    let display_content = normalize_system_content_for_display(content);
     let compact = display_content
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -460,6 +486,14 @@ pub(crate) fn render_system_message(
     width: u16,
     _diff_mode: crate::config::DiffDisplayMode,
 ) -> Vec<Line<'static>> {
+    if let Some(lines) = render_scheduled_session_message(msg, width) {
+        return lines;
+    }
+    // Routine status messages occupy one row, including connection notices.
+    // Authored multiline help and structured reports keep their full layout.
+    if let Some(lines) = render_single_line_system_notice(msg, width) {
+        return lines;
+    }
     if let Some(title) = msg.title.as_deref()
         && title == "Connection"
     {
@@ -472,16 +506,6 @@ pub(crate) fn render_system_message(
         || msg.content.starts_with("⚡ Connection lost - retrying")
     {
         return render_connection_system_message(msg, width);
-    }
-
-    // Compact notices are transient status summaries. Keep them scannable and
-    // prevent a narrow viewport from turning one notice into a paragraph.
-    if let Some(lines) = render_single_line_system_notice(msg, width) {
-        return lines;
-    }
-
-    if let Some(lines) = render_scheduled_session_message(msg, width) {
-        return lines;
     }
 
     let centered = markdown::center_code_blocks();

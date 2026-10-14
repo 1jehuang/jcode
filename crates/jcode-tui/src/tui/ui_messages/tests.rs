@@ -25,6 +25,38 @@ fn system_glyph_env_lock() -> std::sync::MutexGuard<'static, ()> {
 }
 
 #[test]
+fn transient_system_notices_are_single_line_without_changing_content() {
+    let notices = [
+        "[auto] Your session was interrupted by a server reload while a tool was running. The\ntool was aborted and results may be incomplete. Continue exactly where you left off.",
+        "Reload complete - continuing because a recovery directive was pending.",
+        "Stream read timeout: no data received for 180 seconds",
+        "📡 Network appears offline - waiting to retry automatically. listening for Linux\nnetlink changes via `ip monitor`; also verifying with reconnect probes",
+        "✓ Retrying continuation... (system message)",
+        "An ordinary status notice that should never wrap even in a narrow terminal.",
+        "[auto] Continue the task.\nKeep the todo up to date.",
+    ];
+    for content in notices {
+        let msg = DisplayMessage::system(content);
+        for width in [1, 10, 30, 80, 120] {
+            let lines = render_system_message(&msg, width, crate::config::DiffDisplayMode::Off);
+            assert_eq!(lines.len(), 1, "{content:?} at width {width}");
+            assert!(lines[0].width() <= width as usize);
+            assert!(!extract_line_text(&lines[0]).contains('\n'));
+        }
+        assert_eq!(
+            msg.content, content,
+            "display must not rewrite agent instructions"
+        );
+    }
+    let msg = DisplayMessage::system(notices[0]);
+    let lines = render_system_message(&msg, 80, crate::config::DiffDisplayMode::Off);
+    assert_eq!(
+        extract_line_text(&lines[0]).trim(),
+        "Server reloaded; resuming interrupted work."
+    );
+}
+
+#[test]
 fn render_system_message_forces_system_color_on_all_spans() {
     let msg = DisplayMessage::system("**Reload complete** - continuing.");
 
@@ -296,8 +328,8 @@ fn render_system_message_uses_width_stable_titles_on_kitty() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(plain.contains("reconnecting"));
-    assert!(!plain.contains("⚡ reconnecting"));
+    assert!(plain.contains("Connection lost - retrying"));
+    assert!(!plain.contains('⚡'));
 
     match prev_term_program {
         Some(value) => crate::env::set_var("TERM_PROGRAM", value),
@@ -1845,7 +1877,7 @@ fn render_system_message_uses_minimal_inline_style_for_reload_title() {
 }
 
 #[test]
-fn render_system_message_uses_connection_card_for_reconnect_status() {
+fn render_system_message_uses_one_line_for_reconnect_status() {
     let msg = DisplayMessage::system(
         "⚡ Connection lost - retrying (attempt 2, 7s) - connection reset by server · resume: jcode --resume koala",
     )
@@ -1858,13 +1890,10 @@ fn render_system_message_uses_connection_card_for_reconnect_status() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(
-        plain.contains("reconnecting"),
-        "expected reconnect card title: {plain}"
-    );
-    assert!(plain.contains("Retrying · attempt 2 · 7s"));
-    assert!(plain.contains("connection reset by server"));
-    assert!(plain.contains("jcode --resume koala"));
+    assert_eq!(lines.len(), 1);
+    assert!(lines[0].width() <= 80);
+    assert!(plain.contains("Connection lost - retrying (attempt 2, 7s)"));
+    assert!(!plain.contains('╭'));
 }
 
 #[test]
