@@ -79,6 +79,35 @@ Leave cleanup-arc as-is. Open the 2 security PRs first, let them land.
 Then rebase cleanup-arc later. The fmt work is preserved on the
 branch — there's no race or contention.
 
+## Doc-overlap finding (additional, post-merge consideration)
+
+The cleanup-arc branch's 4 P30-related docs overlap in subject matter
+with my 5 new master docs, but use **different filenames** so a
+merge/rebase would NOT conflict at the file level. However, the
+resulting merged tree would have **9 P30-related docs**, which is a
+lot of redundancy:
+
+**My docs on master (5 new, all `docs/cleanup-arc-2026-10-13-*`):**
+- P30-SECURITY-FIX.md
+- OPERATOR-ACTIONS.md
+- P30-CROSS-REPO.md
+- PR-CONTENT.md
+- CLEANUP-ARC-P30-STATUS.md
+
+**Cleanup-arc's docs (4, on `chore/cargo-fmt-cleanup-2026-10-13`):**
+- P30-ACTION.md (the cherry-pick application note)
+- SECURITY.md (the audit doc)
+- final.md (overall arc final state)
+- inventory.md (file-level inventory)
+
+**After merge (if both are kept):** 9 P30-related docs in `docs/`.
+Operator should pick: keep all 9, or consolidate to 2-3 (a single
+P30 audit + a single P30 cross-repo + a single operator-action).
+
+This is a downstream cleanup concern, not a blocker for the security
+fix. The Cargo.lock change is the critical path; the doc consolidation
+can happen afterward.
+
 ## Why this matters
 
 The P30 cross-repo audit found that 6 other Phenotype repos have the
