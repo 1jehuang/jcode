@@ -40,7 +40,7 @@ pub fn set_session_internal(session_id: &str, internal: bool) {
         let _ = std::fs::create_dir_all(&dir);
         let _ = std::fs::write(dir.join(session_id), "");
     } else {
-        let _ = std::fs::remove_file(dir.join(session_id));
+        let _ = remove_marker(&dir, session_id);
     }
 }
 
@@ -60,7 +60,7 @@ pub fn register_active_pid(session_id: &str, pid: u32) {
 /// Remove the active-PID record for `session_id`, if present.
 pub fn unregister_active_pid(session_id: &str) {
     if let Some(dir) = active_pids_dir() {
-        let _ = std::fs::remove_file(dir.join(session_id));
+        let _ = remove_marker(&dir, session_id);
     }
     // A closed session is never streaming, and its internal flag is moot.
     unmark_streaming(session_id);
@@ -78,8 +78,64 @@ pub fn mark_streaming(session_id: &str) {
 /// Clear the streaming marker for a session (turn finished or interrupted).
 pub fn unmark_streaming(session_id: &str) {
     if let Some(dir) = streaming_pids_dir() {
-        let _ = std::fs::remove_file(dir.join(session_id));
+        let _ = remove_marker(&dir, session_id);
     }
+}
+
+/// Remove a session-marker file from `dir` without re-resolving the path on the
+/// filesystem. Resolves the race where a directory may be replaced with a
+/// symlink (or otherwise swapped) between the caller validating the session ID
+/// and the unlink call. On Unix we open `dir` with `O_NOFOLLOW` and call
+/// `unlinkat` against the directory descriptor; on other platforms we fall
+/// back to `std::fs::remove_file` (the active-pid and streaming-marker
+/// directories are operator-controlled, so the race is not as severe there).
+fn remove_marker(dir: &std::path::Path, session_id: &str) -> std::io::Result<()> {
+    if session_id.is_empty()
+        || session_id == "."
+        || session_id == ".."
+        || session_id.contains('/')
+        || session_id.contains('\\')
+        || session_id.contains('\0')
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid session marker name",
+        ));
+    }
+
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let directory = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(dir)?;
+        let name = CString::new(session_id)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+        remove_marker_in_directory(&directory, &name)
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        std::fs::remove_file(dir.join(session_id))
+    }
+}
+
+#[cfg(unix)]
+fn remove_marker_in_directory(
+    directory: &std::fs::File,
+    name: &std::ffi::CStr,
+) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    let result = unsafe { libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0) };
+    if result < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// RAII guard that marks a session as streaming for its lifetime and clears the
@@ -389,5 +445,69 @@ mod tests {
         assert!(!session_is_internal("session_worker"));
 
         jcode_core::env::remove_var("JCODE_HOME");
+    }
+
+    /// `remove_marker` must refuse session IDs that would let a caller escape
+    /// the active-pid or streaming-marker directory, and must successfully
+    /// remove a well-formed marker. Regression test for the
+    /// `unlinkat`-through-directory-handle fix that landed in
+    /// `rescue/e45ddd4-fixstorage-unlink-session-markers-through-director`.
+    #[test]
+    fn remove_marker_validates_and_removes() {
+        let _guard = lock_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dir = temp.path().to_path_buf();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("good"), b"1234").unwrap();
+
+        // Valid session ID is removed.
+        remove_marker(&dir, "good").expect("remove_marker valid");
+        assert!(!dir.join("good").exists());
+
+        // Refuse empty / dot / dotdot / path-traversal / null-byte names.
+        for bad in ["", ".", "..", "../escape", "a/b", "a\\b", "a\0b"] {
+            let result = remove_marker(&dir, bad);
+            assert!(
+                result.is_err(),
+                "remove_marker should reject {bad:?} but got Ok"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_marker_in_directory_uses_captured_handle_after_swap() {
+        use std::ffi::CString;
+        use std::os::unix::fs::{OpenOptionsExt, symlink};
+
+        let outer = tempfile::tempdir().expect("tempdir");
+        let active = outer.path().join("active_pids");
+        let moved = outer.path().join("original-active-pids");
+        let stable = outer.path().join("stable-active-pids");
+        std::fs::create_dir_all(&active).unwrap();
+        std::fs::create_dir_all(&stable).unwrap();
+        std::fs::write(active.join("session"), b"1234").unwrap();
+        let sentinel = stable.join("session");
+        std::fs::write(&sentinel, b"STABLE").unwrap();
+
+        // Capture the directory inode before any swap could happen.
+        let directory = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&active)
+            .unwrap();
+
+        // Swap the on-disk `active` path to a symlink that points at a wholly
+        // different tree (`stable`). A re-resolution-based remove would now
+        // see `stable/session` instead of the original `moved/session`.
+        std::fs::rename(&active, &moved).unwrap();
+        symlink(&stable, &active).unwrap();
+
+        // unlinkat against the captured handle must remove the original file
+        // (now under `moved`), not the unrelated sentinel under `stable`.
+        remove_marker_in_directory(&directory, CString::new("session").unwrap().as_c_str())
+            .expect("unlinkat");
+        assert!(!moved.join("session").exists());
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"STABLE");
     }
 }
