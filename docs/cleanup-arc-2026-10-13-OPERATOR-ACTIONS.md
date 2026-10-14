@@ -38,13 +38,12 @@
 
 ---
 
-## P11 — Disk pressure URGENT (12 GB free, 99% used)
+## P11 — Disk pressure URGENT (14 GB free, 99% used) [verified 2026-10-14 04:14Z]
 
-### Current state
+### Current state (verified 2026-10-14 04:14Z)
 
-- Filesystem `/dev/disk3s1s1` (926 GB total, 855 GB used, **12 GB free = 1.3%**)
-- Single biggest consumer in the repo ecosystem: `PhenoShared/target` (53 GB) — looks like a long-archived product
-- Jcode-specific build artifacts: 56 GB across 9 target/ dirs
+- Filesystem `/dev/disk3s1s1` (926 GB total, 855 GB used, **14 GB free = 1.5%**) — trending up from 12 GB earlier
+- Jcode `/target` now **33 GB** (was 29 GB at doc time, grew due to recent cargo check + cargo audit runs)
 
 ### Exact cleanup targets (ranked by size, low risk first)
 
