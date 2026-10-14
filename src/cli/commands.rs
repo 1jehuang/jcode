@@ -2040,7 +2040,22 @@ pub async fn run_browser(action: &str, requested: Option<&str>) -> Result<()> {
                 println!("  missing actions: {}", status.missing_actions.join(", "));
             }
 
-            if status.ready {
+            if status.ready && !browser::status_answered_by(&status, target.kind) {
+                let answering = status
+                    .connected_browser
+                    .as_deref()
+                    .unwrap_or("another browser");
+                println!(
+                    "\n{name} is not connected: the bridge that answered belongs to {answering}. Browser actions with browser={} will fail until {name} runs the Browser Agent Bridge extension. Run `jcode browser setup {}` to set it up.",
+                    target.kind.id(),
+                    target.kind.id()
+                );
+                if browser::is_browser_running(target.kind)
+                    && let Some(diagnosis) = browser::diagnose_silent_chromium_bridge(target.kind)
+                {
+                    println!("{diagnosis}");
+                }
+            } else if status.ready {
                 println!("\nBuilt-in browser tool is ready.");
             } else if status.responding && !status.compatible {
                 println!(

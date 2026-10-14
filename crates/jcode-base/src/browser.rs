@@ -527,6 +527,14 @@ fn ping_matches(info: &serde_json::Value, kind: BrowserKind) -> bool {
 }
 
 fn connected_matches(status: &BrowserStatus, kind: BrowserKind) -> bool {
+    status_answered_by(status, kind)
+}
+
+/// Whether the bridge that answered belongs to `kind` (or its family).
+/// Each browser runs its own host, and the CLI falls back to another
+/// browser's host when `kind` has none, so a responding bridge alone does
+/// not mean `kind` is ready (#1743).
+pub fn status_answered_by(status: &BrowserStatus, kind: BrowserKind) -> bool {
     match status.connected_browser.as_deref() {
         None => kind.family() == BrowserFamily::Gecko,
         Some(reported) => {

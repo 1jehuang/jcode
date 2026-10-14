@@ -679,3 +679,15 @@ fn stale_session_errors_are_recognized() {
     ));
     assert!(!is_stale_session_target_error("Element not found: #save"));
 }
+
+// #1743: with Chrome requested, a ping answered by the Firefox host must not
+// count as Chrome being ready.
+#[test]
+fn a_bridge_answered_by_another_browser_is_not_the_requested_one() {
+    let mut status = status_fixture(true, true, true);
+    status.connected_browser = Some("firefox".into());
+    assert!(!status_answered_by(&status, BrowserKind::Chrome));
+    assert!(status_answered_by(&status, BrowserKind::Firefox));
+    status.connected_browser = Some("chrome".into());
+    assert!(status_answered_by(&status, BrowserKind::Brave), "same Chromium family");
+}
