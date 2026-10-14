@@ -153,6 +153,44 @@ f6acfb1cb docs: correct overstated headline counts
 | MEDIUM | P26 | Pick sync strategy A/B/C/D | LOW | Reconcile local + origin |
 | LOW | P25c | Pick rescue branch disposition A/B/C/D | LOW | 3 orphan branches resolved |
 
+---
+
+## Additional finding: 2 jcode worktrees need only the quinn-proto fix
+
+A scan of jcode worktrees (24+ total) found 2 worktrees with **partial
+P30 fix** already applied to their `Cargo.lock` (h2 0.4.19+ and rustls
+0.23.45) but still vulnerable to the 5 quinn-proto RUSTSEC vulns:
+
+| Worktree | Branch | quinn-proto | h2 | rustls | Needs |
+|----------|--------|-------------|----|----|-------|
+| `jcode-upstream-sync` | `feature/upstream-0.88-sync` | 0.11.15 | 0.4.20 | 0.23.45 | quinn-proto bump only |
+| `jcode-win-anchor` | `instinct/win-herdr-inline-anchor` | 0.11.15 | 0.4.19 | 0.23.45 | quinn-proto bump only |
+
+Each worktree needs ONLY the `quinn-proto-0.11.19` patch (one
+cherry-pick, no source changes). Dry-run verified: the patch applies
+cleanly to both worktrees' Cargo.lock (27 lines changed each).
+
+### Operator action: cherry-pick b3130e026 onto each worktree
+
+```bash
+# Per worktree (run from each worktree's repo):
+cd /Users/kooshapari/CodeProjects/Phenotype/repos/jcode-upstream-sync
+git cherry-pick b3130e026
+cargo check && cargo clippy && cargo audit   # should be 0 vulns
+
+cd /Users/kooshapari/CodeProjects/Phenotype/repos/jcode-win-anchor
+git cherry-pick b3130e026
+cargo check && cargo clippy && cargo audit   # should be 0 vulns
+```
+
+These 2 cherry-picks are independent of the 2 main security PRs.
+The operator can do them before, after, or alongside the main P30 work.
+
+**Why this is in the action list:** the 2 worktrees are active
+branches (not dead/archived). They have REAL upstream-sync and
+Win-anchor work. Leaving them with 5 active RUSTSEC vulns is a
+security exposure if those branches ever get built or merged.
+
 tx-agent: jcode
 tx-task: P11+P25c+P26
 tx-validated: manual
