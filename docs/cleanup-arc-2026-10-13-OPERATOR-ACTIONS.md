@@ -92,7 +92,18 @@
 
 ## P25c — Rescue branches (decision needed)
 
-**RESEARCH 2026-10-14 04:11Z:** See `docs/cleanup-arc-2026-10-13-P25C-RESEARCH.md` for full content analysis of each rescue branch. Key finding: all 3 branches modify `kcode-*` paths; jcode master uses `jcode-*` paths. The fix logic is generic but requires manual port. Recommendation: Option C with prioritization.
+**RESEARCH 2026-10-14 04:11Z, REFINED 04:17Z:** See `docs/cleanup-arc-2026-10-13-P25C-RESEARCH.md` for full content analysis of each rescue branch. Key findings:
+
+1. **All 3 branches modify `kcode-*` paths**; jcode master uses `jcode-*` paths
+2. **ceb860bf2 + e45ddd47e** contain valuable, generic fixes that need manual port to `jcode-storage/`
+3. **d6f2d2091 (session-memory)** is **OBSOLETE due to refactor** — the bug it fixed is structurally impossible in the new `VariableSubstitutor` implementation. **Safe to delete at any time** without porting.
+
+**Mixed strategy recommendation:**
+- d6f2d2091 → Option B (delete) — obsolete, no porting needed
+- ceb860bf2 + e45ddd47e → Option C (port to jcode-storage) — 2-4 hours of work, then delete the rescue branches
+- Total: 2-4 hours of port work, then delete all 3 rescue branches and 3 corresponding worktrees
+
+**Worktree mapping (verified 04:16Z):** `wt-kcode-home-symlink` (ceb860bf2), `wt-kcode-heading-boundary` (d6f2d2091), `wt-kcode-active-pids-race` (e45ddd47e). Removing these worktrees does NOT lose the commits.
 
 ### Branches in question
 
