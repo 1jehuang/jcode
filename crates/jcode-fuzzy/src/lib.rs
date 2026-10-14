@@ -51,7 +51,7 @@ impl PositionTracker for Vec<usize> {
         self.len()
     }
     fn first_pos(&self) -> Option<usize> {
-        self.as_slice().first().copied()
+        self.first().copied()
     }
 }
 

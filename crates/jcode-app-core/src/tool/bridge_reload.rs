@@ -43,6 +43,7 @@ impl BridgeLaunch {
 
 /// Parse a NUL-separated `/proc/<pid>/cmdline`, preferring the resolved exe
 /// path over argv[0] (argv[0] may be a bare name resolved through PATH).
+#[cfg(any(target_os = "linux", test))]
 pub(crate) fn parse_cmdline(raw: &[u8], exe: Option<PathBuf>) -> Option<BridgeLaunch> {
     let mut parts = raw
         .split(|byte| *byte == 0)

@@ -1,3 +1,7 @@
+#[path = "ui_prepare/assistant_aux.rs"]
+mod assistant_aux;
+use assistant_aux::*;
+
 use super::*;
 use crate::tui::ui::{self, WrappedLineMap};
 
@@ -39,79 +43,6 @@ fn assistant_aux_cache() -> &'static std::sync::Mutex<AssistantAuxCacheState> {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<AssistantAuxCacheState>> =
         std::sync::OnceLock::new();
     CACHE.get_or_init(|| std::sync::Mutex::new(AssistantAuxCacheState::default()))
-}
-
-/// Compute (and cache) the auxiliary raw-line-map data for an assistant message.
-/// `cached` is the already-rendered (and possibly cached) display lines for the
-/// message; `align` and `centered` describe the current display mode.
-fn assistant_aux_data(
-    msg: &DisplayMessage,
-    cached: &[Line<'static>],
-    content_width: u16,
-    centered: bool,
-    diff_mode: crate::config::DiffDisplayMode,
-    align: ratatui::layout::Alignment,
-) -> std::sync::Arc<AssistantAuxData> {
-    let build = || {
-        let content_lines =
-            markdown::render_markdown_with_width(&msg.content, Some(content_width as usize));
-        let content_line_count = content_lines.len().min(cached.len());
-        let logical_plain_lines: Vec<String> =
-            if content_prefers_display_as_logical_lines(&msg.content) {
-                cached
-                    .iter()
-                    .take(content_line_count)
-                    .map(ui::line_plain_text)
-                    .collect()
-            } else {
-                markdown::render_markdown(&msg.content)
-                    .into_iter()
-                    .map(|line| ui::line_plain_text(&align_if_unset(line, align)))
-                    .collect()
-            };
-        AssistantAuxData {
-            content_line_count,
-            logical_plain_lines,
-        }
-    };
-
-    if cfg!(test) {
-        return std::sync::Arc::new(build());
-    }
-
-    let key = AssistantAuxKey {
-        message_hash: msg.stable_cache_hash(),
-        content_len: msg.content.len(),
-        content_width,
-        centered,
-        diff_mode,
-        cached_len: cached.len(),
-    };
-
-    {
-        let cache = match assistant_aux_cache().lock() {
-            Ok(c) => c,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        if let Some(data) = cache.entries.get(&key) {
-            return data.clone();
-        }
-    }
-
-    let data = std::sync::Arc::new(build());
-    let mut cache = match assistant_aux_cache().lock() {
-        Ok(c) => c,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    if cache.entries.insert(key.clone(), data.clone()).is_none() {
-        cache.order.push_back(key);
-        while cache.order.len() > ASSISTANT_AUX_CACHE_LIMIT {
-            if let Some(oldest) = cache.order.pop_front() {
-                cache.entries.remove(&oldest);
-            }
-        }
-    }
-    data
 }
 
 fn content_prefers_display_as_logical_lines(content: &str) -> bool {
@@ -1066,6 +997,11 @@ fn header_prep_signature(app: &dyn TuiState, width: u16) -> u64 {
     app.connected_clients().hash(&mut hasher);
     app.server_sessions().len().hash(&mut hasher);
     app.working_dir().hash(&mut hasher);
+    // The directory row renders `(branch)`. The branch arrives from the async
+    // git probe, so without this the header kept the branch-less row until an
+    // unrelated field changed (or the 30s TTL lapsed), and a `git switch` did
+    // not show in the header at all.
+    app.git_branch().hash(&mut hasher);
     // Credential changes alter the auth inventory lines. Hashing the auth
     // generation (cheap atomic load) means `/login` and account edits repaint
     // the header on the very next frame instead of waiting out the TTL, which
@@ -1397,6 +1333,15 @@ fn render_message_into(
             .as_ref()
             .is_some_and(|tool| tools_ui::canonical_tool_name(&tool.name) == "todo")
     {
+        // Hidden messages still occupy a position in the transcript cache.
+        // Without this zero-length boundary, incremental updates compare later
+        // messages against the wrong indices and can truncate earlier content.
+        acc.segments.push((
+            msg.stable_cache_hash(),
+            acc.lines.len(),
+            acc.raw_plain_lines.len(),
+            acc.user_prompt_texts.len(),
+        ));
         return;
     }
     let align = default_message_alignment(role, centered);
@@ -1567,8 +1512,13 @@ fn render_message_into(
                                 })
                         })
                         .unwrap_or_else(|| "unknown".to_string());
-                    let expandable =
-                        messages::edit_tool_inline_diff_is_expandable(tc, &msg.content, width);
+                    // Outside the inline modes the diff body is hidden entirely,
+                    // so any edit with a diff can be expanded into full inline.
+                    let expandable = if app.diff_mode().is_inline() {
+                        messages::edit_tool_inline_diff_is_expandable(tc, &msg.content, width)
+                    } else {
+                        messages::edit_tool_has_inline_diff(tc, &msg.content)
+                    };
                     acc.edit_tool_line_ranges.push((
                         msg_global_idx,
                         file_path,

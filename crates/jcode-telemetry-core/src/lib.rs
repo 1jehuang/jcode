@@ -1,6 +1,13 @@
 use jcode_logging as logging;
 use jcode_storage as storage;
 mod concurrency;
+mod desktop;
+pub use desktop::{record_desktop_active, record_desktop_update};
+mod oauth_account;
+pub use oauth_account::{
+    OAUTH_ACCOUNT_NOTICE_TEXT, OAuthAccountNotice, acknowledge_oauth_account_notice_displayed,
+    enqueue_oauth_account, pending_oauth_account_notice,
+};
 mod lifecycle;
 pub use concurrency::{ConcurrencySession, begin_concurrency_session};
 pub mod onboarding_trace;
@@ -10,7 +17,7 @@ use jcode_usage_types::{
     AuthEvent, DiscoveryEvent, ErrorCounts, FeedbackEvent, InstallEvent, OnboardingStepEvent,
     SessionLifecycleEvent, SessionStartEvent, TelemetryProjectProfile as ProjectProfile,
     TelemetryToolCategory as ToolCategory, TelemetryWorkflowCounts, TodoSessionEvent, TurnEndEvent,
-    UpgradeEvent, classify_telemetry_tool_category as classify_tool_category,
+    UpgradeEvent, UsageReportEvent, classify_telemetry_tool_category as classify_tool_category,
     looks_like_telemetry_test_run as looks_like_test_run,
     mcp_telemetry_server_name as mcp_server_name, sanitize_feedback_text, sanitize_telemetry_label,
     telemetry_workflow_flags_from_counts,
@@ -1022,100 +1029,8 @@ fn update_turn_activity_timestamp(turn: &mut TurnTelemetry, now: Instant) {
     }
 }
 
-fn min_optional_ms(values: impl IntoIterator<Item = Option<u64>>) -> Option<u64> {
-    values.into_iter().flatten().min()
-}
-
-fn time_to_first_agent_action_ms(state: &SessionTelemetry) -> Option<u64> {
-    min_optional_ms([
-        state.first_assistant_response_ms,
-        state.first_tool_call_ms,
-        state.first_tool_success_ms,
-        state.first_file_edit_ms,
-        state.first_test_pass_ms,
-    ])
-}
-
-fn time_to_first_useful_action_ms(state: &SessionTelemetry) -> Option<u64> {
-    min_optional_ms([
-        state.first_tool_success_ms,
-        state.first_file_edit_ms,
-        state.first_test_pass_ms,
-    ])
-    .or(state.first_assistant_response_ms)
-}
-
-fn infer_agent_role(state: &SessionTelemetry) -> &'static str {
-    if state.feature_swarm_used || state.tool_cat_swarm > 0 {
-        "swarm"
-    } else if state.feature_subagent_used || state.tool_cat_subagent > 0 {
-        "subagent"
-    } else if state.feature_background_used || state.background_task_count > 0 {
-        "background"
-    } else {
-        "foreground"
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn infer_session_stop_reason(
-    event_name: &'static str,
-    reason: SessionEndReason,
-    state: &SessionTelemetry,
-    errors: &ErrorCounts,
-    duration_secs: u64,
-    session_success: bool,
-    abandoned_before_response: bool,
-    workflow_coding_used: bool,
-) -> &'static str {
-    if event_name == "session_crash"
-        || matches!(reason, SessionEndReason::Panic | SessionEndReason::Signal)
-    {
-        return "crash";
-    }
-    if errors.auth_failed > 0 {
-        return "auth_blocked";
-    }
-    if errors.rate_limited > 0 {
-        return "rate_limited";
-    }
-    if errors.provider_timeout > 0 {
-        return "provider_timeout";
-    }
-    if !state.had_user_prompt {
-        return "never_prompted";
-    }
-    if abandoned_before_response {
-        return "no_first_response";
-    }
-    if state.user_cancelled_count > 0 || matches!(reason, SessionEndReason::Disconnect) {
-        return "user_interrupted";
-    }
-    if matches!(state.first_assistant_response_ms, Some(ms) if ms > 60_000)
-        && time_to_first_useful_action_ms(state).is_none_or(|ms| ms > 60_000)
-    {
-        return "too_slow";
-    }
-    if state.executed_tool_failures >= 3 && state.executed_tool_successes == 0 {
-        return "tool_error_loop";
-    }
-    if errors.tool_error > 0 && state.executed_tool_successes == 0 {
-        return "tool_failures";
-    }
-    if workflow_coding_used && state.file_write_calls == 0 {
-        return "no_file_change";
-    }
-    if state.tests_run > 0 && state.tests_passed == 0 {
-        return "test_failure_unresolved";
-    }
-    if !session_success && duration_secs >= 300 && state.agent_active_ms_total >= 300_000 {
-        return "agent_got_stuck";
-    }
-    if !session_success {
-        return "no_useful_action";
-    }
-    "completed_successfully"
-}
+mod session_outcome;
+use session_outcome::*;
 
 fn mark_command_family_usage(state: &mut SessionTelemetry, command: &str) {
     let family = command
@@ -1305,6 +1220,9 @@ fn post_payload(payload: serde_json::Value, timeout: Duration) -> bool {
     if TELEMETRY_PERMANENTLY_REJECTED.load(Ordering::Relaxed) {
         return false;
     }
+    // Newer event types can reach an older worker that rejects them as unknown.
+    // That must only drop the one payload, never disable all telemetry.
+    let breaker_exempt = payload_is_breaker_exempt(&payload);
     let client = TELEMETRY_HTTP_CLIENT.get_or_init(|| {
         reqwest::blocking::Client::builder()
             .user_agent(jcode_provider_core::JCODE_USER_AGENT)
@@ -1320,7 +1238,7 @@ fn post_payload(payload: serde_json::Value, timeout: Duration) -> bool {
         Ok(response) if response.status().is_success() => true,
         Ok(response) => {
             let status = response.status();
-            if telemetry_status_is_permanent(status.as_u16()) {
+            if telemetry_status_is_permanent(status.as_u16()) && !breaker_exempt {
                 TELEMETRY_PERMANENTLY_REJECTED.store(true, Ordering::Relaxed);
                 logging::warn(&format!(
                     "telemetry endpoint permanently rejected payload with HTTP {status}; suppressing telemetry delivery for this process"
@@ -1390,6 +1308,30 @@ fn telemetry_status_is_permanent(status: u16) -> bool {
     (400..500).contains(&status) && !matches!(status, 408 | 425 | 429)
 }
 
+/// Event types added after the worker's validation was frozen. A 4xx for one of
+/// these means "this worker does not know the event yet", not "stop sending".
+fn payload_is_breaker_exempt(payload: &serde_json::Value) -> bool {
+    matches!(
+        payload.get("event").and_then(|value| value.as_str()),
+        Some("usage_report" | "desktop_active" | "desktop_upgrade" | "desktop_update")
+    )
+}
+
+/// Background payloads queued but not yet delivered (or abandoned).
+static TELEMETRY_IN_FLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Block until queued background telemetry has been delivered, or `timeout`
+/// elapses. For short-lived processes, such as `jcode-desktop --update`, that
+/// exit right after recording an event.
+pub fn flush_pending(timeout: std::time::Duration) {
+    let deadline = std::time::Instant::now() + timeout;
+    while TELEMETRY_IN_FLIGHT.load(std::sync::atomic::Ordering::Acquire) > 0
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
 fn spawn_background_worker<F>(capacity: usize, mut deliver: F) -> std::io::Result<SyncSender<Value>>
 where
     F: FnMut(Value) + Send + 'static,
@@ -1410,6 +1352,7 @@ fn background_sender() -> &'static SyncSender<Value> {
     TELEMETRY_BACKGROUND_SENDER.get_or_init(|| {
         spawn_background_worker(BACKGROUND_QUEUE_CAPACITY, |payload| {
             let _ = post_payload_with_retry(payload, ASYNC_SEND_TIMEOUT);
+            TELEMETRY_IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
         })
         .expect("telemetry background worker should start")
     })
@@ -1467,12 +1410,14 @@ fn send_payload(mut payload: serde_json::Value, mode: DeliveryMode) -> bool {
                 return false;
             }
             logging::debug("queueing telemetry payload for background delivery");
+            TELEMETRY_IN_FLIGHT.fetch_add(1, Ordering::AcqRel);
             match background_sender().try_send(payload) {
                 Ok(()) => {
                     TELEMETRY_QUEUE_OVERFLOW_WARNED.store(false, Ordering::Relaxed);
                     true
                 }
                 Err(TrySendError::Full(_)) => {
+                    TELEMETRY_IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
                     if !TELEMETRY_QUEUE_OVERFLOW_WARNED.swap(true, Ordering::Relaxed) {
                         logging::warn(&format!(
                             "telemetry background queue is full (capacity={BACKGROUND_QUEUE_CAPACITY}); dropping events until delivery catches up"
@@ -1481,6 +1426,7 @@ fn send_payload(mut payload: serde_json::Value, mode: DeliveryMode) -> bool {
                     false
                 }
                 Err(TrySendError::Disconnected(_)) => {
+                    TELEMETRY_IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
                     logging::warn("telemetry background worker stopped; dropping payload");
                     false
                 }
@@ -2308,6 +2254,137 @@ pub fn record_connection_type(connection: &str) {
         }
     }
     maybe_emit_session_start();
+}
+
+/// Where a provider call originated, for usage accounting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsageSource {
+    /// A normal agent turn (foreground, swarm worker, background, subagent).
+    Agent,
+    /// A compaction summary request.
+    Compaction,
+    /// A memory/sidecar helper request.
+    Sidecar,
+}
+
+impl UsageSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            UsageSource::Agent => "agent",
+            UsageSource::Compaction => "compaction",
+            UsageSource::Sidecar => "sidecar",
+        }
+    }
+}
+
+/// Provider-reported token usage for one completed provider response.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProviderUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_input_tokens: Option<u64>,
+    pub cache_creation_input_tokens: Option<u64>,
+}
+
+impl ProviderUsage {
+    fn is_zero(&self) -> bool {
+        self.input_tokens == 0
+            && self.output_tokens == 0
+            && self.cache_read_input_tokens.unwrap_or(0) == 0
+            && self.cache_creation_input_tokens.unwrap_or(0) == 0
+    }
+}
+
+/// Emit a `usage_report` for one provider response, attributed to the calling
+/// session and the model that actually served it.
+///
+/// This is the authoritative spend signal. Unlike `session_end`, it does not
+/// depend on the session ending cleanly and does not read the process-global
+/// telemetry session, so concurrent agents in one server process (swarm
+/// workers, background tasks, desktop panels) are each attributed correctly.
+/// Delivery is background and best-effort; token counts only, no content.
+pub fn record_provider_usage(
+    session_id: Option<&str>,
+    provider: &str,
+    model: &str,
+    source: UsageSource,
+    usage: ProviderUsage,
+) {
+    if !is_enabled() || usage.is_zero() {
+        return;
+    }
+    let Some(id) = get_or_create_id() else {
+        return;
+    };
+    let session_id = session_id
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            SESSION_STATE
+                .lock()
+                .ok()
+                .and_then(|guard| guard.as_ref().map(|state| state.session_id.clone()))
+        })
+        .unwrap_or_default();
+    let cache_read = usage.cache_read_input_tokens.unwrap_or(0);
+    let cache_creation = usage.cache_creation_input_tokens.unwrap_or(0);
+    let (schema_version, build_channel, git_checkout, ci, from_cargo) = telemetry_envelope();
+    let event = UsageReportEvent {
+        event_id: new_event_id(),
+        id,
+        session_id,
+        event: "usage_report",
+        version: version(),
+        os: std::env::consts::OS,
+        arch: std::env::consts::ARCH,
+        source: source.as_str(),
+        provider: sanitize_telemetry_label(provider),
+        model: sanitize_telemetry_label(model),
+        input_tokens: usage.input_tokens,
+        output_tokens: usage.output_tokens,
+        cache_read_input_tokens: cache_read,
+        cache_creation_input_tokens: cache_creation,
+        total_tokens: usage
+            .input_tokens
+            .saturating_add(usage.output_tokens)
+            .saturating_add(cache_read)
+            .saturating_add(cache_creation),
+        responses: 1,
+        schema_version,
+        build_channel,
+        is_git_checkout: git_checkout,
+        is_ci: ci,
+        ran_from_cargo: from_cargo,
+    };
+    if let Ok(payload) = serde_json::to_value(&event) {
+        let _ = send_payload(payload, DeliveryMode::Background);
+    }
+}
+
+/// Convenience wrapper for side calls made through
+/// `Provider::complete_simple_with_usage`.
+pub fn record_simple_completion_usage(
+    session_id: Option<&str>,
+    provider: &str,
+    model: &str,
+    source: UsageSource,
+    usage: jcode_provider_core::SimpleCompletionUsage,
+) {
+    if usage.is_empty() {
+        return;
+    }
+    record_provider_usage(
+        session_id,
+        provider,
+        model,
+        source,
+        ProviderUsage {
+            input_tokens: usage.input_tokens.unwrap_or(0),
+            output_tokens: usage.output_tokens.unwrap_or(0),
+            cache_read_input_tokens: usage.cache_read_input_tokens,
+            cache_creation_input_tokens: usage.cache_creation_input_tokens,
+        },
+    );
 }
 
 pub fn record_token_usage(

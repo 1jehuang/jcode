@@ -28,6 +28,17 @@ impl Provider for MockSummaryProvider {
     async fn complete_simple(&self, prompt: &str, _system: &str) -> Result<String> {
         Ok(format!("summary({} chars)", prompt.len()))
     }
+
+    async fn complete_simple_with_usage(
+        &self,
+        prompt: &str,
+        system: &str,
+    ) -> Result<(String, jcode_provider_core::SimpleCompletionUsage)> {
+        Ok((
+            self.complete_simple(prompt, system).await?,
+            jcode_provider_core::SimpleCompletionUsage::default(),
+        ))
+    }
 }
 
 fn make_text_message(role: Role, text: &str) -> Message {

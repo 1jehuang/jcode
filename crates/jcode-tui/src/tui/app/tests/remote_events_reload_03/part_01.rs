@@ -146,6 +146,7 @@ fn test_handle_server_event_history_with_interruption_queues_continuation() {
             provider_name: Some("claude".to_string()),
             provider_model: Some("claude-sonnet-4-20250514".to_string()),
             subagent_model: None,
+            agent_model_overrides: Default::default(),
             autoreview_enabled: None,
             autojudge_enabled: None,
             available_models: vec![],
@@ -166,6 +167,7 @@ fn test_handle_server_event_history_with_interruption_queues_continuation() {
             connection_type: Some("websocket".to_string()),
             status_detail: None,
             upstream_provider: None,
+            provider_oauth_email: None,
             resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,
@@ -223,6 +225,7 @@ fn test_handle_server_event_history_uses_server_owned_reload_recovery_directive(
         provider_name: Some("claude".to_string()),
         provider_model: Some("claude-sonnet-4-20250514".to_string()),
         subagent_model: None,
+        agent_model_overrides: Default::default(),
         autoreview_enabled: None,
         autojudge_enabled: None,
         available_models: vec![],
@@ -246,6 +249,7 @@ fn test_handle_server_event_history_uses_server_owned_reload_recovery_directive(
         connection_type: Some("websocket".to_string()),
         status_detail: None,
         upstream_provider: None,
+        provider_oauth_email: None,
         resolved_credential: None,
         reasoning_effort: None,
         service_tier: None,
@@ -308,6 +312,7 @@ fn test_handle_server_event_history_without_interruption_does_not_queue() {
             provider_name: Some("claude".to_string()),
             provider_model: Some("claude-sonnet-4-20250514".to_string()),
             subagent_model: None,
+            agent_model_overrides: Default::default(),
             autoreview_enabled: None,
             autojudge_enabled: None,
             available_models: vec![],
@@ -328,6 +333,7 @@ fn test_handle_server_event_history_without_interruption_does_not_queue() {
             connection_type: Some("https/sse".to_string()),
             status_detail: None,
             upstream_provider: None,
+            provider_oauth_email: None,
             resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,
@@ -375,6 +381,7 @@ fn test_handle_server_event_history_after_reload_reports_no_continuation_needed(
             provider_name: Some("claude".to_string()),
             provider_model: Some("claude-sonnet-4-20250514".to_string()),
             subagent_model: None,
+            agent_model_overrides: Default::default(),
             autoreview_enabled: None,
             autojudge_enabled: None,
             available_models: vec![],
@@ -395,6 +402,7 @@ fn test_handle_server_event_history_after_reload_reports_no_continuation_needed(
             connection_type: Some("websocket".to_string()),
             status_detail: None,
             upstream_provider: None,
+            provider_oauth_email: None,
             resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,
@@ -679,6 +687,7 @@ fn test_handle_server_event_history_restores_side_panel_snapshot() {
             provider_name: Some("claude".to_string()),
             provider_model: Some("claude-sonnet-4-20250514".to_string()),
             subagent_model: None,
+            agent_model_overrides: Default::default(),
             autoreview_enabled: None,
             autojudge_enabled: None,
             available_models: vec![],
@@ -699,6 +708,7 @@ fn test_handle_server_event_history_restores_side_panel_snapshot() {
             connection_type: Some("websocket".to_string()),
             status_detail: None,
             upstream_provider: None,
+            provider_oauth_email: None,
             resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,
@@ -737,6 +747,7 @@ fn test_handle_server_event_history_restores_active_resume_processing_state() {
             provider_name: Some("openai".to_string()),
             provider_model: Some("gpt-5.4".to_string()),
             subagent_model: None,
+            agent_model_overrides: Default::default(),
             autoreview_enabled: None,
             autojudge_enabled: None,
             available_models: vec![],
@@ -757,6 +768,7 @@ fn test_handle_server_event_history_restores_active_resume_processing_state() {
             connection_type: Some("websocket".to_string()),
             status_detail: None,
             upstream_provider: None,
+            provider_oauth_email: None,
             resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,
@@ -771,7 +783,10 @@ fn test_handle_server_event_history_restores_active_resume_processing_state() {
         &mut remote,
     );
 
-    assert!(needs_redraw, "resumed session history must redraw immediately");
+    assert!(
+        needs_redraw,
+        "resumed session history must redraw immediately"
+    );
     assert!(app.is_processing());
     assert!(app.processing_started.is_some());
     assert!(app.time_since_activity().is_some());

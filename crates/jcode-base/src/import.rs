@@ -462,7 +462,8 @@ fn imported_message_text(blocks: &[ContentBlock], truncate_blocks: bool) -> (Str
             | ContentBlock::AnthropicThinking { .. }
             | ContentBlock::OpenAIReasoning { .. }
             | ContentBlock::OpenAICompaction { .. }
-            | ContentBlock::ToolReference { .. } => {
+            | ContentBlock::ToolReference { .. }
+            | ContentBlock::ProviderNative { .. } => {
                 changed = true;
                 continue;
             }

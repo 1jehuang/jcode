@@ -25,6 +25,38 @@ fn system_glyph_env_lock() -> std::sync::MutexGuard<'static, ()> {
 }
 
 #[test]
+fn transient_system_notices_are_single_line_without_changing_content() {
+    let notices = [
+        "[auto] Your session was interrupted by a server reload while a tool was running. The\ntool was aborted and results may be incomplete. Continue exactly where you left off.",
+        "Reload complete - continuing because a recovery directive was pending.",
+        "Stream read timeout: no data received for 180 seconds",
+        "📡 Network appears offline - waiting to retry automatically. listening for Linux\nnetlink changes via `ip monitor`; also verifying with reconnect probes",
+        "✓ Retrying continuation... (system message)",
+        "An ordinary status notice that should never wrap even in a narrow terminal.",
+        "[auto] Continue the task.\nKeep the todo up to date.",
+    ];
+    for content in notices {
+        let msg = DisplayMessage::system(content);
+        for width in [1, 10, 30, 80, 120] {
+            let lines = render_system_message(&msg, width, crate::config::DiffDisplayMode::Off);
+            assert_eq!(lines.len(), 1, "{content:?} at width {width}");
+            assert!(lines[0].width() <= width as usize);
+            assert!(!extract_line_text(&lines[0]).contains('\n'));
+        }
+        assert_eq!(
+            msg.content, content,
+            "display must not rewrite agent instructions"
+        );
+    }
+    let msg = DisplayMessage::system(notices[0]);
+    let lines = render_system_message(&msg, 80, crate::config::DiffDisplayMode::Off);
+    assert_eq!(
+        extract_line_text(&lines[0]).trim(),
+        "Server reloaded; resuming interrupted work."
+    );
+}
+
+#[test]
 fn render_system_message_forces_system_color_on_all_spans() {
     let msg = DisplayMessage::system("**Reload complete** - continuing.");
 
@@ -36,6 +68,19 @@ fn render_system_message_forces_system_color_on_all_spans() {
             assert_eq!(span.style.fg, Some(system_message_color()));
         }
     }
+}
+
+#[test]
+fn render_system_message_drops_emoji_variation_selectors() {
+    let msg = DisplayMessage::system(
+        "⚠️ KV cache miss [harness: prefix changed] turn 13: ~336K tokens resent (an earlier message was modified). See KV_CACHE_USAGE in logs.",
+    );
+
+    let lines = render_system_message(&msg, 80, crate::config::DiffDisplayMode::Off);
+    let text: String = lines.iter().map(extract_line_text).collect();
+
+    assert!(text.contains("⚠ KV cache miss"), "got: {text}");
+    assert!(!text.contains('\u{FE0F}'), "VS16 must not reach the buffer");
 }
 
 #[test]
@@ -283,8 +328,8 @@ fn render_system_message_uses_width_stable_titles_on_kitty() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(plain.contains("reconnecting"));
-    assert!(!plain.contains("⚡ reconnecting"));
+    assert!(plain.contains("Connection lost - retrying"));
+    assert!(!plain.contains('⚡'));
 
     match prev_term_program {
         Some(value) => crate::env::set_var("TERM_PROGRAM", value),
@@ -882,6 +927,52 @@ fn render_todos_message_wraps_goal_scores_at_narrow_widths() {
 }
 
 #[test]
+fn render_todos_message_packs_multiple_goal_gates_per_row() {
+    let todos = vec![crate::todo::TodoItem {
+        id: "1".to_string(),
+        content: "Render the card".to_string(),
+        status: "in_progress".to_string(),
+        priority: "high".to_string(),
+        group: Some("todo rendering".to_string()),
+        confidence: Some(crate::todo::ConfidenceState::from_legacy_score(85)),
+        completion_confidence: None,
+        confidence_history: Vec::new(),
+        blocked_by: Vec::new(),
+        assigned_to: None,
+    }];
+    let goals = vec![crate::todo::TodoGoal {
+        group: Some("todo rendering".to_string()),
+        closed_feedback_loop: Some(crate::todo::FeedbackLoopState::Usable),
+        feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
+        feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
+        delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
+        ..Default::default()
+    }];
+    let msg =
+        DisplayMessage::todos(serde_json::json!({ "todos": todos, "goals": goals }).to_string());
+
+    let lines = render_todos_message(&msg, 80, crate::config::DiffDisplayMode::Off);
+    let rendered: Vec<String> = lines.iter().map(extract_line_text).collect();
+    let gate_rows: Vec<&String> = rendered
+        .iter()
+        .filter(|line| {
+            ["Closed feedback loop", "Relevance", "Coverage", "Delivery"]
+                .iter()
+                .any(|label| line.contains(label))
+        })
+        .collect();
+    assert!(
+        gate_rows.len() < 4,
+        "gates should share rows instead of one per line: {rendered:#?}"
+    );
+    assert!(
+        gate_rows.iter().any(|line| line.contains(" · ")),
+        "{rendered:#?}"
+    );
+    assert!(lines.iter().all(|line| line.width() <= 78), "{rendered:#?}");
+}
+
+#[test]
 fn render_todos_message_empty_list_shows_placeholder() {
     let msg = DisplayMessage::todos("[]");
     let plain = render_todos_message(&msg, 100, crate::config::DiffDisplayMode::Off)
@@ -931,8 +1022,6 @@ fn render_todo_tool_result_uses_borderless_card_with_goal_scores() {
         crate::todo::TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE
     );
     let msg = DisplayMessage {
-        timestamp: None,
-        tool_duration_ms: None,
         role: "tool".to_string(),
         content,
         tool_calls: Vec::new(),
@@ -1020,8 +1109,6 @@ fn render_todo_quality_gate_retry_shows_only_changed_goal_fields() {
         crate::todo::TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE,
     );
     let msg = DisplayMessage {
-        timestamp: None,
-        tool_duration_ms: None,
         role: "tool".to_string(),
         content,
         tool_calls: Vec::new(),
@@ -1139,8 +1226,6 @@ fn render_todo_plan_update_card_shows_only_changed_intent_fields() {
         serde_json::to_string_pretty(&update).unwrap(),
     );
     let msg = DisplayMessage {
-        timestamp: None,
-        tool_duration_ms: None,
         role: "tool".to_string(),
         content,
         tool_calls: Vec::new(),
@@ -1252,8 +1337,6 @@ fn unbiased_visual_prompt_retry_renders_complete_feedback_change() {
             duration_secs: None,
             title: Some("1 todos".to_string()),
             tool_data,
-            timestamp: None,
-            tool_duration_ms: None,
         };
         render_tool_message(&msg, 72, crate::config::DiffDisplayMode::Off)
             .iter()
@@ -1353,8 +1436,6 @@ fn visually_appealing_prompt_batched_retry_renders_complete_todo_card() {
         "--- [1] todo ---\n{todo_output}\n\n--- [2] ls ---\n./\n\n0 files, 0 directories\n\nCompleted: 2 succeeded, 0 failed"
     );
     let msg = DisplayMessage {
-        timestamp: None,
-        tool_duration_ms: None,
         role: "tool".to_string(),
         content,
         tool_calls: Vec::new(),
@@ -1449,8 +1530,6 @@ fn render_ownership_gated_todo_result_keeps_the_full_card() {
         crate::todo::TODO_OWNERSHIP_CONTINUATION_MESSAGE
     );
     let msg = DisplayMessage {
-        timestamp: None,
-        tool_duration_ms: None,
         role: "tool".to_string(),
         content,
         tool_calls: Vec::new(),
@@ -1532,8 +1611,6 @@ fn render_system_message_uses_scheduled_task_card() {
 #[test]
 fn render_tool_message_uses_scheduled_card() {
     let msg = DisplayMessage {
-        timestamp: None,
-        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "Scheduled task 'Follow up on the scheduler test' for in 1m (id: sched_abc123)\nWorking directory: /home/jeremy/jcode\nRelevant files: src/tui/ui_messages.rs\nTarget: resume session session_test".to_string(),
         tool_calls: Vec::new(),
@@ -1650,128 +1727,35 @@ fn split_plan_segments_returns_none_without_plan_block() {
 }
 
 #[test]
-fn render_assistant_message_truncates_tool_calls_to_single_line() {
-    let saved = crate::tui::markdown::center_code_blocks();
-    crate::tui::markdown::set_center_code_blocks(false);
-    let msg = DisplayMessage {
+fn transcript_assistant_message_omits_tool_summary_restored_from_history() {
+    // History restore fills `tool_calls`, live turns do not. The transcript
+    // must look the same either way, so no `tool:` line in the chat view.
+    let restored = DisplayMessage {
         role: "assistant".to_string(),
-        content: "Done.".to_string(),
-        tool_calls: vec![
-            "read".to_string(),
-            "grep".to_string(),
-            "apply_patch".to_string(),
-            "batch".to_string(),
-        ],
+        content: "Formatting touched 2 extra files.".to_string(),
+        tool_calls: vec!["bash".to_string(), "todo".to_string()],
         duration_secs: None,
         title: None,
         tool_data: None,
-        timestamp: None,
-        tool_duration_ms: None,
     };
-
-    let lines = render_assistant_message(&msg, 20, crate::config::DiffDisplayMode::Off);
-    assert_eq!(extract_line_text(&lines[1]), "");
-    let tool_lines: Vec<String> = lines
-        .iter()
-        .skip(2)
-        .map(|line| {
-            line.spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect()
-        })
-        .collect();
-
-    assert!(
-        tool_lines.len() == 1,
-        "expected single-line tool-call summary: {tool_lines:?}"
-    );
-    assert!(
-        tool_lines[0].contains("tools:"),
-        "expected tool summary label on first line: {tool_lines:?}"
-    );
-    assert!(
-        tool_lines.iter().all(|line| line.width() <= 20),
-        "tool-call summary line should respect available width: {tool_lines:?}"
-    );
-    crate::tui::markdown::set_center_code_blocks(saved);
-}
-
-#[test]
-fn render_assistant_message_centers_single_line_tool_summary() {
-    let saved = crate::tui::markdown::center_code_blocks();
-    crate::tui::markdown::set_center_code_blocks(true);
-    let msg = DisplayMessage {
-        role: "assistant".to_string(),
-        content: "Done.".to_string(),
-        tool_calls: vec![
-            "read".to_string(),
-            "grep".to_string(),
-            "apply_patch".to_string(),
-            "batch".to_string(),
-        ],
-        duration_secs: None,
-        title: None,
-        tool_data: None,
-        timestamp: None,
-        tool_duration_ms: None,
+    let live = DisplayMessage {
+        tool_calls: Vec::new(),
+        ..restored.clone()
     };
-
-    let lines = render_assistant_message(&msg, 28, crate::config::DiffDisplayMode::Off);
-    assert_eq!(extract_line_text(&lines[1]), "");
-    let tool_lines: Vec<String> = lines
-        .iter()
-        .skip(2)
-        .map(|line| {
-            line.spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect()
-        })
-        .collect();
-
-    assert!(
-        tool_lines.len() == 1,
-        "expected single-line tool-call summary: {tool_lines:?}"
-    );
-    let first_pad = tool_lines[0].chars().take_while(|c| *c == ' ').count();
-    assert!(
-        first_pad > 0,
-        "tool summary should still be padded/centered as a block: {tool_lines:?}"
-    );
-    assert!(
-        lines
+    let render = |msg: &DisplayMessage| -> Vec<String> {
+        render_assistant_message(msg, 80, crate::config::DiffDisplayMode::Off)
             .iter()
-            .skip(2)
-            .all(|line| line.alignment == Some(ratatui::layout::Alignment::Left)),
-        "centered tool summary should use a shared left-aligned block pad"
-    );
-
-    crate::tui::markdown::set_center_code_blocks(saved);
-}
-
-#[test]
-fn render_assistant_message_without_body_does_not_add_extra_blank_line_before_tool_summary() {
-    let saved = crate::tui::markdown::center_code_blocks();
-    crate::tui::markdown::set_center_code_blocks(false);
-    let msg = DisplayMessage {
-        role: "assistant".to_string(),
-        content: String::new(),
-        tool_calls: vec!["read".to_string()],
-        duration_secs: None,
-        title: None,
-        tool_data: None,
-        timestamp: None,
-        tool_duration_ms: None,
+            .map(extract_line_text)
+            .collect()
     };
-
-    let lines = render_assistant_message(&msg, 28, crate::config::DiffDisplayMode::Off);
-    let rendered: Vec<String> = lines.iter().map(extract_line_text).collect();
-
-    assert_eq!(rendered.len(), 1, "rendered={rendered:?}");
-    assert!(rendered[0].contains("tool:"), "rendered={rendered:?}");
-
-    crate::tui::markdown::set_center_code_blocks(saved);
+    let restored_lines = render(&restored);
+    assert!(
+        restored_lines
+            .iter()
+            .all(|line| !line.contains("tool:") && !line.contains("tools:")),
+        "{restored_lines:?}"
+    );
+    assert_eq!(restored_lines, render(&live));
 }
 
 #[test]
@@ -1893,7 +1877,7 @@ fn render_system_message_uses_minimal_inline_style_for_reload_title() {
 }
 
 #[test]
-fn render_system_message_uses_connection_card_for_reconnect_status() {
+fn render_system_message_uses_one_line_for_reconnect_status() {
     let msg = DisplayMessage::system(
         "⚡ Connection lost - retrying (attempt 2, 7s) - connection reset by server · resume: jcode --resume koala",
     )
@@ -1906,13 +1890,10 @@ fn render_system_message_uses_connection_card_for_reconnect_status() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(
-        plain.contains("reconnecting"),
-        "expected reconnect card title: {plain}"
-    );
-    assert!(plain.contains("Retrying · attempt 2 · 7s"));
-    assert!(plain.contains("connection reset by server"));
-    assert!(plain.contains("jcode --resume koala"));
+    assert_eq!(lines.len(), 1);
+    assert!(lines[0].width() <= 80);
+    assert!(plain.contains("Connection lost - retrying (attempt 2, 7s)"));
+    assert!(!plain.contains('╭'));
 }
 
 #[test]
@@ -1961,6 +1942,12 @@ fn render_swarm_message_collapsed_shows_tldr_and_expand_badge_only() {
 
     assert!(plain.contains("fixed the flaky test"), "{plain}");
     assert!(plain.contains(super::SWARM_EXPAND_BADGE), "{plain}");
+    let preview = lines
+        .iter()
+        .flat_map(|line| &line.spans)
+        .find(|span| span.content.contains("fixed the flaky test"))
+        .expect("DM preview span");
+    assert_eq!(preview.style.fg, Some(rgb(130, 130, 140)));
     assert!(
         !plain.contains("race in the setup helper"),
         "collapsed card must hide the full body: {plain}"
@@ -1996,8 +1983,6 @@ fn render_swarm_message_expanded_shows_body_and_collapse_badge() {
 #[test]
 fn render_tool_message_prefers_subagent_title_with_model() {
     let msg = DisplayMessage {
-        timestamp: None,
-        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "done".to_string(),
         tool_calls: Vec::new(),
@@ -2029,8 +2014,6 @@ fn render_tool_message_prefers_subagent_title_with_model() {
 fn render_tool_message_shows_intent_and_technical_preview_on_one_line() {
     crate::tui::ui::tools_ui::tests_tool_call_details_override::set(true);
     let msg = DisplayMessage {
-        timestamp: None,
-        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "ok".to_string(),
         tool_calls: Vec::new(),
@@ -2062,8 +2045,6 @@ fn render_tool_message_shows_intent_and_technical_preview_on_one_line() {
 #[test]
 fn render_tool_message_hides_technical_preview_by_default() {
     let msg = DisplayMessage {
-        timestamp: None,
-        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "ok".to_string(),
         tool_calls: Vec::new(),
@@ -2100,8 +2081,6 @@ fn render_tool_message_hides_technical_preview_by_default() {
 #[test]
 fn render_tool_message_keeps_error_summary_when_details_hidden() {
     let msg = DisplayMessage {
-        timestamp: None,
-        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "Error: command not found: cargoo".to_string(),
         tool_calls: Vec::new(),
@@ -2131,8 +2110,6 @@ fn render_tool_message_keeps_error_summary_when_details_hidden() {
 #[test]
 fn render_tool_message_shows_token_badge() {
     let msg = DisplayMessage {
-        timestamp: None,
-        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "x".repeat(7_600),
         tool_calls: Vec::new(),
@@ -2160,8 +2137,6 @@ fn render_tool_message_shows_token_badge() {
 #[test]
 fn render_tool_message_hides_bash_output() {
     let msg = DisplayMessage {
-        timestamp: None,
-        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "<class 'zip'>\n[('p', 'b'), ('a', 'a'), ('l', 'l'), ('e', 'e')]".to_string(),
         tool_calls: Vec::new(),
@@ -2189,8 +2164,6 @@ fn render_tool_message_hides_bash_output() {
 fn render_tool_message_shows_bash_output_when_enabled() {
     crate::tui::ui::tools_ui::tests_show_bash_output_override::set(true);
     let msg = DisplayMessage {
-        timestamp: None,
-        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "one\ntwo\nthree\nfour".to_string(),
         tool_calls: Vec::new(),
@@ -2217,205 +2190,12 @@ fn render_tool_message_shows_bash_output_when_enabled() {
     crate::tui::ui::tools_ui::tests_show_bash_output_override::set(false);
 }
 
-fn gmail_draft_message(content: &str, input: serde_json::Value) -> DisplayMessage {
-    DisplayMessage {
-        timestamp: None,
-        tool_duration_ms: None,
-        role: "tool".to_string(),
-        content: content.to_string(),
-        tool_calls: Vec::new(),
-        duration_secs: None,
-        title: None,
-        tool_data: Some(crate::message::ToolCall {
-            id: "call_gmail_draft".to_string(),
-            name: "gmail".to_string(),
-            input,
-            intent: None,
-            thought_signature: None,
-        }),
-    }
-}
-
-#[test]
-fn render_tool_message_shows_gmail_draft_card() {
-    let msg = gmail_draft_message(
-        "Draft created successfully.\nDraft ID: draft_123\nTo: bob@example.com\nSubject: Project update",
-        serde_json::json!({
-            "action": "draft",
-            "to": "bob@example.com",
-            "subject": "Project update",
-            "body": "Hi Bob,\n\nThe release is ready for review."
-        }),
-    );
-
-    let lines = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Off);
-    let plain = lines
-        .iter()
-        .map(extract_line_text)
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    assert!(plain.contains("Gmail draft created · draft_123"), "{plain}");
-    assert!(
-        !plain.contains('✉'),
-        "draft card should not show an icon: {plain}"
-    );
-    assert!(plain.contains("To: bob@example.com"), "{plain}");
-    assert!(plain.contains("Subject: Project update"), "{plain}");
-    assert!(
-        plain.contains("The release is ready for review."),
-        "{plain}"
-    );
-    assert!(
-        !plain.contains("\"body\""),
-        "must not leak raw JSON: {plain}"
-    );
-}
-
-#[test]
-fn render_gmail_draft_card_marks_failures_and_empty_fields() {
-    let msg = gmail_draft_message(
-        "Error: Gmail draft creation failed",
-        serde_json::json!({ "action": "draft", "body": "" }),
-    );
-
-    let lines = render_tool_message(&msg, 80, crate::config::DiffDisplayMode::Off);
-    let plain = lines
-        .iter()
-        .map(extract_line_text)
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    assert!(plain.contains("Gmail draft failed"), "{plain}");
-    assert!(plain.contains("(recipient missing)"), "{plain}");
-    assert!(plain.contains("(no subject)"), "{plain}");
-    assert!(plain.contains("(empty body)"), "{plain}");
-}
-
-#[test]
-fn render_gmail_draft_card_wraps_attachments_and_shows_complete_long_body() {
-    let body = (1..=30)
-        .map(|index| format!("body line {index}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let msg = gmail_draft_message(
-        "Draft created successfully.\nDraft ID: draft_long",
-        serde_json::json!({
-            "action": "draft",
-            "to": "a-very-long-recipient-address@example.com",
-            "subject": "A subject that should wrap cleanly in a narrow transcript",
-            "body": body,
-            "attachments": [
-                "/tmp/a-very-long-quarterly-report-filename.pdf",
-                "/tmp/notes.txt"
-            ]
-        }),
-    );
-
-    let lines = render_tool_message(&msg, 48, crate::config::DiffDisplayMode::Off);
-    let rendered = lines.iter().map(extract_line_text).collect::<Vec<_>>();
-    let plain = rendered.join("\n");
-    let compact = without_whitespace(&plain.replace('│', ""));
-
-    assert!(
-        compact.contains("To:a-very-long-recipient-address@example.com"),
-        "{plain}"
-    );
-    assert!(
-        compact.contains("Subject:Asubjectthatshouldwrapcleanlyinanarrowtranscript"),
-        "{plain}"
-    );
-    assert!(
-        compact
-            .contains("Attachments:/tmp/a-very-long-quarterly-report-filename.pdf,/tmp/notes.txt"),
-        "{plain}"
-    );
-    assert!(plain.contains("body line 18"), "{plain}");
-    assert!(plain.contains("body line 19"), "{plain}");
-    assert!(plain.contains("body line 30"), "{plain}");
-    assert!(
-        !plain.contains("more lines"),
-        "body must not be truncated: {plain}"
-    );
-    assert!(
-        lines.iter().all(|line| line.width() <= 47),
-        "draft card exceeded row width: {rendered:?}"
-    );
-}
-
-#[test]
-fn render_gmail_draft_card_preserves_html_like_body_text() {
-    let msg = gmail_draft_message(
-        "Draft created successfully.\nDraft ID: draft_html",
-        serde_json::json!({
-            "action": "draft",
-            "to": "web@example.com",
-            "subject": "HTML-ish content",
-            "body": "<p>Hello <strong>team</strong></p>"
-        }),
-    );
-
-    let plain = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Off)
-        .iter()
-        .map(extract_line_text)
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    assert!(
-        plain.contains("<p>Hello <strong>team</strong></p>"),
-        "{plain}"
-    );
-}
-
-#[test]
-fn render_batch_tool_message_shows_nested_gmail_draft_card() {
-    let msg = DisplayMessage {
-        timestamp: None,
-        tool_duration_ms: None,
-        role: "tool".to_string(),
-        content: "--- [1] gmail ---\nDraft created successfully.\nDraft ID: nested_123\nTo: nested@example.com\nSubject: Nested\n\nCompleted: 1 succeeded, 0 failed".to_string(),
-        tool_calls: Vec::new(),
-        duration_secs: None,
-        title: None,
-        tool_data: Some(crate::message::ToolCall {
-            id: "call_batch_gmail".to_string(),
-            name: "batch".to_string(),
-            input: serde_json::json!({
-                "tool_calls": [{
-                    "tool": "gmail",
-                    "parameters": {
-                        "action": "draft",
-                        "to": "nested@example.com",
-                        "subject": "Nested",
-                        "body": "Created inside a batch"
-                    }
-                }]
-            }),
-            intent: None,
-            thought_signature: None,
-        }),
-    };
-
-    let lines = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Off);
-    let plain = lines
-        .iter()
-        .map(extract_line_text)
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    assert!(
-        plain.contains("Gmail draft created · nested_123"),
-        "{plain}"
-    );
-    assert!(plain.contains("Created inside a batch"), "{plain}");
-}
+include!("gmail_drafts_tests.rs");
 
 #[test]
 fn render_batch_tool_message_shows_flat_and_nested_subcall_intents() {
     crate::tui::ui::tools_ui::tests_tool_call_details_override::set(true);
     let msg = DisplayMessage {
-        timestamp: None,
-        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "--- [1] read ---\nflat output\n\n--- [2] read ---\nnested output\n\nCompleted: 2 succeeded, 0 failed".to_string(),
         tool_calls: Vec::new(),
@@ -2466,8 +2246,6 @@ fn render_batch_tool_message_shows_flat_and_nested_subcall_intents() {
 
 fn discovery_message(content: &str, input: serde_json::Value) -> DisplayMessage {
     DisplayMessage {
-        timestamp: None,
-        tool_duration_ms: None,
         role: "tool".to_string(),
         content: content.to_string(),
         tool_calls: Vec::new(),
@@ -2546,8 +2324,6 @@ fn render_tool_message_shows_discovery_browse_results_and_rationale() {
 #[test]
 fn batched_discovery_renders_without_disclosure_notice() {
     let msg = DisplayMessage {
-        timestamp: None,
-        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "--- [1] integration_tools ---\nAvailable integrations in 'payments' (Jcode tool directory; recommendations must be based only on fit; details: https://jcode.sh/discovery-tools):\n\n- agentcard: prepaid virtual Visa cards for AI agents (https://agentcard.sh/?via=jcode-discovery)\n\nSearch request ID: `11111111-2222-4333-8444-555555555555`\n\nCompleted: 1 succeeded, 0 failed".to_string(),
         tool_calls: Vec::new(),
@@ -2741,8 +2517,6 @@ fn discovery_cards_wrap_within_narrow_transcript_width() {
 #[test]
 fn render_tool_message_colors_high_token_badge() {
     let msg = DisplayMessage {
-        timestamp: None,
-        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "x".repeat(48_000),
         tool_calls: Vec::new(),
@@ -2770,8 +2544,6 @@ fn render_tool_message_colors_high_token_badge() {
 #[test]
 fn render_tool_message_shows_inline_diff_for_pascal_case_multiedit() {
     let msg = DisplayMessage {
-        timestamp: None,
-        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "Edited demo.txt\n\nApplied:\n  ✓ Edit 1: replaced 1 occurrence\n\nTotal: 1 applied, 0 failed\n"
             .to_string(),
@@ -2805,8 +2577,6 @@ fn render_tool_message_shows_inline_diff_for_pascal_case_multiedit() {
 #[test]
 fn render_tool_message_labels_single_file_apply_patch_diff() {
     let msg = DisplayMessage {
-        timestamp: None,
-        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "✓ src/example.rs: modified (1 hunks)".to_string(),
         tool_calls: Vec::new(),
@@ -2839,8 +2609,6 @@ fn render_tool_message_labels_single_file_apply_patch_diff() {
 #[test]
 fn render_tool_message_preserves_multi_file_apply_patch_boundaries() {
     let msg = DisplayMessage {
-        timestamp: None,
-        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "✓ a.txt: modified (1 hunks)\n1- old a\n1+ new a\n✓ b.txt: modified (1 hunks)\n1- old b\n1+ new b\n".to_string(),
         tool_calls: Vec::new(),
@@ -2883,8 +2651,6 @@ fn render_tool_message_preserves_multi_file_apply_patch_boundaries() {
 #[test]
 fn render_tool_message_shows_numbered_write_result_diff_after_input_compaction() {
     let msg = DisplayMessage {
-        timestamp: None,
-        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "Created /tmp/head-to-head.html (2 lines):\n1+ <!doctype html>\n2+ <html lang=\"en\">\n..."
             .to_string(),
@@ -2929,8 +2695,6 @@ fn render_tool_message_never_draws_an_empty_edit_diff_frame() {
         ("apply_patch", "✓ demo.txt: modified (1 hunks)"),
     ] {
         let msg = DisplayMessage {
-            timestamp: None,
-            tool_duration_ms: None,
             role: "tool".to_string(),
             content: content.to_string(),
             tool_calls: Vec::new(),
@@ -2960,8 +2724,6 @@ fn render_tool_message_never_draws_an_empty_edit_diff_frame() {
 #[test]
 fn render_tool_message_marks_failed_apply_patch_without_empty_diff() {
     let msg = DisplayMessage {
-        timestamp: None,
-        tool_duration_ms: None,
         role: "tool".to_string(),
         content:
             "[apply_patch] ✗ /tmp/main.rs: Failed to find expected lines in /tmp/main.rs:\nfn missing() {}"
@@ -3002,8 +2764,6 @@ fn render_tool_message_inline_mode_truncates_large_diffs() {
         .map(|i| format!("new line {i} suffix_{i}_abcdefghijklmnopqrstuvwxyz0123456789\n"))
         .collect::<String>();
     let msg = DisplayMessage {
-        timestamp: None,
-        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "Edited demo.txt".to_string(),
         tool_calls: Vec::new(),
@@ -3048,8 +2808,6 @@ fn render_tool_message_full_inline_mode_shows_full_diff() {
         .map(|i| format!("new line {i} suffix_{i}_abcdefghijklmnopqrstuvwxyz0123456789\n"))
         .collect::<String>();
     let msg = DisplayMessage {
-        timestamp: None,
-        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "Edited demo.txt".to_string(),
         tool_calls: Vec::new(),
@@ -3089,8 +2847,6 @@ fn render_tool_message_memory_recall_centered_mode_left_aligns_with_padding() {
     let saved = crate::tui::markdown::center_code_blocks();
     crate::tui::markdown::set_center_code_blocks(true);
     let msg = DisplayMessage {
-        timestamp: None,
-        tool_duration_ms: None,
         role: "tool".to_string(),
         content: concat!(
             "- [fact] Centered mode should keep the recall card centered\n",
@@ -3148,8 +2904,6 @@ fn render_tool_message_memory_store_centered_mode_left_aligns_with_padding() {
     let saved = crate::tui::markdown::center_code_blocks();
     crate::tui::markdown::set_center_code_blocks(true);
     let msg = DisplayMessage {
-        timestamp: None,
-        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "Saved memory".to_string(),
         tool_calls: Vec::new(),
@@ -3196,8 +2950,6 @@ fn render_tool_message_memory_store_centered_mode_left_aligns_with_padding() {
 #[test]
 fn render_tool_message_shows_swarm_spawn_prompt_summary() {
     let msg = DisplayMessage {
-        timestamp: None,
-        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "spawned".to_string(),
         tool_calls: Vec::new(),
@@ -3232,8 +2984,6 @@ fn render_tool_message_shows_swarm_spawn_prompt_summary() {
 #[test]
 fn render_tool_message_batch_subcall_shows_swarm_dm_details() {
     let msg = DisplayMessage {
-        timestamp: None,
-        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "--- [1] swarm ---\nDone\n\nCompleted: 1 succeeded, 0 failed".to_string(),
         tool_calls: Vec::new(),
@@ -3399,8 +3149,6 @@ fn render_swarm_message_preserves_inline_image_placeholder_lines() {
 #[test]
 fn render_empty_todo_tool_result_collapses_to_compact_line() {
     let msg = DisplayMessage {
-        timestamp: None,
-        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "[todo] []".to_string(),
         tool_calls: Vec::new(),
@@ -3423,4 +3171,52 @@ fn render_empty_todo_tool_result_collapses_to_compact_line() {
 
     assert!(!plain.contains("No tasks yet"), "{plain}");
     assert!(plain.contains("no tasks"), "{plain}");
+}
+
+/// The edit row must not repeat the file path that the inline diff header
+/// directly below already shows. With an intent it reads like any other tool
+/// row, and without one it falls back to the bare name plus change counts.
+#[test]
+fn render_tool_message_edit_row_does_not_duplicate_diff_header_path() {
+    for intent in [Some("Fix the network hint"), None] {
+        let msg = DisplayMessage {
+            role: "tool".to_string(),
+            content: "Edited".to_string(),
+            tool_calls: Vec::new(),
+            duration_secs: None,
+            title: None,
+            tool_data: Some(crate::message::ToolCall {
+                id: "call_edit".to_string(),
+                name: "edit".to_string(),
+                input: serde_json::json!({
+                    "file_path": "/repo/src/very_specific_name.rs",
+                    "old_string": "old\n",
+                    "new_string": "new\n",
+                }),
+                intent: intent.map(str::to_string),
+                thought_signature: None,
+            }),
+        };
+
+        let lines = render_tool_message(&msg, 160, crate::config::DiffDisplayMode::Inline);
+        let text: Vec<String> = lines.iter().map(extract_line_text).collect();
+        let occurrences = text
+            .iter()
+            .filter(|line| line.contains("very_specific_name.rs"))
+            .count();
+        assert_eq!(occurrences, 1, "path should appear once: {text:#?}");
+        assert!(
+            text[1].contains("diff · /repo/src/very_specific_name.rs"),
+            "{text:#?}"
+        );
+        if let Some(intent) = intent {
+            assert!(text[0].contains(&format!("edit · {intent}")), "{text:#?}");
+        }
+
+        // With diffs hidden the row is the only place the path can appear.
+        let lines = render_tool_message(&msg, 160, crate::config::DiffDisplayMode::Off);
+        if intent.is_none() {
+            assert!(extract_line_text(&lines[0]).contains("very_specific_name.rs"));
+        }
+    }
 }

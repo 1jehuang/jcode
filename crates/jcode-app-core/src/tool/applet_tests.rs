@@ -166,10 +166,9 @@ fn documented_shapes_validate() {
         {"type":"progress","value":0.5,"label":"half"},
         {"type":"text","text":"t","style":"caption","tone":"dim","max_lines":2}
     ]});
-    let document: jcode_applet_types::Document = serde_json::from_value(
-        json!({"revision":1,"title":"T","state":{"env":"a"},"view":view}),
-    )
-    .expect("documented shapes deserialize");
+    let document: jcode_applet_types::Document =
+        serde_json::from_value(json!({"revision":1,"title":"T","state":{"env":"a"},"view":view}))
+            .expect("documented shapes deserialize");
     jcode_applet_types::validate_document(
         &document,
         &jcode_applet_types::agent::manifest(),

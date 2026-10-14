@@ -966,6 +966,12 @@ impl App {
             }
         } else if cmd == "version" {
             format!("version: {}", jcode_build_meta::version())
+        } else if cmd == "oauth-notice-preview" {
+            // Synthetic visual validation only. No account, queue, upload,
+            // or persisted one-time receipt is touched by this command.
+            self.oauth_notice_displayed_at = Some(Instant::now());
+            self.request_full_redraw();
+            "OK: provider email telemetry notice preview (8 seconds)".to_string()
         } else if cmd == "help" {
             "Debug commands:\n\
                  - message:<text> - inject and submit a message\n\
@@ -1034,6 +1040,7 @@ impl App {
                  - bundle-save - save test bundle\n\
                  - script:<json> - run test script\n\
                  - version - get version\n\
+                 - oauth-notice-preview - preview provider email notice for 8 seconds, no upload\n\
                  - help - show this help"
                 .to_string()
         } else {

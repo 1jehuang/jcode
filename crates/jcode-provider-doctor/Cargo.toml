@@ -37,6 +37,6 @@ jcode-provider-copilot-runtime = { path = "../jcode-provider-copilot-runtime" }
 
 [dev-dependencies]
 # The auth-lifecycle driver tests run inside jcode-base's auth test sandbox.
-jcode-base = { path = "../jcode-base", default-features = false, features = ["test-support"] }
-jcode-provider-metadata = { path = "../jcode-provider-metadata" }
+jcode-base = { path = "../jcode-base", version = "0.1.0", default-features = false, features = ["test-support"] }
+jcode-provider-metadata = { path = "../jcode-provider-metadata", version = "0.1.0" }
 tokio = { version = "1", features = ["macros", "rt"] }

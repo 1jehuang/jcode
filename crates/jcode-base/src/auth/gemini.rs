@@ -86,10 +86,10 @@ pub fn save_api_key(key: &str) -> Result<()> {
     if key.is_empty() {
         anyhow::bail!("Gemini API key cannot be empty");
     }
-    crate::provider_catalog::save_env_value_to_env_file(
-        GEMINI_API_KEY_ENV_VARS[0],
+    crate::provider_catalog::save_named_api_key(
         GEMINI_API_KEY_ENV_FILE,
-        Some(key),
+        GEMINI_API_KEY_ENV_VARS[0],
+        key,
     )?;
     super::AuthStatus::invalidate_cache();
     Ok(())
@@ -363,7 +363,7 @@ pub async fn login(no_browser: bool) -> Result<GeminiTokens> {
 
         eprintln!("\nOpening browser for Gemini login...\n");
         eprintln!("If the browser didn't open, visit:\n{}\n", auth_url);
-        if let Some(qr) = crate::login_qr::indented_section(
+        if let Some(qr) = crate::auth::login_ui::qr_section(
             &auth_url,
             "Scan this QR on another device if this machine has no browser:",
             "    ",
@@ -372,7 +372,7 @@ pub async fn login(no_browser: bool) -> Result<GeminiTokens> {
             eprintln!("{qr}\n");
         }
 
-        let browser_opened = open::that(&auth_url).is_ok();
+        let browser_opened = crate::companion_client::open_url(&auth_url);
         if browser_opened {
             eprintln!(
                 "Waiting up to 300s for automatic callback on {}",
@@ -430,7 +430,7 @@ async fn manual_login(
     let auth_url = build_manual_auth_url(GEMINI_MANUAL_REDIRECT_URI, challenge, state)?;
     eprintln!("\nManual Gemini auth required.\n");
     eprintln!("Open this URL in your browser:\n\n{}\n", auth_url);
-    if let Some(qr) = crate::login_qr::indented_section(
+    if let Some(qr) = crate::auth::login_ui::qr_section(
         &auth_url,
         "Scan this QR on another device if needed:",
         "    ",
@@ -439,12 +439,12 @@ async fn manual_login(
         eprintln!("{qr}\n");
     }
     if !crate::auth::browser_suppressed(no_browser) {
-        let _ = open::that(&auth_url);
+        let _ = crate::companion_client::open_url(&auth_url);
     }
     eprintln!("After approving access, Google will show an authorization code. Paste it below.\n");
     eprint!("Authorization code: ");
     io::stdout().flush()?;
-    let code = crate::secret_input::read_secret_line()?;
+    let code = crate::auth::login_ui::read_secret_line()?;
     if code.trim().is_empty() {
         anyhow::bail!("No authorization code provided.");
     }

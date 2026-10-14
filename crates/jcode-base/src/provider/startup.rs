@@ -60,25 +60,6 @@ impl MultiProvider {
         });
     }
 
-    pub(super) async fn invalidate_provider_credentials_for_account_switch(
-        &self,
-        provider: ActiveProvider,
-    ) {
-        match provider {
-            ActiveProvider::Claude => {
-                if let Some(anthropic) = self.anthropic_provider() {
-                    anthropic.invalidate_credentials().await;
-                }
-            }
-            ActiveProvider::OpenAI => {
-                if let Some(openai) = self.openai_provider() {
-                    openai.invalidate_credentials().await;
-                }
-            }
-            _ => {}
-        }
-    }
-
     pub(super) fn new_with_auth_status(auth_status: auth::AuthStatus) -> Self {
         let provider_init_start = std::time::Instant::now();
         let cfg = crate::config::config();
@@ -194,7 +175,7 @@ impl MultiProvider {
         };
 
         let bedrock_provider = if has_bedrock_creds {
-            Some(Arc::new(bedrock::BedrockProvider::new()))
+            Some(Arc::new(new_bedrock_provider()))
         } else {
             None
         };
@@ -321,6 +302,7 @@ impl MultiProvider {
             active: RwLock::new(active),
             startup_notices: RwLock::new(Vec::new()),
             initial_provider,
+            catalog_scope: next_catalog_scope(),
             routes_memo: Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };

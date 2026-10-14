@@ -1,4 +1,9 @@
-use super::auth_account_picker_saved_accounts::{account_display_name, anthropic_account_use};
+#[path = "auth_account_add_replace.rs"]
+mod add_replace;
+
+use super::auth_account_picker_saved_accounts::{
+    account_picker_display_name, anthropic_account_use,
+};
 use super::*;
 
 impl App {
@@ -322,73 +327,6 @@ impl App {
         self.set_status_notice("Account center: choose an action");
     }
 
-    pub(crate) fn open_account_add_replace_flow(&mut self, provider_filter: Option<&str>) {
-        use crate::tui::account_picker::{AccountPicker, AccountPickerCommand, AccountPickerItem};
-
-        let mut items = vec![AccountPickerItem::action(
-            "account-flow",
-            "Add / Replace",
-            "Back to account center",
-            "Return to the full provider/auth account center",
-            AccountPickerCommand::OpenAccountCenter {
-                provider_filter: provider_filter.map(|value| value.to_string()),
-            },
-        )];
-
-        let include_claude = provider_filter.is_none()
-            || matches!(provider_filter, Some("claude") | Some("anthropic"));
-        let include_openai = provider_filter.is_none() || matches!(provider_filter, Some("openai"));
-
-        if include_claude {
-            items.push(AccountPickerItem::action(
-                "claude",
-                "Claude",
-                "Add new account",
-                "Create the next numbered Claude account",
-                AccountPickerCommand::SubmitInput("/account claude add".to_string()),
-            ));
-            for account in crate::auth::claude::list_accounts().unwrap_or_default() {
-                let label = account.label.clone();
-                items.push(AccountPickerItem::action(
-                    "claude",
-                    "Claude",
-                    format!("Replace account {label}"),
-                    "Refresh this saved Claude account in place",
-                    AccountPickerCommand::SubmitInput(format!("/account claude add {}", label)),
-                ));
-            }
-        }
-
-        if include_openai {
-            items.push(AccountPickerItem::action(
-                "openai",
-                "OpenAI",
-                "Add new account",
-                "Create the next numbered OpenAI account",
-                AccountPickerCommand::SubmitInput("/account openai add".to_string()),
-            ));
-            for account in crate::auth::codex::list_accounts().unwrap_or_default() {
-                let label = account.label.clone();
-                items.push(AccountPickerItem::action(
-                    "openai",
-                    "OpenAI",
-                    format!("Replace account {label}"),
-                    "Refresh this saved OpenAI account in place",
-                    AccountPickerCommand::SubmitInput(format!("/account openai add {}", label)),
-                ));
-            }
-        }
-
-        self.account_picker_overlay = Some(std::cell::RefCell::new(AccountPicker::new(
-            " Add / Replace Account ",
-            items,
-        )));
-        self.inline_interactive_state = None;
-        self.input.clear();
-        self.cursor_pos = 0;
-        self.set_status_notice("Account center: choose add/replace target");
-    }
-
     pub(crate) fn open_account_picker(&mut self, provider_filter: Option<&str>) {
         let Some(scope_key) = self.inline_account_picker_scope_key(provider_filter) else {
             if let Some(provider_id) = provider_filter {
@@ -516,7 +454,12 @@ impl App {
                 selected = idx;
             }
             models.push(crate::tui::PickerEntry {
-                name: account_display_name("Claude", &account.label, claude_accounts.len()),
+                name: account_picker_display_name(
+                    "Claude",
+                    &account.label,
+                    claude_accounts.len(),
+                    account.email.as_deref(),
+                ),
                 options: vec![crate::tui::PickerOption {
                     provider: "Claude".to_string(),
                     api_method: if is_active {
@@ -571,7 +514,12 @@ impl App {
                 selected = idx;
             }
             models.push(crate::tui::PickerEntry {
-                name: account_display_name("OpenAI", &account.label, openai_accounts.len()),
+                name: account_picker_display_name(
+                    "OpenAI",
+                    &account.label,
+                    openai_accounts.len(),
+                    account.email.as_deref(),
+                ),
                 options: vec![crate::tui::PickerOption {
                     provider: "OpenAI".to_string(),
                     api_method: if is_active {
@@ -799,7 +747,12 @@ impl App {
                 .unwrap_or_else(|| "unknown".to_string());
             let plan = account.subscription_type.as_deref().unwrap_or("unknown");
             models.push(crate::tui::PickerEntry {
-                name: account_display_name("Claude", &account.label, accounts.len()),
+                name: account_picker_display_name(
+                    "Claude",
+                    &account.label,
+                    accounts.len(),
+                    account.email.as_deref(),
+                ),
                 options: vec![crate::tui::PickerOption {
                     provider: "Claude".to_string(),
                     api_method: if is_active {
@@ -955,7 +908,12 @@ impl App {
                 .unwrap_or_else(|| "unknown".to_string());
             let account_id = account.account_id.as_deref().unwrap_or("unknown");
             models.push(crate::tui::PickerEntry {
-                name: account_display_name("OpenAI", &account.label, accounts.len()),
+                name: account_picker_display_name(
+                    "OpenAI",
+                    &account.label,
+                    accounts.len(),
+                    account.email.as_deref(),
+                ),
                 options: vec![crate::tui::PickerOption {
                     provider: "OpenAI".to_string(),
                     api_method: if is_active {

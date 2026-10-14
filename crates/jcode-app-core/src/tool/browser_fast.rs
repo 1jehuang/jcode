@@ -73,11 +73,13 @@ pub(super) async fn handoff(
         }
         Err(error) => Ok(outcome(
             "hand_back",
-            &format!("Decision transport unavailable: {error}"),
+            &format!(
+                "The fast browser agent (handoff) is unavailable: {error}. The browser itself still works: complete this task with direct browser actions (snapshot, click, type, open) in the same tab."
+            ),
             &[],
             &Value::Null,
             "typesafe/jev-1.13",
-            Some("uncertain"),
+            Some("direct_actions"),
         )),
     }
 }
@@ -158,6 +160,15 @@ fn outcome(
         .with_metadata(result)
 }
 
+#[derive(Debug)]
+struct HandoffCancelled;
+impl std::fmt::Display for HandoffCancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Handoff cancelled.")
+    }
+}
+impl std::error::Error for HandoffCancelled {}
+
 async fn bounded<T>(
     ctx: &ToolContext,
     timeout: Duration,
@@ -171,8 +182,8 @@ async fn bounded<T>(
     };
     tokio::select! {
         biased;
-        _ = cancel => anyhow::bail!("Handoff cancelled. An in-flight browser action may already have taken effect."),
-        result = tokio::time::timeout(timeout, future) => result.context("Handoff operation timed out; an in-flight action may already have taken effect")?,
+        _ = cancel => Err(HandoffCancelled.into()),
+        result = tokio::time::timeout(timeout, future) => result.context("Handoff operation timed out")?,
     }
 }
 
@@ -401,7 +412,8 @@ async fn observe_page(
     timeout: Duration,
     deadline: tokio::time::Instant,
 ) -> Result<Value> {
-    let deadline = deadline.min(tokio::time::Instant::now() + Duration::from_secs(8));
+    let deadline = deadline.min(tokio::time::Instant::now() + timeout.min(Duration::from_secs(8)));
+    let mut last_disconnect = None;
     loop {
         let remaining =
             timeout.min(deadline.saturating_duration_since(tokio::time::Instant::now()));
@@ -410,7 +422,9 @@ async fn observe_page(
             Err(error)
                 if transition_disconnect(&error) && tokio::time::Instant::now() < deadline =>
             {
-                bounded(
+                let disconnect_details = format!("{error:#}");
+                last_disconnect = Some(error);
+                if let Err(error) = bounded(
                     ctx,
                     deadline.saturating_duration_since(tokio::time::Instant::now()),
                     async {
@@ -418,9 +432,17 @@ async fn observe_page(
                         Ok(())
                     },
                 )
-                .await?;
+                .await {
+                    return Err(error.context(format!(
+                        "Page observation could not reconnect; last connection error: {:#}. The page may have no content script; navigate to a supported page first",
+                        disconnect_details
+                    )));
+                }
             }
-            Err(error) => return Err(error),
+            Err(error) => return Err(match last_disconnect {
+                Some(last) => error.context(format!("Page observation could not reconnect; last connection error: {last:#}. The page may have no content script; navigate to a supported page first")),
+                None => error,
+            }),
         }
     }
 }
@@ -568,6 +590,7 @@ pub(super) async fn run(
     let mut images = Vec::new();
     let mut used_exact = std::collections::HashSet::new();
     let mut requested_help = Some("uncertain");
+    let mut decision_failed = false;
     let result: Result<(&str,String)> = async {
         anyhow::ensure!(input.tab_id.is_some(),"handoff requires explicit tab_id");
         anyhow::ensure!(input.all_frames!=Some(true),"handoff must target a single frame");
@@ -618,7 +641,13 @@ pub(super) async fn run(
                 // than aborting the whole task or reusing them on another page.
                 used_exact.extend(0..input.candidates.len());
             }
-            if observation["sensitive"]==true {return Ok(("hand_back","Credential material, password, OTP, CAPTCHA, or account recovery requires the main agent/user. Never reset passwords.".into()));}
+            if observation["sensitive"]==true {
+                // Login, 2FA and CAPTCHA screens are the user's to complete in
+                // their own browser. Say so explicitly so the main agent asks the
+                // user, waits, and re-runs the same handoff on the same tab.
+                requested_help=Some("user_login");
+                return Ok(("hand_back","The page needs the user: sign-in, one-time code, CAPTCHA, or account recovery. Ask the user to complete it in this browser tab (their saved session and password manager apply), wait for them to confirm, then re-run this same handoff with the same tab_id to continue. Never type credentials. Never reset passwords.".into()));
+            }
             if stale>=3 {return Ok(("hand_back","Browser stalled: repeated unchanged observations".into()));}
             if trace.len()==budget {return Ok(("hand_back","Action step budget exhausted; final action has been observed".into()));}
             let choices:Vec<_>=candidates(input,&observation)?.into_iter().filter(|c| c.exact_index.is_none_or(|i|!used_exact.contains(&i))).filter(|c|!explore_only || (c.exact_index.is_none() && matches!(c.input.action.as_str(),"scroll"|"wait"))).collect();
@@ -630,7 +659,9 @@ pub(super) async fn run(
             let capabilities:Vec<_>=choices.iter().enumerate().filter(|(_,choice)|choice.exact_index.is_some()).map(|(index,choice)|json!({"action_id":format!("a{index}"),"operation":choice.input.action,"source":"trusted_caller","executable_now":true,"requires_code_generation":false})).collect();
             let request=DecisionRequest{goal:goal.into(),observation:json!({"task_context":input.context,"caller_capabilities":capabilities,"page":observation,"supplied_text_values":input.text_values,"action_history":task_history(&trace),"controller_note":task_note,"remaining_actions":budget-trace.len()}),options};
             anyhow::ensure!(serde_json::to_vec(&request)?.len()<=MAX_REQUEST,"Decision state exceeds safe size limit");
-            let decision=bounded(ctx,timeout.min(deadline.saturating_duration_since(tokio::time::Instant::now())),transport.decide(&request)).await?;
+            let decision=bounded(ctx,timeout.min(deadline.saturating_duration_since(tokio::time::Instant::now())),transport.decide(&request)).await.inspect_err(|error| {
+                decision_failed = !error.is::<HandoffCancelled>();
+            })?;
             anyhow::ensure!(decision.confidence.is_finite() && (0.0..=1.0).contains(&decision.confidence),"Invalid decision probability/confidence");
             anyhow::ensure!(decision.reason.len()<=2000,"Decision reason exceeds limit");
             let index=request.options.iter().position(|o|o.id==decision.choice).context("Decision selected an unknown action ID")?;
@@ -680,7 +711,7 @@ pub(super) async fn run(
             if let Some(index)=chosen.exact_index {used_exact.insert(index);}
             trace.push(json!({"step":trace.len()+1,"id":decision.choice,"action":chosen.input.action,"label":chosen.label,"confidence":decision.confidence,"status":"started","before":page_evidence(&observation)}));
             let navigation=chosen.input.action=="open" || (chosen.input.action=="click" && chosen.input.url.is_some()) || chosen.input.submit==Some(true) || chosen.input.provider_action.as_deref()==Some("navigate");
-            let executed=bounded(ctx,timeout.min(deadline.saturating_duration_since(tokio::time::Instant::now())),provider.execute(&chosen.input.action,&chosen.input,ctx)).await;
+            let executed=bounded(ctx,timeout.min(deadline.saturating_duration_since(tokio::time::Instant::now())),provider.execute(&chosen.input.action,&chosen.input,ctx)).await.context("An in-flight browser action may already have taken effect; inspect current state before retrying");
             let executed=match executed {
                 Ok(output) => Ok(output),
                 // Only ordinary navigation/search can be verified this way. Never
@@ -735,6 +766,15 @@ pub(super) async fn run(
                     "hand_back",
                     format!("{quota} Tell the user this and continue with direct browser actions."),
                 )
+            } else if decision_failed {
+                // A decision service failure is not a page/task blocker.
+                requested_help = Some("direct_actions");
+                (
+                    "hand_back",
+                    format!(
+                        "The handoff decision service failed: {error:#}. Continue the same task with direct browser actions (snapshot, click, type, open) using the same tab_id and frame_id. Use final_observation and action_trace to preserve progress, refresh the page observation before acting, and do not replay completed actions. Do not ask the user to sign in or switch paid providers merely because this decision service failed. Still respect page sign-in, authorization, and safety blockers."
+                    ),
+                )
             } else {
                 ("hand_back", format!("{error:#}"))
             }
@@ -754,6 +794,12 @@ pub(super) async fn run(
         transport.model(),
         requested_help,
     );
+    if let Some(metadata) = output.metadata.as_mut() {
+        metadata["tab_id"] = json!(input.tab_id);
+        metadata["frame_id"] = json!(input.frame_id.unwrap_or(0));
+        metadata["window_id"] = json!(input.window_id);
+        output.output = serde_json::to_string(metadata)?;
+    }
     output.images = images;
     Ok(output)
 }

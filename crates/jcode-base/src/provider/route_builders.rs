@@ -45,6 +45,7 @@ pub fn model_name_is_likely_non_chat(model: &str) -> bool {
         "gpt-audio",
         "style-transfer",
         "video-detector",
+        "dall-e",
     ];
     if SUBSTRING_MARKERS.iter().any(|m| lower.contains(m)) {
         return true;
@@ -76,21 +77,19 @@ pub fn model_name_is_likely_non_chat(model: &str) -> bool {
         "vila",
         "nvembed",
         "reward",
+        "sora",
+        "dalle",
+        "realtime",
+        "audio",
+        "video",
     ];
-    if tokens.iter().any(|t| TOKEN_MARKERS.contains(t)) {
-        // "vision" is sometimes part of a multimodal chat model, so only drop
-        // it when paired with another non-chat signal. Vision-language chat
-        // models keep words like "instruct"/"chat" which we treat as a keep.
-        if tokens.contains(&"vision")
-            && (tokens.contains(&"instruct") || tokens.contains(&"chat") || tokens.contains(&"vl"))
-        {
-            // multimodal chat: keep
-        } else {
-            return true;
-        }
-    }
-
-    false
+    // Vision-language chat is legitimate, but a vision/chat marker must not
+    // rescue an independently disqualifying media token (such as Sora).
+    let vision_chat =
+        tokens.contains(&"instruct") || tokens.contains(&"chat") || tokens.contains(&"vl");
+    tokens
+        .iter()
+        .any(|t| TOKEN_MARKERS.contains(t) && !(*t == "vision" && vision_chat))
 }
 
 pub fn openrouter_catalog_model_id(model: &str) -> Option<String> {
@@ -319,6 +318,14 @@ mod listable_tests {
             "us.stability.stable-style-transfer-v1:0",
             "nvidia/nemotron-4-340b-reward",
             "nvidia/ai-synthetic-video-detector",
+            "sora-2-pro",
+            "openai/sora-2",
+            "dall-e-3",
+            "gpt-image-1",
+            "gpt-4o-audio-preview",
+            "gpt-4o-realtime-preview",
+            "gpt-realtime",
+            "sora-2-vision-chat",
         ] {
             assert!(
                 model_name_is_likely_non_chat(model),
