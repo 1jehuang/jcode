@@ -315,10 +315,37 @@ A broader scan for `quinn-proto < 0.11.18`, `h2 < 0.4.16`, `rustls < 0.23.45` in
 
 **Updated final tally: 12 distinct Phenotype repos at 0 active P30 RUSTSEC vulns** (was 11, +1 for zz-merge-unk-PhenoJourneys). tooling-clone is documented as "blocked, see notes" — fixable but requires operator's WIP cleanup first.
 
+### Round 3 — `_full_*` snapshot dirs (2026-10-14)
+
+A second broader scan covering underscore-prefixed `_full_*` dirs found 3 more snapshot archives with the vulnerable trio. Each dir is a full clone of an active Phenotype repo (made before the P30 fix landed in the active repo's main branch), and each was fixed by the same P30 pattern:
+
+| Repo | quinn-proto pre→post | h2 pre→post | rustls pre→post | Branch @ SHA | Status |
+|------|---------------------|-------------|-----------------|--------------|--------|
+| **`_full_AgilePlus`** | 0.11.17 → 0.11.19 | 0.4.17 → 0.4.19 | 0.23.43 → 0.23.45 | `security/quinn-proto-0.11.19-rustls-0.23.45-p30` @ `5fb22f9` | **FULL FIX + cargo check PASS** (6m 11s, 27 agileplus crates). cargo audit: 0 P30, 7 unmaintained warnings. |
+| **`_full_tooling`** | 0.11.16 → 0.11.19 | 0.4.15 → 0.4.19 | 0.23.42 → 0.23.45 | `security/quinn-proto-0.11.19-rustls-0.23.45-p30` @ `baf43bf4` | **Lockfile FIX, cargo check FAIL** (pre-existing: phinbox uses `Urgency` symbol not in `spec` module + E0432 unresolved import — unrelated to P30). cargo audit: 0 P30, 3 unmaintained warnings. |
+| **`_full_HexaKit`** | 0.11.14 ✗ (no change) | 0.4.15 ✗ (no change) | 0.23.40 ✗ (no change) | (no branch — empty) | **BLOCKED — broken git-dep state.** The `phenotype-router` workspace member has a self-referential `phenotype-router-standalone = { git = "https://github.com/KooshaPari/phenotype-router", tag = "v0.2.0" }` pointer dep, but the underlying GitHub repo no longer exists (404 on `git fetch`). cargo update fails before it can touch the P30 trio. This is a "POINTER" package placeholder; the canonical repo is `KooshaPari/phenotype-router` (private/missing). Recommend operator either restore the upstream `KooshaPari/phenotype-router` repo, or replace the pointer dep with a path dep or vendored copy. **No security branch created; the empty branch was deleted via `git update-ref -d`.** |
+
+`_branches.txt` and `_triage.bat/sh` files in each `_full_*` dir are archive metadata from the snapshot creation; no action needed.
+
+**Snapshot relationship to active repos:**
+- `_full_AgilePlus` HEAD `eef93db7a` ≠ `AgilePlus` main HEAD `61f0aadec` (older snapshot, AgilePlus is on 0.11.18 already)
+- `_full_tooling` HEAD `26f8bef17` ≠ `phenotype-tooling` main HEAD `b9ec4220f` (older snapshot, parent is on 0.11.19 already)
+- `_full_HexaKit` HEAD `5e70def07` has no `zz-HexaKit` sibling to compare against
+
+**Updated final tally: 14 distinct Phenotype repos at 0 active P30 RUSTSEC vulns** (was 12, +2 for `_full_AgilePlus` and `_full_tooling`; `_full_HexaKit` blocked on missing GitHub repo).
+
+### Validation matrix (round 3)
+
+| Repo | Branch | cargo audit | cargo check | Notes |
+|---|---|---|---|---|
+| `_full_AgilePlus` | `security/quinn-proto-0.11.19-rustls-0.23.45-p30` @ `5fb22f9` | **0 P30** | **PASS** (6m 11s) | clean fix + clean build |
+| `_full_tooling` | `security/quinn-proto-0.11.19-rustls-0.23.45-p30` @ `baf43bf4` | **0 P30** | FAIL (phinbox pre-existing) | lockfile fix correct; build error is unrelated |
+| `_full_HexaKit` | (no branch) | n/a | n/a | cannot fix — `KooshaPari/phenotype-router` GitHub repo 404 |
+
 ---
 
 tx-agent: jcode
-tx-task: P30-cross-repo-final-tally
-tx-validated: cargo-check + cargo-audit
-tx-scope: docs:cleanup-arc
-tx-intent: final tally of 12 Phenotype repos at 0 P30 RUSTSEC + branch cleanup + round-2 scan
+tx-task: P30-cross-repo-round-3-_full_*
+tx-validated: cargo-audit + cargo-check
+tx-scope: docs:cleanup-arc + _full_AgilePlus + _full_tooling
+tx-intent: round 3 scan: 2 _full_* snapshot dirs fully P30-fixed, 1 blocked on missing upstream GitHub repo
