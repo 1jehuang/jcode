@@ -114,7 +114,39 @@ fn running_versions() -> HashSet<String> {
         .collect()
 }
 
-#[cfg(not(target_os = "linux"))]
+/// Versions whose binary is the executable of a live process. macOS has no
+/// `/proc`; libproc reports each process's executable path instead.
+#[cfg(target_os = "macos")]
+fn running_versions() -> HashSet<String> {
+    use std::os::unix::ffi::OsStrExt;
+    // SAFETY: a null buffer only asks libproc for the number of pids.
+    let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    let Ok(count) = usize::try_from(count) else {
+        return HashSet::new();
+    };
+    // Headroom for processes started between the two calls.
+    let mut pids: Vec<libc::c_int> = vec![0; count + 64];
+    let Ok(buffer_bytes) = libc::c_int::try_from(pids.len() * std::mem::size_of::<libc::c_int>())
+    else {
+        return HashSet::new();
+    };
+    // SAFETY: `pids` is writable for exactly `buffer_bytes` bytes.
+    let filled = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), buffer_bytes) };
+    pids.truncate(usize::try_from(filled).unwrap_or(0));
+    let mut path = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    pids.into_iter()
+        .filter_map(|pid| {
+            // SAFETY: `path` is writable for its full length.
+            let len =
+                unsafe { libc::proc_pidpath(pid, path.as_mut_ptr().cast(), path.len() as u32) };
+            // A failed lookup (for example another user's process) returns 0 or less.
+            let exe = std::ffi::OsStr::from_bytes(path.get(..usize::try_from(len).unwrap_or(0))?);
+            version_from_binary_path(Path::new(exe))
+        })
+        .collect()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn running_versions() -> HashSet<String> {
     HashSet::new()
 }
@@ -250,6 +282,46 @@ mod tests {
             assert!(!versions.join(removed).exists(), "{removed} should go");
         }
         assert_eq!(report.removed.len(), 5);
+    }
+
+    /// A build an older session still runs from must survive the daily pass.
+    /// macOS had no process lookup, so such builds were deleted there.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn daily_pass_keeps_a_build_a_process_runs() {
+        let temp = tempfile::tempdir().unwrap();
+        // running_versions() matches `.../versions/<version>/<binary>`.
+        let versions = &temp.path().join("versions");
+        make_version(versions, "v-idle", DAY * 3);
+        make_version(versions, "v-running", DAY * 3);
+        let binary = versions.join("v-running").join("jcode");
+        fs::copy("/bin/sleep", &binary).unwrap();
+        File::open(versions.join("v-running"))
+            .and_then(|dir| dir.set_modified(SystemTime::now() - DAY * 3))
+            .unwrap();
+        let mut child = std::process::Command::new(&binary)
+            .arg("30")
+            .spawn()
+            .unwrap();
+        // The executable path is visible once exec completes.
+        let mut running = HashSet::new();
+        for _ in 0..100 {
+            std::thread::sleep(Duration::from_millis(20));
+            running = running_versions();
+            if running.contains("v-running") {
+                break;
+            }
+        }
+
+        let report = prune_old_versions_in(versions, &running, 0, SystemTime::now()).unwrap();
+        child.kill().unwrap();
+        child.wait().unwrap();
+
+        assert_eq!(report.removed, vec!["v-idle".to_string()]);
+        assert!(
+            versions.join("v-running").exists(),
+            "a running build must be kept"
+        );
     }
 
     #[test]
