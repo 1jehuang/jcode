@@ -12,6 +12,7 @@ const RECOVERY_REMINDER: &str = "Resume from the last saved step after provider 
 #[derive(Clone, Default)]
 struct PromptCaptureProvider {
     requests: Arc<Mutex<Vec<(String, String)>>>,
+    own_system_prompt: bool,
 }
 
 #[async_trait]
@@ -52,6 +53,10 @@ impl Provider for PromptCaptureProvider {
 
     fn supports_compaction(&self) -> bool {
         false
+    }
+
+    fn uses_own_system_prompt(&self) -> bool {
+        self.own_system_prompt
     }
 
     fn fork(&self) -> Arc<dyn Provider> {
@@ -147,5 +152,23 @@ fn changing_recovery_reminders_never_pollutes_custom_static_prompt() {
             ],
             Some(CUSTOM_PROMPT.into()),
         )
+    );
+}
+
+#[test]
+fn own_prompt_provider_gets_only_working_dir_and_custom_prompt() {
+    let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let provider = PromptCaptureProvider {
+        own_system_prompt: true,
+        ..Default::default()
+    };
+    let mut agent = Agent::new(Arc::new(provider), Registry::empty());
+    agent.session.working_dir = Some("/work/project".into());
+    let context = "# Session Context\nWorking directory: /work/project";
+    assert_eq!(agent.build_system_prompt_split(None).static_part, context);
+    agent.session.system_prompt = Some(CUSTOM_PROMPT.into());
+    assert_eq!(
+        agent.build_system_prompt_split(None).static_part,
+        format!("{context}\n\n{CUSTOM_PROMPT}")
     );
 }

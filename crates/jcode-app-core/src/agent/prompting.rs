@@ -124,6 +124,29 @@ impl Agent {
         &self,
         memory_prompt: Option<&str>,
     ) -> crate::prompt::SplitSystemPrompt {
+        let mut split = self.build_jcode_system_prompt_split(memory_prompt);
+        if self.provider.uses_own_system_prompt() {
+            // The provider brings its own prompt, tools and instruction files.
+            // Send only where the session runs and its custom prompt.
+            split.static_part = [
+                self.session
+                    .working_dir
+                    .as_deref()
+                    .map(crate::prompt::own_prompt_session_context),
+                self.session.system_prompt.clone(),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        }
+        split
+    }
+
+    fn build_jcode_system_prompt_split(
+        &self,
+        memory_prompt: Option<&str>,
+    ) -> crate::prompt::SplitSystemPrompt {
         if let Some(ref override_prompt) = self.session.system_prompt {
             let mut split = crate::prompt::SplitSystemPrompt {
                 static_part: override_prompt.clone(),

@@ -680,6 +680,10 @@ impl Provider for ClaudeCodeProvider {
         true
     }
 
+    fn uses_own_system_prompt(&self) -> bool {
+        true
+    }
+
     fn account_pin(&self, kind: AccountProviderKind) -> Option<AccountPin> {
         (kind == AccountProviderKind::ClaudeCode)
             .then(|| self.pin.get())

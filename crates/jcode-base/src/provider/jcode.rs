@@ -229,6 +229,10 @@ impl Provider for JcodeProvider {
         self.inner.handles_tools_internally()
     }
 
+    fn uses_own_system_prompt(&self) -> bool {
+        self.inner.uses_own_system_prompt()
+    }
+
     async fn invalidate_credentials(&self) {
         self.inner.invalidate_credentials().await;
     }

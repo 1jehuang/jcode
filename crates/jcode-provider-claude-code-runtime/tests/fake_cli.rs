@@ -7,6 +7,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use jcode_message_types::{Message, StreamEvent, ToolDefinition};
 use jcode_provider_claude_code_runtime::ClaudeCodeProvider;
+use jcode_provider_claude_code_runtime::prompt::JCODE_APPEND_SYSTEM_PROMPT;
 use jcode_provider_claude_code_runtime::settings::{ClaudeCodeInstance, ClaudeCodeSettings};
 use jcode_provider_core::{AccountPin, AccountProviderKind, NativeToolResult, Provider};
 use serde_json::{Value, json};
@@ -639,6 +640,25 @@ async fn supplied_system_prompt_reaches_claude_and_a_change_restarts_with_resume
             .any(|a| a.as_str().unwrap().starts_with("--resume=")),
         "the restarted child keeps the Claude session"
     );
+    provider.shutdown().await;
+}
+
+#[tokio::test]
+async fn session_working_dir_becomes_the_child_cwd_and_is_not_appended() {
+    let fake = Fake::new();
+    let provider = fake.provider();
+    let dir = tempfile::tempdir().unwrap();
+    let system = format!(
+        "{}\n\nAnswer in French.",
+        jcode_base::prompt::own_prompt_session_context(&dir.path().display().to_string())
+    );
+    let events = run_turn_with_system(&provider, &system, &[Message::user("system")], None).await;
+    assert_eq!(
+        text(&events),
+        format!("system:{JCODE_APPEND_SYSTEM_PROMPT}\n\nAnswer in French.")
+    );
+    let cwd = fake.launches()[0]["cwd"].as_str().unwrap().to_string();
+    assert_eq!(Path::new(&cwd), dir.path().canonicalize().unwrap());
     provider.shutdown().await;
 }
 
