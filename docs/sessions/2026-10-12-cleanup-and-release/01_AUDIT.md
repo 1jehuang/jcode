@@ -2446,4 +2446,55 @@ Other live jcode sessions in this device (NOT in this layer, kept as-is): `bloss
 3. **P7 release `v0.96.0-k1.0.0`** — after master CI fully green and PR #62 disposition decided.
 4. **Orphan branch `-D` cleanup** — list and `git branch -D` (operator approval per destructive-commands blocklist).
 5. **Duck's branch `fix/panic-budget-wave1-pb1` merge** — operator decision: merge or close.
-6. **13+ Dependabot alerts** — review each, mark with `security:` trailers and link to fix-PR where applicable.
+6. **13+ Dependabot alerts** — review each, mark with `security:` trailers and link to fix-PR where applicable. Of the 10 alerts, 3 remain OPEN (cmov aarch64 wrong-results, tar PAX desync, rand custom-logger unsoundness); all are transitive deps, none touch panic-budget-tracked files.
+
+---
+
+**B.8.71 EXECUTED 2026-10-14T23:37-23:51Z — Verify subagent confirms regression test passes**
+
+Dispatched verify subagent `spider` (`session_spider_1792021049096_e0c106933dabf129`, `openai-compatible:MiniMax-M3` low) to run the regression test for the `restore_session` fix. After 11m 22s of cargo compile (system load 150, contention with deer+other cargo processes), the test binary was produced at `target/debug/deps/jcode_app_core-18c3f595e78cd6e1`. Spider's first filter `agent_tests::restore_session_falls_back_to_provider_default_when_saved_model_is_rejected` was wrong (the test lives in the `agent::tests` submodule, not `agent_tests`); orchestrator ran the correct filter via the prebuilt binary:
+
+```
+$ target/debug/deps/jcode_app_core-18c3f595e78cd6e1 \
+    --test agent::tests::restore_session_falls_back_to_provider_default_when_saved_model_is_rejected \
+    --nocapture
+
+running 1 test
+test agent::tests::restore_session_falls_back_to_provider_default_when_saved_model_is_rejected ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1301 filtered out; finished in 2.58s
+```
+
+**Test PASSES with the fix in place.** `6eb00b35d fix(agent): fall back to provider default when restoring a session model` correctly resolves the bug: when a saved session model is no longer in the live catalog, the fix replaces it with the provider's current default and re-persists the session via `persist_session_best_effort("model fallback")`.
+
+**Unrelated warning surfaced**: `warning: unused variable: e` at `crates/jcode-app-core/src/agent/turn_execution.rs:735:24`. The `e` in `if let Err(e) =` is unused because the warning log doesn't use it (it uses the inner `model` and `fallback` strings). Low-priority cleanup item — change to `if let Err(_e) =` or include the error in the log message.
+
+**State at 23:51Z (B.8.71 exit)**:
+- Master: `5868b9f01` (5 ratchets + lion fix + audit doc B.8.66-B.8.70; regression test verified locally PASSING)
+- Master CI: NOT STARTED. Most recent master CI run is `failure 29c85cbdf` at 2026-10-14T10:20:15Z (12+ hours stale). My pushes at 23:36Z (6eb00b35d) and 23:42Z (5868b9f01) have not triggered any workflow runs; the Actions API returns 0 in_progress/queued/waiting runs. Per AGENTS.md §24, the `Bypass Rule` and `Merge Decision` apply: this is treated as a GitHub Actions billing/throttling issue, not a blocking bug, and merge decisions may proceed if Linux-runnable gates pass.
+- Deer's worktrees: `wt-jcode-pb-acp` and `wt-jcode-pb-sdk` both have uncommitted panic-budget reduction work. Recon (squid subagent) showed 3 real changes in pb-acp (`fake_acp.rs` panic→Result, `telemetry-core/concurrency.rs` + `telemetry-core/lib.rs` .expect→.ok()) and 2 real changes in pb-sdk (`jcode-sdk/auth.rs` + `jcode-sdk/ssh.rs`). **Deer is the manager of these branches; orchestrator does NOT commit there.** Risk: if deer's session is lost, the uncommitted work is lost (branches are LOCAL-ONLY, no remote push). Operator decision: have deer commit+push, or have orchestrator commit+push as preservation.
+- `wt-jcode-pb-small`: genuinely empty, safe to delete (BLOCKED on operator approval per destructive-commands blocklist).
+- PR #64 (fix/ci-unused-deps): OPEN, DRAFT, MERGEABLE, +6/-6. Peer agent's work. CI stuck queued >1h40m.
+- PR #66 (duck's `fix/panic-budget-wave1-pb1`): OPEN, MERGEABLE, +61/-37. No Rust CI run yet, only security checks. Recommendation: trigger CI before merge.
+- Dependabot: 10 alerts total (5 high, 3 medium, 1 low, 1 moderate); 7 fixed (fast-uri x6, rustls x1); 3 OPEN (cmov, tar, rand — all transitive deps, none in panic-budget files).
+
+**B.8.71 lessons**:
+- The cargo compile under high system load is slow (11+ minutes for the first build). The compiled test binary at `target/debug/deps/jcode_app_core-18c3f595e78cd6e1` is a fast path for future test runs (2.58s for a single test).
+- The test path is `agent::tests::...` not `agent_tests::...`. Future spider dispatches should use the correct path.
+- GitHub Actions has gone silent on master. Until it resumes, `cargo test` locally is the verification path of record.
+- The verify subagent pattern (spawn, do focused cargo test, report back) worked well despite the slow first compile. The model `openai-compatible:MiniMax-M3` low effort was adequate for the verification task.
+
+---
+
+**B.8.72 NEXT** — After master CI resumes and goes green, OR after explicit operator sign-off given the CI silence:
+
+1. **Merge PR #64** (fix/ci-unused-deps) — clean peer agent work, +6/-6, but DRAFT — author needs to mark ready and CI needs to pass.
+2. **Merge PR #66** (duck's `fix/panic-budget-wave1-pb1`) — real TUI-SSH panic reduction, +61/-37; needs CI.
+3. **Preserve deer's uncommitted work** — either deer commits himself, or orchestrator commits as preservation with `tx-agent: jcode (bat)`, `tx-preserve-from: session_deer_...`.
+4. **Delete `wt-jcode-pb-small`** — genuinely empty branch, safe to remove (operator approval).
+5. **Delete `fix/panic-budget-small`** remote branch — same as above.
+6. **P7 release `v0.96.0-k1.0.0`** — after master CI green and any blocked PRs resolved.
+7. **Orphan branch `-D` cleanup** — list and `git branch -D` (operator approval per destructive-commands blocklist).
+8. **Fix the unused `e` warning** at `turn_execution.rs:735:24` — trivial cleanup.
+9. **Dependabot triage** — review 3 OPEN alerts (cmov, tar, rand) and either fix or accept the risk.
+
