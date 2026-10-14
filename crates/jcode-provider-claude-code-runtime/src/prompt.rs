@@ -16,6 +16,15 @@ pub const JCODE_APPEND_SYSTEM_PROMPT: &str = "You are running inside jcode, a co
 Tools named mcp__jcode__* are provided by jcode (memory, session search, swarm coordination and similar); \
 use them when they fit the task. Use your built-in tools for files, shell and search.";
 
+/// Text appended to Claude Code's system prompt: the jcode note, then the
+/// system prompt jcode supplied for this session (its own or a custom one).
+pub fn append_system_prompt(system: &str) -> String {
+    match system.trim() {
+        "" => JCODE_APPEND_SYSTEM_PROMPT.to_string(),
+        system => format!("{JCODE_APPEND_SYSTEM_PROMPT}\n\n{system}"),
+    }
+}
+
 fn is_tool_result_message(message: &Message) -> bool {
     message
         .content
