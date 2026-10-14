@@ -357,11 +357,12 @@ async fn stream_response(
             // An error event inside a 200 stream (a proxy relaying the
             // upstream's 503, or a provider's "deploying" notice) ends the
             // turn if forwarded. When it is transient, fail this attempt
-            // instead so the retry loop resends it.
+            // instead so the retry loop resends it. Azure Responses failures
+            // are typed below and keep their own retry decision.
             Ok(Some(Ok(StreamEvent::Error {
                 message,
                 retry_after_secs,
-            }))) if is_retryable_error(&message.to_lowercase()) => {
+            }))) if !azure_responses && is_retryable_error(&message.to_lowercase()) => {
                 let wait = retry_after_secs
                     .map(std::time::Duration::from_secs)
                     .or_else(|| {
