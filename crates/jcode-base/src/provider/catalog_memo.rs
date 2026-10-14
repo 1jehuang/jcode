@@ -95,8 +95,8 @@ impl MultiProvider {
             .active_openai_compatible_profile
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
-            .unwrap_or_default();
+            .clone();
+        // Preserve absence in the key rather than conflating it with an empty profile.
         let mut compat_profiles: Vec<String> = self
             .openai_compatible_profiles
             .read()
@@ -127,9 +127,15 @@ impl MultiProvider {
                 (
                     self.catalog_scope,
                     CATALOG_CLOCK.elapsed().as_secs() / 60,
-                    crate::storage::jcode_dir()
-                        .ok()
-                        .map(|path| path.into_os_string().into_encoded_bytes()),
+                    match crate::storage::jcode_dir() {
+                        Ok(path) => Some(path.into_os_string().into_encoded_bytes()),
+                        Err(error) => {
+                            crate::logging::warn(&format!(
+                                "Cannot resolve route memo storage scope: {error}"
+                            ));
+                            None
+                        }
+                    },
                     std::env::var_os("JCODE_HOME").map(|value| value.into_encoded_bytes()),
                     crate::config::config_reload_generation(),
                 ),
@@ -195,7 +201,15 @@ impl MultiProvider {
             // Shared path: another instance with the same catalog-relevant state
             // (typically a fresh fork on the shared server) built one already.
             let try_shared = || -> Option<RoutesMemoEntry> {
-                let shared = GLOBAL_ROUTES_MEMO.lock().ok()?;
+                let shared = match GLOBAL_ROUTES_MEMO.lock() {
+                    Ok(shared) => shared,
+                    Err(error) => {
+                        crate::logging::warn(&format!(
+                            "Route catalog memo lock poisoned, rebuilding: {error}"
+                        ));
+                        return None;
+                    }
+                };
                 let entry = shared.get(&shared_key)?;
                 if !fresh(entry) {
                     return None;

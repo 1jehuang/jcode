@@ -34,12 +34,32 @@ struct UsageFileStamp {
 }
 
 fn usage_file_stamp(path: &Path) -> Option<UsageFileStamp> {
-    let metadata = std::fs::metadata(path).ok()?;
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => {
+            crate::logging::debug(&format!(
+                "Cannot inspect usage file {}: {error}",
+                path.display()
+            ));
+            return None;
+        }
+    };
+    let modified = match metadata.modified() {
+        Ok(modified) => Some(modified),
+        Err(error) => {
+            crate::logging::debug(&format!(
+                "Usage file timestamp unavailable for {}: {error}",
+                path.display()
+            ));
+            None
+        }
+    };
     #[cfg(unix)]
     use std::os::unix::fs::MetadataExt;
     Some(UsageFileStamp {
         len: metadata.len(),
-        modified: metadata.modified().ok(),
+        modified,
         #[cfg(unix)]
         inode: metadata.ino(),
         #[cfg(unix)]
