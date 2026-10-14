@@ -280,9 +280,7 @@ pub async fn spawn(launch: LaunchConfig, tools: &[ToolDefinition]) -> Result<Arc
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    for (key, value) in settings::instance_env(&launch.instance) {
-        command.env(key, value);
-    }
+    settings::apply_instance_env(&mut command, &launch.instance);
     if let Some(cwd) = launch.cwd.as_ref().filter(|dir| dir.is_dir()) {
         command.current_dir(cwd);
     }

@@ -2951,6 +2951,13 @@ impl Provider for MultiProvider {
         }
     }
 
+    fn uses_own_system_prompt(&self) -> bool {
+        self.active_provider() == ActiveProvider::ClaudeCode
+            && self
+                .claude_code_provider()
+                .is_some_and(|p| p.uses_own_system_prompt())
+    }
+
     fn reasoning_effort(&self) -> Option<String> {
         match self.active_provider() {
             ActiveProvider::Claude => self
