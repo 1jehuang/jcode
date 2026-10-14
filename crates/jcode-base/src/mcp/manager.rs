@@ -286,7 +286,13 @@ impl McpManager {
 
     #[allow(clippy::await_holding_lock)]
     async fn connect_owned(&self, name: &str, config: &McpServerConfig) -> Result<()> {
-        if self.owned_clients.read().await.contains_key(name) {
+        if self
+            .owned_clients
+            .read()
+            .await
+            .get(name)
+            .is_some_and(|client| !client.handle().is_closed())
+        {
             return Ok(());
         }
 
@@ -295,7 +301,13 @@ impl McpManager {
             if let Some(sender) = connecting.get(name) {
                 (Some(sender.subscribe()), false, None)
             } else {
-                if self.owned_clients.read().await.contains_key(name) {
+                if self
+                    .owned_clients
+                    .read()
+                    .await
+                    .get(name)
+                    .is_some_and(|client| !client.handle().is_closed())
+                {
                     return Ok(());
                 }
                 let (sender, _receiver) = watch::channel(None);
@@ -394,8 +406,22 @@ impl McpManager {
 
     /// Get list of connected server names
     pub async fn connected_servers(&self) -> Vec<String> {
-        let mut names: Vec<String> = self.pool_handles.read().await.keys().cloned().collect();
-        names.extend(self.owned_clients.read().await.keys().cloned());
+        let mut names: Vec<String> = self
+            .pool_handles
+            .read()
+            .await
+            .iter()
+            .filter(|(_, handle)| !handle.is_closed())
+            .map(|(name, _)| name.clone())
+            .collect();
+        names.extend(
+            self.owned_clients
+                .read()
+                .await
+                .iter()
+                .filter(|(_, client)| !client.handle().is_closed())
+                .map(|(name, _)| name.clone()),
+        );
         names
     }
 
@@ -405,6 +431,9 @@ impl McpManager {
 
         // Pool handles
         for (server_name, handle) in self.pool_handles.read().await.iter() {
+            if handle.is_closed() {
+                continue;
+            }
             for tool in handle.tools() {
                 tools.push((server_name.clone(), tool));
             }
@@ -412,6 +441,9 @@ impl McpManager {
 
         // Owned clients
         for (server_name, client) in self.owned_clients.read().await.iter() {
+            if client.handle().is_closed() {
+                continue;
+            }
             for tool in client.tools() {
                 tools.push((server_name.clone(), tool));
             }
@@ -470,7 +502,9 @@ impl McpManager {
         // Fast path: already connected via pool handle.
         {
             let handles = self.pool_handles.read().await;
-            if let Some(handle) = handles.get(server) {
+            if let Some(handle) = handles.get(server)
+                && !handle.is_closed()
+            {
                 let result = handle.call_tool(tool, arguments).await;
                 meter_provenance_call(server, &result);
                 return result;
@@ -479,7 +513,9 @@ impl McpManager {
         // Fast path: already connected via owned client.
         {
             let clients = self.owned_clients.read().await;
-            if let Some(client) = clients.get(server) {
+            if let Some(client) = clients.get(server)
+                && !client.handle().is_closed()
+            {
                 let result = client.call_tool(tool, arguments).await;
                 meter_provenance_call(server, &result);
                 return result;
@@ -497,14 +533,18 @@ impl McpManager {
                     // Retry once now that we should be connected.
                     {
                         let handles = self.pool_handles.read().await;
-                        if let Some(handle) = handles.get(server) {
+                        if let Some(handle) = handles.get(server)
+                            && !handle.is_closed()
+                        {
                             let result = handle.call_tool(tool, arguments).await;
                             meter_provenance_call(server, &result);
                             return result;
                         }
                     }
                     let clients = self.owned_clients.read().await;
-                    if let Some(client) = clients.get(server) {
+                    if let Some(client) = clients.get(server)
+                        && !client.handle().is_closed()
+                    {
                         let result = client.call_tool(tool, arguments).await;
                         meter_provenance_call(server, &result);
                         return result;

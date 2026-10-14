@@ -1064,6 +1064,9 @@ if ($DownloadMode -eq "tar") {
     }
 
     Write-Info "Building jcode from source (this can take several minutes)..."
+    # .cargo/config.toml sets a POSIX shell rustc wrapper for local builds.
+    # Windows cannot run it, so clear it for this build.
+    $env:CARGO_BUILD_RUSTC_WRAPPER = ""
     $cargoResult = Invoke-ProcessWithTimeout -FilePath "cargo" -ArgumentList @(
         "build", "--release", "--locked", "-p", "jcode", "--bin", "jcode",
         "--manifest-path", (Join-Path $SrcDir "Cargo.toml")

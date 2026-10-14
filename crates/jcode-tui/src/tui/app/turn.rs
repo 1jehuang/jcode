@@ -185,11 +185,10 @@ impl App {
                     event = event_stream.next() => {
                         match event {
                             Some(Ok(Event::Key(key))) => {
+                                let key = jcode_tui_core::korean_input::normalize_key_event(key);
                                 self.update_copy_badge_key_event(key);
                                 self.observe_voice_key_release(&key);
-                                if self.handle_voice_key_event(&key) {
-                                    // Voice keys work from every screen and never type.
-                                } else if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                                if !self.handle_voice_key_event(&key) && matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
                                     let scroll_only = super::input::is_scroll_only_key(self, key.code, key.modifiers);
                                     let _ = self.handle_key_press_event(key);
                                     if self.cancel_requested {
@@ -381,11 +380,10 @@ impl App {
                     event = event_stream.next() => {
                         match event {
                             Some(Ok(Event::Key(key))) => {
+                                let key = jcode_tui_core::korean_input::normalize_key_event(key);
                                 self.update_copy_badge_key_event(key);
                                 self.observe_voice_key_release(&key);
-                                if self.handle_voice_key_event(&key) {
-                                    // Voice keys work from every screen and never type.
-                                } else if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                                if !self.handle_voice_key_event(&key) && matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
                                     let scroll_only = super::input::is_scroll_only_key(self, key.code, key.modifiers);
                                     let _ = self.handle_key_press_event(key);
                                     // Check for cancel request
@@ -607,6 +605,23 @@ impl App {
                                                 self.broadcast_debug(crate::tui::backend::DebugEvent::TextDelta {
                                                     text: chunk
                                                 });
+                                            }
+                                            if eager_stream_redraw {
+                                                status_spinner_renderer.draw_full(self, terminal)?;
+                                            }
+                                        }
+                                    }
+                                    StreamEvent::TextSuffixReplace { old_text, new_text } => {
+                                        if provider_native_items.replace_text_suffix(
+                                            &mut text_content, &old_text, &new_text,
+                                        ) {
+                                            let ops = self.stream_buffer.flush();
+                                            self.apply_stream_ops(ops);
+                                            let mut corrected = self.streaming.streaming_text.clone();
+                                            if crate::message::replace_text_suffix(
+                                                &mut corrected, &old_text, &new_text,
+                                            ).is_some() {
+                                                self.replace_streaming_text(corrected);
                                             }
                                             if eager_stream_redraw {
                                                 status_spinner_renderer.draw_full(self, terminal)?;
@@ -1456,11 +1471,10 @@ impl App {
                         event = event_stream.next() => {
                             match event {
                                 Some(Ok(Event::Key(key))) => {
+                                    let key = jcode_tui_core::korean_input::normalize_key_event(key);
                                     self.update_copy_badge_key_event(key);
                                     self.observe_voice_key_release(&key);
-                                    if self.handle_voice_key_event(&key) {
-                                        // Voice keys work from every screen and never type.
-                                    } else if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                                    if !self.handle_voice_key_event(&key) && matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
                                         let scroll_only = super::input::is_scroll_only_key(self, key.code, key.modifiers);
                                         let _ = self.handle_key_press_event(key);
                                         if self.cancel_requested {
