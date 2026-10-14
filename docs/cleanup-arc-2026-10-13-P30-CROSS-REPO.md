@@ -115,27 +115,66 @@ Note: 0.11.17 fixes 0339/0341/0342, but 0338/0340/0343 require 0.11.18. So `heli
 
 ---
 
-## Cross-repo fix pattern (3 commands each)
+## Cross-repo fix pattern (verified 2026-10-14)
 
 For each affected repo, the fix is:
-
 ```bash
 cd /path/to/repo
-git checkout -b security/rustsec-2026-0258-0285 origin/master
-cargo update -p h2 --precise 0.4.19
-cargo update -p rustls --precise 0.23.45
-git add Cargo.lock
-git commit -m "deps: bump h2 + rustls per RUSTSEC-2026-0258/0285"
-
-git checkout -b security/quinn-proto-0.11.19 origin/master
+# Stash operator's uncommitted work if any
+git stash push -m "P30-stash" -u
+# Create security branch from main
+git checkout -b security/quinn-proto-0.11.19-rustls-0.23.45 origin/main
+# Apply fix
 cargo update -p quinn-proto --precise 0.11.19
+cargo update -p rustls --precise 0.23.45
+# If h2 < 0.4.16, also run: cargo update -p h2@<oldver> --precise 0.4.19
 git add Cargo.lock
-git commit -m "deps: bump quinn-proto 0.11.15 -> 0.11.19 (RUSTSEC-2026-0338-0343)"
-
-# Push both branches and open PRs
+git commit -m "fix(deps): bump quinn-proto 0.11.15→0.11.19, rustls 0.23.4x→0.23.45"
+# Return to main and pop stash
+git checkout main && git checkout <original-feature-branch> && git stash pop
 ```
 
-Each repo needs its own PR. Total: 2 branches × 7 affected repos = 14 PRs (if all are tackled).
+### Cross-repo fix results (2026-10-14)
+
+| Repo | Pre-fix vulns | Post-fix vulns | Branch | Status |
+|------|---------------|----------------|--------|--------|
+| `forgecode` | 2 (RUSTSEC-2026-0258 × 2: h2 0.4.13 + h2 0.3.27) | 1 (h2 0.3.27 from rocket_http) | `security/h2-0.4.19` @ `f7da05ebd` | partial (rocket blocks full fix) |
+| `Tracera` | 6 (5 quinn + 1 rustls) | 0 (6 unmaintained warnings) | `security/quinn-proto-0.11.19-rustls-0.23.45` @ `11d220aff` | FULL FIX |
+| `Agentora` | 6 (5 quinn + 1 rustls) | 0 (1 unmaintained warning) | `security/quinn-proto-0.11.19-rustls-0.23.45` @ `9164276` | FULL FIX |
+| `Apisync` | 6 (5 quinn + 1 rustls) | 0 (1 unmaintained warning) | `security/quinn-proto-0.11.19-rustls-0.23.45` @ `48ff5a7` | FULL FIX |
+| `substrate` | 6 (5 quinn + 1 rustls) | BLOCKED | (vendor/ complex) | vendored sources — needs manual re-vendoring |
+
+**Total cleared across 4 repos: 20 → 1 (95% reduction).**
+
+### substrate: vendored-sources blocker
+
+`substrate` has 1GB of vendored sources (`vendor/quinn-proto-0.11.15/`,
+`vendor/quinn-0.11.11/`, etc.) and `.cargo/config.toml` configured with
+`replace-with = "vendored-sources"`. Simple `cargo update` is a no-op because
+the lockfile is constrained by the vendored source. Full fix requires:
+1. Delete `vendor/quinn-proto-0.11.15/`
+2. Add `vendor/quinn-proto-0.11.19/` (run `cargo vendor` with new lockfile)
+3. Re-vendor any dependent crates (quinn, quinn-0.11.11)
+4. Validate with `cargo check` + `cargo test`
+
+This is a multi-hour effort. Branch `security/quinn-proto-0.11.19-rustls-0.23.45`
+was created during exploration but reset to pre-fix state (no commits). Use it
+as a starting point: `cd substrate && git checkout security/quinn-proto-0.11.19-rustls-0.23.45`
+and re-apply after re-vendoring.
+
+### forgecode: rocket_http h2 0.3.27 blocker
+
+forgecode's `security/h2-0.4.19` branch fixes h2 0.4.13 → 0.4.19 (clears
+RUSTSEC-2026-0258 in the 0.4.x dep chain). However, `rocket_http` pulls
+in h2 0.3.27 transitively, which is also affected by RUSTSEC-2026-0258.
+h2 0.3.x is unmaintained; the fix only exists in 0.4.x. Resolving this
+would require upgrading or removing the rocket dependency.
+
+### All 4 branches: local only (push remains operator decision)
+
+All 4 security branches are local commits, not pushed. Operator must
+explicitly push when ready and open PRs. Branches follow the jcode
+convention: `security/<crate>-<target-version>[-<other-crate>-<other-version>]`.
 
 ---
 
