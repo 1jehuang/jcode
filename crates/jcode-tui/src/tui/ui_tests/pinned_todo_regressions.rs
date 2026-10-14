@@ -67,8 +67,10 @@ fn terminal_text(terminal: &Terminal<TestBackend>) -> String {
 
 #[test]
 fn pinned_todo_regression_packed_fresh_session_keeps_prompt_when_band_appears() {
-    let _render_lock = viewport_snapshot_test_lock();
     with_pinned_todos_config(|| {
+        // Env lock is already held by the helper; take the render lock second
+        // so the order matches every other test (env, then render).
+        let _render_lock = viewport_snapshot_test_lock();
         let _changelog = header::scoped_unseen_changelog_entries_override_for_tests(Vec::new());
         reset_prompt_viewport_state_for_test();
         struct RestoreDebug(bool);
@@ -129,8 +131,9 @@ fn pinned_todo_regression_packed_fresh_session_keeps_prompt_when_band_appears() 
 
 #[test]
 fn pinned_todo_regression_hidden_message_has_zero_length_cache_boundary() {
-    let _render_lock = viewport_snapshot_test_lock();
     with_pinned_todos_config(|| {
+        // Env lock is already held by the helper; take the render lock second.
+        let _render_lock = viewport_snapshot_test_lock();
         let mut state = TestState {
             display_messages: vec![
                 DisplayMessage::user("Preserve the original prompt"),
