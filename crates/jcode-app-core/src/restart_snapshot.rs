@@ -61,7 +61,7 @@ pub fn clear_snapshot() -> Result<bool> {
     if !path.exists() {
         return Ok(false);
     }
-    std::fs::remove_file(path)?;
+    crate::storage::remove_state_file(&path)?;
     Ok(true)
 }
 

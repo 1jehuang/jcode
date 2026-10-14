@@ -1060,7 +1060,7 @@ impl AmbientRunnerHandle {
 
         // Clear any previous result file
         if let Ok(result_path) = VisibleCycleContext::result_path() {
-            let _ = std::fs::remove_file(&result_path);
+            let _ = crate::storage::remove_state_file(&result_path);
         }
 
         // Spawn kitty with `jcode ambient run-visible`
@@ -1084,7 +1084,7 @@ impl AmbientRunnerHandle {
                     && let Ok(result) =
                         crate::storage::read_json::<AmbientCycleResult>(&result_path)
                 {
-                    let _ = std::fs::remove_file(&result_path);
+                    let _ = crate::storage::remove_state_file(&result_path);
                     return Ok(VisibleCycleOutcome::Completed(Box::new(
                         AmbientCycleResult {
                             started_at,

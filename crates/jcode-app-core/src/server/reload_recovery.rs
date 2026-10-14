@@ -74,7 +74,7 @@ pub(super) fn path_for_session(session_id: &str) -> Result<PathBuf> {
 
 fn remove_record_files(path: &std::path::Path) -> Result<()> {
     for candidate in [path.to_path_buf(), path.with_extension("bak")] {
-        match std::fs::remove_file(&candidate) {
+        match crate::storage::remove_state_file(&candidate) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
@@ -138,7 +138,7 @@ fn collect_garbage_at(now: SystemTime) -> Result<GarbageCollectionStats> {
         if extension == Some("bak") {
             let primary = path.with_extension("json");
             if !primary.exists() && file_is_expired(&path, now) {
-                match std::fs::remove_file(&path) {
+                match crate::storage::remove_state_file(&path) {
                     Ok(()) => stats.removed += 1,
                     Err(error) => {
                         stats.errors += 1;
