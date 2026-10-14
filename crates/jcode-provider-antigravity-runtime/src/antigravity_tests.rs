@@ -897,4 +897,49 @@ fn model_routes_reconciles_alias_availability_by_canonical_request_id() {
         !medium_argon.available,
         "canonical target must not be marked available when its alias is unavailable"
     );
+    assert!(
+        medium_argon
+            .detail
+            .contains("canonical target 'gemini-4-argon-medium' unavailable"),
+        "expected canonical veto explanation in detail, got: {}",
+        medium_argon.detail
+    );
+
+    // Exact-ID duplicate policy is keep-first: a trailing `available: false`
+    // duplicate of the exact same ID must not veto the first retained `true` row.
+    *provider.fetched_catalog.write().expect("catalog lock") = vec![
+        CatalogModel {
+            id: "gemini-3-flash".to_string(),
+            display_name: None,
+            reset_time: None,
+            tag_title: None,
+            model_provider: None,
+            max_tokens: None,
+            max_output_tokens: None,
+            recommended: true,
+            available: true,
+            remaining_fraction_milli: Some(1000),
+        },
+        CatalogModel {
+            id: " gemini-3-flash ".to_string(),
+            display_name: None,
+            reset_time: None,
+            tag_title: None,
+            model_provider: None,
+            max_tokens: None,
+            max_output_tokens: None,
+            recommended: false,
+            available: false,
+            remaining_fraction_milli: Some(0),
+        },
+    ];
+    let deduped_routes = provider.model_routes();
+    let flash = deduped_routes
+        .iter()
+        .find(|route| route.model == "gemini-3-flash")
+        .expect("gemini-3-flash route");
+    assert!(
+        flash.available,
+        "exact-ID deduplication is keep-first and must retain the first row's availability"
+    );
 }

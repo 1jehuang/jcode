@@ -836,6 +836,33 @@ mod endpoint_tests {
         }
     }
 
+    struct VersionEnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        prev: Option<std::ffi::OsString>,
+    }
+
+    impl VersionEnvGuard {
+        fn acquire() -> Self {
+            let lock = ENV_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let prev = std::env::var_os(VERSION_ENV);
+            Self { _lock: lock, prev }
+        }
+    }
+
+    impl Drop for VersionEnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                if let Some(prev) = self.prev.as_ref() {
+                    std::env::set_var(VERSION_ENV, prev);
+                } else {
+                    std::env::remove_var(VERSION_ENV);
+                }
+            }
+        }
+    }
+
     fn expected_platform_suffix() -> &'static str {
         if cfg!(target_os = "windows") {
             "windows/amd64"
@@ -848,7 +875,7 @@ mod endpoint_tests {
 
     #[test]
     fn antigravity_user_agent_defaults_to_cli_version_with_platform_suffix() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = VersionEnvGuard::acquire();
         unsafe {
             std::env::remove_var(VERSION_ENV);
         }
@@ -864,7 +891,7 @@ mod endpoint_tests {
 
     #[test]
     fn antigravity_user_agent_ignores_empty_and_whitespace_overrides() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = VersionEnvGuard::acquire();
         let expected_ua = format!(
             "antigravity/cli/{ANTIGRAVITY_VERSION} {}",
             expected_platform_suffix()
@@ -884,14 +911,11 @@ mod endpoint_tests {
                 "blank override {blank:?} must produce default User-Agent"
             );
         }
-        unsafe {
-            std::env::remove_var(VERSION_ENV);
-        }
     }
 
     #[test]
     fn antigravity_user_agent_normalizes_custom_and_cli_prefixed_overrides() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = VersionEnvGuard::acquire();
         let expected_ua = format!("antigravity/cli/1.4.2 {}", expected_platform_suffix());
         for raw in ["1.4.2", "  1.4.2  ", "cli/1.4.2", "  cli/1.4.2  "] {
             unsafe {
@@ -907,9 +931,6 @@ mod endpoint_tests {
                 expected_ua,
                 "override {raw:?} must produce exact cli-prefixed User-Agent without double prefix"
             );
-        }
-        unsafe {
-            std::env::remove_var(VERSION_ENV);
         }
     }
 }

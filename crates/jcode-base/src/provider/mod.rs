@@ -1516,7 +1516,7 @@ impl MultiProvider {
 
         let already_has_gemini = self.gemini_provider().is_some();
         if !already_has_gemini
-            && (crate::auth::gemini::load_tokens().is_ok() || crate::auth::gemini::has_api_key())
+            && (crate::auth::gemini::load_tokens().is_ok() || crate::auth::gemini::uses_api_key())
             && let Some(gemini) =
                 external::instantiate_expected_external_provider(external::GEMINI_RUNTIME)
         {
@@ -2153,35 +2153,7 @@ impl Provider for MultiProvider {
             );
         }
 
-        if self.active_provider() == ActiveProvider::Antigravity
-            && crate::provider::antigravity::is_known_model(model)
-        {
-            return self.set_model_on_provider(ActiveProvider::Antigravity, model);
-        }
-
-        // Detect which provider an unprefixed model belongs to.
-        let target_provider = provider_for_model(model);
-        if let Some(target_provider) = target_provider
-            && let Some(target) = provider_from_model_key(target_provider)
-        {
-            if !self.reconcile_auth_if_provider_missing(target)
-                && self.antigravity_provider().is_some()
-                && crate::provider::antigravity::is_known_model(model)
-            {
-                return self.set_model_on_provider(ActiveProvider::Antigravity, model);
-            }
-            self.set_model_on_provider(target, model)
-        } else if let Some(profile) = self.openai_compatible_profile_owning_model(model) {
-            // Bare ids from an OpenAI-compatible catalog (`celeris-1`,
-            // `mimo-v2.5`, ...) match none of the built-in model-name
-            // heuristics. Without this, `/model <bare-id>` fell through to
-            // whichever provider happened to be active and failed with a
-            // misleading "not supported by <active provider>" error.
-            self.set_model_on_openai_compatible_profile(profile, model)
-        } else {
-            // Unknown model - try current provider.
-            self.set_model_on_provider(self.active_provider(), model)
-        }
+        self.set_unprefixed_model(model)
     }
 
     fn set_route_selection(&self, selection: &RouteSelection) -> Result<()> {

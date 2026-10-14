@@ -815,27 +815,42 @@ impl Provider for AntigravityProvider {
     fn model_routes(&self) -> Vec<jcode_provider_core::ModelRoute> {
         let catalog = self.fetched_catalog();
         if !catalog.is_empty() {
-            let unavailable_canonical_ids: std::collections::HashSet<String> = catalog
-                .iter()
-                .filter(|model| !model.available)
-                .map(|model| remap_unsupported_model(model.id.trim()).to_string())
-                .collect();
             let mut seen = std::collections::HashSet::new();
-            let mut routes: Vec<jcode_provider_core::ModelRoute> = Vec::new();
-            for model in catalog {
+            let mut deduped_catalog = Vec::with_capacity(catalog.len());
+            for mut model in catalog {
                 let id = model.id.trim().to_string();
                 if id.is_empty() || !seen.insert(id.clone()) {
                     continue;
                 }
-                let canonical_id = remap_unsupported_model(&id);
+                model.id = id;
+                deduped_catalog.push(model);
+            }
+            let unavailable_canonical_ids: std::collections::HashSet<String> = deduped_catalog
+                .iter()
+                .filter(|model| !model.available)
+                .map(|model| remap_unsupported_model(&model.id).to_string())
+                .collect();
+            let mut routes: Vec<jcode_provider_core::ModelRoute> =
+                Vec::with_capacity(deduped_catalog.len() + AVAILABLE_MODELS.len());
+            for model in deduped_catalog {
+                let canonical_id = remap_unsupported_model(&model.id);
                 let available =
                     model.available && !unavailable_canonical_ids.contains(canonical_id);
+                let mut detail = catalog_model_detail(&model);
+                if model.available && !available {
+                    let note = format!("canonical target '{canonical_id}' unavailable");
+                    if detail.is_empty() {
+                        detail = note;
+                    } else {
+                        detail = format!("{detail} · {note}");
+                    }
+                }
                 routes.push(jcode_provider_core::ModelRoute {
-                    model: id,
+                    model: model.id,
                     provider: "Antigravity".to_string(),
                     api_method: "https".to_string(),
                     available,
-                    detail: catalog_model_detail(&model),
+                    detail,
                     usage: None,
                     cheapness: None,
                 });
