@@ -338,6 +338,17 @@ struct ProfileLock {
     _file: std::fs::File,
 }
 
+/// Marker another jcode process writes while it waits for the profile. An
+/// idle holder sees it and hands the profile over instead of keeping it until
+/// its idle timeout.
+fn handoff_request_path(profile: &Path) -> PathBuf {
+    profile.parent().unwrap_or(profile).join("profile.wanted")
+}
+
+fn handoff_requested(profile: &Path) -> bool {
+    handoff_request_path(profile).exists()
+}
+
 impl ProfileLock {
     #[cfg(unix)]
     async fn acquire(profile: &Path) -> Result<Self> {
@@ -352,17 +363,31 @@ impl ProfileLock {
             .open(parent.join("profile.lock"))
             .context("Failed to open the ChatGPT web profile lock")?;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(15 * 60);
-        loop {
+        let mut requested = false;
+        let result = loop {
             // SAFETY: flock on an owned, open file descriptor.
             if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-                return Ok(Self { _file: file });
+                break Ok(Self { _file: file });
             }
-            anyhow::ensure!(
-                tokio::time::Instant::now() < deadline,
-                "Another jcode process kept ChatGPT web busy for 15 minutes"
-            );
+            if !requested {
+                // Ask an idle holder (for example the daemon) to hand over.
+                let _ = std::fs::write(
+                    handoff_request_path(profile),
+                    std::process::id().to_string(),
+                );
+                requested = true;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                break Err(anyhow::anyhow!(
+                    "Another jcode process kept ChatGPT web busy for 15 minutes"
+                ));
+            }
             tokio::time::sleep(Duration::from_millis(250)).await;
+        };
+        if requested {
+            let _ = std::fs::remove_file(handoff_request_path(profile));
         }
+        result
     }
 }
 
@@ -610,20 +635,26 @@ fn start_idle_reaper() {
     IDLE_REAPER.call_once(|| {
         tokio::spawn(async {
             loop {
-                tokio::time::sleep(Duration::from_secs(60)).await;
+                tokio::time::sleep(Duration::from_millis(500)).await;
                 let idle = LAST_USED
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .elapsed();
-                if idle < IDLE_SHUTDOWN {
+                let wanted = profile_dir().is_ok_and(|profile| handoff_requested(&profile));
+                if idle < IDLE_SHUTDOWN && !wanted {
                     continue;
                 }
-                // Only stop an instance nobody is using right now.
+                // Only stop an instance nobody is using right now. A busy
+                // instance keeps the profile until its turn is done.
                 if let Ok(mut guard) = INSTANCE.try_lock()
                     && let Some(instance) = guard.take()
                 {
                     instance.shutdown().await;
-                    crate::logging::info("Stopped the idle private ChatGPT web browser");
+                    crate::logging::info(if wanted {
+                        "Handed the private ChatGPT web browser to another jcode process"
+                    } else {
+                        "Stopped the idle private ChatGPT web browser"
+                    });
                 }
             }
         });
@@ -1348,6 +1379,37 @@ mod tests {
                 .await
                 .is_ok()
         );
+    }
+
+    #[tokio::test]
+    async fn waiting_process_requests_handoff_and_clears_the_request() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path().join("chatgpt-web").join("profile");
+        let held = ProfileLock::acquire(&profile).await.unwrap();
+        assert!(!handoff_requested(&profile));
+        let waiter = tokio::spawn({
+            let profile = profile.clone();
+            async move { ProfileLock::acquire(&profile).await }
+        });
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while !handoff_requested(&profile) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "waiter never asked for the profile"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        drop(held);
+        let lock = tokio::time::timeout(Duration::from_secs(2), waiter)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(
+            !handoff_requested(&profile),
+            "the request is removed once the waiter holds the profile"
+        );
+        drop(lock);
     }
 
     #[tokio::test]
