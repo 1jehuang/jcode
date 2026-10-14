@@ -131,7 +131,7 @@ mod tests {
         assert!(error.contains("Timed out waiting for build store lock"));
         drop(guard);
         assert!(store.path().join(LOCK_FILE).is_file());
-        acquire_in(store.path(), Duration::ZERO).unwrap();
+        drop(acquire_in(store.path(), Duration::ZERO).unwrap());
     }
 
     #[test]
