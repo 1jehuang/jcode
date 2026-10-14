@@ -398,8 +398,12 @@ async fn wait_for_ui_execution_with_bridge(
             !remaining.is_zero(),
             "ChatGPT read-only execution readiness timed out: {last_failure}"
         );
+        // Never abandon an attempt early. A dropped evaluate keeps running in
+        // the browser, and starting another on the same tab overlaps debugger
+        // sessions: the first detach kills both with "Detached while
+        // handling command." Only the overall deadline may cut one short.
         match tokio::time::timeout(
-            remaining.min(Duration::from_secs(2)),
+            remaining,
             bridge.command(
                 "evaluate",
                 serde_json::json!({"tabId":tab_id,"script":UI_EXECUTION_READINESS_SCRIPT}),
@@ -668,6 +672,10 @@ mod tests {
                     match self.fail {
                         "readiness_once" if attempts == 1 => anyhow::bail!("transient CSP blocked"),
                         "readiness_pending" => std::future::pending::<serde_json::Value>().await,
+                        "readiness_slow" if attempts == 1 => {
+                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                            json!({"result":{"hostname":"chatgpt.com","ready":true}})
+                        }
                         "readiness_incomplete" if attempts == 1 => {
                             json!({"result":{"hostname":"chatgpt.com","ready":false}})
                         }
@@ -803,6 +811,21 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn chatgpt_web_readiness_never_overlaps_a_slow_evaluate() {
+        // A dropped evaluate keeps running in the browser. Starting another one
+        // on the same tab overlaps debugger sessions, and the first detach
+        // kills both with "Detached while handling command."
+        let bridge = FakeBridge {
+            actions: Default::default(),
+            fail: "readiness_slow",
+        };
+        let started = tokio::time::Instant::now();
+        wait_for_ui_execution_with_bridge(&bridge, 8).await.unwrap();
+        assert_eq!(started.elapsed(), std::time::Duration::from_secs(5));
+        assert_eq!(*bridge.actions.lock().unwrap(), ["evaluate"]);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn chatgpt_web_readiness_fails_closed_and_cleans_fork() {
         for fail in [
             "readiness_permanent",
@@ -824,7 +847,7 @@ mod tests {
                 assert_eq!(elapsed, std::time::Duration::from_secs(10));
                 assert_eq!(
                     actions.iter().filter(|a| a.as_str() == "evaluate").count(),
-                    if fail == "readiness_pending" { 4 } else { 20 }
+                    if fail == "readiness_pending" { 1 } else { 20 }
                 );
             } else {
                 assert_eq!(
