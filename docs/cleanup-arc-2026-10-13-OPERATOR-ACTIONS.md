@@ -92,6 +92,8 @@
 
 ## P25c — Rescue branches (decision needed)
 
+**RESEARCH 2026-10-14 04:11Z:** See `docs/cleanup-arc-2026-10-13-P25C-RESEARCH.md` for full content analysis of each rescue branch. Key finding: all 3 branches modify `kcode-*` paths; jcode master uses `jcode-*` paths. The fix logic is generic but requires manual port. Recommendation: Option C with prioritization.
+
 ### Branches in question
 
 | Branch | Created | Commits | Preservation status |
