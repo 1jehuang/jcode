@@ -310,6 +310,19 @@ fn build_hook_process(
     let _ = CLIENT_TERMINAL_ENV.try_with(|env| {
         crate::terminal_launch::apply_client_terminal_env(&mut cmd, env);
     });
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+
+        // A hook is background work the user never asked to see. Without this the
+        // child is a console application started by a process that may hold no
+        // console, so Windows allocates a fresh one — and on a host where Windows
+        // Terminal is the default terminal application that console is a new tab,
+        // one per hook event. The flag is inherited, so a script that shells out to
+        // `curl.exe` stays invisible too.
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
     Ok(cmd)
 }
 
@@ -329,7 +342,7 @@ pub fn dispatch_observer(event: HookEvent) {
                 cmd.stdin(std::process::Stdio::null())
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null());
-                match crate::platform::spawn_detached(&mut cmd) {
+                match crate::platform::spawn_detached_without_console_window(&mut cmd) {
                     Ok(child) => {
                         crate::platform::reap_detached(child);
                         crate::logging::debug(&format!(

@@ -229,7 +229,6 @@ struct TestState {
     side_pane_images: Vec<crate::session::RenderedImage>,
     pin_images: bool,
     inline_images_visible: bool,
-    chat_overscroll_active: bool,
     cache_ttl_status: Option<crate::tui::CacheTtlInfo>,
     openai_reset_hint: Option<&'static str>,
     status_notice: Option<String>,
@@ -353,14 +352,6 @@ impl crate::tui::TuiState for TestState {
     }
     fn time_since_activity(&self) -> Option<Duration> {
         self.time_since_activity
-    }
-    fn chat_overscroll_active(&self) -> bool {
-        self.chat_overscroll_active
-    }
-    fn chat_overscroll_remaining(&self) -> Option<f32> {
-        // TestState models the elastic reveal: while active, a countdown is
-        // depleting (a config-pinned line would report None here instead).
-        self.chat_overscroll_active.then_some(1.0)
     }
     fn total_session_tokens(&self) -> Option<(u64, u64)> {
         None

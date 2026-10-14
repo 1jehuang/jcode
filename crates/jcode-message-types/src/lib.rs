@@ -23,9 +23,42 @@ pub struct ToolDefinition {
     /// ToolDefinition::description_token_estimate() when reviewing tool bloat.
     pub description: String,
     pub input_schema: serde_json::Value,
+    /// Provider-native deferred loading. A deferred definition is sent in the
+    /// request's tool catalog but stays out of the cached system-prompt prefix;
+    /// it becomes callable only once a [`ContentBlock::ToolReference`] for it
+    /// appears in the conversation. Adding or removing deferred definitions
+    /// therefore never invalidates the provider prompt cache. Providers without
+    /// native support drop deferred definitions and reference blocks.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub defer_loading: bool,
 }
 
 impl ToolDefinition {
+    /// Construct an eagerly loaded definition.
+    pub fn new(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        input_schema: serde_json::Value,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            input_schema,
+            defer_loading: false,
+        }
+    }
+
+    /// Mark this definition as deferred (see [`ToolDefinition::defer_loading`]).
+    pub fn deferred(mut self) -> Self {
+        self.defer_loading = true;
+        self
+    }
+
+    /// Eager definitions only: what enters the cached prompt prefix.
+    pub fn eager(defs: &[ToolDefinition]) -> Vec<ToolDefinition> {
+        defs.iter().filter(|d| !d.defer_loading).cloned().collect()
+    }
+
     /// Serialized size of the full tool definition payload sent to providers.
     pub fn prompt_chars(&self) -> usize {
         serde_json::json!({
@@ -172,6 +205,17 @@ pub enum ContentBlock {
     /// compaction state across turns/saves when jcode explicitly triggers it.
     OpenAICompaction {
         encrypted_content: String,
+    },
+    /// Loads a deferred tool definition into the model's context at this
+    /// point in the conversation, without touching the cached prompt prefix.
+    ///
+    /// Carried in the user message holding the `ToolResult` it belongs to
+    /// (`tool_use_id`). Anthropic renders it as a `tool_reference` inside that
+    /// tool_result; OpenAI Responses renders an `additional_tools` input item.
+    /// Other providers ignore it.
+    ToolReference {
+        tool_use_id: String,
+        tool_name: String,
     },
 }
 

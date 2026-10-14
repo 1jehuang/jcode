@@ -55,7 +55,8 @@ pub(super) use input_dispatch::{
     apply_remote_transcript_event, apply_transcript_event, begin_remote_send,
     begin_remote_split_launch, finish_remote_split_launch, history_matches_pending_startup_prompt,
     route_prepared_input_to_new_remote_session, stage_turn_for_remote_tick_loop,
-    submit_prepared_remote_input, submit_remote_slash_input,
+    submit_prepared_remote_input, submit_remote_slash_input, submit_remote_voice_transcript,
+    submit_voice_transcript,
 };
 pub(super) use key_handling::{
     handle_remote_char_input, handle_remote_key, handle_remote_key_event, send_interleave_now,
@@ -133,7 +134,6 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     needs_redraw |= app.maybe_push_idle_cold_cache_warning();
     needs_redraw |= app.progress_copy_selection_edge_autoscroll();
     app.progress_mouse_scroll_animation();
-    needs_redraw |= app.update_chat_overscroll();
     needs_redraw |= app.update_pinned_images_auto_hide();
     // Dissolve stale (off-screen) reasoning traces with zero visible motion.
     needs_redraw |= app.gc_offscreen_reasoning_traces();
@@ -141,6 +141,8 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     // Adopt the resolved scroll position once a frame containing newly loaded
     // older history has rendered, so manual scrolling resumes seamlessly.
     needs_redraw |= app.reconcile_history_anchor();
+    // Same for a resize: adopt the resolved row once the rewrap has rendered.
+    needs_redraw |= app.reconcile_resize_anchor();
     // Reveal buffered streaming text at the smooth paced rate on each tick, the
     // same as the local turn loop. When Done arrived with a backlog, leave one
     // rendered live frame after the final reveal before committing the turn.
@@ -442,7 +444,10 @@ async fn apply_terminal_event(
             input_attribution.scroll_delta = key_scroll_delta(&key);
             app.note_client_interaction();
             app.update_copy_badge_key_event(key);
-            if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+            app.observe_voice_key_release(&key);
+            if app.handle_voice_key_event(&key) {
+                // Voice keys work from every screen and never type.
+            } else if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
                 handle_remote_key_event(app, key, remote).await?;
                 if let Some(selection) = app.pending_route_selection.take() {
                     app.pending_model_switch = None;
@@ -701,6 +706,20 @@ pub(super) async fn handle_bus_event(
             app.handle_dictation_failure(message);
             true
         }
+        Ok(BusEvent::VoiceInputWake) => match app.poll_voice_input() {
+            super::voice_input::VoicePoll::Idle => false,
+            super::voice_input::VoicePoll::Changed => true,
+            super::voice_input::VoicePoll::Transcript(text) => {
+                if let Err(error) = submit_remote_voice_transcript(app, remote, &text).await {
+                    app.push_display_message(DisplayMessage::error(format!(
+                        "Failed to send voice transcript: {error}"
+                    )));
+                    app.set_status_notice("Voice transcript not sent");
+                }
+                process_remote_followups(app, remote).await;
+                true
+            }
+        },
         _ => false,
     }
 }
@@ -816,7 +835,10 @@ fn handle_terminal_event_while_disconnected(
         Some(Ok(Event::Key(key))) => {
             app.note_client_interaction();
             app.update_copy_badge_key_event(key);
-            if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+            app.observe_voice_key_release(&key);
+            if app.handle_voice_key_event(&key) {
+                // Voice keys work from every screen and never type.
+            } else if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
                 handle_disconnected_key_event(app, key)?;
             }
             needs_redraw = true;

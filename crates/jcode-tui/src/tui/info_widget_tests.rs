@@ -1100,14 +1100,22 @@ fn contextual_subgraph_prefers_memory_hub() {
 
 #[test]
 fn overview_requires_multiple_sections() {
-    let one_section = InfoWidgetData {
+    // Status-line facts (model identity) are never an overview section.
+    let identity_only = InfoWidgetData {
         model: Some("gpt-test".to_string()),
+        queue_mode: Some(true),
+        ..Default::default()
+    };
+    assert!(!identity_only.has_data_for(WidgetKind::Overview));
+
+    let one_section = InfoWidgetData {
+        session_name: Some("sauropod".to_string()),
         ..Default::default()
     };
     assert!(!one_section.has_data_for(WidgetKind::Overview));
 
     let two_sections = InfoWidgetData {
-        model: Some("gpt-test".to_string()),
+        session_name: Some("sauropod".to_string()),
         queue_mode: Some(true),
         ..Default::default()
     };
@@ -1127,7 +1135,7 @@ fn overview_widget_is_placed_when_space_allows() {
     }
 
     let data = InfoWidgetData {
-        model: Some("gpt-test".to_string()),
+        session_name: Some("sauropod".to_string()),
         queue_mode: Some(true),
         ..Default::default()
     };
@@ -1163,7 +1171,7 @@ fn workspace_widget_has_high_priority_when_enabled() {
             focused_index: Some(0),
             sessions: vec![crate::tui::workspace_map::WorkspaceSessionTile::new("fox")],
         }],
-        model: Some("gpt-test".to_string()),
+        session_name: Some("sauropod".to_string()),
         queue_mode: Some(true),
         ..Default::default()
     };
@@ -1201,108 +1209,6 @@ fn model_widget_renders_connection_type() {
         .join("\n")
         .to_lowercase();
     assert!(text.contains("websocket"));
-}
-
-#[test]
-fn usage_pill_renders_filled_and_empty_segments() {
-    let line = super::render_usage_pill(200_000, 1_000_000, 26);
-    let text: String = line
-        .spans
-        .iter()
-        .map(|span| span.content.as_ref())
-        .collect();
-
-    assert!(text.contains('▰'), "expected filled pill segments: {text}");
-    assert!(text.contains('▱'), "expected empty pill segments: {text}");
-}
-
-#[test]
-fn usage_pill_renders_when_narrow() {
-    let line = super::render_usage_pill(200_000, 1_000_000, 10);
-    let text: String = line
-        .spans
-        .iter()
-        .map(|span| span.content.as_ref())
-        .collect();
-
-    assert!(
-        text.contains('▰') || text.contains('▱'),
-        "narrow bar should still render pill segments: {text}"
-    );
-}
-
-#[test]
-fn context_usage_line_shows_numeric_label_inside_bar() {
-    let line = super::render_context_usage_line("Context", 50_000, 200_000, 40);
-    let text: String = line
-        .spans
-        .iter()
-        .map(|span| span.content.as_ref())
-        .collect();
-
-    assert!(text.contains("Context"), "expected context label: {text}");
-    assert!(
-        text.contains("50k/200k"),
-        "expected inline token label: {text}"
-    );
-}
-
-#[test]
-fn render_context_compact_prefers_observed_token_usage_for_label() {
-    let data = InfoWidgetData {
-        context_info: Some(crate::prompt::ContextInfo {
-            total_chars: 400_000,
-            ..Default::default()
-        }),
-        context_limit: Some(200_000),
-        observed_context_tokens: Some(50_000),
-        ..Default::default()
-    };
-
-    let lines = super::render_context_compact(&data, Rect::new(0, 0, 40, 1));
-    let text: String = lines[0]
-        .spans
-        .iter()
-        .map(|span| span.content.as_ref())
-        .collect();
-
-    assert!(
-        text.contains("50k/200k"),
-        "expected observed token count: {text}"
-    );
-    assert!(
-        !text.contains("100k/200k"),
-        "should not fall back to char estimate when observed tokens exist: {text}"
-    );
-}
-
-#[test]
-fn render_context_compact_reports_updating_when_snapshot_is_stale() {
-    let data = InfoWidgetData {
-        context_info_stale: true,
-        context_info: Some(crate::prompt::ContextInfo {
-            total_chars: 400_000,
-            ..Default::default()
-        }),
-        context_limit: Some(200_000),
-        ..Default::default()
-    };
-
-    let lines = super::render_context_compact(&data, Rect::new(0, 0, 40, 1));
-    let text: String = lines[0]
-        .spans
-        .iter()
-        .map(|span| span.content.as_ref())
-        .collect();
-
-    assert!(
-        text.contains("updating"),
-        "expected updating marker: {text}"
-    );
-    assert!(
-        !text.contains("100k/200k"),
-        "stale snapshots must not render old usage as current: {text}"
-    );
 }
 
 fn managed_member(id: &str, status: &str, role: Option<&str>) -> SwarmMemberStatus {
@@ -1606,7 +1512,7 @@ fn sticky_placement_clamps_width_to_current_margin() {
     }
 
     let data = InfoWidgetData {
-        model: Some("gpt-test".to_string()),
+        session_name: Some("sauropod".to_string()),
         queue_mode: Some(true),
         ..Default::default()
     };

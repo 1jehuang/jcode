@@ -255,7 +255,10 @@ impl App {
             crate::logging::info(&format!("MCP: Found {} server(s) in config", server_count));
 
             let (successes, failures) = {
-                let manager = self.mcp_manager.write().await;
+                // `connect_all` uses the manager's internal locks. Keep only a
+                // read guard here so MCP management reads are not blocked by a
+                // slow initialize handshake.
+                let manager = self.mcp_manager.read().await;
                 let result = manager.connect_all().await.unwrap_or((0, Vec::new()));
                 // Cache server names with tool counts
                 let servers = manager.connected_servers().await;

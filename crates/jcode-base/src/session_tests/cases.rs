@@ -69,6 +69,28 @@ fn derive_session_provider_key_keeps_openai_compatible_profile_namespace() {
 }
 
 #[test]
+fn save_label_becomes_the_session_title() {
+    let mut session = Session::create_with_id(
+        "session_save_label_123".to_string(),
+        None,
+        Some("Generated title".to_string()),
+    );
+    session.mark_saved(None);
+    assert_eq!(session.display_title(), Some("Generated title"));
+
+    session.mark_saved(Some("  yc mcp  ".to_string()));
+    assert_eq!(session.save_label.as_deref(), Some("yc mcp"));
+    assert_eq!(session.custom_title.as_deref(), Some("yc mcp"));
+    assert_eq!(session.display_title(), Some("yc mcp"));
+
+    // Legacy bookmarks saved a label without setting the title.
+    session.custom_title = None;
+    assert_eq!(session.display_title(), Some("yc mcp"));
+    session.unmark_saved();
+    assert_eq!(session.display_title(), Some("Generated title"));
+}
+
+#[test]
 fn rename_title_preserves_generated_title_for_clear() {
     let mut session = Session::create_with_id(
         "session_rename_clear_123".to_string(),
@@ -2753,4 +2775,43 @@ fn system_prompt_missing_in_legacy_session_defaults_to_none() -> Result<()> {
     let restored: Session = serde_json::from_value(json)?;
     assert_eq!(restored.system_prompt, None);
     Ok(())
+}
+
+#[test]
+fn first_visible_user_prompt_becomes_the_generated_title() {
+    let mut session = Session::create_with_id("session_prompt_title_1".to_string(), None, None);
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "<system-reminder>\n# Session Context\n</system-reminder>".into(),
+            cache_control: None,
+        }],
+    );
+    session.add_message_with_display_role(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "background finished".into(),
+            cache_control: None,
+        }],
+        Some(StoredDisplayRole::BackgroundTask),
+    );
+    assert_eq!(session.title, None);
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "<transcription>\nFix the   sidebar names\n</transcription>".into(),
+            cache_control: None,
+        }],
+    );
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "second prompt".into(),
+            cache_control: None,
+        }],
+    );
+    assert_eq!(session.display_title(), Some("Fix the sidebar names"));
+
+    session.rename_title(Some("Custom".into()));
+    assert_eq!(session.display_title(), Some("Custom"));
 }

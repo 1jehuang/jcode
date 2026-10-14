@@ -309,31 +309,6 @@ pub(super) fn anthropic_account_use(subscription_type: Option<&str>) -> &'static
     }
 }
 
-#[cfg(test)]
-mod account_display_tests {
-    use super::*;
-
-    #[test]
-    fn animals_only_distinguish_duplicate_provider_logins() {
-        assert_eq!(account_display_name("Claude", "claude-otter", 1), "Claude");
-        assert_eq!(
-            account_display_name("Claude", "claude-otter", 2),
-            "Claude Otter"
-        );
-        assert_eq!(
-            account_display_name("Claude", "claude-fox", 2),
-            "Claude Fox"
-        );
-    }
-
-    #[test]
-    fn known_anthropic_plans_identify_personal_and_work_accounts() {
-        assert_eq!(anthropic_account_use(Some("max")), "personal");
-        assert_eq!(anthropic_account_use(Some("team")), "work");
-        assert_eq!(anthropic_account_use(None), "unknown");
-    }
-}
-
 fn format_account_table(headers: &[&str; 5], rows: &[[String; 5]]) -> Vec<String> {
     let mut widths = [0usize; 5];
     for (i, h) in headers.iter().enumerate() {
@@ -361,4 +336,29 @@ fn format_account_table(headers: &[&str; 5], rows: &[[String; 5]]) -> Vec<String
         lines.push(render_row(row));
     }
     lines
+}
+
+#[cfg(test)]
+mod account_display_tests {
+    use super::*;
+
+    #[test]
+    fn animals_only_distinguish_duplicate_provider_logins() {
+        assert_eq!(account_display_name("Claude", "claude-otter", 1), "Claude");
+        assert_eq!(
+            account_display_name("Claude", "claude-otter", 2),
+            "Claude Otter"
+        );
+        assert_eq!(
+            account_display_name("Claude", "claude-fox", 2),
+            "Claude Fox"
+        );
+    }
+
+    #[test]
+    fn known_anthropic_plans_identify_personal_and_work_accounts() {
+        assert_eq!(anthropic_account_use(Some("max")), "personal");
+        assert_eq!(anthropic_account_use(Some("team")), "work");
+        assert_eq!(anthropic_account_use(None), "unknown");
+    }
 }

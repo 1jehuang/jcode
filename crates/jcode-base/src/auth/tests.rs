@@ -533,13 +533,29 @@ fn copilot_recent_token_exchange_failure_is_not_auto_usable() {
 fn openrouter_like_status_is_provider_specific() {
     let _lock = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().expect("create temp dir");
-    let prev_home = std::env::var_os("JCODE_HOME");
-    let prev_chutes = std::env::var_os("CHUTES_API_KEY");
-    let prev_opencode = std::env::var_os("OPENCODE_API_KEY");
+    // Issue #1479: a jcode-launched shell with an active named provider
+    // profile exports these, and the named-profile check short-circuits the
+    // per-provider key lookup. Clear them so the test sees only its own env.
+    let keys = [
+        "JCODE_HOME",
+        "CHUTES_API_KEY",
+        "OPENCODE_API_KEY",
+        "JCODE_NAMED_PROVIDER_PROFILE",
+        "JCODE_OPENROUTER_ALLOW_NO_AUTH",
+        "JCODE_OPENROUTER_API_KEY_NAME",
+        "JCODE_OPENROUTER_ENV_FILE",
+        "JCODE_OPENROUTER_API_BASE",
+    ];
+    let saved = keys
+        .into_iter()
+        .map(|key| (key, std::env::var_os(key)))
+        .collect::<Vec<_>>();
+    for key in keys {
+        crate::env::remove_var(key);
+    }
 
     crate::env::set_var("JCODE_HOME", temp.path());
     crate::env::set_var("CHUTES_API_KEY", "chutes-test-key");
-    crate::env::remove_var("OPENCODE_API_KEY");
     AuthStatus::invalidate_cache();
 
     let status = AuthStatus::check_fast();
@@ -554,9 +570,9 @@ fn openrouter_like_status_is_provider_specific() {
         "API key (`CHUTES_API_KEY`)".to_string()
     );
 
-    restore_env_var("JCODE_HOME", prev_home);
-    restore_env_var("CHUTES_API_KEY", prev_chutes);
-    restore_env_var("OPENCODE_API_KEY", prev_opencode);
+    for (key, value) in saved {
+        restore_env_var(key, value);
+    }
     AuthStatus::invalidate_cache();
 }
 

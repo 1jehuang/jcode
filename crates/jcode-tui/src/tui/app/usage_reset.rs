@@ -266,8 +266,10 @@ mod tests {
 
     #[test]
     fn usage_reset_uncertain_result_preserves_exact_pending_request() {
-        let mut state = ResetState::<String>::default();
-        state.pending = Some("same-account-credit-and-uuid".into());
+        let mut state = ResetState::<String> {
+            pending: Some("same-account-credit-and-uuid".into()),
+            ..Default::default()
+        };
         state.finish(Reply::Redeemed(Err(anyhow::anyhow!("timeout"))));
         assert_eq!(
             state.pending.as_deref(),
@@ -279,8 +281,10 @@ mod tests {
 
     #[test]
     fn usage_reset_cancelled_prepare_cannot_restore_pending() {
-        let mut state = ResetState::<String>::default();
-        state.cancelled = true;
+        let mut state = ResetState::<String> {
+            cancelled: true,
+            ..Default::default()
+        };
         state.finish(Reply::Prepared(Ok(Some("discarded".into()))));
         assert!(state.pending.is_none());
         assert!(state.receiver.is_none());

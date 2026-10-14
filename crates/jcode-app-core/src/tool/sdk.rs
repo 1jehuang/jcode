@@ -132,6 +132,7 @@ pub(crate) fn apply_definitions(
                 name: custom.name,
                 description: custom.description,
                 input_schema: custom.parameters,
+                defer_loading: false,
             });
         }
         tools.retain(|t| !tool_name_is_disabled(&disabled, &t.name));

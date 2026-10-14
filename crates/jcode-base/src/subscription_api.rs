@@ -58,6 +58,32 @@ pub struct SubscriptionMe {
     /// Optional stable public account-management URL. It must never contain a secret.
     #[serde(default)]
     pub manage_url: Option<String>,
+    /// Daily included-feature allowances (memory recall, browser automation).
+    /// Absent on older gateways or when the account is not entitled.
+    #[serde(default)]
+    pub jev_usage: Option<JevUsage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct JevFeatureUsage {
+    #[serde(default)]
+    pub used: u64,
+    #[serde(default)]
+    pub limit: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct JevUsage {
+    #[serde(default)]
+    pub memory: JevFeatureUsage,
+    #[serde(default)]
+    pub browser: JevFeatureUsage,
+    #[serde(default)]
+    pub resets_at: Option<String>,
+    #[serde(default)]
+    pub upgrade_tier: Option<String>,
+    #[serde(default)]
+    pub upgrade_url: Option<String>,
 }
 
 impl SubscriptionMe {

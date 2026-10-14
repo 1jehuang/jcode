@@ -2182,6 +2182,7 @@ mod tests {
                     context_length: None,
                     pricing: Default::default(),
                     created: Some(1_700_000_000),
+                    ..Default::default()
                 },
                 jcode_provider_openrouter::ModelInfo {
                     id: "qwen-3-235b-a22b-instruct-2507".to_string(),
@@ -2189,6 +2190,7 @@ mod tests {
                     context_length: None,
                     pricing: Default::default(),
                     created: Some(1_800_000_000),
+                    ..Default::default()
                 },
             ],
             Some("https://api.cerebras.ai/v1"),

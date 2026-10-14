@@ -63,8 +63,15 @@ pub(super) fn invalidate_anthropic_usage_after_reset(account_label: Option<&str>
         {
             Some(label) => {
                 map.remove(&format!("label:{label}"));
+                let key = format!("label:{label}");
+                super::disk_cache::invalidate(|candidate| candidate == key);
             }
-            None => map.retain(|key, _| !key.starts_with("token:") && key != "label:default"),
+            None => {
+                map.retain(|key, _| !key.starts_with("token:") && key != "label:default");
+                super::disk_cache::invalidate(|key| {
+                    key.starts_with("token:") || key == "label:default"
+                });
+            }
         }
     }
     if let Some(cache) = super::PROVIDER_USAGE_CACHE.get()

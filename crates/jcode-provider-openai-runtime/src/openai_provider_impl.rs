@@ -93,7 +93,8 @@ impl Provider for OpenAIProvider {
                 .await;
         }
 
-        let input = build_responses_input(messages);
+        let mut input = build_responses_input(messages);
+        insert_additional_tools(&mut input, messages, tools);
         let input_item_count = input.len();
         let request = self.response_request(&input, tools, system).await;
         let model_id = openai_request_model(&request);
@@ -733,6 +734,11 @@ impl Provider for OpenAIProvider {
 
     fn supports_image_input(&self) -> bool {
         !is_chatgpt_web_model(&self.model())
+    }
+
+    fn supports_deferred_tools(&self) -> bool {
+        let model = self.model();
+        !is_chatgpt_web_model(&model) && model_supports_additional_tools(&model)
     }
 
     fn set_model(&self, model: &str) -> Result<()> {

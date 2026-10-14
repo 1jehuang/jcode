@@ -13,8 +13,8 @@
 
 use super::*;
 use crate::tui::info_widget::{
-    BackgroundInfo, CacheHitInfo, CompactionInfo, GitInfo, InfoWidgetData, MemoryInfo, SwarmInfo,
-    UsageInfo, UsageProvider,
+    BackgroundInfo, CacheHitInfo, CompactionInfo, DirtyFile, GitInfo, InfoWidgetData, MemoryInfo,
+    SwarmInfo, UsageInfo, UsageProvider,
 };
 
 fn todo(id: &str, status: &str) -> crate::todo::TodoItem {
@@ -127,7 +127,9 @@ fn contended_data() -> InfoWidgetData {
             untracked: 1,
             ahead: 1,
             behind: 0,
-            dirty_files: vec!["a.rs".to_string(), "b.rs".to_string()],
+            dirty_files: vec![DirtyFile::new('M', "a.rs"), DirtyFile::new('M', "b.rs")],
+            dirty_total: 2,
+            ..Default::default()
         }),
         ..Default::default()
     }

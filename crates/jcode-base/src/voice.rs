@@ -16,13 +16,16 @@ pub use nari::{
     NARI_PCM_CHUNK_SAMPLES, NARI_USD_PER_AUDIO_HOUR, NariEvent, NariSession, correct_transcript,
     estimated_transcription_usd, nari_api_key, nari_pcm_channel, recognition_prompt,
 };
+mod command_capture;
 #[cfg(any(feature = "voice-capture", test))]
 mod resample;
-#[cfg(feature = "voice-capture")]
 mod streaming_capture;
-#[cfg(feature = "voice-capture")]
+pub use command_capture::{RecorderCommand, detect_recorders};
 pub use streaming_capture::{NariRecording, PcmRecording};
 
+/// Native (cpal) microphone capture is compiled in. Without it, voice input
+/// records through an external recorder process.
+pub const NATIVE_CAPTURE: bool = cfg!(feature = "voice-capture");
 pub const MAX_AUDIO_BYTES: usize = 10 * 1024 * 1024;
 pub const MAX_RECORDING_DURATION: Duration = Duration::from_secs(5 * 60);
 pub const TRANSCRIPTION_TIMEOUT: Duration = Duration::from_secs(120);

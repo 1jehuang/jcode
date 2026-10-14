@@ -28,6 +28,7 @@ enum Disposition {
     ClientInternal,
     /// A real gap. Worth exposing, not yet done. Every entry needs a reason
     /// that says what a client cannot build without it.
+    #[allow(dead_code)] // Empty today; the ledger keeps the slot for future gaps.
     Gap(&'static str),
 }
 
@@ -67,10 +68,7 @@ const LEDGER: &[(&str, Disposition)] = &[
     ("SetReasoningEffort", Covered),
     ("SetRoute", ClientInternal),
     ("SetServiceTier", ClientInternal),
-    (
-        "SetSessionSaved",
-        Gap("clients can read a session's saved flag but cannot pin or unpin it"),
-    ),
+    ("SetSessionSaved", Covered),
     ("SetSubagentModel", ClientInternal),
     ("SetTransport", ClientInternal),
     ("SoftInterrupt", Covered),

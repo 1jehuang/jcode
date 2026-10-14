@@ -118,6 +118,13 @@ impl Config {
             model.unwrap_or("(none)"),
             provider.unwrap_or("(auto)")
         ));
+        // The first auto-switch account is the default, so the order follows
+        // whichever path changed it. A failure here must not undo the save.
+        if let Some(route) = provider
+            && let Err(error) = crate::auth::account_pool::sync_order_with_default_route(route)
+        {
+            crate::logging::error(&format!("Could not sync account order: {error}"));
+        }
         Ok(())
     }
 

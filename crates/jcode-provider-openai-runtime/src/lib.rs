@@ -15,7 +15,9 @@ use async_trait::async_trait;
 use futures::{FutureExt, SinkExt, StreamExt as FuturesStreamExt};
 use jcode_base::auth::codex::CodexCredentials;
 use jcode_base::auth::oauth;
-use jcode_base::provider::openai_request::{build_responses_input, build_tools};
+use jcode_base::provider::openai_request::{
+    build_responses_input, build_tools, insert_additional_tools,
+};
 #[cfg(test)]
 use jcode_message_types::TOOL_OUTPUT_MISSING_TEXT;
 use jcode_message_types::{Message as ChatMessage, StreamEvent, ToolDefinition};
@@ -56,6 +58,26 @@ pub(crate) fn is_chatgpt_web_model(model: &str) -> bool {
 /// The Responses backend only exposes `image_generation` to general
 /// ChatGPT/GPT models. Codex models (ids containing `codex`) reject unknown
 /// hosted tools, so they must not receive it. See issue #369.
+/// Responses `additional_tools` / deferred tool loading requires gpt-5.4 or
+/// newer. Unknown model families stay eager, which is always correct.
+fn model_supports_additional_tools(model_id: &str) -> bool {
+    let lower = model_id.to_ascii_lowercase();
+    let Some(rest) = lower.strip_prefix("gpt-") else {
+        return false;
+    };
+    let version: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    let mut parts = version.split('.').filter(|p| !p.is_empty());
+    let major: u32 = match parts.next().and_then(|p| p.parse().ok()) {
+        Some(major) => major,
+        None => return false,
+    };
+    let minor: u32 = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+    major > 5 || (major == 5 && minor >= 4)
+}
+
 fn model_supports_image_generation(model_id: &str) -> bool {
     !model_id.to_ascii_lowercase().contains("codex")
 }

@@ -593,7 +593,7 @@ fn banked_reset_report(provider: &crate::usage::ProviderUsage) -> Option<UsageBa
                         .any(|limit| limit.usage_percent >= 100.0)
             }
         };
-        return (credits.available_count > 0).then(|| UsageBankedResetReport {
+        return Some(UsageBankedResetReport {
             provider: "openai",
             account_label: credits.account_label.clone(),
             available_count: credits.available_count,
@@ -608,7 +608,10 @@ fn banked_reset_report(provider: &crate::usage::ProviderUsage) -> Option<UsageBa
             provider: "claude",
             account_label: offer.account_label.clone(),
             available_count: u64::from(offer.available),
-            limit_reached: true,
+            limit_reached: provider
+                .limits
+                .iter()
+                .any(|limit| limit.name == "5-hour window" && limit.usage_percent >= 100.0),
             next_available_at: offer.next_available_at.clone(),
         })
 }
@@ -688,7 +691,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn usage_json_reports_only_redeemable_banked_resets() {
+    fn usage_json_preserves_confirmed_zero_and_distinguishes_unknown_resets() {
         use crate::usage::{AnthropicLimitResetOffer, OpenAiResetCredits, ProviderUsage};
         let openai = |available_count, allowed| ProviderUsage {
             provider_name: "OpenAI - work".into(),
@@ -710,7 +713,12 @@ mod tests {
                 .unwrap()
                 .limit_reached
         );
-        assert!(banked_reset_report(&openai(0, Some(false))).is_none());
+        assert_eq!(
+            banked_reset_report(&openai(0, Some(false)))
+                .unwrap()
+                .available_count,
+            0
+        );
         let mut failed = openai(2, Some(false));
         failed.error = Some("HTTP 500".into());
         assert!(banked_reset_report(&failed).is_none());
@@ -727,6 +735,16 @@ mod tests {
         };
         let ready = banked_reset_report(&claude(true)).unwrap();
         assert_eq!((ready.provider, ready.available_count), ("claude", 1));
+        assert!(!ready.limit_reached);
+        let mut at_wall = claude(true);
+        at_wall.limits.push(crate::usage::UsageLimit {
+            name: "5-hour window".into(),
+            usage_percent: 100.0,
+            resets_at: None,
+        });
+        assert!(banked_reset_report(&at_wall).unwrap().limit_reached);
+        at_wall.limits[0].name = "7-day window".into();
+        assert!(!banked_reset_report(&at_wall).unwrap().limit_reached);
         let spent = banked_reset_report(&claude(false)).unwrap();
         assert_eq!(spent.available_count, 0);
         assert!(spent.next_available_at.is_some());

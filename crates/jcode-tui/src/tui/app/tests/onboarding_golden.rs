@@ -722,6 +722,8 @@ fn onboarding_import_happy_path_images() {
                 ahead: 0,
                 behind: 0,
                 dirty_files: Vec::new(),
+                dirty_total: 0,
+                ..Default::default()
             },
         ));
         let mut app = create_test_app();

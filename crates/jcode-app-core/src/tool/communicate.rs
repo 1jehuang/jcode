@@ -1211,6 +1211,7 @@ async fn broadcast_plan_alert(ctx: &ToolContext, message: &str) -> Result<()> {
         wake: None,
         delivery: None,
         tldr: Some("run_plan paused: credential failure wave; fix auth then retry".to_string()),
+        to_swarm: None,
     };
     match send_request(request).await {
         Ok(response) => ensure_success(&response),
@@ -1724,6 +1725,43 @@ fn default_await_target_statuses() -> Vec<String> {
     default_comm_await_target_statuses()
 }
 
+fn non_blank(value: Option<String>) -> Option<String> {
+    value.filter(|value| !value.trim().is_empty())
+}
+
+fn cross_swarm_confirmation(swarm: &str, to_session: Option<&str>, message: &str) -> String {
+    match to_session {
+        Some(target) => format!("Cross-swarm DM sent to {target} in swarm '{swarm}': {message}"),
+        None => format!("Cross-swarm DM sent to the coordinator of swarm '{swarm}': {message}"),
+    }
+}
+
+/// Render the `list_swarms` directory: one line per live swarm with label,
+/// id, coordinator, and member count. The caller's own swarm is marked.
+pub(super) fn format_swarm_directory(swarms: &[crate::protocol::SwarmInfo]) -> String {
+    if swarms.is_empty() {
+        return "No live swarms.".to_string();
+    }
+    let mut out = String::from("Live swarms:\n\n");
+    for swarm in swarms {
+        let name = swarm.label.as_deref().unwrap_or("(unlabeled)");
+        let own = if swarm.is_own { " [yours]" } else { "" };
+        let coordinator = match (&swarm.coordinator_name, &swarm.coordinator_session_id) {
+            (Some(name), Some(id)) => format!("{name} [{id}]"),
+            (None, Some(id)) => id.clone(),
+            _ => "none".to_string(),
+        };
+        out.push_str(&format!(
+            "- {name}{own}\n  id: {}\n  coordinator: {coordinator}\n  members: {}\n",
+            swarm.swarm_id, swarm.member_count
+        ));
+    }
+    out.push_str(
+        "\nCross-swarm DM: action=dm with to_swarm=<label or id> and optional to_session (defaults to that swarm's coordinator).",
+    );
+    out
+}
+
 fn format_channels(channels: &[SwarmChannelInfo]) -> ToolOutput {
     ToolOutput::new(format_comm_channels(channels))
 }
@@ -1816,6 +1854,9 @@ struct CommunicateInput {
     message: Option<String>,
     #[serde(default)]
     to_session: Option<String>,
+    /// Cross-swarm DM target: swarm label or id (see list_swarms).
+    #[serde(default)]
+    to_swarm: Option<String>,
     #[serde(default)]
     channel: Option<String>,
     #[serde(default)]
@@ -1940,6 +1981,8 @@ fn canonical_swarm_action(action: &str) -> &str {
         "dm_session" | "direct_message" | "whisper" => "dm",
         "broadcast_all" | "announce" => "broadcast",
         "agents" | "members" | "list_agents" | "list_members" | "roster" => "list",
+        "swarms" | "list_swarm" | "swarm_list" => "list_swarms",
+        "label_swarm" | "name_swarm" | "rename_swarm" | "set_label" => "set_swarm_label",
         "models" | "model_list" | "list_model" | "list_providers" | "list_routes" => "list_models",
         "plan" | "status_plan" => "plan_status",
         "assign" => "assign_task",
@@ -1966,7 +2009,7 @@ impl Tool for CommunicateTool {
                 "intent": super::intent_schema_property(),
                 "action": {
                     "type": "string",
-                    "enum": ["share", "share_append", "read", "message", "broadcast", "dm", "channel", "list", "list_channels", "channel_members",
+                    "enum": ["share", "share_append", "read", "message", "broadcast", "dm", "channel", "list", "list_channels", "channel_members", "list_swarms", "set_swarm_label",
                              "propose_plan", "approve_plan", "reject_plan", "spawn", "stop", "assign_role",
                              "status", "report", "plan_status", "summary", "read_context", "resync_plan", "assign_task", "assign_next", "fill_slots", "run_plan", "cleanup",
                              "task_graph", "expand_node", "complete_node", "inject_gap",
@@ -1987,7 +2030,7 @@ impl Tool for CommunicateTool {
                 },
                 "tldr": {
                     "type": "string",
-                    "description": "One-line summary under ~120 chars. Required for message/report bodies longer than 240 chars."
+                    "description": "Optional one-line summary under ~120 chars. Recommended for message/report bodies longer than 240 chars. When omitted, a compact preview is derived automatically without blocking delivery."
                 },
                 "status": {
                     "type": "string",
@@ -2004,6 +2047,10 @@ impl Tool for CommunicateTool {
                 "to_session": {
                     "type": "string",
                     "description": "Session ID or unique friendly name of one agent. Alias of target_session."
+                },
+                "to_swarm": {
+                    "type": "string",
+                    "description": "Cross-swarm DM: target swarm label or id (see list_swarms). With to_session, DMs that agent in that swarm; without, DMs its coordinator."
                 },
                 "channel": {
                     "type": "string",
@@ -2022,7 +2069,7 @@ impl Tool for CommunicateTool {
                 "label": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "Required for spawn. Short label shown on the agent's chip (e.g. 'api reviewer')."
+                    "description": "Required for spawn. Short label shown on the agent's chip (e.g. 'api reviewer'). For set_swarm_label, your swarm's new unique label."
                 },
                 "working_dir": {
                     "type": "string",
@@ -2283,6 +2330,7 @@ impl Tool for CommunicateTool {
                     .map_err(|e| anyhow::anyhow!(e))?;
                 let to_session = params.to_session.clone();
                 let channel = params.channel.clone();
+                let to_swarm = non_blank(params.to_swarm.clone());
 
                 let request = Request::CommMessage {
                     id: REQUEST_ID,
@@ -2293,11 +2341,19 @@ impl Tool for CommunicateTool {
                     wake: params.wake,
                     delivery: params.delivery,
                     tldr,
+                    to_swarm: to_swarm.clone(),
                 };
 
                 match send_request(request).await {
                     Ok(response) => {
                         ensure_success(&response)?;
+                        if let Some(swarm) = to_swarm {
+                            return Ok(ToolOutput::new(cross_swarm_confirmation(
+                                &swarm,
+                                to_session.as_deref(),
+                                &message,
+                            )));
+                        }
                         let confirmation = match (to_session, channel) {
                             (Some(target), _) => {
                                 format!("Direct message sent to {}: {}", target, message)
@@ -2337,6 +2393,7 @@ impl Tool for CommunicateTool {
                     wake: params.wake,
                     delivery: params.delivery,
                     tldr,
+                    to_swarm: None,
                 };
 
                 match send_request(request).await {
@@ -2357,24 +2414,37 @@ impl Tool for CommunicateTool {
                     .ok_or_else(|| anyhow::anyhow!("'message' is required for dm action"))?;
                 let tldr = validate_swarm_tldr(params.tldr.as_deref(), &message, "this DM")
                     .map_err(|e| anyhow::anyhow!(e))?;
-                let to_session = params.to_session.ok_or_else(|| {
-                    anyhow::anyhow!("'to_session' (or 'target_session') is required for dm action")
-                })?;
+                let to_swarm = non_blank(params.to_swarm.clone());
+                if to_swarm.is_none() && params.to_session.is_none() {
+                    return Err(anyhow::anyhow!(
+                        "'to_session' (or 'target_session') is required for dm action, or pass 'to_swarm' to DM another swarm's coordinator"
+                    ));
+                }
+                let to_session = params.to_session.clone();
 
                 let request = Request::CommMessage {
                     id: REQUEST_ID,
                     from_session: ctx.session_id.clone(),
                     message: message.clone(),
-                    to_session: Some(to_session.clone()),
+                    to_session: to_session.clone(),
                     channel: None,
                     delivery: params.delivery,
                     wake: params.wake,
                     tldr,
+                    to_swarm: to_swarm.clone(),
                 };
 
                 match send_request(request).await {
                     Ok(response) => {
                         ensure_success(&response)?;
+                        if let Some(swarm) = to_swarm {
+                            return Ok(ToolOutput::new(cross_swarm_confirmation(
+                                &swarm,
+                                to_session.as_deref(),
+                                &message,
+                            )));
+                        }
+                        let to_session = to_session.unwrap_or_default();
                         Ok(ToolOutput::new(format!(
                             "Direct message sent to {}: {}",
                             to_session, message
@@ -2404,6 +2474,7 @@ impl Tool for CommunicateTool {
                     delivery: params.delivery,
                     wake: params.wake,
                     tldr,
+                    to_swarm: None,
                 };
 
                 match send_request(request).await {
@@ -2433,6 +2504,61 @@ impl Tool for CommunicateTool {
                         Ok(ToolOutput::new("No agents found."))
                     }
                     Err(e) => Err(anyhow::anyhow!("Failed to list agents: {}", e)),
+                }
+            }
+
+            "list_swarms" => {
+                let request = Request::CommListSwarms {
+                    id: REQUEST_ID,
+                    session_id: ctx.session_id.clone(),
+                };
+                match send_request(request).await {
+                    Ok(ServerEvent::CommSwarms { swarms, .. }) => {
+                        Ok(ToolOutput::new(format_swarm_directory(&swarms)))
+                    }
+                    Ok(response) => {
+                        ensure_success(&response)?;
+                        Ok(ToolOutput::new("No swarms found."))
+                    }
+                    Err(e) => Err(anyhow::anyhow!("Failed to list swarms: {}", e)),
+                }
+            }
+
+            "set_swarm_label" => {
+                let label = params
+                    .label
+                    .clone()
+                    .or_else(|| params.value.clone())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "'label' is required for set_swarm_label (empty string clears it)"
+                        )
+                    })?;
+                let request = Request::CommSetSwarmLabel {
+                    id: REQUEST_ID,
+                    session_id: ctx.session_id.clone(),
+                    label: label.clone(),
+                };
+                match send_request(request).await {
+                    Ok(ServerEvent::CommSwarms { swarms, .. }) => {
+                        let applied = swarms
+                            .iter()
+                            .find(|swarm| swarm.is_own)
+                            .and_then(|swarm| swarm.label.clone());
+                        let head = match applied {
+                            Some(label) => format!("Your swarm is now labeled '{label}'.\n\n"),
+                            None => "Your swarm label was cleared.\n\n".to_string(),
+                        };
+                        Ok(ToolOutput::new(format!(
+                            "{head}{}",
+                            format_swarm_directory(&swarms)
+                        )))
+                    }
+                    Ok(response) => {
+                        ensure_success(&response)?;
+                        Ok(ToolOutput::new(format!("Swarm label set to '{label}'.")))
+                    }
+                    Err(e) => Err(anyhow::anyhow!("Failed to set swarm label: {}", e)),
                 }
             }
 

@@ -67,49 +67,6 @@ fn test_redraw_interval_uses_low_frequency_during_remote_startup_phase() {
 }
 
 #[test]
-fn test_active_overscroll_keeps_redrawing_at_deep_idle() {
-    // Regression: once a conversation has messages and is no longer processing,
-    // `time_since_activity()` reports deep-idle forever. The overscroll dwell
-    // line shows a live `(overscroll x.x)` countdown that must keep ticking, so
-    // `periodic_redraw_required` must not short-circuit to `false` via the
-    // deep-idle guard while the overscroll line is revealed.
-    let deep_idle = crate::tui::REDRAW_DEEP_IDLE_AFTER + Duration::from_secs(1);
-
-    let idle = TestState {
-        display_messages: vec![DisplayMessage::system("seed".to_string())],
-        time_since_activity: Some(deep_idle),
-        ..Default::default()
-    };
-    assert!(
-        !crate::tui::periodic_redraw_required(&idle),
-        "a quiet deep-idle session should not require periodic redraws"
-    );
-
-    let overscrolling = TestState {
-        display_messages: vec![DisplayMessage::system("seed".to_string())],
-        time_since_activity: Some(deep_idle),
-        chat_overscroll_active: true,
-        ..Default::default()
-    };
-    assert!(
-        crate::tui::periodic_redraw_required(&overscrolling),
-        "an active overscroll countdown must keep driving redraws even at deep idle"
-    );
-
-    // The redraw cadence should also be the smooth animation interval, not the
-    // coarse deep-idle one, so the countdown reads as continuous.
-    assert_eq!(
-        crate::tui::redraw_interval(&idle),
-        crate::tui::REDRAW_DEEP_IDLE
-    );
-    assert_ne!(
-        crate::tui::redraw_interval(&overscrolling),
-        crate::tui::REDRAW_DEEP_IDLE,
-        "overscroll should bump the redraw interval above the deep-idle cadence"
-    );
-}
-
-#[test]
 fn test_cold_cache_warning_keeps_redrawing_at_deep_idle() {
     // Regression: the notification line renders a `🧊 cache cold` warning once
     // the prompt cache TTL expires, but the cache only goes cold long after the

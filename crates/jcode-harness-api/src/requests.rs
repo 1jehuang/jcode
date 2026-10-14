@@ -247,6 +247,33 @@ pub enum ApiRequest {
         title: Option<String>,
     },
 
+    /// Bookmark (`saved: true`) or unbookmark a session. A non-empty `label`
+    /// also becomes the session's title, announced with `SessionRenamed`.
+    SetSessionSaved {
+        session_id: String,
+        saved: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
+
+    /// The user pressed something in an agent applet instance. The server
+    /// stores `state` into the instance, then delivers the action to the agent.
+    AppletAction {
+        session_id: String,
+        instance: String,
+        action: jcode_applet_types::Action,
+        #[serde(default)]
+        state: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_key: Option<String>,
+    },
+
+    /// The user closed an agent applet instance. The agent is not woken.
+    CloseApplet {
+        session_id: String,
+        instance: String,
+    },
+
     /// Restore the history that the last `Rewind` removed.
     ///
     /// `Rewind` is destructive, so without an undo a client cannot offer it

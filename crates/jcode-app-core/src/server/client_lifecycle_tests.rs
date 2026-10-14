@@ -1,3 +1,4 @@
+#![cfg_attr(test, allow(clippy::await_holding_lock))]
 use super::*;
 use crate::message::{ContentBlock, Message, StreamEvent, ToolDefinition};
 use crate::provider::{EventStream, Provider};
@@ -1489,7 +1490,7 @@ impl Provider for SdkCallbackProvider {
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, "read");
         assert_eq!(tools[0].description, "SDK read callback");
-        let events = if self.calls.fetch_add(1, Ordering::SeqCst) % 2 == 0 {
+        let events = if self.calls.fetch_add(1, Ordering::SeqCst).is_multiple_of(2) {
             vec![
                 StreamEvent::ToolUseStart {
                     id: "model-call".into(),

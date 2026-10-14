@@ -114,3 +114,10 @@ jcode-app-core = { path = "../jcode-app-core", default-features = false, feature
 
 [target.'cfg(target_os = "macos")'.dependencies]
 global-hotkey = "0.7"
+
+# Built-in voice input (/voice, Ctrl+Space). macOS and Windows capture natively
+# through CoreAudio / WASAPI (system frameworks, like Jcode Desktop). Linux uses
+# an external recorder (pw-record, parecord, arecord, ...) so release builds
+# need no ALSA development headers.
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+jcode-base = { path = "../jcode-base", default-features = false, features = ["voice-capture"] }

@@ -339,6 +339,14 @@ pub const KEYBINDING_DEFAULTS: &[KeybindingDefault] = &[
         macos: PlatformDefault::dev("cmd+b"),
         other: PlatformDefault::dev("alt+r"),
     },
+    KeybindingDefault {
+        id: "voice_input",
+        description: "Start or stop built-in voice input (Nari transcription)",
+        // Ctrl+Space is unused in jcode. Alt/Cmd+Space already route the next
+        // prompt to a new session.
+        macos: PlatformDefault::dev("ctrl+space"),
+        other: PlatformDefault::dev("ctrl+space"),
+    },
 ];
 
 /// Look up a keybinding action by id.

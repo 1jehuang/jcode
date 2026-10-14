@@ -99,6 +99,7 @@ mod state_ui;
 mod state_ui_input_helpers;
 mod update_sim;
 mod usage_reset;
+mod voice_input;
 pub(crate) use state_ui_input_helpers::{registered_command_entries, registered_command_names};
 mod state_ui_maintenance;
 mod state_ui_messages;
@@ -639,6 +640,28 @@ pub(super) struct HistoryScrollAnchor {
     pub base_total: usize,
 }
 
+/// Resize anchor captured against the pre-resize geometry.
+///
+/// The stored `scroll_offset` is a wrapped line index, which only means
+/// something for the width that produced it. When a resize rewraps the
+/// transcript while the reader is paused in history, the reading position is
+/// captured in content coordinates instead, and the next frame resolves it
+/// against the new geometry so the same message stays under the reader
+/// (issue #1412, persistent half).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct PendingResizeAnchor {
+    /// Where the reader was, in content coordinates. A message, or a row in a
+    /// section with no message boundaries (live streaming output, retained
+    /// reasoning, the header).
+    pub target: jcode_tui_messages::ContentPos,
+    /// Viewport width the anchor was captured at; the frame that resolves it
+    /// is laid out at a different one.
+    pub captured_width: u16,
+    /// Resolved row the screen was showing when the anchor was captured, used
+    /// to tell the stale published value from the post-resize one.
+    pub captured_scroll: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct OvernightAutoPokeFingerprint {
     pub run_id: String,
@@ -860,6 +883,12 @@ pub struct App {
     /// viewport to the content the reader was looking at so the prepend does not
     /// visibly jump. Resolved into `scroll_offset` by the next render frame.
     pending_history_anchor: Option<HistoryScrollAnchor>,
+    /// Set when a resize rewraps the transcript while the reader is paused in
+    /// history. Holds the reading position in content coordinates (which
+    /// message, which row inside it) captured against the pre-resize geometry,
+    /// and is resolved against each new frame until the renderer reports that
+    /// it applied it. See `jcode_tui_messages::anchor`.
+    pending_resize_anchor: Option<PendingResizeAnchor>,
     input: String,
     command_candidates_cache: RefCell<Option<CommandCandidatesCache>>,
     /// Per-input memo for `command_suggestions()`; see
@@ -1472,6 +1501,12 @@ pub struct App {
     new_terminal_key: OptionalBinding,
     // Optional configured keybinding for opening the /resume session picker
     open_resume_key: OptionalBinding,
+    // Keybinding that starts/stops built-in voice input (Ctrl+Space default)
+    voice_input_key: OptionalBinding,
+    // Active built-in voice input (Nari streaming), if recording or finishing
+    voice_input: Option<voice_input::VoiceInput>,
+    // Last voice key press, to tell a held key's auto-repeat from a new press
+    voice_input_last_press: Option<Instant>,
     // Optional configured keybinding for accepting the post-error fallback offer
     fallback_switch_key: OptionalBinding,
     // Config reload generation the keybinding snapshot above was parsed at.
@@ -1632,23 +1667,14 @@ pub struct App {
     mouse_scroll_target: Option<MouseScrollTarget>,
     /// Remaining queued mouse-wheel lines. Positive = down, negative = up.
     mouse_scroll_queue: i16,
-    /// When the user overscrolls past the bottom of the transcript, an extra
-    /// status line is revealed below the input. This records the last time an
-    /// overscroll tick was received; the line dwells for a fixed window after
-    /// the last tick, then rebounds away. `None` means the line is hidden.
-    chat_overscroll_last: Option<Instant>,
-    /// Timestamp of the most recent downward chat scroll intent. Segments
-    /// wheel/key motion into "gestures": a pause longer than
-    /// `OVERSCROLL_GESTURE_GAP` starts a new gesture.
-    chat_scroll_down_last: Option<Instant>,
-    /// Whether the current downward scroll gesture began while the transcript
-    /// was already pinned to the bottom. Only such gestures reveal the elastic
-    /// overscroll line, so momentum from a scroll that merely carries the view
-    /// into the bottom does not trigger it.
-    chat_scroll_gesture_from_bottom: bool,
-    /// When to show the overscroll status line: off, always on, or the elastic
-    /// overscroll reveal (default). From `display.overscroll_status` config.
-    overscroll_status_mode: crate::config::OverscrollStatusMode,
+    /// Absolute paths edited by the agent's edit-style tool calls, derived
+    /// from `display_messages` and cached by `display_messages_version`.
+    agent_edited_cache: std::cell::RefCell<
+        Option<(
+            u64,
+            std::sync::Arc<std::collections::HashSet<std::path::PathBuf>>,
+        )>,
+    >,
     /// Scroll offset for changelog overlay (None = not visible)
     changelog_scroll: Option<usize>,
     help_scroll: Option<usize>,

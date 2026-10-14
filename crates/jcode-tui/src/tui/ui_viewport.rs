@@ -372,7 +372,6 @@ pub(super) fn draw_messages(
     );
 
     super::set_last_max_scroll(max_scroll);
-    update_user_prompt_positions(wrapped_user_prompt_starts);
 
     // When older compacted history is being loaded in, the app hands us the
     // reader's distance-from-bottom instead of an absolute offset. Distance from
@@ -386,8 +385,22 @@ pub(super) fn draw_messages(
                 .saturating_sub(lines_from_bottom)
                 .min(max_scroll)
         });
+    // A resize rewrapped the transcript while the reader was parked in history.
+    // The captured position is in content coordinates, so resolving it against
+    // this frame's geometry keeps the same message under the reader instead of
+    // reinterpreting a stale line index (issue #1412, persistent half).
+    let resize_anchor_scroll = if app.auto_scroll_paused() {
+        app.pending_resize_anchor()
+            .and_then(|pos| jcode_tui_messages::resolve_content_pos(&pos, &prepared, max_scroll))
+    } else {
+        // The anchor describes a reading position; following the tail is not one.
+        None
+    };
     let user_scroll = app.scroll_offset().min(max_scroll);
-    let scroll = if let Some(anchored) = anchored_scroll {
+    let scroll = if let Some(anchored) = resize_anchor_scroll {
+        super::set_tail_catchup_active(false);
+        anchored
+    } else if let Some(anchored) = anchored_scroll {
         super::set_tail_catchup_active(false);
         anchored
     } else if app.auto_scroll_paused() {

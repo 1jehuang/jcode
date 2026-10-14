@@ -11,12 +11,16 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock, watch};
 
 /// Bound on how long a tool call will wait for a not-yet-connected MCP server
 /// to come up before failing with a clean tool error. Keeps a slow/hanging
 /// server from blocking a single tool call forever (and never blocks spawn).
 const CONNECT_ON_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+type OwnedConnectionResult = Option<std::result::Result<(), String>>;
+type OwnedConnectionSender = watch::Sender<OwnedConnectionResult>;
+type OwnedConnecting = Arc<Mutex<HashMap<String, OwnedConnectionSender>>>;
 
 /// Meter a completed tool call for partner-discovery provenance. No-op for
 /// servers without discovery provenance (the overwhelmingly common case) and
@@ -51,11 +55,66 @@ pub struct McpManager {
     pool_handles: RwLock<HashMap<String, McpHandle>>,
     /// Per-session owned clients (non-shared / stateful servers)
     owned_clients: RwLock<HashMap<String, McpClient>>,
+    /// In-flight owned-server handshakes, keyed by server name. This prevents
+    /// background startup and a manual connect from spawning two processes for
+    /// the same session server at the same time.
+    connecting: OwnedConnecting,
     config: McpConfig,
     session_id: String,
     /// Project directory used to resolve project-local MCP config. `None`
     /// loads only global config and never consults the process working directory.
     project_dir: Option<std::path::PathBuf>,
+}
+
+struct OwnedConnectionAttemptGuard {
+    connecting: OwnedConnecting,
+    name: String,
+    sender: OwnedConnectionSender,
+    armed: bool,
+}
+
+impl OwnedConnectionAttemptGuard {
+    fn new(connecting: OwnedConnecting, name: &str, sender: OwnedConnectionSender) -> Self {
+        Self {
+            connecting,
+            name: name.to_string(),
+            sender,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for OwnedConnectionAttemptGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+
+        let connecting = Arc::clone(&self.connecting);
+        let name = self.name.clone();
+        let sender = self.sender.clone();
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+
+        handle.spawn(async move {
+            let mut connecting = connecting.lock().await;
+            let is_current = connecting
+                .get(&name)
+                .is_some_and(|current| current.same_channel(&sender));
+            if is_current {
+                connecting.remove(&name);
+                let _ = sender.send(Some(Err(format!(
+                    "MCP server '{}' connection attempt was cancelled",
+                    name
+                ))));
+            }
+        });
+    }
 }
 
 impl McpManager {
@@ -66,6 +125,7 @@ impl McpManager {
             pool: None,
             pool_handles: RwLock::new(HashMap::new()),
             owned_clients: RwLock::new(HashMap::new()),
+            connecting: Arc::new(Mutex::new(HashMap::new())),
             config: McpConfig::load_for_dir(project_dir.as_deref()),
             session_id: "owned".to_string(),
             project_dir,
@@ -89,6 +149,7 @@ impl McpManager {
             pool: Some(pool),
             pool_handles: RwLock::new(HashMap::new()),
             owned_clients: RwLock::new(HashMap::new()),
+            connecting: Arc::new(Mutex::new(HashMap::new())),
             config: McpConfig::load_for_dir(project_dir.as_deref()),
             session_id,
             project_dir,
@@ -101,6 +162,7 @@ impl McpManager {
             pool: None,
             pool_handles: RwLock::new(HashMap::new()),
             owned_clients: RwLock::new(HashMap::new()),
+            connecting: Arc::new(Mutex::new(HashMap::new())),
             config,
             session_id: "owned".to_string(),
             project_dir: None,
@@ -159,38 +221,25 @@ impl McpManager {
 
         // Connect non-shared servers per-session
         if !owned_servers.is_empty() {
-            let mut spawn_handles = Vec::new();
-
-            for (name, config) in owned_servers {
+            let connect_futures = owned_servers.into_iter().map(|(name, config)| {
                 let name = name.clone();
                 let config = config.clone();
-                let project_dir = self.project_dir.clone();
-                let handle = tokio::spawn(async move {
-                    let result =
-                        McpClient::connect_in_dir(name.clone(), &config, project_dir.as_deref())
-                            .await;
+                async move {
+                    let result = self.connect(&name, &config).await;
                     (name, result)
-                });
-                spawn_handles.push(handle);
-            }
+                }
+            });
 
-            for handle in spawn_handles {
-                match handle.await {
-                    Ok((name, Ok(client))) => {
-                        let mut clients = self.owned_clients.write().await;
-                        clients.insert(name, client);
-                        total_successes += 1;
-                    }
-                    Ok((name, Err(e))) => {
+            for (name, result) in futures::future::join_all(connect_futures).await {
+                match result {
+                    Ok(()) => total_successes += 1,
+                    Err(e) => {
                         let error_msg = format!("{:#}", e);
                         crate::logging::error(&format!(
                             "Failed to connect to MCP server '{}': {}",
                             name, error_msg
                         ));
                         total_failures.push((name, error_msg));
-                    }
-                    Err(e) => {
-                        crate::logging::error(&format!("MCP connection task panicked: {}", e));
                     }
                 }
             }
@@ -229,17 +278,72 @@ impl McpManager {
             }
         }
 
-        // Owned (non-shared or no pool available)
-        let client =
-            McpClient::connect_in_dir(name.to_string(), config, self.project_dir.as_deref())
-                .await
-                .with_context(|| format!("Failed to connect to MCP server '{}'", name))?;
+        // Owned (non-shared or no pool available). Coordinate concurrent
+        // callers so background startup and a manual connect share one
+        // handshake instead of spawning duplicate child processes.
+        self.connect_owned(name, config).await
+    }
 
-        self.owned_clients
-            .write()
-            .await
-            .insert(name.to_string(), client);
-        Ok(())
+    #[allow(clippy::await_holding_lock)]
+    async fn connect_owned(&self, name: &str, config: &McpServerConfig) -> Result<()> {
+        if self.owned_clients.read().await.contains_key(name) {
+            return Ok(());
+        }
+
+        let (mut waiter, leader, sender) = {
+            let mut connecting = self.connecting.lock().await;
+            if let Some(sender) = connecting.get(name) {
+                (Some(sender.subscribe()), false, None)
+            } else {
+                if self.owned_clients.read().await.contains_key(name) {
+                    return Ok(());
+                }
+                let (sender, _receiver) = watch::channel(None);
+                connecting.insert(name.to_string(), sender.clone());
+                (None, true, Some(sender))
+            }
+        };
+
+        if !leader {
+            let receiver = waiter
+                .as_mut()
+                .expect("owned MCP connection waiter must have a receiver");
+            receiver.changed().await.with_context(|| {
+                format!("MCP server '{}' connection attempt was cancelled", name)
+            })?;
+            return receiver
+                .borrow()
+                .clone()
+                .unwrap_or_else(|| Err(format!("MCP server '{}' connection did not finish", name)))
+                .map_err(anyhow::Error::msg);
+        }
+
+        let sender = sender.expect("owned MCP connection leader must have a sender");
+        let mut attempt_guard =
+            OwnedConnectionAttemptGuard::new(Arc::clone(&self.connecting), name, sender.clone());
+        let connection =
+            McpClient::connect_in_dir(name.to_string(), config, self.project_dir.as_deref()).await;
+
+        let mut connecting = self.connecting.lock().await;
+        let mut clients = self.owned_clients.write().await;
+        let result = match connection {
+            Ok(client) => {
+                clients.insert(name.to_string(), client);
+                Ok(())
+            }
+            Err(error) => Err(format!("{:#}", error)),
+        };
+
+        if connecting
+            .get(name)
+            .is_some_and(|current| current.same_channel(&sender))
+        {
+            connecting.remove(name);
+            let _ = sender.send(Some(result.clone()));
+        }
+        attempt_guard.disarm();
+
+        result.map_err(anyhow::Error::msg)
     }
 
     /// Disconnect from a server
@@ -679,6 +783,132 @@ mod tests {
             started.elapsed() < Duration::from_secs(35),
             "connect-on-first-call must be bounded"
         );
+    }
+
+    #[tokio::test]
+    async fn cancelled_owned_connection_notifies_waiters_and_clears_entry() {
+        let manager = McpManager::with_config(empty_config());
+        let (sender, _receiver) = watch::channel(None);
+        manager
+            .connecting
+            .lock()
+            .await
+            .insert("cancelled".to_string(), sender.clone());
+        let mut waiter = sender.subscribe();
+
+        drop(OwnedConnectionAttemptGuard::new(
+            Arc::clone(&manager.connecting),
+            "cancelled",
+            sender,
+        ));
+
+        tokio::time::timeout(Duration::from_secs(1), waiter.changed())
+            .await
+            .expect("cancellation cleanup must notify waiters")
+            .expect("cancellation sender must remain alive");
+        assert_eq!(
+            waiter
+                .borrow()
+                .as_ref()
+                .and_then(|result| result.as_ref().err())
+                .map(String::as_str),
+            Some("MCP server 'cancelled' connection attempt was cancelled")
+        );
+        assert!(!manager.connecting.lock().await.contains_key("cancelled"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    // `disconnect_all` flushes process-global sponsor provenance counters, so
+    // hold the test-env lock to avoid draining another test's pending reports.
+    #[allow(clippy::await_holding_lock)]
+    async fn concurrent_owned_connects_spawn_only_one_server() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::Arc;
+
+        let _env_lock = crate::storage::lock_test_env();
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let script = temp.path().join("counted-mcp.sh");
+        let count = temp.path().join("starts");
+        std::fs::write(
+            &script,
+            r##"#!/bin/sh
+printf 'started\n' >> "$MCP_START_COUNT"
+while IFS= read -r line; do
+  id=$(printf '%s\n' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  case "$line" in
+    *'"initialize"'*)
+      echo '{"jsonrpc":"2.0","id":'$id',"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"counted","version":"0.0.1"}}}'
+      ;;
+    *'"tools/list"'*)
+      echo '{"jsonrpc":"2.0","id":'$id',"result":{"tools":[]}}'
+      ;;
+    *'"shutdown"'*)
+      exit 0
+      ;;
+  esac
+done
+"##,
+        )
+        .expect("write MCP script");
+        let mut permissions = std::fs::metadata(&script)
+            .expect("script metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).expect("make script executable");
+
+        let mut config = McpConfig::default();
+        let mut env = HashMap::new();
+        env.insert("MCP_START_COUNT".to_string(), count.display().to_string());
+        config.servers.insert(
+            "counted".to_string(),
+            McpServerConfig {
+                command: script.display().to_string(),
+                args: Vec::new(),
+                env,
+                shared: false,
+                transport: None,
+                url: None,
+                headers: HashMap::new(),
+                enabled: None,
+                disabled: None,
+                timeout_secs: Some(10),
+            },
+        );
+        let config = config
+            .servers
+            .get("counted")
+            .cloned()
+            .expect("server config");
+        let manager = Arc::new(McpManager::with_config({
+            let mut cfg = McpConfig::default();
+            cfg.servers.insert("counted".to_string(), config.clone());
+            cfg
+        }));
+
+        let background = {
+            let manager = Arc::clone(&manager);
+            tokio::spawn(async move { manager.connect_all().await })
+        };
+        let manual = {
+            let manager = Arc::clone(&manager);
+            tokio::spawn(async move { manager.connect("counted", &config).await })
+        };
+
+        let (_, failures) = background
+            .await
+            .expect("background task join")
+            .expect("background connect_all");
+        assert!(failures.is_empty(), "background failures: {failures:?}");
+        manual
+            .await
+            .expect("manual task join")
+            .expect("manual connect");
+
+        let starts = std::fs::read_to_string(&count).expect("read start count");
+        assert_eq!(starts.lines().count(), 1, "server starts: {starts:?}");
+        manager.disconnect_all().await;
     }
 }
 

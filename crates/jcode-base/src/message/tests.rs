@@ -727,6 +727,7 @@ fn description_token_estimate_uses_chars_per_token_heuristic() {
         name: "read".to_string(),
         description: "abcdwxyz".to_string(),
         input_schema: serde_json::json!({"type": "object"}),
+        defer_loading: false,
     };
 
     assert_eq!(def.description_token_estimate(), 2);

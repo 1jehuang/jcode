@@ -188,7 +188,8 @@ pub fn build_compaction_conversation_text(
                 ContentBlock::Reasoning { .. }
                 | ContentBlock::ReasoningTrace { .. }
                 | ContentBlock::AnthropicThinking { .. }
-                | ContentBlock::OpenAIReasoning { .. } => {}
+                | ContentBlock::OpenAIReasoning { .. }
+                | ContentBlock::ToolReference { .. } => {}
                 ContentBlock::Image { .. } => conversation_text.push_str("[Image]\n"),
                 ContentBlock::OpenAICompaction { .. } => {
                     conversation_text.push_str("[OpenAI native compaction]\n")
@@ -324,6 +325,9 @@ pub fn content_char_count(content: &[ContentBlock]) -> usize {
             // compactions.
             ContentBlock::Image { .. } => IMAGE_TOKEN_COST * CHARS_PER_TOKEN,
             ContentBlock::OpenAICompaction { encrypted_content } => encrypted_content.len(),
+            // The provider expands a reference into the full definition, but
+            // that definition is already accounted for by the tool catalog.
+            ContentBlock::ToolReference { tool_name, .. } => tool_name.len() + 20,
         })
         .sum()
 }
