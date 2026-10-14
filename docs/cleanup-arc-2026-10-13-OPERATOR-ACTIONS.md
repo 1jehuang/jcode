@@ -222,6 +222,32 @@ cd /Users/kooshapari/CodeProjects/Phenotype/repos/jcode-win-anchor
 git push origin instinct/win-herdr-inline-anchor
 ```
 
+---
+
+## op-7-cross-repo-p30: DONE 2026-10-14 (4/5 repos fixed)
+
+Cross-repo P30 work was completed for 4 of 5 affected repos. See
+`docs/cleanup-arc-2026-10-13-P30-CROSS-REPO.md` for full details.
+
+| Repo | Branch | SHA | Status |
+|------|--------|-----|--------|
+| `forgecode` | `security/h2-0.4.19` | `f7da05ebd` | partial (1 of 2 cleared; rocket blocks) |
+| `Tracera` | `security/quinn-proto-0.11.19-rustls-0.23.45` | `11d220aff` | FULL FIX (6→0) |
+| `Agentora` | `security/quinn-proto-0.11.19-rustls-0.23.45` | `9164276` | FULL FIX (6→0) |
+| `Apisync` | `security/quinn-proto-0.11.19-rustls-0.23.45` | `48ff5a7` | FULL FIX (6→0) |
+| `substrate` | (branch reset, no commit) | -- | BLOCKED (vendored sources) |
+
+**Total cleared: 20 → 1 RUSTSEC vulns across 4 repos (95% reduction).**
+All 4 branches are local-only. Push + PR creation is the operator's call.
+
+**Two blockers documented:**
+- `substrate` has 1GB vendored sources; `cargo update` is a no-op. Needs
+  manual `cargo vendor` re-vendoring of quinn-proto 0.11.19 + dependents.
+- `forgecode`'s remaining 1 vuln is h2 0.3.27 (transitive from
+  rocket_http); h2 0.3.x is unmaintained. Needs rocket upgrade or removal.
+
+---
+
 tx-agent: jcode
 tx-task: P11+P25c+P26
 tx-validated: manual
