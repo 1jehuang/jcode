@@ -84,6 +84,13 @@ fi
 
 # Install versioned binary into ~/.jcode/builds/versions/<hash>/
 builds_dir="${JCODE_HOME:-$HOME/.jcode}/builds"
+# Installed versions are immutable. A different binary under a label that is
+# already installed (a dirty tree edited again, or the other build profile)
+# gets a content-hash suffix instead of failing publication.
+if [[ -e "$builds_dir/versions/$hash/jcode" ]] && ! cmp -s "$bin" "$builds_dir/versions/$hash/jcode"; then
+  content_hash="$({ sha256sum "$bin" 2>/dev/null || shasum -a 256 "$bin"; } | cut -c1-12)"
+  hash="${hash}-${content_hash}"
+fi
 version_dir="$builds_dir/versions/$hash"
 stable_dir="$builds_dir/stable"
 current_dir="$builds_dir/current"

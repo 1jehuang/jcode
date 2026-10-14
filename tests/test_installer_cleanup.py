@@ -5,6 +5,7 @@ No real Cargo, network, server, user cache, or installation is touched.
 JCODE_TEST_INSTALLER_BASELINE=1 checks the original HEAD scripts instead.
 The guarded publisher itself is validated by Rust integration tests, not this stub.
 """
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -196,6 +197,16 @@ sys.exit(22)
         calls = [args for args in self.commands() if "publish-build" in args]
         self.assertEqual((result.returncode, len(calls), calls[0][0],
                           calls[0][calls[0].index("--channel") + 1]), (0, 1, "--no-update", "stable"))
+
+    def test_release_changed_build_gets_new_label_and_keeps_installed_bytes(self):
+        installed = self.home / ".jcode/builds/versions/fixture/jcode"
+        installed.parent.mkdir(parents=True)
+        installed.write_bytes(b"earlier build")
+        result = self.run_installer("install_release.sh", "--fast")
+        calls = [args for args in self.commands() if "publish-build" in args]
+        suffix = hashlib.sha256(self.payload.read_bytes()).hexdigest()[:12]
+        self.assertEqual((result.returncode, calls[0][calls[0].index("--version") + 1],
+                          installed.read_bytes()), (0, "fixture-" + suffix, b"earlier build"), result)
 
     def test_release_legacy_binary_fails_without_publication(self):
         self.env["FIXTURE_LEGACY"] = "1"
