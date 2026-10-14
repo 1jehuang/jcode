@@ -22,8 +22,26 @@ fn main() {
         eprintln!("cargo:warning=failed to resolve auto build semver: {err}");
         pkg_version.clone()
     });
-    let (major, minor, patch) = parse_semver(&build_semver).unwrap_or(base_version);
-    let base_semver = format!("{}.{}.{}", base_version.0, base_version.1, base_version.2);
+    // Parse the resolved build semver into (major, minor, patch) + optional
+    // channel segment (e.g. `k0.1.2` in `1.5.3-k0.1.2`). The channel is
+    // preserved through JCODE_VERSION, JCODE_BASE_SEMVER, and JCODE_UPDATE_SEMVER
+    // so that channel-flagged builds report a channel-bearing version from
+    // `--version` and downstream consumers (installers, update checks) can see
+    // the channel too. Without this, `format!("{}.{}.{}", ...)` silently drops
+    // the channel segment and a `1.5.3-k0.1.2-channel` build reports `1.5.3`.
+    let (major, minor, patch, channel_suffix) = match parse_semver_with_channel(&build_semver) {
+        Some((m, mi, p, channel)) => (m, mi, p, channel_suffix(channel.as_deref())),
+        None => (
+            base_version.0,
+            base_version.1,
+            base_version.2,
+            String::new(),
+        ),
+    };
+    let base_semver = format!(
+        "{}.{}.{}{}",
+        base_version.0, base_version.1, base_version.2, channel_suffix
+    );
     let update_semver = if explicit_build_semver_override().is_some() {
         build_semver.clone()
     } else {
@@ -111,16 +129,27 @@ fn main() {
         .join("\x1f");
 
     // Build version string:
-    //   Release: v0.2.17 (abc1234)
-    //   Dev:     v0.2.17-dev (abc1234)
-    //   Dirty:   v0.2.17-dev (abc1234, dirty)
+    //   Release:                v0.2.17 (abc1234)
+    //   Dev:                    v0.2.17-dev (abc1234)
+    //   Dirty:                  v0.2.17-dev (abc1234, dirty)
+    //   Channel-flagged release: v0.2.17-k0.1.2 (abc1234)
+    //   Channel-flagged dev:     v0.2.17-k0.1.2-dev (abc1234)
     let is_release = std::env::var("JCODE_RELEASE_BUILD").is_ok();
     let version = if is_release {
-        format!("v{}.{}.{} ({})", major, minor, patch, git_hash)
+        format!(
+            "v{}.{}.{}{} ({})",
+            major, minor, patch, channel_suffix, git_hash
+        )
     } else if dirty {
-        format!("v{}.{}.{}-dev ({}, dirty)", major, minor, patch, git_hash)
+        format!(
+            "v{}.{}.{}{}-dev ({}, dirty)",
+            major, minor, patch, channel_suffix, git_hash
+        )
     } else {
-        format!("v{}.{}.{}-dev ({})", major, minor, patch, git_hash)
+        format!(
+            "v{}.{}.{}{}-dev ({})",
+            major, minor, patch, channel_suffix, git_hash
+        )
     };
 
     // Set environment variables for compilation
@@ -222,11 +251,59 @@ fn parse_semver(value: &str) -> Option<(u32, u32, u32)> {
     Some((major, minor, patch))
 }
 
+/// Like `parse_semver` but also extracts an optional channel segment that
+/// follows the first `-` after the patch number. Accepts inputs of the form
+/// `major.minor.patch` and `major.minor.patch-channel` (with optional `v`
+/// prefix). Returns `None` for anything that does not look like a strict
+/// `MAJOR.MINOR.PATCH` semver — including empty channels (`1.2.3-`).
+///
+/// Examples:
+///   `0.0.0`              -> Some((0, 0, 0, None))
+///   `1.2.3`              -> Some((1, 2, 3, None))
+///   `v1.2.3`             -> Some((1, 2, 3, None))
+///   `1.2.3-k0.1.2`       -> Some((1, 2, 3, Some("k0.1.2")))
+///   `1.5.3-channel`      -> Some((1, 5, 3, Some("channel")))
+///   `1.5.3-k0.1.2-night` -> Some((1, 5, 3, Some("k0.1.2-night")))
+///   `1.2.3.4`            -> None (too many numeric parts)
+///   `1.2.3-`             -> None (empty channel is not a real one)
+///   `not.a.semver`       -> None
+fn parse_semver_with_channel(value: &str) -> Option<(u32, u32, u32, Option<String>)> {
+    let trimmed = value.trim().trim_start_matches('v');
+    // Split on the first `-` only. Anything before the `-` is the version
+    // part; anything after is the channel (which may itself contain `-`).
+    let (version_part, channel_part) = match trimmed.split_once('-') {
+        Some((v, c)) => (v, Some(c)),
+        None => (trimmed, None),
+    };
+    let mut nums = version_part.split('.');
+    let major = nums.next()?.parse().ok()?;
+    let minor = nums.next()?.parse().ok()?;
+    let patch = nums.next()?.parse().ok()?;
+    if nums.next().is_some() {
+        return None;
+    }
+    let channel = channel_part
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .map(str::to_string);
+    Some((major, minor, patch, channel))
+}
+
+/// Render the channel segment as a leading `-<channel>` suffix, or an empty
+/// string when there is no channel. Centralised so that the format strings
+/// stay readable.
+fn channel_suffix(channel: Option<&str>) -> String {
+    match channel {
+        Some(c) if !c.is_empty() => format!("-{}", c),
+        _ => String::new(),
+    }
+}
+
 fn explicit_build_semver_override() -> Option<String> {
     std::env::var("JCODE_BUILD_SEMVER")
         .ok()
         .map(|value| value.trim().trim_start_matches('v').to_string())
-        .filter(|value| parse_semver(value).is_some())
+        .filter(|value| parse_semver_with_channel(value).is_some())
 }
 
 fn resolve_build_semver(base_version: (u32, u32, u32)) -> Result<String, String> {
@@ -316,4 +393,72 @@ fn metadata_value(key: &str) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_semver_with_channel_strict_semver() {
+        assert_eq!(parse_semver_with_channel("0.0.0"), Some((0, 0, 0, None)));
+        assert_eq!(parse_semver_with_channel("1.2.3"), Some((1, 2, 3, None)));
+        assert_eq!(
+            parse_semver_with_channel("0.91.42"),
+            Some((0, 91, 42, None))
+        );
+    }
+
+    #[test]
+    fn parse_semver_with_channel_strips_v_prefix() {
+        assert_eq!(parse_semver_with_channel("v0.0.0"), Some((0, 0, 0, None)));
+        assert_eq!(parse_semver_with_channel("v1.2.3"), Some((1, 2, 3, None)));
+    }
+
+    #[test]
+    fn parse_semver_with_channel_simple_channel() {
+        assert_eq!(
+            parse_semver_with_channel("1.5.3-channel"),
+            Some((1, 5, 3, Some("channel".to_string())))
+        );
+        assert_eq!(
+            parse_semver_with_channel("0.91.0-khostty"),
+            Some((0, 91, 0, Some("khostty".to_string())))
+        );
+    }
+
+    #[test]
+    fn parse_semver_with_channel_dashed_channel_preserved() {
+        // The channel may itself contain `-`; the first `-` is the delimiter,
+        // everything after stays in the channel string.
+        assert_eq!(
+            parse_semver_with_channel("1.5.3-k0.1.2"),
+            Some((1, 5, 3, Some("k0.1.2".to_string())))
+        );
+        assert_eq!(
+            parse_semver_with_channel("1.5.3-k0.1.2-night"),
+            Some((1, 5, 3, Some("k0.1.2-night".to_string())))
+        );
+    }
+
+    #[test]
+    fn parse_semver_with_channel_rejects_invalid() {
+        // Too few / too many numeric parts.
+        assert_eq!(parse_semver_with_channel(""), None);
+        assert_eq!(parse_semver_with_channel("1.2"), None);
+        assert_eq!(parse_semver_with_channel("1.2.3.4"), None);
+        // Non-numeric.
+        assert_eq!(parse_semver_with_channel("not.a.semver"), None);
+        assert_eq!(parse_semver_with_channel("a.b.c"), None);
+        // Empty channel is not a real channel.
+        assert_eq!(parse_semver_with_channel("1.2.3-"), None);
+    }
+
+    #[test]
+    fn channel_suffix_renders_or_empty() {
+        assert_eq!(channel_suffix(None), "");
+        assert_eq!(channel_suffix(Some("")), "");
+        assert_eq!(channel_suffix(Some("channel")), "-channel");
+        assert_eq!(channel_suffix(Some("k0.1.2")), "-k0.1.2");
+    }
 }
