@@ -12,7 +12,19 @@ return (async () => {
   function checkBudget() {
     if (Date.now() - started >= (restoring ? 27_000 : 18_000)) throw Error('ChatGPT UI evaluation exceeded its time budget');
   }
-  const delay = async () => { checkBudget(); await new Promise(resolve => setTimeout(resolve, 300)); checkBudget(); };
+  // A hidden tab (occluded or background browser window) clamps timers to
+  // ~1s steps, which overruns the budget. MessageChannel tasks are not throttled.
+  const sleep = ms => document.hidden ? new Promise(resolve => {
+    const end = Date.now() + ms;
+    const channel = new MessageChannel();
+    channel.port1.onmessage = () => {
+      if (Date.now() < end) return channel.port2.postMessage(0);
+      channel.port1.close();
+      resolve();
+    };
+    channel.port2.postMessage(0);
+  }) : new Promise(resolve => setTimeout(resolve, ms));
+  const delay = async () => { checkBudget(); await sleep(300); checkBudget(); };
   async function until(check, description) {
     for (let attempt=0; attempt<30; attempt++) {
       checkBudget();
