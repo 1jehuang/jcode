@@ -79,6 +79,11 @@ pub fn set_latex_log_hook(hook: fn(&str)) {
     latex_image::set_log_hook(hook);
 }
 
+/// Missing optional TeX tooling is configuration information, not a warning.
+pub fn latex_error_is_missing_toolchain(error: &str) -> bool {
+    latex_image::error_is_missing_toolchain(error)
+}
+
 pub use latex_image::{
     HandtermNativeLatex, encode_handterm_latex_apc, handterm_native_latex_for_hash,
 };
@@ -1077,6 +1082,9 @@ fn latex_image_lines(
     display: bool,
     max_width: Option<usize>,
 ) -> Option<Vec<Line<'static>>> {
+    if math.trim().is_empty() {
+        return None;
+    }
     if let Some(lines) = latex_image::render_handterm_native_latex(math, display, max_width) {
         return Some(lines);
     }

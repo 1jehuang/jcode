@@ -22,7 +22,8 @@ const DPI_PER_CELL_PIXEL: u16 = 9;
 const DPI_QUANTUM: u16 = 12;
 
 static LOG_HOOK: LazyLock<Mutex<fn(&str)>> = LazyLock::new(|| Mutex::new(|_| {}));
-static LAST_REPORTED_ERROR: LazyLock<Mutex<Option<String>>> = LazyLock::new(|| Mutex::new(None));
+static REPORTED_ERRORS: LazyLock<Mutex<HashSet<String>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
 const COPY_SOURCE_CACHE_LIMIT: usize = 4096;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -227,20 +228,24 @@ pub(crate) fn set_log_hook(hook: fn(&str)) {
 }
 
 pub(crate) fn report_error(error: &str) {
-    let should_report = LAST_REPORTED_ERROR
-        .lock()
-        .map(|mut last| {
-            if last.as_deref() == Some(error) {
-                false
-            } else {
-                *last = Some(error.to_string());
-                true
-            }
-        })
-        .unwrap_or(false);
-    if should_report && let Ok(hook) = LOG_HOOK.lock() {
+    if should_report_error(error)
+        && let Ok(hook) = LOG_HOOK.lock()
+    {
         hook(error);
     }
+}
+
+fn should_report_error(error: &str) -> bool {
+    REPORTED_ERRORS
+        .lock()
+        .map(|mut reported| reported.insert(error.to_string()))
+        .unwrap_or(false)
+}
+
+pub(crate) fn error_is_missing_toolchain(error: &str) -> bool {
+    error == TOOLCHAIN_MISSING_ERROR
+        || (error.contains("start latex:")
+            && (error.contains("No such file or directory") || error.contains("program not found")))
 }
 
 fn handterm_terminal_name(term_program: Option<&str>) -> bool {
@@ -863,6 +868,32 @@ fn validate_source(source: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn distinct_fallback_errors_are_reported_once_across_redraws() {
+        let errors = ["issue1791-test-missing-tex", "issue1791-test-other-error"];
+        for error in errors {
+            assert!(should_report_error(error));
+        }
+        for _ in 0..20 {
+            for error in errors {
+                assert!(!should_report_error(error));
+            }
+        }
+    }
+
+    #[test]
+    fn missing_tex_is_informational_but_render_failures_are_not() {
+        assert!(error_is_missing_toolchain(TOOLCHAIN_MISSING_ERROR));
+        assert!(error_is_missing_toolchain(
+            "DVI renderer failed (start latex: No such file or directory (os error 2))"
+        ));
+        assert!(!error_is_missing_toolchain("LaTeX source is empty"));
+        assert!(!error_is_missing_toolchain(
+            "start latex: Permission denied (os error 13)"
+        ));
+        assert!(!error_is_missing_toolchain("latex exited with status 1"));
+    }
 
     #[test]
     fn document_wraps_inline_and_display_math_without_shell_escape() {
