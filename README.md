@@ -7,7 +7,12 @@
 
 # jcode
 
-**High-performance coding agents.** <br><br>
+<p>
+<a href="https://trendshift.io/repositories/25042?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-25042" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/25042" alt="1jehuang/jcode | Trendshift" width="250" height="55"></a>
+</p>
+
+**High-performance coding agents.**
+
 Run more agents with less RAM for your multi-agent development workflow.
 
 [![Last Commit](https://badgen.net/github/last-commit/1jehuang/jcode/master?icon=github)](https://github.com/1jehuang/jcode/commits/master)
@@ -15,15 +20,9 @@ Run more agents with less RAM for your multi-agent development workflow.
 [![GitHub Downloads](https://img.shields.io/github/downloads/1jehuang/jcode/total?style=flat-square)](https://github.com/1jehuang/jcode/releases)
 [![Discord](https://img.shields.io/badge/Discord-Join%20Community-5865F2?style=flat-square&logo=discord&logoColor=white)](https://discord.gg/nBe9vGyK9a)
 
-<a href="https://trendshift.io/repositories/25042?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-25042" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/25042" alt="1jehuang/jcode | Trendshift" width="250" height="55"></a>
-
-<br>
-
 [Website](https://jcode.sh) · [Docs](https://jcode.sh/docs) · [SDK](https://jcode.sh/sdk) · [Benchmarks](https://jcode.sh/bench) · [Screenshots](#screenshots) · [Install](#installation) · [Quick Start](#quick-start) · [Further Reading](#further-reading) · [Contributing](CONTRIBUTING.md)
 
 </div>
-
----
 
 <div align="center">
 
@@ -48,8 +47,6 @@ Run more agents with less RAM for your multi-agent development workflow.
 
 </div>
 
----
-
 <div align="center">
 
 ## Installation
@@ -62,9 +59,6 @@ curl -fsSL https://jcode.sh/install | bash
 ```
 
 [Windows installation instructions](https://jcode.sh/docs#install).
-
----
-
 
 <div align="center">
 
@@ -305,11 +299,6 @@ versions tested for this corrected memory rerun:
 
 </div>
 
-
----
-
-
-
 ## Swarm
 
 Spawn two or more agents in the same repo, and they will automatically be managed by the server to allow native collaboration. When agent A edits a file that agent B has read (code shifting under its feet), the server notifies agent B. Agent B can ignore it if it is not relevant, or it can check the diff to make sure that it doesn't conflict. Each agent has messaging abilities, capable of DMing just one agent, broadcasting to all other agents hosted by the server, or just agents working in that repo. This allows you to spawn multiple sessions in the same repo, and have all conflicts automatically resolved.
@@ -325,8 +314,6 @@ Spawn two or more agents in the same repo, and they will automatically be manage
 </div>
 
 Agents are also able to spawn their own swarms autonomously. They have a swarm tool which allows them to spawn in their own teamates to accomplish tasks in parallel. Doing so turns the main agent into a coordinator and the spawned agents into workers. Groups of agents, their messaging channels, their completion statuses, etc are all automatically managed. This can be done headlessly or headed.
-
----
 
 Swarm modes keep root reasoning separate from worker effort. Configure each mode
 in `~/.jcode/config.toml`:
@@ -402,8 +389,6 @@ for behavior, controls, and verification.
 
 Jcode also supports easy multi-account switching. Ran out of tokens on your first ChatGPT Pro subscription? /account and quickly switch to your second. 
 
----
-
 ## Customizability / Self-Dev
 
 Jcode is inventing a new form of customizability. One that doesn't limit you to what a plugin or extension can do. Tell your jcode agent to enter self dev mode, and it will start modifying its own source code. Jcode is optimized to iterate on itself. There is significant infrastructure around self development, which allows it to edit, build, and test its own source code, then reload its own binary and continue work in your (potentially many) sessions, fully automatically.
@@ -411,8 +396,6 @@ Jcode is inventing a new form of customizability. One that doesn't limit you to 
 It is recommended that you use a frontier model for this. The jcode codebase is not a simple one, and weaker models can make subtle, breaking changes. GPT 5.5 or the latest available frontier model works well.
 
 <!-- Add self-dev demo thumbnail/video and fuller writeup here. -->
-
----
 
 ## Misc.
 
@@ -428,17 +411,11 @@ Inputs are by default interleaved with the working agent. It sends the input as 
 
 Resume sessions from different harnesses. Claude code broke on you? Resume the session from jcode and continue where you left off. Session resume is supported for codex, claude code, opencode, and pi. 
 
-
-
 Skills are not all loaded on startup. The conversation is embedded as a semantic vector, and will automatically inject a skill if there is an embedding hit similar to memories. The agent has a skill tool for you to manually activate a skill at anytime. You may also activate via slash commands. 
-
----
 
 ## iOS Application / Native OpenClaw
 
 A native iOS application version of jcode is coming soon. This will allow you to work with jcode on your personal machine's environment from your phone, via Tailscale. Openclaw like features will be bundled with this iOS application. 
-
----
 
 ## Other planned features
 
@@ -447,8 +424,6 @@ Agents dont like to commit in dirty git state with active changes. Git was clear
 Build speed improvements: An incremental debug cargo build with cache enabled takes about 1 minute on my machine. The goal is 5-20 seconds. Refactors and crates seams should be able to make this happen. 
 
 <!-- Add iOS / native OpenClaw preview and fuller writeup here. -->
-
----
 
 <div align="center">
 
@@ -487,8 +462,6 @@ and hotkey-friendly dictation without requiring a bundled speech-to-text stack.
 
 </div>
 
----
-
 ## Browser Automation
 
 The built-in `browser` tool lets agents navigate pages, fill forms, upload files,
@@ -496,8 +469,6 @@ and capture screenshots through Firefox Agent Bridge. Ask your agent to set it
 up and handle browser tasks directly.
 
 See [Browser Provider Protocol](docs/BROWSER_PROVIDER_PROTOCOL.md) for details.
-
----
 
 ## Further Reading
 
