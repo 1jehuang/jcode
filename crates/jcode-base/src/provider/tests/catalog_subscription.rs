@@ -120,19 +120,17 @@ fn test_openai_live_catalog_replaces_static_fallback_list() {
         crate::env::set_var("OPENAI_API_KEY", value);
     }
 
-    let web = jcode_provider_core::CHATGPT_WEB_MODELS;
     assert_eq!(models[0], "gpt-5.4-live-only");
-    assert_eq!(
-        models[1..=web.len()],
-        web.iter().map(|web| web.id.to_string()).collect::<Vec<_>>()[..]
-    );
-    // The only entries allowed past the live catalog and the ChatGPT web
-    // models are the platform-API-only GPT Pro models, appended when an
-    // OPENAI_API_KEY is configured on the machine running the tests.
-    for extra in &models[web.len() + 1..] {
+    assert!(!models.contains(&jcode_provider_core::CHATGPT_WEB_MODEL.to_string()));
+    // Native fallback models must be replaced. Independently observed browser
+    // IDs and platform-API-only Pro IDs are separate catalog sources, not
+    // native OAuth fallback entries. Web availability has its own fail-closed
+    // cache and route tests.
+    for extra in &models[1..] {
         assert!(
-            jcode_provider_core::is_openai_api_only_pro_model(extra),
-            "unexpected non-pro extra model '{extra}' in live catalog list"
+            jcode_provider_core::is_chatgpt_web_model(extra)
+                || jcode_provider_core::is_openai_api_only_pro_model(extra),
+            "unexpected native fallback model '{extra}' in live catalog list"
         );
     }
 

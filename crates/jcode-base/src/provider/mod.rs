@@ -6,6 +6,7 @@ pub mod antigravity;
 pub mod bedrock;
 mod catalog_routes;
 pub mod catalog_scheduler;
+pub mod chatgpt_web;
 pub mod copilot;
 mod credit_failover;
 pub mod cursor;
@@ -51,17 +52,16 @@ pub use catalog_routes::{
 pub use jcode_provider_core::attempt_tracker;
 pub use jcode_provider_core::cli_provider_arg_for_session_key;
 pub use jcode_provider_core::{
-    ALL_CLAUDE_MODELS, ALL_OPENAI_MODELS, CHATGPT_WEB_MODEL, CHATGPT_WEB_MODELS,
-    CHEAPNESS_REFERENCE_INPUT_TOKENS, CHEAPNESS_REFERENCE_OUTPUT_TOKENS, CredentialMode,
-    DEFAULT_CONTEXT_LIMIT, EventStream, JCODE_USER_AGENT, ModelCapabilities,
-    ModelCatalogRefreshSummary, ModelRoute, ModelRouteApiMethod, NativeCompactionResult,
-    NativeToolResult, NativeToolResultSender, PremiumMode, Provider, RouteBillingKind,
-    RouteCheapnessEstimate, RouteCostConfidence, RouteCostSource, RouteSelection, RuntimeKey,
-    claude_code_api_method, claude_code_model_spec, dedupe_model_routes,
-    explicit_model_provider_prefix, fresh_transport_client, grok_build_model_spec,
-    inferred_reasoning_efforts, is_chatgpt_web_model, model_name_for_provider,
-    normalize_copilot_model_name, provider_from_model_key, shared_http_client,
-    summarize_model_catalog_refresh,
+    ALL_CLAUDE_MODELS, ALL_OPENAI_MODELS, CHATGPT_WEB_MODEL, CHEAPNESS_REFERENCE_INPUT_TOKENS,
+    CHEAPNESS_REFERENCE_OUTPUT_TOKENS, CredentialMode, DEFAULT_CONTEXT_LIMIT, EventStream,
+    JCODE_USER_AGENT, ModelCapabilities, ModelCatalogRefreshSummary, ModelRoute,
+    ModelRouteApiMethod, NativeCompactionResult, NativeToolResult, NativeToolResultSender,
+    PremiumMode, Provider, RouteBillingKind, RouteCheapnessEstimate, RouteCostConfidence,
+    RouteCostSource, RouteSelection, RuntimeKey, claude_code_api_method, claude_code_model_spec,
+    dedupe_model_routes, explicit_model_provider_prefix, fresh_transport_client,
+    grok_build_model_spec, inferred_reasoning_efforts, is_chatgpt_web_model,
+    model_name_for_provider, normalize_copilot_model_name, provider_from_model_key,
+    shared_http_client, summarize_model_catalog_refresh,
 };
 pub use jcode_provider_core::{AccountPin, AccountProviderKind, AccountScope};
 pub use jcode_provider_core::{
@@ -2011,6 +2011,19 @@ impl Default for MultiProvider {
     }
 }
 
+async fn prefetch_openai_or_web_catalog<F>(
+    openai: Option<Arc<dyn Provider>>,
+    browser_refresh: F,
+) -> Result<()>
+where
+    F: std::future::Future<Output = Result<()>>,
+{
+    match openai {
+        Some(provider) => provider.prefetch_models().await,
+        None => browser_refresh.await,
+    }
+}
+
 #[async_trait]
 impl Provider for MultiProvider {
     async fn prewarm(&self, tools: &[ToolDefinition], system_static: &str) {
@@ -2656,10 +2669,10 @@ impl Provider for MultiProvider {
                 }
             },
             async {
-                match openai {
-                    Some(provider) => provider.prefetch_models().await,
-                    None => Ok(()),
-                }
+                prefetch_openai_or_web_catalog(openai, async {
+                    chatgpt_web::refresh_models().await.map(|_| ())
+                })
+                .await
             },
             async {
                 match openrouter {

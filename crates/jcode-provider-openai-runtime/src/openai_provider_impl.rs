@@ -148,8 +148,10 @@ impl Provider for OpenAIProvider {
     ) -> Result<EventStream> {
         let selected_model = self.model();
         if is_chatgpt_web_model(&selected_model) {
+            let effort = self.reasoning_effort();
+            let effort = self.api_reasoning_effort(effort.as_deref());
             return Arc::clone(&self.chatgpt_web)
-                .complete(messages, tools, system, &selected_model)
+                .complete(messages, tools, system, &selected_model, effort.as_deref())
                 .await;
         }
 
@@ -909,28 +911,26 @@ impl Provider for OpenAIProvider {
 
     fn available_models(&self) -> Vec<&'static str> {
         if self.is_browser_only() {
-            return jcode_provider_core::CHATGPT_WEB_MODELS
-                .iter()
-                .map(|web| web.id)
-                .collect();
+            // Dynamic IDs belong in available_models_for_switching, not a leaked static list.
+            return Vec::new();
         }
         jcode_provider_core::ALL_OPENAI_MODELS.to_vec()
     }
 
     fn available_models_for_switching(&self) -> Vec<String> {
+        let web_models: Vec<String> = jcode_base::provider::chatgpt_web::cached_models()
+            .into_iter()
+            .map(|model| model.model)
+            .collect();
         if self.is_browser_only() {
-            return jcode_provider_core::CHATGPT_WEB_MODELS
-                .iter()
-                .map(|web| web.id.to_string())
-                .collect();
+            return web_models;
         }
         let mut models =
             jcode_base::provider::cached_openai_model_ids_for_scope(&self.catalog_scope())
                 .unwrap_or_else(|| vec![self.model()]);
-        for web in jcode_provider_core::CHATGPT_WEB_MODELS.iter().rev() {
-            if !models.iter().any(|model| model == web.id) {
-                models.insert(0, web.id.to_string());
-            }
+        models.retain(|model| !is_chatgpt_web_model(model));
+        for model in web_models.into_iter().rev() {
+            models.insert(0, model);
         }
         // Platform-API-only GPT Pro models are absent from the Codex OAuth
         // catalog by design; surface them whenever an OPENAI_API_KEY exists.
@@ -949,8 +949,26 @@ impl Provider for OpenAIProvider {
     }
 
     async fn prefetch_models(&self) -> Result<()> {
-        if self.is_browser_only() {
+        let web = jcode_base::provider::chatgpt_web::refresh_models().await;
+        if self.is_browser_only() || is_chatgpt_web_model(&self.model()) {
+            let models = web?;
+            if self.model() == CHATGPT_WEB_MODEL
+                && !models
+                    .iter()
+                    .any(|model| model.available && model.model == CHATGPT_WEB_MODEL)
+            {
+                let model = models.iter().find(|model| model.available).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "No selectable ChatGPT web models were observed in the connected browser"
+                    )
+                })?;
+                self.set_model(&model.model)?;
+            }
+            self.revalidate_reasoning_effort();
             return Ok(());
+        }
+        if let Err(error) = web {
+            jcode_base::logging::info(&format!("ChatGPT web models are unavailable: {error:#}"));
         }
         // The loaded credential's *shape* is authoritative for which catalog
         // endpoint to hit, not the requested credential mode. In Auto mode a
@@ -1089,6 +1107,18 @@ impl Provider for OpenAIProvider {
     }
 
     fn available_efforts(&self) -> Vec<&'static str> {
+        if is_chatgpt_web_model(&self.model()) {
+            let mut efforts: Vec<&'static str> =
+                jcode_base::provider::chatgpt_web::cached_reasoning_options(&self.model())
+                    .into_iter()
+                    .filter(|option| option.available)
+                    .filter_map(|option| {
+                        jcode_provider_core::canonical_reasoning_effort(&option.value)
+                    })
+                    .collect();
+            efforts.extend(["swarm", "swarm-deep"]);
+            return efforts;
+        }
         let model = jcode_provider_core::model_id::canonical(&self.model());
         // Platform-API-only GPT Pro models never appear in the Codex catalog,
         // so their ladders are pinned from live Responses API behavior:
