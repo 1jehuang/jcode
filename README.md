@@ -61,12 +61,7 @@ Run more agents with less RAM for your multi-agent development workflow.
 curl -fsSL https://jcode.sh/install | bash
 ```
 
-```powershell
-# Windows 11 (PowerShell 5.1+)
-irm https://jcode.sh/install.ps1 | iex
-```
-
-See the [documentation](https://jcode.sh/docs) for installation options and provider configuration.
+[Windows installation instructions](https://jcode.sh/docs#install).
 
 ---
 
