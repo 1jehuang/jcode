@@ -256,6 +256,7 @@ fn http_retry_decision(
                     Err(error) => panic!("local HTTP accept failed: {error}"),
                 }
             };
+            socket.set_nonblocking(false).unwrap();
             socket
                 .set_read_timeout(Some(std::time::Duration::from_secs(3)))
                 .unwrap();
