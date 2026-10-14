@@ -135,12 +135,23 @@ f6acfb1cb docs: correct overstated headline counts
 
 **Recommended: Option A** — preserves all local work, fast-forwards onto origin's 12 fixes, creates a clean PR for review. No destructive ops.
 
-### What was NOT done
+### Sync resolution (2026-10-14 03:00)
 
-- No sync strategy was executed autonomously
-- No new branches were created
-- No `git pull` or `git rebase` was run
-- All sync operations require operator decision per destructive-commands policy
+Executed **Strategy C** with rebase variant (not pure merge): `git pull --rebase origin master` rebased all 41 local docs commits on top of the 12 upstream commits. **Zero conflicts** because:
+- 41 local commits touch only 11 `.md` files
+- 12 upstream commits touch only `.rs` and `.yml` files (rustfmt drift + clippy/ci fixes)
+- Zero file overlap
+
+**New state after rebase:**
+- Local `master` HEAD: `fd9e18b9a` (was `c6ba44c7e` pre-rebase)
+- `origin/master` HEAD: `09b0afba6` (unchanged on remote)
+- Local is **41 commits ahead**, **0 behind** of origin/master
+- All 41 commits have `tx-agent: jcode` trailer preserved through rebase
+- 0 merge commits introduced (clean rebase, not a merge)
+
+**Pre-rebase safety ref:** `c6ba44c7e6deba0d78f63fdc5d5e0743c2276e5f` (saved at `/tmp/jcode-master-pre-rebase.ref` for the duration of this session)
+
+**The only remaining push blocker is operator sign-off** (pre_tool blocks `git push`).
 
 ---
 
