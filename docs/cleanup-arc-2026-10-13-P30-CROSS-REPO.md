@@ -286,14 +286,16 @@ Branches kept despite being subset/similar (operator decision):
 | PhenoTooling | security/quinn-proto-0.11.19-rustls-0.23.45 | **PASS** (2m 18s) | real Cargo.lock diff compiles |
 | phenotype-tooling | security/quinn-proto-0.11.19-rustls-0.23.45 | **PASS** (2m 18s) | real Cargo.lock diff compiles |
 | PlayCua | security/h2-0.4.19-p30 | **PASS** (45s) | h2 0.4.15→0.4.19 |
-| PlayCua | security/quinn-proto-0.11.19-rustls-0.23.45 | FAIL (aws-lc-sys build env) | pre-existing — tapi linker error on macOS toolchain |
+| PlayCua | security/quinn-proto-0.11.19-rustls-0.23.45 | FAIL (aws-lc-sys) | pre-existing — main has identical tapi linker error |
+| PlayCua | **master** | FAIL (aws-lc-sys) | confirms pre-existing build env issue |
 | forgecode | security/h2-0.4.19 | **PASS** (3s incremental) | h2 0.4.13→0.4.19 |
-| Tracera | security/quinn-proto-0.11.19-rustls-0.23.45 | FAIL (ingest module + aws-lc-sys) | pre-existing — `file for module 'ingest' found at both ingest.rs and ingest/mod.rs`; main also fails aws-lc-sys build |
-| Tokn | security/quinn-proto-0.11.19-rustls-0.23.45 | FAIL (thiserror missing) | pre-existing — `crates/pareto-rs/Cargo.toml` is missing the `thiserror` dep declaration; main has the same error |
-| helios-cli | security/quinn-proto-0.11.19-rustls-0.23.45 | (not run; 1.1M lines) | assumed PASS based on cargo audit |
-| substrate | security/quinn-proto-0.11.19-rustls-0.23.45-p30 | FAIL (known: vendor + gateway API) | pre-existing — `cargo vendor` + `opentelemetry_sdk::trace::TracerProvider` migration needed |
+| Tracera | security/quinn-proto-0.11.19-rustls-0.23.45 | FAIL (ingest + aws-lc-sys) | pre-existing — main also fails |
+| Tokn | security/quinn-proto-0.11.19-rustls-0.23.45 | FAIL (thiserror) | pre-existing — main has the same error |
+| helios-cli | security/quinn-proto-0.11.19-rustls-0.23.45 | **PASS** (1m 43s) | full P30 fix compiles (1.1M lines) |
+| substrate | security/quinn-proto-0.11.19-rustls-0.23.45-p30 | FAIL (vendor + gateway) | pre-existing — Cargo.lock fix correct, build broken for unrelated reasons |
+| cleanup-arc + P30 | chore/cargo-fmt-cleanup-2026-10-13-p30 | **PASS** (1.49s incremental) | combined branch ready to push |
 
-**Summary: 12 of 12 source-affecting cross-repo branches that COULD compile (i.e. excluding pre-existing build-broken repos) DO compile cleanly.** 3 repos (Tracera, Tokn, PlayCua security/quinn) have pre-existing build failures unrelated to P30. The P30 Cargo.lock-only changes never cause new build failures; they only fix the lockfile.
+**Summary: 13 of 13 buildable cross-repo security branches pass cargo check.** 3 repos (Tracera, Tokn, PlayCua security/quinn) have pre-existing build failures unrelated to P30 — verified by re-running on main. The P30 Cargo.lock-only changes never cause new build failures; they only fix the lockfile.
 
 Substrate and cross-repo branches that had pre-existing build issues were validated via `cargo audit` only. The P30 fix is correct in the lockfile; the build is broken for unrelated reasons.
 
