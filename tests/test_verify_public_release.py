@@ -59,6 +59,11 @@ class PublicReleaseTests(unittest.TestCase):
         self.assertNotIn("continue-on-error", step)
         self.assertIn('--sha "$TAG_SHA"', step)
         self.assertIn('git show "$WORKFLOW_SHA:scripts/verify_public_release.py"', step)
+        self.assertIn("Smoke test public Linux installer in an isolated home", step)
+        self.assertIn('HOME="$install_home"', step)
+        self.assertIn('JCODE_VERSION="$RELEASE_TAG"', step)
+        self.assertIn("JCODE_SKIP_SERVER_RELOAD=1 JCODE_NO_TELEMETRY=1", step)
+        self.assertIn('"$install_home/.local/bin/jcode" --version', step)
 
     def test_incomplete_metadata_rejected(self):
         for field, value in (("draft", True), ("prerelease", True), ("tag_name", "v0.98.0")):
