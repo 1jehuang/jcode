@@ -137,6 +137,99 @@ After both PRs are open, the auto-merge can be enabled if the CI passes. The bra
 
 ---
 
+## PR #3: combined P30 fix on top of cleanup-arc (single PR alternative)
+
+### Title
+
+```
+chore: cargo fmt cleanup + RUSTSEC-2026-0258/0285/0338-0342 remediation (single PR)
+```
+
+### Pre-push requirement (CRITICAL)
+
+The source branch `chore/cargo-fmt-cleanup-2026-10-13-p30` is **local-only** (no remote tracking). It must be pushed from its worktree first:
+
+```bash
+cd /private/tmp/jcode-cleanup-arc-p30
+git push -u origin chore/cargo-fmt-cleanup-2026-10-13-p30
+```
+
+The branch is also **12 commits behind** the rebased `origin/master` (post-2026-10-14 rebase that pulled in 12 upstream rustfmt-drift commits). The branch must be rebased onto the current `origin/master` BEFORE the PR can be cleanly diffed:
+
+```bash
+cd /private/tmp/jcode-cleanup-arc-p30
+git fetch origin
+git rebase origin/master
+# (rebase should be conflict-free: fmt cleanup touches .rs files,
+#  rebase brings in rustfmt drift which has been pre-applied on the
+#  cleanup-arc branch's fmt commits — the rebase will be a no-op for
+#  the fmt-applied .rs files)
+git push --force-with-lease   # BLOCKED by pre_tool
+# OR safe alternative: create new branch and push that
+git checkout -b chore/cargo-fmt-cleanup-2026-10-13-p30-rebased
+git push -u origin chore/cargo-fmt-cleanup-2026-10-13-p30-rebased
+```
+
+### Body (Markdown)
+
+```markdown
+## Summary
+
+Single PR that combines the cargo fmt cleanup arc (31 commits) with the P30 RUSTSEC remediation (2 cherry-picked security commits). Target: master. After merge, `master` is both fmt-clean AND has 0 P30 RUSTSEC vulns.
+
+**This is an alternative to opening the 2 split security PRs (#PR_1, #PR_2).** It is the recommended path when the operator wants to ship both fixes in one PR.
+
+## Files changed
+
+127 files changed, 4305 insertions(+), 2325 deletions(-) vs origin/master.
+
+- **31 fmt cleanup commits** (chore/cargo-fmt-cleanup-2026-10-13 base) — `cargo fmt --all` applied across the workspace
+- **2 P30 security commits** (cherry-picked from upstream 1jehuang/jcode):
+  - `312e603bb` — h2 0.4.13 → 0.4.19 + rustls 0.23.37 → 0.23.45
+  - `1101c3b42` — quinn-proto 0.11.15 → 0.11.19
+
+## Vulnerabilities fixed (7 → 0)
+
+| Advisory | Crate | Old | New | Severity |
+|----------|-------|-----|-----|----------|
+| RUSTSEC-2026-0258 | h2 | 0.4.13 | 0.4.19 | DoS (unbounded empty DATA frames) |
+| RUSTSEC-2026-0285 | rustls | 0.23.37 | 0.23.45 | TLS 1.3 handshake boundary bug |
+| RUSTSEC-2026-0338 | quinn-proto | 0.11.15 | 0.11.19 | DoS (zero-length STREAM panic) |
+| RUSTSEC-2026-0339 | quinn-proto | 0.11.15 | 0.11.19 | OOM (unbounded CID retirements) |
+| RUSTSEC-2026-0340 | quinn-proto | 0.11.15 | 0.11.19 | DoS (peer ACK delay panic) |
+| RUSTSEC-2026-0341 | quinn-proto | 0.11.15 | 0.11.19 | OOM (stream reassembly bypass) |
+| RUSTSEC-2026-0342 | quinn-proto | 0.11.15 | 0.11.19 | OOM (zero-length DATAGRAM bypass) |
+
+## Validation
+
+- `cargo check --workspace`: clean
+- `cargo audit` (on this branch): 0 active vulnerabilities (10 unmaintained warnings, baseline)
+- `cargo fmt --all --check`: clean
+- `cargo clippy --workspace --no-deps`: clean
+
+## Why a single PR instead of 2 split PRs?
+
+- The 2 split security PRs (`security/rustsec-2026-0258-0285` and `security/quinn-proto-0.11.19`) are already pushed. Opening THIS PR as a 3rd PR means the operator can choose between:
+  - **Path A** (simpler, recommended): Open just the 2 split security PRs. They merge cleanly in any order (Cargo.lock only). After they land, rebase cleanup-arc onto fixed master.
+  - **Path B** (this PR): Single combined PR. Master becomes fmt-clean AND P30-clean in one merge. Larger diff (127 files) but simpler release management.
+
+## Related
+
+- Closes: KooshaPari/Jcode P30 audit + cargo fmt cleanup arc (2026-10-13)
+- Depends on: nothing
+- Blocked by: nothing
+- Companion PRs (Path A alternative): #PR_1 + #PR_2
+- Doc: docs/cleanup-arc-2026-10-13-CLEANUP-ARC-P30-STATUS.md
+```
+
+### Compare URL (after push)
+
+```
+https://github.com/KooshaPari/Jcode/compare/master...chore/cargo-fmt-cleanup-2026-10-13-p30
+```
+
+---
+
 tx-agent: jcode
 tx-task: P30-PR-content
 tx-validated: manual
