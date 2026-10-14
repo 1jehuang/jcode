@@ -19,6 +19,8 @@ Official releases have two gates: **successful CI for the exact tagged commit** 
    The explicit Python check is optional because the helper repeats it. If CI is pending, missing, failed, cancelled, or cannot be queried, the helper exits without pushing the tag. Wait for successful CI and retry. It also rejects a tag version that differs from the committed `Cargo.toml` package version, conflicting tags, failed remote lookups, and HEAD changes during preparation/preflight.
 5. Watch the tag-triggered release workflow. Do not announce or manually publish a partial draft. Publication waits for all required platform builds, Windows signing, checksums, and provenance.
 
+   Use `scripts/watch_release_run.sh <run-id>` to monitor it to completion. Its default four-hour budget covers the 150-minute Windows build timeout plus finalization and runner queues. A successful v0.97 recovery run took about 71 minutes, so a short wait is not evidence that a release is stuck. Every completed non-success conclusion is reported immediately.
+
 Use the helper instead of manually pushing `v*` tags. Git itself cannot enforce this client-side preflight, so the workflow independently repeats the exact-SHA CI check before building or creating its draft. A tag pushed by hand does not bypass that workflow gate.
 
 ### Exact-SHA CI evidence
@@ -94,6 +96,7 @@ Tag push (after successful exact-SHA main/master CI)
            Generate/upload SHA256SUMS and release-provenance.json
            Publish the completed release
            Download/verify every public asset, checksum, and provenance
+           Install the public Linux archive in an isolated home and verify its version
            Queue Discord announcement
            Update Homebrew and AUR when credentials are configured
 ```
