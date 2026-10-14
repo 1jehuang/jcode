@@ -165,22 +165,6 @@ fn refresh_error_summary(error: &anyhow::Error) -> String {
     }
 }
 
-/// Remove non-fatal dynamic loader warnings from bridge stderr. A bridge built
-/// against a newer glibc prints a `weak version` line on every call, which
-/// otherwise hides the actual browser error behind a misleading libc message.
-pub fn bridge_error_detail(stderr: &str) -> String {
-    stderr
-        .lines()
-        .map(str::trim)
-        .filter(|line| {
-            !line.is_empty()
-                && !(line.contains(": weak version `")
-                    && line.contains("' not found (required by "))
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -266,32 +250,41 @@ pub fn cached_reasoning_options(model: &str) -> Vec<ChatGptWebReasoningOption> {
         .collect()
 }
 
-/// Refresh through an existing installed bridge only. The spawned task owns
-/// the session lock and cleanup even if the caller drops its prefetch future.
-pub async fn refresh_models() -> Result<Vec<ChatGptWebModel>> {
-    tokio::spawn(async {
+/// Refreshes the account's ChatGPT model list in jcode's private, invisible
+/// browser. `sign_in` decides whether a signed-out profile may show the
+/// one-time sign-in window: background prefetches never do. The spawned task
+/// owns the session lock and page cleanup even if the caller is dropped.
+pub async fn refresh_models_with(
+    sign_in: super::chatgpt_web_instance::SignIn,
+) -> Result<Vec<ChatGptWebModel>> {
+    tokio::spawn(async move {
         let _session = lock_session().await;
-        record_refresh(async {
-            let initial = InstalledBridge { browser: None };
-            let ping = initial.command("ping", serde_json::json!({})).await?;
-            anyhow::ensure!(
-                ping.get("pong").is_some(),
-                "Installed browser bridge is not connected"
-            );
-            let browser = ping
-                .get("browser")
-                .and_then(serde_json::Value::as_str)
-                .filter(|b| !b.is_empty())
-                .context("Connected bridge did not identify its browser")?;
-            let bridge = InstalledBridge {
-                browser: Some(browser.to_string()),
+        record_refresh(async move {
+            let (instance, page) =
+                super::chatgpt_web_instance::open_signed_in_page(sign_in).await?;
+            let tab = InstanceTab {
+                instance: &instance,
+                page: &page,
             };
-            discover_with_bridge(&bridge).await
+            let result = discover_on(&tab).await;
+            let closed = instance.close_page(&page).await;
+            match (result, closed) {
+                (Ok(snapshot), Ok(())) => Ok(snapshot),
+                (Err(error), _) => Err(error),
+                (Ok(_), Err(error)) => {
+                    Err(error.context("Failed to close the owned ChatGPT discovery tab"))
+                }
+            }
         })
         .await
     })
     .await
     .context("ChatGPT catalog discovery task failed")?
+}
+
+/// Background refresh. Never opens a visible window.
+pub async fn refresh_models() -> Result<Vec<ChatGptWebModel>> {
+    refresh_models_with(super::chatgpt_web_instance::SignIn::Never).await
 }
 
 /// Store a successful observation, or annotate the previous one with the
@@ -325,199 +318,51 @@ async fn record_refresh(
     }
 }
 
+/// One owned ChatGPT page that discovery drives through `chatgpt_web_ui.js`.
 #[async_trait::async_trait]
-trait BridgeTransport: Send + Sync {
-    async fn command(&self, action: &str, params: serde_json::Value) -> Result<serde_json::Value>;
+trait DiscoveryPage: Send + Sync {
+    async fn ui(&self, request: serde_json::Value) -> Result<serde_json::Value>;
 }
 
-struct InstalledBridge {
-    browser: Option<String>,
+struct InstanceTab<'a> {
+    instance: &'a super::chatgpt_web_instance::Instance,
+    page: &'a super::chatgpt_web_instance::Page,
 }
 
 #[async_trait::async_trait]
-impl BridgeTransport for InstalledBridge {
-    async fn command(&self, action: &str, params: serde_json::Value) -> Result<serde_json::Value> {
-        let binary = crate::browser::browser_binary_path();
-        anyhow::ensure!(
-            binary.exists(),
-            "ChatGPT model discovery requires an already installed browser bridge"
-        );
-        let mut command = tokio::process::Command::new(binary);
-        command
-            .arg(action)
-            .arg(serde_json::to_string(&params)?)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true);
-        crate::browser::apply_bridge_browser_env(&mut command, self.browser.as_deref());
-        let output = tokio::time::timeout(std::time::Duration::from_secs(120), command.output())
-            .await
-            .with_context(|| format!("Browser discovery {action} timed out"))??;
-        anyhow::ensure!(
-            output.status.success(),
-            "Browser discovery {action} failed: {} {}",
-            bridge_error_detail(&String::from_utf8_lossy(&output.stderr)),
-            String::from_utf8_lossy(&output.stdout).trim()
-        );
-        let value: serde_json::Value = serde_json::from_slice(&output.stdout)
-            .with_context(|| format!("Browser discovery {action} returned invalid JSON"))?;
-        anyhow::ensure!(
-            value.get("error").is_none()
-                && value.get("ok") != Some(&serde_json::Value::Bool(false)),
-            "Browser discovery {action} failed: {value}"
-        );
-        Ok(value)
+impl DiscoveryPage for InstanceTab<'_> {
+    async fn ui(&self, request: serde_json::Value) -> Result<serde_json::Value> {
+        super::chatgpt_web_instance::ui_request(self.instance, self.page, &request).await
     }
 }
 
-const UI_EXECUTION_READINESS_SCRIPT: &str =
-    "return {hostname:location.hostname, ready:document.readyState === 'complete'};";
-
-/// Prove read-only execution readiness in an already focused, owned ChatGPT tab.
-pub async fn wait_for_ui_execution(tab_id: u64, browser: &str) -> Result<()> {
-    wait_for_ui_execution_with_bridge(
-        &InstalledBridge {
-            browser: Some(browser.to_string()),
-        },
-        tab_id,
-    )
-    .await
-}
-
-async fn wait_for_ui_execution_with_bridge(
-    bridge: &impl BridgeTransport,
-    tab_id: u64,
-) -> Result<()> {
-    use std::time::Duration;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    let mut last_failure = String::from("document not complete");
-    loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        anyhow::ensure!(
-            !remaining.is_zero(),
-            "ChatGPT read-only execution readiness timed out: {last_failure}"
-        );
-        // Never abandon an attempt early. A dropped evaluate keeps running in
-        // the browser, and starting another on the same tab overlaps debugger
-        // sessions: the first detach kills both with "Detached while
-        // handling command." Only the overall deadline may cut one short.
-        match tokio::time::timeout(
-            remaining,
-            bridge.command(
-                "evaluate",
-                serde_json::json!({"tabId":tab_id,"script":UI_EXECUTION_READINESS_SCRIPT}),
-            ),
-        )
-        .await
-        {
-            Ok(Ok(value)) => {
-                let proof = value
-                    .get("result")
-                    .context("Malformed ChatGPT execution readiness proof: missing result")?;
-                anyhow::ensure!(
-                    proof.get("hostname").and_then(serde_json::Value::as_str)
-                        == Some("chatgpt.com"),
-                    "Rejected ChatGPT execution readiness origin proof: {proof}"
-                );
-                let ready = proof
-                    .get("ready")
-                    .and_then(serde_json::Value::as_bool)
-                    .context(
-                        "Malformed ChatGPT execution readiness proof: ready must be boolean",
-                    )?;
-                if ready {
-                    return Ok(());
-                }
-                last_failure = "document not complete".to_string();
-            }
-            Ok(Err(error)) => last_failure = format!("{error:#}"),
-            Err(_) => last_failure = "read-only evaluate attempt timed out".to_string(),
-        }
-        tokio::time::sleep_until(
-            (tokio::time::Instant::now() + Duration::from_millis(500)).min(deadline),
-        )
-        .await;
-    }
-}
-
-async fn discover_with_bridge(bridge: &impl BridgeTransport) -> Result<Snapshot> {
+/// Reads the picker's models, then probes each available model's Power
+/// choices. Never sends a message. The UI script restores the original model
+/// and Power after every probe.
+async fn discover_on(page: &impl DiscoveryPage) -> Result<Snapshot> {
     use serde_json::json;
-    let source = bridge.command("getActiveTab", json!({})).await?;
-    let source_id = source
-        .get("tabId")
-        .and_then(serde_json::Value::as_u64)
-        .context("Browser bridge did not return an active tab ID")?;
-    let fork_name = format!("jcode-chatgpt-catalog-{}", uuid::Uuid::new_v4());
-    let mut owned_tab = None;
-    let result = async {
-        let fork = bridge.command("fork", json!({"tabId":source_id,"paths":[{"name":fork_name}]})).await?;
-        let tab_id = fork.get("forks").and_then(serde_json::Value::as_array)
-            .and_then(|forks|forks.first()).and_then(|fork|fork.get("tabId"))
-            .and_then(serde_json::Value::as_u64).context("Browser bridge did not return owned fork tab ID")?;
-        owned_tab = Some(tab_id);
-        bridge.command("navigate", json!({"tabId":tab_id,"url":"https://chatgpt.com/?temporary-chat=true","wait":true})).await?;
-        bridge.command("waitFor", json!({
-            "tabId":tab_id,
-            "selector":"[contenteditable=true][data-composer-markdown], [contenteditable=true][aria-label='Chat with ChatGPT']",
-            "timeout":20_000
-        })).await.context("ChatGPT composer did not load in the owned temporary fork")?;
-        // Chromium's existing bridge execution capability may require an
-        // active target. Never focus or activate the source/user tab here.
-        bridge.command("setActiveTab", json!({"tabId":tab_id,"focus":true})).await
-            .context("Failed to activate the owned temporary ChatGPT fork")?;
-        wait_for_ui_execution_with_bridge(bridge, tab_id).await?;
-        let script = format!("const request={};\n{}", json!({"op":"discover"}), UI_SCRIPT);
-        let evaluated = bridge.command("evaluate", json!({"tabId":tab_id,"script":script})).await?;
-        let mut discovered = evaluated.get("result").cloned().context("Browser discovery has no result")?;
-        // Validate labels and shape before using any page-derived probe input.
-        parse_discovery(discovered.clone())?;
-        let models = discovered.get_mut("models").and_then(serde_json::Value::as_array_mut)
-            .context("Browser discovery has no models array")?;
-        for model in models {
-            if model.get("available").and_then(serde_json::Value::as_bool) != Some(true) { continue; }
-            let label = model.get("label").and_then(serde_json::Value::as_str).context("Browser model has no label")?;
-            // Each evaluate must fit the installed bridge's own 30-second cap.
-            // JS restores the original model/effort after each individual probe.
-            let script = format!("const request={};\n{}", json!({"op":"probe","label":label}), UI_SCRIPT);
-            let probed = bridge.command("evaluate", json!({"tabId":tab_id,"script":script})).await?;
-            let options = probed.get("result").and_then(|result|result.get("reasoning_options"))
-                .cloned().context("Browser reasoning probe has no choices")?;
-            model["reasoning_options"] = options;
+    let mut discovered = page.ui(json!({"op":"discover"})).await?;
+    // Validate labels and shape before using any page-derived probe input.
+    parse_discovery(discovered.clone())?;
+    let models = discovered
+        .get_mut("models")
+        .and_then(serde_json::Value::as_array_mut)
+        .context("Browser discovery has no models array")?;
+    for model in models {
+        if model.get("available").and_then(serde_json::Value::as_bool) != Some(true) {
+            continue;
         }
-        parse_discovery(discovered)
-    }.await;
-    // The fork command may create a resource even if its reply is malformed.
-    let cleanup = bridge.command("killFork", json!({"fork":fork_name})).await;
-    match (result, cleanup) {
-        (Ok(snapshot), Ok(_)) => Ok(snapshot),
-        (Err(error), Ok(_)) => Err(error),
-        (result, Err(cleanup_error)) => {
-            let blank = if let Some(tab_id) = owned_tab {
-                bridge
-                    .command(
-                        "navigate",
-                        json!({"tabId":tab_id,"url":"about:blank","wait":true}),
-                    )
-                    .await
-            } else {
-                Err(anyhow::anyhow!(
-                    "Owned fork ID unknown, cannot blank fallback"
-                ))
-            };
-            let original = result
-                .err()
-                .map(|e| format!("Discovery also failed: {e:#}. "))
-                .unwrap_or_default();
-            anyhow::bail!(
-                "{original}Failed to close owned ChatGPT discovery fork: {cleanup_error:#}. Blank fallback: {}",
-                match blank {
-                    Ok(_) => "cleared owned tab".to_string(),
-                    Err(e) => format!("failed: {e:#}"),
-                }
-            );
-        }
+        let label = model
+            .get("label")
+            .and_then(serde_json::Value::as_str)
+            .context("Browser model has no label")?;
+        let probed = page.ui(json!({"op":"probe","label":label})).await?;
+        model["reasoning_options"] = probed
+            .get("reasoning_options")
+            .cloned()
+            .context("Browser reasoning probe has no choices")?;
     }
+    parse_discovery(discovered)
 }
 
 #[cfg(test)]
@@ -593,131 +438,61 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires signed-in installed browser bridge, changes only an owned empty temporary fork"]
+    #[ignore = "requires jcode's private ChatGPT browser profile to be signed in; reads the picker in an owned Temporary Chat tab and never sends a message"]
     async fn chatgpt_web_live_catalog_discovers_models_and_reasoning_without_messages() {
         let models = refresh_models().await.unwrap();
-        for expected in ["gpt-6[web]", "gpt-5.6-sol[web]", "gpt-5.5[web]"] {
-            let model = models
-                .iter()
-                .find(|model| model.model == expected)
-                .expect("observed picker model");
-            assert!(model.available, "{model:?}");
+        assert!(!models.is_empty());
+        for model in models.iter().filter(|model| model.available) {
             assert!(model.expected_upstream_models.is_empty());
-            let options = cached_reasoning_options(expected);
-            assert_eq!(
-                options
-                    .iter()
-                    .map(|option| option.value.as_str())
-                    .collect::<Vec<_>>(),
-                ["none", "medium", "high", "xhigh", "max"],
-                "{expected}: {options:?}"
-            );
+            let options = cached_reasoning_options(&model.model);
+            assert!(!options.is_empty(), "{}: {options:?}", model.model);
             assert!(
                 options.iter().all(|option| option.available),
-                "{expected}: {options:?}"
+                "{}: {options:?}",
+                model.model
             );
             eprintln!("{model:?}\nreasoning={options:?}");
         }
     }
 
-    struct FakeBridge {
-        actions: std::sync::Mutex<Vec<String>>,
-        fail: &'static str,
+    struct FakePage {
+        ops: std::sync::Mutex<Vec<String>>,
+        fail_probe: bool,
     }
 
     #[async_trait::async_trait]
-    impl BridgeTransport for FakeBridge {
-        async fn command(
-            &self,
-            action: &str,
-            params: serde_json::Value,
-        ) -> Result<serde_json::Value> {
-            self.actions.lock().unwrap().push(action.to_string());
-            if action == self.fail {
-                anyhow::bail!("injected {action} failure");
+    impl DiscoveryPage for FakePage {
+        async fn ui(&self, request: serde_json::Value) -> Result<serde_json::Value> {
+            let op = request["op"].as_str().unwrap().to_string();
+            self.ops.lock().unwrap().push(op.clone());
+            match op.as_str() {
+                "discover" => Ok(json!({"models":[
+                    {"label":"GPT-6","available":true,"detail":"","reasoning_options":[]},
+                    {"label":"GPT-5.6 Sol","available":false,"detail":"Locked","reasoning_options":[]}
+                ]})),
+                "probe" => {
+                    assert_eq!(request["label"], "GPT-6", "locked models are never probed");
+                    if self.fail_probe {
+                        anyhow::bail!("probe failed");
+                    }
+                    Ok(
+                        json!({"reasoning_options":[{"value":"none","label":"Instant","available":true}]}),
+                    )
+                }
+                other => panic!("unexpected discovery op {other}"),
             }
-            Ok(match action {
-                "getActiveTab" => json!({"tabId":7}),
-                "fork" => json!({"forks":[{"tabId":8}]}),
-                "waitFor" => {
-                    assert_eq!(params["timeout"], 20_000);
-                    assert!(
-                        params["selector"]
-                            .as_str()
-                            .unwrap()
-                            .contains("data-composer-markdown")
-                    );
-                    json!({"ok":true})
-                }
-                "setActiveTab" => {
-                    assert_eq!(params["tabId"], 8);
-                    assert_eq!(params["focus"], true);
-                    json!({"tabId":8})
-                }
-                "navigate" => {
-                    assert!(
-                        params["url"] == "https://chatgpt.com/?temporary-chat=true"
-                            || params["url"] == "about:blank"
-                    );
-                    json!({"ok":true})
-                }
-                "evaluate" if params["script"] == UI_EXECUTION_READINESS_SCRIPT => {
-                    let attempts = self
-                        .actions
-                        .lock()
-                        .unwrap()
-                        .iter()
-                        .filter(|a| a.as_str() == "evaluate")
-                        .count();
-                    match self.fail {
-                        "readiness_once" if attempts == 1 => anyhow::bail!("transient CSP blocked"),
-                        "readiness_pending" => std::future::pending::<serde_json::Value>().await,
-                        "readiness_slow" if attempts == 1 => {
-                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                            json!({"result":{"hostname":"chatgpt.com","ready":true}})
-                        }
-                        "readiness_incomplete" if attempts == 1 => {
-                            json!({"result":{"hostname":"chatgpt.com","ready":false}})
-                        }
-                        "readiness_missing" => json!({"ok":true}),
-                        "readiness_permanent" => anyhow::bail!("CSP blocked"),
-                        "readiness_origin" => {
-                            json!({"result":{"hostname":"example.com","ready":true}})
-                        }
-                        "readiness_malformed" => {
-                            json!({"result":{"hostname":"chatgpt.com","ready":"true"}})
-                        }
-                        _ => json!({"result":{"hostname":"chatgpt.com","ready":true}}),
-                    }
-                }
-                "evaluate" if self.fail.starts_with("probe") => {
-                    let script = params["script"].as_str().unwrap();
-                    if script.contains("\"op\":\"probe\"") {
-                        assert!(script.contains("\"label\":\"GPT-6\""));
-                        if self.fail == "probe" {
-                            anyhow::bail!("probe failed");
-                        }
-                        json!({"result":{"reasoning_options":[{"value":"none","label":"Instant","available":true}]}})
-                    } else {
-                        json!({"result":{"models":[{"label":"GPT-6","available":true,"detail":"","reasoning_options":[]}]}})
-                    }
-                }
-                "evaluate" => json!({"result":{"models":[]}}),
-                "killFork" => json!({"ok":true}),
-                _ => panic!("unexpected discovery action {action}"),
-            })
         }
     }
 
     #[tokio::test]
     async fn chatgpt_web_prefetch_without_native_provider_discovers_catalog() {
-        let bridge = FakeBridge {
-            actions: Default::default(),
-            fail: "probe_success",
+        let page = FakePage {
+            ops: Default::default(),
+            fail_probe: false,
         };
         let mut observed = None;
         super::super::prefetch_openai_or_web_catalog(None, async {
-            observed = Some(discover_with_bridge(&bridge).await?);
+            observed = Some(discover_on(&page).await?);
             Ok(())
         })
         .await
@@ -725,135 +500,22 @@ mod tests {
         let snapshot = observed.expect("browser-only catalog refresh must run without native auth");
         assert_eq!(snapshot.models[0].model, "gpt-6[web]");
         assert!(snapshot.models[0].available);
-        assert_eq!(bridge.actions.lock().unwrap().last().unwrap(), "killFork");
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn chatgpt_web_discovery_always_cleans_owned_fork() {
-        for fail in [
-            "",
-            "navigate",
-            "waitFor",
-            "setActiveTab",
-            "evaluate",
-            "killFork",
-        ] {
-            let bridge = FakeBridge {
-                actions: Default::default(),
-                fail,
-            };
-            let result = discover_with_bridge(&bridge).await;
-            let actions = bridge.actions.lock().unwrap();
-            assert!(
-                actions.iter().any(|a| a == "killFork"),
-                "{fail}: {actions:?}"
-            );
-            assert_eq!(result.is_ok(), fail.is_empty());
-            if fail.is_empty() {
-                assert!(
-                    actions.iter().position(|a| a == "setActiveTab").unwrap()
-                        < actions.iter().position(|a| a == "evaluate").unwrap()
-                );
-            }
-            if fail == "killFork" {
-                assert_eq!(actions.last().unwrap(), "navigate");
-            }
-        }
+        assert!(!snapshot.models[1].available);
     }
 
     #[tokio::test]
-    async fn chatgpt_web_discovery_probes_each_model_and_fails_closed_on_probe_error() {
-        for fail in ["probe", "probe_success"] {
-            let bridge = FakeBridge {
-                actions: Default::default(),
-                fail,
+    async fn chatgpt_web_discovery_probes_each_available_model_and_fails_closed_on_probe_error() {
+        for fail_probe in [true, false] {
+            let page = FakePage {
+                ops: Default::default(),
+                fail_probe,
             };
-            let result = discover_with_bridge(&bridge).await;
-            let actions = bridge.actions.lock().unwrap();
-            assert_eq!(
-                actions.iter().filter(|a| a.as_str() == "evaluate").count(),
-                3
-            );
-            assert_eq!(actions.last().unwrap(), "killFork");
-            if fail == "probe" {
+            let result = discover_on(&page).await;
+            assert_eq!(*page.ops.lock().unwrap(), ["discover", "probe"]);
+            if fail_probe {
                 assert!(result.is_err());
             } else {
                 assert_eq!(result.unwrap().reasoning["gpt-6[web]"][0].value, "none");
-            }
-        }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn chatgpt_web_readiness_recovers_before_discovery() {
-        let bridge = FakeBridge {
-            actions: Default::default(),
-            fail: "readiness_once",
-        };
-        discover_with_bridge(&bridge).await.unwrap();
-        let actions = bridge.actions.lock().unwrap();
-        assert_eq!(
-            actions.iter().filter(|a| a.as_str() == "evaluate").count(),
-            3
-        );
-        assert_eq!(actions.last().unwrap(), "killFork");
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn chatgpt_web_readiness_waits_for_complete_document() {
-        let bridge = FakeBridge {
-            actions: Default::default(),
-            fail: "readiness_incomplete",
-        };
-        let started = tokio::time::Instant::now();
-        wait_for_ui_execution_with_bridge(&bridge, 8).await.unwrap();
-        assert_eq!(started.elapsed(), std::time::Duration::from_millis(500));
-        assert_eq!(*bridge.actions.lock().unwrap(), ["evaluate", "evaluate"]);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn chatgpt_web_readiness_never_overlaps_a_slow_evaluate() {
-        // A dropped evaluate keeps running in the browser. Starting another one
-        // on the same tab overlaps debugger sessions, and the first detach
-        // kills both with "Detached while handling command."
-        let bridge = FakeBridge {
-            actions: Default::default(),
-            fail: "readiness_slow",
-        };
-        let started = tokio::time::Instant::now();
-        wait_for_ui_execution_with_bridge(&bridge, 8).await.unwrap();
-        assert_eq!(started.elapsed(), std::time::Duration::from_secs(5));
-        assert_eq!(*bridge.actions.lock().unwrap(), ["evaluate"]);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn chatgpt_web_readiness_fails_closed_and_cleans_fork() {
-        for fail in [
-            "readiness_permanent",
-            "readiness_pending",
-            "readiness_origin",
-            "readiness_malformed",
-            "readiness_missing",
-        ] {
-            let bridge = FakeBridge {
-                actions: Default::default(),
-                fail,
-            };
-            let started = tokio::time::Instant::now();
-            assert!(discover_with_bridge(&bridge).await.is_err(), "{fail}");
-            let elapsed = started.elapsed();
-            let actions = bridge.actions.lock().unwrap();
-            assert_eq!(actions.last().unwrap(), "killFork");
-            if matches!(fail, "readiness_permanent" | "readiness_pending") {
-                assert_eq!(elapsed, std::time::Duration::from_secs(10));
-                assert_eq!(
-                    actions.iter().filter(|a| a.as_str() == "evaluate").count(),
-                    if fail == "readiness_pending" { 1 } else { 20 }
-                );
-            } else {
-                assert_eq!(
-                    actions.iter().filter(|a| a.as_str() == "evaluate").count(),
-                    1
-                );
             }
         }
     }
@@ -898,16 +560,6 @@ mod tests {
         *CACHE.lock().unwrap() = Cache::default();
         assert!(find_model("gpt-6[web]").unwrap().available);
         assert!(cached_reasoning_options("gpt-6[web]")[0].available);
-    }
-
-    #[test]
-    fn chatgpt_web_bridge_errors_drop_dynamic_loader_noise() {
-        let stderr = "/home/u/.jcode/browser/browser: /lib/x86_64-linux-gnu/libc.so.6: weak version `GLIBC_2.39' not found (required by /home/u/.jcode/browser/browser)\nError: Evaluate error: Detached while handling command.\n";
-        assert_eq!(
-            bridge_error_detail(stderr),
-            "Error: Evaluate error: Detached while handling command."
-        );
-        assert_eq!(bridge_error_detail("Error: plain\n"), "Error: plain");
     }
 
     #[test]

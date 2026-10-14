@@ -9,16 +9,13 @@ use tokio::sync::{Mutex, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 
 use jcode_base::provider::chatgpt_web::{self as web_catalog, ChatGptWebModel};
+use jcode_base::provider::chatgpt_web_instance as web_instance;
 
-const CHATGPT_WEB_URL: &str = "https://chatgpt.com/?temporary-chat=true";
-const EDITOR_SELECTOR: &str = "[contenteditable=true][data-composer-markdown], [contenteditable=true][aria-label='Chat with ChatGPT']";
 const TOOL_CALL_START: &str = "<jcode_tool_call>";
 const TOOL_CALL_END: &str = "</jcode_tool_call>";
-const PROMPT_CHUNK_BYTES: usize = 24_000;
 const POLL_INTERVAL: Duration = Duration::from_millis(750);
 
 static TOOL_CALL_SEQUENCE: AtomicU64 = AtomicU64::new(1);
-tokio::task_local! { static WEB_BROWSER: String; }
 
 /// Per-provider browser state. A single provider instance serializes turns that
 /// each run in an isolated, temporary browser fork. Provider forks get a fresh
@@ -97,68 +94,56 @@ impl ChatGptWebState {
             anyhow::bail!("ChatGPT web response consumer was closed before browser setup");
         }
         if !web_catalog::find_model(model).is_some_and(|model| model.available) {
-            web_catalog::refresh_models()
+            // The user asked for a web model, so a signed-out profile may show
+            // the one-time sign-in window here.
+            web_catalog::refresh_models_with(web_instance::SignIn::Interactive)
                 .await
                 .context("Failed to refresh the connected account's ChatGPT web models")?;
         }
         let selected = web_catalog::find_model(model).filter(|model| model.available)
             .ok_or_else(|| anyhow::anyhow!("ChatGPT web model '{model}' was not observed as selectable in this browser account. Refresh /model and choose an available [web] route"))?;
-        let ping = bridge_command("ping", json!({})).await.context("ChatGPT web transport needs the connected Browser Agent Bridge. Run `jcode browser status` and log in at chatgpt.com in that browser")?;
-        let browser = ping
-            .get("browser")
-            .and_then(Value::as_str)
-            .filter(|browser| !browser.is_empty())
-            .ok_or_else(|| {
-                anyhow::anyhow!("Connected browser bridge did not identify its browser")
-            })?
-            .to_string();
-        WEB_BROWSER.scope(browser, async {
         let _turn_guard = self.turn_lock.lock().await;
         let _session_guard = web_catalog::lock_session().await;
         if tx.is_closed() {
             anyhow::bail!("ChatGPT web response consumer was closed before creating its owned tab");
         }
-        let (tab_id, fork_name) = open_chatgpt_tab().await?;
+        send_phase(tx, jcode_message_types::ConnectionPhase::Authenticating).await?;
+        // The turn runs in jcode's private, invisible browser. A visible
+        // window appears only if ChatGPT needs the user to sign in.
+        let (instance, page) =
+            web_instance::open_signed_in_page(web_instance::SignIn::Interactive).await?;
+        let browser = Tab {
+            instance: &instance,
+            page: &page,
+        };
         let mut original = None;
         let mut submission_started = false;
         let mut restoration_allowed = true;
-        let mut tab_closed = false;
         let mut early_cleanup_error = None;
-        let cancel_key = format!("{fork_name}-submit");
+        let cancel_key = format!("{}-submit", next_owned_tab_name());
         let result = async {
-            send_phase(tx, jcode_message_types::ConnectionPhase::Authenticating).await?;
-            wait_for_editor(tab_id).await?;
-            bridge_command("setActiveTab", json!({"tabId":tab_id,"focus":true})).await
-                .context("Failed to activate the owned Temporary Chat fork")?;
-            let browser = WEB_BROWSER.try_with(Clone::clone)
-                .context("Connected browser context was lost before UI verification")?;
-            web_catalog::wait_for_ui_execution(tab_id, &browser).await?;
-            let selection = ui_request(tab_id, json!({"op":"prepare", "label":selected.label, "effort":effort})).await?;
+            let selection = browser.ui(json!({"op":"prepare", "label":selected.label, "effort":effort})).await?;
             original = selection.get("original").cloned();
             let effective_effort = selection.get("effort").and_then(Value::as_str)
                 .filter(|value| !value.is_empty()).ok_or_else(|| anyhow::anyhow!("ChatGPT did not return a verified thinking effort"))?;
             if !page_verification_ready(&selection, &selected.label, effective_effort) {
                 anyhow::bail!("ChatGPT did not verify the exact model, effort, and Temporary Chat before prompt insertion");
             }
-            insert_prompt(tab_id, prompt).await?;
+            insert_prompt(&browser, prompt).await?;
             if tx.is_closed() { anyhow::bail!("ChatGPT web response consumer was closed before submission"); }
             send_phase(tx, jcode_message_types::ConnectionPhase::SendingRequest).await?;
             let (length, hash) = utf16_fingerprint(prompt);
             submission_started = true;
-            let submission = ui_request(tab_id, json!({"op":"submit", "label":selected.label, "effort":effective_effort, "length":length, "hash":hash,"cancelKey":cancel_key}));
+            let submission = browser.ui(json!({"op":"submit", "label":selected.label, "effort":effective_effort, "length":length, "hash":hash,"cancelKey":cancel_key}));
             tokio::pin!(submission);
             tokio::select! {
                 biased;
                 _ = tx.closed() => {
-                    // Dropping a CLI future does not stop JavaScript already executing.
+                    // Dropping a future does not stop JavaScript already running.
                     // Await a successfully cancelled evaluation before restoration.
-                    if let Err(error) = cancel_submission(tab_id, &cancel_key).await {
+                    if let Err(error) = cancel_submission(&browser, &cancel_key).await {
                         restoration_allowed = false;
-                        match close_chatgpt_tab(tab_id, &fork_name).await {
-                            Ok(()) => tab_closed = true,
-                            Err(cleanup) => early_cleanup_error = Some(cleanup),
-                        }
-                        return Err(error.context("Pending submission could not be cancelled, so its owned tab was closed or cleared before any preference restoration"));
+                        return Err(error.context("Pending submission could not be cancelled, so its owned tab was closed before any preference restoration"));
                     }
                     let _ = submission.await;
                     anyhow::bail!("ChatGPT web response consumer was closed before submission");
@@ -166,31 +151,45 @@ impl ChatGptWebState {
                 response = &mut submission => { response.context("Failed to verify and submit the temporary ChatGPT prompt")?; }
             }
             send_phase(tx, jcode_message_types::ConnectionPhase::WaitingForResponse).await?;
-            poll_for_response(tab_id, &selected, effective_effort, tx).await
+            poll_for_response(&browser, &selected, effective_effort, tx).await
         }.await;
-        // Every post-submit failure, including a dropped stream at a phase send,
-        // must quiesce generation before changing account-wide preferences.
-        if result.is_err() && submission_started && !tab_closed && restoration_allowed {
+        // Every post-submit failure must quiesce generation before changing
+        // account-wide preferences.
+        if result.is_err() && submission_started && restoration_allowed {
             let quiescence = async {
-                cancel_submission(tab_id, &cancel_key).await?;
-                let stopped = ui_request(tab_id, json!({"op":"stop"})).await?;
-                anyhow::ensure!(stopped.get("busy").and_then(Value::as_bool) == Some(false), "ChatGPT did not acknowledge idle generation");
+                cancel_submission(&browser, &cancel_key).await?;
+                let stopped = browser.ui(json!({"op":"stop"})).await?;
+                anyhow::ensure!(
+                    stopped.get("busy").and_then(Value::as_bool) == Some(false),
+                    "ChatGPT did not acknowledge idle generation"
+                );
                 Ok::<_, anyhow::Error>(())
-            }.await;
+            }
+            .await;
             if let Err(error) = quiescence {
                 restoration_allowed = false;
                 early_cleanup_error = Some(error.context("Could not confirm submission and generation stopped before closing the owned tab"));
             }
         }
         let restoration = match original {
-            Some(original) if restoration_allowed => ui_request(tab_id, json!({"op":"restore", "original":original})).await.map(|_| ()),
-            Some(_) => Err(anyhow::anyhow!("Original preferences were not restored because pending browser execution could not be safely quiesced")),
+            Some(original) if restoration_allowed => browser
+                .ui(json!({"op":"restore", "original":original}))
+                .await
+                .map(|_| ()),
+            Some(_) => Err(anyhow::anyhow!(
+                "Original preferences were not restored because pending browser execution could not be safely quiesced"
+            )),
             None => Ok(()),
         };
-        let close = if tab_closed { Ok(()) } else { close_chatgpt_tab(tab_id, &fork_name).await };
+        let close = instance
+            .close_page(&page)
+            .await
+            .context("Failed to close the owned ChatGPT tab");
         let close = match (close, early_cleanup_error) {
             (Ok(()), Some(error)) => Err(error),
-            (Err(error), Some(earlier)) => Err(error.context(format!("Earlier browser cleanup failed: {earlier:#}"))),
+            (Err(error), Some(earlier)) => {
+                Err(error.context(format!("Earlier browser cleanup failed: {earlier:#}")))
+            }
             (result, None) => result,
         };
         let cleanup = match (restoration, close) {
@@ -201,10 +200,13 @@ impl ChatGptWebState {
         match (result, cleanup) {
             (Ok(response), Ok(())) => Ok(response),
             (Err(error), Ok(())) => Err(error),
-            (Ok(_), Err(error)) => Err(error.context("ChatGPT answered, but its owned browser state could not be cleaned up safely")),
-            (Err(error), Err(cleanup_error)) => Err(error.context(format!("Browser cleanup also failed: {cleanup_error:#}"))),
+            (Ok(_), Err(error)) => Err(error.context(
+                "ChatGPT answered, but its owned browser state could not be cleaned up safely",
+            )),
+            (Err(error), Err(cleanup_error)) => {
+                Err(error.context(format!("Browser cleanup also failed: {cleanup_error:#}")))
+            }
         }
-        }).await
     }
 }
 
@@ -217,85 +219,15 @@ async fn send_phase(
         .map_err(|_| anyhow::anyhow!("ChatGPT web response consumer was closed"))
 }
 
-async fn open_chatgpt_tab() -> Result<(u64, String)> {
-    let source = bridge_command("getActiveTab", json!({}))
-        .await
-        .context("Failed to find a connected browser tab to duplicate for ChatGPT")?;
-    let source_tab_id = source
-        .get("tabId")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| anyhow::anyhow!("Browser bridge did not return an active tab id"))?;
-    let fork_name = next_owned_tab_name();
-    let fork = match bridge_command(
-        "fork",
-        json!({"tabId":source_tab_id,"paths":[{"name":fork_name}]}),
-    )
-    .await
-    {
-        Ok(fork) => fork,
-        Err(error) => {
-            let cleanup = bridge_command("killFork", json!({"fork":fork_name})).await;
-            return Err(error.context(format!(
-                "Failed to create owned ChatGPT fork. Cleanup result: {}",
-                cleanup
-                    .err()
-                    .map(|error| format!("{error:#}"))
-                    .unwrap_or_else(|| "closed".to_string())
-            )));
-        }
-    };
-    let tab_id = fork
-        .get("forks")
-        .and_then(Value::as_array)
-        .and_then(|forks| forks.first())
-        .and_then(|fork| fork.get("tabId"))
-        .and_then(Value::as_u64);
-    let Some(tab_id) = tab_id else {
-        let cleanup = bridge_command("killFork", json!({"fork":fork_name})).await;
-        anyhow::bail!(
-            "Browser bridge returned no owned ChatGPT tab id. Cleanup result: {}",
-            cleanup
-                .err()
-                .map(|error| format!("{error:#}"))
-                .unwrap_or_else(|| "closed".to_string())
-        );
-    };
-    if let Err(error) = bridge_command(
-        "navigate",
-        json!({"tabId":tab_id,"url":CHATGPT_WEB_URL,"wait":true}),
-    )
-    .await
-    {
-        let cleanup = close_chatgpt_tab(tab_id, &fork_name).await;
-        return Err(error.context(format!(
-            "Failed to open the owned Temporary Chat. Cleanup result: {}",
-            cleanup
-                .err()
-                .map(|error| format!("{error:#}"))
-                .unwrap_or_else(|| "closed".to_string())
-        )));
-    }
-    Ok((tab_id, fork_name))
+/// An owned page in jcode's private, invisible ChatGPT browser.
+struct Tab<'a> {
+    instance: &'a web_instance::Instance,
+    page: &'a web_instance::Page,
 }
 
-async fn close_chatgpt_tab(tab_id: u64, fork_name: &str) -> Result<()> {
-    match bridge_command("killFork", json!({ "fork": fork_name })).await {
-        Ok(_) => Ok(()),
-        Err(close_err) => {
-            bridge_command(
-                "navigate",
-                json!({ "tabId": tab_id, "url": "about:blank", "wait": true }),
-            )
-            .await
-            .with_context(|| {
-                format!(
-                    "Failed to close the owned browser tab ({close_err:#}) and failed to clear its sensitive prompt content"
-                )
-            })?;
-            Err(close_err).context(
-                "Failed to close the owned browser tab; its sensitive content was cleared to about:blank",
-            )
-        }
+impl Tab<'_> {
+    async fn ui(&self, request: Value) -> Result<Value> {
+        web_instance::ui_request(self.instance, self.page, &request).await
     }
 }
 
@@ -308,29 +240,10 @@ fn next_owned_tab_name() -> String {
     format!("jcode-chatgpt-web-{millis}-{sequence}")
 }
 
-async fn wait_for_editor(tab_id: u64) -> Result<()> {
-    bridge_command(
-        "waitFor",
-        json!({
-            "tabId": tab_id,
-            "selector": EDITOR_SELECTOR,
-            "timeout": 30_000
-        }),
-    )
-    .await
-    .context(
-        "ChatGPT composer did not load. Confirm connected browser is logged in at chatgpt.com and the workspace is active",
-    )?;
-    Ok(())
-}
-
-async fn ui_request(tab_id: u64, request: Value) -> Result<Value> {
-    let script = format!("const request={request};\n{}", web_catalog::UI_SCRIPT);
-    evaluate(tab_id, &script).await
-}
-
-async fn cancel_submission(tab_id: u64, cancel_key: &str) -> Result<()> {
-    let state = ui_request(tab_id, json!({"op":"cancel","cancelKey":cancel_key})).await?;
+async fn cancel_submission(browser: &Tab<'_>, cancel_key: &str) -> Result<()> {
+    let state = browser
+        .ui(json!({"op":"cancel","cancelKey":cancel_key}))
+        .await?;
     anyhow::ensure!(
         state.get("cancelled").and_then(Value::as_bool) == Some(true)
             && state.get("quiescent").and_then(Value::as_bool) == Some(true),
@@ -345,38 +258,13 @@ fn page_verification_ready(verification: &Value, label: &str, effort: &str) -> b
         && verification.get("temporary").and_then(Value::as_bool) == Some(true)
 }
 
-async fn insert_prompt(tab_id: u64, prompt: &str) -> Result<()> {
-    let chunks = split_utf8_chunks(prompt, PROMPT_CHUNK_BYTES);
-    let Some((first, rest)) = chunks.split_first() else {
-        anyhow::bail!("Refusing to submit an empty ChatGPT web prompt");
-    };
-
-    bridge_command(
-        "fillForm",
-        json!({
-            "tabId": tab_id,
-            "fields": [{ "selector": EDITOR_SELECTOR, "value": first }]
-        }),
-    )
-    .await
-    .context("Failed to initialize the ChatGPT rich-text composer")?;
-
-    for chunk in rest {
-        bridge_command(
-            "type",
-            json!({
-                "tabId": tab_id,
-                "selector": EDITOR_SELECTOR,
-                "text": chunk,
-                "clear": false,
-                "append": true
-            }),
-        )
-        .await
-        .context("Failed while appending a chunk to the ChatGPT composer")?;
-    }
-
-    let verification = ui_request(tab_id, json!({"op":"prompt"})).await?;
+async fn insert_prompt(browser: &Tab<'_>, prompt: &str) -> Result<()> {
+    anyhow::ensure!(
+        !prompt.is_empty(),
+        "Refusing to submit an empty ChatGPT web prompt"
+    );
+    web_instance::insert_prompt(browser.instance, browser.page, prompt).await?;
+    let verification = browser.ui(json!({"op":"prompt"})).await?;
     let actual_len = verification
         .get("length")
         .and_then(Value::as_u64)
@@ -398,7 +286,7 @@ async fn insert_prompt(tab_id: u64, prompt: &str) -> Result<()> {
 }
 
 async fn poll_for_response(
-    tab_id: u64,
+    browser: &Tab<'_>,
     selected: &ChatGptWebModel,
     effort: &str,
     tx: &mpsc::Sender<Result<StreamEvent>>,
@@ -422,7 +310,8 @@ async fn poll_for_response(
                 selected.label
             );
         }
-        let state = ui_request(tab_id, json!({"op":"response"}))
+        let state = browser
+            .ui(json!({"op":"response"}))
             .await
             .context("Failed to read the owned ChatGPT web response")?;
         let text = state
@@ -466,7 +355,7 @@ async fn poll_for_response(
             }
             // Current ChatGPT markup exposes no upstream slug. Require independent
             // checked-radio and power-slider evidence again instead of inventing one.
-            ui_request(tab_id, json!({"op":"verify", "label":selected.label, "effort":effort, "requireTemporary":false})).await
+            browser.ui(json!({"op":"verify", "label":selected.label, "effort":effort, "requireTemporary":false})).await
                 .context("The requested ChatGPT model or thinking effort changed during the response")?;
             return Ok(text);
         }
@@ -659,30 +548,6 @@ present above. If no tool is needed, answer normally and do not emit the envelop
     Ok(prompt)
 }
 
-fn split_utf8_chunks(value: &str, max_bytes: usize) -> Vec<&str> {
-    if value.is_empty() || max_bytes == 0 {
-        return Vec::new();
-    }
-    let mut chunks = Vec::new();
-    let mut start = 0;
-    while start < value.len() {
-        let mut end = (start + max_bytes).min(value.len());
-        while end > start && !value.is_char_boundary(end) {
-            end -= 1;
-        }
-        if end == start {
-            end = value[start..]
-                .char_indices()
-                .nth(1)
-                .map(|(offset, _)| start + offset)
-                .unwrap_or(value.len());
-        }
-        chunks.push(&value[start..end]);
-        start = end;
-    }
-    chunks
-}
-
 fn utf16_fingerprint(value: &str) -> (usize, u32) {
     let mut hash = 2_166_136_261u32;
     let mut len = 0usize;
@@ -691,57 +556,6 @@ fn utf16_fingerprint(value: &str) -> (usize, u32) {
         len += 1;
     }
     (len, hash)
-}
-
-async fn evaluate(tab_id: u64, script: &str) -> Result<Value> {
-    let output = bridge_command("evaluate", json!({ "tabId": tab_id, "script": script })).await?;
-    output
-        .get("result")
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("Browser evaluate response did not contain a result"))
-}
-
-async fn bridge_command(action: &str, params: Value) -> Result<Value> {
-    let binary = jcode_base::browser::browser_binary_path();
-    if !binary.exists() {
-        anyhow::bail!(
-            "Browser bridge binary is not installed. Run `jcode browser setup` once, then log in at chatgpt.com in connected browser"
-        );
-    }
-
-    let params = serde_json::to_string(&params)?;
-    let mut command = tokio::process::Command::new(binary);
-    command
-        .arg(action)
-        .arg(params)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
-    if let Ok(browser) = WEB_BROWSER.try_with(Clone::clone) {
-        jcode_base::browser::apply_bridge_browser_env(&mut command, Some(&browser));
-    }
-
-    let output = tokio::time::timeout(Duration::from_secs(45), command.output())
-        .await
-        .with_context(|| format!("Browser bridge action '{action}' timed out"))?
-        .with_context(|| format!("Failed to run browser bridge action '{action}'"))?;
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let stderr = web_catalog::bridge_error_detail(&String::from_utf8_lossy(&output.stderr));
-    if !output.status.success() {
-        let detail = match (stdout.is_empty(), stderr.is_empty()) {
-            (false, false) => format!("{stderr}\n{stdout}"),
-            (false, true) => stdout,
-            (true, false) => stderr,
-            (true, true) => format!("browser bridge action '{action}' failed"),
-        };
-        anyhow::bail!(detail);
-    }
-    if stdout.is_empty() {
-        return Ok(json!({ "ok": true }));
-    }
-    serde_json::from_str(&stdout)
-        .with_context(|| format!("Browser bridge action '{action}' returned invalid JSON"))
 }
 
 #[cfg(test)]
@@ -798,14 +612,6 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(parsed.input["command"], "printf '</jcode_tool_call>'");
-    }
-
-    #[test]
-    fn utf8_chunking_preserves_content_and_boundaries() {
-        let value = "ab😀cdéfg";
-        let chunks = split_utf8_chunks(value, 4);
-        assert_eq!(chunks.concat(), value);
-        assert!(chunks.iter().all(|chunk| chunk.len() <= 4));
     }
 
     #[test]

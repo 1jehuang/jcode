@@ -7,6 +7,7 @@ pub mod bedrock;
 mod catalog_routes;
 pub mod catalog_scheduler;
 pub mod chatgpt_web;
+pub mod chatgpt_web_instance;
 pub mod copilot;
 pub mod cursor;
 mod dispatch;
