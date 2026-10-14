@@ -52,11 +52,11 @@ jobs:
 
       - name: Check all targets and all features
         if: ${{ !cancelled() }}
-        run: cargo check --all-targets --all-features
+        run: cargo check --locked --all-targets --all-features
 
       - name: Run clippy with warnings denied
         if: ${{ !cancelled() }}
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
       - name: Enforce Cargo.lock is up to date
         if: ${{ !cancelled() }}
@@ -66,7 +66,9 @@ jobs:
         # commit passes 8 of 9 CI jobs and fails Windows at "Build release
         # binary", skipping all of its validation steps. This catches it in
         # seconds, on the job that already owns dependency hygiene.
-        run: cargo metadata --locked --format-version 1 > /dev/null
+        run: |
+          cargo metadata --locked --format-version 1 > /dev/null
+          git diff --exit-code -- Cargo.lock
 
       - name: Warning budget gate contract tests
         if: ${{ !cancelled() }}
@@ -106,7 +108,7 @@ jobs:
       - name: Enforce Rust and TypeScript SDK surface parity
         if: ${{ !cancelled() }}
         shell: bash
-        run: cargo test -p jcode-sdk parity -- --nocapture
+        run: cargo test --locked -p jcode-sdk parity -- --nocapture
 
       - name: Enforce wildcard re-export ratchet
         if: ${{ !cancelled() }}
@@ -220,13 +222,13 @@ jobs:
           RUSTC="$(rustup which rustc)"
           export RUSTC
           CARGO_BIN="$(rustup which cargo)"
-          "$CARGO_BIN" build --release --target ${{ matrix.target }}
+          "$CARGO_BIN" build --locked --release --target ${{ matrix.target }}
 
       - name: Compile library and binary tests
         shell: bash
         run: |
           python3 .github/scripts/run_with_timeout.py 900 \
-            "$(rustup which cargo)" test --target ${{ matrix.target }} --lib --bins --no-run
+            "$(rustup which cargo)" test --locked --target ${{ matrix.target }} --lib --bins --no-run
 
       - name: Run deterministic retention-readiness cohort
         shell: bash
@@ -235,7 +237,7 @@ jobs:
           # dependencies and can exceed three minutes on hosted runners. The
           # cohort itself runs in under a second once the lib test is built.
           python3 .github/scripts/run_with_timeout.py 600 \
-            "$(rustup which cargo)" test --target ${{ matrix.target }} \
+            "$(rustup which cargo)" test --locked --target ${{ matrix.target }} \
             -p jcode-app-core --lib retention_readiness -- --nocapture
 
       - name: Run secret-input pty cohort (all platforms with a pty)
@@ -254,14 +256,14 @@ jobs:
         # runner (run 30591536707) while the cohort itself runs in a second.
         run: |
           python3 .github/scripts/run_with_timeout.py 600 \
-            "$(rustup which cargo)" test --target ${{ matrix.target }} \
+            "$(rustup which cargo)" test --locked --target ${{ matrix.target }} \
             -p jcode-base --lib secret_input -- --nocapture
 
       - name: Run browser session liveness and reuse regressions
         shell: bash
         run: |
-          cargo test --target ${{ matrix.target }} -p jcode-base --lib browser_session -- --nocapture
-          cargo test --target ${{ matrix.target }} -p jcode-app-core --lib browser_session -- --nocapture
+          cargo test --locked --target ${{ matrix.target }} -p jcode-base --lib browser_session -- --nocapture
+          cargo test --locked --target ${{ matrix.target }} -p jcode-app-core --lib browser_session -- --nocapture
 
       - name: Run embedding numeric-stability cohort (Linux only)
         if: runner.os == 'Linux'
@@ -288,7 +290,7 @@ jobs:
           test -s "$model_dir/model.onnx"
           test -s "$model_dir/tokenizer.json"
           python3 .github/scripts/run_with_timeout.py 600 \
-            "$(rustup which cargo)" test --target ${{ matrix.target }} \
+            "$(rustup which cargo)" test --locked --target ${{ matrix.target }} \
             -p jcode-embedding --lib -- --nocapture \
             | tee /tmp/embedding-cohort.log
           # The test is present and the harness ran it (rather than the binary
@@ -320,7 +322,7 @@ jobs:
         # provide; the Windows detector still has no test coverage.
         run: |
           python3 .github/scripts/run_with_timeout.py 600 \
-            "$(rustup which cargo)" test --target ${{ matrix.target }} \
+            "$(rustup which cargo)" test --locked --target ${{ matrix.target }} \
             -p jcode-app-core --lib tool::bash::tests::test_stdin_forwarding -- --nocapture
 
       - name: Run TUI library tests (Linux only)
@@ -356,7 +358,7 @@ jobs:
           COLORTERM: truecolor
         run: |
           python3 .github/scripts/run_with_timeout.py 600 \
-            "$(rustup which cargo)" test --target ${{ matrix.target }} \
+            "$(rustup which cargo)" test --locked --target ${{ matrix.target }} \
             -p jcode-tui --lib -- --test-threads=1 \
             --skip test_prompt_entry_shimmer_color_moves_across_positions \
             --skip right_fact_stack_uses_neutral_gray_except_for_context_usage
@@ -369,14 +371,14 @@ jobs:
         # budget was pushing slower hosted ubuntu/macos runners over the limit.
         run: |
           python3 .github/scripts/run_with_timeout.py 900 \
-            "$(rustup which cargo)" test --target ${{ matrix.target }} \
+            "$(rustup which cargo)" test --locked --target ${{ matrix.target }} \
             --test provider_matrix --test e2e --no-run
 
       - name: Run provider matrix tests
         shell: bash
         run: |
           python3 .github/scripts/run_with_timeout.py 600 \
-            "$(rustup which cargo)" test --target ${{ matrix.target }} --test provider_matrix
+            "$(rustup which cargo)" test --locked --target ${{ matrix.target }} --test provider_matrix
 
       - name: Run e2e tests
         shell: bash
@@ -385,7 +387,7 @@ jobs:
           # against an occasional slow hosted runner. Compilation is already done
           # in the dedicated compile step above.
           python3 .github/scripts/run_with_timeout.py 600 \
-            "$(rustup which cargo)" test --target ${{ matrix.target }} --test e2e
+            "$(rustup which cargo)" test --locked --target ${{ matrix.target }} --test e2e
 
       - name: Check PowerShell script syntax (Windows)
         if: runner.os == 'Windows'

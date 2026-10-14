@@ -10,6 +10,20 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class WorkflowGuardTests(unittest.TestCase):
+    def test_ci_builds_and_tests_cannot_silently_refresh_the_lockfile(self):
+        workflow = (ROOT / '.github/workflows/ci.yml').read_text()
+        command = re.compile(r'(?:cargo|"\$CARGO_BIN"|"\$\(rustup which cargo\)") '
+                             r'(?:build|check|test|clippy)\b')
+        checked = 0
+        for line in workflow.splitlines():
+            if line.lstrip().startswith('#') or not command.search(line):
+                continue
+            with self.subTest(command=line.strip()):
+                self.assertIn('--locked', line)
+                checked += 1
+        self.assertGreaterEqual(checked, 15)
+        self.assertIn('git diff --exit-code -- Cargo.lock', workflow)
+
     def test_arm64_release_graph_is_a_mandatory_native_windows_check(self):
         workflow = (ROOT / '.github/workflows/ci.yml').read_text()
         arm64 = workflow.split('  windows-arm64-check:\n', 1)[1].split(
@@ -41,7 +55,7 @@ class WorkflowGuardTests(unittest.TestCase):
                     self.assertIn('if: ${{ !cancelled() }}', step)
                 self.assertNotRegex(step, r'\bcontinue-on-error:\s*true\b')
         self.assertNotIn('continue-on-error: true', quality)
-        self.assertIn('cargo clippy --all-targets --all-features -- -D warnings', quality)
+        self.assertIn('cargo clippy --locked --all-targets --all-features -- -D warnings', quality)
         for script in ('check_code_size_budget.py', 'check_test_size_budget.py',
                        'check_panic_budget.py', 'check_swallowed_error_budget.py'):
             self.assertIn(f'run: python3 scripts/{script}\n', quality)
