@@ -183,6 +183,22 @@ git push origin instinct/win-herdr-inline-anchor  # 0473d4b30
 # 3. Open 2 PRs for the jcode P30 fix (combined or split)
 #    - source: chore/cargo-fmt-cleanup-2026-10-13-p30 (combined fix)
 #    - OR: security/rustsec-2026-0258-0285 + security/quinn-proto-0.11.19 (split fix)
+#
+# IMPORTANT: chore/cargo-fmt-cleanup-2026-10-13-p30 has NO remote tracking!
+# (tracking: /) — it's a local-only branch in /private/tmp/jcode-cleanup-arc-p30.
+# Must be pushed first before opening the PR. Confirmed via:
+#   git for-each-ref --format='%(refname:short) %(upstream:track)' refs/heads/ \
+#     | grep 'cargo-fmt-cleanup-2026-10-13-p30'
+#   → chore/cargo-fmt-cleanup-2026-10-13-p30:  (no upstream track)
+#
+# Push the P30 fix branch from its worktree:
+#   cd /private/tmp/jcode-cleanup-arc-p30
+#   git push -u origin chore/cargo-fmt-cleanup-2026-10-13-p30
+#
+# The 2 split security branches are ALREADY pushed (verified via git show-ref):
+#   origin/security/quinn-proto-0.11.19
+#   origin/security/rustsec-2026-0258-0285
+#   (no worktree path needed — push the PR from any jcode checkout)
 ```
 
 **Pre-rebase recovery (if ever needed):**
