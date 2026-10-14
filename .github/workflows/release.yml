@@ -2,9 +2,19 @@ name: Release
 
 env:
   JCODE_CI: "1"
+  # CI builds without the local parallel-frontend rustc wrapper from
+  # .cargo/config.toml (a POSIX shell script; see scripts/rustc-parallel-frontend).
+  CARGO_BUILD_RUSTC_WRAPPER: ""
   CARGO_TERM_COLOR: always
   SCCACHE_GHA_ENABLED: "true"
   CARGO_INCREMENTAL: "0"
+  # Optimize published binaries fully without changing local/selfdev profiles.
+  CARGO_PROFILE_RELEASE_OPT_LEVEL: "3"
+  # Preserve stable/nightly selected below rather than adopting a JR toolchain.
+  JUSTRUST_TOOLCHAIN: system
+  # Keep packaging paths deterministic and CI installation noninteractive.
+  JUSTRUST_SLOTS: "0"
+  JUSTRUST_NO_TELEMETRY: "1"
 
 on:
   push:
@@ -137,6 +147,13 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq mold
 
+      - name: Install pinned justrust
+        if: matrix.compat_container != true
+        shell: bash
+        run: bash scripts/install_justrust_ci.sh
+
+      # Hosted cannot preserve our ARM64 emulated-TLS build yet, and native
+      # macOS hosted routing is not enabled. Keep the selected runner toolchain.
       - name: Build release binary
         if: matrix.compat_container != true
         shell: bash
@@ -158,9 +175,9 @@ jobs:
           if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
             # Rebuild std with emulated TLS too; see the nightly install step
             # above for why Termux needs this.
-            cargo +nightly build -Z build-std=std,panic_abort --release --target ${{ matrix.target }}
+            RUSTUP_TOOLCHAIN=nightly justrust build --local -Z build-std=std,panic_abort --release --target ${{ matrix.target }}
           else
-            cargo build --release --target ${{ matrix.target }}
+            justrust build --local --release --target ${{ matrix.target }}
           fi
         env:
           JCODE_RELEASE_BUILD: "1"
@@ -183,6 +200,16 @@ jobs:
           mkdir -p dist
           cp target/${{ matrix.target }}/release/jcode dist/${{ matrix.artifact }}
           chmod +x dist/${{ matrix.artifact }}
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            # The linker's ad-hoc signature uses cargo's hashed output name
+            # (`jcode-<hash>`) as the code-signing identifier, so every release
+            # looked like a different program. macOS Tahoe's "Allow in the Menu
+            # Bar" keys unbundled executables on that identity, which added a new
+            # jcode toggle per update and reset the menu bar item's placement
+            # (#621). Re-sign ad-hoc with a stable identifier.
+            codesign --force --sign - --identifier com.jcode.cli dist/${{ matrix.artifact }}
+            codesign -dv dist/${{ matrix.artifact }} 2>&1 | grep -qx 'Identifier=com.jcode.cli'
+          fi
           cd dist && tar czf ${{ matrix.artifact }}.tar.gz ${{ matrix.artifact }}
 
       - name: Upload artifact
@@ -256,6 +283,11 @@ jobs:
           key: ${{ matrix.target }}
           cache-all-crates: "true"
 
+      - name: Install pinned justrust
+        shell: bash
+        run: bash scripts/install_justrust_ci.sh
+
+      # Native Windows hosted routing is not enabled. Preserve the MSVC runner.
       - name: Build release binary
         shell: pwsh
         run: |
@@ -266,13 +298,14 @@ jobs:
             }
           }
 
-          $cargoArgs = @("build", "--release", "--target", "${{ matrix.target }}")
+          $cargoArgs = @("build", "--local", "--release", "--target", "${{ matrix.target }}")
           $extraArgs = "${{ matrix.cargo_args }}"
           if (-not [string]::IsNullOrWhiteSpace($extraArgs)) {
             $cargoArgs += $extraArgs -split ' '
           }
 
-          & cargo @cargoArgs
+          & justrust @cargoArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         env:
           JCODE_RELEASE_BUILD: "1"
           JCODE_CI_BUILD: "1"
@@ -482,6 +515,8 @@ jobs:
             echo "::endgroup::"
 
             export CARGO_TERM_COLOR=always
+            # The VM does not inherit the runner's workflow environment.
+            export CARGO_PROFILE_RELEASE_OPT_LEVEL="${{ env.CARGO_PROFILE_RELEASE_OPT_LEVEL }}"
             # CARGO_BUILD_JOBS keeps memory in check; aws-lc-sys is memory hungry.
             export CARGO_BUILD_JOBS=3
             export JCODE_RELEASE_BUILD=1
@@ -489,6 +524,7 @@ jobs:
             export JCODE_BUILD_SEMVER="${{ github.ref_name }}"
 
             echo "::group::cargo build (jcode binary)"
+            # justrust has no FreeBSD client or hosted worker yet.
             cargo build --locked --release -p jcode --bin jcode
             echo "::endgroup::"
 

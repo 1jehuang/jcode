@@ -68,6 +68,11 @@ pub struct Margins {
     /// previous-prompt preview) rather than transcript. A widget that sticks to
     /// the top edge sticks just below them, not on top of them.
     pub content_start_row: usize,
+    /// The transcript under the widgets is still changing this frame (a turn is
+    /// streaming or a scroll animation is in flight). A resident widget whose
+    /// slot got covered waits that churn out in place; once content has settled
+    /// a covered slot is permanent and the widget re-homes immediately.
+    pub content_churning: bool,
 }
 
 impl Margins {
@@ -335,8 +340,15 @@ pub(crate) fn calculate_placements_anchored(
             // it). Keep the anchor and hide in place so it returns to the same spot
             // when the wide line passes - unless it has been hidden too long, in
             // which case we abandon the anchor and let Phase 2 re-home it.
+            //
+            // "Too long" is counted in frames, and an idle client draws very few:
+            // a header row that permanently grew over the slot (the `mcp:` line
+            // arriving with History) hid the Overview for good. Only content that
+            // is still re-rendering (streaming, or a scroll in progress) is worth
+            // waiting out; settled content re-homes the widget right away.
             let hidden_frames = anchor.hidden_frames.saturating_add(1);
-            if hidden_frames <= MAX_HIDDEN_FRAMES {
+            let content_settled = !margins.content_churning;
+            if hidden_frames <= MAX_HIDDEN_FRAMES && !content_settled {
                 anchored.insert(prev.kind);
                 next_anchors.push(WidgetAnchor {
                     placement: prev.clone(),
@@ -358,6 +370,69 @@ pub(crate) fn calculate_placements_anchored(
             continue;
         }
 
+        // The slot was sized for the content at placement time, but content can
+        // grow under a resident widget (History adds a session row to the
+        // Overview, a todo appears, usage loads). A widget whose body no longer
+        // fits its slot used to render nothing while still holding the slot,
+        // which also kept Phase 2 from re-homing it: the Overview vanished for
+        // good right after startup. Grow the slot in place into free rows
+        // directly above or below when there are any (the render path truncates
+        // when there are not, so the widget never disappears).
+        let (row_start, row_end, target_y, content_top) = {
+            let needed = super::info_widget::calculate_widget_height(
+                prev.kind,
+                data,
+                kept_width,
+                messages_area.height,
+            ) as usize;
+            if needed > height {
+                let extra = needed - height;
+                let limit = widths.len().min(messages_area.height as usize);
+                // Rows held this frame (visible or hidden in place), plus the
+                // rows later residents will take. A resident whose line left
+                // the viewport sticks at the edge, so clamp like Phase 1 does.
+                let occupied = |start: usize, end: usize| {
+                    claimed
+                        .iter()
+                        .any(|&(_, side, s, e)| side == prev.side && s < end && start < e)
+                        || prev_anchors.iter().any(|other| {
+                            let h = other.placement.rect.height as usize;
+                            other.placement.kind != prev.kind
+                                && other.placement.side == prev.side
+                                && {
+                                    let top = (other.content_top as isize
+                                        - margins.scroll_top as isize)
+                                        .clamp(
+                                            first_row as isize,
+                                            row_limit.saturating_sub(h).max(first_row) as isize,
+                                        ) as usize;
+                                    top < end && start < top + h
+                                }
+                        })
+                };
+                let free = |start: usize, end: usize| {
+                    end <= limit
+                        && widths[start..end].iter().all(|&w| w >= kept_width)
+                        && !occupied(start, end)
+                };
+                if row_start >= extra && free(row_start - extra, row_start) {
+                    let start = row_start - extra;
+                    (
+                        start,
+                        row_end,
+                        messages_area.y.saturating_add(start as u16),
+                        content_top - extra,
+                    )
+                } else if free(row_end, row_end + extra) {
+                    (row_start, row_end + extra, target_y, content_top)
+                } else {
+                    (row_start, row_end, target_y, content_top)
+                }
+            } else {
+                (row_start, row_end, target_y, content_top)
+            }
+        };
+
         let kept_x = match prev.side {
             Side::Right => messages_area
                 .x
@@ -367,7 +442,7 @@ pub(crate) fn calculate_placements_anchored(
         };
         let placement = WidgetPlacement {
             kind: prev.kind,
-            rect: Rect::new(kept_x, target_y, kept_width, prev.rect.height),
+            rect: Rect::new(kept_x, target_y, kept_width, (row_end - row_start) as u16),
             side: prev.side,
         };
         placements.push(placement.clone());
