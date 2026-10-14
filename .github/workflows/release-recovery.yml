@@ -1,0 +1,33 @@
+name: Release Recovery Validation
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/release.yml'
+      - '.github/workflows/release-recovery.yml'
+      - 'scripts/apply_release_recovery.py'
+      - 'scripts/install_justrust_ci.sh'
+      - 'tests/test_release_recovery.py'
+  push:
+    branches: [master]
+    paths:
+      - '.github/workflows/release.yml'
+      - '.github/workflows/release-recovery.yml'
+      - 'scripts/apply_release_recovery.py'
+      - 'scripts/install_justrust_ci.sh'
+      - 'tests/test_release_recovery.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Test real-tag recovery and publication guards
+        run: python3 tests/test_release_recovery.py
