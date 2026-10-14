@@ -44,15 +44,22 @@ jobs:
         run: python3 scripts/check_module_files.py
 
       - name: Check formatting
+        # These gates are independent. Report every failure in one run instead
+        # of letting a Clippy error hide stale lockfiles or budget violations.
+        # No continue-on-error: any failed check still fails the quality job.
+        if: ${{ !cancelled() }}
         run: cargo fmt --all -- --check
 
       - name: Check all targets and all features
+        if: ${{ !cancelled() }}
         run: cargo check --all-targets --all-features
 
       - name: Run clippy with warnings denied
+        if: ${{ !cancelled() }}
         run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Enforce Cargo.lock is up to date
+        if: ${{ !cancelled() }}
         shell: bash
         # Adding a dependency without regenerating Cargo.lock breaks every
         # `--locked` build. Only the Windows jobs pass `--locked`, so such a
@@ -62,42 +69,52 @@ jobs:
         run: cargo metadata --locked --format-version 1 > /dev/null
 
       - name: Warning budget gate contract tests
+        if: ${{ !cancelled() }}
         shell: bash
         run: scripts/test_check_warning_budget.sh
 
       - name: Enforce warning budget
+        if: ${{ !cancelled() }}
         shell: bash
         run: scripts/check_warning_budget.sh
 
       - name: Enforce oversized-file ratchet
+        if: ${{ !cancelled() }}
         shell: bash
         run: python3 scripts/check_code_size_budget.py
 
       - name: Enforce oversized-test ratchet
+        if: ${{ !cancelled() }}
         shell: bash
         run: python3 scripts/check_test_size_budget.py
 
       - name: Enforce panic-prone usage ratchet
+        if: ${{ !cancelled() }}
         shell: bash
         run: python3 scripts/check_panic_budget.py
 
       - name: Enforce swallowed-error usage ratchet
+        if: ${{ !cancelled() }}
         shell: bash
         run: python3 scripts/check_swallowed_error_budget.py
 
       - name: Enforce crate dependency boundaries
+        if: ${{ !cancelled() }}
         shell: bash
         run: python3 scripts/check_dependency_boundaries.py
 
       - name: Enforce Rust and TypeScript SDK surface parity
+        if: ${{ !cancelled() }}
         shell: bash
         run: cargo test -p jcode-sdk parity -- --nocapture
 
       - name: Enforce wildcard re-export ratchet
+        if: ${{ !cancelled() }}
         shell: bash
         run: python3 scripts/check_wildcard_reexport_budget.py
 
       - name: Enforce no unused dependencies
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           cargo install cargo-machete --locked
@@ -115,6 +132,7 @@ jobs:
 
       - name: Test justrust release installation and routing
         run: |
+          python3 tests/test_ci_workflow_guards.py
           python3 tests/test_install_justrust_ci.py
           python3 tests/test_public_release_builds.py
           bash -n scripts/install_justrust_ci.sh scripts/build_linux_compat.sh
@@ -199,7 +217,8 @@ jobs:
           # ("compiled by an incompatible version of rustc"). rust-cache already
           # caches target/ across runs, so a clean, wrapper-consistent build is
           # both correct and fast enough.
-          export RUSTC="$(rustup which rustc)"
+          RUSTC="$(rustup which rustc)"
+          export RUSTC
           CARGO_BIN="$(rustup which cargo)"
           "$CARGO_BIN" build --release --target ${{ matrix.target }}
 
