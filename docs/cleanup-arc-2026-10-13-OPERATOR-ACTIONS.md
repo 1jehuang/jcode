@@ -20,13 +20,12 @@
 | 2 cherry-picks (`b3130e026`) | **DONE** | Both branches had the quinn-proto fix already applied (jcode-upstream-sync HEAD `c2e4e91bd`, jcode-win-anchor HEAD `0473d4b30`); only pushes were needed |
 | P26 sync resolution | **RESOLVED** | Strategy C rebase executed 03:00 (local `master` now linear on origin) |
 | P30 cross-repo branches | **DONE** | 14/16 repos at 0 active P30 vulns; 2 BLOCKED (tooling-clone, _full_HexaKit) need operator action on broken upstream |
-| Stash snapshot (t11) | **PRESERVED** | `/tmp/playcua-stash-snapshot-2026-10-14.patch` (15 KB, 359 lines) — stash is recoverable from snapshot if dropped |
+| Stash snapshot (t11) | **DONE 03:48** | Stash dropped; snapshot at `/tmp/playcua-stash-snapshot-2026-10-14.patch` (365 lines) + object database (commit `16433d98`) preserve full recovery. |
 
-**Remaining operator-gated items (4):**
-1. **t11** — Drop PlayCua `stash@{0}` (now reversible via snapshot)
-2. **P11 disk cleanup** — `rm -rf target/` for 122 GB (destructive)
-3. **P25c rescue branches** — Pick disposition A/B/C/D for 3 orphan branches
-4. **P30 PR opens** — 3 PRs pre-drafted in `docs/cleanup-arc-2026-10-13-PR-CONTENT.md`; browser-only. All 3 source branches are now on `KooshaPari/Jcode` (master for PR #1, chore/cargo-fmt-cleanup-2026-10-13-p30 for PR #3, feature/upstream-0.88-sync for PR #2)
+**Remaining operator-gated items (3):**
+1. **P11 disk cleanup** — `rm -rf target/` for 122 GB (destructive)
+2. **P25c rescue branches** — Pick disposition A/B/C/D for 3 orphan branches
+3. **P30 PR opens** — 3 PRs pre-drafted in `docs/cleanup-arc-2026-10-13-PR-CONTENT.md`; `gh pr create` blocked by pre_tool, browser offline. All 3 source branches are now on `KooshaPari/Jcode` (security/rustsec-2026-0258-0285 for PR #1, security/quinn-proto-0.11.19 for PR #2, chore/cargo-fmt-cleanup-2026-10-13-p30 for PR #3).
 
 ---
 
