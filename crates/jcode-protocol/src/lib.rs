@@ -9,6 +9,32 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Selected model-provider OAuth identity for the telemetry notice handshake.
+/// Debug formatting must never disclose this personal information.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct ProviderOAuthEmail(String);
+
+impl ProviderOAuthEmail {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl std::fmt::Debug for ProviderOAuthEmail {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ProviderOAuthEmail([REDACTED])")
+    }
+}
+
 mod comm_format;
 mod notifications;
 

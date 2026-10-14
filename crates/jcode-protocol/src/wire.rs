@@ -1444,6 +1444,10 @@ pub enum ServerEvent {
         /// render usage/billing without re-deriving it from the provider name.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resolved_credential: Option<jcode_provider_core::ResolvedCredential>,
+        /// Authoritative selected model-provider OAuth account email, shared
+        /// only while daemon usage telemetry is enabled. Never a credential.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_oauth_email: Option<ProviderOAuthEmail>,
         /// Reasoning effort for providers that expose it
         #[serde(skip_serializing_if = "Option::is_none")]
         reasoning_effort: Option<String>,
@@ -1549,6 +1553,9 @@ pub enum ServerEvent {
         /// key). Lets clients update the auth badge on an OAuth<->API switch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resolved_credential: Option<jcode_provider_core::ResolvedCredential>,
+        /// Effective OAuth identity for the selected model-provider account.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_oauth_email: Option<ProviderOAuthEmail>,
         /// Effort the switched-to model runs with. A switch can clear an
         /// effort the new model does not advertise, so clients must not keep
         /// showing the old one. Always serialized (`null` = no effort) so a
