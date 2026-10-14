@@ -436,6 +436,44 @@ During the cross-repo lockfile-diff audit, **PlayCua's `security/h2-0.4.19-p30` 
 4. The original tainted branch `security/h2-0.4.19-p30` @ `1254961` is **RETAINED for reference but should NOT be pushed**
 5. The clean branch is the pushable artifact
 
+**Root cause analysis (from `git stash show stash@\{0\}` evidence, 2026-10-14 02:34):**
+
+Discovered that the PlayCua worktree had a stash entry `stash@{0}: On master: PlayCua-P30-stash-2026-10-14` with TWO parents:
+- `16433d9` — staged + working tree changes (the same 16 redaction + Cargo.lock changes that were committed)
+- `90bd656` — **untracked files** (a much larger set of in-progress work that was NOT committed)
+
+The untracked files in the stash include:
+| File | Size | Purpose |
+|---|---|---|
+| `crates/playcua-mobile/Cargo.toml` | 19 lines | New crate manifest (declared in workspace but never committed) |
+| `crates/playcua-mobile/src/lib.rs` | 24 lines | New crate lib |
+| `crates/playcua-mobile/src/devices.rs` | 62 lines | New crate device backends |
+| `crates/playcua-mobile/src/traits.rs` | 121 lines | New crate traits |
+| `.github/auto-merge.yml` | 41 lines | New CI workflow (backup to Mergify) |
+| `.github/workflows/auto-merge.yml` | 35 lines | New CI workflow (auto-merge on CI green) |
+| `.github/workflows/sonarcloud.yml` | 59 lines | New CI workflow (sonarcloud integration) |
+| `sonar-project.properties` | 11 lines | New SonarQube project config |
+| `docs/sessions/00_SESSION_OVERVIEW.md` | 25 lines | New session doc |
+| `docs/sessions/01_CONSOLIDATION_DESIGN.md` | 281 lines | New session doc |
+| `docs/sessions/02_LICENSE_PARTITION.md` | 162 lines | New session doc |
+
+**Sequence reconstructed from reflog + stash + commit timestamps:**
+1. Worktree started on `master` (`4382fee`) with substantial in-progress work (new playcua-mobile crate, new CI workflows, new session docs) all UNTRACKED
+2. A redaction/sanitization tool ran on the worktree (probably a "publish-to-public-GitHub" prep tool), replacing `kooshapari` → `<REDACTED>` and `/Users/kooshapari/...` → `/Users/<REDACTED>/...` in tracked files
+3. `cargo update` ran (probably as part of the redaction workflow checking deps) → created the Cargo.lock P30 diff
+4. The P30 fix was committed as `1254961` on `security/h2-0.4.19-p30` with `git add -A` or `git add .` (or equivalent) — bundling the redactions + Cargo.toml workspace member addition
+5. `git stash push -u` was called AFTER, capturing the full worktree state (index + untracked) — and was **never dropped**, leaving the contamination artifacts available for forensics
+
+**Lesson learned (process fix):**
+- Use `git add Cargo.lock` (specific file) for targeted commits, NOT `git add -A`
+- Use separate worktrees for separate tasks (one for P30, one for playcua-mobile, one for new CI)
+- Verify staged files match the commit's `tx-scope` claim (`git diff --cached --stat` before commit)
+- Drop stashes after using them (`git stash drop stash@{0}`)
+- Pre-commit redaction tools should operate on a worktree copy, NOT the active worktree (so redactions are reviewable before commit)
+
+The PlayCua stash entry remains in place for forensics but should be dropped after the operator confirms the clean re-commit is the only P30 artifact worth keeping. Recommended cleanup: `git stash drop stash@{0}` after the operator signs off on the clean re-commit.
+
+
 **Cross-repo contamination check (2026-10-14):** Verified the other 9 P30-fixed branches (Tracera, Agentora, Apisync, sharecli, Tokn, Grapheon, SessionLedger, _full_AgilePlus, _full_tooling, zz-merge-unk-PhenoJourneys) are all clean lockfile-only commits. **Only PlayCua was affected.**
 
 **Final PlayCua branch state:**
