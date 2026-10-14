@@ -927,7 +927,7 @@ fn test_catchup_brief_reveals_side_panel_the_user_hid() {
         let mut app = create_test_app();
         app.side_panel = test_side_panel_snapshot("plan", "Plan");
         // The user dismissed the panel before opening Catch Up.
-        assert!(app.handle_side_command("/side off"));
+        app.dismiss_side_panel();
         assert!(app.side_panel.focused_page_id.is_none());
 
         let mut target = Session::create(None, Some("hidden catchup".to_string()));

@@ -606,7 +606,8 @@ fn test_is_scroll_only_key_detects_navigation_inputs() {
         KeyModifiers::empty()
     ));
 
-    assert!(super::input::is_scroll_only_key(
+    // Alt+G opens the commit log overlay, which needs a full redraw.
+    assert!(!super::input::is_scroll_only_key(
         &app,
         KeyCode::Char('g'),
         KeyModifiers::ALT
@@ -622,6 +623,52 @@ fn test_is_scroll_only_key_detects_navigation_inputs() {
         KeyCode::Enter,
         KeyModifiers::empty()
     ));
+}
+
+#[test]
+fn test_alt_g_opens_and_closes_commit_log_overlay() {
+    let mut app = create_test_app();
+    // Build a throwaway repo with several commits. CI checks out with
+    // `fetch-depth: 1`, so the jcode checkout itself has a single commit and
+    // scrolling down one row would clamp back to 0.
+    let repo = tempfile::tempdir().expect("tempdir");
+    let git = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .current_dir(repo.path())
+            .args([
+                "-c",
+                "user.name=jcode test",
+                "-c",
+                "user.email=test@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?} failed");
+    };
+    git(&["init", "-q"]);
+    for n in 0..3 {
+        git(&["commit", "-q", "--allow-empty", "-m", &format!("commit {n}")]);
+    }
+    app.session.working_dir = Some(repo.path().to_string_lossy().to_string());
+    let diff_mode_before = app.diff_mode;
+
+    assert!(super::input::handle_navigation_shortcuts(
+        &mut app,
+        KeyCode::Char('g'),
+        KeyModifiers::ALT
+    ));
+    assert_eq!(app.diff_mode, diff_mode_before, "Alt+G no longer cycles diffs");
+    let overlay = app.commit_log_overlay.as_ref().expect("overlay opens");
+    assert!(overlay.error.is_none(), "{:?}", overlay.error);
+    assert!(!overlay.entries.is_empty());
+
+    app.handle_commit_log_key(KeyCode::Char('j')).unwrap();
+    assert_eq!(app.commit_log_overlay.as_ref().unwrap().scroll, 1);
+    app.handle_commit_log_key(KeyCode::Esc).unwrap();
+    assert!(app.commit_log_overlay.is_none());
 }
 
 #[test]
@@ -1052,7 +1099,10 @@ fn test_logout_clear_anthropic_accounts_removes_all_accounts_once() {
                 .unwrap(),
             );
         }
-        let last = assigned.last().expect("three accounts were created").clone();
+        let last = assigned
+            .last()
+            .expect("three accounts were created")
+            .clone();
         crate::auth::claude::set_active_account(&last).unwrap();
 
         let labels: Vec<_> = crate::auth::claude::list_accounts()
@@ -1265,11 +1315,16 @@ fn configure_test_remote_models_with_openai_recommendations(app: &mut App) {
         "gpt-5.3-codex-spark".to_string(),
         "gpt-5.3-codex".to_string(),
         "claude-opus-4-8".to_string(),
+        jcode_provider_core::DEFAULT_OPENAI_MODEL.to_string(),
+        jcode_provider_core::DEFAULT_CLAUDE_MODEL.to_string(),
     ];
     app.remote_model_options = app
         .remote_available_entries
         .iter()
-        .filter(|model| model.as_str() != "claude-opus-4-8")
+        .filter(|model| {
+            model.as_str() != "claude-opus-4-8"
+                && model.as_str() != jcode_provider_core::DEFAULT_CLAUDE_MODEL
+        })
         .cloned()
         .map(|model| crate::provider::ModelRoute {
             model,
@@ -1299,6 +1354,17 @@ fn configure_test_remote_models_with_openai_recommendations(app: &mut App) {
         usage: None,
         cheapness: None,
     });
+    for api_method in ["claude-oauth", "claude-api"] {
+        app.remote_model_options.push(crate::provider::ModelRoute {
+            model: jcode_provider_core::DEFAULT_CLAUDE_MODEL.to_string(),
+            provider: "Anthropic".to_string(),
+            api_method: api_method.to_string(),
+            available: true,
+            detail: String::new(),
+            usage: None,
+            cheapness: None,
+        });
+    }
 }
 
 fn configure_test_remote_openrouter_provider_routes(app: &mut App) {
@@ -1384,7 +1450,7 @@ fn test_agents_command_opens_agent_picker() {
         picker
             .entries
             .iter()
-            .any(|entry| entry.name == "Code review")
+            .any(|entry| entry.name == "Code review [session]")
     );
     assert!(picker.entries.iter().any(|entry| matches!(
         entry.action,
@@ -1466,7 +1532,7 @@ fn test_agent_model_picker_inherit_row_uses_provider_default_when_inherited_mode
             .expect("agent model picker should open");
         let inherit_entry = picker.entries.first().expect("inherit row should exist");
 
-        assert_eq!(inherit_entry.name, "inherit (provider default)");
+        assert_eq!(inherit_entry.name, "use global default [session]");
         assert!(matches!(
             inherit_entry.action,
             crate::tui::PickerAction::AgentModelChoice {

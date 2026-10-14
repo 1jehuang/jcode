@@ -191,10 +191,11 @@ fn test_remote_error_with_retryable_pending_schedules_retry() {
         .expect("retry should surface a connection status message");
     assert_eq!(retry_notice.role, "system");
     assert!(retry_notice.content.contains("Connection lost - retrying"));
-    assert!(retry_notice.content.contains(&format!(
-        "attempt 1/{}",
-        App::AUTO_RETRY_MAX_ATTEMPTS
-    )));
+    assert!(
+        retry_notice
+            .content
+            .contains(&format!("attempt 1/{}", App::AUTO_RETRY_MAX_ATTEMPTS))
+    );
     assert!(retry_notice.content.contains("Remote request failed"));
 }
 
@@ -366,7 +367,7 @@ fn test_remote_fatal_model_endpoint_error_fails_fast_without_retry_budget() {
 }
 
 #[test]
-fn test_remote_connectivity_error_waits_for_network_without_retry_budget() {
+fn test_remote_connectivity_error_waits_for_network_with_bounded_retry_budget() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
@@ -402,8 +403,8 @@ fn test_remote_connectivity_error_waits_for_network_without_retry_budget() {
     let pending = app
         .rate_limit_pending_message
         .as_ref()
-        .expect("offline auto-poke should be held for network recovery");
-    assert_eq!(pending.retry_attempts, 0);
+        .expect("provider failure should be held for bounded network recovery");
+    assert_eq!(pending.retry_attempts, 1);
     assert!(app.rate_limit_reset.is_some());
     assert!(matches!(
         app.status,
@@ -466,9 +467,10 @@ fn test_remote_connectivity_error_without_auto_retry_still_waits_for_network() {
         .rate_limit_pending_message
         .as_ref()
         .expect("offline turn should be held for network recovery");
-    // Promoted to auto_retry so the tick-based resume re-sends it.
+    // Promoted to auto_retry so the tick-based resume re-sends it, with the
+    // provider failure consuming one attempt rather than looping forever.
     assert!(pending.auto_retry);
-    assert_eq!(pending.retry_attempts, 0);
+    assert_eq!(pending.retry_attempts, 1);
     assert!(app.rate_limit_reset.is_some());
     assert!(matches!(
         app.status,
@@ -503,6 +505,454 @@ fn claude_oauth_route(model: &str) -> crate::provider::ModelRoute {
         usage: None,
         cheapness: None,
     }
+}
+
+#[test]
+fn test_remote_account_failover_prompt_does_not_hold_or_retry_same_account() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.is_remote = true;
+    app.auto_poke_incomplete_todos = true;
+    app.auto_poke_default_on = true;
+    app.queued_messages
+        .push(crate::todo::TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE.to_string());
+    app.pending_queued_dispatch = true;
+    app.remote_provider_name = Some("Anthropic".to_string());
+    app.remote_provider_model = Some("claude-sonnet-4".to_string());
+    app.remote_model_options = vec![
+        claude_oauth_route("claude-sonnet-4"),
+        claude_oauth_route("claude-opus-4"),
+        openai_oauth_route("gpt-5.5"),
+    ];
+    app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        content: "hi".to_string(),
+        images: vec![],
+        is_system: false,
+        system_reminder: None,
+        auto_retry: true,
+        retry_attempts: 0,
+        retry_at: None,
+    });
+    app.last_submitted_input = Some("hi".to_string());
+    app.is_processing = true;
+    app.status = ProcessingStatus::Streaming;
+    let prompt = jcode_provider_core::ProviderFailoverPrompt {
+        from_provider: "claude".into(),
+        from_label: "Anthropic".into(),
+        to_provider: "openai".into(),
+        to_label: "OpenAI".into(),
+        target_route: None,
+        reason: "429 rate limit exceeded; retry in 60 seconds".into(),
+        estimated_input_chars: 400,
+        estimated_input_tokens: 100,
+    };
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Error {
+            id: 21,
+            message: prompt.to_error_message(),
+            retry_after_secs: Some(60),
+        },
+        &mut remote,
+    );
+
+    assert!(app.rate_limit_reset.is_none());
+    assert!(app.rate_limit_pending_message.is_none());
+    assert!(!app.auto_poke_incomplete_todos);
+    assert!(!app.auto_poke_default_on);
+    assert!(app.queued_messages.is_empty());
+    assert!(!app.pending_queued_dispatch);
+    assert!(!app.schedule_turn_end_followups());
+    assert_eq!(app.input, "hi");
+    assert!(app.pending_provider_failover.is_none());
+    let offer = app
+        .pending_fallback_offer
+        .as_ref()
+        .expect("manual fallback offer");
+    assert_eq!(offer.selection.provider_label, "OpenAI");
+    let resend = offer
+        .remote_resend
+        .as_ref()
+        .expect("preserved failed payload");
+    assert_eq!(resend.content, "hi");
+    assert_eq!(resend.raw_input.as_deref(), Some("hi"));
+    assert!(app.display_messages().iter().any(|message| {
+        message.role == "system"
+            && message.content.contains("Anthropic unavailable:")
+            && message.content.contains("/model")
+    }));
+    assert!(
+        !app.display_messages()
+            .iter()
+            .any(|message| { message.content.contains("[jcode-provider-failover]") })
+    );
+    assert!(!app.display_messages().iter().any(|message| {
+        message.role == "system"
+            && (message.content.contains("queued retry")
+                || message.content.contains("Rate limited"))
+    }));
+}
+
+fn remote_exact_failover_fixture() -> (App, crate::tui::backend::RemoteConnection) {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.remote_provider_name = Some("Anthropic".into());
+    app.remote_provider_model = Some("claude-sonnet-4".into());
+    app.session.route_api_method = Some("claude-oauth@claude-otter".into());
+    app.remote_resolved_credential = Some(jcode_provider_core::ResolvedCredential::Oauth);
+    let mut target = openai_oauth_route("gpt-5.4");
+    target.api_method = "openai-oauth@openai-fox".into();
+    app.remote_model_options = vec![target];
+    app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        content: "hi".into(),
+        images: vec![],
+        is_system: false,
+        system_reminder: None,
+        auto_retry: false,
+        retry_attempts: 0,
+        retry_at: None,
+    });
+    app.last_submitted_input = Some("hi".into());
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    let prompt = jcode_provider_core::ProviderFailoverPrompt {
+        from_provider: "claude".into(),
+        from_label: "Anthropic".into(),
+        to_provider: "openai".into(),
+        to_label: "OpenAI fox".into(),
+        target_route: Some("openai-oauth@openai-fox:gpt-5.4".into()),
+        reason: "OAuth usage exhausted".into(),
+        estimated_input_chars: 400,
+        estimated_input_tokens: 100,
+    };
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Error {
+            id: 21,
+            message: prompt.to_error_message(),
+            retry_after_secs: None,
+        },
+        &mut remote,
+    );
+    (app, remote)
+}
+
+#[test]
+fn test_remote_failover_countdown_holds_payload_and_stages_exact_route_after_deadline() {
+    with_temp_jcode_home(|| {
+        write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let (mut app, _remote) = remote_exact_failover_fixture();
+        assert!(app.pending_provider_failover.is_some());
+        assert_eq!(
+            app.pending_provider_failover
+                .as_ref()
+                .unwrap()
+                .remote_resend
+                .as_ref()
+                .unwrap()
+                .raw_input
+                .as_deref(),
+            Some("hi")
+        );
+        assert!(app.pending_fallback_offer.is_none());
+        assert!(app.pending_fallback_resend.is_none());
+        assert!(app.pending_route_selection.is_none());
+        app.maybe_progress_provider_failover_countdown();
+        assert!(app.pending_route_selection.is_none());
+        let manual = crate::provider::RouteSelection::from_model_route(&openai_oauth_route(
+            "manual-only-model",
+        ));
+        app.pending_route_selection = Some(manual.clone());
+        app.pending_provider_failover.as_mut().unwrap().deadline =
+            Instant::now() - Duration::from_secs(1);
+        app.maybe_progress_provider_failover_countdown();
+        assert!(app.pending_provider_failover.is_none());
+        assert_eq!(app.pending_route_selection.as_ref(), Some(&manual));
+        assert_eq!(
+            app.pending_automatic_failover_route
+                .as_ref()
+                .unwrap()
+                .routed_model_spec(),
+            "openai-oauth@openai-fox:gpt-5.4"
+        );
+        assert_eq!(app.pending_fallback_resend.as_ref().unwrap().content, "hi");
+        assert!(!app.pending_turn);
+    });
+}
+
+#[test]
+fn test_remote_generic_auth_error_arms_countdown_for_exact_pool_route() {
+    with_temp_jcode_home(|| {
+        write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
+        seed_failover_openai_fox();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let (mut app, _remote) = remote_exact_failover_fixture();
+        let payload = app.pending_provider_failover.take().unwrap().remote_resend;
+        assert!(app.offer_fallback_after_error_with_payload("401 invalid API key", payload));
+        assert!(app.pending_fallback_offer.is_none());
+        let pending = app.pending_provider_failover.as_ref().unwrap();
+        assert_eq!(
+            pending.prompt.target_route.as_deref(),
+            Some("openai-oauth@openai-fox:gpt-5.4")
+        );
+        assert_eq!(pending.remote_resend.as_ref().unwrap().content, "hi");
+    });
+}
+
+#[test]
+fn test_generic_auto_fallback_skips_excluded_preferred_and_checks_source_pool() {
+    with_temp_jcode_home(|| {
+        write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
+        seed_failover_openai_fox();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let (mut app, _remote) = remote_exact_failover_fixture();
+        let payload = app.pending_provider_failover.take().unwrap().remote_resend;
+        app.session.route_api_method = Some("claude-api".into());
+        app.remote_resolved_credential = Some(jcode_provider_core::ResolvedCredential::ApiKey);
+        let mut preferred = claude_oauth_route("claude-sonnet-4");
+        preferred.api_method = "claude-oauth@claude-otter".into();
+        app.remote_model_options.insert(0, preferred);
+        let mut pool = crate::auth::account_pool::AccountPool {
+            members: vec!["anthropic-api".into(), "openai:openai-fox".into()],
+            excluded: vec!["claude:claude-otter".into()],
+        };
+        pool.save().unwrap();
+        assert!(
+            app.offer_fallback_after_error_with_payload("401 invalid API key", payload.clone())
+        );
+        assert_eq!(
+            app.pending_provider_failover
+                .as_ref()
+                .unwrap()
+                .prompt
+                .target_route
+                .as_deref(),
+            Some("openai-oauth@openai-fox:gpt-5.4")
+        );
+        app.pending_provider_failover = None;
+        pool.members.retain(|key| key != "anthropic-api");
+        pool.excluded.push("anthropic-api".into());
+        pool.save().unwrap();
+        assert!(app.offer_fallback_after_error_with_payload("401 invalid API key", payload));
+        assert!(app.pending_provider_failover.is_none());
+        assert_eq!(
+            app.pending_fallback_offer
+                .as_ref()
+                .unwrap()
+                .selection
+                .api_method,
+            "claude-oauth@claude-otter"
+        );
+    });
+}
+
+#[test]
+fn test_generic_auto_fallback_respects_explicit_pool_account_order() {
+    with_temp_jcode_home(|| {
+        write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
+        seed_failover_openai_fox();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let (mut app, _remote) = remote_exact_failover_fixture();
+        let payload = app.pending_provider_failover.take().unwrap().remote_resend;
+        let mut earlier_catalog_route = openai_oauth_route("gpt-5.4");
+        earlier_catalog_route.api_method = "openai-oauth@openai-otter".into();
+        app.remote_model_options.insert(0, earlier_catalog_route);
+        crate::auth::account_pool::AccountPool {
+            members: vec!["openai:openai-fox".into(), "openai:openai-otter".into()],
+            excluded: vec![],
+        }
+        .save()
+        .unwrap();
+        assert!(app.offer_fallback_after_error_with_payload("401 invalid API key", payload));
+        assert_eq!(
+            app.pending_provider_failover
+                .as_ref()
+                .unwrap()
+                .prompt
+                .target_route
+                .as_deref(),
+            Some("openai-oauth@openai-fox:gpt-5.4")
+        );
+    });
+}
+
+#[test]
+fn test_generic_quota_fallback_skips_exhausted_account_sibling_model() {
+    with_temp_jcode_home(|| {
+        write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
+        seed_failover_openai_fox();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let (mut app, _remote) = remote_exact_failover_fixture();
+        let payload = app.pending_provider_failover.take().unwrap().remote_resend;
+        app.remote_provider_name = Some("OpenAI".into());
+        app.remote_provider_model = Some("gpt-5.4".into());
+        app.session.route_api_method = Some("openai-oauth@openai-otter".into());
+        let mut exhausted_sibling = openai_oauth_route("gpt-5.2");
+        exhausted_sibling.api_method = "openai-oauth@openai-otter".into();
+        app.remote_model_options.insert(0, exhausted_sibling);
+        crate::auth::account_pool::AccountPool {
+            members: vec!["openai:openai-otter".into(), "openai:openai-fox".into()],
+            excluded: vec![],
+        }
+        .save()
+        .unwrap();
+        assert!(app.offer_fallback_after_error_with_payload(
+            "429 usage limit reached; quota exhausted",
+            payload
+        ));
+        let target = app
+            .pending_provider_failover
+            .as_ref()
+            .unwrap()
+            .prompt
+            .target_route
+            .as_deref();
+        assert_eq!(target, Some("openai-oauth@openai-fox:gpt-5.4"));
+        assert!(app.pending_fallback_offer.is_none());
+    });
+}
+
+#[test]
+fn test_rejected_remote_automatic_route_retains_old_identity_and_drops_payload() {
+    with_temp_jcode_home(|| {
+        write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let (mut app, mut remote) = remote_exact_failover_fixture();
+        app.session.route_api_method = Some("claude-oauth@claude-otter".into());
+        app.pending_provider_failover.as_mut().unwrap().deadline =
+            Instant::now() - Duration::from_secs(1);
+        app.maybe_progress_provider_failover_countdown();
+        assert_eq!(
+            app.session.route_api_method.as_deref(),
+            Some("claude-oauth@claude-otter")
+        );
+        app.remote_model_switch_in_flight = true;
+        app.pending_automatic_failover_request_id = Some(22);
+        app.pending_fallback_resend
+            .as_mut()
+            .unwrap()
+            .images
+            .push(("image/png".into(), "image-data".into()));
+        app.handle_server_event(
+            crate::protocol::ServerEvent::ModelChanged {
+                id: 0,
+                model: "unrelated-model".into(),
+                provider_name: Some("Other".into()),
+                error: None,
+                provider_oauth_email: None,
+                resolved_credential: None,
+                reasoning_effort: None,
+                context_window: None,
+            },
+            &mut remote,
+        );
+        assert!(app.remote_model_switch_in_flight);
+        assert!(app.pending_automatic_failover_route.is_some());
+        assert!(app.pending_fallback_resend.is_some());
+        assert_eq!(app.pending_automatic_failover_request_id, Some(22));
+        app.handle_server_event(
+            crate::protocol::ServerEvent::ModelChanged {
+                id: 22,
+                model: "claude-sonnet-4".into(),
+                provider_name: None,
+                error: Some("Target is no longer in the auto-switch pool".into()),
+                provider_oauth_email: None,
+                resolved_credential: None,
+                reasoning_effort: None,
+                context_window: None,
+            },
+            &mut remote,
+        );
+        assert_eq!(
+            app.session.route_api_method.as_deref(),
+            Some("claude-oauth@claude-otter")
+        );
+        assert_eq!(
+            app.remote_provider_model.as_deref(),
+            Some("claude-sonnet-4")
+        );
+        assert!(app.pending_automatic_failover_route.is_none());
+        assert!(app.pending_fallback_resend.is_none());
+        assert!(!app.remote_model_switch_in_flight);
+        assert_eq!(app.input, "hi");
+        assert_eq!(
+            app.pending_images,
+            vec![("image/png".into(), "image-data".into())]
+        );
+        assert!(app.pending_automatic_failover_request_id.is_none());
+    });
+}
+
+#[test]
+fn test_remote_failover_esc_cancels_without_route_request_or_resend() {
+    with_temp_jcode_home(|| {
+        write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let (mut app, mut remote) = remote_exact_failover_fixture();
+        rt.block_on(remote::handle_remote_key_event(
+            &mut app,
+            crossterm::event::KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &mut remote,
+        ))
+        .unwrap();
+        assert!(app.pending_provider_failover.is_none());
+        assert!(app.pending_fallback_resend.is_none());
+        assert!(app.pending_route_selection.is_none());
+        assert_eq!(app.input, "hi");
+    });
+}
+
+#[test]
+fn test_cancel_image_only_failover_restores_attachments() {
+    with_temp_jcode_home(|| {
+        write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let (mut app, _remote) = remote_exact_failover_fixture();
+        app.input.clear();
+        let payload = app
+            .pending_provider_failover
+            .as_mut()
+            .unwrap()
+            .remote_resend
+            .as_mut()
+            .unwrap();
+        payload.content.clear();
+        payload.raw_input = Some(String::new());
+        payload.images = vec![("image/png".into(), "image-data".into())];
+        app.cancel_pending_provider_failover("Canceled");
+        assert!(app.input.is_empty());
+        assert_eq!(
+            app.pending_images,
+            vec![("image/png".into(), "image-data".into())]
+        );
+        assert!(app.pending_provider_failover.is_none());
+    });
+}
+
+#[test]
+fn test_pending_failover_honors_changed_manual_configuration() {
+    with_temp_jcode_home(|| {
+        write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let (mut app, _remote) = remote_exact_failover_fixture();
+        write_test_config("[provider]\ncross_provider_failover = \"manual\"\n");
+        app.pending_provider_failover.as_mut().unwrap().deadline =
+            Instant::now() - Duration::from_secs(1);
+        app.maybe_progress_provider_failover_countdown();
+        assert!(app.pending_provider_failover.is_none());
+        assert!(app.pending_route_selection.is_none());
+        assert!(app.pending_fallback_resend.is_none());
+    });
 }
 
 /// The motivating scenario: a remote session's OpenAI OAuth session expires
@@ -629,6 +1079,7 @@ fn test_remote_fallback_offer_accept_stages_switch_and_resends() {
             model: "claude-sonnet-4".to_string(),
             provider_name: Some("Anthropic".to_string()),
             error: None,
+            provider_oauth_email: None,
             resolved_credential: None,
             reasoning_effort: None,
         },
@@ -676,6 +1127,7 @@ fn test_remote_fallback_resend_dropped_when_switch_fails() {
             model: "claude-sonnet-4".to_string(),
             provider_name: None,
             error: Some("switch failed".to_string()),
+            provider_oauth_email: None,
             resolved_credential: None,
             reasoning_effort: None,
         },
@@ -1273,10 +1725,7 @@ fn test_tui_grok_build_login_starts_managed_oauth_flow() {
 
     app.start_login_provider(crate::provider_catalog::GROK_BUILD_LOGIN_PROVIDER);
 
-    assert!(matches!(
-        app.pending_login,
-        Some(PendingLogin::GrokBuild)
-    ));
+    assert!(matches!(app.pending_login, Some(PendingLogin::GrokBuild)));
     let rendered = app
         .display_messages()
         .iter()
@@ -1327,7 +1776,10 @@ fn test_remote_context_limit_survives_a_later_local_re_derivation() {
     app.remote_provider_model = Some("stealth/space-bunny-alpha@Stealth".to_string());
 
     app.update_context_limit_for_model("stealth/space-bunny-alpha@Stealth", Some(1_000_000));
-    assert_eq!(app.context_limit, 1_000_000, "server window must be adopted");
+    assert_eq!(
+        app.context_limit, 1_000_000,
+        "server window must be adopted"
+    );
 
     // A later local re-derivation must not undo it.
     app.update_context_limit_for_model("stealth/space-bunny-alpha@Stealth", None);
@@ -2023,7 +2475,9 @@ fn test_debug_command_side_panel_latency_bench_reports_immediate_redraw() {
     // against 16.0ms purely from machine load, while passing in isolation. The
     // behavioral assertions above are the real subject, so gate only the timing
     // (refs #592).
-    let p95 = value["summary"]["latency_ms"]["p95"].as_f64().unwrap_or(0.0);
+    let p95 = value["summary"]["latency_ms"]["p95"]
+        .as_f64()
+        .unwrap_or(0.0);
     assert_perf_budget(p95 < 16.0, || {
         format!("side-panel p95 should stay within a 60fps frame budget: {result}")
     });
@@ -2310,7 +2764,10 @@ fn test_externally_started_turn_adopts_processing_state_and_settles_on_done() {
         app.status
     );
 
-    app.handle_server_event(crate::protocol::ServerEvent::MessageEnd { stop_reason: None }, &mut remote);
+    app.handle_server_event(
+        crate::protocol::ServerEvent::MessageEnd { stop_reason: None },
+        &mut remote,
+    );
     app.handle_server_event(crate::protocol::ServerEvent::Done { id: 0 }, &mut remote);
 
     // Streaming text is revealed at a paced rate, so a `Done` that arrives with
@@ -2509,6 +2966,95 @@ fn test_credential_failure_breaker_trips_after_consecutive_auth_errors() {
 }
 
 #[test]
+fn test_rejected_refresh_token_stops_all_automatic_resends_immediately() {
+    with_temp_jcode_home(|| {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        for auto_poke in [false, true] {
+            for (auto_retry, retry_after_secs) in [(false, None), (true, None), (true, Some(1))] {
+                let mut app = create_test_app();
+                let mut remote = crate::tui::backend::RemoteConnection::dummy();
+                remote.mark_history_loaded();
+                app.is_remote = true;
+                app.remote_provider_name = Some("Claude".to_string());
+                app.remote_provider_model = Some("claude-sonnet-4".to_string());
+                app.remote_resolved_credential =
+                    Some(jcode_provider_core::ResolvedCredential::Oauth);
+                app.remote_model_options = vec![
+                    claude_oauth_route("claude-sonnet-4"),
+                    claude_oauth_route("claude-opus-4"),
+                    openai_oauth_route("gpt-5.5"),
+                ];
+                app.auto_poke_incomplete_todos = auto_poke;
+                // Even an inactive default-on scheduler must not re-arm after
+                // a terminal credential failure.
+                app.auto_poke_default_on = true;
+                crate::todo::save_todos(
+                    &app.session.id,
+                    &[crate::todo::TodoItem {
+                        id: "todo-1".to_string(),
+                        content: "Finish work".to_string(),
+                        status: "in_progress".to_string(),
+                        ..Default::default()
+                    }],
+                )
+                .unwrap();
+                app.queued_messages
+                    .push(crate::todo::TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE.to_string());
+                app.queued_messages
+                    .push("Keep my queued prompt".to_string());
+                app.rate_limit_pending_message = Some(PendingRemoteMessage {
+                    content: "keep going".to_string(),
+                    images: vec![],
+                    is_system: false,
+                    system_reminder: Some("preserve reminder".to_string()),
+                    auto_retry,
+                    retry_attempts: 0,
+                    retry_at: None,
+                });
+                app.last_submitted_input = Some("keep going".to_string());
+                app.is_processing = true;
+                app.status = ProcessingStatus::Streaming;
+                app.current_message_id = Some(30);
+
+                assert!(!app.handle_server_event(
+                    crate::protocol::ServerEvent::Error {
+                        id: 30,
+                        message: "Claude OAuth refresh token was previously rejected by Anthropic and cannot be refreshed. Run `jcode login --provider claude` to mint a fresh token.".to_string(),
+                        retry_after_secs,
+                    },
+                    &mut remote,
+                ));
+                assert!(app.rate_limit_pending_message.is_none());
+                assert!(app.rate_limit_reset.is_none());
+                assert!(!app.auto_poke_incomplete_todos);
+                assert!(!app.auto_poke_default_on);
+                assert!(app.overnight_auto_poke.is_none());
+                assert!(!app.is_processing);
+                assert_eq!(app.input, "keep going");
+                assert_eq!(app.queued_messages, vec!["Keep my queued prompt"]);
+                let offer = app
+                    .pending_fallback_offer
+                    .as_ref()
+                    .expect("manual fallback");
+                assert_eq!(offer.selection.provider_label, "OpenAI");
+                let resend = offer.remote_resend.as_ref().expect("saved payload");
+                assert_eq!(resend.content, "keep going");
+                assert_eq!(resend.system_reminder.as_deref(), Some("preserve reminder"));
+                assert_eq!(resend.raw_input.as_deref(), Some("keep going"));
+
+                app.queued_messages.clear();
+                app.pending_queued_dispatch = false;
+                assert!(!app.schedule_turn_end_followups());
+                // A late Done must not restart auto-poke either.
+                app.handle_server_event(crate::protocol::ServerEvent::Done { id: 30 }, &mut remote);
+                assert!(app.queued_messages.is_empty());
+            }
+        }
+    });
+}
+
+#[test]
 fn test_credential_failure_breaker_streak_resets_on_other_errors() {
     let mut app = create_test_app();
 
@@ -2521,6 +3067,42 @@ fn test_credential_failure_breaker_streak_resets_on_other_errors() {
     assert!(!app.note_error_for_credential_breaker("401 unauthorized"));
     assert!(!app.note_error_for_credential_breaker("token expired"));
     assert!(app.note_error_for_credential_breaker("unauthorized"));
+}
+
+#[test]
+fn test_local_rejected_refresh_token_stops_pokes_and_preserves_input() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.auto_poke_incomplete_todos = true;
+        app.auto_poke_default_on = true;
+        app.last_submitted_input = Some("keep going".to_string());
+        crate::todo::save_todos(
+            &app.session.id,
+            &[crate::todo::TodoItem {
+                id: "todo-1".to_string(),
+                content: "Finish work".to_string(),
+                status: "in_progress".to_string(),
+                ..Default::default()
+            }],
+        )
+        .unwrap();
+        app.handle_turn_error(
+            "Claude OAuth refresh token was previously rejected by Anthropic and cannot be refreshed. Run `jcode login --provider claude` to mint a fresh token.",
+        );
+        assert!(!app.auto_poke_incomplete_todos);
+        assert!(!app.auto_poke_default_on);
+        assert_eq!(app.input, "keep going");
+        assert!(!app.schedule_turn_end_followups());
+        assert!(app.queued_messages.is_empty());
+        // After repairing auth, /poke still allows the user to resume work.
+        assert!(matches!(
+            commands::activate_auto_poke(&mut app),
+            commands::PokeActivation::SendNow { .. }
+        ));
+        assert!(app.auto_poke_incomplete_todos);
+        assert!(app.schedule_auto_poke_followup_if_needed());
+        assert!(!app.queued_messages.is_empty());
+    });
 }
 
 #[test]
@@ -2565,6 +3147,7 @@ fn test_remote_model_changed_updates_resolved_credential() {
             model: "claude-opus-5-5".to_string(),
             provider_name: Some("Claude".to_string()),
             error: None,
+            provider_oauth_email: None,
             resolved_credential: Some(jcode_provider_core::ResolvedCredential::ApiKey),
             reasoning_effort: None,
         },
@@ -2592,6 +3175,7 @@ fn model_changed_event(
         model: "gpt-5.6-terra".to_string(),
         provider_name: Some("OpenAI".to_string()),
         error: error.map(str::to_string),
+        provider_oauth_email: None,
         resolved_credential: None,
         reasoning_effort: reasoning_effort.map(str::to_string),
     }
@@ -2607,8 +3191,16 @@ fn test_setting_context_limit_also_syncs_the_compaction_budget() {
 
     app.set_context_limit_and_sync_budget(1_000_000);
 
-    assert_eq!(app.context_limit, 1_000_000, "panel must show the new window");
-    let budget = app.registry.compaction().try_read().expect("compaction lock").token_budget();
+    assert_eq!(
+        app.context_limit, 1_000_000,
+        "panel must show the new window"
+    );
+    let budget = app
+        .registry
+        .compaction()
+        .try_read()
+        .expect("compaction lock")
+        .token_budget();
     assert_eq!(
         budget, 1_000_000,
         "compaction budget must follow the panel limit, or the session compacts early"
@@ -2649,6 +3241,7 @@ fn test_remote_model_changed_for_same_model_adopts_window_silently() {
             context_window: Some(1_000_000),
             error,
             resolved_credential,
+            provider_oauth_email: None,
             reasoning_effort,
         },
         &mut remote,
