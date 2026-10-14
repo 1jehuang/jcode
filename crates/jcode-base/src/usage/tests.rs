@@ -1368,3 +1368,51 @@ fn zai_quota_url_follows_profile_region() {
         "https://api.z.ai/api/monitor/usage/quota/limit"
     );
 }
+
+/// A token refresh for the same Claude login rotates its access token. The
+/// login's cached usage and shared 429 backoff must follow it to the new key,
+/// in memory and on disk, so the next check does not refetch as if it were a
+/// new account.
+#[test]
+fn anthropic_usage_follows_a_token_refresh_of_the_same_login() {
+    let _guard = crate::storage::lock_test_env();
+    let dir = tempfile::tempdir().unwrap();
+    let previous = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", dir.path());
+
+    let label = "refresh-carry";
+    let old_key = anthropic_usage_cache_key("sk-ant-oat01-before-refresh", Some(label));
+    let new_key = anthropic_usage_cache_key("sk-ant-oat01-after-refresh", Some(label));
+    let exhausted = UsageData {
+        five_hour: 1.0,
+        seven_day: 1.0,
+        fetched_at: Some(Instant::now()),
+        ..Default::default()
+    };
+    store_anthropic_usage(old_key.clone(), exhausted.clone());
+    super::disk_cache::store_success(&old_key, &exhausted);
+    super::accessors::set_active_usage_key(Some(old_key.clone()));
+
+    carry_anthropic_usage_across_token_refresh(
+        label,
+        "sk-ant-oat01-before-refresh",
+        "sk-ant-oat01-after-refresh",
+    );
+
+    let carried = cached_anthropic_usage(&new_key).expect("usage follows the refresh");
+    assert_eq!(carried.five_hour, 1.0);
+    assert!(cached_anthropic_usage(&old_key).is_none());
+    assert!(super::disk_cache::fresh(&new_key).is_some());
+    assert!(super::disk_cache::fresh(&old_key).is_none());
+
+    // A relogin under the same label is a different account: nothing carries.
+    let relogin_key = anthropic_usage_cache_key("sk-ant-oat01-other-account", Some(label));
+    assert!(cached_anthropic_usage(&relogin_key).is_none());
+
+    super::accessors::set_active_usage_key(None);
+    invalidate_anthropic_usage_reset_state(Some(label));
+    match previous {
+        Some(value) => crate::env::set_var("JCODE_HOME", value),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+}

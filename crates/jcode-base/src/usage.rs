@@ -22,6 +22,7 @@ pub use anthropic_reset::{
     invalidate_anthropic_usage_reset_state, prepare_anthropic_limit_reset,
 };
 use api_keys::enqueue_api_key_usage_tasks;
+pub use cache::carry_anthropic_usage_across_token_refresh;
 pub(crate) use cache::note_openai_unavailability_observed;
 use cache::*;
 #[cfg(test)]
