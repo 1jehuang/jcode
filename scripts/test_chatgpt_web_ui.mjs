@@ -174,6 +174,17 @@ test('stop cleanup waits for the owned generation to become idle without submitt
   let stops=0;stop.onClick=()=>{stops++;stop.hidden=true;};f.main.children.push(stop);stop.parentElement=f.main;
   const result=await run({op:'stop'},f);assert.equal(result.stopped,true);assert.equal(result.busy,false);assert.equal(stops,1);assert.equal(f.submits(),0);
 });
+test('a thinking turn already marked complete is busy, not finished, until its answer bar renders',async()=>{
+  const f=fixture(); const assistant=new Element('div',{'data-markdown-text-style':'assistant-message'},''); const turn=new Element('div',{'data-talvt-turn-state':'complete'},'',[assistant]); const stop=new Element('button',{'aria-label':'Stop'});
+  f.main.children.push(turn,stop); turn.parentElement=f.main; stop.parentElement=f.main;
+  let result=await run({op:'response'},f); assert.equal(result.busy,true); assert.equal(result.terminal,false);
+  stop.hidden=true; result=await run({op:'response'},f); assert.equal(result.busy,false); assert.equal(result.terminal,false);
+});
+test('stop cleanup clicks the current plain Stop button',async()=>{
+  const f=fixture();const stop=new Element('button',{'aria-label':'Stop'});
+  let stops=0;stop.onClick=()=>{stops++;stop.hidden=true;};f.main.children.push(stop);stop.parentElement=f.main;
+  const result=await run({op:'stop'},f);assert.equal(result.stopped,true);assert.equal(stops,1);
+});
 test('updated response markup returns complete assistant text, not user prompt',async()=>{
   const f=fixture(); const assistant=new Element('div',{'data-markdown-text-style':'assistant-message'},'JCODE_BRIDGE_OK'); const turn=new Element('div',{'data-talvt-turn-state':'complete'},'', [assistant,new Element('button',{'aria-label':'Copy'})]);f.main.children.push(turn);turn.parentElement=f.main;
   const result=await run({op:'response'},f);assert.equal(result.text,'JCODE_BRIDGE_OK');assert.equal(result.terminal,true);assert.equal(result.busy,false);assert.equal(result.model,'');
