@@ -230,6 +230,17 @@ async fn wait_for_reload_handoff_before_reconnect(
         return Ok(None);
     }
 
+    // The marker stays `SocketReady` for up to RELOAD_MARKER_MAX_AGE after a
+    // reload completes. Any client launched in that window would otherwise
+    // flash "Waiting for reload handoff..." (an extra notice row that shoved
+    // the layout) even though the replacement server is already serving.
+    if !state.server_reload_in_progress
+        && crate::server::recent_reload_state(RELOAD_MARKER_MAX_AGE)
+            .is_some_and(|marker| marker.phase == crate::server::ReloadPhase::SocketReady)
+    {
+        return Ok(None);
+    }
+
     state.disconnect_start.get_or_insert_with(Instant::now);
     app.set_remote_startup_phase(super::super::RemoteStartupPhase::WaitingForReload);
     app.set_status_notice("Waiting for reload handoff...");

@@ -227,6 +227,7 @@ function makeDb(plan = {}) {
                 "milestone_elapsed_ms", "event_id", "session_id",
                 "schema_version", "build_channel", "is_git_checkout", "is_ci",
                 "ran_from_cargo", "account_id", "tier", "model_start",
+                "from_version",
               ].map((name) => ({ name })),
             };
           }
@@ -1359,4 +1360,46 @@ test("usage_report maps provider/model/source onto firehose blobs", async () => 
   assert.ok(point.blobs.includes("OpenAI"));
   assert.ok(point.blobs.includes("compaction"));
   assert.ok(point.doubles.includes(1000) && point.doubles.includes(2000));
+});
+
+test("desktop fleet events land in events with sanitized update fields", async () => {
+  const db = makeDb();
+  const base = { step: undefined, auth_provider: undefined, auth_method: undefined, auth_failure_reason: undefined, is_ci: true };
+  for (const body of [
+    makeBody({ ...base, event: "desktop_active", event_id: "d-active", version: "0.6.0" }),
+    makeBody({ ...base, event: "desktop_upgrade", event_id: "d-upgrade", version: "0.6.0", from_version: "0.5.0" }),
+    makeBody({
+      ...base,
+      event: "desktop_update",
+      event_id: "d-update",
+      version: "0.6.0",
+      from_version: "0.5.0",
+      install_kind: "Linux Managed",
+      update_outcome: "failure",
+      update_failure_stage: "verify: /home/u/secret " + "x".repeat(100),
+    }),
+  ]) {
+    const response = await worker.fetch(postRequest(body), { DB: db }, makeCtx());
+    assert.equal(response.status, 200, body.event);
+  }
+  const inserts = db.executed.filter(({ sql }) => /INSERT OR IGNORE INTO events /.test(sql));
+  assert.equal(inserts.length, 3);
+  const details = db.executed.filter(({ sql }) => /INSERT OR IGNORE INTO desktop_update_details/.test(sql));
+  assert.equal(details.length, 1, "only desktop_update writes details");
+  const row = (insert) => {
+    const cols = insert.sql.match(/\(([^)]*)\)/)[1].split(",").map((c) => c.trim());
+    return Object.fromEntries(cols.map((c, i) => [c, insert.values[i]]));
+  };
+  const [active, upgrade, update] = inserts.map(row);
+  const detail = row(details[0]);
+  assert.equal(detail.event_id, "d-update");
+  assert.equal(active.event, "desktop_active");
+  assert.equal(active.from_version, null);
+  assert.equal(upgrade.from_version, "0.5.0");
+  assert.equal(update.version, "0.6.0");
+  assert.equal(detail.install_kind, "linux_managed");
+  assert.equal(detail.update_outcome, "failure");
+  assert.ok(detail.update_failure_stage.startsWith("verify_home_u_secret_"));
+  assert.ok(detail.update_failure_stage.length <= 64);
+  assert.equal(update.is_ci, 1);
 });

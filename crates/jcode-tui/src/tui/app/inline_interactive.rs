@@ -17,8 +17,8 @@ mod preview;
 #[path = "inline_interactive/preview_request.rs"]
 mod preview_request;
 use helpers::{
-    agent_model_default_summary, agent_model_target_label, catchup_candidates,
-    catchup_queue_position, model_entry_base_name, model_entry_saved_spec,
+    agent_model_default_summary, agent_model_target_label, agent_model_target_slug,
+    catchup_candidates, catchup_queue_position, model_entry_base_name, model_entry_saved_spec,
     openrouter_route_model_id, picker_route_model_spec, picker_route_selection,
     save_agent_model_override,
 };
@@ -142,9 +142,17 @@ fn filter_routes_by_provider_allowlist(
             .split_once(':')
             .map(|(_, profile)| normalize(profile))
             .unwrap_or_default();
+        let account_base_method = route
+            .api_method
+            .split_once('@')
+            .filter(|_| jcode_provider_core::oauth_account_label(&route.api_method).is_some())
+            .map(|(method, _)| normalize(method));
         allowed.iter().any(|entry| {
             *entry == provider
                 || *entry == api_method
+                || account_base_method
+                    .as_ref()
+                    .is_some_and(|method| method == entry)
                 || (!profile_id.is_empty() && *entry == profile_id)
                 || crate::provider::model_route_provider_labels_match(&route.provider, entry)
         })
@@ -156,6 +164,8 @@ fn filter_routes_by_provider_allowlist(
             && current_api_method.is_none_or(|api_method| {
                 crate::provider::ModelRouteApiMethod::parse(&route.api_method)
                     == crate::provider::ModelRouteApiMethod::parse(api_method)
+                    && jcode_provider_core::oauth_account_label(&route.api_method)
+                        == jcode_provider_core::oauth_account_label(api_method)
             })
     };
     let filtered: Vec<crate::provider::ModelRoute> = routes
@@ -318,6 +328,32 @@ fn picker_is_runtime_model_picker(picker: &InlineInteractiveState) -> bool {
             .any(|entry| matches!(entry.action, PickerAction::Model))
 }
 
+/// Which `/agents` view is open, if any.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AgentModelsPickerView {
+    /// The role list (swarm, review, judge, memory, ambient).
+    Targets,
+    /// The model list for one role.
+    Models(crate::tui::AgentModelTarget),
+}
+
+pub(crate) fn agent_models_picker_view(
+    picker: &InlineInteractiveState,
+) -> Option<AgentModelsPickerView> {
+    if picker.kind != PickerKind::Model {
+        return None;
+    }
+    if picker.is_agent_target_picker() {
+        return Some(AgentModelsPickerView::Targets);
+    }
+    picker.entries.iter().find_map(|entry| match entry.action {
+        PickerAction::AgentModelChoice { target, .. } => {
+            Some(AgentModelsPickerView::Models(target))
+        }
+        _ => None,
+    })
+}
+
 fn key_char_eq_ignore_ascii_case(code: KeyCode, expected: char) -> bool {
     matches!(code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&expected))
 }
@@ -438,7 +474,10 @@ fn model_picker_route_is_current(
             .unwrap_or(true)
 }
 
-const RECOMMENDED_MODELS: &[&str] = &["gpt-5.5", "claude-opus-4-8"];
+const RECOMMENDED_MODELS: &[&str] = &[
+    jcode_provider_core::DEFAULT_OPENAI_MODEL,
+    jcode_provider_core::DEFAULT_CLAUDE_MODEL,
+];
 
 fn model_picker_recommendation_rank(name: &str) -> usize {
     RECOMMENDED_MODELS
@@ -540,6 +579,12 @@ fn model_picker_route_is_default(
         &route.api_method,
         &route.provider,
     );
+    if default_model
+        .split_once(':')
+        .is_some_and(|(method, _)| jcode_provider_core::oauth_account_label(method).is_some())
+    {
+        return default_model == selection.model_spec;
+    }
     let provider_matches = |provider: &str| {
         model_picker_route_provider_matches_key(
             selection.provider_key.as_deref(),
@@ -671,6 +716,22 @@ impl App {
         // previously known detailed routes in that case; the picker synthesizes
         // fallback routes for any newly appearing models. If the provider
         // identity changed, the old routes are stale and must be dropped.
+        //
+        // A snapshot with neither names nor routes means "catalog not ready"
+        // (History ships without names when the server's catalog build would
+        // delay first paint; `GetModelCatalog` fills it in right after). It
+        // must not wipe the catalog this client already knows.
+        let catalog_absent =
+            snapshot.model_routes.is_empty() && snapshot.available_models.is_empty();
+        if catalog_absent && !provider_name_changed {
+            if provider_meta_changed {
+                self.invalidate_model_picker_cache();
+            }
+            return CatalogReplaceOutcome {
+                provider_meta_changed,
+                catalog_changed: provider_meta_changed,
+            };
+        }
         let names_only = snapshot.model_routes.is_empty() && !snapshot.available_models.is_empty();
         let replace_routes = !names_only || provider_name_changed;
         // Shared-server bus chatter rebroadcasts the catalog frequently (every
@@ -2450,6 +2511,7 @@ impl App {
         };
         picker.set_current_dir(current_dir);
         picker.set_current_session_id(Some(super::commands::active_session_id(self)));
+        picker.apply_resume_project_scope_default();
         // `/resume` opens search-first: typing filters immediately.
         picker.focus_search_input();
         self.session_picker_overlay = Some(RefCell::new(picker));
@@ -2540,9 +2602,9 @@ impl App {
             let notice = match self.session_picker_mode {
                 SessionPickerMode::Resume => {
                     if let Some(existing) = self.session_picker_overlay.as_ref() {
-                        existing
-                            .borrow_mut()
-                            .reseed_grouped(server_groups, orphan_sessions);
+                        let mut picker = existing.borrow_mut();
+                        picker.reseed_grouped(server_groups, orphan_sessions);
+                        picker.apply_resume_project_scope_default();
                     }
                     "Sessions loaded"
                 }
@@ -2576,6 +2638,7 @@ impl App {
                 let mut picker = SessionPicker::new_grouped(server_groups, orphan_sessions);
                 picker.set_current_dir(self.session.working_dir.clone());
                 picker.set_current_session_id(Some(super::commands::active_session_id(self)));
+                picker.apply_resume_project_scope_default();
                 picker.focus_search_input();
                 self.session_picker_overlay = Some(RefCell::new(picker));
                 self.set_status_notice("Sessions loaded");
@@ -3299,6 +3362,27 @@ impl App {
         code: KeyCode,
         modifiers: KeyModifiers,
     ) -> Result<()> {
+        // `/agents` pickers: Ctrl+G switches between editing this session and
+        // the global default, then reopens the same view in the other scope.
+        if modifiers.contains(KeyModifiers::CONTROL)
+            && key_char_eq_ignore_ascii_case(code, 'g')
+            && let Some(view) = self
+                .inline_interactive_state
+                .as_ref()
+                .and_then(agent_models_picker_view)
+        {
+            self.agent_models_global_scope = !self.agent_models_global_scope;
+            match view {
+                AgentModelsPickerView::Targets => self.open_agents_picker(),
+                AgentModelsPickerView::Models(target) => self.open_agent_model_picker(target),
+            }
+            self.set_status_notice(if self.agent_models_global_scope {
+                "/agents: editing the global default (all sessions)"
+            } else {
+                "/agents: editing this session only"
+            });
+            return Ok(());
+        }
         match code {
             KeyCode::Esc => {
                 if let Some(ref mut picker) = self.inline_interactive_state
@@ -3615,18 +3699,39 @@ impl App {
                         clear_override,
                     } => {
                         self.inline_interactive_state = None;
-                        let result = if clear_override {
-                            save_agent_model_override(target, None)
+                        let spec = (!clear_override).then(|| model_entry_saved_spec(&entry));
+                        let result = if self.is_remote {
+                            // The server owns both scopes in remote mode: global
+                            // defaults go to its config, not this client's. Only
+                            // AgentModelsChanged confirms persistence. Generic Ack
+                            // is sent by the server before request dispatch.
+                            self.set_status_notice(if self.agent_models_global_scope {
+                                "Applying agent model [global]…"
+                            } else {
+                                "Applying agent model [session]…"
+                            });
+                            return Ok(());
+                        } else if self.agent_models_global_scope {
+                            save_agent_model_override(target, spec.as_deref())
                         } else {
-                            let spec = model_entry_saved_spec(&entry);
-                            save_agent_model_override(target, Some(&spec))
+                            self.session
+                                .set_agent_model_override(agent_model_target_slug(target), spec)
+                                .and_then(|()| self.session.save_prepared())
                         };
                         match result {
                             Ok(()) => {
-                                let label = agent_model_target_label(target);
+                                let label = format!(
+                                    "{} [{}]",
+                                    agent_model_target_label(target),
+                                    if self.agent_models_global_scope {
+                                        "global"
+                                    } else {
+                                        "session"
+                                    }
+                                );
                                 if clear_override {
                                     self.push_display_message(DisplayMessage::system(format!(
-                                        "{} model override cleared. It now inherits `{}`.",
+                                        "{} model override cleared. Using default `{}`.",
                                         label,
                                         agent_model_default_summary(target, self)
                                     )));
@@ -4048,6 +4153,47 @@ mod tests {
     }
 
     #[test]
+    fn saved_account_model_picker_current_and_default_are_account_specific() {
+        let work = picker_option_with_method("OpenAI", "openai-oauth@work");
+        let personal = picker_option_with_method("OpenAI", "openai-oauth@personal");
+        assert!(super::model_picker_route_is_current(
+            "gpt-5.5",
+            &work,
+            "gpt-5.5",
+            "OpenAI",
+            Some("openai-oauth@work")
+        ));
+        assert!(!super::model_picker_route_is_current(
+            "gpt-5.5",
+            &personal,
+            "gpt-5.5",
+            "OpenAI",
+            Some("openai-oauth@work")
+        ));
+        assert!(super::model_picker_route_is_default(
+            "gpt-5.5",
+            &work,
+            Some("openai-oauth@work:gpt-5.5"),
+            Some("openai-oauth")
+        ));
+        assert!(!super::model_picker_route_is_default(
+            "gpt-5.5",
+            &personal,
+            Some("openai-oauth@work:gpt-5.5"),
+            Some("openai-oauth")
+        ));
+        assert!(super::remote_catalog_api_method_is_safe(
+            "openai-oauth@work"
+        ));
+        assert!(super::remote_catalog_api_method_is_safe(
+            "claude-oauth@personal"
+        ));
+        assert!(!super::remote_catalog_api_method_is_safe(
+            "claude-oauth@work:bad"
+        ));
+    }
+
+    #[test]
     fn model_picker_hotkey_char_matching_is_case_insensitive() {
         assert!(key_char_eq_ignore_ascii_case(KeyCode::Char('f'), 'f'));
         assert!(key_char_eq_ignore_ascii_case(KeyCode::Char('F'), 'f'));
@@ -4436,39 +4582,39 @@ mod tests {
         };
 
         assert!(model_picker_route_is_recommended(
-            "gpt-5.5",
+            jcode_provider_core::DEFAULT_OPENAI_MODEL,
             &openai_oauth_route
         ));
         assert!(!model_picker_route_is_recommended(
-            "gpt-5.5",
+            jcode_provider_core::DEFAULT_OPENAI_MODEL,
             &openai_api_key_route
         ));
         assert!(!model_picker_route_is_recommended(
-            "gpt-5.5",
+            jcode_provider_core::DEFAULT_OPENAI_MODEL,
             &copilot_route
         ));
         assert!(!model_picker_route_is_recommended(
-            "gpt-5.5",
+            jcode_provider_core::DEFAULT_OPENAI_MODEL,
             &unavailable_openai_oauth_route,
         ));
 
-        // Current policy (see jcode-provider-core): claude-opus-4-8 is the
-        // recommended Anthropic flagship; older Opus and OpenRouter/Copilot
-        // routes are not recommended.
+        // Recommendations follow the curated defaults (see jcode-provider-core):
+        // the default Claude flagship is recommended; older Opus and
+        // OpenRouter/Copilot routes are not.
         assert!(model_picker_route_is_recommended(
-            "claude-opus-4-8",
-            &claude_oauth_route,
-        ));
-        assert!(!model_picker_route_is_recommended(
-            "claude-opus-4-7",
+            jcode_provider_core::DEFAULT_CLAUDE_MODEL,
             &claude_oauth_route,
         ));
         assert!(!model_picker_route_is_recommended(
             "claude-opus-4-8",
+            &claude_oauth_route,
+        ));
+        assert!(!model_picker_route_is_recommended(
+            jcode_provider_core::DEFAULT_CLAUDE_MODEL,
             &claude_openrouter_route,
         ));
         assert!(!model_picker_route_is_recommended(
-            "claude-opus-4-8",
+            jcode_provider_core::DEFAULT_CLAUDE_MODEL,
             &copilot_route,
         ));
 
