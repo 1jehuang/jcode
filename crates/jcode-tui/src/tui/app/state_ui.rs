@@ -9,6 +9,7 @@ pub(super) struct RestoredReloadInput {
     pub pending_images: Vec<(String, String)>,
     pub submit_on_restore: bool,
     pub queued_messages: Vec<String>,
+    pub queued_commands: Vec<String>,
     pub hidden_queued_system_messages: Vec<String>,
     pub startup_status_notice: Option<String>,
     pub startup_display_message: Option<(String, String)>,
@@ -123,7 +124,7 @@ impl App {
             return;
         }
 
-        if crate::dictation::remember_last_focused_session(&session_id).is_ok() {
+        if crate::client_focus::remember_last_focused_session(&session_id).is_ok() {
             self.last_client_focus_recorded_at = Some(Instant::now());
             self.last_client_focus_session_id = Some(session_id);
         }
@@ -248,6 +249,7 @@ impl App {
         if self.input.is_empty()
             && self.pending_images.is_empty()
             && self.queued_messages.is_empty()
+            && self.queued_commands.is_empty()
             && self.hidden_queued_system_messages.is_empty()
             && self.interleave_message.is_none()
             && self.pending_soft_interrupts.is_empty()
@@ -339,6 +341,7 @@ impl App {
                 })).collect::<Vec<_>>(),
                 "submit_on_restore": resume_prompt.is_some(),
                 "queued_messages": queued_messages,
+                "queued_commands": self.queued_commands,
                 "hidden_queued_system_messages": hidden_queued_system_messages,
                 "interleave_message": self.interleave_message,
                 "pending_soft_interrupts": self.pending_soft_interrupts,
@@ -435,6 +438,16 @@ impl App {
                 .unwrap_or(false);
             let queued_messages = value
                 .get("queued_messages")
+                .and_then(|v| v.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let queued_commands = value
+                .get("queued_commands")
                 .and_then(|v| v.as_array())
                 .map(|items| {
                     items
@@ -585,6 +598,7 @@ impl App {
                 pending_images,
                 submit_on_restore,
                 queued_messages,
+                queued_commands,
                 hidden_queued_system_messages,
                 startup_status_notice,
                 startup_display_message,
@@ -619,6 +633,7 @@ impl App {
             pending_images: Vec::new(),
             submit_on_restore: false,
             queued_messages: Vec::new(),
+            queued_commands: Vec::new(),
             hidden_queued_system_messages: Vec::new(),
             startup_status_notice: None,
             startup_display_message: None,

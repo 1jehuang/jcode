@@ -127,7 +127,22 @@ pub(super) async fn create_headless_session(
         // the *outcome*, not whether `set_model` returned Ok: a provider that
         // cannot switch is fine as long as it already serves the requested model,
         // and a switch that "succeeds" onto a different model is not.
-        let switch_error = new_agent.set_model(&model_request).err();
+        let mut switch_error = new_agent.set_model(&model_request).err();
+        // The inherited route can name a credential this process no longer
+        // has (the coordinator's session predates a credential-type change).
+        // Keep the requested model on the credential that does exist instead
+        // of refusing the spawn; the outcome check below still guards the model.
+        if let Some(error) = switch_error.as_ref()
+            && let Some((fallback, _)) =
+                crate::provider::stale_credential_route_fallback(&model_request)
+        {
+            crate::logging::warn(&format!(
+                "Headless session route '{model_request}' is not usable ({error}); retrying via '{fallback}'"
+            ));
+            if new_agent.set_model(&fallback).is_ok() {
+                switch_error = None;
+            }
+        }
         if let Some(error) = switch_error.as_ref() {
             crate::logging::warn(&format!(
                 "Failed to set headless session model override '{model}' (request '{model_request}'): {error}"

@@ -757,6 +757,17 @@ fn build_persistent_header_with_auth(
             }
         }
         lines.push(Line::from(spans).alignment(align));
+    } else if is_remote && server_name.is_some() && app.remote_startup_phase_active() {
+        // The session name arrives with the server's History event. Hold the
+        // row now so the header does not grow by a line (and shove the whole
+        // layout down) when it lands a few dozen milliseconds later.
+        lines.push(
+            Line::from(Span::styled(
+                "client: connecting…".to_string(),
+                Style::default().fg(dim_color()),
+            ))
+            .alignment(align),
+        );
     } else if server_name.is_none() {
         lines.push(
             Line::from(Span::styled(
