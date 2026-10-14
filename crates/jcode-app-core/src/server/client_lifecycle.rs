@@ -1273,6 +1273,7 @@ pub(super) async fn handle_client(
                         info.current_tool_name = None;
                     }
                 }
+                let peer_content = content.clone();
                 start_processing_message(
                     ProcessingMessage {
                         id,
@@ -1301,6 +1302,20 @@ pub(super) async fn handle_client(
                     },
                 )
                 .await;
+                // Other windows attached to this session only see the turn's
+                // stream events, never the message that started it. Tell them
+                // so the prompt (or auto-poke notice) shows up everywhere.
+                if processing_message_id == Some(id) && !peer_content.trim().is_empty() {
+                    super::state::fanout_peer_client_event(
+                        &swarm_members,
+                        &client_session_id,
+                        &client_connection_id,
+                        ServerEvent::PeerUserMessage {
+                            content: peer_content,
+                        },
+                    )
+                    .await;
+                }
             }
 
             Request::Cancel { id } => {
@@ -1338,6 +1353,7 @@ pub(super) async fn handle_client(
                 content,
                 images,
                 urgent,
+                client_id,
             } => {
                 // A soft interrupt has somewhere to go only while a turn is
                 // active. When the session is idle, queueing it would strand
@@ -1365,6 +1381,18 @@ pub(super) async fn handle_client(
                     start
                 };
                 if start_idle_turn {
+                    // The interrupt becomes the new turn's prompt, so the
+                    // model sees it before anything else. A caller tracking it
+                    // by id must still learn that it was picked up.
+                    if let Some(client_id) = client_id {
+                        let _ = client_event_tx.send(ServerEvent::SoftInterruptInjected {
+                            content: content.clone(),
+                            display_role: None,
+                            point: "turn_start".to_string(),
+                            tools_skipped: None,
+                            client_ids: vec![client_id],
+                        });
+                    }
                     start_processing_message(
                         ProcessingMessage {
                             id,
@@ -1405,16 +1433,25 @@ pub(super) async fn handle_client(
                         content,
                         images,
                         urgent,
-                        SoftInterruptSource::User,
+                        client_id,
                         &session_control,
                         &client_event_tx,
                     );
                 }
             }
 
-            Request::CancelSoftInterrupts { id } => {
-                clear_soft_interrupts(id, &client_session_id, &session_control, &client_event_tx);
-            }
+            Request::CancelSoftInterrupts { id, client_ids } => match client_ids {
+                Some(client_ids) => cancel_soft_interrupts_by_id(
+                    id,
+                    &client_session_id,
+                    &client_ids,
+                    &session_control,
+                    &client_event_tx,
+                ),
+                None => {
+                    clear_soft_interrupts(id, &client_session_id, &session_control, &client_event_tx)
+                }
+            },
 
             Request::BackgroundTool { id } => {
                 move_tool_to_background(id, &session_control, &client_event_tx);
@@ -1589,7 +1626,7 @@ pub(super) async fn handle_client(
             }
 
             Request::Ping { id } => {
-                let json = encode_event(&ServerEvent::Pong { id, native_ssh_protocol: Some(1), capabilities: vec!["session_tools".into()] });
+                let json = encode_event(&ServerEvent::Pong { id, native_ssh_protocol: Some(1), capabilities: vec!["session_tools".into(), "soft_interrupt_ids".into(), "runtime_commands".into()] });
                 let mut w = writer.lock().await;
                 if w.write_all(json.as_bytes()).await.is_err() {
                     break;
@@ -1610,6 +1647,7 @@ pub(super) async fn handle_client(
                     id,
                     &client_session_id,
                     client_is_processing,
+                    session_control.pending_soft_interrupt_count(),
                     &sessions,
                     &writer,
                 )
@@ -1823,9 +1861,12 @@ pub(super) async fn handle_client(
                         &swarm_event_tx,
                     )
                     .await;
-                    if let Some(snapshot) = try_available_models_snapshot(&agent) {
-                        last_available_models_snapshot = Some(snapshot);
-                    }
+                    // No catalog dedup baseline here. A fresh subscribe sends
+                    // no catalog to the client (History does, and GetHistory
+                    // records the baseline right after). Building the snapshot
+                    // here cost ~200ms on a cold server and sat directly in
+                    // front of the client's GetHistory, delaying first paint.
+                    last_available_models_snapshot = None;
                 }
                 client_subscribed = true;
                 provisional_session = false;
@@ -2018,8 +2059,25 @@ pub(super) async fn handle_client(
                 handle_set_model(id, model, &agent, &client_event_tx).await;
             }
 
-            Request::SetRoute { id, selection } => {
-                handle_set_route(id, selection, &agent, &client_event_tx).await;
+            Request::SetRoute { id, selection, automatic_failover } => {
+                handle_set_route(id, selection, automatic_failover, &agent, &client_event_tx).await;
+            }
+
+            Request::SetAgentModel { id, target, model, global } => {
+                let result = if global {
+                    super::client_actions::set_global_agent_model(
+                        &agent, &client_session_id, &target, model,
+                    ).await
+                } else {
+                    super::client_actions::set_session_agent_model(
+                        &agent, &client_session_id, &target, model,
+                    ).await
+                };
+                let event = match result {
+                    Ok(overrides) => ServerEvent::AgentModelsChanged { id, session_id: client_session_id.clone(), overrides },
+                    Err(error) => ServerEvent::Error { id, message: error.to_string(), retry_after_secs: None },
+                };
+                let _ = client_event_tx.send(event);
             }
 
             Request::SetSubagentModel { id, model } => {
@@ -2276,6 +2334,72 @@ pub(super) async fn handle_client(
                 let _ = client_event_tx.send(ServerEvent::Done { id });
             }
 
+            Request::RuntimeCommand { id, command, args } => {
+                let result: anyhow::Result<(serde_json::Value, String)> = async {
+                    let parsed: jcode_harness_api::RuntimeCommand = serde_json::from_value(serde_json::json!(command))?;
+                    if parsed == jcode_harness_api::RuntimeCommand::ServerReload {
+                        if !args.is_empty() { anyhow::bail!("Server reload accepts no arguments. Forced reload is intentionally not exposed."); }
+                        let _ = client_event_tx.send(ServerEvent::RuntimeCommandResult { id, command: command.clone(),
+                            data: serde_json::json!({"requested": true, "force": false}),
+                            message: "Requested a state-preserving server upgrade if a newer binary is available. Watch reload progress for completion.".into() });
+                        handle_reload(id, false, &client_session_id, &agent, &swarm_members, &client_event_tx).await;
+                        return Ok((serde_json::Value::Null, String::new()));
+                    }
+                    if matches!(parsed, jcode_harness_api::RuntimeCommand::Continue | jcode_harness_api::RuntimeCommand::ResumeAll) {
+                        if !args.is_empty() { anyhow::bail!("This command accepts no arguments"); }
+                        let (tx, mut rx) = mpsc::unbounded_channel();
+                        super::client_actions::handle_resume_all_sessions(id, &sessions, &swarm_members, &swarms_by_id,
+                            &event_history, &event_counter, &swarm_event_tx, &tx).await;
+                        while let Ok(event) = rx.try_recv() {
+                            if let ServerEvent::ResumeAllResult { resumed, skipped, message, resumed_sessions, .. } = event {
+                                return Ok((serde_json::json!({"resumed": resumed, "skipped": skipped, "resumed_sessions": resumed_sessions}), message));
+                            }
+                        }
+                        anyhow::bail!("Runtime did not report continuation outcome");
+                    }
+                    if parsed == jcode_harness_api::RuntimeCommand::RefreshModelList {
+                        if !args.is_empty() { anyhow::bail!("This command accepts no arguments"); }
+                        provider.refresh_model_catalog().await?;
+                        crate::bus::Bus::global().publish_models_updated();
+                        let guard = agent.try_lock().map_err(|_| anyhow::anyhow!("Catalog refreshed, but session is busy. Open the model picker after the turn."))?;
+                        let data = serde_json::json!({"refreshed": true, "models": guard.available_models_for_switching(), "routes": guard.model_routes()});
+                        return Ok((data, "Provider model catalog refreshed.".into()));
+                    }
+                    if parsed == jcode_harness_api::RuntimeCommand::Swarm {
+                        if let Some(enabled) = super::runtime_commands::boolean_action(&args, swarm_enabled, false)? {
+                            if reject_if_agent_busy_for_request(id, "runtime_command", &client_session_id, client_is_processing, &agent, &client_event_tx) {
+                                return Ok((serde_json::Value::Null, String::new()));
+                            }
+                            let (tx, mut rx) = mpsc::unbounded_channel();
+                            handle_set_feature(id, crate::protocol::FeatureToggle::Swarm, enabled, &agent, &client_session_id, &friendly_name,
+                                &mut swarm_enabled, &swarm_members, &swarms_by_id, &swarm_coordinators,
+                                &channel_subscriptions, &channel_subscriptions_by_session, &swarm_plans, &tx).await;
+                            while let Ok(event) = rx.try_recv() {
+                                if let ServerEvent::Error { message, .. } = event { anyhow::bail!("{message}"); }
+                            }
+                        }
+                        let members = swarm_members.read().await;
+                        let member = members.get(&client_session_id);
+                        let data = serde_json::json!({"enabled": swarm_enabled, "config_default": crate::config::config().features.swarm,
+                            "swarm_id": member.and_then(|m| m.swarm_id.as_deref()), "role": member.map(|m| &m.role)});
+                        return Ok((data.clone(), serde_json::to_string_pretty(&data)?));
+                    }
+                    if parsed == jcode_harness_api::RuntimeCommand::Subscription {
+                        if !args.is_empty() && args != ["status".to_string()] { anyhow::bail!("Usage: subscription [status]"); }
+                        let data = if crate::subscription_catalog::has_credentials() {
+                            serde_json::to_value(crate::subscription_api::fetch_subscription_me().await?)?
+                        } else { serde_json::json!({"signed_in": false, "status": "not_signed_in"}) };
+                        return Ok((data.clone(), serde_json::to_string_pretty(&data)?));
+                    }
+                    let mut guard = agent.try_lock().map_err(|_| anyhow::anyhow!("Session is busy. Retry this runtime command after the current turn."))?;
+                    super::runtime_commands::execute(&mut guard, parsed, &args, swarm_enabled, serde_json::Value::Null).await
+                }.await;
+                match result {
+                    Ok((data, message)) if !data.is_null() => { let _ = client_event_tx.send(ServerEvent::RuntimeCommandResult { id, command, data, message }); },
+                    Ok(_) => {},
+                    Err(error) => { let _ = client_event_tx.send(ServerEvent::Error { id, message: error.to_string(), retry_after_secs: None }); },
+                }
+            }
             Request::AgentContext { id } => {
                 let _ = client_event_tx.send(ServerEvent::Done { id });
             }
@@ -3459,9 +3583,12 @@ async fn start_processing_message(
     )
     .await;
 
-    let start_message_index = {
+    let (start_message_index, pending_queue) = {
         let agent_guard = agent.lock().await;
-        agent_guard.message_count()
+        (
+            agent_guard.message_count(),
+            agent_guard.soft_interrupt_queue(),
+        )
     };
     let agent = Arc::clone(agent);
     let report_agent = Arc::clone(&agent);
@@ -3535,6 +3662,14 @@ async fn start_processing_message(
                     .and_then(|stream_error| stream_error.retry_after_secs),
             },
         };
+        // Interrupts still queued here were never seen by this turn. Report
+        // them on the ordered stream so a client can reconcile its own view.
+        // Usually zero (the turn injects everything it can before ending), so
+        // skip the event then and let clients default to zero.
+        let pending = pending_queue.lock().map(|queue| queue.len()).unwrap_or(0);
+        if pending > 0 {
+            let _ = tx.send(ServerEvent::SoftInterruptQueue { pending });
+        }
         let _ = tx.send(terminal_event);
         let _ = done_tx.send((id, result, completion_report));
     }));
@@ -3790,22 +3925,60 @@ fn queue_soft_interrupt(
     content: String,
     images: Vec<(String, String)>,
     urgent: bool,
-    source: SoftInterruptSource,
+    client_id: Option<String>,
     session_control: &SessionControlHandle,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
+    let source = SoftInterruptSource::User;
     let content_bytes = content.len();
     let content_chars = content.chars().count();
     crate::logging::info(&format!(
-        "SERVER_SOFT_INTERRUPT_QUEUE_REQUEST id={} session={} source={:?} urgent={} content_bytes={} content_chars={}",
-        id, session_control.session_id, source, urgent, content_bytes, content_chars
+        "SERVER_SOFT_INTERRUPT_QUEUE_REQUEST id={} session={} source={:?} urgent={} content_bytes={} content_chars={} client_id={}",
+        id,
+        session_control.session_id,
+        source,
+        urgent,
+        content_bytes,
+        content_chars,
+        client_id.is_some()
     ));
-    let queued = session_control.queue_soft_interrupt(content, images, urgent, source);
+    let queued =
+        session_control.queue_soft_interrupt_with_id(content, images, urgent, source, client_id);
     let ack_queued = client_event_tx.send(ServerEvent::Ack { id }).is_ok();
     crate::logging::info(&format!(
         "SERVER_SOFT_INTERRUPT_QUEUE_RESULT id={} session={} queued={} ack_queued={}",
         id, session_control.session_id, queued, ack_queued
     ));
+}
+
+fn cancel_soft_interrupts_by_id(
+    id: u64,
+    session_id: &str,
+    client_ids: &[String],
+    session_control: &SessionControlHandle,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    let (mut cancelled, mut not_queued) = session_control.cancel_soft_interrupts_by_id(client_ids);
+    // An interrupt sent while no live queue was reachable is parked on disk
+    // until the session restores it. It is just as cancellable.
+    if !not_queued.is_empty() {
+        match crate::soft_interrupt_store::remove_by_client_ids(session_id, &not_queued) {
+            Ok(removed) if !removed.is_empty() => {
+                not_queued.retain(|id| !removed.contains(id));
+                cancelled.extend(removed);
+            }
+            Ok(_) => {}
+            Err(err) => crate::logging::warn(&format!(
+                "SERVER_SOFT_INTERRUPT_CANCEL_BY_ID_PERSISTED_FAILED id={} session={} error={}",
+                id, session_id, err
+            )),
+        }
+    }
+    let _ = client_event_tx.send(ServerEvent::SoftInterruptsCancelled {
+        id,
+        cancelled,
+        not_queued,
+    });
 }
 
 fn clear_soft_interrupts(
@@ -3845,8 +4018,23 @@ fn move_tool_to_background(
         "SERVER_BACKGROUND_TOOL_REQUEST id={} session={}",
         id, session_control.session_id
     ));
+    let running = crate::running_tool_registry::current(&session_control.session_id);
+    // Fire regardless: the agent resets the signal before every tool wait, so
+    // an idle fire is harmless, and this keeps the pre-#1778 behavior.
     let signalled = session_control.request_background_current_tool();
     let ack_queued = client_event_tx.send(ServerEvent::Ack { id }).is_ok();
+    let running = running.filter(|_| signalled);
+    let moved = running.is_some();
+    let (tool_call_id, tool_name) = match running {
+        Some(tool) => (Some(tool.call_id), Some(tool.name)),
+        None => (None, None),
+    };
+    let _ = client_event_tx.send(ServerEvent::BackgroundToolResult {
+        id,
+        moved,
+        tool_call_id,
+        tool_name,
+    });
     crate::logging::info(&format!(
         "SERVER_BACKGROUND_TOOL_RESULT id={} session={} signalled={} ack_queued={}",
         id, session_control.session_id, signalled, ack_queued

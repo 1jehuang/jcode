@@ -100,6 +100,7 @@ fn captured_request_for_host(host: &str, conversation_id: &str) -> String {
             tx,
             Arc::new(Mutex::new(None)),
             "m".to_string(),
+            false,
         )
         .await;
         while events.recv().await.is_some() {}
@@ -437,6 +438,8 @@ fn named_azure_openai_profile_keeps_chat_protocol_and_named_route() {
 #[test]
 fn builtin_azure_does_not_send_global_reasoning_default_to_unknown_deployment() {
     let _lock = ENV_LOCK.lock();
+    let home = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set("JCODE_HOME", home.path().to_str().unwrap());
     let (api_base, captured) = spawn_single_response_chat_server();
     let _namespace = EnvVarGuard::set("JCODE_OPENROUTER_CACHE_NAMESPACE", "azure-openai");
     let _base = EnvVarGuard::set("JCODE_OPENROUTER_API_BASE", api_base);

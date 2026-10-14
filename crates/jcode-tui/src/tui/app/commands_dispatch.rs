@@ -66,6 +66,7 @@ pub(super) fn ssh_unsupported_command(input: &str) -> bool {
             | "/rebuild"
             | "/update"
             | "/update-sim"
+            | "/update-rehearsal"
             | "/onboarding-sim"
             | "/onboarding-preview"
             | "/usage"
@@ -244,6 +245,7 @@ fn dispatch_single_local_command(app: &mut App, trimmed: &str) -> bool {
         || super::state_ui::handle_info_command(app, trimmed)
         || super::auth::handle_auth_command(app, trimmed)
         || super::tui_lifecycle_runtime::handle_dev_command(app, trimmed)
+        || app.handle_update_rehearsal_command(trimmed)
 }
 
 /// Environment-mode tests run in their own process, so parallel local-mode

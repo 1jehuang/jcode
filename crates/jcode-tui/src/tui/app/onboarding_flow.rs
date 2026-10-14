@@ -215,10 +215,10 @@ impl ImportReview {
         self.telemetry = None;
     }
 
-    /// Open the telemetry settings sub-page, highlighting "Send everything" so
-    /// the most helpful option is the default commit.
+    /// Open the telemetry settings sub-page, highlighting "No prompts or
+    /// transcripts" (usage stats only) as the default commit.
     pub(crate) fn open_telemetry(&mut self) {
-        self.telemetry = Some(TelemetryLevel::Everything);
+        self.telemetry = Some(TelemetryLevel::NoContent);
     }
 
     /// Close the telemetry sub-page and return to the summary screen with the
@@ -247,8 +247,9 @@ impl ImportReview {
         self.continue_focused = self.summary_pill == SummaryPill::Continue;
     }
 
-    /// Focus a specific summary pill (used by the onboarding simulator to land
-    /// directly on a given screen state).
+    /// Focus a specific summary pill (used by tests to land directly on a
+    /// given screen state).
+    #[cfg(test)]
     pub(crate) fn focus_summary_pill(&mut self, pill: SummaryPill) {
         self.summary_pill = pill;
         self.continue_focused = pill == SummaryPill::Continue;
@@ -367,10 +368,10 @@ impl ImportReview {
     }
 
     /// Whether the decision countdown has elapsed. Paused while the telemetry
-    /// settings sub-page is open so the screen never commits the import out
-    /// from under a user who is reading it.
+    /// settings sub-page or the per-login "Import less" list is open, so the
+    /// screen never commits the import out from under a user who is choosing.
     pub(crate) fn timed_out(&self) -> bool {
-        self.telemetry.is_none() && self.shown_at.elapsed() >= DECISION_TIMEOUT
+        self.telemetry.is_none() && !self.choosing && self.shown_at.elapsed() >= DECISION_TIMEOUT
     }
 }
 
@@ -415,7 +416,10 @@ pub(crate) enum OnboardingPhase {
     },
     /// Action-only picker offering the suggested review or a blank new session.
     StartChoice { shown_at: Instant },
-    /// Existing prompt-suggestion cards (resting / "No" state).
+    /// Legacy prompt-suggestion cards state. The live flow no longer enters it
+    /// (it lands on the regular new-session screen instead), but replay, golden
+    /// and onboarding-graph fixtures still exercise it.
+    #[cfg_attr(not(test), allow(dead_code))]
     Suggestions,
     /// Flow finished; nothing onboarding-specific to render.
     Done,

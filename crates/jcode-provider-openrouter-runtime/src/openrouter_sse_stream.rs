@@ -1,5 +1,7 @@
 use super::*;
+use futures::Stream;
 use jcode_provider_openrouter::stream::OpenRouterStream;
+use std::pin::Pin;
 
 fn local_endpoint_troubleshooting_hint(api_base: &str, model: &str) -> &'static str {
     let lower = api_base.to_ascii_lowercase();
@@ -61,10 +63,11 @@ pub(super) async fn run_stream_with_retries(
     send_openrouter_headers: bool,
     conversation_id: String,
     request: Value,
-    responses_api: bool,
+    azure_responses: bool,
     tx: mpsc::Sender<Result<StreamEvent>>,
     provider_pin: Arc<Mutex<Option<ProviderPin>>>,
     model: String,
+    responses_api: bool,
 ) {
     let mut last_error = None;
     let mut next_retry_delay = None;
@@ -123,10 +126,11 @@ pub(super) async fn run_stream_with_retries(
             send_openrouter_headers,
             &conversation_id,
             request.clone(),
-            responses_api,
+            azure_responses,
             attempt_tx,
             Arc::clone(&provider_pin),
             model.clone(),
+            responses_api,
         )
         .await
         {
@@ -138,8 +142,7 @@ pub(super) async fn run_stream_with_retries(
                 let saw_output = attempt_guard.finish().await;
                 // Full anyhow chain ({:#}) so a `.context(...)`-wrapped transport
                 // cause (e.g. TLS BadRecordMac) is visible to the classifier.
-                let error_str = format!("{e:#}").to_lowercase();
-                if is_retryable_error(&error_str) && attempt + 1 < max_retries {
+                if retryable_stream_failure(&e) && attempt + 1 < max_retries {
                     if saw_output {
                         // Partial output already reached the consumer; tell it
                         // to discard the partial attempt so the retried
@@ -193,10 +196,11 @@ async fn stream_response(
     send_openrouter_headers: bool,
     conversation_id: &str,
     request: Value,
-    responses_api: bool,
+    azure_responses: bool,
     tx: mpsc::Sender<Result<StreamEvent>>,
     provider_pin: Arc<Mutex<Option<ProviderPin>>>,
     model: String,
+    responses_api: bool,
 ) -> Result<()> {
     use jcode_message_types::ConnectionPhase;
     let _ = tx
@@ -207,12 +211,12 @@ async fn stream_response(
     let connect_start = std::time::Instant::now();
     let stream_idle_timeout = jcode_base::provider::stream_idle_timeout();
 
-    let route = if responses_api {
+    let route = if azure_responses || responses_api {
         "responses"
     } else {
         "chat/completions"
     };
-    let request_kind = if responses_api {
+    let request_kind = if azure_responses {
         "Azure OpenAI Responses"
     } else {
         "OpenAI-compatible chat"
@@ -244,7 +248,7 @@ async fn stream_response(
     )
     .await
     .with_context(|| {
-        let hint = if responses_api {
+        let hint = if azure_responses {
             "Hint: check the Azure deployment and that the endpoint supports /openai/v1/responses."
         } else {
             local_endpoint_troubleshooting_hint(&api_base, &model)
@@ -269,7 +273,7 @@ async fn stream_response(
         let status = response.status();
         let retry_after = jcode_provider_core::retry_after::retry_after(response.headers());
         let body = jcode_base::util::http_error_body(response, "HTTP error").await;
-        let hint = if responses_api {
+        let hint = if azure_responses {
             match status.as_u16() {
                 401 | 402 | 403 | 500..=599 => http_status_hint(status.as_u16(), &api_base, &model),
                 429 => {
@@ -302,8 +306,12 @@ async fn stream_response(
         }))
         .await;
 
-    let mut stream: EventStream = if responses_api {
+    let mut stream: Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>> = if azure_responses {
         Box::pin(jcode_provider_openai::stream::OpenAIResponsesStream::new(
+            response.bytes_stream(),
+        ))
+    } else if responses_api {
+        Box::pin(super::opencode_go_responses::ResponsesStream::new(
             response.bytes_stream(),
         ))
     } else {
@@ -348,9 +356,13 @@ async fn stream_response(
                 );
             }
         };
-        if responses_api {
-            if let StreamEvent::Error { message, .. } = &event {
-                anyhow::bail!("Azure OpenAI Responses stream error: {message}");
+        if azure_responses {
+            if let StreamEvent::Error {
+                message,
+                retry_after_secs,
+            } = &event
+            {
+                return Err(azure_response_failure(message, *retry_after_secs));
             }
             if matches!(event, StreamEvent::MessageEnd { .. }) {
                 saw_message_end = true;
@@ -364,12 +376,99 @@ async fn stream_response(
         }
     }
 
-    if responses_api && !saw_message_end {
-        anyhow::bail!("Azure OpenAI Responses stream ended before response.completed");
+    if azure_responses && !saw_message_end {
+        return Err(anyhow::Error::new(AzureResponseFailure {
+            retryable: true,
+            source: anyhow::anyhow!(
+                "Azure OpenAI Responses stream ended before response.completed"
+            ),
+        }));
     }
 
     Ok(())
 }
+
+/// An Azure protocol failure is not necessarily a transient transport failure.
+/// Keep its retry decision separate from the legacy string classifier, and
+/// retain the shared retry-hint error as a source for deadline extraction.
+#[derive(Debug)]
+struct AzureResponseFailure {
+    retryable: bool,
+    source: anyhow::Error,
+}
+
+impl std::fmt::Display for AzureResponseFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.source, formatter)
+    }
+}
+
+impl std::error::Error for AzureResponseFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
+fn retryable_stream_failure(error: &anyhow::Error) -> bool {
+    if let Some(failure) = error.downcast_ref::<AzureResponseFailure>() {
+        return failure.retryable;
+    }
+    // Preserve the existing classifier and full transport context for every
+    // non-Azure failure, including HTTP errors and reqwest body errors.
+    is_retryable_error(&format!("{error:#}").to_lowercase())
+}
+
+fn azure_response_failure(message: &str, retry_after_secs: Option<u64>) -> anyhow::Error {
+    let lower = message.to_ascii_lowercase();
+    // The shared Responses parser preserves error type/code in the message.
+    // Permanent failures must win even if their prose mentions a timeout or
+    // overload, or the server supplies a retry hint.
+    let permanent = [
+        "invalid_request",
+        "invalid_argument",
+        "content_filter",
+        "content_policy",
+        "authentication",
+        "permission_denied",
+        "insufficient_quota",
+        "billing",
+        "unauthorized",
+        "forbidden",
+        "model_not_found",
+        "deployment_not_found",
+        "tool argument snapshot differs",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker));
+    let transient = [
+        "rate_limit",
+        "rate limit",
+        "server_error",
+        "internal_error",
+        "internal server error",
+        "service_unavailable",
+        "overloaded",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+        || jcode_provider_core::is_transient_transport_error(&lower);
+    let retry_after = retry_after_secs.and_then(|seconds| {
+        jcode_provider_core::retry_after::retry_after_body(
+            &serde_json::json!({"retry_after_seconds": seconds}).to_string(),
+        )
+    });
+    anyhow::Error::new(AzureResponseFailure {
+        retryable: !permanent && (transient || retry_after.is_some()),
+        source: jcode_provider_core::retry_after::error_with_retry_after(
+            format!("Azure OpenAI Responses stream error: {message}"),
+            retry_after,
+        ),
+    })
+}
+
+#[cfg(test)]
+#[path = "azure_retry_tests.rs"]
+mod azure_retry_tests;
 
 /// Extract the HTTP status code reported in a formatted provider error string.
 ///

@@ -389,15 +389,15 @@ fn globally_preferred_model_rank(model: &str) -> (u8, usize) {
     if normalized == claude_default {
         return (2, 0);
     }
-    if let Some(position) = crate::provider::ALL_CLAUDE_MODELS
+    if let Some(position) = normalized_preference_order(crate::provider::ALL_CLAUDE_MODELS)
         .iter()
-        .position(|candidate| normalize_model_for_preference(candidate) == normalized)
+        .position(|candidate| *candidate == normalized)
     {
         return (3, position);
     }
-    if let Some(position) = crate::provider::ALL_OPENAI_MODELS
+    if let Some(position) = normalized_preference_order(crate::provider::ALL_OPENAI_MODELS)
         .iter()
-        .position(|candidate| normalize_model_for_preference(candidate) == normalized)
+        .position(|candidate| *candidate == normalized)
     {
         return (4, position);
     }
@@ -483,18 +483,46 @@ fn provider_preferred_model_orders(
 /// preference tiers. Lower is more preferred: an earlier family tier always
 /// outranks a later one, and within a tier the curated position decides.
 /// Unknown models sort last so they only win when nothing curated matches.
-fn preferred_model_rank(orders: &[&[&str]], model: &str) -> usize {
+fn preferred_model_rank(orders: &[&'static [&'static str]], model: &str) -> usize {
     const TIER_STRIDE: usize = 10_000;
     let normalized = normalize_model_for_preference(model);
     for (tier, order) in orders.iter().enumerate() {
-        if let Some(position) = order
+        if let Some(position) = normalized_preference_order(order)
             .iter()
-            .position(|candidate| normalize_model_for_preference(candidate) == normalized)
+            .position(|candidate| *candidate == normalized)
         {
             return tier * TIER_STRIDE + position;
         }
     }
     usize::MAX
+}
+
+/// `order` with every id passed through [`normalize_model_for_preference`],
+/// memoized per curated list. Ranking a catalog compares every catalog model
+/// against every curated id; re-normalizing the curated side each time made a
+/// single OpenRouter catalog ranking cost ~80ms (it runs on every new session).
+/// Curated orders are `&'static` constants, so the slice address identifies
+/// them.
+fn normalized_preference_order(order: &'static [&'static str]) -> std::sync::Arc<Vec<String>> {
+    type OrderCache =
+        std::sync::Mutex<std::collections::HashMap<(usize, usize), std::sync::Arc<Vec<String>>>>;
+    static CACHE: std::sync::LazyLock<OrderCache> = std::sync::LazyLock::new(Default::default);
+    let key = (order.as_ptr() as usize, order.len());
+    if let Ok(cache) = CACHE.lock()
+        && let Some(hit) = cache.get(&key)
+    {
+        return hit.clone();
+    }
+    let normalized = std::sync::Arc::new(
+        order
+            .iter()
+            .map(|candidate| normalize_model_for_preference(candidate))
+            .collect::<Vec<_>>(),
+    );
+    if let Ok(mut cache) = CACHE.lock() {
+        cache.insert(key, normalized.clone());
+    }
+    normalized
 }
 
 /// Normalize a model id for flagship-preference comparison: lowercase, drop a
@@ -1282,7 +1310,35 @@ fn apply_auth_provider_runtime(provider_id: Option<&str>) -> Option<String> {
 }
 
 fn direct_provider_activation(provider_id: &str) -> Option<ProviderActivation> {
-    let (runtime_id, active) = match normalized_login_provider_id(provider_id)? {
+    let (runtime_id, active) = direct_provider_runtime_ids(provider_id)?;
+    // A login must not override an explicit configured default for every
+    // future session. Selecting the initial provider writes process-global env
+    // (JCODE_ACTIVE_PROVIDER + JCODE_INITIAL_PROVIDER_EXPLICIT), and in the
+    // shared daemon that env outranks `[provider] default_model`, so logging
+    // into OpenAI once made every new session start on GPT instead of the
+    // configured Claude default. The session that performed the login still
+    // switches models through the session-local auth-change path.
+    if config_has_explicit_default_provider() {
+        return Some(ProviderActivation::new(
+            runtime_id,
+            crate::provider::activation::RuntimeSelection::Unchanged,
+        ));
+    }
+    Some(ProviderActivation::initial(runtime_id, active))
+}
+
+fn config_has_explicit_default_provider() -> bool {
+    let provider_config = &crate::config::config().provider;
+    let non_empty = |value: &Option<String>| {
+        value
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+    };
+    non_empty(&provider_config.default_provider) || non_empty(&provider_config.default_model)
+}
+
+fn direct_provider_runtime_ids(provider_id: &str) -> Option<(RuntimeProviderId, ActiveProvider)> {
+    Some(match normalized_login_provider_id(provider_id)? {
         "claude" => (RuntimeProviderId::Claude, ActiveProvider::Claude),
         "claude-api" => (RuntimeProviderId::ClaudeApiKey, ActiveProvider::Claude),
         "openai" => (RuntimeProviderId::OpenAi, ActiveProvider::OpenAI),
@@ -1296,8 +1352,7 @@ fn direct_provider_activation(provider_id: &str) -> Option<ProviderActivation> {
         "antigravity" => (RuntimeProviderId::Antigravity, ActiveProvider::Antigravity),
         "grok-build" => (RuntimeProviderId::GrokBuild, ActiveProvider::OpenRouter),
         _ => return None,
-    };
-    Some(ProviderActivation::initial(runtime_id, active))
+    })
 }
 
 pub fn model_switch_request_for_provider_id(
@@ -1645,6 +1700,36 @@ mod tests {
                 "grok-build:grok-4.6"
             );
         }
+    }
+
+    #[test]
+    fn login_does_not_override_configured_default_provider_for_new_sessions() {
+        let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().expect("sandbox");
+        std::fs::write(
+            sandbox.root().join("config.toml"),
+            "[provider]\ndefault_model = \"claude-oauth:claude-opus-5-5\"\ndefault_provider = \"claude-oauth\"\n",
+        )
+        .expect("write config");
+        crate::config::invalidate_config_cache();
+        crate::env::set_var("JCODE_RUNTIME_PROVIDER", "claude");
+        crate::env::set_var("JCODE_ACTIVE_PROVIDER", "claude");
+        crate::env::remove_var("JCODE_INITIAL_PROVIDER_EXPLICIT");
+
+        let activation = activate_auth_change(&AuthActivationRequest::new(
+            None,
+            Some(AuthChanged::new("openai")),
+        ));
+
+        assert_eq!(activation.provider_id.as_deref(), Some("openai"));
+        assert_eq!(
+            std::env::var("JCODE_ACTIVE_PROVIDER").as_deref(),
+            Ok("claude"),
+            "logging into OpenAI must not retarget the daemon-wide initial provider"
+        );
+        assert!(std::env::var("JCODE_INITIAL_PROVIDER_EXPLICIT").is_err());
+
+        std::fs::remove_file(sandbox.root().join("config.toml")).ok();
+        crate::config::invalidate_config_cache();
     }
 
     #[test]

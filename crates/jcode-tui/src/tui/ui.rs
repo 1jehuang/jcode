@@ -126,6 +126,7 @@ use file_diff_ui::{
 };
 pub(crate) use header::capitalize;
 use inline_ui::{draw_inline_ui, inline_ui_height};
+pub(crate) use layout_support::{draw_side_panel_markdown, side_panel_dismiss_area};
 pub(crate) use memory_estimates::{debug_memory_profile, debug_side_panel_memory_profile};
 use memory_estimates::{estimate_prepared_chat_frame_bytes, estimate_prepared_messages_bytes};
 #[cfg(test)]
@@ -141,7 +142,6 @@ pub(crate) use messages::{
     render_swarm_message, render_system_message, render_tool_message, render_usage_message,
 };
 pub(crate) use output_style::adapt_buffer_for_emoji_preference;
-use pinned_ui::draw_side_panel_markdown;
 pub use pinned_ui::{
     SidePanelDebugStats, SidePanelMermaidProbe, SidePanelMermaidProbeRect,
     debug_probe_side_panel_mermaid,
@@ -1467,6 +1467,24 @@ pub fn last_layout_snapshot() -> Option<LayoutSnapshot> {
     }
 }
 
+/// First post-clear line while following the tail. Keep the full prepared
+/// transcript for scrollback, copying, and prompt navigation.
+fn terminal_clear_start(app: &dyn TuiState, prepared: &PreparedChatFrame) -> Option<usize> {
+    if app.auto_scroll_paused() || app.pending_history_anchor_lines_from_bottom().is_some() {
+        return None;
+    }
+    let index = app
+        .display_messages()
+        .iter()
+        .rposition(|msg| msg.role == "spacer")?;
+    let body = prepared
+        .sections
+        .iter()
+        .find(|section| section.kind == PreparedSectionKind::Body)?;
+    let boundary = body.prepared.message_boundaries.get(index)?;
+    Some(body.line_start + boundary.wrapped_len)
+}
+
 /// Record the prepared transcript frame the renderer just drew.
 pub(crate) fn set_last_chat_frame(frame: Arc<PreparedChatFrame>) {
     #[cfg(test)]
@@ -1738,7 +1756,9 @@ pub(crate) mod selection_highlight;
 #[path = "ui/url.rs"]
 mod url_regex_support;
 use self::copy_selection::{copy_point_from_snapshot, link_target_from_snapshot};
-use self::display_width::{display_col_slice, line_display_width};
+#[cfg(test)]
+use self::display_width::display_col_slice;
+use self::display_width::line_display_width;
 use self::draw_recovery::render_recovered_panic_frame;
 use self::profile::{profile_enabled, record_profile};
 
@@ -2631,6 +2651,18 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         return;
     }
 
+    if let Some(overlay) = app.commit_log_overlay() {
+        overlays::draw_commit_log_overlay(frame, area, overlay);
+        finalize_frame_metrics(
+            app,
+            total_start,
+            Duration::ZERO,
+            total_start.elapsed(),
+            None,
+        );
+        return;
+    }
+
     if let Some(scroll) = app.changelog_scroll() {
         overlays::draw_changelog_overlay(frame, area, scroll, app);
         finalize_frame_metrics(
@@ -3075,15 +3107,33 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
             .collect();
     }
     let prep_elapsed = prep_start.elapsed();
-    let content_height = prepared.total_wrapped_lines().max(1) as u16;
+    let clear_start = terminal_clear_start(app, &prepared);
+    // The pinned todo band consumes transcript rows too, including in a fresh
+    // session. Reserve it before packing the view so the first todo update
+    // cannot squeeze the user prompt out of the messages area.
+    let pinned_band_height = {
+        let width = chat_area
+            .width
+            .saturating_sub(u16::from(chat_scrollbar_visible));
+        let width = width.saturating_sub(left_aligned_content_inset(width, app.centered_mode()));
+        viewport::pinned_todo_band_lines(app, width, available_height.saturating_sub(fixed_height))
+            .0
+            .len()
+    };
+    let content_height = prepared
+        .total_wrapped_lines()
+        .saturating_sub(clear_start.unwrap_or(0))
+        .saturating_add(pinned_band_height)
+        .max(1)
+        .min(u16::MAX as usize) as u16;
 
     // Terminal-style clear (Ctrl+L): the trailing spacer makes every visible
     // transcript row blank, so a normal bottom-anchored layout would park the
     // status line and numbered prompt at the *bottom* of a screenful of
     // blanks. Collapse the messages area instead, exactly like a terminal
     // after `clear`: the prompt sits at the top and the history is one scroll
-    // away. Scrolling up, new output, or streaming all end the state (see
-    // `terminal_clear_collapsed`) and restore the normal layout.
+    // away. New output expands only the post-clear content. Scrolling up
+    // restores the full transcript layout.
     let terminal_clear_collapsed = !swarm_page_active && app.terminal_clear_collapsed();
     let content_height = if terminal_clear_collapsed {
         0
@@ -3095,7 +3145,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let use_packed = terminal_clear_collapsed
         || (!swarm_page_active
             && !side_panel_fullscreen
-            && content_height + fixed_height <= available_height);
+            && content_height.saturating_add(fixed_height) <= available_height);
 
     // Layout: messages (includes header), queued, status, notification, inline UI, gap, input, donut
     // All vertical chunks are within the chat_area (left column).

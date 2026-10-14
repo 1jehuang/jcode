@@ -5,8 +5,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 const SERVER_NOT_RUNNING: &str = "jcode server is not running; start it with jcode server start";
 
-fn map_socket_connection_error(err: anyhow::Error) -> anyhow::Error {
-    let server_is_unavailable = err.chain().any(|cause| {
+fn server_is_unavailable(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
         cause
             .downcast_ref::<std::io::Error>()
             .is_some_and(|io_err| {
@@ -15,9 +15,11 @@ fn map_socket_connection_error(err: anyhow::Error) -> anyhow::Error {
                     std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
                 )
             })
-    });
+    })
+}
 
-    if server_is_unavailable {
+fn map_socket_connection_error(err: anyhow::Error) -> anyhow::Error {
+    if server_is_unavailable(&err) {
         anyhow::anyhow!(SERVER_NOT_RUNNING)
     } else {
         err
@@ -25,6 +27,31 @@ fn map_socket_connection_error(err: anyhow::Error) -> anyhow::Error {
 }
 
 async fn connect_swarm_socket(path: &std::path::Path) -> Result<crate::transport::Stream> {
+    let first_error = match crate::server::connect_socket(path).await {
+        Ok(stream) => return Ok(stream),
+        Err(err) if server_is_unavailable(&err) => err,
+        Err(err) => return Err(err),
+    };
+
+    // A headless one-shot `jcode run` hosts its agent in-process, so there is
+    // no server on this socket for the swarm tool to use and `--socket X`
+    // never binds `X` by itself (issue #1748). The run registers an owned
+    // server spawner for exactly this moment: start an ephemeral server that
+    // lives as long as the run, then retry once. Interactive contexts register
+    // no owned spawner, so they keep the original error.
+    if !crate::server_spawn::on_demand_server_spawner_registered() {
+        return Err(map_socket_connection_error(first_error));
+    }
+
+    if let Err(spawn_error) = crate::server_spawn::ensure_on_demand_server().await {
+        crate::logging::warn(&format!(
+            "[tool:communicate] could not start a server for this run at {}: {:#}",
+            path.display(),
+            spawn_error
+        ));
+        return Err(map_socket_connection_error(first_error));
+    }
+
     crate::server::connect_socket(path)
         .await
         .map_err(map_socket_connection_error)

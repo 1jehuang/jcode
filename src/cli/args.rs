@@ -3,8 +3,10 @@ use clap::{Parser, Subcommand, ValueEnum};
 use super::provider_init::ProviderChoice;
 
 mod google;
+mod mcp;
 #[allow(unused_imports)]
 pub(crate) use google::{GoogleAccessTierArg, GoogleLoginArgs};
+pub(crate) use mcp::McpCommand;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 pub(crate) enum TranscriptModeArg {
@@ -85,9 +87,8 @@ pub(crate) struct Args {
     #[arg(long, global = true)]
     pub(crate) no_selfdev: bool,
 
-    /// Start the onboarding simulator on launch (same as `/onboarding-sim`).
-    /// Steps through every first-run onboarding screen with synthetic data;
-    /// never touches real auth state.
+    /// Rehearse first-run onboarding on launch: the real flow, as if jcode
+    /// were new on this machine (same as `/onboarding-sim`).
     #[arg(long = "onboarding-sim")]
     pub(crate) onboarding_sim: bool,
 
@@ -96,7 +97,13 @@ pub(crate) struct Args {
     #[arg(long = "update-sim")]
     pub(crate) update_sim: bool,
 
-    /// Custom socket path for server/client communication
+    /// Custom socket path for server/client communication.
+    ///
+    /// Clients dial this path instead of the shared daemon socket. A headless
+    /// `run` hosts its agent in-process, so nothing binds the path until a
+    /// tool needs a server (today: `swarm`); the first such tool starts a
+    /// temporary server here that exits with the run, leaving no daemon
+    /// behind on a one-off socket.
     #[arg(long, global = true)]
     pub(crate) socket: Option<String>,
 
@@ -143,6 +150,12 @@ pub(crate) struct Args {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum Command {
+    /// List configured MCP servers or manage remote-server OAuth credentials
+    Mcp {
+        #[command(subcommand)]
+        action: McpCommand,
+    },
+
     /// Start the agent server (background daemon)
     Serve {
         /// Internal: mark this server as temporary so it can self-clean when its owner exits.
@@ -369,6 +382,18 @@ pub(crate) enum Command {
         /// Target a specific live session instead of the active TUI
         #[arg(short = 'S', long)]
         session: Option<String>,
+    },
+
+    /// Run the desktop companion: opens URLs and terminals, global voice and
+    /// the lid override for the shared server, in this login session
+    Companion {
+        /// Report whether a companion is running and exit
+        #[arg(long)]
+        status: bool,
+
+        /// Do not run the global push-to-talk listener
+        #[arg(long)]
+        no_voice: bool,
     },
 
     /// Run configured dictation: send to last-focused jcode client or type raw text

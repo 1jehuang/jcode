@@ -82,6 +82,7 @@ fn test_soft_interrupt_images_roundtrip_and_legacy_default() -> Result<()> {
         content: "look at this".to_string(),
         images: vec![("image/png".to_string(), "ZmFrZQ==".to_string())],
         urgent: true,
+        client_id: None,
     };
     let json = serde_json::to_string(&req)?;
     let decoded = parse_request_json(&json)?;
@@ -107,6 +108,67 @@ fn test_soft_interrupt_images_roundtrip_and_legacy_default() -> Result<()> {
         return Err(anyhow!("wrong legacy request type"));
     };
     assert!(images.is_empty());
+    Ok(())
+}
+
+#[test]
+fn test_soft_interrupt_ids_wire_shape_and_legacy_defaults() -> Result<()> {
+    let req = Request::SoftInterrupt {
+        id: 4,
+        content: "steer".to_string(),
+        images: Vec::new(),
+        urgent: false,
+        client_id: Some("f1".to_string()),
+    };
+    assert_eq!(
+        serde_json::to_string(&req)?,
+        r#"{"type":"soft_interrupt","id":4,"content":"steer","urgent":false,"client_id":"f1"}"#
+    );
+    let legacy = parse_request_json(r#"{"type":"soft_interrupt","id":5,"content":"x"}"#)?;
+    assert!(matches!(
+        legacy,
+        Request::SoftInterrupt {
+            client_id: None,
+            ..
+        }
+    ));
+
+    let cancel_all = parse_request_json(r#"{"type":"cancel_soft_interrupts","id":6}"#)?;
+    assert!(matches!(
+        cancel_all,
+        Request::CancelSoftInterrupts {
+            client_ids: None,
+            ..
+        }
+    ));
+    let cancel_some = Request::CancelSoftInterrupts {
+        id: 7,
+        client_ids: Some(vec!["f1".to_string()]),
+    };
+    assert_eq!(
+        serde_json::to_string(&cancel_some)?,
+        r#"{"type":"cancel_soft_interrupts","id":7,"client_ids":["f1"]}"#
+    );
+
+    // An injection without ids keeps the pre-#1778 wire shape exactly.
+    let injected = ServerEvent::SoftInterruptInjected {
+        content: "a".to_string(),
+        display_role: None,
+        point: "D".to_string(),
+        tools_skipped: None,
+        client_ids: Vec::new(),
+    };
+    assert_eq!(
+        serde_json::to_string(&injected)?,
+        r#"{"type":"soft_interrupt_injected","content":"a","point":"D"}"#
+    );
+    let with_ids: ServerEvent = serde_json::from_str(
+        r#"{"type":"soft_interrupt_injected","content":"a","point":"B","client_ids":["f1","f2"]}"#,
+    )?;
+    assert!(matches!(
+        with_ids,
+        ServerEvent::SoftInterruptInjected { client_ids, .. } if client_ids == ["f1", "f2"]
+    ));
     Ok(())
 }
 
@@ -503,6 +565,7 @@ fn test_history_event_decodes_without_compaction_mode_for_older_servers() -> Res
         connection_type,
         compaction_mode,
         side_panel,
+        agent_model_overrides,
         ..
     } = decoded
     else {
@@ -517,6 +580,7 @@ fn test_history_event_decodes_without_compaction_mode_for_older_servers() -> Res
         jcode_config_types::CompactionMode::Reactive
     );
     assert!(!side_panel.has_pages());
+    assert!(agent_model_overrides.is_empty());
     Ok(())
 }
 
@@ -565,6 +629,7 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         reasoning_effort: None,
         service_tier: None,
         subagent_model: None,
+        agent_model_overrides: Default::default(),
         autoreview_enabled: None,
         autojudge_enabled: None,
         compaction_mode: jcode_config_types::CompactionMode::Reactive,
@@ -728,5 +793,43 @@ fn test_error_event_retry_after_back_compat_default() -> Result<()> {
     assert_eq!(id, 7);
     assert_eq!(message, "oops");
     assert_eq!(retry_after_secs, None);
+    Ok(())
+}
+
+#[test]
+fn test_agent_models_session_setter_and_response_roundtrip() -> Result<()> {
+    let clear = parse_request_json(r#"{"type":"set_agent_model","id":31,"target":"swarm"}"#)?;
+    assert!(matches!(clear, Request::SetAgentModel { model: None, .. }));
+    assert!(matches!(clear, Request::SetAgentModel { global: false, .. }));
+    let request = Request::SetAgentModel {
+        id: 32,
+        target: "review".into(),
+        model: Some("inherit".into()),
+        global: false,
+    };
+    let encoded = serde_json::to_string(&request)?;
+    assert!(!encoded.contains("global"), "session updates keep the old wire shape");
+    let decoded = parse_request_json(&encoded)?;
+    assert!(
+        matches!(decoded, Request::SetAgentModel { model: Some(model), .. } if model == "inherit")
+    );
+    let global = Request::SetAgentModel {
+        id: 33,
+        target: "swarm".into(),
+        model: Some("server-default".into()),
+        global: true,
+    };
+    let decoded = parse_request_json(&serde_json::to_string(&global)?)?;
+    assert!(matches!(decoded, Request::SetAgentModel { global: true, .. }));
+    let event = ServerEvent::AgentModelsChanged {
+        id: 32,
+        session_id: "session-a".into(),
+        overrides: std::collections::BTreeMap::from([("review".into(), "inherit".into())]),
+    };
+    let decoded = parse_event_json(encode_event(&event).trim())?;
+    assert!(
+        matches!(decoded, ServerEvent::AgentModelsChanged { session_id, overrides, .. }
+        if session_id == "session-a" && overrides.get("review").map(String::as_str) == Some("inherit"))
+    );
     Ok(())
 }

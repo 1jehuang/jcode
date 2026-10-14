@@ -19,6 +19,7 @@ fn stopped(reason: TurnStopReason) -> ApiEvent {
 fn done() -> ApiEvent {
     ApiEvent::TurnDone {
         session_id: "s".into(),
+        pending_soft_interrupts: None,
     }
 }
 
@@ -189,6 +190,7 @@ fn cancellation_and_other_clients_drop_a_pending_retry() {
     let cancelled = ApiEvent::SessionStatus {
         session_id: "s".into(),
         status: "cancelled".into(),
+        pending_soft_interrupts: None,
     };
     assert_eq!(retry.observe(&cancelled, now), RetryDecision::Cancelled);
 

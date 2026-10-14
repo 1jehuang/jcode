@@ -44,7 +44,7 @@ pub(super) fn record_installed_version(tag: &str) {
 
 /// Parse `v1.2.3` / `1.2.3` into comparable numbers. Pre-release suffixes
 /// (`-rc1`) are ignored, which is fine for this repo's plain version tags.
-fn parse_version(tag: &str) -> Option<(u64, u64, u64)> {
+pub(super) fn parse_version(tag: &str) -> Option<(u64, u64, u64)> {
     let core = tag.trim().trim_start_matches('v');
     let core = core.split(['-', '+']).next()?;
     let mut nums = [0u64; 3];

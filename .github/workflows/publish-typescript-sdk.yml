@@ -2,6 +2,9 @@ name: Publish TypeScript SDK
 
 env:
   JCODE_CI: "1"
+  # CI builds without the local parallel-frontend rustc wrapper from
+  # .cargo/config.toml (a POSIX shell script; see scripts/rustc-parallel-frontend).
+  CARGO_BUILD_RUSTC_WRAPPER: ""
 
 on:
   workflow_dispatch:
@@ -72,6 +75,12 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           for package in sdk/npm/*; do
+            name=$(node -p "require('./$package/package.json').name")
+            version=$(node -p "require('./$package/package.json').version")
+            if npm view "$name@$version" version >/dev/null 2>&1; then
+              echo "$name@$version already published, skipping"
+              continue
+            fi
             npm publish "$package" --access public --provenance
           done
 

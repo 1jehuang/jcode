@@ -93,6 +93,9 @@ impl Config {
         if let Ok(v) = std::env::var("JCODE_DIFF_MODE_CYCLE_KEY") {
             self.keybindings.diff_mode_cycle = v;
         }
+        if let Ok(v) = std::env::var("JCODE_COMMIT_LOG_KEY") {
+            self.keybindings.commit_log = v;
+        }
         if let Ok(v) = std::env::var("JCODE_INFO_WIDGET_TOGGLE_KEY") {
             self.keybindings.info_widget_toggle = v;
         }
@@ -284,6 +287,11 @@ impl Config {
                 self.display.external_sessions = parsed;
             }
         }
+        if let Ok(v) = std::env::var("JCODE_RESUME_PROJECT_SCOPE") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.display.resume_project_scope = parsed;
+            }
+        }
         if let Ok(v) = std::env::var("JCODE_PERFORMANCE") {
             let trimmed = v.trim().to_lowercase();
             if matches!(trimmed.as_str(), "auto" | "full" | "reduced" | "minimal") {
@@ -433,6 +441,18 @@ impl Config {
                 self.agents.swarm_max_concurrent_agents = parsed;
             }
         }
+        if let Ok(v) = std::env::var("JCODE_SWARM_STALL_AFTER_SECS") {
+            if let Ok(parsed) = v.trim().parse::<u64>() {
+                self.agents.swarm_stall_after_secs = parsed;
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_SWARM_STALL_NUDGE") {
+            match v.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" | "on" => self.agents.swarm_stall_nudge = true,
+                "0" | "false" | "no" | "off" => self.agents.swarm_stall_nudge = false,
+                _ => {}
+            }
+        }
         if let Ok(v) = std::env::var("JCODE_MEMORY_JEV_PROVIDER") {
             self.agents.memory_jev_provider = v.trim().to_ascii_lowercase();
         }
@@ -533,6 +553,15 @@ impl Config {
             self.hooks.pre_tool_transform_timeout_ms = parsed;
         }
         hook_env_override(&mut self.hooks.post_tool, "JCODE_HOOK_POST_TOOL");
+        hook_env_override(
+            &mut self.hooks.post_tool_feedback,
+            "JCODE_HOOK_POST_TOOL_FEEDBACK",
+        );
+        if let Ok(v) = std::env::var("JCODE_HOOK_POST_TOOL_FEEDBACK_TIMEOUT_MS")
+            && let Ok(parsed) = v.trim().parse::<u64>()
+        {
+            self.hooks.post_tool_feedback_timeout_ms = parsed;
+        }
         if let Ok(v) = std::env::var("JCODE_HOOK_PRE_TOOL_TIMEOUT_MS") {
             if let Ok(parsed) = v.trim().parse::<u64>() {
                 self.hooks.pre_tool_timeout_ms = parsed;
