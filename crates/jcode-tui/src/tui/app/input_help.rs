@@ -38,7 +38,7 @@ impl App {
                 "/refresh-model-list\nForce-refresh provider model catalogs, update /model, and persist the refreshed cache."
             }
             "agents" => {
-                "/agents\nOpen the agent-model config picker.\n\n/agents <swarm|review|judge|memory|ambient>\nJump straight to that agent role's saved model override."
+                "/agents\nConfigure agent models for this session only, preserved on resume.\n\n/agents <swarm|review|judge|memory|ambient>\nChoose a session override. Use global default clears it, while inherit bypasses a global pin.\n\n/agents default [role] (or /agents global [role])\nEdit saved global defaults for all sessions without a session override. Ambient session choices apply to scheduled workers spawned from this session, not the daemon's independent ambient loop."
             }
             "swarm-prompt" => {
                 "/swarm-prompt\nOpen the active swarm routing prompt in $VISUAL or $EDITOR.\n\nJcode uses a nonblank project override at ./.jcode/swarm-prompt.md when present, then ~/.jcode/swarm-prompt.md, then the built-in default. If no editable override exists, this command creates the global file from the built-in default. Restart or reload Jcode after editing because running agent tool registries cache the prompt."
@@ -110,7 +110,7 @@ impl App {
                 "/effort\nShow current effort.\n\n/effort <level>\nSet effort (none|minimal|low|medium|high|xhigh|max|swarm|swarm-deep). Which levels apply depends on the model. The swarm rungs [Beta] turn on swarm orchestration (swarm: light fan-out, swarm-deep: deep task graph). Root reasoning is configurable via [agents] swarm_root_effort and swarm_deep_root_effort (both default to max).\n\nAlso: {effort_keys} to cycle."
             }
             "fast" => {
-                "/fast\nShow whether fast mode is enabled, plus the saved default.\n\n/fast on\nEnable fast mode (service_tier = priority) for the current session.\n\n/fast off\nDisable fast mode for the current session.\n\n/fast status\nShow current fast-mode status.\n\n/fast default on\nSave fast mode as the default on startup.\n\n/fast default off\nSave fast mode as the default off on startup.\n\n/fast default status\nShow the saved fast-mode default."
+                "/fast\nShow whether fast mode is enabled, plus the saved default.\n\n/fast on\nEnable fast mode (service_tier = priority) for the current session.\n\n/fast ultra\nEnable OpenAI Ultrafast (service_tier = ultrafast) on models that support it, such as GPT-6 Astra.\n\n/fast off\nDisable fast mode for the current session.\n\nAlt+Up / Alt+Down cycle Standard -> Fast -> Ultrafast (configure speed_increase / speed_decrease).\n\n/fast status\nShow current fast-mode status.\n\n/fast default on\nSave fast mode as the default on startup.\n\n/fast default off\nSave fast mode as the default off on startup.\n\n/fast default status\nShow the saved fast-mode default."
             }
             "memory" => "/memory [on|off|status]\nToggle memory features for this session.",
             "log" => {

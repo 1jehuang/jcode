@@ -7,6 +7,24 @@ use crate::tool::bash::{
 use serde_json::json;
 use tokio::sync::mpsc;
 
+#[cfg(not(windows))]
+#[test]
+fn bash_definition_prefers_repository_search_tools() {
+    let definition = BashTool::new().to_definition();
+    assert_eq!(definition.name, "bash");
+    assert!(
+        definition
+            .description
+            .contains("prefer agentgrep or rg over grep -r")
+    );
+    assert!(
+        definition
+            .description
+            .contains("hidden and ignored files by default, not all untracked files")
+    );
+    assert!(definition.description.contains("--hidden --no-ignore"));
+}
+
 #[test]
 fn bash_optional_nulls_use_omitted_defaults() {
     let omitted: BashInput = serde_json::from_value(json!({"command": "printf ok"})).unwrap();

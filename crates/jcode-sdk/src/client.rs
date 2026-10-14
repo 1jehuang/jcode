@@ -93,18 +93,18 @@ impl UnixTransport {
                 ErrorKind::ConnectFailed,
                 match cause.kind() {
                     std::io::ErrorKind::NotFound => format!(
-                        "no harness API socket at {}: the jcode harness is not running. \
-                         Start it with `jcode serve` and `jcode-harness-api-bridge`, or \
-                         connect with ensure_runtime enabled.",
+                        "harness not running (no socket at {}). Start `jcode-harness-api-bridge` \
+                         or connect with ensure_runtime.",
                         path.display()
                     ),
+                    // Also seen briefly while the bridge restarts, so do not
+                    // claim the socket is stale.
                     std::io::ErrorKind::ConnectionRefused => format!(
-                        "{} exists but refuses connections: a previous harness left a \
-                         stale socket behind. Remove it and start the harness again.",
+                        "harness refused the connection at {}. It may be restarting or stopped.",
                         path.display()
                     ),
                     std::io::ErrorKind::PermissionDenied => format!(
-                        "permission denied on {}: the socket belongs to another user.",
+                        "permission denied on {}. The socket belongs to another user.",
                         path.display()
                     ),
                     _ => format!("could not connect to {}: {cause}", path.display()),
@@ -802,6 +802,18 @@ impl JcodeClient {
     }
 
     /// Clone a session's complete persisted context into a new idle session.
+    pub fn transfer_session(&self, session_id: &str) -> Result<SessionInfo> {
+        match self
+            .request_ok(ApiRequest::TransferSession {
+                session_id: session_id.into(),
+            })?
+            .event
+        {
+            ApiEvent::SessionForked { session } => Ok(session),
+            other => Err(unexpected("session_forked", &other)),
+        }
+    }
+
     pub fn fork_session(&self, session_id: &str) -> Result<SessionInfo> {
         match self
             .request_ok(ApiRequest::ForkSession {
@@ -847,13 +859,30 @@ impl JcodeClient {
         images: Vec<(String, String)>,
         wait_for_accept: Option<Duration>,
     ) -> Result<()> {
+        self.send_message_with_reminder(session_id, content, images, None, wait_for_accept)
+    }
+
+    /// [`send_message`](Self::send_message) with a hidden system reminder
+    /// for this turn only, such as a collection's instructions. The reminder
+    /// guides the model without appearing in the visible transcript.
+    pub fn send_message_with_reminder(
+        &self,
+        session_id: &str,
+        content: &str,
+        images: Vec<(String, String)>,
+        system_reminder: Option<&str>,
+        wait_for_accept: Option<Duration>,
+    ) -> Result<()> {
         // Subscribe *before* writing: an ack that lands between the write and
         // the subscribe would otherwise be missed and time out a healthy turn.
         let stream = wait_for_accept.map(|_| self.events(Some(session_id)));
         self.notify(ApiRequest::SendMessage {
             session_id: session_id.to_string(),
             content: content.to_string(),
-            system_reminder: None,
+            system_reminder: system_reminder
+                .map(str::trim)
+                .filter(|reminder| !reminder.is_empty())
+                .map(str::to_owned),
             images,
             no_reply: false,
         })?;
@@ -892,11 +921,29 @@ impl JcodeClient {
         images: Vec<(String, String)>,
         urgent: bool,
     ) -> Result<()> {
+        self.soft_interrupt_with_id(session_id, content, images, urgent, None)
+    }
+
+    /// Queue a soft interrupt tagged with an opaque `client_id`.
+    ///
+    /// The id comes back in [`ApiEvent::SoftInterruptInjected`] when the model
+    /// receives the message, and [`Self::cancel_soft_interrupt`] can take it
+    /// back before then. Needs the `soft_interrupt_ids` capability; an older
+    /// server accepts the message but drops the id.
+    pub fn soft_interrupt_with_id(
+        &self,
+        session_id: &str,
+        content: &str,
+        images: Vec<(String, String)>,
+        urgent: bool,
+        client_id: Option<&str>,
+    ) -> Result<()> {
         self.request_ok(ApiRequest::SoftInterrupt {
             session_id: session_id.to_string(),
             content: content.to_string(),
             images,
             urgent,
+            client_id: client_id.map(str::to_string),
         })
         .map(drop)
     }
@@ -986,6 +1033,41 @@ impl JcodeClient {
 
     /// Runtime identity, route catalog, protocol metadata, and a live health
     /// check for a session.
+    pub fn runtime_command(
+        &self,
+        session_id: &str,
+        command: jcode_harness_api::RuntimeCommand,
+        args: Vec<String>,
+    ) -> Result<jcode_harness_api::RuntimeCommandOutput> {
+        if !self.supports("runtime_commands") {
+            return Err(Error::new(
+                ErrorKind::Harness(jcode_harness_api::ErrorCode::UnknownRequest),
+                "This runtime does not support structured commands. Update and restart the daemon and bridge.",
+            ));
+        }
+        match self
+            .request_ok(ApiRequest::RuntimeCommand {
+                session_id: session_id.into(),
+                command,
+                args,
+            })?
+            .event
+        {
+            ApiEvent::RuntimeCommandResult {
+                session_id,
+                command,
+                data,
+                message,
+            } => Ok(jcode_harness_api::RuntimeCommandOutput {
+                session_id,
+                command,
+                data,
+                message,
+            }),
+            other => Err(unexpected("runtime_command_result", &other)),
+        }
+    }
+
     pub fn get_runtime_info(&self, session_id: &str) -> Result<RuntimeInfo> {
         self.ping()?;
         match self
@@ -1161,6 +1243,36 @@ impl JcodeClient {
     }
 
     /// Read safe filesystem metadata for a path under the session root.
+    /// The session's persisted todo state for the auto-poke and quality-gate
+    /// policy. Requires the `todo_state` capability.
+    pub fn todo_state(&self, session_id: &str) -> Result<jcode_todo_policy::TodoSnapshot> {
+        match self
+            .request_ok(ApiRequest::GetTodoState {
+                session_id: session_id.to_string(),
+            })?
+            .event
+        {
+            ApiEvent::TodoState { state, .. } => Ok(state),
+            other => Err(unexpected("todo_state", &other)),
+        }
+    }
+
+    /// Apply a follow-up decision's persistent effects. A no-op when empty.
+    pub fn ack_todo_follow_up(
+        &self,
+        session_id: &str,
+        effects: jcode_todo_policy::TodoEffects,
+    ) -> Result<()> {
+        if effects.is_empty() {
+            return Ok(());
+        }
+        self.request_ok(ApiRequest::AckTodoFollowUp {
+            session_id: session_id.to_string(),
+            effects,
+        })
+        .map(drop)
+    }
+
     pub fn file_status(&self, session_id: &str, path: &str) -> Result<FileStatus> {
         match self
             .request_ok(ApiRequest::FileStatus {
@@ -1342,16 +1454,65 @@ impl JcodeClient {
     pub fn cancel_soft_interrupts(&self, session_id: &str) -> Result<()> {
         self.request_ok(ApiRequest::CancelSoftInterrupts {
             session_id: session_id.to_string(),
+            client_ids: None,
         })
         .map(drop)
     }
 
+    /// Take back specific queued soft interrupts by `client_id`.
+    ///
+    /// Returns `(cancelled, not_queued)`. The server decides against injection
+    /// atomically, so an id in `cancelled` was never seen by the model, and an
+    /// id in `not_queued` was already delivered (or never queued).
+    pub fn cancel_soft_interrupts_by_id(
+        &self,
+        session_id: &str,
+        client_ids: &[&str],
+    ) -> Result<(Vec<String>, Vec<String>)> {
+        let request = ApiRequest::CancelSoftInterrupts {
+            session_id: session_id.to_string(),
+            client_ids: Some(client_ids.iter().map(|id| id.to_string()).collect()),
+        };
+        match self.request_ok(request)?.event {
+            ApiEvent::SoftInterruptsCancelled {
+                cancelled,
+                not_queued,
+            } => Ok((cancelled, not_queued)),
+            other => Err(unexpected("soft_interrupts_cancelled", &other)),
+        }
+    }
+
+    /// Take back one queued soft interrupt. `true` means it was removed before
+    /// the model saw it, `false` that it was already delivered (or unknown).
+    pub fn cancel_soft_interrupt(&self, session_id: &str, client_id: &str) -> Result<bool> {
+        self.cancel_soft_interrupts_by_id(session_id, &[client_id])
+            .map(|(cancelled, _)| !cancelled.is_empty())
+    }
+
     /// Move the running tool call to the background (the TUI's Alt+B).
     pub fn background_tool(&self, session_id: &str) -> Result<()> {
-        self.request_ok(ApiRequest::BackgroundTool {
-            session_id: session_id.to_string(),
-        })
-        .map(drop)
+        self.background_tool_result(session_id).map(drop)
+    }
+
+    /// Move the running tool call to the background and report what moved.
+    ///
+    /// Returns `(moved, tool_call_id)`. A server without the
+    /// `background_tool_result` capability answers only `Ok`, reported here as
+    /// `(false, None)` even if a tool was moved.
+    pub fn background_tool_result(&self, session_id: &str) -> Result<(bool, Option<String>)> {
+        match self
+            .request_ok(ApiRequest::BackgroundTool {
+                session_id: session_id.to_string(),
+            })?
+            .event
+        {
+            ApiEvent::BackgroundToolResult {
+                moved,
+                tool_call_id,
+                ..
+            } => Ok((moved, tool_call_id)),
+            _ => Ok((false, None)),
+        }
     }
 
     pub fn ping(&self) -> Result<()> {
@@ -1824,6 +1985,7 @@ fn event_session(event: &ApiEvent) -> Option<&str> {
         | TokenUsage { session_id, .. }
         | KvCacheMiss { session_id, .. }
         | TurnDone { session_id, .. }
+        | SoftInterruptInjected { session_id, .. }
         | TurnStopped { session_id, .. }
         | BackgroundProgress { session_id, .. }
         | MessageAccepted { session_id, .. }

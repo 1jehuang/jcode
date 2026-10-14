@@ -259,6 +259,7 @@ fn format_members_renders_activity_progress_churn_and_turns() {
             live_attachments: Some(1),
             status_age_secs: Some(8),
             last_activity_age_secs: Some(3),
+            stalled_secs: None,
             activity: Some(SessionActivitySnapshot {
                 is_processing: true,
                 current_tool_name: Some("edit".to_string()),
@@ -292,6 +293,31 @@ fn format_members_renders_activity_progress_churn_and_turns() {
     // not read as a dead worker.
     assert!(text.contains("· active 3s ago"), "got: {text}");
     assert!(!text.contains("idle"), "got: {text}");
+    assert!(!text.contains("STALLED"), "got: {text}");
+}
+
+#[test]
+fn format_members_flags_watchdog_stalled_worker() {
+    let ctx = test_ctx(
+        "session_self_1234567890_deadbeefcafebabe",
+        std::path::Path::new("."),
+    );
+    let output = format_members(
+        &ctx,
+        &[AgentInfo {
+            session_id: "session_peer_1234567890_aaaaaaaaaaaa0002".to_string(),
+            friendly_name: Some("heron".to_string()),
+            status: Some("running".to_string()),
+            role: Some("agent".to_string()),
+            status_age_secs: Some(900),
+            last_activity_age_secs: Some(700),
+            stalled_secs: Some(700),
+            ..Default::default()
+        }],
+    );
+    let text = output.output;
+    assert!(text.contains("STALLED (no activity for 11m"), "got: {text}");
+    assert!(!text.contains("active 11m"), "got: {text}");
 }
 
 #[test]
@@ -406,6 +432,7 @@ fn format_status_snapshot_includes_activity_and_metadata() {
         live_attachments: Some(0),
         status_age_secs: Some(7),
         last_activity_age_secs: Some(3),
+        stalled_secs: None,
         joined_age_secs: Some(42),
         files_touched: vec!["src/server/comm_sync.rs".to_string()],
         activity: Some(SessionActivitySnapshot {

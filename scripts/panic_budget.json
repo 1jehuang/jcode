@@ -1,13 +1,15 @@
 {
-  "total": 166,
+  "total": 169,
   "tracked_files": {
     "crates/jcode-app-core/build.rs": 4,
     "crates/jcode-app-core/src/agent/provider.rs": 1,
+    "crates/jcode-app-core/src/agent/tool_markup_recovery.rs": 2,
     "crates/jcode-app-core/src/session_launch.rs": 1,
     "crates/jcode-app-core/src/tool/bash.rs": 2,
     "crates/jcode-app-core/src/tool/browser.rs": 2,
     "crates/jcode-app-core/src/tool/browser_fast.rs": 6,
     "crates/jcode-app-core/src/tool/browser_jev.rs": 1,
+    "crates/jcode-app-core/src/tool/calendar.rs": 1,
     "crates/jcode-app-core/src/tool/communicate.rs": 1,
     "crates/jcode-app-core/src/tool/compile_remote.rs": 2,
     "crates/jcode-app-core/src/tool/computer/win.rs": 3,

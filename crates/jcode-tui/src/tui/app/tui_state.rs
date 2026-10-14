@@ -65,7 +65,7 @@ impl App {
             .filter(|model| !model.is_empty() && !model.eq_ignore_ascii_case("unknown"))
     }
 
-    fn configured_remote_provider_hint(&self) -> Option<String> {
+    pub(super) fn configured_remote_provider_hint(&self) -> Option<String> {
         if crate::tui::is_ssh_remote() {
             return None;
         }
@@ -656,6 +656,10 @@ impl crate::tui::TuiState for App {
         &self.queued_messages
     }
 
+    fn queued_commands(&self) -> &[String] {
+        &self.queued_commands
+    }
+
     fn interleave_message(&self) -> Option<&str> {
         self.interleave_message.as_deref()
     }
@@ -972,6 +976,15 @@ impl crate::tui::TuiState for App {
     }
 
     fn status_notice(&self) -> Option<String> {
+        // This priority notice is owned by the telemetry handshake, not the
+        // expiring general status slot. Other notices cannot clobber it.
+        if crate::telemetry::pending_oauth_account_notice().is_some()
+            || self
+                .oauth_notice_displayed_at
+                .is_some_and(super::oauth_telemetry::readable_notice_active)
+        {
+            return Some(crate::telemetry::OAUTH_ACCOUNT_NOTICE_TEXT.to_string());
+        }
         if !self.is_remote
             && self.provider.uses_jcode_compaction()
             && let Ok(manager) = self.registry.compaction().try_read()
@@ -982,7 +995,7 @@ impl crate::tui::TuiState for App {
             ));
         }
         self.status_notice.as_ref().and_then(|(text, at)| {
-            if at.elapsed() <= Duration::from_secs(3) {
+            if at.elapsed() <= STATUS_NOTICE_TTL {
                 Some(text.clone())
             } else {
                 None
@@ -1524,13 +1537,15 @@ impl crate::tui::TuiState for App {
             None
         };
 
-        // Gather background task info
+        // Gather background task info. Session-scoped rows come from task
+        // events (works when tasks run in the server process). The global
+        // manager only knows tasks spawned in this process.
         let background_info = {
-            // Get running background tasks count
             let bg_manager = crate::background::global();
             let (running_count, running_tasks, progress) = bg_manager.running_snapshot();
+            let rows = self.background_task_rows_ref().to_vec();
 
-            if running_count > 0 {
+            if running_count > 0 || !rows.is_empty() {
                 Some(crate::tui::info_widget::BackgroundInfo {
                     running_count,
                     running_tasks,
@@ -1540,6 +1555,7 @@ impl crate::tui::TuiState for App {
                         .and_then(|progress| progress.detail.clone()),
                     memory_agent_active: false,
                     memory_agent_turns: 0,
+                    rows,
                 })
             } else {
                 None
@@ -1955,6 +1971,10 @@ impl crate::tui::TuiState for App {
     fn model_status_overlay(&self) -> Option<(usize, &str)> {
         self.model_status_scroll
             .map(|scroll| (scroll, self.model_status_content.as_str()))
+    }
+
+    fn commit_log_overlay(&self) -> Option<&crate::tui::app::CommitLogOverlay> {
+        self.commit_log_overlay.as_ref()
     }
 
     fn session_picker_overlay(
