@@ -513,7 +513,7 @@ fn connection_config(
         }
         return configured.ok_or_else(|| anyhow::anyhow!("'command' or 'url' is required for connect action (server is not in the MCP config)"));
     }
-    if params.url.is_some() {
+    if let Some(url) = params.url.as_deref() {
         if params.args.is_some() || params.env.is_some() {
             anyhow::bail!("'args' and 'env' are only supported for stdio MCP servers");
         }
@@ -521,7 +521,7 @@ fn connection_config(
         if !matches!(transport, "http" | "streamable-http" | "sse") {
             anyhow::bail!("Remote 'transport' must be 'http', 'streamable-http', or 'sse'");
         }
-        validate_remote_url(params.url.as_deref().expect("remote URL"))?;
+        validate_remote_url(url)?;
     } else {
         if params
             .command
