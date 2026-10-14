@@ -658,9 +658,8 @@ pub(super) async fn run(
             let capabilities:Vec<_>=choices.iter().enumerate().filter(|(_,choice)|choice.exact_index.is_some()).map(|(index,choice)|json!({"action_id":format!("a{index}"),"operation":choice.input.action,"source":"trusted_caller","executable_now":true,"requires_code_generation":false})).collect();
             let request=DecisionRequest{goal:goal.into(),observation:json!({"task_context":input.context,"caller_capabilities":capabilities,"page":observation,"supplied_text_values":input.text_values,"action_history":task_history(&trace),"controller_note":task_note,"remaining_actions":budget-trace.len()}),options};
             anyhow::ensure!(serde_json::to_vec(&request)?.len()<=MAX_REQUEST,"Decision state exceeds safe size limit");
-            let decision=bounded(ctx,timeout.min(deadline.saturating_duration_since(tokio::time::Instant::now())),transport.decide(&request)).await.map_err(|error| {
+            let decision=bounded(ctx,timeout.min(deadline.saturating_duration_since(tokio::time::Instant::now())),transport.decide(&request)).await.inspect_err(|error| {
                 decision_failed = !error.is::<HandoffCancelled>();
-                error
             })?;
             anyhow::ensure!(decision.confidence.is_finite() && (0.0..=1.0).contains(&decision.confidence),"Invalid decision probability/confidence");
             anyhow::ensure!(decision.reason.len()<=2000,"Decision reason exceeds limit");
