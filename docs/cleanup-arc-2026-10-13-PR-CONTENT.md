@@ -130,13 +130,11 @@ If both this PR and #FIRST_PR are merged:
 
 ---
 
-## How to open the PRs
+## How to open the PRs (historical — 2026-10-14 04:00Z: NO LONGER NEEDED)
 
-The operator's tool hook defers `gh pr create` so the PRs must be opened in the browser.
+The P30 fix was cherry-picked directly onto `master` (commits `7e773ef3f` and `3c2479126`) and pushed to `KooshaPari/Jcode` at `a2c3e51ec`. `cargo audit` on master now reports 0 P30 vulnerabilities. None of the 3 PRs described in this document need to be opened. The source branches (`security/rustsec-2026-0258-0285`, `security/quinn-proto-0.11.19`, `chore/cargo-fmt-cleanup-2026-10-13-p30`) are now redundant and can be deleted from origin at operator's discretion (`git push origin --delete <branch>`).
 
-For each PR, visit the compare URL (e.g. `https://github.com/KooshaPari/Jcode/compare/master...security/rustsec-2026-0258-0285`), click "Create pull request", then paste the title + body from above.
-
-After both PRs are open, the auto-merge can be enabled if the CI passes. The branches are non-overlapping (`Cargo.lock` changes only) so they merge cleanly in any order.
+**Original (historical) instructions for reference:** The operator's tool hook defers `gh pr create` so the PRs would have had to be opened in the browser. For each PR, visit the compare URL (e.g. `https://github.com/KooshaPari/Jcode/compare/master...security/rustsec-2026-0258-0285`), click "Create pull request", then paste the title + body from above. The branches are non-overlapping (`Cargo.lock` changes only) so they would have merged cleanly in any order.
 
 ---
 
