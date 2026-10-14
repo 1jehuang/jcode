@@ -32,6 +32,27 @@ use uuid::Uuid;
 
 const DEFAULT_MODEL: &str = "default";
 
+fn deduped_catalog_with_unavailable_canonical_ids(
+    catalog: Vec<CatalogModel>,
+) -> (Vec<CatalogModel>, std::collections::HashSet<String>) {
+    let mut seen = std::collections::HashSet::new();
+    let mut deduped_catalog = Vec::with_capacity(catalog.len());
+    for mut model in catalog {
+        let id = model.id.trim().to_string();
+        if id.is_empty() || !seen.insert(id.clone()) {
+            continue;
+        }
+        model.id = id;
+        deduped_catalog.push(model);
+    }
+    let unavailable_canonical_ids = deduped_catalog
+        .iter()
+        .filter(|model| !model.available)
+        .map(|model| remap_unsupported_model(&model.id).to_string())
+        .collect();
+    (deduped_catalog, unavailable_canonical_ids)
+}
+
 pub struct AntigravityProvider {
     client: reqwest::Client,
     model: Arc<RwLock<String>>,
@@ -191,12 +212,18 @@ impl AntigravityProvider {
             return remap_unsupported_model(trimmed).to_string();
         }
 
+        let (catalog, unavailable_canonical_ids) =
+            deduped_catalog_with_unavailable_canonical_ids(self.fetched_catalog());
+
         if let Some(backend_default) = self
             .backend_default_model()
             .map(|id| id.trim().to_string())
             .filter(|id| !id.is_empty() && id != DEFAULT_MODEL)
         {
-            return remap_unsupported_model(&backend_default).to_string();
+            let canonical = remap_unsupported_model(&backend_default);
+            if !unavailable_canonical_ids.contains(canonical) {
+                return canonical.to_string();
+            }
         }
 
         // No backend-advertised default: pick a usable catalog model. Prefer a
@@ -204,23 +231,22 @@ impl AntigravityProvider {
         // Claude models on the Cloud Code backend currently reject jcode's tool
         // schemas (they require JSON Schema draft 2020-12), so they are a poor
         // automatic default even when listed first in the catalog.
-        let catalog = self.fetched_catalog();
-        if let Some(gemini_model) = catalog
-            .iter()
-            .find(|model| {
-                model.available
-                    && model.id.trim() != DEFAULT_MODEL
-                    && model.id.starts_with("gemini-")
-            })
-            .map(|model| remap_unsupported_model(model.id.trim()).to_string())
-        {
+        if let Some(gemini_model) = catalog.iter().find_map(|model| {
+            if !model.available || model.id == DEFAULT_MODEL || !model.id.starts_with("gemini-") {
+                return None;
+            }
+            let canonical = remap_unsupported_model(&model.id);
+            (!unavailable_canonical_ids.contains(canonical)).then(|| canonical.to_string())
+        }) {
             return gemini_model;
         }
-        if let Some(catalog_model) = catalog
-            .iter()
-            .find(|model| model.available && model.id.trim() != DEFAULT_MODEL)
-            .map(|model| remap_unsupported_model(model.id.trim()).to_string())
-        {
+        if let Some(catalog_model) = catalog.iter().find_map(|model| {
+            if !model.available || model.id == DEFAULT_MODEL {
+                return None;
+            }
+            let canonical = remap_unsupported_model(&model.id);
+            (!unavailable_canonical_ids.contains(canonical)).then(|| canonical.to_string())
+        }) {
             return catalog_model;
         }
 
@@ -815,20 +841,11 @@ impl Provider for AntigravityProvider {
     fn model_routes(&self) -> Vec<jcode_provider_core::ModelRoute> {
         let catalog = self.fetched_catalog();
         if !catalog.is_empty() {
-            let mut seen = std::collections::HashSet::new();
-            let mut deduped_catalog = Vec::with_capacity(catalog.len());
-            for mut model in catalog {
-                let id = model.id.trim().to_string();
-                if id.is_empty() || !seen.insert(id.clone()) {
-                    continue;
-                }
-                model.id = id;
-                deduped_catalog.push(model);
-            }
-            let unavailable_canonical_ids: std::collections::HashSet<String> = deduped_catalog
+            let (deduped_catalog, unavailable_canonical_ids) =
+                deduped_catalog_with_unavailable_canonical_ids(catalog);
+            let mut seen: std::collections::HashSet<String> = deduped_catalog
                 .iter()
-                .filter(|model| !model.available)
-                .map(|model| remap_unsupported_model(&model.id).to_string())
+                .map(|model| model.id.clone())
                 .collect();
             let mut routes: Vec<jcode_provider_core::ModelRoute> =
                 Vec::with_capacity(deduped_catalog.len() + AVAILABLE_MODELS.len());

@@ -976,3 +976,55 @@ fn antigravity_context_window_resolves_argon_default_and_catalog_fallback() {
     provider.set_model("chat_20706").unwrap();
     assert_eq!(provider.context_window(), 16_384);
 }
+
+#[test]
+fn resolve_model_for_request_skips_alias_when_canonical_target_is_unavailable() {
+    let catalog_entry = |id: &str, available: bool| CatalogModel {
+        id: id.to_string(),
+        display_name: None,
+        reset_time: None,
+        tag_title: None,
+        model_provider: None,
+        max_tokens: None,
+        max_output_tokens: None,
+        recommended: true,
+        available,
+        remaining_fraction_milli: Some(if available { 1000 } else { 0 }),
+    };
+
+    // Gemini-preferred fallback branch: available `gemini-4-argon` alias whose
+    // canonical `gemini-4-argon-medium` target is unavailable must be skipped
+    // in favor of available `gemini-3-flash`.
+    let provider = AntigravityProvider {
+        client: reqwest::Client::new(),
+        model: Arc::new(RwLock::new(DEFAULT_MODEL.to_string())),
+        fetched_catalog: Arc::new(RwLock::new(vec![
+            catalog_entry("gemini-4-argon", true),
+            catalog_entry("gemini-4-argon-medium", false),
+            catalog_entry("gemini-3-flash", true),
+        ])),
+        backend_default_model: Arc::new(RwLock::new(None)),
+    };
+    assert_eq!(
+        provider.resolve_model_for_request("default"),
+        "gemini-3-flash"
+    );
+    assert_eq!(provider.resolve_model_for_request(""), "gemini-3-flash");
+
+    // General non-Gemini catalog fallback branch: when the only Gemini entries
+    // map to an unavailable canonical target, fallback continues to the next
+    // available non-Gemini catalog entry.
+    *provider.fetched_catalog.write().expect("catalog lock") = vec![
+        catalog_entry("gemini-4-argon", true),
+        catalog_entry("gemini-4-argon-medium", false),
+        catalog_entry("gpt-oss-120b-medium", true),
+    ];
+    assert_eq!(
+        provider.resolve_model_for_request("default"),
+        "gpt-oss-120b-medium"
+    );
+    assert_eq!(
+        provider.resolve_model_for_request(""),
+        "gpt-oss-120b-medium"
+    );
+}
