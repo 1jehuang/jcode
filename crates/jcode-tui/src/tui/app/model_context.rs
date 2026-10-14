@@ -51,6 +51,21 @@ impl App {
                 self.provider.name(),
                 self.session.provider_key.as_deref(),
             );
+        if let Some(label) = self.provider.oauth_account_label() {
+            let method = if self.provider.name().eq_ignore_ascii_case("openai") {
+                "openai-oauth"
+            } else {
+                "claude-oauth"
+            };
+            self.session.route_api_method = Some(format!("{method}@{label}"));
+        } else if self
+            .session
+            .route_api_method
+            .as_deref()
+            .is_some_and(|method| jcode_provider_core::oauth_account_label(method).is_some())
+        {
+            self.session.route_api_method = None;
+        }
         self.session.model = Some(active_model.clone());
         let _ = self.session.save();
         active_model
@@ -214,15 +229,40 @@ impl App {
             self.provider.active_resolved_credential()
         };
         use jcode_provider_core::{ActiveProvider, ResolvedCredential};
+        let account_method = |base: &str| {
+            if !self.is_remote
+                && let Some(label) = self.provider.oauth_account_label()
+            {
+                return format!("{base}@{label}");
+            }
+            if let Some(method) = self.session.route_api_method.as_deref()
+                && method
+                    .split_once('@')
+                    .is_some_and(|(prefix, _)| prefix == base)
+                && jcode_provider_core::oauth_account_label(method).is_some()
+            {
+                return method.to_string();
+            }
+            let label = if self.is_remote {
+                None
+            } else if base == "claude-oauth" {
+                crate::auth::claude::active_account_label()
+            } else {
+                crate::auth::codex::active_account_label()
+            };
+            label
+                .map(|label| format!("{base}@{label}"))
+                .unwrap_or_else(|| base.to_string())
+        };
         match (provider, credential) {
             (Some(ActiveProvider::Claude), Some(ResolvedCredential::Oauth)) => {
-                Some("claude-oauth".to_string())
+                Some(account_method("claude-oauth"))
             }
             (Some(ActiveProvider::Claude), Some(ResolvedCredential::ApiKey)) => {
                 Some("claude-api".to_string())
             }
             (Some(ActiveProvider::OpenAI), Some(ResolvedCredential::Oauth)) => {
-                Some("openai-oauth".to_string())
+                Some(account_method("openai-oauth"))
             }
             (Some(ActiveProvider::OpenAI), Some(ResolvedCredential::ApiKey)) => {
                 Some("openai-api".to_string())

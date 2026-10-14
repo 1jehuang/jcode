@@ -1,5 +1,6 @@
 mod accessors;
 mod account_failover;
+mod account_selection;
 pub mod activation;
 pub mod anthropic;
 pub mod antigravity;
@@ -495,6 +496,7 @@ pub use self::models::{
     known_openai_model_ids_for_scope, model_availability_for_scope,
     openai_catalog_scope_for_credential, persist_openai_model_catalog_for_scope,
     populate_account_models_for_scope, record_model_unavailable_for_scope,
+    refresh_openai_model_catalog_in_background_for_scope,
     should_refresh_openai_model_catalog_for_scope,
 };
 pub use self::selection::DefaultModelSelection;
@@ -814,6 +816,31 @@ impl MultiProvider {
             };
 
         let active = self.active_provider();
+        // Explicit account picks are a billing boundary. Do not inspect another
+        // login's cooldown or automatically rotate onto its credentials.
+        if self.selected_account_for_provider(active).is_some() {
+            let attempt = match mode {
+                CompletionMode::Unified { system } => {
+                    self.complete_on_provider(active, messages, tools, system, resume_session_id)
+                        .await
+                }
+                CompletionMode::Split {
+                    system_static,
+                    system_dynamic,
+                } => {
+                    self.complete_split_on_provider(
+                        active,
+                        messages,
+                        tools,
+                        system_static,
+                        system_dynamic,
+                        resume_session_id,
+                    )
+                    .await
+                }
+            };
+            return self.await_account_stream_start(active, attempt).await;
+        }
         let sequence = Self::fallback_sequence(active);
         let mut notes: Vec<String> = Vec::new();
         let mut failover_reason: Option<String> = None;
@@ -1143,6 +1170,9 @@ impl MultiProvider {
     fn named_provider_profile_model_prefix(model: &str) -> Option<(String, String)> {
         let (prefix, rest) = model.split_once(':')?;
         if explicit_model_provider_prefix(model).is_some()
+            || model.split_once(':').is_some_and(|(method, _)| {
+                jcode_provider_core::oauth_account_label(method).is_some()
+            })
             || Self::openai_compatible_model_prefix(model).is_some()
         {
             return None;
@@ -1758,6 +1788,9 @@ impl MultiProvider {
         // single provider would make it reject the id and silently keep its
         // fallback default model.
         if explicit_model_provider_prefix(model).is_some()
+            || model.split_once(':').is_some_and(|(method, _)| {
+                jcode_provider_core::oauth_account_label(method).is_some()
+            })
             || Self::openai_compatible_model_prefix(model).is_some()
         {
             return self.set_model(model);
@@ -1845,6 +1878,14 @@ impl MultiProvider {
     }
 
     fn fork_model_switch_request(&self, active: ActiveProvider, current_model: &str) -> String {
+        if let Some(label) = self.selected_account_for_provider(active) {
+            let method = if active == ActiveProvider::Claude {
+                "claude-oauth"
+            } else {
+                "openai-oauth"
+            };
+            return format!("{method}@{label}:{current_model}");
+        }
         let prefix = match active {
             ActiveProvider::Claude => {
                 if let Some(anthropic) = self.anthropic_provider() {
@@ -2109,6 +2150,32 @@ impl Provider for MultiProvider {
         Ok(())
     }
 
+    fn oauth_account_label(&self) -> Option<String> {
+        self.selected_account_for_provider(self.active_provider())
+    }
+
+    fn set_oauth_account(&self, label: Option<&str>) -> Result<()> {
+        let active = self.active_provider();
+        if let Some(label) = label {
+            let method = match active {
+                ActiveProvider::Claude => "claude-oauth",
+                ActiveProvider::OpenAI => "openai-oauth",
+                _ => anyhow::bail!("This provider does not support saved OAuth accounts"),
+            };
+            return self.set_model_on_saved_account(method, label, &self.model());
+        }
+        let runtime = match active {
+            ActiveProvider::Claude => self.anthropic_provider(),
+            ActiveProvider::OpenAI => self.openai_provider(),
+            _ => None,
+        };
+        if let Some(runtime) = runtime {
+            runtime.set_oauth_account(None)?;
+        }
+        self.invalidate_routes_memo();
+        Ok(())
+    }
+
     fn active_explicit_credential(&self) -> Option<jcode_provider_core::ResolvedCredential> {
         use jcode_provider_core::ResolvedCredential;
         // Only report an *explicit* in-memory pin. Auto mode returns `None` so
@@ -2192,6 +2259,27 @@ impl Provider for MultiProvider {
         let requested_model = model.trim();
         if requested_model.is_empty() {
             anyhow::bail!("Model cannot be empty");
+        }
+
+        if let Some((prefix, target_model)) = requested_model.split_once(':')
+            && let Some((method, label)) = prefix.split_once('@')
+            && matches!(method, "claude-oauth" | "openai-oauth")
+        {
+            return self.set_model_on_saved_account(method, label, target_model);
+        }
+        // Bare model changes keep the selected login. Explicit generic routes
+        // opt back into the normal active-account preference.
+        if let Some((prefix, _)) = requested_model.split_once(':')
+            && let Some(route) =
+                jcode_provider_core::AuthRoute::parse_explicit_credential_prefix(prefix)
+        {
+            let runtime = match route.provider {
+                jcode_provider_core::DualAuthProvider::Anthropic => self.anthropic_provider(),
+                jcode_provider_core::DualAuthProvider::OpenAI => self.openai_provider(),
+            };
+            if let Some(runtime) = runtime {
+                runtime.set_oauth_account(None)?;
+            }
         }
 
         if let Some(target_model) = requested_model.strip_prefix("grok-build:") {

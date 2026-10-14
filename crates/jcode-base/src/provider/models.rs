@@ -976,6 +976,21 @@ pub fn refresh_openai_model_catalog_in_background(
     context: &'static str,
 ) {
     let scope = openai_catalog_scope_for_credential(is_chatgpt_mode, &access_token);
+    refresh_openai_model_catalog_in_background_for_scope(
+        access_token,
+        is_chatgpt_mode,
+        context,
+        scope,
+    );
+}
+
+/// Refresh a catalog for a captured credential scope, never the global active login.
+pub fn refresh_openai_model_catalog_in_background_for_scope(
+    access_token: String,
+    is_chatgpt_mode: bool,
+    context: &'static str,
+    scope: String,
+) {
     if access_token.trim().is_empty() {
         finish_openai_model_catalog_refresh_for_scope(&scope);
         return;
@@ -1374,4 +1389,29 @@ pub fn provider_for_model_with_hint(
 /// Detect which provider a model belongs to
 pub fn provider_for_model(model: &str) -> Option<&'static str> {
     provider_for_model_with_hint(model, None)
+}
+
+#[cfg(test)]
+mod scoped_refresh_tests {
+    use super::*;
+
+    #[test]
+    fn saved_account_background_refresh_uses_captured_scope() {
+        let scope = format!(
+            "captured-refresh-test-{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        );
+        assert!(!OPENAI_MODEL_CATALOG_SERVICE.refresh_throttled(&scope));
+        assert!(begin_openai_model_catalog_refresh_for_scope(&scope));
+        refresh_openai_model_catalog_in_background_for_scope(
+            String::new(),
+            true,
+            "scope-test",
+            scope.clone(),
+        );
+        assert!(
+            OPENAI_MODEL_CATALOG_SERVICE.refresh_throttled(&scope),
+            "completion must apply retry throttling to the captured scope, not the active login"
+        );
+    }
 }

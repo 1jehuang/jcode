@@ -33,6 +33,41 @@ struct DelayedProvider {
 
 struct NativeAutoCompactionProvider;
 
+#[tokio::test]
+async fn saved_account_restore_mismatch_blocks_model_turn() {
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    struct RestoreHome(Option<std::ffi::OsString>);
+    impl Drop for RestoreHome {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(home) => crate::env::set_var("JCODE_HOME", home),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+            crate::config::Config::invalidate_cache();
+        }
+    }
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::config::Config::invalidate_cache();
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let mut agent = Agent::new(provider, Registry::empty());
+    agent.session.route_api_method = Some("openai-oauth@work".into());
+    let error = agent.ensure_session_lease().unwrap_err().to_string();
+    assert!(error.contains("Saved account 'work' could not be restored"));
+    agent.session.route_api_method = None;
+    agent.session.provider_key = Some("openai-oauth@personal".into());
+    assert!(
+        agent
+            .ensure_session_lease()
+            .unwrap_err()
+            .to_string()
+            .contains("personal")
+    );
+    agent.session.provider_key = Some("openai-oauth".into());
+    assert!(agent.ensure_session_lease().is_ok());
+}
+
 struct NativeCompactionStreamProvider;
 
 #[derive(Clone, Default)]

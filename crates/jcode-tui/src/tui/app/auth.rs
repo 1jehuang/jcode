@@ -15,6 +15,133 @@ use super::*;
 use crossterm::event::{KeyCode, KeyModifiers};
 use std::sync::Arc;
 
+fn saved_account_route_selection(
+    provider_id: &str,
+    label: &str,
+    current_provider: &str,
+    current_model: &str,
+    configured_default: Option<&str>,
+) -> crate::provider::RouteSelection {
+    let (runtime_key, provider_label, method) = if provider_id == "claude" {
+        (
+            crate::provider::RuntimeKey::ClaudeOAuth,
+            "Claude",
+            "claude-oauth",
+        )
+    } else {
+        (
+            crate::provider::RuntimeKey::OpenAIOAuth,
+            "OpenAI",
+            "openai-oauth",
+        )
+    };
+    let same_provider = current_provider.eq_ignore_ascii_case(provider_label)
+        || (provider_id == "claude" && current_provider.eq_ignore_ascii_case("anthropic"));
+    let configured_model = configured_default
+        .and_then(|spec| {
+            jcode_provider_core::selection::explicit_model_provider_prefix(spec.trim())
+        })
+        .filter(|(provider, _, _)| {
+            matches!(
+                (provider_id, provider),
+                ("claude", jcode_provider_core::ActiveProvider::Claude)
+                    | ("openai", jcode_provider_core::ActiveProvider::OpenAI)
+            )
+        })
+        .map(|(_, _, model)| model.trim())
+        .filter(|model| !model.is_empty());
+    let model = if same_provider && !current_model.trim().is_empty() {
+        current_model
+    } else {
+        configured_model.unwrap_or_else(|| {
+            crate::auth::lifecycle::default_model_for_provider(provider_id)
+                .expect("saved account provider has a default model")
+        })
+    };
+    crate::provider::RouteSelection {
+        model: model.to_string(),
+        runtime_key,
+        api_method: format!("{method}@{label}"),
+        provider_label: provider_label.to_string(),
+        detail: format!("Saved account {label}"),
+    }
+}
+
+#[cfg(test)]
+mod saved_account_route_tests {
+    use super::*;
+
+    #[test]
+    fn account_switch_preserves_same_provider_model_and_replaces_account_pin() {
+        for (id, name, model, method) in [
+            ("claude", "Claude", "claude-custom-model", "claude-oauth"),
+            ("openai", "OpenAI", "gpt-custom-model", "openai-oauth"),
+        ] {
+            let selection = saved_account_route_selection(
+                id,
+                "work",
+                name,
+                model,
+                Some("openai-oauth:configured-other-model"),
+            );
+            assert_eq!(selection.model, model);
+            assert_eq!(selection.account_label(), Some("work"));
+            assert_eq!(
+                selection.routed_model_spec(),
+                format!("{method}@work:{model}")
+            );
+        }
+    }
+
+    #[test]
+    fn account_switch_uses_target_provider_default_for_cross_provider_selection() {
+        for (id, other) in [("claude", "OpenAI"), ("openai", "Claude")] {
+            let selection =
+                saved_account_route_selection(id, "personal", other, "foreign-model", None);
+            assert_eq!(
+                selection.model,
+                crate::auth::lifecycle::default_model_for_provider(id).unwrap()
+            );
+            assert_eq!(selection.account_label(), Some("personal"));
+            assert_ne!(selection.model, "foreign-model");
+        }
+    }
+
+    #[test]
+    fn cross_provider_account_switch_honors_matching_configured_default() {
+        let mut config = crate::config::Config::default();
+        config.provider.default_model = Some("openai-oauth:gpt-6.1-sol".to_string());
+        let configured = config.provider.default_model.as_deref();
+        let selection =
+            saved_account_route_selection("openai", "work", "Claude", "claude-current", configured);
+        assert_eq!(selection.model, "gpt-6.1-sol");
+        assert_eq!(
+            selection.routed_model_spec(),
+            "openai-oauth@work:gpt-6.1-sol"
+        );
+        let selection =
+            saved_account_route_selection("openai", "work", "OpenAI", "gpt-current", configured);
+        assert_eq!(selection.model, "gpt-current");
+        let selection =
+            saved_account_route_selection("claude", "work", "OpenAI", "gpt-current", configured);
+        assert_eq!(
+            selection.model,
+            crate::auth::lifecycle::default_model_for_provider("claude").unwrap()
+        );
+        let selection = saved_account_route_selection(
+            "claude",
+            "work",
+            "OpenAI",
+            "gpt-current",
+            Some("claude-api:claude-configured"),
+        );
+        assert_eq!(
+            selection.routed_model_spec(),
+            "claude-oauth@work:claude-configured"
+        );
+    }
+}
+
 impl App {
     pub(super) fn open_auth_browser(url: &str) -> bool {
         // Honors --no-browser/NO_BROWSER/JCODE_NO_BROWSER and never opens real
@@ -1007,34 +1134,52 @@ impl App {
     }
 
     pub(super) fn switch_account(&mut self, label: &str) {
-        match crate::auth::claude::set_active_account(label) {
-            Ok(()) => {
-                {
-                    let provider = self.provider.clone();
-                    let label_owned = label.to_string();
-                    tokio::spawn(async move {
-                        provider.invalidate_credentials().await;
-                        crate::logging::info(&format!(
-                            "Switched to Anthropic account '{}'",
-                            label_owned
-                        ));
-                    });
-                }
-                self.push_display_message(DisplayMessage::system(format!(
-                    "Switched to Anthropic account {}.",
-                    label
-                )));
-                // Keep account-sensitive UI state in sync immediately.
-                crate::auth::AuthStatus::invalidate_cache();
-                self.set_context_limit_and_sync_budget(self.provider.context_window());
-            }
-            Err(e) => {
-                self.push_display_message(DisplayMessage::error(format!(
-                    "Failed to switch account: {}",
-                    e
-                )));
-            }
+        self.switch_saved_oauth_account("claude", label);
+    }
+
+    fn switch_saved_oauth_account(&mut self, provider_id: &str, label: &str) {
+        let selection = saved_account_route_selection(
+            provider_id,
+            label,
+            self.provider.name(),
+            &self.provider.model(),
+            crate::config::config().provider.default_model.as_deref(),
+        );
+        let model_request = selection.routed_model_spec();
+        if let Err(error) = self.provider.set_route_selection(&selection) {
+            self.push_display_message(DisplayMessage::error(format!(
+                "Failed to switch {} account: {}",
+                selection.provider_label, error
+            )));
+            return;
         }
+        // Reset upstream conversation state and persist the qualified account
+        // route, not just the process-wide saved-login preference.
+        self.finalize_model_switch(&model_request);
+        let saved = if provider_id == "claude" {
+            crate::auth::claude::set_active_account(label)
+        } else {
+            crate::auth::codex::set_active_account(label)
+        };
+        if let Err(error) = saved {
+            self.push_display_message(DisplayMessage::error(format!(
+                "Selected {} account {} for this session, but could not save the active login: {}",
+                selection.provider_label, label, error
+            )));
+        } else {
+            self.push_display_message(DisplayMessage::system(format!(
+                "Switched to {} account {}.",
+                selection.provider_label, label
+            )));
+        }
+        crate::auth::AuthStatus::invalidate_cache();
+        let provider = self.provider.clone();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                provider.invalidate_credentials().await;
+            });
+        }
+        self.set_context_limit_and_sync_budget(self.provider.context_window());
     }
 
     pub(super) fn switch_account_by_label(&mut self, label: &str) {
@@ -1079,33 +1224,7 @@ impl App {
     }
 
     pub(super) fn switch_openai_account(&mut self, label: &str) {
-        match crate::auth::codex::set_active_account(label) {
-            Ok(()) => {
-                {
-                    let provider = self.provider.clone();
-                    let label_owned = label.to_string();
-                    tokio::spawn(async move {
-                        provider.invalidate_credentials().await;
-                        crate::logging::info(&format!(
-                            "Switched to OpenAI account '{}'",
-                            label_owned
-                        ));
-                    });
-                }
-                self.push_display_message(DisplayMessage::system(format!(
-                    "Switched to OpenAI account {}.",
-                    label
-                )));
-                crate::auth::AuthStatus::invalidate_cache();
-                self.set_context_limit_and_sync_budget(self.provider.context_window());
-            }
-            Err(e) => {
-                self.push_display_message(DisplayMessage::error(format!(
-                    "Failed to switch OpenAI account: {}",
-                    e
-                )));
-            }
-        }
+        self.switch_saved_oauth_account("openai", label);
     }
 
     pub(super) fn remove_openai_account(&mut self, label: &str) {

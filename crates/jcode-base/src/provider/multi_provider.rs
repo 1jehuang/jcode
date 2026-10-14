@@ -87,7 +87,9 @@ impl MultiProvider {
         initial_reason: &str,
         notes: &mut Vec<String>,
     ) -> Result<Option<EventStream>> {
-        if !same_provider_account_failover_enabled() || !self.provider_uses_oauth_accounts(provider)
+        if self.selected_account_for_provider(provider).is_some()
+            || !same_provider_account_failover_enabled()
+            || !self.provider_uses_oauth_accounts(provider)
         {
             return Ok(None);
         }

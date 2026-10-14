@@ -377,6 +377,7 @@ fn http_retry_decision(
                 },
                 tx,
                 Arc::new(RwLock::new(None)),
+                Some(account_labels[0].clone()),
                 "claude-sonnet-4-6".into(),
                 "test-session".into(),
                 Arc::new(std::sync::RwLock::new("claude-sonnet-4-6".into())),

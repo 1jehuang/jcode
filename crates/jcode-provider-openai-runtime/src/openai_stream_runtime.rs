@@ -19,9 +19,10 @@ use self::openai_stream_timeout::{
 };
 
 pub(super) async fn openai_access_token(
+    account_label: Option<String>,
     credentials: &Arc<RwLock<CodexCredentials>>,
 ) -> anyhow::Result<String> {
-    let (access_token, refresh_token, needs_refresh) = {
+    let (access_token, refresh_token, needs_refresh, is_oauth) = {
         let tokens = credentials.read().await;
         if tokens.access_token.is_empty() {
             anyhow::bail!("OpenAI access token is empty");
@@ -38,8 +39,14 @@ pub(super) async fn openai_access_token(
             tokens.access_token.clone(),
             tokens.refresh_token.clone(),
             should_refresh,
+            !tokens.refresh_token.is_empty() || tokens.id_token.is_some(),
         )
     };
+
+    if is_oauth && let Some(label) = account_label.as_deref() {
+        // A deleted explicit login must not continue using its cached bearer.
+        jcode_base::auth::codex::load_credentials_for_account(label)?;
+    }
 
     if !needs_refresh {
         return Ok(access_token);
@@ -49,7 +56,7 @@ pub(super) async fn openai_access_token(
         return Ok(access_token);
     }
 
-    force_refresh_openai_token(credentials, &refresh_token).await
+    force_refresh_openai_token(credentials, &refresh_token, account_label).await
 }
 
 /// Unconditionally refresh the OpenAI access token using the stored refresh
@@ -59,6 +66,7 @@ pub(super) async fn openai_access_token(
 pub(super) async fn force_refresh_openai_token(
     credentials: &Arc<RwLock<CodexCredentials>>,
     refresh_token: &str,
+    account_label: Option<String>,
 ) -> anyhow::Result<String> {
     // Rotation, persistence, and the in-memory commit form one transaction.
     // It runs as its own task so a cancelled caller (dropped stream, aborted
@@ -67,7 +75,10 @@ pub(super) async fn force_refresh_openai_token(
     // `oauth::OPENAI_REFRESH_TIMEOUT`.
     let refresh_token = refresh_token.to_string();
     refresh_and_commit_openai_tokens(credentials, async move {
-        oauth::refresh_openai_tokens(&refresh_token).await
+        match account_label {
+            Some(label) => oauth::refresh_openai_tokens_for_account(&refresh_token, &label).await,
+            None => oauth::refresh_openai_tokens(&refresh_token).await,
+        }
     })
     .await
 }
@@ -128,6 +139,7 @@ fn ws_stall_diagnostics(
 pub(super) async fn stream_response(
     client: Client,
     credentials: Arc<RwLock<CodexCredentials>>,
+    account_label: Option<String>,
     request: Value,
     initial_status_detail: String,
     tx: mpsc::Sender<Result<StreamEvent>>,
@@ -153,7 +165,7 @@ pub(super) async fn stream_response(
     if tx.is_closed() {
         return Ok(());
     }
-    let access_token = openai_access_token(&credentials).await?;
+    let access_token = openai_access_token(account_label.clone(), &credentials).await?;
     if tx.is_closed() {
         return Ok(());
     }
@@ -297,7 +309,9 @@ pub(super) async fn stream_response(
                 )));
             }
 
-            match force_refresh_openai_token(&credentials, &refresh_token).await {
+            match force_refresh_openai_token(&credentials, &refresh_token, account_label.clone())
+                .await
+            {
                 Ok(_) => {
                     jcode_base::logging::info(
                         "OpenAI access token rejected; refreshed credentials and will retry",
@@ -1273,22 +1287,27 @@ async fn continue_persistent_ws_locked(
 /// This replaces the old `stream_response_websocket` for the fresh-connection path.
 pub(super) async fn stream_response_websocket_persistent(
     credentials: Arc<RwLock<CodexCredentials>>,
+    account_label: Option<String>,
     request: Value,
     tx: mpsc::Sender<Result<StreamEvent>>,
     persistent_ws: Arc<Mutex<Option<PersistentWsState>>>,
     input_item_count: usize,
 ) -> Result<(), OpenAIStreamFailure> {
     let request_credentials = Arc::clone(&credentials);
-    let result = after_authentication(&tx, openai_access_token(&credentials), |access_token| {
-        stream_response_websocket_authenticated(
-            request_credentials,
-            request,
-            tx.clone(),
-            persistent_ws,
-            input_item_count,
-            access_token,
-        )
-    })
+    let result = after_authentication(
+        &tx,
+        openai_access_token(account_label, &credentials),
+        |access_token| {
+            stream_response_websocket_authenticated(
+                request_credentials,
+                request,
+                tx.clone(),
+                persistent_ws,
+                input_item_count,
+                access_token,
+            )
+        },
+    )
     .await?;
     result.unwrap_or(Ok(()))
 }

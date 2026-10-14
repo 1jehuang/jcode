@@ -38,7 +38,11 @@ fn pad_left_display(text: &str, width: usize) -> String {
 }
 
 fn api_method_display(raw: &str) -> String {
-    crate::provider::ModelRouteApiMethod::parse(raw).display_label()
+    let method = crate::provider::ModelRouteApiMethod::parse(raw).display_label();
+    match jcode_provider_core::oauth_account_label(raw) {
+        Some(label) => format!("{method} · {label}"),
+        None => method,
+    }
 }
 
 fn route_provider_display(provider: &str, api_method: &str) -> String {
@@ -1369,6 +1373,8 @@ mod tests {
 
     #[test]
     fn model_picker_method_display_uses_user_friendly_labels() {
+        assert_eq!(api_method_display("openai-oauth@work"), "oauth · work");
+        assert_eq!(api_method_display("claude-oauth@personal"), "oauth · personal");
         assert_eq!(api_method_display("openai-oauth"), "oauth");
         assert_eq!(api_method_display("openai-api-key"), "api key");
         assert_eq!(api_method_display("openai-compatible:comtegra"), "api key");
