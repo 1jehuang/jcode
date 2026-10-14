@@ -97,11 +97,12 @@ fn test_chatgpt_browser_only_runtime_rejects_api_models_and_uses_local_compactio
     let provider = OpenAIProvider::new_browser_only();
 
     assert_eq!(provider.model(), CHATGPT_WEB_MODEL);
-    assert_eq!(provider.available_models(), vec![CHATGPT_WEB_MODEL]);
-    assert_eq!(
-        provider.available_models_for_switching(),
-        vec![CHATGPT_WEB_MODEL.to_string()]
-    );
+    let web_models: Vec<&str> = jcode_provider_core::CHATGPT_WEB_MODELS
+        .iter()
+        .map(|web| web.id)
+        .collect();
+    assert_eq!(provider.available_models(), web_models);
+    assert_eq!(provider.available_models_for_switching(), web_models);
     assert!(provider.supports_compaction());
     assert!(provider.uses_jcode_compaction());
     assert_eq!(provider.available_transports(), vec!["browser"]);

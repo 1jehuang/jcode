@@ -909,20 +909,28 @@ impl Provider for OpenAIProvider {
 
     fn available_models(&self) -> Vec<&'static str> {
         if self.is_browser_only() {
-            return vec![CHATGPT_WEB_MODEL];
+            return jcode_provider_core::CHATGPT_WEB_MODELS
+                .iter()
+                .map(|web| web.id)
+                .collect();
         }
         jcode_provider_core::ALL_OPENAI_MODELS.to_vec()
     }
 
     fn available_models_for_switching(&self) -> Vec<String> {
         if self.is_browser_only() {
-            return vec![CHATGPT_WEB_MODEL.to_string()];
+            return jcode_provider_core::CHATGPT_WEB_MODELS
+                .iter()
+                .map(|web| web.id.to_string())
+                .collect();
         }
         let mut models =
             jcode_base::provider::cached_openai_model_ids_for_scope(&self.catalog_scope())
                 .unwrap_or_else(|| vec![self.model()]);
-        if !models.iter().any(|model| model == CHATGPT_WEB_MODEL) {
-            models.insert(0, CHATGPT_WEB_MODEL.to_string());
+        for web in jcode_provider_core::CHATGPT_WEB_MODELS.iter().rev() {
+            if !models.iter().any(|model| model == web.id) {
+                models.insert(0, web.id.to_string());
+            }
         }
         // Platform-API-only GPT Pro models are absent from the Codex OAuth
         // catalog by design; surface them whenever an OPENAI_API_KEY exists.
@@ -1161,7 +1169,7 @@ impl Provider for OpenAIProvider {
             }
             anyhow::bail!(
                 "The '{}' model always uses the browser transport; available transport: browser",
-                CHATGPT_WEB_MODEL
+                self.model()
             );
         }
         let mode = match transport.trim().to_ascii_lowercase().as_str() {

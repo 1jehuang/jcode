@@ -51,14 +51,15 @@ pub use catalog_routes::{
 pub use jcode_provider_core::attempt_tracker;
 pub use jcode_provider_core::cli_provider_arg_for_session_key;
 pub use jcode_provider_core::{
-    ALL_CLAUDE_MODELS, ALL_OPENAI_MODELS, CHATGPT_WEB_MODEL, CHEAPNESS_REFERENCE_INPUT_TOKENS,
-    CHEAPNESS_REFERENCE_OUTPUT_TOKENS, CredentialMode, DEFAULT_CONTEXT_LIMIT, EventStream,
-    JCODE_USER_AGENT, ModelCapabilities, ModelCatalogRefreshSummary, ModelRoute,
-    ModelRouteApiMethod, NativeCompactionResult, NativeToolResult, NativeToolResultSender,
-    PremiumMode, Provider, RouteBillingKind, RouteCheapnessEstimate, RouteCostConfidence,
-    RouteCostSource, RouteSelection, RuntimeKey, claude_code_api_method, claude_code_model_spec,
-    dedupe_model_routes, explicit_model_provider_prefix, fresh_transport_client,
-    grok_build_model_spec, inferred_reasoning_efforts, model_name_for_provider,
+    ALL_CLAUDE_MODELS, ALL_OPENAI_MODELS, CHATGPT_WEB_MODEL, CHATGPT_WEB_MODELS,
+    CHEAPNESS_REFERENCE_INPUT_TOKENS, CHEAPNESS_REFERENCE_OUTPUT_TOKENS, CredentialMode,
+    DEFAULT_CONTEXT_LIMIT, EventStream, JCODE_USER_AGENT, ModelCapabilities,
+    ModelCatalogRefreshSummary, ModelRoute, ModelRouteApiMethod, NativeCompactionResult,
+    NativeToolResult, NativeToolResultSender, PremiumMode, Provider, RouteBillingKind,
+    RouteCheapnessEstimate, RouteCostConfidence, RouteCostSource, RouteSelection, RuntimeKey,
+    claude_code_api_method, claude_code_model_spec, dedupe_model_routes,
+    explicit_model_provider_prefix, fresh_transport_client, grok_build_model_spec,
+    inferred_reasoning_efforts, is_chatgpt_web_model, model_name_for_provider,
     normalize_copilot_model_name, provider_from_model_key, shared_http_client,
     summarize_model_catalog_refresh,
 };

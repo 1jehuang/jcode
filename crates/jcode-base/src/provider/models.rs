@@ -16,7 +16,7 @@ pub use catalog::{
 };
 use catalog_service::{ModelCatalogService, RuntimeModelUnavailability};
 use jcode_provider_core::{
-    ALL_CLAUDE_MODELS, ALL_OPENAI_MODELS, CHATGPT_WEB_MODEL, ModelCapabilities,
+    ALL_CLAUDE_MODELS, ALL_OPENAI_MODELS, CHATGPT_WEB_MODELS, ModelCapabilities,
     OPENAI_API_ONLY_PRO_MODELS, context_limit_for_model_with_provider_and_cache,
     core_provider_for_model_with_hint, is_openai_api_only_pro_model, provider_key_from_hint,
     shared_http_client,
@@ -884,8 +884,10 @@ pub fn known_openai_model_ids_for_scope(scope: &str) -> Vec<String> {
 }
 
 fn finish_known_openai_model_ids(mut models: Vec<String>) -> Vec<String> {
-    if !models.iter().any(|model| model == CHATGPT_WEB_MODEL) {
-        models.push(CHATGPT_WEB_MODEL.to_string());
+    for web in CHATGPT_WEB_MODELS {
+        if !models.iter().any(|model| model == web.id) {
+            models.push(web.id.to_string());
+        }
     }
     // GPT Pro models never appear in the ChatGPT/Codex OAuth catalog (they are
     // platform-API-only), so a live OAuth catalog must not hide them when the
@@ -1320,7 +1322,7 @@ pub fn model_availability_for_account(model: &str) -> AccountModelAvailability {
 /// Availability of `model` within one credential's catalog scope (see
 /// [`openai_catalog_scope_for_credential`]).
 pub fn model_availability_for_scope(scope: &str, model: &str) -> AccountModelAvailability {
-    if model.trim() == CHATGPT_WEB_MODEL {
+    if jcode_provider_core::is_chatgpt_web_model(model) {
         return AccountModelAvailability {
             state: AccountModelAvailabilityState::Unknown,
             reason: Some("requires a logged-in ChatGPT web session".to_string()),

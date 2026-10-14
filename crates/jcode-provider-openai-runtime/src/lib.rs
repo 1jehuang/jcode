@@ -54,7 +54,7 @@ const ORIGINATOR: &str = "codex_cli_rs";
 pub(crate) const CHATGPT_WEB_MODEL: &str = jcode_provider_core::CHATGPT_WEB_MODEL;
 
 pub(crate) fn is_chatgpt_web_model(model: &str) -> bool {
-    model.trim() == CHATGPT_WEB_MODEL
+    jcode_provider_core::is_chatgpt_web_model(model)
 }
 
 /// Whether the hosted `image_generation` tool can be attached for `model_id`.
