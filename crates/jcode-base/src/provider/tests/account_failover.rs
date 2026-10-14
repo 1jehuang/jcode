@@ -67,7 +67,7 @@ fn openai_marked_account_is_rechecked_live_and_the_resume_is_sent() {
             OPENAI_USAGE_OPEN_BODY, Arc::clone(&hits)));
         let far = chrono::Utc::now().timestamp() + 5 * 3600;
         crate::provider::account_failover::record_account_exhausted(AccountProviderKind::OpenAi, "openai-otter", Some(far));
-        record_provider_unavailable_for_label("openai", "openai-otter", "openai-otter is out of usage");
+        record_provider_unavailable_for_account_label("openai", Some("openai-otter"), "openai-otter is out of usage");
         let text = complete_text(&rt, &a);
         crate::usage::forget_openai_usage_for_label_for_tests("openai-otter");
         assert_eq!(text.expect("resume is sent"), "hi from openai-otter");
@@ -554,7 +554,7 @@ fn rotation_skips_exhausted_and_wraps() {
 }
 
 #[test]
-fn all_exhausted_error_names_earliest_reset_and_falls_to_cross_provider_prompt() {
+fn all_exhausted_error_names_earliest_reset_without_unapproved_cross_provider_switch() {
     with_account_failover_env(|| {
         store_claude_accounts(3);
         let world = Arc::new(FakeAccountWorld::default());
@@ -582,23 +582,20 @@ fn all_exhausted_error_names_earliest_reset_and_falls_to_cross_provider_prompt()
 
         let rt = enter_test_runtime();
         let err = complete_text(&rt, &a).expect_err("every Claude account is out");
-        let prompt = crate::provider::parse_failover_prompt_message(&err.to_string())
-            .unwrap_or_else(|| panic!("expected the cross-provider prompt, got: {err:#}"));
-        assert_eq!(prompt.from_provider, "claude");
-        assert_eq!(prompt.to_provider, "openai");
+        // A cross-provider offer needs a pool-approved exact route (the
+        // auto-switch pool); this fixture has none, so the error carries the
+        // reason instead of a prompt.
+        let text = format!("{err:#}");
+        let reason = crate::provider::parse_failover_prompt_message(&text)
+            .map(|prompt| prompt.reason)
+            .unwrap_or(text);
         assert!(
-            prompt
-                .reason
-                .contains("All 3 Claude accounts are out of usage."),
-            "{}",
-            prompt.reason
+            reason.contains("All 3 Claude accounts are out of usage."),
+            "{reason}"
         );
         assert!(
-            prompt
-                .reason
-                .contains(&format!("First reset: claude-fox at {}", clock(fox_reset))),
-            "{}",
-            prompt.reason
+            reason.contains(&format!("First reset: claude-fox at {}", clock(fox_reset))),
+            "{reason}"
         );
         assert_eq!(
             world.labels_for("A"),
@@ -710,6 +707,37 @@ fn session_failover_off_disables_rotation() {
 }
 
 #[test]
+fn rejected_login_moves_window_but_excluded_source_stays_manual() {
+    with_account_failover_env(|| {
+        store_claude_accounts(2);
+        let world = Arc::new(FakeAccountWorld::default());
+        world.set(
+            "claude-otter",
+            FakeAccountBehavior::SyncError(
+                "Claude OAuth refresh token was previously rejected by Anthropic and cannot be refreshed.",
+            ),
+        );
+        let rt = enter_test_runtime();
+
+        // A rejected login cannot recover by retrying: this window moves on.
+        let a = account_session(&world, "A", ActiveProvider::Claude, false);
+        assert_eq!(complete_text(&rt, &a).unwrap(), "hi from claude-fox");
+        assert_eq!(world.labels_for("A"), ["claude-otter", "claude-fox"]);
+        assert_eq!(crate::auth::claude::get_active_account_override(), None);
+
+        // A source the user moved out of the auto-switch pool stays manual.
+        clear_provider_unavailable_for_label("claude", "claude-otter");
+        let mut pool = crate::auth::account_pool::AccountPool::load();
+        pool.excluded.push("claude:claude-otter".to_string());
+        pool.save().unwrap();
+        let b = account_session(&world, "B", ActiveProvider::Claude, false);
+        let _ = complete_text(&rt, &b).expect_err("excluded source does not move");
+        assert_eq!(world.labels_for("B"), ["claude-otter"]);
+        assert_eq!(b.account_pin(AccountProviderKind::Claude), None);
+    });
+}
+
+#[test]
 fn short_429_retries_same_account() {
     with_account_failover_env(|| {
         store_claude_accounts(3);
@@ -781,8 +809,8 @@ fn unavailability_is_per_label() {
         // Otter itself stays marked: A's next turn sends nothing to it.
         let _ = complete_text(&rt, &a).expect_err("otter is still marked");
         assert_eq!(world.labels_for("A"), ["claude-otter"]);
-        assert!(provider_unavailability_detail_for_label("claude", "claude-otter").is_some());
-        assert!(provider_unavailability_detail_for_label("claude", "claude-fox").is_none());
+        assert!(provider_unavailability_detail_for_account_label("claude", Some("claude-otter")).is_some());
+        assert!(provider_unavailability_detail_for_account_label("claude", Some("claude-fox")).is_none());
     });
 }
 
@@ -1067,9 +1095,7 @@ fn chatgpt_web_model_is_not_gated_by_openai_account_usage() {
             "openai-otter",
             Some(chrono::Utc::now().timestamp() + 5 * 3600),
         );
-        record_provider_unavailable_for_label(
-            "openai",
-            "openai-otter",
+        record_provider_unavailable_for_account_label("openai", Some("openai-otter"),
             "openai-otter is out of usage",
         );
         crate::usage::store_openai_usage_for_label_for_tests(
@@ -1118,9 +1144,7 @@ fn openai_early_reset_clears_usage_limit_mark_and_resume_is_sent() {
             "openai-otter",
             Some(far_reset),
         );
-        record_provider_unavailable_for_label(
-            "openai",
-            "openai-otter",
+        record_provider_unavailable_for_account_label("openai", Some("openai-otter"),
             "openai-otter is out of usage",
         );
         crate::usage::store_openai_usage_for_label_for_tests(
@@ -1177,7 +1201,7 @@ fn openai_early_reset_clears_usage_limit_mark_and_resume_is_sent() {
             "fresh usage that confirms the reset must clear the mark"
         );
         assert_eq!(
-            provider_unavailability_detail_for_label("openai", "openai-otter"),
+            provider_unavailability_detail_for_account_label("openai", Some("openai-otter")),
             None,
             "and the provider cooldown"
         );

@@ -1,6 +1,7 @@
 import {
   CONCURRENCY_EVENTS, concurrencyEntries, rawConcurrencyScalar,
 } from "./concurrency.js";
+import { oauthAccount } from "./oauth-account.js";
 import { syncModelPrices } from "./model-pricing.js";
 
 let cachedEventColumns = null;
@@ -459,14 +460,16 @@ function writeWebFirehose(env, body) {
 
 export default {
   async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    if (url.pathname === "/v1/oauth-account" || url.pathname === "/v1/oauth-account/check") {
+      return oauthAccount(request, env, url.pathname.endsWith("/check"));
+    }
     const cors = corsHeaders(request, env);
     if (request.method === "OPTIONS") {
       return new Response(null, {
         headers: cors,
       });
     }
-
-    const url = new URL(request.url);
 
     // Monitoring endpoint: database size vs the soft limit, so cap pressure
     // is observable before inserts start failing.
@@ -626,6 +629,18 @@ export default {
   async scheduled(event, env, ctx) {
     ctx.waitUntil(
       (async () => {
+        // Private account data is not covered by ordinary event retention.
+        // Run first so later maintenance failures cannot skip its 90-day expiry.
+        try {
+          for (let batch = 0; batch < 12; batch++) {
+            const result = await env.DB.prepare(`DELETE FROM oauth_accounts WHERE rowid IN (
+              SELECT rowid FROM oauth_accounts WHERE created_at < datetime('now', '-90 days') LIMIT 10000
+            )`).run();
+            if ((result.meta?.changes || 0) < 10000) break;
+          }
+        } catch {
+          console.warn("private OAuth account retention failed");
+        }
         await repairDailyActivityYesterday(env);
         // Price any model label first seen recently, so new models (e.g.
         // claude-opus-5-5) are not silently valued at $0 in spend dashboards.

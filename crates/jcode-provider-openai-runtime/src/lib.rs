@@ -1101,17 +1101,29 @@ impl OpenAIProvider {
         )
     }
 
+    fn selected_catalog_scope_for(&self, credentials: &CodexCredentials) -> String {
+        if Self::is_chatgpt_mode(credentials)
+            && let Some(label) = self.oauth_account_label()
+        {
+            label
+        } else {
+            Self::catalog_scope_for(credentials)
+        }
+    }
+
     pub(crate) fn catalog_scope(&self) -> String {
         match self.credentials.try_read() {
-            Ok(credentials) => Self::catalog_scope_for(&credentials),
+            Ok(credentials) => self.selected_catalog_scope_for(&credentials),
             // Writers hold this lock only briefly (token refresh / mode swap).
             // Fall back to the account scope rather than blocking.
-            Err(_) => jcode_base::provider::openai_catalog_scope_for_credential(true, ""),
+            Err(_) => self.oauth_account_label().unwrap_or_else(|| {
+                jcode_base::provider::openai_catalog_scope_for_credential(true, "")
+            }),
         }
     }
 
     async fn catalog_scope_async(&self) -> String {
-        Self::catalog_scope_for(&*self.credentials.read().await)
+        self.selected_catalog_scope_for(&*self.credentials.read().await)
     }
 
     fn catalog_credential_identity(credentials: &CodexCredentials) -> String {
@@ -1532,12 +1544,14 @@ impl OpenAIProvider {
                     let token =
                         match openai_access_token(&self.credentials, &self.account_pin).await {
                             Ok(token) => token,
+                            Err(_) if self.oauth_account_label().is_some() => String::new(),
                             Err(_) => self.credentials.read().await.access_token.clone(),
                         };
-                    jcode_base::provider::refresh_openai_model_catalog_in_background(
+                    jcode_base::provider::refresh_openai_model_catalog_in_background_for_scope(
                         token,
                         is_chatgpt_mode,
                         "openai-request-setup",
+                        scope.clone(),
                     );
                 }
             }
@@ -1611,3 +1625,6 @@ use self::websocket_health::{
 #[cfg(test)]
 #[path = "openai_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod account_binding_tests;

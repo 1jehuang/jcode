@@ -788,10 +788,14 @@ fn test_side_panel_header_close_hides_without_deleting_page() {
         .diff_pane_area
         .unwrap();
     let close_column = pane.right() - 2;
-    assert_eq!(
-        terminal.backend().buffer()[(close_column, pane.y)].symbol(),
-        "x"
-    );
+    let close_label = (pane.right() - 8..pane.right())
+        .map(|x| {
+            terminal.backend().buffer()[(x, pane.y)]
+                .symbol()
+                .to_string()
+        })
+        .collect::<String>();
+    assert_eq!(close_label, " [close]");
     let header = (pane.x..pane.right())
         .map(|x| {
             terminal.backend().buffer()[(x, pane.y)]
@@ -1041,10 +1045,14 @@ fn test_fullscreen_side_panel_header_close_restores_chat() {
         .diff_pane_area
         .unwrap();
     let close_column = pane.right() - 2;
-    assert_eq!(
-        terminal.backend().buffer()[(close_column, pane.y)].symbol(),
-        "x"
-    );
+    let close_label = (pane.right() - 8..pane.right())
+        .map(|x| {
+            terminal.backend().buffer()[(x, pane.y)]
+                .symbol()
+                .to_string()
+        })
+        .collect::<String>();
+    assert_eq!(close_label, " [close]");
 
     app.handle_mouse_event(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),

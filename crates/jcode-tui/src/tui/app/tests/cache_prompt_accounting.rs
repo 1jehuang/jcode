@@ -414,6 +414,7 @@ fn history_refresh_same_session_clears_optimal_baseline() {
         images: vec![],
         provider_name: Some("OpenAI".to_string()),
         provider_model: Some("gpt-5.6".to_string()),
+        provider_oauth_email: None,
         subagent_model: None,
         agent_model_overrides: Default::default(),
         autoreview_enabled: None,

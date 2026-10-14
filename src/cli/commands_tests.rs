@@ -1750,6 +1750,7 @@ fn run_explains_failover_offer_without_resending() {
         from_label: "prof-a".to_string(),
         to_provider: "prof-b:glm-5.3".to_string(),
         to_label: "prof-b (glm-5.3)".to_string(),
+        target_route: Some("prof-b:glm-5.3".to_string()),
         reason: "out of credit (HTTP 402: Insufficient credits)".to_string(),
         estimated_input_chars: 40,
         estimated_input_tokens: 10,

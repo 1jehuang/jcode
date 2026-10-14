@@ -109,6 +109,7 @@ fn produces_output(event: &StreamEvent) -> bool {
     matches!(
         event,
         StreamEvent::TextDelta(_)
+            | StreamEvent::TextSuffixReplace { .. }
             | StreamEvent::ThinkingDelta(_)
             | StreamEvent::ToolUseStart { .. }
             | StreamEvent::ToolInputDelta(_)

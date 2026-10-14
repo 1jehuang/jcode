@@ -240,6 +240,8 @@ impl MultiProvider {
                 from_label: from_profile.clone(),
                 to_provider: format!("{to_profile}:{model}"),
                 to_label: format!("{to_profile} ({model})"),
+                // The exact sibling-profile route the countdown switches to.
+                target_route: Some(format!("{to_profile}:{model}")),
                 reason,
                 estimated_input_chars: chars,
                 estimated_input_tokens: tokens,

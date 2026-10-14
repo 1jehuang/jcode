@@ -163,6 +163,16 @@ impl App {
             })
             .collect::<Vec<_>>();
 
+        if !logout {
+            let mut saved_accounts =
+                super::super::auth_account_picker_saved_accounts::saved_login_picker_entries(
+                    self.provider.name(),
+                    self.provider.oauth_account_label().as_deref(),
+                );
+            saved_accounts.extend(models);
+            models = saved_accounts;
+        }
+
         if logout {
             // Prepend a synthetic "All providers" entry that logs out everywhere.
             models.insert(

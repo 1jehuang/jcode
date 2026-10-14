@@ -744,6 +744,21 @@ fn delimited_content_looks_like_prose(rest: &str, close_delimiter: &str) -> bool
     {
         return true;
     }
+    // Short prose lists like `\[old, new\]` have no four-letter word.
+    // Preserve them without changing mathematical tuples like `\[x, y\]`.
+    if !body.contains('\n')
+        && body.contains(',')
+        && body
+            .split(',')
+            .filter(|entry| {
+                let entry = entry.trim();
+                entry.chars().count() >= 3 && entry.chars().all(char::is_alphabetic)
+            })
+            .count()
+            >= 2
+    {
+        return true;
+    }
     body.split_whitespace()
         .filter(|word| word.chars().filter(|ch| ch.is_alphabetic()).count() >= 2)
         .count()

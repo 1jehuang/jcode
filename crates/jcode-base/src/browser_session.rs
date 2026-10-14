@@ -141,6 +141,42 @@ pub async fn ensure_browser_session_for_async(
     }
 }
 
+/// Stop the session daemon for `session_id`/`browser` so the next call starts
+/// a fresh one. Used when the daemon's bound window or tab is gone: the host
+/// keeps routing every untargeted action to the dead tab, so without a
+/// restart each later call fails with "No tab with id" (#1743).
+pub fn reset_browser_session_for(session_id: &str, browser: Option<&str>) {
+    let name = session_name_for(session_id, browser);
+    if let Ok(pid) = std::fs::read_to_string(session_pid_path(&name))
+        && let Ok(pid) = pid.trim().parse::<u32>()
+        && pid > 0
+        && pid <= i32::MAX as u32
+        && platform::is_process_running(pid)
+    {
+        #[cfg(unix)]
+        // SAFETY: plain signal to the pid this session's daemon recorded.
+        unsafe {
+            libc::kill(pid as i32, libc::SIGTERM);
+        }
+    }
+    let _ = std::fs::remove_file(session_socket_path(&name));
+    let _ = std::fs::remove_file(session_pid_path(&name));
+}
+
+/// Whether the session daemon for `session_id`/`browser` is already running.
+/// Unlike `ensure_browser_session_for`, never starts one.
+pub fn browser_session_running(session_id: &str, browser: Option<&str>) -> bool {
+    is_session_alive(&session_name_for(session_id, browser))
+}
+
+/// Whether a bridge error means the session's tab or window no longer exists.
+pub fn is_stale_session_target_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("no tab with id")
+        || lower.contains("no active tab found in window")
+        || lower.contains("no window with id")
+}
+
 fn browser_supports_bind_window(bin: &std::path::Path) -> bool {
     std::process::Command::new(bin)
         .args(["session", "start", "--help"])

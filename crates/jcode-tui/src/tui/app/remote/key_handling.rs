@@ -298,6 +298,16 @@ async fn handle_remote_key_internal(
     let mut modifiers = modifiers;
     ctrl_bracket_fallback_to_esc(&mut code, &mut modifiers);
 
+    if app.pending_provider_failover.is_some() && !app.is_processing {
+        if code == KeyCode::Esc {
+            app.cancel_pending_provider_failover("Provider auto-switch canceled");
+            return Ok(());
+        }
+        if !input::is_scroll_only_key(app, code, modifiers) {
+            app.cancel_pending_provider_failover("Provider auto-switch canceled");
+        }
+    }
+
     if app.handle_ssh_login_key(code, modifiers, text_input.as_deref()) {
         return Ok(());
     }
@@ -356,6 +366,28 @@ async fn handle_remote_key_internal(
                 .await?;
         }
         return Ok(());
+    }
+
+    // Copy-selection mode owns the keyboard, mirroring the local path in
+    // `input::handle_modal_key`. Without this, Enter/Y fell through to the
+    // composer in client mode: Enter submitted the draft and letters were
+    // typed into it, so nothing was ever copied.
+    if app.copy_selection_mode {
+        let ctrl_copy_or_quit = modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(code, KeyCode::Char('c') | KeyCode::Char('d'));
+        if !ctrl_copy_or_quit {
+            let _ = app.handle_copy_selection_key(code, modifiers)
+                || input::handle_navigation_shortcuts(app, code, modifiers);
+            return Ok(());
+        }
+        if code == KeyCode::Char('c')
+            && app
+                .current_copy_selection_text()
+                .is_some_and(|text| !text.is_empty())
+        {
+            app.copy_current_selection_to_clipboard();
+            return Ok(());
+        }
     }
 
     if let Some(ref picker) = app.inline_interactive_state

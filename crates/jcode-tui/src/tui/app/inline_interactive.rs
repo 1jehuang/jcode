@@ -142,9 +142,17 @@ fn filter_routes_by_provider_allowlist(
             .split_once(':')
             .map(|(_, profile)| normalize(profile))
             .unwrap_or_default();
+        let account_base_method = route
+            .api_method
+            .split_once('@')
+            .filter(|_| jcode_provider_core::oauth_account_label(&route.api_method).is_some())
+            .map(|(method, _)| normalize(method));
         allowed.iter().any(|entry| {
             *entry == provider
                 || *entry == api_method
+                || account_base_method
+                    .as_ref()
+                    .is_some_and(|method| method == entry)
                 || (!profile_id.is_empty() && *entry == profile_id)
                 || crate::provider::model_route_provider_labels_match(&route.provider, entry)
         })
@@ -156,6 +164,8 @@ fn filter_routes_by_provider_allowlist(
             && current_api_method.is_none_or(|api_method| {
                 crate::provider::ModelRouteApiMethod::parse(&route.api_method)
                     == crate::provider::ModelRouteApiMethod::parse(api_method)
+                    && jcode_provider_core::oauth_account_label(&route.api_method)
+                        == jcode_provider_core::oauth_account_label(api_method)
             })
     };
     let filtered: Vec<crate::provider::ModelRoute> = routes
@@ -885,6 +895,12 @@ fn model_picker_route_is_default(
         &route.api_method,
         &route.provider,
     );
+    if default_model
+        .split_once(':')
+        .is_some_and(|(method, _)| jcode_provider_core::oauth_account_label(method).is_some())
+    {
+        return default_model == selection.model_spec;
+    }
     let provider_matches = |provider: &str| {
         model_picker_route_provider_matches_key(
             selection.provider_key.as_deref(),
@@ -5007,6 +5023,47 @@ reasoning_effort = "low"
         let route = picker_option_with_method("custom", "openai-compatible:custom");
 
         assert!(model_route_effort_levels_with_config("kimi-k3", &route, &config).is_empty());
+    }
+
+    #[test]
+    fn saved_account_model_picker_current_and_default_are_account_specific() {
+        let work = picker_option_with_method("OpenAI", "openai-oauth@work");
+        let personal = picker_option_with_method("OpenAI", "openai-oauth@personal");
+        assert!(super::model_picker_route_is_current(
+            "gpt-5.5",
+            &work,
+            "gpt-5.5",
+            "OpenAI",
+            Some("openai-oauth@work")
+        ));
+        assert!(!super::model_picker_route_is_current(
+            "gpt-5.5",
+            &personal,
+            "gpt-5.5",
+            "OpenAI",
+            Some("openai-oauth@work")
+        ));
+        assert!(super::model_picker_route_is_default(
+            "gpt-5.5",
+            &work,
+            Some("openai-oauth@work:gpt-5.5"),
+            Some("openai-oauth")
+        ));
+        assert!(!super::model_picker_route_is_default(
+            "gpt-5.5",
+            &personal,
+            Some("openai-oauth@work:gpt-5.5"),
+            Some("openai-oauth")
+        ));
+        assert!(super::remote_catalog_api_method_is_safe(
+            "openai-oauth@work"
+        ));
+        assert!(super::remote_catalog_api_method_is_safe(
+            "claude-oauth@personal"
+        ));
+        assert!(!super::remote_catalog_api_method_is_safe(
+            "claude-oauth@work:bad"
+        ));
     }
 
     #[test]

@@ -57,6 +57,33 @@ pub(crate) fn agent_provider(agent: &Arc<Mutex<Agent>>) -> Option<Arc<dyn Provid
         .and_then(|(_, provider)| provider.upgrade())
 }
 
+/// Do not probe any identity until telemetry is enabled. Only the provider
+/// may identify its effective OAuth credential. An API-key route must not expose the email
+/// of an unrelated saved subscription account.
+pub(crate) fn provider_oauth_email(
+    provider: &dyn Provider,
+) -> Option<crate::protocol::ProviderOAuthEmail> {
+    selected_provider_oauth_email(provider, crate::telemetry::is_enabled(), || {
+        provider.active_oauth_account_email()
+    })
+}
+
+fn selected_provider_oauth_email(
+    provider: &dyn Provider,
+    telemetry_enabled: bool,
+    resolve: impl FnOnce() -> Option<String>,
+) -> Option<crate::protocol::ProviderOAuthEmail> {
+    if !telemetry_enabled
+        || provider.active_resolved_credential()
+            == Some(jcode_provider_core::ResolvedCredential::ApiKey)
+    {
+        return None;
+    }
+    // The provider owns the effective credential snapshot, including unbound
+    // active OAuth and account failover. Never substitute a global login here.
+    resolve().map(crate::protocol::ProviderOAuthEmail::new)
+}
+
 fn optional_token_usage_totals(totals: TokenUsageTotals) -> Option<TokenUsageTotals> {
     (totals.messages_with_token_usage > 0).then_some(totals)
 }
@@ -270,6 +297,7 @@ pub(super) async fn handle_get_model_catalog(
         reasoning_effort,
         account_labels,
         source,
+        provider_oauth_email,
     ) = {
         match agent.try_lock() {
             Ok(agent_guard) => (
@@ -285,6 +313,7 @@ pub(super) async fn handle_get_model_catalog(
                     agent_guard.account_pins(),
                 ),
                 "live",
+                provider_oauth_email(agent_guard.provider_handle().as_ref()),
             ),
             Err(_) => {
                 crate::logging::warn(&format!(
@@ -334,6 +363,7 @@ pub(super) async fn handle_get_model_catalog(
                         pins
                     }),
                     "fallback",
+                    provider_oauth_email(provider.as_ref()),
                 )
             }
         }
@@ -367,6 +397,7 @@ pub(super) async fn handle_get_model_catalog(
         status_detail: None,
         upstream_provider: None,
         resolved_credential,
+        provider_oauth_email,
         reasoning_effort,
         // Catalog replies still use History, so the TUI applies this field as
         // authoritative. Omitting it falsely turns off /fast status and its badge.
@@ -690,6 +721,7 @@ async fn send_history_from_persisted_session(
         status_detail: None,
         upstream_provider: None,
         resolved_credential: provider.active_resolved_credential(),
+        provider_oauth_email: provider_oauth_email(provider.as_ref()),
         reasoning_effort,
         // The transcript is persisted, but the tier is live provider state and
         // can be read without waiting for the busy agent's mutex.
@@ -850,6 +882,8 @@ async fn send_history_with_guard(
         )
     };
 
+    let provider_oauth_email = provider_oauth_email(agent_guard.provider_handle().as_ref());
+
     // Only snapshot preparation needs the agent. Never hold it across session
     // metadata locks or socket backpressure.
     drop(agent_guard);
@@ -948,6 +982,7 @@ async fn send_history_with_guard(
         status_detail,
         upstream_provider,
         resolved_credential,
+        provider_oauth_email,
         reasoning_effort,
         service_tier,
         compaction_mode,

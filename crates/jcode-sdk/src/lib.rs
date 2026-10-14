@@ -196,4 +196,6 @@ pub use jcode_harness_api::{
     SidePanelPage, SidePanelPageFormat, SidePanelPageSource, SidePanelSnapshot, TextMatch,
     ToolConfiguration, TurnStopReason, api_socket_path,
 };
-pub use jcode_harness_api::{ModelUsage, compare_model_usage};
+pub use jcode_harness_api::{
+    ModelUsage, RuntimeCommand, RuntimeCommandOutput, compare_model_usage,
+};

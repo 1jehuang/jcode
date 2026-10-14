@@ -1,4 +1,6 @@
-use super::auth_account_picker_saved_accounts::{account_display_name, anthropic_account_use};
+use super::auth_account_picker_saved_accounts::{
+    account_picker_display_name, anthropic_account_use,
+};
 use super::*;
 
 impl App {
@@ -626,7 +628,12 @@ impl App {
                 selected = idx;
             }
             models.push(crate::tui::PickerEntry {
-                name: account_display_name("Claude", &account.label, claude_accounts.len()),
+                name: account_picker_display_name(
+                    "Claude",
+                    &account.label,
+                    claude_accounts.len(),
+                    account.email.as_deref(),
+                ),
                 options: vec![crate::tui::PickerOption {
                     provider: "Claude".to_string(),
                     api_method: self
@@ -680,7 +687,12 @@ impl App {
                 selected = idx;
             }
             models.push(crate::tui::PickerEntry {
-                name: account_display_name("OpenAI", &account.label, openai_accounts.len()),
+                name: account_picker_display_name(
+                    "OpenAI",
+                    &account.label,
+                    openai_accounts.len(),
+                    account.email.as_deref(),
+                ),
                 options: vec![crate::tui::PickerOption {
                     provider: "OpenAI".to_string(),
                     api_method: self
@@ -908,7 +920,12 @@ impl App {
                 .unwrap_or_else(|| "unknown".to_string());
             let plan = account.subscription_type.as_deref().unwrap_or("unknown");
             models.push(crate::tui::PickerEntry {
-                name: account_display_name("Claude", &account.label, accounts.len()),
+                name: account_picker_display_name(
+                    "Claude",
+                    &account.label,
+                    accounts.len(),
+                    account.email.as_deref(),
+                ),
                 options: vec![crate::tui::PickerOption {
                     provider: "Claude".to_string(),
                     api_method: self
@@ -1064,7 +1081,12 @@ impl App {
                 .unwrap_or_else(|| "unknown".to_string());
             let account_id = account.account_id.as_deref().unwrap_or("unknown");
             models.push(crate::tui::PickerEntry {
-                name: account_display_name("OpenAI", &account.label, accounts.len()),
+                name: account_picker_display_name(
+                    "OpenAI",
+                    &account.label,
+                    accounts.len(),
+                    account.email.as_deref(),
+                ),
                 options: vec![crate::tui::PickerOption {
                     provider: "OpenAI".to_string(),
                     api_method: self

@@ -273,8 +273,18 @@ fn test_account_command_opens_account_picker() {
                 }) if provider_id == "claude" && label == "claude-otter"
             )
         }));
-        assert!(picker.entries.iter().any(|entry| entry.name == "Claude"));
-        assert!(picker.entries.iter().any(|entry| entry.name == "OpenAI"));
+        assert!(
+            picker
+                .entries
+                .iter()
+                .any(|entry| entry.name == "Claude · claude@example.com")
+        );
+        assert!(
+            picker
+                .entries
+                .iter()
+                .any(|entry| entry.name == "OpenAI · user@example.com")
+        );
         assert!(picker.entries.iter().any(|entry| {
             matches!(
                 entry.action,
@@ -345,13 +355,13 @@ fn test_account_picker_arrows_navigate_and_bare_letters_search() {
             picker
                 .entries
                 .iter()
-                .any(|entry| entry.name == "OpenAI Otter")
+                .any(|entry| entry.name == "OpenAI Otter · first@example.com")
         );
         assert!(
             picker
                 .entries
                 .iter()
-                .any(|entry| entry.name == "OpenAI Fox")
+                .any(|entry| entry.name == "OpenAI Fox · second@example.com")
         );
 
         app.handle_key(KeyCode::Down, KeyModifiers::empty())
@@ -484,6 +494,61 @@ fn test_account_command_combines_claude_and_openai_accounts() {
                 .iter()
                 .any(|entry| entry.name == "account center")
         );
+    });
+}
+
+#[test]
+fn test_account_picker_renders_each_oauth_email_in_combined_and_scoped_views() {
+    use ratatui::{Terminal, backend::TestBackend};
+
+    with_temp_jcode_home(|| {
+        let expires = chrono::Utc::now().timestamp_millis() + 60_000;
+        let claude_emails = ["claude.personal@example.com", "claude.work@example.com"];
+        let openai_emails = ["openai.personal@example.com", "openai.work@example.com"];
+        for (index, email) in claude_emails.iter().enumerate() {
+            crate::auth::claude::upsert_account(crate::auth::claude::AnthropicAccount {
+                label: format!("claude-{}", index + 1),
+                access: "access".to_string(),
+                refresh: "refresh".to_string(),
+                expires,
+                email: Some((*email).to_string()),
+                scopes: Vec::new(),
+                subscription_type: Some("pro".to_string()),
+            })
+            .unwrap();
+        }
+        for (index, email) in openai_emails.iter().enumerate() {
+            crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
+                label: format!("openai-{}", index + 1),
+                access_token: "access".to_string(),
+                refresh_token: "refresh".to_string(),
+                id_token: None,
+                account_id: Some(format!("acct_{index}")),
+                expires_at: Some(expires),
+                email: Some((*email).to_string()),
+            })
+            .unwrap();
+        }
+        let mut app = create_test_app();
+        for scope in [None, Some("claude"), Some("openai")] {
+            app.open_account_picker(scope);
+            for preview in [false, true] {
+                app.inline_interactive_state.as_mut().unwrap().preview = preview;
+                let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+                terminal
+                    .draw(|frame| crate::tui::ui::draw(frame, &app))
+                    .unwrap();
+                let rendered = buffer_to_text(&terminal);
+                for email in claude_emails.iter().chain(openai_emails.iter()) {
+                    let expected = scope.is_none() || email.starts_with(scope.unwrap());
+                    assert_eq!(
+                        rendered.contains(email),
+                        expected,
+                        "scope {scope:?}, preview {preview}: {rendered}"
+                    );
+                }
+            }
+        }
     });
 }
 
@@ -1252,7 +1317,11 @@ fn test_account_ux_single_filtered_account_stays_visible_in_full_frame() {
         }
         let picker = app.inline_interactive_state.as_ref().unwrap();
         assert_eq!(picker.filtered.len(), 1);
-        assert_eq!(picker.selected_entry().unwrap().name, "Claude Otter");
+        // The picker shows the login email next to the name (upstream 3b52c5430).
+        assert_eq!(
+            picker.selected_entry().unwrap().name,
+            "Claude Otter · first@example.com"
+        );
 
         let backend = ratatui::backend::TestBackend::new(80, 24);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();

@@ -474,6 +474,7 @@ impl StatusSpinnerRenderer {
         crate::logging::watchdog::beat("tui.draw");
         app.refresh_terminal_title_metrics();
         app.sync_herdr_agent_state();
+        app.poll_oauth_account_telemetry();
         let invalidation = full_frame_invalidation(app.force_full_redraw, app.force_full_repaint);
         let force_full_redraw = invalidation != FullFrameInvalidation::None;
         // Wrap the whole frame (optional clear + diff flush) in a synchronized update so the
@@ -498,6 +499,7 @@ impl StatusSpinnerRenderer {
         let previous_frame = self.last_frame.as_ref();
         let draw_start = Instant::now();
         let mut render_elapsed = Duration::ZERO;
+        super::oauth_telemetry::begin_frame();
         let completed = terminal.draw(|frame| {
             let render_start = Instant::now();
             crate::tui::ui::draw(frame, app);
@@ -518,8 +520,10 @@ impl StatusSpinnerRenderer {
         let completed_buffer = completed.buffer.clone();
         // `completed` borrows the terminal; it is unused past this point, so the
         // borrow ends here (NLL) before we touch the backend again below.
-        if sync {
-            let _ = crossterm::execute!(terminal.backend_mut(), EndSynchronizedUpdate);
+        let frame_released =
+            !sync || crossterm::execute!(terminal.backend_mut(), EndSynchronizedUpdate).is_ok();
+        if frame_released {
+            app.acknowledge_rendered_oauth_notice(&completed_buffer);
         }
         crate::tui::ui::record_draw_call_attribution(crate::tui::ui::DrawCallAttribution {
             timestamp_ms: crate::tui::ui::wall_clock_ms(),

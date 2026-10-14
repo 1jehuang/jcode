@@ -116,7 +116,9 @@ pub fn next_account_label() -> Result<String> {
     let auth = load_auth_file()?;
     Ok(crate::auth::account_store::next_account_label(
         ACCOUNT_LABEL_PREFIX,
-        auth.anthropic_accounts.len(),
+        auth.anthropic_accounts
+            .iter()
+            .map(|account| account.label.as_str()),
     ))
 }
 
@@ -323,7 +325,7 @@ pub fn load_auth_file() -> Result<JcodeAuthFile> {
     {
         crate::logging::info("Migrating legacy single-account auth.json to multi-account format");
         auth.anthropic_accounts.push(AnthropicAccount {
-            label: "default".to_string(),
+            label: primary_account_label(),
             access: legacy.access,
             refresh: legacy.refresh,
             expires: legacy.expires,
@@ -331,7 +333,7 @@ pub fn load_auth_file() -> Result<JcodeAuthFile> {
             subscription_type: Some("max".to_string()),
             scopes: Vec::new(),
         });
-        auth.active_anthropic_account = Some("default".to_string());
+        auth.active_anthropic_account = Some(primary_account_label());
         let _ = save_auth_file(&auth);
     }
 

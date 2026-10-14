@@ -1,5 +1,5 @@
 use anyhow::Result;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{LazyLock, RwLock};
 
 /// Runtime (process-local) active-account overrides, keyed by provider
@@ -53,8 +53,43 @@ pub fn canonical_account_label(prefix: &str, index: usize) -> String {
     }
 }
 
-pub fn next_account_label(prefix: &str, account_count: usize) -> String {
-    canonical_account_label(prefix, account_count + 1)
+fn legacy_account_ordinal(prefix: &str, label: &str) -> Option<usize> {
+    // Primary-account sentinels from before numbered/animal labels.
+    if matches!(label, "default" | "main") {
+        return Some(1);
+    }
+    let suffix = label.strip_prefix(prefix)?.strip_prefix('-')?;
+    if suffix.is_empty() || !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    suffix.parse::<usize>().ok().filter(|index| *index > 0)
+}
+
+fn account_ordinal(prefix: &str, label: &str) -> Option<usize> {
+    let suffix = label.strip_prefix(prefix)?.strip_prefix('-')?;
+    ACCOUNT_ANIMALS
+        .iter()
+        .position(|animal| *animal == suffix)
+        .map(|index| index + 1)
+        .or_else(|| suffix.strip_prefix("animal-")?.parse::<usize>().ok())
+        .or_else(|| legacy_account_ordinal(prefix, label))
+}
+
+pub fn next_account_label<'a>(prefix: &str, labels: impl IntoIterator<Item = &'a str>) -> String {
+    let labels = labels.into_iter().collect::<HashSet<_>>();
+    let highest = labels
+        .iter()
+        .filter_map(|label| account_ordinal(prefix, label))
+        .max()
+        .unwrap_or(0);
+    let mut index = highest.checked_add(1).unwrap_or(1);
+    loop {
+        let candidate = canonical_account_label(prefix, index);
+        if !labels.contains(candidate.as_str()) {
+            return candidate;
+        }
+        index = index.checked_add(1).unwrap_or(1);
+    }
 }
 
 pub fn login_target_label<T, F>(
@@ -77,7 +112,7 @@ where
         {
             return requested.to_string();
         }
-        return next_account_label(prefix, accounts.len());
+        return next_account_label(prefix, accounts.iter().map(label_of));
     }
 
     active_label
@@ -271,7 +306,7 @@ where
         return requested_label;
     }
 
-    let label = next_account_label(prefix, accounts.len());
+    let label = next_account_label(prefix, accounts.iter().map(label_of));
     let mut account = account;
     set_label(&mut account, label.clone());
     accounts.push(account);
@@ -300,14 +335,31 @@ where
     FGet: Fn(&T) -> &str + Copy,
     FSet: Fn(&mut T, String) + Copy,
 {
+    // Account labels are identities, not positions. Never renumber surviving
+    // canonical (or user-named) accounts when an earlier account is removed.
+    // Reserve every existing identity before migrating numeric legacy labels
+    // and the old primary-account sentinels (default/main).
+    let mut used = accounts
+        .iter()
+        .map(|account| label_of(account).to_string())
+        .collect::<HashSet<_>>();
     let label_map = accounts
         .iter()
-        .enumerate()
-        .map(|(index, account)| {
-            (
-                label_of(account).to_string(),
-                canonical_account_label(prefix, index + 1),
-            )
+        .map(|account| {
+            let original = label_of(account).to_string();
+            let canonical = match legacy_account_ordinal(prefix, &original) {
+                Some(index) => {
+                    let candidate = canonical_account_label(prefix, index);
+                    if used.contains(&candidate) {
+                        next_account_label(prefix, used.iter().map(String::as_str))
+                    } else {
+                        candidate
+                    }
+                }
+                None => original.clone(),
+            };
+            used.insert(canonical.clone());
+            (original, canonical)
         })
         .collect::<Vec<_>>();
     let mut changed = false;
@@ -368,19 +420,19 @@ mod tests {
     fn relabel_accounts_canonicalizes_labels_and_active_label() {
         let mut accounts = vec![
             Account {
-                label: "default".to_string(),
+                label: "openai-1".to_string(),
             },
             Account {
-                label: "other".to_string(),
+                label: "openai-2".to_string(),
             },
         ];
-        let mut active = Some("other".to_string());
+        let mut active = Some("openai-2".to_string());
 
         let outcome = relabel_accounts(
             "openai",
             &mut accounts,
             &mut active,
-            Some("default".to_string()),
+            Some("openai-1".to_string()),
             |account| account.label.as_str(),
             |account, label| account.label = label,
         );
@@ -475,5 +527,117 @@ mod tests {
         assert_eq!(canonical_account_label("claude", 2), "claude-fox");
         assert_eq!(canonical_account_label("openai", 32), "openai-penguin");
         assert_eq!(canonical_account_label("openai", 33), "openai-animal-33");
+    }
+
+    #[test]
+    fn deleting_first_account_keeps_survivor_identity_and_allocates_unique_label() {
+        for prefix in ["claude", "openai"] {
+            let first = canonical_account_label(prefix, 1);
+            let survivor = canonical_account_label(prefix, 2);
+            let mut accounts = vec![
+                Account { label: first },
+                Account {
+                    label: survivor.clone(),
+                },
+            ];
+            accounts.remove(0);
+            let mut active = Some(survivor.clone());
+            let outcome = relabel_accounts(
+                prefix,
+                &mut accounts,
+                &mut active,
+                Some(survivor.clone()),
+                |account| &account.label,
+                |account, label| account.label = label,
+            );
+            assert!(!outcome.changed);
+            assert!(outcome.canonical_override_label.is_none());
+            assert_eq!(accounts[0].label, survivor);
+            assert_eq!(active.as_deref(), Some(survivor.as_str()));
+            let next = next_account_label(
+                prefix,
+                accounts.iter().map(|account| account.label.as_str()),
+            );
+            assert_eq!(next, canonical_account_label(prefix, 3));
+            assert_eq!(
+                login_target_label(prefix, Some("new"), active.clone(), &accounts, |account| {
+                    &account.label
+                }),
+                next
+            );
+            let inserted = upsert_account(
+                prefix,
+                &mut accounts,
+                &mut active,
+                Account {
+                    label: "new".into(),
+                },
+                |account| &account.label,
+                |account, label| account.label = label,
+            );
+            assert_eq!(inserted, next);
+            assert_eq!(accounts[0].label, survivor);
+            assert_ne!(accounts[0].label, accounts[1].label);
+        }
+    }
+
+    #[test]
+    fn legacy_primary_aliases_migrate_without_renaming_named_accounts() {
+        for alias in ["default", "main"] {
+            let mut accounts = [alias, "work"].map(|label| Account {
+                label: label.into(),
+            });
+            let mut active = Some(alias.into());
+            let outcome = relabel_accounts(
+                "openai",
+                &mut accounts,
+                &mut active,
+                Some(alias.into()),
+                |account| &account.label,
+                |account, label| account.label = label,
+            );
+            assert!(outcome.changed);
+            assert_eq!(accounts[0].label, "openai-otter");
+            assert_eq!(accounts[1].label, "work");
+            assert_eq!(active.as_deref(), Some("openai-otter"));
+            assert_eq!(
+                outcome.canonical_override_label.as_deref(),
+                Some("openai-otter")
+            );
+        }
+    }
+
+    #[test]
+    fn numeric_migration_never_steals_existing_canonical_or_named_identity() {
+        let mut accounts =
+            ["claude-1", "claude-otter", "work", "claude-animal-33"].map(|label| Account {
+                label: label.into(),
+            });
+        let mut active = Some("claude-1".into());
+        let outcome = relabel_accounts(
+            "claude",
+            &mut accounts,
+            &mut active,
+            Some("claude-1".into()),
+            |account| &account.label,
+            |account, label| account.label = label,
+        );
+        assert!(outcome.changed);
+        assert_eq!(accounts[0].label, "claude-animal-34");
+        assert_eq!(accounts[1].label, "claude-otter");
+        assert_eq!(accounts[2].label, "work");
+        assert_eq!(accounts[3].label, "claude-animal-33");
+        assert_eq!(active.as_deref(), Some("claude-animal-34"));
+        assert_eq!(
+            outcome.canonical_override_label.as_deref(),
+            Some("claude-animal-34")
+        );
+        assert_eq!(
+            next_account_label(
+                "claude",
+                accounts.iter().map(|account| account.label.as_str())
+            ),
+            "claude-animal-35"
+        );
     }
 }

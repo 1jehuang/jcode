@@ -353,6 +353,11 @@ async fn macos_bridge_public_tool_denies_before_dispatch_despite_live_session() 
 #[path = "browser_session_tests.rs"]
 mod browser_session_tests;
 
+// Session-daemon regressions (#1743); macOS never starts bridge sessions.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[path = "browser_user_browser_tests.rs"]
+mod browser_user_browser_tests;
+
 #[test]
 fn press_script_uses_selector_when_present() {
     let script = build_press_script(Some("Enter"), Some("#email")).unwrap();
@@ -998,3 +1003,8 @@ async fn live_macos_bridge_explicit_tab_ignores_selected_decoy() -> Result<()> {
     );
     Ok(())
 }
+
+// #1743 live acceptance (ignored by default; see the module docs).
+#[cfg(unix)]
+#[path = "browser_live_1743_tests.rs"]
+mod browser_live_1743_tests;

@@ -845,6 +845,11 @@ impl BedrockProvider {
             || id.starts_with("nvidia.")
     }
 
+    /// Whether this model's Converse runtime implements agent tool calls.
+    pub fn model_supports_tools(model: &str) -> bool {
+        Self::model_info(model).supports_tools
+    }
+
     fn model_info(model: &str) -> BedrockModelInfo {
         let id = Self::normalize_model_id(model).to_ascii_lowercase();
         if id.contains("claude-opus-4") || id.contains("claude-sonnet-4") {

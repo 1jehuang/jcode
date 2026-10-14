@@ -11,6 +11,7 @@ fn test_model_changed_roundtrip_carries_context_window() -> Result<()> {
         context_window: Some(1_310_720),
         error: None,
         resolved_credential: None,
+        provider_oauth_email: None,
         reasoning_effort: None,
     };
     let json = encode_event(&event);
@@ -19,10 +20,7 @@ fn test_model_changed_roundtrip_carries_context_window() -> Result<()> {
         "window must reach the wire: {json}"
     );
     let decoded = parse_event_json(json.trim())?;
-    let ServerEvent::ModelChanged {
-        context_window, ..
-    } = decoded
-    else {
+    let ServerEvent::ModelChanged { context_window, .. } = decoded else {
         return Err(anyhow!("wrong event type"));
     };
     assert_eq!(context_window, Some(1_310_720));
@@ -41,21 +39,39 @@ fn test_model_changed_without_context_window_stays_absent() -> Result<()> {
         context_window: None,
         error: None,
         resolved_credential: None,
+        provider_oauth_email: None,
         reasoning_effort: None,
     };
     let json = encode_event(&event);
+    assert!(!json.contains("provider_oauth_email"));
     assert!(
         !json.contains("context_window"),
         "unknown window must be omitted, not sent as null: {json}"
     );
     let decoded = parse_event_json(json.trim())?;
-    let ServerEvent::ModelChanged {
-        context_window, ..
-    } = decoded
-    else {
+    let ServerEvent::ModelChanged { context_window, .. } = decoded else {
         return Err(anyhow!("wrong event type"));
     };
     assert_eq!(context_window, None);
+    Ok(())
+}
+
+#[test]
+fn test_model_changed_oauth_identity_legacy_and_redaction() -> Result<()> {
+    let legacy = parse_event_json(r#"{"type":"model_changed","id":0,"model":"test"}"#)?;
+    assert!(!encode_event(&legacy).contains("provider_oauth_email"));
+    let event = parse_event_json(
+        r#"{"type":"model_changed","id":0,"model":"test","provider_oauth_email":"effective@example.test"}"#,
+    )?;
+    assert!(!format!("{event:?}").contains("effective@example.test"));
+    let ServerEvent::ModelChanged {
+        provider_oauth_email: Some(email),
+        ..
+    } = parse_event_json(encode_event(&event).trim())?
+    else {
+        return Err(anyhow!("identity missing"));
+    };
+    assert_eq!(email.as_str(), "effective@example.test");
     Ok(())
 }
 
@@ -566,6 +582,7 @@ fn test_history_event_decodes_without_compaction_mode_for_older_servers() -> Res
         compaction_mode,
         side_panel,
         agent_model_overrides,
+        provider_oauth_email,
         ..
     } = decoded
     else {
@@ -581,6 +598,27 @@ fn test_history_event_decodes_without_compaction_mode_for_older_servers() -> Res
     );
     assert!(!side_panel.has_pages());
     assert!(agent_model_overrides.is_empty());
+    assert!(provider_oauth_email.is_none());
+    Ok(())
+}
+
+#[test]
+fn test_history_provider_oauth_email_roundtrip_redacts_debug() -> Result<()> {
+    let decoded = parse_event_json(
+        r#"{"type":"history","id":1,"session_id":"test","messages":[],"provider_oauth_email":"selected@example.test"}"#,
+    )?;
+    assert!(!format!("{decoded:?}").contains("selected@example.test"));
+    let wire = encode_event(&decoded);
+    assert!(wire.contains("\"provider_oauth_email\":\"selected@example.test\""));
+    let ServerEvent::History {
+        provider_oauth_email: Some(email),
+        ..
+    } = parse_event_json(wire.trim())?
+    else {
+        return Err(anyhow!("identity missing"));
+    };
+    assert_eq!(email.as_str(), "selected@example.test");
+    assert_eq!(email.into_string(), "selected@example.test");
     Ok(())
 }
 
@@ -626,6 +664,7 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         status_detail: None,
         upstream_provider: None,
         resolved_credential: None,
+        provider_oauth_email: None,
         reasoning_effort: None,
         service_tier: None,
         account_labels: Vec::new(),
@@ -804,7 +843,10 @@ fn test_error_event_retry_after_back_compat_default() -> Result<()> {
 fn test_agent_models_session_setter_and_response_roundtrip() -> Result<()> {
     let clear = parse_request_json(r#"{"type":"set_agent_model","id":31,"target":"swarm"}"#)?;
     assert!(matches!(clear, Request::SetAgentModel { model: None, .. }));
-    assert!(matches!(clear, Request::SetAgentModel { global: false, .. }));
+    assert!(matches!(
+        clear,
+        Request::SetAgentModel { global: false, .. }
+    ));
     let request = Request::SetAgentModel {
         id: 32,
         target: "review".into(),
@@ -812,7 +854,10 @@ fn test_agent_models_session_setter_and_response_roundtrip() -> Result<()> {
         global: false,
     };
     let encoded = serde_json::to_string(&request)?;
-    assert!(!encoded.contains("global"), "session updates keep the old wire shape");
+    assert!(
+        !encoded.contains("global"),
+        "session updates keep the old wire shape"
+    );
     let decoded = parse_request_json(&encoded)?;
     assert!(
         matches!(decoded, Request::SetAgentModel { model: Some(model), .. } if model == "inherit")
@@ -824,7 +869,10 @@ fn test_agent_models_session_setter_and_response_roundtrip() -> Result<()> {
         global: true,
     };
     let decoded = parse_request_json(&serde_json::to_string(&global)?)?;
-    assert!(matches!(decoded, Request::SetAgentModel { global: true, .. }));
+    assert!(matches!(
+        decoded,
+        Request::SetAgentModel { global: true, .. }
+    ));
     let event = ServerEvent::AgentModelsChanged {
         id: 32,
         session_id: "session-a".into(),

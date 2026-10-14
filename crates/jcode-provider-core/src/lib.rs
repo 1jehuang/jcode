@@ -181,6 +181,27 @@ pub trait Provider: Send + Sync {
         None
     }
 
+    /// Bind this runtime to a saved OAuth account without changing the global login.
+    /// Implementations must preserve the binding through credential refresh and forks.
+    fn set_oauth_account(&self, label: Option<&str>) -> Result<()> {
+        if label.is_some() {
+            anyhow::bail!("This provider does not support named OAuth accounts");
+        }
+        Ok(())
+    }
+
+    /// The explicitly bound OAuth account, independent of the global active login.
+    fn oauth_account_label(&self) -> Option<String> {
+        None
+    }
+
+    /// Email belonging to this runtime's actual cached OAuth credential.
+    /// Return `None` for API keys, unknown credentials, or unknown identity.
+    /// Implementations must not fall back to the globally active saved account.
+    fn active_oauth_account_email(&self) -> Option<String> {
+        None
+    }
+
     /// Whether this provider path can safely receive `ContentBlock::Image` inputs.
     fn supports_image_input(&self) -> bool {
         false
@@ -568,6 +589,9 @@ pub async fn collect_simple_completion<P: Provider + ?Sized>(
     while let Some(event) = response.next().await {
         match event {
             Ok(StreamEvent::TextDelta(text)) => result.push_str(&text),
+            Ok(StreamEvent::TextSuffixReplace { old_text, new_text }) => {
+                jcode_message_types::replace_text_suffix(&mut result, &old_text, &new_text);
+            }
             Ok(StreamEvent::TokenUsage {
                 input_tokens,
                 output_tokens,
@@ -960,6 +984,11 @@ impl RouteSelection {
         }
     }
 
+    /// Exact saved OAuth account encoded in the wire API method, if pinned.
+    pub fn account_label(&self) -> Option<&str> {
+        oauth_account_label(&self.api_method)
+    }
+
     /// The string model spec that applies this route selection, including any
     /// provider routing prefix/suffix (`openai-oauth:`, `claude-api:`,
     /// `openai/gpt-5@OpenAI`, `copilot:`, ...).
@@ -971,6 +1000,16 @@ impl RouteSelection {
     /// drift between provider implementations.
     pub fn routed_model_spec(&self) -> String {
         let model = self.model.trim();
+        if let Some(label) = self.account_label() {
+            let prefix = match self.runtime_key {
+                RuntimeKey::ClaudeOAuth => Some("claude-oauth"),
+                RuntimeKey::OpenAIOAuth => Some("openai-oauth"),
+                _ => None,
+            };
+            if let Some(prefix) = prefix {
+                return format!("{prefix}@{label}:{model}");
+            }
+        }
         match &self.runtime_key {
             RuntimeKey::JcodeSubscription => model.to_string(),
             RuntimeKey::ClaudeOAuth => format!("claude-oauth:{model}"),
@@ -1078,6 +1117,19 @@ pub enum ModelRouteApiMethod {
     Other(String),
 }
 
+/// Account-qualified OAuth method, preserving the case-sensitive saved label.
+pub fn oauth_account_label(method: &str) -> Option<&str> {
+    let (base, label) = method.trim().split_once('@')?;
+    if !matches!(base, "claude-oauth" | "openai-oauth")
+        || label.is_empty()
+        || label.contains([':', '@'])
+        || label.chars().any(char::is_control)
+    {
+        return None;
+    }
+    Some(label)
+}
+
 impl ModelRouteApiMethod {
     /// The route-vocabulary api_method for a canonical dual-auth route.
     pub fn from_auth_route(route: crate::auth_mode::AuthRoute) -> Self {
@@ -1092,6 +1144,11 @@ impl ModelRouteApiMethod {
 
     pub fn parse(value: &str) -> Self {
         let trimmed = value.trim();
+        let trimmed = if oauth_account_label(trimmed).is_some() {
+            trimmed.split_once('@').unwrap().0
+        } else {
+            trimmed
+        };
         let lower = trimmed.to_ascii_lowercase();
         // Claude Code routes are checked first so the Claude auth alias table
         // can never swallow them as native Claude OAuth.
@@ -1567,6 +1624,54 @@ fn reference_request_cost_micros(
 ) -> u64 {
     input_price_per_mtok_micros.saturating_mul(CHEAPNESS_REFERENCE_INPUT_TOKENS) / 1_000_000
         + output_price_per_mtok_micros.saturating_mul(CHEAPNESS_REFERENCE_OUTPUT_TOKENS) / 1_000_000
+}
+
+#[cfg(test)]
+mod saved_account_route_tests {
+    use super::*;
+
+    #[test]
+    fn saved_account_routes_survive_serialization_and_restore_specs() {
+        for (base, runtime, model) in [
+            ("claude-oauth", RuntimeKey::ClaudeOAuth, "claude-sonnet-4-6"),
+            ("openai-oauth", RuntimeKey::OpenAIOAuth, "gpt-5.5"),
+        ] {
+            for label in ["work", "personal", "Named-Account"] {
+                let route = ModelRoute {
+                    model: model.to_string(),
+                    provider: "provider".to_string(),
+                    api_method: format!("{base}@{label}"),
+                    available: true,
+                    detail: String::new(),
+                    cheapness: None,
+                    usage: None,
+                };
+                let selection = RouteSelection::from_model_route(&route);
+                assert_eq!(selection.runtime_key, runtime);
+                assert_eq!(selection.account_label(), Some(label));
+                let json = serde_json::to_string(&selection).unwrap();
+                let restored: RouteSelection = serde_json::from_str(&json).unwrap();
+                assert_eq!(restored, selection);
+                assert_eq!(
+                    restored.routed_model_spec(),
+                    format!("{base}@{label}:{model}")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_or_non_oauth_account_methods_are_not_accepted() {
+        for method in [
+            "claude-oauth@",
+            "openai-oauth@work:bad",
+            "openai-oauth@a@b",
+            "openai-api-key@work",
+            "claude-oauth@work\nlabel",
+        ] {
+            assert_eq!(oauth_account_label(method), None, "{method:?}");
+        }
+    }
 }
 
 #[cfg(test)]

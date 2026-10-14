@@ -529,7 +529,7 @@ fn onboarding_golden_telemetry_settings_page() {
         "option 1: {text}"
     );
     assert!(
-        text.contains("Includes prompts, model responses, reasoning, code, and tool"),
+        text.contains("Includes provider account email, prompts, responses, reasoning, code"),
         "caption 1: {text}"
     );
     assert!(

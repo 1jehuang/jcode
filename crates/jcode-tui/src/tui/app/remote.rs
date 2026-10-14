@@ -112,8 +112,14 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     let mut needs_redraw = crate::tui::periodic_redraw_required(app);
     needs_redraw |= app.retire_expired_status_notice();
     needs_redraw |= app.poll_usage_reset();
-    if let Some(account) = app.usage_reset.invalidate_account.take() {
-        match remote.invalidate_openai_usage(account).await {
+    if let Some((provider, account)) = app.usage_reset.invalidate_account.take() {
+        let sent = match provider {
+            super::usage_reset::Provider::OpenAi => remote.invalidate_openai_usage(account).await,
+            super::usage_reset::Provider::Claude => {
+                remote.invalidate_anthropic_usage(account).await
+            }
+        };
+        match sent {
             Ok(id) => {
                 app.usage_reset.invalidate_requests.insert(id, Some(Instant::now()));
             }
@@ -138,6 +144,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         needs_redraw = true;
     }
     needs_redraw |= app.poll_ssh_login(remote).await;
+    needs_redraw |= app.poll_oauth_account_telemetry();
     needs_redraw |= app.poll_ssh_login_onboarding();
     needs_redraw |= app.flush_pending_resize_redraw();
     app.maybe_capture_runtime_memory_heartbeat();
@@ -201,6 +208,42 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     }
 
     let _ = check_debug_command(app, remote).await;
+
+    let had_failover_countdown = app.pending_provider_failover.is_some();
+    needs_redraw |= app.maybe_progress_provider_failover_countdown();
+    if had_failover_countdown {
+        if let Some(selection) = app.pending_automatic_failover_route.take() {
+            app.pending_model_switch = None;
+            match remote
+                .set_route_selection_for_failover(selection.clone())
+                .await
+            {
+                Ok(id) => {
+                    app.pending_automatic_failover_request_id = Some(id);
+                    app.pending_automatic_failover_route = Some(selection);
+                    app.remote_model_switch_in_flight = true;
+                    forward_pending_reasoning_effort(app, remote).await;
+                }
+                Err(error) => {
+                    if let Some(payload) = app.pending_fallback_resend.take() {
+                        app.restore_failover_payload(payload);
+                    }
+                    app.push_display_message(DisplayMessage::error(format!(
+                        "Auto-switch failed: {}",
+                        App::compact_provider_failure(&error.to_string())
+                    )));
+                    app.set_status_notice("Model switch failed");
+                }
+            }
+        }
+        // No queued continuation or retry may race the cancellable countdown
+        // or the route acknowledgement that must precede its resend.
+        return true;
+    }
+
+    if app.remote_model_switch_in_flight && app.pending_fallback_resend.is_some() {
+        return needs_redraw;
+    }
 
     if !app.is_processing {
         if let Some(request) = app.take_pending_catchup_resume() {
@@ -505,6 +548,7 @@ async fn apply_terminal_event<B: Backend>(
             {
                 handle_remote_key_event(app, key, remote).await?;
                 if let Some(selection) = app.pending_route_selection.take() {
+                    app.cancel_pending_provider_failover("Provider auto-switch canceled");
                     app.pending_model_switch = None;
                     match remote.set_route_selection(selection).await {
                         Ok(_) => {
@@ -522,6 +566,7 @@ async fn apply_terminal_event<B: Backend>(
                         }
                     }
                 } else if let Some(spec) = app.pending_model_switch.take() {
+                    app.cancel_pending_provider_failover("Provider auto-switch canceled");
                     match remote.set_model(&spec).await {
                         Ok(_) => {
                             app.remote_model_switch_in_flight = true;
@@ -1260,6 +1305,11 @@ async fn dispatch_pending_server_reload(app: &mut App, remote: &mut RemoteConnec
 }
 
 pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteConnection) {
+    if app.pending_provider_failover.is_some()
+        || (app.remote_model_switch_in_flight && app.pending_fallback_resend.is_some())
+    {
+        return;
+    }
     // A pending *server* reload must be dispatched even when the bootstrap
     // History payload was intentionally deferred. The runtime-identity /
     // stale-binary guard in the History handler sets `pending_server_reload =

@@ -137,40 +137,51 @@ impl Agent {
         event_tx: &mpsc::UnboundedSender<ServerEvent>,
         model_at_request_start: &str,
         provider_at_request_start: &str,
+        credential_at_request_start: &Option<jcode_provider_core::ResolvedCredential>,
+        oauth_email_at_request_start: &Option<crate::protocol::ProviderOAuthEmail>,
     ) {
         // Same-provider account failover can move this session's pin during
         // the request. Persist and announce it on every exit path too.
         self.sync_account_pins_after_stream(Some(event_tx));
         let model_after_stream = self.provider.model();
         let provider_after_stream = self.provider.display_name();
-        if model_after_stream == model_at_request_start
-            && provider_after_stream == provider_at_request_start
-        {
-            return;
+        let route_changed = model_after_stream != model_at_request_start
+            || provider_after_stream != provider_at_request_start;
+        if route_changed {
+            logging::warn(&format!(
+                "Provider switched route mid-request: '{}' ({}) -> '{}' ({}) (resyncing session/UI)",
+                model_at_request_start,
+                provider_at_request_start,
+                model_after_stream,
+                provider_after_stream
+            ));
+            self.session.model = Some(self.provider_model());
+            self.provider_runtime_state.apply(
+                crate::provider::ProviderStateEvent::RuntimeModelObserved {
+                    model: model_after_stream.clone(),
+                },
+            );
+            self.persist_session_best_effort("model fallback");
         }
-        logging::warn(&format!(
-            "Provider switched route mid-request: '{}' ({}) -> '{}' ({}) (resyncing session/UI)",
-            model_at_request_start,
-            provider_at_request_start,
-            model_after_stream,
-            provider_after_stream
-        ));
-        self.session.model = Some(self.provider_model());
-        self.provider_runtime_state.apply(
-            crate::provider::ProviderStateEvent::RuntimeModelObserved {
-                model: model_after_stream.clone(),
-            },
-        );
-        self.persist_session_best_effort("model fallback");
-        let _ = event_tx.send(ServerEvent::ModelChanged {
-            id: 0,
-            model: model_after_stream,
-            provider_name: Some(provider_after_stream),
-            context_window: Some(self.provider.context_window() as u64),
-            error: None,
-            resolved_credential: self.provider.active_resolved_credential(),
-            reasoning_effort: self.provider.reasoning_effort(),
-        });
+        // Refresh authoritative credential identity after every upstream
+        // request, including auto credential resolution and OAuth failover.
+        let oauth_email_after_stream = crate::server::provider_oauth_email(self.provider.as_ref());
+        let credential_after_stream = self.provider.active_resolved_credential();
+        if route_changed
+            || credential_after_stream != *credential_at_request_start
+            || oauth_email_after_stream != *oauth_email_at_request_start
+        {
+            let _ = event_tx.send(ServerEvent::ModelChanged {
+                id: 0,
+                model: model_after_stream,
+                provider_name: Some(provider_after_stream),
+                context_window: Some(self.provider.context_window() as u64),
+                error: None,
+                resolved_credential: credential_after_stream,
+                provider_oauth_email: oauth_email_after_stream,
+                reasoning_effort: self.provider.reasoning_effort(),
+            });
+        }
     }
 
     pub(super) async fn run_turn_streaming_mpsc(
@@ -365,6 +376,9 @@ impl Agent {
             // OpenAI-compatible profile serving the same model id, so the
             // model alone does not reveal the switch.
             let provider_at_request_start = provider.display_name();
+            let credential_at_request_start = provider.active_resolved_credential();
+            let oauth_email_at_request_start =
+                crate::server::provider_oauth_email(provider.as_ref());
             let resume_session_id = self.provider_session_id.clone();
             self.last_status_detail = None;
             let kv_request = kv_cache_request_event(
@@ -401,9 +415,11 @@ impl Agent {
                             return Ok(());
                         }
                         result = &mut complete_future => {
+                            self.sync_bound_account_route();
                             match result {
                                 Ok(stream) => break stream,
                                 Err(e) => {
+                                    self.record_failed_account_route(&e.to_string());
                                     if self.try_auto_compact_after_context_limit(&e.to_string()) {
                                         context_limit_retries += 1;
                                         if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
@@ -437,6 +453,8 @@ impl Agent {
                                         &event_tx,
                                         &model_at_request_start,
                                         &provider_at_request_start,
+                                        &credential_at_request_start,
+                                        &oauth_email_at_request_start,
                                     );
                                     return Err(e);
                                 }
@@ -573,6 +591,7 @@ impl Agent {
                 let event = match event {
                     Ok(event) => event,
                     Err(e) => {
+                        self.record_failed_account_route(&e.to_string());
                         record_partial_stream_usage(
                             &self.session.id,
                             provider.name(),
@@ -647,6 +666,8 @@ impl Agent {
                             &event_tx,
                             &model_at_request_start,
                             &provider_at_request_start,
+                            &credential_at_request_start,
+                            &oauth_email_at_request_start,
                         );
                         return Err(e);
                     }
@@ -707,6 +728,20 @@ impl Agent {
                     }
                     StreamEvent::TextDone => {
                         let _ = event_tx.send(ServerEvent::TextDone);
+                    }
+                    StreamEvent::TextSuffixReplace { old_text, new_text } => {
+                        if provider_native_items.replace_text_suffix(
+                            &mut text_content,
+                            &old_text,
+                            &new_text,
+                        ) {
+                            if inline_output_tap {
+                                self.inline_tail.set_live(&text_content);
+                                self.publish_inline_tail();
+                            }
+                            let _ = event_tx
+                                .send(ServerEvent::TextSuffixReplace { old_text, new_text });
+                        }
                     }
                     StreamEvent::ProviderNative { provider, item } => {
                         if reasoning_open {
@@ -1250,6 +1285,8 @@ impl Agent {
                             &event_tx,
                             &model_at_request_start,
                             &provider_at_request_start,
+                            &credential_at_request_start,
+                            &oauth_email_at_request_start,
                         );
                         return Err(StreamError::new(message, retry_after_secs).into());
                     }
@@ -1370,6 +1407,8 @@ impl Agent {
                 &event_tx,
                 &model_at_request_start,
                 &provider_at_request_start,
+                &credential_at_request_start,
+                &oauth_email_at_request_start,
             );
 
             let had_tool_calls_before = !tool_calls.is_empty();

@@ -19,6 +19,14 @@ pub enum ApiEvent {
     /// Generic success acknowledgment for requests without a richer reply.
     Ok,
 
+    /// Reply to a runtime command. Not a transcript message or model output.
+    RuntimeCommandResult {
+        session_id: String,
+        command: crate::RuntimeCommand,
+        data: serde_json::Value,
+        message: String,
+    },
+
     /// Request failed.
     Error { code: ErrorCode, message: String },
 

@@ -7,13 +7,14 @@ pub use jcode_config_types::{
     AgentsConfig, AmbientConfig, AuthConfig, AutoJudgeConfig, AutoReviewConfig,
     CLAUDE_CODE_BIN_ENV, CLAUDE_CODE_DEFAULT_INSTANCE_ID, ClaudeCodeConfig,
     ClaudeCodeInstanceConfig, CompactionConfig, CompactionMode, CrossProviderFailoverMode,
-    DiagramDisplayMode, DiagramPanePosition, DiffDisplayMode, DisplayConfig, FeatureConfig,
-    GatewayConfig, HookCommands, HooksConfig, InfoWidgetLayout, KeybindingsConfig,
-    LatexRenderingMode, LaunchHotkeyEntry, LaunchHotkeysConfig, MarkdownSpacingMode, MenubarConfig,
-    NamedProviderAuth, NamedProviderConfig, NamedProviderModelConfig, NamedProviderType,
-    NativeScrollbarConfig, NotificationsConfig, PowerConfig, ProviderConfig, ReasoningDisplayMode,
-    SafetyConfig, SessionPickerResumeAction, SponsorsConfig, SwarmSpawnMode, SwarmStripLayout,
-    TerminalConfig, UpdateChannel, WebSearchConfig, WebSearchEngine,
+    CustomWebSearchConfig, CustomWebSearchMethod, DiagramDisplayMode, DiagramPanePosition,
+    DiffDisplayMode, DisplayConfig, FeatureConfig, GatewayConfig, HookCommands, HooksConfig,
+    InfoWidgetLayout, KeybindingsConfig, LatexRenderingMode, LaunchHotkeyEntry,
+    LaunchHotkeysConfig, MarkdownSpacingMode, MenubarConfig, NamedProviderAuth,
+    NamedProviderConfig, NamedProviderModelConfig, NamedProviderType, NativeScrollbarConfig,
+    NotificationsConfig, PowerConfig, ProviderConfig, ReasoningDisplayMode, SafetyConfig,
+    SessionPickerResumeAction, SponsorsConfig, SwarmSpawnMode, SwarmStripLayout, TerminalConfig,
+    UpdateChannel, WebSearchConfig, WebSearchEngine,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -27,6 +28,49 @@ const CONFIG_CACHE_CHECK_INTERVAL: Duration = if cfg!(test) {
 } else {
     Duration::from_millis(500)
 };
+
+#[cfg(test)]
+#[test]
+fn custom_websearch_config_toml_roundtrip() {
+    let input = r#"
+engine = "custom"
+prefer_native = false
+fallback_engines = []
+[custom]
+endpoint = "https://search.example.test/api"
+method = "POST"
+query_param = "search"
+count_param = "limit"
+params = { format = "json" }
+body = { options = { safe = true } }
+headers = { Accept = "application/json" }
+header_env = { Authorization = "SEARCH_AUTH" }
+results_pointer = "/data/hits"
+title_pointer = "/name"
+url_pointer = "/link"
+snippet_pointer = "/summary"
+"#;
+    let config: WebSearchConfig = toml::from_str(input).unwrap();
+    assert_eq!(config.engine, WebSearchEngine::Custom);
+    assert!(!config.native_enabled());
+    assert_eq!(
+        WebSearchEngine::parse("custom"),
+        Some(WebSearchEngine::Custom)
+    );
+    assert!(WebSearchEngine::Custom.is_local());
+    assert_eq!(WebSearchEngine::Custom.as_str(), "custom");
+    let encoded = toml::to_string(&config).unwrap();
+    let decoded: WebSearchConfig = toml::from_str(&encoded).unwrap();
+    assert_eq!(
+        serde_json::to_value(config).unwrap(),
+        serde_json::to_value(decoded).unwrap()
+    );
+    let no_count: CustomWebSearchConfig =
+        toml::from_str("endpoint = 'https://example.test'").unwrap();
+    assert!(no_count.count_param.is_none());
+    assert_eq!(no_count.method, CustomWebSearchMethod::Get);
+    assert!(WebSearchConfig::default().custom.is_none());
+}
 
 const CONFIG_ENV_KEYS: &[&str] = &[
     "HOME",

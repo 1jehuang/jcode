@@ -303,7 +303,11 @@ pub(super) async fn handle_debug_client(
                 let event = ServerEvent::Pong {
                     id,
                     native_ssh_protocol: Some(1),
-                    capabilities: vec!["session_tools".into(), "soft_interrupt_ids".into()],
+                    capabilities: vec![
+                        "session_tools".into(),
+                        "soft_interrupt_ids".into(),
+                        "runtime_commands".into(),
+                    ],
                 };
                 let json = encode_event(&event);
                 writer.write_all(json.as_bytes()).await?;

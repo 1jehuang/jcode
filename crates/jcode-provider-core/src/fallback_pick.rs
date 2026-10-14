@@ -56,6 +56,7 @@ pub fn error_looks_like_credential_failure(error: &str) -> bool {
     let markers = [
         "token refresh failed",
         "refresh_token_invalidated",
+        "refresh token was previously rejected",
         "re-authenticate",
         "session has ended",
         "authentication_error",
@@ -335,6 +336,9 @@ mod tests {
 
     #[test]
     fn classifies_credential_failures() {
+        assert!(error_looks_like_credential_failure(
+            "Claude OAuth refresh token was previously rejected by Anthropic and cannot be refreshed. Run `jcode login --provider claude` to mint a fresh token."
+        ));
         assert!(error_looks_like_credential_failure(
             "OpenAI token refresh failed; run /login to re-authenticate: refresh_token_invalidated"
         ));
