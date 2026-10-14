@@ -163,6 +163,8 @@ impl SessionPicker {
             && !modifiers.contains(KeyModifiers::ALT)
             && c.eq_ignore_ascii_case(&'s')
         {
+            // A user choice: the project-scope default must not override it.
+            self.filter_mode_user_chosen = true;
             if c == 'S' || modifiers.contains(KeyModifiers::SHIFT) {
                 self.filter_mode = self.filter_mode.previous();
             } else {

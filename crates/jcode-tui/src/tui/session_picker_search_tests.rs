@@ -564,3 +564,28 @@ fn test_loading_picker_ctrl_s_filter_survives_reseed() {
     assert_eq!(picker.filter_mode, SessionFilterMode::Saved);
     assert_eq!(visible_ids(&picker), vec!["session_saved".to_string()]);
 }
+
+/// A filter picked with Ctrl+S while the index loads is the user's choice, so
+/// the project-scope default applied after the load must not replace it.
+#[test]
+fn test_loading_picker_ctrl_s_choice_beats_project_scope_default() {
+    let mut picker = SessionPicker::loading();
+    picker.set_current_dir(Some("/work/project".to_string()));
+    picker.focus_search_input();
+    // Forward then back again: the user lands on All on purpose.
+    for mods in [
+        KeyModifiers::CONTROL,
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ] {
+        picker.handle_overlay_key(KeyCode::Char('s'), mods).unwrap();
+    }
+    assert_eq!(picker.filter_mode, SessionFilterMode::All);
+
+    let mut here = make_session("session_here", "here", false, SessionStatus::Closed);
+    here.working_dir = Some("/work/project".to_string());
+    let other = make_session("session_other", "other", false, SessionStatus::Closed);
+    picker.reseed_grouped(Vec::new(), vec![here, other]);
+    picker.prefer_current_dir_filter();
+    assert_eq!(picker.filter_mode, SessionFilterMode::All);
+    assert_eq!(visible_ids(&picker).len(), 2);
+}
