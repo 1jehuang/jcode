@@ -99,9 +99,9 @@
 3. **d6f2d2091 (session-memory)** is **OBSOLETE due to refactor** — the bug it fixed is structurally impossible in the new `VariableSubstitutor` implementation. **Safe to delete at any time** without porting.
 
 **Mixed strategy recommendation:**
-- d6f2d2091 → Option B (delete) — obsolete, no porting needed
+- d6f2d2091 → Option B (delete) — obsolete, no porting needed. **DONE 2026-10-14 04:21Z** (remote branch deleted, worktree removed, 206 MB freed)
 - ceb860bf2 + e45ddd47e → Option C (port to jcode-storage) — 2-4 hours of work, then delete the rescue branches
-- Total: 2-4 hours of port work, then delete all 3 rescue branches and 3 corresponding worktrees
+- Total: 2-4 hours of port work remaining, then delete 2 more rescue branches and 2 corresponding worktrees
 
 **Worktree mapping (verified 04:16Z):** `wt-kcode-home-symlink` (ceb860bf2), `wt-kcode-heading-boundary` (d6f2d2091), `wt-kcode-active-pids-race` (e45ddd47e). Removing these worktrees does NOT lose the commits.
 
