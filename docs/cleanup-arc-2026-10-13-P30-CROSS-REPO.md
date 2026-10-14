@@ -1,8 +1,12 @@
 # P30-cross-repo: Cross-Repository RUSTSEC Audit (2026-10-13)
 
-**Date**: 2026-10-13
+**Date**: 2026-10-13 (updated 2026-10-14 03:55)
 **Source**: Companion to `docs/cleanup-arc-2026-10-13-P30-SECURITY-FIX.md`
 **Scope**: 56+ Cargo.lock files under `~/CodeProjects/Phenotype/repos/*` and `~/wt-*`
+
+---
+
+**CRITICAL UPDATE 2026-10-14 03:53:** `jcode` master was still vulnerable despite PR-#1 + PR-#2 source branches having the fix (the PRs were never opened → master never received the cherry-pick). The P30 fix commits `2c2d7cced` (h2+rustls) and `a14509a8e` (quinn-proto) were cherry-picked onto master as `7e773ef3f` and `3c2479126`, fast-forwarded and pushed. `cargo audit` on master now reports **0 vulnerabilities** (was 7). `cargo check` passes. **Master is now P30-clean.**
 
 ---
 
@@ -12,7 +16,7 @@ The 7 RUSTSEC vulns found in jcode (`origin/master` 09b0afba6) affect **20 jcode
 
 | Repo | quinn-proto | h2 | rustls | P30 vulns | Risk |
 |------|-------------|-----|--------|-----------|------|
-| `jcode` (master) | 0.11.15 ✗ | 0.4.13 ✗ | 0.23.37 ✗ | 7 | critical |
+| `jcode` (master) | 0.11.19 ✓ | 0.4.19 ✓ | 0.23.45 ✓ | 0 | **FIXED 2026-10-14 03:53** (cherry-pick `2c2d7cced`+`a14509a8e`) |
 | `forgecode` | 0.11.18 ✓ | 0.4.13 ✗ | 0.23.45 ✓ | 1 (h2) | medium |
 | `substrate` | 0.11.15 ✗ | 0.4.19 ✓ | 0.23.41 ✗ | 5+ | high |
 | `Tracera` | 0.11.15 ✗ | 0.4.18 partial | 0.23.41 ✗ | 5+ | high |
