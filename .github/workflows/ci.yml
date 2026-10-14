@@ -138,6 +138,7 @@ jobs:
           python3 tests/test_install_justrust_ci.py
           python3 tests/test_public_release_builds.py
           python3 tests/test_release_ci.py
+          python3 tests/test_verify_public_release.py
           bash -n scripts/install_justrust_ci.sh scripts/build_linux_compat.sh
 
       - name: Compile release automation scripts
