@@ -317,7 +317,17 @@ A broader scan for `quinn-proto < 0.11.18`, `h2 < 0.4.16`, `rustls < 0.23.45` in
 
 ### Round 3 — `_full_*` snapshot dirs (2026-10-14)
 
-A second broader scan covering underscore-prefixed `_full_*` dirs found 3 more snapshot archives with the vulnerable trio. Each dir is a full clone of an active Phenotype repo (made before the P30 fix landed in the active repo's main branch), and each was fixed by the same P30 pattern:
+A second broader scan covering underscore-prefixed `_full_*` dirs found 3 more snapshot archives with the vulnerable trio. Each dir is a full clone of an active Phenotype repo (made before the P30 fix landed in the active repo's main branch), and each was fixed by the same P30 pattern.
+
+**Other `_full_*` dirs scanned but not vulnerable** (no quinn-proto / h2 / rustls in their lockfiles):
+- `_full_agentapi` (no Cargo.lock at all)
+- `_full_HeliosLab` (188 packages, no P30 crates)
+- `_full_landing` (no Cargo.lock)
+- `_full_pheno` (515 packages, no P30 crates)
+- `_full_PhenoVCS` (148 packages, no P30 crates)
+
+**All 8 underscore-prefixed `_full_*` dirs covered** by this round 3 scan.
+
 
 | Repo | quinn-proto pre→post | h2 pre→post | rustls pre→post | Branch @ SHA | Status |
 |------|---------------------|-------------|-----------------|--------------|--------|
