@@ -1503,25 +1503,6 @@ fn linux_hotkey_config_path(comp: linux_env::LinuxCompositor) -> Option<PathBuf>
     }
 }
 
-/// Human description of where the binds land, for the startup notice footer.
-#[cfg(target_os = "linux")]
-fn linux_hotkey_target_description(comp: linux_env::LinuxCompositor) -> String {
-    use linux_env::LinuxCompositor;
-    match comp {
-        LinuxCompositor::Gnome => "GNOME custom shortcuts (via dconf)".to_string(),
-        LinuxCompositor::Kde => "KDE global shortcuts (kglobalshortcutsrc)".to_string(),
-        LinuxCompositor::Cinnamon => "Cinnamon custom shortcuts (via dconf)".to_string(),
-        LinuxCompositor::Mate => "MATE custom shortcuts (via dconf)".to_string(),
-        LinuxCompositor::Xfce => "XFCE keyboard shortcuts (via xfconf)".to_string(),
-        other => {
-            let path = linux_hotkey_config_path(other)
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| "its config".to_string());
-            format!("your {} config ({})", other.name(), path)
-        }
-    }
-}
-
 /// The sentinel that marks jcode's managed region in `path` for `comp`.
 #[cfg(target_os = "linux")]
 fn linux_hotkey_sentinel(comp: linux_env::LinuxCompositor) -> &'static str {
