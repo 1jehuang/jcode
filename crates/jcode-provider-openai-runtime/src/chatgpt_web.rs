@@ -727,7 +727,7 @@ async fn bridge_command(action: &str, params: Value) -> Result<Value> {
         .with_context(|| format!("Browser bridge action '{action}' timed out"))?
         .with_context(|| format!("Failed to run browser bridge action '{action}'"))?;
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stderr = web_catalog::bridge_error_detail(&String::from_utf8_lossy(&output.stderr));
     if !output.status.success() {
         let detail = match (stdout.is_empty(), stderr.is_empty()) {
             (false, false) => format!("{stderr}\n{stdout}"),

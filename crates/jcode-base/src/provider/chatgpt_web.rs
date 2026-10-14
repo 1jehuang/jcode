@@ -5,8 +5,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::{Arc, LazyLock};
 
-const CACHE_TTL_SECS: u64 = 300;
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ChatGptWebModel {
     pub model: String,
@@ -29,6 +27,11 @@ struct Snapshot {
     observed_at: u64,
     models: Vec<ChatGptWebModel>,
     reasoning: BTreeMap<String, Vec<ChatGptWebReasoningOption>>,
+    /// Most recent failed refresh. It annotates, but never erases, the last
+    /// successful observation: every browser turn re-verifies the exact model
+    /// and Power choice in the page before sending anything.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_refresh_error: Option<String>,
 }
 
 static SESSION_LOCK: LazyLock<Arc<tokio::sync::Mutex<()>>> =
@@ -118,17 +121,17 @@ fn parse_discovery(value: serde_json::Value) -> Result<Snapshot> {
     Ok(snapshot)
 }
 
-fn snapshot_is_fresh(snapshot: &Snapshot, now: u64, live: bool) -> bool {
-    live && snapshot.version == 1
-        && snapshot.observed_at <= now
-        && now - snapshot.observed_at < CACHE_TTL_SECS
-}
-
-fn snapshot_models(snapshot: &Snapshot, now: u64, live: bool) -> Vec<ChatGptWebModel> {
+/// Availability is the last successful picker observation. Age, restarts and
+/// failed refreshes never hide it: a transient discovery failure must not make
+/// the routes unselectable, and each turn verifies selection in the live page.
+fn snapshot_models(snapshot: &Snapshot) -> Vec<ChatGptWebModel> {
     if snapshot.version != 1 {
         return Vec::new();
     }
-    let fresh = snapshot_is_fresh(snapshot, now, live);
+    let note = snapshot
+        .last_refresh_error
+        .as_deref()
+        .map(|error| format!("last refresh failed: {error}"));
     snapshot
         .models
         .iter()
@@ -140,32 +143,42 @@ fn snapshot_models(snapshot: &Snapshot, now: u64, live: bool) -> Vec<ChatGptWebM
         .map(|mut model| {
             // Never trust mappings persisted by another build or edited cache file.
             model.expected_upstream_models = accepted_upstream_models_for_label(&model.label);
-            if !fresh {
-                model.available = false;
-                let note = "ChatGPT browser session availability unverified; refresh required";
-                if !model.detail.contains(note) {
-                    model.detail = if model.detail.is_empty() {
-                        note.to_string()
-                    } else {
-                        format!("{} · {note}", model.detail)
-                    };
-                }
+            if let Some(note) = &note {
+                model.detail = if model.detail.is_empty() {
+                    note.clone()
+                } else {
+                    format!("{} · {note}", model.detail)
+                };
             }
             model
         })
         .collect()
 }
 
-fn invalidate_snapshot(snapshot: &mut Snapshot, detail: &str) {
-    for model in &mut snapshot.models {
-        model.available = false;
-        model.detail = format!("ChatGPT discovery failed: {detail}");
+/// One short line for model-picker details.
+fn refresh_error_summary(error: &anyhow::Error) -> String {
+    let text = format!("{error:#}");
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    match text.char_indices().nth(200) {
+        Some((end, _)) => format!("{}...", &text[..end]),
+        None => text,
     }
-    for options in snapshot.reasoning.values_mut() {
-        for option in options {
-            option.available = false;
-        }
-    }
+}
+
+/// Remove non-fatal dynamic loader warnings from bridge stderr. A bridge built
+/// against a newer glibc prints a `weak version` line on every call, which
+/// otherwise hides the actual browser error behind a misleading libc message.
+pub fn bridge_error_detail(stderr: &str) -> String {
+    stderr
+        .lines()
+        .map(str::trim)
+        .filter(|line| {
+            !line.is_empty()
+                && !(line.contains(": weak version `")
+                    && line.contains("' not found (required by "))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn now_secs() -> u64 {
@@ -181,7 +194,6 @@ const CACHE_FILE: &str = "chatgpt_web_model_catalog_cache.json";
 struct Cache {
     path: Option<std::path::PathBuf>,
     snapshot: Snapshot,
-    live: bool,
 }
 
 static CACHE: LazyLock<std::sync::Mutex<Cache>> = LazyLock::new(Default::default);
@@ -199,16 +211,14 @@ fn load_cache() -> Cache {
             .and_then(|p| crate::storage::read_json(p).ok())
             .unwrap_or_default();
         cache.path = path.clone();
-        cache.live = false;
     }
     Cache {
         path,
         snapshot: cache.snapshot.clone(),
-        live: cache.live,
     }
 }
 
-fn store_cache(snapshot: Snapshot, live: bool) {
+fn store_cache(snapshot: Snapshot) {
     let path = cache_path().ok();
     if let Some(path) = &path
         && let Err(error) = crate::storage::write_json(path, &snapshot)
@@ -217,18 +227,14 @@ fn store_cache(snapshot: Snapshot, live: bool) {
             "Failed to persist ChatGPT browser catalog: {error:#}"
         ));
     }
-    *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Cache {
-        path,
-        snapshot,
-        live,
-    };
+    *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Cache { path, snapshot };
 }
 
-/// Cached models are informational until this process has observed a live
-/// browser session. Disk snapshots never confer account availability.
+/// Models from the last successful picker observation. Their availability
+/// decides which routes can be selected. Every browser turn still proves the
+/// exact model and Power choice in the live page before sending.
 pub fn cached_models() -> Vec<ChatGptWebModel> {
-    let cache = load_cache();
-    snapshot_models(&cache.snapshot, now_secs(), cache.live)
+    snapshot_models(&load_cache().snapshot)
 }
 
 pub fn find_model(model: &str) -> Option<ChatGptWebModel> {
@@ -242,7 +248,7 @@ pub fn find_model(model: &str) -> Option<ChatGptWebModel> {
 
 pub fn cached_reasoning_options(model: &str) -> Vec<ChatGptWebReasoningOption> {
     let cache = load_cache();
-    let available = snapshot_models(&cache.snapshot, now_secs(), cache.live)
+    let available = snapshot_models(&cache.snapshot)
         .iter()
         .any(|entry| entry.model == model && entry.available);
     cache
@@ -265,10 +271,7 @@ pub fn cached_reasoning_options(model: &str) -> Vec<ChatGptWebReasoningOption> {
 pub async fn refresh_models() -> Result<Vec<ChatGptWebModel>> {
     tokio::spawn(async {
         let _session = lock_session().await;
-        let mut previous = load_cache().snapshot;
-        invalidate_snapshot(&mut previous, "refresh in progress");
-        store_cache(previous.clone(), false);
-        let result = async {
+        record_refresh(async {
             let initial = InstalledBridge { browser: None };
             let ping = initial.command("ping", serde_json::json!({})).await?;
             anyhow::ensure!(
@@ -284,23 +287,42 @@ pub async fn refresh_models() -> Result<Vec<ChatGptWebModel>> {
                 browser: Some(browser.to_string()),
             };
             discover_with_bridge(&bridge).await
-        }
-        .await;
-        match result {
-            Ok(snapshot) => {
-                let models = snapshot_models(&snapshot, now_secs(), true);
-                store_cache(snapshot, true);
-                Ok(models)
-            }
-            Err(error) => {
-                invalidate_snapshot(&mut previous, &format!("{error:#}"));
-                store_cache(previous, false);
-                Err(error)
-            }
-        }
+        })
+        .await
     })
     .await
     .context("ChatGPT catalog discovery task failed")?
+}
+
+/// Store a successful observation, or annotate the previous one with the
+/// failure. A running or failed refresh never removes known availability.
+async fn record_refresh(
+    discovery: impl std::future::Future<Output = Result<Snapshot>>,
+) -> Result<Vec<ChatGptWebModel>> {
+    match discovery.await {
+        Ok(snapshot) => {
+            let models = snapshot_models(&snapshot);
+            store_cache(snapshot);
+            Ok(models)
+        }
+        Err(error) => {
+            // Another jcode process (CLI or daemon) may have stored a newer
+            // observation. Annotate the newest one instead of overwriting it.
+            let memory = load_cache().snapshot;
+            let disk = cache_path()
+                .ok()
+                .and_then(|path| crate::storage::read_json::<Snapshot>(&path).ok());
+            let mut previous = match disk {
+                Some(disk) if disk.version == 1 && disk.observed_at > memory.observed_at => disk,
+                _ => memory,
+            };
+            if previous.version == 1 {
+                previous.last_refresh_error = Some(refresh_error_summary(&error));
+                store_cache(previous);
+            }
+            Err(error)
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -335,8 +357,8 @@ impl BridgeTransport for InstalledBridge {
         anyhow::ensure!(
             output.status.success(),
             "Browser discovery {action} failed: {} {}",
-            String::from_utf8_lossy(&output.stderr),
-            String::from_utf8_lossy(&output.stdout)
+            bridge_error_detail(&String::from_utf8_lossy(&output.stderr)),
+            String::from_utf8_lossy(&output.stdout).trim()
         );
         let value: serde_json::Value = serde_json::from_slice(&output.stdout)
             .with_context(|| format!("Browser discovery {action} returned invalid JSON"))?;
@@ -528,11 +550,11 @@ mod tests {
     }
 
     #[test]
-    fn chatgpt_web_cache_restart_demotes_models_efforts_and_slug_mappings() {
+    fn chatgpt_web_cache_restart_keeps_observed_models_and_drops_slug_mappings() {
         let _home = HomeGuard::new();
         assert!(cached_models().is_empty());
         let snapshot = parse_discovery(json!({"models":[{"label":"GPT-6","available":true,"detail":"","reasoning_options":[{"value":"none","label":"Instant","available":true}]}]})).unwrap();
-        store_cache(snapshot, true);
+        store_cache(snapshot);
         assert!(find_model("gpt-6[web]").unwrap().available);
         assert!(cached_reasoning_options("gpt-6[web]")[0].available);
         assert!(super::super::known_openai_model_ids().contains(&"gpt-6[web]".to_string()));
@@ -545,27 +567,24 @@ mod tests {
             None
         );
         *CACHE.lock().unwrap() = Cache::default();
-        assert!(!find_model("gpt-6[web]").unwrap().available);
-        assert!(!cached_reasoning_options("gpt-6[web]")[0].available);
+        assert!(find_model("gpt-6[web]").unwrap().available);
+        assert!(cached_reasoning_options("gpt-6[web]")[0].available);
         assert!(find_model("gpt-6").is_none());
         let mut cache = load_cache().snapshot;
         cache.models[0]
             .expected_upstream_models
             .push("invented".to_string());
-        store_cache(cache, false);
+        store_cache(cache);
         assert!(
             find_model("gpt-6[web]")
                 .unwrap()
                 .expected_upstream_models
                 .is_empty()
         );
-        store_cache(
-            Snapshot {
-                version: 1,
-                ..Default::default()
-            },
-            true,
-        );
+        store_cache(Snapshot {
+            version: 1,
+            ..Default::default()
+        });
         assert!(cached_models().is_empty());
     }
 
@@ -816,6 +835,58 @@ mod tests {
         }
     }
 
+    fn observed_gpt6() -> Snapshot {
+        parse_discovery(json!({"models":[{"label":"GPT-6","available":true,"detail":"","reasoning_options":[{"value":"medium","label":"Medium","available":true}]}]})).unwrap()
+    }
+
+    #[tokio::test]
+    async fn chatgpt_web_failed_or_running_refresh_keeps_last_observed_availability() {
+        let _home = HomeGuard::new();
+        record_refresh(async { Ok(observed_gpt6()) }).await.unwrap();
+        let error = record_refresh(async {
+            // A slow live discovery must not hide routes while it runs.
+            assert!(find_model("gpt-6[web]").unwrap().available);
+            anyhow::bail!("Evaluate error: ChatGPT did not finish opening the model picker")
+        })
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("model picker"));
+        let model = find_model("gpt-6[web]").unwrap();
+        assert!(model.available, "{model:?}");
+        assert!(model.detail.contains("last refresh failed"), "{model:?}");
+        assert!(cached_reasoning_options("gpt-6[web]")[0].available);
+        let routes = super::super::simplified_model_routes_for_picker("OpenAI", "", Vec::new());
+        assert!(routes[0].available);
+        record_refresh(async { Ok(observed_gpt6()) }).await.unwrap();
+        assert!(
+            !find_model("gpt-6[web]")
+                .unwrap()
+                .detail
+                .contains("refresh failed")
+        );
+    }
+
+    #[test]
+    fn chatgpt_web_last_observed_availability_survives_age_and_restart() {
+        let _home = HomeGuard::new();
+        let mut snapshot = observed_gpt6();
+        snapshot.observed_at = now_secs() - 24 * 60 * 60;
+        store_cache(snapshot);
+        *CACHE.lock().unwrap() = Cache::default();
+        assert!(find_model("gpt-6[web]").unwrap().available);
+        assert!(cached_reasoning_options("gpt-6[web]")[0].available);
+    }
+
+    #[test]
+    fn chatgpt_web_bridge_errors_drop_dynamic_loader_noise() {
+        let stderr = "/home/u/.jcode/browser/browser: /lib/x86_64-linux-gnu/libc.so.6: weak version `GLIBC_2.39' not found (required by /home/u/.jcode/browser/browser)\nError: Evaluate error: Detached while handling command.\n";
+        assert_eq!(
+            bridge_error_detail(stderr),
+            "Error: Evaluate error: Detached while handling command."
+        );
+        assert_eq!(bridge_error_detail("Error: plain\n"), "Error: plain");
+    }
+
     #[test]
     fn chatgpt_web_discovery_preserves_picker_labels_and_per_model_efforts() {
         let result = parse_discovery(json!({"models":[
@@ -853,28 +924,32 @@ mod tests {
     }
 
     #[test]
-    fn chatgpt_web_snapshot_never_trusts_disk_or_stale_availability() {
-        let mut snapshot = parse_discovery(json!({"models":[{"label":"GPT-6","available":true,"detail":"","reasoning_options":[{"value":"none","label":"Instant","available":true}]}]})).unwrap();
+    fn chatgpt_web_snapshot_keeps_observed_availability_and_rejects_unknown_versions() {
+        let mut snapshot = parse_discovery(json!({"models":[
+            {"label":"GPT-6","available":true,"detail":"","reasoning_options":[{"value":"none","label":"Instant","available":true}]},
+            {"label":"GPT-5.6 Sol","available":false,"detail":"Locked","reasoning_options":[]}
+        ]})).unwrap();
         snapshot.observed_at = 100;
-        assert!(snapshot_models(&snapshot, 101, true)[0].available);
-        assert!(!snapshot_models(&snapshot, 101, false)[0].available);
-        assert!(!snapshot_models(&snapshot, 100 + CACHE_TTL_SECS + 1, true)[0].available);
-        assert!(!snapshot_models(&snapshot, 99, true)[0].available);
+        let models = snapshot_models(&snapshot);
+        assert!(models[0].available);
+        // Picker-observed locks stay locked; persistence never grants access.
+        assert!(!models[1].available);
         assert!(
-            snapshot_models(
-                &Snapshot {
-                    version: 99,
-                    ..snapshot.clone()
-                },
-                101,
-                true
-            )
+            snapshot_models(&Snapshot {
+                version: 99,
+                ..snapshot.clone()
+            })
             .is_empty()
         );
-        invalidate_snapshot(&mut snapshot, "bridge failed");
-        assert!(!snapshot_models(&snapshot, 101, true)[0].available);
-        assert!(snapshot.models[0].detail.contains("bridge failed"));
-        assert!(!snapshot.reasoning["gpt-6[web]"][0].available);
+        snapshot.last_refresh_error = Some("bridge failed".to_string());
+        let models = snapshot_models(&snapshot);
+        assert!(models[0].available);
+        assert_eq!(models[0].detail, "last refresh failed: bridge failed");
+        assert_eq!(
+            models[1].detail,
+            "Locked · last refresh failed: bridge failed"
+        );
+        assert!(snapshot.reasoning["gpt-6[web]"][0].available);
     }
 
     #[tokio::test]
