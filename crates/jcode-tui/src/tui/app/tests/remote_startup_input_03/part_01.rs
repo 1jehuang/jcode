@@ -482,80 +482,84 @@ fn test_multiple_pastes() {
 
 #[test]
 fn test_restore_session_adds_reload_message() {
-    use crate::session::Session;
+    with_temp_jcode_home(|| {
+        use crate::session::Session;
 
-    let mut app = create_test_app();
+        let mut app = create_test_app();
 
-    // Create and save a session with a fake provider_session_id
-    let mut session = Session::create(None, None);
-    session.add_message(
-        Role::User,
-        vec![ContentBlock::Text {
-            text: "test message".to_string(),
-            cache_control: None,
-        }],
-    );
-    session.provider_session_id = Some("fake-uuid".to_string());
-    let session_id = session.id.clone();
-    session.save().unwrap();
+        // Create and save a session with a fake provider_session_id
+        let mut session = Session::create(None, None);
+        session.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "test message".to_string(),
+                cache_control: None,
+            }],
+        );
+        session.provider_session_id = Some("fake-uuid".to_string());
+        let session_id = session.id.clone();
+        session.save().unwrap();
 
-    // Restore the session
-    app.restore_session(&session_id);
+        // Restore the session
+        app.restore_session(&session_id);
 
-    // Should have the original message + reload success message in display
-    assert_eq!(app.display_messages().len(), 2);
-    assert_eq!(app.display_messages()[0].role, "user");
-    assert_eq!(app.display_messages()[0].content, "test message");
-    assert_eq!(app.display_messages()[1].role, "system");
-    assert!(
-        app.display_messages()[1]
-            .content
-            .contains("Reload complete - continuing.")
-    );
+        // Should have the original message + reload success message in display
+        assert_eq!(app.display_messages().len(), 2);
+        assert_eq!(app.display_messages()[0].role, "user");
+        assert_eq!(app.display_messages()[0].content, "test message");
+        assert_eq!(app.display_messages()[1].role, "system");
+        assert!(
+            app.display_messages()[1]
+                .content
+                .contains("Reload complete - continuing.")
+        );
 
-    // Local restore keeps provider messages lazy until the next active turn.
-    assert_eq!(app.messages.len(), 0);
-    assert_eq!(
-        app.session.debug_memory_profile()["provider_messages_cache"]["count"],
-        0
-    );
+        // Local restore keeps provider messages lazy until the next active turn.
+        assert_eq!(app.messages.len(), 0);
+        assert_eq!(
+            app.session.debug_memory_profile()["provider_messages_cache"]["count"],
+            0
+        );
 
-    // Provider session ID should be cleared (Claude sessions don't persist across restarts)
-    assert!(app.provider_session_id.is_none());
+        // Provider session ID should be cleared (Claude sessions don't persist across restarts)
+        assert!(app.provider_session_id.is_none());
 
-    // Clean up
-    let _ = std::fs::remove_file(crate::session::session_path(&session_id).unwrap());
+        // Clean up
+        let _ = std::fs::remove_file(crate::session::session_path(&session_id).unwrap());
+    });
 }
 
 #[test]
 fn test_restore_session_with_selfdev_reload_tool_result_queues_continuation() {
-    use crate::session::Session;
+    with_temp_jcode_home(|| {
+        use crate::session::Session;
 
-    let mut app = create_test_app();
+        let mut app = create_test_app();
 
-    let mut session = Session::create(None, None);
-    session.add_message(
-        Role::User,
-        vec![ContentBlock::ToolResult {
-            tool_use_id: "tool_selfdev_reload".to_string(),
-            content: "Reload initiated. Process restarting...".to_string(),
-            is_error: Some(false),
-        }],
-    );
-    let session_id = session.id.clone();
-    session.save().unwrap();
+        let mut session = Session::create(None, None);
+        session.add_message(
+            Role::User,
+            vec![ContentBlock::ToolResult {
+                tool_use_id: "tool_selfdev_reload".to_string(),
+                content: "Reload initiated. Process restarting...".to_string(),
+                is_error: Some(false),
+            }],
+        );
+        let session_id = session.id.clone();
+        session.save().unwrap();
 
-    app.restore_session(&session_id);
+        app.restore_session(&session_id);
 
-    assert!(
-        app.hidden_queued_system_messages
-            .iter()
-            .any(|message| message.contains("Continue exactly where you left off"))
-    );
-    assert!(app.pending_turn);
-    assert!(matches!(app.status, ProcessingStatus::Sending));
+        assert!(
+            app.hidden_queued_system_messages
+                .iter()
+                .any(|message| message.contains("Continue exactly where you left off"))
+        );
+        assert!(app.pending_turn);
+        assert!(matches!(app.status, ProcessingStatus::Sending));
 
-    let _ = std::fs::remove_file(crate::session::session_path(&session_id).unwrap());
+        let _ = std::fs::remove_file(crate::session::session_path(&session_id).unwrap());
+    });
 }
 
 #[test]
@@ -1025,49 +1029,54 @@ fn test_selfdev_command_spawns_session_in_test_mode() {
 
 #[test]
 fn test_save_and_restore_reload_state_preserves_queued_messages() {
-    let mut app = create_test_app();
-    let session_id = format!("test-reload-{}", std::process::id());
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let session_id = format!("test-reload-{}", std::process::id());
 
-    app.input = "draft".to_string();
-    app.cursor_pos = 3;
-    app.queued_messages.push("queued one".to_string());
-    app.queued_messages.push("queued two".to_string());
-    app.hidden_queued_system_messages
-        .push("continue silently".to_string());
-    app.save_input_for_reload(&session_id);
+        app.input = "draft".to_string();
+        app.cursor_pos = 3;
+        app.queued_messages.push("queued one".to_string());
+        app.queued_messages.push("queued two".to_string());
+        app.hidden_queued_system_messages
+            .push("continue silently".to_string());
+        app.save_input_for_reload(&session_id);
 
-    let restored = App::restore_input_for_reload(&session_id).expect("reload state should exist");
-    assert_eq!(restored.input, "draft");
-    assert_eq!(restored.cursor, 3);
-    assert_eq!(restored.queued_messages, vec!["queued one", "queued two"]);
-    assert_eq!(
-        restored.hidden_queued_system_messages,
-        vec!["continue silently"]
-    );
+        let restored =
+            App::restore_input_for_reload(&session_id).expect("reload state should exist");
+        assert_eq!(restored.input, "draft");
+        assert_eq!(restored.cursor, 3);
+        assert_eq!(restored.queued_messages, vec!["queued one", "queued two"]);
+        assert_eq!(
+            restored.hidden_queued_system_messages,
+            vec!["continue silently"]
+        );
 
-    assert!(App::restore_input_for_reload(&session_id).is_none());
+        assert!(App::restore_input_for_reload(&session_id).is_none());
+    });
 }
 
 #[test]
 fn test_new_for_remote_restored_queued_messages_stay_queued_until_remote_idle() {
-    let mut app = create_test_app();
-    let session_id = format!("test-remote-queued-restore-{}", std::process::id());
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let session_id = format!("test-remote-queued-restore-{}", std::process::id());
 
-    app.queued_messages.push("queued one".to_string());
-    app.queued_messages.push("queued two".to_string());
-    app.hidden_queued_system_messages
-        .push("continue silently".to_string());
-    app.save_input_for_reload(&session_id);
+        app.queued_messages.push("queued one".to_string());
+        app.queued_messages.push("queued two".to_string());
+        app.hidden_queued_system_messages
+            .push("continue silently".to_string());
+        app.save_input_for_reload(&session_id);
 
-    let restored = App::new_for_remote(Some(session_id));
-    assert_eq!(restored.queued_messages(), &["queued one", "queued two"]);
-    assert_eq!(
-        restored.hidden_queued_system_messages,
-        vec!["continue silently"]
-    );
-    assert!(!restored.pending_queued_dispatch);
-    assert!(!restored.is_processing);
-    assert!(matches!(restored.status, ProcessingStatus::Idle));
+        let restored = App::new_for_remote(Some(session_id));
+        assert_eq!(restored.queued_messages(), &["queued one", "queued two"]);
+        assert_eq!(
+            restored.hidden_queued_system_messages,
+            vec!["continue silently"]
+        );
+        assert!(!restored.pending_queued_dispatch);
+        assert!(!restored.is_processing);
+        assert!(matches!(restored.status, ProcessingStatus::Idle));
+    });
 }
 
 #[test]
@@ -1092,139 +1101,153 @@ fn test_save_and_restore_startup_submission_preserves_pending_images() {
 
 #[test]
 fn test_save_and_restore_reload_state_preserves_interleave_and_pending_retry() {
-    let mut app = create_test_app();
-    let session_id = format!("test-reload-pending-{}", std::process::id());
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let session_id = format!("test-reload-pending-{}", std::process::id());
 
-    app.input = "draft".to_string();
-    app.cursor_pos = 5;
-    app.interleave_message = Some("urgent now".to_string());
-    app.pending_soft_interrupts = vec![
-        "already sent one".to_string(),
-        "already sent two".to_string(),
-    ];
-    app.pending_soft_interrupt_requests = vec![(17, "already sent two".to_string())];
-    app.rate_limit_pending_message = Some(PendingRemoteMessage {
-        content: "retry me".to_string(),
-        images: vec![("image/png".to_string(), "abc123".to_string())],
-        is_system: true,
-        system_reminder: Some("continue silently".to_string()),
-        auto_retry: true,
-        retry_attempts: 2,
-        retry_at: None,
+        app.input = "draft".to_string();
+        app.cursor_pos = 5;
+        app.interleave_message = Some("urgent now".to_string());
+        app.pending_soft_interrupts = vec![
+            "already sent one".to_string(),
+            "already sent two".to_string(),
+        ];
+        app.pending_soft_interrupt_requests = vec![(17, "already sent two".to_string())];
+        app.rate_limit_pending_message = Some(PendingRemoteMessage {
+            content: "retry me".to_string(),
+            images: vec![("image/png".to_string(), "abc123".to_string())],
+            is_system: true,
+            system_reminder: Some("continue silently".to_string()),
+            auto_retry: true,
+            retry_attempts: 2,
+            retry_at: None,
+        });
+        app.rate_limit_reset = Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
+        app.save_input_for_reload(&session_id);
+
+        let restored =
+            App::restore_input_for_reload(&session_id).expect("reload state should exist");
+        assert_eq!(restored.interleave_message.as_deref(), Some("urgent now"));
+        assert_eq!(
+            restored.pending_soft_interrupts,
+            vec!["already sent one", "already sent two"]
+        );
+        assert_eq!(
+            restored.pending_soft_interrupt_resend,
+            Some(vec!["already sent two".to_string()])
+        );
+
+        let pending = restored
+            .rate_limit_pending_message
+            .expect("pending retry should restore");
+        assert_eq!(pending.content, "retry me");
+        assert_eq!(
+            pending.images,
+            vec![("image/png".to_string(), "abc123".to_string())]
+        );
+        assert!(pending.is_system);
+        assert_eq!(
+            pending.system_reminder.as_deref(),
+            Some("continue silently")
+        );
+        assert!(pending.auto_retry);
+        assert_eq!(pending.retry_attempts, 2);
+        assert!(pending.retry_at.is_some());
+        assert!(restored.rate_limit_reset.is_some());
     });
-    app.rate_limit_reset = Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
-    app.save_input_for_reload(&session_id);
-
-    let restored = App::restore_input_for_reload(&session_id).expect("reload state should exist");
-    assert_eq!(restored.interleave_message.as_deref(), Some("urgent now"));
-    assert_eq!(
-        restored.pending_soft_interrupts,
-        vec!["already sent one", "already sent two"]
-    );
-    assert_eq!(
-        restored.pending_soft_interrupt_resend,
-        Some(vec!["already sent two".to_string()])
-    );
-
-    let pending = restored
-        .rate_limit_pending_message
-        .expect("pending retry should restore");
-    assert_eq!(pending.content, "retry me");
-    assert_eq!(
-        pending.images,
-        vec![("image/png".to_string(), "abc123".to_string())]
-    );
-    assert!(pending.is_system);
-    assert_eq!(
-        pending.system_reminder.as_deref(),
-        Some("continue silently")
-    );
-    assert!(pending.auto_retry);
-    assert_eq!(pending.retry_attempts, 2);
-    assert!(pending.retry_at.is_some());
-    assert!(restored.rate_limit_reset.is_some());
 }
 
 #[test]
 fn test_save_and_restore_reload_state_promotes_inflight_prompt_to_startup_submission() {
-    let mut app = create_test_app();
-    let session_id = format!("test-reload-inflight-prompt-{}", std::process::id());
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let session_id = format!("test-reload-inflight-prompt-{}", std::process::id());
 
-    app.rate_limit_pending_message = Some(PendingRemoteMessage {
-        content: "finish the refactor".to_string(),
-        images: vec![("image/png".to_string(), "abc123".to_string())],
-        is_system: false,
-        system_reminder: None,
-        auto_retry: false,
-        retry_attempts: 0,
-        retry_at: None,
+        app.rate_limit_pending_message = Some(PendingRemoteMessage {
+            content: "finish the refactor".to_string(),
+            images: vec![("image/png".to_string(), "abc123".to_string())],
+            is_system: false,
+            system_reminder: None,
+            auto_retry: false,
+            retry_attempts: 0,
+            retry_at: None,
+        });
+        app.rate_limit_reset = Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
+        app.save_input_for_reload(&session_id);
+
+        let restored =
+            App::restore_input_for_reload(&session_id).expect("reload state should exist");
+        assert_eq!(restored.input, "finish the refactor");
+        assert_eq!(restored.cursor, "finish the refactor".len());
+        assert!(
+            restored.submit_on_restore,
+            "in-flight prompt should resume automatically"
+        );
+        assert_eq!(restored.pending_images.len(), 1);
+        assert!(
+            restored.rate_limit_pending_message.is_none(),
+            "promoted startup submission should not linger as a passive pending retry"
+        );
     });
-    app.rate_limit_reset = Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
-    app.save_input_for_reload(&session_id);
-
-    let restored = App::restore_input_for_reload(&session_id).expect("reload state should exist");
-    assert_eq!(restored.input, "finish the refactor");
-    assert_eq!(restored.cursor, "finish the refactor".len());
-    assert!(
-        restored.submit_on_restore,
-        "in-flight prompt should resume automatically"
-    );
-    assert_eq!(restored.pending_images.len(), 1);
-    assert!(
-        restored.rate_limit_pending_message.is_none(),
-        "promoted startup submission should not linger as a passive pending retry"
-    );
 }
 
 #[test]
 fn test_save_and_restore_reload_state_preserves_observe_mode() {
-    let mut app = create_test_app();
-    let session_id = format!("test-reload-observe-{}", std::process::id());
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let session_id = format!("test-reload-observe-{}", std::process::id());
 
-    app.set_observe_mode_enabled(true, true);
-    app.observe_page_markdown = "# Observe\n\nPersist me through reload.".to_string();
-    app.observe_page_updated_at_ms = 42;
-    app.save_input_for_reload(&session_id);
+        app.set_observe_mode_enabled(true, true);
+        app.observe_page_markdown = "# Observe\n\nPersist me through reload.".to_string();
+        app.observe_page_updated_at_ms = 42;
+        app.save_input_for_reload(&session_id);
 
-    let restored = App::restore_input_for_reload(&session_id).expect("reload state should exist");
-    assert!(restored.observe_mode_enabled);
-    assert_eq!(
-        restored.observe_page_markdown,
-        "# Observe\n\nPersist me through reload."
-    );
-    assert_eq!(restored.observe_page_updated_at_ms, 42);
+        let restored =
+            App::restore_input_for_reload(&session_id).expect("reload state should exist");
+        assert!(restored.observe_mode_enabled);
+        assert_eq!(
+            restored.observe_page_markdown,
+            "# Observe\n\nPersist me through reload."
+        );
+        assert_eq!(restored.observe_page_updated_at_ms, 42);
+    });
 }
 
 #[test]
 fn test_save_and_restore_reload_state_preserves_split_view_mode() {
-    let mut app = create_test_app();
-    let session_id = format!("test-reload-splitview-{}", std::process::id());
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let session_id = format!("test-reload-splitview-{}", std::process::id());
 
-    app.set_split_view_enabled(true, true);
-    app.save_input_for_reload(&session_id);
+        app.set_split_view_enabled(true, true);
+        app.save_input_for_reload(&session_id);
 
-    let restored = App::restore_input_for_reload(&session_id).expect("reload state should exist");
-    assert!(restored.split_view_enabled);
+        let restored =
+            App::restore_input_for_reload(&session_id).expect("reload state should exist");
+        assert!(restored.split_view_enabled);
+    });
 }
 
 #[test]
 fn test_new_for_remote_restores_observe_mode_from_reload_state() {
-    let mut app = create_test_app();
-    let session_id = format!("test-remote-observe-{}", std::process::id());
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let session_id = format!("test-remote-observe-{}", std::process::id());
 
-    app.set_observe_mode_enabled(true, true);
-    app.observe_page_markdown = "# Observe\n\nRestored after reload.".to_string();
-    app.observe_page_updated_at_ms = 99;
-    app.save_input_for_reload(&session_id);
+        app.set_observe_mode_enabled(true, true);
+        app.observe_page_markdown = "# Observe\n\nRestored after reload.".to_string();
+        app.observe_page_updated_at_ms = 99;
+        app.save_input_for_reload(&session_id);
 
-    let restored = App::new_for_remote(Some(session_id));
-    assert!(restored.observe_mode_enabled());
-    let page = restored
-        .side_panel()
-        .focused_page()
-        .expect("observe page should be focused");
-    assert_eq!(page.id, "observe");
-    assert!(page.content.contains("Restored after reload."));
+        let restored = App::new_for_remote(Some(session_id));
+        assert!(restored.observe_mode_enabled());
+        let page = restored
+            .side_panel()
+            .focused_page()
+            .expect("observe page should be focused");
+        assert_eq!(page.id, "observe");
+        assert!(page.content.contains("Restored after reload."));
+    });
 }
 
 #[test]
@@ -1249,16 +1272,18 @@ fn test_new_for_remote_restores_split_view_from_reload_state() {
 
 #[test]
 fn test_restore_reload_state_supports_legacy_input_format() {
-    let session_id = format!("test-reload-legacy-{}", std::process::id());
-    let jcode_dir = crate::storage::jcode_dir().unwrap();
-    let path = jcode_dir.join(format!("client-input-{}", session_id));
-    std::fs::write(&path, "2\nhello").unwrap();
+    with_temp_jcode_home(|| {
+        let session_id = format!("test-reload-legacy-{}", std::process::id());
+        let jcode_dir = crate::storage::jcode_dir().unwrap();
+        let path = jcode_dir.join(format!("client-input-{}", session_id));
+        std::fs::write(&path, "2\nhello").unwrap();
 
-    let restored =
-        App::restore_input_for_reload(&session_id).expect("legacy reload state should restore");
-    assert_eq!(restored.input, "hello");
-    assert_eq!(restored.cursor, 2);
-    assert!(restored.queued_messages.is_empty());
+        let restored =
+            App::restore_input_for_reload(&session_id).expect("legacy reload state should restore");
+        assert_eq!(restored.input, "hello");
+        assert_eq!(restored.cursor, 2);
+        assert!(restored.queued_messages.is_empty());
+    });
 }
 
 #[test]

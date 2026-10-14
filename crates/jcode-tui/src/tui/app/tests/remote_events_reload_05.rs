@@ -183,39 +183,42 @@ fn test_disconnect_still_clears_pending_for_non_queued_shapes() {
 
 #[test]
 fn test_save_input_for_reload_persists_inflight_queued_continuation() {
-    let mut app = create_test_app();
-    let session_id = format!("test-391-inflight-{}", std::process::id());
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let session_id = format!("test-391-inflight-{}", std::process::id());
 
-    // Simulate the reload racing the dispatch: one message still queued, one
-    // already dequeued into the in-flight pending slot.
-    app.queued_messages.push("still queued".to_string());
-    app.rate_limit_pending_message = Some(PendingRemoteMessage {
-        content: "dispatched but unfinished".to_string(),
-        images: vec![],
-        is_system: true,
-        system_reminder: Some("hidden reminder".to_string()),
-        auto_retry: false,
-        retry_attempts: 0,
-        retry_at: None,
+        // Simulate the reload racing the dispatch: one message still queued, one
+        // already dequeued into the in-flight pending slot.
+        app.queued_messages.push("still queued".to_string());
+        app.rate_limit_pending_message = Some(PendingRemoteMessage {
+            content: "dispatched but unfinished".to_string(),
+            images: vec![],
+            is_system: true,
+            system_reminder: Some("hidden reminder".to_string()),
+            auto_retry: false,
+            retry_attempts: 0,
+            retry_at: None,
+        });
+        app.rate_limit_reset = None;
+
+        app.save_input_for_reload(&session_id);
+
+        let restored =
+            App::restore_input_for_reload(&session_id).expect("reload state should exist");
+        assert_eq!(
+            restored.queued_messages,
+            vec!["dispatched but unfinished", "still queued"],
+            "the in-flight continuation must be persisted at the front of the queue"
+        );
+        assert_eq!(
+            restored.hidden_queued_system_messages,
+            vec!["hidden reminder"]
+        );
+        assert!(
+            restored.rate_limit_pending_message.is_none(),
+            "the continuation must not also restore as an unreachable pending message"
+        );
     });
-    app.rate_limit_reset = None;
-
-    app.save_input_for_reload(&session_id);
-
-    let restored = App::restore_input_for_reload(&session_id).expect("reload state should exist");
-    assert_eq!(
-        restored.queued_messages,
-        vec!["dispatched but unfinished", "still queued"],
-        "the in-flight continuation must be persisted at the front of the queue"
-    );
-    assert_eq!(
-        restored.hidden_queued_system_messages,
-        vec!["hidden reminder"]
-    );
-    assert!(
-        restored.rate_limit_pending_message.is_none(),
-        "the continuation must not also restore as an unreachable pending message"
-    );
 }
 
 #[test]
@@ -719,61 +722,63 @@ fn remote_done_does_not_repeat_ownership_notice() {
 
 #[test]
 fn test_save_input_for_reload_removes_stale_file_when_state_is_empty() {
-    let mut app = create_test_app();
-    let session_id = format!("test-391-stale-{}", std::process::id());
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let session_id = format!("test-391-stale-{}", std::process::id());
 
-    // First reload snapshot holds a queued message.
-    app.queued_messages.push("old queued".to_string());
-    app.save_input_for_reload(&session_id);
+        // First reload snapshot holds a queued message.
+        app.queued_messages.push("old queued".to_string());
+        app.save_input_for_reload(&session_id);
 
-    let path = crate::storage::jcode_dir()
-        .expect("jcode dir")
-        .join(format!("client-input-{}", session_id));
-    assert!(path.exists(), "first save should write the reload file");
+        let path = crate::storage::jcode_dir()
+            .expect("jcode dir")
+            .join(format!("client-input-{}", session_id));
+        assert!(path.exists(), "first save should write the reload file");
 
-    // An empty save while the file is FRESH must preserve it: another client
-    // attached to the same session may have just saved its own queued
-    // messages during the same reload handoff.
-    app.queued_messages.clear();
-    app.save_input_for_reload(&session_id);
-    assert!(
-        path.exists(),
-        "an empty save must not delete a fresh reload file (multi-client safety)"
-    );
-
-    // Backdate the file past the staleness window; now an empty save must
-    // remove it so a long-stale queue cannot resurrect on a later restore.
-    #[cfg(unix)]
-    {
-        let stale_age_secs = 400; // > 300s staleness cutoff
-        let target = std::time::SystemTime::now() - Duration::from_secs(stale_age_secs);
-        let since_epoch = target
-            .duration_since(std::time::SystemTime::UNIX_EPOCH)
-            .expect("clock before epoch");
-        let times = [
-            libc::timespec {
-                tv_sec: since_epoch.as_secs() as libc::time_t,
-                tv_nsec: 0,
-            },
-            libc::timespec {
-                tv_sec: since_epoch.as_secs() as libc::time_t,
-                tv_nsec: 0,
-            },
-        ];
-        let c_path = std::ffi::CString::new(path.to_str().expect("utf8 path")).expect("c path");
-        let rc = unsafe { libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), 0) };
-        assert_eq!(rc, 0, "backdating the reload file mtime should succeed");
-
+        // An empty save while the file is FRESH must preserve it: another client
+        // attached to the same session may have just saved its own queued
+        // messages during the same reload handoff.
+        app.queued_messages.clear();
         app.save_input_for_reload(&session_id);
         assert!(
-            !path.exists(),
-            "an empty save must remove a stale reload file so old queued messages cannot resurrect"
+            path.exists(),
+            "an empty save must not delete a fresh reload file (multi-client safety)"
         );
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = std::fs::remove_file(&path);
-    }
+
+        // Backdate the file past the staleness window; now an empty save must
+        // remove it so a long-stale queue cannot resurrect on a later restore.
+        #[cfg(unix)]
+        {
+            let stale_age_secs = 400; // > 300s staleness cutoff
+            let target = std::time::SystemTime::now() - Duration::from_secs(stale_age_secs);
+            let since_epoch = target
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .expect("clock before epoch");
+            let times = [
+                libc::timespec {
+                    tv_sec: since_epoch.as_secs() as libc::time_t,
+                    tv_nsec: 0,
+                },
+                libc::timespec {
+                    tv_sec: since_epoch.as_secs() as libc::time_t,
+                    tv_nsec: 0,
+                },
+            ];
+            let c_path = std::ffi::CString::new(path.to_str().expect("utf8 path")).expect("c path");
+            let rc = unsafe { libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), 0) };
+            assert_eq!(rc, 0, "backdating the reload file mtime should succeed");
+
+            app.save_input_for_reload(&session_id);
+            assert!(
+                !path.exists(),
+                "an empty save must remove a stale reload file so old queued messages cannot resurrect"
+            );
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = std::fs::remove_file(&path);
+        }
+    });
 }
 
 /// Repeated provider guardrail refusals must trip the circuit breaker and
@@ -1247,8 +1252,10 @@ fn peer_user_prompt_renders_as_user_message() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         app.handle_peer_user_message("can you show me what he sent?");
-        assert!(app.display_messages().iter().any(
-            |msg| msg.role == "user" && msg.content == "can you show me what he sent?"
-        ));
+        assert!(
+            app.display_messages()
+                .iter()
+                .any(|msg| msg.role == "user" && msg.content == "can you show me what he sent?")
+        );
     });
 }
