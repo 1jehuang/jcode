@@ -58,6 +58,7 @@ pub(crate) enum LinuxCompositor {
 }
 
 impl LinuxCompositor {
+    #[cfg(target_os = "linux")]
     pub(crate) fn name(&self) -> &'static str {
         match self {
             LinuxCompositor::Niri => "niri",
@@ -683,7 +684,9 @@ mod tests {
 
     #[test]
     fn detects_compositors_from_sockets_and_desktop_names() {
-        let cases: Vec<(Vec<(&str, &str)>, Option<LinuxCompositor>)> = vec![
+        type EnvPairs = (&'static str, &'static str);
+        type EnvExpectation = (Vec<EnvPairs>, Option<LinuxCompositor>);
+        let cases: Vec<EnvExpectation> = vec![
             (
                 vec![("NIRI_SOCKET", "/run/niri.sock")],
                 Some(LinuxCompositor::Niri),
