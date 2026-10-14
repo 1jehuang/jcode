@@ -213,27 +213,27 @@ impl SshProcess {
     }
 
     pub(crate) fn shutdown(&self) {
-        if let Ok(mut child) = self.child.lock() {
-            if let Some(mut child) = child.take() {
-                // A dedicated process group also closes ProxyCommand helpers.
-                #[cfg(unix)]
-                unsafe {
-                    libc::kill(-(child.id() as i32), libc::SIGKILL);
-                }
-                let _ = child.kill();
-                if let Ok(status) = child.wait() {
-                    if let Ok(mut saved) = self.status.lock() {
-                        *saved = Some(status);
-                    }
-                }
+        if let Ok(mut child) = self.child.lock()
+            && let Some(mut child) = child.take()
+        {
+            // A dedicated process group also closes ProxyCommand helpers.
+            #[cfg(unix)]
+            unsafe {
+                libc::kill(-(child.id() as i32), libc::SIGKILL);
+            }
+            let _ = child.kill();
+            if let Ok(status) = child.wait()
+                && let Ok(mut saved) = self.status.lock()
+            {
+                *saved = Some(status);
             }
         }
         // Usually EOF arrives immediately. Never hang cleanup on an inherited
         // stderr handle held by a configured external SSH helper.
-        if let Ok(mut done) = self.stderr_done.lock() {
-            if let Some(done) = done.take() {
-                let _ = done.recv_timeout(Duration::from_millis(100));
-            }
+        if let Ok(mut done) = self.stderr_done.lock()
+            && let Some(done) = done.take()
+        {
+            let _ = done.recv_timeout(Duration::from_millis(100));
         }
     }
 

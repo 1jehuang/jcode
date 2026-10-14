@@ -492,7 +492,7 @@ fn sort_json(value: &Value) -> Value {
         Value::Array(values) => Value::Array(values.iter().map(sort_json).collect()),
         Value::Object(values) => {
             let mut entries: Vec<_> = values.iter().collect();
-            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            entries.sort_by_key(|(left, _)| *left);
             Value::Object(
                 entries
                     .into_iter()

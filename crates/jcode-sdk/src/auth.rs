@@ -348,6 +348,7 @@ impl FlowInner {
         let _ = rx.recv_timeout(Duration::from_secs(1));
     }
 
+    #[allow(clippy::collapsible_if)]
     fn command(&self, operation: Operation) -> Command {
         let mut command = Command::new(&self.options.binary);
         command.args(["--no-update", "--no-selfdev"]);
