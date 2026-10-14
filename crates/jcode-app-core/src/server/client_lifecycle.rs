@@ -601,6 +601,7 @@ pub(super) async fn handle_client(
     // Old clients count unknown events against a stray-line budget, so
     // `session_account_changed` goes only to clients that opted in.
     let supports_session_accounts = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut supports_user_response = false;
     // Client selfdev status is determined by Subscribe request, not server's env
     let mut client_selfdev = false;
 
@@ -1659,7 +1660,8 @@ pub(super) async fn handle_client(
             }
 
             Request::Ping { id } => {
-                let json = encode_event(&ServerEvent::Pong { id, native_ssh_protocol: Some(1), capabilities: vec!["session_tools".into(), "soft_interrupt_ids".into(), "runtime_commands".into()] });
+                let event = super::session_connections::connection_presence_pong(id, &client_connections, &swarm_members).await;
+                let json = encode_event(&event);
                 let mut w = writer.lock().await;
                 if w.write_all(json.as_bytes()).await.is_err() {
                     break;
@@ -1695,6 +1697,7 @@ pub(super) async fn handle_client(
                 id,
                 system_prompt,
                 supports_pdf_panels: requested_pdf_panels,
+                supports_user_response: requested_user_response,
                 working_dir: subscribe_working_dir,
                 selfdev,
                 target_session_id,
@@ -1738,6 +1741,7 @@ pub(super) async fn handle_client(
                     requested_session_accounts,
                     std::sync::atomic::Ordering::Relaxed,
                 );
+                supports_user_response = requested_user_response;
                 active_terminal_env = terminal_env;
                 current_client_instance_id = client_instance_id.clone();
                 {
@@ -1913,6 +1917,11 @@ pub(super) async fn handle_client(
                 // resumed session's stored pin.
                 apply_subscribe_account_pins(&agent, &requested_account_pins, &client_event_tx).await;
                 send_pending_account_notices(&agent, &client_event_tx);
+                super::client_session::apply_or_defer_desktop_response_capability(
+                    &agent,
+                    supports_user_response,
+                )
+                .await;
                 client_subscribed = true;
                 provisional_session = false;
             }
@@ -2064,6 +2073,11 @@ pub(super) async fn handle_client(
                     provisional_session = false;
                 }
                 send_pending_account_notices(&agent, &client_event_tx);
+                super::client_session::apply_or_defer_desktop_response_capability(
+                    &agent,
+                    supports_user_response,
+                )
+                .await;
                 session_control = refresh_session_control_handle(
                     &client_session_id,
                     &agent,

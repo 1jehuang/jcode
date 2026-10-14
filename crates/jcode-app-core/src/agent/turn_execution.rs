@@ -1000,6 +1000,19 @@ impl Agent {
         self.kv_cache_monitor.reset();
     }
 
+    pub(crate) async fn set_desktop_response_capability(&mut self, enabled: bool) {
+        let was_enabled = self
+            .registry
+            .tool_names()
+            .await
+            .iter()
+            .any(|n| n == "user_response");
+        if was_enabled != enabled {
+            self.registry.set_user_response_enabled(enabled).await;
+            self.invalidate_sdk_tools();
+        }
+    }
+
     pub async fn tool_names(&self) -> Vec<String> {
         self.tool_definitions_for_debug()
             .await

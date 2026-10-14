@@ -850,6 +850,7 @@ fn subscribe_request(working_dir: Option<&str>) -> Request {
     Request::Subscribe {
         system_prompt: None,
         supports_pdf_panels: false,
+        supports_user_response: false,
         id: 1,
         working_dir: working_dir.map(str::to_string),
         selfdev: None,
@@ -1569,6 +1570,15 @@ impl Provider for SdkCallbackProvider {
 
 #[tokio::test]
 async fn sdk_socket_configure_list_callback_and_busy_rejection() {
+    sdk_socket_workflow(false).await;
+}
+
+#[tokio::test]
+async fn user_response_socket_registration_follows_explicit_capability() {
+    sdk_socket_workflow(true).await;
+}
+
+async fn sdk_socket_workflow(response_only: bool) {
     let _lock = crate::storage::lock_test_env();
     let home = IsolatedReloadRecoveryEnv::new();
     let provider_template: Arc<dyn Provider> = Arc::new(SdkCallbackProvider::default());
@@ -1668,6 +1678,50 @@ async fn sdk_socket_configure_list_callback_and_busy_rejection() {
         matches!(e, ServerEvent::Done { id: 1 })
     })
     .await;
+    if response_only {
+        // Exercise actual Desktop/TUI Subscribe snapshots, including disabling
+        // the tool again on a repeated subscription rather than retaining it.
+        for (index, capability) in [false, true, false].into_iter().enumerate() {
+            let id = 100 + index as u64 * 2;
+            send(
+                &mut client_writer,
+                json!({
+                    "type": "subscribe",
+                    "id": id,
+                    "working_dir": home._home.path(),
+                    "supports_pdf_panels": true,
+                    "supports_user_response": capability,
+                }),
+            )
+            .await;
+            until(
+                &mut client_reader,
+                |e| matches!(e, ServerEvent::Done { id: done } if *done == id),
+            )
+            .await;
+            send(&mut client_writer, json!({"type":"list_tools","id":id + 1})).await;
+            let ServerEvent::Tools { tools, .. } = until(
+                &mut client_reader,
+                |e| matches!(e, ServerEvent::Tools { id: listed, .. } if *listed == id + 1),
+            )
+            .await
+            else {
+                panic!("expected tool list")
+            };
+            assert_eq!(tools.iter().any(|t| t.name == "user_response"), capability);
+        }
+        // This test exercises catalog gating, not the 30-second retention of
+        // idle unsaved sessions. Remove the isolated fixture before detaching.
+        sessions.write().await.clear();
+        drop(client_writer);
+        drop(client_reader);
+        tokio::time::timeout(Duration::from_secs(5), server_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        return;
+    }
     send(&mut client_writer, json!({"type":"configure_tools","id":2,"tools":{"enabled":[],"custom":[{"name":"read","description":"SDK read callback","parameters":{"type":"object"}}]}})).await;
     let configured = until(&mut client_reader, |e| {
         matches!(

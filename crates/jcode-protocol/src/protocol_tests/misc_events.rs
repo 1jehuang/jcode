@@ -400,6 +400,7 @@ fn test_subscribe_request_roundtrip_preserves_session_takeover_flags() -> Result
     let req = Request::Subscribe {
         system_prompt: None,
         supports_pdf_panels: true,
+        supports_user_response: true,
         id: 89,
         working_dir: Some("/tmp/project".to_string()),
         selfdev: Some(true),
@@ -419,6 +420,7 @@ fn test_subscribe_request_roundtrip_preserves_session_takeover_flags() -> Result
     let Request::Subscribe {
         system_prompt: _,
         supports_pdf_panels,
+        supports_user_response,
         id,
         working_dir,
         selfdev,
@@ -437,6 +439,7 @@ fn test_subscribe_request_roundtrip_preserves_session_takeover_flags() -> Result
     };
     assert_eq!(id, 89);
     assert!(supports_pdf_panels);
+    assert!(supports_user_response);
     assert_eq!(working_dir.as_deref(), Some("/tmp/project"));
     assert_eq!(selfdev, Some(true));
     assert_eq!(target_session_id.as_deref(), Some("sess_target"));
@@ -459,6 +462,7 @@ fn test_subscribe_request_defaults_optional_flags() -> Result<()> {
     let Request::Subscribe {
         system_prompt: _,
         supports_pdf_panels,
+        supports_user_response,
         id,
         working_dir,
         selfdev,
@@ -477,6 +481,7 @@ fn test_subscribe_request_defaults_optional_flags() -> Result<()> {
     };
     assert_eq!(id, 91);
     assert!(!supports_pdf_panels);
+    assert!(!supports_user_response);
     assert_eq!(working_dir, None);
     assert_eq!(selfdev, None);
     assert_eq!(target_session_id, None);
@@ -665,6 +670,7 @@ fn test_native_ssh_pong_capability_is_backward_compatible() -> Result<()> {
         id: 7,
         native_ssh_protocol: Some(1),
         capabilities: vec!["session_tools".into()],
+        user_connected_session_ids: None,
     };
     let json = serde_json::to_value(&modern)?;
     assert_eq!(json["native_ssh_protocol"], 1);

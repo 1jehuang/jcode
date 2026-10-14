@@ -60,6 +60,9 @@ quality debt remains unresolved. It does not reset budgets or waive CI failures.
 
 All platform build commands use `--locked`; dependency metadata is checked
 before building and every platform checks that `Cargo.lock` remains unchanged.
+The FreeBSD VM does not include Git metadata, so it snapshots the lockfile before
+compilation and compares its bytes afterward, failing on changes or a missing
+file without depending on `git diff`.
 The Linux compatibility helper, like the installer, comes from the immutable
 workflow commit, so old recovery tags receive the same locked build behavior.
 Both helper hashes are recorded in provenance. The glibc 2.17 baseline remains
