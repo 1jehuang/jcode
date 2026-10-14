@@ -5,12 +5,13 @@ return (async () => {
   const visible = e => !!e && e.getClientRects().length > 0 && !e.closest(hidden);
   const all = (selector, root = document) => Array.from(root.querySelectorAll(selector));
   const one = selector => all(selector).find(visible) || null;
-  // The bridge kills evaluation at 30 seconds. Stop work early enough to run
-  // preference restoration and return an error before that outer deadline.
+  // Every evaluation is bounded. jcode's DevTools command timeout is 60
+  // seconds, so stop early enough to run preference restoration and return
+  // an error first. A cold prepare is ~12s, so leave headroom for slow loads.
   const started = Date.now();
   let restoring = false;
   function checkBudget() {
-    if (Date.now() - started >= (restoring ? 27_000 : 18_000)) throw Error('ChatGPT UI evaluation exceeded its time budget');
+    if (Date.now() - started >= (restoring ? 55_000 : 40_000)) throw Error('ChatGPT UI evaluation exceeded its time budget');
   }
   const delay = async () => { checkBudget(); await new Promise(resolve => setTimeout(resolve, 300)); checkBudget(); };
   async function until(check, description, attempts = 30) {
