@@ -242,7 +242,7 @@ fn should_report_error(error: &str) -> bool {
         .unwrap_or(false)
 }
 
-pub(crate) fn error_is_missing_toolchain(error: &str) -> bool {
+pub fn error_is_missing_toolchain(error: &str) -> bool {
     error == TOOLCHAIN_MISSING_ERROR
         || (error.contains("start latex:")
             && (error.contains("No such file or directory") || error.contains("program not found")))

@@ -80,9 +80,7 @@ pub fn set_latex_log_hook(hook: fn(&str)) {
 }
 
 /// Missing optional TeX tooling is configuration information, not a warning.
-pub fn latex_error_is_missing_toolchain(error: &str) -> bool {
-    latex_image::error_is_missing_toolchain(error)
-}
+pub use latex_image::error_is_missing_toolchain as latex_error_is_missing_toolchain;
 
 pub use latex_image::{
     HandtermNativeLatex, encode_handterm_latex_apc, handterm_native_latex_for_hash,
