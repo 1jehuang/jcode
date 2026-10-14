@@ -1516,7 +1516,8 @@ fn compute_max_scroll_with_prompt_preview(
     pinned_todo_lines: u16,
     prompt_number_offset: usize,
 ) -> usize {
-    let mut max_scroll = total_lines.saturating_sub(area.height as usize);
+    let mut max_scroll =
+        total_lines.saturating_sub(area.height.saturating_sub(pinned_todo_lines) as usize);
     let preview_enabled = crate::config::config().display.prompt_preview;
     if max_scroll == 0 || (!preview_enabled && pinned_todo_lines == 0) {
         return max_scroll;
@@ -1549,6 +1550,24 @@ fn compute_max_scroll_with_prompt_preview(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pinned_todos_scroll_when_only_the_band_causes_overflow() {
+        let area = ratatui::layout::Rect::new(0, 0, 80, 10);
+        // The transcript alone fits, but the pinned band leaves only seven rows.
+        assert_eq!(
+            super::compute_max_scroll_with_prompt_preview(9, &[], &[], area, 3, 0),
+            2
+        );
+        assert_eq!(
+            super::compute_max_scroll_with_prompt_preview(7, &[], &[], area, 3, 0),
+            0
+        );
+        assert_eq!(
+            super::compute_max_scroll_with_prompt_preview(9, &[], &[], area, 0, 0),
+            0
+        );
+    }
+
     #[test]
     fn ctrl_l_preview_measurement_keeps_global_prompt_number_width() {
         let prompts = vec!["x".repeat(15)];

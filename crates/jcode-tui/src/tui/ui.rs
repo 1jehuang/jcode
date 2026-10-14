@@ -3108,9 +3108,10 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     }
     let prep_elapsed = prep_start.elapsed();
     let clear_start = terminal_clear_start(app, &prepared);
-    // The pinned todo band consumes transcript rows too. Reserve it before
-    // packing the fresh view, otherwise it can push the new prompt offscreen.
-    let clear_band_height = if clear_start.is_some() {
+    // The pinned todo band consumes transcript rows too, including in a fresh
+    // session. Reserve it before packing the view so the first todo update
+    // cannot squeeze the user prompt out of the messages area.
+    let pinned_band_height = {
         let width = chat_area
             .width
             .saturating_sub(u16::from(chat_scrollbar_visible));
@@ -3118,13 +3119,11 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         viewport::pinned_todo_band_lines(app, width, available_height.saturating_sub(fixed_height))
             .0
             .len()
-    } else {
-        0
     };
     let content_height = prepared
         .total_wrapped_lines()
         .saturating_sub(clear_start.unwrap_or(0))
-        .saturating_add(clear_band_height)
+        .saturating_add(pinned_band_height)
         .max(1)
         .min(u16::MAX as usize) as u16;
 

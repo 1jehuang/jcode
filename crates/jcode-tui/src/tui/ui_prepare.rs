@@ -1402,6 +1402,15 @@ fn render_message_into(
             .as_ref()
             .is_some_and(|tool| tools_ui::canonical_tool_name(&tool.name) == "todo")
     {
+        // Hidden messages still occupy a position in the transcript cache.
+        // Without this zero-length boundary, incremental updates compare later
+        // messages against the wrong indices and can truncate earlier content.
+        acc.segments.push((
+            msg.stable_cache_hash(),
+            acc.lines.len(),
+            acc.raw_plain_lines.len(),
+            acc.user_prompt_texts.len(),
+        ));
         return;
     }
     let align = default_message_alignment(role, centered);
