@@ -13,8 +13,8 @@ return (async () => {
     if (Date.now() - started >= (restoring ? 27_000 : 18_000)) throw Error('ChatGPT UI evaluation exceeded its time budget');
   }
   const delay = async () => { checkBudget(); await new Promise(resolve => setTimeout(resolve, 300)); checkBudget(); };
-  async function until(check, description) {
-    for (let attempt=0; attempt<30; attempt++) {
+  async function until(check, description, attempts = 30) {
+    for (let attempt=0; attempt<attempts; attempt++) {
       checkBudget();
       if (check()) return;
       await delay();
@@ -89,7 +89,18 @@ return (async () => {
     await closeMenu();
     const b = trigger();
     if (!b || unavailable(b)) throw Error('ChatGPT model picker is unavailable');
-    b.click(); await until(() => !!one('[role="menu"]'), 'opening the model picker'); await delay(); checkAccess();
+    // A freshly loaded ChatGPT page intermittently ignores the first trigger
+    // click. Re-click only while the visible trigger is verifiably still
+    // closed, so a retry can never toggle an open picker shut.
+    const menuOpen = () => !!one('[role="menu"]');
+    for (let click = 1; ; click++) {
+      const current = trigger();
+      if (!current || unavailable(current)) throw Error('ChatGPT model picker is unavailable');
+      if (current.getAttribute('aria-expanded') !== 'true' && !menuOpen()) current.click();
+      try { await until(menuOpen, 'opening the model picker', 8); break; }
+      catch (error) { if (click >= 3 || current.getAttribute('aria-expanded') === 'true') throw error; }
+    }
+    await delay(); checkAccess();
     if (advanced && rows().length === 0) {
       const toggle = one('[data-model-picker-view-toggle="true"]');
       if (!toggle) throw Error('ChatGPT model list cannot be opened');
