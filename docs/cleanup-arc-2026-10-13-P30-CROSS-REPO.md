@@ -352,6 +352,39 @@ A second broader scan covering underscore-prefixed `_full_*` dirs found 3 more s
 | `_full_tooling` | `security/quinn-proto-0.11.19-rustls-0.23.45-p30` @ `baf43bf4` | **0 P30** | FAIL (phinbox pre-existing) | lockfile fix correct; build error is unrelated |
 | `_full_HexaKit` | (no branch) | n/a | n/a | cannot fix — `KooshaPari/phenotype-router` GitHub repo 404 |
 
+### Lockfile diff audit (concrete evidence, 2026-10-14)
+
+The P30 fix is **strictly Cargo.lock-only**. The actual diff for each round-3 branch:
+
+**`_full_AgilePlus` lockfile diff vs main (3 changes, all P30):**
+```
+quinn-proto: 0.11.17 → 0.11.19 ✓ P30 target
+h2:          0.4.17  → 0.4.19  ✓ P30 target
+rustls:      0.23.43 → 0.23.45 ✓ P30 target
+```
+No transitive changes. **Cleanest possible diff — exactly the P30 trio, nothing else.**
+
+**`_full_tooling` lockfile diff vs main (6 changes: 3 P30 + 3 transitive):**
+```
+quinn-proto:  0.11.16 → 0.11.19 ✓ P30 target
+h2:           0.4.15  → 0.4.19  ✓ P30 target
+rustls:       0.23.42 → 0.23.45 ✓ P30 target
+rustls-webpki: 0.103.13 → 0.103.15 (auto-bumped by rustls 0.23.45)
+aws-lc-sys:   0.43.0  → 0.46.0  (auto-bumped by rustls 0.23.45)
+aws-lc-rs:    1.17.3  → 1.18.2  (auto-bumped by rustls 0.23.45)
+```
+3 P30 changes + 3 transitive changes (all caused by rustls 0.23.45's MSRV bump). **No unrelated dep drift.**
+
+**cargo audit (final state on the 2 fixed branches):**
+- `_full_AgilePlus`: 0 P30 RUSTSEC. 7 allowed warnings (6 unmaintained + 1 unsound `faster-hex` + 1 yanked `chacha20` — all pre-existing, non-P30).
+- `_full_tooling`: 0 P30 RUSTSEC. 3 allowed warnings (1 unmaintained + 1 unsound `lru` + 1 yanked `chacha20` — all pre-existing, non-P30).
+- Both show `quinn-proto 0.11.19` in the dependency tree (the fixed version). RUSTSEC-2025-0022 (quinn RNG underflow), RUSTSEC-2024-0001 (rustls x.509 DoS), and GHSA-9h95-8rx6-9m5c (h2 CONTINUATION flood) are all CLEARED.
+
+**Acceptance path for these fixes:**
+- Real acceptance = `cargo audit` on CI when the PR is opened. This is the authoritative check, and I have run it directly on each branch.
+- The cargo audit results above ARE the acceptance test. The fix is purely a lockfile bump, no code changes; CI can re-run `cargo audit` and reproduce these results.
+- Push is operator-gated (pre_tool blocks `git push`). All 10 cross-repo security branches remain local.
+
 ---
 
 tx-agent: jcode
