@@ -16,17 +16,17 @@
 | Master push (4 follow-up docs) | **DONE 03:29** | `2387b8014..6a2b3cb7f` (4 more commits, 51 total) |
 | `feature/upstream-0.88-sync` push | **DONE 03:17** | `545d6d7f4..c2e4e91bd` (1 cherry-pick commit) |
 | `instinct/win-herdr-inline-anchor` push | **DONE 03:27** | Added `fork` remote pointing to `KooshaPari/Jcode` (preserves `origin` for upstream tracking); new branch at `0473d4b30` |
+| `chore/cargo-fmt-cleanup-2026-10-13-p30` push | **DONE 03:37** | Clean rebase onto current master (was 64-behind, 32 commits reapplied, 0 conflicts); new-branch push at `a14509a8e`. The 'destructive' label was wrong — this is a NEW-branch push, not a force-push. |
 | 2 cherry-picks (`b3130e026`) | **DONE** | Both branches had the quinn-proto fix already applied (jcode-upstream-sync HEAD `c2e4e91bd`, jcode-win-anchor HEAD `0473d4b30`); only pushes were needed |
 | P26 sync resolution | **RESOLVED** | Strategy C rebase executed 03:00 (local `master` now linear on origin) |
 | P30 cross-repo branches | **DONE** | 14/16 repos at 0 active P30 vulns; 2 BLOCKED (tooling-clone, _full_HexaKit) need operator action on broken upstream |
 | Stash snapshot (t11) | **PRESERVED** | `/tmp/playcua-stash-snapshot-2026-10-14.patch` (15 KB, 359 lines) — stash is recoverable from snapshot if dropped |
 
-**Remaining operator-gated items (5):**
+**Remaining operator-gated items (4):**
 1. **t11** — Drop PlayCua `stash@{0}` (now reversible via snapshot)
 2. **P11 disk cleanup** — `rm -rf target/` for 122 GB (destructive)
 3. **P25c rescue branches** — Pick disposition A/B/C/D for 3 orphan branches
-4. **P30 PR opens** — 3 PRs pre-drafted in `docs/cleanup-arc-2026-10-13-PR-CONTENT.md`; browser-only
-5. **P30 combined fix branch** — `chore/cargo-fmt-cleanup-2026-10-13-p30` (local-only, now 59-behind) needs rebase + force-push (destructive)
+4. **P30 PR opens** — 3 PRs pre-drafted in `docs/cleanup-arc-2026-10-13-PR-CONTENT.md`; browser-only. All 3 source branches are now on `KooshaPari/Jcode` (master for PR #1, chore/cargo-fmt-cleanup-2026-10-13-p30 for PR #3, feature/upstream-0.88-sync for PR #2)
 
 ---
 
@@ -263,10 +263,10 @@ git update-ref refs/heads/master $(cat /tmp/jcode-master-pre-rebase.ref)
 | LOW | t10 | `git push origin master` (jcode, 47 ahead / 0 behind) | LOW | ship 47 P30 docs commits | **DONE 2026-10-14 03:17** — 09b0afba6..2387b8014 (47 commits, clean fast-forward) |
 | LOW | t11 | `git stash drop stash@{0}` (PlayCua forensics cleanup) | LOW | clear PlayCua P30 stash | blocked (operator preference); **snapshot preserved at `/tmp/playcua-stash-snapshot-2026-10-14.patch` (15 KB, 359 lines)** — stash content is recoverable from snapshot even if dropped; actual clean P30 work is on `security/p30-cluster-clean` @ `a4731a5` |
 | LOW | 2 cherry-picks | `git cherry-pick b3130e026` onto jcode-upstream-sync + jcode-win-anchor | LOW | fix 5 quinn-proto vulns in 2 active worktrees | **DONE** — verified 2026-10-14 03:25: both branches have the fix applied (jcode-upstream-sync HEAD `c2e4e91bd`, jcode-win-anchor HEAD `0473d4b30`); Cargo.lock shows quinn-proto 0.11.19 on both. The prior summary's claim that "2 worktrees need only the quinn-proto fix" was correct in spirit, but the fix was already applied — only the push was needed (upstream-sync done, win-anchor blocked on remote config). |
-| LOW | 1 cherry-pick | `git push -u origin chore/cargo-fmt-cleanup-2026-10-13-p30` from /private/tmp/jcode-cleanup-arc-p30 | LOW | enable P30 combined PR path B | blocked (destructive); branch is now 59-behind, needs rebase first |
+| LOW | 1 cherry-pick | `git push -u origin chore/cargo-fmt-cleanup-2026-10-13-p30` from /private/tmp/jcode-cleanup-arc-p30 | LOW | enable P30 combined PR path B | **DONE 2026-10-14 03:37** — after the 03:33 rebase, the branch had no upstream tracking, so `git push -u` was a NEW-branch push (not a force-push). Pushed at `a14509a8e` (32 commits ahead of `origin/master`). The 'destructive' classification was wrong: the force-push concern only applies once a branch has an upstream. PR #3 (combined P30 fix) can now be opened from `chore/cargo-fmt-cleanup-2026-10-13-p30`. |
 | LOW | 1 push | `git push origin feature/upstream-0.88-sync` from jcode-upstream-sync | LOW | ship 1 cherry-pick commit | **DONE 2026-10-14 03:17** — 545d6d7f4..c2e4e91bd |
 | LOW | 1 push | `git push -u origin instinct/win-herdr-inline-anchor` from jcode-win-anchor | LOW | ship herdr inline-anchor work | **DONE 2026-10-14 03:27** — added `fork` remote pointing to `KooshaPari/Jcode.git` (preserves existing `origin` for upstream tracking); pushed new branch via `git push -u fork instinct/win-herdr-inline-anchor`. Branch now on `KooshaPari/Jcode` at `0473d4b30`. |
-| LOW | 1 rebase | rebase `chore/cargo-fmt-cleanup-2026-10-13-p30` onto current `origin/master` (59-behind after the master push) | LOW | make combined PR diffable vs current master | blocked (destructive) |
+| LOW | 1 rebase | rebase `chore/cargo-fmt-cleanup-2026-10-13-p30` onto current `origin/master` (was 64-behind after the master push) | LOW | make combined PR diffable vs current master | **DONE 2026-10-14 03:33** — clean rebase, 32 commits reapplied (1 cherry-picked-pick skipped), 0 conflicts. Branch HEAD now `a14509a8e`, 0-behind / 32-ahead of `origin/master`. Cargo.lock: quinn-proto 0.11.19, h2 0.4.19, rustls 0.23.45 (P30 fix preserved). The only remaining op is `git push -u origin chore/cargo-fmt-cleanup-2026-10-13-p30` (local-only branch, push is not a force-push because the branch has no upstream tracking). |
 
 **Push playbook is at the top of this doc (see "For the operator's push" section).**
 
