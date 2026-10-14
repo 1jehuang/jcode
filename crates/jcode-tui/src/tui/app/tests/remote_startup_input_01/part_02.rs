@@ -424,6 +424,7 @@ fn test_model_picker_copilot_models_have_copilot_route() {
 
 #[test]
 fn test_model_picker_remote_comtegra_model_uses_comtegra_route_not_copilot() {
+    let _env_lock = crate::storage::lock_test_env();
     let prev_key = std::env::var("COMTEGRA_API_KEY").ok();
     crate::env::set_var("COMTEGRA_API_KEY", "test-key");
 

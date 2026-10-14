@@ -1498,16 +1498,19 @@ fn import_continue_reaches_ready_quality_first_openai_model() {
                 app.onboarding_phase(),
                 Some(OnboardingPhase::StartChoice { .. })
             ));
+            // The bus is process-global: only this app's activation counts.
+            let own_session = app.session.id.clone();
             let (model, provider_key) = tokio::time::timeout(
                 std::time::Duration::from_secs(4),
                 async {
                     loop {
                         match bus_rx.recv().await {
                             Ok(crate::bus::BusEvent::ProviderModelActivated {
+                                session_id,
                                 model,
                                 provider_key,
                                 ..
-                            }) => break (model, provider_key),
+                            }) if session_id == own_session => break (model, provider_key),
                             Ok(crate::bus::BusEvent::AuthCatalogRefreshReady) => {
                                 app.finish_auth_catalog_refresh();
                             }
