@@ -123,7 +123,13 @@ fn test_alignment_status_shows_current_and_saved_defaults() {
         );
         assert!(last.content.contains("Saved default: left-aligned."));
         assert!(last.content.contains("/alignment centered"));
-        assert!(last.content.contains("Alt+C"));
+        // The keycap hint is platform-dependent: the message renders the
+        // platform chord via alt_chord (Option symbol on macOS, Alt elsewhere),
+        // so assert exactly that instead of a hardcoded "Alt+C" that fails on
+        // macOS builds while passing on the upstream Linux CI.
+        assert!(last
+            .content
+            .contains(&jcode_tui_core::keybind::alt_chord("C")));
     });
 }
 

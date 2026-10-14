@@ -19,6 +19,7 @@
 )]
 
 pub mod account_login;
+pub mod applets;
 pub mod auth;
 pub mod background;
 pub mod browser;
@@ -27,12 +28,14 @@ pub mod bus;
 pub mod cache_invalidation;
 pub mod cache_tracker;
 pub mod claude_live;
+pub mod client_focus;
 pub mod client_input;
 pub mod compaction;
+pub mod companion_client;
 pub mod config;
 pub mod console;
 pub mod copilot_usage;
-pub mod dictation;
+pub mod detected_emails;
 #[cfg(feature = "embeddings")]
 pub mod embedding;
 pub mod embedding_backend;
@@ -45,13 +48,15 @@ pub mod generated_image;
 pub mod github;
 pub mod gmail;
 pub mod goal;
+pub mod google_calendar;
 pub mod hooks;
 pub mod id;
+pub mod image_normalize;
 pub mod import;
 pub mod jev;
+pub mod kv_cache_monitor;
 pub mod live_tests;
 pub mod logging;
-pub mod login_qr;
 pub mod mcp;
 pub mod memory;
 pub mod memory_agent;
@@ -79,7 +84,7 @@ pub mod recent_session_index;
 pub mod registry;
 pub mod runtime_memory_log;
 pub mod safety;
-pub mod secret_input;
+pub mod scratch_maintenance;
 pub mod session;
 pub mod session_list_cache;
 pub mod session_metrics;
@@ -92,6 +97,7 @@ pub mod stdin_detect;
 pub mod storage;
 pub mod subscription_api;
 pub mod subscription_catalog;
+pub mod subscription_notice;
 pub mod telegram;
 pub mod telemetry {
     pub use jcode_telemetry_core::*;
@@ -102,7 +108,6 @@ pub mod transcript_sample;
 pub mod transport;
 pub mod usage;
 pub mod util;
-pub mod voice;
 pub mod voice_intent;
 #[cfg(not(feature = "embeddings"))]
 pub use embedding_stub as embedding;

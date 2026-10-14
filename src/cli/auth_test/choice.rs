@@ -299,6 +299,9 @@ async fn run_provider_tool_smoke_for_choice(
             crate::session::Session::create(None, None),
             Some(allowed_tools),
         );
+        // The smoke test checks for an exact reply. Memory recall (and any
+        // plan-limit notice it raises) would add unrelated text to it.
+        agent.set_memory_enabled(false);
         let transcript_start = agent.messages().len();
         let output = agent.run_once_capture(prompt).await.with_context(|| {
             format!(

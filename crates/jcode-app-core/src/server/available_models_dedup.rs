@@ -21,42 +21,74 @@ use crate::protocol::ServerEvent;
 /// (models, providers, api methods, availability, non-age detail text) still
 /// differ and still propagate.
 pub(super) fn available_models_dedup_key(event: &ServerEvent) -> String {
-    let encoded = crate::protocol::encode_event(event);
-    strip_relative_age_text(&encoded)
+    let ServerEvent::AvailableModelsUpdated {
+        provider_name,
+        provider_model,
+        available_models,
+        available_model_routes,
+    } = event
+    else {
+        return crate::protocol::encode_event(event);
+    };
+    // Only route details contain cosmetic ages. Scanning the encoded catalog
+    // wastes work and can hide real changes to model IDs or provider names.
+    let routes: Vec<_> = available_model_routes
+        .iter()
+        .map(|route| {
+            // Exhaustive destructuring makes additions to ModelRoute require a
+            // deliberate dedup decision rather than silently hiding changes.
+            let crate::provider::ModelRoute {
+                model,
+                provider,
+                api_method,
+                available,
+                detail,
+                usage,
+                cheapness,
+            } = route;
+            (
+                model,
+                provider,
+                api_method,
+                available,
+                strip_relative_age_text(detail),
+                usage,
+                cheapness,
+            )
+        })
+        .collect();
+    serde_json::to_string(&(provider_name, provider_model, available_models, routes))
+        .unwrap_or_else(|_| crate::protocol::encode_event(event))
 }
 
 /// Replace `<digits><unit> ago` runs (e.g. `12m ago`, `3h ago`, `5d ago`) with a
 /// fixed placeholder so relative-age drift does not register as a change.
 pub(super) fn strip_relative_age_text(text: &str) -> String {
-    const AGE_SUFFIX: &str = " ago";
-    let mut out = String::with_capacity(text.len());
+    const AGE_SUFFIX: &[u8] = b" ago";
     let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut copied = 0;
     let mut i = 0;
-    while i < text.len() {
-        // Look for the start of a "<digits><unit> ago" run at this position.
-        let digits_end = bytes[i..]
-            .iter()
-            .position(|b| !b.is_ascii_digit())
-            .map(|offset| i + offset)
-            .unwrap_or(text.len());
-        let has_digits = digits_end > i;
-        let unit_is_age = matches!(bytes.get(digits_end), Some(b's' | b'm' | b'h' | b'd'));
-        // Only slice past the unit byte once we know a unit byte exists, so a
-        // trailing digit run at end-of-string cannot index out of range.
-        if has_digits && unit_is_age && text[digits_end + 1..].starts_with(AGE_SUFFIX) {
-            out.push_str("<age>");
-            i = digits_end + 1 + AGE_SUFFIX.len();
-            continue;
+    while let Some(offset) = bytes[i..].iter().position(u8::is_ascii_digit) {
+        let start = i + offset;
+        let mut end = start + 1;
+        while bytes.get(end).is_some_and(u8::is_ascii_digit) {
+            end += 1;
         }
-        // Not an age run: copy one char and continue from the next boundary.
-        // `i` is always a char boundary here, so `chars().next()` yields a char
-        // for any non-empty remainder; fall through to the end otherwise.
-        let Some(ch) = text[i..].chars().next() else {
-            break;
-        };
-        out.push(ch);
-        i += ch.len_utf8();
+        let unit_is_age = matches!(bytes.get(end), Some(b's' | b'm' | b'h' | b'd'));
+        if unit_is_age && bytes[end + 1..].starts_with(AGE_SUFFIX) {
+            // ASCII digits are always UTF-8 boundaries. Copy unchanged spans
+            // in bulk, not one Unicode character at a time across the catalog.
+            out.push_str(&text[copied..start]);
+            out.push_str("<age>");
+            copied = end + 1 + AGE_SUFFIX.len();
+            i = copied;
+        } else {
+            // Consume each digit run once, avoiding quadratic suffix scans.
+            i = end;
+        }
     }
+    out.push_str(&text[copied..]);
     out
 }
 

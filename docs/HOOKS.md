@@ -10,17 +10,41 @@ sessions appear*); lifecycle hooks tell you *what is happening inside them*.
 ```toml
 # ~/.jcode/config.toml
 [hooks]
+turn_start    = "~/bin/jcode-turn-busy"       # observer
 turn_end      = "~/bin/jcode-turn-notify"     # observer
 session_start = ""                            # observer
 session_end   = ""                            # observer
 pre_tool      = "~/bin/jcode-tool-policy"     # gate
 post_tool     = ""                            # observer
+post_tool_feedback = "~/bin/jcode-vale"       # feeds output back to the model
 pre_tool_timeout_ms = 5000
+post_tool_feedback_timeout_ms = 10000
 ```
 
+All eight command keys (`pre_tool_transform`, `turn_start`, `turn_end`,
+`session_start`, `session_end`, `pre_tool`, `post_tool`, and
+`post_tool_feedback`) accept either a command string or an array of strings.
+Independent plugins can share an event without a dispatcher:
+
+```toml
+[hooks]
+turn_end = ["~/bin/jcode-turn-notify", "~/bin/jcode-event-log"]
+pre_tool = ["~/bin/jcode-tool-policy", "~/bin/jcode-audit-policy"]
+```
+
+Empty or whitespace-only commands are skipped. Observer commands are spawned
+in declaration order but run independently, so completion order is unspecified.
+Gate commands run sequentially in declaration order, even after a block, and
+the first blocking result is returned. Transformers and feedback hooks also
+run sequentially in declaration order, as described below.
+
 Env overrides (always win; empty value disables a config hook):
-`JCODE_HOOK_TURN_END`, `JCODE_HOOK_SESSION_START`, `JCODE_HOOK_SESSION_END`,
-`JCODE_HOOK_PRE_TOOL`, `JCODE_HOOK_POST_TOOL`, `JCODE_HOOK_PRE_TOOL_TIMEOUT_MS`.
+`JCODE_HOOK_TURN_START`, `JCODE_HOOK_TURN_END`, `JCODE_HOOK_SESSION_START`, `JCODE_HOOK_SESSION_END`,
+`JCODE_HOOK_PRE_TOOL`, `JCODE_HOOK_POST_TOOL`, `JCODE_HOOK_PRE_TOOL_TIMEOUT_MS`,
+`JCODE_HOOK_POST_TOOL_FEEDBACK`, `JCODE_HOOK_POST_TOOL_FEEDBACK_TIMEOUT_MS`,
+`JCODE_HOOK_PRE_TOOL_TRANSFORM`, `JCODE_HOOK_PRE_TOOL_TRANSFORM_TIMEOUT_MS`.
+Command overrides accept a command string or a TOML array of strings, for
+example `JCODE_HOOK_TURN_END='["notify-one", "notify-two"]'`.
 
 ## Common contract
 
@@ -32,7 +56,7 @@ Env overrides (always win; empty value disables a config hook):
 
 | Variable | Meaning |
 | --- | --- |
-| `JCODE_HOOK_EVENT` | `turn_end`, `session_start`, `session_end`, `pre_tool`, `post_tool` |
+| `JCODE_HOOK_EVENT` | `turn_start`, `turn_end`, `session_start`, `session_end`, `pre_tool`, `post_tool`, `post_tool_feedback`, `pre_tool_transform` |
 | `JCODE_HOOK_SESSION_ID` | Session the event belongs to |
 | `JCODE_HOOK_CWD` | Session working directory |
 | `JCODE_HOOK_PAYLOAD` | JSON object mirroring all fields (capped at 16 KB) |
@@ -40,18 +64,36 @@ Env overrides (always win; empty value disables a config hook):
 
 ## Observer hooks
 
-`turn_end`, `session_start`, `session_end`, and `post_tool` are
-**observers**: spawned detached, fire-and-forget. They can never block or slow
-the agent; failures are only logged.
+`turn_start`, `turn_end`, `session_start`, `session_end`, and `post_tool` are
+**observers**: spawned detached, fire-and-forget. The agent does not wait for
+their completion; failures are only logged.
+
+### `turn_start`
+
+Fires before model generation and the first tool call in the `chat` entrypoint
+(which uses the streaming turn loop) and one-shot `run` path. Extra fields:
+`JCODE_HOOK_MODEL` and `JCODE_HOOK_SOURCE` (`chat` or `run`, respectively).
+
+There are no distinct `resume` or `ambient` source values dispatched by the
+current implementation. Those labels in older config comments are not a
+runtime guarantee.
 
 ### `turn_end`
 
 Fires when an agent turn completes (streaming turn path, which covers TUI,
-desktop, swarm workers, and headless sessions).
+desktop, swarm workers, and headless sessions, plus one-shot `jcode run`).
 
 Extra fields: `JCODE_HOOK_STATUS` (`ok`/`error`), `JCODE_HOOK_DURATION_MS`,
 `JCODE_HOOK_MODEL`, `JCODE_HOOK_LAST_ASSISTANT_TEXT` (first 4000 chars),
+`JCODE_HOOK_PROMPT_TOKENS`, `JCODE_HOOK_INPUT_TOKENS`,
+`JCODE_HOOK_OUTPUT_TOKENS`, `JCODE_HOOK_CACHE_READ_TOKENS`,
+`JCODE_HOOK_CACHE_WRITE_TOKENS`, and
 `JCODE_HOOK_ERROR` (on failure).
+
+Token fields are summed from assistant messages in the current turn. `PROMPT_TOKENS` is the provider-reported full prompt size when available; `INPUT_TOKENS` is the raw provider-reported input count.
+These values are not normalized across providers; for example, cached input may be included in the OpenAI input count
+but is reported separately by Anthropic. Cache fields are omitted when no
+assistant message in the turn reports that metric.
 
 ### `session_start` / `session_end`
 
@@ -62,9 +104,54 @@ attached), or `resume` (restored by id). `session_end` fires on normal close
 
 ### `post_tool`
 
-Fires after every tool call. Extra fields: `JCODE_HOOK_TOOL_NAME`,
-`JCODE_HOOK_STATUS`, `JCODE_HOOK_DURATION_MS`, `JCODE_HOOK_OUTPUT_BYTES` (on
-success), `JCODE_HOOK_ERROR` (on failure).
+Fires after every tool call. Extra fields:
+
+| Variable | Meaning |
+| --- | --- |
+| `JCODE_HOOK_TOOL_NAME` | Resolved tool name |
+| `JCODE_HOOK_TOOL_CALL_ID` | Provider tool call id |
+| `JCODE_HOOK_TOOL_INPUT` | Tool input JSON (capped at 16 KB) |
+| `JCODE_HOOK_TOUCHED_PATHS` | Newline-separated absolute paths named by the input (`file_path`, `path`, `paths`, `apply_patch` headers, ...) |
+| `JCODE_HOOK_STATUS` | `ok` / `error` |
+| `JCODE_HOOK_DURATION_MS` | Tool execution time |
+| `JCODE_HOOK_OUTPUT_BYTES` | Output size (on success) |
+| `JCODE_HOOK_ERROR` | Error message (on failure) |
+
+`JCODE_HOOK_TOUCHED_PATHS` is derived from the tool input, so it lists paths a
+tool was asked to read or write. It does not track files a `bash` command
+happened to modify.
+
+## Feedback hook: `post_tool_feedback`
+
+`post_tool_feedback` runs **synchronously after every successful tool call**
+and can add text to the result the model sees. It gets the same env fields as
+`post_tool` plus the full tool input JSON on stdin.
+
+- Trimmed **stdout** is appended to the tool result under a
+  `[post_tool_feedback]` marker (capped at 8 KB per hook). Empty stdout adds
+  nothing.
+- The exit code is ignored, since linters usually exit non-zero when they
+  report findings. Stderr is discarded.
+- Timeouts (`post_tool_feedback_timeout_ms`, default 10s) and spawn failures
+  add nothing and are logged.
+- Multiple hooks run in declaration order and their outputs are concatenated.
+
+Keep it fast and filter early: it runs on every tool call, including reads.
+
+```bash
+#!/usr/bin/env bash
+# ~/bin/jcode-vale: lint prose the agent just wrote
+case "$JCODE_HOOK_TOOL_NAME" in
+  write|edit|multiedit|apply_patch) ;;
+  *) exit 0 ;;
+esac
+while IFS= read -r path; do
+  case "$path" in
+    *.md|*.mdx|*.txt|*.rst) [ -f "$path" ] && vale --output=line "$path" ;;
+  esac
+done <<<"$JCODE_HOOK_TOUCHED_PATHS"
+exit 0
+```
 
 ## Gate hook: `pre_tool`
 

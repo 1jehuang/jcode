@@ -126,7 +126,8 @@ fn issue_1206_local_submit_and_bracketed_paste_both_resolve_paths() {
 fn issue_1206_image_drop_still_attaches_bytes() {
     let dir = tempfile::tempdir().unwrap();
     let image = dir.path().join("sample image.png");
-    std::fs::write(&image, b"image payload").unwrap();
+    let payload = crate::tui::app::input::tiny_png_bytes_for_test();
+    std::fs::write(&image, &payload).unwrap();
     let mut app = create_test_app();
     app.set_input_for_test(image.display().to_string().replace(' ', "\\ "));
     assert!(promote_dropped_images(&mut app));
@@ -135,7 +136,7 @@ fn issue_1206_image_drop_still_attaches_bytes() {
         app.pending_images,
         vec![(
             "image/png".into(),
-            base64::engine::general_purpose::STANDARD.encode(b"image payload")
+            base64::engine::general_purpose::STANDARD.encode(&payload)
         )]
     );
 }

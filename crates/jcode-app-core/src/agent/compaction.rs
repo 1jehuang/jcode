@@ -3,6 +3,7 @@ use super::*;
 impl Agent {
     pub(super) fn note_compaction_applied(&mut self) {
         self.cache_tracker.reset();
+        self.kv_cache_monitor.reset();
         self.locked_tools = None;
         self.provider_session_id = None;
         self.session.provider_session_id = None;
@@ -121,6 +122,9 @@ impl Agent {
         if self.try_recover_after_payload_too_large(error) {
             return true;
         }
+        if self.try_recover_after_image_rejection(error) {
+            return true;
+        }
         if !Self::is_context_limit_error(error) {
             return false;
         }
@@ -159,6 +163,7 @@ impl Agent {
         };
 
         self.cache_tracker.reset();
+        self.kv_cache_monitor.reset();
         self.locked_tools = None;
         self.provider_session_id = None;
         self.session.provider_session_id = None;
@@ -203,26 +208,7 @@ impl Agent {
             );
             return false;
         }
-
-        // The transcript changed; reseed compaction bookkeeping and reset
-        // provider session/cache state so the retry sends the reduced payload.
-        let compaction = self.registry.compaction();
-        if let Ok(mut manager) = compaction.try_write() {
-            let provider_messages = self.session.messages_for_provider();
-            manager.reset();
-            manager.set_budget(self.provider.context_window());
-            if let Some(state) = self.session.compaction.as_ref() {
-                manager.restore_persisted_state_with(state, &provider_messages);
-            } else {
-                manager.seed_restored_messages_with(&provider_messages);
-            }
-            self.sync_session_compaction_state_from_manager(&manager);
-        }
-
-        self.cache_tracker.reset();
-        self.locked_tools = None;
-        self.provider_session_id = None;
-        self.session.provider_session_id = None;
+        self.reset_after_transcript_image_rewrite();
 
         logging::warn(&format!(
             "Request body exceeded provider size limit; stripped {} oversized inline image(s) and retrying",
@@ -239,6 +225,63 @@ impl Agent {
         );
 
         true
+    }
+
+    /// A provider rejected an inline image with a deterministic 400 (bad
+    /// media type, undecodable data, a limit jcode does not model). Every
+    /// retry would replay the same image, so replace stored images with text
+    /// notes and retry once (#1712). The outbound clamp normally prevents
+    /// this; this catches provider rules it does not know about.
+    fn try_recover_after_image_rejection(&mut self, error: &str) -> bool {
+        if !crate::compaction::is_image_rejection_error(error) {
+            return false;
+        }
+        let stripped = self.session.strip_all_images();
+        if stripped == 0 {
+            return false;
+        }
+        self.reset_after_transcript_image_rewrite();
+        if let Err(err) = self.session.save() {
+            logging::warn(&format!(
+                "Image-rejection recovery: failed to persist stripped transcript: {err}"
+            ));
+        }
+        logging::warn(&format!(
+            "Provider rejected an inline image; replaced {stripped} image(s) with text notes and retrying"
+        ));
+        crate::runtime_memory_log::emit_event(
+            crate::runtime_memory_log::RuntimeMemoryLogEvent::new(
+                "image_rejection_recovered",
+                "provider_image_rejected",
+            )
+            .with_session_id(self.session.id.clone())
+            .with_detail(format!("images_stripped={stripped}"))
+            .force_attribution(),
+        );
+        true
+    }
+
+    /// The transcript's images changed; reseed compaction bookkeeping and
+    /// reset provider session/cache state so the retry sends the new payload.
+    fn reset_after_transcript_image_rewrite(&mut self) {
+        let compaction = self.registry.compaction();
+        if let Ok(mut manager) = compaction.try_write() {
+            let provider_messages = self.session.messages_for_provider();
+            manager.reset();
+            manager.set_budget(self.provider.context_window());
+            if let Some(state) = self.session.compaction.as_ref() {
+                manager.restore_persisted_state_with(state, &provider_messages);
+            } else {
+                manager.seed_restored_messages_with(&provider_messages);
+            }
+            self.sync_session_compaction_state_from_manager(&manager);
+        }
+
+        self.cache_tracker.reset();
+        self.kv_cache_monitor.reset();
+        self.locked_tools = None;
+        self.provider_session_id = None;
+        self.session.provider_session_id = None;
     }
 
     fn try_recover_oversized_openai_native_compaction(&mut self) -> bool {
@@ -264,6 +307,7 @@ impl Agent {
         }
 
         self.cache_tracker.reset();
+        self.kv_cache_monitor.reset();
         self.locked_tools = None;
         self.provider_session_id = None;
         self.session.provider_session_id = None;

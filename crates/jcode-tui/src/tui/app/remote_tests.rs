@@ -12,6 +12,9 @@ use crate::tui::info_widget::{MemoryState, StepStatus};
 use anyhow::Result;
 use std::sync::Arc;
 
+#[path = "remote_tests/korean_input.rs"]
+mod korean_input;
+
 struct MockProvider;
 
 #[async_trait::async_trait]
@@ -39,10 +42,7 @@ impl Provider for MockProvider {
 
 fn create_test_app() -> crate::tui::app::App {
     ensure_test_jcode_home_if_unset();
-    // `has_notification()` (via `unfocused_redraw_warranted`) consults a
-    // process-wide ambient-info cache that another test may have populated
-    // from its own JCODE_HOME (scheduled reminders read as a notification).
-    // Reset it so these tests observe only their own state.
+    // Reset the process-wide ambient cache to isolate redraw assertions.
     crate::tui::app::helpers::clear_ambient_info_cache_for_tests();
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let rt = tokio::runtime::Runtime::new().expect("runtime");
@@ -175,207 +175,7 @@ fn client_interaction_restores_focus_so_scroll_redraws_at_full_rate() {
     );
 }
 
-#[test]
-fn auth_provider_hint_maps_openai_compatible_login_providers() {
-    assert_eq!(
-        auth_provider_hint_for_login_provider("Azure OpenAI"),
-        Some("azure-openai")
-    );
-    assert_eq!(
-        auth_provider_hint_for_login_provider("cerebras"),
-        Some("cerebras")
-    );
-    assert_eq!(
-        auth_provider_hint_for_login_provider("Cerebras"),
-        Some("cerebras")
-    );
-    assert_eq!(
-        auth_provider_hint_for_login_provider("minimax"),
-        Some("minimax")
-    );
-    assert_eq!(
-        auth_provider_hint_for_login_provider("not-a-provider"),
-        None
-    );
-}
-
-#[test]
-fn auth_provider_hint_maps_direct_provider_logins_by_display_label() {
-    // LoginCompleted carries the descriptor display label, which must still map
-    // to the canonical server provider id so the auth-change refresh is
-    // attributed correctly (regression: an Anthropic API-key login used to send
-    // no hint, so the server reported "OpenAI credentials are active" and
-    // skipped the post-login model switch).
-    assert_eq!(
-        auth_provider_hint_for_login_provider("Anthropic API"),
-        Some("anthropic-api")
-    );
-    assert_eq!(
-        auth_provider_hint_for_login_provider("anthropic-api"),
-        Some("anthropic-api")
-    );
-    assert_eq!(
-        auth_provider_hint_for_login_provider("claude-api"),
-        Some("anthropic-api")
-    );
-    assert_eq!(
-        auth_provider_hint_for_login_provider("Anthropic/Claude"),
-        Some("claude")
-    );
-    assert_eq!(
-        auth_provider_hint_for_login_provider("claude"),
-        Some("claude")
-    );
-    assert_eq!(
-        auth_provider_hint_for_login_provider("OpenAI"),
-        Some("openai")
-    );
-    assert_eq!(
-        auth_provider_hint_for_login_provider("OpenAI API"),
-        Some("openai-api")
-    );
-    assert_eq!(
-        auth_provider_hint_for_login_provider("OpenRouter"),
-        Some("openrouter")
-    );
-    assert_eq!(
-        auth_provider_hint_for_login_provider("AWS Bedrock"),
-        Some("bedrock")
-    );
-}
-
-#[test]
-fn auth_provider_hint_resolves_every_emitted_login_completed_provider() {
-    // Every string published as `LoginCompleted.provider` (see the emit sites in
-    // src/tui/app/auth.rs) must resolve to a canonical server provider id so the
-    // auth-change refresh is attributed to the right provider and the post-login
-    // model auto-select runs. Before the loose display-name resolution, only
-    // Azure and OpenAI-compatible logins resolved; every direct provider sent no
-    // hint, so the server fell back to the session's active provider (the
-    // "OpenAI credentials are active" bug) and skipped the model switch.
-    //
-    // Pairs of (emitted string, expected canonical hint). `None` is only correct
-    // for auto-import, which intentionally has no single runtime to attribute to.
-    let cases: &[(&str, Option<&str>)] = &[
-        // OAuth logins emit lowercase descriptor ids.
-        ("openai", Some("openai")),
-        ("claude", Some("claude")),
-        ("gemini", Some("gemini")),
-        ("copilot", Some("copilot")),
-        ("antigravity", Some("antigravity")),
-        ("cursor", Some("cursor")),
-        // API-key paste logins emit descriptor display labels.
-        ("Anthropic API", Some("anthropic-api")),
-        ("OpenAI API", Some("openai-api")),
-        ("AWS Bedrock", Some("bedrock")),
-        ("OpenRouter", Some("openrouter")),
-        // Azure keeps its dedicated runtime id mapping.
-        ("Azure OpenAI", Some("azure-openai")),
-        // Auto-import has no single runtime to attribute the refresh to.
-        ("auto-import", None),
-    ];
-
-    for (emitted, expected) in cases {
-        assert_eq!(
-            auth_provider_hint_for_login_provider(emitted),
-            *expected,
-            "login provider {emitted:?} should resolve to {expected:?}"
-        );
-    }
-
-    // Every login provider descriptor must resolve to the EXACT canonical hint
-    // implied by its target, across its display label, id, and every alias.
-    // Asserting the exact value (not just `is_some`) is what catches a
-    // wrong-attribution bug like the original "OpenAI credentials are active"
-    // after an Anthropic login - a weak `is_some` check would have passed even
-    // while the hint pointed at the wrong provider.
-    use crate::provider_catalog::LoginProviderTarget;
-    for descriptor in crate::provider_catalog::login_providers() {
-        // Expected hint mirrors auth_provider_hint_for_login_provider's target
-        // mapping, the single source of truth for post-login attribution.
-        let expected: Option<String> = match descriptor.target {
-            LoginProviderTarget::AutoImport => None,
-            LoginProviderTarget::Azure => Some("azure-openai".to_string()),
-            LoginProviderTarget::OpenAiCompatible(profile) => Some(profile.id.to_string()),
-            _ => Some(descriptor.id.to_string()),
-        };
-
-        // The emitted string can be the descriptor id, its display label, or any
-        // alias (LoginCompleted.provider varies by surface/auth path).
-        let mut emitted: Vec<&str> = vec![descriptor.id, descriptor.display_name];
-        emitted.extend_from_slice(descriptor.aliases);
-        for label in emitted {
-            assert_eq!(
-                auth_provider_hint_for_login_provider(label),
-                expected.as_deref(),
-                "login provider {:?} (id {:?}, target {:?}) emitted as {label:?} must attribute \
-                 to {expected:?}; a wrong/missing hint mislabels the catalog-refresh message and \
-                 skips the post-login model switch",
-                descriptor.display_name,
-                descriptor.id,
-                descriptor.target
-            );
-        }
-    }
-}
-
-#[test]
-fn auth_changed_event_for_anthropic_api_login_targets_claude_api_route() {
-    let auth = super::auth_changed_event_for_login_provider("Anthropic API")
-        .expect("Anthropic API login should produce a typed auth event");
-    // The server maps the descriptor id `anthropic-api` to the `claude-api`
-    // route family for model selection and labelling.
-    assert_eq!(auth.provider.as_str(), "anthropic-api");
-    assert_eq!(
-        auth.auth_method,
-        Some(crate::protocol::AuthMethod::RemoteTuiPasteApiKey)
-    );
-    assert_eq!(
-        auth.credential_source,
-        Some(crate::protocol::AuthCredentialSource::ApiKeyFile)
-    );
-    // Direct providers must not claim the OpenAI-compatible runtime/namespace.
-    assert!(auth.expected_runtime.is_none());
-    assert!(auth.expected_catalog_namespace.is_none());
-}
-
-#[test]
-fn auth_changed_event_for_oauth_claude_login_is_not_marked_as_api_key_paste() {
-    let auth = super::auth_changed_event_for_login_provider("claude")
-        .expect("Claude OAuth login should produce a typed auth event");
-    assert_eq!(auth.provider.as_str(), "claude");
-    // OAuth logins are not API-key pastes.
-    assert!(auth.auth_method.is_none());
-    assert!(auth.credential_source.is_none());
-}
-
-#[test]
-fn auth_changed_event_for_cerebras_login_carries_runtime_and_catalog_identity() {
-    let auth = super::auth_changed_event_for_login_provider("Cerebras")
-        .expect("Cerebras login should produce typed auth event");
-
-    assert_eq!(auth.provider.as_str(), "cerebras");
-    assert_eq!(
-        auth.credential_source,
-        Some(crate::protocol::AuthCredentialSource::ApiKeyFile)
-    );
-    assert_eq!(
-        auth.auth_method,
-        Some(crate::protocol::AuthMethod::RemoteTuiPasteApiKey)
-    );
-    assert_eq!(
-        auth.expected_runtime
-            .as_ref()
-            .map(crate::protocol::RuntimeProviderKey::as_str),
-        Some("openai-compatible")
-    );
-    assert_eq!(
-        auth.expected_catalog_namespace
-            .as_ref()
-            .map(crate::protocol::CatalogNamespace::as_str),
-        Some("cerebras")
-    );
-}
+include!("remote_tests/auth_mapping.rs");
 
 #[test]
 fn reload_handoff_inactive_without_flag_or_marker() {
@@ -643,6 +443,7 @@ fn startup_history(session_id: &str) -> ServerEvent {
         provider_name: None,
         provider_model: None,
         subagent_model: None,
+        agent_model_overrides: Default::default(),
         autoreview_enabled: None,
         autojudge_enabled: None,
         available_models: vec![],
@@ -663,12 +464,14 @@ fn startup_history(session_id: &str) -> ServerEvent {
         connection_type: None,
         status_detail: None,
         upstream_provider: None,
+        provider_oauth_email: None,
         resolved_credential: None,
         reasoning_effort: None,
         service_tier: None,
         compaction_mode: crate::config::CompactionMode::Reactive,
         activity: None,
         side_panel: crate::side_panel::SidePanelSnapshot::default(),
+        applets: Default::default(),
     }
 }
 
@@ -1313,3 +1116,155 @@ fn remote_submit_input_never_strands_a_local_pending_turn() {
         "the prompt should be queued for the remote tick loop"
     );
 }
+
+fn swarm_dm_notification(sender: &str, body: &str, tldr: Option<&str>) -> ServerEvent {
+    ServerEvent::Notification {
+        from_session: format!("session_{sender}_123"),
+        from_name: Some(sender.to_string()),
+        notification_type: crate::protocol::NotificationType::Message {
+            scope: Some("dm".to_string()),
+            channel: None,
+            tldr: tldr.map(str::to_string),
+        },
+        message: format!("DM from {sender}: {body}"),
+    }
+}
+
+fn soft_interrupt_injected(content: &str, display_role: Option<&str>) -> ServerEvent {
+    ServerEvent::SoftInterruptInjected {
+        content: content.to_string(),
+        display_role: display_role.map(str::to_string),
+        point: "A".to_string(),
+        tools_skipped: None,
+        client_ids: Vec::new(),
+    }
+}
+
+fn assert_no_long_rows(app: &crate::tui::app::App) {
+    for message in app.display_messages() {
+        if message.role == "swarm" {
+            let lines = crate::tui::ui::render_swarm_message(
+                message,
+                100,
+                crate::config::DiffDisplayMode::Off,
+            );
+            assert_eq!(lines.len(), 1, "swarm row must be one row: {message:?}");
+        } else {
+            assert!(
+                !message.content.contains("DM from"),
+                "raw DM text leaked into a {} row: {:?}",
+                message.role,
+                message.content
+            );
+        }
+    }
+}
+
+#[test]
+fn injected_swarm_dm_is_deduped_against_its_notification_card() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+
+    let body = "Finished the parser refactor. ".repeat(15) + "\n\nDetails follow.";
+    handle_server_event(
+        &mut app,
+        swarm_dm_notification("fox", &body, Some("parser refactor done")),
+        &mut remote,
+    );
+    let before = app.display_messages().len();
+    handle_server_event(
+        &mut app,
+        soft_interrupt_injected(&format!("DM from fox: {body}"), Some("system")),
+        &mut remote,
+    );
+    assert_eq!(
+        app.display_messages().len(),
+        before,
+        "injected copy of an already-shown DM must not add a row"
+    );
+    assert_no_long_rows(&app);
+}
+
+#[test]
+fn injected_swarm_dm_without_card_renders_one_collapsed_row() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+
+    let body = "word ".repeat(200);
+    handle_server_event(
+        &mut app,
+        soft_interrupt_injected(&format!("DM from owl: {body}"), Some("system")),
+        &mut remote,
+    );
+    let last = app.display_messages().last().expect("row");
+    assert_eq!(last.role, "swarm");
+    assert_eq!(last.title.as_deref(), Some("DM from owl"));
+    assert_no_long_rows(&app);
+}
+
+#[test]
+fn history_restore_renders_swarm_deliveries_as_one_row() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    let mut history = startup_history("history-session");
+    if let ServerEvent::History { messages, .. } = &mut history {
+        let long = "Investigated the flaky test in depth. ".repeat(20);
+        for (role, content) in [
+            ("user", format!("DM from fox: {long}")),
+            ("system", format!("#parser from owl: {long}")),
+            ("user", "please review my change".to_string()),
+            ("assistant", format!("DM from fox: {long}")),
+        ] {
+            messages.push(crate::protocol::HistoryMessage {
+                response_stats: None,
+                role: role.to_string(),
+                content,
+                tool_calls: None,
+                tool_data: None,
+            });
+        }
+    }
+    handle_server_event(&mut app, history, &mut remote);
+
+    let roles: Vec<(String, Option<String>)> = app
+        .display_messages()
+        .iter()
+        .map(|m| (m.role.clone(), m.title.clone()))
+        .collect();
+    assert!(
+        roles.contains(&("swarm".to_string(), Some("DM from fox".to_string()))),
+        "{roles:?}"
+    );
+    assert!(
+        roles.contains(&("swarm".to_string(), Some("#parser · owl".to_string()))),
+        "{roles:?}"
+    );
+    assert!(
+        app.display_messages()
+            .iter()
+            .any(|m| m.role == "user" && m.content == "please review my change"),
+        "ordinary user prompts are untouched: {roles:?}"
+    );
+    assert!(
+        app.display_messages()
+            .iter()
+            .any(|m| m.role == "assistant" && m.content.starts_with("DM from fox")),
+        "assistant text is never rewritten: {roles:?}"
+    );
+    for message in app.display_messages().iter().filter(|m| m.role == "swarm") {
+        let lines =
+            crate::tui::ui::render_swarm_message(message, 100, crate::config::DiffDisplayMode::Off);
+        assert_eq!(lines.len(), 1, "{message:?}");
+    }
+}
+
+include!("remote_tests/recall_cancellation.rs");

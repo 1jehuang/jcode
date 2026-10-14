@@ -1,3 +1,80 @@
+/// The server resolves the real window and reports it here. A remote client
+/// cannot derive it itself: its provider is an inert placeholder with no model
+/// catalog, and the static resolver has no entry for a model it does not
+/// recognise, so without this field the panel shows the generic default.
+#[test]
+fn test_model_changed_roundtrip_carries_context_window() -> Result<()> {
+    let event = ServerEvent::ModelChanged {
+        id: 7,
+        model: "auto/included".to_string(),
+        provider_name: Some("OmniRouteV2".to_string()),
+        context_window: Some(1_310_720),
+        error: None,
+        resolved_credential: None,
+        provider_oauth_email: None,
+        reasoning_effort: None,
+    };
+    let json = encode_event(&event);
+    assert!(
+        json.contains("\"context_window\":1310720"),
+        "window must reach the wire: {json}"
+    );
+    let decoded = parse_event_json(json.trim())?;
+    let ServerEvent::ModelChanged { context_window, .. } = decoded else {
+        return Err(anyhow!("wrong event type"));
+    };
+    assert_eq!(context_window, Some(1_310_720));
+    Ok(())
+}
+
+/// An older server omits the field. It must not appear on the wire, and the
+/// client must read it as unknown rather than as a number, so a missing value can
+/// never be mistaken for a real one.
+#[test]
+fn test_model_changed_without_context_window_stays_absent() -> Result<()> {
+    let event = ServerEvent::ModelChanged {
+        id: 3,
+        model: "m".to_string(),
+        provider_name: None,
+        context_window: None,
+        error: None,
+        resolved_credential: None,
+        provider_oauth_email: None,
+        reasoning_effort: None,
+    };
+    let json = encode_event(&event);
+    assert!(!json.contains("provider_oauth_email"));
+    assert!(
+        !json.contains("context_window"),
+        "unknown window must be omitted, not sent as null: {json}"
+    );
+    let decoded = parse_event_json(json.trim())?;
+    let ServerEvent::ModelChanged { context_window, .. } = decoded else {
+        return Err(anyhow!("wrong event type"));
+    };
+    assert_eq!(context_window, None);
+    Ok(())
+}
+
+#[test]
+fn test_model_changed_oauth_identity_legacy_and_redaction() -> Result<()> {
+    let legacy = parse_event_json(r#"{"type":"model_changed","id":0,"model":"test"}"#)?;
+    assert!(!encode_event(&legacy).contains("provider_oauth_email"));
+    let event = parse_event_json(
+        r#"{"type":"model_changed","id":0,"model":"test","provider_oauth_email":"effective@example.test"}"#,
+    )?;
+    assert!(!format!("{event:?}").contains("effective@example.test"));
+    let ServerEvent::ModelChanged {
+        provider_oauth_email: Some(email),
+        ..
+    } = parse_event_json(encode_event(&event).trim())?
+    else {
+        return Err(anyhow!("identity missing"));
+    };
+    assert_eq!(email.as_str(), "effective@example.test");
+    Ok(())
+}
+
 #[test]
 fn test_request_roundtrip() -> Result<()> {
     let req = Request::Message {
@@ -21,6 +98,7 @@ fn test_soft_interrupt_images_roundtrip_and_legacy_default() -> Result<()> {
         content: "look at this".to_string(),
         images: vec![("image/png".to_string(), "ZmFrZQ==".to_string())],
         urgent: true,
+        client_id: None,
     };
     let json = serde_json::to_string(&req)?;
     let decoded = parse_request_json(&json)?;
@@ -46,6 +124,67 @@ fn test_soft_interrupt_images_roundtrip_and_legacy_default() -> Result<()> {
         return Err(anyhow!("wrong legacy request type"));
     };
     assert!(images.is_empty());
+    Ok(())
+}
+
+#[test]
+fn test_soft_interrupt_ids_wire_shape_and_legacy_defaults() -> Result<()> {
+    let req = Request::SoftInterrupt {
+        id: 4,
+        content: "steer".to_string(),
+        images: Vec::new(),
+        urgent: false,
+        client_id: Some("f1".to_string()),
+    };
+    assert_eq!(
+        serde_json::to_string(&req)?,
+        r#"{"type":"soft_interrupt","id":4,"content":"steer","urgent":false,"client_id":"f1"}"#
+    );
+    let legacy = parse_request_json(r#"{"type":"soft_interrupt","id":5,"content":"x"}"#)?;
+    assert!(matches!(
+        legacy,
+        Request::SoftInterrupt {
+            client_id: None,
+            ..
+        }
+    ));
+
+    let cancel_all = parse_request_json(r#"{"type":"cancel_soft_interrupts","id":6}"#)?;
+    assert!(matches!(
+        cancel_all,
+        Request::CancelSoftInterrupts {
+            client_ids: None,
+            ..
+        }
+    ));
+    let cancel_some = Request::CancelSoftInterrupts {
+        id: 7,
+        client_ids: Some(vec!["f1".to_string()]),
+    };
+    assert_eq!(
+        serde_json::to_string(&cancel_some)?,
+        r#"{"type":"cancel_soft_interrupts","id":7,"client_ids":["f1"]}"#
+    );
+
+    // An injection without ids keeps the pre-#1778 wire shape exactly.
+    let injected = ServerEvent::SoftInterruptInjected {
+        content: "a".to_string(),
+        display_role: None,
+        point: "D".to_string(),
+        tools_skipped: None,
+        client_ids: Vec::new(),
+    };
+    assert_eq!(
+        serde_json::to_string(&injected)?,
+        r#"{"type":"soft_interrupt_injected","content":"a","point":"D"}"#
+    );
+    let with_ids: ServerEvent = serde_json::from_str(
+        r#"{"type":"soft_interrupt_injected","content":"a","point":"B","client_ids":["f1","f2"]}"#,
+    )?;
+    assert!(matches!(
+        with_ids,
+        ServerEvent::SoftInterruptInjected { client_ids, .. } if client_ids == ["f1", "f2"]
+    ));
     Ok(())
 }
 
@@ -442,6 +581,8 @@ fn test_history_event_decodes_without_compaction_mode_for_older_servers() -> Res
         connection_type,
         compaction_mode,
         side_panel,
+        agent_model_overrides,
+        provider_oauth_email,
         ..
     } = decoded
     else {
@@ -456,6 +597,28 @@ fn test_history_event_decodes_without_compaction_mode_for_older_servers() -> Res
         jcode_config_types::CompactionMode::Reactive
     );
     assert!(!side_panel.has_pages());
+    assert!(agent_model_overrides.is_empty());
+    assert!(provider_oauth_email.is_none());
+    Ok(())
+}
+
+#[test]
+fn test_history_provider_oauth_email_roundtrip_redacts_debug() -> Result<()> {
+    let decoded = parse_event_json(
+        r#"{"type":"history","id":1,"session_id":"test","messages":[],"provider_oauth_email":"selected@example.test"}"#,
+    )?;
+    assert!(!format!("{decoded:?}").contains("selected@example.test"));
+    let wire = encode_event(&decoded);
+    assert!(wire.contains("\"provider_oauth_email\":\"selected@example.test\""));
+    let ServerEvent::History {
+        provider_oauth_email: Some(email),
+        ..
+    } = parse_event_json(wire.trim())?
+    else {
+        return Err(anyhow!("identity missing"));
+    };
+    assert_eq!(email.as_str(), "selected@example.test");
+    assert_eq!(email.into_string(), "selected@example.test");
     Ok(())
 }
 
@@ -501,13 +664,16 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         status_detail: None,
         upstream_provider: None,
         resolved_credential: None,
+        provider_oauth_email: None,
         reasoning_effort: None,
         service_tier: None,
         subagent_model: None,
+        agent_model_overrides: Default::default(),
         autoreview_enabled: None,
         autojudge_enabled: None,
         compaction_mode: jcode_config_types::CompactionMode::Reactive,
         activity: None,
+        applets: Default::default(),
         side_panel: jcode_side_panel_types::SidePanelSnapshot {
             focus_revision: 0,
             focused_page_id: Some("page-1".to_string()),
@@ -666,5 +832,52 @@ fn test_error_event_retry_after_back_compat_default() -> Result<()> {
     assert_eq!(id, 7);
     assert_eq!(message, "oops");
     assert_eq!(retry_after_secs, None);
+    Ok(())
+}
+
+#[test]
+fn test_agent_models_session_setter_and_response_roundtrip() -> Result<()> {
+    let clear = parse_request_json(r#"{"type":"set_agent_model","id":31,"target":"swarm"}"#)?;
+    assert!(matches!(clear, Request::SetAgentModel { model: None, .. }));
+    assert!(matches!(
+        clear,
+        Request::SetAgentModel { global: false, .. }
+    ));
+    let request = Request::SetAgentModel {
+        id: 32,
+        target: "review".into(),
+        model: Some("inherit".into()),
+        global: false,
+    };
+    let encoded = serde_json::to_string(&request)?;
+    assert!(
+        !encoded.contains("global"),
+        "session updates keep the old wire shape"
+    );
+    let decoded = parse_request_json(&encoded)?;
+    assert!(
+        matches!(decoded, Request::SetAgentModel { model: Some(model), .. } if model == "inherit")
+    );
+    let global = Request::SetAgentModel {
+        id: 33,
+        target: "swarm".into(),
+        model: Some("server-default".into()),
+        global: true,
+    };
+    let decoded = parse_request_json(&serde_json::to_string(&global)?)?;
+    assert!(matches!(
+        decoded,
+        Request::SetAgentModel { global: true, .. }
+    ));
+    let event = ServerEvent::AgentModelsChanged {
+        id: 32,
+        session_id: "session-a".into(),
+        overrides: std::collections::BTreeMap::from([("review".into(), "inherit".into())]),
+    };
+    let decoded = parse_event_json(encode_event(&event).trim())?;
+    assert!(
+        matches!(decoded, ServerEvent::AgentModelsChanged { session_id, overrides, .. }
+        if session_id == "session-a" && overrides.get("review").map(String::as_str) == Some("inherit"))
+    );
     Ok(())
 }

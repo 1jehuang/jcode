@@ -154,6 +154,19 @@ fn swarm_spawn_mode_defaults_to_inline() {
 }
 
 #[test]
+fn swarm_stall_watchdog_defaults_and_parses() {
+    let defaults = Config::default().agents;
+    assert_eq!(defaults.swarm_stall_after_secs, 600);
+    assert!(!defaults.swarm_stall_nudge);
+
+    let cfg: Config =
+        toml::from_str("[agents]\nswarm_stall_after_secs = 0\nswarm_stall_nudge = true\n")
+            .expect("stall watchdog settings should parse");
+    assert_eq!(cfg.agents.swarm_stall_after_secs, 0);
+    assert!(cfg.agents.swarm_stall_nudge);
+}
+
+#[test]
 fn swarm_max_concurrent_agents_defaults_to_safe_live_worker_budget() {
     // Keep enough parallelism for deep fan-out without allowing recursive ad hoc
     // spawns to grow until the 1000-member hard cap exhausts machine memory.
@@ -1724,4 +1737,16 @@ fn cli_config_save_round_trips_desktop_tables() {
 
     restore_env_var("JCODE_HOME", prev_home);
     Config::invalidate_cache();
+}
+
+/// `display.overscroll_status` was removed; configs that still set it (users
+/// had `"on"` written by older versions) must load without losing settings.
+#[test]
+fn removed_overscroll_status_key_still_loads_config() {
+    let config = toml::from_str::<Config>(
+        "[display]\ncentered = true\noverscroll_status = \"on\"\nusage_display = \"used\"\n",
+    )
+    .expect("legacy key must not break config");
+    assert!(config.display.centered);
+    assert_eq!(config.display.usage_display, "used");
 }

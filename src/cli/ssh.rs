@@ -115,7 +115,13 @@ async fn run_unix(args: Args) -> Result<()> {
         _ = quit.recv() => Ok(()),
     };
     let cleanup = connection.close().await;
-    result.and(cleanup)
+    let result = result.and(cleanup);
+    if result.is_ok()
+        && let Some(handoff) = super::cloud_move::take_stashed_handoff()
+    {
+        return super::cloud_move::exec_handoff(handoff);
+    }
+    result
 }
 
 fn quote(value: &str) -> String {

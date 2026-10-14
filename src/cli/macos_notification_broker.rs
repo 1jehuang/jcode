@@ -151,7 +151,9 @@ mod platform {
             match authorization.load(Ordering::Acquire) {
                 AUTHORIZATION_GRANTED => drain_inbox(&center),
                 AUTHORIZATION_DENIED
-                    if ticks.fetch_add(1, Ordering::Relaxed) % AUTHORIZATION_RETRY_TICKS == 0 =>
+                    if ticks
+                        .fetch_add(1, Ordering::Relaxed)
+                        .is_multiple_of(AUTHORIZATION_RETRY_TICKS) =>
                 {
                     // Permission may be enabled while the helper is running.
                     // Re-query without dropping queued work; macOS only presents

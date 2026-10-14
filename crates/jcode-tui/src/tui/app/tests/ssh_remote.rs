@@ -121,9 +121,11 @@ fn ssh_remote_reconnect_waits_for_authoritative_history_without_local_reload() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
             let mut remote = crate::tui::backend::RemoteConnection::dummy();
-            let mut state = super::remote::RemoteRunState::default();
-            state.reconnect_attempts = 1;
-            state.server_reload_in_progress = true;
+            let mut state = super::remote::RemoteRunState {
+                reconnect_attempts: 1,
+                server_reload_in_progress: true,
+                ..Default::default()
+            };
             assert!(!super::remote::reload_handoff_active(&state));
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
@@ -165,6 +167,7 @@ fn ssh_remote_history_is_authoritative_even_when_empty_or_server_version_differs
             provider_name: Some("remote-provider".into()),
             provider_model: Some("remote-model".into()),
             subagent_model: None,
+            agent_model_overrides: Default::default(),
             autoreview_enabled: Some(false),
             autojudge_enabled: Some(false),
             available_models: vec![],
@@ -185,12 +188,14 @@ fn ssh_remote_history_is_authoritative_even_when_empty_or_server_version_differs
             connection_type: None,
             status_detail: None,
             upstream_provider: None,
+            provider_oauth_email: None,
             resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
+            applets: Default::default(),
         };
         app.handle_server_event(event, &mut remote);
         assert!(remote.has_loaded_history());

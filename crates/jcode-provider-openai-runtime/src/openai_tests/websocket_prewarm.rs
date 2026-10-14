@@ -17,6 +17,7 @@ fn prewarm_test_tool() -> ToolDefinition {
             "properties": { "key": { "type": "string" } },
             "required": ["key"]
         }),
+        defer_loading: false,
     }
 }
 

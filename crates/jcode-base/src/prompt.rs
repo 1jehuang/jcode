@@ -240,6 +240,7 @@ impl SplitSystemPrompt {
 }
 
 /// Skill info for system prompt
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillInfo {
     pub name: String,
     pub description: String,

@@ -66,7 +66,7 @@ fn manager_without_working_dir_does_not_infer_process_project() {
 /// Decisions adapter, local stores, selection, and pending-injection boundary.
 /// No provider calls or credentials leave this loopback fixture.
 #[tokio::test]
-async fn automatic_recall_uses_jev_http_without_embeddings_or_sidecar() {
+async fn retained_recall_pipeline_uses_jev_http_without_embeddings_or_sidecar() {
     use std::io::{Read, Write};
     let _lock = crate::storage::lock_test_env();
     let dir = tempfile::tempdir().unwrap();
@@ -91,6 +91,8 @@ async fn automatic_recall_uses_jev_http_without_embeddings_or_sidecar() {
                 }
                 Err(error) => panic!("{error}"),
             };
+            // On BSD/macOS an accepted socket can inherit the listener's nonblocking flag.
+            stream.set_nonblocking(false).unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(3)))
                 .unwrap();
@@ -181,7 +183,7 @@ async fn automatic_recall_uses_jev_http_without_embeddings_or_sidecar() {
             ..Default::default()
         },
     );
-    let result = agent
+    let disabled = agent
         .process_context(
             sid,
             &[crate::message::Message::user(
@@ -189,8 +191,27 @@ async fn automatic_recall_uses_jev_http_without_embeddings_or_sidecar() {
             )],
         )
         .await;
+    disabled.unwrap();
+    assert!(memory::take_pending_memory_for_project(sid, Some("/jev-project")).is_none());
+    let result = manager
+        .get_relevant_parallel_enabled(
+            sid,
+            &[crate::message::Message::user(
+                "How do I test this Rust project?",
+            )],
+            None,
+        )
+        .await
+        .unwrap();
     server.join().unwrap();
-    result.unwrap();
+    memory::set_pending_memory_for_project_with_selection(
+        sid,
+        result.prompt.unwrap(),
+        result.selected_entries.len(),
+        &result.selected_entries,
+        result.display_prompt,
+        Some("/jev-project"),
+    );
     let pending = memory::take_pending_memory_for_project(sid, Some("/jev-project"))
         .expect("judged memory ready for next turn");
     assert_eq!(pending.memory_ids, vec![id]);

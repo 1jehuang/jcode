@@ -3,6 +3,9 @@
 //! Shows a list of sessions on the left, with a preview of the selected session's
 //! conversation on the right. Sessions are grouped by server for multi-server support.
 
+#[path = "session_picker_presence.rs"]
+mod presence;
+
 use super::color_support::rgb;
 use crate::session::{CrashedSessionsInfo, Session};
 use crate::tui::{DisplayMessage, markdown};
@@ -16,9 +19,14 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph},
 };
-use std::collections::HashSet;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+/// Label for the first-run suggested review action.
+const ONBOARDING_REVIEW_LABEL: &str = "Find bugs in my most active repo";
 
 pub use jcode_tui_session_picker::{
     PickerItem, PreviewMessage, ResumeTarget, ServerGroup, SessionFilterMode, SessionInfo,
@@ -40,9 +48,16 @@ pub use loading::{
 };
 
 const SEARCH_CONTENT_BUDGET_BYTES: usize = 12_000;
-const DEFAULT_SESSION_SCAN_LIMIT: usize = 100;
+const DEFAULT_SESSION_SCAN_LIMIT: usize = 400;
 const MIN_SESSION_SCAN_LIMIT: usize = 50;
 const MAX_SESSION_SCAN_LIMIT: usize = 10_000;
+
+type GroupedSessionList = (Vec<ServerGroup>, Vec<SessionInfo>);
+
+enum SessionListUpdate {
+    Cached(GroupedSessionList),
+    Fresh(Result<GroupedSessionList>),
+}
 
 #[derive(Clone, Debug)]
 pub enum PickerResult {
@@ -95,6 +110,31 @@ fn normalize_dir(dir: &str) -> String {
     } else {
         stripped.to_string()
     }
+}
+
+fn dir_is_home(dir: &str) -> bool {
+    dirs::home_dir().is_some_and(|home| normalize_dir(&home.to_string_lossy()) == dir)
+}
+
+/// Shared `.git` directory of the repository containing `dir`, resolving
+/// linked worktrees (`.git` file + `commondir`) to the main repository.
+fn git_common_dir(dir: &Path) -> Option<PathBuf> {
+    for ancestor in dir.ancestors() {
+        let dot_git = ancestor.join(".git");
+        if dot_git.is_dir() {
+            return dot_git.canonicalize().ok();
+        }
+        if dot_git.is_file() {
+            let contents = std::fs::read_to_string(&dot_git).ok()?;
+            let gitdir = ancestor.join(contents.trim().strip_prefix("gitdir:")?.trim());
+            let common = match std::fs::read_to_string(gitdir.join("commondir")) {
+                Ok(rel) => gitdir.join(rel.trim()),
+                Err(_) => gitdir,
+            };
+            return common.canonicalize().ok();
+        }
+    }
+    None
 }
 
 /// Format duration since a time in a human-readable way
@@ -280,6 +320,14 @@ pub struct SessionPicker {
     /// matches this are highlighted so the user can quickly spot sessions from
     /// the same project they are currently in.
     current_dir: Option<String>,
+    /// Git common dir of `current_dir`, so sibling worktrees of the same
+    /// repository count as the current project.
+    current_repo: Option<PathBuf>,
+    /// Memoized current-project answers keyed by normalized session dir.
+    same_project_cache: RefCell<HashMap<String, bool>>,
+    /// Set once the user cycles the filter, so async reloads never replace
+    /// their choice with the automatic current-project default.
+    filter_mode_user_chosen: bool,
     /// Live process presence keyed by session ID (active-pid registry snapshot).
     /// Drives the working/ready badges in the list and the Active filter
     /// membership. Refreshed on load/reseed and periodically while the Active
@@ -338,6 +386,9 @@ impl SessionPicker {
             onboarding_action: None,
             preview_cache: None,
             current_dir: None,
+            current_repo: None,
+            same_project_cache: RefCell::new(HashMap::new()),
+            filter_mode_user_chosen: false,
             live_presence: std::collections::HashMap::new(),
             live_presence_refreshed_at: None,
             current_session_id: None,
@@ -383,6 +434,9 @@ impl SessionPicker {
             onboarding_action: None,
             preview_cache: None,
             current_dir: None,
+            current_repo: None,
+            same_project_cache: RefCell::new(HashMap::new()),
+            filter_mode_user_chosen: false,
             live_presence: std::collections::HashMap::new(),
             live_presence_refreshed_at: None,
             current_session_id: None,
@@ -460,6 +514,9 @@ impl SessionPicker {
             onboarding_action: None,
             preview_cache: None,
             current_dir: None,
+            current_repo: None,
+            same_project_cache: RefCell::new(HashMap::new()),
+            filter_mode_user_chosen: false,
             live_presence: std::collections::HashMap::new(),
             live_presence_refreshed_at: None,
             current_session_id: None,
@@ -479,15 +536,39 @@ impl SessionPicker {
     /// share it can be visually highlighted in the list.
     pub fn set_current_dir(&mut self, dir: Option<String>) {
         self.current_dir = dir.map(|d| normalize_dir(&d));
+        self.current_repo = self
+            .current_dir
+            .as_deref()
+            .and_then(|dir| git_common_dir(Path::new(dir)));
+        self.same_project_cache.borrow_mut().clear();
     }
 
-    /// Whether the given session's working directory matches the directory the
-    /// picker was opened from.
+    /// Whether the given session belongs to the project the picker was opened
+    /// from: the same directory, a subdirectory of it, or another worktree of
+    /// the same git repository.
     pub(super) fn session_in_current_dir(&self, session: &SessionInfo) -> bool {
-        match (self.current_dir.as_deref(), session.working_dir.as_deref()) {
-            (Some(current), Some(dir)) => normalize_dir(dir) == current,
-            _ => false,
+        let (Some(current), Some(dir)) =
+            (self.current_dir.as_deref(), session.working_dir.as_deref())
+        else {
+            return false;
+        };
+        let dir = normalize_dir(dir);
+        if dir == current {
+            return true;
         }
+        // Opening `/resume` from $HOME would otherwise claim every session.
+        if !dir_is_home(current) && dir.starts_with(&format!("{current}/")) {
+            return true;
+        }
+        let Some(repo) = self.current_repo.as_ref() else {
+            return false;
+        };
+        if let Some(&hit) = self.same_project_cache.borrow().get(&dir) {
+            return hit;
+        }
+        let hit = git_common_dir(Path::new(&dir)).is_some_and(|common| &common == repo);
+        self.same_project_cache.borrow_mut().insert(dir, hit);
+        hit
     }
 
     /// Record the session the picker was opened from so it can be labeled in
@@ -507,59 +588,6 @@ impl SessionPicker {
         self.filter_mode = SessionFilterMode::Active;
         self.refresh_live_presence();
         self.rebuild_items();
-    }
-
-    /// Snapshot the active-pid registry + streaming markers into the picker.
-    pub(super) fn refresh_live_presence(&mut self) {
-        self.live_presence = crate::session::session_presence()
-            .into_iter()
-            .map(|presence| (presence.session_id.clone(), presence))
-            .collect();
-        if let Ok(sessions) = crate::claude_live::live_claude_sessions() {
-            for session in sessions {
-                let session_id = format!("claude:{}", session.session_id);
-                self.live_presence.insert(
-                    session_id.clone(),
-                    crate::session::SessionPresence {
-                        session_id,
-                        pid: session.pid,
-                        streaming: false,
-                        streaming_since: None,
-                        internal: false,
-                    },
-                );
-            }
-        }
-        self.live_presence_refreshed_at = Some(std::time::Instant::now());
-    }
-
-    /// Periodically re-snapshot live presence while the picker is on screen so
-    /// working/ready badges track reality. Rebuilds the list when the Active
-    /// view is showing and membership or streaming state changed (a session
-    /// finished its turn, went idle, or exited). Returns true when anything
-    /// changed so callers can redraw.
-    pub fn maybe_refresh_live_presence(&mut self) -> bool {
-        if self.loading_message.is_some() {
-            return false;
-        }
-        let due = self
-            .live_presence_refreshed_at
-            .is_none_or(|at| at.elapsed() >= LIVE_PRESENCE_REFRESH_INTERVAL);
-        if !due {
-            return false;
-        }
-        let before = std::mem::take(&mut self.live_presence);
-        self.refresh_live_presence();
-        let changed = before != self.live_presence;
-        if changed && self.filter_mode == SessionFilterMode::Active {
-            self.rebuild_items();
-        }
-        changed
-    }
-
-    /// Whether the session has a live process right now.
-    pub(super) fn session_is_live(&self, session: &SessionInfo) -> bool {
-        self.live_presence.contains_key(&session.id)
     }
 
     fn selected_live_claude_target(&self) -> Option<ResumeTarget> {
@@ -606,29 +634,11 @@ impl SessionPicker {
         self.pending_claude_takeover.is_some()
     }
 
-    /// Whether the session's live process is streaming a model response.
-    pub(super) fn session_is_streaming(&self, session: &SessionInfo) -> bool {
-        self.live_presence
-            .get(&session.id)
-            .is_some_and(|presence| presence.streaming)
-    }
-
     /// Whether the current picker view contains a running session whose status
     /// glyph needs animated redraws.
     pub(crate) fn has_visible_running_sessions(&self) -> bool {
         self.visible_session_iter()
             .any(|session| self.session_is_streaming(session))
-    }
-
-    /// How long the session's current streaming turn has been running.
-    pub(super) fn session_streaming_duration(
-        &self,
-        session: &SessionInfo,
-    ) -> Option<std::time::Duration> {
-        self.live_presence
-            .get(&session.id)
-            .and_then(|presence| presence.streaming_since)
-            .and_then(|since| std::time::SystemTime::now().duration_since(since).ok())
     }
 
     /// Test-only: inject a synthetic live-presence snapshot so Active-view
@@ -2096,8 +2106,33 @@ impl SessionPicker {
         frame.render_widget(Paragraph::new(preview_lines), header_area);
     }
 
-    /// Render the suggested first-run prompt as the primary centered action,
-    /// with the current-directory session kept secondary in the bottom-right.
+    /// Label for the blank-session onboarding action, naming the directory
+    /// the new session will start in (home abbreviated to `~`).
+    fn onboarding_start_new_label(&self) -> String {
+        let dir = self.current_dir.as_deref().map(str::to_string).or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .map(|p| p.display().to_string())
+        });
+        match dir {
+            Some(dir) => {
+                let shown = match dirs::home_dir().map(|h| h.display().to_string()) {
+                    Some(home) if dir == home => "~ (home)".to_string(),
+                    Some(home) => match dir.strip_prefix(&home) {
+                        Some(rest) if rest.starts_with('/') => format!("~{rest}"),
+                        _ => dir,
+                    },
+                    None => dir,
+                };
+                format!("New session in {shown}")
+            }
+            None => "New session in the current directory".to_string(),
+        }
+    }
+
+    /// Render the first-run choice: the welcome copy, then the two actions
+    /// side by side with an "or" between them. When the row is too narrow,
+    /// the actions stack vertically with the "or" on its own line.
     fn render_onboarding_band(&self, frame: &mut Frame, area: Rect) {
         if area.height == 0 {
             return;
@@ -2140,7 +2175,7 @@ impl SessionPicker {
             frame.render_widget(prompt, prompt_area);
         }
 
-        let action_line = |label: &'static str, selected: bool| {
+        let action_spans = |label: &str, selected: bool| -> Vec<Span<'static>> {
             let (cap_style, body_style) = if selected {
                 (
                     Style::default().fg(accent),
@@ -2155,42 +2190,56 @@ impl SessionPicker {
                     Style::default().fg(rgb(170, 174, 182)).bg(rgb(58, 62, 70)),
                 )
             };
-            Line::from(vec![
+            vec![
                 Span::styled("\u{25D6}", cap_style),
                 Span::styled(format!(" {label} "), body_style),
                 Span::styled("\u{25D7}", cap_style),
-            ])
+            ]
         };
 
         let review_selected = self.onboarding_review_recent_project_highlighted();
-        frame.render_widget(
-            Paragraph::new(action_line(
-                "Find bugs in my most active repo",
-                review_selected,
-            ))
-            .alignment(Alignment::Center),
-            Rect {
-                x: inner.x,
-                y: review_y,
-                width: inner.width,
-                height: 1,
-            },
-        );
-
         let start_selected = self.onboarding_start_new_highlighted();
-        frame.render_widget(
-            Paragraph::new(action_line(
-                "Start in the current directory",
-                start_selected,
-            ))
-            .alignment(Alignment::Right),
-            Rect {
-                x: inner.x,
-                y: inner.y + inner.height.saturating_sub(1),
-                width: inner.width,
-                height: 1,
-            },
-        );
+        let review = action_spans(ONBOARDING_REVIEW_LABEL, review_selected);
+        let start_label = self.onboarding_start_new_label();
+        let start = action_spans(&start_label, start_selected);
+        let or_span = || Span::styled("or", Style::default().fg(rgb(130, 134, 142)));
+
+        let width_of =
+            |spans: &[Span<'static>]| -> u16 { spans.iter().map(|s| s.width() as u16).sum() };
+        // "<review>   or   <start>"
+        let side_by_side_width = width_of(&review) + 8 + width_of(&start);
+        let row = |y: u16| Rect {
+            x: inner.x,
+            y,
+            width: inner.width,
+            height: 1,
+        };
+
+        if side_by_side_width <= inner.width {
+            let mut spans = review;
+            spans.push(Span::raw("   "));
+            spans.push(or_span());
+            spans.push(Span::raw("   "));
+            spans.extend(start);
+            frame.render_widget(
+                Paragraph::new(Line::from(spans)).alignment(Alignment::Center),
+                row(review_y),
+            );
+        } else {
+            let max_y = inner.y + inner.height.saturating_sub(1);
+            let lines = [
+                Line::from(review),
+                Line::from(vec![or_span()]),
+                Line::from(start),
+            ];
+            for (i, line) in lines.into_iter().enumerate() {
+                let y = review_y + i as u16;
+                if y > max_y {
+                    break;
+                }
+                frame.render_widget(Paragraph::new(line).alignment(Alignment::Center), row(y));
+            }
+        }
     }
 
     pub fn render(&mut self, frame: &mut Frame) {
@@ -2339,7 +2388,24 @@ impl SessionPicker {
     }
 
     /// Run the interactive picker, returns selected session ID or None if cancelled
-    pub fn run(mut self) -> Result<Option<PickerResult>> {
+    pub fn run(self) -> Result<Option<PickerResult>> {
+        self.run_with_session_updates(None)
+    }
+
+    fn apply_session_list_update(&mut self, update: SessionListUpdate) -> Result<bool> {
+        let (sessions, finished) = match update {
+            SessionListUpdate::Cached(sessions) => (sessions, false),
+            SessionListUpdate::Fresh(sessions) => (sessions?, true),
+        };
+        self.reseed_grouped(sessions.0, sessions.1);
+        self.apply_resume_project_scope_default();
+        Ok(finished)
+    }
+
+    fn run_with_session_updates(
+        mut self,
+        mut updates: Option<std::sync::mpsc::Receiver<SessionListUpdate>>,
+    ) -> Result<Option<PickerResult>> {
         if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
             anyhow::bail!(
                 "session picker requires an interactive terminal (stdin/stdout must be a TTY)"
@@ -2372,7 +2438,8 @@ impl SessionPicker {
             crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
         }
 
-        let result = loop {
+        let mut no_sessions_found = false;
+        let result = 'picker: loop {
             // Keep live working/ready badges current while the picker idles.
             self.maybe_refresh_live_presence();
             terminal.draw(|frame| {
@@ -2382,13 +2449,39 @@ impl SessionPicker {
                 jcode_tui_style::adapt_buffer_for_display(frame.buffer_mut());
                 crate::tui::ui::adapt_buffer_for_emoji_preference(frame.buffer_mut());
             })?;
-            if event::poll(Duration::from_millis(100))? {
-                match event::read()? {
-                    Event::Key(key) => {
-                        if key.kind != KeyEventKind::Press {
+            // Always paint before polling, including on a cold cache. Neither
+            // disk-cache parsing nor the full transcript scan may hold up the
+            // first frame or prevent Escape from cancelling the picker.
+            if let Some(receiver) = updates.as_ref() {
+                match receiver.try_recv() {
+                    Ok(update) => match self.apply_session_list_update(update) {
+                        Ok(finished) => {
+                            if finished {
+                                updates = None;
+                                if self.all_sessions.is_empty()
+                                    && self.all_server_groups.iter().all(|g| g.sessions.is_empty())
+                                    && self.all_orphan_sessions.is_empty()
+                                {
+                                    no_sessions_found = true;
+                                    break 'picker Ok(None);
+                                }
+                            }
                             continue;
                         }
-
+                        Err(err) => break 'picker Err(err),
+                    },
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        break 'picker Err(anyhow::anyhow!(
+                            "session list loader stopped unexpectedly"
+                        ));
+                    }
+                }
+            }
+            if event::poll(Duration::from_millis(100))? {
+                match event::read()? {
+                    Event::Key(key) if key.kind == KeyEventKind::Press => {
+                        let key = jcode_tui_core::korean_input::normalize_key_event(key);
                         match self.handle_overlay_key(key.code, key.modifiers)? {
                             OverlayAction::Continue => {}
                             OverlayAction::Close => break Ok(None),
@@ -2416,6 +2509,10 @@ impl SessionPicker {
         jcode_tui_style::restore_terminal_quietly();
         super::mermaid::clear_image_state();
 
+        if no_sessions_found {
+            eprintln!("No sessions found.");
+        }
+
         result
     }
 }
@@ -2430,23 +2527,34 @@ pub fn pick_session() -> Result<Option<PickerResult>> {
         );
     }
 
-    // Load sessions grouped by server
-    let (server_groups, orphan_sessions) = load_sessions_grouped()?;
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("jcode-session-list-loader".to_string())
+        .spawn(move || {
+            // Even the cache can be tens of MB on long-lived installations.
+            // Read it off the UI thread, then refresh without resetting the
+            // user's selection, search, or explicitly chosen filter.
+            if let Some(cached) = load_cached_sessions_grouped()
+                && sender.send(SessionListUpdate::Cached(cached)).is_err()
+            {
+                return;
+            }
+            if sender
+                .send(SessionListUpdate::Fresh(load_sessions_grouped()))
+                .is_err()
+            {
+                crate::logging::debug("Session picker closed before session scan finished");
+            }
+        })?;
 
-    // Check if there are any sessions at all
-    let total_sessions: usize = server_groups
-        .iter()
-        .map(|g| g.sessions.len())
-        .sum::<usize>()
-        + orphan_sessions.len();
-
-    if total_sessions == 0 {
-        eprintln!("No sessions found.");
-        return Ok(None);
-    }
-
-    let picker = SessionPicker::new_grouped(server_groups, orphan_sessions);
-    picker.run()
+    let mut picker = SessionPicker::loading();
+    picker.set_current_dir(
+        std::env::current_dir()
+            .ok()
+            .map(|dir| dir.to_string_lossy().into_owned()),
+    );
+    picker.apply_resume_project_scope_default();
+    picker.run_with_session_updates(Some(receiver))
 }
 
 #[cfg(test)]

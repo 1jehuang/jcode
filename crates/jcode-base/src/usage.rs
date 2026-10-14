@@ -7,6 +7,7 @@ mod accessors;
 mod anthropic_reset;
 mod api_keys;
 mod cache;
+mod disk_cache;
 mod display;
 mod model;
 mod openai_helpers;
@@ -67,6 +68,15 @@ async fn fetch_anthropic_usage_data(access_token: String, cache_key: String) -> 
     if let Some(cached) = cached_anthropic_usage(&cache_key) {
         return Ok(cached);
     }
+    // Short-lived CLI processes (`jcode usage --json`) share one fetch cadence
+    // and one 429 backoff through the persisted cache.
+    if let Some(shared) = disk_cache::fresh(&cache_key) {
+        store_anthropic_usage(cache_key, shared.clone());
+        return match &shared.last_error {
+            Some(error) if shared.fetched_at.is_none() => Err(anyhow::anyhow!(error.clone())),
+            _ => Ok(shared),
+        };
+    }
 
     let client = crate::provider::shared_http_client();
     let response = crate::provider::anthropic::apply_oauth_attribution_headers(
@@ -88,11 +98,9 @@ async fn fetch_anthropic_usage_data(access_token: String, cache_key: String) -> 
     let response = match response {
         Ok(response) => response,
         Err(e) => {
-            let err = anthropic_usage_error(format!("Failed to fetch usage data: {}", e));
-            store_anthropic_usage(cache_key, err.clone());
-            anyhow::bail!(
-                err.last_error
-                    .unwrap_or_else(|| "Failed to fetch usage data".into())
+            return cache_anthropic_usage_failure(
+                cache_key,
+                format!("Failed to fetch usage data: {}", e),
             );
         }
     };
@@ -100,15 +108,19 @@ async fn fetch_anthropic_usage_data(access_token: String, cache_key: String) -> 
     if !response.status().is_success() {
         let status = response.status();
         let error_text = response.text().await.unwrap_or_default();
-        let err = anthropic_usage_error(format!("Usage API error ({}): {}", status, error_text));
-        store_anthropic_usage(cache_key, err.clone());
-        anyhow::bail!(err.last_error.unwrap_or_else(|| "Usage API error".into()));
+        let message = format!("Usage API error ({}): {}", status, error_text);
+        return cache_anthropic_usage_failure(cache_key, message);
     }
 
-    let data: UsageResponse = response
-        .json()
-        .await
-        .context("Failed to parse usage response")?;
+    let data: UsageResponse = match response.json().await {
+        Ok(data) => data,
+        Err(error) => {
+            return cache_anthropic_usage_failure(
+                cache_key,
+                format!("Failed to parse usage response: {error}"),
+            );
+        }
+    };
 
     let usage = UsageData {
         five_hour: data
@@ -152,8 +164,25 @@ async fn fetch_anthropic_usage_data(access_token: String, cache_key: String) -> 
         last_error: None,
     };
 
+    disk_cache::store_success(&cache_key, &usage);
     store_anthropic_usage(cache_key, usage.clone());
     Ok(usage)
+}
+
+/// A failed request keeps any last-known limits, but marks them as stale and
+/// shares the error timestamp for cross-process endpoint backoff.
+fn cache_anthropic_usage_failure(cache_key: String, message: String) -> Result<UsageData> {
+    disk_cache::store_error(&cache_key, &message);
+    if let Some(mut last_good) = disk_cache::last_good(&cache_key) {
+        last_good.fetched_at = Some(Instant::now());
+        last_good.last_error = Some(message);
+        store_anthropic_usage(cache_key, last_good.clone());
+        return Ok(last_good);
+    }
+    let mut err = anthropic_usage_error(message.clone());
+    err.fetched_at = Some(Instant::now());
+    store_anthropic_usage(cache_key, err);
+    Err(anyhow::anyhow!(message))
 }
 
 /// Fetch usage from all connected providers with OAuth credentials.
@@ -362,10 +391,20 @@ fn enqueue_provider_usage_tasks(tasks: &mut tokio::task::JoinSet<Option<Provider
         total += 1;
     }
 
-    if auth::cursor::has_cursor_api_key() {
+    if auth::cursor::has_cursor_native_auth() {
         tasks.spawn(async {
             fetch_cursor_usage_report().await.map(|mut report| {
                 attach_activity(&mut report, "cursor");
+                report
+            })
+        });
+        total += 1;
+    }
+
+    if crate::subscription_catalog::configured_api_key().is_some() {
+        tasks.spawn(async {
+            fetch_jcode_usage_report().await.map(|mut report| {
+                attach_activity(&mut report, "jcode");
                 report
             })
         });
@@ -391,7 +430,8 @@ fn activity_source_has_dedicated_report(source_key: &str) -> bool {
         "copilot" => auth::copilot::has_copilot_credentials(),
         "antigravity" => auth::antigravity::has_cached_auth(),
         "gemini" => auth::gemini::has_api_key(),
-        "cursor" => auth::cursor::has_cursor_api_key(),
+        "cursor" => auth::cursor::has_cursor_native_auth(),
+        "jcode" => crate::subscription_catalog::configured_api_key().is_some(),
         _ => {
             // Direct OpenAI-compatible profiles are reported by the API-key
             // module whenever their key is configured.

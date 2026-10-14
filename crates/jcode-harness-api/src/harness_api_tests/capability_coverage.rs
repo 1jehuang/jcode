@@ -28,6 +28,7 @@ enum Disposition {
     ClientInternal,
     /// A real gap. Worth exposing, not yet done. Every entry needs a reason
     /// that says what a client cannot build without it.
+    #[allow(dead_code)] // Empty today; the ledger keeps the slot for future gaps.
     Gap(&'static str),
 }
 
@@ -37,7 +38,7 @@ use Disposition::{ClientInternal, Covered, Gap};
 ///
 /// Sorted by name so additions produce clean diffs.
 const LEDGER: &[(&str, Disposition)] = &[
-    ("BackgroundTool", ClientInternal),
+    ("BackgroundTool", Covered),
     ("Cancel", Covered),
     ("CancelSoftInterrupts", Covered),
     ("Clear", Covered),
@@ -50,6 +51,7 @@ const LEDGER: &[(&str, Disposition)] = &[
     // Create/attach session bootstrap requests state through the API bridge.
     ("GetState", Covered),
     ("InputShell", ClientInternal),
+    ("InvalidateAnthropicUsage", Covered),
     ("Message", Covered),
     ("NotifyAuthChanged", Covered),
     ("RefreshModels", ClientInternal),
@@ -61,16 +63,14 @@ const LEDGER: &[(&str, Disposition)] = &[
     ("RewindUndo", Covered),
     ("RunSubagent", ClientInternal),
     ("SetCompactionMode", ClientInternal),
+    ("SetAgentModel", Covered),
     ("SetFeature", ClientInternal),
     ("SetModel", Covered),
     ("SetPremiumMode", ClientInternal),
     ("SetReasoningEffort", Covered),
     ("SetRoute", ClientInternal),
     ("SetServiceTier", ClientInternal),
-    (
-        "SetSessionSaved",
-        Gap("clients can read a session's saved flag but cannot pin or unpin it"),
-    ),
+    ("SetSessionSaved", Covered),
     ("SetSubagentModel", ClientInternal),
     ("SetTransport", ClientInternal),
     ("SoftInterrupt", Covered),
@@ -80,6 +80,7 @@ const LEDGER: &[(&str, Disposition)] = &[
     ("SwitchAnthropicAccount", ClientInternal),
     ("SwitchOpenAiAccount", ClientInternal),
     ("InvalidateOpenAiUsage", Covered),
+    ("InvalidateAnthropicUsage", Covered),
     ("Transcript", ClientInternal),
     ("Transfer", ClientInternal),
     ("TriggerMemoryExtraction", ClientInternal),

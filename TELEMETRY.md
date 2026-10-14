@@ -1,6 +1,6 @@
 # jcode Telemetry
 
-jcode collects **anonymous, minimal usage statistics** to help understand how many people use jcode, what providers/models are popular, whether onboarding works, which feature families are used, how often sessions succeed, and whether performance/regressions are improving. This data helps prioritize development. Ordinary telemetry does **not** contain prompts, source code, model responses, or conversation transcripts.
+jcode collects **minimal usage statistics** to help understand how many people use jcode, what providers/models are popular, whether onboarding works, which feature families are used, how often sessions succeed, and whether performance/regressions are improving. This data helps prioritize development. Ordinary telemetry does **not** contain prompts, source code, model responses, or conversation transcripts.
 
 Jcode also offers a separate, optional transcript-sharing program. It is off by
 default and requires choosing **Share full transcripts** in the telemetry
@@ -54,7 +54,7 @@ Recent telemetry additions also include: coarse onboarding steps, explicit thumb
 
 | Field | Example | Purpose |
 |-------|---------|----------|
-| `id` | `a1b2c3d4-...` | Random UUID, not tied to your identity |
+| `id` | `a1b2c3d4-...` | Random installation UUID; may be linked to a provider OAuth email as described below |
 | `event` | `"install"` | Event type |
 | `version` | `"0.6.0"` | jcode version |
 | `os` | `"linux"` | Operating system |
@@ -79,6 +79,52 @@ Recent telemetry additions also include: coarse onboarding steps, explicit thumb
 | `auth_provider` | `"claude"` | Which provider/account system was configured |
 | `auth_method` | `"oauth"` | Coarse auth method only |
 | `version` / `os` / `arch` | `"0.9.1"` / `"linux"` / `"x86_64"` | Activation funnel dimensions |
+
+### Provider OAuth Account Emails
+
+Policy updated October 14, 2026. Ordinary telemetry may include the email address
+of an account actually used for model-provider OAuth, alongside the provider name
+and installation telemetry ID. This helps measure distinct-account usage across
+installations and provider adoption. Email addresses are personal information:
+these records are not anonymous and can link installation usage to account identity.
+
+This collection is part of default usage telemetry, not a separate opt-in program.
+All telemetry opt-outs apply. The TUI shows a one-time status-line notice when
+the telemetry database already knows the installation, an OAuth account email
+upload is imminent, and that provider/email is not already tracked for the
+installation. The notice points to `/telemetry` to disable collection. It is
+recorded persistently after display and never repeats for that installation,
+even when a different provider account is used later. Installations not yet known
+to the database and already-tracked emails do not trigger this notice. A failed
+database check must not trigger a notice or an email upload.
+
+This permission does not extend to unrelated Gmail, Calendar, MCP, or other
+connected-service identities, or scanning unused credential stores. Never send
+access tokens, refresh tokens, API keys, passwords, or other authentication secrets.
+Do not add emails to ordinary diagnostic logs or every usage event. Identifiable
+telemetry access is restricted to authorized maintainers and infrastructure
+providers operating the pipeline. Emails must not be sold, published, or included
+in investor summaries.
+
+The client first checks database state using a SHA-256 digest of the normalized
+email, not the raw email. Digests are still identifying data and are handled as
+private account telemetry. Membership checks are scoped to the installation so
+they do not reveal whether another installation has registered an email. An
+eligible notice is acknowledged only after its complete text is rendered in the
+status line, before sending the raw email. The notice remains readable briefly
+and its acknowledgment survives restarts and account changes.
+
+| Endpoint | Fields | Purpose |
+|----------|--------|---------|
+| `POST /v1/oauth-account/check` | `id`, `provider`, `email_hash` | Check installation presence and whether that installation/provider/email is tracked |
+| `POST /v1/oauth-account` | `id`, `provider`, `email` | Store the provider OAuth identity separately from ordinary usage events |
+
+**Rollout:** Collection requires the matching telemetry Worker deployment and
+D1 migration `0030_oauth_accounts.sql`. Until the preflight endpoint is
+available, checks fail closed and no email is uploaded. Current identity
+resolution covers Anthropic and OpenAI OAuth runtimes; accounts without a
+safely resolved email are skipped rather than inferred from unrelated logins.
+Transcript sharing remains separately opt-in.
 
 ### Onboarding Step Event
 
@@ -317,6 +363,23 @@ This is a privacy-safe per-prompt summary event. It contains no prompt text, no 
 | `turn_abandoned` | `false` | Whether the turn appears to have ended without success |
 | `turn_end_reason` | `"next_user_prompt"` | Why the turn was finalized |
 
+### Usage Report Event
+
+Sent in the background once per completed model response, so spend can be measured accurately even when a session never ends cleanly and when many agents run inside one jcode process (swarm workers, background tasks, desktop panels). It contains token counts and model labels only: no prompt text, no response text, no tool inputs/outputs, and no file paths.
+
+| Field | Example | Purpose |
+|-------|---------|----------|
+| `event` | `"usage_report"` | Event type |
+| `session_id` | `"uuid"` | The calling agent's own session, so concurrent agents are attributed separately |
+| `source` | `"agent"` / `"compaction"` / `"sidecar"` | What made the call: a normal agent turn, a context-compaction summary, or a memory helper request |
+| `provider` / `model` | `"openai"` / `"gpt-5.6-luna"` | The provider and model that served this response |
+| `input_tokens` / `output_tokens` | `1200` / `180` | Provider-reported token usage for this response |
+| `cache_read_input_tokens` / `cache_creation_input_tokens` | `8000` / `600` | Provider-reported prompt-cache tokens when available |
+| `total_tokens` | `9980` | Sum of the token fields above |
+| `responses` | `1` | Number of model responses covered by this report |
+
+The receiving worker adds these counts into a per-day, per-model total (keyed by date, source, provider, model, build channel, and CI flag) instead of storing a separate row per response. That daily total does not include your telemetry ID.
+
 ### Shared Event Metadata
 
 Most events also carry a few coarse quality / cleanup fields:
@@ -346,7 +409,7 @@ official release workflows set `JCODE_CI_BUILD=1` while compiling, producing the
 - No MCP server names or configurations
 - No IP addresses (the worker never reads or stores the client IP)
 - No city, region, coordinates, postal code, or timezone
-- No personal information of any kind
+- No account identity information except the provider OAuth emails described above
 - No error messages or stack traces in telemetry (only coarse categories and end reasons)
 - No exact wall-clock timestamps beyond coarse hour-of-day / weekday buckets
 
@@ -379,8 +442,24 @@ We do **not** sell event-level telemetry, and we do not collect conversation con
 sell or to train models. If that ever changes, it will be a separate, clearly disclosed,
 **opt-in** program rather than a silent change to this document.
 
-We do not attempt to re-identify users from telemetry, and the client does not link
-telemetry to account identity.
+### De-identified usage data for investor due diligence
+
+We may share de-identified, per-installation usage summaries with prospective investors
+under confidentiality, for evaluating Jcode only. These summaries contain a random label
+for each installation (not the telemetry ID), and per day: session counts, token counts,
+and the estimated list-price value of model usage, plus the first day of activity. They
+contain no telemetry IDs, prompts, code, model responses, file paths, account details,
+country, operating system, or other device information, and the labels cannot be linked
+back to an installation without our internal mapping, which we never share. Recipients may
+not attempt to re-identify anyone or use the data for any other purpose.
+
+If you would rather your usage not be included, turn off telemetry (see
+[How to Opt Out](#how-to-opt-out)). Installations with telemetry disabled are never
+included.
+
+We do not attempt to infer additional identities from telemetry. Provider OAuth
+email telemetry may explicitly link installation usage to account identity; this
+does not authorize other account linkage.
 
 ## How It Works
 
@@ -399,8 +478,12 @@ The telemetry endpoint is a Cloudflare Worker that stores events in a D1 databas
 ## Changes to This Policy
 
 The version of this document in the repository is the current policy. If we ever want to
-collect conversation content, or to share or sell anything beyond aggregate statistics,
-that will require a separate opt-in rather than a quiet edit here.
+collect conversation content, or to sell telemetry or share it beyond aggregate statistics
+and the confidential, de-identified investor summaries described above, that will require
+a separate opt-in rather than a quiet edit here. Changes to this document are visible in its
+git history. Provider OAuth email telemetry is part of ordinary, opt-out telemetry,
+with the conditional, one-time TUI status-line notice described above. Updating
+this policy alone does not activate collection.
 
 ### Schema v5 deployment note
 
@@ -439,6 +522,15 @@ This is open source. The telemetry implementation is in [`crates/jcode-telemetry
 
 ## Data Retention
 
-Telemetry data is used in aggregate (install count, active users, provider distribution, session success/crash rates, feature-level counts). Individual event records are retained for up to 12 months and then deleted.
+Provider OAuth emails and their digests are stored in the private D1
+`oauth_accounts` table, not in ordinary event rows or Analytics Engine. They
+are retained for 90 days from record creation and pruned nightly. Duplicate
+uploads do not extend that retention window. Maintainers can delete these
+records, including their digests, by installation telemetry ID. To request
+deletion, contact the maintainers with your installation telemetry ID from
+`jcode telemetry status`, never OAuth credentials. Disabling telemetry stops
+future collection but does not itself delete previously uploaded records.
 
-High-volume raw events are pruned earlier on a nightly schedule, after their aggregate signal has been captured in a compact daily-activity rollup: per-turn and per-session-start records and onboarding-step records are kept for about 30 days, upgrade records for about 60 days, and auth-success records for about 180 days. Session summary records (the per-session aggregate counts described above) are kept for up to 12 months.
+Telemetry data is used in aggregate (install count, active users, provider distribution, session success/crash rates, feature-level counts), and in the de-identified investor summaries described under [How We Use and Share Data](#how-we-use-and-share-data). Individual event records are retained for up to 12 months and then deleted.
+
+High-volume raw events are pruned earlier on a nightly schedule, after their aggregate signal has been captured in a compact daily-activity rollup: per-turn and per-session-start records and onboarding-step records are kept for about 30 days, upgrade records for about 60 days, and auth-success records for about 180 days. Session summary records (the per-session aggregate counts described above) are kept for up to 12 months. Usage report events are not stored as individual records in the database; only the per-day, per-model token totals described above are kept.

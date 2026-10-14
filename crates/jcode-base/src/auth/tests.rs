@@ -533,13 +533,29 @@ fn copilot_recent_token_exchange_failure_is_not_auto_usable() {
 fn openrouter_like_status_is_provider_specific() {
     let _lock = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().expect("create temp dir");
-    let prev_home = std::env::var_os("JCODE_HOME");
-    let prev_chutes = std::env::var_os("CHUTES_API_KEY");
-    let prev_opencode = std::env::var_os("OPENCODE_API_KEY");
+    // Issue #1479: a jcode-launched shell with an active named provider
+    // profile exports these, and the named-profile check short-circuits the
+    // per-provider key lookup. Clear them so the test sees only its own env.
+    let keys = [
+        "JCODE_HOME",
+        "CHUTES_API_KEY",
+        "OPENCODE_API_KEY",
+        "JCODE_NAMED_PROVIDER_PROFILE",
+        "JCODE_OPENROUTER_ALLOW_NO_AUTH",
+        "JCODE_OPENROUTER_API_KEY_NAME",
+        "JCODE_OPENROUTER_ENV_FILE",
+        "JCODE_OPENROUTER_API_BASE",
+    ];
+    let saved = keys
+        .into_iter()
+        .map(|key| (key, std::env::var_os(key)))
+        .collect::<Vec<_>>();
+    for key in keys {
+        crate::env::remove_var(key);
+    }
 
     crate::env::set_var("JCODE_HOME", temp.path());
     crate::env::set_var("CHUTES_API_KEY", "chutes-test-key");
-    crate::env::remove_var("OPENCODE_API_KEY");
     AuthStatus::invalidate_cache();
 
     let status = AuthStatus::check_fast();
@@ -554,9 +570,9 @@ fn openrouter_like_status_is_provider_specific() {
         "API key (`CHUTES_API_KEY`)".to_string()
     );
 
-    restore_env_var("JCODE_HOME", prev_home);
-    restore_env_var("CHUTES_API_KEY", prev_chutes);
-    restore_env_var("OPENCODE_API_KEY", prev_opencode);
+    for (key, value) in saved {
+        restore_env_var(key, value);
+    }
     AuthStatus::invalidate_cache();
 }
 
@@ -947,18 +963,46 @@ fn claude_oauth_provider_reports_oauth_independently_of_api_key() {
 /// Test binaries must never open real browser windows: login/onboarding flows
 /// are exercised heavily by unit tests, and each ungated `open::that` pops an
 /// OAuth page on the developer's desktop. `running_in_test_harness` detects
-/// the `target/**/deps/` test-binary path, and `browser_suppressed` must honor
+/// the Cargo `deps/` test-binary path, and `browser_suppressed` must honor
 /// it even without --no-browser or NO_BROWSER/JCODE_NO_BROWSER.
 #[test]
 fn browser_suppressed_inside_test_harness_without_env_overrides() {
     assert!(
         super::running_in_test_harness(),
-        "test binary should be detected as a test harness (exe under target/**/deps/)"
+        "test binary should be detected even with a custom Cargo target directory"
     );
     assert!(
         super::browser_suppressed(false),
         "browser opens must be suppressed in test binaries even without --no-browser/env vars"
     );
+}
+
+#[test]
+fn test_harness_paths_include_custom_cargo_target_directories() {
+    for path in [
+        "/work/target/debug/deps/test_binary-0123456789abcdef",
+        "/work/target/debug/deps/custom_runner",
+        "/build-cache/debug/deps/test_binary-0123456789abcdef",
+        "/build-cache/aarch64-apple-darwin/release/deps/test_binary-0123456789abcdef",
+        r"C:\build-cache\debug\deps\test_binary-0123456789abcdef.exe",
+    ] {
+        assert!(
+            super::is_test_harness_path(path),
+            "missed test binary: {path}"
+        );
+    }
+    for path in [
+        "/usr/local/bin/jcode",
+        "/work/target/debug/jcode",
+        "/build-cache/debug/deps/jcode",
+        "/build-cache/debug/deps/libjcode-0123456789abcdef.rlib",
+        "/build-cache/debug/deps/test_binary-not_a_cargo_hash",
+    ] {
+        assert!(
+            !super::is_test_harness_path(path),
+            "not a test binary: {path}"
+        );
+    }
 }
 
 /// Antigravity/Gemini access tokens live about an hour and are refreshed

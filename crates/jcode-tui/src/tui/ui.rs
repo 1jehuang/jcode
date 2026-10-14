@@ -10,6 +10,10 @@
     )
 )]
 
+#[path = "ui_copy_pane_drag.rs"]
+mod copy_pane_drag;
+pub(crate) use copy_pane_drag::*;
+
 use super::info_widget;
 use super::markdown;
 use super::ui_diff::{
@@ -126,6 +130,7 @@ use file_diff_ui::{
 };
 pub(crate) use header::capitalize;
 use inline_ui::{draw_inline_ui, inline_ui_height};
+pub(crate) use layout_support::{draw_side_panel_markdown, side_panel_dismiss_area};
 pub(crate) use memory_estimates::{debug_memory_profile, debug_side_panel_memory_profile};
 use memory_estimates::{estimate_prepared_chat_frame_bytes, estimate_prepared_messages_bytes};
 #[cfg(test)]
@@ -141,7 +146,6 @@ pub(crate) use messages::{
     render_swarm_message, render_system_message, render_tool_message, render_usage_message,
 };
 pub(crate) use output_style::adapt_buffer_for_emoji_preference;
-use pinned_ui::draw_side_panel_markdown;
 pub use pinned_ui::{
     SidePanelDebugStats, SidePanelMermaidProbe, SidePanelMermaidProbeRect,
     debug_probe_side_panel_mermaid,
@@ -217,10 +221,6 @@ static TAIL_CATCHUP_ACTIVE: std::sync::atomic::AtomicBool =
 #[cfg(not(test))]
 static TAIL_FOLLOW_SNAP_PENDING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
-/// Wrapped line indices where each user prompt starts (updated each render frame).
-/// Used by prompt-jump keybindings (Ctrl+5..9, Ctrl+[/]) for accurate positioning.
-#[cfg(not(test))]
-static LAST_USER_PROMPT_POSITIONS: OnceLock<Mutex<Vec<usize>>> = OnceLock::new();
 
 #[cfg(test)]
 thread_local! {
@@ -234,7 +234,6 @@ thread_local! {
     static TEST_LAST_RESOLVED_CHAT_SCROLL: Cell<usize> = const { Cell::new(0) };
     static TEST_TAIL_CATCHUP_ACTIVE: Cell<bool> = const { Cell::new(false) };
     static TEST_TAIL_FOLLOW_SNAP_PENDING: Cell<bool> = const { Cell::new(false) };
-    static TEST_LAST_USER_PROMPT_POSITIONS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
     static TEST_LAST_LAYOUT: RefCell<Option<LayoutSnapshot>> = const { RefCell::new(None) };
     static TEST_LAST_CHAT_FRAME: RefCell<Option<Arc<PreparedChatFrame>>> = const { RefCell::new(None) };
     static TEST_LAST_STATUS_AREA: RefCell<Option<Rect>> = const { RefCell::new(None) };
@@ -321,43 +320,6 @@ pub fn last_diff_pane_max_scroll() -> usize {
     #[cfg(not(test))]
     {
         LAST_DIFF_PANE_MAX_SCROLL.load(Ordering::Relaxed)
-    }
-}
-
-/// Get the last known user prompt line positions (from the most recent render frame).
-/// Returns positions as wrapped line indices from the top of content.
-pub fn last_user_prompt_positions() -> Vec<usize> {
-    #[cfg(test)]
-    {
-        return TEST_LAST_USER_PROMPT_POSITIONS.with(|v| v.borrow().clone());
-    }
-    #[cfg(not(test))]
-    {
-        LAST_USER_PROMPT_POSITIONS
-            .get_or_init(|| Mutex::new(Vec::new()))
-            .lock()
-            .map(|v| v.clone())
-            .unwrap_or_default()
-    }
-}
-
-fn update_user_prompt_positions(positions: &[usize]) {
-    #[cfg(test)]
-    {
-        TEST_LAST_USER_PROMPT_POSITIONS.with(|v| {
-            let mut v = v.borrow_mut();
-            v.clear();
-            v.extend_from_slice(positions);
-        });
-        return;
-    }
-    #[cfg(not(test))]
-    {
-        let mutex = LAST_USER_PROMPT_POSITIONS.get_or_init(|| Mutex::new(Vec::new()));
-        if let Ok(mut v) = mutex.lock() {
-            v.clear();
-            v.extend_from_slice(positions);
-        }
     }
 }
 
@@ -1509,6 +1471,24 @@ pub fn last_layout_snapshot() -> Option<LayoutSnapshot> {
     }
 }
 
+/// First post-clear line while following the tail. Keep the full prepared
+/// transcript for scrollback, copying, and prompt navigation.
+fn terminal_clear_start(app: &dyn TuiState, prepared: &PreparedChatFrame) -> Option<usize> {
+    if app.auto_scroll_paused() || app.pending_history_anchor_lines_from_bottom().is_some() {
+        return None;
+    }
+    let index = app
+        .display_messages()
+        .iter()
+        .rposition(|msg| msg.role == "spacer")?;
+    let body = prepared
+        .sections
+        .iter()
+        .find(|section| section.kind == PreparedSectionKind::Body)?;
+    let boundary = body.prepared.message_boundaries.get(index)?;
+    Some(body.line_start + boundary.wrapped_len)
+}
+
 /// Record the prepared transcript frame the renderer just drew.
 pub(crate) fn set_last_chat_frame(frame: Arc<PreparedChatFrame>) {
     #[cfg(test)]
@@ -1623,7 +1603,6 @@ fn clear_test_render_state_locked() {
     set_last_total_wrapped_lines(0);
     set_last_resolved_chat_scroll(0);
     TEST_TAIL_FOLLOW_SNAP_PENDING.with(|cell| cell.set(false));
-    update_user_prompt_positions(&[]);
     // Flicker events recorded by sibling tests add a "⚠ flicker detected"
     // notification line to subsequent renders, shifting every layout-sensitive
     // assertion (click mapping, snapshot rows).
@@ -1780,10 +1759,10 @@ mod profile;
 pub(crate) mod selection_highlight;
 #[path = "ui/url.rs"]
 mod url_regex_support;
-use self::copy_selection::{
-    copy_point_from_snapshot, copy_selection_text_from_raw_lines, link_target_from_snapshot,
-};
-use self::display_width::{clamp_display_col, display_col_slice, line_display_width};
+use self::copy_selection::{copy_point_from_snapshot, link_target_from_snapshot};
+#[cfg(test)]
+use self::display_width::display_col_slice;
+use self::display_width::line_display_width;
 use self::draw_recovery::render_recovered_panic_frame;
 use self::profile::{profile_enabled, record_profile};
 
@@ -2190,126 +2169,6 @@ mod edge_autoscroll_zone_tests {
     }
 }
 
-pub(crate) fn copy_pane_vertical_edge_point(
-    pane: crate::tui::CopySelectionPane,
-    column: u16,
-    row: u16,
-) -> Option<(crate::tui::CopySelectionPoint, bool)> {
-    // The prompt composer cannot be wheel-scrolled, so it has no browser-style
-    // edge auto-scroll. Drags past its edge clamp via `copy_pane_drag_point`.
-    if pane == crate::tui::CopySelectionPane::Input {
-        return None;
-    }
-    let snapshot = copy_snapshot_for_pane(pane)?;
-    let area = snapshot.content_area;
-    if area.width == 0 || area.height == 0 {
-        return None;
-    }
-
-    // Browser-style edge auto-scroll: terminals clamp the mouse to the visible
-    // viewport, so a drag that "leaves" the top/bottom of the pane is reported on
-    // the boundary row itself. We additionally treat a small band near each edge
-    // as a hot zone, so dragging *near* (not just exactly onto) the top/bottom
-    // keeps pulling in more transcript, just like dragging a selection toward the
-    // edge of a browser window. The horizontal position is clamped into the pane
-    // so the selection extends no matter where along the edge the cursor sits.
-    let last_row = area.y.saturating_add(area.height).saturating_sub(1);
-    let zone = edge_autoscroll_zone_rows(area.height);
-    let top_trigger = area.y.saturating_add(zone);
-    let bottom_trigger = last_row.saturating_sub(zone);
-    // Only engage the hot zone when there is actually more transcript to pull in
-    // that direction. Otherwise dragging into the bottom band while the view is
-    // already pinned to the end (the common case) would snap the selection to the
-    // last visible line and fight precise highlighting of the bottom rows. When
-    // there is nothing to scroll, fall through (`None`) so the caller extends the
-    // selection to the exact cell under the cursor instead.
-    let can_scroll_up = snapshot.scroll > 0;
-    let can_scroll_down = snapshot.visible_end < snapshot.wrapped_plain_line_count();
-    let (edge_row, upward) = if row <= top_trigger && can_scroll_up {
-        (area.y, true)
-    } else if row >= bottom_trigger && can_scroll_down {
-        (last_row, false)
-    } else {
-        return None;
-    };
-
-    let clamped_col = column.clamp(area.x, area.x.saturating_add(area.width).saturating_sub(1));
-
-    copy_point_from_snapshot(&snapshot, clamped_col, edge_row).map(|point| (point, upward))
-}
-
-/// Resolve the selection point for a drag at `(column, row)`, clamping vertical
-/// overshoot to the nearest in-bounds line edge.
-///
-/// Terminals report a drag that "leaves" the pane on the boundary row, but a
-/// drag *into the empty space below the last content line* (common with short
-/// transcripts that leave blank rows underneath) lands on a row that maps to no
-/// line at all, so `copy_point_from_screen` returns `None`. Native terminal and
-/// browser selection treat that as "select through the end of the last line".
-/// This mirrors that: dragging below the last visible line snaps to the end of
-/// that line, and dragging above the first visible line snaps to its start, so
-/// the boundary line is fully covered even when there is nothing more to scroll.
-pub(crate) fn copy_pane_drag_point(
-    pane: crate::tui::CopySelectionPane,
-    column: u16,
-    row: u16,
-) -> Option<crate::tui::CopySelectionPoint> {
-    let snapshot = copy_snapshot_for_pane(pane)?;
-    let area = snapshot.content_area;
-    if area.width == 0 || area.height == 0 {
-        return None;
-    }
-
-    // A direct hit on a real line wins: precise per-cell selection.
-    if let Some(point) = copy_point_from_snapshot(&snapshot, column, row) {
-        return Some(point);
-    }
-
-    let line_count = snapshot.wrapped_plain_line_count();
-    if line_count == 0 {
-        return None;
-    }
-    let last_line = line_count.saturating_sub(1);
-    let last_visible_line = snapshot.visible_end.saturating_sub(1).min(last_line);
-    let first_visible_line = snapshot.scroll.min(last_line);
-
-    let last_row = area.y.saturating_add(area.height).saturating_sub(1);
-    let clamped_col = column.clamp(area.x, area.x.saturating_add(area.width).saturating_sub(1));
-
-    // Below the visible content: snap to the end of the last visible line.
-    if row >= last_row {
-        let text = snapshot.wrapped_plain_line(last_visible_line).unwrap_or("");
-        return Some(crate::tui::CopySelectionPoint {
-            pane,
-            abs_line: last_visible_line,
-            column: line_display_width(text),
-        });
-    }
-
-    // Above the visible content: snap to the start of the first visible line.
-    if row <= area.y {
-        return Some(crate::tui::CopySelectionPoint {
-            pane,
-            abs_line: first_visible_line,
-            column: snapshot
-                .wrapped_copy_offset(first_visible_line)
-                .unwrap_or(0),
-        });
-    }
-
-    // Interior row that maps to no line (e.g. a blank gap row between/after
-    // content within the visible band): fall back to the boundary-clamped point.
-    copy_point_from_snapshot(&snapshot, clamped_col, row.clamp(area.y, last_row)).or(Some(
-        crate::tui::CopySelectionPoint {
-            pane,
-            abs_line: last_visible_line,
-            column: line_display_width(
-                snapshot.wrapped_plain_line(last_visible_line).unwrap_or(""),
-            ),
-        },
-    ))
-}
-
 /// Edge point for tick-driven continuous auto-scroll, where there is no live
 /// mouse position. Uses the top/bottom boundary row of the pane and its left
 /// content column so the selection keeps extending to the freshly revealed line.
@@ -2427,55 +2286,7 @@ pub(crate) fn copy_selection_text(range: crate::tui::CopySelectionRange) -> Opti
         return None;
     }
 
-    if let Some(text) = copy_selection_text_from_raw_lines(&snapshot, start, end) {
-        return Some(text);
-    }
-
-    let selected_lines = end
-        .abs_line
-        .saturating_sub(start.abs_line)
-        .saturating_add(1);
-    let mut out = String::new();
-    for abs_line in start.abs_line..=end.abs_line {
-        if abs_line > start.abs_line {
-            out.push('\n');
-        }
-        let text = snapshot.wrapped_plain_line(abs_line)?;
-        if abs_line != start.abs_line && abs_line != end.abs_line {
-            let copy_start = snapshot.wrapped_copy_offset(abs_line).unwrap_or(0);
-            if copy_start == 0 {
-                if abs_line == start.abs_line + 1 {
-                    out.reserve(text.len().saturating_mul(selected_lines.min(8)));
-                }
-                out.push_str(text);
-                continue;
-            }
-        }
-        let line_width = line_display_width(text);
-        let copy_start = snapshot.wrapped_copy_offset(abs_line).unwrap_or(0);
-        let start_col = if abs_line == start.abs_line {
-            clamp_display_col(text, start.column).max(copy_start)
-        } else {
-            copy_start
-        };
-        let end_col = if abs_line == end.abs_line {
-            clamp_display_col(text, end.column).max(copy_start)
-        } else {
-            line_width
-        };
-
-        if end_col < start_col {
-            continue;
-        }
-
-        let slice = display_col_slice(text, start_col, end_col);
-        if abs_line == start.abs_line {
-            out.reserve(slice.len().saturating_mul(selected_lines.min(8)));
-        }
-        out.push_str(slice);
-    }
-
-    Some(out)
+    copy_selection::copy_selection_text_any(&snapshot, start, end)
 }
 
 /// Compute `(char_count, line_count)` for the current copy selection without
@@ -2508,40 +2319,10 @@ pub(crate) fn copy_selection_metrics(
         return Some(metrics);
     }
 
-    let mut chars = 0usize;
-    let mut lines = 0usize;
-    for abs_line in start.abs_line..=end.abs_line {
-        if abs_line > start.abs_line {
-            chars += 1; // joining '\n'
-        }
-        lines += 1;
-        let text = snapshot.wrapped_plain_line(abs_line)?;
-        if abs_line != start.abs_line && abs_line != end.abs_line {
-            let copy_start = snapshot.wrapped_copy_offset(abs_line).unwrap_or(0);
-            if copy_start == 0 {
-                chars += text.chars().count();
-                continue;
-            }
-        }
-        let line_width = line_display_width(text);
-        let copy_start = snapshot.wrapped_copy_offset(abs_line).unwrap_or(0);
-        let start_col = if abs_line == start.abs_line {
-            clamp_display_col(text, start.column).max(copy_start)
-        } else {
-            copy_start
-        };
-        let end_col = if abs_line == end.abs_line {
-            clamp_display_col(text, end.column).max(copy_start)
-        } else {
-            line_width
-        };
-        if end_col < start_col {
-            continue;
-        }
-        chars += display_col_slice(text, start_col, end_col).chars().count();
-    }
-
-    Some((chars, lines.max(1)))
+    // Fallback for selections that start on unmapped chrome. Rare, so the
+    // allocation is acceptable and keeps metrics identical to copied text.
+    let text = copy_selection::copy_selection_text_from_wrapped_lines(&snapshot, start, end)?;
+    Some((text.chars().count(), text.split('\n').count().max(1)))
 }
 
 pub(crate) fn link_target_from_screen(column: u16, row: u16) -> Option<String> {
@@ -2754,6 +2535,18 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         return;
     }
 
+    if let Some(overlay) = app.commit_log_overlay() {
+        overlays::draw_commit_log_overlay(frame, area, overlay);
+        finalize_frame_metrics(
+            app,
+            total_start,
+            Duration::ZERO,
+            total_start.elapsed(),
+            None,
+        );
+        return;
+    }
+
     if let Some(scroll) = app.changelog_scroll() {
         overlays::draw_changelog_overlay(frame, area, scroll, app);
         finalize_frame_metrics(
@@ -2854,6 +2647,8 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let has_file_diff_edits =
         !swarm_page_active && diff_mode.is_file() && app.has_display_edit_tool_messages();
     let has_right_side_pane_content = has_side_panel_content || has_file_diff_edits;
+    // Fullscreen side panel replaces the transcript area; status line and input stay.
+    let side_panel_fullscreen = has_side_panel_content && app.side_panel_fullscreen();
     // Regular side-panel pages and full-file diffs share the right-hand surface.
     // Suppress a separate diagram pane to avoid a triple-split layout.
     let suppress_side_diagram = has_right_side_pane_content;
@@ -2959,7 +2754,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         (area, None)
     };
 
-    let needs_side_pane = has_right_side_pane_content;
+    let needs_side_pane = has_right_side_pane_content && !side_panel_fullscreen;
 
     let (chat_area, diff_pane_area) = if needs_side_pane {
         const MIN_DIFF_WIDTH: u16 = 30;
@@ -3115,9 +2910,9 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let donut_height: u16 = idle_donut_reserved_height(show_donut, input_height);
     let notification_height =
         input_ui::notification_height(app, chat_area.width).min(chat_area.height.saturating_sub(4));
-    // Elastic overscroll status line revealed when the user scrolls past the
-    // bottom of the transcript. Rendered directly below the input line.
-    let overscroll_height: u16 = if app.chat_overscroll_active() { 1 } else { 0 };
+    // Session status line (dir, branch, context, provider, model), always
+    // pinned directly below the input line.
+    let overscroll_height: u16 = 1;
     let fixed_height = 1
         + queued_height
         + swarm_strip_height
@@ -3128,22 +2923,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         + overscroll_height
         + donut_height; // status + queued + swarm strip + notification + inline UI + gap + input + overscroll + donut
     let available_height = chat_area.height;
-    // Overflow decisions (native scrollbar, and thus the wrap width) must not
-    // depend on the transient overscroll row. Otherwise revealing the line at
-    // the fits/overflows boundary flips the scrollbar on, re-wraps the whole
-    // transcript one column narrower, and the extra wrapped lines keep the
-    // scrollbar latched after the rebound: the screen visibly re-wraps twice
-    // per overscroll and can settle in a different state than it started
-    // (flicker). The packed/scrolling choice below still accounts for the real
-    // row so the elastic reveal remains a clean one-row slide.
-    //
-    // When the line is pinned permanently visible by config it is part of the
-    // stable layout, not a transient reveal, so it does count here.
-    let stable_fixed_height = if app.chat_overscroll_pinned() {
-        fixed_height
-    } else {
-        fixed_height - overscroll_height
-    };
+    let stable_fixed_height = fixed_height;
     let overflows = |prepared: &PreparedChatFrame| {
         let started = Instant::now();
         let result =
@@ -3211,15 +2991,33 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
             .collect();
     }
     let prep_elapsed = prep_start.elapsed();
-    let content_height = prepared.total_wrapped_lines().max(1) as u16;
+    let clear_start = terminal_clear_start(app, &prepared);
+    // The pinned todo band consumes transcript rows too, including in a fresh
+    // session. Reserve it before packing the view so the first todo update
+    // cannot squeeze the user prompt out of the messages area.
+    let pinned_band_height = {
+        let width = chat_area
+            .width
+            .saturating_sub(u16::from(chat_scrollbar_visible));
+        let width = width.saturating_sub(left_aligned_content_inset(width, app.centered_mode()));
+        viewport::pinned_todo_band_lines(app, width, available_height.saturating_sub(fixed_height))
+            .0
+            .len()
+    };
+    let content_height = prepared
+        .total_wrapped_lines()
+        .saturating_sub(clear_start.unwrap_or(0))
+        .saturating_add(pinned_band_height)
+        .max(1)
+        .min(u16::MAX as usize) as u16;
 
     // Terminal-style clear (Ctrl+L): the trailing spacer makes every visible
     // transcript row blank, so a normal bottom-anchored layout would park the
     // status line and numbered prompt at the *bottom* of a screenful of
     // blanks. Collapse the messages area instead, exactly like a terminal
     // after `clear`: the prompt sits at the top and the history is one scroll
-    // away. Scrolling up, new output, or streaming all end the state (see
-    // `terminal_clear_collapsed`) and restore the normal layout.
+    // away. New output expands only the post-clear content. Scrolling up
+    // restores the full transcript layout.
     let terminal_clear_collapsed = !swarm_page_active && app.terminal_clear_collapsed();
     let content_height = if terminal_clear_collapsed {
         0
@@ -3229,7 +3027,9 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
 
     // Use packed layout when content fits, scrolling layout otherwise
     let use_packed = terminal_clear_collapsed
-        || (!swarm_page_active && content_height + fixed_height <= available_height);
+        || (!swarm_page_active
+            && !side_panel_fullscreen
+            && content_height.saturating_add(fixed_height) <= available_height);
 
     // Layout: messages (includes header), queued, status, notification, inline UI, gap, input, donut
     // All vertical chunks are within the chat_area (left column).
@@ -3344,6 +3144,11 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
 
     // Messages area is chunks[0] within the chat column (already excludes diagram).
     let messages_area = chunks[0];
+    let diff_pane_area = if side_panel_fullscreen {
+        Some(messages_area)
+    } else {
+        diff_pane_area
+    };
     let _ = swarm_strip_height;
     note_chat_layout(ChatLayoutMetrics {
         chat_area,
@@ -3389,7 +3194,10 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
             centered: false,
             ..Default::default()
         }
-    } else if terminal_clear_collapsed {
+    } else if terminal_clear_collapsed || side_panel_fullscreen {
+        if side_panel_fullscreen {
+            clear_area(frame, messages_area);
+        }
         // Collapsed terminal-style clear: the messages chunk is zero-height, so
         // there is nothing to draw. Deliberately skip `draw_messages` so it does
         // not publish a zero-height viewport/max-scroll geometry that the scroll
@@ -3495,7 +3303,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         draw_inline_ui(frame, app, chunks[5]);
     }
 
-    let input_cursor = input_ui::draw_input(
+    let _input_cursor = input_ui::draw_input(
         frame,
         app,
         chunks[7],
@@ -3523,6 +3331,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         && !widget_data.is_empty()
         && !show_donut
         && !swarm_page_active
+        && !side_panel_fullscreen
     {
         if let Some(ref mut capture) = debug_capture {
             capture.render_order.push("render_info_widgets".to_string());
@@ -3598,18 +3407,6 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     if visual_debug::overlay_enabled() {
         overlays::draw_debug_overlay(frame, &placements, &chunks);
     }
-
-    // Session facts use actual final-frame cells for collision detection. They
-    // prefer the composer chrome and may climb into a few transcript-tail rows
-    // only when the right suffix is genuinely unused.
-    input_ui::draw_right_fact_stack(
-        frame,
-        app,
-        messages_area,
-        chunks[7],
-        chat_scrollbar_visible,
-        input_cursor,
-    );
 
     // Command-suggestion popover: a late overlay pass so the palette floats
     // over existing rows (blank space, pinned footer, or the transcript tail)

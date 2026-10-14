@@ -399,6 +399,14 @@ impl ProviderMessageMemoryStats {
                     self.openai_compaction_bytes += encrypted_content.len();
                     self.record_bytes(encrypted_content.len());
                 }
+                crate::message::ContentBlock::ToolReference { tool_name, .. } => {
+                    self.record_bytes(tool_name.len());
+                }
+                crate::message::ContentBlock::ProviderNative { item, .. } => {
+                    let bytes = crate::process_memory::estimate_json_bytes(item);
+                    self.tool_result_bytes += bytes;
+                    self.record_bytes(bytes);
+                }
             }
         }
     }
