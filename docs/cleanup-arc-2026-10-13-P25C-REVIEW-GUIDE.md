@@ -13,11 +13,13 @@ and [`docs/cleanup-arc-2026-10-13-P25C-RESEARCH.md`](./cleanup-arc-2026-10-13-P2
 | `rescue/ceb860bf2-...` | `ceb860bf2` | `p25c/port-ceb860bf2-symlinked-state-home` | `2060e81f5` | 8/8 pass | Merge (API opt-in) or discard |
 | (bonus, not a rescue) | n/a | `p25c/port-jcode-sdk-clippy-cleanup` | `90cea21ba` | compile, 1+4 pre-existing flakes | Merge (clippy cleanup) or discard |
 | (bonus, not a rescue) | n/a | `p25c/port-jcode-workspace-clippy-bonus` | `80109ee45` | compile, no test regressions | Merge (clippy cleanup) or discard |
+| (bonus, not a rescue) | n/a | `p25c/port-jcode-workspace-clippy-bonus-2` | `852a9794c` | compile, no test regressions | Merge (clippy cleanup) or discard |
 
-**Recommended action:** merge all four. The ports are self-contained,
+**Recommended action:** merge all five. The ports are self-contained,
 non-breaking, and either add a public API (ceb860bf2) or fix pre-existing
-clippy lints on master (jcode-sdk + 5 workspace crates). Ports 3 and 4
-resolve current `cargo clippy -D warnings` failures on master.
+clippy lints on master (jcode-sdk + 9 more workspace crates across 9 crates).
+Ports 3, 4, and 5 resolve current `cargo clippy -D warnings` failures on
+master.
 
 ## Port 1: e45ddd47e — race-resistant session-marker unlink
 
@@ -280,7 +282,7 @@ git push origin master
 # No worktree or source branch to clean up (this was not a rescue port)
 ```
 
-## After all four are merged
+## After all five are merged
 
 The cleanup-arc-2026-10-13 will be complete:
 - 4 P30 source branches deleted
@@ -291,6 +293,86 @@ The cleanup-arc-2026-10-13 will be complete:
 - 0 P25c structural divergence (other than the dev-isolation feature that doesn't exist in jcode)
 - 0 pre-existing clippy lints in jcode-sdk (Port 3)
 - 0 pre-existing clippy lints in 5 more workspace crates (Port 4)
+- 0 pre-existing clippy lints in 4 more workspace crates (Port 5)
 
 Final memory record: this arc freed ~260 MB of disk space and resolved
 every P30 + P25c structural issue in the kcode→jcode fork.
+
+**Remaining on master after merge:** the following crates will still
+have non-trivial clippy failures (these need real refactors, not lint
+cleanups, and are out of scope for this arc):
+- `jcode-base` (1: `await_holding_lock` — needs `parking_lot::Mutex` or restructure)
+- `jcode-herdr` (5: all `await_holding_lock` — same)
+- `jcode-setup-hints` (7: 6 dead code, 1 type_complexity — needs real usage or removal)
+- `jcode-provider-openai-runtime` (8: 7 `await_holding_lock`, 1 `result_large_err` — needs real refactor)
+- `jcode-telemetry-core` (16) — needs full sweep
+- `jcode-app-core` (20) — needs full sweep
+
+These should be the next cleanup targets after the operator merges
+the 5 ports in this guide.
+
+## Port 5 (bonus, not a rescue): jcode-workspace clippy bonus #2
+
+### What it does
+Sweeps the remaining crates (after Port 4) for single-error clippy
+failures. After Port 4 (5 crates), 4 more crates have small clippy
+failures that fit the lint-cleanup pattern. This commit fixes them
+all with the smallest possible change in each file.
+
+### Lints addressed
+| Crate | Lint | Count | Resolution |
+|---|---|---|---|
+| `jcode-message-types` | `clippy::redundant_clone` | 2 | Replace `&[X.clone()]` with `std::slice::from_ref(&X)` in `lib.rs:871-872` (test code). |
+| `jcode-tui-mermaid` | `clippy::items_after_test_module` | 1 | Move the `mod fallback_note_tests` block from the middle of `mermaid_content.rs` to the very end of the file. 75 lines reordered; no semantic change. |
+| `jcode-tui-mermaid` | `clippy::unnecessary_get` | 1 | Replace `.get(&HASH).is_none()` with `!contains_key(&HASH)` in `mermaid_viewport.rs:1825`. |
+| `jcode-tui-mermaid` | `clippy::redundant_closure` | 1 | Replace `\|\| crate::fn()` with `crate::fn` in `mermaid_tests/part_02.rs:452`. |
+| `jcode-harness-api` | `clippy::dead_code` | 1 | `#[allow(dead_code)]` on the `Gap` variant of the `Disposition` enum. The variant is kept for future ledger use; doc comment explains intent. |
+| `jcode-harness-api` | `clippy::single_element_loop` | 1 | Inline a single-element `for dir in ["../jcode-tui/src"] { ... }` into two plain statements in `capability_coverage.rs:86-89`. |
+| `jcode-harness-api` | `clippy::collapsible_if` | 1 | Collapse nested `if let ... { if let ... { ... } }` into one `if let ... && let ... { ... }` in `schema_snapshot.rs:339-343` (let-chain syntax, Rust 2024). |
+| `jcode-herdr` | `clippy::match_single_binding` | 1 | Replace `match saved { Some(v) => ..., None => {} }` with `if let Some(v) = saved { ... }` in `reporter.rs:467-470`. |
+
+### Diff summary
+| File | Lines | Change |
+|---|---|---|
+| `crates/jcode-message-types/src/lib.rs` | +2 / -2 | `std::slice::from_ref` |
+| `crates/jcode-tui-mermaid/src/mermaid_content.rs` | +75 / -75 | move `mod fallback_note_tests` to end |
+| `crates/jcode-tui-mermaid/src/mermaid_tests/part_02.rs` | +1 / -1 | drop redundant closure |
+| `crates/jcode-tui-mermaid/src/mermaid_viewport.rs` | +1 / -1 | `!contains_key` |
+| `crates/jcode-harness-api/src/harness_api_tests/capability_coverage.rs` | +3 / -5 | allow(dead_code) + inline for-loop |
+| `crates/jcode-harness-api/src/harness_api_tests/schema_snapshot.rs` | +4 / -6 | let-chain collapse |
+| `crates/jcode-herdr/src/reporter.rs` | +2 / -3 | match → if let |
+| **Total** | **+88 / -90** | **9 lints fixed** |
+
+### Validation
+- `cargo clippy -p <each> --all-targets -- -D warnings` — PASS on 3 of 4 (jcode-message-types, jcode-tui-mermaid, jcode-harness-api)
+  - **jcode-herdr**: 1 of 6 errors fixed; 5 `clippy::await_holding_lock` errors REMAIN — they need a real refactor (`parking_lot::Mutex` or restructure), out of scope for a lint cleanup port. These should be a separate "await_holding_lock" port.
+- `cargo fmt -p <each> -- --check` — PASS on all 4
+- `cargo test -p <each> --no-run` — PASS on all 4
+- `cargo check --workspace` — PASS
+
+### Important: no behavior change in production code
+- All 9 fixes are mechanical rewrites that clippy can verify are equivalent.
+- The `Gap` variant is preserved with `#[allow(dead_code)]` rather than removed because the doc comment is documentation, not a no-op marker.
+- The `mod fallback_note_tests` move is a pure reorder; tests still reference the same `super::` symbols.
+
+### How to review
+```bash
+git fetch origin
+git checkout p25c/port-jcode-workspace-clippy-bonus-2
+git log --oneline -3
+git diff master..HEAD --stat
+# Read the actual diff
+git diff master..HEAD -- crates/jcode-message-types crates/jcode-tui-mermaid crates/jcode-harness-api crates/jcode-herdr
+# Re-test (per crate)
+for c in jcode-message-types jcode-tui-mermaid jcode-harness-api jcode-herdr; do
+  cargo clippy -p "$c" --all-targets -- -D warnings
+done
+```
+
+### How to merge
+```bash
+git checkout master
+git merge --no-ff p25c/port-jcode-workspace-clippy-bonus-2
+git push origin master
+# No worktree or source branch to clean up (this was not a rescue port)
+```
