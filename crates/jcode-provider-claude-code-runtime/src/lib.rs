@@ -87,12 +87,8 @@ pub async fn probe_instance(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
-    for (k, v) in settings::instance_env(instance)
-        .into_iter()
-        .chain(settings::probe_env_extras())
-    {
-        command.env(k, v);
-    }
+    settings::apply_instance_env(&mut command, instance);
+    command.envs(settings::probe_env_extras());
     tokio::time::timeout(PROBE_TIMEOUT, async move {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         let mut child = command.spawn().context("start Claude Code probe")?;
@@ -739,9 +735,7 @@ impl Provider for ClaudeCodeProvider {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
-        for (k, v) in settings::instance_env(&instance) {
-            command.env(k, v);
-        }
+        settings::apply_instance_env(&mut command, &instance);
         let output = tokio::time::timeout(ONESHOT_TIMEOUT, async {
             use tokio::io::AsyncWriteExt;
             let mut child = command.spawn().context("start Claude Code")?;

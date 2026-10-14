@@ -219,6 +219,14 @@ pub fn instance_env(instance: &ClaudeCodeInstance) -> Vec<(String, String)> {
     env
 }
 
+/// Apply [`instance_env`] to `command`. An inherited `CLAUDE_CONFIG_DIR` is
+/// dropped first, so an instance without `home` uses the CLI default login
+/// like `jcode login` does.
+pub fn apply_instance_env(command: &mut tokio::process::Command, instance: &ClaudeCodeInstance) {
+    command.env_remove("CLAUDE_CONFIG_DIR");
+    command.envs(instance_env(instance));
+}
+
 /// Extra env for the identity probe so it never connects to remote MCP or IDEs.
 pub fn probe_env_extras() -> Vec<(String, String)> {
     vec![
@@ -458,6 +466,34 @@ mod tests {
                 .all(|(k, _)| k != "CLAUDE_CONFIG_DIR")
         );
         assert_eq!(login_command("claude", &inst), "claude auth login");
+    }
+
+    #[test]
+    fn inherited_config_dir_never_reaches_an_instance_without_home() {
+        use std::ffi::OsStr;
+        let config_dir = |instance: &ClaudeCodeInstance| {
+            let mut command = tokio::process::Command::new("claude");
+            apply_instance_env(&mut command, instance);
+            command
+                .as_std()
+                .get_envs()
+                .find(|(k, _)| *k == OsStr::new("CLAUDE_CONFIG_DIR"))
+                .map(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
+        };
+        // Explicitly removed, not inherited from the parent.
+        assert_eq!(
+            config_dir(&ClaudeCodeInstance::implicit_default()),
+            Some(None)
+        );
+        let personal = ClaudeCodeInstance {
+            id: "personal".into(),
+            home: Some("/tmp/claude_personal".into()),
+            ..ClaudeCodeInstance::default()
+        };
+        assert_eq!(
+            config_dir(&personal),
+            Some(Some("/tmp/claude_personal".into()))
+        );
     }
 
     #[test]
