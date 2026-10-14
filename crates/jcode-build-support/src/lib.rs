@@ -34,10 +34,7 @@ pub use storage_helpers::{
     shared_server_binary_path, shared_server_version_file, stable_binary_path, stable_version_file,
     version_binary_path, write_build_progress,
 };
-pub use version_gc::{
-    DEFAULT_KEEP_RECENT_VERSIONS, KEEP_VERSIONS_ENV, VersionPruneReport, prune_old_versions,
-    prune_old_versions_in,
-};
+pub use version_gc::{DEFAULT_KEEP_RECENT_VERSIONS, KEEP_VERSIONS_ENV, prune_old_versions};
 
 pub use store_lock::{BuildStoreLock, acquire_build_store_lock};
 
