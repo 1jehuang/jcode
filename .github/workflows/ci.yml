@@ -39,6 +39,18 @@ jobs:
         run: python3 scripts/check_module_files.py
 
       - name: Check formatting
+        # `continue-on-error: true` so a fmt diff does not blind the rest of
+        # this job (clippy, `cargo check --all-targets --all-features`, and all
+        # eight budget/ratchet gates). The fmt step is still reported, and the
+        # separate `fmt` job below remains the canonical blocking gate for
+        # merge.
+        #
+        # Real bug reports this addresses: #1796 and #1803 (fmt-blindness in
+        # the Quality Guardrails job). The prior commit's `tx-task: #38` was
+        # a misattribution from a stale-context triage; #38 is the closed
+        # Linux ARM64 CI issue, not a fmt-blindness bug. Option B (decouple
+        # fmt from the budget/ratchet gates) is the fix for #1796 / #1803.
+        continue-on-error: true
         run: cargo fmt --all -- --check
 
       - name: Check all targets and all features
