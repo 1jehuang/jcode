@@ -1252,6 +1252,8 @@ pub enum WebSearchEngine {
     /// `JCODE_SEARXNG_URL` env var) to point at a SearXNG instance. Useful on
     /// hosts where DuckDuckGo/Bing block the request via TLS fingerprinting.
     Searxng,
+    /// User-configured HTTP JSON endpoint.
+    Custom,
     /// Provider-native server-side search (Anthropic `web_search`, OpenAI
     /// Responses `web_search`). Search runs on the model provider's side, so it
     /// works on hosts where scraping is blocked and needs no extra API key.
@@ -1266,6 +1268,7 @@ impl WebSearchEngine {
             Self::Duckduckgo => "duckduckgo",
             Self::Bing => "bing",
             Self::Searxng => "searxng",
+            Self::Custom => "custom",
             Self::Native => "native",
         }
     }
@@ -1275,6 +1278,7 @@ impl WebSearchEngine {
             "duckduckgo" | "ddg" => Some(Self::Duckduckgo),
             "bing" => Some(Self::Bing),
             "searxng" | "searx" => Some(Self::Searxng),
+            "custom" => Some(Self::Custom),
             "native" | "provider" => Some(Self::Native),
             _ => None,
         }
@@ -1286,10 +1290,62 @@ impl WebSearchEngine {
     }
 }
 
+/// HTTP method for a custom JSON search endpoint.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum CustomWebSearchMethod {
+    #[default]
+    #[serde(rename = "GET", alias = "get")]
+    Get,
+    #[serde(rename = "POST", alias = "post")]
+    Post,
+}
+
+/// Configurable HTTP JSON search. Pointers use RFC 6901 syntax.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CustomWebSearchConfig {
+    pub endpoint: String,
+    pub method: CustomWebSearchMethod,
+    pub query_param: String,
+    pub count_param: Option<String>,
+    /// Static URL query parameters for either method.
+    pub params: std::collections::BTreeMap<String, String>,
+    /// Static JSON object for POST requests.
+    pub body: serde_json::Value,
+    pub headers: std::collections::BTreeMap<String, String>,
+    /// Header name to environment variable containing its complete value.
+    pub header_env: std::collections::BTreeMap<String, String>,
+    pub results_pointer: String,
+    pub title_pointer: String,
+    pub url_pointer: String,
+    pub snippet_pointer: String,
+}
+
+impl Default for CustomWebSearchConfig {
+    fn default() -> Self {
+        Self {
+            endpoint: String::new(),
+            method: CustomWebSearchMethod::Get,
+            query_param: "q".into(),
+            count_param: None,
+            params: Default::default(),
+            body: serde_json::json!({}),
+            headers: Default::default(),
+            header_env: Default::default(),
+            results_pointer: "/results".into(),
+            title_pointer: "/title".into(),
+            url_pointer: "/url".into(),
+            snippet_pointer: "/snippet".into(),
+        }
+    }
+}
+
 /// Configuration for the websearch tool.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WebSearchConfig {
+    /// HTTP JSON provider configuration for engine = "custom".
+    pub custom: Option<CustomWebSearchConfig>,
     /// Preferred engine when the tool input does not specify one.
     pub engine: WebSearchEngine,
     /// Keyless HTML engines to try after the preferred engine fails.
@@ -1331,6 +1387,7 @@ pub struct WebSearchConfig {
 impl Default for WebSearchConfig {
     fn default() -> Self {
         Self {
+            custom: None,
             engine: WebSearchEngine::Duckduckgo,
             fallback_engines: vec![WebSearchEngine::Bing],
             bing_api_key: None,
