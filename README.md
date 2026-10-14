@@ -5,29 +5,50 @@
   <img src="assets/brand/jcode-mark.svg" alt="jcode halftone donut logo" width="160">
 </picture>
 
+<br><br>
+
+<p>
+<a href="https://trendshift.io/repositories/25042?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-25042" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/25042" alt="1jehuang/jcode | Trendshift" width="250" height="55"></a>
+</p>
+
 # jcode
+
+<p>
+  <strong>High-performance coding agents.</strong><br>
+  Run more agents with less RAM for your multi-agent development workflow.
+</p>
 
 [![Last Commit](https://badgen.net/github/last-commit/1jehuang/jcode/master?icon=github)](https://github.com/1jehuang/jcode/commits/master)
 [![GitHub Stars](https://badgen.net/github/stars/1jehuang/jcode?icon=github)](https://github.com/1jehuang/jcode/stargazers)
 [![GitHub Downloads](https://img.shields.io/github/downloads/1jehuang/jcode/total?style=flat-square)](https://github.com/1jehuang/jcode/releases)
 [![Discord](https://img.shields.io/badge/Discord-Join%20Community-5865F2?style=flat-square&logo=discord&logoColor=white)](https://discord.gg/nBe9vGyK9a)
 
-High-performance coding agents. <br>
-Run more agents with less RAM.
+[Website](https://jcode.sh) · [Docs](https://jcode.sh/docs) · [SDK](https://jcode.sh/sdk) · [Benchmarks](https://jcode.sh/bench) · [Screenshots](#screenshots) · [Install](#installation) · [Contributing](CONTRIBUTING.md)
 
-<a href="https://trendshift.io/repositories/25042?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-25042" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/25042" alt="1jehuang/jcode | Trendshift" width="250" height="55"></a>
+</div>
+
+<div align="center">
+
+## Screenshots
+
+[Browse the interactive gallery on jcode.sh](https://jcode.sh/#screenshots).
+
+<table>
+  <tr>
+    <td align="center"><a href="https://jcode.sh/screenshots/inline-image-read.webp"><img src="https://jcode.sh/screenshots/thumbs/inline-image-read.webp" alt="Jcode rendering an image inline after reading it" width="440" /></a><br>Inline images</td>
+    <td align="center"><a href="https://jcode.sh/screenshots/deep-swarm-investigation.webp"><img src="https://jcode.sh/screenshots/thumbs/deep-swarm-investigation.webp" alt="Jcode coordinating a deep swarm investigation" width="440" /></a><br>Deep swarm investigation</td>
+  </tr>
+  <tr>
+    <td align="center"><a href="https://jcode.sh/screenshots/latex-rendering.webp"><img src="https://jcode.sh/screenshots/thumbs/latex-rendering.webp" alt="Jcode rendering LaTeX mathematics inline" width="440" /></a><br>Inline LaTeX</td>
+    <td align="center"><a href="https://jcode.sh/screenshots/info-widgets.webp"><img src="https://jcode.sh/screenshots/thumbs/info-widgets.webp" alt="Jcode showing information widgets beside an active session" width="440" /></a><br>Info widgets</td>
+  </tr>
+</table>
 
 <a href="https://github.com/1jehuang/jcode/releases/download/readme-assets/jcode-yc-launch.mp4">
   <img src="https://github.com/1jehuang/jcode/releases/download/readme-assets/jcode-yc-launch.webp" alt="jcode YC launch video" width="800">
 </a>
 
-<br>
-
-[Website](https://jcode.sh) · [Docs](https://jcode.sh/docs) · [SDK](https://jcode.sh/sdk) · [Benchmarks](https://jcode.sh/bench) · [Install](#installation) · [Quick Start](#quick-start) · [Further Reading](#further-reading) · [Contributing](CONTRIBUTING.md)
-
 </div>
-
----
 
 <div align="center">
 
@@ -40,15 +61,7 @@ Run more agents with less RAM.
 curl -fsSL https://jcode.sh/install | bash
 ```
 
-```powershell
-# Windows 11 (PowerShell 5.1+)
-irm https://jcode.sh/install.ps1 | iex
-```
-
-See the [documentation](https://jcode.sh/docs) for installation options and provider configuration.
-
----
-
+[Windows installation instructions](https://jcode.sh/docs#install).
 
 <div align="center">
 
@@ -289,11 +302,6 @@ versions tested for this corrected memory rerun:
 
 </div>
 
-
----
-
-
-
 ## Swarm
 
 Spawn two or more agents in the same repo, and they will automatically be managed by the server to allow native collaboration. When agent A edits a file that agent B has read (code shifting under its feet), the server notifies agent B. Agent B can ignore it if it is not relevant, or it can check the diff to make sure that it doesn't conflict. Each agent has messaging abilities, capable of DMing just one agent, broadcasting to all other agents hosted by the server, or just agents working in that repo. This allows you to spawn multiple sessions in the same repo, and have all conflicts automatically resolved.
@@ -310,8 +318,6 @@ Spawn two or more agents in the same repo, and they will automatically be manage
 
 Agents are also able to spawn their own swarms autonomously. They have a swarm tool which allows them to spawn in their own teamates to accomplish tasks in parallel. Doing so turns the main agent into a coordinator and the spawned agents into workers. Groups of agents, their messaging channels, their completion statuses, etc are all automatically managed. This can be done headlessly or headed.
 
----
-
 Swarm modes keep root reasoning separate from worker effort. Configure each mode
 in `~/.jcode/config.toml`:
 
@@ -327,69 +333,13 @@ switcher shows the configured root level. These settings do not change worker
 `swarm_effort`. Environment overrides are `JCODE_SWARM_ROOT_EFFORT` and
 `JCODE_SWARM_DEEP_ROOT_EFFORT`.
 
-### Agent model scope
-
-`/agents` configures worker models for the current session only. Choices persist
-when that session resumes and do not change other Jcode instances. Target a role
-with `/agents swarm`, `/agents review`, `/agents judge`, `/agents memory`, or
-`/agents ambient`. Session ambient choices apply to scheduled workers spawned
-from that session, not the daemon's independent ambient loop.
-
-Use `/agents default [role]` or `/agents global [role]` to edit saved global
-defaults. **Use global default** removes a session override. **Inherit coordinator**
-explicitly bypasses a global pin. An explicit model on a worker spawn still wins.
-Changing routing affects future workers, not workers already running. Memory
-choices affect extraction only, not Jev recall.
-
 ## OAuth and Providers
 
-jcode works with subscription-backed OAuth flows and many provider integrations, so you can use the models you already pay for and still fall back to direct API providers when needed.
+Supports a [wide range of providers](https://jcode.sh/docs#providers), including Claude OAuth and OpenAI Codex OAuth.
 
-### Supported built-in login flows
+The **Claude Code CLI** provider (`jcode login --provider claude-code [--account <instance>]`) runs Claude through the official `claude` binary, side by side with native Claude. See [Claude Code mode](OAUTH.md#claude-code-mode-opt-in-side-by-side-with-native-claude).
 
-- **Claude** (`jcode login --provider claude`)
-- **Claude Code CLI** (`jcode login --provider claude-code [--account <instance>]`): Claude through the official `claude` binary, side by side with native Claude. See [Claude Code mode](OAUTH.md#claude-code-mode-opt-in-side-by-side-with-native-claude).
-- **OpenAI / ChatGPT / Codex** (`jcode login --provider openai`, browser callback on `http://localhost:1455/auth/callback`; see [OAUTH.md](OAUTH.md))
-- **Google Gemini** (`jcode login --provider gemini`)
-- **GitHub Copilot** (`jcode login --provider copilot`)
-- **Azure OpenAI** (`jcode login --provider azure`)
-- **Alibaba Cloud Coding Plan** (`jcode login --provider alibaba-coding-plan`)
-- **Fireworks** (`jcode login --provider fireworks`)
-- **Novita AI** (`jcode login --provider novita`, API key)
-- **MiniMax** (`jcode login --provider minimax`)
-- **Meta Model API / Muse** (`jcode login --provider meta-muse`)
-- **LM Studio** (`jcode login --provider lmstudio`)
-- **Ollama** (`jcode login --provider ollama`)
-- **Custom OpenAI-compatible endpoint** (`jcode login --provider openai-compatible`)
-
-For custom OpenAI-compatible endpoints, jcode now prompts for the API base and supports local localhost servers without requiring an API key.
-
-Azure OpenAI accepts a resource URL or a base URL ending in `/openai/v1`, a
-deployment name, and either an API key or Microsoft Entra ID. Agent turns use
-`/openai/v1/responses`, including tool calls with reasoning enabled. The
-Responses route carries encrypted reasoning and tool results between turns;
-`/chat/completions` cannot combine function tools with reasoning on GPT-5.6
-and later Azure deployments. The saved Azure credentials remain in
-`~/.config/jcode/azure-openai.env`. Azure omits reasoning effort unless you
-set `AZURE_OPENAI_REASONING_EFFORT` for a deployment that supports it; this
-avoids sending the global OpenAI default to non-reasoning deployments.
-See the [Azure reasoning model guide](https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/reasoning#tool-calling-with-reasoning-models).
-
-The native OpenAI providers use Responses WebSocket v2 with opportunistic
-background prewarming and HTTPS fallback. See [OpenAI WebSocket transport](docs/OPENAI_WEBSOCKET.md)
-for behavior, controls, and verification.
-
-### Supported providers
-
-- **Native / first-party style providers:** `claude`, `openai`, `copilot`, `gemini`, `azure`, `alibaba-coding-plan`
-- **Aggregator / compatibility providers:** `openrouter`, `orcarouter`, `yolo-auto`, `openai-compatible`
-- **Additional provider integrations:** `opencode`, `opencode-go`, `zai` / `kimi`, `302ai`, `baseten`, `cortecs`, `deepseek`, `firmware`, `huggingface`, `moonshotai`, `nebius`, `scaleway`, `stackit`, `groq`, `mistral`, `perplexity`, `togetherai`, `deepinfra`, `fireworks`, `novita`, `minimax`, `xai`, `lmstudio`, `ollama`, `chutes`, `cerebras`, `cursor`, `antigravity`, `google`
-
-Jcode also supports easy multi-account switching. Ran out of tokens on your first ChatGPT Pro subscription? /account and quickly switch to your second. 
-
-Accounts are per window: `/account switch claude-fox` (or Enter in the `/account` picker) moves only this window, so two windows can use two subscriptions of the same provider at once. `/account default claude-fox` (or `d` in the picker) sets the account new windows start with, `/account unpin` returns this window to the default, and `/account failover on|off|status` controls automatic moves to the next saved account when this window's account runs out. From the command line, `jcode --account claude-fox` and `jcode run --account openai-otter ...` pick the account for that window or run, and `jcode login claude --default` makes a new login the default.
-
----
+Accounts are per window: `/account switch claude-fox` (or Enter in the `/account` picker) moves only this window, so two windows can use two subscriptions of the same provider at once. `/account default claude-fox` (or `d` in the picker) sets the account new windows start with, `/account unpin` returns this window to the default, and `/account failover on|off|status` controls automatic moves to the next saved account in the auto-switch pool when this window's account runs out. From the command line, `jcode --account claude-fox` and `jcode run --account openai-otter ...` pick the account for that window or run, and `jcode login claude --default` makes a new login the default.
 
 ## Customizability / Self-Dev
 
@@ -398,8 +348,6 @@ Jcode is inventing a new form of customizability. One that doesn't limit you to 
 It is recommended that you use a frontier model for this. The jcode codebase is not a simple one, and weaker models can make subtle, breaking changes. GPT 5.5 or the latest available frontier model works well.
 
 <!-- Add self-dev demo thumbnail/video and fuller writeup here. -->
-
----
 
 ## Misc.
 
@@ -415,68 +363,7 @@ Inputs are by default interleaved with the working agent. It sends the input as 
 
 Resume sessions from different harnesses. Claude code broke on you? Resume the session from jcode and continue where you left off. Session resume is supported for codex, claude code, opencode, and pi. 
 
-<img width="2877" height="1762" alt="Screenshot from 2026-04-11 16-28-52" src="https://github.com/user-attachments/assets/c2b383cf-2531-4217-85ae-6a863354dc97" />
-image of /Resume for codex sessions
-
-
 Skills are not all loaded on startup. The conversation is embedded as a semantic vector, and will automatically inject a skill if there is an embedding hit similar to memories. The agent has a skill tool for you to manually activate a skill at anytime. You may also activate via slash commands. 
-
----
-
-## iOS Application / Native OpenClaw
-
-A native iOS application version of jcode is coming soon. This will allow you to work with jcode on your personal machine's environment from your phone, via Tailscale. Openclaw like features will be bundled with this iOS application. 
-
----
-
-## Other planned features
-
-Agents dont like to commit in dirty git state with active changes. Git was clearly not built for multi-agent workflows, and git worktrees is not a good solution. Given this, I believe that is an opporunity for a new git like primitive to be born. 
-
-Build speed improvements: An incremental debug cargo build with cache enabled takes about 1 minute on my machine. The goal is 5-20 seconds. Refactors and crates seams should be able to make this happen. 
-
-<!-- Add iOS / native OpenClaw preview and fuller writeup here. -->
-
----
-
-<div align="center">
-
-## Quick Start
-
-</div>
-
-```bash
-# Launch the TUI
-jcode
-
-# Run a single command non-interactively
-jcode run "say hello"
-
-# Resume a previous session by memorable name
-jcode --resume fox
-
-# Run as a persistent background server, then attach more clients
-jcode serve
-jcode connect
-
-# Send voice input from your configured STT command
-jcode dictate
-```
-
-jcode supports interactive TUI use, non-interactive runs, persistent server/client workflows,
-and hotkey-friendly dictation without requiring a bundled speech-to-text stack.
-
-<div align="center">
-
-  <a href="https://github.com/1jehuang/jcode/releases/download/readme-assets/workflow.mp4">
-    <img src="https://github.com/1jehuang/jcode/releases/download/readme-assets/jcode-workflow-demonstration.webp" alt="jcode workflow demonstration" width="900">
-  </a>
-
-  <p><em>jcode workflow demonstration</em></p>
-
-</div>
-
----
 
 ## Browser Automation
 
@@ -490,22 +377,3 @@ Page actions there need an explicit `tab_id`, and file upload and screenshots ar
 unavailable. See [macOS browser validation](docs/MACOS_BROWSER_VALIDATION.md).
 
 See [Browser Provider Protocol](docs/BROWSER_PROVIDER_PROTOCOL.md) for details.
-
----
-
-## Further Reading
-
-- [jcode.sh/docs](https://jcode.sh/docs) — install, providers, configuration, keybindings
-- [jcode.sh/swarm](https://jcode.sh/swarm) — many coding agents in one repository
-- [jcode.sh/sdk](https://jcode.sh/sdk) — TypeScript SDK: drive jcode sessions from your own program
-- [jcode.sh/bench](https://jcode.sh/bench) — benchmark methodology and results
-- [Ambient Mode / OpenClaw](docs/AMBIENT_MODE.md)
-- [Browser Provider Protocol](docs/BROWSER_PROVIDER_PROTOCOL.md)
-- [Memory Architecture](docs/MEMORY_ARCHITECTURE.md)
-- [Swarm Architecture](docs/SWARM_ARCHITECTURE.md)
-- [Server Architecture](docs/SERVER_ARCHITECTURE.md)
-- [Safety System](docs/SAFETY_SYSTEM.md)
-- [Sponsored Discovery Sponsor Onboarding](docs/SPONSORED_DISCOVERY_SPONSOR_ONBOARDING.md)
-- [Windows Notes](docs/WINDOWS.md)
-- [Wrappers and Shell Integration](docs/WRAPPERS.md)
-- [Refactoring Notes](docs/REFACTORING.md)

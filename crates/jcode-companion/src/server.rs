@@ -169,6 +169,9 @@ pub async fn run(options: CompanionOptions) -> Result<()> {
     let mut listener = bind(&options.socket)?;
     #[cfg(not(windows))]
     let listener = bind(&options.socket)?;
+    // Windows named-pipe acceptance replaces the listening pipe instance.
+    #[cfg(windows)]
+    let mut listener = listener;
     let mut capabilities = vec![
         "open".to_string(),
         "reveal".to_string(),

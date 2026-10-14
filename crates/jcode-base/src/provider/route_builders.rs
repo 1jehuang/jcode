@@ -87,14 +87,9 @@ pub fn model_name_is_likely_non_chat(model: &str) -> bool {
     // rescue an independently disqualifying media token (such as Sora).
     let vision_chat =
         tokens.contains(&"instruct") || tokens.contains(&"chat") || tokens.contains(&"vl");
-    if tokens
+    tokens
         .iter()
         .any(|t| TOKEN_MARKERS.contains(t) && !(*t == "vision" && vision_chat))
-    {
-        return true;
-    }
-
-    false
 }
 
 pub fn openrouter_catalog_model_id(model: &str) -> Option<String> {
