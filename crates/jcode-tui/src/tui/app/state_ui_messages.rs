@@ -847,8 +847,8 @@ impl App {
                 duration_secs: None,
                 title: None,
                 tool_data: msg.tool_data,
-                timestamp: None,
-                tool_duration_ms: None,
+                timestamp: msg.timestamp,
+                tool_duration_ms: msg.tool_duration_ms,
             })
             .collect();
         self.apply_compacted_history_window(

@@ -96,7 +96,6 @@ fn test_tool_row_stamp_renders_in_configured_utc3() {
     let msg = time_tool_msg(Some(stamp), Some(45));
 
     let row = rendered_first_row(&msg, 200);
-    println!("observed UTC+3 row: {row}");
     assert!(
         row.contains("23:23:35"),
         "UTC+3 stamp (20:23Z + 3h = 23:23) missing: {row}"
@@ -119,7 +118,6 @@ fn test_tool_row_utc3_exact_offset_arithmetic_across_day_boundary() {
     let msg = time_tool_msg(Some(stamp), Some(2_325));
 
     let row = rendered_first_row(&msg, 200);
-    println!("observed: {row}");
     assert!(
         row.contains("00:51:28"),
         "21:51:28Z + 3h must be 00:51:28 UTC+3: {row}"
