@@ -31,7 +31,10 @@ mod tests {
 
     #[test]
     fn ansi_support_matches_stderr_terminal_detection() {
-        assert_eq!(super::stderr_supports_ansi(), std::io::stderr().is_terminal());
+        assert_eq!(
+            super::stderr_supports_ansi(),
+            std::io::stderr().is_terminal()
+        );
     }
 }
 
