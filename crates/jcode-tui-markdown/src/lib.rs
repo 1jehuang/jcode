@@ -79,6 +79,9 @@ pub fn set_latex_log_hook(hook: fn(&str)) {
     latex_image::set_log_hook(hook);
 }
 
+/// Missing optional TeX tooling is configuration information, not a warning.
+pub use latex_image::error_is_missing_toolchain as latex_error_is_missing_toolchain;
+
 pub use latex_image::{
     HandtermNativeLatex, encode_handterm_latex_apc, handterm_native_latex_for_hash,
 };
@@ -117,6 +120,12 @@ use context::{
 
 #[path = "markdown_latex_image.rs"]
 mod latex_image;
+#[path = "markdown_math_copy.rs"]
+mod math_copy;
+pub use math_copy::{
+    InlineMathSpan, inline_math_spans, inline_math_spans_for_plain_line,
+    record_inline_math_for_line,
+};
 #[path = "markdown_render_full.rs"]
 mod render_full;
 #[path = "markdown_render_lazy.rs"]
@@ -991,10 +1000,9 @@ fn count_unescaped_double_dollar(line: &str) -> usize {
 }
 
 fn math_inline_span(math: &str) -> Span<'static> {
-    Span::styled(
-        jcode_render_core::render_inline_latex(math),
-        Style::default().fg(math_inline_fg()),
-    )
+    let rendered = jcode_render_core::render_inline_latex(math);
+    math_copy::register_inline_math(&rendered, math);
+    Span::styled(rendered, Style::default().fg(math_inline_fg()))
 }
 
 fn raw_math_inline_span(math: &str) -> Span<'static> {
@@ -1005,7 +1013,9 @@ fn math_display_lines(math: &str) -> Vec<Line<'static>> {
     let mut out = Vec::new();
     let dim = Style::default().fg(md_dim_color());
     out.push(Line::from(Span::styled("┌─ math ", dim)).left_aligned());
-    for line in jcode_render_core::render_display_latex(math) {
+    let rendered = jcode_render_core::render_display_latex(math);
+    math_copy::register_display_math(&rendered, math);
+    for line in rendered {
         out.push(
             Line::from(vec![
                 Span::styled("│ ", dim),
@@ -1040,11 +1050,39 @@ fn raw_math_display_lines(math: &str) -> Vec<Line<'static>> {
     out
 }
 
+/// Shown once per rendered message when image mode had to fall back to the
+/// Unicode approximation because no TeX toolchain is installed.
+pub const LATEX_INSTALL_HINT_TEXT: &str = "LaTeX is not installed, so math is shown as a text approximation. Install TeX Live (latex + dvipng) for typeset math, or set display.latex_rendering = \"unicode\" to hide this.";
+
+fn latex_install_hint_line() -> Line<'static> {
+    Line::from(vec![
+        Span::styled("  ⓘ ", Style::default().fg(rgb(100, 100, 100))),
+        Span::styled(
+            LATEX_INSTALL_HINT_TEXT,
+            Style::default()
+                .fg(rgb(140, 170, 200))
+                .add_modifier(Modifier::DIM | Modifier::ITALIC),
+        ),
+    ])
+}
+
+/// Push the install hint after a Unicode fallback when the TeX toolchain is
+/// missing, at most once per render pass.
+fn push_latex_install_hint_if_needed(lines: &mut Vec<Line<'static>>, shown: &mut bool) {
+    if !*shown && mermaid::image_protocol_available() && latex_image::toolchain_missing() {
+        lines.push(latex_install_hint_line());
+        *shown = true;
+    }
+}
+
 fn latex_image_lines(
     math: &str,
     display: bool,
     max_width: Option<usize>,
 ) -> Option<Vec<Line<'static>>> {
+    if math.trim().is_empty() {
+        return None;
+    }
     if let Some(lines) = latex_image::render_handterm_native_latex(math, display, max_width) {
         return Some(lines);
     }

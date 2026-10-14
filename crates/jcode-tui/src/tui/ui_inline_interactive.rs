@@ -38,7 +38,31 @@ fn pad_left_display(text: &str, width: usize) -> String {
 }
 
 fn api_method_display(raw: &str) -> String {
-    crate::provider::ModelRouteApiMethod::parse(raw).display_label()
+    let method = crate::provider::ModelRouteApiMethod::parse(raw).display_label();
+    match jcode_provider_core::oauth_account_label(raw) {
+        Some(label) => format!("{method} · {label}"),
+        None => method,
+    }
+}
+
+fn route_method_display(route: &crate::tui::PickerOption) -> String {
+    let Some(label) = jcode_provider_core::oauth_account_label(&route.api_method) else {
+        return api_method_display(&route.api_method);
+    };
+    // Only the catalog identity prefix is authoritative, not later diagnostics.
+    let identity = format!("account {label} · ");
+    let detail = route
+        .detail
+        .trim_start_matches("[global] ")
+        .trim_start_matches("[session] ");
+    let email = detail
+        .strip_prefix(&identity)
+        .and_then(|rest| rest.split(" · ").next())
+        .filter(|email| email.contains('@') && !email.chars().any(char::is_whitespace));
+    match email {
+        Some(email) => format!("oauth · {email}"),
+        None => api_method_display(&route.api_method),
+    }
 }
 
 fn route_provider_display(provider: &str, api_method: &str) -> String {
@@ -177,10 +201,21 @@ fn model_picker_top_hint(picker: &crate::tui::InlineInteractiveState) -> Option<
                 }
             )
         });
-    if is_swarm_agent_model_picker {
-        return Some(
-            " swarm routing is configured by a prompt · /swarm-prompt to edit the active file",
-        );
+    if let Some(global) = agent_models_scope(picker) {
+        return Some(match (global, is_swarm_agent_model_picker) {
+            (true, false) => {
+                " GLOBAL DEFAULT: changes every session without its own choice · Ctrl+G this session instead"
+            }
+            (false, false) => {
+                " THIS SESSION ONLY: other sessions keep the global default · Ctrl+G global default"
+            }
+            (true, true) => {
+                " GLOBAL DEFAULT (all sessions) · Ctrl+G this session · swarm routing: /swarm-prompt"
+            }
+            (false, true) => {
+                " THIS SESSION ONLY · Ctrl+G global default · swarm routing: /swarm-prompt"
+            }
+        });
     }
 
     // The favorite/default hotkeys now work in both the focused picker and the
@@ -198,6 +233,33 @@ fn model_picker_top_hint(picker: &crate::tui::InlineInteractiveState) -> Option<
     } else {
         None
     }
+}
+
+/// Scope of an open `/agents` view: `Some(true)` edits the global default,
+/// `Some(false)` this session, `None` when it is not an `/agents` view. Both
+/// views tag every row with its scope (`Swarm [session]` role rows,
+/// `[global] ...` model route details), so the scope is read from there.
+fn agent_models_scope(picker: &crate::tui::InlineInteractiveState) -> Option<bool> {
+    if picker.kind != crate::tui::PickerKind::Model {
+        return None;
+    }
+    let is_agents_view = picker.is_agent_target_picker()
+        || picker.entries.iter().any(|entry| {
+            matches!(
+                entry.action,
+                crate::tui::PickerAction::AgentModelChoice { .. }
+            )
+        });
+    if !is_agents_view {
+        return None;
+    }
+    Some(picker.entries.iter().any(|entry| {
+        entry.name.ends_with("[global]")
+            || entry
+                .options
+                .iter()
+                .any(|option| option.detail.starts_with("[global]"))
+    }))
 }
 
 fn account_picker_shows_provider_badge(picker: &crate::tui::InlineInteractiveState) -> bool {
@@ -263,7 +325,13 @@ fn picker_render_width(picker: &crate::tui::InlineInteractiveState, max_width: u
 
         let state_width = (max_state_len + 1).clamp(7, 10);
         let min_title_width = max_title_len.clamp(8, 10);
-        let title_cap = if show_provider_badge { 42 } else { 34 };
+        let title_cap = if picker.kind == crate::tui::PickerKind::Account {
+            max_title_len
+        } else if show_provider_badge {
+            42
+        } else {
+            34
+        };
         let budget = max_width.saturating_sub(marker_width + state_width);
         let title_width = max_title_len
             .min(title_cap)
@@ -287,7 +355,7 @@ fn picker_render_width(picker: &crate::tui::InlineInteractiveState, max_width: u
                 provider_label
             };
             max_provider_len = max_provider_len.max(display_width(provider_label.as_str()));
-            max_via_len = max_via_len.max(display_width(&api_method_display(&route.api_method)));
+            max_via_len = max_via_len.max(display_width(&route_method_display(route)));
         }
     }
 
@@ -300,7 +368,7 @@ fn picker_render_width(picker: &crate::tui::InlineInteractiveState, max_width: u
     } else {
         56
     };
-    let min_model_width = max_model_len.clamp(6, 8);
+    let min_model_width = max_model_len.clamp(6, 16);
 
     let budget = max_width.saturating_sub(marker_width);
     if provider_width + via_width + min_model_width > budget {
@@ -574,7 +642,7 @@ pub(super) fn model_suggestion_lines(
             ));
             spans.push(Span::styled(" · ", dim));
             spans.push(Span::styled(
-                api_method_display(&route.api_method),
+                route_method_display(route),
                 if row == selected && !picker.preview && picker.column == 2 {
                     route_style.bold().underlined()
                 } else {
@@ -656,14 +724,16 @@ pub(super) fn draw_inline_interactive(frame: &mut Frame, app: &dyn TuiState, are
         is_account_picker && account_picker_shows_provider_badge(picker);
     let mut max_provider_len = display_width(picker.secondary_label(is_preview));
     let mut max_via_len = display_width(picker.tertiary_label());
+    let mut max_model_len = display_width(picker.primary_label());
     let mut max_account_title_len = display_width("ACCOUNT");
     let mut max_account_state_len = display_width("STATE");
     for &fi in picker.filtered.iter().take(WIDTH_SCAN_LIMIT) {
         let entry = &picker.entries[fi];
         let route = entry.active_option();
+        max_model_len = max_model_len.max(display_width(&picker_entry_display_name(entry)));
         if let Some(r) = route {
             max_provider_len = max_provider_len.max(display_width(r.provider.as_str()));
-            max_via_len = max_via_len.max(display_width(&api_method_display(&r.api_method)));
+            max_via_len = max_via_len.max(display_width(&route_method_display(r)));
         }
         if is_account_picker {
             let (title, _) = account_picker_entry_title(entry, show_account_provider_badge);
@@ -734,7 +804,7 @@ pub(super) fn draw_inline_interactive(frame: &mut Frame, app: &dyn TuiState, are
     let mut provider_width = (max_provider_len + 1).max(8);
     let mut via_width = (max_via_len + 1).max(6);
     if !is_account_picker {
-        let min_model_width = 8usize;
+        let min_model_width = max_model_len.clamp(6, 16);
         let needed = marker_width + provider_width + via_width + min_model_width;
         if needed > width {
             let provider_floor = 8usize.min(provider_width);
@@ -1083,7 +1153,7 @@ pub(super) fn draw_inline_interactive(frame: &mut Frame, app: &dyn TuiState, are
         };
 
         let via_raw = route
-            .map(|r| api_method_display(&r.api_method))
+            .map(route_method_display)
             .unwrap_or_else(|| "-".to_string());
         let vw = via_width.saturating_sub(1);
         let via_display = format!(" {}", pad_left_display(via_raw.as_str(), vw));
@@ -1467,9 +1537,56 @@ mod tests {
 
     #[test]
     fn model_picker_method_display_uses_user_friendly_labels() {
+        assert_eq!(api_method_display("openai-oauth@work"), "oauth · work");
+        assert_eq!(
+            api_method_display("claude-oauth@personal"),
+            "oauth · personal"
+        );
         assert_eq!(api_method_display("openai-oauth"), "oauth");
         assert_eq!(api_method_display("openai-api-key"), "api key");
         assert_eq!(api_method_display("openai-compatible:comtegra"), "api key");
+    }
+
+    #[test]
+    fn oauth_row_displays_email_instead_of_account_label() {
+        let mut picker = sample_picker();
+        let route = &mut picker.entries[0].options[0];
+        route.api_method = "openai-oauth@work".into();
+        route.detail = "account work · full.person@example.com · expired".into();
+        assert_eq!(
+            route_method_display(route),
+            "oauth · full.person@example.com"
+        );
+        route.detail = "account work · quota reached, contact support@example.com".into();
+        assert_eq!(route_method_display(route), "oauth · work");
+        route.detail = "[global] account work · full.person@example.com".into();
+        assert!(route_method_display(route).contains("full.person@example.com"));
+        route.api_method = "openai-api-key".into();
+        assert_eq!(route_method_display(route), "api key");
+    }
+
+    #[test]
+    fn oauth_email_is_visible_in_unselected_suggestion_rows_and_width_scan() {
+        let mut picker = sample_picker();
+        picker.entries.push(picker.entries[0].clone());
+        picker.filtered.push(1);
+        picker.selected = 1;
+        picker.entries[0].options[0].api_method = "claude-oauth@personal".into();
+        picker.entries[0].options[0].detail = "account personal · full.person@example.com".into();
+        let lines = model_suggestion_lines(&picker, 6);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.to_string().contains("full.person@example.com"))
+        );
+        let wide = picker_render_width(&picker, 160);
+        assert!(wide >= display_width("oauth · full.person@example.com") + 16);
+        for width in [24, 40, 60, 80, 160] {
+            assert!(picker_render_width(&picker, width) <= width);
+        }
+        let shortened = truncate_display("oauth · full.person@example.com", 24);
+        assert!(shortened.ends_with('…'));
+        assert!(display_width(&shortened) <= 24);
     }
 
     #[test]
@@ -1529,7 +1646,49 @@ mod tests {
 
         let hint = model_picker_top_hint(&picker).expect("swarm picker should show prompt hint");
         assert!(hint.contains("/swarm-prompt"));
-        assert!(hint.contains("configured by a prompt"));
+        assert!(hint.contains("swarm routing"));
+    }
+
+    /// `/agents` must say which settings a choice changes and how to switch:
+    /// the hint follows the `[session]` / `[global]` tags on the rows.
+    #[test]
+    fn agents_pickers_name_their_scope_and_the_toggle() {
+        let mut picker = sample_picker();
+        for entry in &mut picker.entries {
+            entry.action = crate::tui::PickerAction::AgentModelChoice {
+                target: crate::tui::AgentModelTarget::Review,
+                clear_override: false,
+            };
+            for option in &mut entry.options {
+                option.detail = format!("[session] {}", option.detail);
+            }
+        }
+        let hint = model_picker_top_hint(&picker).expect("session hint");
+        assert!(hint.contains("THIS SESSION ONLY"), "{hint}");
+        assert!(hint.contains("Ctrl+G global default"), "{hint}");
+
+        for entry in &mut picker.entries {
+            for option in &mut entry.options {
+                option.detail = option.detail.replacen("[session]", "[global]", 1);
+            }
+        }
+        let hint = model_picker_top_hint(&picker).expect("global hint");
+        assert!(hint.contains("GLOBAL DEFAULT"), "{hint}");
+        assert!(hint.contains("Ctrl+G this session"), "{hint}");
+
+        // The role list carries the scope in its row names.
+        let mut roles = sample_picker();
+        for entry in &mut roles.entries {
+            entry.name = "Swarm [global]".to_string();
+            entry.action =
+                crate::tui::PickerAction::AgentTarget(crate::tui::AgentModelTarget::Swarm);
+        }
+        let hint = model_picker_top_hint(&roles).expect("role list hint");
+        assert!(hint.contains("GLOBAL DEFAULT"), "{hint}");
+
+        // The plain /model picker keeps its own key hint.
+        let hint = model_picker_top_hint(&sample_picker()).expect("model hint");
+        assert!(hint.contains("Ctrl+O set default"), "{hint}");
     }
 
     #[test]
@@ -1596,6 +1755,20 @@ mod tests {
         let (single_title, _) = account_picker_entry_title(&single.entries[0], false);
         assert!(mixed_title.starts_with("Claude · "));
         assert_eq!(single_title, "work");
+    }
+
+    #[test]
+    fn account_picker_fits_full_email_and_clamps_to_narrow_terminals() {
+        for mixed in [false, true] {
+            let mut picker = sample_account_picker(mixed);
+            picker.entries[0].name = "Claude Otter · personal.account@example.com".to_string();
+            let (title, _) = account_picker_entry_title(&picker.entries[0], mixed);
+            let width = picker_render_width(&picker, 120);
+            assert!(width >= display_width(&title) + 3 + 7);
+            for available in [16, 24, 40] {
+                assert!(picker_render_width(&picker, available) <= available);
+            }
+        }
     }
 
     #[test]
