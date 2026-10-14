@@ -8,7 +8,7 @@
  */
 
 export const API_VERSION_MAJOR = 1;
-export const API_VERSION_MINOR = 10;
+export const API_VERSION_MINOR = 11;
 
 export type RuntimeCommand = "skills" | "context" | "info" | "cache" | "memory" | "swarm" | "agents" | "subagent_model" | "autoreview" | "autojudge" | "transport" | "fast" | "telemetry" | "subscription" | "overnight" | "productivity" | "initiatives" | "premium" | "provider_test_coverage" | "refresh_model_list" | "continue" | "resume_all" | "remote" | "server_reload" | "review" | "judge" | "subagent" | "auth" | "logout";
 
@@ -40,6 +40,8 @@ export interface SessionInfo {
   working_dir?: string;
   title?: string;
   status: string;
+  /** Whether a user client is attached. Omitted by older servers, meaning false. */
+  user_connected?: boolean;
   /** Approximate size of the stored transcript, in bytes. */
   transcript_bytes?: number;
   archived?: boolean;

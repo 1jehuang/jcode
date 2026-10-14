@@ -114,6 +114,8 @@ static NEXT_TEXT_ID: AtomicU64 = AtomicU64::new(1);
 /// Per-connection translation state.
 #[derive(Debug, Default)]
 pub struct BridgeState {
+    /// Refreshed from an authoritative source-daemon Ping before each list.
+    pub user_connected_sessions: std::collections::HashSet<String>,
     pub runtime_commands_supported: bool,
     /// Set only after a safe legacy ping capability probe succeeds.
     pub session_tools_supported: bool,
@@ -788,6 +790,9 @@ impl BridgeState {
                     recent.truncate(limit);
                     ids = recent.into_iter().collect();
                 }
+                // Connected user clients must remain discoverable even when
+                // their idle session is older than the persisted recency page.
+                ids.extend(self.user_connected_sessions.iter().cloned());
                 // Titles are deliberately not cached. A rename is persisted
                 // before `SessionRenamed` is broadcast, and every list call
                 // should reflect that newest canonical value even on another
@@ -834,7 +839,9 @@ impl BridgeState {
                     let cutoff = Self::now_ms().saturating_sub(u64::from(days) * 86_400_000);
                     let mut changed = false;
                     for id in &ids {
-                        if self.session_id.as_ref() == Some(id) || archive.sessions.contains_key(id)
+                        if self.session_id.as_ref() == Some(id)
+                            || self.user_connected_sessions.contains(id)
+                            || archive.sessions.contains_key(id)
                         {
                             continue;
                         }
@@ -854,6 +861,7 @@ impl BridgeState {
                         include_archived || !archive.sessions.contains_key(session_id)
                     })
                     .map(|session_id| SessionInfo {
+                        user_connected: self.user_connected_sessions.contains(&session_id),
                         edit_stats: None,
                         parent_session_id: None,
                         agent_label: None,
@@ -1710,6 +1718,7 @@ impl BridgeState {
                         api_id,
                         ApiEvent::Attached {
                             session: SessionInfo {
+                                user_connected: self.user_connected_sessions.contains(&session_id),
                                 edit_stats: None,
                                 parent_session_id: None,
                                 agent_label: None,
@@ -2029,6 +2038,7 @@ impl BridgeState {
                     api_id,
                     ApiEvent::SessionForked {
                         session: SessionInfo {
+                            user_connected: self.user_connected_sessions.contains(&session_id),
                             edit_stats: None,
                             parent_session_id: None,
                             agent_label: None,

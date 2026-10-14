@@ -1327,6 +1327,9 @@ pub enum ServerEvent {
         native_ssh_protocol: Option<u32>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         capabilities: Vec<String>,
+        /// Authoritative connected non-headless users. None on older daemons.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user_connected_session_ids: Option<Vec<String>>,
     },
 
     /// Current state (debug)

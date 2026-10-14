@@ -1627,7 +1627,8 @@ pub(super) async fn handle_client(
             }
 
             Request::Ping { id } => {
-                let json = encode_event(&ServerEvent::Pong { id, native_ssh_protocol: Some(1), capabilities: vec!["session_tools".into(), "soft_interrupt_ids".into(), "runtime_commands".into()] });
+                let event = super::session_connections::connection_presence_pong(id, &client_connections, &swarm_members).await;
+                let json = encode_event(&event);
                 let mut w = writer.lock().await;
                 if w.write_all(json.as_bytes()).await.is_err() {
                     break;
