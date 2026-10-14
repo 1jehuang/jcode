@@ -2,6 +2,18 @@ use super::*;
 use jcode_provider_core::{FailoverDecision, ProviderFailoverPrompt};
 
 impl MultiProvider {
+    /// Eligibility must be identical for saved-account and catalog candidates.
+    /// Unknown capacity is not a safe escape hatch after known windows fail.
+    pub(super) fn failover_model_fits(
+        model: &str,
+        provider: &str,
+        required_context: usize,
+    ) -> bool {
+        models::is_agent_model_for_failover(model, provider)
+            && models::context_limit_for_model_with_provider(model, Some(provider))
+                .is_some_and(|limit| limit >= required_context)
+    }
+
     pub(super) fn provider_is_configured(&self, provider: ActiveProvider) -> bool {
         self.reconcile_auth_if_provider_missing(provider)
     }

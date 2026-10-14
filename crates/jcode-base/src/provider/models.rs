@@ -1362,6 +1362,38 @@ pub fn resolve_model_capabilities(model: &str, provider_hint: Option<&str>) -> M
     }
 }
 
+/// Automatic agent failover is narrower than manual model selection. A model
+/// appearing in an account's catalog is not evidence that it can run an agent
+/// turn: platform catalogs also advertise video, audio and embedding models.
+/// Accept curated/frontier agent models, plus versioned GPT variants so an
+/// explicitly configured new release need not wait for the bundled order.
+/// Unrecognized catalogs remain available for manual selection, not failover.
+pub(super) fn is_agent_model_for_failover(model: &str, provider: &str) -> bool {
+    let normalized = normalize_model_id(model);
+    if !super::is_listable_model_name(&normalized) || normalized.contains("[web]") {
+        return false;
+    }
+    if provider == "bedrock" {
+        return super::bedrock::BedrockProvider::model_supports_tools(model);
+    }
+    let base = jcode_provider_core::model_id::slash_base(&normalized);
+    // These GPT specializations do not implement the normal agent tool API.
+    if base
+        .split('-')
+        .any(|token| matches!(token, "instruct" | "search" | "research"))
+    {
+        return false;
+    }
+    if crate::auth::lifecycle::ranked_flagship_for_provider(provider, &[model]).is_some() {
+        return true;
+    }
+    matches!(provider, "openai" | "copilot" | "cursor" | "openrouter")
+        && base
+            .strip_prefix("gpt-")
+            .and_then(|version| version.chars().next())
+            .is_some_and(|first| first.is_ascii_digit())
+}
+
 /// Detect which provider a model belongs to
 pub fn provider_for_model_with_hint(
     model: &str,

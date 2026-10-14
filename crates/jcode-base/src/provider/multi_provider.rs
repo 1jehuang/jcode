@@ -8,7 +8,14 @@ impl MultiProvider {
         let Some((method, model)) = route.split_once(':') else {
             return false;
         };
-        if model.trim().is_empty() {
+        let provider = match method.split('@').next().unwrap_or(method) {
+            "openai" | "openai-oauth" | "openai-api" | "openai-api-key" => "openai",
+            "claude" | "claude-oauth" | "claude-api" | "anthropic-api" | "anthropic-api-key" => {
+                "claude"
+            }
+            other => other,
+        };
+        if !models::is_agent_model_for_failover(model, provider) {
             return false;
         }
         let key = if let Some((method, label)) = method.split_once('@') {
@@ -113,6 +120,11 @@ impl MultiProvider {
         // This path never consults or mutates the global active login.
         let context_only = jcode_provider_core::classify_failover_error_message(&reason)
             == jcode_provider_core::FailoverDecision::RetryNextProvider;
+        let required_context = if context_only {
+            tokens.max(self.context_window().saturating_add(1))
+        } else {
+            tokens
+        };
         if let Some(current) = from_label
             .as_deref()
             .filter(|_| !context_only && same_provider_account_failover_enabled())
@@ -127,7 +139,9 @@ impl MultiProvider {
                 .filter(|label| label != current)
             {
                 let spec = format!("{method}@{label}:{}", self.model());
-                if Self::is_failover_route_pool_approved(&spec) {
+                if Self::is_failover_route_pool_approved(&spec)
+                    && Self::failover_model_fits(&self.model(), from_provider, required_context)
+                {
                     candidates.push((
                         crate::auth::account_pool::account_key(from_provider, Some(&label)),
                         from,
@@ -144,18 +158,6 @@ impl MultiProvider {
         {
             let selection = jcode_provider_core::RouteSelection::from_model_route(&route);
             let spec = selection.routed_model_spec();
-            let context_limit =
-                models::context_limit_for_model_with_provider(&route.model, Some(&route.provider));
-            let required_context = if context_only {
-                tokens.max(self.context_window().saturating_add(1))
-            } else {
-                tokens
-            };
-            if context_limit.is_some_and(|limit| limit < required_context)
-                || (context_only && context_limit.is_none())
-            {
-                continue;
-            }
             if !Self::is_failover_route_pool_approved(&spec) {
                 continue;
             }
@@ -173,6 +175,14 @@ impl MultiProvider {
                 jcode_provider_core::RuntimeKey::OpenRouter => ActiveProvider::OpenRouter,
                 _ => continue,
             };
+            if !Self::failover_model_fits(
+                &route.model,
+                Self::provider_key(target_provider),
+                required_context,
+            ) || route.detail.contains("no tools")
+            {
+                continue;
+            }
             if target_provider == from
                 && (context_only || !same_provider_account_failover_enabled())
             {
@@ -209,6 +219,7 @@ impl MultiProvider {
         if let Some(position) = order.iter().position(|key| *key == source_key) {
             order.rotate_left(position + 1);
         }
+        let configured_model = crate::config::Config::load().provider.default_model;
         let target = order
             .into_iter()
             .filter(|key| *key != source_key)
@@ -227,6 +238,13 @@ impl MultiProvider {
                         return Some(*preserved);
                     }
                 }
+                if let Some(configured) = configured_model.as_deref()
+                    && let Some(preferred) = group
+                        .iter()
+                        .find(|candidate| candidate_matches_configured_model(candidate, configured))
+                {
+                    return Some(*preferred);
+                }
                 let models: Vec<&str> = group
                     .iter()
                     .map(|candidate| candidate_model(candidate))
@@ -242,17 +260,9 @@ impl MultiProvider {
                         return Some(*flagship);
                     }
                 }
-                group.into_iter().max_by_key(|candidate| {
-                    models::context_limit_for_model_with_provider(
-                        candidate
-                            .2
-                            .split_once(':')
-                            .map(|(_, model)| model)
-                            .unwrap_or(""),
-                        Some(Self::provider_key(candidate.1)),
-                    )
-                    .unwrap_or_default()
-                })
+                // Capacity is eligibility, not quality. Never pick an unknown
+                // model by maximum context, catalog position or lexical order.
+                None
             })?;
         let mut prompt = self.build_failover_prompt(from, target.1, reason, chars, tokens);
         prompt.target_route = Some(target.2.clone());
@@ -321,6 +331,30 @@ fn candidate_model(candidate: &(String, ActiveProvider, String, String)) -> &str
         .split_once(':')
         .map(|(_, model)| model)
         .unwrap_or("")
+}
+
+fn candidate_matches_configured_model(
+    candidate: &(String, ActiveProvider, String, String),
+    configured: &str,
+) -> bool {
+    let configured = configured.trim();
+    if candidate_model(candidate) == configured {
+        return true;
+    }
+    let Some((method, model)) = configured.split_once(':') else {
+        return false;
+    };
+    let Some((candidate_method, candidate_model)) = candidate.2.split_once(':') else {
+        return false;
+    };
+    // A routed default is a credential preference too. OAuth/API modes must
+    // match, and a saved-account pin may not leak to another billing identity.
+    jcode_provider_core::ModelRouteApiMethod::parse(method)
+        == jcode_provider_core::ModelRouteApiMethod::parse(candidate_method)
+        && jcode_provider_core::oauth_account_label(method).is_none_or(|label| {
+            jcode_provider_core::oauth_account_label(candidate_method) == Some(label)
+        })
+        && candidate_model == model
 }
 
 fn saved_account_can_serve_model(provider: &str, label: &str, model: &str) -> bool {
