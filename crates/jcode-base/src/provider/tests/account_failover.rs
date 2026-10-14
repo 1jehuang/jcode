@@ -1026,6 +1026,51 @@ fn account_failover_return_home_still_limited_does_not_bounce() {
     });
 }
 
+/// Reported bug: with the OpenAI account at its weekly limit, the ChatGPT web
+/// model failed with "openai-otter is out of usage". That route runs in the
+/// browser session and never spends the stored account's usage.
+#[test]
+fn chatgpt_web_model_is_not_gated_by_openai_account_usage() {
+    with_account_failover_env(|| {
+        crate::usage::reset_openai_exhaustion_revalidation_for_tests();
+        assert_eq!(store_openai_accounts(1), ["openai-otter"]);
+        let world = Arc::new(FakeAccountWorld::default());
+        let a = account_session(&world, "A", ActiveProvider::OpenAI, false);
+        let rt = enter_test_runtime();
+
+        crate::provider::account_failover::record_account_exhausted(
+            AccountProviderKind::OpenAi,
+            "openai-otter",
+            Some(chrono::Utc::now().timestamp() + 5 * 3600),
+        );
+        record_provider_unavailable_for_label(
+            "openai",
+            "openai-otter",
+            "openai-otter is out of usage",
+        );
+        crate::usage::store_openai_usage_for_label_for_tests(
+            "openai-otter",
+            crate::usage::OpenAIUsageData {
+                hard_limit_reached: true,
+                fetched_at: Some(std::time::Instant::now()),
+                ..Default::default()
+            },
+        );
+        assert!(
+            complete_text(&rt, &a).is_err(),
+            "an account-backed model is still skipped"
+        );
+
+        a.openai_provider()
+            .expect("openai runtime")
+            .set_model(CHATGPT_WEB_MODEL)
+            .expect("select web model");
+        complete_text(&rt, &a).expect("the web model is sent despite the account limit");
+        assert_eq!(world.labels_for("A").len(), 1);
+        crate::usage::forget_openai_usage_for_label_for_tests("openai-otter");
+    });
+}
+
 /// Reported bug: an OpenAI account hit its limit, the usage reset early (a
 /// banked reset, or the window rolled over), and `/usage` showed it open
 /// again, yet every resume kept being skipped with "out of usage (resets

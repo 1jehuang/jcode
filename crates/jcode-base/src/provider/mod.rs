@@ -862,10 +862,17 @@ impl MultiProvider {
             // block every window on that provider.
             let session_label = account_failover::account_kind(candidate)
                 .and_then(|kind| self.session_account_label(kind));
+            // The ChatGPT web route runs in the browser session, not on the
+            // stored OpenAI account, so that account's usage must not gate it.
+            let browser_session = candidate == ActiveProvider::OpenAI
+                && self
+                    .openai_provider()
+                    .is_some_and(|provider| is_chatgpt_web_model(&provider.model()));
             // A usage-limit mark holds until the reset the provider reported.
             // If the OpenAI account was reset early, recheck live usage first
             // so a resume is not skipped against a stale mark.
             if candidate == ActiveProvider::OpenAI
+                && !browser_session
                 && let Some(label) = session_label.as_deref()
                 && (provider_unavailability_detail_for_label(key, label).is_some()
                     || account_failover::account_exhausted(
@@ -877,14 +884,16 @@ impl MultiProvider {
                 crate::usage::revalidate_openai_account_exhaustion(label).await;
             }
             let unavailable = match session_label.as_deref() {
+                _ if browser_session => None,
                 Some(label) => provider_unavailability_detail_for_label(key, label),
                 None => provider_unavailability_detail_for_account(key),
             };
             // With account failover, a marked account means "rotate", not
             // "skip the provider".
-            let account_failover = (candidate == active && !account_failover_done)
-                .then(|| self.account_failover_labels(candidate))
-                .flatten();
+            let account_failover =
+                (candidate == active && !account_failover_done && !browser_session)
+                    .then(|| self.account_failover_labels(candidate))
+                    .flatten();
             if let Some(detail) = unavailable.clone()
                 && account_failover.is_none()
             {
@@ -952,7 +961,9 @@ impl MultiProvider {
                 }
             }
 
-            if let Some(reason) = self.provider_precheck_unavailable_reason(candidate) {
+            if !browser_session
+                && let Some(reason) = self.provider_precheck_unavailable_reason(candidate)
+            {
                 let note = format!("{}: {}", label, reason);
                 if candidate == active {
                     crate::logging::warn(&format!(
