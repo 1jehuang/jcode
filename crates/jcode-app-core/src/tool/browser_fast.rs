@@ -173,8 +173,8 @@ async fn bounded<T>(
     };
     tokio::select! {
         biased;
-        _ = cancel => anyhow::bail!("Handoff cancelled. An in-flight browser action may already have taken effect."),
-        result = tokio::time::timeout(timeout, future) => result.context("Handoff operation timed out; an in-flight action may already have taken effect")?,
+        _ = cancel => anyhow::bail!("Handoff cancelled."),
+        result = tokio::time::timeout(timeout, future) => result.context("Handoff operation timed out")?,
     }
 }
 
@@ -403,7 +403,8 @@ async fn observe_page(
     timeout: Duration,
     deadline: tokio::time::Instant,
 ) -> Result<Value> {
-    let deadline = deadline.min(tokio::time::Instant::now() + Duration::from_secs(8));
+    let deadline = deadline.min(tokio::time::Instant::now() + timeout.min(Duration::from_secs(8)));
+    let mut last_disconnect = None;
     loop {
         let remaining =
             timeout.min(deadline.saturating_duration_since(tokio::time::Instant::now()));
@@ -412,7 +413,8 @@ async fn observe_page(
             Err(error)
                 if transition_disconnect(&error) && tokio::time::Instant::now() < deadline =>
             {
-                bounded(
+                last_disconnect = Some(error);
+                if let Err(error) = bounded(
                     ctx,
                     deadline.saturating_duration_since(tokio::time::Instant::now()),
                     async {
@@ -420,9 +422,17 @@ async fn observe_page(
                         Ok(())
                     },
                 )
-                .await?;
+                .await {
+                    return Err(error.context(format!(
+                        "Page observation could not reconnect; last connection error: {:#}. The page may have no content script; navigate to a supported page first",
+                        last_disconnect.as_ref().unwrap()
+                    )));
+                }
             }
-            Err(error) => return Err(error),
+            Err(error) => return Err(match last_disconnect {
+                Some(last) => error.context(format!("Page observation could not reconnect; last connection error: {last:#}. The page may have no content script; navigate to a supported page first")),
+                None => error,
+            }),
         }
     }
 }
@@ -688,7 +698,7 @@ pub(super) async fn run(
             if let Some(index)=chosen.exact_index {used_exact.insert(index);}
             trace.push(json!({"step":trace.len()+1,"id":decision.choice,"action":chosen.input.action,"label":chosen.label,"confidence":decision.confidence,"status":"started","before":page_evidence(&observation)}));
             let navigation=chosen.input.action=="open" || (chosen.input.action=="click" && chosen.input.url.is_some()) || chosen.input.submit==Some(true) || chosen.input.provider_action.as_deref()==Some("navigate");
-            let executed=bounded(ctx,timeout.min(deadline.saturating_duration_since(tokio::time::Instant::now())),provider.execute(&chosen.input.action,&chosen.input,ctx)).await;
+            let executed=bounded(ctx,timeout.min(deadline.saturating_duration_since(tokio::time::Instant::now())),provider.execute(&chosen.input.action,&chosen.input,ctx)).await.context("An in-flight browser action may already have taken effect; inspect current state before retrying");
             let executed=match executed {
                 Ok(output) => Ok(output),
                 // Only ordinary navigation/search can be verified this way. Never
