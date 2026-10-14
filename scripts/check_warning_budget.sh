@@ -31,11 +31,29 @@ fi
 # so this gate passed vacuously in CI for as long as it has existed. grep is
 # guaranteed present, and `grep -c` exits 1 on no matches, which the fallback
 # still handles correctly.
-if ! command -v cargo > /dev/null 2>&1; then
+#
+# Capture cargo output and its exit status separately: piping straight into
+# `grep -c ... || true` also swallowed a failing `cargo check`, so a compile
+# error with no warnings reported "Warning budget OK" (issue #1762).
+cargo_bin=${CARGO:-cargo}
+if ! command -v "$cargo_bin" > /dev/null 2>&1; then
   echo "error: cargo not found" >&2
   exit 1
 fi
-current=$(cd "$repo_root" && CARGO_TERM_COLOR=never cargo check -q 2>&1 | grep -c '^warning:' || true)
+cargo_status=0
+cargo_output=$(cd "$repo_root" && CARGO_TERM_COLOR=never "$cargo_bin" check -q 2>&1) || cargo_status=$?
+if (( cargo_status != 0 )); then
+  printf '%s\n' "$cargo_output" >&2
+  echo "error: cargo check failed (exit $cargo_status); warning budget not evaluated" >&2
+  exit "$cargo_status"
+fi
+# grep -c exits 1 on zero matches; only that case means "0 warnings".
+grep_status=0
+current=$(printf '%s\n' "$cargo_output" | grep -c '^warning:') || grep_status=$?
+if (( grep_status > 1 )); then
+  echo "error: failed to count warnings (grep exit $grep_status)" >&2
+  exit "$grep_status"
+fi
 current=$(printf '%s' "${current:-0}" | tr -d '[:space:]')
 baseline=$(tr -d '[:space:]' < "$baseline_file")
 
@@ -52,6 +70,7 @@ if ! [[ "$baseline" =~ ^[0-9]+$ ]]; then
 fi
 
 if (( current > baseline )); then
+  printf '%s\n' "$cargo_output" >&2
   echo "Warning budget exceeded: current=$current baseline=$baseline" >&2
   echo "Run scripts/check_warning_budget.sh --update only after intentional cleanup." >&2
   exit 1
