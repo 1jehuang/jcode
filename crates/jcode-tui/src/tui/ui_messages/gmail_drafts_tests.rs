@@ -12,6 +12,8 @@ fn gmail_draft_message(content: &str, input: serde_json::Value) -> DisplayMessag
             intent: None,
             thought_signature: None,
         }),
+        timestamp: None,
+        tool_duration_ms: None,
     }
 }
 
@@ -171,6 +173,8 @@ fn render_batch_tool_message_shows_nested_gmail_draft_card() {
             intent: None,
             thought_signature: None,
         }),
+        timestamp: None,
+        tool_duration_ms: None,
     };
 
     let lines = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Off);
