@@ -100,8 +100,9 @@
 
 **Mixed strategy recommendation:**
 - d6f2d2091 → Option B (delete) — obsolete, no porting needed. **DONE 2026-10-14 04:21Z** (remote branch deleted, worktree removed, 206 MB freed)
-- ceb860bf2 + e45ddd47e → Option C (port to jcode-storage) — 2-4 hours of work, then delete the rescue branches
-- Total: 2-4 hours of port work remaining, then delete 2 more rescue branches and 2 corresponding worktrees
+- e45ddd47e → Option C (port to jcode-storage) — **DRAFT DONE 2026-10-14 04:27Z** on branch `p25c/port-e45ddd47e-active-pids-race` (commit `58ca7a75c`). 1 file changed (active_pids.rs: 126 +/3 -), 2 tests added, `cargo check` and `cargo test -p jcode-storage` PASS. Operator reviews and either lands (Option C complete) or discards + deletes the rescue branch (Option B).
+- ceb860bf2 → Option C (port to jcode-storage) — still needs port work. Fix creates a new public API (`remove_state_file`, `remove_durable_state_file`) that kcode has 4 callers of; jcode has no equivalent API. Significant porting effort (4 caller updates + `reject_dev_home_symlink_path` helper).
+- Total: e45ddd47e ready to land; ceb860bf2 needs ~2-3 hours of additional work to land.
 
 **Worktree mapping (verified 04:16Z):** `wt-kcode-home-symlink` (ceb860bf2), `wt-kcode-heading-boundary` (d6f2d2091), `wt-kcode-active-pids-race` (e45ddd47e). Removing these worktrees does NOT lose the commits.
 
