@@ -1083,10 +1083,10 @@ fn run_cloud_sessions_dashboard(request: CloudSessionsDashboardRequest) -> Resul
         items.len(),
         output_path.display()
     );
-    if request.open {
-        if let Err(error) = open::that(&output_path) {
-            eprintln!("Dashboard saved, but could not open it: {error}");
-        }
+    if request.open
+        && let Err(error) = open::that(&output_path)
+    {
+        eprintln!("Dashboard saved, but could not open it: {error}");
     }
     Ok(())
 }
