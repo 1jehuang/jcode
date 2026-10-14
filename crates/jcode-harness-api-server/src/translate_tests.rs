@@ -3505,6 +3505,7 @@ fn citation_suffix_replacement_ignores_malformed_mismatched_and_closed_messages(
     // A matching earlier message must never be selected over the active one.
     for event in [
         correction,
+        json!({"type":"text_suffix_replace","old_text":"","new_text":"injected"}),
         json!({"type":"text_suffix_replace","old_text":"current","new_text":"wrong"}),
         json!({"type":"text_suffix_replace","old_text":null,"new_text":"wrong"}),
         json!({"type":"text_suffix_replace","old_text":"current answer"}),

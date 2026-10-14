@@ -1398,6 +1398,9 @@ impl BridgeState {
     }
 
     fn replace_text_suffix(&mut self, old_text: &str, new_text: &str) -> Vec<ServerFrame> {
+        if old_text.is_empty() {
+            return vec![];
+        }
         // Citation annotations arrive at output_item.done, immediately before
         // TextDone. Correct only the active message, never redistribute text
         // across earlier messages using their pre-correction byte lengths.
