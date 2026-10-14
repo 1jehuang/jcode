@@ -48,32 +48,76 @@ pub(super) async fn resolve_debug_session(
     session_id: &Arc<RwLock<String>>,
     requested: Option<String>,
 ) -> Result<(String, Arc<Mutex<Agent>>)> {
-    let mut target = requested;
-    if target.is_none() {
-        let current = session_id.read().await.clone();
-        if !current.is_empty() {
-            target = Some(current);
-        }
-    }
-
     let sessions_guard = sessions.read().await;
-    if let Some(id) = target {
-        let agent = sessions_guard
-            .get(&id)
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("Unknown session_id '{}'", id))?;
+    if let Some(id) = requested.filter(|id| !id.trim().is_empty()) {
+        let agent = sessions_guard.get(&id).cloned().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Unknown session_id '{}'. Live sessions: {}",
+                id,
+                describe_live_session_ids(&sessions_guard)
+            )
+        })?;
         return Ok((id, agent));
     }
+    drop(sessions_guard);
 
-    if sessions_guard.len() == 1
-        && let Some((id, agent)) = sessions_guard.iter().next()
-    {
-        return Ok((id.clone(), Arc::clone(agent)));
+    let id = default_debug_session_id(sessions, session_id).await?;
+    let sessions_guard = sessions.read().await;
+    let agent = sessions_guard.get(&id).cloned().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Session '{}' ended while resolving the debug target. Live sessions: {}",
+            id,
+            describe_live_session_ids(&sessions_guard)
+        )
+    })?;
+    Ok((id, agent))
+}
+
+/// Resolve the session a debug command targets when it names none.
+///
+/// The server-wide "current session" is the id the most recent connection was
+/// created with. A client that then resumes another session leaves that id
+/// behind as a temporary, so it can name a session that no longer exists
+/// (issue #1650: `agent:info` failed with a freshly minted dead id). Only a
+/// live current session is used. Otherwise a sole live session is the
+/// unambiguous default, and anything else is an error naming the valid ids.
+pub(super) async fn default_debug_session_id(
+    sessions: &SessionAgents,
+    session_id: &Arc<RwLock<String>>,
+) -> Result<String> {
+    let current = session_id.read().await.clone();
+    let sessions_guard = sessions.read().await;
+    if !current.is_empty() && sessions_guard.contains_key(&current) {
+        return Ok(current);
     }
-
+    if sessions_guard.len() == 1
+        && let Some(id) = sessions_guard.keys().next()
+    {
+        return Ok(id.clone());
+    }
+    if sessions_guard.is_empty() {
+        return Err(anyhow::anyhow!(
+            "No active session found. Connect a client or provide session_id."
+        ));
+    }
     Err(anyhow::anyhow!(
-        "No active session found. Connect a client or provide session_id."
+        "No active session found as the default target ({}). Provide session_id. Live sessions: {}",
+        if current.is_empty() {
+            "none recorded".to_string()
+        } else {
+            format!("last recorded session '{}' is no longer live", current)
+        },
+        describe_live_session_ids(&sessions_guard)
     ))
+}
+
+fn describe_live_session_ids(sessions: &HashMap<String, Arc<Mutex<Agent>>>) -> String {
+    if sessions.is_empty() {
+        return "none".to_string();
+    }
+    let mut ids: Vec<&str> = sessions.keys().map(String::as_str).collect();
+    ids.sort_unstable();
+    ids.join(", ")
 }
 
 pub(super) fn debug_message_timeout_secs() -> Option<u64> {

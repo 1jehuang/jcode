@@ -1,4 +1,4 @@
-use super::response_recovery::MalformedToolCallInfo;
+use super::response_recovery::{MalformedToolCallInfo, TextToolRecovery};
 use super::*;
 
 /// Largest byte index `<= index` that is a UTF-8 char boundary in `text`.
@@ -123,6 +123,14 @@ fn incomplete_turn_stop(stop_reason: Option<&str>) -> Option<ServerEvent> {
     }
 }
 
+/// What served the request when it started, to notice a route or login change.
+struct RouteAtRequestStart {
+    model: String,
+    provider: String,
+    credential: Option<jcode_provider_core::ResolvedCredential>,
+    oauth_email: Option<crate::protocol::ProviderOAuthEmail>,
+}
+
 impl Agent {
     /// Detect a provider route change made during the request (a transparent
     /// model fallback such as Anthropic's retired `claude-fable-5` ->
@@ -135,39 +143,44 @@ impl Agent {
     fn sync_route_change_after_stream(
         &mut self,
         event_tx: &mpsc::UnboundedSender<ServerEvent>,
-        model_at_request_start: &str,
-        provider_at_request_start: &str,
+        start: &RouteAtRequestStart,
     ) {
         let model_after_stream = self.provider.model();
         let provider_after_stream = self.provider.display_name();
-        if model_after_stream == model_at_request_start
-            && provider_after_stream == provider_at_request_start
-        {
-            return;
+        let route_changed =
+            model_after_stream != start.model || provider_after_stream != start.provider;
+        if route_changed {
+            logging::warn(&format!(
+                "Provider switched route mid-request: '{}' ({}) -> '{}' ({}) (resyncing session/UI)",
+                start.model, start.provider, model_after_stream, provider_after_stream
+            ));
+            self.session.model = Some(self.provider_model());
+            self.provider_runtime_state.apply(
+                crate::provider::ProviderStateEvent::RuntimeModelObserved {
+                    model: model_after_stream.clone(),
+                },
+            );
+            self.persist_session_best_effort("model fallback");
         }
-        logging::warn(&format!(
-            "Provider switched route mid-request: '{}' ({}) -> '{}' ({}) (resyncing session/UI)",
-            model_at_request_start,
-            provider_at_request_start,
-            model_after_stream,
-            provider_after_stream
-        ));
-        self.session.model = Some(self.provider_model());
-        self.provider_runtime_state.apply(
-            crate::provider::ProviderStateEvent::RuntimeModelObserved {
-                model: model_after_stream.clone(),
-            },
-        );
-        self.persist_session_best_effort("model fallback");
-        let _ = event_tx.send(ServerEvent::ModelChanged {
-            id: 0,
-            model: model_after_stream,
-            provider_name: Some(provider_after_stream),
-            context_window: Some(self.provider.context_window() as u64),
-            error: None,
-            resolved_credential: self.provider.active_resolved_credential(),
-            reasoning_effort: self.provider.reasoning_effort(),
-        });
+        // Refresh authoritative credential identity after every upstream
+        // request, including auto credential resolution and OAuth failover.
+        let oauth_email_after_stream = crate::server::provider_oauth_email(self.provider.as_ref());
+        let credential_after_stream = self.provider.active_resolved_credential();
+        if route_changed
+            || credential_after_stream != start.credential
+            || oauth_email_after_stream != start.oauth_email
+        {
+            let _ = event_tx.send(ServerEvent::ModelChanged {
+                id: 0,
+                model: model_after_stream,
+                provider_name: Some(provider_after_stream),
+                context_window: Some(self.provider.context_window() as u64),
+                error: None,
+                resolved_credential: credential_after_stream,
+                provider_oauth_email: oauth_email_after_stream,
+                reasoning_effort: self.provider.reasoning_effort(),
+            });
+        }
     }
 
     pub(super) async fn run_turn_streaming_mpsc(
@@ -194,6 +207,7 @@ impl Agent {
         let mut empty_post_tool_continuations = 0u32;
         let mut fable_guardrail_reconsiderations = 0u32;
         let mut consecutive_malformed_tool_rounds = 0u32;
+        let mut unparsed_tool_markup_nudges = 0u32;
 
         loop {
             // Never open a new provider request after a cancel. Several paths
@@ -351,10 +365,14 @@ impl Agent {
             // model. Compare against this after the stream so we can emit a
             // `ModelChanged` and resync the UI/context-limit.
             let model_at_request_start = provider.model().to_string();
-            // Out-of-credit failover can move the turn to another
-            // OpenAI-compatible profile serving the same model id, so the
-            // model alone does not reveal the switch.
-            let provider_at_request_start = provider.display_name();
+            // OpenAI-compatible profiles can serve the same model id, so the
+            // model alone does not reveal a profile switch.
+            let route_at_request_start = RouteAtRequestStart {
+                model: model_at_request_start.clone(),
+                provider: provider.display_name(),
+                credential: provider.active_resolved_credential(),
+                oauth_email: crate::server::provider_oauth_email(provider.as_ref()),
+            };
             let resume_session_id = self.provider_session_id.clone();
             self.last_status_detail = None;
             let kv_request = kv_cache_request_event(
@@ -391,9 +409,11 @@ impl Agent {
                             return Ok(());
                         }
                         result = &mut complete_future => {
+                            self.sync_bound_account_route();
                             match result {
                                 Ok(stream) => break stream,
                                 Err(e) => {
+                                    self.record_failed_account_route(&e.to_string());
                                     if self.try_auto_compact_after_context_limit(&e.to_string()) {
                                         context_limit_retries += 1;
                                         if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
@@ -423,11 +443,7 @@ impl Agent {
                                         });
                                         continue;
                                     }
-                                    self.sync_route_change_after_stream(
-                                        &event_tx,
-                                        &model_at_request_start,
-                                        &provider_at_request_start,
-                                    );
+                                    self.sync_route_change_after_stream(&event_tx, &route_at_request_start);
                                     return Err(e);
                                 }
                             }
@@ -563,6 +579,7 @@ impl Agent {
                 let event = match event {
                     Ok(event) => event,
                     Err(e) => {
+                        self.record_failed_account_route(&e.to_string());
                         record_partial_stream_usage(
                             &self.session.id,
                             provider.name(),
@@ -629,15 +646,11 @@ impl Agent {
                             api_start,
                             vec![("mode", "mpsc".to_string()), ("error", err_str)],
                         );
-                        // Out-of-credit failover may have moved the provider to
-                        // another profile before this stream failed. Tell
-                        // clients and persist it, or they keep showing the old
-                        // route while the next turn goes to the new one.
-                        self.sync_route_change_after_stream(
-                            &event_tx,
-                            &model_at_request_start,
-                            &provider_at_request_start,
-                        );
+                        // A model fallback may have moved the provider before
+                        // this stream failed. Tell clients and persist it, or
+                        // they keep showing the old route while the next turn
+                        // goes to the new one.
+                        self.sync_route_change_after_stream(&event_tx, &route_at_request_start);
                         return Err(e);
                     }
                 };
@@ -697,6 +710,20 @@ impl Agent {
                     }
                     StreamEvent::TextDone => {
                         let _ = event_tx.send(ServerEvent::TextDone);
+                    }
+                    StreamEvent::TextSuffixReplace { old_text, new_text } => {
+                        if provider_native_items.replace_text_suffix(
+                            &mut text_content,
+                            &old_text,
+                            &new_text,
+                        ) {
+                            if inline_output_tap {
+                                self.inline_tail.set_live(&text_content);
+                                self.publish_inline_tail();
+                            }
+                            let _ = event_tx
+                                .send(ServerEvent::TextSuffixReplace { old_text, new_text });
+                        }
                     }
                     StreamEvent::ProviderNative { provider, item } => {
                         if reasoning_open {
@@ -1231,11 +1258,7 @@ impl Agent {
                                 ),
                             ],
                         );
-                        self.sync_route_change_after_stream(
-                            &event_tx,
-                            &model_at_request_start,
-                            &provider_at_request_start,
-                        );
+                        self.sync_route_change_after_stream(&event_tx, &route_at_request_start);
                         return Err(StreamError::new(message, retry_after_secs).into());
                     }
                 }
@@ -1351,36 +1374,35 @@ impl Agent {
             // requested model with a stale context-limit. Resync the session and
             // notify clients with a `ModelChanged` so the header, picker, and
             // context budget all reflect the model that actually served.
-            self.sync_route_change_after_stream(
-                &event_tx,
-                &model_at_request_start,
-                &provider_at_request_start,
-            );
+            self.sync_route_change_after_stream(&event_tx, &route_at_request_start);
 
             let had_tool_calls_before = !tool_calls.is_empty();
-            self.recover_text_wrapped_tool_call(&mut text_content, &mut tool_calls);
+            let text_tool_recovery =
+                self.recover_text_wrapped_tool_call(&mut text_content, &mut tool_calls);
 
-            if !had_tool_calls_before
-                && !tool_calls.is_empty()
-                && let Some(tc) = tool_calls.last()
-                && tc.id.starts_with("fallback_text_call_")
-            {
+            if !had_tool_calls_before && text_tool_recovery == TextToolRecovery::Recovered {
                 let _ = event_tx.send(ServerEvent::TextReplace {
                     text: text_content.clone(),
                 });
-                let _ = event_tx.send(ServerEvent::ToolStart {
-                    id: tc.id.clone(),
-                    name: tc.name.clone(),
-                });
-                tool_id_to_name.insert(tc.id.clone(), tc.name.clone());
-                let _ = event_tx.send(ServerEvent::ToolInput {
-                    id: Some(tc.id.clone()),
-                    delta: tc.input.to_string(),
-                });
-                let _ = event_tx.send(ServerEvent::ToolExec {
-                    id: tc.id.clone(),
-                    name: tc.name.clone(),
-                });
+                // Markup envelopes can carry several calls, so announce each.
+                for tc in tool_calls
+                    .iter()
+                    .filter(|tc| tc.id.starts_with("fallback_text_call_"))
+                {
+                    let _ = event_tx.send(ServerEvent::ToolStart {
+                        id: tc.id.clone(),
+                        name: tc.name.clone(),
+                    });
+                    tool_id_to_name.insert(tc.id.clone(), tc.name.clone());
+                    let _ = event_tx.send(ServerEvent::ToolInput {
+                        id: Some(tc.id.clone()),
+                        delta: tc.input.to_string(),
+                    });
+                    let _ = event_tx.send(ServerEvent::ToolExec {
+                        id: tc.id.clone(),
+                        name: tc.name.clone(),
+                    });
+                }
             }
 
             // Add assistant message to history
@@ -1481,6 +1503,26 @@ impl Agent {
             // Injecting before tool_results would break the API requirement that
             // tool_use must be immediately followed by tool_result.
             if tool_calls.is_empty() {
+                // The model printed a tool call as markup we could not parse
+                // (issue #1702): say so visibly and ask it to re-issue the
+                // call natively instead of silently ending the turn.
+                if saw_message_end
+                    && !self.is_graceful_shutdown()
+                    && let Some(notice) = self.maybe_nudge_unparsed_tool_markup(
+                        &text_tool_recovery,
+                        stop_reason.as_deref(),
+                        &mut unparsed_tool_markup_nudges,
+                    )?
+                {
+                    let _ = event_tx.send(ServerEvent::SoftInterruptInjected {
+                        content: notice,
+                        display_role: Some("system".to_string()),
+                        point: "B".to_string(),
+                        tools_skipped: None,
+                        client_ids: Vec::new(),
+                    });
+                    continue;
+                }
                 if saw_message_end
                     && !self.is_graceful_shutdown()
                     && self.maybe_reconsider_fable_guardrail(
@@ -1742,6 +1784,8 @@ impl Agent {
                 let allow_reload_handoff = tc.name == "bash";
                 let tool_result;
                 let mut tool_handle = tool_handle;
+                let running_tool_guard =
+                    crate::running_tool_registry::register(self.session_id(), &tc.id, &tc.name);
                 tokio::select! {
                     biased;
                     res = &mut tool_handle => {
@@ -1774,6 +1818,7 @@ impl Agent {
                         }
                     }
                 };
+                drop(running_tool_guard);
 
                 self.unlock_tools_if_needed(&tc.name);
                 let tool_elapsed = tool_start.elapsed();

@@ -144,14 +144,99 @@ pub(super) fn present_swarm_notification(
         tldr: Some(tldr), ..
     } = notification_type
     {
-        let tldr = tldr.trim();
+        let tldr = jcode_tui_messages::swarm_preview_line(
+            tldr,
+            jcode_tui_messages::SWARM_INLINE_BODY_MAX_CHARS,
+        );
         if !tldr.is_empty() && !presentation.message.trim().is_empty() {
             presentation.status_notice = format!("{} · {}", presentation.status_notice, tldr);
             presentation.message =
-                jcode_tui_messages::encode_collapsible_swarm_content(tldr, &presentation.message);
+                jcode_tui_messages::encode_collapsible_swarm_content(&tldr, &presentation.message);
         }
     }
+    // Never render long agent prose inline: anything beyond one short row is
+    // collapsed behind a derived one-row preview, expandable on demand.
+    if collapses_to_one_row(notification_type) {
+        presentation.message =
+            jcode_tui_messages::collapse_long_swarm_content(&presentation.message);
+    }
     presentation
+}
+
+/// Notification kinds whose transcript body is agent-authored prose that
+/// should never render as more than one row by default. Plan, await and
+/// background-task notices have their own compact renderers.
+fn collapses_to_one_row(notification_type: &NotificationType) -> bool {
+    match notification_type {
+        NotificationType::Message { scope, .. } => !matches!(
+            scope.as_deref(),
+            Some("plan" | "background_task" | "swarm_await")
+        ),
+        NotificationType::SharedContext { .. } => true,
+        NotificationType::FileConflict { .. } => false,
+    }
+}
+
+/// If `content` is the model-facing text of a swarm message delivered to this
+/// session (`DM from X: ...`, `#chan from X: ...`, `broadcast from X: ...`),
+/// return a one-row swarm display message for it instead of the raw text.
+pub(super) fn swarm_delivery_display_message(content: &str) -> Option<crate::tui::DisplayMessage> {
+    let trimmed = content.trim();
+    let (title, body) = if let Some(rest) = trimmed.strip_prefix("Cross-swarm DM from ") {
+        let (sender, body) = rest.split_once(": ")?;
+        (format!("DM from {}", sender.trim()), body)
+    } else if let Some(rest) = trimmed.strip_prefix("DM from ") {
+        let (sender, body) = rest.split_once(": ")?;
+        if sender.contains(char::is_whitespace) {
+            return None;
+        }
+        (format!("DM from {}", sender), body)
+    } else if let Some(rest) = trimmed.strip_prefix("broadcast from ") {
+        let (sender, body) = rest.split_once(": ")?;
+        if sender.contains(char::is_whitespace) {
+            return None;
+        }
+        (format!("Broadcast · {}", sender), body)
+    } else if let Some(rest) = trimmed.strip_prefix('#') {
+        let (head, body) = rest.split_once(": ")?;
+        let (channel, sender) = head.split_once(" from ")?;
+        if channel.contains(char::is_whitespace) {
+            return None;
+        }
+        (format!("#{} · {}", channel, sender.trim()), body)
+    } else {
+        return None;
+    };
+    if title.contains('\n') {
+        return None;
+    }
+    Some(crate::tui::DisplayMessage::swarm(
+        title,
+        jcode_tui_messages::collapse_long_swarm_content(body),
+    ))
+}
+
+/// Full underlying body of swarm display content, collapsed or not.
+pub(super) fn swarm_display_full_body(content: &str) -> &str {
+    match jcode_tui_messages::parse_collapsible_swarm_content(content) {
+        Some(parsed) if !parsed.body.trim().is_empty() => parsed.body.trim(),
+        Some(parsed) => parsed.tldr.trim(),
+        None => content.trim(),
+    }
+}
+
+/// Rewrite user/system transcript rows that are really delivered swarm
+/// messages into one-row swarm rows. Used for restored history, where the
+/// original notification card is not available.
+pub(super) fn normalize_swarm_delivery_messages(messages: &mut [crate::tui::DisplayMessage]) {
+    for message in messages.iter_mut() {
+        if !matches!(message.role.as_str(), "user" | "system") {
+            continue;
+        }
+        if let Some(swarm) = swarm_delivery_display_message(&message.content) {
+            *message = swarm;
+        }
+    }
 }
 
 fn present_swarm_notification_inner(
@@ -354,6 +439,46 @@ mod tests {
             "{}",
             presentation.status_notice
         );
+    }
+
+    #[test]
+    fn present_swarm_notification_without_tldr_collapses_long_body() {
+        let body = "Investigated the parser. ".repeat(20);
+        let presentation = present_swarm_notification(
+            "sheep",
+            &NotificationType::Message {
+                scope: Some("dm".to_string()),
+                channel: None,
+                tldr: None,
+            },
+            &format!("DM from sheep: {body}\n\nMore details here."),
+            false,
+        );
+        let parsed = jcode_tui_messages::parse_collapsible_swarm_content(&presentation.message)
+            .expect("long body must collapse");
+        assert!(!parsed.expanded);
+        assert!(!parsed.tldr.contains('\n'));
+        assert!(parsed.tldr.chars().count() <= jcode_tui_messages::SWARM_INLINE_BODY_MAX_CHARS);
+        assert!(parsed.body.contains("More details here."));
+    }
+
+    #[test]
+    fn swarm_delivery_display_message_collapses_injected_dm() {
+        let long = "x".repeat(400);
+        let msg = super::swarm_delivery_display_message(&format!("DM from fox: {long}"))
+            .expect("dm delivery");
+        assert_eq!(msg.role, "swarm");
+        assert_eq!(msg.title.as_deref(), Some("DM from fox"));
+        let parsed =
+            jcode_tui_messages::parse_collapsible_swarm_content(&msg.content).expect("collapsed");
+        assert_eq!(parsed.body, long);
+
+        let chan = super::swarm_delivery_display_message("#parser from owl: hi").expect("channel");
+        assert_eq!(chan.title.as_deref(), Some("#parser · owl"));
+        assert_eq!(chan.content, "hi");
+
+        assert!(super::swarm_delivery_display_message("DM from my boss: please review").is_none());
+        assert!(super::swarm_delivery_display_message("hello there").is_none());
     }
 
     #[test]

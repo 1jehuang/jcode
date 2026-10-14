@@ -2103,7 +2103,7 @@ impl Tool for CommunicateTool {
                 "spawn_mode": {
                     "type": "string",
                     "enum": ["visible", "headless", "inline", "auto"],
-                    "description": "Spawn UI mode: visible terminal, headless, inline gallery, or auto. Defaults to inline."
+                    "description": "Omit to use the user's configured mode. Set only when the user asks for one."
                 },
                 "model": {
                     "type": "string",
@@ -2874,10 +2874,10 @@ impl Tool for CommunicateTool {
                     Ok(ServerEvent::CommSpawnResponse { new_session_id, .. })
                         if !new_session_id.is_empty() =>
                     {
-                        Ok(ToolOutput::new(format!(
-                            "Spawned new agent: {}",
-                            new_session_id
-                        )))
+                        Ok(
+                            ToolOutput::new(format!("Spawned new agent: {}", new_session_id))
+                                .with_metadata(serde_json::json!({"session_id": new_session_id})),
+                        )
                     }
                     Ok(response) => {
                         ensure_success(&response)?;

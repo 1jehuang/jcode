@@ -9,11 +9,11 @@
 //! configured profile serving the same model id.
 //!
 //! The provider never resends on its own. It returns a
-//! `ProviderFailoverPrompt` in both `cross_provider_failover` modes: the TUI
-//! runs the cancelable countdown (countdown mode) or shows the manual hint
-//! (manual mode), and only the TUI switches profile and resends. That keeps
-//! the conversation and tools away from another endpoint until the user had
-//! the chance to press Esc.
+//! `ProviderFailoverPrompt` without a target route, so the TUI shows the
+//! manual hint in both `cross_provider_failover` modes: automatic switching
+//! is reserved for auto-switch pool members, and metered API-key profiles are
+//! not pool members. The conversation and tools never reach another endpoint
+//! until the user switches with `/model`.
 
 use super::*;
 use crate::message::{ConnectionPhase, StreamEvent};
@@ -241,9 +241,9 @@ impl MultiProvider {
     /// fails in any other way before output), return a failover prompt that
     /// offers the next sibling profile serving the same model.
     ///
-    /// Nothing is sent to the sibling here. The TUI countdown (or the user,
-    /// in manual mode) switches to `to_provider` and resends; the next call
-    /// then tries that sibling and, if it fails too, offers the one after it.
+    /// Nothing is sent to the sibling here. The user switches to
+    /// `to_provider` and resends; the next call then tries that sibling and,
+    /// if it fails too, offers the one after it.
     pub(super) async fn complete_candidate_with_credit_failover(
         &self,
         candidate: ActiveProvider,
@@ -317,6 +317,9 @@ impl MultiProvider {
                 reason,
                 estimated_input_chars: chars,
                 estimated_input_tokens: tokens,
+                // Offer only. A metered profile is never a pool-approved
+                // automatic target, so the TUI shows the manual hint.
+                target_route: None,
             }
             .to_error_message()
         ))

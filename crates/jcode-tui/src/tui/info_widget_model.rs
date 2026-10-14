@@ -164,6 +164,7 @@ fn short_service_tier(service_tier: &str) -> Option<&str> {
     }
     Some(match service_tier {
         "priority" => "fast",
+        "ultrafast" => "ultrafast",
         "flex" => "flex",
         other => other,
     })

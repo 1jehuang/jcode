@@ -209,18 +209,19 @@ fn billing_402_in_countdown_mode_offers_sibling_without_resending() {
             let stream = provider.complete(&messages, &[], "", None).await?;
             drain_text(stream).await
         });
-        // The turn must not reach prof-b before the user had the countdown to
-        // cancel it: the provider only offers the switch.
+        // The turn must not reach prof-b until the user switches: the
+        // provider only offers the switch.
         let err = first.expect_err("countdown mode must not resend on its own");
         let prompt = crate::provider::parse_failover_prompt_message(&err.to_string())
             .unwrap_or_else(|| panic!("expected a failover prompt, got: {err:#}"));
         assert_eq!(prompt.to_provider, "prof-b:glm-5.3");
+        assert_eq!(prompt.target_route, None, "a metered profile is offered, not auto-switched");
         assert!(prompt.reason.to_ascii_lowercase().contains("credit"));
         assert_eq!(a_hits.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(
             b_hits.load(std::sync::atomic::Ordering::SeqCst),
             0,
-            "prof-b must get zero requests before the countdown ends"
+            "prof-b must get zero requests before the user switches"
         );
         assert_eq!(
             ProviderRegistry::new(&provider).active_compatible_profile_id(),
@@ -228,10 +229,10 @@ fn billing_402_in_countdown_mode_offers_sibling_without_resending() {
             "the provider must not switch profile by itself"
         );
 
-        // The TUI countdown switches to the offered target and resends.
+        // The user switches to the offered target with /model and resends.
         provider
             .set_model(&prompt.to_provider)
-            .expect("countdown switch to profile B");
+            .expect("switch to profile B");
         let second = rt.block_on(async {
             let stream = provider.complete(&messages, &[], "", None).await?;
             drain_text(stream).await
