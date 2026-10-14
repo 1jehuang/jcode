@@ -248,7 +248,8 @@ Cross-repo P30 work was completed in two rounds. See
 | `Tokn` | `security/quinn-proto-0.11.19-rustls-0.23.45` | `90596ca` | FULL FIX (3→0) |
 | `Grapheon` | `security/quinn-proto-0.11.19-rustls-0.23.45` | `81661cd43` | FULL FIX (3→0) |
 | `SessionLedger` | `security/quinn-proto-0.11.19-rustls-0.23.45` | `9e2e76ba` | FULL FIX (3→0) |
-| `PlayCua` | `security/h2-0.4.19-p30` | `1254961` | P30 cluster FIXED (7→4; rkyv+tokenizers out of scope) |
+| `PlayCua` | `security/h2-0.4.19-p30` | `1254961` | **TAINTED** — commit bundled 16 unrelated redaction changes (CODEOWNERS, renovate.json, etc.); see Round 3 contamination section |
+| `PlayCua` (clean) | `security/p30-cluster-clean` | `a4731a5` | **CLEAN** — 1 file (Cargo.lock only); use this for the PR |
 | `PhenoTooling` | `security/h2-0.4.19-p30` | (no diff vs main) | no-op (already fixed in PR #330) |
 | `phenotype-tooling` | `security/h2-0.4.19-p30` | (no diff vs main) | no-op (already fixed in PR #330) |
 | `PhenoObservability` | `security/quinn-proto-0.11.19-rustls-0.23.45` | (no diff vs main) | no-op (already fixed in PR #253) |
@@ -267,7 +268,7 @@ Cross-repo P30 work was completed in two rounds. See
 
 **Cumulative cross-repo P30 result:**
 - **14 distinct Phenotype repos** at 0 active P30 RUSTSEC vulns
-- **9 cross-repo branches with P30 fix committed** (Tracera, Agentora, Apisync, sharecli, Tokn, Grapheon, SessionLedger, PlayCua P30 cluster on `security/h2-0.4.19-p30`, zz-merge-unk-PhenoJourneys, _full_AgilePlus, _full_tooling) — note: PlayCua had a phantom `security/quinn-proto-0.11.19-rustls-0.23.45` branch with no commit (deleted via `git update-ref -d` 2026-10-14); the real PlayCua P30 fix is on `security/h2-0.4.19-p30` @ `1254961`
+- **9 cross-repo branches with P30 fix committed** (Tracera, Agentora, Apisync, sharecli, Tokn, Grapheon, SessionLedger, zz-merge-unk-PhenoJourneys, _full_AgilePlus, _full_tooling) plus **PlayCua's clean re-commit on `security/p30-cluster-clean` @ `a4731a5`** (replaces the contaminated `security/h2-0.4.19-p30` branch) — see Round 3 PlayCua contamination section for full details
 - **2 with partial fix + remaining non-P30 vulns** (forgecode rocket blocker, helios-cli rkyv)
 - **4 already-fixed on main** (PhenoTooling, phenotype-tooling, PhenoObservability, OmniRoute)
 - **1 lockfile-only fix, build broken** (substrate — vendor + gateway opentelemetry API)
