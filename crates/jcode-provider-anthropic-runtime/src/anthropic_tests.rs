@@ -1845,6 +1845,7 @@ async fn auto_mode_falls_back_to_api_key_when_oauth_is_expired() {
         provider.credential_mode_snapshot(),
         AnthropicCredentialMode::Auto
     );
+    assert_eq!(provider.active_resolved_credential(), None);
 
     let (token, is_oauth) = provider.get_access_token().await.unwrap();
     assert_eq!(token, "test-anthropic-api-key");
@@ -1852,6 +1853,14 @@ async fn auto_mode_falls_back_to_api_key_when_oauth_is_expired() {
         !is_oauth,
         "automatic fallback must use API-key request semantics"
     );
+    assert_eq!(
+        provider.active_resolved_credential(),
+        Some(jcode_provider_core::ResolvedCredential::ApiKey),
+        "Auto must expose the actual API fallback rather than credential presence"
+    );
+    assert_eq!(provider.fork().active_resolved_credential(), None);
+    provider.invalidate_credentials().await;
+    assert_eq!(provider.active_resolved_credential(), None);
 }
 
 #[tokio::test]
@@ -1877,6 +1886,10 @@ async fn explicit_oauth_mode_does_not_silently_fall_back_to_api_key() {
     assert_eq!(
         provider.credential_mode_snapshot(),
         AnthropicCredentialMode::OAuth
+    );
+    assert_eq!(
+        provider.active_resolved_credential(),
+        Some(jcode_provider_core::ResolvedCredential::Oauth)
     );
 
     let error = provider.get_access_token().await.unwrap_err().to_string();

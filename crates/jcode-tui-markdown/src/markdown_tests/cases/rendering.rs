@@ -644,6 +644,21 @@ fn test_link_strike_and_image_render() {
 }
 
 #[test]
+fn native_search_source_links_render_in_full_and_lazy_paths() {
+    let markdown = "许可 🦀. [macOS license](<https://www.apple.com/legal/sla/docs/macOSTahoe.pdf>)";
+    let expected = "许可 🦀. macOS license (https://www.apple.com/legal/sla/docs/macOSTahoe.pdf)";
+    for lines in [
+        render_markdown_with_width(markdown, Some(120)),
+        render_markdown_lazy(markdown, Some(120), 0..100),
+    ] {
+        let text = lines_to_string(&lines);
+        assert_eq!(text.trim(), expected);
+        assert!(!text.contains('\u{e200}'));
+        assert!(!text.contains("turn0search"));
+    }
+}
+
+#[test]
 fn test_ordered_and_task_list_render() {
     let md = "1. first\n2. second\n\n- [x] done\n- [ ] todo";
     let lines = render_markdown(md);

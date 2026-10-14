@@ -107,7 +107,11 @@ fn test_on_auth_changed_hot_initializes_openai_and_marks_routes_available() {
 
         assert!(provider.openai_provider().is_some());
         assert!(provider.model_routes().iter().any(|route| {
-            route.provider == "OpenAI" && route.api_method == "openai-oauth" && route.available
+            route.provider == "OpenAI"
+                && route.api_method_kind() == ModelRouteApiMethod::OpenAIOAuth
+                && jcode_provider_core::oauth_account_label(&route.api_method)
+                    == crate::auth::codex::active_account_label().as_deref()
+                && route.available
         }));
     });
 }
@@ -215,7 +219,11 @@ fn test_on_auth_changed_hot_initializes_anthropic_and_marks_routes_available() {
 
         assert!(provider.anthropic_provider().is_some());
         assert!(provider.model_routes().iter().any(|route| {
-            route.provider == "Anthropic" && route.api_method == "claude-oauth" && route.available
+            route.provider == "Anthropic"
+                && route.api_method_kind() == ModelRouteApiMethod::ClaudeOAuth
+                && jcode_provider_core::oauth_account_label(&route.api_method)
+                    == crate::auth::claude::active_account_label().as_deref()
+                && route.available
         }));
     });
 }
@@ -329,23 +337,31 @@ fn test_anthropic_model_routes_keep_plain_4_6_available_without_extra_usage() {
             .iter()
             .find(|route| {
                 route.provider == "Anthropic"
-                    && route.api_method == "claude-oauth"
+                    && route.api_method_kind() == ModelRouteApiMethod::ClaudeOAuth
+                    && jcode_provider_core::oauth_account_label(&route.api_method)
+                        == crate::auth::claude::active_account_label().as_deref()
                     && route.model == "claude-opus-4-6"
             })
             .expect("plain opus route");
         assert!(plain_opus.available);
-        assert!(plain_opus.detail.is_empty());
+        let label = crate::auth::claude::active_account_label().expect("saved Claude account");
+        assert_eq!(plain_opus.detail, format!("account {label}"));
 
         let opus_1m = routes
             .iter()
             .find(|route| {
                 route.provider == "Anthropic"
-                    && route.api_method == "claude-oauth"
+                    && route.api_method_kind() == ModelRouteApiMethod::ClaudeOAuth
+                    && jcode_provider_core::oauth_account_label(&route.api_method)
+                        == crate::auth::claude::active_account_label().as_deref()
                     && route.model == "claude-opus-4-6[1m]"
             })
             .expect("1m opus route");
         assert!(!opus_1m.available);
-        assert_eq!(opus_1m.detail, "requires extra usage");
+        assert_eq!(
+            opus_1m.detail,
+            format!("account {label} · requires extra usage")
+        );
     });
 }
 

@@ -8,7 +8,9 @@
  */
 
 export const API_VERSION_MAJOR = 1;
-export const API_VERSION_MINOR = 9;
+export const API_VERSION_MINOR = 10;
+
+export type RuntimeCommand = "skills" | "context" | "info" | "cache" | "memory" | "swarm" | "agents" | "subagent_model" | "autoreview" | "autojudge" | "transport" | "fast" | "telemetry" | "subscription" | "overnight" | "productivity" | "initiatives" | "premium" | "provider_test_coverage" | "refresh_model_list" | "continue" | "resume_all" | "remote" | "server_reload" | "review" | "judge" | "subagent" | "auth" | "logout";
 
 export type PermissionDecision = "allow" | "allow_always" | "deny";
 
@@ -158,6 +160,7 @@ export type ApiRequest =
   | { req: "create_session"; working_dir?: string; system_prompt?: string }
   | { req: "attach_session"; session_id: string }
   | { req: "fork_session"; session_id: string }
+  | { req: "transfer_session"; session_id: string }
   | { req: "detach_session"; session_id: string }
   | { req: "configure_tools"; session_id: string; tools: ToolConfiguration }
   | { req: "list_tools"; session_id: string }
@@ -192,6 +195,7 @@ export type ApiRequest =
     }
   | { req: "list_models"; session_id: string }
   | { req: "get_runtime_info"; session_id: string }
+  | { req: "runtime_command"; session_id: string; command: RuntimeCommand; args?: string[] }
   | { req: "set_api_key"; provider: string; api_key: string }
   | { req: "notify_auth_changed"; provider: string }
   | { req: "invalidate_usage"; provider: string; account_label?: string }
@@ -275,6 +279,7 @@ export interface SidePanelSnapshot {
 export type ApiEvent =
   | { ev: "hello_ok"; version: number; server: string; capabilities?: string[] }
   | { ev: "ok" }
+  | { ev: "runtime_command_result"; session_id: string; command: RuntimeCommand; data: unknown; message: string }
   | { ev: "error"; code: ErrorCode; message: string }
   | { ev: "sessions"; sessions: SessionInfo[] }
   | { ev: "attached"; session: SessionInfo }
@@ -448,6 +453,7 @@ export type ServerFrame = { v: number; reply_to?: number } & UnknownApiEvent;
 
 /** Every event tag the SDK knows about, for drift checks and routing. */
 export const KNOWN_EVENT_KINDS = [
+  "runtime_command_result",
   "hello_ok",
   "ok",
   "error",
@@ -499,6 +505,7 @@ export const KNOWN_EVENT_KINDS = [
 
 /** Every request tag the SDK can send. */
 export const KNOWN_REQUEST_KINDS = [
+  "runtime_command",
   "hello",
   "list_sessions",
   "archive_session",
@@ -507,6 +514,7 @@ export const KNOWN_REQUEST_KINDS = [
   "create_session",
   "attach_session",
   "fork_session",
+  "transfer_session",
   "detach_session",
   "configure_tools",
   "list_tools",

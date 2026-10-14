@@ -9,6 +9,10 @@
 
 use std::sync::OnceLock;
 
+#[cfg(test)]
+#[path = "../build_inputs.rs"]
+mod build_inputs;
+
 /// Compile-time human-readable version string, e.g. `v0.14.6-dev (abc1234)`.
 pub const VERSION: &str = env!("JCODE_VERSION");
 /// Short git hash of the build commit, e.g. `abc1234` (or `unknown`).

@@ -64,7 +64,108 @@ impl Agent {
         self.session.model_usage_turn_id.clone().unwrap()
     }
 
-    pub(super) fn record_model_turn_usage(&self, turn_id: &str) {
+    /// Mirror an explicit saved-account binding into the persisted route so
+    /// resume and swarm children restore the same login. The binding is the
+    /// window's account pin, which `/account switch`, failover and return home
+    /// may move, so the route follows it instead of refusing the change.
+    pub(super) fn sync_bound_account_route(&mut self) {
+        let Some(label) = self.provider.oauth_account_label() else {
+            if self
+                .session
+                .route_api_method
+                .as_deref()
+                .and_then(jcode_provider_core::oauth_account_label)
+                .is_some()
+            {
+                // The window no longer has an explicit binding (unpinned, or
+                // moved to an API key): keep the stale label from blocking it.
+                self.session.route_api_method = None;
+                self.persist_session_best_effort("cleared saved account route");
+            }
+            return;
+        };
+        let method = match self.provider.name().to_ascii_lowercase().as_str() {
+            "openai" => "openai-oauth",
+            "claude" | "anthropic" => "claude-oauth",
+            _ => return,
+        };
+        let route = format!("{method}@{label}");
+        if self.session.route_api_method.as_deref() == Some(route.as_str()) {
+            return;
+        }
+        self.session.route_api_method = Some(route);
+        self.session.provider_key = Some(method.to_string());
+        self.session.model = Some(self.provider_model());
+        self.persist_session_best_effort("observed saved account route");
+    }
+
+    /// A model or route change can select a saved account (`claude-oauth@label`
+    /// routes) or drop one (generic routes). That is a user choice: record it
+    /// like `/account switch`, so the next stream does not report it as a
+    /// failover move.
+    fn adopt_provider_account_pins(&mut self) {
+        for kind in crate::provider::AccountProviderKind::ALL {
+            let provider_pin = self.provider.account_pin(kind);
+            if self.observed_account_pins.get(&kind).cloned().flatten() == provider_pin {
+                continue;
+            }
+            let key = kind.key().to_string();
+            let reason = match &provider_pin {
+                Some(pin) => format!("this window now uses {}", pin.label),
+                None => "this window follows the default account".to_string(),
+            };
+            match provider_pin {
+                Some(pin) => {
+                    self.session.account_pins.insert(key.clone(), pin);
+                }
+                None => {
+                    self.session.account_pins.remove(&key);
+                }
+            }
+            self.pending_account_notices.push((kind, reason));
+            self.provider.set_account_failover_home(kind, None);
+            self.session.account_failover_home.remove(&key);
+        }
+        self.record_observed_account_pins();
+    }
+
+    pub(super) fn record_failed_account_route(&mut self, error: &str) {
+        self.sync_bound_account_route();
+        if !jcode_provider_core::classify_failover_error_message(error)
+            .should_mark_provider_unavailable()
+        {
+            return;
+        }
+        let provider = self.provider.name().to_ascii_lowercase();
+        let provider = match provider.as_str() {
+            "openai" => "openai",
+            "claude" | "anthropic" => "claude",
+            _ => return,
+        };
+        let label = self.provider.oauth_account_label();
+        let (key, label) = match (
+            provider,
+            self.provider.active_resolved_credential(),
+            label.as_deref(),
+        ) {
+            (_, Some(jcode_provider_core::ResolvedCredential::Oauth), Some(label)) => {
+                (provider, Some(label))
+            }
+            ("openai", Some(jcode_provider_core::ResolvedCredential::ApiKey), _) => {
+                ("openai-api", None)
+            }
+            ("claude", Some(jcode_provider_core::ResolvedCredential::ApiKey), _) => {
+                ("anthropic-api", None)
+            }
+            _ => return,
+        };
+        if crate::provider::provider_unavailability_detail_for_account_label(key, label).is_none() {
+            crate::provider::record_provider_unavailable_for_account_label(key, label, error);
+        }
+    }
+
+    pub(super) fn record_model_turn_usage(&mut self, turn_id: &str) {
+        self.sync_bound_account_route();
         if self.session.is_debug {
             return;
         }
@@ -168,6 +269,7 @@ impl Agent {
         source: crate::provider::ProviderModelSelectionSource,
     ) -> Result<()> {
         self.provider.set_route_selection(selection)?;
+        self.adopt_provider_account_pins();
         let resolved_model = self.provider.model();
         self.session.provider_key = Some(selection.runtime_key.stable_id());
         self.session.route_api_method = Some(selection.api_method.clone());
@@ -193,6 +295,7 @@ impl Agent {
         source: crate::provider::ProviderModelSelectionSource,
     ) -> Result<()> {
         crate::provider::set_model_with_auth_refresh(self.provider.as_ref(), model)?;
+        self.adopt_provider_account_pins();
         let resolved_model = self.provider.model();
         self.session.provider_key =
             crate::provider::MultiProvider::session_provider_key_after_model_switch(
@@ -200,6 +303,21 @@ impl Agent {
                 self.provider.name(),
                 self.session.provider_key.as_deref(),
             );
+        if let Some(label) = self.provider.oauth_account_label() {
+            let method = if self.provider.name().eq_ignore_ascii_case("openai") {
+                "openai-oauth"
+            } else {
+                "claude-oauth"
+            };
+            self.session.route_api_method = Some(format!("{method}@{label}"));
+        } else if self
+            .session
+            .route_api_method
+            .as_deref()
+            .is_some_and(|method| jcode_provider_core::oauth_account_label(method).is_some())
+        {
+            self.session.route_api_method = None;
+        }
         self.session.model = Some(self.provider_model());
         let event = crate::provider::ProviderStateEvent::selected_model(source, resolved_model);
         self.provider_runtime_state.apply(event);
@@ -341,6 +459,7 @@ impl Agent {
             pin,
         )?;
         self.record_observed_account_pins();
+        self.sync_bound_account_route();
         self.log_env_snapshot("set_account_pin");
         self.session.save()?;
         Ok(())
@@ -402,6 +521,7 @@ impl Agent {
         if changed {
             self.persist_session_best_effort("account failover");
         }
+        self.sync_bound_account_route();
     }
 
     /// At turn start, return to the preferred account once its usage limit
@@ -423,6 +543,7 @@ impl Agent {
                 let _ = event_tx.send(event);
             }
         }
+        self.sync_bound_account_route();
         self.persist_session_best_effort("account return home");
     }
 
@@ -462,6 +583,14 @@ impl Agent {
     /// swarm agents inherit this so they reconstruct the coordinator's exact
     /// auth route instead of falling back to the config default.
     pub fn session_route_api_method(&self) -> Option<String> {
+        if let Some(label) = self.provider.oauth_account_label() {
+            let method = if self.provider.name().eq_ignore_ascii_case("openai") {
+                "openai-oauth"
+            } else {
+                "claude-oauth"
+            };
+            return Some(format!("{method}@{label}"));
+        }
         self.session.route_api_method.clone()
     }
 

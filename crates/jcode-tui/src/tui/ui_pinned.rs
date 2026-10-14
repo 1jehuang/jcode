@@ -46,14 +46,6 @@ fn side_panel_content_area(area: Rect) -> Option<Rect> {
     })
 }
 
-pub(crate) fn side_panel_close_area(area: Rect) -> Option<Rect> {
-    if area.width < 10 || area.height < 3 {
-        return None;
-    }
-    let inner = side_panel_inner(area);
-    Some(Rect::new(inner.right().saturating_sub(3), inner.y, 3, 1))
-}
-
 fn side_panel_content_may_contain_mermaid(content: &str) -> bool {
     content.lines().any(|line| {
         line.trim_start()
@@ -596,7 +588,8 @@ pub(super) fn draw_side_panel_markdown(
         }
     );
     if Line::from(title_parts.clone()).width() + Line::from(toggle_hint.as_str()).width()
-        <= side_panel_inner(area).width.saturating_sub(3) as usize
+        // Leave room for the ` [close]` dismiss label drawn over the header.
+        <= side_panel_inner(area).width.saturating_sub(8) as usize
     {
         title_parts.push(Span::styled(toggle_hint, Style::default().fg(dim_color())));
     }
@@ -643,12 +636,6 @@ pub(super) fn draw_side_panel_markdown(
     else {
         return;
     };
-    if let Some(close_area) = side_panel_close_area(area) {
-        frame.render_widget(
-            Paragraph::new(" x ").style(Style::default().fg(dim_color())),
-            close_area,
-        );
-    }
     let show_native_scrollbar = super::native_scrollbar_visible(
         app.side_panel_native_scrollbar() && content_shell_area.width > 1,
         rendered_full_width.lines.len(),

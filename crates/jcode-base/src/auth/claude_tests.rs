@@ -166,7 +166,7 @@ fn real_jcode_home_is_not_treated_as_a_sandbox() {
 }
 
 #[test]
-fn load_auth_file_renames_existing_labels_to_animal_scheme() {
+fn load_auth_file_preserves_existing_named_labels() {
     let _lock = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().unwrap();
     let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
@@ -201,9 +201,9 @@ fn load_auth_file_renames_existing_labels_to_animal_scheme() {
             .iter()
             .map(|account| account.label.as_str())
             .collect::<Vec<_>>(),
-        vec!["claude-otter", "claude-fox"]
+        vec!["personal", "work"]
     );
-    assert_eq!(auth.active_anthropic_account.as_deref(), Some("claude-fox"));
+    assert_eq!(auth.active_anthropic_account.as_deref(), Some("work"));
 }
 
 #[test]

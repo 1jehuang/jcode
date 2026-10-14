@@ -188,6 +188,7 @@ fn ssh_remote_history_is_authoritative_even_when_empty_or_server_version_differs
             connection_type: None,
             status_detail: None,
             upstream_provider: None,
+            provider_oauth_email: None,
             resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,

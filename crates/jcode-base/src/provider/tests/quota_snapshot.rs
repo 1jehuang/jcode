@@ -26,7 +26,7 @@ fn mark_exhausted() {
 }
 
 fn mark_cooldown() {
-    record_provider_unavailable_for_label("openai", LABEL, "openai-otter is out of usage");
+    record_provider_unavailable_for_account_label("openai", Some(LABEL), "openai-otter is out of usage");
 }
 
 fn store_available() {
@@ -87,7 +87,7 @@ fn deferred_snapshot_preserves_newer_quota_cooldown() {
         store_openai_accounts(1);
         mark_cooldown();
         deferred_snapshot(mark_cooldown);
-        assert!(provider_unavailability_detail_for_label("openai", LABEL).is_some());
+        assert!(provider_unavailability_detail_for_account_label("openai", Some(LABEL)).is_some());
     });
 }
 
@@ -130,7 +130,7 @@ fn accepted_snapshot_clears_older_quota_cooldown() {
         mark_cooldown();
         store_available();
         assert_eq!(
-            provider_unavailability_detail_for_label("openai", LABEL),
+            provider_unavailability_detail_for_account_label("openai", Some(LABEL)),
             None
         );
     });
@@ -140,9 +140,9 @@ fn accepted_snapshot_clears_older_quota_cooldown() {
 fn accepted_snapshot_preserves_non_quota_cooldown() {
     with_account_failover_env(|| {
         store_openai_accounts(1);
-        record_provider_unavailable_for_label("openai", LABEL, "authentication failed");
+        record_provider_unavailable_for_account_label("openai", Some(LABEL), "authentication failed");
         store_available();
-        assert!(provider_unavailability_detail_for_label("openai", LABEL).is_some());
+        assert!(provider_unavailability_detail_for_account_label("openai", Some(LABEL)).is_some());
     });
 }
 
@@ -150,9 +150,9 @@ fn accepted_snapshot_preserves_non_quota_cooldown() {
 fn accepted_snapshot_clears_older_rate_limit_cooldown() {
     with_account_failover_env(|| {
         store_openai_accounts(1);
-        record_provider_unavailable_for_label("openai", LABEL, "OpenAI API error (429): too many requests");
+        record_provider_unavailable_for_account_label("openai", Some(LABEL), "OpenAI API error (429): too many requests");
         store_available();
-        assert_eq!(provider_unavailability_detail_for_label("openai", LABEL), None);
+        assert_eq!(provider_unavailability_detail_for_account_label("openai", Some(LABEL)), None);
     });
 }
 
@@ -160,9 +160,9 @@ fn accepted_snapshot_clears_older_rate_limit_cooldown() {
 fn accepted_snapshot_preserves_auth_cooldown_mentioning_quota() {
     with_account_failover_env(|| {
         store_openai_accounts(1);
-        record_provider_unavailable_for_label("openai", LABEL, "OpenAI API error (401 Unauthorized): quota unavailable until authentication succeeds");
+        record_provider_unavailable_for_account_label("openai", Some(LABEL), "OpenAI API error (401 Unauthorized): quota unavailable until authentication succeeds");
         store_available();
-        assert!(provider_unavailability_detail_for_label("openai", LABEL).is_some());
+        assert!(provider_unavailability_detail_for_account_label("openai", Some(LABEL)).is_some());
     });
 }
 
@@ -170,14 +170,12 @@ fn accepted_snapshot_preserves_auth_cooldown_mentioning_quota() {
 fn accepted_snapshot_clears_marker_quota_cooldown() {
     with_account_failover_env(|| {
         store_openai_accounts(1);
-        record_provider_unavailable_for_label(
-            "openai",
-            LABEL,
+        record_provider_unavailable_for_account_label("openai", Some(LABEL),
             &jcode_provider_core::account_usage_limit_marker(None),
         );
         store_available();
         assert_eq!(
-            provider_unavailability_detail_for_label("openai", LABEL),
+            provider_unavailability_detail_for_account_label("openai", Some(LABEL)),
             None
         );
     });
@@ -187,9 +185,9 @@ fn accepted_snapshot_clears_marker_quota_cooldown() {
 fn accepted_snapshot_preserves_other_account_cooldown() {
     with_account_failover_env(|| {
         store_openai_accounts(2);
-        record_provider_unavailable_for_label("openai", "openai-fox", "out of usage");
+        record_provider_unavailable_for_account_label("openai", Some("openai-fox"), "out of usage");
         store_available();
-        assert!(provider_unavailability_detail_for_label("openai", "openai-fox").is_some());
+        assert!(provider_unavailability_detail_for_account_label("openai", Some("openai-fox")).is_some());
     });
 }
 
@@ -197,7 +195,7 @@ fn accepted_snapshot_preserves_other_account_cooldown() {
 fn claude_cooldown_does_not_advance_openai_generation() {
     with_account_failover_env(|| {
         let generation = crate::usage::openai_usage_generation();
-        record_provider_unavailable_for_label("claude", "claude-otter", "out of usage");
+        record_provider_unavailable_for_account_label("claude", Some("claude-otter"), "out of usage");
         assert_eq!(crate::usage::openai_usage_generation(), generation);
     });
 }

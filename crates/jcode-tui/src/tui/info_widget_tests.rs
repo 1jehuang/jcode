@@ -1324,6 +1324,57 @@ fn swarm_dock_surfaces_attention_and_collapses_overflow() {
     }
 }
 
+#[test]
+fn swarm_dock_shows_current_todo_and_fills_width() {
+    let mut worker = managed_member("blowfish", "running", None);
+    worker.detail = Some("You work across the toolchain".to_string());
+    worker.todo_items = vec![
+        crate::protocol::SwarmTodoItem {
+            content: "Measure baseline".to_string(),
+            status: "completed".to_string(),
+            tool_intents: Vec::new(),
+        },
+        crate::protocol::SwarmTodoItem {
+            content: "Build the per-step ranking script for rustc passes".to_string(),
+            status: "in_progress".to_string(),
+            tool_intents: Vec::new(),
+        },
+    ];
+    let data = InfoWidgetData {
+        swarm_info: Some(SwarmInfo {
+            managed_members: vec![worker],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let width = 40u16;
+    let framed = super::render_swarm_widget(&data, Rect::new(0, 0, width, 10));
+    let title = lines_text_concat(framed.title.as_slice());
+    assert!(title.starts_with("🐝 1/1 active"), "icon only: {title}");
+    assert!(!title.contains("Swarm"), "no spelled-out label: {title}");
+    let row: String = framed.lines[0]
+        .spans
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect();
+    assert!(
+        row.contains(crate::id::session_icon("blowfish")),
+        "agent icon: {row}"
+    );
+    assert!(
+        !row.contains("blowfish"),
+        "no spelled-out agent name: {row}"
+    );
+    assert!(row.contains("Build the per-step"), "current todo: {row}");
+    assert!(!row.contains("..."), "single-char ellipsis: {row}");
+    // Truncated text fills the row instead of backing off to a word boundary.
+    assert_eq!(
+        unicode_width::UnicodeWidthStr::width(row.as_str()),
+        usize::from(width),
+        "{row}"
+    );
+}
+
 /// Without managed members the legacy session-list rendering is preserved and
 /// the widget stays out of layout (has_data_for is false).
 #[test]

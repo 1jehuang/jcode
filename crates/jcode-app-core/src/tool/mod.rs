@@ -1367,6 +1367,18 @@ impl Registry {
             .cloned()
     }
 
+    /// Whether this exact configured server has registered tools. Dispatch
+    /// aliases are normalized and may be collision-suffixed, so callers must
+    /// not infer server membership by matching a name prefix.
+    pub fn has_mcp_tools_for_server(&self, server: &str) -> bool {
+        self.mcp_policy
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .current
+            .values()
+            .any(|(owner, _)| owner == server)
+    }
+
     fn mcp_dispatch_is_allowed(
         &self,
         session: &str,
@@ -1613,105 +1625,121 @@ impl Registry {
                 }
             }
 
-            // Spawn connection and tool registration in background
+            // Publish each completed connection independently. A slow handshake
+            // must not hide an already-connected peer until an entire batch ends.
             let registry = self.clone();
             tokio::spawn(async move {
-                let (successes, failures) = {
-                    // `connect_all` mutates the manager's internal connection
-                    // maps but does not mutate the manager object itself. A
-                    // read guard lets MCP list and other management actions
-                    // inspect those maps while a slow initialize handshake is
-                    // in flight.
-                    let manager = mcp_manager.read().await;
-                    manager.connect_all().await.unwrap_or((0, Vec::new()))
-                };
+                use futures::StreamExt;
 
-                if successes > 0 {
-                    crate::logging::info(&format!("MCP: Connected to {} server(s)", successes));
+                let configs: Vec<_> = mcp_manager
+                    .read()
+                    .await
+                    .config()
+                    .servers
+                    .iter()
+                    .filter(|(_, cfg)| cfg.is_enabled())
+                    .map(|(name, cfg)| (name.clone(), cfg.clone()))
+                    .collect();
+                let mut connections = futures::stream::FuturesUnordered::new();
+                for (name, config) in configs {
+                    let manager = Arc::clone(&mcp_manager);
+                    connections.push(async move {
+                        let result = manager.read().await.connect(&name, &config).await;
+                        (name, result)
+                    });
                 }
-                if !failures.is_empty() {
-                    for (name, error) in &failures {
+
+                while let Some((name, result)) = connections.next().await {
+                    if let Err(error) = result {
                         crate::logging::event_rate_limited(
                             crate::logging::LogLevel::Error,
                             &format!("mcp_register_failed:{name}"),
                             std::time::Duration::from_secs(60),
                             "MCP_REGISTER_FAILED",
-                            vec![("server", name.to_string()), ("error", error.to_string())],
+                            vec![("server", name), ("error", format!("{error:#}"))],
                         );
+                        continue;
                     }
-                }
+                    crate::logging::info(&format!("MCP: Connected to '{name}'"));
 
-                // Register MCP server tools and collect server info
-                let tools = crate::mcp::create_mcp_tools(Arc::clone(&mcp_manager)).await;
-                let mut server_counts: std::collections::BTreeMap<String, usize> =
-                    std::collections::BTreeMap::new();
-                for (_, tool) in &tools {
-                    if let Some((server, _)) = tool.mcp_identity() {
-                        *server_counts.entry(server.to_string()).or_default() += 1;
-                    }
-                }
-                let connected = mcp_manager.read().await.connected_servers().await;
-                registry.refresh_mcp_tools(tools, &connected).await;
-
-                // Reconcile the on-disk schema cache with the live schemas so the
-                // next spawn can advertise the up-to-date tools with zero cache
-                // miss. Group live tool defs by server and update each entry
-                // under the current config fingerprint; prune servers that are
-                // no longer configured. (#206 Phase 2)
-                {
-                    // Live tool defs grouped by server, plus a snapshot of the
-                    // configured servers, captured under one read lock.
-                    type LiveToolsByServer =
-                        std::collections::BTreeMap<String, Vec<crate::mcp::McpToolDef>>;
-                    type ConfigSnapshot = Vec<(String, crate::mcp::McpServerConfig)>;
-                    let (live_by_server, config_snapshot): (LiveToolsByServer, ConfigSnapshot) = {
-                        let manager = mcp_manager.read().await;
-                        let mut grouped: std::collections::BTreeMap<
-                            String,
-                            Vec<crate::mcp::McpToolDef>,
-                        > = std::collections::BTreeMap::new();
-                        for (server, def) in manager.all_tools().await {
-                            grouped.entry(server).or_default().push(def);
+                    // Register MCP server tools and collect server info
+                    let tools = crate::mcp::create_mcp_tools(Arc::clone(&mcp_manager)).await;
+                    let mut server_counts: std::collections::BTreeMap<String, usize> =
+                        std::collections::BTreeMap::new();
+                    for (_, tool) in &tools {
+                        if let Some((server, _)) = tool.mcp_identity() {
+                            *server_counts.entry(server.to_string()).or_default() += 1;
                         }
-                        let configs = manager
-                            .config()
-                            .servers
-                            .iter()
-                            .map(|(name, cfg)| (name.clone(), cfg.clone()))
-                            .collect();
-                        (grouped, configs)
-                    };
+                    }
+                    let connected = mcp_manager.read().await.connected_servers().await;
+                    registry.refresh_mcp_tools(tools, &connected).await;
 
-                    let mut cache = crate::mcp::McpSchemaCache::load();
-                    let mut dirty = false;
-                    for (server, cfg) in &config_snapshot {
-                        if let Some(defs) = live_by_server.get(server) {
-                            // Only cache servers that actually exposed tools.
-                            if cache.update(server, cfg, defs.clone()) {
-                                dirty = true;
+                    // Reconcile the on-disk schema cache with the live schemas so the
+                    // next spawn can advertise the up-to-date tools with zero cache
+                    // miss. Group live tool defs by server and update each entry
+                    // under the current config fingerprint; prune servers that are
+                    // no longer configured. (#206 Phase 2)
+                    {
+                        // Live tool defs grouped by server, plus a snapshot of the
+                        // configured servers, captured under one read lock.
+                        type LiveToolsByServer =
+                            std::collections::BTreeMap<String, Vec<crate::mcp::McpToolDef>>;
+                        type ConfigSnapshot = Vec<(String, crate::mcp::McpServerConfig)>;
+                        let (live_by_server, config_snapshot): (LiveToolsByServer, ConfigSnapshot) = {
+                            let manager = mcp_manager.read().await;
+                            let mut grouped: std::collections::BTreeMap<
+                                String,
+                                Vec<crate::mcp::McpToolDef>,
+                            > = std::collections::BTreeMap::new();
+                            for (server, def) in manager.all_tools().await {
+                                grouped.entry(server).or_default().push(def);
+                            }
+                            // A connected server with zero tools is a valid live
+                            // catalog, not an offline server. Cache its empty list
+                            // so a later startup cannot advertise removed tools.
+                            for server in manager.connected_servers().await {
+                                grouped.entry(server).or_default();
+                            }
+                            let configs = manager
+                                .config()
+                                .servers
+                                .iter()
+                                .map(|(name, cfg)| (name.clone(), cfg.clone()))
+                                .collect();
+                            (grouped, configs)
+                        };
+
+                        let mut cache = crate::mcp::McpSchemaCache::load();
+                        let mut dirty = false;
+                        for (server, cfg) in &config_snapshot {
+                            if let Some(defs) = live_by_server.get(server) {
+                                // Only cache connected servers, including empty catalogs.
+                                if cache.update(server, cfg, defs.clone()) {
+                                    dirty = true;
+                                }
                             }
                         }
+                        let configured_names: Vec<String> =
+                            config_snapshot.iter().map(|(n, _)| n.clone()).collect();
+                        if cache.retain_servers(&configured_names) {
+                            dirty = true;
+                        }
+                        if dirty {
+                            cache.save();
+                            crate::logging::info(
+                                "MCP: updated on-disk tool-schema cache from live connection (#206)",
+                            );
+                        }
                     }
-                    let configured_names: Vec<String> =
-                        config_snapshot.iter().map(|(n, _)| n.clone()).collect();
-                    if cache.retain_servers(&configured_names) {
-                        dirty = true;
-                    }
-                    if dirty {
-                        cache.save();
-                        crate::logging::info(
-                            "MCP: updated on-disk tool-schema cache from live connection (#206)",
-                        );
-                    }
-                }
 
-                // Notify client of MCP status
-                if let Some(tx) = event_tx {
-                    let servers: Vec<String> = server_counts
-                        .into_iter()
-                        .map(|(name, count)| format!("{}:{}", name, count))
-                        .collect();
-                    let _ = tx.send(crate::protocol::ServerEvent::McpStatus { servers });
+                    // Notify client of MCP status
+                    if let Some(ref tx) = event_tx {
+                        let servers: Vec<String> = server_counts
+                            .into_iter()
+                            .map(|(name, count)| format!("{}:{}", name, count))
+                            .collect();
+                        let _ = tx.send(crate::protocol::ServerEvent::McpStatus { servers });
+                    }
                 }
             });
         }

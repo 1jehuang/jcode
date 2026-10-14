@@ -1,4 +1,5 @@
 use super::*;
+mod saved_account_selection;
 use crate::provider::models::{ensure_model_allowed_for_subscription, filtered_display_models};
 
 fn with_clean_provider_test_env<T>(f: impl FnOnce() -> T) -> T {
@@ -39,6 +40,7 @@ fn with_clean_provider_test_env<T>(f: impl FnOnce() -> T) -> T {
         "JCODE_ACTIVE_PROVIDER",
         "JCODE_INITIAL_PROVIDER_EXPLICIT",
         "JCODE_OPENAI_MODEL",
+        "JCODE_SAME_PROVIDER_ACCOUNT_FAILOVER",
         "JCODE_NAMED_PROVIDER_PROFILE",
         "JCODE_PROVIDER_PROFILE_ACTIVE",
         "JCODE_PROVIDER_PROFILE_NAME",
@@ -438,8 +440,15 @@ fn openai_model_routes_cover_oauth_api_and_no_auth_state_space() {
             .filter(|route| route.provider == "OpenAI" && route.model == model)
             .map(|route| (route.api_method.as_str(), route.available))
             .collect::<Vec<_>>();
+        let account_label =
+            crate::auth::codex::active_account_label().expect("saved OpenAI account");
         assert!(
-            methods.contains(&("openai-oauth", true)),
+            methods.iter().any(|(method, available)| {
+                ModelRouteApiMethod::parse(method) == ModelRouteApiMethod::OpenAIOAuth
+                    && jcode_provider_core::oauth_account_label(method)
+                        == Some(account_label.as_str())
+                    && *available
+            }),
             "routes: {methods:?}"
         );
         assert!(
@@ -463,7 +472,15 @@ fn openai_model_routes_cover_oauth_api_and_no_auth_state_space() {
             .filter(|route| route.provider == "OpenAI" && route.model == model)
             .map(|route| route.api_method.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(oauth_only_methods, vec!["openai-oauth"]);
+        assert_eq!(oauth_only_methods.len(), 1);
+        assert_eq!(
+            ModelRouteApiMethod::parse(oauth_only_methods[0]),
+            ModelRouteApiMethod::OpenAIOAuth
+        );
+        assert_eq!(
+            jcode_provider_core::oauth_account_label(oauth_only_methods[0]),
+            Some(account_label.as_str())
+        );
 
         crate::env::set_var("OPENAI_API_KEY", "sk-test-openai-api-key");
         std::fs::remove_file(
@@ -802,6 +819,7 @@ struct StubExternalRuntime {
     models: &'static [&'static str],
     model: std::sync::RwLock<String>,
     credential_mode: std::sync::RwLock<jcode_provider_core::CredentialMode>,
+    oauth_account: std::sync::RwLock<Option<String>>,
 }
 
 impl StubExternalRuntime {
@@ -818,6 +836,7 @@ impl StubExternalRuntime {
             models,
             model: std::sync::RwLock::new(models[0].to_string()),
             credential_mode: std::sync::RwLock::new(jcode_provider_core::CredentialMode::Auto),
+            oauth_account: std::sync::RwLock::new(None),
         }
     }
 
@@ -942,6 +961,15 @@ impl Provider for StubExternalRuntime {
             self.api_method,
             self.models,
         ))
+    }
+
+    fn set_oauth_account(&self, label: Option<&str>) -> anyhow::Result<()> {
+        *self.oauth_account.write().unwrap() = label.map(str::to_owned);
+        Ok(())
+    }
+
+    fn oauth_account_label(&self) -> Option<String> {
+        self.oauth_account.read().unwrap().clone()
     }
 }
 
@@ -1211,6 +1239,7 @@ include!("tests/issue_534_profile_preservation.rs");
 include!("tests/fallback_failover.rs");
 include!("tests/billing_failover.rs");
 include!("tests/account_failover.rs");
+include!("tests/account_routing_pool.rs");
 include!("tests/catalog_subscription.rs");
 include!("tests/account_pins.rs");
 include!("tests/claude_code.rs");

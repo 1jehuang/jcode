@@ -357,6 +357,9 @@ pub enum Request {
     SetRoute {
         id: u64,
         selection: jcode_provider_core::RouteSelection,
+        /// Automatic retries must revalidate the server's current account pool.
+        #[serde(default, skip_serializing_if = "is_false")]
+        automatic_failover: bool,
     },
 
     /// Set or clear the session-scoped subagent model preference.
@@ -408,6 +411,15 @@ pub enum Request {
     /// Set connection transport for OpenAI models (auto|https|websocket)
     #[serde(rename = "set_transport")]
     SetTransport { id: u64, transport: String },
+
+    /// Non-presentation command executed against the attached live runtime.
+    #[serde(rename = "runtime_command")]
+    RuntimeCommand {
+        id: u64,
+        command: String,
+        #[serde(default)]
+        args: Vec<String>,
+    },
 
     /// Set Copilot premium request conservation mode (0=normal, 1=one-per-session, 2=zero)
     #[serde(rename = "set_premium_mode")]
@@ -944,6 +956,13 @@ pub enum Request {
     reason = "wire protocol prioritizes straightforward serde payloads over boxing every larger event variant"
 )]
 pub enum ServerEvent {
+    #[serde(rename = "runtime_command_result")]
+    RuntimeCommandResult {
+        id: u64,
+        command: String,
+        data: serde_json::Value,
+        message: String,
+    },
     #[serde(rename = "tools")]
     Tools {
         id: u64,
@@ -1012,6 +1031,12 @@ pub enum ServerEvent {
     /// shown during streaming is replaced with the clean prefix text.
     #[serde(rename = "text_replace")]
     TextReplace { text: String },
+
+    /// Source-aware correction of a completed provider message. Unlike the
+    /// legacy response-wide replacement, preserve everything before an exact
+    /// trailing old_text match (including already committed messages).
+    #[serde(rename = "text_suffix_replace")]
+    TextSuffixReplace { old_text: String, new_text: String },
 
     /// Tool call started
     #[serde(rename = "tool_start")]
@@ -1329,6 +1354,12 @@ pub enum ServerEvent {
     #[serde(rename = "context_message_added")]
     ContextMessageAdded { id: u64 },
 
+    /// Another client attached to this session started a turn with this
+    /// message. Sent to every other live attachment so each window shows the
+    /// prompt (or the auto-poke notice) instead of only the sender seeing it.
+    #[serde(rename = "peer_user_message")]
+    PeerUserMessage { content: String },
+
     /// Error occurred
     #[serde(rename = "error")]
     Error {
@@ -1474,6 +1505,10 @@ pub enum ServerEvent {
         /// render usage/billing without re-deriving it from the provider name.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resolved_credential: Option<jcode_provider_core::ResolvedCredential>,
+        /// Authoritative selected model-provider OAuth account email, shared
+        /// only while daemon usage telemetry is enabled. Never a credential.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_oauth_email: Option<ProviderOAuthEmail>,
         /// Reasoning effort for providers that expose it
         #[serde(skip_serializing_if = "Option::is_none")]
         reasoning_effort: Option<String>,
@@ -1583,6 +1618,9 @@ pub enum ServerEvent {
         /// key). Lets clients update the auth badge on an OAuth<->API switch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resolved_credential: Option<jcode_provider_core::ResolvedCredential>,
+        /// Effective OAuth identity for the selected model-provider account.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_oauth_email: Option<ProviderOAuthEmail>,
         /// Effort the switched-to model runs with. A switch can clear an
         /// effort the new model does not advertise, so clients must not keep
         /// showing the old one. Always serialized (`null` = no effort) so a

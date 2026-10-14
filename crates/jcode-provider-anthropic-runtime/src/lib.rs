@@ -52,7 +52,7 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use tokio::sync::{RwLock, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
@@ -132,6 +132,8 @@ fn direct_auth_mode() -> String {
 #[derive(Clone)]
 struct DirectTransportConfig {
     api_url: String,
+    #[cfg(test)]
+    oauth_api_url: Option<String>,
     headers: std::result::Result<HeaderMap, String>,
     auth_mode: String,
     auth_header: String,
@@ -141,6 +143,8 @@ impl DirectTransportConfig {
     fn from_env() -> Self {
         Self {
             api_url: direct_api_url(),
+            #[cfg(test)]
+            oauth_api_url: None,
             headers: configured_direct_headers().map_err(|err| format!("{err:#}")),
             auth_mode: direct_auth_mode(),
             auth_header: std::env::var("JCODE_ANTHROPIC_AUTH_HEADER")
@@ -639,6 +643,9 @@ pub struct AnthropicProvider {
     /// pin change takes effect on the next request or retry.
     account_pin: AccountPinSlot,
     credential_mode: Arc<RwLock<AnthropicCredentialMode>>,
+    /// Actual credential resolved for this runtime's latest request: unknown,
+    /// OAuth, or API key. Auto may fall back after a failed OAuth refresh.
+    request_credential: Arc<AtomicU8>,
     /// Explicit `JCODE_ANTHROPIC_MAX_TOKENS` override. When unset, the output
     /// budget is derived per model so newer generations are not clamped to the
     /// legacy 32K default.
@@ -743,8 +750,8 @@ impl AnthropicProvider {
     /// live `GET /v1/models` endpoint works and that the model under test is in
     /// the live catalog.
     pub async fn fetch_live_model_ids_for_doctor(&self) -> Result<Vec<String>> {
-        let oauth_scope = jcode_base::provider::anthropic_catalog_scope_for_route(true);
-        let api_scope = jcode_base::provider::anthropic_catalog_scope_for_route(false);
+        let oauth_scope = self.catalog_scope_for_route(true);
+        let api_scope = self.catalog_scope_for_route(false);
         let (token, is_oauth) = self.get_access_token().await?;
         let scope = if is_oauth { oauth_scope } else { api_scope };
         if token.trim().is_empty() {
@@ -837,6 +844,7 @@ impl AnthropicProvider {
             credential_mode: Arc::new(RwLock::new(AnthropicCredentialMode::from_runtime_env(
                 jcode_provider_core::DualAuthProvider::Anthropic,
             ))),
+            request_credential: Arc::new(AtomicU8::new(0)),
             max_tokens_override,
             oauth_session_id: Uuid::new_v4().to_string(),
             oauth_preflight_done: Arc::new(AtomicBool::new(false)),
@@ -1152,6 +1160,16 @@ impl AnthropicProvider {
     /// Supports both OAuth tokens and direct API keys
     /// Automatically refreshes OAuth tokens when expired
     async fn get_access_token(&self) -> Result<(String, bool)> {
+        self.request_credential.store(0, Ordering::Release);
+        let result = self.resolve_access_token().await;
+        if let Ok((_, is_oauth)) = &result {
+            self.request_credential
+                .store(if *is_oauth { 1 } else { 2 }, Ordering::Release);
+        }
+        result
+    }
+
+    async fn resolve_access_token(&self) -> Result<(String, bool)> {
         let mode = *self.credential_mode.read().await;
 
         // Explicit API-key mode: use the direct API key and surface an error if
@@ -1185,7 +1203,27 @@ impl AnthropicProvider {
         self.get_oauth_access_token().await
     }
 
+    fn load_oauth_credentials(&self) -> Result<auth::claude::ClaudeCredentials> {
+        load_scoped_claude_credentials(&self.account_pin).map(|(credentials, _)| credentials)
+    }
+
+    fn catalog_scope_for_route(&self, oauth: bool) -> String {
+        if oauth && let Some(pin) = self.account_pin.get() {
+            format!("oauth::{}", pin.label)
+        } else {
+            jcode_base::provider::anthropic_catalog_scope_for_route(oauth)
+        }
+    }
+
     async fn get_oauth_access_token(&self) -> Result<(String, bool)> {
+        // An explicit OAuth binding must fail closed when its account is
+        // removed, even with a fresh cache. Window pins in Auto mode fall back
+        // to the default account inside the resolver instead.
+        if *self.credential_mode.read().await == AnthropicCredentialMode::OAuth
+            && let Some(pin) = self.account_pin.get()
+        {
+            auth::claude::load_credentials_scoped(AccountScope::Pinned(&pin))?;
+        }
         resolve_oauth_access_token(&self.credentials, &self.account_pin).await
     }
 
@@ -1204,7 +1242,8 @@ impl AnthropicProvider {
             service_tier: Arc::new(std::sync::RwLock::new(self.service_tier())),
             credentials: Arc::new(RwLock::new(None)),
             account_pin: self.account_pin.fork(),
-            credential_mode: Arc::clone(&self.credential_mode),
+            credential_mode: Arc::new(RwLock::new(self.credential_mode_snapshot())),
+            request_credential: Arc::new(AtomicU8::new(0)),
             max_tokens_override: self.max_tokens_override,
             oauth_session_id: self.oauth_session_id.clone(),
             oauth_preflight_done: Arc::new(AtomicBool::new(
@@ -1223,7 +1262,8 @@ impl AnthropicProvider {
                 load_anthropic_api_key()?;
             }
             AnthropicCredentialMode::OAuth => {
-                auth::claude::load_credentials().context("Failed to load Claude credentials")?;
+                self.load_oauth_credentials()
+                    .context("Failed to load Claude credentials")?;
             }
         }
         let mut mode_guard = self.credential_mode.try_write().map_err(|_| {
@@ -1232,6 +1272,7 @@ impl AnthropicProvider {
             )
         })?;
         *mode_guard = mode;
+        self.request_credential.store(0, Ordering::Release);
         drop(mode_guard);
         if let Ok(mut cached) = self.credentials.try_write() {
             *cached = None;
@@ -1483,6 +1524,64 @@ impl Provider for AnthropicProvider {
         self.credential_mode_snapshot()
     }
 
+    fn active_resolved_credential(&self) -> Option<jcode_provider_core::ResolvedCredential> {
+        use jcode_provider_core::ResolvedCredential;
+        match self.credential_mode_snapshot() {
+            AnthropicCredentialMode::OAuth => Some(ResolvedCredential::Oauth),
+            AnthropicCredentialMode::ApiKey => Some(ResolvedCredential::ApiKey),
+            AnthropicCredentialMode::Auto => {
+                match self.request_credential.load(Ordering::Acquire) {
+                    1 => Some(ResolvedCredential::Oauth),
+                    2 => Some(ResolvedCredential::ApiKey),
+                    _ => None,
+                }
+            }
+        }
+    }
+
+    /// Saved-account binding (model picker `claude-oauth@label` routes) is the
+    /// same per-window pin `/account switch` and failover use.
+    fn set_oauth_account(&self, label: Option<&str>) -> Result<()> {
+        let pin = match label {
+            Some(label) => {
+                auth::claude::load_credentials_for_account(label)?;
+                let identity = auth::claude::list_accounts()?
+                    .iter()
+                    .find(|account| account.label == label)
+                    .and_then(auth::claude::account_identity);
+                Some(AccountPin::new(label, identity))
+            }
+            None => None,
+        };
+        self.set_account_pin(AccountProviderKind::Claude, pin)?;
+        self.request_credential.store(0, Ordering::Release);
+        self.oauth_preflight_done.store(false, Ordering::Release);
+        Ok(())
+    }
+
+    fn oauth_account_label(&self) -> Option<String> {
+        self.account_pin.get().map(|pin| pin.label)
+    }
+
+    fn active_oauth_account_email(&self) -> Option<String> {
+        if self.active_resolved_credential() != Some(jcode_provider_core::ResolvedCredential::Oauth)
+        {
+            return None;
+        }
+        let cached = self.credentials.try_read().ok()?;
+        let cached = cached.as_ref()?;
+        auth::claude::list_accounts()
+            .ok()?
+            .into_iter()
+            .find_map(|account| {
+                let matches = (!cached.access_token.is_empty()
+                    && account.access == cached.access_token)
+                    || (!cached.refresh_token.is_empty()
+                        && account.refresh == cached.refresh_token);
+                matches.then_some(account.email).flatten()
+            })
+    }
+
     fn set_credential_mode(&self, mode: jcode_provider_core::CredentialMode) -> Result<()> {
         AnthropicProvider::set_credential_mode(self, mode)
     }
@@ -1678,7 +1777,7 @@ impl Provider for AnthropicProvider {
             if !configured {
                 continue;
             }
-            let scope = jcode_base::provider::anthropic_catalog_scope_for_route(oauth);
+            let scope = self.catalog_scope_for_route(oauth);
             if !jcode_base::provider::begin_anthropic_model_catalog_refresh_for_scope(&scope) {
                 continue;
             }
@@ -1753,6 +1852,7 @@ impl Provider for AnthropicProvider {
     }
 
     async fn invalidate_credentials(&self) {
+        self.request_credential.store(0, Ordering::Release);
         let mut cached = self.credentials.write().await;
         *cached = None;
     }
@@ -1967,6 +2067,7 @@ async fn run_stream_with_retries(
             jcode_provider_core::fresh_transport_client()
         };
 
+        let mut response_accepted = false;
         match stream_response(
             attempt_client,
             token.clone(),
@@ -1976,6 +2077,7 @@ async fn run_stream_with_retries(
             &model_name,
             &oauth_session_id,
             &direct_transport,
+            &mut response_accepted,
         )
         .await
         {
@@ -2151,6 +2253,24 @@ async fn run_stream_with_retries(
                     continue;
                 }
 
+                // Account routing owns pre-output OAuth auth failures (after the
+                // forced refresh above) when other pool members exist: the
+                // per-window failover moves this window to another login.
+                // Usage limits that reset far out already failed fast above;
+                // a short 429 stays here and retries this account, since it
+                // recovers on its own. Transport and post-output retries stay
+                // below. WaitingForResponse commits routing to this runtime
+                // after HTTP success, so early SSE errors keep the inner retry.
+                if is_oauth
+                    && !saw_output
+                    && !response_accepted
+                    && is_oauth_auth_error(&error_str)
+                    && jcode_base::provider::has_alternate_account_in_pool("claude")
+                {
+                    let _ = tx.send(Err(e)).await;
+                    return;
+                }
+
                 // Check if this is a transient/retryable error
                 if is_retryable_error(&error_str) && attempt + 1 < MAX_RETRIES {
                     if saw_output {
@@ -2316,6 +2436,25 @@ async fn force_refresh_oauth_token(
     let (loaded, refresh_label) = load_scoped_claude_credentials(&account_pin)
         .context("Failed to load Claude credentials for forced refresh")?;
     let source = (loaded.access_token.clone(), loaded.refresh_token.clone());
+    // Another request (or session) already rotated this login since the
+    // cache was filled: join that refresh instead of spending the new
+    // refresh token on a second one.
+    {
+        let mut cached = credentials.write().await;
+        let now = chrono::Utc::now().timestamp_millis();
+        if cached.as_ref().is_some_and(|c| c.source != source)
+            && !loaded.access_token.is_empty()
+            && loaded.expires_at > now + 300_000
+        {
+            *cached = Some(CachedCredentials {
+                access_token: loaded.access_token.clone(),
+                refresh_token: loaded.refresh_token.clone(),
+                expires_at: loaded.expires_at,
+                source,
+            });
+            return Ok(loaded.access_token);
+        }
+    }
     // A token we refreshed ourselves (e.g. from an external source that is not
     // rewritten on refresh) rotates the refresh token, so prefer the cached one
     // only while it still derives from the stored credential.
@@ -2436,6 +2575,7 @@ async fn stream_response(
     model_name: &str,
     oauth_session_id: &str,
     direct_transport: &DirectTransportConfig,
+    response_accepted: &mut bool,
 ) -> Result<()> {
     use jcode_message_types::ConnectionPhase;
     let requested_model_base = strip_1m_suffix(&request.model).to_ascii_lowercase();
@@ -2460,6 +2600,14 @@ async fn stream_response(
         oauth_api_url()
     } else {
         direct_transport.api_url.clone()
+    };
+    // Local HTTP regressions exercise the real OAuth retry loop without
+    // permitting a production environment override of the OAuth endpoint.
+    #[cfg(test)]
+    let url = if is_oauth {
+        direct_transport.oauth_api_url.clone().unwrap_or(url)
+    } else {
+        url
     };
 
     let mut req = client.post(&url);
@@ -2548,6 +2696,7 @@ async fn stream_response(
         return Err(tag_usage_limit_reset(error, &headers));
     }
 
+    *response_accepted = true;
     let _ = tx
         .send(Ok(StreamEvent::ConnectionPhase {
             phase: ConnectionPhase::WaitingForResponse,
@@ -3178,3 +3327,9 @@ mod usage_limit_reset_tests;
 #[cfg(test)]
 #[path = "late_tool_result_tests.rs"]
 mod late_tool_result_tests;
+
+#[cfg(test)]
+mod account_failover_tests;
+
+#[cfg(test)]
+mod account_binding_tests;

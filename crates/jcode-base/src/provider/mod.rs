@@ -1,5 +1,6 @@
 mod accessors;
 mod account_failover;
+mod account_selection;
 pub mod activation;
 pub mod anthropic;
 pub mod antigravity;
@@ -30,6 +31,7 @@ mod selection;
 mod startup;
 mod state;
 mod stream_peek;
+mod stream_start;
 mod stream_timeout;
 
 use crate::auth;
@@ -43,6 +45,7 @@ use registry::ProviderRegistry;
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
 
+pub use account_failover::{has_alternate_account_in_pool, has_eligible_alternate_account};
 pub use catalog_routes::{
     append_simplified_anthropic_model_routes, remote_current_openai_compatible_route_for_model,
     remote_model_is_server_copilot_only, remote_model_routes_fallback,
@@ -483,9 +486,9 @@ pub use self::models::{
     populate_account_models, populate_anthropic_models, populate_anthropic_models_for_scope,
     populate_context_limits, populate_context_limits_from_config,
     populate_context_limits_from_config_value, provider_for_model, provider_for_model_with_hint,
-    provider_unavailability_detail_for_account, provider_unavailability_detail_for_label,
+    provider_unavailability_detail_for_account, provider_unavailability_detail_for_account_label,
     record_model_unavailable_for_account, record_provider_unavailable_for_account,
-    record_provider_unavailable_for_label, refresh_openai_model_catalog_in_background,
+    record_provider_unavailable_for_account_label, refresh_openai_model_catalog_in_background,
     resolve_model_capabilities, should_refresh_anthropic_model_catalog,
     should_refresh_anthropic_model_catalog_for_scope, should_refresh_openai_model_catalog,
 };
@@ -496,6 +499,7 @@ pub use self::models::{
     known_openai_model_ids_for_scope, model_availability_for_scope,
     openai_catalog_scope_for_credential, persist_openai_model_catalog_for_scope,
     populate_account_models_for_scope, record_model_unavailable_for_scope,
+    refresh_openai_model_catalog_in_background_for_scope,
     should_refresh_openai_model_catalog_for_scope,
 };
 pub use self::selection::DefaultModelSelection;
@@ -818,6 +822,25 @@ impl MultiProvider {
             };
 
         let active = self.active_provider();
+        // An explicit saved-account route is a billing choice: a removed login
+        // fails closed instead of healing onto another account.
+        if let Some(bound_label) = self.selected_account_for_provider(active) {
+            let exists = match active {
+                ActiveProvider::OpenAI => crate::auth::codex::list_accounts()?
+                    .iter()
+                    .any(|account| account.label == bound_label),
+                ActiveProvider::Claude => crate::auth::claude::list_accounts()?
+                    .iter()
+                    .any(|account| account.label == bound_label),
+                _ => true,
+            };
+            if !exists {
+                anyhow::bail!(
+                    "Saved account '{}' no longer exists. Select an account with /model or /account.",
+                    bound_label
+                );
+            }
+        }
         let sequence = Self::fallback_sequence(active);
         let mut notes: Vec<String> = Vec::new();
         let mut failover_reason: Option<String> = None;
@@ -829,19 +852,30 @@ impl MultiProvider {
 
         for candidate in sequence {
             let label = Self::provider_label(candidate);
-            let key = Self::provider_key(candidate);
+            let key = self.provider_runtime_cooldown_key(candidate);
 
-            if candidate != active && failover_reason.is_some() {
-                let prompt = self.build_failover_prompt(
+            if candidate != active {
+                // Account rotation may have exhausted the pool since the first
+                // error. Render guidance from current cooldowns, never from an
+                // annotation captured before alternate logins were attempted.
+                let reason = failover_reason
+                    .clone()
+                    .unwrap_or_else(|| "provider unavailable".to_string());
+                let reason = if self.provider_uses_oauth_accounts(active) {
+                    maybe_annotate_limit_summary(active, reason)
+                } else {
+                    reason
+                };
+                if let Some(prompt) = self.cross_provider_pool_prompt(
                     active,
                     candidate,
-                    failover_reason
-                        .clone()
-                        .unwrap_or_else(|| "provider unavailable".to_string()),
+                    reason,
                     estimated_input_chars,
                     estimated_input_tokens,
-                );
-                return Err(anyhow::anyhow!(prompt.to_error_message()));
+                ) {
+                    return Err(anyhow::anyhow!(prompt.to_error_message()));
+                }
+                continue;
             }
 
             if !self.provider_is_configured(candidate) {
@@ -860,7 +894,11 @@ impl MultiProvider {
             // Claude/OpenAI unavailability is per account label (this
             // session's account), so one window's exhausted account does not
             // block every window on that provider.
+            // API-key requests (explicit, or Auto that resolved to a key) never
+            // rotate OAuth accounts or touch their per-label cooldowns.
+            let uses_oauth_accounts = self.provider_uses_oauth_accounts(candidate);
             let session_label = account_failover::account_kind(candidate)
+                .filter(|_| uses_oauth_accounts)
                 .and_then(|kind| self.session_account_label(kind));
             // The ChatGPT web route runs in the browser session, not on the
             // stored OpenAI account, so that account's usage must not gate it.
@@ -874,7 +912,7 @@ impl MultiProvider {
             if candidate == ActiveProvider::OpenAI
                 && !browser_session
                 && let Some(label) = session_label.as_deref()
-                && (provider_unavailability_detail_for_label(key, label).is_some()
+                && (provider_unavailability_detail_for_account_label(key, Some(label)).is_some()
                     || account_failover::account_exhausted(
                         jcode_provider_core::AccountProviderKind::OpenAi,
                         label,
@@ -885,15 +923,17 @@ impl MultiProvider {
             }
             let unavailable = match session_label.as_deref() {
                 _ if browser_session => None,
-                Some(label) => provider_unavailability_detail_for_label(key, label),
+                Some(label) => provider_unavailability_detail_for_account_label(key, Some(label)),
                 None => provider_unavailability_detail_for_account(key),
             };
             // With account failover, a marked account means "rotate", not
             // "skip the provider".
-            let account_failover =
-                (candidate == active && !account_failover_done && !browser_session)
-                    .then(|| self.account_failover_labels(candidate))
-                    .flatten();
+            let account_failover = (candidate == active
+                && !account_failover_done
+                && !browser_session
+                && uses_oauth_accounts)
+                .then(|| self.account_failover_labels(candidate))
+                .flatten();
             if let Some(detail) = unavailable.clone()
                 && account_failover.is_none()
             {
@@ -953,7 +993,11 @@ impl MultiProvider {
                         if decision.should_mark_provider_unavailable()
                             && let Some(session_label) = session_label.as_deref()
                         {
-                            record_provider_unavailable_for_label(key, session_label, &summary);
+                            record_provider_unavailable_for_account_label(
+                                key,
+                                Some(session_label),
+                                &summary,
+                            );
                         }
                         failover_reason = Some(summary);
                         continue;
@@ -976,9 +1020,11 @@ impl MultiProvider {
                 }
                 notes.push(note);
                 match session_label.as_deref() {
-                    Some(session_label) => {
-                        record_provider_unavailable_for_label(key, session_label, &reason)
-                    }
+                    Some(session_label) => record_provider_unavailable_for_account_label(
+                        key,
+                        Some(session_label),
+                        &reason,
+                    ),
                     None => record_provider_unavailable_for_account(key, &reason),
                 }
                 continue;
@@ -999,6 +1045,10 @@ impl MultiProvider {
             {
                 return attempt;
             }
+            // OAuth runtimes return their channel before the HTTP request is
+            // accepted. Surface startup errors here so they are classified and
+            // recorded instead of reaching the client as an endless retry.
+            let attempt = self.await_account_stream_start(candidate, attempt).await;
 
             match attempt {
                 Ok(stream) => {
@@ -1030,26 +1080,32 @@ impl MultiProvider {
                     return Ok(stream);
                 }
                 Err(err) => {
-                    let summary =
-                        maybe_annotate_limit_summary(candidate, Self::summarize_error(&err));
+                    let summary = Self::summarize_error(&err);
+                    let display_summary = if self.provider_uses_oauth_accounts(candidate) {
+                        maybe_annotate_limit_summary(candidate, summary.clone())
+                    } else {
+                        summary.clone()
+                    };
                     let decision = Self::classify_failover_error(&err);
                     crate::logging::info(&format!(
                         "Provider {} failed{}: {} (failover={} decision={})",
                         label,
                         mode.log_suffix(),
-                        summary,
+                        display_summary,
                         decision.should_failover(),
                         decision.as_str()
                     ));
-                    notes.push(format!("{}: {}", label, summary));
+                    notes.push(format!("{}: {}", label, display_summary));
                     if decision.should_failover() {
                         if decision.should_mark_provider_unavailable() {
                             match session_label.as_deref() {
-                                Some(session_label) => record_provider_unavailable_for_label(
-                                    key,
-                                    session_label,
-                                    &summary,
-                                ),
+                                Some(session_label) => {
+                                    record_provider_unavailable_for_account_label(
+                                        key,
+                                        Some(session_label),
+                                        &summary,
+                                    )
+                                }
                                 None => record_provider_unavailable_for_account(key, &summary),
                             }
                         }
@@ -1226,6 +1282,9 @@ impl MultiProvider {
     fn named_provider_profile_model_prefix(model: &str) -> Option<(String, String)> {
         let (prefix, rest) = model.split_once(':')?;
         if explicit_model_provider_prefix(model).is_some()
+            || model.split_once(':').is_some_and(|(method, _)| {
+                jcode_provider_core::oauth_account_label(method).is_some()
+            })
             || Self::openai_compatible_model_prefix(model).is_some()
         {
             return None;
@@ -1864,6 +1923,9 @@ impl MultiProvider {
         // single provider would make it reject the id and silently keep its
         // fallback default model.
         if explicit_model_provider_prefix(model).is_some()
+            || model.split_once(':').is_some_and(|(method, _)| {
+                jcode_provider_core::oauth_account_label(method).is_some()
+            })
             || Self::openai_compatible_model_prefix(model).is_some()
         {
             return self.set_model(model);
@@ -1951,6 +2013,14 @@ impl MultiProvider {
     }
 
     fn fork_model_switch_request(&self, active: ActiveProvider, current_model: &str) -> String {
+        if let Some(label) = self.selected_account_for_provider(active) {
+            let method = if active == ActiveProvider::Claude {
+                "claude-oauth"
+            } else {
+                "openai-oauth"
+            };
+            return format!("{method}@{label}:{current_model}");
+        }
         let prefix = match active {
             ActiveProvider::Claude => {
                 if let Some(anthropic) = self.anthropic_provider() {
@@ -2276,6 +2346,47 @@ impl Provider for MultiProvider {
         Ok(())
     }
 
+    fn oauth_account_label(&self) -> Option<String> {
+        self.selected_account_for_provider(self.active_provider())
+    }
+
+    fn active_oauth_account_email(&self) -> Option<String> {
+        let runtime = match self.active_provider() {
+            ActiveProvider::Claude => self.anthropic_provider(),
+            ActiveProvider::OpenAI => self.openai_provider(),
+            ActiveProvider::Copilot => self.copilot_provider(),
+            ActiveProvider::Antigravity => self.antigravity_provider(),
+            ActiveProvider::Gemini => self.gemini_provider(),
+            ActiveProvider::Cursor => self.cursor_provider(),
+            ActiveProvider::ClaudeCode => self.claude_code_provider(),
+            ActiveProvider::Bedrock => self.bedrock_provider().map(|p| p as Arc<dyn Provider>),
+            ActiveProvider::OpenRouter => self.active_openrouter_execution_provider(),
+        }?;
+        runtime.active_oauth_account_email()
+    }
+
+    fn set_oauth_account(&self, label: Option<&str>) -> Result<()> {
+        let active = self.active_provider();
+        if let Some(label) = label {
+            let method = match active {
+                ActiveProvider::Claude => "claude-oauth",
+                ActiveProvider::OpenAI => "openai-oauth",
+                _ => anyhow::bail!("This provider does not support saved OAuth accounts"),
+            };
+            return self.set_model_on_saved_account(method, label, &self.model());
+        }
+        let runtime = match active {
+            ActiveProvider::Claude => self.anthropic_provider(),
+            ActiveProvider::OpenAI => self.openai_provider(),
+            _ => None,
+        };
+        if let Some(runtime) = runtime {
+            runtime.set_oauth_account(None)?;
+        }
+        self.invalidate_routes_memo();
+        Ok(())
+    }
+
     fn active_explicit_credential(&self) -> Option<jcode_provider_core::ResolvedCredential> {
         use jcode_provider_core::ResolvedCredential;
         // Only report an *explicit* in-memory pin. Auto mode returns `None` so
@@ -2374,6 +2485,27 @@ impl Provider for MultiProvider {
                 anyhow::bail!("Claude Code model cannot be empty");
             }
             return self.set_model_on_provider(ActiveProvider::ClaudeCode, target_model);
+        }
+
+        if let Some((prefix, target_model)) = requested_model.split_once(':')
+            && let Some((method, label)) = prefix.split_once('@')
+            && matches!(method, "claude-oauth" | "openai-oauth")
+        {
+            return self.set_model_on_saved_account(method, label, target_model);
+        }
+        // Bare model changes keep the selected login. Explicit generic routes
+        // opt back into the normal active-account preference.
+        if let Some((prefix, _)) = requested_model.split_once(':')
+            && let Some(route) =
+                jcode_provider_core::AuthRoute::parse_explicit_credential_prefix(prefix)
+        {
+            let runtime = match route.provider {
+                jcode_provider_core::DualAuthProvider::Anthropic => self.anthropic_provider(),
+                jcode_provider_core::DualAuthProvider::OpenAI => self.openai_provider(),
+            };
+            if let Some(runtime) = runtime {
+                runtime.set_oauth_account(None)?;
+            }
         }
 
         if let Some(target_model) = requested_model.strip_prefix("grok-build:") {

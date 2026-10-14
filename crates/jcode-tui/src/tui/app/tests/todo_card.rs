@@ -410,6 +410,34 @@ fn pinned_todo_band_renders_below_sticky_prompt_without_separator() {
 }
 
 #[test]
+fn pinned_todo_band_uses_full_width_on_wide_terminals() {
+    let _env_lock = crate::storage::lock_test_env();
+    let _render_lock = crate::tui::ui::render_state_test_lock();
+    let _pin = PinTodosEnvGuard::enable();
+    let mut app = create_test_app();
+    let session_id = app.session.id.clone();
+    let long_item = format!("wide pinned item {} END", "x".repeat(140));
+    crate::todo::save_todos(&session_id, &[pinned_band_todo("t1", &long_item, "in_progress")])
+        .unwrap();
+    app.refresh_pinned_todos_now();
+
+    let width = 200u16;
+    let band = crate::tui::ui::viewport::pinned_todo_band_lines(&app, width, 40);
+    let row = band
+        .card
+        .iter()
+        .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+        .find(|row| row.contains("wide pinned item"))
+        .expect("pinned todo item row");
+    assert!(
+        row.contains("END"),
+        "pinned todo should use the full terminal width instead of the inline card width cap, got: {row:?}"
+    );
+
+    let _ = crate::todo::save_todos(&session_id, &[]);
+}
+
+#[test]
 fn background_tasks_render_once_in_the_pinned_band_not_the_overview() {
     let _env_lock = crate::storage::lock_test_env();
     let _render_lock = crate::tui::ui::render_state_test_lock();

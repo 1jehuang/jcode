@@ -103,6 +103,7 @@ fn test_remote_session_switch_discards_redirect_images() {
             images: vec![],
             provider_name: Some("mock".to_string()),
             provider_model: Some("mock-model".to_string()),
+            provider_oauth_email: None,
             subagent_model: None,
             agent_model_overrides: Default::default(),
             autoreview_enabled: None,

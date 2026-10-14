@@ -77,6 +77,10 @@ pub enum ApiRequest {
     /// Clone an attached session's transcript into a new, idle session.
     ForkSession { session_id: String },
 
+    /// Create a fresh session containing a runtime-compacted handoff.
+    /// The parent remains unchanged. Replies with `SessionForked`.
+    TransferSession { session_id: String },
+
     /// Detach from the currently attached session.
     DetachSession { session_id: String },
 
@@ -175,6 +179,15 @@ pub enum ApiRequest {
 
     /// Provider routes and active runtime identity for the attached session.
     GetRuntimeInfo { session_id: String },
+
+    /// Execute a runtime-backed command without a model turn. Requires
+    /// `runtime_commands`. Invalid or unavailable actions return an error.
+    RuntimeCommand {
+        session_id: String,
+        command: crate::RuntimeCommand,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        args: Vec<String>,
+    },
 
     /// Persist an API-key credential in jcode's owner-only provider store and
     /// notify the daemon to reload it. OAuth tokens are intentionally excluded.

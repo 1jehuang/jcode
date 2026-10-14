@@ -178,6 +178,14 @@ impl Agent {
     }
 
     pub(super) fn provider_key_for_new_session(&self) -> Option<String> {
+        if let Some(label) = self.provider.oauth_account_label() {
+            let method = if self.provider.name().eq_ignore_ascii_case("openai") {
+                "openai-oauth"
+            } else {
+                "claude-oauth"
+            };
+            return Some(format!("{method}@{label}"));
+        }
         if self
             .provider
             .explicit_provider_pin_for_current_model()

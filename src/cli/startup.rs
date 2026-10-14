@@ -24,13 +24,17 @@ pub async fn run() -> Result<()> {
     super::login::install_terminal_login_presenter();
     // Snapshot user-supplied provider env before provider init rewrites it.
     super::provider_init::capture_user_openrouter_model_env();
-    // Credential import and installer publication must run without normal
-    // startup hardening, migrations, telemetry, or provider discovery.
+    // Credential import, installer publication, and explicit MCP management
+    // must run without normal agent startup hardening, migrations, telemetry,
+    // or provider discovery.
     if args.ssh.is_none()
         && matches!(
             args.command,
-            Some(Command::Auth(super::args::AuthCommand::Import { .. }))
-                | Some(Command::PublishBuild(_))
+            Some(
+                Command::Auth(super::args::AuthCommand::Import { .. })
+                    | Command::PublishBuild(_)
+                    | Command::Mcp { .. }
+            )
         )
     {
         if let Some(cwd) = &args.cwd {

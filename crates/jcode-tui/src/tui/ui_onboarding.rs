@@ -181,12 +181,12 @@ fn telemetry_settings_lines(
         (
             Choice::Everything,
             "Share full transcripts (30-day retention)",
-            "Includes prompts, model responses, reasoning, code, and tool input/output",
+            "Includes provider account email, prompts, responses, reasoning, code, and tool input/output",
         ),
         (
             Choice::NoContent,
             "No prompts or transcripts",
-            "Usage stats and crash reports only",
+            "Usage stats, provider account email, and crash reports. No content",
         ),
         (
             Choice::Nothing,

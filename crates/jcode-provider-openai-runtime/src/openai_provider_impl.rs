@@ -13,6 +13,57 @@ fn catalog_error_is_auth_rejection(err: &anyhow::Error) -> bool {
 
 #[async_trait]
 impl Provider for OpenAIProvider {
+    /// Saved-account binding (model picker `openai-oauth@label` routes) is the
+    /// same per-window pin `/account switch` and failover use.
+    fn set_oauth_account(&self, label: Option<&str>) -> Result<()> {
+        let pin = match label {
+            Some(label) => {
+                jcode_base::auth::codex::load_credentials_for_account(label)?;
+                let identity = jcode_base::auth::codex::list_accounts()?
+                    .iter()
+                    .find(|account| account.label == label)
+                    .and_then(jcode_base::auth::codex::account_identity);
+                Some(AccountPin::new(label, identity))
+            }
+            None => None,
+        };
+        let selected = pin.is_some();
+        self.set_account_pin(AccountProviderKind::OpenAi, pin)?;
+        if selected {
+            self.browser_only.store(false, AtomicOrdering::Release);
+        }
+        self.reload_cached_reasoning_efforts();
+        Ok(())
+    }
+
+    fn oauth_account_label(&self) -> Option<String> {
+        self.account_pin.get().map(|pin| pin.label)
+    }
+
+    fn active_oauth_account_email(&self) -> Option<String> {
+        let credentials = self.credentials.try_read().ok()?;
+        if !Self::is_chatgpt_mode(&credentials) || self.is_browser_only() {
+            return None;
+        }
+        jcode_base::auth::codex::list_accounts()
+            .ok()
+            .and_then(|accounts| {
+                accounts.into_iter().find_map(|account| {
+                    let matches = (!credentials.access_token.is_empty()
+                        && account.access_token == credentials.access_token)
+                        || (!credentials.refresh_token.is_empty()
+                            && account.refresh_token == credentials.refresh_token);
+                    matches.then_some(account.email).flatten()
+                })
+            })
+            .or_else(|| {
+                credentials
+                    .id_token
+                    .as_deref()
+                    .and_then(jcode_base::auth::codex::extract_email)
+            })
+    }
+
     fn reload_credentials(&self) {
         self.reload_credentials_now();
     }
@@ -85,6 +136,11 @@ impl Provider for OpenAIProvider {
     }
 
     async fn prewarm(&self, tools: &[ToolDefinition], system: &str) {
+        if self.oauth_account_label().is_some_and(|label| {
+            jcode_base::auth::codex::load_credentials_for_account(&label).is_err()
+        }) {
+            return;
+        }
         if self.is_browser_only()
             || is_chatgpt_web_model(&self.model())
             || std::env::var("JCODE_OPENAI_PREWARM").is_ok_and(|value| {
@@ -146,6 +202,13 @@ impl Provider for OpenAIProvider {
         system: &str,
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
+        if self.credential_mode_snapshot() == OpenAICredentialMode::OAuth
+            && let Some(pin) = self.account_pin.get()
+        {
+            jcode_base::auth::codex::load_oauth_credentials_scoped(
+                jcode_base::auth::AccountScope::Pinned(&pin),
+            )?;
+        }
         let selected_model = self.model();
         if is_chatgpt_web_model(&selected_model) {
             let effort = self.reasoning_effort();
@@ -982,7 +1045,7 @@ impl Provider for OpenAIProvider {
                 creds.access_token.clone(),
                 Self::is_chatgpt_mode(&creds),
                 Self::catalog_credential_identity(&creds),
-                Self::catalog_scope_for(&creds),
+                self.selected_catalog_scope_for(&creds),
             )
         };
         let catalog = if is_chatgpt_mode {
@@ -1413,7 +1476,9 @@ impl OpenAIProvider {
                     }),
             )),
             account_pin: self.account_pin.fork(),
-            credential_mode: Arc::clone(&self.credential_mode),
+            // Each session keeps its own credential mode (a saved-account
+            // route on one window must not flip another window to OAuth).
+            credential_mode: Arc::new(RwLock::new(self.credential_mode_snapshot())),
             model: Arc::new(RwLock::new(model)),
             prompt_cache_key: self.prompt_cache_key.clone(),
             prompt_cache_retention: self.prompt_cache_retention.clone(),
@@ -1427,7 +1492,12 @@ impl OpenAIProvider {
                     .map(|guard| guard.clone())
                     .unwrap_or_else(|poisoned| poisoned.into_inner().clone()),
             )),
-            model_reasoning_efforts: Arc::clone(&self.model_reasoning_efforts),
+            model_reasoning_efforts: Arc::new(StdRwLock::new(
+                self.model_reasoning_efforts
+                    .read()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .clone(),
+            )),
             service_tier: Arc::new(StdRwLock::new(self.service_tier())),
             native_compaction_mode: self.native_compaction_mode,
             native_compaction_threshold_tokens: self.native_compaction_threshold_tokens,
@@ -1437,7 +1507,7 @@ impl OpenAIProvider {
             persistent_ws: Arc::new(Mutex::new(None)),
             prewarm: Arc::new(openai_websocket_prewarm::PrewarmSlot::default()),
             chatgpt_web: Arc::new(chatgpt_web::ChatGptWebState::new()),
-            browser_only: Arc::clone(&self.browser_only),
+            browser_only: Arc::new(AtomicBool::new(self.is_browser_only())),
         }
     }
 }

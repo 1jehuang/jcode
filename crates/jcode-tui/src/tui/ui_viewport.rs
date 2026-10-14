@@ -354,9 +354,15 @@ pub(super) fn draw_messages(
         height: render_area.height,
     };
     let wrapped_user_indices = &prepared.wrapped_user_indices;
-    let wrapped_user_prompt_starts = &prepared.wrapped_user_prompt_starts;
-    let wrapped_user_prompt_ends = &prepared.wrapped_user_prompt_ends;
-    let user_prompt_texts = &prepared.user_prompt_texts;
+    let clear_start = super::terminal_clear_start(app, &prepared);
+    let preview_start = clear_start.map_or(0, |start| {
+        prepared
+            .wrapped_user_prompt_starts
+            .partition_point(|line| *line < start)
+    });
+    let wrapped_user_prompt_starts = &prepared.wrapped_user_prompt_starts[preview_start..];
+    let wrapped_user_prompt_ends = &prepared.wrapped_user_prompt_ends[preview_start..];
+    let user_prompt_texts = &prepared.user_prompt_texts[preview_start..];
 
     let total_lines = prepared.total_wrapped_lines();
     let viewport_height = render_area.height as usize;
@@ -369,6 +375,7 @@ pub(super) fn draw_messages(
         user_prompt_texts,
         text_render_area,
         pinned_todo_band.height(),
+        preview_start + app.compacted_hidden_user_prompts(),
     );
 
     super::set_last_max_scroll(max_scroll);
@@ -407,7 +414,14 @@ pub(super) fn draw_messages(
         super::set_tail_catchup_active(false);
         user_scroll.min(max_scroll)
     } else {
-        resolve_tail_follow_scroll(max_scroll, viewport_height)
+        // A clear is an explicit viewport boundary, not a jump to animate
+        // through old history. Never show rows preceding it while tailing.
+        if let Some(start) = clear_start {
+            super::set_tail_catchup_active(false);
+            max_scroll.max(start)
+        } else {
+            resolve_tail_follow_scroll(max_scroll, viewport_height)
+        }
     };
 
     // Publish the resolved geometry so scroll handlers and the anchor-reconcile
@@ -425,6 +439,7 @@ pub(super) fn draw_messages(
             user_prompt_texts,
             scroll,
             text_render_area.width,
+            preview_start + app.compacted_hidden_user_prompts(),
         )
     } else {
         0u16
@@ -1267,7 +1282,8 @@ pub(super) fn draw_messages(
         {
             let prompt_text = prompt_text.trim();
             if !prompt_text.is_empty() {
-                let prompt_num = prompt_order + 1 + app.compacted_hidden_user_prompts();
+                let prompt_num =
+                    preview_start + prompt_order + 1 + app.compacted_hidden_user_prompts();
                 let num_str = format!("{}", prompt_num);
                 let prefix_len = num_str.len() + 2;
                 let content_width =
@@ -1437,9 +1453,9 @@ fn windowed_min(widths: &[u16], window: usize) -> Vec<u16> {
 /// Pinned status band: an optional bordered todo card followed by exactly one
 /// compact row per relevant background task (unboxed, below the card).
 #[derive(Default)]
-struct PinnedTodoBand {
+pub(crate) struct PinnedTodoBand {
     /// Todo rows drawn inside the rounded border. Empty means no box.
-    card: Vec<Line<'static>>,
+    pub(crate) card: Vec<Line<'static>>,
     title: String,
     /// Index of the `… +N more` row within `card`.
     more_line: Option<usize>,
@@ -1455,7 +1471,7 @@ impl PinnedTodoBand {
         }
     }
 
-    fn height(&self) -> u16 {
+    pub(crate) fn height(&self) -> u16 {
         self.card_height() + self.tasks.len() as u16
     }
 }
@@ -1492,7 +1508,11 @@ fn render_pinned_todo_band(frame: &mut Frame, area: Rect, band: PinnedTodoBand) 
 /// Build the pinned status band. Todos are shown briefly as a bordered card;
 /// completed tasks are shown briefly as confirmation, while running and failed
 /// tasks remain actionable.
-fn pinned_todo_band_lines(app: &dyn TuiState, width: u16, viewport_height: u16) -> PinnedTodoBand {
+pub(crate) fn pinned_todo_band_lines(
+    app: &dyn TuiState,
+    width: u16,
+    viewport_height: u16,
+) -> PinnedTodoBand {
     if width < 16 || viewport_height < 3 {
         return PinnedTodoBand::default();
     }
@@ -1514,17 +1534,14 @@ fn pinned_todo_band_lines(app: &dyn TuiState, width: u16, viewport_height: u16) 
                 // Unboxed body: the band draws its own border below. Go through
                 // the shared message-line cache so an unchanged list is not
                 // re-rendered on every frame. The distinct title keeps this
-                // entry apart from the boxed inline card for the same payload.
+                // entry apart from the boxed, width-capped inline card.
                 let msg = crate::tui::DisplayMessage::todos(payload.to_string())
                     .with_title("Todos (pinned body)");
                 super::messages::get_cached_message_lines(
                     &msg,
                     inner_width,
                     app.diff_mode(),
-                    |msg, width, _| {
-                        super::messages::render_todo_card_body(&msg.content, width)
-                            .unwrap_or_default()
-                    },
+                    super::messages::render_pinned_todos_message,
                 )
             })
             .unwrap_or_default()
@@ -1732,6 +1749,7 @@ fn compute_prompt_preview_line_count(
     user_prompt_texts: &[String],
     scroll: usize,
     area_width: u16,
+    prompt_number_offset: usize,
 ) -> u16 {
     let last_offscreen = lower_bound(wrapped_user_prompt_starts, scroll).checked_sub(1);
     let Some(prompt_order) = last_offscreen else {
@@ -1744,7 +1762,7 @@ fn compute_prompt_preview_line_count(
     if prompt_text.is_empty() {
         return 0;
     }
-    let num_str = format!("{}", prompt_order + 1);
+    let num_str = format!("{}", prompt_number_offset + prompt_order + 1);
     let prefix_len = num_str.len() + 2;
     let content_width = area_width.saturating_sub(prefix_len as u16 + 2) as usize;
     let text_flat = prompt_text.replace('\n', " ");
@@ -1758,8 +1776,10 @@ fn compute_max_scroll_with_prompt_preview(
     user_prompt_texts: &[String],
     area: Rect,
     pinned_todo_lines: u16,
+    prompt_number_offset: usize,
 ) -> usize {
-    let mut max_scroll = total_lines.saturating_sub(area.height as usize);
+    let mut max_scroll =
+        total_lines.saturating_sub(area.height.saturating_sub(pinned_todo_lines) as usize);
     let preview_enabled = crate::config::config().display.prompt_preview;
     if max_scroll == 0 || (!preview_enabled && pinned_todo_lines == 0) {
         return max_scroll;
@@ -1772,6 +1792,7 @@ fn compute_max_scroll_with_prompt_preview(
                 user_prompt_texts,
                 max_scroll,
                 area.width,
+                prompt_number_offset,
             )
         } else {
             0
@@ -1791,6 +1812,37 @@ fn compute_max_scroll_with_prompt_preview(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pinned_todos_scroll_when_only_the_band_causes_overflow() {
+        let area = ratatui::layout::Rect::new(0, 0, 80, 10);
+        // The transcript alone fits, but the pinned band leaves only seven rows.
+        assert_eq!(
+            super::compute_max_scroll_with_prompt_preview(9, &[], &[], area, 3, 0),
+            2
+        );
+        assert_eq!(
+            super::compute_max_scroll_with_prompt_preview(7, &[], &[], area, 3, 0),
+            0
+        );
+        assert_eq!(
+            super::compute_max_scroll_with_prompt_preview(9, &[], &[], area, 0, 0),
+            0
+        );
+    }
+
+    #[test]
+    fn ctrl_l_preview_measurement_keeps_global_prompt_number_width() {
+        let prompts = vec!["x".repeat(15)];
+        assert_eq!(
+            super::compute_prompt_preview_line_count(&[0], &prompts, 1, 20, 0),
+            1
+        );
+        assert_eq!(
+            super::compute_prompt_preview_line_count(&[0], &prompts, 1, 20, 9),
+            2
+        );
+    }
+
     #[test]
     fn handterm_native_latex_cell_symbol_moves_invokes_and_restores_cursor() {
         assert_eq!(

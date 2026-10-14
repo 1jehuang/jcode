@@ -1925,6 +1925,9 @@ pub(super) async fn handle_resume_session(
                 context_window: Some(resumed_context_window as u64),
                 error: None,
                 resolved_credential: resumed_credential,
+                provider_oauth_email: super::provider_oauth_email(
+                    agent.lock().await.provider_handle().as_ref(),
+                ),
                 reasoning_effort: resumed_reasoning_effort,
             });
             // Resolve project-local MCP config against the restored session's

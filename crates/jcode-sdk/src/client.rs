@@ -802,6 +802,18 @@ impl JcodeClient {
     }
 
     /// Clone a session's complete persisted context into a new idle session.
+    pub fn transfer_session(&self, session_id: &str) -> Result<SessionInfo> {
+        match self
+            .request_ok(ApiRequest::TransferSession {
+                session_id: session_id.into(),
+            })?
+            .event
+        {
+            ApiEvent::SessionForked { session } => Ok(session),
+            other => Err(unexpected("session_forked", &other)),
+        }
+    }
+
     pub fn fork_session(&self, session_id: &str) -> Result<SessionInfo> {
         match self
             .request_ok(ApiRequest::ForkSession {
@@ -1021,6 +1033,41 @@ impl JcodeClient {
 
     /// Runtime identity, route catalog, protocol metadata, and a live health
     /// check for a session.
+    pub fn runtime_command(
+        &self,
+        session_id: &str,
+        command: jcode_harness_api::RuntimeCommand,
+        args: Vec<String>,
+    ) -> Result<jcode_harness_api::RuntimeCommandOutput> {
+        if !self.supports("runtime_commands") {
+            return Err(Error::new(
+                ErrorKind::Harness(jcode_harness_api::ErrorCode::UnknownRequest),
+                "This runtime does not support structured commands. Update and restart the daemon and bridge.",
+            ));
+        }
+        match self
+            .request_ok(ApiRequest::RuntimeCommand {
+                session_id: session_id.into(),
+                command,
+                args,
+            })?
+            .event
+        {
+            ApiEvent::RuntimeCommandResult {
+                session_id,
+                command,
+                data,
+                message,
+            } => Ok(jcode_harness_api::RuntimeCommandOutput {
+                session_id,
+                command,
+                data,
+                message,
+            }),
+            other => Err(unexpected("runtime_command_result", &other)),
+        }
+    }
+
     pub fn get_runtime_info(&self, session_id: &str) -> Result<RuntimeInfo> {
         self.ping()?;
         match self

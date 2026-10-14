@@ -699,6 +699,9 @@ async fn tool_descriptions_stay_under_token_cap() {
         "codemode",
         "compile_remote",
         "macos_computer_use",
+        // Repository-search guidance (agentgrep/rg, hidden files) is tested
+        // load-bearing text (#1804).
+        "bash",
     ];
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
