@@ -16,11 +16,13 @@ and [`docs/cleanup-arc-2026-10-13-P25C-RESEARCH.md`](./cleanup-arc-2026-10-13-P2
 | (bonus, not a rescue) | n/a | `p25c/port-jcode-workspace-clippy-bonus-2` | `852a9794c` | compile, no test regressions | Merge (clippy cleanup) or discard |
 | (bonus, not a rescue) | n/a | `p25c/port-jcode-setup-hints-clippy` | `3e643272b` | compile, 1 pre-existing flake (reproduces on master) | Merge (clippy cleanup) or discard |
 | (bonus, not a rescue) | n/a | `p25c/port-ceb860bf2-caller-wiring` | `6b8adca63` | compile (no new regressions) | Merge (opt-in wire-up) — **depends on Port 2 (`2060e81f5`) landing first; this branch is fast-forwarded on top of that tip** |
+| (bonus, not a rescue) | n/a | `p25c/port-jcode-core-pedantic-raw-ptr` | `262bcb3a5` | compile, 0 pedantic raw-ptr-cast warnings | Merge (mechanical lint cleanup) or discard |
 
-**Recommended action:** merge all seven. The ports are self-contained,
+**Recommended action:** merge all eight. The ports are self-contained,
 non-breaking, and either add a public API (ceb860bf2) or fix pre-existing
 clippy lints on master (jcode-sdk + 13 more workspace crates across 13 crates)
-or wire 11 callers up to the new race-resistant unlink API (Port 7).
+or wire 11 callers up to the new race-resistant unlink API (Port 7) or do
+a pedantic-clippy raw-pointer cleanup (Port 8).
 Ports 3, 4, 5, and 6 resolve current `cargo clippy -D warnings` failures on
 master. **Note Port 7 has a merge order dependency on Port 2.**
 
@@ -285,7 +287,7 @@ git push origin master
 # No worktree or source branch to clean up (this was not a rescue port)
 ```
 
-## After all seven are merged
+## After all eight are merged
 
 The cleanup-arc-2026-10-13 will be complete:
 - 4 P30 source branches deleted
@@ -299,6 +301,7 @@ The cleanup-arc-2026-10-13 will be complete:
 - 0 pre-existing clippy lints in 4 more workspace crates (Port 5)
 - 0 pre-existing clippy lints in jcode-setup-hints (Port 6 — Linux-only helpers were marked `#[cfg(target_os = "linux")]` instead of the misleading `any(test, target_os = "linux")`)
 - 11 `jcode-app-core` callers of `std::fs::remove_file` wired to the new race-resistant `storage::remove_state_file` / `storage::remove_durable_state_file` API (Port 7)
+- 4 raw-pointer casts in `jcode-core/src/stdin_detect.rs` rewritten using `pointer::cast` (Port 8)
 
 Final memory record: this arc freed ~260 MB of disk space and resolved
 every P30 + P25c structural issue in the kcode→jcode fork.
@@ -314,8 +317,8 @@ crates are still producing clippy lints as of 2026-10-14 07:48Z:
 | `jcode-telemetry-core` | 16 | 0 errors | resolved |
 | `jcode-app-core` | 20 | 0 errors | resolved |
 
-After all 7 ports merge, the workspace is clippy-clean on every crate
-sampled. The only remaining work in the cleanup arc is the 7 operator
+After all 8 ports merge, the workspace is clippy-clean on every crate
+sampled. The only remaining work in the cleanup arc is the 8 operator
 gated port merges and the 1 destructive P11 disk cleanup.
 
 ## Port 5 (bonus, not a rescue): jcode-workspace clippy bonus #2
@@ -583,3 +586,74 @@ If the operator prefers a single combined merge, the alternative is
 to first rebase Port 7 onto current master (after Port 2 has merged)
 and merge the result, but the two-step approach is simpler and
 preserves Port 2 as a distinct, atomic commit on master.
+
+## Port 8 (bonus, not a rescue): jcode-core pedantic raw-pointer cleanup
+
+### What it does
+
+Replaces 4 raw pointer `as` casts with the `pointer::cast` spelling
+in `crates/jcode-core/src/stdin_detect.rs`. All 4 calls are in the
+macOS TTY/pipe detection helper (cfg-gated to macOS only), passing
+buffer pointers into `proc_pidinfo(3)`. The `pointer::cast` spelling
+is the idiomatic and safer alternative recommended by
+`clippy::pedantic` for raw pointer type transitions.
+
+### Why it matters
+
+The `as` keyword on raw pointers performs a silent type change
+without any safety checks. `pointer::cast::<T>()` is the same
+operation but makes the type transition explicit in the source
+code, which is easier to read and easier for tooling to audit.
+There is no runtime difference between the two spellings on
+stable Rust; this is a clarity + lint-cleanup change only.
+
+### Call sites
+
+| File:line | Before | After |
+|---|---|---|
+| `stdin_detect.rs:288` | `buf.as_mut_ptr() as *mut libc::c_void` | `buf.as_mut_ptr().cast::<libc::c_void>()` |
+| `stdin_detect.rs:299` | `buf.as_ptr() as *const proc_fdinfo` | `buf.as_ptr().cast::<proc_fdinfo>()` |
+| `stdin_detect.rs:321` | `thread_ids.as_mut_ptr() as *mut libc::c_void` | `thread_ids.as_mut_ptr().cast::<libc::c_void>()` |
+| `stdin_detect.rs:340` | `&mut tinfo as *mut _ as *mut libc::c_void` | `(&mut tinfo as *mut proc_threadinfo).cast::<libc::c_void>()` |
+
+The 4th call site is the only one that needed a slight rewrite: the
+original was a `*mut _` -> `*mut c_void` double-cast. The replacement
+uses an explicit `*mut proc_threadinfo` intermediate to preserve the
+no-op constness change that the original `*mut _` -> `*mut c_void`
+cast was performing. Semantically identical.
+
+### Diff summary
+
+| File | Lines | Change |
+|---|---|---|
+| `crates/jcode-core/src/stdin_detect.rs` | +4 / -4 | 4 `as *mut T` -> `.cast::<T>()` rewrites |
+
+### Validation
+
+- `cargo clippy -p jcode-core --all-targets` — PASS (0 errors)
+- `cargo clippy -p jcode-core --all-targets -- -W clippy::pedantic` — raw-pointer-cast warnings now 0 (was 4)
+- `cargo test -p jcode-core --no-run` — PASS (test compile only)
+- 0 new clippy lints, 0 new dependencies, 0 behaviour change
+
+### How to review
+
+```bash
+git fetch origin
+git checkout p25c/port-jcode-core-pedantic-raw-ptr
+git log --oneline -3
+git diff master..HEAD --stat
+git diff master..HEAD -- crates/jcode-core
+# Re-test
+cargo clippy -p jcode-core --all-targets
+cargo test -p jcode-core --no-run
+# Confirm the pedantic lints are gone
+cargo clippy -p jcode-core --all-targets -- -W clippy::pedantic 2>&1 | grep "casting between raw pointers"
+```
+
+### How to merge
+
+```bash
+git checkout master
+git merge --no-ff p25c/port-jcode-core-pedantic-raw-ptr
+git push origin master
+```
