@@ -101,8 +101,8 @@
 **Mixed strategy recommendation:**
 - d6f2d2091 → Option B (delete) — obsolete, no porting needed. **DONE 2026-10-14 04:21Z** (remote branch deleted, worktree removed, 206 MB freed)
 - e45ddd47e → Option C (port to jcode-storage) — **DRAFT DONE 2026-10-14 04:27Z** on branch `p25c/port-e45ddd47e-active-pids-race` (commit `58ca7a75c`). 1 file changed (active_pids.rs: 126 +/3 -), 2 tests added, `cargo check` and `cargo test -p jcode-storage` PASS. Operator reviews and either lands (Option C complete) or discards + deletes the rescue branch (Option B).
-- ceb860bf2 → Option C (port to jcode-storage) — still needs port work. Fix creates a new public API (`remove_state_file`, `remove_durable_state_file`) that kcode has 4 callers of; jcode has no equivalent API. Significant porting effort (4 caller updates + `reject_dev_home_symlink_path` helper).
-- Total: e45ddd47e ready to land; ceb860bf2 needs ~2-3 hours of additional work to land.
+- ceb860bf2 → Option C (port to jcode-storage) — **DRAFT DONE 2026-10-14 04:33Z** on branch `p25c/port-ceb860bf2-symlinked-state-home` (commit `0070e98a8`). 3 files changed (remove.rs: 183 new, lib.rs: 13 +/0, active_pids.rs: 3 +/3 -), 4 tests added, `cargo test -p jcode-storage` 8/8 PASS. New `remove_state_file` and `remove_durable_state_file` API exposed; **no callers wired up in this commit** (opt-in; the operator can land the API now and wire callers in a follow-up).
+- Total: both ports ready to land. Operator has 2 reviewable branches on origin.
 
 **Worktree mapping (verified 04:16Z):** `wt-kcode-home-symlink` (ceb860bf2), `wt-kcode-heading-boundary` (d6f2d2091), `wt-kcode-active-pids-race` (e45ddd47e). Removing these worktrees does NOT lose the commits.
 
