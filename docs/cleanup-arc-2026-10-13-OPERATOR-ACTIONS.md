@@ -267,7 +267,7 @@ Cross-repo P30 work was completed in two rounds. See
 
 **Cumulative cross-repo P30 result:**
 - **14 distinct Phenotype repos** at 0 active P30 RUSTSEC vulns
-- **10 cross-repo branches with P30 fix committed** (Tracera, Agentora, Apisync, sharecli, Tokn, Grapheon, SessionLedger, PlayCua P30 cluster, zz-merge-unk-PhenoJourneys, _full_AgilePlus, _full_tooling)
+- **9 cross-repo branches with P30 fix committed** (Tracera, Agentora, Apisync, sharecli, Tokn, Grapheon, SessionLedger, PlayCua P30 cluster on `security/h2-0.4.19-p30`, zz-merge-unk-PhenoJourneys, _full_AgilePlus, _full_tooling) — note: PlayCua had a phantom `security/quinn-proto-0.11.19-rustls-0.23.45` branch with no commit (deleted via `git update-ref -d` 2026-10-14); the real PlayCua P30 fix is on `security/h2-0.4.19-p30` @ `1254961`
 - **2 with partial fix + remaining non-P30 vulns** (forgecode rocket blocker, helios-cli rkyv)
 - **4 already-fixed on main** (PhenoTooling, phenotype-tooling, PhenoObservability, OmniRoute)
 - **1 lockfile-only fix, build broken** (substrate — vendor + gateway opentelemetry API)
