@@ -385,6 +385,28 @@ aws-lc-rs:    1.17.3  → 1.18.2  (auto-bumped by rustls 0.23.45)
 - The cargo audit results above ARE the acceptance test. The fix is purely a lockfile bump, no code changes; CI can re-run `cargo audit` and reproduce these results.
 - Push is operator-gated (pre_tool blocks `git push`). All 10 cross-repo security branches remain local.
 
+### Cross-repo lockfile-diff audit (concrete evidence, 2026-10-14)
+
+Run on all 10 P30-fixed branches to verify each one has a real Cargo.lock diff (not a phantom identical-to-default-branch):
+
+| Repo | Security SHA | Default SHA | Diff lines | Notes |
+|---|---|---|---|---|
+| Tracera | `11d220aff` | `191551f04` | 67 | real P30 diff |
+| Agentora | `9164276` | `3f98ef7` | 69 | real P30 diff |
+| Apisync | `48ff5a7` | `6f6fe80` | 71 | real P30 diff |
+| sharecli | `4707816d` | `86e08b55` | 12 | minimal diff (was close to fixed) |
+| Tokn | `90596ca` | `8334572` | 16 | real P30 diff |
+| Grapheon | `81661cd43` | `6c03c6f3f` | 40 | real P30 diff |
+| SessionLedger | `9e2e76ba` | `8ee673bd` | 44 | real P30 diff |
+| PlayCua | `4382fee` (phantom) | `4382fee` | 0 | **PHANTOM** — no commit, identical to master; real fix is on `security/h2-0.4.19-p30` @ `1254961`; phantom branch deleted via `git update-ref -d` |
+| zz-merge-unk-PhenoJourneys | `62f323a` | `87d4eb8` | 139 | real P30 diff (large because main had old lockfile) |
+| _full_AgilePlus | `5fb22f9` | `eef93db` | 84 | real P30 diff |
+| _full_tooling | `baf43bf4` | `26f8bef1` | 56 | real P30 diff |
+
+**9 of 10 security branches have real Cargo.lock diffs (12-139 lines).** PlayCua's `security/quinn-proto-0.11.19-rustls-0.23.45` was a phantom (same SHA as master); the real PlayCua P30 fix is on `security/h2-0.4.19-p30` which has all three P30 crates at the fixed versions.
+
+**Diff sizes are consistent with the scope:** 3 (or 3 + 3 transitive) lockfile changes for a clean P30 fix. Larger diffs (e.g. zz-merge-unk-PhenoJourneys at 139 lines) are due to the source main having an old lockfile that pulled in many transitive changes.
+
 ---
 
 tx-agent: jcode
