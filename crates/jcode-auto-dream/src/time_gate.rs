@@ -63,7 +63,7 @@ mod tests {
     fn hours_since_future_clamps_to_zero() {
         let future = SystemTime::now() + Duration::from_secs(3600);
         let h = hours_since(future);
-        assert!(h >= 0.0 && h < 0.001);
+        assert!((0.0..0.001).contains(&h));
     }
 
     #[test]
