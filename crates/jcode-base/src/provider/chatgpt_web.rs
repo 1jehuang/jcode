@@ -237,6 +237,23 @@ pub fn cached_models() -> Vec<ChatGptWebModel> {
     snapshot_models(&load_cache().snapshot)
 }
 
+/// Test helper for sibling modules: record one available picker model as if a
+/// browser session had been observed, so web routes can be exercised without
+/// a live bridge.
+#[cfg(test)]
+pub(crate) fn seed_observed_model_for_tests(label: &str) {
+    let snapshot = parse_discovery(serde_json::json!({
+        "models": [{
+            "label": label,
+            "available": true,
+            "detail": "",
+            "reasoning_options": []
+        }]
+    }))
+    .expect("valid test discovery");
+    store_cache(snapshot);
+}
+
 pub fn find_model(model: &str) -> Option<ChatGptWebModel> {
     if !jcode_provider_core::is_chatgpt_web_model(model) {
         return None;

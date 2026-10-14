@@ -426,6 +426,7 @@ fn openai_model_routes_cover_oauth_api_and_no_auth_state_space() {
     with_clean_provider_test_env(|| {
         let rt = enter_test_runtime();
         let _runtime_guard = rt.enter();
+        super::chatgpt_web::seed_observed_model_for_tests("GPT-5.6 Pro");
         let model = known_openai_model_ids()
             .first()
             .expect("at least one OpenAI model")
