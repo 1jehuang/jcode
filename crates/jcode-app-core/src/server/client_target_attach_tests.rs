@@ -203,6 +203,35 @@ async fn target_subscribe_unknown_target_never_uses_process_working_dir() {
     .await
     .unwrap_err();
     assert!(error.contains("Unknown session"));
+    assert!(error.contains("session_missing"));
+    let load_error = crate::session::Session::load_startup_stub("session_missing").unwrap_err();
+    assert!(
+        error.contains(&load_error.to_string()),
+        "load cause must survive: {error}"
+    );
+    assert!(initial_subscribe_working_dir(&request).is_err());
+}
+
+#[tokio::test]
+async fn target_subscribe_reports_corrupt_persisted_state_without_using_process_cwd() {
+    let _lock = crate::storage::lock_test_env();
+    let _home = Home::new();
+    let session = crate::session::Session::create(None, None);
+    let path = crate::session::session_path(&session.id).unwrap();
+    // Empty sessions are lazily persisted. Seed an actual broken snapshot.
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, b"{broken session json").unwrap();
+    let cause = crate::session::Session::load_startup_stub(&session.id).unwrap_err();
+    let mut request = subscribe(&session.id);
+    let error = resolve_target_subscribe_working_dir(
+        &mut request,
+        &Arc::new(RwLock::new(HashMap::new())),
+        &Arc::new(RwLock::new(HashMap::new())),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.contains(&session.id), "{error}");
+    assert!(error.contains(&cause.to_string()), "{error}");
     assert!(initial_subscribe_working_dir(&request).is_err());
 }
 
