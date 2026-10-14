@@ -208,21 +208,12 @@ impl Registration {
         };
         self.file.seek(SeekFrom::Start(0))?;
         self.file.set_len(0)?;
-        write!(
-            self.file,
-            "{} {} {}\n",
-            self.focus,
-            stamp,
-            u8::from(eligible)
-        )?;
+        writeln!(self.file, "{} {} {}", self.focus, stamp, u8::from(eligible))?;
         self.published = Some((self.focus, eligible, stamp));
         Ok(())
     }
     fn capture(&self, event_stamp: u64) -> io::Result<Option<Lock>> {
-        let _guard = match Lock::take(&self.dir.join("routing.lock")) {
-            Ok(guard) => guard,
-            Err(e) => return Err(e),
-        };
+        let _guard = Lock::take(&self.dir.join("routing.lock"))?;
         let stamp = now()?;
         let mut winner = None;
         for entry in fs::read_dir(&self.dir)? {
@@ -243,12 +234,14 @@ impl Registration {
                 .split_whitespace()
                 .filter_map(|v| v.parse::<u64>().ok())
                 .collect();
-            if let [focus, heartbeat, 1] = fields.as_slice() {
-                if *focus > 0 && *heartbeat <= stamp && stamp - heartbeat <= TTL {
-                    let candidate = (*focus, entry.path());
-                    if winner.as_ref().is_none_or(|w| candidate > *w) {
-                        winner = Some(candidate);
-                    }
+            if let [focus, heartbeat, 1] = fields.as_slice()
+                && *focus > 0
+                && *heartbeat <= stamp
+                && stamp - heartbeat <= TTL
+            {
+                let candidate = (*focus, entry.path());
+                if winner.as_ref().is_none_or(|w| candidate > *w) {
+                    winner = Some(candidate);
                 }
             }
         }
@@ -679,10 +672,10 @@ impl Listener {
         }
         self.devices.retain(|path, _| paths.contains(path));
         for path in paths {
-            if !self.devices.contains_key(&path) {
-                if let Some(device) = Device::open(&path)? {
-                    self.devices.insert(path, device);
-                }
+            if let std::collections::btree_map::Entry::Vacant(entry) = self.devices.entry(path)
+                && let Some(device) = Device::open(entry.key())?
+            {
+                entry.insert(device);
             }
         }
         Ok(())
@@ -813,25 +806,24 @@ impl Listener {
         }
         // A short routing-lock collision must not lose a physical press. Drain
         // key-up first so a released key can never become a delayed capture.
-        if let Some((path, stamp, edge)) = self.pending.take() {
-            if self.capture.is_none()
-                && self.ready()
-                && self
-                    .devices
-                    .get(&path)
-                    .is_some_and(|d| d.decoder.trigger.is_some())
-            {
-                match self.registration.capture(stamp) {
-                    Ok(Some(lock)) => {
-                        self.capture = Some((path, Instant::now(), Some(lock)));
-                        edges.push(edge);
-                    }
-                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                        self.pending = Some((path, stamp, edge))
-                    }
-                    Err(_) => self.registration_ok = false,
-                    Ok(None) => {}
+        if let Some((path, stamp, edge)) = self.pending.take()
+            && self.capture.is_none()
+            && self.ready()
+            && self
+                .devices
+                .get(&path)
+                .is_some_and(|d| d.decoder.trigger.is_some())
+        {
+            match self.registration.capture(stamp) {
+                Ok(Some(lock)) => {
+                    self.capture = Some((path, Instant::now(), Some(lock)));
+                    edges.push(edge);
                 }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    self.pending = Some((path, stamp, edge))
+                }
+                Err(_) => self.registration_ok = false,
+                Ok(None) => {}
             }
         }
         // After draining, so a key-up during startup is already applied.

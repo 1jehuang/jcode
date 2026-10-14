@@ -45,6 +45,116 @@ account authentication via a repository secret only after the route is supported
 Keep signing and publication separate from compilation and do not send deployment
 or signing credentials to build workers. No hosted speedup is claimed here.
 
+## Recovery of an existing draft without moving its tag
+
+### Release authorization and frozen dependencies
+
+Normal tag pushes and unpatched dispatches require a successful main CI run on
+the **exact resolved tag commit**, not a green moving branch or another SHA.
+The authorization step waits up to three hours for pending CI, and rejects
+failed, cancelled, missing or incomplete approval at the deadline. Quality
+Guardrails, Linux/macOS/Windows Build & Test, and Windows ARM64 Release
+Configuration are mandatory successful jobs. A pushed tag must also still match
+the triggering event SHA. This gate can deliberately block releases while old
+quality debt remains unresolved. It does not reset budgets or waive CI failures.
+
+All platform build commands use `--locked`; dependency metadata is checked
+before building and every platform checks that `Cargo.lock` remains unchanged.
+The Linux compatibility helper, like the installer, comes from the immutable
+workflow commit, so old recovery tags receive the same locked build behavior.
+Both helper hashes are recorded in provenance. The glibc 2.17 baseline remains
+unchanged. Intel macOS receives a 90-minute build budget because v0.97.0 took
+59 minutes 17 seconds against the former 60-minute cap.
+
+Allowlisted source recovery has a separate, explicit eligibility policy: the
+original known-red tag's CI is **not** presented as approval of a repaired tree.
+New recovery workflows check and run companion unit tests on both native Windows
+targets against the exact pinned tag plus verified repair before platform builds
+may start. Full native builds, smoke checks and the complete asset/signing/checksum
+gates still apply. This is not an arbitrary CI waiver. The first v0.96.0 recovery
+run predates these additional preflight/lockfile gates and retains its original
+immutable workflow snapshot. Its outcome must be reported on that evidence,
+without claiming whole main CI approval. Later recoveries use the stronger gates.
+
+For a failed tagged release, commit the reviewed source fix and recovery workflow
+on `master`, then dispatch the workflow from `master` with the existing tag:
+
+```bash
+gh workflow run release.yml --ref master -f tag=v0.96.0 -f recovery=windows-listener
+```
+
+This is a full GitHub-runner rebuild of every platform, not a local asset upload
+or a publication-gate override. Complete v0.96.0 before starting v0.97.0. The
+workflow requires an existing draft and rejects recovery if a newer stable
+version is already public. Both checks fail closed on API errors and are repeated
+immediately before publication. Per-tag concurrency queues runs rather than
+cancelling a build that may already have attached draft assets.
+
+The only source repair is `windows-listener`, allowlisted for v0.96.0 and
+v0.97.0. It adds a Windows-only mutable shadow binding in the companion server.
+`scripts/apply_release_recovery.py` verifies the tag's package version, clean
+tracked checkout, canonical original file SHA256, exact replacement and repaired
+SHA256, and the committed repair source at
+`d4f4c8c8d25c9f8e062773683adcc0c19cf26144`. Windows CRLF checkout is normalized
+only for comparison against canonical Git bytes. Unknown tags, arbitrary patches,
+wrong HEAD, unrelated edits and unexpected source content are rejected. The fix
+commit must be an ancestor of the workflow commit.
+
+Every downstream job checks out the same resolved tag commit, preserving HEAD,
+Cargo version and tag identity. The repair script and release-only justrust
+installer and compatibility helper are loaded from the immutable workflow commit,
+never a moving branch tip. Older tags lack that installer, so it is materialized
+with executable permissions and its digest recorded. A recovery deliberately produces patched tag
+source, not the exact tagged tree. Release notes disclose this distinction and
+`release-provenance.json` records tag/workflow/fix commits, file hashes, release
+helper hashes and the Actions run. Provenance is generated outside the checkout
+until final packaging, so normal `recovery=none` builds remain clean.
+
+Windows launch and installer validation, configured signing policy and signature
+verification, the complete nine-asset platform gate, checksum generation and
+publication all remain in the usual workflow. The existing
+`WINDOWS_SIGNING_REQUIRED=false` policy, if configured, still explicitly permits
+unsigned Windows binaries. Recovery does not change that setting. Provenance is
+uploaded and included in `SHA256SUMS` before the draft becomes public. Missing
+assets keep it draft. Recovery skips bulk issue closure because labels may now
+refer to fixes newer than the recovered tag.
+
+`.github/workflows/windows-companion.yml` adds fast, non-optional companion
+checks on both Windows targets for relevant PRs. `.github/workflows/release-recovery.yml`
+fetches full tag history and runs the recovery regressions. Run locally with:
+
+```bash
+python3 tests/test_release_recovery.py
+actionlint -ignore 'SC2129' .github/workflows/release.yml .github/workflows/windows-companion.yml .github/workflows/release-recovery.yml
+```
+
+The SC2129 suppression is the pre-existing AUR redirect style warning. Recovery
+tests exercise both actual tag trees in disposable clones, genuine CRLF checkout,
+clean no-repair metadata, helper executability and provenance, invalid input and
+dirty-source rejection. A controlled `gh` stub tests draft/newer-release/API-error
+guards. These are not substitutes for successful remote platform builds.
+
+## Temporary Windows measurement mitigation
+
+The v0.97.0 Windows x64 log showed the pinned justrust alpha.17 client aborting
+with a 30,064,771,072-byte allocation request before emitting compiler results.
+Inspection confirmed `JUSTRUST_DISABLE=1` takes its early `exec_cargo` path,
+bypassing measurement/shims while preserving Cargo arguments and exit status.
+This setting is scoped to the Windows release-build job and Windows companion
+compile job only. Both still use the pinned CLI, `--local`, system toolchains and
+deterministic paths. Native Windows hosted routing is unsupported, so this is
+not a hosted billing bypass. Linux and macOS measurement remain enabled. No
+compile, smoke, signing, checksum or complete-platform publication gate is
+bypassed. Remove the setting after a pinned client fixes the Windows crash and
+passes native acceptance. Successful remote rebuilds are still required.
+
+The sampler's process traversal was repaired upstream in justrust commit
+`8e60305` with cycle and PID-reuse regression tests. Its unbounded traversal was
+consistent with the exact allocation size in the incident. The original Windows
+process snapshot was unavailable, so native reproduction is not claimed. The
+pinned alpha.17 client still needs the temporary mitigation until a fixed public
+client has passed native Windows acceptance.
+
 ## Validation
 
 Run `python3 tests/test_install_justrust_ci.py`, `bash -n` on both installer and

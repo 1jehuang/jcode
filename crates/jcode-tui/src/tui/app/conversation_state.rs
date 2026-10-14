@@ -40,10 +40,7 @@ impl App {
 
     pub(super) fn format_compaction_started_message(trigger: &str) -> String {
         let strategy = Self::format_compaction_strategy_label(trigger);
-        format!(
-            "📦 Compacting context ({}) - summarizing older messages in the background to stay within the context window.",
-            strategy
-        )
+        format!("📦 Compacting context ({strategy})")
     }
 
     pub(super) fn format_compaction_progress_notice(elapsed: std::time::Duration) -> String {
@@ -77,115 +74,36 @@ impl App {
             return Self::format_emergency_compaction_message(event, context_limit);
         }
 
-        let reason = match event.trigger.as_str() {
-            "auto_recovery" => "after the context window filled up",
-            _ => "to stay within the context window",
-        };
         let strategy = Self::format_compaction_strategy_label(&event.trigger);
-        let mut message = format!(
-            "📦 Context compacted ({}) - older messages were summarized {}.",
-            strategy, reason
-        );
-        let details = Self::format_compaction_detail_segments(event, context_limit, false);
-        if !details.is_empty() {
-            message.push_str("\n\n");
-            message.push_str(&details.join(" · "));
-        }
-        message
+        Self::format_compaction_usage_message(event, context_limit, strategy)
     }
 
     pub(super) fn format_emergency_compaction_message(
         event: &crate::compaction::CompactionEvent,
         context_limit: u64,
     ) -> String {
-        let mut message =
-            "📦 Emergency compaction - older messages were dropped to recover from context pressure. Recent context was kept.".to_string();
-        let details = Self::format_compaction_detail_segments(event, context_limit, true);
-        if !details.is_empty() {
-            message.push_str("\n\n");
-            message.push_str(&details.join(" · "));
-        }
-        message
+        Self::format_compaction_usage_message(event, context_limit, "emergency")
     }
 
-    fn format_compaction_detail_segments(
+    fn format_compaction_usage_message(
         event: &crate::compaction::CompactionEvent,
         context_limit: u64,
-        emergency: bool,
-    ) -> Vec<String> {
-        let mut details = Vec::new();
-
-        if let Some(duration_ms) = event.duration_ms {
-            details.push(format!(
-                "Took {}",
-                crate::message::Message::format_duration(duration_ms)
-            ));
-        }
-        if let Some(tokens) = event.pre_tokens {
-            details.push(format!(
-                "before ~{} tokens",
-                Self::format_compaction_number(tokens)
-            ));
-        }
-        if let Some(tokens) = event.post_tokens {
-            let mut segment = format!("now ~{} tokens", Self::format_compaction_number(tokens));
-            if context_limit > 0 {
-                segment.push_str(&format!(
-                    " ({})",
-                    Self::format_compaction_usage(tokens, context_limit)
-                ));
-            }
-            details.push(segment);
-        }
-        if let Some(saved) = event.tokens_saved.filter(|saved| *saved > 0) {
-            details.push(format!(
-                "saved ~{} tokens",
-                Self::format_compaction_number(saved)
-            ));
-        }
-
-        let message_count = event.messages_dropped.or(event.messages_compacted);
-        if let Some(count) = message_count {
-            let noun = if count == 1 { "message" } else { "messages" };
-            let verb = if emergency { "dropped" } else { "summarized" };
-            details.push(format!(
-                "{} {} {}",
-                verb,
-                Self::format_compaction_number(count as u64),
-                noun
-            ));
-        }
-
-        if let Some(summary_chars) = event.summary_chars.filter(|chars| *chars > 0) {
-            details.push(format!(
-                "summary {} chars",
-                Self::format_compaction_number(summary_chars as u64)
-            ));
-        }
-
-        if let Some(active_messages) = event.active_messages {
-            let noun = if active_messages == 1 {
-                "recent message"
-            } else {
-                "recent messages"
-            };
-            details.push(format!(
-                "kept {} {} live",
-                Self::format_compaction_number(active_messages as u64),
-                noun
-            ));
-        }
-
-        details
-    }
-
-    fn format_compaction_usage(tokens: u64, context_limit: u64) -> String {
-        let percent = (tokens as f64 / context_limit.max(1) as f64) * 100.0;
-        if percent >= 10.0 {
-            format!("{percent:.0}% of window")
-        } else {
-            format!("{percent:.1}% of window")
-        }
+        strategy: &str,
+    ) -> String {
+        let usage = |tokens: Option<u64>| match tokens {
+            Some(tokens) if context_limit > 0 => format!(
+                "~{} tokens ({:.1}%)",
+                Self::format_compaction_number(tokens),
+                tokens as f64 / context_limit as f64 * 100.0,
+            ),
+            Some(tokens) => format!("~{} tokens", Self::format_compaction_number(tokens)),
+            None => "unknown".to_string(),
+        };
+        format!(
+            "📦 Compacted ({strategy}): {} → {}",
+            usage(event.pre_tokens),
+            usage(event.post_tokens),
+        )
     }
 
     pub(super) fn format_compaction_number(value: u64) -> String {
@@ -917,6 +835,51 @@ impl App {
 mod tests {
     use super::*;
     use crate::message::ToolCall;
+
+    #[test]
+    fn compaction_message_is_one_line_with_method_and_usage() {
+        let mut event = crate::compaction::CompactionEvent {
+            trigger: "reactive".to_string(),
+            pre_tokens: Some(180_000),
+            post_tokens: Some(40_000),
+            tokens_saved: Some(140_000),
+            duration_ms: Some(1500),
+            messages_dropped: None,
+            messages_compacted: Some(100),
+            summary_chars: Some(500),
+            active_messages: Some(10),
+        };
+        for method in ["reactive", "proactive", "semantic", "manual", "automatic"] {
+            event.trigger = method.to_string();
+            assert_eq!(
+                App::format_compaction_complete_message(&event, 200_000),
+                format!(
+                    "📦 Compacted ({method}): ~180,000 tokens (90.0%) → ~40,000 tokens (20.0%)"
+                )
+            );
+        }
+        event.trigger = "hard_compact".to_string();
+        assert_eq!(
+            App::format_compaction_complete_message(&event, 200_000),
+            "📦 Compacted (emergency): ~180,000 tokens (90.0%) → ~40,000 tokens (20.0%)"
+        );
+        assert_eq!(
+            App::format_compaction_complete_message(&event, 0),
+            "📦 Compacted (emergency): ~180,000 tokens → ~40,000 tokens"
+        );
+        event.pre_tokens = None;
+        event.post_tokens = None;
+        assert_eq!(
+            App::format_compaction_complete_message(&event, 200_000),
+            "📦 Compacted (emergency): unknown → unknown"
+        );
+        event.pre_tokens = Some(0);
+        event.post_tokens = Some(0);
+        assert_eq!(
+            App::format_compaction_complete_message(&event, 200_000),
+            "📦 Compacted (emergency): ~0 tokens (0.0%) → ~0 tokens (0.0%)"
+        );
+    }
 
     #[test]
     fn experimental_feature_key_marks_swarm_spawn_actions() {

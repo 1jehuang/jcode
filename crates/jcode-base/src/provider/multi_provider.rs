@@ -240,13 +240,13 @@ impl MultiProvider {
                     .collect();
                 let first = *group.first()?;
                 let current_model = self.model();
-                if !context_only && first.1 == from {
-                    if let Some(preserved) = group
+                if !context_only
+                    && first.1 == from
+                    && let Some(preserved) = group
                         .iter()
                         .find(|candidate| candidate_model(candidate) == current_model)
-                    {
-                        return Some(*preserved);
-                    }
+                {
+                    return Some(*preserved);
                 }
                 if let Some(configured) = configured_model.as_deref()
                     && let Some(preferred) = group
@@ -262,13 +262,11 @@ impl MultiProvider {
                 if let Some(preferred) = crate::auth::lifecycle::preferred_model_for_provider(
                     Self::provider_key(first.1),
                     &models,
-                ) {
-                    if let Some(flagship) = group
-                        .iter()
-                        .find(|candidate| candidate_model(candidate) == preferred)
-                    {
-                        return Some(*flagship);
-                    }
+                ) && let Some(flagship) = group
+                    .iter()
+                    .find(|candidate| candidate_model(candidate) == preferred)
+                {
+                    return Some(*flagship);
                 }
                 // Capacity is eligibility, not quality. Never pick an unknown
                 // model by maximum context, catalog position or lexical order.

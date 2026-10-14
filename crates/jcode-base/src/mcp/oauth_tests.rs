@@ -410,7 +410,7 @@ async fn browser_login(auth_url: String, inject_bad_callbacks: bool) -> Result<(
     if inject_bad_callbacks {
         let state = query.get("state").unwrap();
         for target in [
-            format!("/callback?error=REFLECTED-SECRET&state=wrong"),
+            "/callback?error=REFLECTED-SECRET&state=wrong".to_string(),
             format!("/callback?code=bad&state={state}&state=duplicate"),
             format!("/not-callback?code=bad&state={state}"),
             "/callback?code=bad".to_string(),

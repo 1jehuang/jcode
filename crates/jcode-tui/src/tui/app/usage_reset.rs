@@ -82,7 +82,7 @@ fn parse(input: &str) -> Option<Action> {
 /// leaves this module.
 #[derive(Clone, Debug)]
 pub(super) enum Pending {
-    OpenAi(PendingOpenAiUsageReset),
+    OpenAi(Box<PendingOpenAiUsageReset>),
     Claude(PendingAnthropicLimitReset),
 }
 
@@ -217,7 +217,7 @@ async fn prepare(provider: Provider) -> anyhow::Result<Result<Pending, String>> 
     match provider {
         Provider::OpenAi => Ok(crate::usage::prepare_openai_usage_reset()
             .await?
-            .map(Pending::OpenAi)
+            .map(|pending| Pending::OpenAi(Box::new(pending)))
             .ok_or_else(|| "No banked OpenAI usage resets are available.".to_string())),
         Provider::Claude => Ok(crate::usage::prepare_anthropic_limit_reset(
             crate::auth::claude::active_account_label(),
