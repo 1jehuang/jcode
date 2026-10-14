@@ -7,6 +7,7 @@ use std::ffi::OsString;
 
 struct TestEnvGuard {
     prev_home: Option<OsString>,
+    prev_socket: Option<OsString>,
     _temp_home: tempfile::TempDir,
     _lock: std::sync::MutexGuard<'static, ()>,
 }
@@ -19,8 +20,12 @@ impl TestEnvGuard {
             .tempdir()?;
         let prev_home = std::env::var_os("JCODE_HOME");
         crate::env::set_var("JCODE_HOME", temp_home.path());
+        // An inherited JCODE_SOCKET would point the restart commands at a live daemon.
+        let prev_socket = std::env::var_os("JCODE_SOCKET");
+        crate::env::set_var("JCODE_SOCKET", temp_home.path().join("no-daemon.sock"));
         Ok(Self {
             prev_home,
+            prev_socket,
             _temp_home: temp_home,
             _lock: lock,
         })
@@ -33,6 +38,11 @@ impl Drop for TestEnvGuard {
             crate::env::set_var("JCODE_HOME", prev_home);
         } else {
             crate::env::remove_var("JCODE_HOME");
+        }
+        if let Some(prev_socket) = &self.prev_socket {
+            crate::env::set_var("JCODE_SOCKET", prev_socket);
+        } else {
+            crate::env::remove_var("JCODE_SOCKET");
         }
     }
 }
