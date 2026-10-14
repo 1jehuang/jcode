@@ -125,8 +125,6 @@ pub(crate) fn parse_rate_limit_error(error: &str) -> Option<Duration> {
     None
 }
 
-/// Longest usage-window wait the client will hold a failed turn for.
-const MAX_QUOTA_WINDOW_WAIT: Duration = Duration::from_secs(24 * 3600);
 /// Slack added past the provider's reset instant so clock skew does not
 /// resend a moment early and hit the same exhausted window.
 const QUOTA_WINDOW_RESET_SLACK: Duration = Duration::from_secs(15);
@@ -168,7 +166,7 @@ pub(crate) fn parse_quota_window_reset(
         Err(_) => Duration::ZERO,
     };
     let wait = until_reset + QUOTA_WINDOW_RESET_SLACK;
-    (wait <= MAX_QUOTA_WINDOW_WAIT).then_some(wait)
+    (wait <= Duration::from_secs(MAX_TURN_HOLD_SECS)).then_some(wait)
 }
 
 /// Value of a JSON `"resets_at"`-style string field inside an error body.
