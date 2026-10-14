@@ -1959,14 +1959,27 @@ pub(in crate::tui::app) fn handle_server_event(
             // real switch and must announce itself.
             app.remote_session_facts_provisional = false;
             app.clear_remote_startup_phase();
-            app.session.subagent_model = subagent_model;
-            app.session.agent_model_overrides = agent_model_overrides;
-            app.session.autoreview_enabled = autoreview_enabled;
-            app.session.autojudge_enabled = autojudge_enabled;
-            app.autoreview_enabled =
-                autoreview_enabled.unwrap_or(crate::config::config().autoreview.enabled);
-            app.autojudge_enabled =
-                autojudge_enabled.unwrap_or(crate::config::config().autojudge.enabled);
+            // The model-catalog response reuses the History event shape with
+            // every server-identity, session-list and session-setting field left
+            // empty. Applying those empties wiped the server name/icon/version/
+            // canary flag, skills, and session list for a frame right after
+            // startup, so the header and the Overview session row flickered
+            // (`peak hare` -> `hare`), and reset per-session subagent/autoreview
+            // settings. Only overwrite what the event actually carries; a real
+            // session switch still resets everything.
+            let carries_server_identity =
+                server_name.is_some() || server_version.is_some() || is_canary.is_some();
+            let authoritative = session_changed || carries_server_identity;
+            if authoritative {
+                app.session.subagent_model = subagent_model;
+                app.session.agent_model_overrides = agent_model_overrides;
+                app.session.autoreview_enabled = autoreview_enabled;
+                app.session.autojudge_enabled = autojudge_enabled;
+                app.autoreview_enabled =
+                    autoreview_enabled.unwrap_or(crate::config::config().autoreview.enabled);
+                app.autojudge_enabled =
+                    autojudge_enabled.unwrap_or(crate::config::config().autojudge.enabled);
+            }
             if upstream_provider.is_some() {
                 app.upstream_provider = upstream_provider;
             }
@@ -2009,16 +2022,6 @@ pub(in crate::tui::app) fn handle_server_event(
             // was still loading. Replace that loading row as soon as history
             // supplies the authoritative snapshot.
             app.refresh_open_model_picker_after_catalog_update();
-            // The model-catalog response reuses the History event shape with
-            // every server-identity and session-list field left empty. Applying
-            // those empties wiped the server name/icon/version/canary flag,
-            // skills, and session list for a frame right after startup, so the
-            // header and the Overview session row flickered (`peak hare` ->
-            // `hare`). Only overwrite what the event actually carries; a real
-            // session switch still resets everything.
-            let carries_server_identity =
-                server_name.is_some() || server_version.is_some() || is_canary.is_some();
-            let authoritative = session_changed || carries_server_identity;
             if authoritative || !skills.is_empty() {
                 app.remote_skills = skills;
                 app.invalidate_command_candidates_cache();
@@ -2659,6 +2662,12 @@ pub(in crate::tui::app) fn handle_server_event(
             available_models,
             available_model_routes,
         } => {
+            // The server downgrades oversized catalog changes to names-only, which
+            // cannot add routes for names already listed (a new gateway serving an
+            // existing model id). Refetch full routes once `/model` is open.
+            if available_model_routes.is_empty() && !available_models.is_empty() {
+                app.remote_model_routes_stale = true;
+            }
             let model_catalog_snapshot = jcode_provider_core::ModelCatalogSnapshot::new(
                 provider_name,
                 provider_model,
