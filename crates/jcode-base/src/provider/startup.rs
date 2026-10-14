@@ -60,25 +60,6 @@ impl MultiProvider {
         });
     }
 
-    pub(super) async fn invalidate_provider_credentials_for_account_switch(
-        &self,
-        provider: ActiveProvider,
-    ) {
-        match provider {
-            ActiveProvider::Claude => {
-                if let Some(anthropic) = self.anthropic_provider() {
-                    anthropic.invalidate_credentials().await;
-                }
-            }
-            ActiveProvider::OpenAI => {
-                if let Some(openai) = self.openai_provider() {
-                    openai.invalidate_credentials().await;
-                }
-            }
-            _ => {}
-        }
-    }
-
     pub(super) fn new_with_auth_status(auth_status: auth::AuthStatus) -> Self {
         let provider_init_start = std::time::Instant::now();
         let cfg = crate::config::config();

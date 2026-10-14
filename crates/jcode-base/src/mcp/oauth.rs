@@ -274,7 +274,7 @@ fn open_store_lock(path: &Path) -> Result<File> {
 fn open_lock_file(lock_path: &Path) -> Result<File> {
     private_directory(lock_path.parent().context("OAuth lock has no directory")?)?;
     #[cfg(not(unix))]
-    if let Ok(meta) = std::fs::symlink_metadata(&lock_path)
+    if let Ok(meta) = std::fs::symlink_metadata(lock_path)
         && meta.file_type().is_symlink()
     {
         bail!("OAuth lock must not be a symlink");
@@ -283,9 +283,9 @@ fn open_lock_file(lock_path: &Path) -> Result<File> {
         .read(true)
         .write(true)
         .create(true)
-        .open(&lock_path)
+        .open(lock_path)
         .context("could not open OAuth credential lock")?;
-    secure_file(&lock, &lock_path)?;
+    secure_file(&lock, lock_path)?;
     Ok(lock)
 }
 
