@@ -174,6 +174,13 @@ fn api_route_with_saved_pin_stays_api_through_sync_model_and_resume() {
             detail: String::new(),
         })
         .unwrap();
+    // Explicit generic routes deliberately return to the default account.
+    // The earlier bare-model and resume checks retain the independent pin.
+    assert_eq!(
+        resumed_provider.account_pin(AccountProviderKind::Claude),
+        None
+    );
+    assert_eq!(resumed.session.account_pins.get("claude"), None);
     resumed.set_model(&format!("claude-api:{model}")).unwrap();
     assert_eq!(
         resumed_provider.active_resolved_credential(),
@@ -197,9 +204,10 @@ fn api_route_with_saved_pin_stays_api_through_sync_model_and_resume() {
         Some(ResolvedCredential::ApiKey)
     );
     assert_eq!(
-        api_resumed.session.account_pins.get("claude"),
-        Some(&fox_pin())
+        api_resumed_provider.account_pin(AccountProviderKind::Claude),
+        None
     );
+    assert_eq!(api_resumed.session.account_pins.get("claude"), None);
 }
 
 /// Fake provider that records `set_account_pin` calls. When `failover_to` is
