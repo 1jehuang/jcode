@@ -13,6 +13,29 @@ impl Drop for OptionalBrowserRefreshGuard {
     }
 }
 
+pub(super) fn spawn_optional_browser_catalog_refresh<F>(refresh: F)
+where
+    F: std::future::Future<Output = Result<Vec<jcode_base::provider::chatgpt_web::ChatGptWebModel>>>
+        + Send
+        + 'static,
+{
+    if OPTIONAL_BROWSER_REFRESH_RUNNING
+        .compare_exchange(false, true, AtomicOrdering::AcqRel, AtomicOrdering::Acquire)
+        .is_ok()
+    {
+        let guard = OptionalBrowserRefreshGuard;
+        tokio::spawn(async move {
+            let _guard = guard;
+            match refresh.await {
+                Ok(_) => jcode_base::bus::Bus::global().publish_models_updated(),
+                Err(error) => jcode_base::logging::info(&format!(
+                    "ChatGPT web models are unavailable: {error:#}"
+                )),
+            }
+        });
+    }
+}
+
 impl OpenAIProvider {
     pub(super) fn apply_browser_catalog_refresh(
         &self,
@@ -996,20 +1019,7 @@ impl Provider for OpenAIProvider {
             );
         }
         // Optional discovery must not wait for an unrelated active browser turn.
-        if OPTIONAL_BROWSER_REFRESH_RUNNING
-            .compare_exchange(false, true, AtomicOrdering::AcqRel, AtomicOrdering::Acquire)
-            .is_ok()
-        {
-            let guard = OptionalBrowserRefreshGuard;
-            tokio::spawn(async move {
-                let _guard = guard;
-                if let Err(error) = jcode_base::provider::chatgpt_web::refresh_models().await {
-                    jcode_base::logging::info(&format!(
-                        "ChatGPT web models are unavailable: {error:#}"
-                    ));
-                }
-            });
-        }
+        spawn_optional_browser_catalog_refresh(jcode_base::provider::chatgpt_web::refresh_models());
         // The loaded credential's *shape* is authoritative for which catalog
         // endpoint to hit, not the requested credential mode. In Auto mode a
         // user with only an OPENAI_API_KEY loads an API-key-shaped credential
