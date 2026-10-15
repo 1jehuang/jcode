@@ -15,6 +15,23 @@ const TOOL_CALL_START: &str = "<jcode_tool_call>";
 const TOOL_CALL_END: &str = "</jcode_tool_call>";
 const POLL_INTERVAL: Duration = Duration::from_millis(750);
 const NETWORK_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const PREVIEW_INTERVAL: Duration = Duration::from_millis(1000);
+
+/// One-line live preview of a streaming web answer: its size and the tail
+/// of the latest text, whitespace collapsed.
+fn stream_preview(label: &str, texts: &[&str], chars: usize) -> String {
+    let latest = texts.last().copied().unwrap_or_default();
+    let flat = latest.split_whitespace().collect::<Vec<_>>().join(" ");
+    let tail: String = {
+        let count = flat.chars().count();
+        flat.chars().skip(count.saturating_sub(60)).collect()
+    };
+    if tail.is_empty() {
+        format!("{label} is writing ({chars} chars)")
+    } else {
+        format!("{label} is writing ({chars} chars): …{tail}")
+    }
+}
 
 static TOOL_CALL_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -537,6 +554,8 @@ async fn poll_network_stream(
     let mut verified = false;
     let mut streaming_emitted = false;
     let mut last_status_second = 0u64;
+    let mut last_preview_chars = 0usize;
+    let mut last_preview = Instant::now() - PREVIEW_INTERVAL;
     loop {
         if tx.is_closed() {
             anyhow::bail!("ChatGPT web response consumer was closed");
@@ -581,6 +600,20 @@ async fn poll_network_stream(
             if !streaming_emitted && texts.iter().any(|text| !text.trim().is_empty()) {
                 send_phase(tx, jcode_message_types::ConnectionPhase::Streaming).await?;
                 streaming_emitted = true;
+            }
+            // Live progress only. Committed text is emitted once the answer is
+            // complete, because it may turn out to be a tool envelope or be
+            // discarded by the sandbox retry, and emitted text cannot be
+            // taken back.
+            let streamed: usize = texts.iter().map(|text| text.chars().count()).sum();
+            if streamed > last_preview_chars && last_preview.elapsed() >= PREVIEW_INTERVAL {
+                last_preview_chars = streamed;
+                last_preview = Instant::now();
+                let _ = tx
+                    .send(Ok(StreamEvent::StatusDetail {
+                        detail: stream_preview(&selected.label, &texts, streamed),
+                    }))
+                    .await;
             }
             if state.get("complete").and_then(Value::as_bool) == Some(true) {
                 let text = transcript_answer(&texts);
@@ -1165,6 +1198,21 @@ mod tests {
             recover_tool_name(r#"{ "name" : "mcp__x.y-z", "input": "#).as_deref(),
             Some("mcp__x.y-z")
         );
+    }
+
+    #[test]
+    fn stream_preview_shows_size_and_a_flat_tail() {
+        assert_eq!(
+            stream_preview("GPT-6", &[], 0),
+            "GPT-6 is writing (0 chars)"
+        );
+        let long = "word ".repeat(30) + "\n\nend   of\tline";
+        let preview = stream_preview("GPT-6", &["first", &long], 160);
+        assert!(preview.starts_with("GPT-6 is writing (160 chars): …"));
+        assert!(preview.ends_with("end of line"));
+        assert!(!preview.contains('\n'));
+        let tail = preview.split_once(": …").unwrap().1;
+        assert_eq!(tail.chars().count(), 60);
     }
 
     #[test]
