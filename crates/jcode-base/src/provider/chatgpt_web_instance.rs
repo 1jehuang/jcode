@@ -598,18 +598,6 @@ impl Instance {
             .cloned()
             .unwrap_or(Value::Null))
     }
-
-    /// Inserts text at the focused element as trusted user input.
-    pub async fn insert_text(&self, page: &Page, text: &str) -> Result<()> {
-        self.cdp
-            .send(
-                "Input.insertText",
-                json!({"text": text}),
-                Some(&page.session_id),
-            )
-            .await
-            .map(|_| ())
-    }
 }
 
 /// An owned page in the private instance.
@@ -1089,35 +1077,6 @@ pub async fn ui_request(instance: &Instance, page: &Page, request: &Value) -> Re
         .await
         .with_context(|| format!("ChatGPT UI step '{op}'"))
 }
-
-/// Clears the composer and types the prompt as trusted input.
-pub async fn insert_prompt(instance: &Instance, page: &Page, prompt: &str) -> Result<()> {
-    let focused = instance
-        .evaluate(page, FOCUS_COMPOSER_SCRIPT)
-        .await
-        .context("Failed to focus the ChatGPT composer")?;
-    anyhow::ensure!(
-        focused == Value::Bool(true),
-        "ChatGPT composer is not available"
-    );
-    instance
-        .insert_text(page, prompt)
-        .await
-        .context("Failed to type the prompt into the ChatGPT composer")
-}
-
-const FOCUS_COMPOSER_SCRIPT: &str = r#"(() => {
-  const editor = document.querySelector('[contenteditable=true][data-composer-markdown], [contenteditable=true][aria-label="Chat with ChatGPT"]');
-  if (!editor) return false;
-  editor.focus();
-  const selection = window.getSelection();
-  selection.removeAllRanges();
-  const range = document.createRange();
-  range.selectNodeContents(editor);
-  selection.addRange(range);
-  document.execCommand('delete', false, null);
-  return document.activeElement === editor || editor.contains(document.activeElement);
-})()"#;
 
 /// Stops the private instance.
 pub async fn shutdown() {

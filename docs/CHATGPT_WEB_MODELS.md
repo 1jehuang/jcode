@@ -17,6 +17,27 @@ browser** that jcode controls. Your own browser windows and tabs are never used.
   restores your original ChatGPT model and Power choice and closes the tab.
 - Only one jcode process uses the profile at a time. Others wait their turn.
 
+## Tools and exact text
+
+The web app has no native function calling, so jcode sends the conversation,
+its tool list and a short protocol as one prompt. The model asks for jcode
+tools with `<jcode_tool_call>{...}</jcode_tool_call>` envelopes: one or more
+per answer, optionally after a short sentence. jcode runs them on your machine
+and sends the results in the next turn. ChatGPT's own tools (Python, browsing,
+canvas) run in OpenAI's sandbox, not on your computer, so the prompt tells the
+model not to use them.
+
+Two details keep this exact:
+
+- **Prompt in:** the prompt is pasted as literal text in chunks under
+  ChatGPT's paste-to-file threshold. Typed text would be re-serialized as
+  escaped Markdown (`\#`, ``\` ``, `\\"`) as soon as ChatGPT autolinks a URL.
+  jcode verifies the composer holds the exact prompt before it clicks Send.
+- **Answer out:** jcode reads the raw answer from the owned conversation's
+  transcript instead of the rendered page. The renderer drops backslashes and
+  hides markup that ChatGPT wraps in `<escape>` tags. Citation markers such as
+  `<Cite ref="..."/>` are removed.
+
 ## Signing in
 
 jcode reuses the ChatGPT session from **your main browser**. When the private
@@ -66,3 +87,4 @@ jcode browser chatgpt-status   # browser, profile, display and session check
 | "needs Google Chrome or Chromium" | Install one as above, or set `JCODE_CHATGPT_WEB_CHROME`. |
 | Session keeps expiring | Run `jcode browser chatgpt-status`. Sign in again with `jcode browser chatgpt-login`. |
 | Start fresh | Quit jcode and delete `~/.jcode/chatgpt-web/`. |
+| A `[web]` turn fails and you want details | Set `JCODE_CHATGPT_WEB_DEBUG_DIR=/some/private/dir` before starting jcode. Each failed turn writes its prompt, error and page DOM there. These files contain your conversation. |

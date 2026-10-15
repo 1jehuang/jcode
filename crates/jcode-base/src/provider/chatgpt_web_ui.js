@@ -203,10 +203,57 @@ return (async () => {
   function promptState() {
     const editor = one(editorSelector);
     const submit = one(submitSelector);
-    const text = editor ? (editor.children.length ? Array.from(editor.children).map(e => e.textContent || '').join('\n') : editor.innerText) : '';
+    // Literal pastes keep the exact text in marked spans. ChatGPT sends
+    // those verbatim; read them directly, because innerText adds paragraph
+    // breaks and autolink chrome.
+    const literal = editor ? all('[data-prompt-literal-paste]', editor) : [];
+    const literalText = node => {
+      let text = '';
+      for (const child of node.childNodes || []) {
+        if (child.nodeType === 3) text += child.data;
+        else if (child.nodeName === 'BR') text += '\n';
+        else text += literalText(child);
+      }
+      return text;
+    };
+    const text = literal.length ? literal.map(literalText).join('')
+      : editor ? (editor.children.length ? Array.from(editor.children).map(e => e.textContent || '').join('\n') : editor.innerText) : '';
     let hash = 2166136261;
     for (let index=0; index<text.length; index++) hash = Math.imul(hash ^ text.charCodeAt(index), 16777619);
-    return { length: text.length, hash: hash >>> 0, submitDisabled: !submit || unavailable(submit) };
+    const attachments = all('button[aria-label^="Remove"]').filter(visible).length;
+    return { length: text.length, hash: hash >>> 0, submitDisabled: !submit || unavailable(submit), literal: literal.length > 0, attachments };
+  }
+  // Typed text goes through ChatGPT's rich editor, which autolinks URLs and
+  // then re-serializes the whole prompt as escaped Markdown (\#, \`, \\").
+  // Paste the prompt as literal text instead. ChatGPT turns one large paste
+  // into a file attachment, so paste in chunks below that threshold.
+  async function insertLiteral(text) {
+    if (typeof text !== 'string' || !text) throw Error('Refusing to insert an empty ChatGPT prompt');
+    const editor = one(editorSelector);
+    if (!editor) throw Error('ChatGPT composer is not available');
+    editor.focus();
+    const selection = getSelection();
+    selection.removeAllRanges();
+    const range = document.createRange();
+    range.selectNodeContents(editor);
+    selection.addRange(range);
+    document.execCommand('delete', false, null);
+    const chunk = 6000;
+    for (let start = 0; start < text.length;) {
+      checkBudget();
+      let end = Math.min(text.length, start + chunk);
+      // Never split a UTF-16 surrogate pair across two pastes.
+      if (end < text.length && /[\uD800-\uDBFF]/.test(text[end - 1])) end--;
+      const data = new DataTransfer();
+      data.setData('text/plain', text.slice(start, end));
+      editor.dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }));
+      start = end;
+    }
+    await delay();
+    const state = promptState();
+    if (state.attachments) throw Error('ChatGPT turned the prompt into a file attachment instead of literal text');
+    if (!state.literal) throw Error('ChatGPT did not accept the prompt as literal pasted text');
+    return state;
   }
   function responseState() {
     const root = one('main') || document;
@@ -215,12 +262,41 @@ return (async () => {
     const message = current || legacy;
     const markdown = current || legacy?.querySelector('.markdown') || legacy;
     const turn = message?.closest('[data-talvt-turn-state], section[data-turn="assistant"]');
-    const busy = all('button', root).filter(visible).some(e => /stop (generating|streaming|response)/i.test(e.getAttribute('aria-label') || '') || e.getAttribute('data-testid') === 'stop-button');
+    const busy = all('button', root).filter(visible).some(isStopButton);
     const explicitComplete = turn?.getAttribute('data-talvt-turn-state') === 'complete';
     const legacyComplete = !current && !!turn?.querySelector('[data-testid="copy-turn-action-button"], button[aria-label="Copy"], button[aria-label*="Good response"], button[aria-label*="Bad response"]');
     return { text: markdown?.innerText || '', busy, terminal: !busy && (explicitComplete || legacyComplete),
       alert: all('[role="alert"]', root).filter(visible).map(e => (e.innerText || '').trim()).filter(Boolean).at(-1) || '',
       model: message?.getAttribute('data-message-model-slug') || '' };
+  }
+  // The composer's Send button turns into a plain "Stop" button while a
+  // response generates. Older markup used longer labels or a test id.
+  function isStopButton(e) {
+    return /^stop( (generating|streaming|response))?$/i.test((e.getAttribute('aria-label') || '').trim()) || e.getAttribute('data-testid') === 'stop-button';
+  }
+  // The rendered DOM is lossy: markdown hides backslashes, and ChatGPT can
+  // render wrapped markup such as <escape>...</escape> as an empty message.
+  // Read the owned conversation's raw assistant text from the same-origin
+  // backend instead. The session token never leaves the page.
+  async function transcript() {
+    const id = location.pathname.match(/^\/c\/([0-9a-f-]{36})$/i)?.[1];
+    if (!id) return { available: false, reason: 'the owned tab has no conversation id yet' };
+    const session = await (await globalThis.fetch('/api/auth/session', { credentials: 'same-origin' })).json();
+    if (!session?.accessToken) return { available: false, reason: 'no ChatGPT session token' };
+    const response = await globalThis.fetch(`/backend-api/conversation/${id}`, { credentials: 'same-origin', headers: { authorization: `Bearer ${session.accessToken}` } });
+    if (!response.ok) return { available: false, reason: `conversation request failed with HTTP ${response.status}` };
+    const data = await response.json();
+    const chain = [];
+    for (let node = data.current_node, guard = 0; node && data.mapping?.[node] && guard < 10_000; node = data.mapping[node].parent, guard++) chain.push(data.mapping[node].message);
+    chain.reverse();
+    const turn = chain.slice(chain.findLastIndex(m => m?.author?.role === 'user') + 1).filter(Boolean);
+    const assistant = turn.filter(m => m.author?.role === 'assistant');
+    const texts = assistant.filter(m => (m.recipient ?? 'all') === 'all' && m.content?.content_type === 'text')
+      .map(m => (m.content.parts || []).filter(part => typeof part === 'string').join('')).filter(text => text.trim());
+    const last = turn.at(-1);
+    return { available: true, temporary: data.is_temporary_chat === true, texts,
+      complete: last?.author?.role === 'assistant' && last.end_turn === true && last.status === 'finished_successfully',
+      builtin: [...new Set(assistant.map(m => m.recipient).filter(r => r && r !== 'all'))] };
   }
 
   checkOrigin();
@@ -231,15 +307,17 @@ return (async () => {
     return { cancelled: true, quiescent: true };
   }
   if (request.op === 'response') return responseState();
+  if (request.op === 'transcript') return await transcript();
   if (request.op === 'stop') {
     const root = one('main');
     if (!root) throw Error('ChatGPT owned conversation is unavailable for safe Stop');
-    const stop = all('button', root).filter(visible).find(e => /stop (generating|streaming|response)/i.test(e.getAttribute('aria-label') || '') || e.getAttribute('data-testid') === 'stop-button');
+    const stop = all('button', root).filter(visible).find(isStopButton);
     if (stop) stop.click();
     await until(() => !responseState().busy, 'stopping the owned response');
     return { stopped: !!stop, busy: false };
   }
   if (request.op === 'prompt') return promptState();
+  if (request.op === 'insert') { requireTemporary(true); return await insertLiteral(request.text); }
   if (request.op === 'restore') return await restore(request.original);
   if (request.op === 'verify') {
     if (request.requireTemporary !== false) requireTemporary();
