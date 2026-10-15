@@ -14,6 +14,7 @@ use jcode_base::provider::chatgpt_web_instance as web_instance;
 const TOOL_CALL_START: &str = "<jcode_tool_call>";
 const TOOL_CALL_END: &str = "</jcode_tool_call>";
 const POLL_INTERVAL: Duration = Duration::from_millis(750);
+const NETWORK_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 static TOOL_CALL_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -160,12 +161,27 @@ impl ChatGptWebState {
             if !page_verification_ready(&selection, &selected.label, effective_effort) {
                 anyhow::bail!("ChatGPT did not verify the exact model, effort, and Temporary Chat before prompt insertion");
             }
-            insert_prompt(&browser, prompt).await?;
+            // Network path: the composer gets a short placeholder and the page
+            // sends it with its own sentinel headers. An in-page hook swaps the
+            // exact prompt into that request and streams the raw answer back.
+            // Any failure before Send falls back to pasting the full prompt.
+            let stream_key = format!("{cancel_key}-stream");
+            let network = network_path_enabled()
+                && arm_network_send(&browser, &stream_key, prompt).await.is_ok();
+            let composer_text = if network { placeholder_for(&stream_key) } else { prompt.to_string() };
+            insert_prompt(&browser, &composer_text).await?;
+            // Arming happens before the composer reflows, so re-check that
+            // the hook is still in place right before Send.
+            if network {
+                arm_network_send(&browser, &stream_key, prompt).await
+                    .context("ChatGPT network hook could not be re-armed before Send")?;
+            }
             if tx.is_closed() { anyhow::bail!("ChatGPT web response consumer was closed before submission"); }
             send_phase(tx, jcode_message_types::ConnectionPhase::SendingRequest).await?;
-            let (length, hash) = utf16_fingerprint(prompt);
+            let (length, hash) = utf16_fingerprint(&composer_text);
             submission_started = true;
-            let submission = browser.ui(json!({"op":"submit", "label":selected.label, "effort":effective_effort, "length":length, "hash":hash,"cancelKey":cancel_key}));
+            let armed_key = network.then_some(stream_key.as_str());
+            let submission = browser.ui(json!({"op":"submit", "label":selected.label, "effort":effective_effort, "length":length, "hash":hash,"cancelKey":cancel_key, "armedKey": armed_key}));
             tokio::pin!(submission);
             tokio::select! {
                 biased;
@@ -182,7 +198,11 @@ impl ChatGptWebState {
                 response = &mut submission => { response.context("Failed to verify and submit the temporary ChatGPT prompt")?; }
             }
             send_phase(tx, jcode_message_types::ConnectionPhase::WaitingForResponse).await?;
-            poll_for_response(&browser, &selected, effective_effort, tx).await
+            if network {
+                poll_network_stream(&browser, &selected, effective_effort, &stream_key, prompt, tx).await
+            } else {
+                poll_for_response(&browser, &selected, effective_effort, tx).await
+            }
         }.await;
         if let Err(error) = &result {
             debug_dump(&browser, prompt, error).await;
@@ -470,6 +490,149 @@ async fn poll_for_response(
 /// record the final answer before falling back to the rendered text.
 const TRANSCRIPT_GRACE: Duration = Duration::from_secs(20);
 
+/// The network path is on by default. `JCODE_CHATGPT_WEB_NETWORK=0` forces
+/// the composer-only path.
+fn network_path_enabled() -> bool {
+    !matches!(
+        std::env::var("JCODE_CHATGPT_WEB_NETWORK").as_deref(),
+        Ok("0" | "false" | "off")
+    )
+}
+
+/// Placeholder typed into the composer when the network hook carries the
+/// real prompt. Unique per turn, so the hook can match it exactly.
+fn placeholder_for(stream_key: &str) -> String {
+    format!("jcode turn {stream_key}")
+}
+
+async fn arm_network_send(browser: &Tab<'_>, stream_key: &str, prompt: &str) -> Result<()> {
+    let armed = browser
+        .ui(json!({"op":"arm_send", "key": stream_key, "text": prompt, "placeholder": placeholder_for(stream_key)}))
+        .await?;
+    anyhow::ensure!(
+        armed.get("armed").and_then(Value::as_bool) == Some(true),
+        "ChatGPT network hook did not arm"
+    );
+    Ok(())
+}
+
+/// Streams the page's own response for this turn. Emits text as it arrives
+/// and verifies the request carried exactly jcode's prompt.
+async fn poll_network_stream(
+    browser: &Tab<'_>,
+    selected: &ChatGptWebModel,
+    effort: &str,
+    stream_key: &str,
+    prompt: &str,
+    tx: &mpsc::Sender<Result<StreamEvent>>,
+) -> Result<WebAnswer> {
+    let timeout_secs = std::env::var("JCODE_CHATGPT_WEB_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(900)
+        .max(30);
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(timeout_secs);
+    let (expected_length, expected_hash) = utf16_fingerprint(prompt);
+    let mut verified = false;
+    let mut streaming_emitted = false;
+    let mut last_status_second = 0u64;
+    loop {
+        if tx.is_closed() {
+            anyhow::bail!("ChatGPT web response consumer was closed");
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!(
+                "{} web response timed out after {timeout_secs} seconds (override with JCODE_CHATGPT_WEB_TIMEOUT_SECS)",
+                selected.label
+            );
+        }
+        let state = browser
+            .ui(json!({"op":"stream", "key": stream_key}))
+            .await
+            .context("Failed to read the owned ChatGPT web stream")?;
+        if let Some(error) = state.get("sendError").and_then(Value::as_str) {
+            anyhow::bail!("ChatGPT web send was refused before reaching the network: {error}");
+        }
+        if state.get("started").and_then(Value::as_bool) == Some(true) {
+            if !verified {
+                let substituted = state.get("substituted");
+                let length = substituted
+                    .and_then(|s| s.get("length"))
+                    .and_then(Value::as_u64);
+                let hash = substituted
+                    .and_then(|s| s.get("hash"))
+                    .and_then(Value::as_u64);
+                anyhow::ensure!(
+                    length == Some(expected_length as u64)
+                        && hash == Some(u64::from(expected_hash)),
+                    "ChatGPT web request did not carry the exact jcode prompt"
+                );
+                verified = true;
+            }
+            if let Some(error) = state.get("error").and_then(Value::as_str) {
+                anyhow::bail!("ChatGPT web rejected the request: {error}");
+            }
+            let texts: Vec<&str> = state
+                .get("texts")
+                .and_then(Value::as_array)
+                .map(|texts| texts.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            if !streaming_emitted && texts.iter().any(|text| !text.trim().is_empty()) {
+                send_phase(tx, jcode_message_types::ConnectionPhase::Streaming).await?;
+                streaming_emitted = true;
+            }
+            if state.get("complete").and_then(Value::as_bool) == Some(true) {
+                let text = transcript_answer(&texts);
+                let builtin: Vec<String> = state
+                    .get("builtin")
+                    .and_then(Value::as_array)
+                    .map(|tools| {
+                        tools
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if text.is_empty() {
+                    anyhow::bail!(
+                        "ChatGPT completed the turn without an assistant response{}",
+                        if builtin.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" (it used its own tools instead: {})", builtin.join(", "))
+                        }
+                    );
+                }
+                browser.ui(json!({"op":"verify", "label":selected.label, "effort":effort, "requireTemporary":false})).await
+                    .context("The requested ChatGPT model or thinking effort changed during the response")?;
+                return Ok(WebAnswer { text, builtin });
+            }
+            if state.get("done").and_then(Value::as_bool) == Some(true) {
+                // Stream ended without a finished assistant message (aborted
+                // or interrupted). The transcript decides what happened.
+                return match read_transcript(browser).await? {
+                    Transcript::Final { text, builtin } => Ok(WebAnswer { text, builtin }),
+                    _ => anyhow::bail!("ChatGPT web stream ended before the answer finished"),
+                };
+            }
+        } else if started.elapsed() > Duration::from_secs(45) {
+            anyhow::bail!("ChatGPT web did not start a response stream within 45 seconds");
+        }
+        let elapsed = started.elapsed().as_secs();
+        if elapsed >= last_status_second + 10 {
+            last_status_second = elapsed;
+            let _ = tx
+                .send(Ok(StreamEvent::StatusDetail {
+                    detail: format!("{} is working in ChatGPT web ({elapsed}s)", selected.label),
+                }))
+                .await;
+        }
+        tokio::time::sleep(NETWORK_POLL_INTERVAL).await;
+    }
+}
+
 enum Transcript {
     /// The raw visible answer of the finished turn, plus the ChatGPT
     /// built-in tools (message recipients) the model used for it.
@@ -633,6 +796,9 @@ async fn emit_response(
 
 struct ParsedToolCall {
     name: String,
+    /// Tool arguments. A malformed envelope keeps its tool name with a string
+    /// here, so the agent returns a schema correction to the model instead
+    /// of the whole turn failing.
     input: Value,
 }
 
@@ -669,35 +835,115 @@ fn parse_response(response: &str) -> Result<ParsedResponse> {
     while let Some(start) = rest.find(TOOL_CALL_START) {
         text.push_str(&rest[..start]);
         let after = rest[start + TOOL_CALL_START.len()..].trim_start();
-        // Parse one JSON value, so marker-like text inside JSON strings and
-        // stray characters after the object cannot confuse the boundaries.
-        let mut stream = serde_json::Deserializer::from_str(after).into_iter::<Value>();
-        let payload = match stream.next() {
-            Some(Ok(payload)) => payload,
-            Some(Err(error)) => {
-                return Err(anyhow::Error::new(error)
-                    .context("ChatGPT emitted invalid JSON in a jcode tool-call envelope"));
-            }
-            None => anyhow::bail!("ChatGPT emitted an empty jcode tool-call envelope"),
-        };
-        let tail = &after[stream.byte_offset()..];
-        let Some(end) = tail.find(TOOL_CALL_END) else {
-            anyhow::bail!("ChatGPT started a jcode tool-call envelope without closing it");
-        };
-        let between = tail[..end].trim();
-        // Tolerate a stray wrapper fragment, never real content.
-        anyhow::ensure!(
-            between.chars().all(|c| matches!(c, '`' | '}' | '\\')),
-            "ChatGPT emitted unexpected text inside a jcode tool-call envelope: {between:?}"
-        );
-        calls.push(tool_call_from_payload(payload)?);
-        rest = &tail[end + TOOL_CALL_END.len()..];
+        let (call, consumed) = parse_envelope(after)?;
+        calls.push(call);
+        rest = &after[consumed..];
     }
     text.push_str(rest);
     Ok(ParsedResponse {
         text: text.trim().to_string(),
         calls,
     })
+}
+
+/// Parses one envelope body that starts right after `<jcode_tool_call>`.
+/// Returns the call and how many bytes of `after` it consumed, including the
+/// closing tag.
+fn parse_envelope(after: &str) -> Result<(ParsedToolCall, usize)> {
+    // Parse one JSON value, so marker-like text inside JSON strings and stray
+    // characters after the object cannot confuse the boundaries.
+    let mut stream = serde_json::Deserializer::from_str(after).into_iter::<Value>();
+    let error = match stream.next() {
+        Some(Ok(payload)) => {
+            let tail = &after[stream.byte_offset()..];
+            let Some(end) = tail.find(TOOL_CALL_END) else {
+                anyhow::bail!("ChatGPT started a jcode tool-call envelope without closing it");
+            };
+            let between = tail[..end].trim();
+            // Tolerate a stray wrapper fragment, never real content.
+            anyhow::ensure!(
+                between.chars().all(|c| matches!(c, '`' | '}' | '\\')),
+                "ChatGPT emitted unexpected text inside a jcode tool-call envelope: {between:?}"
+            );
+            let consumed = after.len() - tail.len() + end + TOOL_CALL_END.len();
+            return Ok((tool_call_from_payload(payload)?, consumed));
+        }
+        Some(Err(error)) => error,
+        None => anyhow::bail!("ChatGPT emitted an empty jcode tool-call envelope"),
+    };
+    let invalid =
+        || anyhow::anyhow!("ChatGPT emitted invalid JSON in a jcode tool-call envelope: {error}");
+    // Without a closing tag the envelope boundary is unknown: fail loudly.
+    let end = after.find(TOOL_CALL_END).ok_or_else(invalid)?;
+    let consumed = end + TOOL_CALL_END.len();
+    let raw = after[..end].trim();
+    // Models often write shell escapes such as `\(` inside JSON strings.
+    // Those are invalid JSON but unambiguous: keep the backslash literally.
+    if let Ok(payload) = serde_json::from_str::<Value>(&repair_json_escapes(raw)) {
+        return Ok((tool_call_from_payload(payload)?, consumed));
+    }
+    // Still malformed (often an unescaped quote). Keep the call so the agent
+    // returns a correction to the model, if its name is recoverable.
+    let name = recover_tool_name(raw).ok_or_else(invalid)?;
+    Ok((
+        ParsedToolCall {
+            name,
+            input: Value::String(format!(
+                "Invalid JSON in the <jcode_tool_call> envelope ({error}). Escape every double quote and backslash inside string values, then call the tool again. Raw envelope: {raw}"
+            )),
+        },
+        consumed,
+    ))
+}
+
+/// Doubles backslashes that start an invalid JSON escape inside strings, so
+/// `"grep \(x\)"` parses as the literal text the model meant. Valid escapes
+/// and text outside strings are unchanged.
+fn repair_json_escapes(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len() + 8);
+    let mut in_string = false;
+    let mut chars = raw.chars().peekable();
+    while let Some(c) = chars.next() {
+        if !in_string {
+            if c == '"' {
+                in_string = true;
+            }
+            out.push(c);
+            continue;
+        }
+        match c {
+            '"' => {
+                in_string = false;
+                out.push(c);
+            }
+            '\\' => match chars.peek() {
+                Some('"' | '\\' | '/' | 'b' | 'f' | 'n' | 'r' | 't' | 'u') => {
+                    out.push(c);
+                    out.push(chars.next().expect("peeked"));
+                }
+                _ => out.push_str("\\\\"),
+            },
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// The `"name":"..."` value at the start of a malformed envelope.
+fn recover_tool_name(raw: &str) -> Option<String> {
+    let after = raw
+        .split_once("\"name\"")?
+        .1
+        .trim_start()
+        .strip_prefix(':')?;
+    let value = after.trim_start().strip_prefix('"')?;
+    let name = &value[..value.find('"')?];
+    let valid = !name.is_empty()
+        && name.len() <= 128
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'));
+    valid.then(|| name.to_string())
 }
 
 fn tool_call_from_payload(payload: Value) -> Result<ParsedToolCall> {
@@ -823,6 +1069,9 @@ results in a later turn. The name must exactly match an advertised Jcode tool. P
 required field, including `intent` when its schema requires one, inside `input`. Never
 claim a tool ran unless its result is present above. If no tool is needed, answer normally
 without an envelope.
+
+Jcode shows your answer in a terminal as plain Markdown. Do not use ChatGPT's rich UI
+components (tags such as <box>, <row>, <grid>, <text> or <icon>), widgets, or citations.
 "#,
     );
     Ok(prompt)
@@ -866,6 +1115,65 @@ mod tests {
         assert!(corrected.contains("container.exec"));
         assert!(corrected.contains(TOOL_CALL_START));
         assert!(sandbox_warning(&["container.exec".to_string()]).contains("unverified"));
+    }
+
+    #[test]
+    fn invalid_shell_escapes_in_envelope_json_are_repaired() {
+        // Observed live twice: `\(` from a find command, invalid in JSON.
+        let parsed = only_call(
+            r#"<jcode_tool_call>{"name":"bash","input":{"command":"find / \( -name x \) -o -path \"a b\" | grep \.rs$","intent":"x"}}</jcode_tool_call>"#,
+        );
+        assert_eq!(
+            parsed.input["command"],
+            r#"find / \( -name x \) -o -path "a b" | grep \.rs$"#
+        );
+        // Valid escapes are untouched.
+        assert_eq!(
+            repair_json_escapes(r#"{"a":"x\ny\\z\u0041"}"#),
+            r#"{"a":"x\ny\\z\u0041"}"#
+        );
+        // A valid envelope is never rewritten, even if repair would change it.
+        let valid = only_call(
+            r#"<jcode_tool_call>{"name":"bash","input":{"command":"printf 'a\\nb'"}}</jcode_tool_call>"#,
+        );
+        assert_eq!(valid.input["command"], r#"printf 'a\nb'"#);
+    }
+
+    #[test]
+    fn malformed_envelope_json_becomes_a_correctable_call() {
+        // Observed live: an unescaped quote inside a shell command.
+        let parsed = parse_response(
+            r#"Checking.<jcode_tool_call>{"name":"bash","input":{"command":"echo "hi"","intent":"x"}}</jcode_tool_call>"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.text, "Checking.");
+        assert_eq!(parsed.calls.len(), 1);
+        assert_eq!(parsed.calls[0].name, "bash");
+        let note = parsed.calls[0].input.as_str().expect("string arguments");
+        assert!(note.contains("Invalid JSON"));
+        assert!(note.contains("echo \"hi\""));
+    }
+
+    #[test]
+    fn malformed_envelope_without_a_name_still_fails() {
+        let err = parse_response("<jcode_tool_call>{not json at all}</jcode_tool_call>")
+            .err()
+            .expect("no recoverable tool name");
+        assert!(err.to_string().contains("invalid JSON"));
+        assert_eq!(recover_tool_name(r#"{"name":"rm -rf","input":{}}"#), None);
+        assert_eq!(
+            recover_tool_name(r#"{ "name" : "mcp__x.y-z", "input": "#).as_deref(),
+            Some("mcp__x.y-z")
+        );
+    }
+
+    #[test]
+    fn network_placeholder_is_unique_per_turn() {
+        assert_eq!(
+            placeholder_for("jcode-a-stream"),
+            "jcode turn jcode-a-stream"
+        );
+        assert_ne!(placeholder_for("jcode-a"), placeholder_for("jcode-b"));
     }
 
     #[test]

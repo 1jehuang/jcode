@@ -83,10 +83,11 @@ async function run(request, f, options = {}) {
   let now = 0;
   const globals = options.globals || {};
   const location = { hostname:'chatgpt.com', pathname: options.pathname || '/' };
-  return await new Function('request','document','location','KeyboardEvent','setTimeout','globalThis','Date','getSelection','DataTransfer','ClipboardEvent',source)(request,f.document,location,class {constructor(type,options){this.type=type;Object.assign(this,options);}}, (cb, ms) => {now += options.elapsedPerDelay ?? ms; options.onDelay?.(globals); cb();return 0;}, globals, {now:()=>now},
+  return await new Function('request','document','location','KeyboardEvent','setTimeout','globalThis','Date','getSelection','DataTransfer','ClipboardEvent','TextDecoder','Response',source)(request,f.document,location,class {constructor(type,options){this.type=type;Object.assign(this,options);}}, (cb, ms) => {now += options.elapsedPerDelay ?? ms; options.onDelay?.(globals); cb();return 0;}, globals, {now:()=>now},
     () => ({ removeAllRanges() {}, addRange() {} }),
     class { constructor() { this.data = {}; } setData(type, value) { this.data[type] = value; } getData(type) { return this.data[type] ?? ''; } },
-    class { constructor(type, options) { this.type = type; Object.assign(this, options); } });
+    class { constructor(type, options) { this.type = type; Object.assign(this, options); } },
+    TextDecoder, Response);
 }
 
 function conversation(turn, { temporary = true } = {}) {
@@ -245,4 +246,96 @@ test('transcript reports an unfinished turn and an unknown conversation without 
   assert.equal(result.complete,false);
   const none=await run({op:'transcript'},f,{pathname:'/',globals:{fetch:pending.fetch}});
   assert.equal(none.available,false);
+});
+
+// Network path: the page sends its own request (with its own sentinel
+// headers); jcode swaps the prompt in and reads a tee of the SSE stream.
+// The fixture is a scrubbed live capture of one temporary-chat turn.
+const streamFixture = readFileSync(new URL('./fixtures/chatgpt_web_stream_v1.sse', import.meta.url), 'utf8');
+function sseResponse(text, { chunk = 97, status = 200 } = {}) {
+  const bytes = new TextEncoder().encode(text);
+  return new Response(new ReadableStream({ start(c) { for (let i = 0; i < bytes.length; i += chunk) c.enqueue(bytes.slice(i, i + chunk)); c.close(); } }), { status });
+}
+const sendBody = text => JSON.stringify({ action: 'next', model: 'gpt-6', messages: [{ id: 'm1', author: { role: 'user' }, content: { content_type: 'text', parts: [text] } }] });
+async function settle() { for (let i = 0; i < 5; i++) await new Promise(r => setImmediate(r)); }
+const sseOf = events => events.map(e => `event: delta\ndata: ${JSON.stringify(e)}\n\n`).join('') + 'data: [DONE]\n\n';
+
+test('arm_send swaps the exact prompt into the page send and decodes the v1 stream',async()=>{
+  const f=fixture(); const sent=[];
+  const globals={ fetch: async (url, init) => { sent.push({ url, init }); return sseResponse(streamFixture); } };
+  const prompt=String.raw`# exact \"prompt\" \n with ` + '\u{1F642} and https://example.com';
+  await run({op:'arm_send',key:'jcode-t1',text:prompt,placeholder:'jcode turn jcode-t1'},f,{globals});
+  const response=await globals.fetch('https://chatgpt.com/backend-api/f/conversation',{method:'POST',headers:{a:'b'},body:sendBody('jcode turn jcode-t1\n')});
+  await response.text(); await settle();
+  assert.equal(sent.length,1); assert.deepEqual(sent[0].init.headers,{a:'b'},'page headers pass through untouched');
+  assert.equal(JSON.parse(sent[0].init.body).messages[0].content.parts[0],prompt);
+  const state=await run({op:'stream',key:'jcode-t1'},f,{globals});
+  assert.equal(state.complete,true); assert.equal(state.error,null); assert.deepEqual(state.builtin,[]);
+  assert.equal(state.substituted.length,prompt.length);
+  assert.equal(state.texts.length,1);
+  assert.ok(state.texts[0].startsWith('Rivers are among the most beautiful'));
+  assert.ok(state.texts[0].endsWith('future generations.'));
+  assert.equal(f.submits(),0);
+});
+test('arm_send refuses to send when the page body is not the owned placeholder',async()=>{
+  const f=fixture(); let sends=0;
+  const globals={ fetch: async () => { sends++; return sseResponse(streamFixture); } };
+  await run({op:'arm_send',key:'jcode-t2',text:'real prompt',placeholder:'jcode turn jcode-t2'},f,{globals});
+  await assert.rejects(globals.fetch('https://chatgpt.com/backend-api/f/conversation',{method:'POST',body:sendBody('something the user typed')}),/placeholder/);
+  assert.equal(sends,0,'nothing reaches the network');
+  const state=await run({op:'stream',key:'jcode-t2'},f,{globals});
+  assert.equal(state.started,false); assert.match(state.sendError,/placeholder/);
+});
+test('arm_send leaves unrelated requests alone and substitutes only once',async()=>{
+  const f=fixture(); const sent=[];
+  const globals={ fetch: async (url, init) => { sent.push({ url, init }); return sseResponse(streamFixture); } };
+  await run({op:'arm_send',key:'jcode-t3',text:'PROMPT',placeholder:'jcode turn jcode-t3'},f,{globals});
+  await globals.fetch('https://chatgpt.com/backend-api/f/conversation/prepare',{method:'POST',body:'{"x":1}'});
+  assert.equal(sent[0].init.body,'{"x":1}');
+  await (await globals.fetch('https://chatgpt.com/backend-api/f/conversation',{method:'POST',body:sendBody('jcode turn jcode-t3')})).text();
+  await (await globals.fetch('https://chatgpt.com/backend-api/f/conversation',{method:'POST',body:sendBody('jcode turn jcode-t3')})).text();
+  assert.equal(JSON.parse(sent[1].init.body).messages[0].content.parts[0],'PROMPT');
+  assert.equal(JSON.parse(sent[2].init.body).messages[0].content.parts[0],'jcode turn jcode-t3','a second send is never rewritten');
+});
+test('a placeholder is only sent while the network hook is armed, and the click is deferred',async()=>{
+  const f=fixture(); const placeholder='jcode turn jcode-t6'; f.editor.text=placeholder;
+  const prompt=await run({op:'prompt'},f);
+  const base={op:'submit',label:'GPT-6',effort:'medium',length:prompt.length,hash:prompt.hash,armedKey:'jcode-t6'};
+  await assert.rejects(run({...base,cancelKey:'jcode-t6-a'},f,{globals:{}}),/network hook is not armed/);
+  assert.equal(f.submits(),0,'unarmed placeholder never sent');
+  const globals={ fetch: async () => sseResponse(streamFixture) };
+  await run({op:'arm_send',key:'jcode-t6',text:'REAL',placeholder},f,{globals});
+  const timers=[];
+  const source=readFileSync(path,'utf8');
+  const result=await new Function('request','document','location','KeyboardEvent','setTimeout','globalThis','Date','getSelection','DataTransfer','ClipboardEvent','TextDecoder','Response',source)(
+    {...base,cancelKey:'jcode-t6-b'},f.document,{hostname:'chatgpt.com',pathname:'/'},class{constructor(t,o){this.type=t;Object.assign(this,o);}},
+    (cb,ms)=>{ if(ms===0){timers.push(cb);return 0;} cb(); return 0; },globals,{now:()=>0},()=>({}),class{},class{},TextDecoder,Response);
+  assert.equal(result.deferred,true); assert.equal(f.submits(),0,'click waits for the next task');
+  timers.forEach(cb=>cb()); assert.equal(f.submits(),1);
+});
+test('stream reports HTTP rejections such as unusual-activity blocks',async()=>{
+  const f=fixture();
+  const globals={ fetch: async () => sseResponse('{"detail":"Unusual activity has been detected"}',{status:403}) };
+  await run({op:'arm_send',key:'jcode-t4',text:'P',placeholder:'jcode turn jcode-t4'},f,{globals});
+  await (await globals.fetch('https://chatgpt.com/backend-api/f/conversation',{method:'POST',body:sendBody('jcode turn jcode-t4')})).text(); await settle();
+  const state=await run({op:'stream',key:'jcode-t4'},f,{globals});
+  assert.equal(state.complete,false); assert.match(state.error,/HTTP 403.*Unusual activity/);
+});
+test('stream decoding handles sandbox tool messages, raw wrapper markup and patch shorthand',async()=>{
+  const f=fixture();
+  const envelope='<escape><jcode_tool_call>{"name":"bash","input":{"command":"printf a"}}</jcode_tool_call></escape>';
+  const text=sseOf([
+    {p:'',o:'add',v:{message:{id:'u',author:{role:'user'},content:{content_type:'text',parts:['q']},status:'finished_successfully',recipient:'all'}}},
+    {v:{message:{id:'a1',author:{role:'assistant'},content:{content_type:'code',text:'ls'},status:'finished_successfully',recipient:'container.exec'}}},
+    {v:{message:{id:'a2',author:{role:'assistant'},content:{content_type:'text',parts:[envelope.slice(0,25)]},status:'in_progress',recipient:'all',end_turn:null}}},
+    {p:'/message/content/parts/0',o:'append',v:envelope.slice(25,60)},
+    {v:envelope.slice(60)},
+    {o:'patch',v:[{p:'/message/status',o:'replace',v:'finished_successfully'},{p:'/message/end_turn',o:'replace',v:true}]},
+    {type:'message_stream_complete'}]);
+  const globals={ fetch: async () => sseResponse(text,{chunk:13}) };
+  await run({op:'arm_stream',key:'jcode-t5'},f,{globals});
+  await (await globals.fetch('https://chatgpt.com/backend-api/f/conversation',{method:'POST',body:sendBody('x')})).text(); await settle();
+  const state=await run({op:'stream',key:'jcode-t5'},f,{globals});
+  assert.equal(state.complete,true); assert.deepEqual(state.builtin,['container.exec']);
+  assert.deepEqual(state.texts,[envelope]);
 });
