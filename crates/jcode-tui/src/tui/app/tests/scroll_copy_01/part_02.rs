@@ -769,27 +769,28 @@ fn test_remote_ctrl_c_clears_text_draft_and_resets_completion() {
 #[test]
 fn test_ctrl_z_restores_images_cleared_by_ctrl_c() {
     let mut app = create_test_app();
-    app.input = "describe this".to_string();
-    app.cursor_pos = app.input.len();
-    app.pending_images
-        .push(("image/png".to_string(), "aW1hZ2U=".to_string()));
+    // A typed lookalike stays literal beside the attachment's owned marker.
+    super::input::insert_input_text(&mut app, "describe this [image 1] ");
+    let png = paste_selection_test_png(&mut app, 91);
+    assert_eq!(app.input, "describe this [image 1] [image 1]");
 
     app.handle_key(KeyCode::Char('c'), KeyModifiers::CONTROL)
         .unwrap();
     assert!(app.input.is_empty() && app.pending_images.is_empty());
 
     app.undo_input_change();
-    assert_eq!(app.input, "describe this");
-    assert_eq!(app.pending_images.len(), 1, "undo must restore the image");
+    assert_eq!(app.input, "describe this [image 1] [image 1]");
+    assert_eq!(app.pending_images, vec![("image/png".to_string(), png)]);
 
     // Image-only draft round-trips too.
     let mut app = create_test_app();
-    seed_image_only_draft(&mut app);
+    let png = paste_selection_test_png(&mut app, 92);
     app.handle_key(KeyCode::Char('c'), KeyModifiers::CONTROL)
         .unwrap();
-    assert!(app.pending_images.is_empty());
+    assert!(app.input.is_empty() && app.pending_images.is_empty());
     app.undo_input_change();
-    assert_eq!(app.pending_images.len(), 1);
+    assert_eq!(app.input, "[image 1]");
+    assert_eq!(app.pending_images, vec![("image/png".to_string(), png)]);
 }
 
 #[test]
@@ -807,15 +808,14 @@ fn test_disconnected_ctrl_d_forward_deletes_inside_draft() {
 #[test]
 fn test_ctrl_z_restores_each_cleared_drafts_own_images() {
     let mut app = create_test_app();
-    app.input = "first [image 1]".to_string();
-    app.cursor_pos = app.input.len();
-    app.pending_images
-        .push(("image/png".to_string(), "Zmlyc3Q=".to_string()));
+    super::input::insert_input_text(&mut app, "first ");
+    let png = paste_selection_test_png(&mut app, 93);
+    assert_eq!(app.input, "first [image 1]");
     app.handle_key(KeyCode::Char('c'), KeyModifiers::CONTROL)
         .unwrap();
+    assert!(app.input.is_empty() && app.pending_images.is_empty());
 
-    app.input = "second text only".to_string();
-    app.cursor_pos = app.input.len();
+    super::input::insert_input_text(&mut app, "second text only");
     app.handle_key(KeyCode::Char('c'), KeyModifiers::CONTROL)
         .unwrap();
 
@@ -826,10 +826,7 @@ fn test_ctrl_z_restores_each_cleared_drafts_own_images() {
     app.undo_input_change();
     app.undo_input_change();
     assert_eq!(app.input, "first [image 1]");
-    assert_eq!(
-        app.pending_images,
-        vec![("image/png".to_string(), "Zmlyc3Q=".to_string())]
-    );
+    assert_eq!(app.pending_images, vec![("image/png".to_string(), png)]);
 }
 
 #[test]
