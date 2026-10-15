@@ -12,6 +12,7 @@ use crate::provider_catalog::{
 use super::provider_init::{ProviderChoice, login_provider_for_choice};
 use crate::provider_catalog::save_named_api_key;
 
+mod copilot_host;
 mod existing_key_notice;
 mod google;
 mod jcode_device;
@@ -24,6 +25,7 @@ use scriptable::*;
 
 #[derive(Debug, Clone, Default)]
 pub struct LoginOptions {
+    pub copilot_enterprise_url: Option<String>,
     pub no_browser: bool,
     pub claude_code: bool,
     pub print_auth_url: bool,
@@ -214,6 +216,12 @@ pub async fn run_login(
     if options.claude_code && login_provider_for_choice(choice).is_none() {
         anyhow::bail!("--claude-code requires --provider claude.");
     }
+    if options.copilot_enterprise_url.is_some() {
+        anyhow::ensure!(
+            *choice == ProviderChoice::Copilot,
+            "--enterprise-url / --github-host requires --provider copilot."
+        );
+    }
     if let Some(provider) = login_provider_for_choice(choice) {
         return run_login_provider(provider, account_label, options).await;
     }
@@ -260,6 +268,7 @@ pub async fn run_login_provider(
 ) -> Result<()> {
     options.validate()?;
     validate_claude_code_method(provider, account_label, &options)?;
+    copilot_host::configure_login_host(provider, &options)?;
     if options.cancel {
         return cancel_scriptable_login(provider, &options);
     }

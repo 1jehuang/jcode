@@ -62,6 +62,7 @@ impl JcodeProvider {
     fn model_routes_for(tier: crate::subscription_catalog::JcodeTier) -> Vec<ModelRoute> {
         Self::entitled_models_for(tier)
             .map(|model| ModelRoute {
+                catalog_metadata: None,
                 model: model.id.to_string(),
                 provider: crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME.to_string(),
                 api_method: crate::subscription_catalog::JCODE_ROUTE_API_METHOD.to_string(),

@@ -286,6 +286,7 @@ fn effort_step_route_without_ladder_switches_at_once() {
     let mut app = create_test_app();
     configure_test_remote_models_with_openai_recommendations(&mut app);
     app.remote_model_options.push(crate::provider::ModelRoute {
+        catalog_metadata: None,
         model: "claude-opus-4-8".to_string(),
         provider: "Copilot".to_string(),
         api_method: "copilot".to_string(),
@@ -433,6 +434,7 @@ fn effort_step_other_route_of_the_current_model_uses_the_saved_level() {
         let mut app = create_test_app();
         configure_test_remote_models_with_openai_recommendations(&mut app);
         app.remote_model_options.push(crate::provider::ModelRoute {
+            catalog_metadata: None,
             model: "gpt-5.2".to_string(),
             provider: "OpenAI".to_string(),
             api_method: "openai-api-key".to_string(),

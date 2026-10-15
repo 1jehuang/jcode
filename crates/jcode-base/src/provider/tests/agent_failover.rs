@@ -294,6 +294,7 @@ fn agent_failover_pool_order_beats_global_model_quality_and_configured_identity(
             vec![
                 build_openai_api_key_route("gpt-6-astra", true, ""),
                 ModelRoute {
+                    catalog_metadata: None,
                     model: "claude-sonnet-4-6".into(),
                     provider: "Anthropic".into(),
                     api_method: "anthropic-api-key".into(),

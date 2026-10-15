@@ -187,6 +187,7 @@ fn configure_available_model_browser_routes(app: &mut App) {
     configure_test_remote_models(app);
     app.remote_provider_name = Some("OpenAI".to_string());
     app.remote_model_options = app.remote_available_entries.iter().map(|model| crate::provider::ModelRoute {
+        catalog_metadata: None,
         model: model.clone(),
         provider: "OpenAI".to_string(),
         api_method: "openai-oauth".to_string(),

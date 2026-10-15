@@ -1317,6 +1317,8 @@ pub struct ProviderConfig {
     /// Copilot premium request mode: "normal", "one", or "zero"
     /// "zero" means all requests are free (no premium requests consumed)
     pub copilot_premium: Option<String>,
+    /// Enterprise host for Copilot OAuth, GitHub REST, and inference endpoints.
+    pub copilot_enterprise_url: Option<String>,
     /// Pin the `gemini` provider to Code Assist OAuth even when a Gemini
     /// Developer API key (`gemini.env` / `GEMINI_API_KEY`) is present. Without
     /// this an API key silently wins and every turn bills per token on the
@@ -1365,6 +1367,7 @@ impl Default for ProviderConfig {
             same_provider_account_failover: true,
             account_failover_return_home: true,
             copilot_premium: None,
+            copilot_enterprise_url: None,
             gemini_force_oauth: false,
             gemini_project: None,
             model_picker_providers: None,

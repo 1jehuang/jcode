@@ -132,7 +132,7 @@ impl Agent {
             return false;
         }
 
-        let context_limit = self.provider.context_window() as u64;
+        let context_limit = self.provider.input_token_limit() as u64;
         let compaction = self.registry.compaction();
 
         let (dropped, usage_pct) = match compaction.try_write() {
@@ -268,7 +268,7 @@ impl Agent {
         if let Ok(mut manager) = compaction.try_write() {
             let provider_messages = self.session.messages_for_provider();
             manager.reset();
-            manager.set_budget(self.provider.context_window());
+            manager.set_budget(self.provider.input_token_limit());
             if let Some(state) = self.session.compaction.as_ref() {
                 manager.restore_persisted_state_with(state, &provider_messages);
             } else {

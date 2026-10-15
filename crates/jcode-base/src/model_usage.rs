@@ -362,6 +362,7 @@ mod tests {
 
     fn route(method: &str) -> ModelRoute {
         ModelRoute {
+            catalog_metadata: None,
             model: "test-model".into(),
             provider: "OpenAI".into(),
             api_method: method.into(),

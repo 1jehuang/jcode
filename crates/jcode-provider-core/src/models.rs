@@ -396,6 +396,12 @@ pub fn context_limit_for_model_with_provider_and_cache(
     let model = model.as_str();
 
     if matches!(provider, Some("copilot")) {
+        if let Some(limit) = crate::copilot_model_metadata(model)
+            .and_then(|metadata| metadata.context_window)
+            .filter(|limit| *limit > 0)
+        {
+            return Some(limit);
+        }
         return Some(copilot_context_limit_for_model(model));
     }
 

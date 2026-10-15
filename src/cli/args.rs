@@ -232,6 +232,9 @@ pub(crate) enum Command {
         /// Make this login the default account for new windows.
         #[arg(long = "default", id = "make_default")]
         make_default: bool,
+        /// GitHub hostname for Copilot login (for example hiqfi.ghe.com); github.com selects public GitHub.
+        #[arg(long, visible_alias = "github-host", value_name = "HOSTNAME")]
+        enterprise_url: Option<String>,
 
         /// Do not open a local browser. Show a login QR for another device (useful over SSH).
         #[arg(long, alias = "headless")]
@@ -273,7 +276,7 @@ pub(crate) enum Command {
         flow_id: Option<String>,
 
         /// Cancel only this provider's pending flow. Does not remove saved credentials.
-        #[arg(long, requires = "flow_id", conflicts_with_all = ["print_auth_url", "callback_url", "auth_code", "complete", "account", "api_base", "api_key", "api_key_env"])]
+        #[arg(long, requires = "flow_id", conflicts_with_all = ["print_auth_url", "callback_url", "auth_code", "complete", "account", "enterprise_url", "api_base", "api_key", "api_key_env"])]
         cancel: bool,
 
         /// Save credentials without running the post-login live provider validation.

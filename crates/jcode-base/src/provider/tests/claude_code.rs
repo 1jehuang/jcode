@@ -155,6 +155,7 @@ fn claude_code_route_selection_pins_the_instance() {
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
         let provider = multi_provider_with_claude_code(tx);
         let selection = RouteSelection::from_model_route(&ModelRoute {
+            catalog_metadata: None,
             model: "claude-opus-4-8".to_string(),
             provider: "Claude Code".to_string(),
             api_method: "claude-code".to_string(),
@@ -172,6 +173,7 @@ fn claude_code_route_selection_pins_the_instance() {
 
         // Unknown instance ids are rejected rather than silently using another login.
         let unknown = RouteSelection::from_model_route(&ModelRoute {
+            catalog_metadata: None,
             model: "claude-opus-4-8".to_string(),
             provider: "Claude Code (ghost)".to_string(),
             api_method: "claude-code:ghost".to_string(),

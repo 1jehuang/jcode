@@ -906,6 +906,7 @@ fn remote_model_catalog_cache_rejects_forged_or_oversized_routes() {
 
 fn model_route(model: &str, provider: &str, api_method: &str) -> crate::provider::ModelRoute {
     crate::provider::ModelRoute {
+        catalog_metadata: None,
         model: model.to_string(),
         provider: provider.to_string(),
         api_method: api_method.to_string(),

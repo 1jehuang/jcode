@@ -49,6 +49,7 @@ pub fn simplified_model_routes_for_picker(
             // Platform-API-only GPT Pro models: never advertise an OAuth route.
             if jcode_provider_core::is_openai_api_only_pro_model(&model) {
                 routes.push(ModelRoute {
+                    catalog_metadata: None,
                     model: model.clone(),
                     provider: "OpenAI".to_string(),
                     api_method: "openai-api-key".to_string(),
@@ -65,6 +66,7 @@ pub fn simplified_model_routes_for_picker(
             }
             if auth.openai_has_oauth {
                 routes.push(ModelRoute {
+                    catalog_metadata: None,
                     model: model.clone(),
                     provider: "OpenAI".to_string(),
                     api_method: "openai-oauth".to_string(),
@@ -76,6 +78,7 @@ pub fn simplified_model_routes_for_picker(
             }
             if auth.openai_has_api_key {
                 routes.push(ModelRoute {
+                    catalog_metadata: None,
                     model: model.clone(),
                     provider: "OpenAI".to_string(),
                     api_method: "openai-api-key".to_string(),
@@ -87,6 +90,7 @@ pub fn simplified_model_routes_for_picker(
             }
             if auth.openai == AuthState::NotConfigured {
                 routes.push(ModelRoute {
+                    catalog_metadata: None,
                     model,
                     provider: "OpenAI".to_string(),
                     api_method: "openai-oauth".to_string(),
@@ -154,6 +158,7 @@ pub fn simplified_model_routes_for_picker(
             };
 
         routes.push(ModelRoute {
+            catalog_metadata: None,
             model,
             provider,
             api_method,
@@ -181,6 +186,7 @@ pub fn simplified_model_routes_for_picker(
     }
     if routes.is_empty() && !current_model.is_empty() && current_model != "unknown" {
         routes.push(ModelRoute {
+            catalog_metadata: None,
             model: current_model.to_string(),
             provider: current_provider_name.to_string(),
             api_method: "current".to_string(),
@@ -358,6 +364,7 @@ pub fn append_simplified_anthropic_model_routes(
             anthropic_api_key_route_availability(&model)
         };
         routes.push(ModelRoute {
+            catalog_metadata: None,
             model: model.clone(),
             provider: "Anthropic".to_string(),
             api_method: if oauth { "claude-oauth" } else { "claude-api" }.to_string(),
@@ -424,6 +431,7 @@ pub(super) fn multiprovider_model_routes(provider: &MultiProvider) -> Vec<ModelR
     if !has_openrouter_transport && !added_direct_openai_compatible_routes {
         // OpenRouter not configured - show a placeholder as unavailable.
         routes.push(ModelRoute {
+            catalog_metadata: None,
             model: "openrouter models".to_string(),
             provider: "—".to_string(),
             api_method: "openrouter".to_string(),
@@ -526,6 +534,7 @@ pub(super) fn append_anthropic_routes(
                 routes.push(build_anthropic_oauth_route(&model, available, detail));
             } else {
                 routes.push(ModelRoute {
+                    catalog_metadata: None,
                     model: model.clone(),
                     provider: "Anthropic".to_string(),
                     api_method: "claude-api".to_string(),
@@ -735,6 +744,7 @@ fn named_provider_profile_routes(
             continue;
         }
         routes.push(ModelRoute {
+            catalog_metadata: None,
             model,
             provider: profile_name.to_string(),
             api_method: api_method.clone(),
@@ -755,7 +765,9 @@ fn append_copilot_routes(provider: &MultiProvider, routes: &mut Vec<ModelRoute>)
         let detail = copilot.model_catalog_detail();
         let copilot_models_empty = copilot_models.is_empty();
         for model in copilot_models {
-            routes.push(build_copilot_route(&model, true, detail.clone()));
+            let mut route = build_copilot_route(&model, true, detail.clone());
+            route.catalog_metadata = copilot.model_metadata(&model);
+            routes.push(route);
         }
         if copilot_models_empty && copilot::has_credentials() {
             routes.push(build_copilot_route("copilot models", false, detail));
@@ -773,6 +785,7 @@ fn append_gemini_routes(provider: &MultiProvider, routes: &mut Vec<ModelRoute>) 
     if let Some(gemini) = provider.gemini_provider() {
         for model in gemini.available_models_display() {
             routes.push(ModelRoute {
+                catalog_metadata: None,
                 model,
                 provider: "Gemini".to_string(),
                 api_method: "code-assist-oauth".to_string(),
@@ -795,6 +808,7 @@ fn append_cursor_routes(provider: &MultiProvider, routes: &mut Vec<ModelRoute>) 
     if let Some(cursor) = provider.cursor_provider() {
         for model in cursor.available_models_display() {
             routes.push(ModelRoute {
+                catalog_metadata: None,
                 model,
                 provider: "Cursor".to_string(),
                 api_method: "cursor".to_string(),
@@ -870,6 +884,7 @@ pub(crate) fn claude_code_routes_for(
         };
         for model in models {
             routes.push(ModelRoute {
+                catalog_metadata: None,
                 model: model.clone(),
                 provider: provider_label.clone(),
                 api_method: api_method.clone(),
@@ -973,6 +988,7 @@ fn append_openrouter_routes(
                     )
                 });
             routes.push(ModelRoute {
+                catalog_metadata: None,
                 model: model.clone(),
                 provider,
                 api_method,
@@ -1195,6 +1211,7 @@ mod tests {
         let routes = expand_saved_account_routes(vec![
             build_anthropic_oauth_route("claude-sonnet-4-6", true, ""),
             ModelRoute {
+                catalog_metadata: None,
                 model: "claude-sonnet-4-6".into(),
                 provider: "Anthropic".into(),
                 api_method: "claude-api".into(),

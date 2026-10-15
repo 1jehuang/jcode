@@ -48,6 +48,80 @@ fn test_open_work_rearms_auto_poke_after_completion_gate_breaker() {
 
 include!("model_picker_startup_tests.rs");
 
+fn create_enterprise_metadata_test_app() -> App {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    let metadata = jcode_provider_core::ModelMetadata {
+        context_window: Some(328_000),
+        max_input_tokens: Some(200_000),
+        reasoning_efforts: vec![
+            "low".into(),
+            "medium".into(),
+            "high".into(),
+            "xhigh".into(),
+            "max".into(),
+        ],
+        ..jcode_provider_core::ModelMetadata::default()
+    };
+    let route = crate::provider::ModelRoute {
+        model: "claude-sonnet-5.5".into(),
+        provider: "Copilot".into(),
+        api_method: "copilot".into(),
+        available: true,
+        detail: String::new(),
+        catalog_metadata: Some(metadata),
+        usage: None,
+        cheapness: None,
+    };
+    app.replace_remote_model_catalog_snapshot(jcode_provider_core::ModelCatalogSnapshot::new(
+        Some("Copilot".into()),
+        Some("claude-sonnet-5.5".into()),
+        vec!["claude-sonnet-5.5".into()],
+        vec![route],
+    ));
+    app
+}
+
+#[test]
+fn should_display_enterprise_context_from_remote_catalog() {
+    with_temp_jcode_home(|| {
+        let app = create_enterprise_metadata_test_app();
+        assert_eq!(app.context_limit, 328_000);
+    });
+}
+
+#[test]
+fn should_use_enterprise_prompt_budget_in_remote_compaction() {
+    with_temp_jcode_home(|| {
+        let app = create_enterprise_metadata_test_app();
+        let compaction = app.registry.compaction();
+        assert_eq!(compaction.try_read().unwrap().token_budget(), 200_000);
+    });
+}
+
+#[test]
+fn should_show_exact_enterprise_efforts_in_remote_picker() {
+    with_temp_jcode_home(|| {
+        let mut app = create_enterprise_metadata_test_app();
+        app.open_model_picker();
+        wait_for_model_picker_load(&mut app);
+        let efforts: std::collections::BTreeSet<&str> = app
+            .inline_interactive_state
+            .as_ref()
+            .unwrap()
+            .entries
+            .iter()
+            .filter_map(|entry| entry.effort.as_deref())
+            .collect();
+        assert_eq!(
+            efforts,
+            std::collections::BTreeSet::from(["low", "medium", "high", "xhigh", "max"])
+        );
+    });
+}
+
+
+
 #[test]
 fn test_remote_model_command_opens_picker_without_catalog_request() {
     let mut app = create_test_app();
@@ -113,6 +187,7 @@ impl AuthUxStateSpaceProvider {
         let mut routes = Vec::new();
         if self.include_wrong_profile_first {
             routes.push(crate::provider::ModelRoute {
+                catalog_metadata: None,
                 model: "wrong-profile-first".to_string(),
                 provider: self.provider_label.to_string(),
                 api_method: "openai-compatible:other-provider".to_string(),
@@ -128,6 +203,7 @@ impl AuthUxStateSpaceProvider {
         }
         for model in self.models {
             routes.push(crate::provider::ModelRoute {
+                catalog_metadata: None,
                 model: (*model).to_string(),
                 provider: self.provider_label.to_string(),
                 api_method: format!("openai-compatible:{}", self.provider_id),
@@ -142,6 +218,7 @@ impl AuthUxStateSpaceProvider {
             });
             if self.include_generic_profile_duplicate {
                 routes.push(crate::provider::ModelRoute {
+                    catalog_metadata: None,
                     model: (*model).to_string(),
                     provider: self.provider_label.to_string(),
                     api_method: "openai-compatible".to_string(),
@@ -164,6 +241,7 @@ impl MixedModelRoutesProvider {
     fn routes() -> Vec<crate::provider::ModelRoute> {
         vec![
             crate::provider::ModelRoute {
+                catalog_metadata: None,
                 model: "gpt-5.5".to_string(),
                 provider: "OpenAI".to_string(),
                 api_method: "openai-oauth".to_string(),
@@ -173,6 +251,7 @@ impl MixedModelRoutesProvider {
                 cheapness: None,
             },
             crate::provider::ModelRoute {
+                catalog_metadata: None,
                 model: "claude-opus-4-6".to_string(),
                 provider: "Anthropic".to_string(),
                 api_method: "claude-oauth".to_string(),
@@ -182,6 +261,7 @@ impl MixedModelRoutesProvider {
                 cheapness: None,
             },
             crate::provider::ModelRoute {
+                catalog_metadata: None,
                 model: "Qwen/Qwen3-Coder-480B-A35B-Instruct".to_string(),
                 provider: "Chutes".to_string(),
                 api_method: "openai-compatible:chutes".to_string(),
@@ -191,6 +271,7 @@ impl MixedModelRoutesProvider {
                 cheapness: None,
             },
             crate::provider::ModelRoute {
+                catalog_metadata: None,
                 model: "deepseek/deepseek-v4-pro".to_string(),
                 provider: "auto".to_string(),
                 api_method: "openrouter".to_string(),
@@ -442,6 +523,7 @@ impl Provider for CountingModelRoutesProvider {
         }
         (0..self.route_count)
             .map(|idx| crate::provider::ModelRoute {
+                catalog_metadata: None,
                 model: if idx < 26 {
                     format!("counting-{}", (b'a' + idx as u8) as char)
                 } else {
@@ -1622,6 +1704,7 @@ impl Provider for AzureLoginMockProvider {
 
     fn model_routes(&self) -> Vec<crate::provider::ModelRoute> {
         vec![crate::provider::ModelRoute {
+            catalog_metadata: None,
             model: self.model(),
             provider: "Azure OpenAI".to_string(),
             api_method: "openai-compatible".to_string(),
