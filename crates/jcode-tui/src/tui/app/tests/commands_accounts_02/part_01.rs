@@ -636,7 +636,10 @@ fn test_account_switch_shorthand_switches_openai_account_by_label() {
             "the first inserted account is the active one before the switch"
         );
 
-        let mut app = create_test_app();
+        // The default `MockProvider` does not override `set_model`, so the trait
+        // default rejects the route and `/account switch` bails out before it
+        // saves the active account. Use a provider that accepts the switch.
+        let (mut app, _set_model_calls) = create_openrouter_spec_capture_test_app();
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             app.input = format!("/account switch {second}");
