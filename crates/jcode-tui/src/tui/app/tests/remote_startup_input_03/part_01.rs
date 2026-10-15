@@ -1172,7 +1172,7 @@ fn test_save_and_restore_reload_state_promotes_inflight_prompt_to_startup_submis
             retry_at: None,
             overload_attempts: 0,
         });
-        app.rate_limit_reset = Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
+        app.rate_limit_reset = None;
         app.save_input_for_reload(&session_id);
 
         let restored = App::restore_input_for_reload(&session_id).expect("reload state should exist");
