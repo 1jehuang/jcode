@@ -12,7 +12,7 @@
 //!   the error names several resets (multi-account), the earliest wins.
 //! - A reset in the past waits 60 s, an unknown reset waits 15 min. Never zero.
 //! - At most [`MAX_USAGE_LIMIT_RESUMES`] resumes per turn, then the turn fails.
-//! - A user message to the session cancels its pending resume.
+//! - A user message or cancellation request cancels its pending resume.
 
 use super::live_turn::LiveTurnSwarmContext;
 use super::update_member_status;
@@ -153,8 +153,8 @@ pub(super) fn register_pending_resume(session_id: &str) -> ResumeTicket {
     }
 }
 
-/// Cancel the pending resume for `session_id`, if any. Called when the user
-/// sends the session a message: their turn supersedes the resume.
+/// Cancel the pending resume for `session_id`, if any. A user message
+/// supersedes the resume, and an explicit cancellation stops it.
 pub(super) fn cancel_pending_resume(session_id: &str) -> bool {
     let removed = PENDING
         .lock()
@@ -163,7 +163,7 @@ pub(super) fn cancel_pending_resume(session_id: &str) -> bool {
     match removed {
         Some((_, token)) => {
             crate::logging::info(&format!(
-                "Cancelled pending usage-limit resume for {session_id}: a new message arrived"
+                "Cancelled pending usage-limit resume for {session_id}: stopped or superseded"
             ));
             token.cancel();
             true

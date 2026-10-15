@@ -3723,8 +3723,11 @@ async fn cancel_processing_message(
         .as_deref()
         .unwrap_or(session_control.session_id.as_str())
         .to_string();
-    // Stopping a session also stops the workers it spawned. This runs first
-    // and on every path, including the idle one: a coordinator waiting on
+    // A server-owned turn waiting for its quota reset has no active turn or
+    // local task. Cancel its resume before the idle path acknowledges the stop.
+    super::usage_limit_resume::cancel_pending_resume(&session_label);
+    // Stopping a session also stops the workers it spawned. This runs on
+    // every path, including the idle one: a coordinator waiting on
     // `await_members` has no running turn of its own while its workers do.
     super::swarm::cancel_spawned_descendant_turns(
         &session_control.session_id,
@@ -4113,6 +4116,10 @@ pub(super) async fn process_locked_message_streaming_mpsc(
 #[cfg(test)]
 #[path = "client_lifecycle_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "client_lifecycle_cancel_resume_tests.rs"]
+mod cancel_resume_tests;
 
 #[cfg(test)]
 #[path = "client_target_attach_tests.rs"]
