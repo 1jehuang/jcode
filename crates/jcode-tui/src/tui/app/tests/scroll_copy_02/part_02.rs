@@ -1194,11 +1194,14 @@ fn test_real_draw_click_on_body_anchored_image_label_cycles_level() {
         "clicking the rendered image label must cycle Fit -> Large \
          (this is the exact path the user reported as broken)"
     );
-    assert!(
-        app.status_notice()
-            .unwrap()
-            .starts_with("Image size: large · ")
-    );
+    assert!(matches!(
+        app.status_notice().as_deref(),
+        Some(
+            "Image size: large"
+                | "Image size: large · Image copied"
+                | "Image size: large · Could not copy image"
+        )
+    ));
 }
 
 /// The inline-image placeholder marker row must never reach the terminal as
