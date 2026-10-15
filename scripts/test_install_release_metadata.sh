@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export JCODE_TEST_PUBLISH_HELPER="$repo_root/scripts/lib/test_publish_build.sh"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 fixture="$tmp/repo"; fake_bin="$tmp/bin"
@@ -27,7 +28,8 @@ test "${JCODE_BUILD_GIT_DIRTY:-}" = "${TEST_DIRTY:-0}"
 mkdir -p "$TEST_REPO/target/release"
 cat > "$TEST_REPO/target/release/jcode" <<BIN
 #!/usr/bin/env bash
-if [[ "\${1:-}" == --version ]]; then printf '%s\\n' 'jcode v0.0.0-dev (${TEST_BINARY_HASH:-$JCODE_BUILD_GIT_HASH}, dirty)'; fi
+if [[ "\${1:-}" == --version ]]; then printf '%s\\n' 'jcode v0.0.0-dev (${TEST_BINARY_HASH:-$JCODE_BUILD_GIT_HASH}, dirty)'; exit 0; fi
+if [[ "\${2:-}" == publish-build ]]; then exec bash "\$JCODE_TEST_PUBLISH_HELPER" "\$@"; fi
 BIN
 chmod +x "$TEST_REPO/target/release/jcode"
 EOF
