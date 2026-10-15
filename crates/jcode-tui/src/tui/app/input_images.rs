@@ -36,6 +36,29 @@ fn image_marker_spans(text: &str, image_count: usize) -> Vec<(usize, usize, usiz
 pub(super) type InputUndoSnapshot = (String, usize, Arc<Vec<(String, String)>>);
 
 impl App {
+    /// Startup, reconnect and failover payloads may contain real images without
+    /// composer placeholders. Make them visible on restoration, before an edit
+    /// can mistake them for attachments whose markers the user removed.
+    pub(super) fn ensure_input_image_markers(&mut self) {
+        let mut visible = vec![false; self.pending_images.len()];
+        for (_, _, number) in image_marker_spans(&self.input, self.pending_images.len()) {
+            visible[number - 1] = true;
+        }
+        for (index, present) in visible.into_iter().enumerate() {
+            if !present {
+                if self
+                    .input
+                    .chars()
+                    .last()
+                    .is_some_and(|last| !last.is_whitespace())
+                {
+                    self.input.push(' ');
+                }
+                self.input.push_str(&format!("[image {}]", index + 1));
+            }
+        }
+    }
+
     /// Attachment markers are atomic when deleting text. Even deleting part of
     /// one removes its payload, rather than leaving an invisible attachment.
     pub(super) fn remove_input_range(&mut self, mut start: usize, mut end: usize) -> String {
