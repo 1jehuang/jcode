@@ -503,7 +503,7 @@ pub const STANDARDCOMPUTE_PROFILE: OpenAiCompatibleProfile = OpenAiCompatiblePro
     api_key_env: "STANDARDCOMPUTE_API_KEY",
     env_file: "standardcompute.env",
     setup_url: "https://standardcompute.com/dashboard/api-keys",
-    default_model: Some("standardcompute"),
+    default_model: Some("StandardCompute"),
     requires_api_key: true,
 };
 

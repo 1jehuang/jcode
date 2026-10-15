@@ -372,7 +372,7 @@ mod tests {
         assert_eq!(profile.api_base, "https://api.stdcmpt.com/v1");
         assert_eq!(profile.api_key_env, "STANDARDCOMPUTE_API_KEY");
         assert_eq!(profile.env_file, "standardcompute.env");
-        assert_eq!(profile.default_model, Some("standardcompute"));
+        assert_eq!(profile.default_model, Some("StandardCompute"));
         assert!(profile.requires_api_key);
 
         let alias = resolve_login_provider("standard-compute").expect("Standard Compute alias");

@@ -346,7 +346,7 @@ Notable presets include:
 - Stored env file: `~/.config/jcode/standardcompute.env`
 - API key env var: `STANDARDCOMPUTE_API_KEY`
 - Base URL: `https://api.stdcmpt.com/v1`
-- Default model hint: `standardcompute` (routes each request to a model and provider to keep cost down; individual models are listed at <https://api.stdcmpt.com/v1/models>)
+- Default model hint: `StandardCompute` (the router sends each request to the cheapest model that can handle it; individual models are listed at <https://api.stdcmpt.com/v1/models>)
 - Get a key: <https://standardcompute.com/dashboard/api-keys>
 - Docs: <https://docs.standardcompute.com>
 
