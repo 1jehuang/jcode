@@ -46,17 +46,39 @@ class PublicReleaseTests(unittest.TestCase):
     def test_complete_release_passes(self):
         self.verify()
 
+    def test_draft_validation_is_explicit_and_still_checks_assets(self):
+        data = metadata()
+        data["draft"] = True
+        with self.assertRaises(ValueError):
+            verifier.verify_metadata(data, TAG)
+        self.assertEqual(verifier.verify_metadata(data, TAG, allow_draft=True), self.names)
+        data["assets"].pop()
+        with self.assertRaisesRegex(ValueError, "Missing required"):
+            verifier.verify_metadata(data, TAG, allow_draft=True)
+        for value in (None, 0, "true"):
+            data = metadata()
+            data["draft"] = value
+            with self.assertRaises(ValueError):
+                verifier.verify_metadata(data, TAG, allow_draft=True)
+
     def test_workflow_verifies_before_announcements_and_package_updates(self):
         workflow = (ROOT / ".github/workflows/release.yml").read_text()
         publish = workflow.index("      - name: Publish completed release")
         verify = workflow.index("      - name: Verify public assets and exact source provenance")
         announce = workflow.index("      - name: Queue Discord release announcement")
         packages = workflow.index("      - name: Update Homebrew formula")
+        staged = workflow.index("      - name: Verify staged assets before publication")
+        self.assertLess(staged, publish)
+        staged_step = workflow[staged:publish]
+        self.assertIn('--allow-draft', staged_step)
+        self.assertIn('--sha "$TAG_SHA"', staged_step)
+        self.assertNotIn("continue-on-error", staged_step)
         self.assertLess(publish, verify)
         self.assertLess(verify, announce)
         self.assertLess(verify, packages)
         step = workflow[verify:announce]
         self.assertNotIn("continue-on-error", step)
+        self.assertNotIn("--allow-draft", step)
         self.assertIn('--sha "$TAG_SHA"', step)
         self.assertIn('git show "$WORKFLOW_SHA:scripts/verify_public_release.py"', step)
         self.assertIn("Smoke test public Linux installer in an isolated home", step)

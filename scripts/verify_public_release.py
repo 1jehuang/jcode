@@ -20,8 +20,9 @@ REQUIRED = {f"jcode-{platform}.tar.gz" for platform in PLATFORMS} | {
 }
 
 
-def verify_metadata(metadata, tag):
-    if metadata.get("tag_name") != tag or metadata.get("draft") is not False:
+def verify_metadata(metadata, tag, allow_draft=False):
+    if (metadata.get("tag_name") != tag or type(metadata.get("draft")) is not bool
+            or (metadata["draft"] and not allow_draft)):
         raise ValueError("Release must be public and match the requested tag")
     if metadata.get("prerelease") is not False:
         raise ValueError("Official release must not be a prerelease")
@@ -71,6 +72,8 @@ def main():
     parser.add_argument("tag")
     parser.add_argument("--repo", default="1jehuang/jcode")
     parser.add_argument("--sha", required=True, help="Validated exact tag commit")
+    parser.add_argument("--allow-draft", action="store_true",
+                        help="Validate staged draft assets before publication")
     parser.add_argument("--directory", help="Keep downloads in this new directory")
     args = parser.parse_args()
     if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", args.tag):
@@ -81,13 +84,14 @@ def main():
         parser.error("repo must be OWNER/REPO")
     metadata = json.loads(subprocess.check_output(
         ["gh", "api", f"repos/{args.repo}/releases/tags/{args.tag}"]))
-    names = verify_metadata(metadata, args.tag)
+    names = verify_metadata(metadata, args.tag, allow_draft=args.allow_draft)
 
     def download_and_verify(directory):
         subprocess.run(["gh", "release", "download", args.tag, "--repo", args.repo,
                         "--dir", str(directory)], check=True)
         verify_downloads(directory, names, args.tag, args.sha)
-        print(f"VERIFIED: {args.tag}, {len(names)} public assets, exact provenance and SHA256 hashes")
+        state = "draft" if metadata["draft"] else "public"
+        print(f"VERIFIED: {args.tag}, {len(names)} {state} assets, exact provenance and SHA256 hashes")
 
     if args.directory:
         directory = Path(args.directory)

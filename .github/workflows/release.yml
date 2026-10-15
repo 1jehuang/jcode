@@ -953,6 +953,18 @@ jobs:
           PY
           gh release edit "${RELEASE_TAG}" --notes-file release_notes.md
 
+      - name: Verify staged assets before publication
+        if: env.RELEASE_REPAIR == 'none'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW_SHA: ${{ github.sha }}
+          TAG_SHA: ${{ needs.create-release.outputs.tag_sha }}
+        run: |
+          set -euo pipefail
+          git show "$WORKFLOW_SHA:scripts/verify_public_release.py" > "$RUNNER_TEMP/verify-public-release.py"
+          python3 "$RUNNER_TEMP/verify-public-release.py" "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --sha "$TAG_SHA" --allow-draft
+
       - name: Publish completed release
         env:
           GH_TOKEN: ${{ github.token }}
