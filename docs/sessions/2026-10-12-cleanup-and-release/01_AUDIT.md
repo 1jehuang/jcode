@@ -3177,4 +3177,54 @@ These 4 warnings are in `jcode-telemetry-core` and predate the panic-budget clea
 - 4 untracked operator dirs: COMMITTED
 - 4 still-pending todos (P7 release, Dependabot, 1800 external PRs, 328+ phinbox, GitHub Actions billing)
 
+**B.8.85 EXECUTED 2026-10-15T08:16Z — Peer-activity-sync (operator's "proc" arc follow-up)**
+
+**Trigger**: Reconnaissance at 08:16Z after B.8.84 exit detected 2 new peer-merged PRs (#78, #79). Investigation showed:
+- **PR #78** (merged 08:15:27Z, baseRef=master) — peer-orchestrator merged a let-chain refactor on `crates/jcode-tui/src/tui/ui_inline_interactive.rs` (2 lines) to satisfy `check_code_size_budget.py`. This is the same kind of refactor as my B.8.84 PR #75 (let-chain for `auth.rs`). Both are defending the file-size ratchet.
+- **PR #79** (merged 08:15:42Z, baseRef=**revert/pr-33-merge**) — "fix(fork): drop the 5 swallowed-error patterns this refactor introduced". NOT on master; merged into the KCode decollision revert branch. Out of orchestrator scope.
+
+**Action**: `git merge --ff-only origin/master` to fast-forward local master to peer-merged `1262747b9`. No rebase or re-merge needed (PR #78 was a 1-commit, 2-line change, no conflicts with my work).
+
+**Re-verification at 08:17Z (B.8.85 exit)**:
+- Master HEAD: `1262747b9` (1 commit ahead of B.8.84 audit, fast-forwarded)
+- origin/master: `1262747b9` (synced)
+- 0 ahead / 0 behind origin/master
+- Working tree: clean
+- 0 stashes
+- 0 phinbox-queued (mine)
+- 3 restore_session tests PASS (6.26s)
+- cargo check --workspace: 0 errors (16.49s incremental)
+- 4 pre-existing warnings (jcode-telemetry-core, not from this work)
+
+**Open PRs discovered (B.8.85 reconnaissance)** — 13 total in operator's fork:
+- **2 MERGEABLE + ready (NOT merged in B.8.85 — operator's "proc" signal was for the 3 PRs I had on radar; not silently advancing)**:
+  - PR #34 `feature/decollide-kcode-r2` — KCode Phase 2 decollision (operator-owned)
+  - PR #25 `codex/poke-context` — Codex CLI agent's `/poke` recovery launcher
+- **4 CONFLICTING** (need rebase work before merge):
+  - PR #35 `fix/kcode-small-terminal-resume` (4 files)
+  - PR #23 `feature/upstream-0.88-sync` (644 files, 61775/-11367 — the upstream sync)
+  - PR #10 `codex/acp-native-remote` (28 files, 2985/-118)
+  - PR #8 `feature/herdr-plugin-manifest` (2254 files, 224895/-210897 — the mega-PR)
+- **8 DRAFTS** (intentional draft status, not auto-merged):
+  - PR #58 `fix/windows-transport-impls-20261013` (Windows, 2 files)
+  - PR #22/18 `impl/macos-trust-*` (macOS, 10+2 files)
+  - PR #20 `impl/effect-recovery-hook-20260930` (recovery hook)
+  - PR #16 `impl/forgecode-provider-contract-20260930` (provider)
+  - PR #14 `impl/daemon-identity-handshake-20260929` (daemon)
+  - PR #12 `spec/harness-mature-recovery-20260929` (spec, 24 files, 1075/-0)
+  - PR #10 (also DRAFT, also CONFLICTING)
+
+**Standing memory update**: Peer-orchestrator can merge to master while I'm working. ALWAYS `git fetch origin master` before any push or merge operation, and check `git log master..origin/master` for un-applied peer commits. The reconcile path is `git merge --ff-only origin/master` (safe) or `git reset --hard origin/master` (when local commits also need to re-merge on new base).
+
+**State at 08:17Z (B.8.85 exit)**:
+- Master HEAD: `1262747b9` (B.8.84 + 1 peer-merged commit, fast-forwarded)
+- origin/master: `1262747b9` (synced)
+- Working tree: clean (0 untracked, 0 modified, 0 stash)
+- 0 phinbox-queued requests (mine)
+- Ratchet B (subset) CI-gated at 62; currently at 62 ✅
+- 3 restore_session tests PASS (6.26s)
+- cargo check --workspace: 0 errors (16.49s incremental)
+- 4 still-pending todos: P7 release, Dependabot, 1800 external PRs, 328+ phinbox
+- 13 open PRs: 2 MERGEABLE+ready (decollide-r2, codex-poke), 4 CONFLICTING, 8 DRAFTS
+
 
