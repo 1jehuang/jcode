@@ -40,6 +40,8 @@ pub struct ConnectOptions {
     /// On by default: an app that only works once the user has launched two
     /// daemons by hand is indistinguishable from a broken one.
     pub ensure_runtime: bool,
+    /// Desktop inline Markdown response renderer. Other clients leave false.
+    pub supports_user_response: bool,
 }
 
 impl Default for ConnectOptions {
@@ -49,6 +51,7 @@ impl Default for ConnectOptions {
             client_name: concat!("jcode-sdk-rs/", env!("CARGO_PKG_VERSION")).to_string(),
             request_timeout: Some(Duration::from_secs(30)),
             ensure_runtime: true,
+            supports_user_response: false,
         }
     }
 }
@@ -410,6 +413,7 @@ impl JcodeClient {
         let connect = ConnectOptions {
             socket_path: None,
             client_name: options.client_name.clone(),
+            supports_user_response: options.supports_user_response,
             request_timeout: options.request_timeout,
             ensure_runtime: false,
         };
@@ -458,6 +462,7 @@ impl JcodeClient {
         let instance = Arc::new(launch_instance(&options)?);
         let connect = ConnectOptions {
             socket_path: Some(instance.socket_path.clone()),
+            supports_user_response: false,
             client_name: options.client_name.clone(),
             request_timeout: options.request_timeout,
             ensure_runtime: false,
@@ -539,6 +544,7 @@ impl JcodeClient {
                 min_version: API_VERSION_MAJOR,
                 max_version: API_VERSION_MAJOR,
                 client: options.client_name.clone(),
+                supports_user_response: options.supports_user_response,
             },
             hello_timeout,
         )?;
@@ -1608,90 +1614,8 @@ impl JcodeClient {
     }
 }
 
-/// Options for a one-shot turn.
-#[derive(Default)]
-pub struct RunOptions {
-    pub images: Vec<(String, String)>,
-    /// Called for every event of the turn, for progress rendering.
-    #[allow(clippy::type_complexity)]
-    pub on_event: Option<Box<dyn Fn(&ApiEvent) + Send>>,
-    /// Auto-answer permission prompts. Only meaningful when the server
-    /// advertises the `permissions` capability.
-    pub auto_approve: bool,
-}
-
-/// Runtime identity and protocol metadata returned by [`JcodeClient::get_runtime_info`].
-#[derive(Debug, Clone, PartialEq)]
-pub struct RuntimeInfo {
-    pub server: String,
-    pub protocol_version: u32,
-    pub capabilities: Vec<String>,
-    pub healthy: bool,
-    pub session_id: String,
-    pub provider: Option<String>,
-    pub model: Option<String>,
-    /// Reasoning effort, e.g. `high`, when the provider exposes it.
-    pub reasoning_effort: Option<String>,
-    /// Credential the session bills against (`oauth` or `api_key`).
-    pub auth_method: Option<String>,
-    pub providers: Vec<String>,
-    pub routes: Vec<ModelRouteInfo>,
-}
-
-/// Content and truncation metadata returned by [`JcodeClient::read_file`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FileContent {
-    pub path: String,
-    pub content: String,
-    pub size: u64,
-    pub truncated: bool,
-}
-
-/// Optional constraints for [`JcodeClient::search_text`].
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct SearchTextOptions {
-    /// Restrict the search to this relative path under the session root.
-    pub path: Option<String>,
-    /// Maximum number of matches to return.
-    pub limit: Option<u32>,
-}
-
-/// Safe filesystem metadata returned by [`JcodeClient::file_status`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FileStatus {
-    pub path: String,
-    pub exists: bool,
-    pub kind: String,
-    pub size: Option<u64>,
-    pub modified_ms: Option<u64>,
-}
-
-/// What one turn produced.
-#[derive(Debug, Default, Clone, PartialEq)]
-pub struct TurnResult {
-    /// None for natural completion. Failures still return Err and are also
-    /// delivered to on_event as TurnStopped before the legacy Error event.
-    pub stop_reason: Option<jcode_harness_api::TurnStopReason>,
-    pub stop_message: Option<String>,
-    /// All assistant text in the turn, including tool narration.
-    pub text: String,
-    /// Last completed assistant message, or aggregate text on older bridges.
-    pub final_text: String,
-    /// Framed messages. Empty when connected to an older, unframed bridge.
-    pub messages: Vec<AssistantTextMessage>,
-    pub reasoning: String,
-    pub tool_calls: Vec<ToolCall>,
-    /// Usage from the latest provider call in this turn, not a sum of calls.
-    pub usage: Option<Usage>,
-}
-
-/// One assistant text message, excluding interleaved reasoning.
-#[derive(Debug, Clone, PartialEq)]
-pub struct AssistantTextMessage {
-    /// Stream-local correlator, not a persisted history message id.
-    pub message_id: Option<String>,
-    pub text: String,
-}
+mod types;
+pub use types::*;
 
 #[derive(Default)]
 struct TextCollector {
@@ -1736,24 +1660,6 @@ impl TextCollector {
             .map(|part| part.text.clone())
             .unwrap_or_else(|| result.text.clone());
     }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct ToolCall {
-    pub call_id: String,
-    pub name: String,
-    pub output: String,
-    pub error: Option<String>,
-}
-
-/// Provider-reported counters. Cache counters may be separate from input
-/// (Anthropic) or a subset of it (OpenAI), so do not blindly add them together.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Usage {
-    pub input: u64,
-    pub output: u64,
-    pub cache_read_input: Option<u64>,
-    pub cache_creation_input: Option<u64>,
 }
 
 fn discover_global_sessions(
@@ -1840,6 +1746,7 @@ fn start_global_child(parent: &JcodeClient, control: &Arc<GlobalEventControl>, s
         JcodeClient::connect_ssh(options)
     } else {
         JcodeClient::connect(ConnectOptions {
+            supports_user_response: false,
             socket_path: Some(parent.inner.socket_path.clone()),
             client_name: format!("{}/global-events", parent.inner.client_name),
             request_timeout: parent.inner.request_timeout,
