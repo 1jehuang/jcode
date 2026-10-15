@@ -237,6 +237,7 @@ fn parse_catalog(value: serde_json::Value) -> Result<Snapshot> {
         if snapshot.models.iter().any(|m| m.model == route) {
             return Ok(());
         }
+        let detail = model_detail(&detail, &options);
         snapshot.reasoning.insert(route.clone(), options);
         snapshot.models.push(ChatGptWebModel {
             model: route,
@@ -371,6 +372,34 @@ fn parse_catalog(value: serde_json::Value) -> Result<Snapshot> {
         "ChatGPT catalog contained no usable models"
     );
     Ok(snapshot)
+}
+
+/// One picker line: the context window range across the route's levels.
+/// ChatGPT's own tools (search, code, canvas) and image input are not
+/// listed: jcode turns are text only and tell the model not to use them,
+/// since they run in ChatGPT's sandbox rather than on the user's machine.
+fn model_detail(prefix: &str, options: &[ChatGptWebReasoningOption]) -> String {
+    let short = |tokens: usize| {
+        if tokens >= 1000 {
+            format!("{}K", tokens / 1000)
+        } else {
+            tokens.to_string()
+        }
+    };
+    let contexts: Vec<usize> = options.iter().filter_map(|o| o.context_tokens).collect();
+    let mut parts = Vec::new();
+    if !prefix.is_empty() {
+        parts.push(prefix.to_string());
+    }
+    match (contexts.iter().min(), contexts.iter().max()) {
+        (Some(min), Some(max)) if min == max => parts.push(format!("{} context", short(*min))),
+        (Some(min), Some(max)) => parts.push(format!("{}-{} context", short(*min), short(*max))),
+        _ => {}
+    }
+    if options.iter().any(|o| o.label == "Pro") {
+        parts.push("Pro runs in the background".to_string());
+    }
+    parts.join(" · ")
 }
 
 /// Catalog models the server rejects in a Temporary Chat (every jcode turn
@@ -1057,6 +1086,14 @@ mod tests {
         let gpt6_model = &snapshot.models[0];
         assert_eq!(gpt6_model.slug.as_deref(), Some("gpt-6-thinking"));
         assert_eq!(gpt6_model.context_tokens, Some(262144));
+        assert_eq!(
+            gpt6_model.detail,
+            "52K-410K context · Pro runs in the background"
+        );
+        assert_eq!(
+            snapshot.models[2].detail,
+            "ChatGPT model gpt-6-mini · 137K context"
+        );
         assert!(gpt6_model.image_input);
         assert!(gpt6_model.capabilities.contains(&"web search".to_string()));
         // A family without Pro in its presets does not invent one.
