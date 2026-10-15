@@ -65,15 +65,46 @@ impl ChatGptWebState {
                 return;
             }
 
-            match self.run_turn(&prompt, &model, effort.as_deref(), &tx).await {
-                Ok(response) => {
-                    if let Err(err) = emit_response(&tx, &response, &advertised_tools).await {
+            let mut prompt = prompt;
+            let mut corrected = false;
+            loop {
+                let answer = match self.run_turn(&prompt, &model, effort.as_deref(), &tx).await {
+                    Ok(answer) => answer,
+                    Err(err) => {
                         let _ = tx.send(Err(err)).await;
+                        return;
                     }
+                };
+                let sandbox = sandbox_tools(&answer.builtin);
+                // An answer that requests jcode tools is acted on locally, so
+                // only a final answer computed in the sandbox is suspect.
+                let requests_jcode_tools = parse_response(&answer.text)
+                    .map(|parsed| !parsed.calls.is_empty())
+                    .unwrap_or(true);
+                let mut text = answer.text;
+                if !sandbox.is_empty() && !requests_jcode_tools {
+                    jcode_base::logging::warn(&format!(
+                        "ChatGPT web answered from its own sandbox ({}) instead of jcode tools",
+                        sandbox.join(", ")
+                    ));
+                    if !corrected {
+                        corrected = true;
+                        let _ = tx
+                            .send(Ok(StreamEvent::StatusDetail {
+                                detail: format!(
+                                    "{model} used ChatGPT's remote sandbox instead of this computer. Retrying with a correction"
+                                ),
+                            }))
+                            .await;
+                        prompt = with_sandbox_correction(&prompt, &sandbox);
+                        continue;
+                    }
+                    text = format!("{}\n\n{text}", sandbox_warning(&sandbox));
                 }
-                Err(err) => {
+                if let Err(err) = emit_response(&tx, &text, &advertised_tools).await {
                     let _ = tx.send(Err(err)).await;
                 }
+                return;
             }
         });
 
@@ -86,7 +117,7 @@ impl ChatGptWebState {
         model: &str,
         effort: Option<&str>,
         tx: &mpsc::Sender<Result<StreamEvent>>,
-    ) -> Result<String> {
+    ) -> Result<WebAnswer> {
         if !super::is_chatgpt_web_model(model) {
             anyhow::bail!("Unsupported ChatGPT web model: {model}");
         }
@@ -331,7 +362,7 @@ async fn poll_for_response(
     selected: &ChatGptWebModel,
     effort: &str,
     tx: &mpsc::Sender<Result<StreamEvent>>,
-) -> Result<String> {
+) -> Result<WebAnswer> {
     let timeout_secs = std::env::var("JCODE_CHATGPT_WEB_TIMEOUT_SECS")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
@@ -380,8 +411,8 @@ async fn poll_for_response(
             // The rendered message is lossy (Markdown, hidden wrapper tags,
             // dropped backslashes). The raw transcript is the source of truth.
             let since = *terminal_since.get_or_insert_with(Instant::now);
-            let text = match read_transcript(browser).await? {
-                Transcript::Final(raw) => raw,
+            let (text, builtin) = match read_transcript(browser).await? {
+                Transcript::Final { text, builtin } => (text, builtin),
                 Transcript::Pending if since.elapsed() < TRANSCRIPT_GRACE => {
                     tokio::time::sleep(POLL_INTERVAL).await;
                     continue;
@@ -390,7 +421,7 @@ async fn poll_for_response(
                     jcode_base::logging::warn(
                         "ChatGPT web transcript was not usable, falling back to the rendered answer",
                     );
-                    text
+                    (text, Vec::new())
                 }
                 Transcript::Unavailable(reason) => anyhow::bail!(
                     "ChatGPT completed the turn without an assistant response (transcript unavailable: {reason})"
@@ -418,7 +449,7 @@ async fn poll_for_response(
             // checked-radio and power-slider evidence again instead of inventing one.
             browser.ui(json!({"op":"verify", "label":selected.label, "effort":effort, "requireTemporary":false})).await
                 .context("The requested ChatGPT model or thinking effort changed during the response")?;
-            return Ok(text);
+            return Ok(WebAnswer { text, builtin });
         } else {
             terminal_since = None;
         }
@@ -440,12 +471,49 @@ async fn poll_for_response(
 const TRANSCRIPT_GRACE: Duration = Duration::from_secs(20);
 
 enum Transcript {
-    /// The raw visible answer of the finished turn.
-    Final(String),
+    /// The raw visible answer of the finished turn, plus the ChatGPT
+    /// built-in tools (message recipients) the model used for it.
+    Final { text: String, builtin: Vec<String> },
     /// The backend has not recorded the end of the turn yet.
     Pending,
     /// The transcript cannot be read at all.
     Unavailable(String),
+}
+
+/// A finished web answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WebAnswer {
+    text: String,
+    /// ChatGPT built-in tools used for this answer. Empty when unknown.
+    builtin: Vec<String>,
+}
+
+/// ChatGPT built-ins that execute in OpenAI's remote sandbox. Their view of
+/// files, disks, processes and the environment is not the user's computer.
+/// Web search results are real, so browsing is not treated as a sandbox.
+fn sandbox_tools(builtin: &[String]) -> Vec<String> {
+    builtin
+        .iter()
+        .filter(|tool| tool.starts_with("container.") || tool.starts_with("python"))
+        .cloned()
+        .collect()
+}
+
+/// Correction appended to the prompt when the model answered from ChatGPT's
+/// sandbox instead of requesting jcode tools.
+fn with_sandbox_correction(prompt: &str, sandbox: &[String]) -> String {
+    format!(
+        "{prompt}\n# Correction\n\nA previous attempt at this exact turn used ChatGPT's own sandbox tool(s): {}. That sandbox is OpenAI's remote machine, not the user's computer, so its results about files, disks, processes or the environment were wrong and were discarded. Do not use ChatGPT's built-in tools at all. Request the Jcode tools you need with <jcode_tool_call> envelopes instead.\n",
+        sandbox.join(", ")
+    )
+}
+
+/// Visible note when the model kept answering from its sandbox.
+fn sandbox_warning(sandbox: &[String]) -> String {
+    format!(
+        "> Note: ChatGPT answered using its own remote sandbox ({}), not this computer, even after a correction. Treat any statements about local files, disks or processes below as unverified.",
+        sandbox.join(", ")
+    )
 }
 
 /// Reads the owned conversation's raw assistant text.
@@ -476,28 +544,28 @@ async fn read_transcript(browser: &Tab<'_>) -> Result<Transcript> {
         .map(|texts| texts.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
     let text = transcript_answer(&texts);
+    let builtin: Vec<String> = state
+        .get("builtin")
+        .and_then(Value::as_array)
+        .map(|tools| {
+            tools
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
     if text.is_empty() {
-        let builtin = state
-            .get("builtin")
-            .and_then(Value::as_array)
-            .map(|tools| {
-                tools
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            })
-            .unwrap_or_default();
         anyhow::bail!(
             "ChatGPT completed the turn without an assistant response{}",
             if builtin.is_empty() {
                 String::new()
             } else {
-                format!(" (it used its own tools instead: {builtin})")
+                format!(" (it used its own tools instead: {})", builtin.join(", "))
             }
         );
     }
-    Ok(Transcript::Final(text))
+    Ok(Transcript::Final { text, builtin })
 }
 
 /// The visible answer of one turn. ChatGPT may split it into a progress note
@@ -662,6 +730,9 @@ fn build_web_prompt(
     system: &str,
 ) -> Result<String> {
     let mut prompt = String::new();
+    prompt.push_str(
+        "Jcode web transport: you are working on the user's own computer through the Jcode tools listed below. Never use ChatGPT's built-in tools (Python, code execution, browsing, canvas): their sandbox is not the user's computer. The full protocol is at the end.\n\n",
+    );
     prompt.push_str("# Jcode system instructions\n\n");
     prompt.push_str(system);
     prompt.push_str("\n\n# Jcode tools available for this turn\n\n");
@@ -775,6 +846,26 @@ mod tests {
         let mut parsed = parse_response(response).unwrap();
         assert_eq!(parsed.calls.len(), 1, "expected exactly one call");
         parsed.calls.remove(0)
+    }
+
+    #[test]
+    fn only_remote_execution_builtins_count_as_sandbox() {
+        let used = vec![
+            "container.exec".to_string(),
+            "web.run".to_string(),
+            "python".to_string(),
+        ];
+        assert_eq!(sandbox_tools(&used), vec!["container.exec", "python"]);
+        assert!(sandbox_tools(&["web.run".to_string()]).is_empty());
+    }
+
+    #[test]
+    fn sandbox_correction_keeps_the_prompt_and_names_the_tools() {
+        let corrected = with_sandbox_correction("PROMPT", &["container.exec".to_string()]);
+        assert!(corrected.starts_with("PROMPT"));
+        assert!(corrected.contains("container.exec"));
+        assert!(corrected.contains(TOOL_CALL_START));
+        assert!(sandbox_warning(&["container.exec".to_string()]).contains("unverified"));
     }
 
     #[test]
@@ -985,6 +1076,7 @@ mod tests {
         assert!(prompt.contains("visible"));
         assert!(!prompt.contains("secret reasoning"));
         assert!(prompt.contains(TOOL_CALL_START));
+        assert!(prompt.starts_with("Jcode web transport:"));
         assert!(prompt.contains("system"));
         assert!(prompt.contains("\"role\":\"assistant\""));
         assert!(prompt.contains("\"type\":\"text\""));
