@@ -1,0 +1,109 @@
+  [32m✓[0m agents:list
+{
+  "type": "agents:list",
+  "harnesses": [
+    {
+      "agentName": "claude",
+      "flag": "--launch-claude",
+      "binary": "claude",
+      "executable": "claude",
+      "description": "Hand the terminal over to Anthropic's `claude` CLI.",
+      "installHint": "Install Claude Code: curl -fsSL https://claude.ai/install.sh | bash",
+      "installed": true,
+      "version": "2.1.197 (Claude Code)",
+      "visibility": "public",
+      "supportedOperations": {
+        "install": true,
+        "update": true,
+        "uninstall": false
+      },
+      "installMethod": "vendor-script",
+      "prerequisites": [
+        "curl"
+      ],
+      "supportsGui": false
+    },
+    {
+      "agentName": "codex",
+      "flag": "--launch-codex",
+      "binary": "codex",
+      "executable": "codex",
+      "description": "Hand the terminal over to OpenAI's `codex` CLI.",
+      "installHint": "Install Codex CLI: curl -fsSL https://chatgpt.com/codex/install.sh | sh",
+      "installed": true,
+      "version": "codex-cli 0.162.1",
+      "visibility": "public",
+      "supportedOperations": {
+        "install": true,
+        "update": true,
+        "uninstall": false
+      },
+      "installMethod": "vendor-script",
+      "prerequisites": [
+        "curl"
+      ],
+      "supportsGui": false
+    },
+    {
+      "agentName": "gemini",
+      "flag": "--launch-gemini",
+      "binary": "gemini",
+      "executable": null,
+      "description": "Hand the terminal over to Google's `gemini` CLI.",
+      "installHint": "Install Gemini CLI: npm i -g @google/gemini-cli",
+      "installed": false,
+      "version": null,
+      "visibility": "public",
+      "supportedOperations": {
+        "install": true,
+        "update": true,
+        "uninstall": true
+      },
+      "installMethod": "package-manager",
+      "prerequisites": [
+        "npm"
+      ],
+      "supportsGui": false
+    },
+    {
+      "agentName": "pi",
+      "flag": "--launch-pi",
+      "binary": "pi",
+      "executable": null,
+      "description": "Hand the terminal over to the `pi` coding agent CLI.",
+      "installHint": "Install pi: npm i -g @earendil-works/pi-coding-agent",
+      "installed": false,
+      "version": null,
+      "visibility": "public",
+      "supportedOperations": {
+        "install": true,
+        "update": true,
+        "uninstall": true
+      },
+      "installMethod": "package-manager",
+      "prerequisites": [
+        "npm"
+      ],
+      "supportsGui": false
+    },
+    {
+      "agentName": "cursor",
+      "flag": "--launch-cursor",
+      "binary": "agent",
+      "executable": "agent",
+      "description": "Hand the terminal over to Cursor's `agent` CLI.",
+      "installHint": "Install Cursor CLI: curl https://cursor.com/install -fsS | bash",
+      "installed": true,
+      "version": "2026.10.12-d47ca18",
+      "visibility": "public",
+      "supportedOperations": {
+        "install": false,
+        "update": false,
+        "uninstall": false
+      },
+      "installMethod": null,
+      "prerequisites": [],
+      "supportsGui": false
+    }
+  ]
+}

@@ -1,0 +1,48 @@
+{
+  "apiVersion": "backstage.io/v1alpha1",
+  "kind": "Location",
+  "metadata":
+    {
+      "name": "phenotype-public-repositories",
+      "description": "Public non-zz repository snapshot, 2026-10-09 UTC. Private records belong only in Portal.",
+    },
+  "spec":
+    {
+      "type": "url",
+      "targets":
+        [
+          "./owner.yaml",
+          "./repositories/byteport.yaml",
+          "./repositories/tracera.yaml",
+          "./repositories/civis.yaml",
+          "./repositories/helioscli.yaml",
+          "./repositories/portage.yaml",
+          "./repositories/helioslab.yaml",
+          "./repositories/agileplus.yaml",
+          "./repositories/phenodesign.yaml",
+          "./repositories/dino.yaml",
+          "./repositories/sharecli.yaml",
+          "./repositories/github.yaml",
+          "./repositories/phenoshared.yaml",
+          "./repositories/phenoregistry.yaml",
+          "./repositories/phenomlx.yaml",
+          "./repositories/helioslite.yaml",
+          "./repositories/omniroute.yaml",
+          "./repositories/worldspheremod.yaml",
+          "./repositories/melosviz.yaml",
+          "./repositories/civicwarfare.yaml",
+          "./repositories/khostty.yaml",
+          "./repositories/kooshapari.yaml",
+          "./repositories/phenofabric.yaml",
+          "./repositories/kcode.yaml",
+          "./repositories/phenoinfra.yaml",
+          "./repositories/cmux.yaml",
+          "./repositories/ratatui.yaml",
+          "./repositories/herdr-forgecode.yaml",
+          "./repositories/herdr-helioslite.yaml",
+          "./repositories/herdr-jcode.yaml",
+          "./repositories/parpoura-experiment-0.yaml",
+          "./repositories/herdr.yaml",
+        ],
+    },
+}
