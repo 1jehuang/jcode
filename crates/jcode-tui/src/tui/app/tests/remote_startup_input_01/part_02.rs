@@ -64,6 +64,7 @@ fn test_names_only_catalog_update_refetches_routes_when_model_picker_opens() {
         detail: String::new(),
         usage: None,
         cheapness: None,
+        catalog_metadata: None,
     };
 
     app.is_remote = true;
