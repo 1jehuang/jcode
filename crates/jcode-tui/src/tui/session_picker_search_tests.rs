@@ -591,6 +591,44 @@ fn test_loading_picker_ctrl_s_choice_beats_project_scope_default() {
 }
 
 #[test]
+fn test_loading_list_typing_restarts_search_before_cached_and_fresh_updates() {
+    for use_slash in [false, true] {
+        let mut picker = SessionPicker::loading();
+        picker.focus_search_input();
+        picker
+            .handle_overlay_key(KeyCode::Tab, KeyModifiers::empty())
+            .unwrap();
+        if use_slash {
+            picker
+                .handle_overlay_key(KeyCode::Char('/'), KeyModifiers::empty())
+                .unwrap();
+            assert!(picker.search_input_focused());
+            assert!(picker.search_query.is_empty());
+        }
+        picker
+            .handle_overlay_key(KeyCode::Char('x'), KeyModifiers::empty())
+            .unwrap();
+        assert!(picker.search_input_focused());
+        assert_eq!(picker.search_query, "x");
+
+        for fresh in [false, true] {
+            let matching = make_session("session_x", "x", false, SessionStatus::Closed);
+            let other = make_session("session_other", "other", false, SessionStatus::Closed);
+            let sessions = (Vec::new(), vec![matching, other]);
+            let update = if fresh {
+                SessionListUpdate::Fresh(Ok(sessions))
+            } else {
+                SessionListUpdate::Cached(sessions)
+            };
+            picker.apply_session_list_update(update).unwrap();
+            assert!(picker.search_input_focused());
+            assert_eq!(picker.search_query, "x");
+            assert_eq!(visible_ids(&picker), vec!["session_x".to_string()]);
+        }
+    }
+}
+
+#[test]
 fn test_loading_tab_preserves_list_focus_through_cached_and_fresh_updates() {
     for query in ["", "quota"] {
         let mut picker = SessionPicker::loading();
