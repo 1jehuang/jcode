@@ -84,6 +84,9 @@ impl Client {
             system_prompt: None,
             supports_pdf_panels: false,
             supports_user_response: false,
+            // This programmatic client has no interactive chooser: never
+            // opt in, so ask_user degrades to plain-text asking.
+            supports_decisions: false,
             id,
             working_dir: Some(working_dir),
             selfdev,

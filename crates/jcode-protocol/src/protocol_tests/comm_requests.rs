@@ -633,3 +633,80 @@ fn test_reload_force_roundtrip() -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn test_decision_response_roundtrip_option() -> Result<()> {
+    let req = Request::DecisionResponse {
+        id: 120,
+        request_id: "decision-call_abc".to_string(),
+        choice: DecisionChoice::Option { index: 2 },
+    };
+    let json = serde_json::to_string(&req)?;
+    assert!(json.contains("\"type\":\"decision_response\""));
+    assert!(json.contains("\"request_id\":\"decision-call_abc\""));
+    assert!(json.contains("\"type\":\"option\""));
+    assert!(json.contains("\"index\":2"));
+
+    let decoded = parse_request_json(&json)?;
+    assert_eq!(decoded.id(), 120);
+    let Request::DecisionResponse {
+        request_id,
+        choice,
+        ..
+    } = decoded
+    else {
+        return Err(anyhow!("expected DecisionResponse"));
+    };
+    assert_eq!(request_id, "decision-call_abc");
+    assert_eq!(choice, DecisionChoice::Option { index: 2 });
+    Ok(())
+}
+
+#[test]
+fn test_decision_response_roundtrip_text_and_dismissed() -> Result<()> {
+    for choice in [
+        DecisionChoice::Text {
+            text: "do both".to_string(),
+        },
+        DecisionChoice::Dismissed,
+    ] {
+        let req = Request::DecisionResponse {
+            id: 8,
+            request_id: "d1".to_string(),
+            choice: choice.clone(),
+        };
+        let json = serde_json::to_string(&req)?;
+        let decoded = parse_request_json(&json)?;
+        let Request::DecisionResponse {
+            choice: got, id: _, request_id: _,
+        } = decoded
+        else {
+            return Err(anyhow!("expected DecisionResponse"));
+        };
+        assert_eq!(got, choice);
+    }
+    Ok(())
+}
+
+#[test]
+fn test_decision_response_deserialize_from_json() -> Result<()> {
+    let json = r#"{"type":"decision_response","id":5,"request_id":"req-77","choice":{"type":"text","text":"custom path"}}"#;
+    let decoded = parse_request_json(json)?;
+    assert_eq!(decoded.id(), 5);
+    let Request::DecisionResponse {
+        request_id,
+        choice,
+        id: _,
+    } = decoded
+    else {
+        return Err(anyhow!("expected DecisionResponse"));
+    };
+    assert_eq!(request_id, "req-77");
+    assert_eq!(
+        choice,
+        DecisionChoice::Text {
+            text: "custom path".to_string()
+        }
+    );
+    Ok(())
+}

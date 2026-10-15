@@ -712,7 +712,27 @@ pub(in crate::tui::app) fn handle_server_event(
             revised_prompt,
         ),
         ServerEvent::BatchProgress { progress } => {
-            app.batch_progress = Some(progress);
+            app.batch_progress = Some(progress.clone());
+            // A batch sub-call that just finished may have been a nested
+            // ask_user. It never gets its own ToolDone (the parent `batch`
+            // call does), so a timed-out ask_user otherwise leaves its dead
+            // chooser open, locking the input until the whole turn ends.
+            // Retire the chooser for that sub-call's request id; the server
+            // already auto-picked the answer server-side.
+            for subcall in progress.subcalls.iter().filter(|subcall| {
+                matches!(
+                    subcall.state,
+                    crate::bus::BatchSubcallState::Succeeded
+                        | crate::bus::BatchSubcallState::Failed
+                )
+            }) {
+                if subcall.tool_call.name == "ask_user" {
+                    app.retire_decision_by_request_id(&format!(
+                        "decision-{}",
+                        subcall.tool_call.id
+                    ));
+                }
+            }
             false
         }
         ServerEvent::TokenUsage {
@@ -1078,6 +1098,13 @@ pub(in crate::tui::app) fn handle_server_event(
             app.stream_buffer.clear();
             app.streaming_tool_calls.clear();
             app.batch_progress = None;
+            // A cancel/abort ends the turn that asked the question: the
+            // server-side response channel is gone with it, so drop any
+            // blocking chooser instead of leaving a dead card that would
+            // send answers nobody consumes. Queued questions from the same
+            // dead turn go too, and the published `blocked` OSC 9 status
+            // must flip back so stopped panes stop looking blocked.
+            app.clear_decisions_and_unblock();
             app.thought_line_inserted = false;
             app.thinking_prefix_emitted = false;
             app.thinking_buffer.clear();
@@ -1210,6 +1237,11 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.is_processing = false;
                 app.status = ProcessingStatus::Idle;
                 app.stream_message_ended = false;
+                // A finished turn cannot still be waiting on an ask_user
+                // chooser; drop a stale one so the input box frees up. Queued
+                // questions die with the turn as well, and the published
+                // `blocked` OSC 9 status resets so the pane reads working.
+                app.clear_decisions_and_unblock();
                 // Turn completed successfully; drop the saved prompt so a later
                 // unrelated failure cannot restore stale text into the input box.
                 app.last_submitted_input = None;
@@ -1372,6 +1404,11 @@ pub(in crate::tui::app) fn handle_server_event(
             app.is_processing = false;
             app.status = ProcessingStatus::Idle;
             app.stream_message_ended = false;
+            // A fatal turn error ends the turn that asked the question;
+            // its server-side response channel is gone, so drop the chooser.
+            // Queued questions die with the turn, and the published
+            // `blocked` OSC 9 status resets so the pane reads working.
+            app.clear_decisions_and_unblock();
             let recovered_local = recover_local_interleave_to_queue(app, "request error");
             crate::tui::mermaid::clear_streaming_preview_diagram();
             app.thought_line_inserted = false;
@@ -3151,6 +3188,56 @@ pub(in crate::tui::app) fn handle_server_event(
         }
         ServerEvent::PeerUserMessage { content } => {
             app.handle_peer_user_message(&content);
+            true
+        }
+        ServerEvent::DecisionRequest {
+            request_id,
+            question,
+            options,
+            tool_call_id: _,
+        } => {
+            let options: Vec<(String, Option<String>)> = options
+                .into_iter()
+                .map(|opt| (opt.label, opt.detail))
+                .collect();
+            if options.is_empty() {
+                crate::logging::warn("DecisionRequest with no options; ignoring");
+                return false;
+            }
+            app.push_display_message(DisplayMessage::system(format!("❓ {}", question)));
+            let new_decision = crate::tui::app::PendingDecision {
+                request_id,
+                question,
+                options,
+                selected: 0,
+                answer_draft: String::new(),
+            };
+            if app.pending_decision.is_some() {
+                // A second ask_user while the first chooser is still open (e.g.
+                // two calls inside one batch): queue it instead of dropping the
+                // first question's reply channel. Answered in order once the
+                // visible chooser resolves.
+                app.pending_decision_queue.push_back(new_decision);
+                app.set_status_notice("Another question is queued after the current one");
+                return true;
+            }
+            // The chooser owns the keyboard from here on. Close any open
+            // inline picker (e.g. the /model preview) so its floating overlay
+            // does not sit on top of the chooser and hide keys that now
+            // belong to the question. The composer draft is untouched, so
+            // editing the input after the answer reopens the picker.
+            if app
+                .inline_interactive_state
+                .as_ref()
+                .is_some_and(|picker| picker.preview)
+            {
+                app.inline_interactive_state = None;
+            }
+            app.pending_decision = Some(new_decision);
+            // The turn now blocks on the human: publish `blocked` over OSC 9
+            // so herdr/herdr-webui surface the pane as needing attention.
+            crate::tui::app::decision_osc9::emit_decision_osc9(true);
+            app.set_status_notice("Decision needed: pick a number, or type your own answer");
             true
         }
         _ => false,

@@ -1221,6 +1221,14 @@ pub struct FeatureConfig {
     /// that something in the harness silently invalidated the prefix cache
     /// (default: true).
     pub kv_cache_miss_notices: bool,
+    /// Enable the ask_user decision chooser (default: true). When disabled,
+    /// ask_user never blocks: the tool tells the agent the chooser is off so
+    /// it asks in plain text instead.
+    pub decisions: bool,
+    /// How long ask_user waits for the user before auto-picking the first
+    /// option, in seconds. `0` (default) blocks forever until the user
+    /// answers, the client disconnects, or the turn is shut down.
+    pub decision_timeout_secs: u64,
     /// Update channel: "stable" (releases only) or "main" (latest commits)
     pub update_channel: UpdateChannel,
 }
@@ -1236,6 +1244,8 @@ impl Default for FeatureConfig {
             message_timestamps: true,
             persist_memory_injections: false,
             kv_cache_miss_notices: true,
+            decisions: true,
+            decision_timeout_secs: 0,
             update_channel: UpdateChannel::default(),
         }
     }

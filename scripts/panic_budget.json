@@ -51,6 +51,7 @@
     "crates/jcode-tui/src/tui/app/auth_remote/onboarding.rs": 1,
     "crates/jcode-tui/src/tui/app/auth_remote/picker.rs": 1,
     "crates/jcode-tui/src/tui/app/state_ui_input_helpers.rs": 1,
+    "crates/jcode-tui/src/tui/app/decision.rs": 1,
     "crates/jcode-tui/src/tui/app/usage_reset.rs": 1,
     "crates/jcode-tui/src/tui/session_picker.rs": 2,
     "crates/jcode-tui/src/tui/ui_inline_interactive.rs": 1,

@@ -109,6 +109,13 @@ pub(in crate::tui::app) async fn submit_prepared_remote_input(
     remote: &mut RemoteConnection,
     prepared: input::PreparedInput,
 ) -> Result<()> {
+    // While the ask_user chooser is visible it owns the keyboard: the main
+    // input box is disabled and free-form answers live in the chooser's own
+    // "Your answer" row, so a stray submit must never start a new turn.
+    if app.pending_decision.is_some() {
+        app.set_status_notice("Answer the decision above (Esc dismisses it)");
+        return Ok(());
+    }
     if app.remote_model_switch_in_flight || app.auth_catalog_refresh_pending {
         app.pending_prompt_after_model_switch = Some(prepared);
         app.set_status_notice(if app.auth_catalog_refresh_pending {

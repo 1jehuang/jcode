@@ -2,15 +2,15 @@
   "threshold_loc": 1200,
   "tracked_files": {
     "crates/jcode-app-core/src/agent_tests.rs": 3001,
-    "crates/jcode-app-core/src/server/client_lifecycle_tests.rs": 1929,
+    "crates/jcode-app-core/src/server/client_lifecycle_tests.rs": 1933,
     "crates/jcode-app-core/src/server/comm_control_tests/dag_e2e.rs": 1332,
     "crates/jcode-app-core/src/server/comm_session_tests.rs": 1415,
     "crates/jcode-app-core/src/server/provider_control_tests.rs": 1352,
     "crates/jcode-app-core/src/server/swarm_persistence_tests.rs": 1300,
-    "crates/jcode-app-core/src/tool/bash_tests.rs": 1236,
-    "crates/jcode-app-core/src/tool/communicate_tests.rs": 1711,
-    "crates/jcode-app-core/src/tool/selfdev/tests.rs": 1443,
-    "crates/jcode-app-core/src/tool/tests.rs": 1944,
+    "crates/jcode-app-core/src/tool/bash_tests.rs": 1239,
+    "crates/jcode-app-core/src/tool/communicate_tests.rs": 1713,
+    "crates/jcode-app-core/src/tool/selfdev/tests.rs": 1444,
+    "crates/jcode-app-core/src/tool/tests.rs": 1953,
     "crates/jcode-base/src/config_tests.rs": 1752,
     "crates/jcode-base/src/live_tests.rs": 3087,
     "crates/jcode-base/src/provider/tests.rs": 1270,
@@ -23,8 +23,9 @@
     "crates/jcode-provider-openrouter-runtime/src/openrouter_tests.rs": 3600,
     "crates/jcode-sdk/tests/client_behavior.rs": 1355,
     "crates/jcode-telemetry-core/src/tests.rs": 1706,
-    "crates/jcode-tui/src/tui/app/remote_tests.rs": 1317,
+    "crates/jcode-tui/src/tui/app/remote_tests.rs": 1352,
     "crates/jcode-tui/src/tui/app/tests.rs": 1866,
+    "crates/jcode-tui/src/tui/app/decision_tests.rs": 1280,
     "crates/jcode-tui/src/tui/app/tests/commands_accounts_01/part_01.rs": 1530,
     "crates/jcode-tui/src/tui/app/tests/onboarding_eval.rs": 3305,
     "crates/jcode-tui/src/tui/app/tests/onboarding_flow.rs": 1672,
@@ -47,7 +48,7 @@
     "crates/jcode-tui/src/tui/ui_tests/prepare.rs": 1342,
     "crates/jcode-tui/src/tui/ui_tests/tools.rs": 1530,
     "src/cli/commands_tests.rs": 1744,
-    "tests/e2e/test_support/mod.rs": 1415
+    "tests/e2e/test_support/mod.rs": 1418
   },
   "version": 1
 }

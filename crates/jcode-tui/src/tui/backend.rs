@@ -358,6 +358,9 @@ impl RemoteConnection {
             system_prompt: None,
             supports_pdf_panels: false,
             supports_user_response: false,
+            // The TUI renders the ask_user chooser, so opt in to blocking
+            // decision requests.
+            supports_decisions: true,
             id: conn.next_request_id,
             working_dir,
             selfdev,
@@ -464,7 +467,8 @@ impl RemoteConnection {
             | Request::GetHistory { id }
             | Request::ResumeSession { id, .. }
             | Request::GetModelCatalog { id, .. }
-            | Request::GetState { id } => Some(*id),
+            | Request::GetState { id }
+            | Request::DecisionResponse { id, .. } => Some(*id),
             _ => None,
         };
         if let Some(id) = control_id {
@@ -977,6 +981,21 @@ impl RemoteConnection {
             id: self.next_request_id,
             request_id: request_id.to_string(),
             input: input.to_string(),
+        };
+        self.next_request_id += 1;
+        self.send_request(request).await
+    }
+
+    /// Send the user's answer back to a blocking decision request (ask_user)
+    pub async fn send_decision_response(
+        &mut self,
+        request_id: &str,
+        choice: crate::protocol::DecisionChoice,
+    ) -> Result<()> {
+        let request = Request::DecisionResponse {
+            id: self.next_request_id,
+            request_id: request_id.to_string(),
+            choice,
         };
         self.next_request_id += 1;
         self.send_request(request).await
