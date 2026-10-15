@@ -485,36 +485,6 @@ fn test_remote_connectivity_error_without_auto_retry_still_waits_for_network() {
 
 include!("remote_failover_routes.rs");
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #[test]
 fn test_schedule_pending_remote_retry_respects_retry_limit() {
     let mut app = create_test_app();
@@ -1108,29 +1078,7 @@ fn test_tui_grok_build_login_starts_managed_oauth_flow() {
     assert!(!rendered.contains("run `jcode login"));
 }
 
-#[test]
-fn test_info_widget_remote_openai_uses_remote_provider_for_usage_and_context() {
-    let mut app = create_test_app();
-    app.is_remote = true;
-    app.remote_provider_name = Some("OpenAI".to_string());
-    app.remote_provider_model = Some("gpt-5.4".to_string());
-    app.remote_resolved_credential = Some(jcode_provider_core::ResolvedCredential::Oauth);
-    app.update_context_limit_for_model("gpt-5.4", None);
-
-    let data = crate::tui::TuiState::info_widget_data(&app);
-
-    assert_eq!(data.provider_name.as_deref(), Some("OpenAI"));
-    assert_eq!(data.model.as_deref(), Some("gpt-5.4"));
-    assert_eq!(data.context_limit, Some(1_000_000));
-    assert_eq!(
-        data.auth_method,
-        crate::tui::info_widget::AuthMethod::OpenAIOAuth
-    );
-    assert_eq!(
-        data.usage_info.as_ref().map(|info| info.provider),
-        Some(crate::tui::info_widget::UsageProvider::OpenAI)
-    );
-}
+include!("info_widget_context_fixtures.rs");
 
 #[test]
 fn test_remote_context_limit_survives_a_later_local_re_derivation() {
@@ -1168,26 +1116,6 @@ fn test_remote_context_limit_survives_a_later_local_re_derivation() {
     if let Ok(manager) = compaction.try_read() {
         assert_eq!(manager.token_budget(), 1_000_000);
     }
-}
-
-#[test]
-fn test_info_widget_remote_model_falls_back_to_model_provider_detection() {
-    let mut app = create_test_app();
-    app.is_remote = true;
-    app.remote_provider_model = Some("gpt-5.4".to_string());
-    app.update_context_limit_for_model("gpt-5.4", None);
-
-    let data = crate::tui::TuiState::info_widget_data(&app);
-
-    assert_eq!(data.context_limit, Some(1_000_000));
-    assert_eq!(
-        data.auth_method,
-        crate::tui::info_widget::AuthMethod::Unknown
-    );
-    assert!(
-        data.usage_info.is_none(),
-        "provider/model detection alone must not guess subscription billing"
-    );
 }
 
 #[test]
