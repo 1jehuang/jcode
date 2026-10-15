@@ -339,3 +339,91 @@ test('stream decoding handles sandbox tool messages, raw wrapper markup and patc
   assert.equal(state.complete,true); assert.deepEqual(state.builtin,['container.exec']);
   assert.deepEqual(state.texts,[envelope]);
 });
+
+// The page must never receive jcode's prompt back: its Markdown renderer
+// froze the tab for minutes on a 200K-character single-line prompt.
+const echoTurn = (prompt, answer) => sseOf([
+  {p:'',o:'add',v:{message:{id:'u',author:{role:'user'},content:{content_type:'text',parts:[prompt]},status:'finished_successfully',recipient:'all',metadata:{}}}},
+  {v:{message:{id:'a',author:{role:'assistant'},content:{content_type:'text',parts:[answer]},status:'in_progress',recipient:'all',end_turn:null,metadata:{resolved_model_slug:'gpt-6-thinking',thinking_effort:'extended'}}}},
+  {o:'patch',v:[{p:'/message/status',o:'replace',v:'finished_successfully'},{p:'/message/end_turn',o:'replace',v:true}]},
+  {type:'message_stream_complete'}]);
+test('the page copy of the turn stream carries the placeholder, never the prompt',async()=>{
+  const f=fixture(); const placeholder='jcode turn jcode-m1';
+  const prompt='[{"content":[{"text":"'+'x'.repeat(5000)+'"}]}]';
+  const globals={ fetch: async () => sseResponse(echoTurn(prompt,'ANSWER'),{chunk:61}) };
+  await run({op:'arm_send',key:'jcode-m1',text:prompt,placeholder},f,{globals});
+  const page=await (await globals.fetch('https://chatgpt.com/backend-api/f/conversation',{method:'POST',body:sendBody(placeholder)})).text(); await settle();
+  assert.ok(!page.includes('x'.repeat(100)),'prompt never reaches the page renderer');
+  assert.ok(page.includes(JSON.stringify(placeholder)),'page sees its own placeholder');
+  assert.ok(page.includes('ANSWER'),'answer passes through');
+  assert.ok(page.endsWith('data: [DONE]\n\n'),'stream framing is preserved');
+  const state=await run({op:'stream',key:'jcode-m1'},f,{globals});
+  assert.equal(state.complete,true); assert.deepEqual(state.texts,['ANSWER']);
+  assert.equal(state.substituted.length,prompt.length,'jcode still verifies the exact prompt was sent');
+});
+test('conversation reads by the page are masked, while jcode reads the real transcript',async()=>{
+  const f=fixture(); const placeholder='jcode turn jcode-m2'; const prompt='P'.repeat(3000);
+  const data=conversation([said('user',prompt),said('assistant','DONE',{end_turn:true})]);
+  const calls=[];
+  const globals={ fetch: async (url, init) => {
+    calls.push(url);
+    if (/f\/conversation$/.test(url)) return sseResponse(echoTurn(prompt,'DONE'));
+    if (url === '/api/auth/session') return new Response(JSON.stringify({accessToken:'token'}));
+    return new Response(JSON.stringify(data),{headers:{'content-type':'application/json','content-length':'999'}});
+  } };
+  await run({op:'arm_send',key:'jcode-m2',text:prompt,placeholder},f,{globals});
+  await (await globals.fetch('https://chatgpt.com/backend-api/f/conversation',{method:'POST',body:sendBody(placeholder)})).text(); await settle();
+  const pageRead=await (await globals.fetch('https://chatgpt.com/backend-api/conversation/6ad08967-29f4-83eb-8b81-c5ccaa17b323')).json();
+  assert.equal(pageRead.mapping.n0.message.content.parts[0],placeholder,'page history shows the placeholder');
+  assert.equal(pageRead.mapping.n1.message.content.parts[0],'DONE');
+  const t=await run({op:'transcript'},f,{pathname:'/c/6ad08967-29f4-83eb-8b81-c5ccaa17b323',globals});
+  assert.deepEqual(t.texts,['DONE']); assert.equal(t.complete,true);
+});
+test('a route sets the exact model and thinking level, and the stream reports what served it',async()=>{
+  const f=fixture(); const sent=[]; const placeholder='jcode turn jcode-r1';
+  const globals={ fetch: async (url, init) => { sent.push(init); return sseResponse(echoTurn('Q','OK')); } };
+  await run({op:'arm_send',key:'jcode-r1',text:'Q',placeholder,route:{slug:'gpt-6-thinking',effort:'extended'}},f,{globals});
+  await (await globals.fetch('https://chatgpt.com/backend-api/f/conversation',{method:'POST',body:JSON.stringify({...JSON.parse(sendBody(placeholder)),thinking_effort:'standard'})})).text(); await settle();
+  const body=JSON.parse(sent[0].body);
+  assert.equal(body.model,'gpt-6-thinking'); assert.equal(body.thinking_effort,'extended');
+  const state=await run({op:'stream',key:'jcode-r1'},f,{globals});
+  assert.equal(state.served,'gpt-6-thinking'); assert.equal(state.servedEffort,'extended');
+  assert.deepEqual(state.substituted.model,'gpt-6-thinking');
+});
+test('a route without a thinking level removes the page default, and unsafe routes are refused',async()=>{
+  const f=fixture(); const sent=[]; const placeholder='jcode turn jcode-r2';
+  const globals={ fetch: async (url, init) => { sent.push(init); return sseResponse(echoTurn('Q','OK')); } };
+  await run({op:'arm_send',key:'jcode-r2',text:'Q',placeholder,route:{slug:'gpt-6-instant',effort:null}},f,{globals});
+  await (await globals.fetch('https://chatgpt.com/backend-api/f/conversation',{method:'POST',body:JSON.stringify({...JSON.parse(sendBody(placeholder)),thinking_effort:'standard'})})).text();
+  const body=JSON.parse(sent[0].body);
+  assert.equal(body.model,'gpt-6-instant'); assert.equal('thinking_effort' in body,false);
+  await assert.rejects(run({op:'arm_send',key:'jcode-r3',text:'Q',placeholder,route:{slug:'GPT 6; drop',effort:null}},f,{globals}),/route is invalid/);
+  await assert.rejects(run({op:'arm_send',key:'jcode-r4',text:'Q',placeholder,route:{slug:'gpt-6',effort:'max!'}},f,{globals}),/route is invalid/);
+});
+test('catalog returns only non-secret fields of the account model list',async()=>{
+  const f=fixture();
+  const models={ default_model_slug:'gpt-6', versions:[{id:'latest',display_text:'GPT-6',enabled:true,intelligence_presets:[{preset_type:'available',title:'Instant',model_slug:'gpt-6-instant',lane:'instant'},{preset_type:'unavailable',model_slug:'gpt-6-pro',lane:'pro'}]},{id:'old',enabled:false,intelligence_presets:[]}],
+    models:[{slug:'gpt-6-thinking',title:'GPT-6 Thinking',reasoning_type:'reasoning',max_tokens:262144,is_work_mode_model:false,secret_field:'s3cret',thinking_efforts:[{thinking_effort:'min',short_label:'Light'}],enabled_tools:['search','canvas'],product_features:{attachments:{image_mime_types:['image/png']}}}] };
+  const globals={ fetch: async url => url === '/api/auth/session' ? new Response(JSON.stringify({accessToken:'token'})) : new Response(JSON.stringify(models)) };
+  const c=await run({op:'catalog'},f,{globals});
+  assert.equal(c.defaultSlug,'gpt-6'); assert.equal(c.versions.length,1,'disabled families are dropped');
+  assert.deepEqual(c.versions[0].presets.map(p=>p.slug),['gpt-6-instant'],'unavailable presets are dropped');
+  assert.deepEqual(c.models[0],{slug:'gpt-6-thinking',title:'GPT-6 Thinking',reasoningType:'reasoning',contextTokens:262144,workMode:false,efforts:[{value:'min',label:'Light',description:''}],tools:['search','canvas'],imageInput:true});
+  assert.ok(!JSON.stringify(c).includes('s3cret'));
+});
+test('ready only requires an owned Temporary Chat and never opens the picker',async()=>{
+  const f=fixture();
+  assert.deepEqual(await run({op:'ready'},f),{ready:true,temporary:true});
+  assert.equal(f.triggerClicks(),0); assert.equal(f.submits(),0);
+  await assert.rejects(run({op:'ready'},fixture({temporary:false}),{elapsedPerDelay:1000}),/Temporary Chat|temporary/);
+});
+test('a route submit skips the picker but still requires the armed hook',async()=>{
+  const f=fixture(); const placeholder='jcode turn jcode-r5'; f.editor.text=placeholder;
+  const prompt=await run({op:'prompt'},f);
+  const base={op:'submit',route:{slug:'gpt-6-instant',effort:null},length:prompt.length,hash:prompt.hash,armedKey:'jcode-r5'};
+  await assert.rejects(run({...base,cancelKey:'jcode-r5-a'},f,{globals:{}}),/network hook is not armed/);
+  const globals={ fetch: async () => sseResponse(streamFixture) };
+  await run({op:'arm_send',key:'jcode-r5',text:'REAL',placeholder},f,{globals});
+  await run({...base,cancelKey:'jcode-r5-b'},f,{globals});
+  assert.equal(f.triggerClicks(),0,'picker untouched'); assert.equal(f.submits(),1);
+});
