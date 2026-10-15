@@ -471,7 +471,7 @@ impl Drop for EnvSnapshotGuard {
 /// Run `f` holding the env lock, in a fresh `JCODE_HOME`, and restore the
 /// whole environment afterwards. Use it for any test that persists state under
 /// the home, reads config-derived state twice, or drives a login/activation.
-fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
+pub(super) fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
     let _guard = crate::storage::lock_test_env();
     let _context_cache = crate::provider::models::ContextLimitCacheGuardForTests::new();
     let temp = tempfile::tempdir().expect("tempdir");
