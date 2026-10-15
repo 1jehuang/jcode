@@ -84,6 +84,7 @@ mod inline_interactive;
 pub(crate) use inline_interactive::{model_picker_active_provider, split_model_picker_filter};
 mod input;
 mod input_help;
+mod input_images;
 mod input_selection;
 mod local;
 mod misc_ui;
@@ -1611,13 +1612,14 @@ pub struct App {
     // Stashed input: saved via Ctrl+S for later retrieval
     stashed_input: Option<(String, usize)>,
     // Undo history for in-progress input editing (Ctrl+Z)
-    input_undo_stack: Vec<(String, usize)>,
+    input_undo_stack: Vec<input_images::InputUndoSnapshot>,
     /// Attachment count at each `input_undo_stack` entry (same length), so
     /// undo also detaches images pasted after that snapshot.
     input_undo_image_counts: Vec<usize>,
     /// Attachments discarded by each Ctrl+C draft clear, keyed by the undo
     /// depth of that clear's snapshot, so Ctrl+Z restores images with text.
     cleared_draft_images: Vec<(usize, Vec<(String, String)>)>,
+
     /// Anchor (byte offset into `input`) of the editable composer selection;
     /// the other end is `cursor_pos`. `None` means no selection.
     input_selection_anchor: Option<input_selection::InputSelectionAnchor>,

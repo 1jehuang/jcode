@@ -284,7 +284,8 @@ fn debug_memory_profile_includes_app_owned_summary_for_large_client_state() {
             anchor: None,
         });
     app.observe_page_markdown = "# observe\n".repeat(256);
-    app.input_undo_stack.push(("draft ".repeat(256), 12));
+    app.input_undo_stack
+        .push(("draft ".repeat(256), 12, std::sync::Arc::default()));
 
     let profile = app.debug_memory_profile();
     let app_owned = &profile["app_owned"];

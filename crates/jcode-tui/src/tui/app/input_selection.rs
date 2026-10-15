@@ -168,8 +168,7 @@ impl App {
     pub(crate) fn replace_input_selection_for_insert(&mut self) -> bool {
         let replaced = if let Some((start, end)) = self.input_selection() {
             self.remember_input_undo_state();
-            self.input.drain(start..end);
-            self.cursor_pos = start;
+            self.remove_input_range(start, end);
             true
         } else {
             false
@@ -188,8 +187,7 @@ impl App {
     pub(crate) fn delete_input_selection(&mut self) -> Option<String> {
         let (start, end) = self.input_selection()?;
         self.remember_input_undo_state();
-        let removed: String = self.input.drain(start..end).collect();
-        self.cursor_pos = start;
+        let removed = self.remove_input_range(start, end);
         self.input_selection_anchor = None;
         self.reset_tab_completion();
         self.sync_model_picker_preview_from_input();
