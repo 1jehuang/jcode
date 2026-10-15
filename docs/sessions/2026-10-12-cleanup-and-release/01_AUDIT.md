@@ -3001,4 +3001,53 @@ The branch is at `merge-base 901b3310821e9d65a88301072bb0a183709eefad` (the PR #
 - 1800+ external open PRs in repo (not in scope)
 - 8 still-pending todos (all external-blocked)
 
+**B.8.82 EXECUTED 2026-10-15T06:48Z — Operator signal `"proc"`; m3.1 fix ANOMALY RESOLVED — fix IS in master under different SHA**
+
+**ANOMALY RESOLUTION**: My B.8.81 framing of "fix NOT in master" was wrong. The m3.1-restore-fallback fix is in master, but under SHA `6eb00b35d`, not `29c240ffb`.
+
+| SHA | Title | Where | Notes |
+|---|---|---|---|
+| `29c240ffb` | `fix(agent): fall back to provider default when restoring a session model` | `refactor/panic-budget`, `verify/panic-fork`, `revert/pr-33-merge` branches | original commit on operator's paused branch |
+| `6eb00b35d` | `fix(agent): fall back to provider default when restoring a session model` | **master** ✅ | same fix ported to master, +`JCODE_CI: "1"` env in ci.yml |
+| `013c3826e` | `fix(agent): suppress unused variable warning in restore_session fallback` | **master** ✅ | followup at 16:58:20 (turn_execution.rs mtime 16:58:09) |
+| `eb0949585` | `test(agent): regression for restore_session falling back to provider default` | **master** ✅ | test added at 16:29:10 |
+
+**Why B.8.81 saw the anomaly**:
+- I searched for SHA `29c240ffb` specifically via `git merge-base --is-ancestor 29c240ffb master` → returned "NO, not in master"
+- That's correct, `29c240ffb` is NOT in master
+- But I failed to discover `6eb00b35d` which is the SAME fix content in master
+- I should have searched by file content (`S` flag on `git log -S`) or by commit message prefix
+
+**Verification**:
+- `git diff 29c240ffb 6eb00b35d -- crates/jcode-app-core/src/agent/turn_execution.rs` shows only a whitespace/indentation tweak (unrelated to the fix)
+- The core fix code (lines 735-747 of turn_execution.rs: error → log+fallback+persist) is identical in both SHAs
+- `git log --oneline -- crates/jcode-app-core/src/agent/turn_execution.rs` shows the 3 commits on master: `6eb00b35d` (the fix), `013c3826e` (warning suppress), `f0a4a63bd` (rustfmt)
+- `target/debug/deps/jcode_app_core-18c3f595e78cd6e1` binary mtime 16:49:05 (built AFTER fix, BEFORE warning suppress)
+- 3 restore_session tests PASS in 7.81s — consistent with fix being in master source AND in prebuilt binary
+
+**Prebuilt binary freshness check**:
+- `turn_execution.rs` mtime: Oct 14 16:58:09 (from `013c3826e` followup commit)
+- Prebuilt binary mtime: Oct 14 16:49:05 (built before the followup)
+- Binary is 9 minutes stale relative to the warning-suppress commit
+- BUT: the warning-suppress commit is a no-op behavior change (just renames `e` to `_e`); restore_session behavior is unchanged
+- So the binary is functionally equivalent to current master source for these 3 tests
+
+**🎯 The actual master state for m3.1**: The fix is in master (`6eb00b35d`), the test is in master (`eb0949585`), and both are working. No anomaly, no missing code, no work to do. The session `session_deer_1791971005300_1667b54dc8bfc158` would now resume correctly (fall back to provider default instead of persisting a dead model).
+
+**Standing memory update**: When searching for a specific commit on master, ALWAYS cross-check by file content or commit message prefix. Searching by SHA alone can give false-negative "not in master" when the same fix was ported to master under a different SHA.
+
+**State at 06:51Z (B.8.82 exit)**:
+- Master HEAD: `bce5713be` (B.8.81 audit; no new commits since)
+- origin/master: `bce5713be` (synced)
+- Local branches: 62
+- Working tree: 4 untracked operator dirs (unchanged)
+- 0 stashes
+- 328+ phinbox-queued requests (mine = 0)
+- Ratchet B (subset) CI-gated at 62; currently at 62 ✅
+- 3 restore_session tests PASS (7.81s)
+- m3.1 fix is in master (`6eb00b35d` + followup `013c3826e` + test `eb0949585`)
+- 4 untracked operator dirs (unchanged from B.8.81)
+- 1800+ external open PRs in repo (not in scope)
+- 8 still-pending todos (all external-blocked)
+
 
