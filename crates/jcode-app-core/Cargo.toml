@@ -127,6 +127,7 @@ pdf = ["dep:jcode-pdf"]
 test-support = ["jcode-base/test-support"]
 
 [dev-dependencies]
+jcode-provider-anthropic-runtime = { path = "../jcode-provider-anthropic-runtime" }
 # Paused-time browser tests must compile when this package is tested alone,
 # without inheriting test-util from another workspace package's dev-dependencies.
 tokio = { version = "1", features = ["test-util"] }
