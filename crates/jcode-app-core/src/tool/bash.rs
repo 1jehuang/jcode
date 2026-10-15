@@ -68,11 +68,8 @@ export -f cargo
     ))
 }
 
-/// Build a clear timeout message. The `timeout` param is in milliseconds, which
-/// agents frequently mistake for seconds (e.g. passing 1000 thinking it means
-/// 1000s when it is 1s). Spell out the seconds equivalent and, for suspiciously
-/// short timeouts, hint that the unit is milliseconds so the next attempt uses a
-/// sane value instead of repeating the same mistake.
+/// Build a clear timeout message. `timeout` is in milliseconds, which agents
+/// frequently mistake for seconds, so spell out the seconds equivalent too.
 fn timeout_message(timeout_ms: u64) -> String {
     let secs = timeout_ms as f64 / 1000.0;
     let mut msg = format!("Command timed out after {}ms ({:.1}s)", timeout_ms, secs);
@@ -571,8 +568,7 @@ where
 ///
 /// Detached commands write directly to their output file, so nothing in-process
 /// sees their output as it streams. This follower polls the file while the task
-/// is `Running`, parsing complete lines from where it left off. It performs one
-/// final drain after the task leaves `Running` and then exits.
+/// is `Running`, parsing complete lines, then performs one final drain.
 #[cfg(unix)]
 fn spawn_detached_progress_follower(task_id: String, output_file: std::path::PathBuf) {
     tokio::spawn(async move {

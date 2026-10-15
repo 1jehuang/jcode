@@ -126,21 +126,19 @@ fn keyboard_enhancement_flags() -> crossterm::event::KeyboardEnhancementFlags {
     }
     // Only disambiguate escape codes. REPORT_EVENT_TYPES makes terminals emit
     // press AND release events; hosts that half-support the kitty protocol
-    // (herdr/conpty panes) leak the release events into the prompt as raw
-    // "[<code>;1:3u" text. REPORT_ALTERNATE_KEYS is dropped for the same reason.
+    // (herdr/conpty panes) leak releases into the prompt as "[<code>;1:3u".
     KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
 }
 
 /// Enable Kitty keyboard protocol for unambiguous key reporting.
 ///
-/// Intentionally avoid REPORT_ALL_KEYS_AS_ESCAPE_CODES for now. When that flag is enabled,
-/// terminals such as kitty/Alacritty/Warp can report printable keys as a base key plus
-/// modifiers instead of the final text produced by the active keyboard layout. Crossterm does
-/// not yet expose kitty's associated text / alternate key data, so we cannot safely reconstruct
-/// shifted symbols for every keyboard layout. Prefer the terminal-delivered printable character
-/// and only synthesize ASCII letter casing in the input fallback.
+/// Avoids REPORT_ALL_KEYS_AS_ESCAPE_CODES: with it, kitty/Alacritty/Warp report
+/// printable keys as base key plus modifiers instead of the text the active
+/// layout produces, and crossterm cannot reconstruct shifted symbols for every
+/// layout. Prefer the terminal-delivered character and only synthesize ASCII
+/// letter casing in the input fallback.
 ///
-/// Returns true if successfully enabled, false if the terminal doesn't support it.
+/// Returns true if enabled, false if unsupported.
 pub fn enable_keyboard_enhancement() -> bool {
     use crossterm::event::PushKeyboardEnhancementFlags;
     let result = crossterm::execute!(
@@ -259,9 +257,9 @@ pub(crate) fn hash_rendered_image_anchor(
 }
 
 /// Hash every field that affects inline image rendering. The production App
-/// memoizes this signature until its image set changes, so exact payload hashing
-/// happens on image updates rather than during scrolling. Correctness matters
-/// here: sampling can miss a same-length change and reuse a stale prepared frame.
+/// memoizes this until its image set changes, so exact hashing happens on
+/// updates rather than during scrolling. Sampling could miss a same-length
+/// change and reuse a stale prepared frame, so hash every field.
 pub(crate) fn hash_rendered_image_signature_fields(
     image: &crate::session::RenderedImage,
     hasher: &mut impl std::hash::Hasher,
@@ -276,12 +274,11 @@ pub(crate) fn hash_rendered_image_signature_fields(
 
 /// Trait for TUI state consumed by the shared renderer.
 ///
-/// This is a wide (114-method) presentation interface: the read-only surface the
-/// renderer needs from `App`. The methods are grouped into the domain sections
-/// below (transcript, input, scroll, stream/status, provider, session/server,
+/// A wide (114-method) presentation interface: the read-only surface the
+/// renderer needs from `App`, grouped into the domain sections below
+/// (transcript, input, scroll, stream/status, provider, session/server,
 /// workspace, diagram pane, diff pane, side panel, inline, overlay, copy
-/// selection, onboarding, misc). See `docs/TUISTATE_TRAIT_DECOMPOSITION.md` for
-/// the incremental plan to split these into composable sub-traits.
+/// selection, onboarding, misc). See `docs/TUISTATE_TRAIT_DECOMPOSITION.md`.
 pub trait TuiState {
     // ---- Transcript ----
     fn display_messages(&self) -> &[DisplayMessage];
@@ -988,15 +985,13 @@ fn cache_expected_warm(cache_ttl: Option<&CacheTtlInfo>) -> bool {
     cache_ttl.map(|info| !info.is_cold).unwrap_or(false)
 }
 
-/// Detect a KV/prompt-cache problem that is reliable enough to surface in the UI.
+/// Detect a KV/prompt-cache problem reliable enough to surface in the UI.
 ///
-/// This intentionally does **not** warn merely because a cache-hit metric is absent. A warning
-/// requires all of the following:
-/// - a multi-turn conversation where cache reuse should be possible;
-/// - a prior completed turn still within the provider's expected cache TTL;
-/// - explicit provider telemetry showing either a cache rewrite without a read, or an explicit
-///   zero cache-read count from a known cache-reporting provider family;
-/// - enough input tokens to be cacheable for read-only providers.
+/// Deliberately does not warn merely because a cache-hit metric is absent. A
+/// warning needs all of: a multi-turn conversation; a prior completed turn
+/// still inside the provider's expected cache TTL; provider telemetry showing
+/// a rewrite without a read, or an explicit zero read from a cache-reporting
+/// family; and enough input tokens to be cacheable.
 pub(crate) fn detect_kv_cache_problem(
     provider: &str,
     upstream_provider: Option<&str>,
