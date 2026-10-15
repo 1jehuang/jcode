@@ -2797,4 +2797,66 @@ The previous "140 → 130 → 120" narrative was actually "140 → 0" over the c
 - P7 release: gated on Master CI green (silent per §24) + Ratchet B/C targets
 - 8 still-pending todos (all external-blocked)
 
+**B.8.79 EXECUTED 2026-10-15T06:39Z — Operator signal `"proc"`; PR #69 merged (sdk auth/ssh panic-budget); B.8.78 "0 panic! in production" claim CORRECTED to "0 in tracked subset, 492 whole-tree"; 3 ratchets re-baselined on new HEAD `5a54bc0ba`**
+
+**Master moved again during the turn**:
+- New commit: `5a54bc0ba refactor(sdk): remove panic-prone call sites in auth and ssh (#69)`
+- Fast-forward pulled: `f242488fa → 5a54bc0ba`
+- PR #69 modifies `crates/jcode-sdk/src/auth.rs` (+38 lines), 1 file
+
+**CORRECTION to B.8.78's "Ratchet A = 0" claim**: that "0" was based on counting `panic!` in the 46 specific files listed in `scripts/panic_budget.json` (the peer agent's tracked subset). The actual whole-tree count in non-test production is **492 panic! macros across 131 files**. The peer agents have made progress on the tracked subset (was 140, now 0 in those 46 files) but there are 492 more `panic!` macros in non-tracked production files. B.8.78's headline was misleading; the corrected framing is:
+
+- **Ratchet A (tracked subset)**: 0 in the 46 peer-agent-tracked files ✅ (was 140)
+- **Ratchet A (whole-tree non-test prod)**: 492 sites in 131 files — NOT YET addressed
+- **Ratchet A (test files)**: 492 - 492 = ??? — the B.8.78 492 was whole-tree-without-test, so this isn't yet isolated; will measure in B.8.80
+
+**3 ratchets re-baselined on new HEAD `5a54bc0ba`** (post-PR-#69):
+
+| Ratchet | B.8.78 (cdecb098a) | B.8.79 (5a54bc0ba) | Delta from #69 | Notes |
+|---|---|---|---|---|
+| A. `panic!` non-test prod (whole-tree) | 492 | 492 | 0 | PR #69 didn't touch any `panic!` macros in non-test prod |
+| A. `panic!` in 46-file tracked subset | 0 | 0 | 0 | unchanged (peer agent's work) |
+| A. `unreachable!` non-test prod | 35 | 35 | 0 | unchanged |
+| B. `.expect(` non-test prod | 4449 | 4444 | **-5** | PR #69 removed 5 in sdk/auth.rs |
+| B. `.unwrap(` non-test prod | 3011 | 3003 | **-8** | PR #69 removed 8 in sdk/auth.rs |
+| C. swallowed-error (`let _ = `) | 1584 | 1585 | +1 | PR #69 added 1 (new code path) |
+
+**PR #69 actual effect (sdk/auth.rs single file)**: -5 `.expect()` + -8 `.unwrap()` (Ratchet B), 0 in `panic!` (Ratchet A), 0 in unreachable. Same pattern as PR #66: removes runtime panic sources via `?` propagation and `bail!()` macro, doesn't touch `panic!` macros directly.
+
+**Cumulative panic-budget work across PRs #66, #70, #71, #69** (4 PRs):
+
+| Ratchet | Pre-cleanup (B.8.66 baseline) | B.8.79 (5a54bc0ba) | Delta |
+|---|---|---|---|
+| A. `panic!` in 46-file tracked subset | 140 | 0 | **-140** ✅ |
+| A. `panic!` in non-test prod (whole-tree) | 492 (TBD) | 492 | 0 |
+| B. `.expect(` non-test prod (whole-tree) | (TBD) | 4444 | TBD |
+| B. `.unwrap(` non-test prod (whole-tree) | (TBD) | 3003 | TBD |
+
+**The peer agents' tracked-subset panic-budget work is COMPLETE** (140 → 0). The 492 whole-tree non-test-prod `panic!` macros are in production files that aren't yet covered by the peer agent's tracked set. Future work could expand the tracked set or scan whole-tree.
+
+**3 restore_session tests PASS on new HEAD** (10.27s via prebuilt binary). Prebuilt binary is from an earlier build (B.8.71), so it tests the unchanged jcode-app-core crate — not directly affected by the merged PRs.
+
+**4 untracked operator dirs (peeking only, not committing)**:
+- `docs/drafts/` — 3 draft markdown files: `issue-build-meta-channel.md` (4.7K), `pr-fix-build-meta-channel.md` (5.0K), `pr-fmt-blindness-decouple.md` (5.8K) — appear to be issue/PR drafts
+- `docs/sessions/2026-10-12-cleanup-and-release/00_SESSION_OVERVIEW.md` (4.2K) — operator's session overview doc, starts with `# 2026-10-12 Cleanup and Release — Session Overview` then `## Operator directive (verbatim, 2026-10-12T23:10:15Z)`
+- `docs/sessions/2026-10-12-cleanup-and-release/stash-dumps/` — 6 files including `jcode.patch` (13.4K), `jcode.names`, `jcode.stat`, `wt-jcode-audit.patch` (13.4K) — look like git stash exports; `jcode.patch` and `wt-jcode-audit.patch` are same size (13.4K), possibly same content
+- `docs/sessions/2026-10-14-m31-restore-fix/` — `commit-msg.txt` (896B), `test-postfix.log` (521B), `test-prefix.log` (6.3K) — looks like a restore-fix work folder with test logs
+
+These untracked dirs have been in the working tree since at least 2026-10-14T16:54Z (per file mtime). They've been untracked for 4+ hours and have not been touched. Per standing rule "Do NOT commit/push other agents' uncommitted or local-only work", these are not committed by orchestrator — operator's call. The session overview doc and stash-dumps suggest this work belongs in the session folder (i.e., moved into `docs/sessions/2026-10-12-cleanup-and-release/`), but the mtime/owner pattern suggests operator's parallel work, not orchestrator's.
+
+**Phinbox queue**: 328 total (was 322 in B.8.78; +6 in 11 minutes). All 328 are peer-agent or operator requests — none from me.
+
+**State at 06:39Z (B.8.79 exit)**:
+- Master HEAD: `5a54bc0ba` (PR #69 merged)
+- origin/master: `5a54bc0ba` (synced)
+- Local branches: 62
+- Working tree: 1 stash (`PEER-AGENT scripts/panic_budget.json`); 4 untracked operator dirs (unchanged since 2026-10-14T16:54Z)
+- 328 phinbox-queued requests
+- Ratchet A: 0 in tracked subset, 492 in whole-tree non-test prod
+- Ratchet B: 4444 + 3003 = 7447 (down from 7460 in B.8.78; PR #69 -13)
+- Ratchet C: 1585 (up from 1584; +1 from PR #69)
+- 3 restore_session tests PASS (10.27s)
+- 4 untracked operator dirs NOT committed (operator's purview)
+- 7 still-pending todos (all external-blocked)
+
 
