@@ -441,8 +441,8 @@ impl BridgeState {
             if !self.runtime_commands_supported {
                 return Self::error_reply(
                     api_id,
-                    ErrorCode::InvalidRequest,
-                    "This daemon does not support runtime commands. Update and restart the daemon.",
+                    ErrorCode::UnknownRequest,
+                    "The connected daemon does not support structured commands. Updating Desktop alone does not replace a running daemon. When active work has finished, update Jcode on the runtime host, then run `jcode server reload` for a state-preserving upgrade and reconnect Desktop. Do not stop or kill the daemon while sessions are active.",
                 );
             }
             let parsed = serde_json::from_value::<jcode_harness_api::ApiRequest>(request.clone());

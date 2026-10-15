@@ -787,9 +787,8 @@ export class JcodeClient extends EventEmitter {
   async runtimeCommand(sessionId: string, command: RuntimeCommand, args: string[] = []): Promise<{
     session_id: string; command: RuntimeCommand; data: unknown; message: string;
   }> {
-    if (!this.capabilities.includes("runtime_commands")) {
-      throw new HarnessError("unknown_request", "This runtime does not support structured commands. Update and restart the daemon and bridge.");
-    }
+    // Hello capabilities are a snapshot. Let the bridge recheck a missing
+    // capability without disturbing the session, and send the request once.
     const frame = await this.expectReply(
       { req: "runtime_command", session_id: sessionId, command, args }, "runtime_command_result",
     );
