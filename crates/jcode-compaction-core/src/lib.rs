@@ -78,11 +78,12 @@ pub const SUMMARY_PROMPT: &str = r#"Summarize our conversation so you can contin
 
 Write in natural language with these sections:
 - **Context:** What we're working on and why (1-2 sentences)
+- **Plan status:** If any multi-step plan is in progress, list EVERY item of the ORIGINAL plan verbatim with its state: done (with evidence), in progress, or not started. Never drop unfinished items, never re-derive the plan from recent work, and never promote ideas that the user has not approved into plan items. If there is no plan, say "No active plan."
 - **What we did:** Key actions taken, files changed, problems solved
 - **Current state:** What works, what's broken, what's next
 - **User preferences:** Specific requirements or decisions they made
 
-Be concise but preserve important details. You can search the full conversation later if you need exact error messages or code snippets."#;
+Be concise but preserve important details. The Plan status section is the exception: it must stay complete even when everything else is trimmed, because this summary replaces the conversation and a dropped plan item is lost permanently. You can search the full conversation later if you need exact error messages or code snippets."#;
 
 /// A completed summary covering turns up to a certain point
 #[derive(Debug, Clone)]
