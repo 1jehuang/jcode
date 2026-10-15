@@ -1,0 +1,90 @@
+{
+  "_README": [
+    "TEMPLATE ONLY. Not deployed, not published, not served.",
+    "This is the client-metadata document Spotify's authorization server would",
+    "fetch when it receives this URL as OAuth client_id (SEP-991 CIMD).",
+    "",
+    "BLOCKED until: (1) an HTTPS host serves this at a stable, public URL with a",
+    "non-root path, and (2) that URL is added to the Portal allowed-client-pattern",
+    "list. The allow-list gate is PROVEN, not assumed - see STATE.md section 16.",
+    "",
+    "STEP 1 - choose the CIMD URL, then STEP 2 - compute the redirect port.",
+    "The port is NOT free to choose. mcp-remote derives it:",
+    "    hash = md5(serverUrl + '|' + resource + '|' + clientMetadataUrl)",
+    "    port = 3335 + int(hash[0:4], 16) % 45816",
+    "The hash INCLUDES this document's own URL, so the URL must be fixed first.",
+    "Worked examples already computed:",
+    "    https://kooshapari.com/oauth/client-metadata.json -> port 18586",
+    "    https://jcode.sh/oauth/client-metadata.json      -> port 35683",
+    "Reproduce with: python3 scripts/derive_callback_port.py <cimd-url>",
+    "",
+    "STEP 3 - replace <CIMD_URL>, <PORT>, <CLIENT_NAME> below, publish the file",
+    "over HTTPS with content-type application/json, then request the pattern be",
+    "added to Portal's allowed clients.",
+    "",
+    "",
+    "HOSTING (verified 2026-10-15, see PORTAL-FINDINGS.md):",
+    "  Do NOT use https://kooshapari.com/oauth/client-metadata.json - returns 404.",
+    "  Do NOT use https://jcode.sh/oauth/client-metadata.json - returns HTTP 200 but",
+    "  content-type text/html, 98237 bytes. jcode.sh is a Cloudflare SPA that serves",
+    "  the HTML shell with 200 for EVERY path, so that 200 is a fallback, not a",
+    "  document. Always check content-type on an SPA host.",
+    "  Viable: commit this file to a public repo and serve via raw.githubusercontent.com",
+    "  (KooshaPari/Jcode is public and raw fetches work anonymously). CAVEAT: raw",
+    "  serves JSON as content-type text/plain. Whether Spotify's auth backend accepts",
+    "  that is NOT established. If it is strict, use a static host or Cloudflare Worker",
+    "  that returns application/json instead.",
+    "  Preferred: a Cloudflare Worker returning application/json at a stable path.",
+    "",
+    "PORT DEPENDS ON THE URL. Already computed:",
+    "  https://kooshapari.com/oauth/client-metadata.json -> 18586",
+    "  https://jcode.sh/oauth/client-metadata.json      -> 35683",
+    "  (any other host gives a different port; re-derive, never copy)",
+    "IDENTITY: client_name must be our own. Do NOT copy Xirp's",
+    "client-metadata.json URL as the client_id. That URL is allow-listed and",
+    "would authenticate AS Xirp, attributing Jcode's actions to Xirp in",
+    "Portal's audit trail.",
+    "",
+    "UNRESOLVED - raise with vendor: mcp-remote builds its callback as",
+    "http://127.0.0.1:<port>/oauth/callback, but the allow-listed Xirp document",
+    "declares http://127.0.0.1/callback (default port, different path). If the",
+    "server compares redirect_uri strictly, the derived port must be registered",
+    "and the Xirp form would not match. Confirm before publishing."
+  ],
+  "client_id": "<CIMD_URL>",
+  "client_name": "<CLIENT_NAME>",
+  "redirect_uris": [
+    "http://127.0.0.1:<PORT>/oauth/callback"
+  ],
+  "response_types": [
+    "code"
+  ],
+  "grant_types": [
+    "authorization_code",
+    "refresh_token"
+  ],
+  "token_endpoint_auth_method": "none",
+  "scope": "openid offline_access",
+  "_verified_against": {
+    "_note": "Fields below were read from the real, allow-listed Xirp document at https://xirp.spotify.com/oauth/client-metadata.json and from Portal's own /.well-known/oauth-authorization-server. Do not change these without re-verifying.",
+    "portal_token_endpoint_auth_methods_supported": [
+      "client_secret_basic",
+      "client_secret_post",
+      "none"
+    ],
+    "portal_scopes_supported": [
+      "openid",
+      "offline_access"
+    ],
+    "portal_grant_types_supported": [
+      "authorization_code",
+      "refresh_token"
+    ],
+    "portal_code_challenge_methods_supported": [
+      "S256",
+      "plain"
+    ],
+    "portal_registration_endpoint": "absent - dynamic client registration is NOT available, so CIMD or a pre-registered id are the only paths",
+    "mcp_resource_binding_value": "https://phenotype.spotifyportal.com/api/mcp-actions/v1"
+  }
+}
