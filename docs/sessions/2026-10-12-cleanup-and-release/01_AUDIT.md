@@ -2940,4 +2940,65 @@ These untracked dirs have been in the working tree since at least 2026-10-14T16:
 - 3 restore_session tests PASS (11.79s)
 - 7 still-pending todos (all external-blocked)
 
+**B.8.81 EXECUTED 2026-10-15T06:43Z — Operator signal `"go"`; deep-dive of 4 untracked operator dirs; DISCOVERED m3.1-restore-fallback fix anomaly: test in master PASSES, fix on `refactor/panic-budget` branch not yet merged; 1800+ external PRs (not operator work)**
+
+**Operator's "go" interpretation**: continue with the next actionable gate. Master was stable at `0c48b7067` (B.8.80 push), so next gate was deep-dive the 4 untracked operator dirs that have been sitting in working tree since 2026-10-14T16:54Z.
+
+**4 untracked operator dirs analyzed (read-only, NOT committed per standing rule)**:
+
+| Dir | Files | Content | Disposition |
+|---|---|---|---|
+| `docs/drafts/` | 3 | PR/issue drafts ready to file when phinbox healthy: `issue-build-meta-channel.md`, `pr-fix-build-meta-channel.md`, `pr-fmt-blindness-decouple.md` (Option B for #1796, #1803) | operator-owned, suspended on phinbox-broken signal 2026-10-14T07:00Z |
+| `docs/sessions/2026-10-12-cleanup-and-release/00_SESSION_OVERVIEW.md` | 1 (78 lines) | Operator's authoritative cleanup-and-release plan (created 2026-10-12T23:11Z, mtime 2026-10-14T16:54Z) — full 5-surface scope, 0-9 phasing, "will not silently advance" stance | operator-owned, **NEVER COMMITTED** in 3+ days |
+| `docs/sessions/2026-10-12-cleanup-and-release/stash-dumps/` | 30 (= 6 stashes × 5 files each) | Exported git stashes: jcode, wt-jcode-audit, wt-jcode-fix1, wt-kcode-active-pids-race, wt-kcode-heading-boundary, wt-kcode-home-symlink (each 13439-byte patch) | operator-owned snapshots of unmerged worktree state |
+| `docs/sessions/2026-10-14-m31-restore-fix/` | 3 (commit-msg.txt, test-prefix.log, test-postfix.log) | EVIDENCE of the m3.1-restore-fallback fix work, not the fix itself | the fix itself lives on `refactor/panic-budget` branch as commit `29c240ffb` (NOT in master) |
+
+**🔍 m3.1-restore-fallback fix ANOMALY**:
+
+- **Test commit `eb0949585`** (added Wed Oct 14 16:29:10 2026 -0700): `test(agent): regression for restore_session falling back to provider default on rejected model` — **IN MASTER** ✅
+- **Fix commit `29c240ffb`** (added Wed Oct 14 16:36:51 2026 -0700, 8 minutes after the test): `fix(agent): fall back to provider default when restoring a session model` — **NOT IN MASTER**, only on `refactor/panic-budget`, `verify/panic-fork`, `revert/pr-33-merge` branches
+- **Behavior**: The test PASSES on master HEAD `0c48b7067` (via prebuilt binary `jcode_app_core-18c3f595e78cd6e1`, 15.64s, "3 passed; 0 failed") WITHOUT the fix being in master
+- **Possible explanations**:
+  1. Test passes vacuously (function never actually fails in the test setup)
+  2. Prebuilt binary is from a different commit than current master
+  3. Master has a different code path that happens to satisfy the test
+- **Repro session referenced in fix commit message**: `session_deer_1791971005300_1667b54dc8bfc158` saved with `model "MiniMax-M3.1-Flash-Preview"` on the openai provider; the m3.1 entry was later removed from the live catalog
+
+**`refactor/panic-budget` branch (peer agent's) — first 5 commits on top of master**:
+```
+0f3c86895 fix(fork-panic-budget): post-amend build fixes
+74513573c refactor(fork-panic-budget): bring panic-prone count from 145 -> 61
+96da01391 docs(sessions): record m3.1 fix outcome, picker root cause, panic sweep
+29c240ffb fix(agent): fall back to provider default when restoring a session model
+f2738803a docs(sessions): m3.1 handoff, arc paused at operator's request
+```
+The branch is at `merge-base 901b3310821e9d65a88301072bb0a183709eefad` (the PR #33 squash-merge commit) and the m3.1 fix is the 4th commit on top of that. So this branch represents the operator's "pause" state before the panic-budget PR wave.
+
+**External PR flood detected (1800+ open PRs in KooshaPari/Jcode)**:
+- Most from external contributors: xsa-dev, akushonkamen, anateus, aiapienthusiast, SiavZ, RensTillmann, johnnyfish, tanish111, dev-hann, ianalitis, costajohnt, n3ko, 1jehuang, FalkWoldmann, alecuba16
+- All show `reviewDecision: none` (no approvals)
+- 8 MERGEABLE, 9 CONFLICTING (sampled from #1764-#1834)
+- **NOT in scope** for this orchestrator (external contributions, not operator/peer work)
+- Operator's Web UI is the appropriate review venue for these
+
+**3 restore_session tests STILL PASS** on master HEAD `0c48b7067` (15.64s, "3 passed; 0 failed", 1299 filtered out).
+
+**State at 06:47Z (B.8.81 exit)**:
+- Master HEAD: `0c48b7067` (B.8.80 audit; no new commits since)
+- origin/master: `0c48b7067` (synced)
+- Local branches: 62
+- Working tree: 4 untracked operator dirs (analyzed in B.8.81, NOT committed)
+- 0 stashes
+- 328+ phinbox-queued requests (mine = 0)
+- Ratchet B (subset) CI-gated at 62; currently at 62 ✅
+- 3 restore_session tests PASS (15.64s)
+- 4 untracked operator dirs owned by operator (per standing "don't touch operator's parallel work" rule):
+  1. `docs/drafts/` (3 PR/issue drafts, suspended on phinbox-broken signal)
+  2. `docs/sessions/2026-10-12-cleanup-and-release/00_SESSION_OVERVIEW.md` (operator's cleanup plan)
+  3. `docs/sessions/2026-10-12-cleanup-and-release/stash-dumps/` (6 stash exports)
+  4. `docs/sessions/2026-10-14-m31-restore-fix/` (3 evidence files for the fix work)
+- 1 ANOMALY noted: m3.1-restore-fallback test PASSES on master, fix NOT in master (on `refactor/panic-budget` branch)
+- 1800+ external open PRs in repo (not in scope)
+- 8 still-pending todos (all external-blocked)
+
 
