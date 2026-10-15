@@ -29,7 +29,7 @@ async fn refresh_commit_survives_caller_cancellation() {
     let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
     let caller_credentials = Arc::clone(&credentials);
     let caller = tokio::spawn(async move {
-        refresh_and_commit_openai_tokens(&caller_credentials, async move {
+        refresh_and_commit_openai_tokens(&caller_credentials, "rt_old", async move {
             started_tx.send(()).unwrap();
             release_rx.await.unwrap();
             Ok(rotated_tokens())
@@ -57,7 +57,7 @@ async fn refresh_commit_survives_caller_cancellation() {
 #[tokio::test]
 async fn refresh_failure_leaves_in_memory_credentials_untouched() {
     let credentials = dummy_credentials();
-    let err = refresh_and_commit_openai_tokens(&credentials, async {
+    let err = refresh_and_commit_openai_tokens(&credentials, "rt_old", async {
         anyhow::bail!("OpenAI token refresh timed out after 30s waiting for response headers")
     })
     .await

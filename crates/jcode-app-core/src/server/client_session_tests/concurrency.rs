@@ -174,31 +174,34 @@ async fn comm_status_releases_member_guard_before_reading_connections() {
 
     // Disconnect cleanup holds client_connections.write, then needs swarm_members.write.
     let cleanup_connections = client_connections.write().await;
-    let status = tokio::spawn({
-        let (swarm_members, client_connections) =
-            (Arc::clone(&swarm_members), Arc::clone(&client_connections));
-        async move {
-            crate::server::comm_sync::handle_comm_status(
-                1,
-                "caller".to_string(),
-                "target".to_string(),
-                &sessions,
-                &swarm_members,
-                &client_connections,
-                &FileTouchService::new(),
-                &event_tx,
-            )
-            .await;
-        }
-    });
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let status = async {
+        crate::server::comm_sync::handle_comm_status(
+            1,
+            "caller".to_string(),
+            "target".to_string(),
+            &sessions,
+            &swarm_members,
+            &client_connections,
+            &FileTouchService::new(),
+            &event_tx,
+        )
+        .await;
+    };
+    tokio::pin!(status);
+    // Poll the real handler until it is blocked by the held connections lock.
+    // A sleep cannot establish this ordering on a delayed executor.
+    std::future::poll_fn(|cx| {
+        assert!(std::future::Future::poll(status.as_mut(), cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
 
     let _members = tokio::time::timeout(std::time::Duration::from_secs(2), swarm_members.write())
         .await
         .expect("comm status must not hold swarm_members while waiting on client_connections");
     drop(_members);
     drop(cleanup_connections);
-    status.await.unwrap();
+    status.await;
     assert!(matches!(
         event_rx.recv().await,
         Some(ServerEvent::CommStatusResponse { .. })

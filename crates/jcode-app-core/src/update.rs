@@ -345,6 +345,9 @@ fn install_main_source_update_blocking(latest_sha: &str) -> Result<PathBuf> {
 
     let mut metadata = UpdateMetadata::load().unwrap_or_default();
     let channel_version = format!("main-{}", latest_sha);
+    // Hold across version creation and every reference publication, not just
+    // individual helper calls. This function is synchronous after the build.
+    let _store_lock = jcode_build_support::acquire_build_store_lock()?;
     build::install_binary_at_version(&path, &channel_version)
         .context("Failed to install built binary")?;
     // Carry the long-lived daemon's reload target forward too, but only when it
@@ -359,6 +362,7 @@ fn install_main_source_update_blocking(latest_sha: &str) -> Result<PathBuf> {
     build::update_stable_symlink(&channel_version)?;
     build::update_current_symlink(&channel_version)?;
     build::update_launcher_symlink_to_current()?;
+    build::prune_old_versions_after_install();
 
     metadata.installed_version = Some(channel_version.clone());
     metadata.installed_from = Some("source".to_string());
@@ -1006,6 +1010,9 @@ pub fn download_and_install_blocking_with_progress(
 
     verify_asset_checksum_if_available(&client, release, asset, &bytes)?;
 
+    // Download/checksum work is finished. Serialize the complete synchronous
+    // install transaction, including archive copies before channel publication.
+    let _store_lock = jcode_build_support::acquire_build_store_lock()?;
     let mut installed_version_dir: Option<PathBuf> = None;
     if asset.name.ends_with(".tar.gz") {
         let cursor = std::io::Cursor::new(&bytes);
@@ -1114,6 +1121,7 @@ pub fn download_and_install_blocking_with_progress(
     build::update_stable_symlink(version)?;
     build::update_current_symlink(version)?;
     build::update_launcher_symlink_to_current()?;
+    build::prune_old_versions_after_install();
 
     metadata.installed_version = Some(release.tag_name.clone());
     metadata.installed_from = Some(asset.browser_download_url.clone());

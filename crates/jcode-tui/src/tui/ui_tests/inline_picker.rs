@@ -59,6 +59,8 @@ fn model_picker_state() -> TestState {
             column: 0,
             filter: String::new(),
             preview: false,
+            scoped_route_restore: Vec::new(),
+            effort_step: None,
             entries: vec![model_picker_entry()],
         }),
         ..Default::default()
@@ -118,6 +120,8 @@ fn model_suggestions_replace_box_above_input_in_preview_and_focused_modes() {
     for preview in [true, false] {
         let mut state = model_picker_state();
         state.inline_interactive_state.as_mut().unwrap().preview = preview;
+        state.input = "/model".to_string();
+        state.command_suggestions = vec![("/model legacy".to_string(), "Generic hint")];
         assert_eq!(crate::tui::ui::inline_ui::inline_ui_height(&state), 0);
         let lines = render_model_suggestions(&state, 120, 20, 12);
         let text = lines.join("\n");
@@ -125,6 +129,7 @@ fn model_suggestions_replace_box_above_input_in_preview_and_focused_modes() {
         assert!(text.contains("openai"), "{text}");
         assert!(text.contains("current"), "{text}");
         assert!(text.contains("Ctrl+N favorite"), "{text}");
+        assert!(!text.contains("/model legacy"), "{text}");
         assert!(!text.contains('╭') && !text.contains('│'), "{text}");
         assert!(lines[12..].iter().all(|line| line.trim().is_empty()));
     }
@@ -191,6 +196,69 @@ fn non_model_pickers_still_reserve_inline_panel_height() {
 }
 
 #[test]
+fn account_picker_rows_survive_late_command_overlay() {
+    for preview in [true, false] {
+        let mut state = model_picker_state();
+        state.input = "/account openai".to_string();
+        state.command_suggestions = vec![
+            (
+                "/account openai add".to_string(),
+                "Add a new OpenAI account",
+            ),
+            ("/account openai login".to_string(), "Refresh login"),
+            ("/account openai settings".to_string(), "Provider settings"),
+        ];
+        let picker = state.inline_interactive_state.as_mut().unwrap();
+        picker.kind = crate::tui::PickerKind::Account;
+        picker.preview = preview;
+        picker.entries[0].name = "openai-otter".to_string();
+        picker.entries[0].action =
+            crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Switch {
+                provider_id: "openai".to_string(),
+                label: "openai-otter".to_string(),
+            });
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        terminal
+            .draw(|frame| {
+                let panel_height = crate::tui::ui::inline_ui::inline_ui_height(&state);
+                let panel = Rect::new(0, 18 - panel_height, 100, panel_height);
+                crate::tui::ui::inline_ui::draw_inline_ui(frame, &state, panel);
+                crate::tui::ui::input_ui::draw_command_suggestions_overlay(
+                    frame,
+                    &state,
+                    Rect::new(0, 18, 100, 2),
+                );
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let text = (0..20)
+            .map(|y| (0..100).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("openai-otter"), "preview={preview}:\n{text}");
+        assert!(
+            !text.contains("/account openai add"),
+            "preview={preview}:\n{text}"
+        );
+    }
+}
+
+#[test]
+fn generic_slash_suggestions_remain_visible_without_picker() {
+    let state = TestState {
+        input: "/account openai".to_string(),
+        command_suggestions: vec![(
+            "/account openai add".to_string(),
+            "Add a new OpenAI account",
+        )],
+        ..Default::default()
+    };
+    let text = render_model_suggestions(&state, 100, 20, 18).join("\n");
+    assert!(text.contains("/account openai add"), "{text}");
+    assert!(text.contains("Add a new OpenAI account"), "{text}");
+}
+
+#[test]
 fn model_suggestions_full_frame_keeps_composer_position() {
     let _lock = viewport_snapshot_test_lock();
     let mut state = model_picker_state();
@@ -240,13 +308,69 @@ fn model_suggestions_show_focused_filter_and_route_focus() {
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.contains("Filter: gpt"), "{text}");
+    assert!(text.contains("Search: gpt"), "{text}");
+    assert!(text.contains("Provider: all providers"), "{text}");
     assert!(text.contains("↑↓ route"), "{text}");
     assert!(
-        lines[0]
+        lines[1]
             .spans
             .iter()
             .any(|span| span.content.contains("openai")
                 && span.style.add_modifier.contains(Modifier::UNDERLINED))
+    );
+}
+
+#[test]
+fn model_effort_step_names_the_model_and_lists_levels() {
+    let state = model_picker_state();
+    let parent = state.inline_interactive_state.clone().unwrap();
+    let level = |effort: &str, name: &str| crate::tui::PickerEntry {
+        name: name.to_string(),
+        options: Vec::new(),
+        is_current: effort == "low",
+        recommended: effort == "high",
+        effort: Some(effort.to_string()),
+        ..model_picker_entry()
+    };
+    let step = crate::tui::InlineInteractiveState {
+        kind: crate::tui::PickerKind::Model,
+        entries: vec![
+            level("low", "low"),
+            level("medium", "med"),
+            level("high", "high"),
+        ],
+        filtered: vec![0, 1, 2],
+        selected: 2,
+        column: 0,
+        filter: String::new(),
+        preview: false,
+        scoped_route_restore: Vec::new(),
+        effort_step: Some(Box::new(crate::tui::ModelEffortStep {
+            model: model_picker_entry(),
+            parent,
+            save_default: false,
+        })),
+    };
+
+    let lines = crate::tui::ui::inline_interactive_ui::model_suggestion_lines(&step, 10);
+    let text: Vec<String> = lines.iter().map(ToString::to_string).collect();
+
+    assert!(
+        text[0].contains("Reasoning for GPT-5.4") && text[0].contains("via openai"),
+        "{text:?}"
+    );
+    assert!(
+        text[1].contains("low") && text[1].contains("current"),
+        "{text:?}"
+    );
+    assert!(text[2].contains("med"), "{text:?}");
+    assert!(
+        text[3].contains("▸ high") && text[3].contains("★"),
+        "{text:?}"
+    );
+    assert!(text[4].contains("Esc back to models"), "{text:?}");
+    assert!(
+        !text.iter().any(|line| line.contains("Search:")),
+        "the level step has no search box: {text:?}"
     );
 }

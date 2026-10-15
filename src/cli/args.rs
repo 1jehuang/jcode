@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 use super::provider_init::ProviderChoice;
 
+mod build_store;
 mod google;
 mod mcp;
 #[allow(unused_imports)]
@@ -31,7 +32,7 @@ pub(crate) enum ProviderAuthArg {
 #[command(version = jcode_build_meta::version())]
 #[command(about = "J-Code: A coding agent using Claude Max or ChatGPT Pro subscriptions")]
 pub(crate) struct Args {
-    /// Initial provider to use (jcode, claude, openai, openai-api, openrouter, azure, opencode, opencode-go, zai, 302ai, baseten, conifer, cortecs, comtegra, deepseek, fpt, firmware, huggingface, moonshotai, nebius, scaleway, stackit, groq, mistral, perplexity, togetherai, deepinfra, xai, grok-build, nvidia-nim, lmstudio, ollama, chutes, cerebras, alibaba-coding-plan, openai-compatible, cursor, copilot, gemini, antigravity, google, or auto-detect). Interactive sessions can switch providers with /model.
+    /// Initial provider to use (jcode, claude, claude-code (Claude via the local Claude Code CLI), openai, openai-api, openrouter, azure, opencode, opencode-go, zai, 302ai, baseten, conifer, cortecs, comtegra, deepseek, fpt, firmware, huggingface, moonshotai, nebius, scaleway, stackit, groq, mistral, perplexity, togetherai, deepinfra, xai, grok-build, nvidia-nim, lmstudio, ollama, chutes, cerebras, alibaba-coding-plan, openai-compatible, cursor, copilot, gemini, antigravity, google, or auto-detect). Interactive sessions can switch providers with /model.
     #[arg(short, long, default_value = "auto", global = true)]
     pub(crate) provider: ProviderChoice,
 
@@ -115,6 +116,12 @@ pub(crate) struct Args {
     #[arg(short, long, global = true)]
     pub(crate) model: Option<String>,
 
+    /// Use this saved account for this window/run only (repeatable, one per
+    /// provider; `claude-fox`, `openai-otter`, or an account email). Other
+    /// windows and the default account are unchanged.
+    #[arg(long = "account", value_name = "LABEL")]
+    pub(crate) account: Vec<String>,
+
     /// Named provider profile from [providers.<name>] in config.toml.
     /// Implies --provider openai-compatible for OpenAI-compatible profiles.
     #[arg(long, global = true)]
@@ -192,6 +199,10 @@ pub(crate) enum Command {
 
     /// Run a single message and exit
     Run {
+        /// Use this saved account for this run (repeatable, one per provider).
+        #[arg(long = "account", value_name = "LABEL")]
+        account: Vec<String>,
+
         /// Emit a machine-readable JSON result instead of streaming text
         #[arg(long, conflicts_with = "ndjson")]
         json: bool,
@@ -218,9 +229,27 @@ pub(crate) enum Command {
         #[arg(long, short = 'a')]
         account: Option<String>,
 
+        /// Make this login the default account for new windows.
+        #[arg(long = "default", id = "make_default")]
+        make_default: bool,
+        /// GitHub hostname for Copilot login (for example hiqfi.ghe.com); github.com selects public GitHub.
+        #[arg(long, visible_alias = "github-host", value_name = "HOSTNAME")]
+        enterprise_url: Option<String>,
+
         /// Do not open a local browser. Show a login QR for another device (useful over SSH).
         #[arg(long, alias = "headless")]
         no_browser: bool,
+
+        /// Sign in with the installed Claude Code CLI instead of Jcode's OAuth flow.
+        /// This is the default for `--provider claude` when `claude` is installed.
+        /// Jcode asks before reusing the CLI's credentials.
+        #[arg(long, conflicts_with_all = ["no_browser", "make_default", "account", "oauth"])]
+        claude_code: bool,
+
+        /// Use Jcode's own OAuth browser flow for Claude even when the
+        /// Claude Code CLI is installed.
+        #[arg(long)]
+        oauth: bool,
 
         /// Print a script-friendly auth URL and persist temporary login state for later completion.
         #[arg(long, conflicts_with_all = ["callback_url", "auth_code"])]
@@ -247,7 +276,7 @@ pub(crate) enum Command {
         flow_id: Option<String>,
 
         /// Cancel only this provider's pending flow. Does not remove saved credentials.
-        #[arg(long, requires = "flow_id", conflicts_with_all = ["print_auth_url", "callback_url", "auth_code", "complete", "account", "api_base", "api_key", "api_key_env"])]
+        #[arg(long, requires = "flow_id", conflicts_with_all = ["print_auth_url", "callback_url", "auth_code", "complete", "account", "enterprise_url", "api_base", "api_key", "api_key_env"])]
         cancel: bool,
 
         /// Save credentials without running the post-login live provider validation.
@@ -289,7 +318,18 @@ pub(crate) enum Command {
         #[arg(long)]
         json: bool,
     },
-
+    /// Delete old installed builds, keeping recent, referenced and running ones
+    PruneBuilds {
+        /// Unreferenced builds to keep, newest first (default: JCODE_KEEP_BUILDS or 3)
+        #[arg(long)]
+        keep: Option<usize>,
+        /// Show what would be removed without deleting anything
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Publish a prepared build without exposing a partially installed version
+    #[command(hide = true)]
+    PublishBuild(build_store::PublishBuildArgs),
     /// Show usage limits for connected providers
     Usage {
         /// Emit JSON instead of plain text
@@ -427,12 +467,12 @@ pub(crate) enum Command {
 
     /// Browser automation setup and status
     Browser {
-        /// Action (setup, status, detect)
+        /// Action (setup, status, detect, chatgpt-login, chatgpt-status)
         #[arg(default_value = "setup")]
         action: String,
 
         /// Browser to target: auto (default: detect your browser), firefox,
-        /// chrome, chromium, edge, brave, or safari
+        /// chrome, chromium, edge, brave, opera, or safari
         browser: Option<String>,
     },
 

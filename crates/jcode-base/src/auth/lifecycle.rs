@@ -287,6 +287,7 @@ pub fn ranked_flagship_for_provider(provider_id: &str, models: &[&str]) -> Optio
     let routes: Vec<ModelRoute> = models
         .iter()
         .map(|model| ModelRoute {
+            catalog_metadata: None,
             model: (*model).to_string(),
             provider: String::new(),
             api_method: provider_id.clone(),
@@ -339,6 +340,7 @@ pub fn onboarding_default_selection(provider_ids: &[&str]) -> Option<(String, St
         .iter()
         .filter_map(|id| {
             default_model_for_provider(id).map(|model| ModelRoute {
+                catalog_metadata: None,
                 model: model.to_string(),
                 provider: id.trim().to_string(),
                 api_method: String::new(),
@@ -965,6 +967,9 @@ fn route_matches_activation(route: &ModelRoute, activation: &AuthActivationResul
         "grok-build" => {
             return matches!(api_method, crate::provider::ModelRouteApiMethod::GrokBuild);
         }
+        "claude-code" => {
+            return api_method.is_claude_code();
+        }
         "azure-openai" => {
             // Azure OpenAI reuses the OpenRouter transport (configured via Azure
             // env), so its routes carry the `openrouter` api_method while keeping
@@ -1061,6 +1066,7 @@ fn normalized_login_provider_id(provider_id: &str) -> Option<&'static str> {
         "openrouter" => Some("openrouter"),
         "jcode" | "subscription" | "jcode-subscription" => Some("jcode"),
         "grok-build" => Some("grok-build"),
+        "claude-code" | "claude_code" | "claude-code-cli" => Some("claude-code"),
         "bedrock" | "aws-bedrock" | "aws_bedrock" => Some("bedrock"),
         "cursor" => Some("cursor"),
         "copilot" => Some("copilot"),
@@ -1087,6 +1093,7 @@ pub fn provider_display_label(provider_id: Option<&str>) -> Option<String> {
 #[path = "lifecycle_activation.rs"]
 mod activation;
 pub use activation::*;
+
 pub fn model_switch_request_for_provider_id(
     provider_id: Option<&str>,
     _provider_name: &str,
@@ -1108,6 +1115,7 @@ pub fn model_switch_request_for_provider_id(
         Some("openrouter") => format!("openrouter:{}", model),
         Some("jcode") => model.to_string(),
         Some("grok-build") => crate::provider::grok_build_model_spec(model),
+        Some("claude-code") => crate::provider::claude_code_model_spec(model),
         Some("bedrock") => format!("bedrock:{}", model),
         Some("cursor") => format!("cursor:{}", model),
         Some("copilot") => format!("copilot:{}", model),
@@ -1155,6 +1163,7 @@ mod tests {
 
     fn route(model: &str, provider: &str, api_method: &str, available: bool) -> ModelRoute {
         ModelRoute {
+            catalog_metadata: None,
             model: model.to_string(),
             provider: provider.to_string(),
             api_method: api_method.to_string(),
@@ -1524,6 +1533,9 @@ mod tests {
                 }
                 crate::provider_catalog::LoginProviderTarget::GrokBuild => {
                     Some(("grok-build", "grok-build", "openrouter", "grok-build"))
+                }
+                crate::provider_catalog::LoginProviderTarget::ClaudeCode => {
+                    Some(("claude-code", "claude-code", "claude-code", "claude-code"))
                 }
                 crate::provider_catalog::LoginProviderTarget::Claude => {
                     Some(("claude", "claude", "claude", "claude-oauth"))

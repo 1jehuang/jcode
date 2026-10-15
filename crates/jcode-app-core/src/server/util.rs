@@ -294,12 +294,19 @@ fn strip_deleted_suffix(path: PathBuf) -> PathBuf {
 /// (`builds/stable/jcode`), and installing a new build repoints that link. From
 /// then on `current_exe()` resolves to the *new* binary, so every reload check
 /// concluded the server already ran the newest build and `jcode server reload`
-/// was skipped forever. Resolve the path once, at first use (server startup),
-/// before any later install can move the link.
+/// was skipped forever. The executable entry point pins the path before CLI
+/// startup and asynchronous provider initialization can race with an install.
 pub(crate) fn running_server_binary() -> Option<PathBuf> {
     static RUNNING: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
-    RUNNING
-        .get_or_init(|| std::env::current_exe().ok().map(resolve_launch_path))
+    pin_launch_path(&RUNNING, || std::env::current_exe().ok())
+}
+
+fn pin_launch_path(
+    cache: &std::sync::OnceLock<Option<PathBuf>>,
+    launch_path: impl FnOnce() -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    cache
+        .get_or_init(|| launch_path().map(resolve_launch_path))
         .clone()
 }
 
@@ -310,38 +317,8 @@ fn resolve_launch_path(exe: PathBuf) -> PathBuf {
 }
 
 #[cfg(all(test, unix))]
-mod running_server_binary_tests {
-    /// The server is started through a channel link; installing a new build
-    /// repoints the link. The pinned path must stay on the binary the server
-    /// was started from, so the new build counts as newer and reload runs.
-    #[test]
-    fn launch_path_pinned_before_the_channel_link_moves() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let old = dir.path().join("versions/old/jcode");
-        let new = dir.path().join("versions/new/jcode");
-        for binary in [&old, &new] {
-            std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
-            std::fs::write(binary, b"bin").unwrap();
-        }
-        let link = dir.path().join("stable/jcode");
-        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
-        std::os::unix::fs::symlink(&old, &link).unwrap();
-
-        // Server start: what running_server_binary pins.
-        let pinned = super::resolve_launch_path(link.clone());
-        // An install repoints the channel.
-        std::fs::remove_file(&link).unwrap();
-        std::os::unix::fs::symlink(&new, &link).unwrap();
-
-        assert_eq!(pinned, std::fs::canonicalize(&old).unwrap());
-        // Re-resolving the launch path now (the old behavior) lands on the new
-        // build, which is why reload thought nothing was newer.
-        assert_eq!(
-            super::resolve_launch_path(link),
-            std::fs::canonicalize(&new).unwrap()
-        );
-    }
-}
+#[path = "running_server_binary_tests.rs"]
+mod running_server_binary_tests;
 
 pub(crate) fn git_common_dir_for(path: &Path) -> Option<PathBuf> {
     let mut current = Some(path);

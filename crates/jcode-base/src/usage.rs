@@ -7,12 +7,14 @@ mod accessors;
 mod anthropic_reset;
 mod api_keys;
 mod cache;
+mod claude_code;
 mod disk_cache;
 mod display;
 mod model;
 mod openai_helpers;
 mod openai_reset;
 mod provider_fetch;
+use accessors::set_active_usage_key;
 pub use accessors::*;
 pub use anthropic_reset::{
     AnthropicLimitResetOffer, AnthropicLimitResetOutcome, AnthropicLimitResetUnavailable,
@@ -20,7 +22,14 @@ pub use anthropic_reset::{
     invalidate_anthropic_usage_reset_state, prepare_anthropic_limit_reset,
 };
 use api_keys::enqueue_api_key_usage_tasks;
+pub use cache::carry_anthropic_usage_across_token_refresh;
+pub(crate) use cache::note_openai_unavailability_observed;
 use cache::*;
+#[cfg(test)]
+pub(crate) use cache::{openai_usage_generation, store_openai_usage_for_generation_then};
+pub use claude_code::{
+    ClaudeCodeUsageProbe, ClaudeCodeUsageWindow, register_claude_code_usage_probe,
+};
 pub use jcode_usage_types::{OpenAiResetCredits, ProviderUsage, ProviderUsageProgress, UsageLimit};
 pub use model::*;
 pub use openai_reset::{
@@ -44,7 +53,48 @@ use tokio::sync::RwLock;
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 
 /// OpenAI ChatGPT usage endpoint
+#[cfg(not(test))]
 const OPENAI_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
+
+#[cfg(test)]
+static TEST_OPENAI_USAGE_URL: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+fn openai_usage_url() -> Option<String> {
+    #[cfg(test)]
+    {
+        TEST_OPENAI_USAGE_URL
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+    #[cfg(not(test))]
+    {
+        Some(OPENAI_USAGE_URL.to_string())
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct OpenAiUsageUrlGuard(Option<String>);
+
+#[cfg(test)]
+impl Drop for OpenAiUsageUrlGuard {
+    fn drop(&mut self) {
+        *TEST_OPENAI_USAGE_URL
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = self.0.take();
+    }
+}
+
+/// Only an explicitly supplied loopback endpoint can be contacted by unit tests.
+#[cfg(test)]
+pub(crate) fn override_openai_usage_url_for_tests(url: String) -> OpenAiUsageUrlGuard {
+    assert!(url.starts_with("http://127.0.0.1:"));
+    let previous = TEST_OPENAI_USAGE_URL
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .replace(url);
+    OpenAiUsageUrlGuard(previous)
+}
 
 /// Cache duration (refresh every 5 minutes - usage data is slow-changing)
 const CACHE_DURATION: Duration = Duration::from_secs(300);
@@ -243,10 +293,11 @@ where
     }
 
     let mut tasks = tokio::task::JoinSet::<Option<ProviderUsage>>::new();
-    let total = enqueue_provider_usage_tasks(&mut tasks);
+    let (total, anthropic_key) =
+        enqueue_with_stable_anthropic_key(|| enqueue_provider_usage_tasks(&mut tasks));
 
     if total == 0 {
-        sync_cached_usage_from_reports(&results, openai_generation).await;
+        sync_cached_usage_from_reports(&results, anthropic_key, openai_generation).await;
         if let Ok(mut map) = cache.lock() {
             map.clear();
         }
@@ -265,6 +316,7 @@ where
         completed += 1;
         if let Ok(Some(report)) = joined {
             upsert_provider_usage(&mut results, report);
+            claude_code::dedupe_claude_code_by_email(&mut results);
         }
 
         on_update(ProviderUsageProgress {
@@ -276,7 +328,7 @@ where
         });
     }
 
-    sync_cached_usage_from_reports(&results, openai_generation).await;
+    sync_cached_usage_from_reports(&results, anthropic_key, openai_generation).await;
 
     if let Ok(mut map) = cache.lock()
         && openai_generation == openai_usage_generation()
@@ -344,12 +396,27 @@ fn attach_activity(report: &mut ProviderUsage, source_key: &str) {
     }
 }
 
+/// Enqueue the usage fetches and return the Claude usage key they belong to.
+///
+/// The key is read before and after enqueueing. The tasks pick the active
+/// Claude account while they are enqueued, so if the active login changed in
+/// between, the active report cannot be tied to one account. Then no key is
+/// returned and the Claude report is neither cached nor applied, which is
+/// better than storing one account's usage under another account's key.
+fn enqueue_with_stable_anthropic_key(enqueue: impl FnOnce() -> usize) -> (usize, Option<String>) {
+    let before = accessors::current_anthropic_usage_key();
+    let total = enqueue();
+    let after = accessors::current_anthropic_usage_key();
+    (total, if before == after { before } else { None })
+}
+
 fn enqueue_provider_usage_tasks(tasks: &mut tokio::task::JoinSet<Option<ProviderUsage>>) -> usize {
     let mut total = 0usize;
 
     total += enqueue_anthropic_usage_tasks(tasks);
     total += enqueue_openai_usage_tasks(tasks);
     total += enqueue_api_key_usage_tasks(tasks);
+    total += claude_code::enqueue_claude_code_usage_tasks(tasks);
 
     if openrouter_api_key().is_some() {
         tasks.spawn(async {
@@ -424,6 +491,10 @@ fn activity_source_has_dedicated_report(source_key: &str) -> bool {
     // Dual-auth and OAuth surfaces always reported above.
     if source_key.starts_with("claude:") || source_key.starts_with("openai:") {
         return true;
+    }
+    // Claude Code instances get a probe report while the CLI is installed.
+    if source_key == "claude-code" || source_key.starts_with("claude-code:") {
+        return crate::auth::claude_code::binary_available();
     }
     match source_key {
         "openrouter" => openrouter_api_key().is_some(),
@@ -610,39 +681,61 @@ fn enqueue_openai_usage_tasks(tasks: &mut tokio::task::JoinSet<Option<ProviderUs
     1
 }
 
-async fn sync_cached_usage_from_reports(results: &[ProviderUsage], openai_generation: u64) {
-    sync_active_anthropic_usage_from_reports(results).await;
+async fn sync_cached_usage_from_reports(
+    results: &[ProviderUsage],
+    anthropic_key: Option<String>,
+    openai_generation: u64,
+) {
+    sync_active_anthropic_usage_from_reports(results, anthropic_key).await;
     sync_openai_usage_from_reports(results, openai_generation).await;
 }
 
-async fn sync_active_anthropic_usage_from_reports(results: &[ProviderUsage]) {
+/// `fetched_for` is the usage key of the Claude login that was active when the
+/// fetch started, so the report is stored under the account that produced it.
+/// The process-wide snapshot is only updated while that login is still active:
+/// a fetch that finishes after an account switch must not make the new login
+/// look exhausted.
+async fn sync_active_anthropic_usage_from_reports(
+    results: &[ProviderUsage],
+    fetched_for: Option<String>,
+) {
     let report = active_anthropic_usage_report(results);
     let usage = get_usage().await;
     let mut cached = usage.write().await;
+    let still_active = fetched_for == accessors::current_anthropic_usage_key();
 
     match report {
         Some(report) => {
             let usage_data = usage_data_from_provider_report(report);
-            if let Ok(creds) = auth::claude::load_credentials() {
-                let cache_key = anthropic_usage_cache_key(
-                    &creds.access_token,
-                    auth::claude::active_account_label().as_deref(),
-                );
-                store_anthropic_usage(cache_key, usage_data.clone());
+            if let Some(key) = &fetched_for {
+                store_anthropic_usage(key.clone(), usage_data.clone());
             }
+            if !still_active {
+                return;
+            }
+            set_active_usage_key(fetched_for);
             *cached = usage_data;
             if report.error.is_none() {
                 crate::provider::clear_provider_unavailable_for_account("claude");
             }
         }
-        None => {
+        None if still_active => {
             *cached = UsageData {
                 fetched_at: Some(Instant::now()),
                 last_error: Some("No Anthropic OAuth credentials found".to_string()),
                 ..Default::default()
             };
         }
+        None => {}
     }
+}
+
+#[cfg(test)]
+pub(crate) async fn sync_openai_usage_reports_for_tests(
+    results: &[ProviderUsage],
+    generation: u64,
+) {
+    sync_openai_usage_from_reports(results, generation).await;
 }
 
 async fn sync_openai_usage_from_reports(results: &[ProviderUsage], generation: u64) {
@@ -655,10 +748,9 @@ async fn sync_openai_usage_from_reports(results: &[ProviderUsage], generation: u
 
     match report {
         Some(report) => {
+            // Exact-label cache storage owns generation-bound quota clearing.
+            // Aggregate display synchronization must preserve newer and auth markers.
             *cached = openai_usage_data_from_provider_report(report);
-            if report.error.is_none() {
-                crate::provider::clear_provider_unavailable_for_account("openai");
-            }
         }
         None => {
             *cached = OpenAIUsageData {

@@ -435,7 +435,9 @@ mod tests {
     #[tokio::test]
     async fn test_list_empty() {
         let tool = create_test_tool();
-        let ctx = create_test_context();
+        let empty_project = tempfile::tempdir().unwrap();
+        let mut ctx = create_test_context();
+        ctx.working_dir = Some(empty_project.path().to_path_buf());
         let input = json!({"action": "list"});
 
         let result = tool.execute(input, ctx).await.unwrap();

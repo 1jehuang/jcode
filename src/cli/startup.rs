@@ -24,12 +24,17 @@ pub async fn run() -> Result<()> {
     super::login::install_terminal_login_presenter();
     // Snapshot user-supplied provider env before provider init rewrites it.
     super::provider_init::capture_user_openrouter_model_env();
-    // Credential import and explicit MCP management do not need normal agent
-    // startup hardening, migrations, telemetry, or provider discovery.
+    // Credential import, installer publication, and explicit MCP management
+    // must run without normal agent startup hardening, migrations, telemetry,
+    // or provider discovery.
     if args.ssh.is_none()
         && matches!(
             args.command,
-            Some(Command::Auth(super::args::AuthCommand::Import { .. }) | Command::Mcp { .. })
+            Some(
+                Command::Auth(super::args::AuthCommand::Import { .. })
+                    | Command::PublishBuild(_)
+                    | Command::Mcp { .. }
+            )
         )
     {
         if let Some(cwd) = &args.cwd {
@@ -220,6 +225,31 @@ pub fn register_external_provider_runtimes() {
         crate::provider::external::GROK_BUILD_RUNTIME,
         || std::sync::Arc::new(jcode_provider_grok_build_runtime::GrokBuildProvider::new()),
     );
+    crate::provider::external::register_external_provider(
+        crate::provider::external::CLAUDE_CODE_RUNTIME,
+        || std::sync::Arc::new(jcode_provider_claude_code_runtime::ClaudeCodeProvider::new()),
+    );
+    crate::usage::register_claude_code_usage_probe(|instance| async move {
+        let settings = crate::auth::claude_code::settings();
+        let identity =
+            jcode_provider_claude_code_runtime::probe_instance(&settings, &instance).await?;
+        // An older CLI without `get_usage` still yields identity, just no windows.
+        let usage = identity.usage;
+        Ok(crate::usage::ClaudeCodeUsageProbe {
+            email: identity.email,
+            plan: identity.subscription,
+            limits_unavailable: usage.unavailable,
+            windows: usage
+                .windows
+                .into_iter()
+                .map(|w| crate::usage::ClaudeCodeUsageWindow {
+                    name: w.name,
+                    percent: w.percent,
+                    resets_at: w.resets_at,
+                })
+                .collect(),
+        })
+    });
     crate::provider::external::register_external_provider(
         crate::provider::external::GEMINI_RUNTIME,
         || std::sync::Arc::new(jcode_provider_gemini_runtime::GeminiProvider::new()),
@@ -497,6 +527,8 @@ fn should_spawn_background_update_check_with_config(args: &Args, check_updates: 
         && !matches!(
             args.command,
             Some(Command::Update)
+                | Some(Command::PruneBuilds { .. })
+                | Some(Command::PublishBuild(_))
                 | Some(Command::Serve { .. })
                 | Some(Command::Server { .. })
                 | Some(Command::Acp)
@@ -528,6 +560,36 @@ mod tests {
 
     fn parse_args(argv: &[&str]) -> Args {
         Args::parse_from(argv)
+    }
+
+    #[test]
+    fn build_store_maintenance_never_starts_background_update_check() {
+        for argv in [
+            vec!["jcode", "prune-builds"],
+            vec!["jcode", "prune-builds", "--keep", "0"],
+            vec!["jcode", "prune-builds", "--dry-run"],
+            vec![
+                "jcode",
+                "publish-build",
+                "--source",
+                "prepared",
+                "--version",
+                "test",
+                "--launcher",
+                "launcher",
+                "--channel",
+                "stable",
+            ],
+        ] {
+            let args = parse_args(&argv);
+            assert!(!should_spawn_background_update_check_with_config(
+                &args, true
+            ));
+        }
+        let args = parse_args(&["jcode"]);
+        assert!(should_spawn_background_update_check_with_config(
+            &args, true
+        ));
     }
 
     #[test]

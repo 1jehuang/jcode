@@ -54,10 +54,14 @@ impl App {
                 _ => claude_accounts.len() + openai_accounts.len(),
             };
             let detail = if scoped_saved_accounts == 0 {
-                "choose provider, add a new account, or replace an existing saved one".to_string()
+                "Choose a provider to sign in. Existing saved accounts are kept.".to_string()
+            } else if provider_scope.is_some() {
+                format!(
+                    "{scoped_saved_accounts} saved logins. Add a new login or refresh a saved one."
+                )
             } else {
                 format!(
-                    "choose provider; {} Claude and {} OpenAI account(s) available",
+                    "Saved logins: Claude {}, OpenAI {}. Add or refresh an account.",
                     claude_accounts.len(),
                     openai_accounts.len()
                 )
@@ -120,19 +124,6 @@ impl App {
                 crate::auth::AuthState::NotConfigured => "setup needed",
             };
 
-            if !matches!(auth_state, crate::auth::AuthState::NotConfigured) {
-                items.push(AccountPickerItem::action(
-                    provider.id,
-                    provider.display_name,
-                    "Saved auth entry",
-                    format!(
-                        "{} - {} - {}",
-                        state_label, method_detail, validation_detail
-                    ),
-                    AccountPickerCommand::SubmitInput(format!("/account {} settings", provider.id)),
-                ));
-            }
-
             items.push(AccountPickerItem::action(
                 provider.id,
                 provider.display_name,
@@ -150,17 +141,23 @@ impl App {
             items.push(AccountPickerItem::action(
                 provider.id,
                 provider.display_name,
-                "Login / refresh",
+                if matches!(auth_state, crate::auth::AuthState::NotConfigured) {
+                    "Sign in"
+                } else {
+                    "Refresh login"
+                },
                 provider.menu_detail,
                 AccountPickerCommand::SubmitInput(format!("/account {} login", provider.id)),
             ));
-            items.push(AccountPickerItem::action(
-                provider.id,
-                provider.display_name,
-                "Diagnose login",
-                format!("{} - {}", state_label, validation_detail),
-                AccountPickerCommand::SubmitInput(format!("/account {} doctor", provider.id)),
-            ));
+            if provider_scope.is_none() {
+                items.push(AccountPickerItem::action(
+                    provider.id,
+                    provider.display_name,
+                    "Diagnose login",
+                    format!("{} - {}", state_label, validation_detail),
+                    AccountPickerCommand::SubmitInput(format!("/account {} doctor", provider.id)),
+                ));
+            }
 
             match provider.id {
                 "claude" => self.append_anthropic_account_picker_items(&mut items, provider),
@@ -343,17 +340,45 @@ impl App {
             return;
         };
 
+        let current_provider = if self.is_remote {
+            self.remote_provider_name.clone().unwrap_or_default()
+        } else {
+            self.provider.name().to_string()
+        };
+        let current_is_claude_code = super::window_account::account_family(&current_provider)
+            == Some(super::window_account::CLAUDE_CODE_FAMILY);
+        let include_claude_code =
+            current_is_claude_code || !crate::auth::claude_code::settings().instances.is_empty();
         let provider_label = match scope_key.as_str() {
+            "all" if include_claude_code => "Claude + OpenAI + Claude Code",
             "all" => "Claude + OpenAI",
             "claude" => "Claude",
             "openai" => "OpenAI",
+            super::window_account::CLAUDE_CODE_FAMILY => "Claude Code",
             _ => scope_key.as_str(),
         };
 
         let (models, selected) = match scope_key.as_str() {
-            "all" => self.build_all_inline_account_picker(),
+            "all" => {
+                let (mut models, mut selected) = self.build_all_inline_account_picker();
+                // Include the implicit instance when this window uses Claude
+                // Code, and focus its current instance instead of another family.
+                if !include_claude_code {
+                    (models, selected)
+                } else {
+                    let (cc, cc_selected) = self.build_claude_code_inline_account_picker();
+                    if current_is_claude_code && !cc.is_empty() {
+                        selected = models.len() + cc_selected;
+                    }
+                    models.extend(cc);
+                    (models, selected)
+                }
+            }
             "claude" => self.build_claude_inline_account_picker(),
             "openai" => self.build_openai_inline_account_picker(),
+            super::window_account::CLAUDE_CODE_FAMILY => {
+                self.build_claude_code_inline_account_picker()
+            }
             _ => unreachable!(),
         };
 
@@ -366,11 +391,13 @@ impl App {
             column: 0,
             filter: String::new(),
             preview: false,
+            scoped_route_restore: Vec::new(),
+            effort_step: None,
         });
         self.input.clear();
         self.cursor_pos = 0;
         self.set_status_notice(format!(
-            "Account → {} (↑↓ or j/k, Enter to select)",
+            "Account → {} (Enter: use in this window · Ctrl+D: make default)",
             provider_label
         ));
     }
@@ -390,6 +417,9 @@ impl App {
             return match filter.to_ascii_lowercase().as_str() {
                 "claude" | "anthropic" => Some("claude".to_string()),
                 "openai" => Some("openai".to_string()),
+                "claude-code" | "claude_code" => {
+                    Some(super::window_account::CLAUDE_CODE_FAMILY.to_string())
+                }
                 _ => None,
             };
         }
@@ -407,16 +437,82 @@ impl App {
         {
             "claude" => Some("claude".to_string()),
             "openai" => Some("openai".to_string()),
+            super::window_account::CLAUDE_CODE_FAMILY => {
+                Some(super::window_account::CLAUDE_CODE_FAMILY.to_string())
+            }
             _ => None,
         }
+    }
+
+    /// Claude Code CLI instances from `[provider.claude_code]`: one row per
+    /// instance with the email/plan Claude Code cached for its login. Enter
+    /// pins the instance for this window; logins happen in a terminal.
+    fn build_claude_code_inline_account_picker(&self) -> (Vec<crate::tui::PickerEntry>, usize) {
+        let family = super::window_account::CLAUDE_CODE_FAMILY;
+        let instances = crate::auth::claude_code::instances();
+        let active = self
+            .window_account_label(family)
+            .unwrap_or_else(crate::auth::claude_code::default_instance_id);
+        let mut models = Vec::with_capacity(instances.len());
+        let mut selected = 0usize;
+        for instance in &instances {
+            let is_active = instance.id == active;
+            if is_active {
+                selected = models.len();
+            }
+            let identity = crate::auth::claude_code::instance_identity(instance);
+            let email = identity
+                .as_ref()
+                .and_then(|identity| identity.email.as_deref())
+                .map(mask_email)
+                .unwrap_or_else(|| "not signed in".to_string());
+            let plan = identity
+                .as_ref()
+                .and_then(|identity| identity.plan.clone())
+                .unwrap_or_else(|| "unknown".to_string());
+            let home = instance
+                .resolved_home()
+                .map(|home| home.display().to_string())
+                .unwrap_or_else(|| "default login".to_string());
+            models.push(crate::tui::PickerEntry {
+                name: format!("Claude Code · {}", instance.display_label()),
+                options: vec![crate::tui::PickerOption {
+                    provider: "Claude Code".to_string(),
+                    api_method: self.account_row_badge(family, &instance.id).0.to_string(),
+                    available: true,
+                    detail: format!("{} - plan {} - {} - {}", email, plan, instance.id, home),
+                    estimated_reference_cost_micros: None,
+                }],
+                action: crate::tui::PickerAction::Account(
+                    crate::tui::AccountPickerAction::Switch {
+                        provider_id: family.to_string(),
+                        label: instance.id.clone(),
+                    },
+                ),
+                selected_option: 0,
+                is_current: is_active,
+                is_default: false,
+                is_favorite: false,
+                recommended: false,
+                recommendation_rank: usize::MAX,
+                usage_score: 0,
+                old: false,
+                created_date: None,
+                effort: None,
+            });
+        }
+        (models, selected)
     }
 
     fn build_all_inline_account_picker(&self) -> (Vec<crate::tui::PickerEntry>, usize) {
         let claude_accounts = crate::auth::claude::list_accounts().unwrap_or_default();
         let openai_accounts = crate::auth::codex::list_accounts().unwrap_or_default();
-        let claude_active = crate::auth::claude::active_account_label()
+        // "Active" here means the account THIS window uses.
+        let claude_active = self
+            .window_account_label("claude")
             .unwrap_or_else(crate::auth::claude::primary_account_label);
-        let openai_active = crate::auth::codex::active_account_label()
+        let openai_active = self
+            .window_account_label("openai")
             .unwrap_or_else(crate::auth::codex::primary_account_label);
         let next_claude = crate::auth::claude::next_account_label()
             .unwrap_or_else(|_| crate::auth::claude::primary_account_label());
@@ -462,11 +558,10 @@ impl App {
                 ),
                 options: vec![crate::tui::PickerOption {
                     provider: "Claude".to_string(),
-                    api_method: if is_active {
-                        "active".to_string()
-                    } else {
-                        "saved".to_string()
-                    },
+                    api_method: self
+                        .account_row_badge("claude", &account.label)
+                        .0
+                        .to_string(),
                     available: true,
                     detail: format!(
                         "{} - {} - {} - plan {}",
@@ -522,11 +617,10 @@ impl App {
                 ),
                 options: vec![crate::tui::PickerOption {
                     provider: "OpenAI".to_string(),
-                    api_method: if is_active {
-                        "active".to_string()
-                    } else {
-                        "saved".to_string()
-                    },
+                    api_method: self
+                        .account_row_badge("openai", &account.label)
+                        .0
+                        .to_string(),
                     available: true,
                     detail: format!("{} - {} - acct {}", email, status, account_id),
                     estimated_reference_cost_micros: None,
@@ -721,7 +815,8 @@ impl App {
 
     fn build_claude_inline_account_picker(&self) -> (Vec<crate::tui::PickerEntry>, usize) {
         let accounts = crate::auth::claude::list_accounts().unwrap_or_default();
-        let active_label = crate::auth::claude::active_account_label()
+        let active_label = self
+            .window_account_label("claude")
             .unwrap_or_else(crate::auth::claude::primary_account_label);
         let next_label = crate::auth::claude::next_account_label()
             .unwrap_or_else(|_| crate::auth::claude::primary_account_label());
@@ -755,11 +850,10 @@ impl App {
                 ),
                 options: vec![crate::tui::PickerOption {
                     provider: "Claude".to_string(),
-                    api_method: if is_active {
-                        "active".to_string()
-                    } else {
-                        "saved".to_string()
-                    },
+                    api_method: self
+                        .account_row_badge("claude", &account.label)
+                        .0
+                        .to_string(),
                     available: true,
                     detail: format!(
                         "{} - {} - {} - plan {}",
@@ -882,7 +976,8 @@ impl App {
 
     fn build_openai_inline_account_picker(&self) -> (Vec<crate::tui::PickerEntry>, usize) {
         let accounts = crate::auth::codex::list_accounts().unwrap_or_default();
-        let active_label = crate::auth::codex::active_account_label()
+        let active_label = self
+            .window_account_label("openai")
             .unwrap_or_else(crate::auth::codex::primary_account_label);
         let next_label = crate::auth::codex::next_account_label()
             .unwrap_or_else(|_| crate::auth::codex::primary_account_label());
@@ -916,11 +1011,10 @@ impl App {
                 ),
                 options: vec![crate::tui::PickerOption {
                     provider: "OpenAI".to_string(),
-                    api_method: if is_active {
-                        "active".to_string()
-                    } else {
-                        "saved".to_string()
-                    },
+                    api_method: self
+                        .account_row_badge("openai", &account.label)
+                        .0
+                        .to_string(),
                     available: true,
                     detail: format!("{} - {} - acct {}", email, status, account_id),
                     estimated_reference_cost_micros: None,

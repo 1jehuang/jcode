@@ -1,815 +1,1220 @@
-#[derive(Clone)]
-struct AccountRoutingStreamProvider {
-    attempts: Arc<Mutex<Vec<String>>>,
-    failures: HashMap<String, String>,
+// Per-session same-provider account failover (slice S3).
+//
+// Fake Claude/OpenAI runtimes implement the account-pin trait methods
+// themselves (so these tests do not depend on the real S2 plumbing) and
+// resolve the account per request: the pin, else the stored default account.
+// A shared `FakeAccountWorld` decides how each account answers and records
+// which account served every request.
+
+use jcode_provider_core::{AccountPin, AccountProviderKind};
+
+fn serve_openai_usage(rt: &tokio::runtime::Runtime, body: &'static str,
+    hits: Arc<std::sync::atomic::AtomicUsize>) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+    let url = format!("http://{}/wham/usage", listener.local_addr().unwrap());
+    rt.spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut buf = vec![0u8; 8192];
+            let _ = stream.read(&mut buf).await;
+            let response = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}", body.len(), body);
+            let _ = stream.write_all(response.as_bytes()).await;
+        }
+    });
+    url
+}
+
+#[test]
+fn openai_rotation_rechecks_a_marked_alternative_live() {
+    with_account_failover_env(|| {
+        crate::usage::reset_openai_exhaustion_revalidation_for_tests();
+        assert_eq!(store_openai_accounts(2), ["openai-otter", "openai-fox"]);
+        let world = Arc::new(FakeAccountWorld::default());
+        let a = account_session(&world, "A", ActiveProvider::OpenAI, false);
+        let rt = enter_test_runtime();
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let _endpoint = crate::usage::override_openai_usage_url_for_tests(serve_openai_usage(&rt,
+            OPENAI_USAGE_OPEN_BODY, Arc::clone(&hits)));
+        let far = chrono::Utc::now().timestamp() + 5 * 3600;
+        for label in ["openai-otter", "openai-fox"] {
+            crate::provider::account_failover::record_account_exhausted(AccountProviderKind::OpenAi, label, Some(far));
+        }
+        crate::usage::mark_openai_exhaustion_revalidated_for_tests("openai-otter");
+        let text = complete_text(&rt, &a);
+        crate::usage::forget_openai_usage_for_label_for_tests("openai-fox");
+        assert_eq!(text.expect("the reset alternative takes the request"), "hi from openai-fox");
+        assert_eq!(world.labels_for("A"), ["openai-fox"]);
+        assert!(hits.load(std::sync::atomic::Ordering::SeqCst) >= 1, "live usage fetch must occur");
+        assert_eq!(a.account_pin(AccountProviderKind::OpenAi).unwrap().label, "openai-fox");
+    });
+}
+
+const OPENAI_USAGE_OPEN_BODY: &str = r#"{"rate_limit":{"allowed":true,"limit_reached":false,"primary_window":{"used_percent":3,"limit_window_seconds":18000},"secondary_window":{"used_percent":10,"limit_window_seconds":604800}}}"#;
+
+/// The live recheck path end to end: the session's own marked account is
+/// rechecked against the (mock) usage endpoint, and the resume is sent.
+#[test]
+fn openai_marked_account_is_rechecked_live_and_the_resume_is_sent() {
+    with_account_failover_env(|| {
+        crate::usage::reset_openai_exhaustion_revalidation_for_tests();
+        store_openai_accounts(1);
+        let world = Arc::new(FakeAccountWorld::default());
+        let a = account_session(&world, "A", ActiveProvider::OpenAI, false);
+        let rt = enter_test_runtime();
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let _endpoint = crate::usage::override_openai_usage_url_for_tests(serve_openai_usage(&rt,
+            OPENAI_USAGE_OPEN_BODY, Arc::clone(&hits)));
+        let far = chrono::Utc::now().timestamp() + 5 * 3600;
+        crate::provider::account_failover::record_account_exhausted(AccountProviderKind::OpenAi, "openai-otter", Some(far));
+        record_provider_unavailable_for_account_label("openai", Some("openai-otter"), "openai-otter is out of usage");
+        let text = complete_text(&rt, &a);
+        crate::usage::forget_openai_usage_for_label_for_tests("openai-otter");
+        assert_eq!(text.expect("resume is sent"), "hi from openai-otter");
+        assert!(hits.load(std::sync::atomic::Ordering::SeqCst) >= 1, "usage was fetched live");
+    });
+}
+
+
+#[derive(Clone, Debug)]
+enum FakeAccountBehavior {
+    /// Streams "hi from <label>".
+    Ok,
+    /// HTTP 200 stream whose first item is a marked usage-limit 429.
+    InStreamUsageLimit { resets_at: i64 },
+    /// A marked usage-limit 429 with no reset time (no reset headers).
+    InStreamUsageLimitNoReset,
+    /// Same, delivered as a `StreamEvent::Error` (OpenAI WebSocket shape).
+    InStreamUsageLimitEvent { resets_at: i64 },
+    /// An ordinary short 429 inside the stream (no usage-limit marker).
+    InStreamShort429,
+    /// A synchronous error before any stream exists.
+    SyncError(&'static str),
+}
+
+#[derive(Default)]
+struct FakeAccountWorld {
+    behavior: std::sync::Mutex<std::collections::HashMap<String, FakeAccountBehavior>>,
+    /// (session tag, label) per request, in order.
+    requests: std::sync::Mutex<Vec<(&'static str, String)>>,
+}
+
+impl FakeAccountWorld {
+    fn set(&self, label: &str, behavior: FakeAccountBehavior) {
+        self.behavior
+            .lock()
+            .unwrap()
+            .insert(label.to_string(), behavior);
+    }
+
+    fn behavior(&self, label: &str) -> FakeAccountBehavior {
+        self.behavior
+            .lock()
+            .unwrap()
+            .get(label)
+            .cloned()
+            .unwrap_or(FakeAccountBehavior::Ok)
+    }
+
+    fn requests(&self) -> Vec<(&'static str, String)> {
+        self.requests.lock().unwrap().clone()
+    }
+
+    fn labels_for(&self, session: &str) -> Vec<String> {
+        self.requests()
+            .into_iter()
+            .filter(|(tag, _)| *tag == session)
+            .map(|(_, label)| label)
+            .collect()
+    }
+}
+
+struct FakeAccountRuntime {
+    kind: AccountProviderKind,
+    session: &'static str,
+    world: Arc<FakeAccountWorld>,
+    pin: std::sync::RwLock<Option<AccountPin>>,
+    model: std::sync::RwLock<String>,
+}
+
+impl FakeAccountRuntime {
+    fn new(
+        kind: AccountProviderKind,
+        session: &'static str,
+        world: Arc<FakeAccountWorld>,
+    ) -> Arc<Self> {
+        let model = match kind {
+            AccountProviderKind::Claude => "claude-opus-4-6",
+            AccountProviderKind::OpenAi => "gpt-5.4",
+            AccountProviderKind::ClaudeCode => "claude-opus-4-6",
+        };
+        Arc::new(Self {
+            kind,
+            session,
+            world,
+            pin: std::sync::RwLock::new(None),
+            model: std::sync::RwLock::new(model.to_string()),
+        })
+    }
+
+    /// Pin, else the stored default account (like the real scoped load).
+    fn current_label(&self) -> String {
+        if let Some(pin) = self.pin.read().unwrap().as_ref() {
+            return pin.label.clone();
+        }
+        match self.kind {
+            AccountProviderKind::Claude => crate::auth::claude::active_account_label(),
+            AccountProviderKind::OpenAi => crate::auth::codex::active_account_label(),
+            AccountProviderKind::ClaudeCode => None,
+        }
+        .unwrap_or_else(|| "default".to_string())
+    }
 }
 
 #[async_trait::async_trait]
-impl Provider for AccountRoutingStreamProvider {
+impl Provider for FakeAccountRuntime {
     async fn complete(
         &self,
         _messages: &[Message],
         _tools: &[ToolDefinition],
         _system: &str,
         _resume_session_id: Option<&str>,
-    ) -> Result<EventStream> {
+    ) -> anyhow::Result<EventStream> {
         use crate::message::{ConnectionPhase, StreamEvent};
-        let label = auth::codex::active_account_label().expect("active test login");
-        self.attempts.lock().unwrap().push(label.clone());
-        let mut events = vec![
-            Ok(StreamEvent::ConnectionType {
-                connection: "https/sse".into(),
-            }),
-            Ok(StreamEvent::ConnectionPhase {
-                phase: ConnectionPhase::SendingRequest,
-            }),
-        ];
-        match self.failures.get(&label) {
-            Some(error) if error.starts_with("event:") => events.push(Ok(StreamEvent::Error {
-                message: error.trim_start_matches("event:").into(),
-                retry_after_secs: Some(60),
-            })),
-            Some(error) => events.push(Err(anyhow!("{error}"))),
-            None => {
-                events.push(Ok(StreamEvent::ConnectionPhase {
-                    phase: ConnectionPhase::WaitingForResponse,
-                }));
-                events.push(Ok(StreamEvent::TextDelta(format!("served by {label}"))));
-                events.push(Ok(StreamEvent::MessageEnd { stop_reason: None }));
-            }
-        }
-        Ok(Box::pin(futures::stream::iter(events)))
-    }
-
-    fn name(&self) -> &str {
-        "OpenAI"
-    }
-    fn model(&self) -> String {
-        "gpt-5.4".into()
-    }
-    fn credential_mode(&self) -> CredentialMode {
-        CredentialMode::OAuth
-    }
-    fn fork(&self) -> Arc<dyn Provider> {
-        Arc::new(self.clone())
-    }
-}
-
-struct AccountRoutingFixtureCleanup;
-
-impl Drop for AccountRoutingFixtureCleanup {
-    fn drop(&mut self) {
-        clear_provider_unavailable_for_account("openai-api");
-        clear_provider_unavailable_for_account("anthropic-api");
-        for label in ["openai-otter", "openai-fox", "openai-panda", "openai-wolf"] {
-            super::models::clear_openai_provider_unavailability_for_account_label(Some(label));
-        }
-    }
-}
-
-fn account_routing_fixture(
-    failures: &[(&str, &str)],
-) -> (
-    MultiProvider,
-    Arc<Mutex<Vec<String>>>,
-    AccountRoutingFixtureCleanup,
-) {
-    let provider = test_multi_provider_with_openai();
-    for label in ["openai-otter", "openai-fox", "openai-panda", "openai-wolf"] {
-        auth::codex::upsert_account_from_tokens(label, "fake-access", "fake-refresh", None, None)
-            .expect("save fixture login");
-        auth::codex::set_active_account_override(Some(label.into()));
-        clear_provider_unavailable_for_account("openai");
-    }
-    let labels = ["openai-otter", "openai-fox", "openai-panda"];
-    crate::auth::account_pool::AccountPool {
-        members: labels
-            .iter()
-            .map(|label| format!("openai:{label}"))
-            .collect(),
-        excluded: auth::codex::list_accounts()
+        let label = self.current_label();
+        self.world
+            .requests
+            .lock()
             .unwrap()
-            .into_iter()
-            .filter(|account| !labels.contains(&account.label.as_str()))
-            .map(|account| format!("openai:{}", account.label))
-            .collect(),
-    }
-    .save()
-    .expect("save fixture pool");
-    auth::codex::set_active_account_override(Some("openai-otter".into()));
-    let attempts = Arc::new(Mutex::new(Vec::new()));
-    *provider.openai.write().unwrap() = Some(Arc::new(AccountRoutingStreamProvider {
-        attempts: Arc::clone(&attempts),
-        failures: failures
-            .iter()
-            .map(|(label, error)| ((*label).into(), (*error).into()))
-            .collect(),
-    }));
-    (provider, attempts, AccountRoutingFixtureCleanup)
-}
-
-#[test]
-fn account_router_prompts_before_any_alternate_request_in_both_completion_modes() {
-    with_clean_provider_test_env(|| {
-        enter_test_runtime().block_on(async {
-            for split in [false, true] {
-                let (provider, attempts, _cleanup) =
-                    account_routing_fixture(&[("openai-otter", "429 Too Many Requests")]);
-                let runtime = provider.openai_provider().unwrap();
-                let result = if split {
-                    provider
-                        .complete_split(&[], &[], "static", "dynamic", None)
-                        .await
-                } else {
-                    provider.complete(&[], &[], "system", None).await
-                };
-                let error = result.err().expect("return pre-switch prompt");
-                let prompt = parse_failover_prompt_message(&error.to_string()).unwrap();
-                assert_eq!(
-                    prompt.target_route.as_deref(),
-                    Some("openai-oauth@openai-fox:gpt-5.4")
-                );
-                assert_eq!(*attempts.lock().unwrap(), ["openai-otter"]);
-                assert_eq!(
-                    auth::codex::active_account_label().as_deref(),
-                    Some("openai-otter")
-                );
-                assert!(Arc::ptr_eq(&runtime, &provider.openai_provider().unwrap()));
-                assert!(
-                    super::models::provider_unavailability_detail_for_account_label(
-                        "openai",
-                        Some("openai-otter")
-                    )
-                    .is_some()
-                );
-                assert!(
-                    super::models::provider_unavailability_detail_for_account_label(
-                        "openai",
-                        Some("openai-fox")
-                    )
-                    .is_none()
-                );
-            }
+            .push((self.session, label.clone()));
+        let connecting: anyhow::Result<StreamEvent> = Ok(StreamEvent::ConnectionPhase {
+            phase: ConnectionPhase::Connecting,
         });
-    });
-}
-
-#[test]
-fn account_router_cached_failure_skips_spent_and_excluded_accounts_without_requests() {
-    with_clean_provider_test_env(|| {
-        enter_test_runtime().block_on(async {
-            let (provider, attempts, _cleanup) = account_routing_fixture(&[]);
-            super::models::record_provider_unavailable_for_account_label(
-                "openai",
-                Some("openai-otter"),
-                "quota exhausted",
-            );
-            super::models::record_provider_unavailable_for_account_label(
-                "openai",
-                Some("openai-fox"),
-                "quota exhausted",
-            );
-            let error = provider
-                .complete(&[], &[], "system", None)
-                .await
-                .err()
-                .unwrap();
-            let prompt = parse_failover_prompt_message(&error.to_string()).unwrap();
-            assert_eq!(
-                prompt.target_route.as_deref(),
-                Some("openai-oauth@openai-panda:gpt-5.4")
-            );
-            assert!(attempts.lock().unwrap().is_empty());
-            assert!(!MultiProvider::is_failover_route_pool_approved(
-                "openai-oauth@openai-wolf:gpt-5.4"
-            ));
-            assert!(!MultiProvider::is_failover_route_pool_approved(
-                "openai-oauth@openai-fox:gpt-5.4"
-            ));
-        });
-    });
-}
-
-#[test]
-fn account_router_does_not_rotate_invalid_requests() {
-    with_clean_provider_test_env(|| {
-        enter_test_runtime().block_on(async {
-            let (provider, attempts, _cleanup) =
-                account_routing_fixture(&[("openai-otter", "400 invalid encrypted_content")]);
-            let error = provider
-                .complete(&[], &[], "system", None)
-                .await
-                .err()
-                .unwrap();
-            assert_eq!(error.to_string(), "400 invalid encrypted_content");
-            assert!(parse_failover_prompt_message(&error.to_string()).is_none());
-            assert_eq!(*attempts.lock().unwrap(), ["openai-otter"]);
-            assert!(provider_unavailability_detail_for_account("openai").is_none());
-        });
-    });
-}
-
-#[test]
-fn account_router_respects_disabled_failover() {
-    with_clean_provider_test_env(|| {
-        enter_test_runtime().block_on(async {
-            crate::env::set_var("JCODE_SAME_PROVIDER_ACCOUNT_FAILOVER", "false");
-            let (provider, attempts, _cleanup) =
-                account_routing_fixture(&[("openai-otter", "429 Too Many Requests")]);
-            assert!(!has_eligible_alternate_account("openai"));
-            let error = provider
-                .complete(&[], &[], "system", None)
-                .await
-                .err()
-                .expect("surface account error when no cross-provider pool route exists");
-            assert!(parse_failover_prompt_message(&error.to_string()).is_none());
-            assert_eq!(*attempts.lock().unwrap(), ["openai-otter"]);
-        });
-    });
-}
-
-#[derive(Clone)]
-struct ApiKeyAccountRoutingProvider {
-    inner: AccountRoutingStreamProvider,
-    mode: CredentialMode,
-    synchronous_limit: bool,
-}
-
-#[async_trait::async_trait]
-impl Provider for ApiKeyAccountRoutingProvider {
-    async fn complete(
-        &self,
-        messages: &[Message],
-        tools: &[ToolDefinition],
-        system: &str,
-        resume_session_id: Option<&str>,
-    ) -> Result<EventStream> {
-        let stream = self
-            .inner
-            .complete(messages, tools, system, resume_session_id)
-            .await?;
-        if self.synchronous_limit {
-            return Err(anyhow!("429 Too Many Requests"));
-        }
-        Ok(stream)
-    }
-
-    fn credential_mode(&self) -> CredentialMode {
-        self.mode
-    }
-
-    fn active_resolved_credential(&self) -> Option<jcode_provider_core::ResolvedCredential> {
-        Some(jcode_provider_core::ResolvedCredential::ApiKey)
-    }
-
-    fn name(&self) -> &str {
-        "OpenAI"
-    }
-
-    fn model(&self) -> String {
-        "gpt-5.4".into()
-    }
-
-    fn fork(&self) -> Arc<dyn Provider> {
-        Arc::new(self.clone())
-    }
-}
-
-#[test]
-fn account_router_api_key_requests_ignore_and_preserve_oauth_cooldown() {
-    with_clean_provider_test_env(|| {
-        enter_test_runtime().block_on(async {
-            use futures::StreamExt;
-            for mode in [CredentialMode::ApiKey] {
-                for split in [false, true] {
-                    let (provider, attempts, _cleanup) = account_routing_fixture(&[]);
-                    record_provider_unavailable_for_account(
-                        "openai",
-                        "saved OAuth quota exhausted",
-                    );
-                    *provider.openai.write().unwrap() =
-                        Some(Arc::new(ApiKeyAccountRoutingProvider {
-                            inner: AccountRoutingStreamProvider {
-                                attempts: attempts.clone(),
-                                failures: HashMap::new(),
-                            },
-                            mode,
-                            synchronous_limit: false,
-                        }));
-                    let mut stream = if split {
-                        provider
-                            .complete_split(&[], &[], "static", "dynamic", None)
-                            .await
-                    } else {
-                        provider.complete(&[], &[], "system", None).await
-                    }
-                    .expect("OAuth cooldown must not block an API-key request");
-                    let mut text = String::new();
-                    while let Some(event) = stream.next().await {
-                        if let crate::message::StreamEvent::TextDelta(delta) = event.unwrap() {
-                            text.push_str(&delta);
-                        }
-                    }
-                    assert_eq!(text, "served by openai-otter");
-                    assert_eq!(*attempts.lock().unwrap(), ["openai-otter"]);
-                    assert_eq!(
-                        auth::codex::active_account_label().as_deref(),
-                        Some("openai-otter")
-                    );
-                    assert!(
-                        provider_unavailability_detail_for_account("openai")
-                            .unwrap()
-                            .contains("saved OAuth quota exhausted")
-                    );
-                }
-            }
-        });
-    });
-}
-
-#[test]
-fn account_router_api_key_limit_does_not_rotate_or_poison_oauth_accounts() {
-    with_clean_provider_test_env(|| {
-        enter_test_runtime().block_on(async {
-            for mode in [CredentialMode::ApiKey] {
-                let (provider, attempts, _cleanup) = account_routing_fixture(&[]);
-                *provider.openai.write().unwrap() = Some(Arc::new(ApiKeyAccountRoutingProvider {
-                    inner: AccountRoutingStreamProvider {
-                        attempts: attempts.clone(),
-                        failures: HashMap::new(),
-                    },
-                    mode,
-                    synchronous_limit: true,
-                }));
-                let error = provider
-                    .complete(&[], &[], "system", None)
-                    .await
-                    .err()
-                    .expect("API key is limited");
-                assert!(
-                    parse_failover_prompt_message(&error.to_string()).is_none(),
-                    "excluded API source must not initiate automatic pool routing"
-                );
-                assert_eq!(*attempts.lock().unwrap(), ["openai-otter"]);
-                assert_eq!(
-                    auth::codex::active_account_label().as_deref(),
-                    Some("openai-otter")
-                );
-                for label in ["openai-otter", "openai-fox", "openai-panda"] {
-                    assert!(
-                        super::models::provider_unavailability_detail_for_account_label(
-                            "openai",
-                            Some(label)
-                        )
-                        .is_none()
-                    );
-                }
-            }
-        });
-    });
-}
-
-struct BoundAccountRoutingProvider {
-    attempts: Arc<Mutex<Vec<String>>>,
-    failures: HashMap<String, String>,
-    label: Mutex<String>,
-    mode: Mutex<CredentialMode>,
-}
-
-#[async_trait::async_trait]
-impl Provider for BoundAccountRoutingProvider {
-    async fn complete(
-        &self,
-        _messages: &[Message],
-        _tools: &[ToolDefinition],
-        _system: &str,
-        _resume: Option<&str>,
-    ) -> Result<EventStream> {
-        assert_eq!(
-            *self.mode.lock().unwrap(),
-            CredentialMode::OAuth,
-            "Auto would spend API credits after OAuth failure"
-        );
-        let label = self.label.lock().unwrap().clone();
-        self.attempts.lock().unwrap().push(label.clone());
-        let event = match self.failures.get(&label) {
-            Some(error) => Err(anyhow!("{error}")),
-            None => Ok(crate::message::StreamEvent::TextDelta(format!(
-                "served by {label}"
-            ))),
+        let items: Vec<anyhow::Result<StreamEvent>> = match self.world.behavior(&label) {
+            FakeAccountBehavior::SyncError(message) => anyhow::bail!("{message}"),
+            FakeAccountBehavior::Ok => vec![
+                connecting,
+                Ok(StreamEvent::TextDelta(format!("hi from {label}"))),
+                Ok(StreamEvent::MessageEnd { stop_reason: None }),
+            ],
+            FakeAccountBehavior::InStreamUsageLimit { resets_at } => vec![
+                connecting,
+                Err(anyhow::anyhow!(
+                    "Anthropic API error (429 Too Many Requests): rate_limit_error Usage limit reached for this Claude account. {}",
+                    jcode_provider_core::account_usage_limit_marker(Some(resets_at))
+                )),
+            ],
+            FakeAccountBehavior::InStreamUsageLimitNoReset => vec![
+                connecting,
+                Err(anyhow::anyhow!(
+                    "Anthropic API error (429 Too Many Requests): rate_limit_error Usage limit reached for this Claude account. {}",
+                    jcode_provider_core::account_usage_limit_marker(None)
+                )),
+            ],
+            FakeAccountBehavior::InStreamUsageLimitEvent { resets_at } => vec![
+                connecting,
+                Ok(StreamEvent::Error {
+                    message: format!(
+                        "usage_limit_reached: The usage limit has been reached {}",
+                        jcode_provider_core::account_usage_limit_marker(Some(resets_at))
+                    ),
+                    retry_after_secs: None,
+                }),
+            ],
+            FakeAccountBehavior::InStreamShort429 => vec![
+                connecting,
+                Err(anyhow::anyhow!(
+                    "Anthropic API error (429 Too Many Requests): rate_limit_error"
+                )),
+            ],
         };
-        Ok(Box::pin(futures::stream::iter(vec![event])))
+        Ok(Box::pin(futures::stream::iter(items)))
     }
-    fn name(&self) -> &str {
-        "OpenAI"
+
+    fn name(&self) -> &'static str {
+        match self.kind {
+            AccountProviderKind::Claude => "anthropic",
+            AccountProviderKind::OpenAi => "openai",
+            AccountProviderKind::ClaudeCode => "claude-code",
+        }
     }
+
     fn model(&self) -> String {
-        "gpt-5.4".into()
+        self.model.read().unwrap().clone()
     }
-    fn credential_mode(&self) -> CredentialMode {
-        *self.mode.lock().unwrap()
-    }
-    fn oauth_account_label(&self) -> Option<String> {
-        Some(self.label.lock().unwrap().clone())
-    }
-    fn context_window(&self) -> usize {
-        1024
-    }
-    fn set_oauth_account(&self, label: Option<&str>) -> Result<()> {
-        *self.label.lock().unwrap() = label.unwrap().to_owned();
+
+    fn set_model(&self, model: &str) -> anyhow::Result<()> {
+        *self.model.write().unwrap() = model.to_string();
         Ok(())
     }
-    fn set_credential_mode(&self, mode: CredentialMode) -> Result<()> {
-        *self.mode.lock().unwrap() = mode;
-        Ok(())
-    }
-    fn set_model(&self, _model: &str) -> Result<()> {
-        Ok(())
-    }
+
     fn fork(&self) -> Arc<dyn Provider> {
-        Arc::new(Self {
-            attempts: self.attempts.clone(),
-            failures: self.failures.clone(),
-            label: Mutex::new(self.label.lock().unwrap().clone()),
-            mode: Mutex::new(*self.mode.lock().unwrap()),
-        })
+        let fork = Self::new(self.kind, self.session, Arc::clone(&self.world));
+        *fork.pin.write().unwrap() = self.pin.read().unwrap().clone();
+        fork
+    }
+
+    fn account_pin(&self, kind: AccountProviderKind) -> Option<AccountPin> {
+        (kind == self.kind)
+            .then(|| self.pin.read().unwrap().clone())
+            .flatten()
+    }
+
+    fn set_account_pin(
+        &self,
+        kind: AccountProviderKind,
+        pin: Option<AccountPin>,
+    ) -> anyhow::Result<()> {
+        if kind == self.kind {
+            *self.pin.write().unwrap() = pin;
+        }
+        Ok(())
+    }
+
+    fn resolved_account_label(&self, kind: AccountProviderKind) -> Option<String> {
+        (kind == self.kind).then(|| self.current_label())
     }
 }
 
-fn bind_fixture_account(
-    provider: &MultiProvider,
-    attempts: &Arc<Mutex<Vec<String>>>,
-    label: &str,
-    failures: &[(&str, &str)],
-) {
-    *provider.openai.write().unwrap() = Some(Arc::new(BoundAccountRoutingProvider {
-        attempts: attempts.clone(),
-        failures: failures
-            .iter()
-            .map(|(label, error)| ((*label).into(), (*error).into()))
-            .collect(),
-        label: Mutex::new(label.into()),
-        mode: Mutex::new(CredentialMode::OAuth),
-    }));
-}
-
-#[test]
-fn pinned_complete_can_cross_pool_boundary_for_context_or_disabled_same_provider() {
-    with_clean_provider_test_env(|| {
-        enter_test_runtime().block_on(async {
-            crate::env::set_var("ANTHROPIC_API_KEY", "sk-test-cross-pool");
-            for (same_provider_enabled, failure) in [
-                (true, "context length exceeded"),
-                (false, "429 quota exhausted"),
-            ] {
-                crate::env::set_var(
-                    "JCODE_SAME_PROVIDER_ACCOUNT_FAILOVER",
-                    if same_provider_enabled {
-                        "true"
-                    } else {
-                        "false"
-                    },
-                );
-                for split in [false, true] {
-                    let (provider, attempts, _cleanup) = account_routing_fixture(&[]);
-                    bind_fixture_account(
-                        &provider,
-                        &attempts,
-                        "openai-otter",
-                        &[("openai-otter", failure)],
-                    );
-                    let mut pool = crate::auth::account_pool::AccountPool::load();
-                    pool.members.insert(1, "anthropic-api".into());
-                    pool.save().unwrap();
-                    let result = if split {
-                        provider
-                            .complete_split(&[], &[], "static", "dynamic", None)
-                            .await
-                    } else {
-                        provider.complete(&[], &[], "system", None).await
-                    };
-                    let error = result.err().expect("pre-switch cross-provider prompt");
-                    let prompt = parse_failover_prompt_message(&error.to_string())
-                        .expect("typed exact route prompt");
-                    assert_eq!(prompt.to_provider, "claude");
-                    let route = prompt.target_route.expect("exact API route");
-                    assert!(route.starts_with("claude-api:"), "{route}");
-                    assert!(MultiProvider::is_failover_route_pool_approved(&route));
-                    assert_eq!(*attempts.lock().unwrap(), ["openai-otter"]);
-                    assert_eq!(
-                        provider.oauth_account_label().as_deref(),
-                        Some("openai-otter")
-                    );
-                    assert_eq!(
-                        auth::codex::active_account_label().as_deref(),
-                        Some("openai-otter")
-                    );
-                    assert_eq!(
-                        super::models::provider_unavailability_detail_for_account_label(
-                            "openai",
-                            Some("openai-otter")
-                        )
-                        .is_some(),
-                        !same_provider_enabled,
-                        "context-only failure must not poison account cooldown"
-                    );
-                    if same_provider_enabled {
-                        let model = route.split_once(':').unwrap().1;
-                        assert!(
-                            super::models::context_limit_for_model_with_provider(
-                                model,
-                                Some("claude")
-                            )
-                            .unwrap()
-                                > 1024
-                        );
-                    }
-                }
-            }
-        });
+/// One session: a MultiProvider whose Claude (and optionally OpenAI) slot is
+/// a fake runtime tagged `session`.
+fn account_session(
+    world: &Arc<FakeAccountWorld>,
+    session: &'static str,
+    active: ActiveProvider,
+    with_openai: bool,
+) -> MultiProvider {
+    let anthropic =
+        FakeAccountRuntime::new(AccountProviderKind::Claude, session, Arc::clone(world));
+    let openai = (with_openai || active == ActiveProvider::OpenAI).then(|| {
+        FakeAccountRuntime::new(AccountProviderKind::OpenAi, session, Arc::clone(world))
+            as Arc<dyn Provider>
     });
+    MultiProvider {
+        anthropic: RwLock::new(Some(anthropic as Arc<dyn Provider>)),
+        openai: RwLock::new(openai),
+        copilot_api: RwLock::new(None),
+        antigravity: RwLock::new(None),
+        gemini: RwLock::new(None),
+        cursor: RwLock::new(None),
+        claude_code: RwLock::new(None),
+        bedrock: RwLock::new(None),
+        openrouter: RwLock::new(None),
+        openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
+        active_openai_compatible_profile: RwLock::new(None),
+        active: RwLock::new(active),
+        startup_notices: RwLock::new(Vec::new()),
+        initial_provider: None,
+        catalog_scope: next_catalog_scope(),
+        routes_memo: std::sync::Mutex::new(None),
+        post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        account_failover: Default::default(),
+    }
+}
+
+/// Store `count` Claude accounts (claude-otter, claude-fox, claude-panda...).
+fn store_claude_accounts(count: usize) -> Vec<String> {
+    let expires = chrono::Utc::now().timestamp_millis() + 3_600_000;
+    (0..count)
+        .map(|index| {
+            crate::auth::claude::upsert_account(crate::auth::claude::AnthropicAccount {
+                label: format!("seed-{index}"),
+                access: format!("sk-ant-oat01-ACCT-{index}"),
+                refresh: format!("refresh-{index}"),
+                expires,
+                email: Some(format!("user{index}@example.com")),
+                subscription_type: None,
+                scopes: Vec::new(),
+            })
+            .expect("store claude account")
+        })
+        .collect()
+}
+
+fn store_openai_accounts(count: usize) -> Vec<String> {
+    let expires = chrono::Utc::now().timestamp_millis() + 3_600_000;
+    (0..count)
+        .map(|index| {
+            crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
+                label: format!("seed-{index}"),
+                access_token: format!("acc-{index}"),
+                refresh_token: format!("ref-{index}"),
+                id_token: None,
+                account_id: Some(format!("acct-{index}")),
+                expires_at: Some(expires),
+                email: Some(format!("o{index}@example.com")),
+            })
+            .expect("store openai account")
+        })
+        .collect()
+}
+
+fn write_provider_config(body: &str) {
+    let jcode_home = std::env::var_os("JCODE_HOME").expect("test JCODE_HOME should be set");
+    std::fs::write(
+        std::path::PathBuf::from(jcode_home).join("config.toml"),
+        format!("[provider]\n{body}\n"),
+    )
+    .expect("write test config.toml");
+    crate::config::invalidate_config_cache();
+}
+
+fn reset_account_failover_globals() {
+    crate::provider::account_failover::reset_account_exhaustion_for_tests();
+    clear_all_provider_unavailability_for_account();
+    for label in ["claude-otter", "claude-fox", "claude-panda"] {
+        clear_provider_unavailable_for_label("claude", label);
+    }
+    for label in ["openai-otter", "openai-fox"] {
+        clear_provider_unavailable_for_label("openai", label);
+    }
+}
+
+fn with_account_failover_env<T>(f: impl FnOnce() -> T) -> T {
+    with_clean_provider_test_env(|| {
+        reset_account_failover_globals();
+        let result = f();
+        reset_account_failover_globals();
+        result
+    })
+}
+
+fn complete_text(rt: &tokio::runtime::Runtime, provider: &MultiProvider) -> anyhow::Result<String> {
+    let messages = billing_test_messages();
+    rt.block_on(async {
+        let stream = provider.complete(&messages, &[], "", None).await?;
+        drain_text(stream).await
+    })
+}
+
+fn clock(unix: i64) -> String {
+    crate::provider::account_failover::format_reset_clock(unix)
 }
 
 #[test]
-fn auto_subscription_failure_is_pinned_before_any_api_spending() {
-    with_clean_provider_test_env(|| {
-        enter_test_runtime().block_on(async {
-            let (provider, attempts, _cleanup) = account_routing_fixture(&[]);
-            let mut pool = crate::auth::account_pool::AccountPool::load();
-            pool.excluded.push("openai-api".into());
-            pool.save().unwrap();
-            let original = Arc::new(BoundAccountRoutingProvider {
-                attempts: attempts.clone(),
-                failures: [("openai-otter".into(), "401 OAuth refresh rejected".into())].into(),
-                label: Mutex::new("unbound".into()),
-                mode: Mutex::new(CredentialMode::Auto),
-            });
-            *provider.openai.write().unwrap() = Some(original.clone());
-            let global_before = auth::codex::active_account_label();
-            let error = provider
-                .complete(&[], &[], "system", None)
-                .await
-                .err()
-                .unwrap();
-            let prompt = parse_failover_prompt_message(&error.to_string()).unwrap();
-            assert_eq!(
-                prompt.target_route.as_deref(),
-                Some("openai-oauth@openai-fox:gpt-5.4")
-            );
-            assert_eq!(*attempts.lock().unwrap(), ["openai-otter"]);
-            assert_eq!(
-                provider.oauth_account_label().as_deref(),
-                Some("openai-otter")
-            );
-            assert_eq!(
-                provider.openai_provider().unwrap().credential_mode(),
-                CredentialMode::OAuth
-            );
-            assert_eq!(original.credential_mode(), CredentialMode::Auto);
-            assert_eq!(original.oauth_account_label().as_deref(), Some("unbound"));
-            assert_eq!(auth::codex::active_account_label(), global_before);
-        });
-    });
-}
-
-#[test]
-fn exact_target_readiness_rejects_dead_refresh_and_unavailable_model() {
-    with_clean_provider_test_env(|| {
-        let rt = enter_test_runtime();
-        let _guard = rt.enter();
-        let (_provider, _attempts, _cleanup) = account_routing_fixture(&[]);
-        let route = "openai-oauth@openai-fox:gpt-5.4";
-        auth::codex::upsert_account_from_tokens("openai-fox", "expired", "", None, Some(1))
-            .unwrap();
-        assert!(!MultiProvider::is_failover_route_pool_approved(route));
-        auth::codex::upsert_account_from_tokens(
-            "openai-fox",
-            "expired",
-            "dead-refresh-fox",
-            None,
-            Some(1),
-        )
-        .unwrap();
-        crate::auth::refresh_state::record_permanent_rejection(
-            "openai",
-            "dead-refresh-fox",
-            "invalid_grant",
-        )
-        .unwrap();
-        assert!(!MultiProvider::is_failover_route_pool_approved(route));
-        auth::codex::upsert_account_from_tokens(
-            "openai-fox",
-            "fresh",
-            "new-refresh-fox",
-            None,
-            None,
-        )
-        .unwrap();
-        assert!(MultiProvider::is_failover_route_pool_approved(route));
-        super::models::record_model_unavailable_for_scope(
-            "openai-fox",
-            "gpt-5.4",
-            "model access denied",
+fn in_stream_claude_usage_limit_triggers_account_failover() {
+    with_account_failover_env(|| {
+        let labels = store_claude_accounts(3);
+        assert_eq!(labels, ["claude-otter", "claude-fox", "claude-panda"]);
+        let world = Arc::new(FakeAccountWorld::default());
+        let resets_at = chrono::Utc::now().timestamp() + 3 * 3600 + 17 * 60;
+        world.set(
+            "claude-otter",
+            FakeAccountBehavior::InStreamUsageLimit { resets_at },
         );
-        assert!(!MultiProvider::is_failover_route_pool_approved(route));
-        super::models::clear_model_unavailable_for_scope("openai-fox", "gpt-5.4");
-        assert!(!MultiProvider::is_failover_route_pool_approved(
-            "openai-oauth@openai-fox:not-a-model"
-        ));
+        let a = account_session(&world, "A", ActiveProvider::Claude, false);
+
+        let rt = enter_test_runtime();
+        let text = complete_text(&rt, &a).expect("the turn must finish on another account");
+        assert_eq!(text, "hi from claude-fox");
+        assert_eq!(world.labels_for("A"), ["claude-otter", "claude-fox"]);
+        assert_eq!(
+            a.account_pin(AccountProviderKind::Claude)
+                .map(|pin| pin.label),
+            Some("claude-fox".to_string()),
+            "only this session is pinned to the next account"
+        );
+        assert_eq!(
+            a.account_failover_home(AccountProviderKind::Claude)
+                .map(|pin| pin.label),
+            Some("claude-otter".to_string())
+        );
+        let notices = a.drain_startup_notices();
+        assert!(
+            notices.iter().any(|notice| notice
+                == &format!(
+                    "⚡ This window moved from claude-otter to claude-fox (claude-otter resets {})",
+                    clock(resets_at)
+                )),
+            "{notices:?}"
+        );
+        // The stored default and the process-wide override are untouched.
+        assert_eq!(crate::auth::claude::get_active_account_override(), None);
+        assert_eq!(
+            crate::auth::claude::active_account_label().as_deref(),
+            Some("claude-otter")
+        );
     });
 }
 
 #[test]
-fn context_failover_never_offers_known_too_small_routes() {
-    with_clean_provider_test_env(|| {
+fn in_stream_codex_usage_limit_reached_triggers_account_failover() {
+    with_account_failover_env(|| {
+        let labels = store_openai_accounts(2);
+        assert_eq!(labels, ["openai-otter", "openai-fox"]);
+        let world = Arc::new(FakeAccountWorld::default());
+        let resets_at = chrono::Utc::now().timestamp() + 2 * 3600;
+        world.set(
+            "openai-otter",
+            FakeAccountBehavior::InStreamUsageLimitEvent { resets_at },
+        );
+        let a = account_session(&world, "A", ActiveProvider::OpenAI, false);
+
         let rt = enter_test_runtime();
-        let _guard = rt.enter();
-        let (provider, _attempts, _cleanup) = account_routing_fixture(&[]);
+        let text = complete_text(&rt, &a).expect("the turn must finish on openai-fox");
+        assert_eq!(text, "hi from openai-fox");
+        assert_eq!(world.labels_for("A"), ["openai-otter", "openai-fox"]);
+        assert_eq!(
+            a.account_pin(AccountProviderKind::OpenAi)
+                .map(|pin| pin.label),
+            Some("openai-fox".to_string())
+        );
+        assert_eq!(crate::auth::codex::get_active_account_override(), None);
+        assert_eq!(
+            crate::auth::codex::active_account_label().as_deref(),
+            Some("openai-otter")
+        );
+    });
+}
+
+#[test]
+fn failover_moves_only_this_session() {
+    with_account_failover_env(|| {
+        store_claude_accounts(3);
+        let world = Arc::new(FakeAccountWorld::default());
+        let resets_at = chrono::Utc::now().timestamp() + 3600;
+        world.set(
+            "claude-otter",
+            FakeAccountBehavior::InStreamUsageLimit { resets_at },
+        );
+        let a = account_session(&world, "A", ActiveProvider::Claude, false);
+        let b = account_session(&world, "B", ActiveProvider::Claude, false);
+        b.set_account_pin(
+            AccountProviderKind::Claude,
+            Some(AccountPin::new("claude-panda", None)),
+        )
+        .unwrap();
+
+        let rt = enter_test_runtime();
+        assert_eq!(complete_text(&rt, &a).unwrap(), "hi from claude-fox");
+
+        // B keeps its own pin, the default is still otter, no global override.
+        assert_eq!(
+            b.account_pin(AccountProviderKind::Claude)
+                .map(|pin| pin.label),
+            Some("claude-panda".to_string())
+        );
+        assert_eq!(crate::auth::claude::get_active_account_override(), None);
+        assert_eq!(
+            crate::auth::claude::active_account_label().as_deref(),
+            Some("claude-otter")
+        );
+        assert!(b.drain_startup_notices().is_empty());
         assert!(
-            provider
-                .cross_provider_pool_prompt(
-                    ActiveProvider::OpenAI,
-                    ActiveProvider::Claude,
-                    "context length exceeded".into(),
-                    0,
-                    usize::MAX
-                )
+            b.account_failover_home(AccountProviderKind::Claude)
+                .is_none()
+        );
+        assert_eq!(complete_text(&rt, &b).unwrap(), "hi from claude-panda");
+        assert_eq!(world.labels_for("B"), ["claude-panda"]);
+    });
+}
+
+#[test]
+fn rotation_skips_exhausted_and_wraps() {
+    with_account_failover_env(|| {
+        store_claude_accounts(3);
+        let world = Arc::new(FakeAccountWorld::default());
+        let now = chrono::Utc::now().timestamp();
+        let rt = enter_test_runtime();
+
+        // X on otter runs out: otter is recorded exhausted, X moves to fox.
+        world.set(
+            "claude-otter",
+            FakeAccountBehavior::InStreamUsageLimit {
+                resets_at: now + 3600,
+            },
+        );
+        let x = account_session(&world, "X", ActiveProvider::Claude, false);
+        x.set_account_pin(
+            AccountProviderKind::Claude,
+            Some(AccountPin::new("claude-otter", None)),
+        )
+        .unwrap();
+        assert_eq!(complete_text(&rt, &x).unwrap(), "hi from claude-fox");
+        assert_eq!(world.labels_for("X"), ["claude-otter", "claude-fox"]);
+
+        // Y on panda (the last account) runs out. The rotation wraps to the
+        // start (otter), skips otter because it is known to be exhausted
+        // until its reset, and lands on fox. Otter gets no doomed request.
+        world.set("claude-otter", FakeAccountBehavior::Ok);
+        world.set(
+            "claude-panda",
+            FakeAccountBehavior::InStreamUsageLimit {
+                resets_at: now + 7200,
+            },
+        );
+        let y = account_session(&world, "Y", ActiveProvider::Claude, false);
+        y.set_account_pin(
+            AccountProviderKind::Claude,
+            Some(AccountPin::new("claude-panda", None)),
+        )
+        .unwrap();
+        assert_eq!(complete_text(&rt, &y).unwrap(), "hi from claude-fox");
+        assert_eq!(world.labels_for("Y"), ["claude-panda", "claude-fox"]);
+    });
+}
+
+#[test]
+fn all_exhausted_error_names_earliest_reset_without_unapproved_cross_provider_switch() {
+    with_account_failover_env(|| {
+        store_claude_accounts(3);
+        let world = Arc::new(FakeAccountWorld::default());
+        let now = chrono::Utc::now().timestamp();
+        let fox_reset = now + 3600 + 12 * 60;
+        world.set(
+            "claude-otter",
+            FakeAccountBehavior::InStreamUsageLimit {
+                resets_at: now + 3 * 3600,
+            },
+        );
+        world.set(
+            "claude-fox",
+            FakeAccountBehavior::InStreamUsageLimit {
+                resets_at: fox_reset,
+            },
+        );
+        world.set(
+            "claude-panda",
+            FakeAccountBehavior::InStreamUsageLimit {
+                resets_at: now + 2 * 3600,
+            },
+        );
+        let a = account_session(&world, "A", ActiveProvider::Claude, true);
+
+        let rt = enter_test_runtime();
+        let err = complete_text(&rt, &a).expect_err("every Claude account is out");
+        // A cross-provider offer needs a pool-approved exact route (the
+        // auto-switch pool); this fixture has none, so the error carries the
+        // reason instead of a prompt.
+        let text = format!("{err:#}");
+        let reason = crate::provider::parse_failover_prompt_message(&text)
+            .map(|prompt| prompt.reason)
+            .unwrap_or(text);
+        assert!(
+            reason.contains("All 3 Claude accounts are out of usage."),
+            "{reason}"
+        );
+        assert!(
+            reason.contains(&format!("First reset: claude-fox at {}", clock(fox_reset))),
+            "{reason}"
+        );
+        assert_eq!(
+            world.labels_for("A"),
+            ["claude-otter", "claude-fox", "claude-panda"],
+            "each account is tried once, nothing is sent to OpenAI"
+        );
+        assert_eq!(
+            a.account_pin(AccountProviderKind::Claude),
+            None,
+            "the original (unpinned) state is restored"
+        );
+        assert!(
+            a.account_failover_home(AccountProviderKind::Claude)
                 .is_none()
         );
     });
 }
 
 #[test]
-fn pinned_account_prompts_use_session_identity_and_apply_without_global_override() {
-    with_clean_provider_test_env(|| {
-        enter_test_runtime().block_on(async {
-            use futures::StreamExt;
-            for split in [false, true] {
-                let (provider, attempts, _cleanup) = account_routing_fixture(&[]);
-                bind_fixture_account(
-                    &provider,
-                    &attempts,
-                    "openai-fox",
-                    &[("openai-fox", "429 quota exhausted")],
-                );
-                let sibling = provider.fork();
-                let result = if split {
-                    provider
-                        .complete_split(&[], &[], "static", "dynamic", None)
-                        .await
-                } else {
-                    provider.complete(&[], &[], "system", None).await
-                };
-                let error = result.err().unwrap();
-                let prompt = parse_failover_prompt_message(&error.to_string()).unwrap();
-                let route = prompt.target_route.unwrap();
-                assert_eq!(route, "openai-oauth@openai-panda:gpt-5.4");
-                assert_eq!(*attempts.lock().unwrap(), ["openai-fox"]);
-                assert_eq!(
-                    provider.oauth_account_label().as_deref(),
-                    Some("openai-fox")
-                );
-                assert_eq!(sibling.oauth_account_label().as_deref(), Some("openai-fox"));
-                assert!(
-                    super::models::provider_unavailability_detail_for_account_label(
-                        "openai",
-                        Some("openai-fox")
-                    )
-                    .is_some()
-                );
-                assert!(
-                    super::models::provider_unavailability_detail_for_account_label(
-                        "openai",
-                        Some("openai-otter")
-                    )
-                    .is_none()
-                );
-                assert!(MultiProvider::is_failover_route_pool_approved(&route));
-                provider.set_model(&route).unwrap();
-                let mut stream = provider.complete(&[], &[], "system", None).await.unwrap();
-                assert!(stream.next().await.unwrap().is_ok());
-                assert_eq!(*attempts.lock().unwrap(), ["openai-fox", "openai-panda"]);
-                assert_eq!(
-                    provider.oauth_account_label().as_deref(),
-                    Some("openai-panda")
-                );
-                assert_eq!(sibling.oauth_account_label().as_deref(), Some("openai-fox"));
-                assert_eq!(
-                    auth::codex::active_account_label().as_deref(),
-                    Some("openai-otter")
-                );
-            }
-        });
-    });
-}
-
-#[test]
-fn pool_order_can_choose_explicit_api_before_same_vendor_oauth() {
-    with_clean_provider_test_env(|| {
-        enter_test_runtime().block_on(async {
-            let (provider, attempts, _cleanup) = account_routing_fixture(&[]);
-            bind_fixture_account(
-                &provider,
-                &attempts,
-                "openai-otter",
-                &[("openai-otter", "429 quota exhausted")],
-            );
-            let mut pool = crate::auth::account_pool::AccountPool::load();
-            pool.members.insert(1, "openai-api".into());
-            pool.save().unwrap();
-            let error = provider
-                .complete(&[], &[], "system", None)
-                .await
-                .err()
-                .unwrap();
-            let prompt = parse_failover_prompt_message(&error.to_string()).unwrap();
-            let route = prompt.target_route.unwrap();
-            assert!(
-                route.starts_with("openai-api:"),
-                "exact metered identity should follow configured order: {route}"
-            );
-            assert!(MultiProvider::is_failover_route_pool_approved(&route));
-            assert_eq!(*attempts.lock().unwrap(), ["openai-otter"]);
-            pool.members.retain(|key| key != "openai-api");
-            pool.excluded.push("openai-api".into());
-            pool.save().unwrap();
-            assert!(!MultiProvider::is_failover_route_pool_approved(&route));
-            let error = provider
-                .complete(&[], &[], "system", None)
-                .await
-                .err()
-                .unwrap();
-            let prompt = parse_failover_prompt_message(&error.to_string()).unwrap();
-            assert_eq!(
-                prompt.target_route.as_deref(),
-                Some("openai-oauth@openai-fox:gpt-5.4")
-            );
-            assert_eq!(*attempts.lock().unwrap(), ["openai-otter"]);
-        });
-    });
-}
-
-#[test]
-fn missing_or_excluded_pins_never_fallback() {
-    with_clean_provider_test_env(|| {
-        enter_test_runtime().block_on(async {
-            for label in ["missing", "openai-wolf"] {
-                let (provider, attempts, _cleanup) = account_routing_fixture(&[]);
-                bind_fixture_account(
-                    &provider,
-                    &attempts,
-                    label,
-                    &[(label, "429 quota exhausted")],
-                );
-                let error = provider
-                    .complete(&[], &[], "system", None)
-                    .await
-                    .err()
-                    .unwrap();
-                assert!(parse_failover_prompt_message(&error.to_string()).is_none());
-                assert_eq!(
-                    attempts.lock().unwrap().len(),
-                    usize::from(label != "missing")
-                );
-                assert_eq!(provider.oauth_account_label().as_deref(), Some(label));
-                assert_eq!(
-                    auth::codex::active_account_label().as_deref(),
-                    Some("openai-otter")
-                );
-            }
-        });
-    });
-}
-
-#[test]
-fn timer_target_revalidation_rejects_deleted_excluded_and_cooled_accounts() {
-    with_clean_provider_test_env(|| {
-        let rt = enter_test_runtime();
-        let _guard = rt.enter();
-        let (_provider, _attempts, _cleanup) = account_routing_fixture(&[]);
-        let route = "openai-oauth@openai-fox:gpt-5.4";
-        assert!(MultiProvider::is_failover_route_pool_approved(route));
-        let mut pool = crate::auth::account_pool::AccountPool::load();
-        pool.members.retain(|member| member != "openai:openai-fox");
-        pool.excluded.push("openai:openai-fox".into());
-        pool.save().unwrap();
-        assert!(!MultiProvider::is_failover_route_pool_approved(route));
-        pool.excluded.retain(|member| member != "openai:openai-fox");
-        pool.save().unwrap();
-        super::models::record_provider_unavailable_for_account_label(
-            "openai",
-            Some("openai-fox"),
-            "429 quota exhausted",
+fn returns_home_after_reset_at_turn_start() {
+    with_account_failover_env(|| {
+        store_claude_accounts(2);
+        let world = Arc::new(FakeAccountWorld::default());
+        let resets_at = chrono::Utc::now().timestamp() + 2;
+        world.set(
+            "claude-otter",
+            FakeAccountBehavior::InStreamUsageLimit { resets_at },
         );
-        assert!(!MultiProvider::is_failover_route_pool_approved(route));
-        super::models::clear_openai_provider_unavailability_for_account_label(Some("openai-fox"));
-        auth::codex::remove_account("openai-fox").unwrap();
-        assert!(!MultiProvider::is_failover_route_pool_approved(route));
-        assert!(!MultiProvider::is_failover_route_pool_approved(
-            "openai-oauth:gpt-5.4"
-        ));
-        assert!(!MultiProvider::is_failover_route_pool_approved(
-            "openai-api:gpt-5.4"
-        ));
+        let a = account_session(&world, "A", ActiveProvider::Claude, false);
+        let rt = enter_test_runtime();
+        assert_eq!(complete_text(&rt, &a).unwrap(), "hi from claude-fox");
+
+        // Before the reset: stay on fox.
+        assert!(a.return_account_home_if_reset().is_empty());
+        assert_eq!(
+            a.account_pin(AccountProviderKind::Claude)
+                .map(|pin| pin.label),
+            Some("claude-fox".to_string())
+        );
+
+        std::thread::sleep(std::time::Duration::from_millis(2_200));
+        world.set("claude-otter", FakeAccountBehavior::Ok);
+        assert_eq!(
+            a.return_account_home_if_reset(),
+            vec![AccountProviderKind::Claude]
+        );
+        assert_eq!(
+            a.account_pin(AccountProviderKind::Claude)
+                .map(|pin| pin.label),
+            Some("claude-otter".to_string())
+        );
+        assert!(
+            a.account_failover_home(AccountProviderKind::Claude)
+                .is_none()
+        );
+        assert_eq!(complete_text(&rt, &a).unwrap(), "hi from claude-otter");
+
+        // Config off: never returns on its own.
+        world.set(
+            "claude-otter",
+            FakeAccountBehavior::InStreamUsageLimit {
+                resets_at: chrono::Utc::now().timestamp() + 1,
+            },
+        );
+        assert_eq!(complete_text(&rt, &a).unwrap(), "hi from claude-fox");
+        write_provider_config("account_failover_return_home = false");
+        std::thread::sleep(std::time::Duration::from_millis(1_200));
+        assert!(a.return_account_home_if_reset().is_empty());
+        assert_eq!(
+            a.account_pin(AccountProviderKind::Claude)
+                .map(|pin| pin.label),
+            Some("claude-fox".to_string())
+        );
     });
 }
+
+#[test]
+fn session_failover_off_disables_rotation() {
+    with_account_failover_env(|| {
+        store_claude_accounts(3);
+        let world = Arc::new(FakeAccountWorld::default());
+        let resets_at = chrono::Utc::now().timestamp() + 3600;
+        world.set(
+            "claude-otter",
+            FakeAccountBehavior::InStreamUsageLimit { resets_at },
+        );
+        let rt = enter_test_runtime();
+
+        // This session turned failover off: the usage-limit error reaches the
+        // consumer unchanged and no other account is tried.
+        let a = account_session(&world, "A", ActiveProvider::Claude, false);
+        a.set_account_failover(Some(false));
+        let err = complete_text(&rt, &a).expect_err("failover is off for this session");
+        assert!(err.to_string().contains("429"), "{err:#}");
+        assert_eq!(world.labels_for("A"), ["claude-otter"]);
+        assert_eq!(a.account_pin(AccountProviderKind::Claude), None);
+
+        // Another session with the config default (on) still moves.
+        let b = account_session(&world, "B", ActiveProvider::Claude, false);
+        assert_eq!(complete_text(&rt, &b).unwrap(), "hi from claude-fox");
+
+        // Session on, config off: the session value wins.
+        write_provider_config("same_provider_account_failover = false");
+        reset_account_failover_globals();
+        let c = account_session(&world, "C", ActiveProvider::Claude, false);
+        c.set_account_failover(Some(true));
+        assert_eq!(complete_text(&rt, &c).unwrap(), "hi from claude-fox");
+    });
+}
+
+#[test]
+fn rejected_login_moves_window_but_excluded_source_stays_manual() {
+    with_account_failover_env(|| {
+        store_claude_accounts(2);
+        let world = Arc::new(FakeAccountWorld::default());
+        world.set(
+            "claude-otter",
+            FakeAccountBehavior::SyncError(
+                "Claude OAuth refresh token was previously rejected by Anthropic and cannot be refreshed.",
+            ),
+        );
+        let rt = enter_test_runtime();
+
+        // A rejected login cannot recover by retrying: this window moves on.
+        let a = account_session(&world, "A", ActiveProvider::Claude, false);
+        assert_eq!(complete_text(&rt, &a).unwrap(), "hi from claude-fox");
+        assert_eq!(world.labels_for("A"), ["claude-otter", "claude-fox"]);
+        assert_eq!(crate::auth::claude::get_active_account_override(), None);
+
+        // A source the user moved out of the auto-switch pool stays manual.
+        clear_provider_unavailable_for_label("claude", "claude-otter");
+        let mut pool = crate::auth::account_pool::AccountPool::load();
+        pool.excluded.push("claude:claude-otter".to_string());
+        pool.save().unwrap();
+        let b = account_session(&world, "B", ActiveProvider::Claude, false);
+        let _ = complete_text(&rt, &b).expect_err("excluded source does not move");
+        assert_eq!(world.labels_for("B"), ["claude-otter"]);
+        assert_eq!(b.account_pin(AccountProviderKind::Claude), None);
+    });
+}
+
+#[test]
+fn short_429_retries_same_account() {
+    with_account_failover_env(|| {
+        store_claude_accounts(3);
+        let world = Arc::new(FakeAccountWorld::default());
+        let rt = enter_test_runtime();
+
+        // An ordinary 429 inside the stream is not account exhaustion: the
+        // runtime owns its retries, the error is replayed untouched, and the
+        // session stays on its account.
+        world.set("claude-otter", FakeAccountBehavior::InStreamShort429);
+        let a = account_session(&world, "A", ActiveProvider::Claude, false);
+        let err = complete_text(&rt, &a).expect_err("the short 429 reaches the consumer");
+        assert!(err.to_string().contains("429"), "{err:#}");
+        assert_eq!(world.labels_for("A"), ["claude-otter"]);
+        assert_eq!(a.account_pin(AccountProviderKind::Claude), None);
+        assert!(a.drain_startup_notices().is_empty());
+
+        // Not recorded as exhausted: the next turn goes to the same account.
+        world.set("claude-otter", FakeAccountBehavior::Ok);
+        assert_eq!(complete_text(&rt, &a).unwrap(), "hi from claude-otter");
+
+        // A synchronous short 429 does not move the session either, and
+        // never touches the process-wide override.
+        world.set(
+            "claude-otter",
+            FakeAccountBehavior::SyncError(
+                "Anthropic API error (429 Too Many Requests): rate limited",
+            ),
+        );
+        let b = account_session(&world, "B", ActiveProvider::Claude, false);
+        let _ = complete_text(&rt, &b).expect_err("short 429");
+        assert_eq!(world.labels_for("B"), ["claude-otter"]);
+        assert_eq!(b.account_pin(AccountProviderKind::Claude), None);
+        assert_eq!(crate::auth::claude::get_active_account_override(), None);
+    });
+}
+
+#[test]
+fn unavailability_is_per_label() {
+    with_account_failover_env(|| {
+        store_claude_accounts(2);
+        write_provider_config("same_provider_account_failover = false");
+        let world = Arc::new(FakeAccountWorld::default());
+        world.set(
+            "claude-otter",
+            FakeAccountBehavior::SyncError("401 unauthorized: token revoked"),
+        );
+        let a = account_session(&world, "A", ActiveProvider::Claude, false);
+        a.set_account_pin(
+            AccountProviderKind::Claude,
+            Some(AccountPin::new("claude-otter", None)),
+        )
+        .unwrap();
+        let b = account_session(&world, "B", ActiveProvider::Claude, false);
+        b.set_account_pin(
+            AccountProviderKind::Claude,
+            Some(AccountPin::new("claude-fox", None)),
+        )
+        .unwrap();
+        let rt = enter_test_runtime();
+
+        let _ = complete_text(&rt, &a).expect_err("otter is broken");
+        assert_eq!(world.labels_for("A"), ["claude-otter"]);
+
+        // Otter's mark must not block a window on fox.
+        assert_eq!(complete_text(&rt, &b).unwrap(), "hi from claude-fox");
+        assert_eq!(world.labels_for("B"), ["claude-fox"]);
+
+        // Otter itself stays marked: A's next turn sends nothing to it.
+        let _ = complete_text(&rt, &a).expect_err("otter is still marked");
+        assert_eq!(world.labels_for("A"), ["claude-otter"]);
+        assert!(provider_unavailability_detail_for_account_label("claude", Some("claude-otter")).is_some());
+        assert!(provider_unavailability_detail_for_account_label("claude", Some("claude-fox")).is_none());
+    });
+}
+
+/// Greptile "Relogin inherits exhausted status": a new subscription logged in
+/// under a label that ran out must not inherit its exhausted mark. A token
+/// refresh of the same login keeps it.
+#[test]
+fn relogin_under_exhausted_label_is_not_exhausted() {
+    with_account_failover_env(|| {
+        let labels = store_claude_accounts(2);
+        let otter = labels[0].clone();
+        let now = chrono::Utc::now().timestamp();
+        crate::provider::account_failover::record_account_exhausted(
+            AccountProviderKind::Claude,
+            &otter,
+            Some(now + 3600),
+        );
+        assert!(
+            crate::provider::account_failover::account_exhausted(
+                AccountProviderKind::Claude,
+                &otter
+            )
+            .is_some()
+        );
+
+        // Same login, refreshed tokens: still exhausted.
+        let mut auth = crate::auth::claude::load_auth_file().unwrap();
+        let account = auth
+            .anthropic_accounts
+            .iter_mut()
+            .find(|account| account.label == otter)
+            .unwrap();
+        account.access = "sk-ant-oat01-REFRESHED".to_string();
+        account.refresh = "refresh-rotated".to_string();
+        crate::auth::claude::save_auth_file(&auth).unwrap();
+        assert!(
+            crate::provider::account_failover::account_exhausted(
+                AccountProviderKind::Claude,
+                &otter
+            )
+            .is_some(),
+            "a token refresh is the same subscription"
+        );
+
+        // Another subscription logged in under the same label.
+        let mut auth = crate::auth::claude::load_auth_file().unwrap();
+        let account = auth
+            .anthropic_accounts
+            .iter_mut()
+            .find(|account| account.label == otter)
+            .unwrap();
+        account.email = Some("new-subscription@example.com".to_string());
+        account.access = "sk-ant-oat01-NEWLOGIN".to_string();
+        account.refresh = "refresh-newlogin".to_string();
+        crate::auth::claude::save_auth_file(&auth).unwrap();
+        assert_eq!(
+            crate::provider::account_failover::account_exhausted(
+                AccountProviderKind::Claude,
+                &otter
+            ),
+            None,
+            "a new login under the label must not inherit the old exhaustion"
+        );
+        assert_eq!(
+            crate::provider::account_failover::account_resets_at(
+                AccountProviderKind::Claude,
+                &otter
+            ),
+            None
+        );
+    });
+}
+
+// ---------------------------------------------------------------------------
+// No loops: failover never cycles through accounts that are all out of usage.
+// ---------------------------------------------------------------------------
+
+fn claude_all_limited(world: &FakeAccountWorld, resets: &[i64]) {
+    for (label, resets_at) in ["claude-otter", "claude-fox", "claude-panda"]
+        .into_iter()
+        .zip(resets)
+    {
+        world.set(
+            label,
+            FakeAccountBehavior::InStreamUsageLimit {
+                resets_at: *resets_at,
+            },
+        );
+    }
+}
+
+/// Guard 1: one pass per call. With 3 accounts all out, exactly 3 requests,
+/// then the earliest-reset error. Cross-provider fallback (a configured
+/// OpenAI slot) must not re-enter same-provider failover.
+#[test]
+fn account_failover_all_limited_turn_tries_each_account_once() {
+    with_account_failover_env(|| {
+        store_claude_accounts(3);
+        let world = Arc::new(FakeAccountWorld::default());
+        let now = chrono::Utc::now().timestamp();
+        claude_all_limited(&world, &[now + 3 * 3600, now + 3600, now + 2 * 3600]);
+        let a = account_session(&world, "A", ActiveProvider::Claude, true);
+        let rt = enter_test_runtime();
+        let err = complete_text(&rt, &a).expect_err("all out");
+        assert!(
+            err.to_string()
+                .contains("All 3 Claude accounts are out of usage. First reset: claude-fox"),
+            "{err:#}"
+        );
+        assert_eq!(world.requests().len(), 3, "{:?}", world.requests());
+        assert_eq!(
+            world.labels_for("A"),
+            ["claude-otter", "claude-fox", "claude-panda"]
+        );
+        // Some pre-marked: fewer requests, never more than the stored count.
+        reset_account_failover_globals();
+        crate::provider::account_failover::record_account_exhausted(
+            AccountProviderKind::Claude,
+            "claude-fox",
+            Some(now + 3600),
+        );
+        let b = account_session(&world, "B", ActiveProvider::Claude, true);
+        let _ = complete_text(&rt, &b).expect_err("all out");
+        assert_eq!(world.labels_for("B"), ["claude-otter", "claude-panda"]);
+    });
+}
+
+/// Guard 2: once every account is marked out, the next turn sends nothing
+/// until the earliest reset and fails with the same earliest-reset message.
+#[test]
+fn account_failover_next_turn_after_all_limited_sends_no_requests() {
+    with_account_failover_env(|| {
+        store_claude_accounts(3);
+        let world = Arc::new(FakeAccountWorld::default());
+        let now = chrono::Utc::now().timestamp();
+        claude_all_limited(&world, &[now + 3 * 3600, now + 3600, now + 2 * 3600]);
+        let a = account_session(&world, "A", ActiveProvider::Claude, true);
+        let rt = enter_test_runtime();
+        let first = complete_text(&rt, &a).expect_err("all out");
+        assert_eq!(world.requests().len(), 3);
+        for turn in 0..3 {
+            let err = complete_text(&rt, &a).expect_err("still all out");
+            assert!(
+                err.to_string()
+                    .contains("All 3 Claude accounts are out of usage. First reset: claude-fox"),
+                "turn {turn}: {err:#}"
+            );
+            assert_eq!(world.requests().len(), 3, "turn {turn} sent a request");
+        }
+        // Another window on the same accounts sends nothing either.
+        let b = account_session(&world, "B", ActiveProvider::Claude, true);
+        let _ = complete_text(&rt, &b).expect_err("all out");
+        assert!(
+            world.labels_for("B").is_empty(),
+            "{:?}",
+            world.labels_for("B")
+        );
+        drop(first);
+    });
+}
+
+/// Guard 3: a usage-limit 429 without reset headers keeps the account out
+/// for UNKNOWN_RESET_EXHAUSTION_SECS, so later turns do not hammer it.
+#[test]
+fn account_failover_unknown_reset_not_retried_within_window() {
+    with_account_failover_env(|| {
+        store_claude_accounts(2);
+        let world = Arc::new(FakeAccountWorld::default());
+        world.set(
+            "claude-otter",
+            FakeAccountBehavior::InStreamUsageLimitNoReset,
+        );
+        world.set("claude-fox", FakeAccountBehavior::InStreamUsageLimitNoReset);
+        let a = account_session(&world, "A", ActiveProvider::Claude, false);
+        let rt = enter_test_runtime();
+        let _ = complete_text(&rt, &a).expect_err("both out");
+        assert_eq!(world.requests().len(), 2);
+        let until = crate::provider::account_failover::account_exhausted(
+            AccountProviderKind::Claude,
+            "claude-otter",
+        )
+        .expect("marked");
+        let window = crate::provider::account_failover::UNKNOWN_RESET_EXHAUSTION_SECS;
+        let now = chrono::Utc::now().timestamp();
+        assert!(
+            until >= now + window - 5 && until <= now + window,
+            "{until}"
+        );
+        for _ in 0..3 {
+            let _ = complete_text(&rt, &a).expect_err("still out");
+        }
+        assert_eq!(world.requests().len(), 2, "{:?}", world.requests());
+    });
+}
+
+/// Guard 5: return home only after the recorded reset passed, at most once
+/// per reset. Home still limited after returning: record it, move away once,
+/// and do not bounce back each turn.
+#[test]
+fn account_failover_return_home_still_limited_does_not_bounce() {
+    with_account_failover_env(|| {
+        store_claude_accounts(2);
+        let world = Arc::new(FakeAccountWorld::default());
+        let rt = enter_test_runtime();
+        let soon = chrono::Utc::now().timestamp() + 2;
+        world.set(
+            "claude-otter",
+            FakeAccountBehavior::InStreamUsageLimit { resets_at: soon },
+        );
+        let a = account_session(&world, "A", ActiveProvider::Claude, false);
+        assert_eq!(complete_text(&rt, &a).unwrap(), "hi from claude-fox");
+        assert!(
+            a.return_account_home_if_reset().is_empty(),
+            "not before the reset"
+        );
+
+        std::thread::sleep(std::time::Duration::from_millis(2_200));
+        // The provider still reports the old (now past) reset time.
+        assert_eq!(
+            a.return_account_home_if_reset(),
+            vec![AccountProviderKind::Claude]
+        );
+        assert_eq!(complete_text(&rt, &a).unwrap(), "hi from claude-fox");
+        assert_eq!(
+            world.labels_for("A"),
+            ["claude-otter", "claude-fox", "claude-otter", "claude-fox"],
+            "home tried once after its reset, then one move away"
+        );
+        assert!(
+            crate::provider::account_failover::account_exhausted(
+                AccountProviderKind::Claude,
+                "claude-otter"
+            )
+            .is_some(),
+            "a past reset time must not clear the new mark at once"
+        );
+        for _ in 0..3 {
+            assert!(a.return_account_home_if_reset().is_empty(), "no bounce");
+            assert_eq!(complete_text(&rt, &a).unwrap(), "hi from claude-fox");
+        }
+        assert_eq!(
+            world
+                .labels_for("A")
+                .iter()
+                .filter(|l| *l == "claude-otter")
+                .count(),
+            2,
+            "otter got no more requests: {:?}",
+            world.labels_for("A")
+        );
+
+        // A new reset time passes: return home once more.
+        crate::provider::account_failover::record_account_exhausted(
+            AccountProviderKind::Claude,
+            "claude-otter",
+            Some(chrono::Utc::now().timestamp() + 1),
+        );
+        world.set("claude-otter", FakeAccountBehavior::Ok);
+        std::thread::sleep(std::time::Duration::from_millis(1_200));
+        assert_eq!(
+            a.return_account_home_if_reset(),
+            vec![AccountProviderKind::Claude]
+        );
+        assert_eq!(complete_text(&rt, &a).unwrap(), "hi from claude-otter");
+    });
+}
+
+/// Reported bug: with the OpenAI account at its weekly limit, the ChatGPT web
+/// model failed with "openai-otter is out of usage". That route runs in the
+/// browser session and never spends the stored account's usage.
+#[test]
+fn chatgpt_web_model_is_not_gated_by_openai_account_usage() {
+    with_account_failover_env(|| {
+        crate::usage::reset_openai_exhaustion_revalidation_for_tests();
+        assert_eq!(store_openai_accounts(1), ["openai-otter"]);
+        let world = Arc::new(FakeAccountWorld::default());
+        let a = account_session(&world, "A", ActiveProvider::OpenAI, false);
+        let rt = enter_test_runtime();
+
+        crate::provider::account_failover::record_account_exhausted(
+            AccountProviderKind::OpenAi,
+            "openai-otter",
+            Some(chrono::Utc::now().timestamp() + 5 * 3600),
+        );
+        record_provider_unavailable_for_account_label("openai", Some("openai-otter"),
+            "openai-otter is out of usage",
+        );
+        crate::usage::store_openai_usage_for_label_for_tests(
+            "openai-otter",
+            crate::usage::OpenAIUsageData {
+                hard_limit_reached: true,
+                fetched_at: Some(std::time::Instant::now()),
+                ..Default::default()
+            },
+        );
+        assert!(
+            complete_text(&rt, &a).is_err(),
+            "an account-backed model is still skipped"
+        );
+
+        a.openai_provider()
+            .expect("openai runtime")
+            .set_model(CHATGPT_WEB_MODEL)
+            .expect("select web model");
+        complete_text(&rt, &a).expect("the web model is sent despite the account limit");
+        assert_eq!(world.labels_for("A").len(), 1);
+        crate::usage::forget_openai_usage_for_label_for_tests("openai-otter");
+    });
+}
+
+/// Reported bug: an OpenAI account hit its limit, the usage reset early (a
+/// banked reset, or the window rolled over), and `/usage` showed it open
+/// again, yet every resume kept being skipped with "out of usage (resets
+/// 02:10)". The mark held the reported reset time and nothing re-read usage.
+/// A fresh snapshot confirming the account is open must clear the mark and
+/// the provider cooldown so the resume is actually sent.
+#[test]
+fn openai_early_reset_clears_usage_limit_mark_and_resume_is_sent() {
+    with_account_failover_env(|| {
+        crate::usage::reset_openai_exhaustion_revalidation_for_tests();
+        let labels = store_openai_accounts(1);
+        assert_eq!(labels, ["openai-otter"]);
+        let world = Arc::new(FakeAccountWorld::default());
+        let a = account_session(&world, "A", ActiveProvider::OpenAI, false);
+        let rt = enter_test_runtime();
+
+        // The limit was hit with a reset hours away, exactly as in the logs.
+        let far_reset = chrono::Utc::now().timestamp() + 5 * 3600;
+        crate::provider::account_failover::record_account_exhausted(
+            AccountProviderKind::OpenAi,
+            "openai-otter",
+            Some(far_reset),
+        );
+        record_provider_unavailable_for_account_label("openai", Some("openai-otter"),
+            "openai-otter is out of usage",
+        );
+        crate::usage::store_openai_usage_for_label_for_tests(
+            "openai-otter",
+            crate::usage::OpenAIUsageData {
+                hard_limit_reached: true,
+                fetched_at: Some(std::time::Instant::now()),
+                ..Default::default()
+            },
+        );
+        assert!(
+            complete_text(&rt, &a).is_err(),
+            "while really exhausted the request is still skipped"
+        );
+        assert!(world.labels_for("A").is_empty());
+
+        // A partial or failed snapshot must not be read as "open again".
+        crate::usage::store_openai_usage_for_label_for_tests(
+            "openai-otter",
+            crate::usage::OpenAIUsageData {
+                fetched_at: Some(std::time::Instant::now()),
+                last_error: Some("API error (500)".to_string()),
+                ..Default::default()
+            },
+        );
+        assert!(
+            crate::provider::account_failover::account_exhausted(
+                AccountProviderKind::OpenAi,
+                "openai-otter"
+            )
+            .is_some(),
+            "an error snapshot proves nothing"
+        );
+
+        // Fresh usage after the early reset: weekly 0%, ordinary use allowed.
+        crate::usage::store_openai_usage_for_label_for_tests(
+            "openai-otter",
+            crate::usage::OpenAIUsageData {
+                seven_day: Some(crate::usage::OpenAIUsageWindow {
+                    name: "7-day window".to_string(),
+                    usage_ratio: 0.0,
+                    resets_at: None,
+                }),
+                fetched_at: Some(std::time::Instant::now()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            crate::provider::account_failover::account_exhausted(
+                AccountProviderKind::OpenAi,
+                "openai-otter"
+            ),
+            None,
+            "fresh usage that confirms the reset must clear the mark"
+        );
+        assert_eq!(
+            provider_unavailability_detail_for_account_label("openai", Some("openai-otter")),
+            None,
+            "and the provider cooldown"
+        );
+        assert_eq!(
+            complete_text(&rt, &a).expect("the resume must be sent after the reset"),
+            "hi from openai-otter"
+        );
+        assert_eq!(world.labels_for("A"), ["openai-otter"]);
+        crate::usage::forget_openai_usage_for_label_for_tests("openai-otter");
+    });
+}
+
+include!("account_failover_api_pin.rs");
+#[path = "quota_snapshot.rs"]
+mod quota_snapshot;

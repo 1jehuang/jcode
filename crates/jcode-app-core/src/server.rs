@@ -25,6 +25,7 @@ mod comm_plan;
 mod comm_session;
 mod comm_sync;
 mod configured_name;
+mod credential_watch;
 use configured_name::normalize_configured_server_name;
 mod debug;
 mod debug_ambient;
@@ -57,6 +58,7 @@ mod swarm_labels;
 mod swarm_mutation_state;
 mod swarm_persistence;
 mod swarm_watchdog;
+mod usage_limit_resume;
 mod util;
 
 pub(super) use self::await_members_state::AwaitMembersRuntime;
@@ -635,6 +637,13 @@ pub use self::socket::{
 use self::socket::{signal_ready_fd, socket_has_live_listener};
 
 pub use self::util::ServerIdentity;
+
+/// Pin this process's executable before asynchronous provider initialization.
+/// Repeated calls return the same launch target, even after an install moves
+/// the channel link. Binary entry points should call this before startup work.
+pub fn pin_running_binary() -> Option<std::path::PathBuf> {
+    self::util::running_server_binary()
+}
 pub(crate) use self::util::server_has_newer_binary;
 use self::util::{
     debug_control_allowed, embedding_idle_unload_secs, git_common_dir_for, reload_exec_target,
@@ -658,6 +667,9 @@ mod queue_tests;
 
 #[cfg(test)]
 mod file_activity_tests;
+
+#[cfg(test)]
+mod usage_limit_resume_tests;
 
 /// Idle timeout for the shared server when no clients are connected (5 minutes)
 const IDLE_TIMEOUT_SECS: u64 = 300;
@@ -1010,9 +1022,11 @@ impl Server {
                 )
                 .await;
 
+            let agent_provider = Arc::clone(&provider);
             let agent = Arc::new(Mutex::new(Agent::new_with_session(
                 provider, registry, session, None,
             )));
+            self::client_state::register_agent_provider(&agent, agent_provider);
 
             {
                 let mut sessions = self.sessions.write().await;
@@ -1316,6 +1330,10 @@ impl Server {
         // keeps the first agent `session_search` call from paying the cold
         // indexing cost while leaving exhaustive searches available on demand.
         crate::tool::spawn_recent_index_warmup();
+
+        // Announce account swaps made outside this server (CLI switch, another
+        // process, manual auth-file edit) so held turns resend promptly.
+        credential_watch::spawn();
 
         // Reconcile background-task status files orphaned by a previous
         // process image (crash or exec-based reload). Non-detached tasks die
@@ -2406,7 +2424,7 @@ impl Server {
             .spawn(|| {
                 loop {
                     crate::scratch_maintenance::prune_stale_scratch();
-                    crate::build::prune_old_versions();
+                    crate::build::prune_old_versions_on_idle();
                     std::thread::sleep(std::time::Duration::from_secs(6 * 60 * 60));
                 }
             });

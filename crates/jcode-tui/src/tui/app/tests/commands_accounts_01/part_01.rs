@@ -99,7 +99,9 @@ fn session_picker_enter_queues_current_terminal_resume_and_closes_overlay() {
 
     assert!(app.session_picker_overlay.is_none());
     assert_eq!(
-        app.workspace_client.take_pending_resume_session().as_deref(),
+        app.workspace_client
+            .take_pending_resume_session()
+            .as_deref(),
         Some("session_here_123")
     );
 }
@@ -326,10 +328,7 @@ fn slash_provider_test_coverage_with_args_shows_provider_detail() {
             .starts_with("# Provider test coverage")
     );
     assert!(app.model_status_content.contains("Provider: fpt"));
-    assert!(
-        app.model_status_content
-            .contains("Model: FPT.AI-KIE-v1.7")
-    );
+    assert!(app.model_status_content.contains("Model: FPT.AI-KIE-v1.7"));
 }
 
 #[test]
@@ -606,22 +605,6 @@ fn test_triage_command_includes_focus_in_prompt() {
     assert!(prompt.contains("Triage the open GitHub issues"));
     assert!(prompt.contains("Additional focus from the user: only crash reports"));
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 #[test]
 fn test_help_topic_shows_catchup_command_details() {
@@ -1052,10 +1035,7 @@ fn test_fork_command_with_prompt_forks_session() {
     app.input = "/fork try the other approach".to_string();
     app.submit_input();
 
-    let msg = app
-        .display_messages()
-        .last()
-        .expect("missing fork message");
+    let msg = app.display_messages().last().expect("missing fork message");
     assert_eq!(msg.role, "system");
     assert!(msg.content.contains("created for the next prompt"));
     let session_id = msg
@@ -1088,10 +1068,7 @@ fn test_fork_command_without_prompt_forks_idle_session() {
     app.input = "/fork".to_string();
     app.submit_input();
 
-    let msg = app
-        .display_messages()
-        .last()
-        .expect("missing fork message");
+    let msg = app.display_messages().last().expect("missing fork message");
     assert_eq!(msg.role, "system");
     assert!(msg.content.contains("✂ Fork →"));
     let session_id = msg
@@ -1370,7 +1347,9 @@ fn test_observe_updates_latest_tool_context_only() {
         id: "tool_1".to_string(),
         name: "read".to_string(),
         input: serde_json::json!({"file_path": "src/main.rs", "start_line": 1, "end_line": 10}),
-        intent: None, thought_signature: None, };
+        intent: None,
+        thought_signature: None,
+    };
     app.observe_tool_call(&tool_call);
 
     let page = app.side_panel.focused_page().expect("missing observe page");
@@ -1409,7 +1388,9 @@ fn test_observe_ignores_noise_tools_and_preserves_latest_useful_context() {
         id: "tool_read".to_string(),
         name: "read".to_string(),
         input: serde_json::json!({"file_path": "src/main.rs"}),
-        intent: None, thought_signature: None, };
+        intent: None,
+        thought_signature: None,
+    };
     app.observe_tool_result(&read_tool, "fn main() {}", false, Some("read"));
     let before = app
         .side_panel
@@ -1422,7 +1403,9 @@ fn test_observe_ignores_noise_tools_and_preserves_latest_useful_context() {
         id: "tool_side_panel".to_string(),
         name: "side_panel".to_string(),
         input: serde_json::json!({"action": "write", "page_id": "plan"}),
-        intent: None, thought_signature: None, };
+        intent: None,
+        thought_signature: None,
+    };
     app.observe_tool_call(&noise_tool);
     app.observe_tool_result(&noise_tool, "ok", false, Some("side_panel"));
 
@@ -1527,4 +1510,34 @@ fn test_fast_on_while_processing_mentions_next_request_locally() {
         app.status_notice(),
         Some("Fast: on (next request)".to_string())
     );
+}
+#[test]
+fn test_catchup_brief_reveals_side_panel_the_user_hid() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.side_panel = test_side_panel_snapshot("plan", "Plan");
+        assert!(app.handle_side_command("/side off"));
+        assert!(app.side_panel.focused_page_id.is_none());
+        let mut target = Session::create(None, Some("hidden catchup".to_string()));
+        target.add_message(
+            crate::message::Role::User,
+            vec![crate::message::ContentBlock::Text {
+                text: "Check the release notes.".to_string(),
+                cache_control: None,
+            }],
+        );
+        target.mark_closed();
+        target.save().expect("save catchup session");
+        let target_id = target.id.clone();
+        app.begin_in_flight_catchup_resume(PendingCatchupResume {
+            target_session_id: target_id.clone(),
+            source_session_id: Some(app.session.id.clone()),
+            queue_position: None,
+            show_brief: true,
+        });
+        app.maybe_show_catchup_after_history(&target_id);
+        assert_eq!(app.side_panel.focused_page_id.as_deref(), Some("catchup"));
+        assert!(!app.side_panel_user_hidden);
+        assert!(!app.side_panel_explicit_hidden);
+    });
 }

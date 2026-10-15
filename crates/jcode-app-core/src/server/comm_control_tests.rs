@@ -163,4 +163,6 @@ include!("comm_control_tests/await_background_expired.rs");
 include!("comm_control_tests/await_upgrade_background.rs");
 include!("comm_control_tests/dag_e2e.rs");
 include!("comm_control_tests/auto_worker_filter.rs");
+include!("comm_control_tests/usage_limit_resume.rs");
+include!("comm_control_tests/resume_bookkeeping.rs");
 include!("comm_control_tests/client_attached_dispatch.rs");

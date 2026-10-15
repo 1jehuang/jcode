@@ -257,6 +257,7 @@ mod tests {
     fn oversized_catalog_preserves_names_in_live_payload() {
         let mut full = snapshot("one");
         full.model_routes = vec![crate::provider::ModelRoute {
+            catalog_metadata: None,
             model: "one".into(),
             provider: "test".into(),
             api_method: "test".into(),

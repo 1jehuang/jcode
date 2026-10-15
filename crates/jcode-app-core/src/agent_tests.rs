@@ -23,6 +23,9 @@ mod desktop_selfdev;
 #[path = "agent_tests/compile_remote.rs"]
 mod compile_remote;
 
+#[path = "agent_tests/session_accounts.rs"]
+mod session_accounts;
+
 #[path = "agent_tests/mcp_remote_cache.rs"]
 mod mcp_remote_cache;
 
@@ -142,19 +145,15 @@ async fn saved_account_observed_binding_is_persisted() {
         .is_none()
     );
     crate::provider::clear_openai_provider_unavailability_for_account_label(Some("work"));
+    // The persisted route follows the window's account: failover, return
+    // home and /account switch move it, so a stale label must not block turns.
     agent.session.route_api_method = Some("openai-oauth@personal".to_string());
     agent.sync_bound_account_route();
     assert_eq!(
         agent.session.route_api_method.as_deref(),
-        Some("openai-oauth@personal")
+        Some("openai-oauth@work")
     );
-    assert!(
-        agent
-            .ensure_session_lease()
-            .unwrap_err()
-            .to_string()
-            .contains("personal")
-    );
+    assert!(agent.ensure_session_lease().is_ok());
 }
 
 #[tokio::test]
@@ -946,6 +945,176 @@ async fn run_turn_streaming_mpsc_emits_model_changed_on_midstream_switch() {
         switched_model.as_deref(),
         Some("claude-opus-4-8"),
         "expected a ModelChanged event resyncing to the served model"
+    );
+}
+
+/// Provider that keeps the model id but moves to another OpenAI-compatible
+/// profile during the request (out-of-credit failover between profiles that
+/// serve the same model).
+struct MidStreamProfileSwitchProvider {
+    profile: std::sync::Mutex<String>,
+}
+
+#[async_trait]
+impl Provider for MidStreamProfileSwitchProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        *self.profile.lock().unwrap() = "prof-b".to_string();
+        let (tx, rx) = tokio_mpsc::channel::<Result<StreamEvent>>(8);
+        tokio::spawn(async move {
+            let _ = tx
+                .send(Ok(StreamEvent::TextDelta("hello".to_string())))
+                .await;
+            let _ = tx
+                .send(Ok(StreamEvent::MessageEnd {
+                    stop_reason: Some("stop".to_string()),
+                }))
+                .await;
+        });
+        Ok(Box::pin(ReceiverStream::new(rx)))
+    }
+
+    fn name(&self) -> &str {
+        "openrouter"
+    }
+
+    fn display_name(&self) -> String {
+        self.profile.lock().unwrap().clone()
+    }
+
+    fn model(&self) -> String {
+        "glm-5.3".to_string()
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self {
+            profile: std::sync::Mutex::new(self.profile.lock().unwrap().clone()),
+        })
+    }
+}
+
+#[tokio::test]
+async fn run_turn_streaming_mpsc_emits_model_changed_when_only_the_profile_switches() {
+    let _guard = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(MidStreamProfileSwitchProvider {
+        profile: std::sync::Mutex::new("prof-a".to_string()),
+    });
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    agent.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "test".to_string(),
+            cache_control: None,
+        }],
+    );
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    agent.run_turn_streaming_mpsc(tx).await.unwrap();
+
+    let mut changed = None;
+    while let Ok(event) = rx.try_recv() {
+        if let ServerEvent::ModelChanged {
+            model,
+            provider_name,
+            ..
+        } = event
+        {
+            changed = Some((model, provider_name));
+        }
+    }
+    assert_eq!(
+        changed,
+        Some(("glm-5.3".to_string(), Some("prof-b".to_string()))),
+        "clients must learn the turn moved to another profile so the header updates"
+    );
+}
+
+/// Provider that moves to another profile during the request and then fails
+/// the stream before finishing the response.
+struct MidStreamProfileSwitchThenErrorProvider {
+    profile: std::sync::Mutex<String>,
+}
+
+#[async_trait]
+impl Provider for MidStreamProfileSwitchThenErrorProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        *self.profile.lock().unwrap() = "prof-b".to_string();
+        let (tx, rx) = tokio_mpsc::channel::<Result<StreamEvent>>(8);
+        tokio::spawn(async move {
+            let _ = tx.send(Ok(StreamEvent::TextDelta("hel".to_string()))).await;
+            let _ = tx
+                .send(Err(anyhow::anyhow!("connection dropped mid response")))
+                .await;
+        });
+        Ok(Box::pin(ReceiverStream::new(rx)))
+    }
+
+    fn name(&self) -> &str {
+        "openrouter"
+    }
+
+    fn display_name(&self) -> String {
+        self.profile.lock().unwrap().clone()
+    }
+
+    fn model(&self) -> String {
+        "glm-5.3".to_string()
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self {
+            profile: std::sync::Mutex::new(self.profile.lock().unwrap().clone()),
+        })
+    }
+}
+
+#[tokio::test]
+async fn run_turn_streaming_mpsc_syncs_route_change_when_the_stream_then_fails() {
+    let _guard = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(MidStreamProfileSwitchThenErrorProvider {
+        profile: std::sync::Mutex::new("prof-a".to_string()),
+    });
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    agent.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "test".to_string(),
+            cache_control: None,
+        }],
+    );
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let result = agent.run_turn_streaming_mpsc(tx).await;
+    assert!(result.is_err(), "the stream error must still end the turn");
+
+    let mut changed = None;
+    while let Ok(event) = rx.try_recv() {
+        if let ServerEvent::ModelChanged {
+            model,
+            provider_name,
+            ..
+        } = event
+        {
+            changed = Some((model, provider_name));
+        }
+    }
+    assert_eq!(
+        changed,
+        Some(("glm-5.3".to_string(), Some("prof-b".to_string()))),
+        "clients must learn the provider now routes to prof-b even though the turn failed"
     );
 }
 

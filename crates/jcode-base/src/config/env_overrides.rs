@@ -57,6 +57,9 @@ impl Config {
         if let Ok(v) = std::env::var("JCODE_SCROLL_BOOKMARK_KEY") {
             self.keybindings.scroll_bookmark = v;
         }
+        if let Ok(v) = std::env::var("JCODE_SCROLL_TO_BOTTOM_KEY") {
+            self.keybindings.scroll_to_bottom = v;
+        }
         if let Ok(v) = std::env::var("JCODE_SCROLL_UP_FALLBACK_KEY") {
             self.keybindings.scroll_up_fallback = v;
         }
@@ -881,6 +884,11 @@ impl Config {
                 self.provider.same_provider_account_failover = enabled;
             }
         }
+        if let Ok(v) = std::env::var("JCODE_ACCOUNT_FAILOVER_RETURN_HOME") {
+            if let Some(enabled) = parse_env_bool(&v) {
+                self.provider.account_failover_return_home = enabled;
+            }
+        }
         if let Ok(v) = std::env::var("JCODE_STREAM_IDLE_TIMEOUT_SECS") {
             if let Ok(parsed) = v.trim().parse::<u64>() {
                 if parsed > 0 {
@@ -918,6 +926,13 @@ impl Config {
 
         // Explicit environment overrides win, but never export config values:
         // self-written env would mask subsequent config edits/removals.
+        if let Ok(v) = std::env::var(jcode_config_types::CLAUDE_CODE_BIN_ENV) {
+            let v = v.trim();
+            if !v.is_empty() {
+                self.provider.claude_code.binary = v.to_string();
+            }
+        }
+
         if let Ok(v) = std::env::var("JCODE_GEMINI_FORCE_OAUTH") {
             self.provider.gemini_force_oauth = parse_env_bool(&v).unwrap_or(false);
         }

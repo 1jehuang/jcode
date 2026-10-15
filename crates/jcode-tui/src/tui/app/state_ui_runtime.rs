@@ -466,19 +466,18 @@ impl App {
     }
 
     pub(super) fn toggle_input_stash(&mut self) {
-        if let Some((stashed, stashed_cursor)) = self.stashed_input.take() {
-            let current_input = std::mem::replace(&mut self.input, stashed);
-            let current_cursor = std::mem::replace(&mut self.cursor_pos, stashed_cursor);
-            if current_input.is_empty() {
+        if let Some(stashed) = self.stashed_input.take() {
+            let current = self.take_input_draft();
+            let was_empty = current.0.is_empty() && current.2.is_empty();
+            self.restore_input_draft(stashed);
+            if was_empty {
                 self.set_status_notice("📋 Input restored from stash");
             } else {
-                self.stashed_input = Some((current_input, current_cursor));
+                self.stashed_input = Some(current);
                 self.set_status_notice("📋 Swapped input with stash");
             }
-        } else if !self.input.is_empty() {
-            let input = std::mem::take(&mut self.input);
-            let cursor = std::mem::replace(&mut self.cursor_pos, 0);
-            self.stashed_input = Some((input, cursor));
+        } else if !self.input.is_empty() || !self.pending_images.is_empty() {
+            self.stashed_input = Some(self.take_input_draft());
             self.set_status_notice("📋 Input stashed");
         }
     }

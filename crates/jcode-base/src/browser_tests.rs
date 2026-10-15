@@ -2,6 +2,505 @@ use super::*;
 use crate::browser_detect::BrowserKind;
 
 #[test]
+fn macos_browser_code_sign_clones_are_exact_and_scoped_to_current_user_root() {
+    let root = std::path::Path::new("/private/var/folders/test/current-user/X");
+    for (kind, nonce, executable) in [
+        (BrowserKind::Chrome, "K0GLNn", "Google Chrome"),
+        (BrowserKind::Opera, "kzEn2b", "Opera"),
+    ] {
+        let relative = format!(
+            "{}.code_sign_clone/code_sign_clone.{nonce}/{}.app.bundle/Contents/MacOS/{executable}",
+            kind.macos_bundle_id(),
+            kind.macos_app_name()
+        );
+        let path = root.join(&relative);
+        assert!(macos_process_is_exact_browser_with_clone_root(
+            &path,
+            kind,
+            Some(root)
+        ));
+        let var_alias = PathBuf::from(path.to_str().unwrap().replacen("/private/var", "/var", 1));
+        assert!(macos_process_is_exact_browser_with_clone_root(
+            &var_alias,
+            kind,
+            Some(root)
+        ));
+        assert!(macos_process_is_exact_browser_with_clone_root(
+            &path,
+            kind,
+            Some(std::path::Path::new("/var/folders/test/current-user/X"))
+        ));
+        assert!(!macos_process_is_exact_browser_with_clone_root(
+            &path, kind, None
+        ));
+        assert!(!macos_process_is_exact_browser_with_clone_root(
+            &path,
+            BrowserKind::Brave,
+            Some(root)
+        ));
+        let outside =
+            std::path::Path::new("/private/var/folders/test/other-user/X").join(&relative);
+        assert!(!macos_process_is_exact_browser_with_clone_root(
+            &outside,
+            kind,
+            Some(root)
+        ));
+        for invalid in [
+            relative.replace(kind.macos_bundle_id(), "com.invalid.Browser"),
+            relative.replace(&format!("code_sign_clone.{nonce}"), "code_sign_clone."),
+            relative.replace(
+                &format!("code_sign_clone.{nonce}"),
+                "code_sign_clone.invalid-nonce",
+            ),
+            relative.replace(".app.bundle/", ".app/"),
+            relative.replace(".app.bundle/", ".app.bundle.extra/"),
+            relative.replace("/Contents/", "/nested/Contents/"),
+            relative.replace("/Contents/", "/./Contents/"),
+            relative.replace("/Contents/", "/../Contents/"),
+            format!("{relative}/extra"),
+            format!("{relative}wrong-executable"),
+            format!("nested/{relative}"),
+        ] {
+            let invalid = root.join(invalid);
+            assert!(
+                !macos_process_is_exact_browser_with_clone_root(&invalid, kind, Some(root)),
+                "{}",
+                invalid.display()
+            );
+        }
+        assert!(!macos_process_is_exact_browser_with_clone_root(
+            std::path::Path::new(&relative),
+            kind,
+            Some(root)
+        ));
+        let installed = PathBuf::from(format!(
+            "/Applications/{}.app/Contents/MacOS/{executable}",
+            kind.macos_app_name()
+        ));
+        assert!(macos_process_is_exact_browser_with_clone_root(
+            &installed,
+            kind,
+            Some(root)
+        ));
+        assert!(macos_process_is_exact_browser_with_clone_root(
+            &installed, kind, None
+        ));
+    }
+}
+
+fn firefox_endpoint_fixture() -> NativeHostEndpoint {
+    NativeHostEndpoint {
+        entry: RegisteredBridgeHost {
+            port: 8770,
+            pid: 1234,
+            browser: None,
+            process: Some("/Applications/Firefox.app/Contents/MacOS/firefox".into()),
+        },
+        host_executable: PathBuf::from("/fixture/firefox-agent-bridge-host"),
+        parent_executable: PathBuf::from("/Applications/Firefox.app/Contents/MacOS/firefox"),
+        parent_pid: 1233,
+        host_started: (100, 200),
+    }
+}
+
+#[test]
+fn kernel_listener_fixture_rejects_stale_ports_wrong_pids_and_non_loopback() {
+    // Even if a corrupt registry claims Opera owns 8766, the kernel mapping
+    // proves that PID 222 actually owns 8769 and PID 111 owns 8766.
+    let output = "p111\nn127.0.0.1:8766\np222\nn127.0.0.1:8769\np333\nn127.0.0.1:8770\nn127.0.0.1:8770\nn127.0.0.1:8767\nn0.0.0.0:8768\nn192.168.1.2:8771\nn127.0.0.1:9000\npinvalid\nn127.0.0.1:8772\n";
+    let listeners = lsof_loopback_listeners(output);
+    assert_eq!(
+        listeners
+            .iter()
+            .map(|entry| (entry.pid, entry.port))
+            .collect::<Vec<_>>(),
+        vec![(111, 8766), (222, 8769), (333, 8770)]
+    );
+    assert!(lsof_proves_loopback_listener(output, 333, 8770));
+    assert!(!lsof_proves_loopback_listener(output, 222, 8766));
+    assert!(!lsof_proves_loopback_listener(output, 999, 8770));
+    assert!(!lsof_proves_loopback_listener(output, 333, 8767));
+}
+
+#[test]
+fn native_host_process_evidence_must_match_exact_browser_executable_and_user() {
+    let endpoint = firefox_endpoint_fixture();
+    let valid = |entry: &RegisteredBridgeHost,
+                 kind,
+                 host: &std::path::Path,
+                 parent: &std::path::Path,
+                 same_user| {
+        native_host_entry_matches_process_evidence(
+            entry,
+            kind,
+            host,
+            &endpoint.host_executable,
+            parent,
+            same_user,
+        )
+    };
+    assert!(valid(
+        &endpoint.entry,
+        BrowserKind::Firefox,
+        &endpoint.host_executable,
+        &endpoint.parent_executable,
+        true
+    ));
+    assert!(!valid(
+        &endpoint.entry,
+        BrowserKind::Chrome,
+        &endpoint.host_executable,
+        &endpoint.parent_executable,
+        true
+    ));
+    assert!(!valid(
+        &endpoint.entry,
+        BrowserKind::Firefox,
+        &endpoint.host_executable,
+        &endpoint.parent_executable,
+        false
+    ));
+    assert!(!valid(
+        &endpoint.entry,
+        BrowserKind::Firefox,
+        std::path::Path::new("/wrong/host"),
+        &endpoint.parent_executable,
+        true
+    ));
+    for parent in [
+        "/Applications/FakeFirefox.app/Contents/MacOS/firefox",
+        "/Applications/Firefox.app/Contents/MacOS/other",
+        "Firefox.app/Contents/MacOS/firefox",
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    ] {
+        assert!(!valid(
+            &endpoint.entry,
+            BrowserKind::Firefox,
+            &endpoint.host_executable,
+            std::path::Path::new(parent),
+            true
+        ));
+    }
+    for port in [0, 8767, 8776, 65535] {
+        let mut entry = endpoint.entry.clone();
+        entry.port = port;
+        assert!(!valid(
+            &entry,
+            BrowserKind::Firefox,
+            &endpoint.host_executable,
+            &endpoint.parent_executable,
+            true
+        ));
+    }
+    let mut entry = endpoint.entry.clone();
+    entry.browser = Some("brave".into());
+    assert!(!valid(
+        &entry,
+        BrowserKind::Firefox,
+        &endpoint.host_executable,
+        &endpoint.parent_executable,
+        true
+    ));
+    entry = endpoint.entry.clone();
+    entry.pid = 0;
+    assert!(!valid(
+        &entry,
+        BrowserKind::Firefox,
+        &endpoint.host_executable,
+        &endpoint.parent_executable,
+        true
+    ));
+}
+
+#[test]
+fn anonymous_firefox_identity_requires_unchanged_native_listener_attestation() {
+    let endpoint = firefox_endpoint_fixture();
+    let anonymous = serde_json::json!({"pong":true,"time":1});
+    let mut info = anonymous.clone();
+    assert!(!accept_attested_legacy_firefox_ping(
+        &mut info,
+        BrowserKind::Firefox,
+        None,
+        None
+    ));
+    assert!(!ping_matches(&info, BrowserKind::Firefox));
+    assert!(accept_attested_legacy_firefox_ping(
+        &mut info,
+        BrowserKind::Firefox,
+        Some(&endpoint),
+        Some(&endpoint)
+    ));
+    assert!(ping_matches(&info, BrowserKind::Firefox));
+    assert_eq!(info["identity_evidence"], "native_host_process");
+    assert_eq!(info["attested_port"], 8770);
+    let mut changed = endpoint.clone();
+    changed.host_started.0 += 1;
+    let mut info = anonymous.clone();
+    assert!(!accept_attested_legacy_firefox_ping(
+        &mut info,
+        BrowserKind::Firefox,
+        Some(&endpoint),
+        Some(&changed)
+    ));
+    assert!(!accept_attested_legacy_firefox_ping(
+        &mut info,
+        BrowserKind::Chrome,
+        Some(&endpoint),
+        Some(&endpoint)
+    ));
+    for browser in ["chrome", "brave", "opera", "unknown"] {
+        let mut info = serde_json::json!({"pong":true,"browser":browser});
+        assert!(!accept_attested_legacy_firefox_ping(
+            &mut info,
+            BrowserKind::Firefox,
+            Some(&endpoint),
+            Some(&endpoint)
+        ));
+        assert_eq!(info["browser"], browser);
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn explicit_targets_override_inherited_websocket_urls_and_missing_targets_fail_closed() {
+    let endpoint = firefox_endpoint_fixture();
+    let mut command = std::process::Command::new("unused-fixture");
+    command.env("FAB_WS_URL", "ws://127.0.0.1:8766");
+    apply_bridge_browser_env_with_endpoint(&mut command, Some("firefox"), Some(&endpoint));
+    assert!(command.get_envs().any(|(key, value)| key == "FAB_WS_URL"
+        && value == Some(std::ffi::OsStr::new("ws://127.0.0.1:8770"))));
+    apply_bridge_browser_env_with_endpoint(&mut command, Some("opera"), None);
+    assert!(command.get_envs().any(|(key, value)| key == "FAB_WS_URL"
+        && value == Some(std::ffi::OsStr::new("ws://127.0.0.1:0"))));
+}
+
+#[cfg(unix)]
+#[test]
+fn bounded_listener_subprocess_does_not_hang() {
+    let temp = tempfile::tempdir().unwrap();
+    let fixture = temp.path().join("listener-fixture");
+    write_executable(&fixture, "#!/bin/sh\nexec sleep 600\n");
+    let start = std::time::Instant::now();
+    assert!(bounded_process_output(&fixture, &[], std::time::Duration::from_millis(100)).is_none());
+    assert!(start.elapsed() < std::time::Duration::from_secs(1));
+}
+
+#[test]
+fn chromium_opera_identity_patch_is_checked_idempotent_and_preserves_manifest() {
+    let temp = tempfile::tempdir().unwrap();
+    let background = temp.path().join("background.js");
+    let manifest = temp.path().join("manifest.json");
+    std::fs::write(&manifest, "{\"key\":\"stable-extension-key\"}").unwrap();
+    let source = format!("// before\n{LEGACY_CHROMIUM_BROWSER_DETECTOR}\n// after\n");
+    std::fs::write(&background, &source).unwrap();
+    assert!(repair_chromium_browser_identity(temp.path()).unwrap());
+    let repaired = std::fs::read_to_string(&background).unwrap();
+    assert!(repaired.starts_with("// before\n"));
+    assert!(repaired.ends_with("\n// after\n"));
+    assert!(repaired.contains("if (/OPR\\//.test(ua)) return \"opera\";"));
+    assert!(!repair_chromium_browser_identity(temp.path()).unwrap());
+    assert_eq!(std::fs::read_to_string(&background).unwrap(), repaired);
+    assert_eq!(
+        std::fs::read_to_string(&manifest).unwrap(),
+        "{\"key\":\"stable-extension-key\"}"
+    );
+    for unknown in [
+        "// no detector".to_string(),
+        source.replace("return \"unknown\"", "return \"different\""),
+        format!("{source}{source}"),
+    ] {
+        std::fs::write(&background, &unknown).unwrap();
+        assert!(repair_chromium_browser_identity(temp.path()).is_err());
+        assert_eq!(std::fs::read_to_string(&background).unwrap(), unknown);
+    }
+}
+
+#[test]
+fn chromium_opera_detector_identifies_browsers_in_javascript() {
+    let detector = patch_chromium_browser_identity_source(LEGACY_CHROMIUM_BROWSER_DETECTOR)
+        .unwrap()
+        .unwrap();
+    let cases = serde_json::json!([
+        {"ua":"Mozilla/5.0 Chrome/140.0 Safari/537.36 OPR/123.0", "brave":false, "gecko":false, "expected":"opera"},
+        {"ua":"Mozilla/5.0 Chrome/140.0 Safari/537.36", "brave":false, "gecko":false, "expected":"chrome"},
+        {"ua":"Mozilla/5.0 Chrome/140.0 Safari/537.36", "brave":true, "gecko":false, "expected":"brave"},
+        {"ua":"Mozilla/5.0 Chrome/140.0 Safari/537.36 Edg/140.0", "brave":false, "gecko":false, "expected":"edge"},
+        {"ua":"Mozilla/5.0 Firefox/140.0", "brave":false, "gecko":true, "expected":"firefox"},
+        {"ua":"Mozilla/5.0 Safari/605.1", "brave":false, "gecko":false, "expected":"safari"}
+    ]);
+    let script = format!(
+        "const vm=require('vm');const detector={};const cases={cases};for(const c of cases){{const actual=vm.runInNewContext(detector+'\\ndetectBrowserName()',{{IS_GECKO:c.gecko,navigator:{{userAgent:c.ua,brave:c.brave}}}});if(actual!==c.expected)throw Error(c.expected+' got '+actual);}}",
+        serde_json::to_string(&detector).unwrap()
+    );
+    match std::process::Command::new("node")
+        .args(["-e", &script])
+        .output()
+    {
+        Ok(output) => assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // Pure patch regressions still run on hosts without Node.
+            assert!(detector.find("/OPR\\/").unwrap() < detector.find("/Chrome\\/").unwrap());
+        }
+        Err(error) => panic!("Node identity fixture failed: {error}"),
+    }
+}
+
+#[test]
+fn darwin_temp_directory_parser_rejects_invalid_confstr_results() {
+    let path = b"/var/folders/user/T/\0";
+    assert_eq!(
+        parse_macos_temp_directory(path, path.len()),
+        Some(PathBuf::from("/var/folders/user/T/"))
+    );
+    for (bytes, length) in [
+        (&b"\0"[..], 1),
+        (&b"relative\0"[..], 9),
+        (&b"/missing-terminator"[..], 19),
+        (&b"/embedded\0nul\0"[..], 14),
+        (&b"/\xff\0"[..], 3),
+        (&b"/ok\0"[..], 0),
+        (&b"/ok\0"[..], 100),
+    ] {
+        assert!(parse_macos_temp_directory(bytes, length).is_none());
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn macos_bridge_children_use_system_temp_and_preserve_explicit_xdg_override() {
+    let _guard = crate::storage::lock_test_env();
+    let previous_tmp = std::env::var_os("TMPDIR");
+    let previous_xdg = std::env::var_os("XDG_RUNTIME_DIR");
+    let temp = tempfile::tempdir().unwrap();
+    let bin = temp.path().join("browser-fixture");
+    write_executable(
+        &bin,
+        "#!/bin/sh\nprintf '%s\\n%s\\n' \"$TMPDIR\" \"$XDG_RUNTIME_DIR\"\n",
+    );
+    let mut command = tokio::process::Command::new(&bin);
+    command.env("TMPDIR", temp.path().join("agent-scratch"));
+    command.env("XDG_RUNTIME_DIR", temp.path());
+    apply_bridge_browser_env(&mut command, Some("chrome"));
+    let output = command.output().await.unwrap();
+    let text = String::from_utf8(output.stdout).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines[0], macos_native_host_temp_dir().to_str().unwrap());
+    assert_ne!(PathBuf::from(lines[0]), temp.path().join("agent-scratch"));
+    assert_eq!(PathBuf::from(lines[1]), temp.path());
+    assert_eq!(std::env::var_os("TMPDIR"), previous_tmp);
+    assert_eq!(std::env::var_os("XDG_RUNTIME_DIR"), previous_xdg);
+    let mut session_command = std::process::Command::new("unused-fixture");
+    apply_bridge_browser_env(&mut session_command, Some("firefox"));
+    assert!(
+        session_command
+            .get_envs()
+            .any(|(key, value)| key == "TMPDIR"
+                && value == Some(macos_native_host_temp_dir().as_os_str()))
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn wrong_browser_reply_is_not_ready_and_is_not_probed() {
+    let _guard = crate::storage::lock_test_env();
+    let previous_home = std::env::var_os("JCODE_HOME");
+    let temp = tempfile::tempdir().unwrap();
+    crate::env::set_var("JCODE_HOME", temp.path());
+    std::fs::create_dir_all(browser_dir()).unwrap();
+    let calls = temp.path().join("calls");
+    write_executable(
+        &browser_binary_path(),
+        &format!(
+            "#!/bin/sh\necho \"$1\" >> '{}'\necho '{{\"pong\":true,\"browser\":\"brave\"}}'\n",
+            calls.display()
+        ),
+    );
+    for name in ["chrome", "firefox", "opera"] {
+        let target = resolve_target_browser(Some(name)).unwrap();
+        let status = inspect_browser_status_for(&target).await.unwrap();
+        assert_eq!(status.connected_browser.as_deref(), Some("brave"));
+        assert!(status.responding);
+        assert!(!status.ready);
+        assert!(!status.compatible);
+        assert!(status.missing_actions.is_empty());
+    }
+    assert_eq!(
+        std::fs::read_to_string(calls).unwrap(),
+        "ping\nping\nping\n"
+    );
+    match previous_home {
+        Some(home) => crate::env::set_var("JCODE_HOME", home),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn native_host_manifest_rejects_wrong_identity_path_permissions_and_allowlist() {
+    let temp = tempfile::tempdir().unwrap();
+    let host = temp.path().join("host");
+    write_executable(&host, "#!/bin/sh\nexit 0\n");
+    for kind in [
+        BrowserKind::Firefox,
+        BrowserKind::Chrome,
+        BrowserKind::Brave,
+        BrowserKind::Opera,
+    ] {
+        let valid = native_host_manifest_json(kind, &host.to_string_lossy());
+        assert!(native_host_manifest_is_valid_for_path(kind, &valid, &host));
+        for (key, value) in [
+            ("name", serde_json::json!("different_host")),
+            ("type", serde_json::json!("socket")),
+            ("path", serde_json::json!("host")),
+            ("path", serde_json::json!(temp.path().to_string_lossy())),
+        ] {
+            let mut invalid = valid.clone();
+            invalid[key] = value;
+            assert!(
+                !native_host_manifest_is_valid_for_path(kind, &invalid, &host),
+                "{key}"
+            );
+        }
+        let other = temp.path().join("other-host");
+        write_executable(&other, "#!/bin/sh\nexit 0\n");
+        let mut invalid = valid.clone();
+        invalid["path"] = serde_json::json!(other.to_string_lossy());
+        assert!(!native_host_manifest_is_valid_for_path(
+            kind, &invalid, &host
+        ));
+        let key = if kind == BrowserKind::Firefox {
+            "allowed_extensions"
+        } else {
+            "allowed_origins"
+        };
+        let mut invalid = valid.clone();
+        invalid[key]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!("*"));
+        assert!(!native_host_manifest_is_valid_for_path(
+            kind, &invalid, &host
+        ));
+        invalid[key] = serde_json::json!([]);
+        assert!(!native_host_manifest_is_valid_for_path(
+            kind, &invalid, &host
+        ));
+    }
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&host, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let invalid = native_host_manifest_json(BrowserKind::Chrome, &host.to_string_lossy());
+    assert!(!native_host_manifest_is_valid_for_path(
+        BrowserKind::Chrome,
+        &invalid,
+        &host
+    ));
+}
+
+#[test]
 fn test_is_browser_command() {
     assert!(is_browser_command("browser ping"));
     assert!(is_browser_command(
@@ -169,13 +668,18 @@ async fn test_inspect_browser_status_without_binary() {
     // lock. Without it, the status snapshot and the exists() check below can
     // observe different JCODE_HOME values mid-test.
     let _guard = crate::storage::lock_test_env();
-    let status = inspect_browser_status().await.unwrap();
-    assert_eq!(status.backend, "firefox_agent_bridge");
-    assert!(BrowserKind::parse(status.browser).is_some());
-    if !browser_binary_path().exists() {
-        assert!(!status.binary_installed);
-        assert!(!status.ready);
+    let temp = tempfile::tempdir().unwrap();
+    let previous_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    let target = resolve_target_browser(Some("firefox")).unwrap();
+    let status = inspect_browser_status_for(&target).await.unwrap();
+    match previous_home {
+        Some(home) => crate::env::set_var("JCODE_HOME", home),
+        None => crate::env::remove_var("JCODE_HOME"),
     }
+    assert_eq!(status.backend, "firefox_agent_bridge");
+    assert!(!status.binary_installed);
+    assert!(!status.ready);
 }
 
 #[tokio::test]
@@ -183,14 +687,21 @@ async fn test_ensure_browser_ready_noninteractive_without_binary() {
     // See test_inspect_browser_status_without_binary: serialize against tests
     // that mutate JCODE_HOME under the test-env lock.
     let _guard = crate::storage::lock_test_env();
-    let status = ensure_browser_ready_noninteractive().await.unwrap();
-    assert_eq!(status.backend, "firefox_agent_bridge");
-    assert!(BrowserKind::parse(status.browser).is_some());
-    if !browser_binary_path().exists() {
-        assert!(!status.binary_installed);
-        assert!(!status.ready);
-        assert!(!status.setup_complete);
+    let temp = tempfile::tempdir().unwrap();
+    let previous_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    let target = resolve_target_browser(Some("firefox")).unwrap();
+    let status = ensure_browser_ready_noninteractive_for(&target)
+        .await
+        .unwrap();
+    match previous_home {
+        Some(home) => crate::env::set_var("JCODE_HOME", home),
+        None => crate::env::remove_var("JCODE_HOME"),
     }
+    assert_eq!(status.backend, "firefox_agent_bridge");
+    assert!(!status.binary_installed);
+    assert!(!status.ready);
+    assert!(!status.setup_complete);
 }
 
 #[cfg(unix)]
@@ -405,33 +916,71 @@ fn stale_firefox_manifest_is_not_valid_for_chrome() {
     let temp = tempfile::tempdir().unwrap();
     let host = temp.path().join("host");
     std::fs::write(&host, "x").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&host, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
     let firefox = native_host_manifest_json(BrowserKind::Firefox, &host.to_string_lossy());
-    assert!(native_host_manifest_is_valid(
+    assert!(native_host_manifest_is_valid_for_path(
         BrowserKind::Firefox,
-        &firefox
+        &firefox,
+        &host
     ));
-    assert!(!native_host_manifest_is_valid(
+    assert!(!native_host_manifest_is_valid_for_path(
         BrowserKind::Chrome,
-        &firefox
+        &firefox,
+        &host
     ));
     let chrome = native_host_manifest_json(BrowserKind::Chrome, &host.to_string_lossy());
-    assert!(native_host_manifest_is_valid(BrowserKind::Edge, &chrome));
+    assert!(native_host_manifest_is_valid_for_path(
+        BrowserKind::Edge,
+        &chrome,
+        &host
+    ));
     let missing_host = native_host_manifest_json(BrowserKind::Chrome, "/definitely/missing/host");
-    assert!(!native_host_manifest_is_valid(
+    assert!(!native_host_manifest_is_valid_for_path(
         BrowserKind::Chrome,
-        &missing_host
+        &missing_host,
+        &host
     ));
 }
 
+#[cfg(unix)]
 #[test]
-fn ping_reports_are_matched_by_browser_family() {
+fn invalid_native_manifests_are_repaired_and_valid_ones_preserved() {
+    let temp = tempfile::tempdir().unwrap();
+    let host = temp.path().join("host");
+    write_executable(&host, "#!/bin/sh\nexit 0\n");
+    let dir = temp.path().join("NativeMessagingHosts");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{NATIVE_HOST_NAME}.json"));
+    for invalid in ["not json", "{}", "{\"name\":\"wrong\",\"type\":\"stdio\"}"] {
+        std::fs::write(&path, invalid).unwrap();
+        assert!(write_native_host_manifests(BrowserKind::Brave, vec![dir.clone()], &host).unwrap());
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let repaired = serde_json::from_str(&contents).unwrap();
+        assert!(native_host_manifest_is_valid_for_path(
+            BrowserKind::Brave,
+            &repaired,
+            &host
+        ));
+        assert!(
+            !write_native_host_manifests(BrowserKind::Chrome, vec![dir.clone()], &host).unwrap()
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), contents);
+    }
+}
+
+#[test]
+fn ping_reports_are_matched_by_exact_browser() {
     let chrome = serde_json::json!({"pong": true, "browser": "chrome"});
     assert!(ping_matches(&chrome, BrowserKind::Chrome));
-    assert!(ping_matches(&chrome, BrowserKind::Brave));
+    assert!(!ping_matches(&chrome, BrowserKind::Brave));
     assert!(!ping_matches(&chrome, BrowserKind::Firefox));
-    // Pre-0.10 extensions do not report a browser and only exist for Firefox.
+    // Legacy identity-less replies cannot safely identify a requested browser.
     let legacy = serde_json::json!({"pong": true});
-    assert!(ping_matches(&legacy, BrowserKind::Firefox));
+    assert!(!ping_matches(&legacy, BrowserKind::Firefox));
     assert!(!ping_matches(&legacy, BrowserKind::Safari));
 }
 
@@ -495,15 +1044,35 @@ fn extract_zip_unpacks_deflate_and_rejects_traversal() {
     let evil = build_zip(&[("../escape.txt", b"x")]);
     assert!(extract_zip(&evil, &temp.path().join("sub")).is_err());
     assert!(!temp.path().join("escape.txt").exists());
+
+    let extension = temp.path().join("chromium-staged");
+    let zip = build_zip(&[
+        ("manifest.json", b"{\"key\":\"stable\"}"),
+        ("background.js", LEGACY_CHROMIUM_BROWSER_DETECTOR.as_bytes()),
+    ]);
+    replace_dir_with_zip(&extension, &zip, true).unwrap();
+    let repaired = std::fs::read_to_string(extension.join("background.js")).unwrap();
+    assert_eq!(repaired, opera_aware_chromium_browser_detector());
+    assert_eq!(
+        std::fs::read_to_string(extension.join("manifest.json")).unwrap(),
+        "{\"key\":\"stable\"}"
+    );
+    let unknown = build_zip(&[("background.js", b"unknown detector")]);
+    assert!(replace_dir_with_zip(&extension, &unknown, true).is_err());
+    assert_eq!(
+        std::fs::read_to_string(extension.join("background.js")).unwrap(),
+        repaired
+    );
 }
 
 #[test]
 fn session_daemon_name_includes_the_target_browser() {
+    let _guard = crate::storage::lock_test_env();
     use super::browser_session::session_name_for;
     assert_eq!(session_name_for("session_fox_1", None), "session_fox_1");
     assert_eq!(
         session_name_for("session_fox_1", Some("chrome")),
-        "session_fox_1-chrome"
+        "session_fox_1-chrome-target-v4"
     );
     assert_ne!(
         session_name_for("s", Some("chrome")),
@@ -552,9 +1121,16 @@ async fn bridge_cli_is_pointed_at_the_target_browsers_host() {
     assert_eq!(run(Some(BrowserKind::Firefox)).await, "target=firefox");
     assert_eq!(run(None).await, "target=");
 
-    // A user-chosen FAB_BROWSER (e.g. a fork jcode does not know) wins.
+    // An explicit target wins without mutating the parent environment.
     crate::env::set_var("FAB_BROWSER", "helium");
-    assert_eq!(run(Some(BrowserKind::Chrome)).await, "target=helium");
+    let (chrome, firefox) = tokio::join!(
+        run(Some(BrowserKind::Chrome)),
+        run(Some(BrowserKind::Firefox))
+    );
+    assert_eq!(chrome, "target=chrome");
+    assert_eq!(firefox, "target=firefox");
+    assert_eq!(run(None).await, "target=helium");
+    assert_eq!(std::env::var("FAB_BROWSER").unwrap(), "helium");
     match prev {
         Some(v) => crate::env::set_var("FAB_BROWSER", v),
         None => crate::env::remove_var("FAB_BROWSER"),
@@ -647,6 +1223,71 @@ fn update_stops_only_hosts_running_the_replaced_binary() {
     );
     assert!(new_running, "host running the new binary must be kept");
 }
+#[test]
+#[cfg(unix)]
+fn listener_budget_accepts_measured_slow_enumeration_without_retry() {
+    let output = bounded_process_output(
+        std::path::Path::new("/bin/sh"),
+        &["-c", "sleep 0.7; printf 'p42\\nn127.0.0.1:8770\\n'"],
+        LISTENER_DISCOVERY_TIMEOUT,
+    )
+    .unwrap();
+    assert!(captured_listener_entry(&output, 42, 8770).is_some());
+}
+
+#[test]
+fn captured_listener_does_not_reselect_lower_port() {
+    let output = "p99\nn127.0.0.1:8766\np42\nn127.0.0.1:8770\n";
+    assert_eq!(captured_listener_entry(output, 42, 8770).unwrap().pid, 42);
+}
+
+#[test]
+fn captured_listener_rejects_reused_port_owned_by_another_pid() {
+    assert!(captured_listener_entry("p99\nn127.0.0.1:8770\n", 42, 8770).is_none());
+}
+
+#[test]
+fn captured_listener_rejects_same_pid_on_different_port() {
+    assert!(captured_listener_entry("p42\nn127.0.0.1:8768\n", 42, 8770).is_none());
+}
+
+#[test]
+#[cfg(unix)]
+fn probe_diagnostics_do_not_log_secret_response_bodies() {
+    use std::os::unix::process::ExitStatusExt;
+    let output = std::process::Output {
+        status: std::process::ExitStatus::from_raw(256),
+        stdout: b"{\"password\":\"stdout-secret\"}".to_vec(),
+        stderr: b"stderr-secret".to_vec(),
+    };
+    let diagnostic = safe_probe_output_summary(&output);
+    assert!(!diagnostic.contains("secret"));
+    assert!(diagnostic.contains("stdout_bytes="));
+}
+
+#[test]
+fn unavailable_attestation_does_not_claim_evaluate_is_unsupported() {
+    assert!(
+        bridge_capabilities_from_probes(&[("evaluate", BridgeActionSupport::Unavailable)])
+            .is_none()
+    );
+}
+
+#[test]
+fn genuinely_unsupported_action_remains_reported() {
+    assert_eq!(
+        bridge_capabilities_from_probes(&[("evaluate", BridgeActionSupport::Unsupported)]),
+        Some(vec!["evaluate".to_string()])
+    );
+}
+
+#[test]
+fn supported_probe_has_no_missing_actions() {
+    assert_eq!(
+        bridge_capabilities_from_probes(&[("evaluate", BridgeActionSupport::Supported)]),
+        Some(Vec::new())
+    );
+}
 
 // #1743: readiness probes ran in the user's focused tab before every action.
 #[test]
@@ -689,8 +1330,9 @@ fn a_bridge_answered_by_another_browser_is_not_the_requested_one() {
     assert!(!status_answered_by(&status, BrowserKind::Chrome));
     assert!(status_answered_by(&status, BrowserKind::Firefox));
     status.connected_browser = Some("chrome".into());
+    assert!(status_answered_by(&status, BrowserKind::Chrome));
     assert!(
-        status_answered_by(&status, BrowserKind::Brave),
-        "same Chromium family"
+        !status_answered_by(&status, BrowserKind::Brave),
+        "a shared Chromium family is not the requested browser"
     );
 }

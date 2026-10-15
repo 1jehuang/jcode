@@ -2,6 +2,89 @@ use super::*;
 use crate::cli::provider_init::ProviderChoice;
 
 #[test]
+fn claude_code_login_flag_parses_and_conflicts_with_no_browser() {
+    let args =
+        Args::try_parse_from(["jcode", "login", "--provider", "claude", "--claude-code"]).unwrap();
+    assert!(matches!(
+        args.command,
+        Some(Command::Login {
+            claude_code: true,
+            ..
+        })
+    ));
+
+    for browser_flag in ["--no-browser", "--headless"] {
+        assert!(
+            Args::try_parse_from([
+                "jcode",
+                "login",
+                "--provider",
+                "claude",
+                "--claude-code",
+                browser_flag,
+            ])
+            .is_err()
+        );
+    }
+    assert!(
+        Args::try_parse_from([
+            "jcode",
+            "login",
+            "--provider",
+            "claude",
+            "--claude-code",
+            "--default",
+        ])
+        .is_err()
+    );
+    assert!(
+        Args::try_parse_from([
+            "jcode",
+            "login",
+            "--provider",
+            "claude",
+            "--claude-code",
+            "--account",
+            "work",
+        ])
+        .is_err()
+    );
+}
+
+#[test]
+fn should_parse_native_enterprise_copilot_login() {
+    let args = Args::try_parse_from([
+        "jcode",
+        "login",
+        "--provider",
+        "copilot",
+        "--enterprise-url",
+        "hiqfi.ghe.com",
+        "--no-browser",
+    ])
+    .unwrap();
+    assert!(
+        matches!(args.command, Some(Command::Login { enterprise_url: Some(host), no_browser: true, .. }) if host == "hiqfi.ghe.com")
+    );
+}
+
+#[test]
+fn should_parse_github_host_alias_for_native_login() {
+    let args = Args::try_parse_from([
+        "jcode",
+        "login",
+        "--provider",
+        "copilot",
+        "--github-host",
+        "hiqfi.ghe.com",
+    ])
+    .unwrap();
+    assert!(
+        matches!(args.command, Some(Command::Login { enterprise_url: Some(host), .. }) if host == "hiqfi.ghe.com")
+    );
+}
+
+#[test]
 fn credential_import_cli_requires_stdin_and_preserves_explicit_provider() {
     for provider in ["openai", "claude"] {
         let args = Args::try_parse_from([
@@ -177,6 +260,9 @@ fn test_provider_choice_aliases_parse() {
 
     let args = Args::try_parse_from(["jcode", "--provider", "grok-build"]).unwrap();
     assert_eq!(args.provider, ProviderChoice::GrokBuild);
+
+    let args = Args::try_parse_from(["jcode", "--provider", "claude-code"]).unwrap();
+    assert_eq!(args.provider, ProviderChoice::ClaudeCode);
 
     let args = Args::try_parse_from(["jcode", "--provider", "cgc", "run", "smoke"]).unwrap();
     assert_eq!(args.provider, ProviderChoice::Comtegra);
@@ -467,6 +553,7 @@ fn login_no_browser_flag_parses() {
         Some(Command::Login {
             provider,
             account,
+            enterprise_url: _,
             no_browser,
             print_auth_url,
             callback_url,
@@ -480,6 +567,7 @@ fn login_no_browser_flag_parses() {
             no_validate,
             flow_id,
             cancel,
+            ..
         }) => {
             assert!(provider.is_none());
             assert!(account.is_none());
@@ -790,6 +878,7 @@ fn run_json_subcommand_parses() {
             json,
             ndjson,
             message,
+            ..
         }) => {
             assert!(json);
             assert!(!ndjson);
@@ -807,6 +896,7 @@ fn run_ndjson_subcommand_parses() {
             json,
             ndjson,
             message,
+            ..
         }) => {
             assert!(!json);
             assert!(ndjson);
@@ -1068,4 +1158,286 @@ fn api_stdio_accepts_alias_and_daemon_socket_but_not_api_socket() {
             "stdio must not silently ignore an API socket override"
         );
     }
+}
+
+#[test]
+fn account_flag_is_repeatable_for_tui_and_run() {
+    let args = Args::try_parse_from([
+        "jcode",
+        "--account",
+        "claude-fox",
+        "--account",
+        "openai-otter",
+    ])
+    .unwrap();
+    assert_eq!(args.account, vec!["claude-fox", "openai-otter"]);
+
+    let args = Args::try_parse_from(["jcode", "run", "--account", "claude-fox", "hi"]).unwrap();
+    let Some(Command::Run { account, .. }) = args.command else {
+        panic!("expected run");
+    };
+    assert_eq!(account, vec!["claude-fox"]);
+
+    // `jcode login --account` keeps naming the login target, and `--default`
+    // makes the new login the default.
+    let args = Args::try_parse_from([
+        "jcode",
+        "login",
+        "claude",
+        "--account",
+        "claude-fox",
+        "--default",
+    ])
+    .unwrap();
+    let Some(Command::Login {
+        account,
+        make_default,
+        ..
+    }) = args.command
+    else {
+        panic!("expected login");
+    };
+    assert_eq!(account.as_deref(), Some("claude-fox"));
+    assert!(make_default);
+}
+
+/// Store one Claude and one OpenAI account; returns their labels.
+fn store_cli_accounts() -> (String, String) {
+    let expires = chrono::Utc::now().timestamp_millis() + 3_600_000;
+    let claude = crate::auth::claude::upsert_account(crate::auth::claude::AnthropicAccount {
+        label: String::new(),
+        access: "access-c".to_string(),
+        refresh: "refresh-c".to_string(),
+        expires,
+        email: Some("fox@example.com".to_string()),
+        subscription_type: None,
+        scopes: Vec::new(),
+    })
+    .unwrap();
+    let openai = crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
+        label: String::new(),
+        access_token: "acc".to_string(),
+        refresh_token: "ref".to_string(),
+        id_token: None,
+        account_id: Some("acct-1".to_string()),
+        expires_at: Some(expires),
+        email: Some("otter@example.com".to_string()),
+    })
+    .unwrap();
+    (claude, openai)
+}
+
+#[test]
+fn account_pins_resolve_stored_labels_and_emails() {
+    let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let (claude, openai) = store_cli_accounts();
+    let pins = crate::cli::account_pins::resolve_account_pins(&[
+        claude.clone(),
+        "otter@example.com".to_string(),
+    ])
+    .unwrap();
+    assert_eq!(
+        pins,
+        vec![
+            ("claude".to_string(), claude.clone()),
+            ("openai".to_string(), openai.clone()),
+        ]
+    );
+    let err = crate::cli::account_pins::resolve_account_pins(&[claude.clone(), claude.clone()])
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("one --account per provider"),
+        "{err}"
+    );
+    assert!(crate::cli::account_pins::resolve_account_pins(&["nobody".to_string()]).is_err());
+}
+
+/// Greptile "Missing account passes validation": a label with a known prefix
+/// that names no stored account must fail and list the saved labels.
+#[test]
+fn account_pins_reject_missing_label_with_known_prefix() {
+    let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let (claude, openai) = store_cli_accounts();
+    let missing = if claude == "claude-zebra" {
+        "claude-yak"
+    } else {
+        "claude-zebra"
+    };
+    let err = crate::cli::account_pins::resolve_account_pins(&[missing.to_string()])
+        .expect_err("a missing account must not pass validation");
+    let text = err.to_string();
+    assert!(text.contains(missing), "{text}");
+    assert!(
+        text.contains(&claude) && text.contains(&openai),
+        "the error lists the saved labels: {text}"
+    );
+}
+
+/// Greptile "Top-level account misses run": `jcode --account X run` uses X;
+/// a `run --account` value wins for the same provider.
+#[test]
+fn global_account_flag_applies_to_run() {
+    let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let (claude, openai) = store_cli_accounts();
+    let args = Args::try_parse_from(["jcode", "--account", &claude, "run", "hi"]).unwrap();
+    let Some(Command::Run { account, .. }) = &args.command else {
+        panic!("expected run");
+    };
+    let pins = crate::cli::account_pins::merge_account_values(&args.account, account).unwrap();
+    assert_eq!(pins, vec![("claude".to_string(), claude.clone())]);
+
+    let args = Args::try_parse_from([
+        "jcode",
+        "--account",
+        &claude,
+        "--account",
+        &openai,
+        "run",
+        "--account",
+        "fox@example.com",
+        "hi",
+    ])
+    .unwrap();
+    let Some(Command::Run { account, .. }) = &args.command else {
+        panic!("expected run");
+    };
+    let pins = crate::cli::account_pins::merge_account_values(&args.account, account).unwrap();
+    assert_eq!(
+        pins,
+        vec![
+            ("claude".to_string(), claude.clone()),
+            ("openai".to_string(), openai.clone()),
+        ],
+        "one pin per provider, run's value first"
+    );
+}
+
+#[test]
+fn claude_login_oauth_flag_parses_and_conflicts_with_claude_code() {
+    let args = Args::try_parse_from(["jcode", "login", "--provider", "claude", "--oauth"]).unwrap();
+    assert!(matches!(
+        args.command,
+        Some(Command::Login {
+            oauth: true,
+            claude_code: false,
+            ..
+        })
+    ));
+    assert!(
+        Args::try_parse_from([
+            "jcode",
+            "login",
+            "--provider",
+            "claude",
+            "--oauth",
+            "--claude-code",
+        ])
+        .is_err()
+    );
+}
+
+#[test]
+fn claude_code_provider_and_login_parse() {
+    // `claude-code` is its own provider, never the native Claude choice.
+    let args = Args::try_parse_from(["jcode", "--provider", "claude-code", "run", "hi"]).unwrap();
+    assert_eq!(args.provider, ProviderChoice::ClaudeCode);
+    let args = Args::try_parse_from(["jcode", "--provider", "claude"]).unwrap();
+    assert_eq!(args.provider, ProviderChoice::Claude);
+
+    let args = Args::try_parse_from([
+        "jcode",
+        "login",
+        "--provider",
+        "claude-code",
+        "--account",
+        "personal",
+    ])
+    .unwrap();
+    // `login --provider X` sets the global provider (the dispatcher falls
+    // back to it when the positional is absent).
+    assert_eq!(args.provider, ProviderChoice::ClaudeCode);
+    match args.command {
+        Some(Command::Login { account, .. }) => {
+            assert_eq!(account.as_deref(), Some("personal"));
+        }
+        other => panic!("unexpected command: {:?}", other),
+    }
+
+    let args = Args::try_parse_from(["jcode", "login", "claude-code"]).unwrap();
+    assert!(matches!(
+        args.command,
+        Some(Command::Login {
+            provider: Some(ProviderChoice::ClaudeCode),
+            ..
+        })
+    ));
+}
+
+#[test]
+fn prune_builds_parses_keep_and_dry_run() {
+    let args = Args::try_parse_from(["jcode", "prune-builds", "--keep", "5", "--dry-run"]).unwrap();
+    assert!(matches!(
+        args.command,
+        Some(Command::PruneBuilds {
+            keep: Some(5),
+            dry_run: true
+        })
+    ));
+    let args = Args::try_parse_from(["jcode", "prune-builds"]).unwrap();
+    assert!(matches!(
+        args.command,
+        Some(Command::PruneBuilds {
+            keep: None,
+            dry_run: false
+        })
+    ));
+}
+#[test]
+fn publish_build_parses_paths_and_validates_channels() {
+    let args = Args::try_parse_from([
+        "jcode",
+        "publish-build",
+        "--source",
+        "/prepared payload",
+        "--version",
+        "v-test",
+        "--launcher",
+        "/bin path/jcode",
+        "--channel",
+        "current",
+        "--termux-launcher",
+    ])
+    .unwrap();
+    match args.command {
+        Some(Command::PublishBuild(build_store::PublishBuildArgs {
+            source,
+            version,
+            launcher,
+            channel,
+            termux_launcher,
+        })) => {
+            assert_eq!(source, std::path::PathBuf::from("/prepared payload"));
+            assert_eq!(version, "v-test");
+            assert_eq!(launcher, std::path::PathBuf::from("/bin path/jcode"));
+            assert_eq!(channel, "current");
+            assert!(termux_launcher);
+        }
+        other => panic!("unexpected command: {other:?}"),
+    }
+    assert!(
+        Args::try_parse_from([
+            "jcode",
+            "publish-build",
+            "--source",
+            "/prepared",
+            "--version",
+            "v-test",
+            "--launcher",
+            "/bin/jcode",
+            "--channel",
+            "unknown",
+        ])
+        .is_err()
+    );
+    assert!(Args::try_parse_from(["jcode", "publish-build"]).is_err());
 }

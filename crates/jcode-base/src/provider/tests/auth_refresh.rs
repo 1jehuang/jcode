@@ -81,6 +81,7 @@ fn test_on_auth_changed_hot_initializes_openai_and_marks_routes_available() {
             antigravity: RwLock::new(None),
             gemini: RwLock::new(None),
             cursor: RwLock::new(None),
+            claude_code: RwLock::new(None),
             bedrock: RwLock::new(None),
             openrouter: RwLock::new(None),
             openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
@@ -91,6 +92,7 @@ fn test_on_auth_changed_hot_initializes_openai_and_marks_routes_available() {
             catalog_scope: next_catalog_scope(),
             routes_memo: std::sync::Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            account_failover: Default::default(),
         };
 
         crate::auth::codex::upsert_account_from_tokens(
@@ -152,6 +154,7 @@ fn test_on_auth_changed_refreshes_existing_openai_provider_credentials() {
             antigravity: RwLock::new(None),
             gemini: RwLock::new(None),
             cursor: RwLock::new(None),
+            claude_code: RwLock::new(None),
             bedrock: RwLock::new(None),
             openrouter: RwLock::new(None),
             openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
@@ -162,6 +165,7 @@ fn test_on_auth_changed_refreshes_existing_openai_provider_credentials() {
             catalog_scope: next_catalog_scope(),
             routes_memo: std::sync::Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            account_failover: Default::default(),
         };
 
         provider.on_auth_changed();
@@ -189,6 +193,7 @@ fn test_on_auth_changed_hot_initializes_anthropic_and_marks_routes_available() {
             antigravity: RwLock::new(None),
             gemini: RwLock::new(None),
             cursor: RwLock::new(None),
+            claude_code: RwLock::new(None),
             bedrock: RwLock::new(None),
             openrouter: RwLock::new(None),
             openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
@@ -199,6 +204,7 @@ fn test_on_auth_changed_hot_initializes_anthropic_and_marks_routes_available() {
             catalog_scope: next_catalog_scope(),
             routes_memo: std::sync::Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            account_failover: Default::default(),
         };
 
         crate::auth::claude::upsert_account(crate::auth::claude::AnthropicAccount {
@@ -238,6 +244,7 @@ fn test_on_auth_changed_hot_initializes_anthropic_from_api_key_and_marks_routes_
             antigravity: RwLock::new(None),
             gemini: RwLock::new(None),
             cursor: RwLock::new(None),
+            claude_code: RwLock::new(None),
             bedrock: RwLock::new(None),
             openrouter: RwLock::new(None),
             openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
@@ -248,6 +255,7 @@ fn test_on_auth_changed_hot_initializes_anthropic_from_api_key_and_marks_routes_
             catalog_scope: next_catalog_scope(),
             routes_memo: std::sync::Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            account_failover: Default::default(),
         };
 
         crate::provider_catalog::save_env_value_to_env_file(
@@ -302,6 +310,7 @@ fn test_anthropic_model_routes_keep_plain_4_6_available_without_extra_usage() {
             antigravity: RwLock::new(None),
             gemini: RwLock::new(None),
             cursor: RwLock::new(None),
+            claude_code: RwLock::new(None),
             bedrock: RwLock::new(None),
             openrouter: RwLock::new(None),
             openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
@@ -312,6 +321,7 @@ fn test_anthropic_model_routes_keep_plain_4_6_available_without_extra_usage() {
             catalog_scope: next_catalog_scope(),
             routes_memo: std::sync::Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            account_failover: Default::default(),
         };
 
         crate::auth::claude::upsert_account(crate::auth::claude::AnthropicAccount {
@@ -375,6 +385,7 @@ fn test_on_auth_changed_hot_initializes_openrouter_and_marks_routes_available() 
                     antigravity: RwLock::new(None),
                     gemini: RwLock::new(None),
                     cursor: RwLock::new(None),
+                    claude_code: RwLock::new(None),
                     bedrock: RwLock::new(None),
                     openrouter: RwLock::new(None),
                     openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
@@ -385,6 +396,7 @@ fn test_on_auth_changed_hot_initializes_openrouter_and_marks_routes_available() 
                     catalog_scope: next_catalog_scope(),
                     routes_memo: std::sync::Mutex::new(None),
                     post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                    account_failover: Default::default(),
                 };
 
                 provider.on_auth_changed();
@@ -415,6 +427,7 @@ fn test_on_auth_changed_preserves_openrouter_model_and_explicit_provider_pin() {
                     antigravity: RwLock::new(None),
                     gemini: RwLock::new(None),
                     cursor: RwLock::new(None),
+                    claude_code: RwLock::new(None),
                     bedrock: RwLock::new(None),
                     openrouter: RwLock::new(None),
                     openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
@@ -425,6 +438,7 @@ fn test_on_auth_changed_preserves_openrouter_model_and_explicit_provider_pin() {
                     catalog_scope: next_catalog_scope(),
                     routes_memo: std::sync::Mutex::new(None),
                     post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                    account_failover: Default::default(),
                 };
 
                 provider.on_auth_changed();
@@ -472,6 +486,7 @@ fn test_on_auth_changed_hot_initializes_copilot_and_marks_routes_available() {
                 antigravity: RwLock::new(None),
                 gemini: RwLock::new(None),
                 cursor: RwLock::new(None),
+                claude_code: RwLock::new(None),
                 bedrock: RwLock::new(None),
                 openrouter: RwLock::new(None),
                 openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
@@ -482,6 +497,7 @@ fn test_on_auth_changed_hot_initializes_copilot_and_marks_routes_available() {
                 catalog_scope: next_catalog_scope(),
                 routes_memo: std::sync::Mutex::new(None),
                 post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                account_failover: Default::default(),
             };
 
             provider.on_auth_changed();
@@ -553,6 +569,7 @@ fn test_on_auth_changed_hot_initializes_antigravity_when_tokens_exist_but_are_ex
             antigravity: RwLock::new(None),
             gemini: RwLock::new(None),
             cursor: RwLock::new(None),
+            claude_code: RwLock::new(None),
             bedrock: RwLock::new(None),
             openrouter: RwLock::new(None),
             openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
@@ -563,6 +580,7 @@ fn test_on_auth_changed_hot_initializes_antigravity_when_tokens_exist_but_are_ex
             catalog_scope: next_catalog_scope(),
             routes_memo: std::sync::Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            account_failover: Default::default(),
         };
 
         provider.on_auth_changed();
@@ -583,6 +601,7 @@ fn test_multi_provider_antigravity_routes_do_not_include_legacy_duplicate_entrie
         antigravity: RwLock::new(Some(test_antigravity_runtime())),
         gemini: RwLock::new(None),
         cursor: RwLock::new(None),
+        claude_code: RwLock::new(None),
         bedrock: RwLock::new(None),
         openrouter: RwLock::new(None),
         openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
@@ -593,6 +612,7 @@ fn test_multi_provider_antigravity_routes_do_not_include_legacy_duplicate_entrie
         catalog_scope: next_catalog_scope(),
         routes_memo: std::sync::Mutex::new(None),
         post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        account_failover: Default::default(),
     };
 
     let routes = provider.model_routes();
@@ -614,6 +634,7 @@ fn test_summarize_model_catalog_refresh_ignores_display_only_age_suffix_changes(
         vec!["anthropic/claude-sonnet-4".to_string()],
         vec!["anthropic/claude-sonnet-4".to_string()],
         vec![ModelRoute {
+            catalog_metadata: None,
             model: "anthropic/claude-sonnet-4".to_string(),
             provider: "Fireworks".to_string(),
             api_method: "openrouter".to_string(),
@@ -623,6 +644,7 @@ fn test_summarize_model_catalog_refresh_ignores_display_only_age_suffix_changes(
             cheapness: None,
         }],
         vec![ModelRoute {
+            catalog_metadata: None,
             model: "anthropic/claude-sonnet-4".to_string(),
             provider: "Fireworks".to_string(),
             api_method: "openrouter".to_string(),
@@ -645,6 +667,7 @@ fn test_summarize_model_catalog_refresh_still_counts_meaningful_detail_changes()
         vec!["anthropic/claude-sonnet-4".to_string()],
         vec!["anthropic/claude-sonnet-4".to_string()],
         vec![ModelRoute {
+            catalog_metadata: None,
             model: "anthropic/claude-sonnet-4".to_string(),
             provider: "Fireworks".to_string(),
             api_method: "openrouter".to_string(),
@@ -654,6 +677,7 @@ fn test_summarize_model_catalog_refresh_still_counts_meaningful_detail_changes()
             cheapness: None,
         }],
         vec![ModelRoute {
+            catalog_metadata: None,
             model: "anthropic/claude-sonnet-4".to_string(),
             provider: "Fireworks".to_string(),
             api_method: "openrouter".to_string(),
@@ -721,6 +745,7 @@ fn test_on_auth_changed_hot_initializes_gemini_and_marks_routes_available() {
             antigravity: RwLock::new(None),
             gemini: RwLock::new(None),
             cursor: RwLock::new(None),
+            claude_code: RwLock::new(None),
             bedrock: RwLock::new(None),
             openrouter: RwLock::new(None),
             openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
@@ -731,6 +756,7 @@ fn test_on_auth_changed_hot_initializes_gemini_and_marks_routes_available() {
             catalog_scope: next_catalog_scope(),
             routes_memo: std::sync::Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            account_failover: Default::default(),
         };
 
         provider.on_auth_changed();
@@ -764,6 +790,7 @@ fn test_on_auth_changed_hot_initializes_cursor_and_marks_routes_available() {
                 antigravity: RwLock::new(None),
                 gemini: RwLock::new(None),
                 cursor: RwLock::new(None),
+                claude_code: RwLock::new(None),
                 bedrock: RwLock::new(None),
                 openrouter: RwLock::new(None),
                 openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
@@ -774,6 +801,7 @@ fn test_on_auth_changed_hot_initializes_cursor_and_marks_routes_available() {
                 catalog_scope: next_catalog_scope(),
                 routes_memo: std::sync::Mutex::new(None),
                 post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                account_failover: Default::default(),
             };
 
             provider.on_auth_changed();

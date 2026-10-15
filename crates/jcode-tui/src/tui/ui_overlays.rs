@@ -267,7 +267,14 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
         "/help <command>",
         "Show details for one command",
     ));
-    lines.push(help_entry("/model", "List or switch models"));
+    lines.push(help_entry(
+        "/model",
+        "Browse models: search, Ctrl+P filters by provider",
+    ));
+    lines.push(help_entry(
+        "/model @<provider>",
+        "Browse one provider's models",
+    ));
     lines.push(help_entry("/model <name>", "Switch to a different model"));
     lines.push(help_entry(
         "/provider-test-coverage",
@@ -388,6 +395,10 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
     lines.push(help_entry(
         "/refactor resume",
         "Resume the last saved refactor loop/plan",
+    ));
+    lines.push(help_entry(
+        "/side [on|off]",
+        "Show or hide the selected side-panel page",
     ));
     lines.push(help_entry(
         "/splitview [on|off|status]",

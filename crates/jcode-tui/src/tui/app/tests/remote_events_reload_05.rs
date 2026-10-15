@@ -36,6 +36,7 @@ fn test_busy_automatic_continuation_waits_for_running_turn_without_retrying() {
                 id: rejected_id,
                 message: "Already processing a message".to_string(),
                 retry_after_secs: None,
+                server_resumes: false,
             },
             &mut remote,
         );
@@ -137,6 +138,7 @@ fn test_disconnect_recovers_inflight_queued_continuation_to_queue() {
         auto_retry: false,
         retry_attempts: 0,
         retry_at: None,
+        overload_attempts: 0,
     });
     app.rate_limit_reset = None;
 
@@ -170,6 +172,7 @@ fn test_disconnect_still_clears_pending_for_non_queued_shapes() {
         auto_retry: true,
         retry_attempts: u8::MAX,
         retry_at: None,
+        overload_attempts: 0,
     });
 
     let mut state = remote::RemoteRunState::default();
@@ -182,40 +185,104 @@ fn test_disconnect_still_clears_pending_for_non_queued_shapes() {
 }
 
 #[test]
-fn test_save_input_for_reload_persists_inflight_queued_continuation() {
-    let mut app = create_test_app();
-    let session_id = format!("test-391-inflight-{}", std::process::id());
+fn test_reload_keeps_overload_resend_budget() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let session_id = format!("test-overload-budget-reload-{}", std::process::id());
+        app.rate_limit_pending_message = Some(PendingRemoteMessage {
+            content: "explain the bug".to_string(),
+            images: vec![],
+            is_system: false,
+            system_reminder: None,
+            auto_retry: true,
+            retry_attempts: 0,
+            retry_at: None,
+            overload_attempts: 2,
+        });
+        app.rate_limit_reset = Some(Instant::now() + Duration::from_secs(60));
 
-    // Simulate the reload racing the dispatch: one message still queued, one
-    // already dequeued into the in-flight pending slot.
-    app.queued_messages.push("still queued".to_string());
-    app.rate_limit_pending_message = Some(PendingRemoteMessage {
-        content: "dispatched but unfinished".to_string(),
-        images: vec![],
-        is_system: true,
-        system_reminder: Some("hidden reminder".to_string()),
-        auto_retry: false,
-        retry_attempts: 0,
-        retry_at: None,
+        app.save_input_for_reload(&session_id);
+        let restored =
+            App::restore_input_for_reload(&session_id).expect("reload state should exist");
+        let pending = restored
+            .rate_limit_pending_message
+            .expect("held turn must survive reload");
+        assert_eq!(
+            pending.overload_attempts, 2,
+            "reload must not reset the overload resend budget"
+        );
     });
-    app.rate_limit_reset = None;
+}
 
-    app.save_input_for_reload(&session_id);
+#[test]
+fn test_save_input_for_reload_persists_inflight_queued_continuation() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let session_id = format!("test-391-inflight-{}", std::process::id());
 
-    let restored = App::restore_input_for_reload(&session_id).expect("reload state should exist");
-    assert_eq!(
-        restored.queued_messages,
-        vec!["dispatched but unfinished", "still queued"],
-        "the in-flight continuation must be persisted at the front of the queue"
-    );
-    assert_eq!(
-        restored.hidden_queued_system_messages,
-        vec!["hidden reminder"]
-    );
-    assert!(
-        restored.rate_limit_pending_message.is_none(),
-        "the continuation must not also restore as an unreachable pending message"
-    );
+        // Simulate the reload racing the dispatch: one message still queued, one
+        // already dequeued into the in-flight pending slot.
+        app.queued_messages.push("still queued".to_string());
+        app.rate_limit_pending_message = Some(PendingRemoteMessage {
+            content: "dispatched but unfinished".to_string(),
+            images: vec![],
+            is_system: true,
+            system_reminder: Some("hidden reminder".to_string()),
+            auto_retry: false,
+            retry_attempts: 0,
+            retry_at: None,
+            overload_attempts: 0,
+        });
+        app.rate_limit_reset = None;
+
+        app.save_input_for_reload(&session_id);
+
+        let restored = App::restore_input_for_reload(&session_id).expect("reload state should exist");
+        assert_eq!(
+            restored.queued_messages,
+            vec!["dispatched but unfinished", "still queued"],
+            "the in-flight continuation must be persisted at the front of the queue"
+        );
+        assert_eq!(
+            restored.hidden_queued_system_messages,
+            vec!["hidden reminder"]
+        );
+        assert!(
+            restored.rate_limit_pending_message.is_none(),
+            "the continuation must not also restore as an unreachable pending message"
+        );
+    });
+}
+
+#[test]
+fn test_quota_hold_survives_reload_without_immediate_submission() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let reset = Instant::now() + Duration::from_secs(3600);
+        app.rate_limit_reset = Some(reset);
+        app.rate_limit_pending_message = Some(PendingRemoteMessage {
+            content: "held user turn".to_string(),
+            images: vec![("image/png".to_string(), "payload".to_string())],
+            is_system: false,
+            system_reminder: None,
+            auto_retry: false,
+            retry_attempts: 0,
+            retry_at: None,
+            overload_attempts: 0,
+        });
+        app.save_input_for_reload(&app.session.id);
+        let restored = App::restore_input_for_reload(&app.session.id).unwrap();
+        assert!(!restored.submit_on_restore, "quota holds must not become startup sends");
+        let mut reloaded = create_test_app();
+        reloaded.apply_restored_reload_input(restored);
+        assert!(reloaded.input.is_empty());
+        assert!(reloaded.rate_limit_reset.unwrap() > Instant::now() + Duration::from_secs(3500));
+        let pending = reloaded.rate_limit_pending_message.as_ref().unwrap();
+        assert_eq!(pending.content, "held user turn");
+        assert_eq!(pending.images, [("image/png".to_string(), "payload".to_string())]);
+        assert!(!pending.auto_retry);
+        assert_eq!(pending.retry_at, reloaded.rate_limit_reset);
+    });
 }
 
 #[test]
@@ -719,61 +786,63 @@ fn remote_done_does_not_repeat_ownership_notice() {
 
 #[test]
 fn test_save_input_for_reload_removes_stale_file_when_state_is_empty() {
-    let mut app = create_test_app();
-    let session_id = format!("test-391-stale-{}", std::process::id());
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let session_id = format!("test-391-stale-{}", std::process::id());
 
-    // First reload snapshot holds a queued message.
-    app.queued_messages.push("old queued".to_string());
-    app.save_input_for_reload(&session_id);
+        // First reload snapshot holds a queued message.
+        app.queued_messages.push("old queued".to_string());
+        app.save_input_for_reload(&session_id);
 
-    let path = crate::storage::jcode_dir()
-        .expect("jcode dir")
-        .join(format!("client-input-{}", session_id));
-    assert!(path.exists(), "first save should write the reload file");
+        let path = crate::storage::jcode_dir()
+            .expect("jcode dir")
+            .join(format!("client-input-{}", session_id));
+        assert!(path.exists(), "first save should write the reload file");
 
-    // An empty save while the file is FRESH must preserve it: another client
-    // attached to the same session may have just saved its own queued
-    // messages during the same reload handoff.
-    app.queued_messages.clear();
-    app.save_input_for_reload(&session_id);
-    assert!(
-        path.exists(),
-        "an empty save must not delete a fresh reload file (multi-client safety)"
-    );
-
-    // Backdate the file past the staleness window; now an empty save must
-    // remove it so a long-stale queue cannot resurrect on a later restore.
-    #[cfg(unix)]
-    {
-        let stale_age_secs = 400; // > 300s staleness cutoff
-        let target = std::time::SystemTime::now() - Duration::from_secs(stale_age_secs);
-        let since_epoch = target
-            .duration_since(std::time::SystemTime::UNIX_EPOCH)
-            .expect("clock before epoch");
-        let times = [
-            libc::timespec {
-                tv_sec: since_epoch.as_secs() as libc::time_t,
-                tv_nsec: 0,
-            },
-            libc::timespec {
-                tv_sec: since_epoch.as_secs() as libc::time_t,
-                tv_nsec: 0,
-            },
-        ];
-        let c_path = std::ffi::CString::new(path.to_str().expect("utf8 path")).expect("c path");
-        let rc = unsafe { libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), 0) };
-        assert_eq!(rc, 0, "backdating the reload file mtime should succeed");
-
+        // An empty save while the file is FRESH must preserve it: another client
+        // attached to the same session may have just saved its own queued
+        // messages during the same reload handoff.
+        app.queued_messages.clear();
         app.save_input_for_reload(&session_id);
         assert!(
-            !path.exists(),
-            "an empty save must remove a stale reload file so old queued messages cannot resurrect"
+            path.exists(),
+            "an empty save must not delete a fresh reload file (multi-client safety)"
         );
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = std::fs::remove_file(&path);
-    }
+
+        // Backdate the file past the staleness window; now an empty save must
+        // remove it so a long-stale queue cannot resurrect on a later restore.
+        #[cfg(unix)]
+        {
+            let stale_age_secs = 400; // > 300s staleness cutoff
+            let target = std::time::SystemTime::now() - Duration::from_secs(stale_age_secs);
+            let since_epoch = target
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .expect("clock before epoch");
+            let times = [
+                libc::timespec {
+                    tv_sec: since_epoch.as_secs() as libc::time_t,
+                    tv_nsec: 0,
+                },
+                libc::timespec {
+                    tv_sec: since_epoch.as_secs() as libc::time_t,
+                    tv_nsec: 0,
+                },
+            ];
+            let c_path = std::ffi::CString::new(path.to_str().expect("utf8 path")).expect("c path");
+            let rc = unsafe { libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), 0) };
+            assert_eq!(rc, 0, "backdating the reload file mtime should succeed");
+
+            app.save_input_for_reload(&session_id);
+            assert!(
+                !path.exists(),
+                "an empty save must remove a stale reload file so old queued messages cannot resurrect"
+            );
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = std::fs::remove_file(&path);
+        }
+    });
 }
 
 /// Repeated provider guardrail refusals must trip the circuit breaker and

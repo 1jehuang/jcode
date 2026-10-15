@@ -10,6 +10,17 @@ const GITHUB_API_LATEST: &str =
 const NATIVE_HOST_NAME: &str = "firefox_agent_bridge";
 const EXTENSION_ID_LISTED: &str = "browser-agent-bridge@1jehuang.github.io";
 const EXTENSION_ID_LOCAL: &str = "firefox-agent-bridge@local";
+// Published bridge v0.10.1 checks Chrome before recognizing Opera's OPR token.
+// Only this known detector (or our exact repaired form) may be rewritten.
+const LEGACY_CHROMIUM_BROWSER_DETECTOR: &str = r#"function detectBrowserName() {
+  if (IS_GECKO) return "firefox";
+  const ua = (typeof navigator !== "undefined" && navigator.userAgent) || "";
+  if (/Edg\//.test(ua)) return "edge";
+  if (navigator.brave) return "brave";
+  if (/Chrome\//.test(ua)) return "chrome";
+  if (/Safari\//.test(ua)) return "safari";
+  return "unknown";
+}"#;
 /// Stable ID of the unpacked Chromium extension (derived from the public key
 /// embedded in its manifest by the bridge's build-extensions.py).
 pub const CHROMIUM_EXTENSION_ID: &str = "ijifgeepmnbalajhfjnpbnobfobflfkk";
@@ -155,7 +166,7 @@ pub fn resolve_target_browser(requested: Option<&str>) -> Result<BrowserDetectio
         Some(name) => {
             let kind = BrowserKind::parse(name).with_context(|| {
                 format!(
-                    "Unknown browser '{}'. Supported: auto, firefox, chrome, chromium, edge, brave, safari.",
+                    "Unknown browser '{}'. Supported: auto, firefox, chrome, chromium, edge, brave, opera, safari.",
                     name
                 )
             })?;
@@ -193,15 +204,493 @@ pub use browser_update::{
 ///
 /// Every browser running the extension spawns its own host, and since bridge
 /// v0.10.1 each host takes its own port (#1720). The CLI picks the host by
-/// `FAB_BROWSER`. A user-set `FAB_BROWSER` (e.g. `helium` for a fork jcode does
-/// not know) is left alone.
+/// `FAB_BROWSER`. Explicit targets always override an inherited value on the
+/// child command only, so concurrent sessions cannot change each other's target.
+/// Untargeted invocations retain the user's environment.
 pub fn apply_bridge_browser_env<C: BridgeEnv>(command: &mut C, browser: Option<&str>) {
-    if std::env::var_os("FAB_BROWSER").is_some() {
-        return;
+    let endpoint = browser
+        .and_then(BrowserKind::parse)
+        .and_then(attested_native_host_endpoint);
+    apply_bridge_browser_env_with_endpoint(command, browser, endpoint.as_ref());
+}
+
+fn apply_bridge_browser_env_with_endpoint<C: BridgeEnv>(
+    command: &mut C,
+    browser: Option<&str>,
+    endpoint: Option<&NativeHostEndpoint>,
+) {
+    #[cfg(target_os = "macos")]
+    {
+        // Browser-launched native hosts inherit macOS's per-user temp directory,
+        // not Jcode's scratch TMPDIR. The bridge registry uses temp_dir() unless
+        // an existing XDG_RUNTIME_DIR is supplied. Keep that explicit override,
+        // but align the child's TMPDIR without changing the agent environment.
+        command.set_env("TMPDIR", &macos_native_host_temp_dir().to_string_lossy());
     }
     if let Some(browser) = browser.filter(|b| !b.is_empty() && *b != "auto") {
         command.set_env("FAB_BROWSER", browser);
+        #[cfg(target_os = "macos")]
+        if BrowserKind::parse(browser).is_some() {
+            // FAB_WS_URL has precedence over the bridge's permissive host
+            // selector. Missing attestation must never choose another browser.
+            let port = endpoint.map(|endpoint| endpoint.entry.port).unwrap_or(0);
+            command.set_env("FAB_WS_URL", &format!("ws://127.0.0.1:{port}"));
+        }
     }
+    #[cfg(not(target_os = "macos"))]
+    let _ = endpoint;
+}
+
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+struct RegisteredBridgeHost {
+    port: u16,
+    pid: u32,
+    #[serde(default)]
+    browser: Option<String>,
+    #[serde(default)]
+    process: Option<String>,
+}
+
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NativeHostEndpoint {
+    entry: RegisteredBridgeHost,
+    host_executable: PathBuf,
+    parent_executable: PathBuf,
+    parent_pid: u32,
+    host_started: (u64, u64),
+}
+
+#[cfg(not(any(target_os = "macos", test)))]
+type NativeHostEndpoint = ();
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_process_is_exact_browser(path: &std::path::Path, kind: BrowserKind) -> bool {
+    #[cfg(target_os = "macos")]
+    let clone_root = macos_native_host_temp_dir()
+        .parent()
+        .map(|parent| parent.join("X"))
+        .and_then(|root| std::fs::canonicalize(root).ok());
+    #[cfg(not(target_os = "macos"))]
+    let clone_root: Option<PathBuf> = None;
+    macos_process_is_exact_browser_with_clone_root(path, kind, clone_root.as_deref())
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn normalize_macos_var_path(path: &std::path::Path) -> PathBuf {
+    // macOS /var is an alias of /private/var. No other prefix or filesystem
+    // alias is generalized by this matcher.
+    match path.strip_prefix("/var") {
+        Ok(relative) => std::path::Path::new("/private/var").join(relative),
+        Err(_) => path.to_path_buf(),
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_process_is_exact_browser_with_clone_root(
+    path: &std::path::Path,
+    kind: BrowserKind,
+    clone_root: Option<&std::path::Path>,
+) -> bool {
+    let executable = match kind {
+        BrowserKind::Firefox => "firefox",
+        BrowserKind::Chrome => "Google Chrome",
+        BrowserKind::Chromium => "Chromium",
+        BrowserKind::Edge => "Microsoft Edge",
+        BrowserKind::Brave => "Brave Browser",
+        BrowserKind::Opera => "Opera",
+        BrowserKind::Safari => return false,
+    };
+    if !path.is_absolute()
+        || path
+            .to_str()
+            .is_none_or(|path| path.split('/').any(|part| part == "." || part == ".."))
+    {
+        return false;
+    }
+    // Installed app executables and OS code-sign clones are separate exact
+    // routes. A clone may never be recognized by a broad app-name substring.
+    let path = normalize_macos_var_path(path);
+    let root = clone_root
+        .filter(|root| root.is_absolute())
+        .map(normalize_macos_var_path);
+    let relative = root.as_ref().and_then(|root| path.strip_prefix(root).ok());
+    let Some(relative) = relative else {
+        return path.ends_with(format!(
+            "{}.app/Contents/MacOS/{executable}",
+            kind.macos_app_name()
+        ));
+    };
+    let components: Vec<_> = relative
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(component) => component.to_str(),
+            _ => None,
+        })
+        .collect();
+    if components.len() != 6 {
+        return false;
+    }
+    let namespace = format!("{}.code_sign_clone", kind.macos_bundle_id());
+    let app = format!("{}.app.bundle", kind.macos_app_name());
+    components[0] == namespace
+        && components[1]
+            .strip_prefix("code_sign_clone.")
+            .is_some_and(|nonce| {
+                !nonce.is_empty()
+                    && nonce
+                        .chars()
+                        .all(|character| character.is_ascii_alphanumeric())
+            })
+        && components[2] == app
+        && components[3] == "Contents"
+        && components[4] == "MacOS"
+        && components[5] == executable
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn native_host_entry_matches_process_evidence(
+    entry: &RegisteredBridgeHost,
+    kind: BrowserKind,
+    host_executable: &std::path::Path,
+    expected_host: &std::path::Path,
+    parent_executable: &std::path::Path,
+    same_user: bool,
+) -> bool {
+    (8766..8776).contains(&entry.port)
+        && entry.port != BRIDGE_RELAY_PORT
+        && entry.pid > 0
+        && entry.pid <= i32::MAX as u32
+        && same_user
+        && host_executable.is_absolute()
+        && host_executable == expected_host
+        && macos_process_is_exact_browser(parent_executable, kind)
+        && entry
+            .process
+            .as_deref()
+            .is_some_and(|process| std::path::Path::new(process) == parent_executable)
+        && entry
+            .browser
+            .as_deref()
+            .is_none_or(|browser| BrowserKind::parse(browser) == Some(kind))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn lsof_loopback_listeners(output: &str) -> Vec<RegisteredBridgeHost> {
+    let mut pid = None;
+    let mut listeners = Vec::new();
+    for line in output.lines() {
+        if let Some(value) = line.strip_prefix('p') {
+            pid = value
+                .parse::<u32>()
+                .ok()
+                .filter(|pid| *pid > 0 && *pid <= i32::MAX as u32);
+        } else if let (Some(pid), Some(address)) = (pid, line.strip_prefix('n'))
+            && let Some(port) = address
+                .strip_prefix("127.0.0.1:")
+                .and_then(|port| port.parse::<u16>().ok())
+            && (8766..8776).contains(&port)
+            && port != BRIDGE_RELAY_PORT
+        {
+            listeners.push(RegisteredBridgeHost {
+                port,
+                pid,
+                browser: None,
+                process: None,
+            });
+        }
+    }
+    listeners.sort_by_key(|entry| (entry.port, entry.pid));
+    listeners.dedup_by_key(|entry| (entry.port, entry.pid));
+    listeners
+}
+
+#[cfg(test)]
+fn lsof_proves_loopback_listener(output: &str, pid: u32, port: u16) -> bool {
+    lsof_loopback_listeners(output)
+        .iter()
+        .any(|entry| entry.pid == pid && entry.port == port)
+}
+
+#[cfg(target_os = "macos")]
+fn bounded_lsof_output(args: &[&str]) -> Option<String> {
+    let started = std::time::Instant::now();
+    let output = bounded_process_output(
+        std::path::Path::new("/usr/sbin/lsof"),
+        args,
+        LISTENER_DISCOVERY_TIMEOUT,
+    );
+    if output.is_none() {
+        browser_diagnostic(format!(
+            "listener_discovery_failed elapsed_ms={}",
+            started.elapsed().as_millis()
+        ));
+    }
+    output
+}
+
+// A real macOS lsof scan exceeded the previous 500ms budget (2.523s including
+// termination), falsely marking an unchanged live host silent. Keep one bounded
+// attempt, but allow normal kernel enumeration to finish under host load.
+#[cfg(any(target_os = "macos", test))]
+const LISTENER_DISCOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+#[cfg(any(target_os = "macos", test))]
+fn captured_listener_entry(output: &str, pid: u32, port: u16) -> Option<RegisteredBridgeHost> {
+    lsof_loopback_listeners(output)
+        .into_iter()
+        .find(|entry| entry.pid == pid && entry.port == port)
+}
+
+#[cfg(target_os = "macos")]
+fn reattest_captured_endpoint(
+    kind: BrowserKind,
+    expected: &NativeHostEndpoint,
+) -> Option<NativeHostEndpoint> {
+    let pid = expected.entry.pid.to_string();
+    let port = format!("-iTCP:{}", expected.entry.port);
+    let output = bounded_lsof_output(&["-nP", "-a", "-p", &pid, &port, "-sTCP:LISTEN", "-Fpn"])?;
+    let entry = captured_listener_entry(&output, expected.entry.pid, expected.entry.port)?;
+    let actual = attest_listener_entry(kind, entry)?;
+    (actual == *expected).then_some(actual)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn reattest_captured_endpoint(
+    _kind: BrowserKind,
+    _expected: &NativeHostEndpoint,
+) -> Option<NativeHostEndpoint> {
+    None
+}
+
+fn browser_diagnostic(message: String) {
+    crate::logging::warn(&message);
+    if std::env::var("JCODE_BROWSER_DIAGNOSTICS").as_deref() == Ok("1") {
+        eprintln!("[browser diagnostic] {message}");
+    }
+}
+
+fn safe_probe_output_summary(output: &std::process::Output) -> String {
+    format!(
+        "status={} stdout_bytes={} stderr_bytes={}",
+        output.status,
+        output.stdout.len(),
+        output.stderr.len()
+    )
+}
+
+fn endpoint_probe_identity(
+    endpoint: Option<&NativeHostEndpoint>,
+) -> Option<(u32, u16, u32, u64, u64)> {
+    #[cfg(any(target_os = "macos", test))]
+    return endpoint.map(|endpoint| {
+        (
+            endpoint.entry.pid,
+            endpoint.entry.port,
+            endpoint.parent_pid,
+            endpoint.host_started.0,
+            endpoint.host_started.1,
+        )
+    });
+    #[cfg(not(any(target_os = "macos", test)))]
+    {
+        let _ = endpoint;
+        None
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn bounded_process_output(
+    program: &std::path::Path,
+    args: &[&str],
+    timeout: std::time::Duration,
+) -> Option<String> {
+    let Ok(mut child) = std::process::Command::new(program)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        return None;
+    };
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    browser_diagnostic(format!(
+                        "listener_command_exit pid={} status={status}",
+                        child.id()
+                    ));
+                    return None;
+                }
+                let output = child.wait_with_output().ok()?;
+                if output.stdout.len() > 65_536 {
+                    return None;
+                }
+                return String::from_utf8(output.stdout).ok();
+            }
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(5))
+            }
+            _ => {
+                browser_diagnostic(format!(
+                    "listener_command_deadline pid={} timeout_ms={}",
+                    child.id(),
+                    timeout.as_millis()
+                ));
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_process_path(pid: u32) -> Option<PathBuf> {
+    if pid == 0 || pid > i32::MAX as u32 {
+        return None;
+    }
+    let mut buffer = [0_u8; 4096];
+    // SAFETY: proc_pidpath writes at most the supplied writable buffer size.
+    let length =
+        unsafe { libc::proc_pidpath(pid as i32, buffer.as_mut_ptr().cast(), buffer.len() as u32) };
+    if length <= 0 {
+        return None;
+    }
+    let nul = buffer.iter().position(|byte| *byte == 0)?;
+    let path = std::str::from_utf8(&buffer[..nul]).ok()?;
+    Some(PathBuf::from(path))
+}
+
+#[cfg(target_os = "macos")]
+fn macos_process_info(pid: u32) -> Option<libc::proc_bsdinfo> {
+    if pid == 0 || pid > i32::MAX as u32 {
+        return None;
+    }
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+    let size = std::mem::size_of::<libc::proc_bsdinfo>();
+    // SAFETY: proc_pidinfo receives a writable buffer of the exact struct size.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            pid as i32,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size as i32,
+        )
+    };
+    if written != size as i32 {
+        return None;
+    }
+    // SAFETY: the full struct was initialized successfully by proc_pidinfo.
+    Some(unsafe { info.assume_init() })
+}
+
+#[cfg(target_os = "macos")]
+fn attested_native_host_endpoint(kind: BrowserKind) -> Option<NativeHostEndpoint> {
+    // v0.10.1 can overwrite another host's registry entry with the default port
+    // after binding a different port. Kernel listener ownership is authoritative,
+    // so missing or corrupt registry files cannot hide a correctly running host.
+    let output = bounded_lsof_output(&["-nP", "-iTCP:8766-8775", "-sTCP:LISTEN", "-Fpn"])?;
+    let entries = lsof_loopback_listeners(&output);
+    let listener_count = entries.len();
+    let mut rejected = 0;
+    for entry in entries {
+        let Some(endpoint) = attest_listener_entry(kind, entry) else {
+            rejected += 1;
+            continue;
+        };
+        return Some(endpoint);
+    }
+    browser_diagnostic(format!(
+        "endpoint_attestation_rejected browser={kind:?} listeners={listener_count} rejected={rejected}"
+    ));
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn attest_listener_entry(
+    kind: BrowserKind,
+    mut entry: RegisteredBridgeHost,
+) -> Option<NativeHostEndpoint> {
+    let expected_host = std::fs::canonicalize(host_binary_path()).ok()?;
+    let info = macos_process_info(entry.pid)?;
+    let host = std::fs::canonicalize(macos_process_path(entry.pid)?).ok()?;
+    let parent = macos_process_path(info.pbi_ppid)?;
+    entry.process = Some(parent.to_string_lossy().into_owned());
+    let same_user = info.pbi_uid == unsafe { libc::getuid() };
+    if !native_host_entry_matches_process_evidence(
+        &entry,
+        kind,
+        &host,
+        &expected_host,
+        &parent,
+        same_user,
+    ) {
+        return None;
+    }
+    Some(NativeHostEndpoint {
+        entry,
+        host_executable: host,
+        parent_executable: parent,
+        parent_pid: info.pbi_ppid,
+        host_started: (info.pbi_start_tvsec, info.pbi_start_tvusec),
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn attested_native_host_endpoint(_kind: BrowserKind) -> Option<NativeHostEndpoint> {
+    None
+}
+
+/// Exact native-host process evidence, not a requested-browser inference.
+#[cfg(target_os = "macos")]
+pub fn native_host_identity_evidence(kind: BrowserKind) -> Option<serde_json::Value> {
+    let endpoint = attested_native_host_endpoint(kind)?;
+    Some(
+        serde_json::json!({"source":"native_host_process","port":endpoint.entry.port,"host_pid":endpoint.entry.pid,"parent_pid":endpoint.parent_pid,"host_executable":endpoint.host_executable,"parent_executable":endpoint.parent_executable}),
+    )
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn native_host_identity_evidence(_kind: BrowserKind) -> Option<serde_json::Value> {
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn macos_native_host_temp_dir() -> &'static std::path::Path {
+    static DIRECTORY: std::sync::LazyLock<PathBuf> = std::sync::LazyLock::new(|| {
+        let mut buffer = [0_u8; 4096];
+        // SAFETY: the buffer is writable for exactly the size supplied. confstr
+        // reports the required size including its terminating NUL. No environment
+        // mutation or subprocess is needed, and allocation/probing are bounded.
+        let length = unsafe {
+            libc::confstr(
+                libc::_CS_DARWIN_USER_TEMP_DIR,
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+            )
+        };
+        parse_macos_temp_directory(&buffer, length).unwrap_or_else(|| PathBuf::from("/tmp"))
+    });
+    &DIRECTORY
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn parse_macos_temp_directory(buffer: &[u8], length: usize) -> Option<PathBuf> {
+    if length <= 1 || length > buffer.len() {
+        return None;
+    }
+    let value = std::ffi::CStr::from_bytes_with_nul(&buffer[..length])
+        .ok()?
+        .to_str()
+        .ok()?;
+    let path = PathBuf::from(value);
+    path.is_absolute().then_some(path)
 }
 
 /// Both process builders jcode spawns the bridge CLI with.
@@ -268,6 +757,13 @@ pub async fn ensure_browser_setup() -> Result<String> {
 }
 
 pub async fn ensure_browser_setup_for(target: BrowserDetection) -> Result<String> {
+    if target.kind == BrowserKind::Safari {
+        let result = crate::browser_safari::setup().await?;
+        if result["ready"].as_bool() == Some(true) {
+            save_browser_preference(BrowserKind::Safari);
+        }
+        return Ok(serde_json::to_string_pretty(&result)?);
+    }
     let kind = target.kind;
     let name = kind.display_name();
     let mut log = String::new();
@@ -282,8 +778,15 @@ pub async fn ensure_browser_setup_for(target: BrowserDetection) -> Result<String
         && target.source != browser_detect::DetectionSource::EnvOverride
     {
         log.push_str(
-            "Override with `jcode browser setup <firefox|chrome|edge|brave|chromium|safari>` or JCODE_BROWSER.\n",
+            "Override with `jcode browser setup <firefox|chrome|edge|brave|opera|chromium|safari>` or JCODE_BROWSER.\n",
         );
+    }
+
+    if kind.family() == BrowserFamily::Chromium
+        && extension_package_present(kind)
+        && repair_chromium_browser_identity(&chromium_extension_dir())?
+    {
+        log.push_str("Repaired Chromium bridge browser detection for Opera. Reload Browser Agent Bridge in each browser using this unpacked extension, then re-check status.\n");
     }
 
     match update_bridge_if_newer(kind, true).await {
@@ -299,14 +802,15 @@ pub async fn ensure_browser_setup_for(target: BrowserDetection) -> Result<String
 
     let initial_status = inspect_browser_status_for(&target).await?;
     if initial_status.ready {
-        if connected_matches(&initial_status, kind) {
-            mark_setup_complete_for(kind).ok();
-            log.push_str("Browser bridge is already set up and responding.\n");
-            log.push_str("No setup action was needed.\n");
-            return Ok(log);
-        }
+        install_native_host_manifest_for(kind)?;
+        mark_setup_complete_for(kind).ok();
+        log.push_str("Browser bridge is already set up and responding.\n");
+        log.push_str("No setup action was needed.\n");
+        return Ok(log);
+    }
+    if initial_status.responding && !connected_matches(&initial_status, kind) {
         log.push_str(&format!(
-            "The bridge is currently answered by {}, not {}. Continuing setup for {} (only one browser can own the bridge at a time; close the other browser to switch).\n",
+            "The bridge replied as {}, not {}. It will not be used for this target. Continuing setup for {}.\n",
             initial_status.connected_browser.as_deref().unwrap_or("another browser"),
             name,
             name
@@ -336,7 +840,9 @@ pub async fn ensure_browser_setup_for(target: BrowserDetection) -> Result<String
         None => initial_status,
     };
 
-    let outdated = initial_status.responding && !initial_status.compatible;
+    let outdated = initial_status.responding
+        && connected_matches(&initial_status, kind)
+        && !initial_status.compatible;
     if outdated {
         log.push_str(&format!(
             "Browser bridge is connected, but the live {} extension is out of date for this jcode build. Attempting repair steps...\n",
@@ -514,15 +1020,13 @@ fn extension_package_present(kind: BrowserKind) -> bool {
     }
 }
 
-/// Whether a bridge ping came from the requested browser family. Chromium
-/// browsers are interchangeable here because they share one extension build.
+/// Whether the reply identifies the exact requested browser. Sharing an
+/// extension build does not make Chromium browsers interchangeable.
 fn ping_matches(info: &serde_json::Value, kind: BrowserKind) -> bool {
     match info.get("browser").and_then(|b| b.as_str()) {
-        // Older extensions do not report a browser and are Firefox-only.
-        None => kind.family() == BrowserFamily::Gecko,
-        Some(reported) => {
-            BrowserKind::parse(reported).is_some_and(|r| r == kind || r.family() == kind.family())
-        }
+        // An identity-less reply cannot prove which browser owns the host.
+        None => false,
+        Some(reported) => BrowserKind::parse(reported).is_some_and(|r| r == kind),
     }
 }
 
@@ -530,16 +1034,14 @@ fn connected_matches(status: &BrowserStatus, kind: BrowserKind) -> bool {
     status_answered_by(status, kind)
 }
 
-/// Whether the bridge that answered belongs to `kind` (or its family).
+/// Whether the bridge that answered is exactly `kind` (not just its family).
 /// Each browser runs its own host, and the CLI falls back to another
 /// browser's host when `kind` has none, so a responding bridge alone does
 /// not mean `kind` is ready (#1743).
 pub fn status_answered_by(status: &BrowserStatus, kind: BrowserKind) -> bool {
     match status.connected_browser.as_deref() {
-        None => kind.family() == BrowserFamily::Gecko,
-        Some(reported) => {
-            BrowserKind::parse(reported).is_some_and(|r| r == kind || r.family() == kind.family())
-        }
+        None => false,
+        Some(reported) => BrowserKind::parse(reported).is_some_and(|r| r == kind),
     }
 }
 
@@ -655,7 +1157,7 @@ async fn download_bridge_release(
                 .bytes()
                 .await
                 .context("Failed to download Chromium extension")?;
-            replace_dir_with_zip(&chromium_extension_dir(), &bytes)?;
+            replace_dir_with_zip(&chromium_extension_dir(), &bytes, true)?;
         }
         BrowserFamily::Safari => {
             let url = safari_url
@@ -668,7 +1170,7 @@ async fn download_bridge_release(
                 .bytes()
                 .await
                 .context("Failed to download Safari extension")?;
-            replace_dir_with_zip(&safari_extension_dir(), &bytes)?;
+            replace_dir_with_zip(&safari_extension_dir(), &bytes, false)?;
         }
         BrowserFamily::Gecko => {}
     }
@@ -727,7 +1229,7 @@ fn write_file_atomically(path: &PathBuf, bytes: &[u8], _executable: bool) -> Res
 /// Extract `bytes` (a zip archive) into `dir`, replacing its previous
 /// contents. The directory path stays stable so a browser that loaded the
 /// unpacked extension from it picks up the update on reload.
-fn replace_dir_with_zip(dir: &std::path::Path, bytes: &[u8]) -> Result<()> {
+fn replace_dir_with_zip(dir: &std::path::Path, bytes: &[u8], chromium: bool) -> Result<()> {
     let parent = dir.parent().context("extension dir has no parent")?;
     std::fs::create_dir_all(parent)?;
     let staging = parent.join(format!(
@@ -739,11 +1241,60 @@ fn replace_dir_with_zip(dir: &std::path::Path, bytes: &[u8]) -> Result<()> {
         std::fs::remove_dir_all(&staging)?;
     }
     extract_zip(bytes, &staging)?;
+    if chromium {
+        repair_chromium_browser_identity(&staging)?;
+    }
     if dir.exists() {
         std::fs::remove_dir_all(dir)?;
     }
     std::fs::rename(&staging, dir)?;
     Ok(())
+}
+
+fn opera_aware_chromium_browser_detector() -> String {
+    LEGACY_CHROMIUM_BROWSER_DETECTOR.replace(
+        "  if (/Chrome\\//.test(ua)) return \"chrome\";",
+        "  if (/OPR\\//.test(ua)) return \"opera\";\n  if (/Chrome\\//.test(ua)) return \"chrome\";",
+    )
+}
+
+fn patch_chromium_browser_identity_source(source: &str) -> Result<Option<String>> {
+    anyhow::ensure!(
+        source.matches("function detectBrowserName() {").count() == 1,
+        "Chromium bridge has an unknown or ambiguous browser identity detector; refusing to overwrite it. Install a supported Browser Agent Bridge release."
+    );
+    let repaired = opera_aware_chromium_browser_detector();
+    if source.contains(&repaired) {
+        return Ok(None);
+    }
+    anyhow::ensure!(
+        source.contains(LEGACY_CHROMIUM_BROWSER_DETECTOR),
+        "Chromium bridge browser identity detector does not match the supported v0.10.1 source; refusing an unsafe Opera compatibility patch."
+    );
+    Ok(Some(source.replacen(
+        LEGACY_CHROMIUM_BROWSER_DETECTOR,
+        &repaired,
+        1,
+    )))
+}
+
+fn repair_chromium_browser_identity(dir: &std::path::Path) -> Result<bool> {
+    let path = dir.join("background.js");
+    let source = std::fs::read_to_string(&path).with_context(|| {
+        format!(
+            "Cannot inspect Chromium bridge browser identity at {}",
+            path.display()
+        )
+    })?;
+    match patch_chromium_browser_identity_source(&source)
+        .with_context(|| format!("Cannot safely repair Chromium bridge at {}", path.display()))?
+    {
+        Some(repaired) => {
+            write_file_atomically(&path, repaired.as_bytes(), false)?;
+            Ok(true)
+        }
+        None => Ok(false),
+    }
 }
 
 /// Minimal zip reader (stored and deflate entries) using the central
@@ -866,6 +1417,7 @@ fn get_host_asset_name() -> String {
 #[path = "browser_native_host.rs"]
 mod native_host;
 use native_host::*;
+
 /// Whether the Safari relay host is running. The relay binds its extension
 /// port before the agent port, and other browsers' hosts never take the relay
 /// port, so this stays accurate when another browser's host owns 8766 (#1720).
@@ -914,9 +1466,24 @@ async fn run_browser_cli_capped(
     timeout: std::time::Duration,
     kind: Option<BrowserKind>,
 ) -> Result<Option<std::process::Output>> {
+    let endpoint = kind.and_then(attested_native_host_endpoint);
+    run_browser_cli_capped_with_endpoint(bin, args, timeout, kind, endpoint.as_ref()).await
+}
+
+async fn run_browser_cli_capped_with_endpoint(
+    bin: &std::path::Path,
+    args: &[&str],
+    timeout: std::time::Duration,
+    kind: Option<BrowserKind>,
+    endpoint: Option<&NativeHostEndpoint>,
+) -> Result<Option<std::process::Output>> {
     let mut cmd = tokio::process::Command::new(bin);
-    cmd.args(args).kill_on_drop(true);
-    apply_bridge_browser_env(&mut cmd, kind.map(bridge_browser_name));
+    // Status and capability probes address the selected host directly, never
+    // a daemon inherited from another agent or browser.
+    cmd.args(args)
+        .kill_on_drop(true)
+        .env_remove("BROWSER_SESSION");
+    apply_bridge_browser_env_with_endpoint(&mut cmd, kind.map(bridge_browser_name), endpoint);
 
     match tokio::time::timeout(timeout, cmd.output()).await {
         Ok(output) => Ok(Some(output?)),
@@ -932,53 +1499,168 @@ async fn run_browser_cli_capped(
 }
 
 async fn check_browser_ping(kind: BrowserKind) -> Result<bool> {
-    Ok(bridge_ping_info(kind).await?.is_some())
+    Ok(bridge_ping_info(kind)
+        .await?
+        .as_ref()
+        .is_some_and(|info| ping_matches(info, kind)))
 }
 
 /// Ping the bridge and return the extension's reply (which names the browser
 /// and transport on bridge v0.10+), or `None` if nothing answered.
 async fn bridge_ping_info(kind: BrowserKind) -> Result<Option<serde_json::Value>> {
+    let endpoint = attested_native_host_endpoint(kind);
+    bridge_ping_info_at_endpoint(kind, endpoint.as_ref()).await
+}
+
+/// Legacy signed Firefox identity inference is runtime-enabled only on macOS,
+/// where endpoint ownership and native process ancestry have been attested.
+#[cfg(any(target_os = "macos", test))]
+fn accept_attested_legacy_firefox_ping(
+    info: &mut serde_json::Value,
+    kind: BrowserKind,
+    before: Option<&NativeHostEndpoint>,
+    after: Option<&NativeHostEndpoint>,
+) -> bool {
+    let Some(endpoint) = before else {
+        return false;
+    };
+    if kind != BrowserKind::Firefox
+        || info.get("browser").is_some()
+        || info["pong"].as_bool() != Some(true)
+        || after != Some(endpoint)
+        || !macos_process_is_exact_browser(&endpoint.parent_executable, BrowserKind::Firefox)
+    {
+        return false;
+    }
+    info["browser"] = serde_json::json!("firefox");
+    info["identity_evidence"] = serde_json::json!("native_host_process");
+    info["attested_port"] = serde_json::json!(endpoint.entry.port);
+    info["attested_host_pid"] = serde_json::json!(endpoint.entry.pid);
+    true
+}
+
+async fn bridge_ping_info_at_endpoint(
+    kind: BrowserKind,
+    endpoint: Option<&NativeHostEndpoint>,
+) -> Result<Option<serde_json::Value>> {
     let bin = browser_binary_path();
     if !bin.exists() {
         return Ok(None);
     }
 
-    match run_browser_cli_capped(&bin, &["ping"], BRIDGE_PING_TIMEOUT, Some(kind)).await? {
+    match run_browser_cli_capped_with_endpoint(
+        &bin,
+        &["ping"],
+        BRIDGE_PING_TIMEOUT,
+        Some(kind),
+        endpoint,
+    )
+    .await?
+    {
         Some(output) if output.status.success() => {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            if !stdout.contains("pong") {
+            let Ok(info) = serde_json::from_str::<serde_json::Value>(stdout.trim()) else {
+                crate::logging::warn(&format!(
+                    "browser ping invalid JSON: requested={kind:?} endpoint={:?} stdout_bytes={}",
+                    endpoint_probe_identity(endpoint),
+                    output.stdout.len()
+                ));
+                return Ok(None);
+            };
+            if info["pong"].as_bool() != Some(true) {
+                crate::logging::warn(&format!(
+                    "browser ping omitted true pong: requested={kind:?} endpoint={:?} stdout_bytes={}",
+                    endpoint_probe_identity(endpoint),
+                    output.stdout.len()
+                ));
                 return Ok(None);
             }
-            Ok(Some(
-                serde_json::from_str(stdout.trim())
-                    .unwrap_or_else(|_| serde_json::json!({"pong": true})),
-            ))
+            let after = endpoint.and_then(|endpoint| reattest_captured_endpoint(kind, endpoint));
+            if endpoint.is_some() && after.as_ref() != endpoint {
+                browser_diagnostic(format!(
+                    "browser ping endpoint changed: requested={kind:?} before={:?} after={:?}",
+                    endpoint_probe_identity(endpoint),
+                    endpoint_probe_identity(after.as_ref())
+                ));
+                return Ok(None);
+            }
+            #[cfg(target_os = "macos")]
+            let info = {
+                let mut info = info;
+                accept_attested_legacy_firefox_ping(&mut info, kind, endpoint, after.as_ref());
+                info
+            };
+            Ok(Some(info))
         }
-        _ => Ok(None),
+        Some(output) => {
+            crate::logging::warn(&format!(
+                "browser ping failed: requested={kind:?} endpoint={:?} {}",
+                endpoint_probe_identity(endpoint),
+                safe_probe_output_summary(&output)
+            ));
+            Ok(None)
+        }
+        None => Ok(None),
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BridgeActionSupport {
+    Supported,
+    Unsupported,
+    Unavailable,
+}
+
+fn bridge_capabilities_from_probes(probes: &[(&str, BridgeActionSupport)]) -> Option<Vec<String>> {
+    if probes
+        .iter()
+        .any(|(_, support)| *support == BridgeActionSupport::Unavailable)
+    {
+        return None;
+    }
+    Some(
+        probes
+            .iter()
+            .filter(|(_, support)| *support == BridgeActionSupport::Unsupported)
+            .map(|(action, _)| (*action).to_string())
+            .collect(),
+    )
 }
 
 async fn probe_bridge_action_support(
     action: &str,
     params_json: &str,
     kind: BrowserKind,
-) -> Result<bool> {
+    endpoint: Option<&NativeHostEndpoint>,
+) -> Result<BridgeActionSupport> {
     let bin = browser_binary_path();
     if !bin.exists() {
-        return Ok(false);
+        return Ok(BridgeActionSupport::Unavailable);
     }
 
-    let Some(output) = run_browser_cli_capped(
+    if let Some(captured) = endpoint {
+        let after = reattest_captured_endpoint(kind, captured);
+        if after.as_ref() != endpoint {
+            browser_diagnostic(format!(
+                "capability_endpoint_changed action={action} browser={kind:?} before={:?} after={:?}",
+                endpoint_probe_identity(endpoint),
+                endpoint_probe_identity(after.as_ref())
+            ));
+            return Ok(BridgeActionSupport::Unavailable);
+        }
+    }
+    let Some(output) = run_browser_cli_capped_with_endpoint(
         &bin,
         &[action, params_json],
         BRIDGE_PING_TIMEOUT,
         Some(kind),
+        endpoint,
     )
     .await?
     else {
-        // A dead bridge cannot tell us whether the action exists; report it as
-        // unsupported rather than hanging the caller (#602).
-        return Ok(false);
+        // A dead bridge cannot tell us whether the action exists. Report
+        // transport unavailability, not an unsupported extension action.
+        return Ok(BridgeActionSupport::Unavailable);
     };
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -991,7 +1673,18 @@ async fn probe_bridge_action_support(
         format!("{}\n{}", stderr.trim(), stdout.trim())
     };
 
-    Ok(!combined.contains(&format!("Unknown action: {}", action)))
+    let unsupported = combined.contains(&format!("Unknown action: {}", action));
+    if unsupported {
+        browser_diagnostic(format!(
+            "capability_unknown_action action={action} browser={kind:?} {}",
+            safe_probe_output_summary(&output)
+        ));
+    }
+    Ok(if unsupported {
+        BridgeActionSupport::Unsupported
+    } else {
+        BridgeActionSupport::Supported
+    })
 }
 
 /// Oldest extension release that implements every required action.
@@ -1009,14 +1702,19 @@ fn ping_reports_current_extension(info: &serde_json::Value) -> bool {
         .is_some_and(|v| v >= MIN_PROBE_FREE_EXTENSION)
 }
 
-async fn probe_bridge_missing_actions(kind: BrowserKind) -> Result<Vec<String>> {
-    let mut missing = Vec::new();
+async fn probe_bridge_missing_actions(
+    kind: BrowserKind,
+    endpoint: Option<&NativeHostEndpoint>,
+) -> Result<Option<Vec<String>>> {
+    let mut probes = Vec::new();
     for (action, params_json) in REQUIRED_BRIDGE_ACTION_PROBES {
-        if !probe_bridge_action_support(action, params_json, kind).await? {
-            missing.push((*action).to_string());
+        let support = probe_bridge_action_support(action, params_json, kind, endpoint).await?;
+        if support == BridgeActionSupport::Unavailable {
+            return Ok(None);
         }
+        probes.push((*action, support));
     }
-    Ok(missing)
+    Ok(bridge_capabilities_from_probes(&probes))
 }
 
 pub async fn inspect_browser_status() -> Result<BrowserStatus> {
@@ -1024,29 +1722,53 @@ pub async fn inspect_browser_status() -> Result<BrowserStatus> {
 }
 
 pub async fn inspect_browser_status_for(target: &BrowserDetection) -> Result<BrowserStatus> {
+    if target.kind == BrowserKind::Safari {
+        let result = crate::browser_safari::status().await?;
+        let ready = result["ready"].as_bool() == Some(true);
+        return Ok(BrowserStatus {
+            backend: "safari_applescript",
+            browser: "safari",
+            detected_via: target.source.describe(),
+            connected_browser: ready.then(|| "safari".to_string()),
+            setup_complete: ready,
+            binary_installed: BrowserKind::Safari.is_installed(),
+            responding: ready,
+            compatible: ready,
+            missing_actions: Vec::new(),
+            ready,
+        });
+    }
     let binary_installed = browser_binary_path().exists();
     let setup_complete = is_setup_complete();
+    let endpoint = attested_native_host_endpoint(target.kind);
     let ping = if binary_installed {
-        bridge_ping_info(target.kind).await.unwrap_or(None)
+        bridge_ping_info_at_endpoint(target.kind, endpoint.as_ref())
+            .await
+            .unwrap_or(None)
     } else {
         None
     };
-    let responding = ping.is_some();
     let connected_browser = ping.as_ref().map(|info| {
         info.get("browser")
             .and_then(|b| b.as_str())
-            .unwrap_or("firefox")
+            .unwrap_or("unknown")
             .to_string()
     });
-    let missing_actions =
-        if responding && !ping.as_ref().is_some_and(ping_reports_current_extension) {
-            probe_bridge_missing_actions(target.kind)
+    let identity_matches = ping
+        .as_ref()
+        .is_some_and(|info| ping_matches(info, target.kind));
+    let capabilities =
+        if identity_matches && !ping.as_ref().is_some_and(ping_reports_current_extension) {
+            probe_bridge_missing_actions(target.kind, endpoint.as_ref())
                 .await
-                .unwrap_or_default()
+                .unwrap_or(None)
         } else {
-            Vec::new()
+            Some(Vec::new())
         };
-    let compatible = responding && missing_actions.is_empty();
+    let responding = ping.is_some() && capabilities.is_some();
+    let capability_available = capabilities.is_some();
+    let missing_actions = capabilities.unwrap_or_default();
+    let compatible = identity_matches && capability_available && missing_actions.is_empty();
     let ready = responding && compatible;
 
     Ok(BrowserStatus {
@@ -1071,7 +1793,7 @@ pub async fn ensure_browser_ready_noninteractive_for(
     target: &BrowserDetection,
 ) -> Result<BrowserStatus> {
     let mut status = inspect_browser_status_for(target).await?;
-    if status.ready && !status.setup_complete {
+    if target.kind != BrowserKind::Safari && status.ready && !status.setup_complete {
         mark_setup_complete().ok();
         status.setup_complete = is_setup_complete();
     }
@@ -1555,10 +2277,14 @@ pub async fn run_setup_command_for(requested: Option<&str>) -> Result<()> {
     let target = resolve_target_browser(requested)?;
     println!("Browser Automation Setup");
     println!("========================\n");
-    println!("Backend: Browser Agent Bridge\n");
+    if target.kind == BrowserKind::Safari {
+        println!("Backend: safari_applescript\n");
+    } else {
+        println!("Backend: Browser Agent Bridge\n");
+    }
 
     let log = ensure_browser_setup_for(target).await?;
-    print!("{}", log);
+    println!("{}", log.trim_end());
     Ok(())
 }
 

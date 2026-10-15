@@ -560,7 +560,136 @@ pub(super) fn inferred_reasoning_efforts(
     provider_name: Option<&str>,
     model_name: Option<&str>,
 ) -> Vec<&'static str> {
+    // The remote client only knows the provider/model names, not the runtime's
+    // available_efforts(). On a local connection its named profiles are the
+    // same config the server uses, including explicit capability overrides.
+    if !crate::tui::is_ssh_remote()
+        && let Some(efforts) =
+            named_profile_reasoning_efforts(crate::config::config(), provider_name, model_name)
+    {
+        return efforts;
+    }
     jcode_provider_core::inferred_reasoning_efforts(provider_name, model_name)
+}
+
+/// Return the named OpenAI-compatible profile's actual effort ladder, or None
+/// when `provider_name` is not a configured named profile. `Some(vec![])`
+/// means the profile explicitly disables effort for this model.
+pub(super) fn named_profile_reasoning_efforts(
+    config: &crate::config::Config,
+    provider_name: Option<&str>,
+    model_name: Option<&str>,
+) -> Option<Vec<&'static str>> {
+    let provider_name = provider_name?;
+    let profile_id = provider_name
+        .strip_prefix("openai-compatible:")
+        .unwrap_or(provider_name);
+    let (_, profile) = config
+        .providers
+        .iter()
+        .find(|(id, _)| id.eq_ignore_ascii_case(profile_id))?;
+    if profile.provider_type != crate::config::NamedProviderType::OpenAiCompatible {
+        return None;
+    }
+
+    let model = model_name.unwrap_or_default().trim().to_ascii_lowercase();
+    let model_reasoning = profile
+        .models
+        .iter()
+        .find(|entry| entry.id.trim().eq_ignore_ascii_case(&model))
+        .and_then(|entry| entry.reasoning);
+    // Keep Conifer's current local override policy outside this port.
+    if profile_id.eq_ignore_ascii_case("conifer") {
+        return if model_reasoning == Some(false)
+            || profile.supports_reasoning_effort == Some(false)
+            || (profile.supports_reasoning_effort.is_none()
+                && model_reasoning.is_none()
+                && profile.disable_reasoning_heuristics)
+        {
+            Some(Vec::new())
+        } else if profile.supports_reasoning_effort == Some(true) {
+            Some(jcode_provider_core::DEEPSEEK_SELECTABLE_EFFORTS.to_vec())
+        } else if model_reasoning == Some(true) {
+            Some(jcode_provider_core::OPENAI_SELECTABLE_EFFORTS.to_vec())
+        } else {
+            None
+        };
+    }
+    let heuristics = !profile.disable_reasoning_heuristics;
+    let deepseek_style = model_reasoning != Some(false)
+        && profile.supports_reasoning_effort.unwrap_or_else(|| {
+            profile_id.eq_ignore_ascii_case("deepseek")
+                || (heuristics && model.contains("deepseek"))
+        });
+    if deepseek_style {
+        return Some(jcode_provider_core::DEEPSEEK_SELECTABLE_EFFORTS.to_vec());
+    }
+    let openai_style = model_reasoning.unwrap_or_else(|| {
+        profile.supports_reasoning_effort != Some(false)
+            && (profile_id.eq_ignore_ascii_case("zai")
+                || (heuristics
+                    && (model.starts_with("gpt-5")
+                        || model.contains("codex")
+                        || ["o1", "o3", "o4", "o5"]
+                            .iter()
+                            .any(|prefix| model.starts_with(prefix)))))
+    });
+    if openai_style {
+        return Some(jcode_provider_core::OPENAI_SELECTABLE_EFFORTS.to_vec());
+    }
+    Some(Vec::new())
+}
+
+/// Cycle an advertised ladder while keeping downward reasoning wrap out of
+/// orchestration modes. Unknown/unset effort enters at the highest reasoning
+/// rung (one below it when stepping down), never at a swarm sentinel.
+pub(super) fn cycled_effort_index(
+    efforts: &[&str],
+    current: Option<&str>,
+    direction: i8,
+) -> Option<usize> {
+    if efforts.is_empty() {
+        return None;
+    }
+    let reasoning_len = efforts
+        .iter()
+        .rposition(|effort| !crate::prompt::is_swarm_effort(effort))
+        .map_or(0, |index| index + 1);
+    let Some(index) = current.and_then(|value| efforts.iter().position(|effort| *effort == value))
+    else {
+        return Some(if reasoning_len == 0 {
+            efforts.len() - 1
+        } else if direction > 0 {
+            reasoning_len - 1
+        } else {
+            reasoning_len.saturating_sub(2)
+        });
+    };
+    Some(if direction > 0 {
+        if index + 1 < efforts.len() {
+            index + 1
+        } else if reasoning_len == 0 {
+            index
+        } else {
+            0
+        }
+    } else if index == 0 {
+        reasoning_len.saturating_sub(1)
+    } else {
+        index - 1
+    })
+}
+
+#[cfg(test)]
+#[path = "effort_followup_tests.rs"]
+mod effort_followup_tests;
+
+/// Display fallback only. Unset-effort stepping keeps its directional semantics.
+pub(super) fn default_effort_bar_index(efforts: &[&str]) -> Option<usize> {
+    efforts
+        .iter()
+        .rposition(|effort| !matches!(*effort, "swarm" | "swarm-deep"))
+        .or_else(|| efforts.len().checked_sub(1))
 }
 
 pub(super) fn effort_bar(index: usize, total: usize) -> String {
@@ -880,7 +1009,18 @@ mod helpers_tests;
 ///
 /// Returns `Some((media_type, base64_data))` if an image is available.
 /// Uses `wl-paste` on Wayland, `osascript` on macOS, falls back to `arboard::get_image()`.
+/// Read native clipboard image data without HTML fallback.
+/// Use this in Smart paste to avoid discarding text when HTML contains images.
+pub(super) fn clipboard_image_native() -> Option<(String, String)> {
+    clipboard_image_impl(false)
+}
+
+/// Read clipboard image data, including HTML fallback for image URLs.
 pub(super) fn clipboard_image() -> Option<(String, String)> {
+    clipboard_image_impl(true)
+}
+
+fn clipboard_image_impl(allow_html_fallback: bool) -> Option<(String, String)> {
     use base64::Engine;
 
     // Try wl-paste first (native Wayland - better image format support)
@@ -918,7 +1058,9 @@ pub(super) fn clipboard_image() -> Option<(String, String)> {
         }
 
         // Fallback: check text/html for <img> tags (Discord copies HTML with image URLs)
-        if types.lines().any(|t| t.trim() == "text/html")
+        // Only use this when allow_html_fallback is true to avoid discarding text in Smart paste.
+        if allow_html_fallback
+            && types.lines().any(|t| t.trim() == "text/html")
             && let Ok(html_output) = std::process::Command::new("wl-paste")
                 .args(["--type", "text/html"])
                 .output()

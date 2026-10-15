@@ -219,6 +219,7 @@ fn test_multi_provider_with_openai() -> MultiProvider {
         antigravity: RwLock::new(None),
         gemini: RwLock::new(None),
         cursor: RwLock::new(None),
+        claude_code: RwLock::new(None),
         bedrock: RwLock::new(None),
         openrouter: RwLock::new(None),
         openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
@@ -229,6 +230,7 @@ fn test_multi_provider_with_openai() -> MultiProvider {
         catalog_scope: next_catalog_scope(),
         routes_memo: std::sync::Mutex::new(None),
         post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        account_failover: Default::default(),
     }
 }
 
@@ -459,9 +461,10 @@ fn openai_model_routes_cover_oauth_api_and_no_auth_state_space() {
             .iter()
             .filter(|route| route.model == CHATGPT_WEB_MODEL)
             .collect::<Vec<_>>();
-        assert_eq!(web_routes.len(), 1, "routes: {web_routes:?}");
-        assert_eq!(web_routes[0].api_method, "chatgpt-web");
-        assert!(web_routes[0].available);
+        assert!(
+            web_routes.is_empty(),
+            "unobserved legacy route must not be advertised: {web_routes:?}"
+        );
 
         crate::env::remove_var("OPENAI_API_KEY");
         crate::auth::AuthStatus::invalidate_cache();
@@ -832,6 +835,7 @@ impl Provider for StubExternalRuntime {
         self.available_models_display()
             .into_iter()
             .map(|model| ModelRoute {
+                catalog_metadata: None,
                 model,
                 provider: self.provider_label.to_string(),
                 api_method: self.api_method.to_string(),
@@ -949,6 +953,7 @@ fn test_multi_provider_with_cursor() -> MultiProvider {
         antigravity: RwLock::new(None),
         gemini: RwLock::new(None),
         cursor: RwLock::new(Some(test_cursor_runtime())),
+        claude_code: RwLock::new(None),
         bedrock: RwLock::new(None),
         openrouter: RwLock::new(None),
         openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
@@ -959,6 +964,7 @@ fn test_multi_provider_with_cursor() -> MultiProvider {
         catalog_scope: next_catalog_scope(),
         routes_memo: std::sync::Mutex::new(None),
         post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        account_failover: Default::default(),
     }
 }
 
@@ -1137,8 +1143,12 @@ include!("tests/auth_refresh.rs");
 include!("tests/model_resolution.rs");
 include!("tests/issue_534_profile_preservation.rs");
 include!("tests/fallback_failover.rs");
+include!("tests/billing_failover.rs");
 include!("tests/account_failover.rs");
+include!("tests/account_routing_pool.rs");
 include!("tests/catalog_subscription.rs");
+include!("tests/account_pins.rs");
+include!("tests/claude_code.rs");
 
 /// Rendering the route catalog must never schedule network work.
 ///

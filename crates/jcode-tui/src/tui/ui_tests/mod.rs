@@ -139,6 +139,7 @@ struct TestState {
     chat_native_scrollbar: bool,
     onboarding_preview: bool,
     suggestions: Vec<(String, String)>,
+    command_suggestions: Vec<(String, &'static str)>,
     compacted_hidden_user_prompts: usize,
     side_pane_images: Vec<crate::session::RenderedImage>,
     pin_images: bool,
@@ -153,6 +154,8 @@ struct TestState {
     swarm_panel_focused: bool,
     pinned_todos_payload: Option<String>,
     swarm_panel_full_page: bool,
+    /// First transcript line shown when scrolled; `Some` pauses auto-follow.
+    scroll_top_line: Option<usize>,
 }
 
 impl crate::tui::TuiState for TestState {
@@ -208,10 +211,10 @@ impl crate::tui::TuiState for TestState {
         &self.pending_soft_interrupts
     }
     fn scroll_offset(&self) -> usize {
-        0
+        self.scroll_top_line.unwrap_or(0)
     }
     fn auto_scroll_paused(&self) -> bool {
-        false
+        self.scroll_top_line.is_some()
     }
     fn provider_name(&self) -> String {
         self.provider_name
@@ -257,7 +260,7 @@ impl crate::tui::TuiState for TestState {
         self.status.clone()
     }
     fn command_suggestions(&self) -> Vec<(String, &'static str)> {
-        Vec::new()
+        self.command_suggestions.clone()
     }
     fn active_skill(&self) -> Option<String> {
         self.active_skill.clone()
@@ -517,6 +520,8 @@ mod pinned_todo_regressions;
 mod basic;
 #[path = "diagrams.rs"]
 mod diagrams;
+#[path = "info_dock.rs"]
+mod info_dock;
 #[path = "inline_picker.rs"]
 mod inline_picker;
 #[path = "onboarding.rs"]

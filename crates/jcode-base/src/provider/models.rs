@@ -3,6 +3,8 @@ use crate::provider::cursor;
 
 #[path = "models_catalog.rs"]
 mod catalog;
+#[cfg(any(test, feature = "test-support"))]
+pub use catalog::{OpenAICatalogTestEndpoint, openai_catalog_test_endpoint};
 #[path = "model_catalog_service.rs"]
 mod catalog_service;
 
@@ -16,10 +18,9 @@ pub use catalog::{
 };
 use catalog_service::{ModelCatalogService, RuntimeModelUnavailability};
 use jcode_provider_core::{
-    ALL_CLAUDE_MODELS, ALL_OPENAI_MODELS, CHATGPT_WEB_MODEL, ModelCapabilities,
-    OPENAI_API_ONLY_PRO_MODELS, context_limit_for_model_with_provider_and_cache,
-    core_provider_for_model_with_hint, is_openai_api_only_pro_model, provider_key_from_hint,
-    shared_http_client,
+    ALL_CLAUDE_MODELS, ALL_OPENAI_MODELS, ModelCapabilities, OPENAI_API_ONLY_PRO_MODELS,
+    context_limit_for_model_with_provider_and_cache, core_provider_for_model_with_hint,
+    is_openai_api_only_pro_model, provider_key_from_hint, shared_http_client,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -86,8 +87,48 @@ pub(crate) fn ensure_model_allowed_for_subscription(model: &str) -> Result<()> {
 static CONTEXT_LIMIT_CACHE: std::sync::LazyLock<RwLock<HashMap<String, usize>>> =
     std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
 
+/// Isolate context-limit state for a hermetic test and restore it on drop.
+///
+/// Restoration also runs during panic unwinding.
+/// Callers must hold `storage::lock_test_env()` while this guard is alive.
+#[cfg(any(test, feature = "test-support"))]
+#[must_use]
+pub struct ContextLimitCacheGuardForTests {
+    saved: HashMap<String, usize>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl ContextLimitCacheGuardForTests {
+    pub fn new() -> Self {
+        let mut cache = CONTEXT_LIMIT_CACHE
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Self {
+            saved: std::mem::take(&mut *cache),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Default for ContextLimitCacheGuardForTests {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for ContextLimitCacheGuardForTests {
+    fn drop(&mut self) {
+        let mut cache = CONTEXT_LIMIT_CACHE
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *cache = std::mem::take(&mut self.saved);
+    }
+}
+
 #[derive(Debug, Clone)]
 struct RuntimeProviderUnavailability {
+    generation: u64,
     reason: String,
     recorded_at: Instant,
     observed_at: SystemTime,
@@ -844,8 +885,11 @@ pub fn known_openai_model_ids_for_scope(scope: &str) -> Vec<String> {
 }
 
 fn finish_known_openai_model_ids(mut models: Vec<String>) -> Vec<String> {
-    if !models.iter().any(|model| model == CHATGPT_WEB_MODEL) {
-        models.push(CHATGPT_WEB_MODEL.to_string());
+    models.retain(|model| !jcode_provider_core::is_chatgpt_web_model(model));
+    for model in super::chatgpt_web::cached_models() {
+        if !models.contains(&model.model) {
+            models.push(model.model);
+        }
     }
     // GPT Pro models never appear in the ChatGPT/Codex OAuth catalog (they are
     // platform-API-only), so a live OAuth catalog must not hide them when the
@@ -1080,6 +1124,7 @@ pub fn clear_model_unavailable_for_scope(scope: &str, model: &str) {
 #[path = "model_provider_availability.rs"]
 mod provider_availability;
 pub use provider_availability::*;
+
 pub fn model_unavailability_detail_for_account(model: &str) -> Option<String> {
     let availability = model_availability_for_account(model);
     format_account_model_availability_detail(&availability)
@@ -1103,10 +1148,24 @@ pub fn model_availability_for_account(model: &str) -> AccountModelAvailability {
 /// Availability of `model` within one credential's catalog scope (see
 /// [`openai_catalog_scope_for_credential`]).
 pub fn model_availability_for_scope(scope: &str, model: &str) -> AccountModelAvailability {
-    if model.trim() == CHATGPT_WEB_MODEL {
+    if jcode_provider_core::is_chatgpt_web_model(model) {
+        let entry = super::chatgpt_web::find_model(model);
+        let available = entry.as_ref().is_some_and(|entry| entry.available);
         return AccountModelAvailability {
-            state: AccountModelAvailabilityState::Unknown,
-            reason: Some("requires a logged-in ChatGPT web session".to_string()),
+            state: if available {
+                AccountModelAvailabilityState::Available
+            } else {
+                AccountModelAvailabilityState::Unknown
+            },
+            reason: if available {
+                None
+            } else {
+                Some(
+                    entry
+                        .map(|entry| entry.detail)
+                        .unwrap_or_else(|| "requires verified ChatGPT browser session".to_string()),
+                )
+            },
             source: "browser-session",
             observed_at: None,
         };

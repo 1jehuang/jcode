@@ -687,6 +687,8 @@ async fn tool_descriptions_stay_under_token_cap() {
     // applet carries the whole view-node vocabulary inline, since the model has
     // no other way to learn which node types and props the host renders.
     // codemode documents its sandbox API; compile_remote a credit/consent notice.
+    // macos_computer_use acts on the user's live machine: its inline consent,
+    // background-first routing and discovery policy are safety-critical.
     const EXEMPT: &[&str] = &[
         "integration_tools",
         "swarm",
@@ -696,6 +698,10 @@ async fn tool_descriptions_stay_under_token_cap() {
         "applet",
         "codemode",
         "compile_remote",
+        "macos_computer_use",
+        // Repository-search guidance (agentgrep/rg, hidden files) is tested
+        // load-bearing text (#1804).
+        "bash",
     ];
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
@@ -759,6 +765,8 @@ async fn tool_parameter_descriptions_stay_under_token_cap() {
     // applet placement lists every shorthand so the model can pick a surface
     // without a round trip. desktop_selfdev action carries a safety warning:
     // killing the harness bridge by hand strands the calling session.
+    // macos_computer_use action documents background AX versus visible input
+    // and discovery routing; element defines the AX handle contract inline.
     const EXEMPT: &[(&str, &str)] = &[
         (
             "todo",
@@ -766,6 +774,8 @@ async fn tool_parameter_descriptions_stay_under_token_cap() {
         ),
         ("applet", "$.properties.placement"),
         ("desktop_selfdev", "$.properties.action"),
+        ("macos_computer_use", "$.properties.action"),
+        ("macos_computer_use", "$.properties.element"),
     ];
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
@@ -1920,6 +1930,7 @@ async fn post_tool_feedback_hook_appends_stdout_to_tool_result() {
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     let previous = std::env::var_os("JCODE_HOOK_POST_TOOL_FEEDBACK");
     crate::env::set_var("JCODE_HOOK_POST_TOOL_FEEDBACK", &script);
+    crate::config::invalidate_config_cache();
 
     let registry = Registry::new(Arc::new(MockProvider) as Arc<dyn Provider>).await;
     let mut ctx = mcp_test_context(dir.path());
@@ -1932,6 +1943,7 @@ async fn post_tool_feedback_hook_appends_stdout_to_tool_result() {
         Some(value) => crate::env::set_var("JCODE_HOOK_POST_TOOL_FEEDBACK", value),
         None => crate::env::remove_var("JCODE_HOOK_POST_TOOL_FEEDBACK"),
     }
+    crate::config::invalidate_config_cache();
     let output = result.expect("read should succeed").output;
     assert!(output.contains("hello"), "{output}");
     assert!(output.contains("[post_tool_feedback]"), "{output}");

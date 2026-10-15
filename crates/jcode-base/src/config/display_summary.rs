@@ -29,6 +29,7 @@ impl Config {
 - Prompt up: `{}`
 - Prompt down: `{}`
 - Scroll bookmark: `{}`
+- Jump to bottom: `{}`
 - Auto-poke toggle: `{}`
 - Workspace left: `{}`
 - Workspace down: `{}`
@@ -96,6 +97,7 @@ impl Config {
 - OpenAI native compaction: {}
 - OpenAI native compaction threshold ratio: {:.2}
 - Cross-provider failover: {}
+- Claude Code: {}
 
 **Agent models:**
 - Swarm / subagent: {}
@@ -152,6 +154,7 @@ impl Config {
             self.keybindings.scroll_prompt_up,
             self.keybindings.scroll_prompt_down,
             self.keybindings.scroll_bookmark,
+            self.keybindings.scroll_to_bottom,
             if self.keybindings.auto_poke_toggle.trim().is_empty() {
                 "disabled"
             } else {
@@ -281,6 +284,7 @@ impl Config {
             self.provider.openai_native_compaction_mode.as_str(),
             self.provider.openai_native_compaction_threshold_tokens,
             self.provider.cross_provider_failover.as_str(),
+            claude_code_summary(&self.provider.claude_code),
             self.agents
                 .swarm_model
                 .as_deref()
@@ -379,4 +383,23 @@ impl Config {
             },
         )
     }
+}
+
+fn claude_code_summary(config: &ClaudeCodeConfig) -> String {
+    let instances = config
+        .effective_instances()
+        .into_iter()
+        .map(|instance| match instance.resolved_home() {
+            Some(home) => format!("{} ({})", instance.id, home.display()),
+            None => instance.id,
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "binary `{}`, permission mode {}, default instance {}, instances: {}",
+        config.resolved_binary(),
+        config.permission_mode,
+        config.resolved_default_instance(),
+        instances
+    )
 }

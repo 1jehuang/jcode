@@ -64,26 +64,41 @@ impl Agent {
         self.session.model_usage_turn_id.clone().unwrap()
     }
 
-    pub(super) fn sync_bound_account_route(&mut self) {
-        let Some(label) = self.provider.oauth_account_label() else {
-            return;
-        };
-        if self
-            .session
-            .route_api_method
-            .as_deref()
-            .and_then(jcode_provider_core::oauth_account_label)
-            .is_some_and(|selected| selected != label)
+    /// A retained saved-account pin is not evidence that requests use OAuth.
+    /// Explicit API-key routes keep their pin for later subscription selection.
+    pub(super) fn observed_oauth_account_route(&self) -> Option<(&'static str, String)> {
+        if self.provider.active_resolved_credential()
+            != Some(jcode_provider_core::ResolvedCredential::Oauth)
         {
-            logging::warn(
-                "Refusing to replace an explicit saved-account route with a different observed account",
-            );
-            return;
+            return None;
         }
         let method = match self.provider.name().to_ascii_lowercase().as_str() {
             "openai" => "openai-oauth",
             "claude" | "anthropic" => "claude-oauth",
-            _ => return,
+            _ => return None,
+        };
+        Some((method, self.provider.oauth_account_label()?))
+    }
+
+    /// Mirror an explicit saved-account binding into the persisted route so
+    /// resume and swarm children restore the same login. The binding is the
+    /// window's account pin, which `/account switch`, failover and return home
+    /// may move, so the route follows it instead of refusing the change.
+    pub(super) fn sync_bound_account_route(&mut self) {
+        let Some((method, label)) = self.observed_oauth_account_route() else {
+            if self
+                .session
+                .route_api_method
+                .as_deref()
+                .and_then(jcode_provider_core::oauth_account_label)
+                .is_some()
+            {
+                // The window no longer has an explicit binding (unpinned, or
+                // moved to an API key): keep the stale label from blocking it.
+                self.session.route_api_method = None;
+                self.persist_session_best_effort("cleared saved account route");
+            }
+            return;
         };
         let route = format!("{method}@{label}");
         if self.session.route_api_method.as_deref() == Some(route.as_str()) {
@@ -93,6 +108,36 @@ impl Agent {
         self.session.provider_key = Some(method.to_string());
         self.session.model = Some(self.provider_model());
         self.persist_session_best_effort("observed saved account route");
+    }
+
+    /// A model or route change can select a saved account (`claude-oauth@label`
+    /// routes) or drop one (generic routes). That is a user choice: record it
+    /// like `/account switch`, so the next stream does not report it as a
+    /// failover move.
+    fn adopt_provider_account_pins(&mut self) {
+        for kind in crate::provider::AccountProviderKind::ALL {
+            let provider_pin = self.provider.account_pin(kind);
+            if self.observed_account_pins.get(&kind).cloned().flatten() == provider_pin {
+                continue;
+            }
+            let key = kind.key().to_string();
+            let reason = match &provider_pin {
+                Some(pin) => format!("this window now uses {}", pin.label),
+                None => "this window follows the default account".to_string(),
+            };
+            match provider_pin {
+                Some(pin) => {
+                    self.session.account_pins.insert(key.clone(), pin);
+                }
+                None => {
+                    self.session.account_pins.remove(&key);
+                }
+            }
+            self.pending_account_notices.push((kind, reason));
+            self.provider.set_account_failover_home(kind, None);
+            self.session.account_failover_home.remove(&key);
+        }
+        self.record_observed_account_pins();
     }
 
     pub(super) fn record_failed_account_route(&mut self, error: &str) {
@@ -177,7 +222,7 @@ impl Agent {
     fn refresh_compaction_budget(&self) {
         let compaction = self.registry.compaction();
         match compaction.try_write() {
-            Ok(mut manager) => manager.set_budget(self.provider.context_window()),
+            Ok(mut manager) => manager.set_budget(self.provider.input_token_limit()),
             Err(_) => crate::logging::warn(
                 "Could not refresh compaction token budget after provider change: compaction manager is busy",
             ),
@@ -235,6 +280,7 @@ impl Agent {
         source: crate::provider::ProviderModelSelectionSource,
     ) -> Result<()> {
         self.provider.set_route_selection(selection)?;
+        self.adopt_provider_account_pins();
         let resolved_model = self.provider.model();
         self.session.provider_key = Some(selection.runtime_key.stable_id());
         self.session.route_api_method = Some(selection.api_method.clone());
@@ -260,6 +306,7 @@ impl Agent {
         source: crate::provider::ProviderModelSelectionSource,
     ) -> Result<()> {
         crate::provider::set_model_with_auth_refresh(self.provider.as_ref(), model)?;
+        self.adopt_provider_account_pins();
         let resolved_model = self.provider.model();
         self.session.provider_key =
             crate::provider::MultiProvider::session_provider_key_after_model_switch(
@@ -267,18 +314,18 @@ impl Agent {
                 self.provider.name(),
                 self.session.provider_key.as_deref(),
             );
-        if let Some(label) = self.provider.oauth_account_label() {
-            let method = if self.provider.name().eq_ignore_ascii_case("openai") {
-                "openai-oauth"
-            } else {
-                "claude-oauth"
-            };
+        if let Some((method, label)) = self.observed_oauth_account_route() {
             self.session.route_api_method = Some(format!("{method}@{label}"));
         } else if self
             .session
             .route_api_method
             .as_deref()
-            .is_some_and(|method| jcode_provider_core::oauth_account_label(method).is_some())
+            .is_some_and(|method| {
+                jcode_provider_core::oauth_account_label(method).is_some()
+                    || (self.provider.active_resolved_credential()
+                        == Some(jcode_provider_core::ResolvedCredential::ApiKey)
+                        && matches!(method, "claude-oauth" | "openai-oauth"))
+            })
         {
             self.session.route_api_method = None;
         }
@@ -319,6 +366,198 @@ impl Agent {
         );
     }
 
+    /// Push the session's per-provider account pins, failover toggle, and
+    /// failover home onto the provider instance. Pins whose account no longer
+    /// exists are dropped (the session falls back to the default account).
+    /// Kinds without a pin are unpinned, since a restored session may reuse a
+    /// provider instance that carried another session's pin.
+    pub fn restore_account_pins_from_session(&mut self) {
+        use crate::provider::AccountProviderKind;
+        let mut dropped = Vec::new();
+        for kind in AccountProviderKind::ALL {
+            let key = kind.key();
+            match self.session.account_pins.get(key).cloned() {
+                Some(pin) => match crate::session_accounts::resolve_pin(kind, &pin) {
+                    Some(label) => {
+                        let pin = crate::provider::AccountPin::new(label, pin.identity.clone());
+                        if let Err(e) = self.provider.set_account_pin(kind, Some(pin.clone())) {
+                            logging::warn(&format!(
+                                "Failed to restore {key} account pin '{}': {e}",
+                                pin.label
+                            ));
+                        } else {
+                            self.session.account_pins.insert(key.to_string(), pin);
+                        }
+                    }
+                    None => {
+                        let reason = crate::session_accounts::dropped_pin_reason(kind, &pin);
+                        logging::warn(&format!(
+                            "Session {} was pinned to {key} account '{}': {reason}",
+                            self.session.id, pin.label
+                        ));
+                        // Never keep a pin whose label now names another
+                        // login: unpin the provider too, so it cannot carry
+                        // a stale pin from an earlier session.
+                        if self.provider.account_pin(kind).is_some() {
+                            let _ = self.provider.set_account_pin(kind, None);
+                        }
+                        self.pending_account_notices.push((kind, reason));
+                        dropped.push(key.to_string());
+                    }
+                },
+                None => {
+                    if self.provider.account_pin(kind).is_some() {
+                        let _ = self.provider.set_account_pin(kind, None);
+                    }
+                }
+            }
+            self.provider.set_account_failover_home(
+                kind,
+                self.session.account_failover_home.get(key).cloned(),
+            );
+        }
+        for key in dropped {
+            self.session.account_pins.remove(&key);
+        }
+        self.provider
+            .set_account_failover(self.session.account_failover);
+        self.record_observed_account_pins();
+    }
+
+    /// `SessionAccountChanged` events for pins that restore had to drop (the
+    /// account was removed, or its label now names another login). Drained
+    /// once, by whoever can reach the client first.
+    pub fn take_account_notices(&mut self) -> Vec<ServerEvent> {
+        std::mem::take(&mut self.pending_account_notices)
+            .into_iter()
+            .map(|(kind, what)| {
+                let uses = crate::session_accounts::current_use_suffix_with_pins(
+                    self.provider.as_ref(),
+                    &self.session.account_pins,
+                    kind,
+                );
+                crate::session_accounts::account_changed_event_with_pins(
+                    self.provider.as_ref(),
+                    &self.session.account_pins,
+                    kind,
+                    Some(format!("{what}{uses}")),
+                )
+            })
+            .collect()
+    }
+
+    /// Remember what the provider reports now, so the next post-stream sync
+    /// only reacts to moves the provider made on its own.
+    fn record_observed_account_pins(&mut self) {
+        for kind in crate::provider::AccountProviderKind::ALL {
+            self.observed_account_pins
+                .insert(kind, self.provider.account_pin(kind));
+        }
+    }
+
+    /// Pin (or unpin with `None`) this session to one stored account. Only
+    /// this session's provider instance changes; the stored default and other
+    /// sessions are untouched. A user choice clears the failover home.
+    pub fn set_account_pin(
+        &mut self,
+        kind: crate::provider::AccountProviderKind,
+        pin: Option<crate::provider::AccountPin>,
+    ) -> Result<()> {
+        crate::session_accounts::apply_manual_pin(
+            self.provider.as_ref(),
+            &mut self.session,
+            kind,
+            pin,
+        )?;
+        self.record_observed_account_pins();
+        self.sync_bound_account_route();
+        self.log_env_snapshot("set_account_pin");
+        self.session.save()?;
+        Ok(())
+    }
+
+    /// Per-session same-provider account failover toggle (`None` = config).
+    pub fn set_account_failover(&mut self, enabled: Option<bool>) -> Result<()> {
+        self.provider.set_account_failover(enabled);
+        self.session.account_failover = enabled;
+        self.log_env_snapshot("set_account_failover");
+        self.session.save()?;
+        Ok(())
+    }
+
+    pub fn account_pins(&self) -> &std::collections::BTreeMap<String, crate::provider::AccountPin> {
+        &self.session.account_pins
+    }
+
+    pub fn account_failover(&self) -> Option<bool> {
+        self.session.account_failover
+    }
+
+    /// Account state a child session inherits from this one.
+    pub fn account_inheritance(&self) -> crate::session_accounts::AccountInheritance {
+        crate::session_accounts::AccountInheritance::from_session(&self.session)
+    }
+
+    /// Adopt a parent's account pins and failover toggle (swarm workers).
+    pub fn apply_account_inheritance(
+        &mut self,
+        inheritance: &crate::session_accounts::AccountInheritance,
+    ) {
+        if inheritance.is_empty() {
+            return;
+        }
+        inheritance.apply_to_session(&mut self.session);
+        self.restore_account_pins_from_session();
+        self.persist_session_best_effort("inherited account pins");
+    }
+
+    /// Persist account moves the provider made on its own (same-provider
+    /// failover) and tell clients. Runs after every stream, on success and on
+    /// every error exit, because a failed turn can still leave the provider on
+    /// another account.
+    pub(super) fn sync_account_pins_after_stream(
+        &mut self,
+        event_tx: Option<&mpsc::UnboundedSender<ServerEvent>>,
+    ) {
+        let (changed, events) = crate::session_accounts::sync_pins_after_stream(
+            self.provider.as_ref(),
+            &mut self.session,
+            &mut self.observed_account_pins,
+        );
+        if let Some(event_tx) = event_tx {
+            for event in events {
+                let _ = event_tx.send(event);
+            }
+        }
+        if changed {
+            self.persist_session_best_effort("account failover");
+        }
+        self.sync_bound_account_route();
+    }
+
+    /// At turn start, return to the preferred account once its usage limit
+    /// has reset (the provider decides, locally). Never runs mid-turn.
+    pub(super) fn return_account_home_at_turn_start(
+        &mut self,
+        event_tx: Option<&mpsc::UnboundedSender<ServerEvent>>,
+    ) {
+        let events = crate::session_accounts::return_home_if_reset(
+            self.provider.as_ref(),
+            &mut self.session,
+            &mut self.observed_account_pins,
+        );
+        if events.is_empty() {
+            return;
+        }
+        if let Some(event_tx) = event_tx {
+            for event in events {
+                let _ = event_tx.send(event);
+            }
+        }
+        self.sync_bound_account_route();
+        self.persist_session_best_effort("account return home");
+    }
+
     pub fn set_reasoning_effort(&mut self, effort: &str) -> Result<Option<String>> {
         self.provider.set_reasoning_effort(effort)?;
         let current = self.provider.reasoning_effort();
@@ -355,12 +594,7 @@ impl Agent {
     /// swarm agents inherit this so they reconstruct the coordinator's exact
     /// auth route instead of falling back to the config default.
     pub fn session_route_api_method(&self) -> Option<String> {
-        if let Some(label) = self.provider.oauth_account_label() {
-            let method = if self.provider.name().eq_ignore_ascii_case("openai") {
-                "openai-oauth"
-            } else {
-                "claude-oauth"
-            };
+        if let Some((method, label)) = self.observed_oauth_account_route() {
             return Some(format!("{method}@{label}"));
         }
         self.session.route_api_method.clone()

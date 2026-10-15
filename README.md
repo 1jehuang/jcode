@@ -337,6 +337,10 @@ switcher shows the configured root level. These settings do not change worker
 
 Supports a [wide range of providers](https://jcode.sh/docs#providers), including Claude OAuth and OpenAI Codex OAuth.
 
+The **Claude Code CLI** provider (`jcode login --provider claude-code [--account <instance>]`) runs Claude through the official `claude` binary, side by side with native Claude. See [Claude Code mode](OAUTH.md#claude-code-mode-opt-in-side-by-side-with-native-claude).
+
+Accounts are per window: `/account switch claude-fox` (or Enter in the `/account` picker) moves only this window, so two windows can use two subscriptions of the same provider at once. `/account default claude-fox` (or `d` in the picker) sets the account new windows start with, `/account unpin` returns this window to the default, and `/account failover on|off|status` controls automatic moves to the next saved account in the auto-switch pool when this window's account runs out. From the command line, `jcode --account claude-fox` and `jcode run --account openai-otter ...` pick the account for that window or run, and `jcode login claude --default` makes a new login the default.
+
 ## Customizability / Self-Dev
 
 Jcode is inventing a new form of customizability. One that doesn't limit you to what a plugin or extension can do. Tell your jcode agent to enter self dev mode, and it will start modifying its own source code. Jcode is optimized to iterate on itself. There is significant infrastructure around self development, which allows it to edit, build, and test its own source code, then reload its own binary and continue work in your (potentially many) sessions, fully automatically.
@@ -366,5 +370,10 @@ Skills are not all loaded on startup. The conversation is embedded as a semantic
 The built-in `browser` tool lets agents navigate pages, fill forms, upload files,
 and capture screenshots through Firefox Agent Bridge. Ask your agent to set it
 up and handle browser tasks directly.
+
+On macOS, Brave, Chrome, Opera, and Firefox use Browser Agent Bridge, and Safari
+uses a native AppleScript backend. Pick one with `jcode browser setup <browser>`.
+Page actions there need an explicit `tab_id`, and file upload and screenshots are
+unavailable. See [macOS browser validation](docs/MACOS_BROWSER_VALIDATION.md).
 
 See [Browser Provider Protocol](docs/BROWSER_PROVIDER_PROTOCOL.md) for details.

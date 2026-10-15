@@ -65,6 +65,7 @@ fn test_metadata_only_history_preserves_fast_restored_startup_state() {
             resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,
+            account_labels: Vec::new(),
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
@@ -146,6 +147,7 @@ fn test_duplicate_history_for_same_session_is_ignored_after_fast_path_restore() 
             resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,
+            account_labels: Vec::new(),
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
@@ -366,6 +368,7 @@ fn test_remote_error_with_retry_after_keeps_pending_for_auto_retry() {
         auto_retry: false,
         retry_attempts: 0,
         retry_at: None,
+        overload_attempts: 0,
     });
     app.is_processing = true;
     app.status = ProcessingStatus::Streaming;
@@ -376,6 +379,7 @@ fn test_remote_error_with_retry_after_keeps_pending_for_auto_retry() {
             id: 9,
             message: "rate limited".to_string(),
             retry_after_secs: Some(3),
+            server_resumes: false,
         },
         &mut remote,
     );
@@ -392,4 +396,827 @@ fn test_remote_error_with_retry_after_keeps_pending_for_auto_retry() {
         .expect("missing rate-limit status message");
     assert_eq!(last.role, "system");
     assert!(last.content.contains("Will auto-retry in 3 seconds"));
+}
+
+#[test]
+fn test_remote_openference_window_quota_holds_turn_until_resets_at() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        content: "keep going".to_string(),
+        images: vec![],
+        is_system: false,
+        system_reminder: None,
+        auto_retry: false,
+        retry_attempts: 0,
+        retry_at: None,
+        overload_attempts: 0,
+    });
+    app.is_processing = true;
+    app.status = ProcessingStatus::Streaming;
+    app.current_message_id = Some(11);
+
+    let resets_at = (chrono::Utc::now() + chrono::Duration::hours(2))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let message = format!(
+        "OpenAI-compatible chat request failed\n  endpoint: https://api.openference.com/v1/chat/completions\n  model: GLM-5.3\n  status: 402 Payment Required\n  response: {{\"error\":\"Request limit exceeded (1500 per 5 hours). Top up your balance to continue.\",\"type\":\"insufficient_quota\",\"code\":\"window_quota_exceeded\",\"resets_at\":\"{resets_at}\"}}"
+    );
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Error {
+            id: 11,
+            message,
+            retry_after_secs: None,
+            server_resumes: false,
+        },
+        &mut remote,
+    );
+
+    assert!(!app.is_processing);
+    assert!(matches!(app.status, ProcessingStatus::Idle));
+    let reset = app
+        .rate_limit_reset
+        .expect("turn should be held for resume");
+    let wait = reset.saturating_duration_since(std::time::Instant::now());
+    assert!(wait > std::time::Duration::from_secs(2 * 3600 - 60));
+    assert!(wait <= std::time::Duration::from_secs(2 * 3600 + 60));
+    assert_eq!(
+        app.rate_limit_pending_message
+            .as_ref()
+            .map(|p| p.content.as_str()),
+        Some("keep going")
+    );
+    let last = app.display_messages().last().expect("missing hold notice");
+    assert!(
+        last.content.contains("auto-resuming in 2h"),
+        "{}",
+        last.content
+    );
+}
+
+#[test]
+fn test_rate_limit_notice_survives_out_of_range_reset_secs() {
+    let mut app = create_test_app();
+    for secs in [u64::MAX, i64::MAX as u64 + 1, i64::MAX as u64] {
+        let line = app.rate_limit_notice_with_nudge(secs);
+        assert!(line.contains("auto-resuming in"), "{line}");
+        assert!(!line.contains("(at "), "{line}");
+    }
+    let line = app.rate_limit_notice_with_nudge(2 * 3600);
+    assert!(line.contains("auto-resuming in 2h 00m (at "), "{line}");
+}
+
+/// A provider overload (Openference 529 "heavy usage ... please try again in a
+/// moment") must hold the turn and resend it automatically, also when the
+/// user typed it (auto_retry false), instead of failing the turn at once.
+#[test]
+fn test_remote_provider_overload_529_holds_user_turn_and_retries() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    let overload = "OpenAI-compatible chat request failed\n  endpoint: https://api.openference.com/v1/chat/completions\n  model: GLM-5.3\n  auth: JCODE_PROVIDER_OPENCODE_OPENFERENCE_API_KEY\n  status: 529 <unknown status code>\n  response: data: {\"error\":{\"message\":\"We're experiencing heavy usage right now, which may cause increased latency or temporary unavailability. We're working on adding more capacity \u{2014} please try again in a moment.\",\"type\":\"server_error\"}}data: [DONE]";
+
+    let mut delays = Vec::new();
+    for attempt in 1..=App::OVERLOAD_RETRY_MAX_ATTEMPTS {
+        if attempt == 1 {
+            app.rate_limit_pending_message = Some(PendingRemoteMessage {
+                content: "fix the flaky test".to_string(),
+                images: vec![],
+                is_system: false,
+                system_reminder: None,
+                auto_retry: false,
+                retry_attempts: 0,
+                retry_at: None,
+                overload_attempts: 0,
+            });
+        }
+        app.is_processing = true;
+        app.status = ProcessingStatus::Streaming;
+        app.current_message_id = Some(20 + u64::from(attempt));
+        app.handle_server_event(
+            crate::protocol::ServerEvent::Error {
+                id: 20 + u64::from(attempt),
+                message: overload.to_string(),
+                retry_after_secs: None,
+                server_resumes: false,
+            },
+            &mut remote,
+        );
+        assert!(!app.is_processing, "attempt {attempt}");
+        let pending = app
+            .rate_limit_pending_message
+            .as_ref()
+            .unwrap_or_else(|| panic!("attempt {attempt}: turn must be held for retry"));
+        assert_eq!(pending.content, "fix the flaky test");
+        assert!(pending.auto_retry, "held turn is resent automatically");
+        assert_eq!(pending.overload_attempts, attempt);
+        assert_eq!(pending.retry_attempts, 0, "ordinary retry count untouched");
+        let reset = app.rate_limit_reset.expect("retry scheduled");
+        delays.push(
+            reset
+                .saturating_duration_since(std::time::Instant::now())
+                .as_secs(),
+        );
+        let last = app.display_messages().last().expect("notice");
+        assert!(
+            last.content.contains("provider is overloaded"),
+            "{}",
+            last.content
+        );
+        assert!(app.input.is_empty(), "prompt stays queued, not restored");
+    }
+    // Growing delays: 15s, 30s, 60s, 120s (allow a second of scheduling slack).
+    for (got, want) in delays.iter().zip(App::OVERLOAD_RETRY_DELAYS_SECS) {
+        assert!(*got + 1 >= want && *got <= want, "delays {delays:?}");
+    }
+
+    // After the budget is used up, the next overload falls through to the
+    // normal failure path instead of retrying forever.
+    app.is_processing = true;
+    app.status = ProcessingStatus::Streaming;
+    app.current_message_id = Some(99);
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Error {
+            id: 99,
+            message: overload.to_string(),
+            retry_after_secs: None,
+            server_resumes: false,
+        },
+        &mut remote,
+    );
+    assert!(
+        !app.display_messages()
+            .last()
+            .is_some_and(|m| m.content.contains("Retrying automatically in")),
+        "no fifth overload retry"
+    );
+}
+
+#[test]
+fn test_provider_overload_classifier() {
+    use crate::tui::app::commands::is_provider_overload_error as overload;
+    assert!(overload("status: 529 <unknown status code>"));
+    assert!(overload("  status: 503 Service Unavailable\n"));
+    assert!(overload(
+        "stream error: We're experiencing heavy usage right now"
+    ));
+    assert!(!overload("status: 402 Payment Required"));
+    assert!(!overload("status: 400 Bad Request"));
+    assert!(!overload("status: 401 Unauthorized"));
+    assert!(!overload("model_not_found"));
+}
+
+/// A user turn held after an overload is announced as "Resending your
+/// message", while continuations and plain rate-limit resumes keep their
+/// existing wording.
+#[test]
+fn test_held_user_turn_resend_notice_wording() {
+    use crate::tui::app::remote::held_user_turn_resend_notice as notice;
+    let mut pending = PendingRemoteMessage {
+        content: "fix the flaky test".to_string(),
+        images: vec![],
+        is_system: false,
+        system_reminder: None,
+        auto_retry: true,
+        retry_attempts: 1,
+        retry_at: None,
+        overload_attempts: 0,
+    };
+    assert_eq!(
+        notice(&pending).as_deref(),
+        Some("✓ Resending your message (attempt 2)...")
+    );
+    pending.is_system = true;
+    assert_eq!(
+        notice(&pending),
+        None,
+        "system continuation keeps its wording"
+    );
+    pending.is_system = false;
+    pending.retry_attempts = 0;
+    assert_eq!(notice(&pending), None, "first send is not a resend");
+    pending.retry_attempts = 1;
+    pending.auto_retry = false;
+    assert_eq!(
+        notice(&pending),
+        None,
+        "rate-limit resume keeps its wording"
+    );
+}
+
+const OPENFERENCE_529: &str = "OpenAI-compatible chat request failed\n  endpoint: https://api.openference.com/v1/chat/completions\n  model: GLM-5.3\n  status: 529 <unknown status code>\n  response: data: {\"error\":{\"message\":\"We're experiencing heavy usage right now, please try again in a moment.\",\"type\":\"server_error\"}}";
+
+fn held_user_turn(content: &str, auto_retry: bool, retry_attempts: u8) -> PendingRemoteMessage {
+    PendingRemoteMessage {
+        content: content.to_string(),
+        images: vec![],
+        is_system: false,
+        system_reminder: None,
+        auto_retry,
+        retry_attempts,
+        retry_at: None,
+        overload_attempts: 0,
+    }
+}
+
+#[test]
+fn test_remote_openference_json_rate_limit_holds_user_turn() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    let mut pending = held_user_turn("continue the adapter", false, 0);
+    pending.images = vec![("image/png".to_string(), "saved-image".to_string())];
+    pending.system_reminder = Some("preserve the existing files".to_string());
+    app.rate_limit_pending_message = Some(pending.clone());
+    app.is_processing = true;
+    app.status = ProcessingStatus::Streaming;
+    app.current_message_id = Some(41);
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Error {
+            id: 41,
+            message: "OpenAI-compatible chat request failed\n  status: 429 Too Many Requests\n  response: {\"error\":\"Rate limit exceeded. Too many requests per minute.\",\"type\":\"rate_limit_error\",\"code\":\"rate_limit_exceeded\",\"retry_after_seconds\":2,\"max_rpm\":25}".to_string(),
+            retry_after_secs: None,
+            server_resumes: false,
+        },
+        &mut remote,
+    );
+
+    assert!(!app.is_processing);
+    let held = app
+        .rate_limit_pending_message
+        .as_ref()
+        .expect("rate-limited turn held");
+    assert_eq!(held.content, pending.content);
+    assert_eq!(held.images, pending.images);
+    assert_eq!(held.system_reminder, pending.system_reminder);
+    assert_eq!(held.retry_attempts, 1);
+    let wait = app
+        .rate_limit_reset
+        .expect("retry scheduled")
+        .saturating_duration_since(std::time::Instant::now());
+    assert!(wait <= std::time::Duration::from_secs(2));
+    assert!(wait > std::time::Duration::from_secs(1));
+}
+
+#[test]
+fn test_remote_stale_quota_reset_stops_after_bounded_resumes() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.auto_poke_incomplete_todos = true;
+    app.last_submitted_input = Some("continue the adapter".to_string());
+    app.rate_limit_pending_message = Some(held_user_turn("continue the adapter", false, 0));
+    let error = "OpenAI-compatible chat request failed\n  status: 402 Payment Required\n  response: {\"error\":\"Request limit exceeded (1500 per 5 hours). Top up your balance to continue.\",\"type\":\"insufficient_quota\",\"code\":\"window_quota_exceeded\",\"resets_at\":\"2026-10-03T04:00:00.000Z\"}";
+
+    for attempt in 1..=App::AUTO_RETRY_MAX_ATTEMPTS {
+        app.is_processing = true;
+        app.status = ProcessingStatus::Streaming;
+        app.handle_server_event(
+            crate::protocol::ServerEvent::Error {
+                id: u64::from(attempt),
+                message: error.to_string(),
+                retry_after_secs: None,
+                server_resumes: false,
+            },
+            &mut remote,
+        );
+        let pending = app
+            .rate_limit_pending_message
+            .as_ref()
+            .expect("hold within budget");
+        assert_eq!(pending.retry_attempts, attempt);
+        assert!(app.rate_limit_reset.is_some());
+    }
+
+    app.is_processing = true;
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Error {
+            id: 99,
+            message: error.to_string(),
+            retry_after_secs: None,
+            server_resumes: false,
+        },
+        &mut remote,
+    );
+    assert!(
+        app.rate_limit_pending_message.is_none(),
+        "no fourth automatic resend"
+    );
+    assert!(app.rate_limit_reset.is_none());
+    assert!(
+        !app.auto_poke_incomplete_todos,
+        "auto-poke must not restart the loop"
+    );
+    assert_eq!(app.input, "continue the adapter");
+    assert!(
+        app.display_messages()
+            .iter()
+            .any(|m| m.content.contains("Rate-limit retry limit reached"))
+    );
+}
+
+#[test]
+fn test_remote_invalid_tool_calls_breaker_stops_auto_retry_immediately() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.auto_poke_incomplete_todos = true;
+    app.auto_poke_default_on = true;
+    app.last_submitted_input = Some("continue the adapter".to_string());
+    app.rate_limit_pending_message = Some(held_user_turn("continue the adapter", true, 0));
+    app.is_processing = true;
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Error {
+            id: 99,
+            message: "Invalid tool calls: GLM-5.3 produced null arguments for 3 rounds. Switch with /model.".to_string(),
+            retry_after_secs: Some(2),
+            server_resumes: false,
+        },
+        &mut remote,
+    );
+
+    assert!(app.rate_limit_pending_message.is_none());
+    assert!(app.rate_limit_reset.is_none());
+    assert!(!app.auto_poke_incomplete_todos);
+    assert!(!app.auto_poke_default_on);
+    assert_eq!(app.input, "continue the adapter");
+}
+
+#[test]
+fn test_local_invalid_tool_calls_breaker_prevents_auto_poke_rearming() {
+    let mut app = create_test_app();
+    app.auto_poke_incomplete_todos = false;
+    app.auto_poke_default_on = true;
+    app.last_submitted_input = Some("continue the adapter".to_string());
+
+    app.handle_turn_error(
+        "Invalid tool calls: GLM-5.3 produced null arguments for 3 rounds. Switch with /model.",
+    );
+
+    assert!(!app.auto_poke_default_on);
+    assert_eq!(app.input, "continue the adapter");
+    assert_eq!(
+        app.status_notice.as_ref().map(|(text, _)| text.as_str()),
+        Some("Paused: invalid tool arguments")
+    );
+}
+
+#[test]
+fn test_remote_provider_dns_failure_has_bounded_resumes() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.auto_poke_incomplete_todos = true;
+    app.auto_poke_default_on = true;
+    app.last_submitted_input = Some("continue the adapter".to_string());
+    app.rate_limit_pending_message = Some(held_user_turn("continue the adapter", false, 0));
+    let error = "Failed to send OpenAI-compatible chat request: client error (Connect): dns error: failed to lookup address information: nodename nor servname provided, or not known";
+
+    for attempt in 1..=App::AUTO_RETRY_MAX_ATTEMPTS {
+        app.is_processing = true;
+        app.handle_server_event(
+            crate::protocol::ServerEvent::Error {
+                id: u64::from(attempt),
+                message: error.to_string(),
+                retry_after_secs: None,
+                server_resumes: false,
+            },
+            &mut remote,
+        );
+        let pending = app
+            .rate_limit_pending_message
+            .as_ref()
+            .expect("held within budget");
+        assert_eq!(pending.retry_attempts, attempt);
+        assert!(matches!(
+            app.status,
+            ProcessingStatus::WaitingForNetwork { .. }
+        ));
+        let wait = app
+            .rate_limit_reset
+            .unwrap()
+            .saturating_duration_since(std::time::Instant::now());
+        assert!(wait <= std::time::Duration::from_secs(5 * u64::from(attempt)));
+    }
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Error {
+            id: 99,
+            message: error.to_string(),
+            retry_after_secs: None,
+            server_resumes: false,
+        },
+        &mut remote,
+    );
+    assert!(app.rate_limit_pending_message.is_none());
+    assert!(app.rate_limit_reset.is_none());
+    assert!(!app.auto_poke_incomplete_todos);
+    assert!(!app.auto_poke_default_on);
+    assert_eq!(app.input, "continue the adapter");
+}
+
+#[test]
+fn test_offline_probes_do_not_consume_provider_retry_budget() {
+    let mut app = create_test_app();
+    app.rate_limit_pending_message = Some(held_user_turn("continue", true, 2));
+    for _ in 0..10 {
+        assert!(app.schedule_pending_remote_network_wait("network probe still failing"));
+    }
+    assert_eq!(
+        app.rate_limit_pending_message
+            .as_ref()
+            .unwrap()
+            .retry_attempts,
+        2
+    );
+}
+
+#[test]
+fn test_remote_retry_hint_is_clamped_before_scheduling() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.rate_limit_pending_message = Some(held_user_turn("continue", false, 0));
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Error {
+            id: 99,
+            message: "rate limited".to_string(),
+            retry_after_secs: Some(u64::MAX),
+            server_resumes: false,
+        },
+        &mut remote,
+    );
+    let wait = app
+        .rate_limit_reset
+        .unwrap()
+        .saturating_duration_since(std::time::Instant::now());
+    assert!(wait <= std::time::Duration::from_secs(24 * 60 * 60));
+    assert_eq!(
+        app.rate_limit_pending_message
+            .as_ref()
+            .unwrap()
+            .retry_attempts,
+        1
+    );
+}
+
+#[test]
+fn test_invalid_tool_calls_cannot_be_adopted_as_server_resume() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.auto_poke_default_on = true;
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Error {
+            id: 0,
+            message: "Invalid tool calls: model produced null arguments".to_string(),
+            retry_after_secs: Some(2),
+            server_resumes: true,
+        },
+        &mut remote,
+    );
+    assert!(!app.auto_poke_default_on);
+    assert!(app.rate_limit_reset.is_none());
+    assert!(
+        !app.display_messages()
+            .iter()
+            .any(|m| m.content.contains("server will resume"))
+    );
+}
+
+/// The exact error that stalled two auto-poked sessions: a 429 whose body
+/// says the provider is temporarily unavailable, after the stream layer's own
+/// retries ran out.
+const OPENFERENCE_429_UNAVAILABLE: &str = "OpenAI-compatible chat request failed\n  endpoint: https://api.openference.com/v1/chat/completions\n  model: GLM-5.3\n  auth: JCODE_PROVIDER_OPENCODE_OPENFERENCE_API_KEY\n  status: 429 Too Many Requests\n  response: data: {\"error\":{\"message\":\"The model provider is temporarily unavailable. Please try again in a moment.\",\"type\":\"server_error\"}}data: [DONE]\nHint: the provider rate limited this request (per-minute or quota cap), not a network problem. jcode backs off automatically, honoring any provider-requested delay, within its retry budget; if it keeps failing, wait a minute, lower request frequency, or switch to another provider with /model.";
+
+/// If the failed attempt already streamed part of an answer (or ran tools),
+/// a full resend would redo that work and append a second answer. The server
+/// saved every completed step, so the turn is continued with a hidden
+/// reminder instead, and the partial reply the model never saw is dropped.
+#[test]
+fn test_remote_provider_overload_after_partial_output_continues_turn() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.rate_limit_pending_message = Some(held_user_turn("explain the bug", false, 0));
+    app.is_processing = true;
+    app.status = ProcessingStatus::Streaming;
+    app.current_message_id = Some(41);
+    app.handle_server_event(
+        crate::protocol::ServerEvent::TextDelta {
+            text: "The bug is caused by ".to_string(),
+        },
+        &mut remote,
+    );
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Error {
+            id: 41,
+            message: OPENFERENCE_529.to_string(),
+            retry_after_secs: None,
+            server_resumes: false,
+        },
+        &mut remote,
+    );
+    let pending = app
+        .rate_limit_pending_message
+        .as_ref()
+        .expect("the turn is held, not failed");
+    assert!(pending.content.is_empty(), "the user message is not resent");
+    assert!(pending.is_system && pending.auto_retry);
+    assert_eq!(
+        pending.system_reminder.as_deref(),
+        Some(App::PROVIDER_ERROR_CONTINUATION)
+    );
+    assert_eq!(pending.overload_attempts, 1);
+    assert!(app.rate_limit_reset.is_some(), "a continuation is scheduled");
+    assert!(
+        app.streaming.streaming_text.is_empty(),
+        "the partial reply the model never saw is dropped"
+    );
+    assert!(
+        app.display_messages()
+            .iter()
+            .any(|m| m.content.contains("Continuing from the last saved step")),
+        "continuation notice"
+    );
+    assert!(app.input.is_empty(), "nothing restored to the input box");
+}
+
+/// Auto-poke sent a continuation, the model ran a tool, then the provider
+/// went down (429 "temporarily unavailable") for longer than the stream
+/// layer retries. The turn must be continued later, not failed: a failed
+/// turn left auto-poke idle ("unchanged_todos") and the session stopped.
+#[test]
+fn test_remote_unavailable_429_after_tool_run_continues_auto_poked_turn() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.auto_poke_incomplete_todos = true;
+
+    let poke = crate::todo::build_auto_poke_message(1);
+    app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        content: poke,
+        images: vec![],
+        is_system: true,
+        system_reminder: None,
+        auto_retry: false,
+        retry_attempts: 0,
+        retry_at: None,
+        overload_attempts: 0,
+    });
+    app.is_processing = true;
+    app.status = ProcessingStatus::Streaming;
+    app.current_message_id = Some(77);
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ToolStart {
+            id: "call_1".to_string(),
+            name: "bash".to_string(),
+        },
+        &mut remote,
+    );
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Error {
+            id: 77,
+            message: OPENFERENCE_429_UNAVAILABLE.to_string(),
+            retry_after_secs: None,
+            server_resumes: false,
+        },
+        &mut remote,
+    );
+    let pending = app
+        .rate_limit_pending_message
+        .as_ref()
+        .expect("the poked turn is held for a continuation");
+    assert!(pending.content.is_empty());
+    assert_eq!(
+        pending.system_reminder.as_deref(),
+        Some(App::PROVIDER_ERROR_CONTINUATION)
+    );
+    assert!(app.auto_poke_incomplete_todos, "auto-poke stays armed");
+
+    // When the wait ends, the tick sends the continuation and carries the
+    // overload budget so it still stops after four attempts.
+    app.rate_limit_reset = Some(std::time::Instant::now());
+    rt.block_on(crate::tui::app::remote::handle_tick(&mut app, &mut remote));
+    assert!(app.is_processing, "continuation sent");
+    let resent = app
+        .rate_limit_pending_message
+        .as_ref()
+        .expect("continuation is tracked");
+    assert!(resent.content.is_empty());
+    assert_eq!(
+        resent.system_reminder.as_deref(),
+        Some(App::PROVIDER_ERROR_CONTINUATION)
+    );
+    assert_eq!(resent.overload_attempts, 1);
+}
+
+/// Reasoning that is not shown (reasoning display off) puts nothing on screen,
+/// so an overload after it is still safe to answer with a full resend.
+#[test]
+fn test_remote_provider_overload_after_hidden_reasoning_still_resends() {
+    with_temp_jcode_home(|| {
+        crate::config::Config::set_reasoning_display(crate::config::ReasoningDisplayMode::Off)
+            .expect("pin reasoning display off for the test config");
+        crate::config::invalidate_config_cache();
+
+        let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+        app.rate_limit_pending_message = Some(held_user_turn("explain the bug", false, 0));
+        app.is_processing = true;
+        app.status = ProcessingStatus::Streaming;
+        app.current_message_id = Some(43);
+        app.handle_server_event(
+            crate::protocol::ServerEvent::ReasoningDelta {
+                text: "thinking about it".to_string(),
+            },
+            &mut remote,
+        );
+        app.handle_server_event(
+            crate::protocol::ServerEvent::Error {
+                id: 43,
+                message: OPENFERENCE_529.to_string(),
+                retry_after_secs: None,
+                server_resumes: false,
+            },
+            &mut remote,
+        );
+        assert!(
+            app.rate_limit_pending_message.is_some(),
+            "hidden reasoning must not block the overload resend"
+        );
+        assert!(app.rate_limit_reset.is_some(), "a resend must be scheduled");
+    });
+}
+
+#[test]
+fn test_remote_exhausted_overload_budget_pauses_without_generic_retry() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    let prompt = "finish this work";
+    let mut pending = held_user_turn(prompt, true, 0);
+    pending.overload_attempts = App::OVERLOAD_RETRY_MAX_ATTEMPTS;
+    app.rate_limit_pending_message = Some(pending);
+    app.last_submitted_input = Some(prompt.to_string());
+    app.auto_poke_incomplete_todos = true;
+    app.is_processing = true;
+    app.status = ProcessingStatus::Streaming;
+    app.current_message_id = Some(44);
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Error {
+            id: 44,
+            message: OPENFERENCE_529.to_string(),
+            retry_after_secs: None,
+            server_resumes: false,
+        },
+        &mut remote,
+    );
+
+    assert!(app.rate_limit_pending_message.is_none());
+    assert!(app.rate_limit_reset.is_none());
+    assert!(!app.auto_poke_incomplete_todos);
+    assert!(!app.is_processing);
+    assert_eq!(app.input, prompt);
+    assert!(app.display_messages().iter().any(|message| {
+        message.content.contains("Provider overload retry limit reached")
+    }));
+}
+
+/// A permanent 4xx (or model-not-found) whose body happens to contain an
+/// overload phrase must not be classified as an overload: the provider
+/// runtime refuses to retry these statuses, so the TUI must not resend them.
+#[test]
+fn test_provider_overload_classifier_excludes_permanent_errors() {
+    use crate::tui::app::commands::is_provider_overload_error as overload;
+    for status in [400, 401, 402, 403, 404, 405, 406, 422] {
+        let error = format!(
+            "chat request failed\n  status: {status} Error\n  response: model temporarily unavailable, try again in a moment"
+        );
+        assert!(!overload(&error), "status {status} must not be an overload");
+    }
+    assert!(!overload(
+        "model_not_found: this model is temporarily unavailable"
+    ));
+    // Still an overload: 5xx, or the wording with no permanent status.
+    assert!(overload(
+        "status: 503 Service Unavailable\n  response: temporarily unavailable"
+    ));
+    assert!(overload(
+        "stream error: server is busy, try again in a moment"
+    ));
+    // A provider mid-deploy, relayed inside the stream by a local proxy, is
+    // held and resent by the TUI when the runtime's retries run out.
+    assert!(overload(
+        r#"HTTP 503: {"error":"We're deploying an update right now ⚙️ It only takes a few minutes and everything comes back on its own. Please try again shortly.","code":"DEPLOYING"}"#
+    ));
+    // The provider lost its own upstream mid-response. Resending works.
+    assert!(overload(
+        "OpenAI-compatible stream error\n  error: The model provider's stream was interrupted. Please retry."
+    ));
+}
+
+/// The overload budget is its own counter: earlier ordinary retries on the
+/// same held turn must not shorten the 15/30/60/120 s overload schedule.
+#[test]
+fn test_remote_provider_overload_budget_is_separate_from_other_retries() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    // A continuation that already used two ordinary auto-retries.
+    let mut pending = held_user_turn("continue", true, 2);
+    pending.is_system = true;
+    app.rate_limit_pending_message = Some(pending);
+
+    let mut delays = Vec::new();
+    for attempt in 1..=App::OVERLOAD_RETRY_MAX_ATTEMPTS {
+        app.is_processing = true;
+        app.status = ProcessingStatus::Streaming;
+        app.current_message_id = Some(60 + u64::from(attempt));
+        app.handle_server_event(
+            crate::protocol::ServerEvent::Error {
+                id: 60 + u64::from(attempt),
+                message: OPENFERENCE_529.to_string(),
+                retry_after_secs: None,
+                server_resumes: false,
+            },
+            &mut remote,
+        );
+        let pending = app
+            .rate_limit_pending_message
+            .as_ref()
+            .unwrap_or_else(|| panic!("overload attempt {attempt} must be held"));
+        assert_eq!(pending.retry_attempts, 2, "ordinary retry count untouched");
+        let reset = app.rate_limit_reset.expect("retry scheduled");
+        delays.push(
+            reset
+                .saturating_duration_since(std::time::Instant::now())
+                .as_secs(),
+        );
+        let last = app.display_messages().last().expect("notice");
+        assert!(
+            last.content.contains(&format!(
+                "(attempt {attempt}/{})",
+                App::OVERLOAD_RETRY_MAX_ATTEMPTS
+            )),
+            "{}",
+            last.content
+        );
+    }
+    for (got, want) in delays.iter().zip(App::OVERLOAD_RETRY_DELAYS_SECS) {
+        assert!(*got + 1 >= want && *got <= want, "delays {delays:?}");
+    }
+}
+
+/// The tick resend of a held turn keeps its overload count, so the budget
+/// ends after OVERLOAD_RETRY_MAX_ATTEMPTS resends even though the resend
+/// builds a fresh pending message.
+#[test]
+fn test_overload_attempts_survive_tick_resend() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    let mut pending = held_user_turn("fix the flaky test", true, 0);
+    pending.overload_attempts = 2;
+    app.rate_limit_pending_message = Some(pending);
+    app.rate_limit_reset = Some(std::time::Instant::now());
+    app.is_processing = false;
+
+    rt.block_on(crate::tui::app::remote::handle_tick(&mut app, &mut remote));
+
+    assert!(app.is_processing, "held turn was resent");
+    let resent = app
+        .rate_limit_pending_message
+        .as_ref()
+        .expect("resent turn is tracked");
+    assert_eq!(resent.overload_attempts, 2);
+    assert!(
+        app.display_messages()
+            .iter()
+            .any(|m| m.content == "✓ Resending your message (attempt 3)..."),
+        "resend notice"
+    );
 }

@@ -114,6 +114,11 @@ fn test_ctrl_l_keeps_fresh_view_after_new_prompt_and_output() {
         );
     }
 
+    // At 100x20 the header can leave one transcript row, which the
+    // "Jump to bottom" pill covers once scrolled up. Check history in a
+    // terminal tall enough to show it.
+    terminal.backend_mut().resize(100, 40);
+    terminal.autoresize().unwrap();
     app.scroll_up(usize::MAX);
     let history = render_and_snap(&app, &mut terminal);
     assert!(history.contains("OLD PROMPT MARKER"), "{history}");
@@ -693,6 +698,175 @@ fn test_ctrl_l_puts_prompt_indicator_at_top_of_screen() {
     );
 }
 
+fn seed_image_only_draft(app: &mut App) {
+    app.input.clear();
+    app.cursor_pos = 0;
+    app.pending_images
+        .push(("image/png".to_string(), "aW1hZ2U=".to_string()));
+}
+
+#[test]
+fn test_local_ctrl_c_clears_image_only_draft_then_quits() {
+    let mut app = create_test_app();
+    seed_image_only_draft(&mut app);
+
+    app.handle_key(KeyCode::Char('c'), KeyModifiers::CONTROL)
+        .unwrap();
+    assert!(
+        app.pending_images.is_empty(),
+        "first press must discard the image"
+    );
+    assert!(app.quit_pending.is_some());
+    assert!(!app.should_quit);
+
+    app.handle_key(KeyCode::Char('c'), KeyModifiers::CONTROL)
+        .unwrap();
+    assert!(app.should_quit, "second press must quit");
+}
+
+#[test]
+fn test_remote_ctrl_c_clears_image_only_draft_then_quits() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    seed_image_only_draft(&mut app);
+
+    rt.block_on(app.handle_remote_key(KeyCode::Char('c'), KeyModifiers::CONTROL, &mut remote))
+        .unwrap();
+    assert!(
+        app.pending_images.is_empty(),
+        "first press must discard the image"
+    );
+    assert!(app.quit_pending.is_some());
+    assert!(!app.should_quit);
+    assert_eq!(
+        app.status_notice(),
+        Some("Input cleared. Press Ctrl+C again to quit".to_string())
+    );
+
+    rt.block_on(app.handle_remote_key(KeyCode::Char('c'), KeyModifiers::CONTROL, &mut remote))
+        .unwrap();
+    assert!(app.should_quit, "second press must quit");
+}
+
+#[test]
+fn test_remote_ctrl_c_clears_text_draft_and_resets_completion() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.input = "half-written prompt".to_string();
+    app.cursor_pos = app.input.len();
+
+    rt.block_on(app.handle_remote_key(KeyCode::Char('c'), KeyModifiers::CONTROL, &mut remote))
+        .unwrap();
+    assert!(app.input.is_empty());
+    assert_eq!(app.cursor_pos, 0);
+    assert!(!app.should_quit);
+}
+
+#[test]
+fn test_ctrl_z_restores_images_cleared_by_ctrl_c() {
+    let mut app = create_test_app();
+    // A typed lookalike stays literal beside the attachment's owned marker.
+    super::input::insert_input_text(&mut app, "describe this [image 1] ");
+    let png = paste_selection_test_png(&mut app, 91);
+    assert_eq!(app.input, "describe this [image 1] [image 1]");
+
+    app.handle_key(KeyCode::Char('c'), KeyModifiers::CONTROL)
+        .unwrap();
+    assert!(app.input.is_empty() && app.pending_images.is_empty());
+
+    app.undo_input_change();
+    assert_eq!(app.input, "describe this [image 1] [image 1]");
+    assert_eq!(app.pending_images, vec![("image/png".to_string(), png)]);
+
+    // Image-only draft round-trips too.
+    let mut app = create_test_app();
+    let png = paste_selection_test_png(&mut app, 92);
+    app.handle_key(KeyCode::Char('c'), KeyModifiers::CONTROL)
+        .unwrap();
+    assert!(app.input.is_empty() && app.pending_images.is_empty());
+    app.undo_input_change();
+    assert_eq!(app.input, "[image 1]");
+    assert_eq!(app.pending_images, vec![("image/png".to_string(), png)]);
+}
+
+#[test]
+fn test_disconnected_ctrl_d_forward_deletes_inside_draft() {
+    let mut app = create_test_app();
+    app.input = "hello".to_string();
+    app.cursor_pos = 1;
+
+    remote::handle_disconnected_key(&mut app, KeyCode::Char('d'), KeyModifiers::CONTROL).unwrap();
+
+    assert_eq!(app.input, "hllo");
+    assert!(app.quit_pending.is_none());
+}
+
+#[test]
+fn test_ctrl_z_restores_each_cleared_drafts_own_images() {
+    let mut app = create_test_app();
+    super::input::insert_input_text(&mut app, "first ");
+    let png = paste_selection_test_png(&mut app, 93);
+    assert_eq!(app.input, "first [image 1]");
+    app.handle_key(KeyCode::Char('c'), KeyModifiers::CONTROL)
+        .unwrap();
+    assert!(app.input.is_empty() && app.pending_images.is_empty());
+
+    super::input::insert_input_text(&mut app, "second text only");
+    app.handle_key(KeyCode::Char('c'), KeyModifiers::CONTROL)
+        .unwrap();
+
+    app.undo_input_change();
+    assert_eq!(app.input, "second text only");
+    assert!(app.pending_images.is_empty());
+
+    app.undo_input_change();
+    app.undo_input_change();
+    assert_eq!(app.input, "first [image 1]");
+    assert_eq!(app.pending_images, vec![("image/png".to_string(), png)]);
+}
+
+#[test]
+fn test_undoing_image_paste_after_clear_keeps_attachments_consistent() {
+    let mut app = create_test_app();
+    app.handle_paste_image_for_test("image/png", "QQ==");
+    app.handle_key(KeyCode::Char('c'), KeyModifiers::CONTROL)
+        .unwrap();
+    app.handle_paste_image_for_test("image/png", "Qg==");
+    assert_eq!(app.input, "[image 1]");
+
+    // Undo the second paste: placeholder and attachment go together.
+    app.undo_input_change();
+    assert_eq!(app.input, "");
+    assert!(app.pending_images.is_empty(), "no invisible attachment");
+
+    // Undo the clear: the first draft comes back with its own image.
+    app.undo_input_change();
+    assert_eq!(app.input, "[image 1]");
+    assert_eq!(
+        app.pending_images,
+        vec![("image/png".to_string(), "QQ==".to_string())]
+    );
+}
+
+#[test]
+fn test_undo_image_paste_detaches_even_with_literal_placeholder_text() {
+    let mut app = create_test_app();
+    app.set_input_for_test("compare with [image 1]");
+    app.handle_paste_image_for_test("image/png", "QQ==");
+    assert_eq!(app.pending_images.len(), 1);
+
+    app.undo_input_change();
+    assert_eq!(app.input, "compare with [image 1]");
+    assert!(
+        app.pending_images.is_empty(),
+        "undone paste must not stay attached"
+    );
+}
+
 /// New behavior: typing a second prompt while a turn runs and then pressing
 /// Esc stops only the current turn and runs the new prompt next. Previously
 /// local Esc threw the second prompt away and turned auto-poke off.
@@ -713,7 +887,11 @@ fn test_local_escape_with_pending_prompt_redirects_to_it() {
     );
     assert_eq!(app.queued_messages(), &["do this instead"]);
     assert!(app.interleave_message.is_none());
-    assert_eq!(app.pending_images.len(), 1, "staged images are not dropped");
+    assert!(
+        app.pending_images.is_empty(),
+        "redirect images are not composer attachments"
+    );
+    assert_eq!(app.queued_message_images.len(), 1);
     assert_eq!(
         app.status_notice(),
         Some("Interrupting... sending your next prompt".to_string())

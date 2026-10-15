@@ -667,6 +667,7 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         provider_oauth_email: None,
         reasoning_effort: None,
         service_tier: None,
+        account_labels: Vec::new(),
         subagent_model: None,
         agent_model_overrides: Default::default(),
         autoreview_enabled: None,
@@ -800,6 +801,7 @@ fn test_error_event_retry_after_roundtrip() -> Result<()> {
         id: 42,
         message: "rate limited".to_string(),
         retry_after_secs: Some(17),
+        server_resumes: false,
     };
     let json = encode_event(&event);
     let decoded = parse_event_json(json.trim())?;
@@ -807,6 +809,7 @@ fn test_error_event_retry_after_roundtrip() -> Result<()> {
         id,
         message,
         retry_after_secs,
+        ..
     } = decoded
     else {
         return Err(anyhow!("wrong event type"));
@@ -825,6 +828,7 @@ fn test_error_event_retry_after_back_compat_default() -> Result<()> {
         id,
         message,
         retry_after_secs,
+        ..
     } = decoded
     else {
         return Err(anyhow!("wrong event type"));

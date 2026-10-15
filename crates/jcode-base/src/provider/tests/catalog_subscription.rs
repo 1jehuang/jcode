@@ -120,20 +120,17 @@ fn test_openai_live_catalog_replaces_static_fallback_list() {
         crate::env::set_var("OPENAI_API_KEY", value);
     }
 
-    assert_eq!(
-        models[..2],
-        [
-            "gpt-5.4-live-only".to_string(),
-            jcode_provider_core::CHATGPT_WEB_MODEL.to_string()
-        ]
-    );
-    // The only entries allowed past the live catalog are the platform-API-only
-    // GPT Pro models, appended when an OPENAI_API_KEY is configured on the
-    // machine running the tests.
-    for extra in &models[2..] {
+    assert_eq!(models[0], "gpt-5.4-live-only");
+    assert!(!models.contains(&jcode_provider_core::CHATGPT_WEB_MODEL.to_string()));
+    // Native fallback models must be replaced. Independently observed browser
+    // IDs and platform-API-only Pro IDs are separate catalog sources, not
+    // native OAuth fallback entries. Web availability has its own fail-closed
+    // cache and route tests.
+    for extra in &models[1..] {
         assert!(
-            jcode_provider_core::is_openai_api_only_pro_model(extra),
-            "unexpected non-pro extra model '{extra}' in live catalog list"
+            jcode_provider_core::is_chatgpt_web_model(extra)
+                || jcode_provider_core::is_openai_api_only_pro_model(extra),
+            "unexpected native fallback model '{extra}' in live catalog list"
         );
     }
 
@@ -258,8 +255,16 @@ fn test_same_provider_account_candidates_include_other_openai_accounts() {
         })
         .unwrap();
 
-        crate::auth::codex::set_active_account("openai-otter").unwrap();
-        let candidates = MultiProvider::same_provider_account_candidates(ActiveProvider::OpenAI);
+        let labels: Vec<String> =
+            account_failover::stored_accounts(jcode_provider_core::AccountProviderKind::OpenAi)
+                .into_iter()
+                .map(|(label, _)| label)
+                .collect();
+        let candidates = account_failover::account_rotation(
+            jcode_provider_core::AccountProviderKind::OpenAi,
+            Some("openai-otter"),
+            &labels,
+        );
         assert_eq!(candidates, vec!["openai-fox".to_string()]);
     });
 }
@@ -779,4 +784,23 @@ fn test_anthropic_pro_no_catalog_and_explicit_long_context_keep_legacy_gates() {
         };
         assert_eq!(anthropic_oauth_route_availability(model), expected);
     });
+}
+
+/// Account switches and relogins call this. It used to clear only OpenAI
+/// markers, so a Claude usage-limit marker from the old account kept the
+/// precheck skipping Claude for the new one (same label after relogin).
+#[test]
+fn test_clear_all_provider_unavailability_also_clears_claude_marker() {
+    let _guard = crate::storage::lock_test_env();
+    crate::auth::claude::set_active_account_override(Some("default".to_string()));
+    record_provider_unavailable_for_account("claude", "429 usage limit reached");
+    assert!(provider_unavailability_detail_for_account("claude").is_some());
+    clear_all_provider_unavailability_for_account();
+    let leftover = provider_unavailability_detail_for_account("claude");
+    crate::auth::claude::set_active_account_override(None);
+    clear_claude_provider_unavailability_for_account_label(Some("default"));
+    assert!(
+        leftover.is_none(),
+        "stale Claude marker survived: {leftover:?}"
+    );
 }

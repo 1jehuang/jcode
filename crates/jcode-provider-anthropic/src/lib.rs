@@ -177,6 +177,8 @@ pub fn format_messages_with_native(
         ));
     }
 
+    rewrite_orphaned_tool_results(&mut merged);
+
     // Anthropic requires every tool_result answering the previous assistant
     // turn to lead the user message. Merging separate tool-result messages can
     // interleave sibling text (for example text moved out of a tool_result by

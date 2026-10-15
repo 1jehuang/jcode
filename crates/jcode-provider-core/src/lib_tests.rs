@@ -257,6 +257,7 @@ impl Provider for SnapshotTestProvider {
 
     fn model_routes(&self) -> Vec<ModelRoute> {
         vec![ModelRoute {
+            catalog_metadata: None,
             model: "snapshot-model".to_string(),
             provider: "Snapshot".to_string(),
             api_method: "snapshot-api".to_string(),
@@ -304,6 +305,7 @@ fn runtime_key_distinguishes_openrouter_from_direct_compatible_profile() {
 #[test]
 fn route_selection_preserves_runtime_identity_from_model_route() {
     let selection = RouteSelection::from_model_route(&ModelRoute {
+        catalog_metadata: None,
         model: "openrouter/owl-alpha".to_string(),
         provider: "OpenRouter".to_string(),
         api_method: "openrouter".to_string(),
@@ -317,6 +319,7 @@ fn route_selection_preserves_runtime_identity_from_model_route() {
     assert_eq!(selection.api_method, "openrouter");
 
     let selection = RouteSelection::from_model_route(&ModelRoute {
+        catalog_metadata: None,
         model: "nvidia/example".to_string(),
         provider: "NVIDIA NIM".to_string(),
         api_method: "openai-compatible:nvidia-nim".to_string(),
@@ -335,8 +338,60 @@ fn route_selection_preserves_runtime_identity_from_model_route() {
 }
 
 #[test]
+fn claude_code_routes_round_trip() {
+    assert_eq!(
+        ModelRouteApiMethod::parse("claude-code"),
+        ModelRouteApiMethod::ClaudeCode { instance: None }
+    );
+    assert_eq!(
+        ModelRouteApiMethod::parse("claude-code:Personal"),
+        ModelRouteApiMethod::ClaudeCode {
+            instance: Some("Personal".to_string())
+        }
+    );
+    // The Claude auth alias table must not swallow Claude Code.
+    assert!(!ModelRouteApiMethod::parse("claude-code").is_anthropic_credential_route());
+    assert_eq!(
+        ModelRouteApiMethod::parse("claude"),
+        ModelRouteApiMethod::ClaudeOAuth
+    );
+    assert!(crate::auth_mode::AuthRoute::parse("claude-code").is_none());
+
+    for (api_method, instance) in [("claude-code", None), ("claude-code:work", Some("work"))] {
+        let selection = RouteSelection::from_model_route(&ModelRoute {
+            catalog_metadata: None,
+            model: "claude-opus-4-8".to_string(),
+            provider: "Claude Code".to_string(),
+            api_method: api_method.to_string(),
+            available: true,
+            detail: String::new(),
+            cheapness: None,
+            usage: None,
+        });
+        assert_eq!(
+            selection.runtime_key,
+            RuntimeKey::ClaudeCode {
+                instance: instance.map(str::to_string)
+            }
+        );
+        assert_eq!(selection.runtime_key.stable_id(), api_method);
+        assert_eq!(selection.routed_model_spec(), "claude-code:claude-opus-4-8");
+        let json = serde_json::to_value(&selection.runtime_key).expect("serialize");
+        let decoded: RuntimeKey = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(decoded, selection.runtime_key);
+    }
+    assert_eq!(
+        claude_code_model_spec("claude-code:claude-opus-4-8"),
+        "claude-code:claude-opus-4-8"
+    );
+    assert_eq!(claude_code_api_method(Some("work")), "claude-code:work");
+    assert_eq!(claude_code_api_method(None), "claude-code");
+}
+
+#[test]
 fn grok_build_route_selection_is_a_first_class_runtime() {
     let selection = RouteSelection::from_model_route(&ModelRoute {
+        catalog_metadata: None,
         model: "grok-4.6".to_string(),
         provider: "Grok Build".to_string(),
         api_method: "grok-build-acp".to_string(),
@@ -350,6 +405,7 @@ fn grok_build_route_selection_is_a_first_class_runtime() {
     assert_eq!(selection.routed_model_spec(), "grok-build:grok-4.6");
 
     let prefixed = RouteSelection::from_model_route(&ModelRoute {
+        catalog_metadata: None,
         model: "grok-build:grok-4.6".to_string(),
         provider: "Grok Build".to_string(),
         api_method: "grok-build-acp".to_string(),

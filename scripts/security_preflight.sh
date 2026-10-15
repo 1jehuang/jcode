@@ -48,7 +48,11 @@ echo "[1/3] Scanning for likely secrets"
 secret_regex='(AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36,}|xox[baprs]-[A-Za-z0-9-]{10,}|-----BEGIN (RSA|OPENSSH|EC|DSA|PGP) PRIVATE KEY-----|AIza[0-9A-Za-z_-]{35})'
 
 set +e
-mapfile -d '' tracked_files < <(git ls-files -z)
+# Portable NUL-delimited read (`mapfile -d` needs bash 4.4, macOS ships 3.2).
+tracked_files=()
+while IFS= read -r -d '' tracked_file; do
+  tracked_files+=("$tracked_file")
+done < <(git ls-files -z)
 scan_status=1
 if [[ "${#tracked_files[@]}" -gt 0 ]]; then
   if command -v rg >/dev/null 2>&1; then

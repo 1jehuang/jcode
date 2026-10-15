@@ -80,6 +80,13 @@ impl App {
         &mut self,
         prompt: &crate::provider::ProviderFailoverPrompt,
     ) -> anyhow::Result<String> {
+        // Out-of-credit failover between OpenAI-compatible profiles offers an
+        // exact sibling model spec (`<profile>:<model>`) serving the same model.
+        if Self::is_profile_failover_prompt(prompt) {
+            self.provider.set_model(&prompt.to_provider)?;
+            let active_model = self.provider.model();
+            return Ok(self.finalize_model_switch(&active_model));
+        }
         // Pool edits during the countdown apply to both ends. Derive the
         // source from the live provider, never stale prompt/session metadata.
         let provider = self.provider.name().to_ascii_lowercase();
@@ -94,11 +101,22 @@ impl App {
         let credential = self.provider.active_resolved_credential();
         let source_key = match (provider, credential) {
             ("claude" | "openai", Some(jcode_provider_core::ResolvedCredential::Oauth)) => {
-                let label = self.provider.oauth_account_label().ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Source account identity is unknown. Use /model to switch manually."
-                    )
-                })?;
+                // An explicit saved-account route, else the account this
+                // window resolved to (its pin or the default login).
+                let kind = if provider == "openai" {
+                    crate::provider::AccountProviderKind::OpenAi
+                } else {
+                    crate::provider::AccountProviderKind::Claude
+                };
+                let label = self
+                    .provider
+                    .oauth_account_label()
+                    .or_else(|| self.provider.resolved_account_label(kind))
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Source account identity is unknown. Use /model to switch manually."
+                        )
+                    })?;
                 let exists = if provider == "openai" {
                     crate::auth::codex::list_accounts()
                         .unwrap_or_default()
@@ -167,6 +185,16 @@ impl App {
                 self.pending_images.push(image);
             }
         }
+        self.ensure_input_image_markers();
+    }
+
+    /// Out-of-credit failover between OpenAI-compatible profiles names an
+    /// exact `<profile>:<model>` target; built-in provider and saved-account
+    /// prompts name a provider and carry a pool-approved `target_route`.
+    pub(super) fn is_profile_failover_prompt(
+        prompt: &crate::provider::ProviderFailoverPrompt,
+    ) -> bool {
+        prompt.to_provider.contains(':')
     }
 
     pub(super) fn cancel_pending_provider_failover(&mut self, notice: impl Into<String>) {
@@ -220,6 +248,21 @@ impl App {
 
         self.pending_provider_failover = None;
         if self.is_remote {
+            if Self::is_profile_failover_prompt(&pending.prompt) {
+                // The remote tick loop sends the switch to the server; the
+                // failed turn is resent once the server confirms it.
+                self.pending_model_switch = Some(pending.prompt.to_provider.clone());
+                self.pending_fallback_resend = pending.remote_resend.clone();
+                self.push_display_message(DisplayMessage::system(format!(
+                    "Switching {} → {}. Retrying once the server confirms.",
+                    pending.prompt.from_label, pending.prompt.to_label,
+                )));
+                self.set_status_notice(format!(
+                    "Provider → {} (retrying)",
+                    pending.prompt.to_label
+                ));
+                return true;
+            }
             let selection = pending.prompt.target_route.as_deref().and_then(|target| {
                 self.fallback_candidate_routes()
                     .iter()
@@ -292,7 +335,10 @@ impl App {
         self.handle_provider_failover_prompt_with_payload(prompt, remote_resend);
     }
 
-    fn handle_provider_failover_prompt_with_payload(
+    /// Show a provider failover prompt. In countdown mode arm the cancelable
+    /// countdown; nothing is sent to the target until it expires. Remote
+    /// sessions resend the failed turn (`remote_resend`) after the switch.
+    pub(super) fn handle_provider_failover_prompt_with_payload(
         &mut self,
         prompt: crate::provider::ProviderFailoverPrompt,
         remote_resend: Option<super::FallbackResendPayload>,
@@ -308,12 +354,14 @@ impl App {
             "{} unavailable: {}\nUse /model to switch to {} and resend.",
             prompt.from_label, reason, prompt.to_label,
         );
-
         match crate::config::Config::load()
             .provider
             .cross_provider_failover
         {
             crate::config::CrossProviderFailoverMode::Manual => {
+                if let Some(payload) = remote_resend {
+                    self.restore_failover_payload(payload);
+                }
                 self.push_display_message(DisplayMessage::system(manual_message));
                 self.set_status_notice(format!(
                     "{} unavailable; switch manually if desired",
@@ -321,10 +369,14 @@ impl App {
                 ));
             }
             crate::config::CrossProviderFailoverMode::Countdown
-                if prompt.target_route.as_deref().is_some_and(|route| {
-                    self.is_remote
-                        || crate::provider::MultiProvider::is_failover_route_pool_approved(route)
-                }) && (!self.is_remote || remote_resend.is_some()) =>
+                if (Self::is_profile_failover_prompt(&prompt)
+                    || prompt.target_route.as_deref().is_some_and(|route| {
+                        self.is_remote
+                            || crate::provider::MultiProvider::is_failover_route_pool_approved(
+                                route,
+                            )
+                    }))
+                    && (!self.is_remote || remote_resend.is_some()) =>
             {
                 self.pending_provider_failover = Some(super::PendingProviderFailover {
                     prompt: prompt.clone(),
@@ -341,6 +393,9 @@ impl App {
                 ));
             }
             _ => {
+                if let Some(payload) = remote_resend {
+                    self.restore_failover_payload(payload);
+                }
                 self.push_display_message(DisplayMessage::system(manual_message));
                 self.set_status_notice(format!(
                     "{} unavailable; manual switch suggested",
@@ -889,23 +944,10 @@ impl App {
         } else {
             self.provider.reasoning_effort()
         };
-        let current_index = current
-            .as_ref()
-            .and_then(|c| efforts.iter().position(|e| *e == c.as_str()))
-            .unwrap_or(efforts.len() - 1); // default to last (highest)
-
+        let next_index =
+            super::helpers::cycled_effort_index(&efforts, current.as_deref(), direction)
+                .expect("nonempty effort ladder");
         let len = efforts.len();
-        let next_index = if direction > 0 {
-            if current_index + 1 >= len {
-                current_index // already at max
-            } else {
-                current_index + 1
-            }
-        } else if current_index == 0 {
-            0 // already at min
-        } else {
-            current_index - 1
-        };
 
         let next_effort = efforts[next_index];
         if Some(next_effort.to_string()) == current {
@@ -1010,7 +1052,7 @@ impl App {
         {
             let compaction = self.registry.compaction();
             if let Ok(mut manager) = compaction.try_write() {
-                manager.set_budget(limit);
+                manager.set_budget(self.prompt_budget_for_context_limit(limit));
             };
         }
     }
@@ -1027,8 +1069,28 @@ impl App {
         self.context_warning_shown = false;
         let compaction = self.registry.compaction();
         if let Ok(mut manager) = compaction.try_write() {
-            manager.set_budget(limit);
+            manager.set_budget(self.prompt_budget_for_context_limit(limit));
         };
+    }
+
+    fn prompt_budget_for_context_limit(&self, limit: usize) -> usize {
+        let metadata = if self.is_remote {
+            if jcode_provider_core::provider_key_from_hint(self.remote_provider_name.as_deref())
+                != Some("copilot")
+            {
+                return limit;
+            }
+            self.remote_provider_model
+                .as_deref()
+                .and_then(jcode_provider_core::copilot_model_metadata)
+        } else {
+            self.provider.model_metadata(&self.provider.model())
+        };
+        metadata
+            .and_then(|metadata| metadata.max_input_tokens)
+            .filter(|budget| *budget > 0)
+            .unwrap_or(limit)
+            .min(limit)
     }
 
     pub(super) fn effective_context_tokens_from_usage(
@@ -1163,6 +1225,23 @@ impl App {
         let error = error.into();
         self.refresh_openai_usage_after_quota_error(&error);
         self.last_stream_error = Some(error.clone());
+        if error.starts_with(crate::agent::Agent::MALFORMED_TOOL_CALL_ERROR_PREFIX) {
+            // The agent already used its schema-guided recovery attempts.
+            // Auto-poke must not start a new turn and reset that circuit breaker.
+            super::commands::disable_auto_poke(self);
+            self.overnight_auto_poke = None;
+            self.clear_pending_remote_retry();
+            self.restore_failed_input_to_box();
+            self.push_display_message(DisplayMessage::error(error));
+            self.set_status_notice("Paused: invalid tool arguments");
+            return;
+        }
+
+        // A usage limit with a known reset is a pause: hold the turn and run
+        // it again after the reset (local mode).
+        if self.hold_local_turn_for_usage_limit(&error) {
+            return;
+        }
 
         if let Some(prompt) = crate::provider::parse_failover_prompt_message(&error) {
             self.handle_provider_failover_prompt(prompt);
@@ -1376,6 +1455,7 @@ impl App {
         match retry_result {
             Ok(()) => {
                 self.last_stream_error = None;
+                self.local_usage_limit_resume_attempts = 0;
                 true
             }
             Err(e) => {

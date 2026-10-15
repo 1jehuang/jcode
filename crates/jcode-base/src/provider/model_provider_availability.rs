@@ -32,6 +32,7 @@ pub fn record_provider_unavailable_for_account(provider: &str, reason: &str) {
 }
 
 /// Record a session-bound login failure without changing global auth selection.
+/// Sessions pinned to other accounts of the same provider are unaffected.
 pub fn record_provider_unavailable_for_account_label(
     provider: &str,
     label: Option<&str>,
@@ -40,15 +41,31 @@ pub fn record_provider_unavailable_for_account_label(
     record_provider_unavailable_for_key(provider_runtime_scope_key(provider, label), reason);
 }
 
+/// Clear the unavailability of `provider` for one account label.
+pub fn clear_provider_unavailable_for_label(provider: &str, account_label: &str) {
+    let key = provider_runtime_scope_key(provider, Some(account_label));
+    if let Ok(mut unavailable) = ACCOUNT_RUNTIME_UNAVAILABLE_PROVIDERS.write()
+        && unavailable.remove(&key).is_some()
+    {
+        crate::provider::bump_catalog_generation();
+    }
+}
+
 pub(super) fn record_provider_unavailable_for_key(key: String, reason: &str) {
     if key.trim().is_empty() {
         return;
     }
 
     if let Ok(mut unavailable) = ACCOUNT_RUNTIME_UNAVAILABLE_PROVIDERS.write() {
+        let generation = if key.starts_with("openai::") {
+            crate::usage::note_openai_unavailability_observed()
+        } else {
+            0
+        };
         unavailable.insert(
             key,
             RuntimeProviderUnavailability {
+                generation,
                 reason: reason.trim().to_string(),
                 recorded_at: Instant::now(),
                 observed_at: SystemTime::now(),
@@ -81,6 +98,71 @@ pub fn clear_openai_provider_unavailability_for_account_label(account_label: Opt
     {
         crate::provider::bump_catalog_generation();
     }
+    if let Some(label) = account_label {
+        crate::provider::account_failover::clear_account_exhausted(
+            jcode_provider_core::AccountProviderKind::OpenAi,
+            label,
+        );
+    }
+}
+
+pub(super) fn is_usage_limit_cooldown_reason(reason: &str) -> bool {
+    let lower = reason.to_ascii_lowercase();
+    if [
+        "401",
+        "403",
+        "unauthorized",
+        "forbidden",
+        "access denied",
+        "authentication",
+        "credentials",
+        "token exchange",
+    ]
+    .iter()
+    .any(|term| lower.contains(term))
+    {
+        return false;
+    }
+    jcode_provider_core::classify_account_usage_limit(reason).is_some()
+        || [
+            "usage",
+            "quota",
+            "rate limit",
+            "rate-limit",
+            "rate_limit",
+            "too many requests",
+            "429",
+            "limit reached",
+        ]
+        .iter()
+        .any(|term| lower.contains(term))
+}
+
+/// Compare and remove under each owning lock. No locks are nested, and a
+/// snapshot accepted before a new mark cannot remove that newer observation.
+pub(crate) fn clear_openai_unavailability_through_generation<'a>(
+    label: impl Into<Option<&'a str>>,
+    generation: u64,
+) {
+    clear_openai_scope_unavailability_through_generation(label.into(), generation);
+}
+
+/// `None` is the literal default scope, not the globally selected saved login.
+fn clear_openai_scope_unavailability_through_generation(label: Option<&str>, generation: u64) {
+    let key = provider_runtime_scope_key("openai", label);
+    if let Ok(mut unavailable) = ACCOUNT_RUNTIME_UNAVAILABLE_PROVIDERS.write()
+        && unavailable.get(&key).is_some_and(|entry| {
+            entry.generation <= generation && is_usage_limit_cooldown_reason(&entry.reason)
+        })
+    {
+        unavailable.remove(&key);
+        crate::provider::bump_catalog_generation();
+    }
+    if let Some(label) = label {
+        crate::provider::account_failover::clear_openai_account_exhausted_through_generation(
+            label, generation,
+        );
+    }
 }
 
 /// Clear the quota cooldown for the exact Claude login whose limits were reset.
@@ -92,6 +174,12 @@ pub fn clear_claude_provider_unavailability_for_account_label(account_label: Opt
     {
         crate::provider::bump_catalog_generation();
     }
+    if let Some(label) = account_label {
+        crate::provider::account_failover::clear_account_exhausted(
+            jcode_provider_core::AccountProviderKind::Claude,
+            label,
+        );
+    }
 }
 
 /// Clear all runtime model unavailability markers.
@@ -101,12 +189,18 @@ pub fn clear_all_model_unavailability_for_account() {
     crate::provider::bump_catalog_generation();
 }
 
-/// Clear all runtime provider unavailability markers.
+/// Clear the runtime provider unavailability markers of the active accounts.
+///
+/// Called on account switches and relogins. Claude markers are keyed by label,
+/// and a relogin often reuses the label for a different account, so the
+/// active Claude login's marker (for example an old usage-limit 429) must be
+/// dropped here too, or the precheck keeps skipping Claude for the new login.
 pub fn clear_all_provider_unavailability_for_account() {
-    let scope = current_openai_account_scope();
+    let openai_prefix = format!("openai::{}", current_openai_account_scope());
+    let claude_key = provider_runtime_scope_key("claude", None);
     if let Ok(mut unavailable) = ACCOUNT_RUNTIME_UNAVAILABLE_PROVIDERS.write() {
         let before = unavailable.len();
-        unavailable.retain(|key, _| !key.starts_with(&format!("openai::{}", scope)));
+        unavailable.retain(|key, _| !key.starts_with(&openai_prefix) && *key != claude_key);
         if unavailable.len() != before {
             crate::provider::bump_catalog_generation();
         }

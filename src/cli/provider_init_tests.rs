@@ -12,11 +12,52 @@ use tempfile::TempDir;
 
 static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
-fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+/// Both env locks, held with the calling session's provider selection cleared
+/// as in CI. A jcode session exports JCODE_PROVIDER_PROFILE_NAME and friends,
+/// which would otherwise steer provider init in these tests. Holding the
+/// crate-wide lock too means no other test is mid-way through changing env.
+struct EnvLock {
+    inherited: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    _env: std::sync::MutexGuard<'static, ()>,
+    _guard: std::sync::MutexGuard<'static, ()>,
+}
+
+impl Drop for EnvLock {
+    fn drop(&mut self) {
+        for (key, value) in &self.inherited {
+            crate::env::set_var(key, value);
+        }
+    }
+}
+
+fn is_session_provider_selection(key: &str) -> bool {
+    matches!(
+        key,
+        "JCODE_ACTIVE_PROVIDER"
+            | "JCODE_RUNTIME_PROVIDER"
+            | "JCODE_NAMED_PROVIDER_PROFILE"
+            | "JCODE_PROVIDER_PROFILE_ACTIVE"
+            | "JCODE_PROVIDER_PROFILE_NAME"
+    ) || key.starts_with("JCODE_OPENROUTER_")
+}
+
+fn lock_env() -> EnvLock {
     let mutex = ENV_LOCK.get_or_init(|| Mutex::new(()));
-    match mutex.lock() {
+    let guard = match mutex.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
+    };
+    let env = crate::storage::lock_test_env();
+    let inherited: Vec<_> = std::env::vars_os()
+        .filter(|(key, _)| key.to_str().is_some_and(is_session_provider_selection))
+        .collect();
+    for (key, _) in &inherited {
+        crate::env::remove_var(key);
+    }
+    EnvLock {
+        inherited,
+        _env: env,
+        _guard: guard,
     }
 }
 
@@ -44,6 +85,11 @@ fn test_provider_choice_arg_values() {
     assert_eq!(ProviderChoice::Minimax.as_arg_value(), "minimax");
     assert_eq!(ProviderChoice::Xai.as_arg_value(), "xai");
     assert_eq!(ProviderChoice::GrokBuild.as_arg_value(), "grok-build");
+    assert_eq!(ProviderChoice::ClaudeCode.as_arg_value(), "claude-code");
+    assert_eq!(
+        login_provider_for_choice(&ProviderChoice::ClaudeCode).map(|provider| provider.id),
+        Some("claude-code")
+    );
     assert_eq!(ProviderChoice::XiaomiMimo.as_arg_value(), "xiaomi-mimo");
     assert_eq!(ProviderChoice::MetaMuse.as_arg_value(), "meta-muse");
     assert_eq!(ProviderChoice::Celeris.as_arg_value(), "celeris");
@@ -85,13 +131,12 @@ fn novita_cli_aliases_select_the_builtin_profile() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[expect(
+#[allow(
     clippy::await_holding_lock,
     reason = "test env locks intentionally stay held across provider init to isolate process-global auth env"
 )]
 async fn explicit_anthropic_api_choice_pins_api_key_over_available_oauth() {
     let _guard = lock_env();
-    let _env_guard = crate::storage::lock_test_env();
     let dir = TempDir::new().expect("temp dir");
     let keys = [
         "JCODE_HOME",
@@ -156,13 +201,12 @@ async fn explicit_anthropic_api_choice_pins_api_key_over_available_oauth() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[expect(
+#[allow(
     clippy::await_holding_lock,
     reason = "test env locks intentionally stay held across provider init to isolate process-global auth env"
 )]
 async fn explicit_openai_api_choice_overrides_configured_compatible_default() {
     let _guard = lock_env();
-    let _env_guard = crate::storage::lock_test_env();
     let dir = TempDir::new().expect("temp dir");
     let keys = [
         "JCODE_HOME",
@@ -282,7 +326,6 @@ fn test_auto_init_login_selection_preserves_order() {
 #[test]
 fn test_init_provider_jcode_delegates_runtime_profile_to_wrapper() {
     let _guard = lock_env();
-    let _env_guard = crate::storage::lock_test_env();
     // Sandbox JCODE_HOME: with the real home, persisted auth/credential state
     // (e.g. a pinned anthropic api-key route) re-pins JCODE_RUNTIME_PROVIDER
     // during MultiProvider construction and breaks the assertions below.
@@ -609,7 +652,6 @@ fn auth_integration_registry_matches_cli_choice_runtime_wiring() {
 #[test]
 fn resolved_profile_default_model_uses_openai_compatible_override() {
     let _guard = lock_env();
-    let _env_guard = crate::storage::lock_test_env();
     let saved: Vec<(String, Option<String>)> = [
         "JCODE_OPENAI_COMPAT_API_BASE",
         "JCODE_OPENAI_COMPAT_API_KEY_NAME",
@@ -644,7 +686,6 @@ fn apply_login_provider_profile_env_keeps_an_explicit_named_profile() {
     // built-in generic openai-compatible slot and false-negatived every custom
     // named profile.
     let _guard = lock_env();
-    let _env_guard = crate::storage::lock_test_env();
     let saved: Vec<(String, Option<String>)> = [
         "JCODE_OPENROUTER_API_BASE",
         "JCODE_OPENROUTER_API_KEY_NAME",
@@ -689,7 +730,6 @@ fn apply_login_provider_profile_env_keeps_an_explicit_named_profile() {
 #[test]
 fn apply_login_provider_profile_env_preserves_compatible_profile_for_auto_spawn() {
     let _guard = lock_env();
-    let _env_guard = crate::storage::lock_test_env();
     let saved: Vec<(String, Option<String>)> = [
         "JCODE_OPENROUTER_API_BASE",
         "JCODE_OPENROUTER_API_KEY_NAME",
@@ -770,14 +810,13 @@ fn apply_login_provider_profile_env_preserves_compatible_profile_for_auto_spawn(
 }
 
 #[tokio::test]
-#[expect(
+#[allow(
     clippy::await_holding_lock,
     reason = "test env locks intentionally stay held across provider init to isolate process-global runtime env"
 )]
 async fn init_provider_for_ollama_reapplies_local_compat_runtime_env_after_disabling_subscription_mode()
  {
     let _guard = lock_env();
-    let _env_guard = crate::storage::lock_test_env();
     let dir = TempDir::new().expect("temp dir");
     let saved: Vec<(String, Option<String>)> = [
         "JCODE_HOME",
@@ -791,12 +830,17 @@ async fn init_provider_for_ollama_reapplies_local_compat_runtime_env_after_disab
         "JCODE_RUNTIME_PROVIDER",
         "JCODE_INITIAL_PROVIDER_EXPLICIT",
         "JCODE_ACTIVE_PROVIDER",
+        "JCODE_NAMED_PROVIDER_PROFILE",
+        "JCODE_PROVIDER_PROFILE_ACTIVE",
     ]
     .iter()
     .map(|k| (k.to_string(), std::env::var(k).ok()))
     .collect();
 
     crate::env::set_var("JCODE_HOME", dir.path());
+    // A jcode session exports its named profile; it must not leak into Ollama init.
+    crate::env::remove_var("JCODE_NAMED_PROVIDER_PROFILE");
+    crate::env::remove_var("JCODE_PROVIDER_PROFILE_ACTIVE");
     crate::subscription_catalog::apply_runtime_env();
 
     let provider = init_provider_for_validation(&ProviderChoice::Ollama, Some("llama3.2"))
@@ -850,13 +894,12 @@ async fn init_provider_for_ollama_reapplies_local_compat_runtime_env_after_disab
 }
 
 #[tokio::test]
-#[expect(
+#[allow(
     clippy::await_holding_lock,
     reason = "test env locks intentionally stay held across provider init to isolate process-global runtime env"
 )]
 async fn auto_provider_uses_config_default_named_no_auth_provider() {
     let _guard = lock_env();
-    let _env_guard = crate::storage::lock_test_env();
     let dir = TempDir::new().expect("temp dir");
     let saved: Vec<(String, Option<String>)> = [
         "JCODE_HOME",
@@ -949,18 +992,18 @@ id = "llama3.1:8b"
 }
 
 #[tokio::test]
-#[expect(
+#[allow(
     clippy::await_holding_lock,
     reason = "test env locks intentionally stay held across provider init to isolate process-global auth env"
 )]
 async fn auto_provider_noninteractive_skips_untrusted_external_auth_instead_of_blocking() {
     let _guard = lock_env();
-    let _env_guard = crate::storage::lock_test_env();
     let dir = TempDir::new().expect("temp dir");
-    let saved: Vec<(String, Option<String>)> = [
+    let mut keys: HashSet<String> = [
         "JCODE_HOME",
         "JCODE_NON_INTERACTIVE",
         "JCODE_DEFERRED_AUTH_BOOTSTRAP",
+        "JCODE_RELOAD_AUTH_STATUS",
         "ANTHROPIC_API_KEY",
         "OPENAI_API_KEY",
         "OPENROUTER_API_KEY",
@@ -970,26 +1013,42 @@ async fn auto_provider_noninteractive_skips_untrusted_external_auth_instead_of_b
         "JCODE_RUNTIME_PROVIDER",
         "JCODE_ACTIVE_PROVIDER",
         "JCODE_INITIAL_PROVIDER_EXPLICIT",
+        "JCODE_NAMED_PROVIDER_PROFILE",
     ]
-    .iter()
-    .map(|k| (k.to_string(), std::env::var(k).ok()))
+    .into_iter()
+    .map(str::to_string)
     .collect();
+    // Auto discovery also accepts direct compatible-provider credentials.
+    // For example, an inherited CHUTES_API_KEY legitimately selects OpenRouter
+    // even with a fresh JCODE_HOME. This fixture must isolate those keys too,
+    // rather than mistaking a configured provider for an external-auth bypass.
+    keys.extend(
+        provider_catalog::openai_compatible_profiles()
+            .iter()
+            .map(|profile| profile.api_key_env.to_string()),
+    );
+    keys.extend(std::env::vars_os().filter_map(|(key, _)| {
+        let key = key.to_string_lossy().into_owned();
+        (key.starts_with("JCODE_OPENROUTER_")
+            || key.starts_with("JCODE_OPENAI_COMPAT_")
+            || key.starts_with("JCODE_PROVIDER_"))
+        .then_some(key)
+    }));
+    let saved: Vec<(String, Option<String>)> = keys
+        .into_iter()
+        .map(|key| {
+            let value = std::env::var(&key).ok();
+            (key, value)
+        })
+        .collect();
 
-    crate::env::set_var("JCODE_HOME", dir.path());
-    crate::env::set_var("JCODE_NON_INTERACTIVE", "1");
-    for key in [
-        "JCODE_DEFERRED_AUTH_BOOTSTRAP",
-        "ANTHROPIC_API_KEY",
-        "OPENAI_API_KEY",
-        "OPENROUTER_API_KEY",
-        "GITHUB_TOKEN",
-        "GEMINI_API_KEY",
-        "CURSOR_API_KEY",
-        "JCODE_ACTIVE_PROVIDER",
-        "JCODE_INITIAL_PROVIDER_EXPLICIT",
-    ] {
+    for (key, _) in &saved {
         crate::env::remove_var(key);
     }
+    crate::env::set_var("JCODE_HOME", dir.path());
+    crate::env::set_var("JCODE_NON_INTERACTIVE", "1");
+    crate::config::invalidate_config_cache();
+    crate::auth::AuthStatus::invalidate_cache();
 
     let opencode_path = crate::auth::claude::ExternalClaudeAuthSource::OpenCode
         .path()
@@ -1050,12 +1109,13 @@ async fn auto_provider_noninteractive_skips_untrusted_external_auth_instead_of_b
             crate::env::remove_var(&key);
         }
     }
+    crate::config::invalidate_config_cache();
+    crate::auth::AuthStatus::invalidate_cache();
 }
 
 #[test]
 fn pending_external_auth_review_candidates_include_shared_and_legacy_sources() {
     let _guard = lock_env();
-    let _env_guard = crate::storage::lock_test_env();
     let dir = TempDir::new().expect("temp dir");
     let prev_home = std::env::var_os("JCODE_HOME");
     crate::env::set_var("JCODE_HOME", dir.path());

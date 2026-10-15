@@ -1,6 +1,71 @@
 use super::*;
 use crate::tui::info_widget::InfoWidgetData;
 
+#[test]
+fn stationary_widget_inside_viewport_counts_content_drift() {
+    let widget = PlacedRect {
+        kind: "overview",
+        x: 60,
+        y: 6,
+        width: 40,
+        height: 8,
+    };
+    let frames = vec![vec![widget]; 5];
+    let report = analyze_frames_with_scroll(&frames, &[0, 1, 2, 3, 4]);
+    assert_eq!(report.total_content_travel, 4);
+}
+
+#[test]
+fn stationary_widget_edges_follow_the_live_viewport_rows() {
+    for (y, travel) in [(5, 0), (25, 0), (6, 4)] {
+        let widget = PlacedRect {
+            kind: "overview",
+            x: 60,
+            y,
+            width: 40,
+            height: 8,
+        };
+        let frames = vec![vec![widget]; 5];
+        let rows = vec![5..33; 5];
+        assert_eq!(
+            analyze_frames_with_viewport_rows(&frames, &[0, 1, 2, 3, 4], Some(&rows))
+                .total_content_travel,
+            travel
+        );
+    }
+}
+
+#[test]
+fn stationary_widget_edges_use_each_frames_bounds() {
+    let widget = PlacedRect {
+        kind: "overview",
+        x: 60,
+        y: 8,
+        width: 40,
+        height: 8,
+    };
+    let frames = vec![vec![widget]; 5];
+    let rows = vec![5..33, 5..33, 5..33, 8..33, 8..33];
+    assert_eq!(
+        analyze_frames_with_viewport_rows(&frames, &[0, 1, 2, 3, 4], Some(&rows))
+            .total_content_travel,
+        2
+    );
+    assert_eq!(
+        analyze_frames_with_viewport_rows(&[], &[], Some(&[])).steps,
+        0
+    );
+    assert_eq!(
+        analyze_frames_with_viewport_rows(&frames[..1], &[0], Some(&rows[..1])).steps,
+        0
+    );
+    assert_eq!(
+        analyze_frames_with_viewport_rows(&frames, &[0, 1, 2, 3, 4], Some(&[]))
+            .total_content_travel,
+        4
+    );
+}
+
 /// Build widget data that yields a stable overview widget (model + queue line etc).
 fn sample_data() -> InfoWidgetData {
     InfoWidgetData {
@@ -441,4 +506,32 @@ fn demo_lookahead_sweep() {
             );
         }
     }
+}
+
+/// Review #1456: holding still in the middle of the viewport while the
+/// transcript scrolls is real drift and must be counted. Only a widget flush
+/// against the top or bottom edge (stuck there on purpose) is excused.
+#[test]
+fn stationary_widget_counts_as_drift_except_at_the_edge() {
+    let at = |y: u16| {
+        vec![PlacedRect {
+            kind: "overview",
+            x: 60,
+            y,
+            width: 40,
+            height: 8,
+        }]
+    };
+    let tops: Vec<i64> = (0..5).collect();
+    let middle: Vec<_> = (0..5).map(|_| at(10)).collect();
+    let report = analyze_frames_with_viewport(&middle, &tops, Some(24));
+    assert_eq!(report.total_content_travel, 4, "{report:#?}");
+    for edge_y in [0u16, 16] {
+        let edge: Vec<_> = (0..5).map(|_| at(edge_y)).collect();
+        let report = analyze_frames_with_viewport(&edge, &tops, Some(24));
+        assert_eq!(report.total_content_travel, 0, "y={edge_y}: {report:#?}");
+    }
+    // Without a viewport height every stationary widget is judged.
+    let report = analyze_frames_with_scroll(&middle, &tops);
+    assert_eq!(report.total_content_travel, 4, "{report:#?}");
 }

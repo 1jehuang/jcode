@@ -100,13 +100,45 @@ impl Provider for OpenRouterProvider {
             false
         };
 
-        let api_messages = jcode_provider_openrouter::request::build_chat_messages(
+        let mut api_messages = jcode_provider_openrouter::request::build_chat_messages(
             &effective_messages,
             system,
             allow_reasoning,
             include_reasoning_content,
             allow_image_input,
         );
+
+        // Kimi partial-mode thinking prefill (Moonshot partial mode): append a
+        // final assistant message with `partial: true`, empty `content`, and the
+        // configured seed in `reasoning_content`. The model continues the
+        // seeded thinking instead of starting deliberation from scratch, so a
+        // long-CoT model cannot re-derive a refusal from a clean slate. Opt-in
+        // via named-profile `thinking_prefill` config or the
+        // `JCODE_KIMI_THINKING_PREFILL` env/env-file value; Kimi models only
+        // (or any model when the profile sets `thinking_prefill_non_kimi`),
+        // suppressed on strict-schema endpoints.
+        if let Some(seed) = self
+            .thinking_prefill_seed
+            .as_deref()
+            .filter(|seed| !seed.trim().is_empty())
+            && (Self::is_kimi_model(&model) || self.thinking_prefill_non_kimi)
+            && !strict_openai_schema
+        {
+            let mut partial_message = serde_json::json!({
+                "role": "assistant",
+                "partial": true,
+                "content": "",
+                "reasoning_content": seed,
+            });
+            if let Some(name) = self
+                .thinking_prefill_name
+                .as_deref()
+                .filter(|name| !name.trim().is_empty())
+            {
+                partial_message["name"] = serde_json::json!(name);
+            }
+            api_messages.push(partial_message);
+        }
 
         // Build tools in OpenAI format
         let api_tools: Vec<Value> = tools
@@ -662,6 +694,7 @@ impl Provider for OpenRouterProvider {
                     detail.clone()
                 };
                 jcode_provider_core::ModelRoute {
+                    catalog_metadata: None,
                     model,
                     provider: provider_label.clone(),
                     api_method: api_method.clone(),
@@ -844,6 +877,9 @@ impl Provider for OpenRouterProvider {
             static_reasoning_config: self.static_reasoning_config.clone(),
             max_tokens: self.max_tokens,
             extra_body: self.extra_body.clone(),
+            thinking_prefill_seed: self.thinking_prefill_seed.clone(),
+            thinking_prefill_name: self.thinking_prefill_name.clone(),
+            thinking_prefill_non_kimi: self.thinking_prefill_non_kimi,
             static_models: self.static_models.clone(),
             static_context_limits: self.static_context_limits.clone(),
             static_image_input_support: self.static_image_input_support.clone(),

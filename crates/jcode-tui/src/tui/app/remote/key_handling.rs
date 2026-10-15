@@ -95,7 +95,7 @@ async fn apply_remote_speed_direction(
     Ok(())
 }
 
-async fn apply_remote_effort_direction(
+pub(super) async fn apply_remote_effort_direction(
     app: &mut App,
     remote: &mut RemoteConnection,
     direction: i8,
@@ -113,21 +113,8 @@ async fn apply_remote_effort_direction(
     }
     let current = app.remote_reasoning_effort_hint();
     let current = current.as_deref();
-    let current_index = current
-        .and_then(|c| efforts.iter().position(|e| *e == c))
-        .unwrap_or(efforts.len() - 1);
-    let len = efforts.len();
-    let next_index = if direction > 0 {
-        if current_index + 1 >= len {
-            current_index
-        } else {
-            current_index + 1
-        }
-    } else if current_index == 0 {
-        0
-    } else {
-        current_index - 1
-    };
+    let next_index = app_mod::helpers::cycled_effort_index(&efforts, current, direction)
+        .expect("nonempty effort ladder");
     let next_effort = efforts[next_index];
     if Some(next_effort) == current {
         let label = app_mod::effort_display_label(next_effort);
@@ -137,13 +124,18 @@ async fn apply_remote_effort_direction(
             if direction > 0 { "max" } else { "min" }
         ));
     } else {
+        app.remember_remote_effort_before_request();
         app.remote_reasoning_effort = Some(next_effort.to_string());
         app.invalidate_model_picker_cache();
         app.set_status_notice(format!(
             "Effort: {} (will apply to next request)",
             app_mod::effort_display_label(next_effort)
         ));
-        remote.set_reasoning_effort(next_effort).await?;
+        if let Err(error) = remote.set_reasoning_effort(next_effort).await {
+            app.restore_rejected_remote_effort();
+            app.set_status_notice("Effort switch failed");
+            return Err(error);
+        }
     }
     Ok(())
 }
@@ -374,6 +366,13 @@ async fn handle_remote_key_internal(
         return Ok(());
     }
 
+    // Composer text selection (copy/cut/delete/extend) takes priority over
+    // the whole-line Ctrl+X, the Ctrl+C interrupt/quit, and plain arrow moves.
+    // Mirrors the local path in `input.rs` `handle_key_core`.
+    if crate::tui::app::input_selection::handle_input_selection_key(app, code, modifiers) {
+        return Ok(());
+    }
+
     // Inline hotkey feedback: when a known-but-rarely-used chord is pressed,
     // show "you just pressed X → does Y". Placed after the overlay handlers so
     // overlay-local keys stay silent. Unknown chords are reported at the
@@ -409,6 +408,18 @@ async fn handle_remote_key_internal(
         }
         app.handle_new_terminal_hotkey();
         return Ok(());
+    }
+
+    // A running provider auto-switch countdown: Esc (or any other
+    // non-scroll key) cancels it before anything is sent to the target.
+    if app.pending_provider_failover.is_some() && !app.is_processing {
+        if code == KeyCode::Esc {
+            app.cancel_pending_provider_failover("Provider auto-switch canceled");
+            return Ok(());
+        }
+        if !input::is_scroll_only_key(app, code, modifiers) {
+            app.cancel_pending_provider_failover("Provider auto-switch canceled");
+        }
     }
 
     // Accept an armed post-error fallback offer: stage the route switch and
@@ -618,7 +629,7 @@ async fn handle_remote_key_internal(
                 if app.cursor_pos < end {
                     app.remember_input_undo_state();
                 }
-                app.input.drain(app.cursor_pos..end);
+                app.remove_input_range(app.cursor_pos, end);
                 return Ok(());
             }
             KeyCode::Backspace | KeyCode::Delete | KeyCode::Char('\u{7f}') => {
@@ -711,6 +722,11 @@ async fn handle_remote_key_internal(
         return Ok(());
     }
 
+    if app.scroll_keys.is_to_bottom(code, modifiers) {
+        app.jump_to_chat_bottom();
+        return Ok(());
+    }
+
     if app.scroll_keys.is_bookmark(code, modifiers) {
         app.toggle_scroll_bookmark();
         return Ok(());
@@ -765,7 +781,7 @@ async fn handle_remote_key_internal(
                     remote.cancel_with_reason("keyboard_ctrl_c_or_d").await?;
                     app.set_status_notice("Interrupting...");
                 } else {
-                    app.handle_quit_request();
+                    input::clear_draft_or_request_quit(app);
                 }
                 return Ok(());
             }
@@ -948,8 +964,7 @@ async fn handle_remote_key_internal(
             if app.cursor_pos > 0 {
                 let prev = core::prev_char_boundary(&app.input, app.cursor_pos);
                 app.remember_input_undo_state();
-                app.input.drain(prev..app.cursor_pos);
-                app.cursor_pos = prev;
+                app.remove_input_range(prev, app.cursor_pos);
                 app.reset_tab_completion();
                 app.sync_model_picker_preview_from_input();
             }
@@ -958,7 +973,7 @@ async fn handle_remote_key_internal(
             if app.cursor_pos < app.input.len() {
                 let next = core::next_char_boundary(&app.input, app.cursor_pos);
                 app.remember_input_undo_state();
-                app.input.drain(app.cursor_pos..next);
+                app.remove_input_range(app.cursor_pos, next);
                 app.reset_tab_completion();
                 app.sync_model_picker_preview_from_input();
             }
@@ -1042,9 +1057,8 @@ async fn handle_remote_key_internal(
     Ok(())
 }
 
-/// Everything a plain Enter does with the composer contents in a remote
-/// session: slash commands, shell commands, and prompts. Shared by the key
-/// handler and by the turn-end dispatcher for commands queued with Ctrl+Enter.
+/// Remote Enter dispatch for commands and prompts, shared by key handling
+/// and turn-end replay of commands queued with Ctrl+Enter.
 pub(in crate::tui::app) async fn submit_remote_enter_input(
     app: &mut App,
     remote: &mut RemoteConnection,
@@ -1054,7 +1068,7 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
     }
     if !app.input.is_empty() {
         let prepared = input::take_prepared_input(app);
-        let trimmed = prepared.expanded.trim();
+        let trimmed = prepared.routing_input().trim();
 
         // Before the SSH gate: `/local` must work from a client attached
         // to the cloud copy, because the return is coordinated locally.
@@ -1373,6 +1387,7 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
                 provider_model.as_deref(),
             );
             if efforts.contains(&level) {
+                app.remember_remote_effort_before_request();
                 app.remote_reasoning_effort = Some(level.to_string());
                 app.invalidate_model_picker_cache();
                 app.set_status_notice(format!(
@@ -1380,7 +1395,11 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
                     app_mod::effort_display_label(level)
                 ));
             }
-            remote.set_reasoning_effort(level).await?;
+            if let Err(error) = remote.set_reasoning_effort(level).await {
+                app.restore_rejected_remote_effort();
+                app.set_status_notice("Effort switch failed");
+                return Err(error);
+            }
             return Ok(());
         }
 
@@ -1577,7 +1596,7 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
             } else {
                 app.pending_split_request = false;
                 begin_remote_split_launch(app, "Autoreview");
-                if let Err(error) = remote.split().await {
+                if let Err(error) = remote.split_feedback(Some("autoreview".to_string())).await {
                     finish_remote_split_launch(app);
                     app.pending_split_startup_message = None;
                     app.pending_split_parent_session_id = None;
@@ -1634,7 +1653,7 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
             } else {
                 app.pending_split_request = false;
                 begin_remote_split_launch(app, "Autojudge");
-                if let Err(error) = remote.split().await {
+                if let Err(error) = remote.split_feedback(Some("autojudge".to_string())).await {
                     finish_remote_split_launch(app);
                     app.pending_split_startup_message = None;
                     app.pending_split_parent_session_id = None;
@@ -1669,7 +1688,7 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
             } else {
                 app.pending_split_request = false;
                 begin_remote_split_launch(app, "Review");
-                if let Err(error) = remote.split().await {
+                if let Err(error) = remote.split_feedback(Some("review".to_string())).await {
                     finish_remote_split_launch(app);
                     app.pending_split_startup_message = None;
                     app.pending_split_parent_session_id = None;
@@ -1704,7 +1723,7 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
             } else {
                 app.pending_split_request = false;
                 begin_remote_split_launch(app, "Judge");
-                if let Err(error) = remote.split().await {
+                if let Err(error) = remote.split_feedback(Some("judge".to_string())).await {
                     finish_remote_split_launch(app);
                     app.pending_split_startup_message = None;
                     app.pending_split_parent_session_id = None;
@@ -1815,6 +1834,7 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
             app.clear_provider_messages();
             app.clear_display_messages();
             app.queued_messages.clear();
+            app.queued_message_images.clear();
             app.queued_commands.clear();
             app.pasted_contents.clear();
             app.pending_images.clear();
@@ -1853,15 +1873,21 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
                 ));
                 return Ok(());
             }
-            // Attached images belong to the forked prompt, not the
-            // parent's next message.
+            // Attached images belong to the forked prompt, not its parent.
             let images = std::mem::take(&mut app.pending_images);
             let prepared = input::PreparedInput {
+                image_markers: Default::default(),
+                routing_input: None,
+                pasted_contents: Vec::new(),
                 raw_input: prompt.to_string(),
                 expanded: prompt.to_string(),
                 images,
             };
             route_prepared_input_to_new_remote_session(app, remote, prepared).await?;
+            return Ok(());
+        }
+
+        if app.handle_side_command(trimmed) {
             return Ok(());
         }
 

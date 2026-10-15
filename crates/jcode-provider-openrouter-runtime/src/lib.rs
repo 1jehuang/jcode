@@ -844,6 +844,19 @@ pub struct OpenRouterProvider {
     /// Resolved once at construction from named-profile config or the
     /// `JCODE_OPENAI_EXTRA_BODY` env/env-file value.
     extra_body: Option<serde_json::Map<String, Value>>,
+    /// Kimi partial-mode thinking prefill seed, resolved once at construction
+    /// from named-profile config or the `JCODE_KIMI_THINKING_PREFILL`
+    /// env/env-file value. Sent only for Kimi-family models on non-strict
+    /// OpenAI-schema endpoints (appended in `complete()`).
+    thinking_prefill_seed: Option<String>,
+    /// Optional character-anchor `name` for the partial-mode prefill message,
+    /// resolved from named-profile config or `JCODE_KIMI_PREFILL_NAME`.
+    thinking_prefill_name: Option<String>,
+    /// Whether the profile's `thinking_prefill` should also be sent for
+    /// non-Kimi models (explicit opt-in via named-profile config), so gateways
+    /// that accept partial-mode prefills beyond Moonshot (e.g. GLM proxies)
+    /// can seed their thinking too.
+    thinking_prefill_non_kimi: bool,
     static_models: Vec<String>,
     static_context_limits: HashMap<String, usize>,
     /// Explicit per-model image-input capability from named-provider `models[].input`.
@@ -1211,6 +1224,41 @@ impl OpenRouterProvider {
         }
     }
 
+    /// Resolve the Kimi partial-mode thinking prefill for an
+    /// OpenAI-compatible/OpenRouter provider.
+    ///
+    /// Sources, in precedence order:
+    /// 1. Optional named-profile `thinking_prefill` / `prefill_name` config.
+    /// 2. The `JCODE_KIMI_THINKING_PREFILL` / `JCODE_KIMI_PREFILL_NAME` env
+    ///    vars (or the same keys inside the profile's `.env` file).
+    ///
+    /// Returns `(seed, name)`; both `None` when nothing is configured.
+    fn resolve_thinking_prefill(
+        seed_config: Option<&str>,
+        name_config: Option<&str>,
+        env_file: &str,
+    ) -> (Option<String>, Option<String>) {
+        let seed = seed_config
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                load_env_value_from_env_or_config("JCODE_KIMI_THINKING_PREFILL", env_file)
+                    .map(|raw| raw.trim().to_string())
+                    .filter(|value| !value.is_empty())
+            });
+        let name = name_config
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                load_env_value_from_env_or_config("JCODE_KIMI_PREFILL_NAME", env_file)
+                    .map(|raw| raw.trim().to_string())
+                    .filter(|value| !value.is_empty())
+            });
+        (seed, name)
+    }
+
     pub fn supports_provider_routing_features(&self) -> bool {
         self.supports_provider_features
     }
@@ -1423,6 +1471,15 @@ impl OpenRouterProvider {
                 ))
             })
             .collect::<HashMap<_, _>>();
+        let (thinking_prefill_seed, thinking_prefill_name) = Self::resolve_thinking_prefill(
+            profile.thinking_prefill.as_deref(),
+            profile.prefill_name.as_deref(),
+            profile
+                .env_file
+                .as_deref()
+                .filter(|name| is_safe_env_file_name(name))
+                .unwrap_or(DEFAULT_ENV_FILE),
+        );
         let provider = Self {
             client: jcode_provider_core::shared_http_client(),
             model: Arc::new(RwLock::new(model)),
@@ -1453,6 +1510,9 @@ impl OpenRouterProvider {
                     .filter(|name| is_safe_env_file_name(name))
                     .unwrap_or(DEFAULT_ENV_FILE),
             ),
+            thinking_prefill_seed,
+            thinking_prefill_name,
+            thinking_prefill_non_kimi: profile.thinking_prefill_non_kimi,
             static_models,
             static_context_limits,
             static_image_input_support,
@@ -1657,6 +1717,8 @@ impl OpenRouterProvider {
         };
         let max_tokens = Self::configured_max_tokens(profile_id.as_deref());
         let extra_body = Self::resolve_extra_body(None, &configured_env_file_name());
+        let (thinking_prefill_seed, thinking_prefill_name) =
+            Self::resolve_thinking_prefill(None, None, &configured_env_file_name());
 
         Ok(Self {
             client: jcode_provider_core::shared_http_client(),
@@ -1679,6 +1741,9 @@ impl OpenRouterProvider {
             static_reasoning_config: HashMap::new(),
             max_tokens,
             extra_body,
+            thinking_prefill_seed,
+            thinking_prefill_name,
+            thinking_prefill_non_kimi: false,
             static_models,
             static_context_limits,
             static_image_input_support: HashMap::new(),
@@ -1736,6 +1801,9 @@ impl OpenRouterProvider {
             static_reasoning_config: HashMap::new(),
             max_tokens: Self::configured_max_tokens(None),
             extra_body: None,
+            thinking_prefill_seed: None,
+            thinking_prefill_name: None,
+            thinking_prefill_non_kimi: false,
             static_models,
             static_context_limits,
             static_image_input_support: HashMap::new(),
@@ -1785,6 +1853,9 @@ impl OpenRouterProvider {
             static_reasoning_config: HashMap::new(),
             max_tokens: Self::configured_max_tokens(None),
             extra_body: Self::resolve_extra_body(None, DEFAULT_ENV_FILE),
+            thinking_prefill_seed: Self::resolve_thinking_prefill(None, None, DEFAULT_ENV_FILE).0,
+            thinking_prefill_name: Self::resolve_thinking_prefill(None, None, DEFAULT_ENV_FILE).1,
+            thinking_prefill_non_kimi: false,
             static_models: Vec::new(),
             static_context_limits: HashMap::new(),
             static_image_input_support: HashMap::new(),
@@ -1866,6 +1937,9 @@ impl OpenRouterProvider {
             static_reasoning_config: HashMap::new(),
             max_tokens: Self::configured_max_tokens(Some(&resolved.id)),
             extra_body: Self::resolve_extra_body(None, &resolved.env_file),
+            thinking_prefill_seed: Self::resolve_thinking_prefill(None, None, &resolved.env_file).0,
+            thinking_prefill_name: Self::resolve_thinking_prefill(None, None, &resolved.env_file).1,
+            thinking_prefill_non_kimi: false,
             static_models,
             static_context_limits,
             static_image_input_support: HashMap::new(),
@@ -2073,6 +2147,9 @@ impl OpenRouterProvider {
                 static_reasoning_config: HashMap::new(),
                 max_tokens: None,
                 extra_body: None,
+                thinking_prefill_seed: None,
+                thinking_prefill_name: None,
+                thinking_prefill_non_kimi: false,
                 static_models: Vec::new(),
                 static_context_limits: HashMap::new(),
                 static_image_input_support: HashMap::new(),

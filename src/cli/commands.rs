@@ -12,11 +12,11 @@ use crate::{browser, gateway, memory, session, storage, tui};
 
 use super::{output::terminal_title, terminal::init_tui_runtime};
 
+pub(crate) mod build_store;
 mod menubar;
 mod provider_setup;
 mod report_info;
 mod restart;
-
 pub(crate) use super::auth_test::run_post_login_validation;
 #[cfg(test)]
 pub(crate) use super::auth_test::{
@@ -1997,6 +1997,20 @@ pub async fn run_browser(action: &str, requested: Option<&str>) -> Result<()> {
             let target = browser::resolve_target_browser(requested)?;
             let name = target.kind.display_name();
             let status = browser::ensure_browser_ready_noninteractive_for(&target).await?;
+            if status.backend == "safari_applescript" {
+                println!("Browser automation");
+                println!("  backend: {}", status.backend);
+                println!("  browser: {} ({})", status.browser, status.detected_via);
+                println!("  ready: {}", status.ready);
+                println!("  extension: not required");
+                if status.ready {
+                    println!("\nBuilt-in browser tool is ready in dedicated Safari windows.");
+                } else {
+                    println!("\n{}", crate::browser_safari::SETUP_HELP);
+                    println!("Run `jcode browser setup safari` to check permissions.");
+                }
+                return Ok(());
+            }
             println!("Browser automation");
             println!("  backend: {}", status.backend);
             println!("  browser: {} ({})", status.browser, status.detected_via);
@@ -2059,6 +2073,17 @@ pub async fn run_browser(action: &str, requested: Option<&str>) -> Result<()> {
                 }
             } else if status.ready {
                 println!("\nBuilt-in browser tool is ready.");
+            } else if status
+                .connected_browser
+                .as_deref()
+                .is_some_and(|connected| connected != target.kind.id())
+            {
+                println!(
+                    "\nThe bridge is answering from {}, not {}. Run `jcode browser setup {}` and enable the extension in the requested browser. Jcode will not send actions to a different browser.",
+                    status.connected_browser.as_deref().unwrap_or("unknown"),
+                    name,
+                    target.kind.id()
+                );
             } else if status.responding && !status.compatible {
                 println!(
                     "\nThe browser bridge is connected, but the installed extension is out of date for this jcode build. Run `jcode browser setup` to repair or update it."
@@ -2081,9 +2106,77 @@ pub async fn run_browser(action: &str, requested: Option<&str>) -> Result<()> {
                 println!("\nRun `jcode browser setup` to install or repair it.");
             }
         }
+        "chatgpt-login" => {
+            use crate::provider::chatgpt_web_instance as web;
+            let chrome = web::find_chrome().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "ChatGPT web models need Google Chrome or Chromium for this system (on WSL: the Linux build inside WSL). Install one, or set JCODE_CHATGPT_WEB_CHROME"
+                )
+            })?;
+            println!("ChatGPT web sign-in");
+            println!("  browser: {}", chrome.display());
+            println!("  private profile: {}", web::profile_dir()?.display());
+            // Copies the session from your main browser through the bridge
+            // when possible. A private sign-in window is the last resort.
+            let (instance, page) = web::open_signed_in_page(web::SignIn::Interactive).await?;
+            let _ = instance.close_page(&page).await;
+            drop(instance);
+            println!("\nSigned in. [web] models run invisibly.");
+            let models = crate::provider::chatgpt_web::refresh_models().await?;
+            let available: Vec<_> = models
+                .iter()
+                .filter(|m| m.available)
+                .map(|m| m.model.as_str())
+                .collect();
+            println!(
+                "  available: {}",
+                if available.is_empty() {
+                    "none".to_string()
+                } else {
+                    available.join(", ")
+                }
+            );
+            web::shutdown().await;
+        }
+        "chatgpt-status" => {
+            use crate::provider::chatgpt_web_instance as web;
+            println!("ChatGPT web models");
+            match web::find_chrome() {
+                Some(chrome) => println!("  browser: {}", chrome.display()),
+                None => {
+                    println!(
+                        "  browser: missing (install Google Chrome or Chromium, or set JCODE_CHATGPT_WEB_CHROME)"
+                    );
+                    return Ok(());
+                }
+            }
+            println!("  private profile: {}", web::profile_dir()?.display());
+            println!(
+                "  sign-in window: {}",
+                if web::display_available() {
+                    "available"
+                } else {
+                    "no display (DISPLAY/WAYLAND_DISPLAY unset)"
+                }
+            );
+            let access = web::signed_in_status().await;
+            web::shutdown().await;
+            println!(
+                "  session: {}",
+                match access {
+                    Ok(web::PageAccess::SignedIn) => "signed in".to_string(),
+                    Ok(web::PageAccess::SignedOut) =>
+                        "signed out (run `jcode browser chatgpt-login`)".to_string(),
+                    Ok(web::PageAccess::Loading) => "ChatGPT did not load".to_string(),
+                    Err(error) => format!("error: {error:#}"),
+                }
+            );
+        }
         other => {
             eprintln!("Unknown browser action: {}", other);
-            eprintln!("Available: setup [browser], status [browser], detect");
+            eprintln!(
+                "Available: setup [browser], status [browser], detect, chatgpt-login, chatgpt-status"
+            );
             std::process::exit(1);
         }
     }
@@ -2580,10 +2673,13 @@ pub async fn run_single_message_command(
     message: &str,
     emit_json: bool,
     emit_ndjson: bool,
+    account_pins: &[(String, String)],
 ) -> Result<()> {
     let provider =
         super::provider_init::init_provider_for_run(choice, model, emit_json || emit_ndjson)
             .await?;
+    // `jcode run --account`: this run only; the stored default is unchanged.
+    super::account_pins::apply_to_provider(&provider, account_pins)?;
     let registry = crate::tool::Registry::new(provider.clone()).await;
     // Load MCP servers from ~/.jcode/mcp.json so headless `jcode run` has the
     // same `mcp__*` tools as interactive/server sessions. This is non-blocking:
@@ -2673,7 +2769,25 @@ async fn run_single_message_with_agent(
     // one-shot exit from looking like a stale-PID crash on the next startup
     // (issue #988).
     agent.mark_closed();
-    result
+    result.map_err(explain_run_failover_prompt)
+}
+
+/// `jcode run` has no countdown and nobody to press Esc, so it never switches
+/// provider on its own after a failover offer. Replace the machine-readable
+/// prompt with plain words: what failed, what was not done, and how to use
+/// the offered route. The command still fails (non-zero exit).
+fn explain_run_failover_prompt(error: anyhow::Error) -> anyhow::Error {
+    let text = crate::util::format_error_chain(&error);
+    let Some(prompt) = crate::provider::parse_failover_prompt_message(&text) else {
+        return error;
+    };
+    anyhow::anyhow!(
+        "{} is {}. jcode run did not resend the prompt anywhere else. {} serves the same model: rerun with --model {} to use it.",
+        prompt.from_label,
+        prompt.reason,
+        prompt.to_label,
+        prompt.to_provider
+    )
 }
 
 fn run_command_auto_poke_enabled() -> bool {

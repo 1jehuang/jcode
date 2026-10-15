@@ -142,9 +142,236 @@ pub fn classify_failover_error_message(message: &str) -> FailoverDecision {
     FailoverDecision::None
 }
 
+/// True when an error means "this account is out of credit / payment
+/// required" (HTTP 402 or billing wording) and will not recover by itself.
+///
+/// A usage-window 402 that carries a reset instant (`resets_at`/`reset_at`,
+/// e.g. Openference's "1500 requests per 5 hours") is excluded: jcode holds
+/// and auto-resumes those instead of switching provider. Only the response
+/// body is searched for the reset fields (the text after `response:` in a
+/// formatted HTTP error), so an endpoint URL or query string that happens to
+/// contain those words does not hide a real out-of-credit error.
+pub fn is_billing_exhausted_error_message(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    let payload = if let Some(idx) = lower.find("response:") {
+        lower[idx + "response:".len()..].to_string()
+    } else {
+        lower
+            .lines()
+            .filter(|line| !is_request_metadata(line))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    if payload.contains("resets_at") || payload.contains("reset_at") {
+        return false;
+    }
+    // An explicit authentication, rate-limit or server failure cannot become
+    // billing exhaustion because a model, endpoint or hint mentions payment.
+    if let Some(status) = parse_http_status_message(&lower) {
+        return status == 402;
+    }
+    contains_independent_status_code(&payload, "402")
+        || [
+            "payment required",
+            "insufficient credit",
+            "insufficient balance",
+            "insufficient_balance",
+            "credit balance",
+            "credits have run out",
+            "out of credit",
+        ]
+        .iter()
+        .any(|needle| payload.contains(needle))
+}
+
+fn is_request_metadata(line: &str) -> bool {
+    ["endpoint:", "model:", "auth:"]
+        .iter()
+        .any(|prefix| line.trim_start().starts_with(prefix))
+}
+
+/// Parse a formatted status, a relayed HTTP status, or a leading status code.
+/// Request metadata and codes embedded in identifiers or longer numbers are ignored.
+pub fn parse_http_status_message(message: &str) -> Option<u16> {
+    let lower = message.to_ascii_lowercase();
+    for line in lower.lines().filter(|line| !is_request_metadata(line)) {
+        let line = line.trim_start();
+        let tail = ["status:", "http "]
+            .iter()
+            .find_map(|marker| {
+                line.match_indices(marker).find_map(|(idx, _)| {
+                    let boundary = idx == 0
+                        || !line.as_bytes()[idx - 1].is_ascii_alphanumeric()
+                            && line.as_bytes()[idx - 1] != b'_';
+                    boundary.then_some(&line[idx + marker.len()..])
+                })
+            })
+            .unwrap_or(line)
+            .trim_start();
+        let digits = tail.bytes().take_while(u8::is_ascii_digit).count();
+        if digits == 3
+            && !tail
+                .as_bytes()
+                .get(digits)
+                .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+            && let Ok(status) = tail[..digits].parse::<u16>()
+            && (100..600).contains(&status)
+        {
+            return Some(status);
+        }
+    }
+    None
+}
+
+/// Whether a failed request means the provider is temporarily overloaded on
+/// its side: HTTP 5xx (including the non-standard 529 "overloaded"), or the
+/// wording providers use for a busy period ("heavy usage", "try again in a
+/// moment"). The provider answered, so this is not a network problem, but
+/// waiting and resending the same turn usually works.
+///
+/// Permanent failures are never an overload, even when their body happens
+/// to use overload wording (a 404 model-not-found saying "temporarily
+/// unavailable"): the statuses the provider runtime refuses to retry
+/// (400, 401, 402, 403, 404, 405, 406, 422) are rejected before the wording
+/// is checked.
+pub fn is_provider_overload_message(message: &str) -> bool {
+    let status = parse_http_status_message(message);
+    if matches!(status, Some(400 | 401 | 402 | 403 | 404 | 405 | 406 | 422)) {
+        return false;
+    }
+    let lower = message.to_ascii_lowercase();
+    status.is_some_and(|code| (500..=599).contains(&code))
+        || [
+            "overloaded",
+            "heavy usage",
+            "temporarily unavailable",
+            "temporary unavailability",
+            "try again in a moment",
+            "server is busy",
+            "at capacity",
+            "capacity constraints",
+            "503 service unavailable",
+            "502 bad gateway",
+            "504 gateway timeout",
+            // A provider mid-deploy ("We're deploying an update right now
+            // ... Please try again shortly.", "code":"DEPLOYING").
+            "deploying",
+            "try again shortly",
+            // The provider lost its own upstream mid-response ("The model
+            // provider's stream was interrupted. Please retry.").
+            "stream was interrupted",
+        ]
+        .iter()
+        .any(|marker| lower.contains(marker))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_http_status_accepts_formatted_and_relayed_codes() {
+        for (message, expected) in [
+            ("  STATUS:529 upstream busy", 529),
+            ("proxy relayed HTTP 529: upstream busy", 529),
+            ("HTTP 401: temporarily unavailable", 401),
+            ("429 Too Many Requests", 429),
+            ("status: 100 Continue", 100),
+            ("status: 599 upstream failed", 599),
+        ] {
+            assert_eq!(
+                parse_http_status_message(message),
+                Some(expected),
+                "{message}"
+            );
+        }
+    }
+
+    #[test]
+    fn shared_http_status_ignores_metadata_before_real_status() {
+        let message = "endpoint: HTTP 529\n MODEL: status: 503\n auth: HTTP 402\n status: 401 temporarily unavailable";
+        assert_eq!(parse_http_status_message(message), Some(401));
+    }
+
+    #[test]
+    fn shared_http_status_rejects_metadata_and_embedded_codes() {
+        for message in [
+            "",
+            "no status here",
+            "endpoint: HTTP 529",
+            "model: status: 503",
+            "auth: HTTP 401",
+            "model529 failed",
+            "status: 5290",
+            "HTTP 529busy",
+            "status: 529_id",
+            "mystatus: 529",
+            "model_http 529",
+            "status: 099",
+            "status: 600",
+            "status: 99",
+            "status: nope",
+            "endpoint: http://localhost:529",
+        ] {
+            assert_eq!(parse_http_status_message(message), None, "{message}");
+        }
+    }
+
+    #[test]
+    fn billing_exhausted_detects_402_and_credit_wording() {
+        let body = "OpenAI-compatible chat request failed\n  status: 402 Payment Required\n  response: {\"error\":{\"message\":\"Insufficient credits\",\"type\":\"insufficient_quota\",\"code\":402}}";
+        assert!(is_billing_exhausted_error_message(body));
+        assert!(is_billing_exhausted_error_message(
+            "Your credit balance is too low"
+        ));
+    }
+
+    #[test]
+    fn billing_exhausted_skips_usage_window_402_with_reset_time() {
+        let body = "status: 402 Payment Required\n  response: {\"error\":\"Request limit exceeded (1500 per 5 hours)\",\"type\":\"insufficient_quota\",\"code\":\"window_quota_exceeded\",\"resets_at\":\"2026-09-24T09:00:00.000Z\"}";
+        assert!(!is_billing_exhausted_error_message(body));
+    }
+
+    #[test]
+    fn billing_exhausted_ignores_reset_words_in_the_endpoint_url() {
+        let body = "OpenAI-compatible chat request failed\n  endpoint: http://127.0.0.1:9/v1/chat/completions?reset_at=0&resets_at=1\n  model: glm-5.3\n  status: 402 Payment Required\n  response: {\"error\":{\"message\":\"Insufficient credits\",\"code\":402}}";
+        assert!(is_billing_exhausted_error_message(body));
+    }
+
+    #[test]
+    fn billing_exhausted_ignores_rate_limits_and_embedded_digits() {
+        assert!(!is_billing_exhausted_error_message("429 Too Many Requests"));
+        assert!(!is_billing_exhausted_error_message("model 4021 failed"));
+    }
+
+    #[test]
+    fn billing_exhausted_metadata_does_not_override_explicit_http_failure() {
+        for message in [
+            "request failed\n  model: model-402\n  status: 401 Unauthorized\n  response: invalid API key",
+            "request failed\n  endpoint: https://example.test/402\n  status: 500 Internal Server Error\n  response: upstream unavailable",
+            "request failed\n  auth: payment required\n  status: 403 Forbidden\n  response: denied",
+            "HTTP 401: payment required by an unrelated service",
+        ] {
+            assert!(!is_billing_exhausted_error_message(message), "{message}");
+        }
+    }
+
+    #[test]
+    fn billing_exhausted_ignores_metadata_without_a_response_section() {
+        for message in [
+            "request failed\n  model: model-402",
+            "request failed\n  endpoint: https://example.test/402",
+            "request failed\n  auth: insufficient credit",
+        ] {
+            assert!(!is_billing_exhausted_error_message(message), "{message}");
+        }
+        assert!(is_billing_exhausted_error_message(
+            "HTTP 402: payment required"
+        ));
+        assert!(is_billing_exhausted_error_message(
+            "response: insufficient_balance"
+        ));
+    }
 
     #[test]
     fn failover_prompt_roundtrips_from_error_message() {

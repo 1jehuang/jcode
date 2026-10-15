@@ -117,12 +117,31 @@ pub(super) async fn cancel_spawned_descendant_turns(
     let descendants = swarm_descendants(&*swarm_members.read().await, session_id);
     let mut stopped = Vec::new();
     for descendant in descendants {
-        let signals = crate::turn_cancel_registry::active_turn_signals(&descendant);
-        if signals.is_empty() {
+        let publication = turn_publication_for(&descendant).await;
+        let mut publication_state = match publication.as_ref() {
+            Some(publication) => Some(publication.state.lock().await),
+            None => None,
+        };
+        if publication_state
+            .as_deref()
+            .is_some_and(|state| *state != TurnPublicationState::Running)
+        {
             continue;
         }
+        let signals = crate::turn_cancel_registry::active_turn_signals(&descendant);
+        if signals.is_empty() && publication.is_none() {
+            continue;
+        }
+        if let Some(state) = publication_state.as_deref_mut() {
+            *state = TurnPublicationState::Cancelled;
+        }
+        // Latch ownership before signalling. Do not defer firing across an
+        // await: the agent's RAII guard may reset its signal on completion.
         for signal in &signals {
             signal.fire();
+        }
+        if let Some(publication) = &publication {
+            publication.cancelled.cancel();
         }
         // Workers usually have no attached client; the status update below
         // is what the coordinator's swarm view shows.
@@ -158,9 +177,123 @@ pub(super) async fn cancel_spawned_descendant_turns(
     stopped
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TurnPublicationState {
+    Running,
+    Cancelled,
+    Finished,
+    Superseded,
+}
+
+/// A server turn's terminal-publication ownership, independent of the agent's
+/// resettable interrupt signal. Holding this lock serializes cascade stop,
+/// completion, and replacement by a new generation.
+pub(super) struct TurnPublication {
+    session_id: String,
+    state: Mutex<TurnPublicationState>,
+    pub(super) cancelled: tokio_util::sync::CancellationToken,
+}
+
+type TurnPublications = HashMap<String, std::sync::Weak<TurnPublication>>;
+static TURN_PUBLICATIONS: OnceLock<Mutex<TurnPublications>> = OnceLock::new();
+
+pub(super) async fn begin_turn_publication(session_id: &str) -> Arc<TurnPublication> {
+    let publication = Arc::new(TurnPublication {
+        session_id: session_id.to_string(),
+        state: Mutex::new(TurnPublicationState::Running),
+        cancelled: tokio_util::sync::CancellationToken::new(),
+    });
+    loop {
+        let previous = {
+            let mut turns = TURN_PUBLICATIONS.get_or_init(Mutex::default).lock().await;
+            turns.retain(|_, turn| turn.strong_count() > 0);
+            match turns.get(session_id).and_then(std::sync::Weak::upgrade) {
+                Some(previous) => previous,
+                None => {
+                    turns.insert(session_id.to_string(), Arc::downgrade(&publication));
+                    return publication;
+                }
+            }
+        };
+        // Never wait on one turn while holding the process-wide registry.
+        // Recheck identity after locking so simultaneous replacements cannot
+        // leave two generations believing they own terminal publication.
+        let mut state = previous.state.lock().await;
+        let mut turns = TURN_PUBLICATIONS.get_or_init(Mutex::default).lock().await;
+        if !turns
+            .get(session_id)
+            .and_then(std::sync::Weak::upgrade)
+            .is_some_and(|current| Arc::ptr_eq(&current, &previous))
+        {
+            continue;
+        }
+        *state = TurnPublicationState::Superseded;
+        previous.cancelled.cancel();
+        turns.insert(session_id.to_string(), Arc::downgrade(&publication));
+        return publication;
+    }
+}
+
+async fn turn_publication_for(session_id: &str) -> Option<Arc<TurnPublication>> {
+    TURN_PUBLICATIONS
+        .get_or_init(Mutex::default)
+        .lock()
+        .await
+        .get(session_id)
+        .and_then(std::sync::Weak::upgrade)
+}
+
+impl TurnPublication {
+    pub(super) async fn publish_start<F: std::future::Future<Output = ()>>(
+        &self,
+        start: F,
+    ) -> bool {
+        let state = self.state.lock().await;
+        if *state != TurnPublicationState::Running {
+            return false;
+        }
+        start.await;
+        true
+    }
+
+    /// Reserve cancellation ownership before polling the agent. A cascade
+    /// between accepting the turn and registering its inner streaming guard
+    /// must either prevent the future from starting or reach this signal.
+    pub(super) async fn run<F: std::future::Future>(
+        &self,
+        signal: jcode_agent_runtime::InterruptSignal,
+        turn: F,
+    ) -> Option<F::Output> {
+        let state = self.state.lock().await;
+        if *state != TurnPublicationState::Running {
+            return None;
+        }
+        let active = crate::turn_cancel_registry::register_active_turn(&self.session_id, signal);
+        drop(state);
+        let result = turn.await;
+        drop(active);
+        Some(result)
+    }
+
+    /// Execute the actual status/event completion path exactly once, and only
+    /// while this generation still owns an uncancelled turn.
+    pub(super) async fn complete<F: std::future::Future<Output = ()>>(&self, completion: F) {
+        let mut state = self.state.lock().await;
+        if *state != TurnPublicationState::Running {
+            return;
+        }
+        completion.await;
+        *state = TurnPublicationState::Finished;
+    }
+}
+
 #[cfg(test)]
 #[path = "swarm_cascade_tests.rs"]
 mod swarm_cascade_tests;
+
+#[cfg(test)]
+#[path = "swarm_completion_tests.rs"]
+mod swarm_completion_tests;
 
 const DEFAULT_SWARM_STATUS_DEBOUNCE_MEMBER_THRESHOLD: usize = 2;
 const DEFAULT_SWARM_STATUS_DEBOUNCE_MS: u64 = 75;
@@ -1561,6 +1694,71 @@ pub(super) async fn update_member_status_with_report_tldr(
     event_counter: Option<&Arc<std::sync::atomic::AtomicU64>>,
     swarm_event_tx: Option<&broadcast::Sender<SwarmEvent>>,
 ) {
+    update_member_status_inner(
+        session_id,
+        None,
+        status,
+        detail,
+        completion_report,
+        report_tldr,
+        swarm_members,
+        swarms_by_id,
+        event_history,
+        event_counter,
+        swarm_event_tx,
+    )
+    .await;
+}
+
+/// Compare and update under the member write lock, preserving newer turns.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "status update needs shared swarm and event sinks"
+)]
+pub(super) async fn update_member_status_if(
+    session_id: &str,
+    expected: &str,
+    status: &str,
+    detail: Option<String>,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    event_history: Option<&Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>>,
+    event_counter: Option<&Arc<std::sync::atomic::AtomicU64>>,
+    swarm_event_tx: Option<&broadcast::Sender<SwarmEvent>>,
+) {
+    update_member_status_inner(
+        session_id,
+        Some(expected),
+        status,
+        detail,
+        None,
+        None,
+        swarm_members,
+        swarms_by_id,
+        event_history,
+        event_counter,
+        swarm_event_tx,
+    )
+    .await;
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "status update needs shared swarm, report and event sinks"
+)]
+async fn update_member_status_inner(
+    session_id: &str,
+    expected: Option<&str>,
+    status: &str,
+    detail: Option<String>,
+    completion_report: Option<String>,
+    report_tldr: Option<String>,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    event_history: Option<&Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>>,
+    event_counter: Option<&Arc<std::sync::atomic::AtomicU64>>,
+    swarm_event_tx: Option<&broadcast::Sender<SwarmEvent>>,
+) {
     let completion_report = normalize_completion_report(completion_report);
     let detail_present = detail.is_some();
     let (
@@ -1573,7 +1771,10 @@ pub(super) async fn update_member_status_with_report_tldr(
         report_back_to_session_id,
     ) = {
         let mut members = swarm_members.write().await;
-        if let Some(member) = members.get_mut(session_id) {
+        if let Some(member) = members
+            .get_mut(session_id)
+            .filter(|member| expected.is_none_or(|expected| member.status == expected))
+        {
             let previous_status = member.status.clone();
             let status_changed = member.status != status;
             let detail_changed = member.detail != detail;
@@ -1735,7 +1936,16 @@ pub(super) async fn run_swarm_task(
     prompt: &str,
 ) -> Result<String> {
     let started = Instant::now();
-    let (provider, registry, session_id, working_dir, coordinator_model, provider_key, route) = {
+    let (
+        provider,
+        registry,
+        session_id,
+        working_dir,
+        coordinator_model,
+        provider_key,
+        route,
+        accounts,
+    ) = {
         let agent = agent.lock().await;
         (
             agent.provider_fork(),
@@ -1745,6 +1955,7 @@ pub(super) async fn run_swarm_task(
             agent.provider_model(),
             agent.session_provider_key(),
             agent.session_route_api_method(),
+            agent.account_inheritance(),
         )
     };
     let parent_session_id = session_id.clone();
@@ -1759,6 +1970,8 @@ pub(super) async fn run_swarm_task(
     // instead of silently falling back to the config default on persistence.
     session.provider_key = provider_key;
     session.route_api_method = route;
+    // Workers bill the same subscription as their coordinator.
+    accounts.apply_to_session(&mut session);
     if let Some(dir) = working_dir {
         session.working_dir = Some(dir.display().to_string());
     }

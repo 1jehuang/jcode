@@ -35,6 +35,8 @@ pub enum LoginProviderTarget {
     OpenAiCompatible(OpenAiCompatibleProfile),
     Cursor,
     GrokBuild,
+    /// Claude through the local Claude Code CLI (`[provider.claude_code]`).
+    ClaudeCode,
     Copilot,
     Gemini,
     Antigravity,
@@ -55,6 +57,7 @@ pub enum LoginProviderAuthStateKey {
     Antigravity,
     Cursor,
     GrokBuild,
+    ClaudeCode,
     Google,
 }
 

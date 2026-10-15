@@ -156,6 +156,23 @@ pub(super) fn is_auto_poke_connectivity_error(error: &str) -> bool {
         .any(|marker| lower.contains(marker))
 }
 
+/// Whether `error` says the provider is temporarily overloaded or failing on
+/// its side: HTTP 5xx (including the non-standard 529 "overloaded"), or the
+/// wording providers use for a busy period ("heavy usage", "try again in a
+/// moment"). The provider answered, so this is not a network problem, but
+/// waiting and resending the same turn usually works.
+///
+/// Permanent failures are never an overload, even when their body happens
+/// to use overload wording (a 404 model-not-found saying "temporarily
+/// unavailable"): the statuses the provider runtime refuses to retry
+/// (400, 401, 402, 403, 404, 405, 406, 422) and model/endpoint mismatches are
+/// rejected before the wording is checked. The server's resume of headless
+/// turns shares [`jcode_provider_core::is_provider_overload_message`].
+pub(super) fn is_provider_overload_error(error: &str) -> bool {
+    !is_fatal_model_endpoint_error(error)
+        && jcode_provider_core::is_provider_overload_message(error)
+}
+
 /// Whether `error` is a deterministic model/endpoint-capability failure that can
 /// never succeed by resending the identical request: the configured model is not
 /// valid for the configured endpoint (e.g. Volcengine Ark's coding-plan endpoint
@@ -1372,6 +1389,7 @@ pub(super) fn fork_session_with_prompt_local(app: &mut App, prompt: Option<&str>
     if let Err(error) = launch_forked_session_local(app, staged) {
         if !images.is_empty() {
             app.pending_images = images;
+            app.ensure_input_image_markers();
         }
         app.push_display_message(DisplayMessage::error(format!(
             "Failed to fork session: {}",
@@ -1667,7 +1685,8 @@ pub(super) fn handle_git_status_completed(app: &mut App, completed: GitStatusCom
 }
 
 pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
-    if handle_subagent_model_command(app, trimmed)
+    if app.handle_side_command(trimmed)
+        || handle_subagent_model_command(app, trimmed)
         || app.handle_hotkeys_command(trimmed)
         || app.handle_terminal_setup_command(trimmed)
         || handle_subagent_command(app, trimmed)
@@ -3944,3 +3963,7 @@ pub(super) fn handle_telemetry_command(app: &mut App, trimmed: &str) -> bool {
 #[cfg(test)]
 #[path = "commands_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "provider_recovery_status_tests.rs"]
+mod provider_recovery_status_tests;

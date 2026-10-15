@@ -103,16 +103,10 @@ pub(super) fn save_agent_model_override(
     cfg.save()
 }
 
+/// The model id of a model row. Rows no longer carry an effort suffix (the
+/// level is picked in a second step), so the name is the id.
 pub(super) fn model_entry_base_name(entry: &PickerEntry) -> String {
-    if entry.effort.is_some() {
-        entry
-            .name
-            .rsplit_once(" (")
-            .map(|(base, _)| base.to_string())
-            .unwrap_or_else(|| entry.name.clone())
-    } else {
-        entry.name.clone()
-    }
+    entry.name.clone()
 }
 
 pub(super) fn openrouter_route_model_id(model: &str) -> String {
@@ -129,6 +123,9 @@ pub(super) fn picker_route_model_spec(entry: &PickerEntry, route: &PickerOption)
         crate::provider::ModelRouteApiMethod::Copilot => format!("copilot:{}", bare_name),
         crate::provider::ModelRouteApiMethod::GrokBuild => {
             crate::provider::grok_build_model_spec(&bare_name)
+        }
+        crate::provider::ModelRouteApiMethod::ClaudeCode { .. } => {
+            crate::provider::claude_code_model_spec(&bare_name)
         }
         crate::provider::ModelRouteApiMethod::ClaudeOAuth => {
             format!("claude-oauth:{}", bare_name)
@@ -164,6 +161,7 @@ pub(super) fn picker_route_selection(
     route: &PickerOption,
 ) -> crate::provider::RouteSelection {
     crate::provider::RouteSelection::from_model_route(&crate::provider::ModelRoute {
+        catalog_metadata: None,
         model: model_entry_base_name(entry),
         provider: route.provider.clone(),
         api_method: route.api_method.clone(),
@@ -315,8 +313,8 @@ mod tests {
         ] {
             for label in ["work", "personal", "research"] {
                 let option = route(provider, &format!("{base}@{label}"));
+                // Rows carry no effort suffix; the level is a second step.
                 let mut entry = entry(model, option.clone());
-                entry.name = format!("{model} (high)");
                 entry.effort = Some("high".into());
                 let expected = format!("{base}@{label}:{model}");
                 assert_eq!(picker_route_model_spec(&entry, &option), expected);

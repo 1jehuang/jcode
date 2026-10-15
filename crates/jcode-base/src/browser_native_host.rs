@@ -17,35 +17,70 @@ pub(super) fn native_host_manifest_json(kind: BrowserKind, host_path: &str) -> s
     manifest
 }
 
-/// Whether an existing manifest already points at a live host and allows the
-/// extension this browser uses.
-pub(super) fn native_host_manifest_is_valid(
+/// Validate the managed host identity, executable and extension allowlist.
+pub(super) fn native_host_manifest_is_valid_for_path(
     kind: BrowserKind,
     existing: &serde_json::Value,
+    expected_path: &std::path::Path,
 ) -> bool {
-    let host_ok = existing["path"]
-        .as_str()
-        .is_some_and(|p| std::path::Path::new(p).exists());
+    let host_ok = existing["path"].as_str().is_some_and(|p| {
+        let path = std::path::Path::new(p);
+        path.is_absolute() && path == expected_path && host_is_executable(path)
+    });
     let allowed_ok = if kind.family() == BrowserFamily::Gecko {
         existing["allowed_extensions"]
             .as_array()
             .is_some_and(|ids| {
-                ids.iter()
-                    .any(|id| id.as_str() == Some(EXTENSION_ID_LISTED))
+                ids.len() == 2
+                    && ids
+                        .iter()
+                        .any(|id| id.as_str() == Some(EXTENSION_ID_LISTED))
+                    && ids.iter().any(|id| id.as_str() == Some(EXTENSION_ID_LOCAL))
             })
     } else {
         let origin = format!("chrome-extension://{}/", CHROMIUM_EXTENSION_ID);
         existing["allowed_origins"]
             .as_array()
-            .is_some_and(|o| o.iter().any(|v| v.as_str() == Some(origin.as_str())))
+            .is_some_and(|origins| {
+                origins.len() == 1 && origins[0].as_str() == Some(origin.as_str())
+            })
     };
-    host_ok && allowed_ok
+    existing["name"].as_str() == Some(NATIVE_HOST_NAME)
+        && existing["type"].as_str() == Some("stdio")
+        && host_ok
+        && allowed_ok
+}
+
+fn host_is_executable(path: &std::path::Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 
 pub(super) fn install_native_host_manifest_for(kind: BrowserKind) -> Result<bool> {
     let dirs = native_messaging_hosts_dirs_for(kind)?;
-    let host_path = host_binary_path();
-    if !host_path.exists() {
+    let host_path = std::path::absolute(host_binary_path())?;
+    write_native_host_manifests(kind, dirs, &host_path)
+}
+
+pub(super) fn write_native_host_manifests(
+    kind: BrowserKind,
+    dirs: Vec<PathBuf>,
+    host_path: &std::path::Path,
+) -> Result<bool> {
+    if !host_path.is_absolute() || !host_is_executable(host_path) {
         return Err(anyhow::anyhow!(
             "Host binary not found at {}. The native messaging host is required for the {} extension to communicate with the bridge.",
             host_path.display(),
@@ -58,7 +93,7 @@ pub(super) fn install_native_host_manifest_for(kind: BrowserKind) -> Result<bool
         let manifest_path = manifest_dir.join(format!("{}.json", NATIVE_HOST_NAME));
         let valid = match std::fs::read_to_string(&manifest_path) {
             Ok(contents) => match serde_json::from_str::<serde_json::Value>(&contents) {
-                Ok(existing) => native_host_manifest_is_valid(kind, &existing),
+                Ok(existing) => native_host_manifest_is_valid_for_path(kind, &existing, host_path),
                 Err(error) => {
                     crate::logging::warn(&format!(
                         "Replacing invalid native host manifest {}: {error}",
@@ -78,7 +113,10 @@ pub(super) fn install_native_host_manifest_for(kind: BrowserKind) -> Result<bool
         };
         if !valid {
             std::fs::create_dir_all(&manifest_dir)?;
-            std::fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)?;
+            use std::io::Write;
+            let mut file = tempfile::NamedTempFile::new_in(&manifest_dir)?;
+            file.write_all(serde_json::to_string_pretty(&manifest)?.as_bytes())?;
+            file.persist(&manifest_path)?;
             wrote_any = true;
         }
         #[cfg(target_os = "windows")]
@@ -88,7 +126,7 @@ pub(super) fn install_native_host_manifest_for(kind: BrowserKind) -> Result<bool
 }
 
 #[cfg(target_os = "windows")]
-pub(super) fn register_windows_native_host_manifest(
+fn register_windows_native_host_manifest(
     kind: BrowserKind,
     manifest_path: &std::path::Path,
 ) -> Result<()> {
@@ -141,9 +179,7 @@ pub(super) fn native_messaging_hosts_dirs_for(kind: BrowserKind) -> Result<Vec<P
     Ok(dirs)
 }
 
-/// Extra `NativeMessagingHosts` directories for Chromium forks jcode does not
-/// know (Helium, Vivaldi, Thorium, ...), from `JCODE_BROWSER_NATIVE_HOST_DIRS`
-/// (an OS path list). Setup installs the Chromium host manifest there too.
+/// Extra Chromium fork NativeMessagingHosts directories from an OS path list.
 pub(super) fn extra_native_messaging_dirs(value: Option<&std::ffi::OsStr>) -> Vec<PathBuf> {
     let Some(value) = value else {
         return Vec::new();

@@ -1045,41 +1045,58 @@ pub(crate) fn render_todos_message(
     width: u16,
     diff_mode: crate::config::DiffDisplayMode,
 ) -> Vec<Line<'static>> {
-    render_todos_message_with_cap(msg, width, diff_mode, true)
+    let Some(body) = render_todo_card_body(&msg.content, width.saturating_sub(4), true) else {
+        return render_system_message(msg, width, diff_mode);
+    };
+    let (done, total) = todo_payload_counts(&msg.content).unwrap_or((0, 0));
+    let mut lines = render_rounded_box(
+        &format!("Todos {}/{}", done, total),
+        body,
+        width as usize,
+        Style::default().fg(todo_border_color()),
+    );
+    if markdown::center_code_blocks() {
+        left_pad_lines_for_centered_mode(&mut lines, width);
+    }
+    lines
 }
 
-/// Todo card for the pinned band at the top of the viewport. The band owns
-/// its full rows (info widgets never dock beside it), so the card spans the
-/// whole available width instead of the transcript's readability cap.
+/// Border colour shared by the inline todo card and the pinned todo band.
+/// Clearly brighter than the dim info-box border so the list stands out.
+pub(crate) fn todo_border_color() -> Color {
+    rgb(130, 115, 175)
+}
+
+/// Unboxed todo card body for the pinned band at the top of the viewport. The
+/// band owns its full rows (info widgets never dock beside it) and draws its
+/// own border, so the body spans the whole available width instead of the
+/// transcript's readability cap.
 pub(crate) fn render_pinned_todos_message(
     msg: &DisplayMessage,
     width: u16,
-    diff_mode: crate::config::DiffDisplayMode,
+    _diff_mode: crate::config::DiffDisplayMode,
 ) -> Vec<Line<'static>> {
-    render_todos_message_with_cap(msg, width, diff_mode, false)
+    render_todo_card_body(&msg.content, width, false).unwrap_or_default()
 }
 
-fn render_todos_message_with_cap(
-    msg: &DisplayMessage,
+/// Unboxed todo card rows for `content` at `width` columns. Returns `None`
+/// when the payload is not a todo card. Callers add the border. `cap_width`
+/// applies the transcript's readability cap.
+pub(crate) fn render_todo_card_body(
+    content: &str,
     width: u16,
-    diff_mode: crate::config::DiffDisplayMode,
     cap_width: bool,
-) -> Vec<Line<'static>> {
-    let Ok(payload) = serde_json::from_str::<TodoCardPayload>(&msg.content) else {
-        return render_system_message(msg, width, diff_mode);
-    };
+) -> Option<Vec<Line<'static>>> {
+    let payload = serde_json::from_str::<TodoCardPayload>(content).ok()?;
     let (todos, plan, goals) = payload.into_parts();
 
-    let centered = markdown::center_code_blocks();
     let meta_style = Style::default().fg(todo_meta_color());
-    let card_width = match (centered, cap_width) {
-        (true, true) => (width.saturating_sub(4) as usize).min(120),
-        (true, false) => width.saturating_sub(4) as usize,
-        (false, true) => (width.saturating_sub(2) as usize).min(100),
-        (false, false) => width.saturating_sub(2) as usize,
-    }
-    .max(1);
-    let base_indent = if centered { "" } else { "  " };
+    let card_width = if cap_width {
+        (width as usize).clamp(1, 120)
+    } else {
+        (width as usize).max(1)
+    };
+    let base_indent = "";
     let inner_width = card_width.saturating_sub(base_indent.width()).max(1);
     // Long assessment prose is useful in a wide transcript, but wrapping it
     // with a hanging label quickly overwhelms the actual task list in a narrow
@@ -1149,10 +1166,7 @@ fn render_todos_message_with_cap(
         }
     }
 
-    if centered {
-        left_pad_lines_for_centered_mode(&mut lines, width);
-    }
-    lines
+    Some(lines)
 }
 
 fn todo_card_line(
@@ -4316,3 +4330,13 @@ fn tool_output_token_badge(content: &str) -> ToolOutputTokenBadge {
 #[cfg(test)]
 #[path = "ui_messages/tests.rs"]
 mod tests;
+
+/// `(done, total)` todo counts for a todo-card payload, used by the pinned
+/// band's border title. Returns `None` for unparseable payloads.
+pub(crate) fn todo_payload_counts(content: &str) -> Option<(usize, usize)> {
+    let (todos, _, _) = serde_json::from_str::<TodoCardPayload>(content)
+        .ok()?
+        .into_parts();
+    let done = todos.iter().filter(|t| t.status == "completed").count();
+    Some((done, todos.len()))
+}

@@ -2241,6 +2241,29 @@ pub(crate) fn input_pane_line_count() -> Option<usize> {
     copy_pane_line_count(crate::tui::CopySelectionPane::Input)
 }
 
+/// Convert a composer (`Input` pane) selection point into a byte offset into
+/// `input`, on a char boundary. Uses the last rendered composer snapshot to
+/// undo soft wrapping and the prompt prefix, so it is exact for wrapped and
+/// multi-line drafts as long as `input` is what was last drawn.
+pub(crate) fn input_byte_offset_for_copy_point(
+    input: &str,
+    point: crate::tui::CopySelectionPoint,
+) -> Option<usize> {
+    if point.pane != crate::tui::CopySelectionPane::Input {
+        return None;
+    }
+    let snapshot = copy_snapshot_for_pane(crate::tui::CopySelectionPane::Input)?;
+    let (raw_line, column) = copy_selection::raw_line_column_from_snapshot(&snapshot, point)?;
+    let mut offset = 0usize;
+    for (index, line) in input.split('\n').enumerate() {
+        if index == raw_line {
+            return Some(offset + display_width::display_col_to_byte_offset(line, column));
+        }
+        offset += line.len() + 1;
+    }
+    Some(input.len())
+}
+
 pub(crate) fn copy_viewport_visible_range() -> Option<(usize, usize)> {
     let snapshot = copy_snapshot_for_pane(crate::tui::CopySelectionPane::Chat)?;
     Some((snapshot.scroll, snapshot.visible_end))
@@ -2504,6 +2527,10 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
 }
 fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     panel_image_preview::clear_regions();
+    // `draw_messages` republishes the pill rect when it draws one; frames that
+    // skip the chat viewport (overlays, swarm page, collapsed clear) must not
+    // leave a stale clickable rect behind.
+    viewport::set_jump_to_bottom_area(None);
     let area = frame.area().intersection(*frame.buffer_mut().area());
     if area.width == 0 || area.height == 0 {
         return;
@@ -2854,8 +2881,27 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         capture.render_order.push("prepare_messages".to_string());
     }
     let prep_start = Instant::now();
-    let chat_left_inset = left_aligned_content_inset(chat_area.width, app.centered_mode());
-    let wide_prepare_width = chat_area.width.saturating_sub(chat_left_inset);
+    // Docked info column: reserve a fixed column on the right of the
+    // transcript so the info box never covers chat text and never moves with
+    // scrolling or streaming. The transcript wraps to the remaining width.
+    // Its rows still span the full chat column (status, input and the rest of
+    // the chrome are unchanged).
+    let dock_data = (crate::config::config().display.info_widget_layout
+        == crate::config::InfoWidgetLayout::Dock
+        && app.info_widget_overlays_enabled()
+        && info_widget::is_enabled()
+        && !swarm_page_active
+        && diff_pane_area.is_none()
+        && diagram_area.is_none())
+    .then(|| app.info_widget_data())
+    .filter(|data| !data.is_empty());
+    let info_dock_width = dock_data
+        .as_ref()
+        .and_then(|data| info_widget::dock_width(data, chat_area.width))
+        .unwrap_or(0);
+    let transcript_width = chat_area.width.saturating_sub(info_dock_width);
+    let chat_left_inset = left_aligned_content_inset(transcript_width, app.centered_mode());
+    let wide_prepare_width = transcript_width.saturating_sub(chat_left_inset);
     let narrow_prepare_width = wide_prepare_width.saturating_sub(1);
     let pinned_mermaid_aspect_ratio =
         diagram_area.and_then(|area| pinned_diagram_preferred_aspect_ratio(area, pane_position));
@@ -3001,8 +3047,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
             .saturating_sub(u16::from(chat_scrollbar_visible));
         let width = width.saturating_sub(left_aligned_content_inset(width, app.centered_mode()));
         viewport::pinned_todo_band_lines(app, width, available_height.saturating_sub(fixed_height))
-            .0
-            .len()
+            .height() as usize
     };
     let content_height = prepared
         .total_wrapped_lines()
@@ -3210,14 +3255,46 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
             ..Default::default()
         }
     } else {
+        // With the info dock, the transcript is drawn only in the columns
+        // left of it (matching the width it was wrapped to).
+        let transcript_area = Rect {
+            width: messages_area.width.saturating_sub(info_dock_width),
+            ..messages_area
+        };
         draw_messages(
             frame,
             app,
-            messages_area,
+            transcript_area,
             prepared.clone(),
             chat_scrollbar_visible,
         )
     };
+
+    // Docked info box. Its top edge sits a third of the way down the chat
+    // column and it grows downward, pulled up only near the status line. Its
+    // position and width depend only on the terminal size; its height on its
+    // own content. Never on the scroll position, streaming, or the input.
+    let dock_rect = dock_data
+        .as_ref()
+        .filter(|_| info_dock_width > 0)
+        .and_then(|data| {
+            let column = Rect {
+                x: chat_area.x + chat_area.width - info_dock_width,
+                y: chat_area.y,
+                width: info_dock_width,
+                height: chat_area.height,
+            };
+            info_widget::dock_rect(
+                column,
+                chunks[3].y,
+                info_widget::dock_height(data, info_dock_width),
+            )
+        });
+    if let (Some(rect), Some(data)) = (dock_rect, dock_data.as_ref())
+        && !show_donut
+    {
+        info_widget::render_dock(frame, rect, data);
+    }
 
     crate::tui::reset_pinned_diagram_debug_snapshot();
     // Render pinned diagram if we have one
@@ -3279,6 +3356,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
             left_widths: margins.left_widths.clone(),
             right_widths: margins.right_widths.clone(),
             centered: margins.centered,
+            content_start_row: margins.content_start_row,
         });
     }
     let chrome_start = Instant::now();
@@ -3328,6 +3406,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let mut placements: Vec<info_widget::WidgetPlacement> = Vec::new();
     let widget_bounds = messages_area;
     if app.info_widget_overlays_enabled()
+        && info_dock_width == 0
         && !widget_data.is_empty()
         && !show_donut
         && !swarm_page_active

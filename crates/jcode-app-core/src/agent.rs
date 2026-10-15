@@ -288,6 +288,15 @@ pub struct Agent {
     last_connection_type: Option<String>,
     /// Last provider-supplied human-readable transport detail for this session
     last_status_detail: Option<String>,
+    /// Per-provider account pin the provider reported after the last pin
+    /// change or post-stream sync. Only a change from this baseline is a move
+    /// made by the provider itself (failover).
+    observed_account_pins: std::collections::BTreeMap<
+        crate::provider::AccountProviderKind,
+        Option<crate::provider::AccountPin>,
+    >,
+    /// Account pins restore dropped, with the reason to show the user.
+    pending_account_notices: Vec<(crate::provider::AccountProviderKind, String)>,
     /// Pending swarm alerts to inject into the next turn
     pending_alerts: Vec<String>,
     /// Transient reminder injected into provider requests for the current turn only.
@@ -450,6 +459,8 @@ impl Agent {
             last_upstream_provider: None,
             last_connection_type: None,
             last_status_detail: None,
+            observed_account_pins: std::collections::BTreeMap::new(),
+            pending_account_notices: Vec::new(),
             pending_alerts: Vec::new(),
             current_turn_system_reminder: None,
             tool_call_ids: HashSet::new(),
@@ -619,6 +630,7 @@ impl Agent {
         }
         agent.restore_session_model_from_session();
         agent.restore_reasoning_effort_from_session();
+        agent.restore_account_pins_from_session();
         agent.session.ensure_initial_session_context_message();
         agent.sync_memory_dedup_state_from_session();
         agent.seed_compaction_from_session();
@@ -650,7 +662,7 @@ impl Agent {
             }
         };
         manager.reset();
-        let budget = self.provider.context_window();
+        let budget = self.provider.input_token_limit();
         manager.set_budget(budget);
         if let Some(state) = self.session.compaction.as_ref() {
             manager.restore_persisted_stored_state_with(state, &self.session.messages);
@@ -826,7 +838,7 @@ impl Agent {
         self.session.compaction = Some(state.clone());
         let compaction = self.registry.compaction();
         if let Ok(mut manager) = compaction.try_write() {
-            manager.set_budget(self.provider.context_window());
+            manager.set_budget(self.provider.input_token_limit());
             manager.restore_persisted_stored_state_with(&state, &self.session.messages);
         }
 
@@ -853,6 +865,7 @@ impl Agent {
             let compaction = self.registry.compaction();
             match compaction.try_write() {
                 Ok(mut manager) => {
+                    manager.set_budget(self.provider.input_token_limit());
                     let discarded_oversized_native =
                         manager.discard_oversized_openai_native_compaction();
                     let messages = {

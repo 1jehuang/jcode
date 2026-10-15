@@ -3,6 +3,7 @@ use super::openai_stream_diagnostics::{
     StreamProgress, reqwest_header_fields, tungstenite_header_fields,
 };
 use super::*;
+use std::sync::Mutex as StdMutex;
 
 #[path = "openai_usage_recording.rs"]
 mod openai_usage_recording;
@@ -18,12 +19,92 @@ use self::openai_stream_timeout::{
     effective_https_idle_timeout, effective_ws_completion_timeout_secs, send_websocket_frame,
 };
 
-pub(super) async fn openai_access_token(
-    account_label: Option<String>,
+/// Access tokens this process minted by refreshing a stored credential, mapped
+/// to the stored refresh token they were minted from. Refreshes of jcode-stored
+/// accounts are persisted, but a refresh of an external login (for example
+/// `~/.codex/auth.json`) is not, so the cache legitimately differs from the
+/// store and must not be reverted to the rotated-away stored token.
+static REFRESHED_FROM: LazyLock<StdMutex<HashMap<String, String>>> =
+    LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+fn record_refreshed_from(access_token: &str, stored_refresh_token: &str) {
+    let mut map = REFRESHED_FROM
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if map.len() > 64 {
+        map.clear();
+    }
+    map.insert(access_token.to_string(), stored_refresh_token.to_string());
+}
+
+fn was_refreshed_from(access_token: &str, stored_refresh_token: &str) -> bool {
+    REFRESHED_FROM
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(access_token)
+        .is_some_and(|origin| origin == stored_refresh_token)
+}
+
+/// Replace this session's cached credential when the stored login changed.
+///
+/// Every provider runtime (one per session, fork, or swarm worker) caches its
+/// own credential, while an account switch, same-label relogin, or external
+/// Codex relogin only rewrites the store and at most notifies one session.
+/// Re-reading the store (local file reads, no network) before each request
+/// makes every live session pick up the new account on its next request or
+/// retry. The cached credential's shape selects the source so an OAuth session
+/// stays on OAuth and an API-key session stays on its API key.
+pub(super) async fn sync_with_stored_credentials(
     credentials: &Arc<RwLock<CodexCredentials>>,
+    account_pin: &AccountPinSlot,
+) {
+    let (cached_access, cached_is_oauth) = {
+        let cached = credentials.read().await;
+        (
+            cached.access_token.clone(),
+            !cached.refresh_token.is_empty() || cached.id_token.is_some(),
+        )
+    };
+    if cached_access.is_empty() {
+        return;
+    }
+    let stored = if cached_is_oauth {
+        load_scoped_openai_oauth_credentials(account_pin).map(|(creds, _)| creds)
+    } else {
+        jcode_base::auth::codex::load_api_key_credentials()
+    };
+    let Ok(stored) = stored else {
+        return;
+    };
+    if stored.access_token == cached_access
+        || was_refreshed_from(&cached_access, &stored.refresh_token)
+    {
+        return;
+    }
+    let mut cached = credentials.write().await;
+    if cached.access_token == cached_access {
+        jcode_base::logging::info(
+            "OpenAI stored credentials changed (account switch or relogin); using the new login",
+        );
+        *cached = stored;
+    }
+}
+
+pub(super) async fn openai_access_token(
+    credentials: &Arc<RwLock<CodexCredentials>>,
+    account_pin: &AccountPinSlot,
 ) -> anyhow::Result<String> {
-    let (access_token, refresh_token, needs_refresh, is_oauth) = {
+    sync_with_stored_credentials(credentials, account_pin).await;
+    let (access_token, refresh_token, needs_refresh) = {
         let tokens = credentials.read().await;
+        // Validate pins only for the post-sync OAuth credential snapshot. An
+        // explicit API-key request must not depend on a retained OAuth login,
+        // while ambiguous legacy OAuth pins still fail before bearer use.
+        if (!tokens.refresh_token.is_empty() || tokens.id_token.is_some())
+            && account_pin.get().is_some()
+        {
+            load_scoped_openai_oauth_credentials(account_pin)?;
+        }
         if tokens.access_token.is_empty() {
             anyhow::bail!("OpenAI access token is empty");
         }
@@ -39,14 +120,8 @@ pub(super) async fn openai_access_token(
             tokens.access_token.clone(),
             tokens.refresh_token.clone(),
             should_refresh,
-            !tokens.refresh_token.is_empty() || tokens.id_token.is_some(),
         )
     };
-
-    if is_oauth && let Some(label) = account_label.as_deref() {
-        // A deleted explicit login must not continue using its cached bearer.
-        jcode_base::auth::codex::load_credentials_for_account(label)?;
-    }
 
     if !needs_refresh {
         return Ok(access_token);
@@ -56,7 +131,7 @@ pub(super) async fn openai_access_token(
         return Ok(access_token);
     }
 
-    force_refresh_openai_token(credentials, &refresh_token, account_label).await
+    force_refresh_openai_token(credentials, account_pin, &refresh_token).await
 }
 
 /// Unconditionally refresh the OpenAI access token using the stored refresh
@@ -65,43 +140,124 @@ pub(super) async fn openai_access_token(
 /// its local expiry window.
 pub(super) async fn force_refresh_openai_token(
     credentials: &Arc<RwLock<CodexCredentials>>,
+    account_pin: &AccountPinSlot,
     refresh_token: &str,
-    account_label: Option<String>,
 ) -> anyhow::Result<String> {
-    // Rotation, persistence, and the in-memory commit form one transaction.
-    // It runs as its own task so a cancelled caller (dropped stream, aborted
-    // turn) cannot strand rotated tokens on disk while this provider keeps the
-    // consumed refresh token in memory. The network wait inside is bounded by
-    // `oauth::OPENAI_REFRESH_TIMEOUT`.
-    let refresh_token = refresh_token.to_string();
-    refresh_and_commit_openai_tokens(credentials, async move {
-        match account_label {
-            Some(label) => oauth::refresh_openai_tokens_for_account(&refresh_token, &label).await,
-            None => oauth::refresh_openai_tokens(&refresh_token).await,
+    // Start from the stored login: if the user swapped accounts since the
+    // rejected request was built, retry with the new account's token instead
+    // of refreshing the old account's refresh token.
+    sync_with_stored_credentials(credentials, account_pin).await;
+    {
+        let current = credentials.read().await;
+        if current.refresh_token != refresh_token && !current.access_token.is_empty() {
+            return Ok(current.access_token.clone());
         }
+    }
+    // Chained refreshes of a non-persisted login keep pointing at the stored
+    // refresh token they ultimately came from.
+    let origin = {
+        let current = credentials.read().await;
+        REFRESHED_FROM
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&current.access_token)
+            .cloned()
+            .unwrap_or_else(|| refresh_token.to_string())
+    };
+    // Scoped rotation, persistence, and cache commit survive caller cancellation.
+    let pin = account_pin.get();
+    let refresh_token = refresh_token.to_string();
+    let refresh_from = refresh_token.clone();
+    refresh_and_commit_openai_tokens(credentials, &refresh_from, async move {
+        let refreshed = match pin {
+            Some(pin) => {
+                oauth::refresh_openai_tokens_scoped(
+                    &refresh_token,
+                    jcode_base::auth::AccountScope::Pinned(&pin),
+                )
+                .await?
+            }
+            None => oauth::refresh_openai_tokens(&refresh_token).await?,
+        };
+        record_refreshed_from(&refreshed.access_token, &origin);
+        Ok(refreshed)
     })
     .await
 }
 
-/// Run `refresh` (rotation plus persistence) and the in-memory commit as one
-/// task that survives cancellation of the caller.
+/// Run rotation, persistence, and guarded cache commit as one task that
+/// survives cancellation of the caller without overwriting another login.
 pub(super) async fn refresh_and_commit_openai_tokens(
     credentials: &Arc<RwLock<CodexCredentials>>,
+    refreshed_from: &str,
     refresh: impl std::future::Future<Output = anyhow::Result<oauth::OAuthTokens>> + Send + 'static,
 ) -> anyhow::Result<String> {
+    let refreshed_from = refreshed_from.to_string();
     let credentials = Arc::clone(credentials);
     oauth::run_refresh_transaction(async move {
         let refreshed = refresh.await?;
-        Ok(commit_refreshed_openai_tokens(&credentials, refreshed).await)
+        Ok(commit_openai_refresh(&credentials, &refreshed_from, refreshed).await)
     })
     .await
 }
 
-async fn commit_refreshed_openai_tokens(
+/// OAuth credential this provider instance should use: the pinned jcode
+/// account when pinned, else the default resolution (identical to
+/// `codex::load_oauth_credentials`). Records the resolved label on the slot.
+/// A pin whose account is gone is dropped so the session follows the default.
+pub(super) fn load_scoped_openai_oauth_credentials(
+    account_pin: &AccountPinSlot,
+) -> anyhow::Result<(CodexCredentials, Option<String>)> {
+    use jcode_base::auth::AccountScope;
+    if let Some(pin) = account_pin.get() {
+        match jcode_base::auth::codex::load_oauth_credentials_scoped(AccountScope::Pinned(&pin)) {
+            Ok((creds, label)) => {
+                account_pin.set_resolved_label(label.clone());
+                return Ok((creds, label));
+            }
+            Err(err)
+                if err
+                    .downcast_ref::<jcode_base::auth::account_store::PinnedAccountMissing>()
+                    .is_some() =>
+            {
+                jcode_base::logging::warn(&format!(
+                    "{err}; this session falls back to the default OpenAI account"
+                ));
+                account_pin.set(None);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    let (creds, label) =
+        jcode_base::auth::codex::load_oauth_credentials_scoped(AccountScope::Default)?;
+    account_pin.set_resolved_label(
+        label
+            .clone()
+            .or_else(jcode_base::auth::codex::default_account_label),
+    );
+    Ok((creds, label))
+}
+
+/// Write a finished refresh into the session cache and return the bearer the
+/// caller should use.
+///
+/// The account can change while the refresh awaits the OAuth response. The
+/// result only belongs in the cache while the cache still holds the refresh
+/// token the refresh started from. Otherwise the cache now holds another
+/// login (or a newer refresh of the same one), so keep it and return its
+/// bearer instead of pairing the old account's token with the new account id.
+pub(super) async fn commit_openai_refresh(
     credentials: &Arc<RwLock<CodexCredentials>>,
+    refreshed_from: &str,
     refreshed: oauth::OAuthTokens,
 ) -> String {
     let mut tokens = credentials.write().await;
+    if tokens.refresh_token != refreshed_from && !tokens.access_token.is_empty() {
+        jcode_base::logging::info(
+            "OpenAI credentials changed while a token refresh was in flight; keeping the new login",
+        );
+        return tokens.access_token.clone();
+    }
     let account_id = tokens.account_id.clone();
     let id_token = refreshed
         .id_token
@@ -120,8 +276,7 @@ async fn commit_refreshed_openai_tokens(
     new_access_token
 }
 
-/// Privacy-safe context for a websocket stall: the provider response id (a
-/// correlation handle, not content) and how long the stream had been silent.
+/// Privacy-safe websocket stall context: correlation id and timing only.
 fn ws_stall_diagnostics(
     response_id: Option<&str>,
     started_at: Instant,
@@ -139,7 +294,7 @@ fn ws_stall_diagnostics(
 pub(super) async fn stream_response(
     client: Client,
     credentials: Arc<RwLock<CodexCredentials>>,
-    account_label: Option<String>,
+    account_pin: AccountPinSlot,
     request: Value,
     initial_status_detail: String,
     tx: mpsc::Sender<Result<StreamEvent>>,
@@ -165,7 +320,7 @@ pub(super) async fn stream_response(
     if tx.is_closed() {
         return Ok(());
     }
-    let access_token = openai_access_token(account_label.clone(), &credentials).await?;
+    let access_token = openai_access_token(&credentials, &account_pin).await?;
     if tx.is_closed() {
         return Ok(());
     }
@@ -309,9 +464,7 @@ pub(super) async fn stream_response(
                 )));
             }
 
-            match force_refresh_openai_token(&credentials, &refresh_token, account_label.clone())
-                .await
-            {
+            match force_refresh_openai_token(&credentials, &account_pin, &refresh_token).await {
                 Ok(_) => {
                     jcode_base::logging::info(
                         "OpenAI access token rejected; refreshed credentials and will retry",
@@ -1287,7 +1440,7 @@ async fn continue_persistent_ws_locked(
 /// This replaces the old `stream_response_websocket` for the fresh-connection path.
 pub(super) async fn stream_response_websocket_persistent(
     credentials: Arc<RwLock<CodexCredentials>>,
-    account_label: Option<String>,
+    account_pin: AccountPinSlot,
     request: Value,
     tx: mpsc::Sender<Result<StreamEvent>>,
     persistent_ws: Arc<Mutex<Option<PersistentWsState>>>,
@@ -1296,7 +1449,7 @@ pub(super) async fn stream_response_websocket_persistent(
     let request_credentials = Arc::clone(&credentials);
     let result = after_authentication(
         &tx,
-        openai_access_token(account_label, &credentials),
+        openai_access_token(&credentials, &account_pin),
         |access_token| {
             stream_response_websocket_authenticated(
                 request_credentials,
@@ -1855,6 +2008,11 @@ fn classify_unavailable_model_error(status: StatusCode, body: &str) -> Option<St
 
 /// Check if an error is transient and should be retried
 pub(super) fn is_retryable_error(error_str: &str) -> bool {
+    // Subscription usage spent until a far reset: retrying on the same
+    // account is doomed. Fail fast so account failover can move the session.
+    if jcode_provider_core::classify_account_usage_limit(error_str).is_some() {
+        return false;
+    }
     // Shared transport-layer classifier used by every other provider. This
     // covers transient TLS/network faults (connection reset/closed/refused/
     // aborted, broken pipe, timeouts, unexpected EOF, error decoding/reading,

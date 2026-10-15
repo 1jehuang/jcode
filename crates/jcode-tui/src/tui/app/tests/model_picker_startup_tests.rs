@@ -43,19 +43,21 @@ fn test_model_picker_preview_arrow_keys_navigate() {
 
 #[test]
 fn test_open_model_picker_without_routes_shows_actionable_guidance() {
-    let mut app = create_test_app();
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
 
-    app.open_model_picker();
-    wait_for_model_picker_load(&mut app);
+        app.open_model_picker();
+        wait_for_model_picker_load(&mut app);
 
-    assert!(app.inline_interactive_state.is_none());
-    assert_eq!(app.status_notice(), Some("No models available".to_string()));
+        assert!(app.inline_interactive_state.is_none());
+        assert_eq!(app.status_notice(), Some("No models available".to_string()));
 
-    let last = app.display_messages.last().expect("display message");
-    assert_eq!(last.role, "system");
-    assert!(last.content.contains("/login"));
-    assert!(last.content.contains("/account"));
-    assert!(last.content.contains("/model"));
+        let last = app.display_messages.last().expect("display message");
+        assert_eq!(last.role, "system");
+        assert!(last.content.contains("/login"));
+        assert!(last.content.contains("/account"));
+        assert!(last.content.contains("/model"));
+    });
 }
 
 #[test]

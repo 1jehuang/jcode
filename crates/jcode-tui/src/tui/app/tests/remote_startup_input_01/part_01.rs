@@ -687,6 +687,7 @@ fn configure_test_remote_models_with_cursor(app: &mut App) {
         .iter()
         .cloned()
         .map(|model| crate::provider::ModelRoute {
+            catalog_metadata: None,
             model,
             provider: "Cursor".to_string(),
             api_method: "cursor".to_string(),
@@ -716,13 +717,14 @@ fn test_model_picker_includes_copilot_models_in_remote_mode() {
 
         let model_names: Vec<&str> = picker.entries.iter().map(|m| m.name.as_str()).collect();
 
-        // Effort metadata (a process-global catalog) may expand a model into
-        // "name (effort)" rows, so match the bare name or an effort-suffixed row.
-        let has_model = |model: &str| {
+        // One row per model and route: reasoning levels are picked in a
+        // second step, never listed as "name (effort)" rows.
+        let has_model = |model: &str| model_names.contains(&model);
+        assert!(
+            !model_names.iter().any(|name| name.ends_with(')')),
+            "no effort-suffixed rows, got: {:?}",
             model_names
-                .iter()
-                .any(|name| *name == model || name.starts_with(&format!("{model} (")))
-        };
+        );
         assert!(
             has_model("claude-opus-4.6"),
             "picker should contain copilot model claude-opus-4.6, got: {:?}",
@@ -759,6 +761,7 @@ fn test_available_models_updated_event_surfaces_authed_provider_in_remote_model_
             ],
             available_model_routes: vec![
                 crate::provider::ModelRoute {
+                    catalog_metadata: None,
                     model: "claude-opus-4.6".to_string(),
                     provider: "Copilot".to_string(),
                     api_method: "copilot".to_string(),
@@ -768,6 +771,7 @@ fn test_available_models_updated_event_surfaces_authed_provider_in_remote_model_
                     cheapness: None,
                 },
                 crate::provider::ModelRoute {
+                    catalog_metadata: None,
                     model: "grok-code-fast-1".to_string(),
                     provider: "Copilot".to_string(),
                     api_method: "copilot".to_string(),
@@ -822,6 +826,7 @@ fn test_duplicate_available_models_updated_event_is_a_no_op() {
             provider_model: Some("claude-opus-4.6".to_string()),
             available_models: vec!["claude-opus-4.6".to_string()],
             available_model_routes: vec![crate::provider::ModelRoute {
+                catalog_metadata: None,
                 model: "claude-opus-4.6".to_string(),
                 provider: "Copilot".to_string(),
                 api_method: "copilot".to_string(),
@@ -863,6 +868,7 @@ fn test_remote_final_catalog_replaces_post_login_loading_state_in_place() {
     app.remote_provider_model = Some("gpt-5.4".to_string());
     app.remote_available_entries = vec!["gpt-5.4".to_string()];
     app.remote_model_options = vec![crate::provider::ModelRoute {
+        catalog_metadata: None,
         model: "gpt-5.4".to_string(),
         provider: "OpenAI".to_string(),
         api_method: "openai-oauth".to_string(),
@@ -887,6 +893,7 @@ fn test_remote_final_catalog_replaces_post_login_loading_state_in_place() {
             provider_model: Some("claude-opus-4.6".to_string()),
             available_models: vec!["claude-opus-4.6".to_string()],
             available_model_routes: vec![crate::provider::ModelRoute {
+                catalog_metadata: None,
                 model: "claude-opus-4.6".to_string(),
                 provider: "Anthropic".to_string(),
                 api_method: "anthropic-oauth".to_string(),
@@ -988,6 +995,9 @@ fn test_remote_prompt_defers_while_model_switch_is_in_flight() {
         &mut app,
         &mut remote,
         crate::tui::app::input::PreparedInput {
+            image_markers: Default::default(),
+            routing_input: None,
+            pasted_contents: Vec::new(),
             raw_input: "hello after model switch".to_string(),
             expanded: "hello after model switch".to_string(),
             images: vec![("image/png".to_string(), "abc123".to_string())],
@@ -1026,6 +1036,9 @@ fn test_remote_prompt_defers_while_post_login_model_setup_is_pending() {
         &mut app,
         &mut remote,
         crate::tui::app::input::PreparedInput {
+            image_markers: Default::default(),
+            routing_input: None,
+            pasted_contents: Vec::new(),
             raw_input: "review my project".to_string(),
             expanded: "review my project".to_string(),
             images: Vec::new(),
@@ -1061,6 +1074,9 @@ fn test_remote_model_switch_failure_restores_deferred_prompt() {
     app.is_remote = true;
     app.remote_model_switch_in_flight = true;
     app.pending_prompt_after_model_switch = Some(crate::tui::app::input::PreparedInput {
+            image_markers: Default::default(),
+            routing_input: None,
+            pasted_contents: Vec::new(),
         raw_input: "please use the selected model".to_string(),
         expanded: "please use the selected model".to_string(),
         images: vec![("image/jpeg".to_string(), "def456".to_string())],
@@ -1082,7 +1098,7 @@ fn test_remote_model_switch_failure_restores_deferred_prompt() {
 
     assert!(!app.remote_model_switch_in_flight);
     assert!(app.pending_prompt_after_model_switch.is_none());
-    assert_eq!(app.input, "please use the selected model");
+    assert_eq!(app.input, "please use the selected model [image 1]");
     assert_eq!(app.cursor_pos, app.input.len());
     assert_eq!(app.pending_images.len(), 1);
     assert_eq!(app.status_notice(), Some("Model switch failed".to_string()));
@@ -1150,6 +1166,7 @@ fn test_detailed_catalog_replaces_placeholder_routes_after_names_only_update() {
                 provider_model: Some("claude-opus-4.6".to_string()),
                 available_models: vec!["claude-opus-4.6".to_string()],
                 available_model_routes: vec![crate::provider::ModelRoute {
+                    catalog_metadata: None,
                     model: "claude-opus-4.6".to_string(),
                     provider: "Copilot".to_string(),
                     api_method: "copilot".to_string(),

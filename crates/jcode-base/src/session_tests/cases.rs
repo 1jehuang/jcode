@@ -1,6 +1,12 @@
 use super::*;
 use anyhow::{Result, anyhow};
 
+// current_dir() reports the resolved path, and macOS keeps the temp dir under the
+// /var -> /private/var symlink, so cwd tests start from the real temp path.
+fn real_temp_dir() -> std::path::PathBuf {
+    std::fs::canonicalize(std::env::temp_dir()).unwrap()
+}
+
 #[test]
 fn test_session_exists_roundtrip() -> Result<()> {
     let tmp_dir = std::env::temp_dir().join(format!(
@@ -39,6 +45,23 @@ fn derive_session_provider_key_prefers_runtime_identity_over_transport() {
     assert_eq!(
         derive_session_provider_key("openrouter").as_deref(),
         Some("azure-openai")
+    );
+}
+
+#[test]
+fn derive_session_provider_key_maps_claude_code_name() {
+    let _lock = lock_env();
+    let _runtime = EnvVarGuard::remove("JCODE_RUNTIME_PROVIDER");
+    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
+    let _active = EnvVarGuard::remove("JCODE_ACTIVE_PROVIDER");
+
+    assert_eq!(
+        derive_session_provider_key("Claude Code").as_deref(),
+        Some("claude-code")
+    );
+    assert_eq!(
+        derive_session_provider_key("Claude").as_deref(),
+        Some("claude")
     );
 }
 
@@ -312,11 +335,11 @@ fn initial_session_context_preserves_explicitly_bound_cwd_when_inserted() -> Res
     let original_cwd = std::env::current_dir().map_err(|e| anyhow!(e))?;
     let first_dir = tempfile::Builder::new()
         .prefix("jcode-session-context-first-")
-        .tempdir()
+        .tempdir_in(real_temp_dir())
         .map_err(|e| anyhow!(e))?;
     let second_dir = tempfile::Builder::new()
         .prefix("jcode-session-context-second-")
-        .tempdir()
+        .tempdir_in(real_temp_dir())
         .map_err(|e| anyhow!(e))?;
 
     std::env::set_current_dir(first_dir.path()).map_err(|e| anyhow!(e))?;
@@ -360,11 +383,11 @@ fn initial_session_context_can_refresh_before_real_conversation() -> Result<()> 
     let original_cwd = std::env::current_dir().map_err(|e| anyhow!(e))?;
     let first_dir = tempfile::Builder::new()
         .prefix("jcode-session-context-stale-")
-        .tempdir()
+        .tempdir_in(real_temp_dir())
         .map_err(|e| anyhow!(e))?;
     let second_dir = tempfile::Builder::new()
         .prefix("jcode-session-context-real-")
-        .tempdir()
+        .tempdir_in(real_temp_dir())
         .map_err(|e| anyhow!(e))?;
 
     std::env::set_current_dir(first_dir.path()).map_err(|e| anyhow!(e))?;
@@ -409,11 +432,11 @@ fn initial_session_context_does_not_refresh_after_real_conversation() -> Result<
     let original_cwd = std::env::current_dir().map_err(|e| anyhow!(e))?;
     let first_dir = tempfile::Builder::new()
         .prefix("jcode-session-context-original-")
-        .tempdir()
+        .tempdir_in(real_temp_dir())
         .map_err(|e| anyhow!(e))?;
     let second_dir = tempfile::Builder::new()
         .prefix("jcode-session-context-late-")
-        .tempdir()
+        .tempdir_in(real_temp_dir())
         .map_err(|e| anyhow!(e))?;
 
     std::env::set_current_dir(first_dir.path()).map_err(|e| anyhow!(e))?;
@@ -2505,6 +2528,12 @@ fn streaming_guard_creates_visible_macos_sleep_assertion() {
     let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
 
     let reason = "Jcode streaming model response";
+    let owner = format!("pid {}(", std::process::id());
+    let owns_streaming_assertion = |output: &str| {
+        output
+            .lines()
+            .any(|line| line.contains(&owner) && line.contains(reason))
+    };
     {
         let _streaming = StreamingGuard::new("session_power");
 
@@ -2515,8 +2544,8 @@ fn streaming_guard_creates_visible_macos_sleep_assertion() {
         assert!(output.status.success(), "pmset should succeed");
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
-            stdout.contains(reason),
-            "pmset output should show the streaming assertion; output was:\n{stdout}"
+            owns_streaming_assertion(&stdout),
+            "pmset output should show this process's streaming assertion; output was:\n{stdout}"
         );
     }
 
@@ -2526,8 +2555,8 @@ fn streaming_guard_creates_visible_macos_sleep_assertion() {
         .expect("pmset -g assertions should run on macOS");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        !stdout.contains(reason),
-        "streaming assertion should be released after guard drop; output was:\n{stdout}"
+        !owns_streaming_assertion(&stdout),
+        "this process's streaming assertion should be released after guard drop; output was:\n{stdout}"
     );
 }
 
@@ -2956,4 +2985,53 @@ fn first_visible_user_prompt_becomes_the_generated_title() {
 
     session.rename_title(Some("Custom".into()));
     assert_eq!(session.display_title(), Some("Custom"));
+}
+
+#[test]
+fn account_pins_persist_through_snapshot_and_journal() -> Result<()> {
+    let _env_lock = lock_env();
+    let temp_home = tempfile::Builder::new()
+        .prefix("jcode-account-pins-test-")
+        .tempdir()
+        .map_err(|e| anyhow!(e))?;
+    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+
+    let session_id = "session_account_pins_roundtrip";
+    let mut session = Session::create_with_id(session_id.to_string(), None, None);
+    session.save_prepared()?;
+
+    // Second save goes through the journal meta path.
+    let fox = AccountPin::new("claude-fox", Some("fox@example.com".to_string()));
+    session
+        .account_pins
+        .insert("claude".to_string(), fox.clone());
+    session.account_failover = Some(false);
+    session
+        .account_failover_home
+        .insert("claude".to_string(), AccountPin::new("claude-otter", None));
+    session.save_prepared()?;
+
+    let loaded = Session::load(session_id)?;
+    assert_eq!(loaded.account_pins.get("claude"), Some(&fox));
+    assert_eq!(loaded.account_failover, Some(false));
+    assert_eq!(
+        loaded
+            .account_failover_home
+            .get("claude")
+            .map(|p| p.label.as_str()),
+        Some("claude-otter")
+    );
+
+    let remote = Session::load_for_remote_startup(session_id)?;
+    assert_eq!(remote.account_pins.get("claude"), Some(&fox));
+    assert_eq!(remote.account_failover, Some(false));
+
+    // Old session JSON without the fields still loads with empty defaults.
+    let old: Session = serde_json::from_str(
+        r#"{"id":"old","parent_id":null,"title":null,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","messages":[]}"#,
+    )?;
+    assert!(old.account_pins.is_empty());
+    assert_eq!(old.account_failover, None);
+    assert!(old.account_failover_home.is_empty());
+    Ok(())
 }

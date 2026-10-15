@@ -36,6 +36,7 @@ fn task_graph_seed_collision_is_detected_from_server_error() {
         id: 1,
         message: "Seed rejected: duplicate node id 'final-synthesis'".to_string(),
         retry_after_secs: None,
+        server_resumes: false,
     };
     assert_eq!(
         super::seed_node_id_collision(&response),
@@ -1203,6 +1204,7 @@ fn spawning_action_inputs_allow_omitted_or_null_model() {
 fn format_swarm_model_list_renders_routes_and_default() {
     let routes = vec![
         jcode_provider_core::ModelRoute {
+            catalog_metadata: None,
             model: "gpt-5.5".to_string(),
             provider: "OpenAI".to_string(),
             api_method: "openai-api-key".to_string(),
@@ -1212,6 +1214,7 @@ fn format_swarm_model_list_renders_routes_and_default() {
             cheapness: None,
         },
         jcode_provider_core::ModelRoute {
+            catalog_metadata: None,
             model: "claude-fable-5".to_string(),
             provider: "Anthropic".to_string(),
             api_method: "anthropic-api-key".to_string(),
@@ -1494,6 +1497,8 @@ impl RawClient {
             crash_on_disconnect: false,
             continue_on_disconnect: false,
             terminal_env: Vec::new(),
+            account_pins: Vec::new(),
+            supports_session_accounts: false,
         })
         .await?;
         self.read_until(

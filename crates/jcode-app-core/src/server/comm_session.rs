@@ -70,6 +70,7 @@ fn create_visible_spawn_session(
     provider_key_override: Option<&str>,
     route_api_method_override: Option<&str>,
     effort_override: Option<&str>,
+    accounts: &crate::session_accounts::AccountInheritance,
     selfdev_requested: bool,
 ) -> anyhow::Result<(String, PathBuf)> {
     let cwd = working_dir
@@ -96,6 +97,9 @@ fn create_visible_spawn_session(
         // headed client attaches to this session.
         session.reasoning_effort = Some(effort.to_string());
     }
+    // Restored by `restore_account_pins_from_session` when the headed client
+    // attaches, like the model and effort above.
+    accounts.apply_to_session(&mut session);
     if selfdev_requested {
         session.set_canary("self-dev");
     }
@@ -215,6 +219,8 @@ pub(super) struct CoordinatorSpawnIdentity {
     pub provider_key: Option<String>,
     pub route_api_method: Option<String>,
     pub is_canary: bool,
+    /// Account pins and failover toggle the worker inherits.
+    pub accounts: crate::session_accounts::AccountInheritance,
 }
 
 /// The resolved model + auth route a spawned swarm agent should be created
@@ -247,6 +253,7 @@ async fn resolve_coordinator_spawn_identity(
             provider_key: agent_guard.session_provider_key(),
             route_api_method: agent_guard.session_route_api_method(),
             is_canary: agent_guard.is_canary(),
+            accounts: agent_guard.account_inheritance(),
         };
     }
 
@@ -259,6 +266,7 @@ async fn resolve_coordinator_spawn_identity(
                 provider_key: session.provider_key.clone(),
                 route_api_method: session.route_api_method.clone(),
                 is_canary: session.is_canary,
+                accounts: crate::session_accounts::AccountInheritance::from_session(&session),
             };
             crate::logging::info(&format!(
                 "Swarm spawn: coordinator {} agent busy/unavailable, inheriting identity from persisted session (model={:?} provider_key={:?} route={:?} canary={})",
@@ -452,6 +460,7 @@ fn prepare_visible_spawn_session<F>(
     provider_key_override: Option<&str>,
     route_api_method_override: Option<&str>,
     effort_override: Option<&str>,
+    accounts: &crate::session_accounts::AccountInheritance,
     selfdev_requested: bool,
     startup_message: Option<&str>,
     launch_visible: F,
@@ -466,6 +475,7 @@ where
         provider_key.as_deref(),
         route_api_method_override,
         effort_override,
+        accounts,
         selfdev_requested,
     )?;
 
@@ -686,6 +696,7 @@ pub(super) async fn spawn_swarm_agent(
             spawn_provider_key.as_deref(),
             spawn_route_api_method.as_deref(),
             spawn_effort.as_deref(),
+            &coordinator.accounts,
             coordinator_is_canary,
             startup_message.as_deref(),
             |session_id, cwd, selfdev_requested, provider_key| {
@@ -729,6 +740,7 @@ pub(super) async fn spawn_swarm_agent(
                 spawn_provider_key.clone(),
                 spawn_route_api_method.clone(),
                 spawn_effort.clone(),
+                coordinator.accounts.clone(),
                 Some(Arc::clone(mcp_pool)),
                 Some(req_session_id.to_string()),
                 super::headless::HeadlessMemoryScope::RealProject,
@@ -824,54 +836,59 @@ pub(super) async fn spawn_swarm_agent(
             let event_history2 = Arc::clone(event_history);
             let event_counter2 = Arc::clone(event_counter);
             let swarm_event_tx2 = swarm_event_tx.clone();
+            let publication = super::swarm::begin_turn_publication(&new_session_id).await;
             tokio::spawn(async move {
-                update_member_status(
-                    &sid_clone,
-                    "running",
-                    Some(truncate_detail(&initial_msg, 120)),
-                    &swarm_members2,
-                    &swarms_by_id2,
-                    Some(&event_history2),
-                    Some(&event_counter2),
-                    Some(&swarm_event_tx2),
-                )
-                .await;
+                publication
+                    .publish_start(update_member_status(
+                        &sid_clone,
+                        "running",
+                        Some(truncate_detail(&initial_msg, 120)),
+                        &swarm_members2,
+                        &swarms_by_id2,
+                        Some(&event_history2),
+                        Some(&event_counter2),
+                        Some(&swarm_event_tx2),
+                    ))
+                    .await;
                 let event_tx = super::session_event_fanout_sender(
                     sid_clone.clone(),
                     Arc::clone(&swarm_members2),
                 );
-                let start_message_index = {
+                let (start_message_index, signal) = {
                     let agent = agent_arc.lock().await;
-                    agent.message_count()
+                    (agent.message_count(), agent.graceful_shutdown_signal())
                 };
-                let result = process_message_streaming_mpsc(
-                    Arc::clone(&agent_arc),
-                    &initial_msg,
-                    vec![],
-                    None,
-                    event_tx,
-                )
-                .await;
+                let result = publication
+                    .run(
+                        signal,
+                        process_message_streaming_mpsc(
+                            Arc::clone(&agent_arc),
+                            &initial_msg,
+                            vec![],
+                            None,
+                            event_tx,
+                        ),
+                    )
+                    .await
+                    .unwrap_or(Ok(()));
                 let completion_report = if result.is_ok() {
                     let agent = agent_arc.lock().await;
                     agent.latest_assistant_text_after(start_message_index)
                 } else {
                     None
                 };
-                let (new_status, new_detail) = match result {
-                    Ok(()) => ("ready", None),
-                    Err(ref error) => ("failed", Some(truncate_detail(&error.to_string(), 120))),
-                };
-                update_member_status_with_report(
+                complete_headless_turn(
                     &sid_clone,
-                    new_status,
-                    new_detail,
+                    &publication,
+                    result,
                     completion_report,
-                    &swarm_members2,
-                    &swarms_by_id2,
-                    Some(&event_history2),
-                    Some(&event_counter2),
-                    Some(&swarm_event_tx2),
+                    &super::live_turn::LiveTurnSwarmContext::new(
+                        &swarm_members2,
+                        &swarms_by_id2,
+                        &event_history2,
+                        &event_counter2,
+                        &swarm_event_tx2,
+                    ),
                 )
                 .await;
             });
@@ -879,6 +896,36 @@ pub(super) async fn spawn_swarm_agent(
     }
 
     Ok(new_session_id)
+}
+
+pub(super) async fn complete_headless_turn(
+    session_id: &str,
+    publication: &super::swarm::TurnPublication,
+    result: anyhow::Result<()>,
+    completion_report: Option<String>,
+    swarm: &super::live_turn::LiveTurnSwarmContext,
+) {
+    publication
+        .complete(async {
+            let completion_report = result.is_ok().then_some(completion_report).flatten();
+            let (new_status, new_detail) = match result {
+                Ok(()) => ("ready", None),
+                Err(ref error) => ("failed", Some(truncate_detail(&error.to_string(), 120))),
+            };
+            update_member_status_with_report(
+                session_id,
+                new_status,
+                new_detail,
+                completion_report,
+                &swarm.members,
+                &swarm.swarms_by_id,
+                Some(&swarm.event_history),
+                Some(&swarm.event_counter),
+                Some(&swarm.event_tx),
+            )
+            .await;
+        })
+        .await;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1079,6 +1126,7 @@ pub(super) async fn handle_comm_stop(
             id,
             message: "Not in a swarm.".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         });
         return;
     };
@@ -1091,6 +1139,7 @@ pub(super) async fn handle_comm_stop(
                     id,
                     message,
                     retry_after_secs: None,
+                    server_resumes: false,
                 });
                 return;
             }
@@ -1118,6 +1167,7 @@ pub(super) async fn handle_comm_stop(
                 "Refusing to stop session '{target_session}' because it was not spawned by this coordinator. Pass force=true to stop a non-owned/user-created swarm session explicitly."
             ),
             retry_after_secs: None,
+            server_resumes: false,
         });
         return;
     }
@@ -1383,6 +1433,7 @@ async fn ensure_spawn_coordinator_swarm(
             id,
             message: "Not in a swarm.".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         });
         return None;
     };
@@ -1402,6 +1453,7 @@ async fn ensure_spawn_coordinator_swarm(
                     "Recursive swarm spawning is disabled for light and ad hoc swarms. Only the root session ({root_session_id}) may spawn agents unless that root is running in swarm-deep mode."
                 ),
                 retry_after_secs: None,
+                server_resumes: false,
             });
             return None;
         }
@@ -1416,6 +1468,7 @@ async fn ensure_spawn_coordinator_swarm(
                 super::MAX_SWARM_MEMBERS
             ),
             retry_after_secs: None,
+            server_resumes: false,
         });
         return None;
     }
@@ -1433,6 +1486,7 @@ async fn ensure_spawn_coordinator_swarm(
                 "Swarm live-agent limit reached (max {limit}, configured by agents.swarm_max_concurrent_agents). This swarm already has {live_spawned_agent_count} active spawned agents. Let existing agents finish or stop them before spawning more."
             ),
             retry_after_secs: None,
+            server_resumes: false,
         });
         return None;
     }

@@ -114,7 +114,7 @@ async fn account_switch_clears_only_selected_login_failure_even_when_agent_is_bu
         let agent = Arc::new(Mutex::new(Agent::new(provider, Registry::empty())));
         let busy = agent.lock().await;
         let (tx, mut rx) = mpsc::unbounded_channel();
-        spawn_account_switch_refresh(71, kind, target.to_string(), Arc::clone(&agent), tx);
+        spawn_account_switch_refresh(71, kind, Some(target.to_string()), Arc::clone(&agent), tx);
         assert!(crate::provider::provider_unavailability_detail_for_account(provider_id).is_some());
         crate::auth::claude::set_active_account_override(Some(target.to_string()));
         crate::auth::codex::set_active_account_override(Some(target.to_string()));
@@ -339,6 +339,7 @@ impl Provider for AuthChangeMockProvider {
         self.available_models_display()
             .into_iter()
             .map(|model| ModelRoute {
+                catalog_metadata: None,
                 model,
                 provider: provider.clone(),
                 api_method: api_method.clone(),
@@ -1020,6 +1021,7 @@ async fn onboarding_auth_refresh_prefers_global_gpt_5_6_route_over_fable() {
     let provider = Arc::new(AuthChangeMockProvider::new());
     *provider.state.routes_override.write().unwrap() = Some(vec![
         ModelRoute {
+            catalog_metadata: None,
             model: "claude-fable-5".to_string(),
             provider: "Anthropic".to_string(),
             api_method: "claude-oauth".to_string(),
@@ -1029,6 +1031,7 @@ async fn onboarding_auth_refresh_prefers_global_gpt_5_6_route_over_fable() {
             cheapness: None,
         },
         ModelRoute {
+            catalog_metadata: None,
             model: "gpt-5.5".to_string(),
             provider: "OpenAI".to_string(),
             api_method: "openai-api-key".to_string(),
@@ -1038,6 +1041,7 @@ async fn onboarding_auth_refresh_prefers_global_gpt_5_6_route_over_fable() {
             cheapness: None,
         },
         ModelRoute {
+            catalog_metadata: None,
             model: "gpt-5.6-sol".to_string(),
             provider: "OpenAI".to_string(),
             api_method: "openai-api-key".to_string(),
@@ -1349,4 +1353,103 @@ async fn refresh_models_emits_available_models_updated_after_prefetch() {
             && route.provider == "MockAuth"
             && route.api_method == "mock-auth"
     }));
+}
+
+#[tokio::test]
+async fn notify_auth_changed_broadcasts_credentials_changed_to_all_sessions() {
+    let _guard = EnvGuard::save(&[]);
+    crate::bus::reset_models_updated_publish_state_for_tests();
+    // Subscribe before the request: every connected client's bus forwarder
+    // turns this into ServerEvent::CredentialsChanged (client_lifecycle.rs).
+    let mut bus_rx = crate::bus::Bus::global().subscribe();
+    let provider: Arc<dyn Provider> = Arc::new(AuthChangeMockProvider::new());
+    let agent = Arc::new(Mutex::new(Agent::new(provider.clone(), Registry::empty())));
+    let session_id = { agent.lock().await.session_id().to_string() };
+    let sessions: SessionAgents = Arc::new(RwLock::new(HashMap::from([(
+        "test-session".to_string(),
+        Arc::clone(&agent),
+    )])));
+    let (client_event_tx, _client_event_rx) = mpsc::unbounded_channel();
+
+    handle_notify_auth_changed(
+        7,
+        Some("anthropic".to_string()),
+        None,
+        false,
+        &provider,
+        &provider,
+        &sessions,
+        session_id.as_str(),
+        &agent,
+        &client_event_tx,
+    )
+    .await;
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let event = tokio::time::timeout(remaining, bus_rx.recv())
+            .await
+            .expect("CredentialsChanged must be published after an auth change");
+        if let Ok(crate::bus::BusEvent::CredentialsChanged { .. }) = event {
+            break;
+        }
+    }
+}
+
+/// The one-shot path (`jcode login` on a fresh socket) has no requesting
+/// session. It must still refresh every idle session now and every busy one
+/// once idle, and must not auto-switch any session's model.
+#[tokio::test]
+async fn one_shot_auth_change_refreshes_every_session_without_model_switch() {
+    let _guard = EnvGuard::save(&[]);
+    crate::bus::reset_models_updated_publish_state_for_tests();
+    let template: Arc<dyn Provider> = Arc::new(AuthChangeMockProvider::new());
+    let idle_provider = Arc::new(AuthChangeMockProvider::new());
+    let idle_state = Arc::clone(&idle_provider.state);
+    *idle_state.selected_model.write().unwrap() = Some("pinned-model".to_string());
+    let busy_provider = Arc::new(AuthChangeMockProvider::new());
+    let busy_state = Arc::clone(&busy_provider.state);
+    let idle_agent = Arc::new(Mutex::new(Agent::new(idle_provider, Registry::empty())));
+    let busy_agent = Arc::new(Mutex::new(Agent::new(busy_provider, Registry::empty())));
+    let busy_guard = busy_agent.lock().await;
+    let sessions: SessionAgents = Arc::new(RwLock::new(HashMap::from([
+        ("idle".to_string(), Arc::clone(&idle_agent)),
+        ("busy".to_string(), Arc::clone(&busy_agent)),
+    ])));
+    let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();
+
+    handle_notify_auth_changed_process_wide(
+        11,
+        Some("claude".to_string()),
+        None,
+        &template,
+        &sessions,
+        &client_event_tx,
+    )
+    .await;
+
+    assert!(matches!(
+        client_event_rx.try_recv(),
+        Ok(ServerEvent::Done { id: 11 })
+    ));
+    assert!(
+        *idle_state.logged_in.read().unwrap(),
+        "idle session refreshed"
+    );
+    assert_eq!(
+        idle_state.selected_model.read().unwrap().as_deref(),
+        Some("pinned-model"),
+        "one-shot notice must not switch a session's model"
+    );
+    assert!(!*busy_state.logged_in.read().unwrap());
+    drop(busy_guard);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !*busy_state.logged_in.read().unwrap() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "busy session was not refreshed once idle"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
 }

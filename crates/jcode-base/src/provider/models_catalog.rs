@@ -138,6 +138,9 @@ pub(crate) fn parse_openai_model_catalog(data: &serde_json::Value) -> OpenAIMode
                     efforts.push(effort.to_string());
                 }
             }
+            efforts.sort_by_key(|effort| {
+                jcode_provider_core::reasoning_effort_rank(effort).unwrap_or(usize::MAX)
+            });
             if !efforts.is_empty() {
                 reasoning_efforts.insert(slug, efforts);
             }
@@ -154,13 +157,49 @@ pub(crate) fn parse_openai_model_catalog(data: &serde_json::Value) -> OpenAIMode
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
+static TEST_OPENAI_CATALOG_URL: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+#[cfg(any(test, feature = "test-support"))]
+pub struct OpenAICatalogTestEndpoint(Option<String>);
+
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for OpenAICatalogTestEndpoint {
+    fn drop(&mut self) {
+        *TEST_OPENAI_CATALOG_URL
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = self.0.take();
+    }
+}
+
+/// Loopback-only HTTP boundary for tests holding the shared test-env lock.
+#[cfg(any(test, feature = "test-support"))]
+pub fn openai_catalog_test_endpoint(url: String) -> Result<OpenAICatalogTestEndpoint> {
+    anyhow::ensure!(
+        url.starts_with("http://127.0.0.1:"),
+        "catalog test endpoint must be loopback HTTP"
+    );
+    let previous = TEST_OPENAI_CATALOG_URL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .replace(url);
+    Ok(OpenAICatalogTestEndpoint(previous))
+}
+
 /// Fetch model availability and context windows from the Codex backend API.
 pub async fn fetch_openai_model_catalog(access_token: &str) -> Result<OpenAIModelCatalog> {
     note_openai_model_catalog_refresh_attempt();
 
     let client = shared_http_client();
+    let url = "https://chatgpt.com/backend-api/codex/models?client_version=1.0.0";
+    #[cfg(any(test, feature = "test-support"))]
+    let url = TEST_OPENAI_CATALOG_URL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone()
+        .unwrap_or_else(|| url.to_string());
     let resp = client
-        .get("https://chatgpt.com/backend-api/codex/models?client_version=1.0.0")
+        .get(url)
         .header("Authorization", format!("Bearer {}", access_token))
         .timeout(CATALOG_REQUEST_TIMEOUT)
         .send()
@@ -370,6 +409,23 @@ mod tests {
                 "none".to_string(),
                 "low".to_string(),
                 "xhigh".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn openai_catalog_sorts_unsorted_reasoning_efforts_into_ladder_order() {
+        let catalog = parse_openai_model_catalog(&serde_json::json!({
+            "models": [{"slug": "gpt-5.6", "supported_reasoning_efforts":
+                ["max", "medium", "minimal", "high"]}]
+        }));
+        assert_eq!(
+            catalog.reasoning_efforts.get("gpt-5.6"),
+            Some(&vec![
+                "minimal".to_string(),
+                "medium".to_string(),
+                "high".to_string(),
+                "max".to_string()
             ])
         );
     }

@@ -51,6 +51,7 @@ input = ["text"]
             antigravity: RwLock::new(None),
             gemini: RwLock::new(None),
             cursor: RwLock::new(None),
+            claude_code: RwLock::new(None),
             bedrock: RwLock::new(None),
             openrouter: RwLock::new(None),
             openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
@@ -61,6 +62,7 @@ input = ["text"]
             catalog_scope: next_catalog_scope(),
             routes_memo: std::sync::Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            account_failover: Default::default(),
         };
 
         provider

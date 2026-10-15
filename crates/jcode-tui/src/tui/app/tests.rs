@@ -31,8 +31,12 @@ include!("tests/native_citations.rs");
 include!("tests/remote_events_reload_05.rs");
 include!("tests/swarm_plan_no_inline_graph.rs");
 include!("tests/remote_model_picker_hotkeys.rs");
+include!("tests/model_browser.rs");
+include!("tests/model_effort_step.rs");
 include!("tests/scroll_copy_01/part_01.rs");
 include!("tests/scroll_copy_01/part_02.rs");
+#[path = "tests/attachment_redirect.rs"]
+mod attachment_redirect;
 include!("tests/scroll_copy_02/part_01.rs");
 include!("tests/scroll_copy_02/part_02.rs");
 include!("tests/scroll_copy_03.rs");
@@ -40,6 +44,8 @@ include!("tests/resize_viewport.rs");
 include!("tests/issue_1642_panel_dismiss.rs");
 include!("tests/resize_anchor.rs");
 include!("tests/input_copy_selection.rs");
+include!("tests/input_text_selection.rs");
+include!("tests/input_image_selection.rs");
 include!("tests/onboarding_flow.rs");
 include!("tests/onboarding_golden.rs");
 include!("tests/onboarding_eval.rs");
@@ -48,6 +54,7 @@ include!("tests/reasoning_region.rs");
 include!("tests/smoothness_benchmark.rs");
 include!("tests/hotkey_feedback_e2e.rs");
 include!("tests/todo_card.rs");
+include!("tests/jump_to_bottom.rs");
 include!("tests/issue_496_input_routing.rs");
 include!("tests/issue_544_paste_enter.rs");
 include!("tests/keybinding_hot_reload.rs");
@@ -67,6 +74,10 @@ include!("tests/slash_command_boundaries.rs");
 include!("tests/prompt_history_cross_session.rs");
 include!("tests/ssh_remote.rs");
 include!("tests/skill_startup.rs");
+include!("tests/resume_search_first.rs");
+include!("tests/usage_limit_resume.rs");
+include!("tests/credentials_changed_resend.rs");
+include!("tests/window_accounts_local.rs");
 #[test]
 fn kv_cache_signature_prefix_match_allows_appended_messages() {
     let baseline_messages = vec![
@@ -1176,6 +1187,7 @@ fn update_command_reloads_stale_remote_server_before_client_update_check() {
 
 #[test]
 fn stale_server_history_is_deferred_before_remote_state_is_applied() {
+    let _env_guard = crate::storage::lock_test_env();
     crate::env::remove_var("JCODE_ALLOW_SERVER_VERSION_MISMATCH");
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -1226,6 +1238,7 @@ fn stale_server_history_is_deferred_before_remote_state_is_applied() {
             resolved_credential: None,
             reasoning_effort: Some("high".to_string()),
             service_tier: Some("stale-tier".to_string()),
+            account_labels: Vec::new(),
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
@@ -1322,6 +1335,7 @@ fn deferred_stale_server_history_captures_session_id_for_reload_handoff() {
             resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,
+            account_labels: Vec::new(),
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
@@ -1408,6 +1422,7 @@ fn ancient_server_history_is_deferred_via_client_side_release_check() {
             resolved_credential: None,
             reasoning_effort: Some("high".to_string()),
             service_tier: Some("ancient-tier".to_string()),
+            account_labels: Vec::new(),
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
@@ -1493,6 +1508,7 @@ fn older_server_reporting_no_update_is_still_deferred_via_client_check() {
             resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,
+            account_labels: Vec::new(),
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
@@ -1598,6 +1614,7 @@ fn older_server_history_repairs_stale_shared_server_channel_end_to_end() {
             resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,
+            account_labels: Vec::new(),
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
@@ -1677,6 +1694,7 @@ fn current_release_server_history_is_not_deferred_by_client_check() {
             resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,
+            account_labels: Vec::new(),
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),

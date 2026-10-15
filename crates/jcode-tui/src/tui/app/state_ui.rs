@@ -3,30 +3,7 @@ use super::*;
 use crate::tui::ui::tools_ui;
 use crate::tui::{TuiState, backend};
 
-pub(super) struct RestoredReloadInput {
-    pub input: String,
-    pub cursor: usize,
-    pub pending_images: Vec<(String, String)>,
-    pub submit_on_restore: bool,
-    pub queued_messages: Vec<String>,
-    pub queued_commands: Vec<String>,
-    pub hidden_queued_system_messages: Vec<String>,
-    pub startup_status_notice: Option<String>,
-    pub startup_display_message: Option<(String, String)>,
-    pub interleave_message: Option<String>,
-    pub pending_soft_interrupts: Vec<String>,
-    pub pending_soft_interrupt_resend: Option<Vec<String>>,
-    pub rate_limit_pending_message: Option<super::PendingRemoteMessage>,
-    pub rate_limit_reset: Option<Instant>,
-    pub observe_mode_enabled: bool,
-    pub observe_page_markdown: String,
-    pub observe_page_updated_at_ms: u64,
-    pub split_view_enabled: bool,
-    pub todos_view_enabled: bool,
-    pub todo_confidence_spike_challenged: bool,
-    pub last_todo_ownership_fingerprint: Option<String>,
-    pub final_response_todo_fingerprint: Option<String>,
-}
+pub(super) use super::tui_lifecycle::reload_input::RestoredReloadInput;
 
 impl App {
     pub(super) fn append_live_inline_images(
@@ -232,15 +209,14 @@ impl App {
     pub(super) fn save_input_for_reload(&self, session_id: &str) {
         let resume_prompt = self.rate_limit_pending_message.as_ref().filter(|pending| {
             !pending.auto_retry
+                && self.rate_limit_reset.is_none()
                 && !pending.is_system
                 && (!pending.content.trim().is_empty() || !pending.images.is_empty())
         });
-        // A queued follow-up that was dequeued and is currently in flight lives
-        // only in `rate_limit_pending_message` (is_system). Without a scheduled
-        // retry reset, that shape has no dispatch path after a restore (the
-        // tick resend requires `rate_limit_reset`), so persist it back into
-        // the queued/hidden lists instead; the restored queue re-sends it once
-        // the turn is proven idle (issue #391).
+        // An in-flight queued follow-up lives only in rate_limit_pending_message
+        // (is_system). Without a reset, tick cannot dispatch it after restore.
+        // Persist it back into queued/hidden lists so it is sent once the turn
+        // is proven idle (issue #391).
         let inflight_continuation = self.rate_limit_pending_message.as_ref().filter(|pending| {
             pending.is_system
                 && self.rate_limit_reset.is_none()
@@ -309,14 +285,21 @@ impl App {
                             "system_reminder": pending.system_reminder,
                             "auto_retry": pending.auto_retry,
                             "retry_attempts": pending.retry_attempts,
+                            "overload_attempts": pending.overload_attempts,
                         })
                     })
                 };
             let mut queued_messages = self.queued_messages.clone();
+            let mut queued_message_images = if queued_messages.is_empty() {
+                Vec::new()
+            } else {
+                self.queued_message_images.clone()
+            };
             let mut hidden_queued_system_messages = self.hidden_queued_system_messages.clone();
             if let Some(pending) = inflight_continuation {
                 if !pending.content.trim().is_empty() {
                     queued_messages.insert(0, pending.content.clone());
+                    queued_message_images.splice(0..0, pending.images.clone());
                 }
                 if let Some(reminder) = pending.system_reminder.clone() {
                     hidden_queued_system_messages.insert(0, reminder);
@@ -338,11 +321,14 @@ impl App {
                     "media_type": media_type,
                     "data": data,
                 })).collect::<Vec<_>>(),
+                "image_markers": if resume_prompt.is_some() { super::input_images::InputImageMarkers::default() } else { self.input_image_markers.clone() },
                 "submit_on_restore": resume_prompt.is_some(),
                 "queued_messages": queued_messages,
+                "queued_message_images": queued_message_images,
                 "queued_commands": self.queued_commands,
                 "hidden_queued_system_messages": hidden_queued_system_messages,
                 "interleave_message": self.interleave_message,
+                "interleave_images": self.interleave_images,
                 "pending_soft_interrupts": self.pending_soft_interrupts,
                 "pending_soft_interrupt_resend": pending_soft_interrupt_resend,
                 "rate_limit_pending_message": rate_limit_pending_message,
@@ -443,6 +429,18 @@ impl App {
                         .iter()
                         .filter_map(|item| item.as_str().map(|s| s.to_string()))
                         .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let queued_message_images = value
+                .get("queued_message_images")
+                .and_then(|images| {
+                    serde_json::from_value::<Vec<(String, String)>>(images.clone()).ok()
+                })
+                .unwrap_or_default();
+            let interleave_images = value
+                .get("interleave_images")
+                .and_then(|images| {
+                    serde_json::from_value::<Vec<(String, String)>>(images.clone()).ok()
                 })
                 .unwrap_or_default();
             let queued_commands = value
@@ -549,6 +547,11 @@ impl App {
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0) as u8,
                     retry_at: None,
+                    // Older reload files have no count: start at 0 for those.
+                    overload_attempts: pending
+                        .get("overload_attempts")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as u8,
                 });
             let rate_limit_reset = value
                 .get("rate_limit_reset_in_ms")
@@ -590,13 +593,16 @@ impl App {
                 input,
                 cursor,
                 pending_images,
+                image_markers: super::input_images::InputImageMarkers::from_saved(&value),
                 submit_on_restore,
                 queued_messages,
+                queued_message_images,
                 queued_commands,
                 hidden_queued_system_messages,
                 startup_status_notice,
                 startup_display_message,
                 interleave_message,
+                interleave_images,
                 pending_soft_interrupts,
                 pending_soft_interrupt_resend,
                 rate_limit_pending_message,
@@ -625,13 +631,16 @@ impl App {
             input: input.to_string(),
             cursor,
             pending_images: Vec::new(),
+            image_markers: Default::default(),
             submit_on_restore: false,
             queued_messages: Vec::new(),
+            queued_message_images: Vec::new(),
             queued_commands: Vec::new(),
             hidden_queued_system_messages: Vec::new(),
             startup_status_notice: None,
             startup_display_message: None,
             interleave_message: None,
+            interleave_images: Vec::new(),
             pending_soft_interrupts: Vec::new(),
             pending_soft_interrupt_resend: None,
             rate_limit_pending_message: None,
@@ -664,6 +673,14 @@ impl App {
         // If already at bottom with no bookmark, do nothing
     }
 
+    /// `scroll_to_bottom` hotkey / "Jump to bottom" pill: go to the live tail
+    /// and resume auto-follow. Unlike the Ctrl+G bookmark this is one-way, so
+    /// any stashed bookmark is dropped.
+    pub(super) fn jump_to_chat_bottom(&mut self) {
+        self.scroll_bookmark = None;
+        self.follow_chat_bottom();
+    }
+
     pub(super) fn follow_chat_bottom_for_typing(&mut self) {
         if !self.typing_scroll_lock {
             self.follow_chat_bottom();
@@ -693,21 +710,23 @@ impl App {
         } else {
             snapshot
         };
-        let mut snapshot = if self.observe_mode_enabled {
+        let snapshot = if self.observe_mode_enabled {
             self.decorate_side_panel_with_observe(snapshot, focus_observe)
         } else {
             snapshot
         };
-        if self.side_panel_user_hidden && snapshot.focused_page_id.is_some() {
-            snapshot.focused_page_id = None;
-        }
         self.apply_side_panel_snapshot(snapshot);
     }
 
     pub(super) fn apply_side_panel_snapshot(
         &mut self,
-        snapshot: crate::side_panel::SidePanelSnapshot,
+        mut snapshot: crate::side_panel::SidePanelSnapshot,
     ) {
+        // Local app panels refresh through this path too. Content updates must
+        // not undo a user dismissal or replace the saved selection.
+        if self.side_panel_user_hidden {
+            snapshot.focused_page_id = None;
+        }
         let focused_before = self.side_panel.focused_page_id.clone();
         let focused_after = snapshot.focused_page_id.clone();
         let focused_changed = focused_before != focused_after;
@@ -1224,8 +1243,13 @@ fn format_cache_stats(app: &App) -> String {
     };
     let read_pct = format_pct(read, effective_reported);
     let write_pct = format_pct(write, effective_reported);
-    let optimal_pct =
-        (optimal > 0 && remote_cache_read == 0).then(|| cache_ratio_pct(read, optimal));
+    // Optimal input is live-only, so compare it against live-only reads.
+    let optimal_pct = (optimal > 0).then(|| {
+        cache_ratio_pct(
+            app.token_accounting.total_cache_optimal_read_tokens,
+            optimal,
+        )
+    });
     let cache_totals_source = match (
         remote_usage.is_some(),
         app.token_accounting.total_cache_prompt_tokens > 0,

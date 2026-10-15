@@ -97,6 +97,7 @@ fn test_remote_error_without_retry_recovers_pending_followups() {
         auto_retry: false,
         retry_attempts: 0,
         retry_at: None,
+        overload_attempts: 0,
     });
     app.is_processing = true;
     app.status = ProcessingStatus::Streaming;
@@ -111,6 +112,7 @@ fn test_remote_error_without_retry_recovers_pending_followups() {
             id: 10,
             message: "provider failed hard".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         },
         &mut remote,
     );
@@ -163,6 +165,7 @@ fn test_remote_error_with_retryable_pending_schedules_retry() {
         auto_retry: true,
         retry_attempts: 0,
         retry_at: None,
+        overload_attempts: 0,
     });
     app.is_processing = true;
     app.status = ProcessingStatus::Streaming;
@@ -172,6 +175,7 @@ fn test_remote_error_with_retryable_pending_schedules_retry() {
             id: 11,
             message: "provider failed hard".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         },
         &mut remote,
     );
@@ -218,6 +222,7 @@ fn test_remote_non_retryable_error_gets_short_auto_poke_retry() {
         auto_retry: true,
         retry_attempts: 0,
         retry_at: None,
+        overload_attempts: 0,
     });
     app.is_processing = true;
     app.status = ProcessingStatus::Streaming;
@@ -227,6 +232,7 @@ fn test_remote_non_retryable_error_gets_short_auto_poke_retry() {
             id: 12,
             message: "OpenAI API error 400 Bad Request: {\"error\":{\"message\":\"Invalid 'input[0].encrypted_content': string too long. Expected a string with maximum length 10485760, but got a string with length 11237432 instead.\",\"type\":\"invalid_request_error\",\"code\":\"string_above_max_length\"}}".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         },
         &mut remote,
     );
@@ -249,6 +255,7 @@ fn test_remote_non_retryable_error_gets_short_auto_poke_retry() {
             id: 13,
             message: "OpenAI API error 400 Bad Request: {\"error\":{\"type\":\"invalid_request_error\",\"code\":\"string_above_max_length\"}}".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         },
         &mut remote,
     );
@@ -285,6 +292,7 @@ fn test_remote_non_retryable_error_stops_auto_poke_after_short_retry_budget() {
         auto_retry: true,
         retry_attempts: 2,
         retry_at: None,
+        overload_attempts: 0,
     });
     app.is_processing = true;
     app.status = ProcessingStatus::Streaming;
@@ -294,6 +302,7 @@ fn test_remote_non_retryable_error_stops_auto_poke_after_short_retry_budget() {
             id: 14,
             message: "OpenAI API error 400 Bad Request: {\"error\":{\"type\":\"invalid_request_error\",\"code\":\"string_above_max_length\"}}".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         },
         &mut remote,
     );
@@ -330,6 +339,7 @@ fn test_remote_fatal_model_endpoint_error_fails_fast_without_retry_budget() {
         auto_retry: true,
         retry_attempts: 0,
         retry_at: None,
+        overload_attempts: 0,
     });
     app.is_processing = true;
     app.status = ProcessingStatus::Streaming;
@@ -339,6 +349,7 @@ fn test_remote_fatal_model_endpoint_error_fails_fast_without_retry_budget() {
             id: 21,
             message: "OpenAI-compatible chat request failed\n  endpoint: https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions\n  model: volcengine:ark-code-latest\n  auth: ARK_API_KEY\n  status: 404 Not Found\n  response: {\"error\":{\"code\":\"UnsupportedModel\",\"message\":\"The requested model does not support the coding plan feature.\"}}".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         },
         &mut remote,
     );
@@ -385,6 +396,7 @@ fn test_remote_connectivity_error_waits_for_network_with_bounded_retry_budget() 
         auto_retry: true,
         retry_attempts: 0,
         retry_at: None,
+        overload_attempts: 0,
     });
     app.is_processing = true;
     app.status = ProcessingStatus::Streaming;
@@ -394,6 +406,7 @@ fn test_remote_connectivity_error_waits_for_network_with_bounded_retry_budget() 
             id: 15,
             message: "Failed to send OpenAI-compatible chat request\n  endpoint: https://api.groq.com/openai/v1/chat/completions\n  model: llama-3.1-8b-instant\n  auth: GROQ_API_KEY\nHint: check network connectivity, DNS/TLS, and that the base URL includes the API version (usually /v1).: error sending request for url (https://api.groq.com/openai/v1/chat/completions): client error (Connect): dns error: failed to lookup address information: Name or service not known".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         },
         &mut remote,
     );
@@ -412,7 +425,7 @@ fn test_remote_connectivity_error_waits_for_network_with_bounded_retry_budget() 
     ));
     assert_eq!(
         app.status_detail.as_deref(),
-        Some("offline; waiting for network before retry")
+        Some("connection failed; waiting before retry")
     );
     assert!(
         app.display_messages()
@@ -447,6 +460,7 @@ fn test_remote_connectivity_error_without_auto_retry_still_waits_for_network() {
         auto_retry: false,
         retry_attempts: 0,
         retry_at: None,
+        overload_attempts: 0,
     });
     app.is_processing = true;
     app.status = ProcessingStatus::Streaming;
@@ -456,6 +470,7 @@ fn test_remote_connectivity_error_without_auto_retry_still_waits_for_network() {
             id: 16,
             message: "Failed to send request to Anthropic API: error sending request for url (https://api.anthropic.com/v1/messages): client error (Connect): dns error: failed to lookup address information: Name or service not known".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         },
         &mut remote,
     );
@@ -485,36 +500,6 @@ fn test_remote_connectivity_error_without_auto_retry_still_waits_for_network() {
 
 include!("remote_failover_routes.rs");
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #[test]
 fn test_schedule_pending_remote_retry_respects_retry_limit() {
     let mut app = create_test_app();
@@ -526,6 +511,7 @@ fn test_schedule_pending_remote_retry_respects_retry_limit() {
         auto_retry: true,
         retry_attempts: App::AUTO_RETRY_MAX_ATTEMPTS,
         retry_at: None,
+        overload_attempts: 0,
     });
 
     assert!(!app.schedule_pending_remote_retry("⚠ failed."));
@@ -564,6 +550,7 @@ fn test_provider_guardrail_event_offers_opus_reroute_with_resend_payload() {
         auto_retry: false,
         retry_attempts: 0,
         retry_at: None,
+        overload_attempts: 0,
     });
     app.last_submitted_input = Some("please help".to_string());
 
@@ -615,6 +602,7 @@ fn test_guardrail_reroute_prefers_native_anthropic_route() {
     app.remote_model_options = vec![
         openai_oauth_route("gpt-5.5"),
         crate::provider::ModelRoute {
+            catalog_metadata: None,
             model: "claude-opus-4-8".to_string(),
             provider: "OpenRouter".to_string(),
             api_method: "openrouter".to_string(),
@@ -1110,26 +1098,29 @@ fn test_tui_grok_build_login_starts_managed_oauth_flow() {
 
 #[test]
 fn test_info_widget_remote_openai_uses_remote_provider_for_usage_and_context() {
-    let mut app = create_test_app();
-    app.is_remote = true;
-    app.remote_provider_name = Some("OpenAI".to_string());
-    app.remote_provider_model = Some("gpt-5.4".to_string());
-    app.remote_resolved_credential = Some(jcode_provider_core::ResolvedCredential::Oauth);
-    app.update_context_limit_for_model("gpt-5.4", None);
+    with_temp_jcode_home(|| {
+        let _context_cache = crate::provider::models::ContextLimitCacheGuardForTests::new();
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.remote_provider_name = Some("OpenAI".to_string());
+        app.remote_provider_model = Some("gpt-5.4".to_string());
+        app.remote_resolved_credential = Some(jcode_provider_core::ResolvedCredential::Oauth);
+        app.update_context_limit_for_model("gpt-5.4", None);
 
-    let data = crate::tui::TuiState::info_widget_data(&app);
+        let data = crate::tui::TuiState::info_widget_data(&app);
 
-    assert_eq!(data.provider_name.as_deref(), Some("OpenAI"));
-    assert_eq!(data.model.as_deref(), Some("gpt-5.4"));
-    assert_eq!(data.context_limit, Some(1_000_000));
-    assert_eq!(
-        data.auth_method,
-        crate::tui::info_widget::AuthMethod::OpenAIOAuth
-    );
-    assert_eq!(
-        data.usage_info.as_ref().map(|info| info.provider),
-        Some(crate::tui::info_widget::UsageProvider::OpenAI)
-    );
+        assert_eq!(data.provider_name.as_deref(), Some("OpenAI"));
+        assert_eq!(data.model.as_deref(), Some("gpt-5.4"));
+        assert_eq!(data.context_limit, Some(1_000_000));
+        assert_eq!(
+            data.auth_method,
+            crate::tui::info_widget::AuthMethod::OpenAIOAuth
+        );
+        assert_eq!(
+            data.usage_info.as_ref().map(|info| info.provider),
+            Some(crate::tui::info_widget::UsageProvider::OpenAI)
+        );
+    });
 }
 
 #[test]
@@ -1172,22 +1163,25 @@ fn test_remote_context_limit_survives_a_later_local_re_derivation() {
 
 #[test]
 fn test_info_widget_remote_model_falls_back_to_model_provider_detection() {
-    let mut app = create_test_app();
-    app.is_remote = true;
-    app.remote_provider_model = Some("gpt-5.4".to_string());
-    app.update_context_limit_for_model("gpt-5.4", None);
+    with_temp_jcode_home(|| {
+        let _context_cache = crate::provider::models::ContextLimitCacheGuardForTests::new();
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.remote_provider_model = Some("gpt-5.4".to_string());
+        app.update_context_limit_for_model("gpt-5.4", None);
 
-    let data = crate::tui::TuiState::info_widget_data(&app);
+        let data = crate::tui::TuiState::info_widget_data(&app);
 
-    assert_eq!(data.context_limit, Some(1_000_000));
-    assert_eq!(
-        data.auth_method,
-        crate::tui::info_widget::AuthMethod::Unknown
-    );
-    assert!(
-        data.usage_info.is_none(),
-        "provider/model detection alone must not guess subscription billing"
-    );
+        assert_eq!(data.context_limit, Some(1_000_000));
+        assert_eq!(
+            data.auth_method,
+            crate::tui::info_widget::AuthMethod::Unknown
+        );
+        assert!(
+            data.usage_info.is_none(),
+            "provider/model detection alone must not guess subscription billing"
+        );
+    });
 }
 
 #[test]
@@ -1254,6 +1248,31 @@ fn test_info_widget_remote_anthropic_api_key_shows_cost_based_usage() {
     assert_eq!(
         data.usage_info.as_ref().map(|info| info.provider),
         Some(crate::tui::info_widget::UsageProvider::Anthropic)
+    );
+}
+
+/// Before the first Anthropic usage fetch lands, the usage state is an empty
+/// default (0% used, no error). The widget must not treat that as data: it
+/// used to flash "100% left" for both limits at startup.
+#[test]
+fn test_info_widget_anthropic_oauth_usage_waits_for_first_fetch() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.remote_provider_name = Some("Claude".to_string());
+    app.remote_provider_model = Some("claude-sonnet-4-20250514".to_string());
+    app.remote_resolved_credential = Some(jcode_provider_core::ResolvedCredential::Oauth);
+
+    let data = crate::tui::TuiState::info_widget_data(&app);
+    let usage = data.usage_info.as_ref().expect("anthropic usage info");
+    assert!(
+        !usage.available,
+        "unfetched usage must not render as limits: 5h={} 7d={}",
+        usage.five_hour, usage.seven_day
+    );
+    let text = crate::tui::info_widget::dock_text_lines(&data, 44).join("\n");
+    assert!(
+        !text.contains("100% left"),
+        "startup must not claim full limits:\n{text}"
     );
 }
 
@@ -2305,6 +2324,7 @@ fn test_credential_failure_breaker_trips_after_consecutive_auth_errors() {
             auto_retry: true,
             retry_attempts: 0,
             retry_at: None,
+            overload_attempts: 0,
         });
         app.is_processing = true;
         app.status = ProcessingStatus::Streaming;
@@ -2313,6 +2333,7 @@ fn test_credential_failure_breaker_trips_after_consecutive_auth_errors() {
                 id: 100 + u64::from(attempt),
                 message: "401 Unauthorized: invalid api key".to_string(),
                 retry_after_secs: None,
+                server_resumes: false,
             },
             &mut remote,
         );
@@ -2382,6 +2403,7 @@ fn test_rejected_refresh_token_stops_all_automatic_resends_immediately() {
                     auto_retry,
                     retry_attempts: 0,
                     retry_at: None,
+                    overload_attempts: 0,
                 });
                 app.last_submitted_input = Some("keep going".to_string());
                 app.is_processing = true;
@@ -2393,6 +2415,7 @@ fn test_rejected_refresh_token_stops_all_automatic_resends_immediately() {
                         id: 30,
                         message: "Claude OAuth refresh token was previously rejected by Anthropic and cannot be refreshed. Run `jcode login --provider claude` to mint a fresh token.".to_string(),
                         retry_after_secs,
+                        server_resumes: false,
                     },
                     &mut remote,
                 ));

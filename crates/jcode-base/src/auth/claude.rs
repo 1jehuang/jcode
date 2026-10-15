@@ -284,6 +284,16 @@ struct OpenCodeAnthropicAuth {
 }
 
 fn claude_code_path() -> Result<PathBuf> {
+    if let Some(config_dir) =
+        std::env::var_os("CLAUDE_CONFIG_DIR").filter(|value| !value.is_empty())
+    {
+        let config_dir = PathBuf::from(config_dir);
+        anyhow::ensure!(
+            config_dir.is_absolute(),
+            "CLAUDE_CONFIG_DIR must be absolute to reuse Claude Code credentials across Jcode processes."
+        );
+        return Ok(config_dir.join(".credentials.json"));
+    }
     crate::storage::user_home_path(".claude/.credentials.json")
 }
 
@@ -537,6 +547,21 @@ pub fn is_max_subscription() -> bool {
 /// Load credentials for the active Anthropic account.
 /// Falls through Claude Code -> jcode accounts -> OpenCode, preferring non-expired tokens.
 pub fn load_credentials() -> Result<ClaudeCredentials> {
+    load_credentials_with_candidate(None)
+}
+
+/// Resolve normal source precedence as if an approved native snapshot were
+/// imported and selected, without writing accounts, runtime overrides or trust.
+/// Used by native login to validate before committing persistent changes.
+pub fn load_credentials_with_staged_native(
+    credentials: &ClaudeCredentials,
+) -> Result<ClaudeCredentials> {
+    load_credentials_with_candidate(Some(credentials))
+}
+
+fn load_credentials_with_candidate(
+    staged_native: Option<&ClaudeCredentials>,
+) -> Result<ClaudeCredentials> {
     let now_ms = chrono::Utc::now().timestamp_millis();
 
     let mut expired_candidates: Vec<(&str, ClaudeCredentials)> = Vec::new();
@@ -567,7 +592,7 @@ pub fn load_credentials() -> Result<ClaudeCredentials> {
     // macOS Keychain is NOT read here: it can trigger an interactive unlock
     // prompt, so it is read once at import time and copied into jcode's own
     // auth.json (see `import_native_credentials_into_account`).
-    if native_source_allowed()
+    if (staged_native.is_some() || native_source_allowed())
         && let Some(creds) = load_claude_code_env_credentials()
     {
         if creds.expires_at > now_ms {
@@ -576,7 +601,11 @@ pub fn load_credentials() -> Result<ClaudeCredentials> {
         expired_candidates.push(("claude-native", creds));
     }
 
-    if let Ok(creds) = load_jcode_credentials() {
+    let jcode_credentials = match staged_native {
+        Some(credentials) => Ok(credentials.clone()),
+        None => load_jcode_credentials(),
+    };
+    if let Ok(creds) = jcode_credentials {
         if creds.expires_at > now_ms {
             return Ok(creds);
         }
@@ -608,6 +637,103 @@ pub fn load_credentials() -> Result<ClaudeCredentials> {
     }
 
     anyhow::bail!("No Claude OAuth credentials found (checked Claude Code, jcode, OpenCode)")
+}
+
+/// Stable identity of a stored account (see [`crate::auth::AccountPin`]).
+pub fn account_identity(account: &AnthropicAccount) -> Option<String> {
+    crate::auth::account_store::account_identity(account.email.as_deref(), None, &account.refresh)
+}
+
+fn credentials_from_account(account: &AnthropicAccount) -> ClaudeCredentials {
+    ClaudeCredentials {
+        access_token: account.access.clone(),
+        refresh_token: account.refresh.clone(),
+        expires_at: account.expires,
+        scopes: account.scopes.clone(),
+        subscription_type: account
+            .subscription_type
+            .clone()
+            .or_else(|| Some("max".to_string())),
+    }
+}
+
+/// Load credentials for `scope`, returning the jcode account label they came
+/// from (`None` when an external source such as Claude Code served them).
+///
+/// `Default` behaves exactly like [`load_credentials`]. `Pinned` reads only
+/// the jcode-stored account the pin resolves to, never an external source,
+/// and fails with [`crate::auth::account_store::PinnedAccountMissing`] when
+/// that account is gone.
+pub fn load_credentials_scoped(
+    scope: crate::auth::AccountScope<'_>,
+) -> Result<(ClaudeCredentials, Option<String>)> {
+    match scope {
+        crate::auth::AccountScope::Default => {
+            let creds = load_credentials()?;
+            let label = load_auth_file().ok().and_then(|auth| {
+                auth.anthropic_accounts
+                    .iter()
+                    .find(|account| {
+                        account.refresh == creds.refresh_token
+                            && account.access == creds.access_token
+                    })
+                    .map(|account| account.label.clone())
+            });
+            Ok((creds, label))
+        }
+        crate::auth::AccountScope::Pinned(pin) => {
+            let auth = load_auth_file()?;
+            let label = resolve_pin_in(pin, &auth).ok_or_else(|| {
+                anyhow::Error::new(crate::auth::account_store::PinnedAccountMissing(
+                    pin.label.clone(),
+                ))
+            })?;
+            let account = auth
+                .anthropic_accounts
+                .iter()
+                .find(|account| account.label == label)
+                .context("pinned Claude account disappeared")?;
+            Ok((credentials_from_account(account), Some(label)))
+        }
+    }
+}
+
+fn resolve_pin_in(pin: &crate::auth::AccountPin, auth: &JcodeAuthFile) -> Option<String> {
+    crate::auth::account_store::resolve_pin(
+        pin,
+        &auth.anthropic_accounts,
+        |account| account.label.as_str(),
+        account_identity,
+    )
+}
+
+/// Current label of the stored account a pin names (identity first, then label).
+pub fn resolve_pin(pin: &crate::auth::AccountPin) -> Option<String> {
+    let auth = load_auth_file().ok()?;
+    resolve_pin_in(pin, &auth)
+}
+
+/// Stored default account (persisted active, else first). Unlike
+/// [`active_account_label`] this ignores the one-shot runtime override.
+pub fn default_account_label() -> Option<String> {
+    let auth = load_auth_file().ok()?;
+    crate::auth::account_store::default_account_label(
+        auth.active_anthropic_account.as_deref(),
+        &auth.anthropic_accounts,
+        |account| account.label.as_str(),
+    )
+}
+
+/// Build a pin (label plus identity) for the stored account at `label`.
+pub fn pin_for_label(label: &str) -> Result<crate::auth::AccountPin> {
+    let auth = load_auth_file()?;
+    crate::auth::account_store::pin_for_label(
+        label,
+        &auth.anthropic_accounts,
+        |account| account.label.as_str(),
+        account_identity,
+        "No Claude account with label '{}' found",
+    )
 }
 
 /// Load credentials for a specific jcode account by label.
@@ -658,7 +784,7 @@ fn load_jcode_credentials() -> Result<ClaudeCredentials> {
     })
 }
 
-fn load_claude_code_credentials() -> Result<ClaudeCredentials> {
+pub fn load_claude_code_credentials() -> Result<ClaudeCredentials> {
     let path = crate::storage::validate_external_auth_file(&claude_code_path()?)?;
     let content = std::fs::read_to_string(&path)
         .with_context(|| format!("Could not read credentials from {:?}", path))?;
@@ -772,6 +898,23 @@ fn read_claude_code_keychain_blob() -> Option<String> {
             }
             Err(_) => return None,
         }
+    }
+}
+
+/// Whether Claude sign-in should default to the installed Claude Code CLI
+/// (`claude auth login`) instead of Jcode's own OAuth browser flow.
+///
+/// On by default whenever the `claude` binary is installed, so Claude Code
+/// accounts sign in the way Claude Code itself does. Opt out with
+/// `JCODE_CLAUDE_LOGIN_METHOD=oauth`, or force it with `=cli`.
+pub fn prefer_claude_code_cli_login() -> bool {
+    match std::env::var("JCODE_CLAUDE_LOGIN_METHOD")
+        .map(|value| value.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Ok("oauth" | "jcode") => false,
+        Ok("cli" | "claude-code" | "claude_code") => true,
+        _ => crate::auth::command_exists("claude"),
     }
 }
 
@@ -889,7 +1032,11 @@ pub fn trust_native_source() -> Result<()> {
 pub fn import_native_credentials_into_account() -> Result<String> {
     let creds = load_native_credentials()
         .context("Could not read Claude Code native credentials to import")?;
+    import_native_credentials_into_account_from(creds)
+}
 
+/// Store the credential snapshot read after the user approved native import.
+pub fn import_native_credentials_into_account_from(creds: ClaudeCredentials) -> Result<String> {
     if creds.refresh_token.trim().is_empty() {
         // Without a refresh token we cannot keep the account alive past the
         // current access token, so we do not persist a dead-end account.
@@ -899,8 +1046,29 @@ pub fn import_native_credentials_into_account() -> Result<String> {
         );
     }
 
-    let label = login_target_label(None)?;
-    upsert_account(AnthropicAccount {
+    // Never use the current login target: native reuse must not overwrite an
+    // unrelated active account. Match an existing snapshot or allocate a label
+    // from the latest store, skipping holes and arbitrary user labels.
+    let mut auth = load_auth_file()?;
+    if let Some(account) = auth.anthropic_accounts.iter().find(|account| {
+        account.access == creds.access_token && account.refresh == creds.refresh_token
+    }) {
+        return Ok(account.label.clone());
+    }
+    let mut index = 1;
+    let label = loop {
+        let candidate =
+            crate::auth::account_store::canonical_account_label(ACCOUNT_LABEL_PREFIX, index);
+        if !auth
+            .anthropic_accounts
+            .iter()
+            .any(|account| account.label == candidate)
+        {
+            break candidate;
+        }
+        index += 1;
+    };
+    auth.anthropic_accounts.push(AnthropicAccount {
         label: label.clone(),
         access: creds.access_token,
         refresh: creds.refresh_token,
@@ -908,7 +1076,12 @@ pub fn import_native_credentials_into_account() -> Result<String> {
         email: None,
         subscription_type: creds.subscription_type.or_else(|| Some("max".to_string())),
         scopes: creds.scopes,
-    })
+    });
+    if auth.active_anthropic_account.is_none() {
+        auth.active_anthropic_account = Some(label.clone());
+    }
+    save_auth_file(&auth)?;
+    Ok(label)
 }
 
 pub fn load_opencode_credentials() -> Result<ClaudeCredentials> {

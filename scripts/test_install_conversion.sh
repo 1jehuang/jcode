@@ -2,6 +2,7 @@
 set -euo pipefail
 
 repo_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+export JCODE_TEST_PUBLISH_HELPER="$repo_dir/scripts/lib/test_publish_build.sh"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/bin" "$tmp/home" "$tmp/install"
@@ -80,7 +81,8 @@ done
 artifact="${TEST_ARCHIVE_ARTIFACT:-jcode-linux-x86_64}"
 cat > "$dest/$artifact" <<'BIN'
 #!/usr/bin/env bash
-if [ "${1:-}" = "--version" ]; then printf 'jcode 1.2.3\n'; fi
+if [ "${1:-}" = "--version" ]; then printf 'jcode 1.2.3\n'; exit 0; fi
+if [ "${2:-}" = publish-build ]; then exec bash "$JCODE_TEST_PUBLISH_HELPER" "$@"; fi
 if [ "${1:-}" = "setup-hotkey" ] && [ -n "${HOTKEY_SETUP_LOG:-}" ]; then
   printf '%s\n' "$*" >> "$HOTKEY_SETUP_LOG"
 fi

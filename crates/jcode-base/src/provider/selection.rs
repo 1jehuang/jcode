@@ -96,6 +96,7 @@ impl MultiProvider {
             LoginProviderTarget::Bedrock => Some("bedrock"),
             LoginProviderTarget::OpenAiCompatible(profile) => Some(profile.id),
             LoginProviderTarget::Cursor => Some("cursor"),
+            LoginProviderTarget::ClaudeCode => Some("claude-code"),
             LoginProviderTarget::Copilot => Some("copilot"),
             LoginProviderTarget::Gemini => Some("gemini"),
             LoginProviderTarget::Antigravity => Some("antigravity"),
@@ -149,6 +150,9 @@ impl MultiProvider {
         let model_spec = match &api_method_kind {
             ModelRouteApiMethod::Copilot => format!("copilot:{}", bare_name),
             ModelRouteApiMethod::GrokBuild => crate::provider::grok_build_model_spec(bare_name),
+            ModelRouteApiMethod::ClaudeCode { .. } => {
+                jcode_provider_core::claude_code_model_spec(bare_name)
+            }
             ModelRouteApiMethod::ClaudeOAuth => format!("claude-oauth:{}", bare_name),
             ModelRouteApiMethod::AnthropicApiKey if provider_display == "Anthropic" => {
                 format!("claude-api:{}", bare_name)
@@ -170,6 +174,7 @@ impl MultiProvider {
         let provider_key = match &api_method_kind {
             ModelRouteApiMethod::JcodeSubscription => Some("jcode".to_string()),
             ModelRouteApiMethod::GrokBuild => Some("grok-build".to_string()),
+            ModelRouteApiMethod::ClaudeCode { .. } => Some("claude-code".to_string()),
             ModelRouteApiMethod::AnthropicApiKey
                 if provider_display == "Anthropic"
                     && crate::provider::provider_for_model(bare_name) == Some("claude") =>
@@ -253,7 +258,8 @@ impl MultiProvider {
                     return Some(route.session_provider_key().to_string());
                 }
                 match prefix {
-                    "copilot" | "antigravity" | "gemini" | "cursor" | "bedrock" | "openrouter" => {
+                    "copilot" | "antigravity" | "gemini" | "cursor" | "bedrock" | "openrouter"
+                    | "claude-code" => {
                         return Some(prefix.to_string());
                     }
                     _ => {
@@ -401,13 +407,15 @@ impl MultiProvider {
 
         if let Some((prefix, rest)) = model.split_once(':') {
             let prefix = prefix.trim();
-            if !prefix.is_empty()
-                && !rest.trim().is_empty()
-                && (crate::provider_catalog::resolve_openai_compatible_profile_selection(prefix)
-                    .is_some()
-                    || crate::config::config().providers.contains_key(prefix))
-            {
-                return model.to_string();
+            if !prefix.is_empty() && !rest.trim().is_empty() {
+                if crate::config::config().providers.contains_key(prefix) {
+                    return model.to_string();
+                }
+                if let Some(profile) =
+                    crate::provider_catalog::resolve_openai_compatible_profile_selection(prefix)
+                {
+                    return format!("{}:{}", profile.id, rest.trim());
+                }
             }
         }
 
@@ -451,17 +459,17 @@ impl MultiProvider {
         let provider_key = Self::canonical_session_provider_key(provider_key);
 
         match provider_key {
-            "copilot" | "antigravity" | "gemini" | "cursor" | "bedrock" | "openrouter" => {
-                format!("{provider_key}:{model}")
-            }
+            "copilot" | "antigravity" | "gemini" | "cursor" | "bedrock" | "openrouter"
+            | "claude-code" => format!("{provider_key}:{model}"),
             _ => {
-                if crate::provider_catalog::resolve_openai_compatible_profile_selection(
-                    provider_key,
-                )
-                .is_some()
-                    || crate::config::config().providers.contains_key(provider_key)
-                {
+                if crate::config::config().providers.contains_key(provider_key) {
                     format!("{provider_key}:{model}")
+                } else if let Some(profile) =
+                    crate::provider_catalog::resolve_openai_compatible_profile_selection(
+                        provider_key,
+                    )
+                {
+                    format!("{}:{model}", profile.id)
                 } else {
                     model.to_string()
                 }
@@ -484,17 +492,23 @@ impl MultiProvider {
             || model.split_once(':').is_some_and(|(method, _)| {
                 jcode_provider_core::oauth_account_label(method).is_some()
             })
-            || model.split_once(':').is_some_and(|(prefix, rest)| {
-                !prefix.trim().is_empty()
-                    && !rest.trim().is_empty()
-                    && (crate::provider_catalog::resolve_openai_compatible_profile_selection(
-                        prefix,
-                    )
-                    .is_some()
-                        || crate::config::config().providers.contains_key(prefix))
-            })
         {
             return model.to_string();
+        }
+        if let Some((prefix, rest)) = model.split_once(':')
+            && !prefix.trim().is_empty()
+            && !rest.trim().is_empty()
+        {
+            // Named profiles own their exact keys, including catalog aliases.
+            // Runtime profile lookup requires a canonical catalog id.
+            if crate::config::config().providers.contains_key(prefix) {
+                return model.to_string();
+            }
+            if let Some(profile) =
+                crate::provider_catalog::resolve_openai_compatible_profile_selection(prefix)
+            {
+                return format!("{}:{}", profile.id, rest.trim());
+            }
         }
         if model.contains('@') {
             return format!("openrouter:{model}");
@@ -510,6 +524,9 @@ impl MultiProvider {
                 ModelRouteApiMethod::JcodeSubscription => return model.to_string(),
                 ModelRouteApiMethod::GrokBuild => {
                     return crate::provider::grok_build_model_spec(model);
+                }
+                ModelRouteApiMethod::ClaudeCode { .. } => {
+                    return jcode_provider_core::claude_code_model_spec(model);
                 }
                 ModelRouteApiMethod::ClaudeOAuth => return format!("claude-oauth:{model}"),
                 ModelRouteApiMethod::AnthropicApiKey => return format!("claude-api:{model}"),

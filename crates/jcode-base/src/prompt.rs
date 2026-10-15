@@ -722,9 +722,18 @@ fn build_selfdev_prompt_for_context(context: SelfDevProductContext) -> String {
     SELFDEV_MODE_PROMPT.replace("__SELFDEV_PRODUCT_FOCUS__", context.prompt_block())
 }
 
+/// First line of the session context.
+pub const SESSION_CONTEXT_HEADING: &str = "# Session Context";
+
+/// Session context for providers that keep their own system prompt
+/// (`Provider::uses_own_system_prompt`). They only need the working directory.
+pub fn own_prompt_session_context(working_dir: &str) -> String {
+    format!("{SESSION_CONTEXT_HEADING}\nWorking directory: {working_dir}")
+}
+
 /// Build immutable session context captured once per session.
 pub fn build_session_context(working_dir: Option<&Path>) -> String {
-    let mut lines = vec!["# Session Context".to_string()];
+    let mut lines = vec![SESSION_CONTEXT_HEADING.to_string()];
 
     if is_desktop_working_dir(working_dir) {
         lines.push("Self-development mode: desktop".to_string());

@@ -1,7 +1,6 @@
 #[path = "tui_lifecycle_reload_input.rs"]
-mod reload_input;
+pub(super) mod reload_input;
 
-use super::state_ui::RestoredReloadInput;
 use super::*;
 use crate::tui::{backend, keybind};
 
@@ -11,11 +10,9 @@ impl App {
     /// The parsed bindings are cached on `App` for cheap per-keystroke lookup,
     /// so without this poll a config.toml keybinding edit would only take
     /// effect after a restart. Called from the idle tick in both local and
-    /// remote run loops, and again immediately before dispatching a key press
-    /// so an edit lands on the very next keystroke even when the run loop is
-    /// sitting at the 5s deep-idle cadence. The generation check makes the
-    /// no-change path a single atomic load. Returns true when bindings were
-    /// re-parsed.
+    /// remote run loops and before each key press, including at the 5s idle
+    /// cadence. The generation check is one atomic load when unchanged.
+    /// Returns true when bindings were re-parsed.
     pub(super) fn refresh_keybindings_if_config_reloaded(&mut self) -> bool {
         // config() performs the throttled file-fingerprint staleness check and
         // bumps the reload generation when config.toml changed on disk.
@@ -63,6 +60,65 @@ impl App {
         self.schedule_pending_remote_network_wait_with_force(reason, false)
     }
 
+    /// Hold the in-flight remote turn after the provider reported it is
+    /// overloaded (5xx, 529, "heavy usage, try again in a moment"), then
+    /// resend it. Unlike ordinary failures this also covers turns the user
+    /// typed: the provider will likely take the same request a moment later,
+    /// so making the user resend it by hand is only friction. Bounded by
+    /// [`Self::OVERLOAD_RETRY_MAX_ATTEMPTS`] with a growing delay; after that
+    /// the turn fails as before and the prompt is restored.
+    ///
+    /// When the turn already streamed output or ran tools, a full resend would
+    /// redo that work and append a second answer. The server saved every
+    /// completed step, so the held turn becomes a hidden continuation instead
+    /// and the model resumes where it stopped.
+    pub(super) fn schedule_pending_remote_overload_retry(&mut self, reason: &str) -> bool {
+        let continues_turn = self.remote_turn_streamed_output;
+        let Some(pending) = self.rate_limit_pending_message.as_mut() else {
+            return false;
+        };
+        if pending.overload_attempts >= Self::OVERLOAD_RETRY_MAX_ATTEMPTS {
+            return false;
+        }
+        if continues_turn {
+            pending.content = String::new();
+            pending.images.clear();
+            pending.is_system = true;
+            pending.system_reminder = Some(Self::PROVIDER_ERROR_CONTINUATION.to_string());
+        }
+        pending.auto_retry = true;
+        pending.overload_attempts += 1;
+        let attempt = pending.overload_attempts;
+        let delay_secs = Self::OVERLOAD_RETRY_DELAYS_SECS
+            .get(usize::from(attempt - 1))
+            .copied()
+            .unwrap_or(60);
+        let retry_at = Instant::now() + Duration::from_secs(delay_secs);
+        pending.retry_at = Some(retry_at);
+        self.rate_limit_reset = Some(retry_at);
+        self.status_detail = Some(format!(
+            "provider overloaded; retrying in {delay_secs}s ({attempt}/{})",
+            Self::OVERLOAD_RETRY_MAX_ATTEMPTS
+        ));
+        let first_line = reason.lines().next().unwrap_or(reason).trim();
+        if continues_turn {
+            // The model never saw the reply it was writing when the provider
+            // failed, so it writes it again. Drop the partial copy on screen.
+            self.rollback_streaming_attempt();
+            self.push_display_message(DisplayMessage::system(format!(
+                "⏳ The provider failed mid-turn. Continuing from the last saved step in {delay_secs}s (attempt {attempt}/{}). {first_line}",
+                Self::OVERLOAD_RETRY_MAX_ATTEMPTS
+            )));
+        } else {
+            self.push_display_message(DisplayMessage::system(format!(
+                "⏳ The provider is overloaded. Retrying automatically in {delay_secs}s (attempt {attempt}/{}). {first_line}",
+                Self::OVERLOAD_RETRY_MAX_ATTEMPTS
+            )));
+        }
+        self.set_status_notice(format!("Provider overloaded; retrying in {delay_secs}s"));
+        true
+    }
+
     /// Hold the in-flight remote turn until the network recovers, then resume it.
     ///
     /// Connectivity failures (DNS, connection reset, no route, transient TLS,
@@ -106,10 +162,10 @@ impl App {
         self.status = ProcessingStatus::WaitingForNetwork {
             listener: plan.listener_summary.clone(),
         };
-        self.status_detail = Some("offline; waiting for network before retry".to_string());
+        self.status_detail = Some("connection failed; waiting before retry".to_string());
 
         let content = format!(
-            "📡 Network appears offline - waiting to retry automatically. {} - {}",
+            "📡 Network appears offline or the provider is unreachable - waiting to retry automatically. {} - {}",
             plan.listener_summary,
             reason.trim().trim_end_matches('.')
         );
@@ -213,6 +269,89 @@ impl App {
                 }
                 true
             }
+        }
+    }
+
+    /// Notice shown when a held turn is resent because credentials changed.
+    pub(super) const ACCOUNT_CHANGED_RESEND_NOTICE: &'static str =
+        "🔑 Account changed. Resending your message";
+
+    /// Credentials changed (login, account switch, credential file edit).
+    ///
+    /// A turn held on a rate/usage limit (or an overload/connection backoff)
+    /// is waiting for the previous account's reset time, which can be hours
+    /// away. Pull that hold forward so the next tick resends the turn on the
+    /// new credentials. Returns true when a hold was released.
+    ///
+    /// Idempotent: once released the hold is due now (or already resent), so
+    /// repeated auth broadcasts neither add notices nor resend twice. Offline
+    /// holds are left alone because the network, not the account, blocks them.
+    ///
+    /// `changed_provider` scopes the change: an OpenAI login must not resend a
+    /// turn held on an exhausted Claude account (or the reverse). `None` means
+    /// the change may affect any provider.
+    pub(super) fn release_rate_limit_hold_after_credentials_changed(
+        &mut self,
+        changed_provider: Option<&str>,
+    ) -> bool {
+        let held_provider = self.held_turn_provider_name();
+        if !credential_change_applies_to(changed_provider, held_provider.as_deref()) {
+            crate::logging::info(&format!(
+                "Credentials changed for {:?}; keeping hold on {:?}",
+                changed_provider, held_provider
+            ));
+            return false;
+        }
+        let now = Instant::now();
+        self.credentials_changed_at = Some(now);
+        self.local_usage_limit_resume_attempts = 0;
+        if self.is_processing
+            || (self.is_remote && self.rate_limit_pending_message.is_none())
+            || matches!(self.status, ProcessingStatus::WaitingForNetwork { .. })
+        {
+            return false;
+        }
+        let Some(reset) = self.rate_limit_reset else {
+            return false;
+        };
+        if reset <= now {
+            return false;
+        }
+        self.arm_account_change_resend(now);
+        true
+    }
+
+    /// Provider the current (possibly held) turn runs on.
+    fn held_turn_provider_name(&self) -> Option<String> {
+        if let Some(name) = self.remote_provider_name.clone() {
+            return Some(name);
+        }
+        if self.is_remote || self.uses_server_or_replay_metadata() {
+            return self.remote_effort_identity().0;
+        }
+        Some(self.provider.name().to_string())
+    }
+
+    /// Hold the pending turn for an immediate resend on the new account.
+    pub(super) fn arm_account_change_resend(&mut self, at: Instant) {
+        if let Some(pending) = self.rate_limit_pending_message.as_mut() {
+            pending.retry_at = Some(at);
+        }
+        self.rate_limit_reset = Some(at);
+        self.account_change_resend_at = Some(at);
+        self.consecutive_credential_failures = 0;
+        self.push_display_message(DisplayMessage::system(
+            Self::ACCOUNT_CHANGED_RESEND_NOTICE.to_string(),
+        ));
+        self.set_status_notice("Account changed; resending");
+    }
+
+    /// True when a limit error belongs to a turn that was sent before the
+    /// latest credential change, i.e. it reports the previous account's limit.
+    pub(super) fn turn_predates_credentials_change(&self) -> bool {
+        match (self.credentials_changed_at, self.processing_started) {
+            (Some(changed), Some(started)) => started <= changed,
+            _ => false,
         }
     }
 
@@ -384,6 +523,7 @@ impl App {
             power_inhibitor: crate::power_inhibit::PowerInhibitor::new(),
             should_quit: false,
             queued_messages: Vec::new(),
+            queued_message_images: Vec::new(),
             queued_commands: Vec::new(),
             hidden_queued_system_messages: Vec::new(),
             current_turn_system_reminder: None,
@@ -434,6 +574,7 @@ impl App {
             session_save_pending: false,
             streaming_tool_calls: Vec::new(),
             attempt_committed_assistant_messages: 0,
+            remote_turn_streamed_output: false,
             provider_session_id: None,
             rewind_undo_snapshot: None,
             cancel_requested: false,
@@ -461,6 +602,7 @@ impl App {
             cloud_handoff_requested: None,
             pasted_contents: Vec::new(),
             pending_images: Vec::new(),
+            input_image_markers: Default::default(),
             route_next_prompt_to_new_session: false,
             submit_input_on_startup: false,
             startup_submit_deferred_reason: None,
@@ -497,6 +639,7 @@ impl App {
             remote_startup_phase: None,
             remote_startup_phase_started: None,
             remote_reasoning_effort: None,
+            remote_reasoning_effort_before_request: None,
             remote_service_tier: None,
             remote_transport: None,
             remote_compaction_mode: None,
@@ -629,6 +772,9 @@ impl App {
             pending_prompt_before_history: None,
             pending_startup_prompt_echo: None,
             pending_account_picker_action: None,
+            window_accounts: Vec::new(),
+            window_account_failover: None,
+            pending_account_requests: Default::default(),
             model_switch_keys: keybind::load_model_switch_keys(),
             effort_switch_keys: keybind::load_effort_switch_keys(),
             speed_switch_keys: keybind::load_speed_switch_keys(),
@@ -652,6 +798,10 @@ impl App {
             typing_scroll_lock: false,
             stashed_input: None,
             input_undo_stack: Vec::new(),
+            input_undo_image_counts: Vec::new(),
+            cleared_draft_images: Vec::new(),
+            input_selection_anchor: None,
+            input_selection_clicks: Default::default(),
             input_typing_undo: None,
             history_draft: None,
             status_notice: None,
@@ -697,6 +847,9 @@ impl App {
                 .and_then(|p| std::fs::metadata(&p).ok())
                 .and_then(|m| m.modified().ok()),
             rate_limit_reset: None,
+            local_usage_limit_resume_attempts: 0,
+            credentials_changed_at: None,
+            account_change_resend_at: None,
             rate_limit_pending_message: None,
             consecutive_credential_failures: 0,
             last_stream_error: None,
@@ -855,6 +1008,7 @@ impl App {
             power_inhibitor: crate::power_inhibit::PowerInhibitor::new(),
             should_quit: false,
             queued_messages: Vec::new(),
+            queued_message_images: Vec::new(),
             queued_commands: Vec::new(),
             hidden_queued_system_messages: Vec::new(),
             current_turn_system_reminder: None,
@@ -905,6 +1059,7 @@ impl App {
             session_save_pending: false,
             streaming_tool_calls: Vec::new(),
             attempt_committed_assistant_messages: 0,
+            remote_turn_streamed_output: false,
             provider_session_id: None,
             rewind_undo_snapshot: None,
             cancel_requested: false,
@@ -932,6 +1087,7 @@ impl App {
             cloud_handoff_requested: None,
             pasted_contents: Vec::new(),
             pending_images: Vec::new(),
+            input_image_markers: Default::default(),
             route_next_prompt_to_new_session: false,
             submit_input_on_startup: false,
             startup_submit_deferred_reason: None,
@@ -968,6 +1124,7 @@ impl App {
             remote_startup_phase: None,
             remote_startup_phase_started: None,
             remote_reasoning_effort: None,
+            remote_reasoning_effort_before_request: None,
             remote_service_tier: None,
             remote_transport: None,
             remote_compaction_mode: None,
@@ -1100,6 +1257,9 @@ impl App {
             pending_prompt_before_history: None,
             pending_startup_prompt_echo: None,
             pending_account_picker_action: None,
+            window_accounts: Vec::new(),
+            window_account_failover: None,
+            pending_account_requests: Default::default(),
             model_switch_keys: keybind::load_model_switch_keys(),
             effort_switch_keys: keybind::load_effort_switch_keys(),
             speed_switch_keys: keybind::load_speed_switch_keys(),
@@ -1123,6 +1283,10 @@ impl App {
             typing_scroll_lock: false,
             stashed_input: None,
             input_undo_stack: Vec::new(),
+            input_undo_image_counts: Vec::new(),
+            cleared_draft_images: Vec::new(),
+            input_selection_anchor: None,
+            input_selection_clicks: Default::default(),
             input_typing_undo: None,
             history_draft: None,
             status_notice: None,
@@ -1168,6 +1332,9 @@ impl App {
                 .and_then(|p| std::fs::metadata(&p).ok())
                 .and_then(|m| m.modified().ok()),
             rate_limit_reset: None,
+            local_usage_limit_resume_attempts: 0,
+            credentials_changed_at: None,
+            account_change_resend_at: None,
             rate_limit_pending_message: None,
             consecutive_credential_failures: 0,
             last_stream_error: None,
@@ -1406,5 +1573,64 @@ impl App {
         self.server_spawning = true;
         self.remote_startup_phase = Some(super::RemoteStartupPhase::StartingServer);
         self.remote_startup_phase_started = Some(Instant::now());
+    }
+}
+
+/// Credential family a provider id or display name belongs to. Claude login,
+/// Claude API keys, and the Anthropic provider share one account; the same
+/// holds for OpenAI OAuth (Codex) and API keys.
+fn credential_family(provider: &str) -> String {
+    let normalized = provider.trim().to_ascii_lowercase();
+    // Login labels vary ("claude", "claude-api", "Anthropic API").
+    if normalized.starts_with("anthropic") || normalized.starts_with("claude") {
+        return "anthropic".to_string();
+    }
+    match normalized.as_str() {
+        "openai" | "openai-api" | "openai-oauth" | "openai api" | "codex" | "chatgpt" => {
+            "openai".to_string()
+        }
+        _ => normalized,
+    }
+}
+
+/// Whether a credential change for `changed` can unblock a turn held on
+/// `held`. An unscoped change (`None` or a catch-all such as an auto-import)
+/// applies to every provider, as does a change when the held provider is
+/// unknown.
+fn credential_change_applies_to(changed: Option<&str>, held: Option<&str>) -> bool {
+    let (Some(changed), Some(held)) = (changed, held) else {
+        return true;
+    };
+    let changed = credential_family(changed);
+    if changed.is_empty() || matches!(changed.as_str(), "all" | "auth" | "auto-import") {
+        return true;
+    }
+    let held = credential_family(held);
+    // Only Claude and OpenAI names are reliably comparable. Other ids (e.g. an
+    // OpenAI-compatible profile id vs its "OpenRouter" slot name) may not
+    // match textually, so keep releasing for them rather than strand a hold.
+    let known = |family: &str| matches!(family, "anthropic" | "openai");
+    changed == held || (!known(&changed) && !known(&held))
+}
+
+#[cfg(test)]
+mod credential_scope_tests {
+    use super::credential_change_applies_to as applies;
+
+    #[test]
+    fn credentials_changed_scope_matches_provider_families() {
+        assert!(applies(None, Some("Claude")));
+        assert!(applies(Some("anthropic"), None));
+        assert!(applies(Some("anthropic"), Some("Claude")));
+        assert!(applies(Some("Anthropic API"), Some("claude")));
+        assert!(applies(Some("claude-api"), Some("anthropic")));
+        assert!(applies(Some("openai-api"), Some("OpenAI")));
+        assert!(applies(Some("auto-import"), Some("Claude")));
+        assert!(!applies(Some("openai"), Some("Claude")));
+        assert!(!applies(Some("claude"), Some("OpenAI")));
+        assert!(!applies(Some("gemini"), Some("Claude")));
+        assert!(!applies(Some("anthropic"), Some("OpenRouter")));
+        // Unknown ids are not reliably comparable, so they still release.
+        assert!(applies(Some("deepseek"), Some("OpenRouter")));
     }
 }

@@ -11,7 +11,7 @@ use crate::agent::Agent;
 use crate::protocol::{FeatureToggle, NotificationType, ServerEvent};
 use crate::session::Session;
 use crate::util::truncate_str;
-use jcode_agent_runtime::{SoftInterruptSource, StreamError};
+use jcode_agent_runtime::SoftInterruptSource;
 use std::collections::{HashMap, HashSet};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -170,6 +170,7 @@ pub(super) async fn handle_notify_session(
             id,
             message: format!("Session '{}' is not currently live", session_id),
             retry_after_secs: None,
+            server_resumes: false,
         });
     }
 }
@@ -192,6 +193,7 @@ pub(super) async fn handle_applet_action(
                 id,
                 message: error.to_string(),
                 retry_after_secs: None,
+                server_resumes: false,
             });
             return;
         }
@@ -229,6 +231,7 @@ pub(super) fn handle_close_applet(
                 id,
                 message: error.to_string(),
                 retry_after_secs: None,
+                server_resumes: false,
             });
         }
     }
@@ -338,6 +341,7 @@ pub(super) async fn handle_set_subagent_model(
                 id,
                 message: crate::util::format_error_chain(&error),
                 retry_after_secs: None,
+                server_resumes: false,
             });
         }
     }
@@ -381,6 +385,7 @@ pub(super) fn handle_run_subagent(
                         id,
                         message: crate::util::format_error_chain(&error),
                         retry_after_secs: None,
+                        server_resumes: false,
                     });
                     return;
                 }
@@ -449,6 +454,7 @@ pub(super) fn handle_run_subagent(
                         id,
                         message: crate::util::format_error_chain(&error),
                         retry_after_secs: None,
+                        server_resumes: false,
                     });
                     return;
                 }
@@ -471,6 +477,7 @@ pub(super) fn handle_run_subagent(
                         id,
                         message: crate::util::format_error_chain(&persist_error),
                         retry_after_secs: None,
+                        server_resumes: false,
                     });
                     return;
                 }
@@ -533,6 +540,7 @@ pub(super) async fn handle_set_feature(
                         id,
                         message: crate::util::format_error_chain(&error),
                         retry_after_secs: None,
+                        server_resumes: false,
                     });
                 }
             }
@@ -548,6 +556,7 @@ pub(super) async fn handle_set_feature(
                         id,
                         message: crate::util::format_error_chain(&error),
                         retry_after_secs: None,
+                        server_resumes: false,
                     });
                 }
             }
@@ -654,6 +663,7 @@ pub(super) async fn handle_set_session_saved(
             id,
             message: crate::util::format_error_chain(&error),
             retry_after_secs: None,
+            server_resumes: false,
         });
         return;
     }
@@ -755,6 +765,7 @@ pub(super) async fn handle_rename_session(
                     id,
                     message: crate::util::format_error_chain(&error),
                     retry_after_secs: None,
+                    server_resumes: false,
                 });
                 return;
             }
@@ -813,9 +824,18 @@ pub(super) async fn handle_trigger_memory_extraction(
     let _ = client_event_tx.send(ServerEvent::Done { id });
 }
 
+#[cfg(test)]
 fn clone_split_session(
     parent_session_id: &str,
     live_parent: Option<&Session>,
+) -> anyhow::Result<(String, String)> {
+    clone_split_session_with_feedback(parent_session_id, live_parent, None)
+}
+
+fn clone_split_session_with_feedback(
+    parent_session_id: &str,
+    live_parent: Option<&Session>,
+    feedback_role: Option<&str>,
 ) -> anyhow::Result<(String, String)> {
     // Keep the persisted snapshot authoritative, including while the parent is
     // busy. A brand-new Agent may not have saved anything yet, however. Only a
@@ -837,6 +857,36 @@ fn clone_split_session(
     child.system_prompt = parent.system_prompt.clone();
     child.working_dir = parent.working_dir.clone();
     child.model = parent.model.clone();
+    crate::session_accounts::AccountInheritance::from_session(&parent).apply_to_session(&mut child);
+    if let Some(role) = feedback_role {
+        let (target, one_shot) = match role {
+            "review" => ("review", true),
+            "autoreview" => ("review", false),
+            "judge" => ("judge", true),
+            "autojudge" => ("judge", false),
+            _ => anyhow::bail!("Unknown feedback role: {role}"),
+        };
+        let config = crate::config::Config::load_strict()?;
+        let global = if target == "review" {
+            config.autoreview.model
+        } else {
+            config.autojudge.model
+        };
+        match parent.effective_agent_model(target, global) {
+            Some(model) if model != "inherit" => child.model = Some(model),
+            Some(_) => {}
+            None if one_shot => {
+                if let Ok(credentials) = crate::auth::codex::load_credentials()
+                    && (!credentials.refresh_token.trim().is_empty()
+                        || credentials.id_token.is_some())
+                {
+                    child.model = Some("gpt-5.5".to_string());
+                    child.provider_key = Some("openai".to_string());
+                }
+            }
+            None => {}
+        }
+    }
     child.status = crate::session::SessionStatus::Closed;
     // The parent agent keeps ownership of any in-flight request; tell the
     // forked agent so it treats the next prompt as fresh work instead of
@@ -874,6 +924,7 @@ fn create_transfer_child_session(
     child.model = parent.model.clone();
     child.provider_key = parent.provider_key.clone();
     child.route_api_method = parent.route_api_method.clone();
+    crate::session_accounts::AccountInheritance::from_session(parent).apply_to_session(&mut child);
     child.subagent_model = parent.subagent_model.clone();
     child.improve_mode = parent.improve_mode;
     child.autoreview_enabled = parent.autoreview_enabled;
@@ -892,6 +943,7 @@ pub(super) async fn handle_split(
     client_session_id: &str,
     agent: &Arc<Mutex<Agent>>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    feedback_role: Option<&str>,
 ) {
     let started = Instant::now();
     crate::logging::event_info(
@@ -906,9 +958,10 @@ pub(super) async fn handle_split(
     // Agent lock: busy sessions can still fork their last persisted snapshot.
     let result = {
         let idle_agent = agent.try_lock().ok();
-        clone_split_session(
+        clone_split_session_with_feedback(
             client_session_id,
             idle_agent.as_ref().map(|agent| agent.session_for_split()),
+            feedback_role,
         )
     };
     let (new_session_id, new_session_name) = match result {
@@ -928,6 +981,7 @@ pub(super) async fn handle_split(
                 id,
                 message: format!("Failed to save split session: {e}"),
                 retry_after_secs: None,
+                server_resumes: false,
             });
             return;
         }
@@ -982,6 +1036,7 @@ pub(super) async fn handle_transfer(
                 id,
                 message: format!("Failed to load session for transfer: {error}"),
                 retry_after_secs: None,
+                server_resumes: false,
             });
             return;
         }
@@ -1015,6 +1070,7 @@ pub(super) async fn handle_transfer(
                 id,
                 message: format!("Failed to compact session for transfer: {error}"),
                 retry_after_secs: None,
+                server_resumes: false,
             });
             return;
         }
@@ -1038,6 +1094,7 @@ pub(super) async fn handle_transfer(
                     id,
                     message: format!("Failed to create transfer session: {error}"),
                     retry_after_secs: None,
+                    server_resumes: false,
                 });
                 return;
             }
@@ -1329,13 +1386,12 @@ pub(super) async fn handle_agent_task(
                 Some(ctx.swarm_event_tx),
             )
             .await;
-            let retry_after_secs = e
-                .downcast_ref::<StreamError>()
-                .and_then(|stream_error| stream_error.retry_after_secs);
+            let retry_after_secs = super::usage_limit_resume::error_retry_after_secs(&e);
             let _ = ctx.client_event_tx.send(ServerEvent::Error {
                 id,
                 message: crate::util::format_error_chain(&e),
                 retry_after_secs,
+                server_resumes: false,
             });
         }
     }

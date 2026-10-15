@@ -39,6 +39,8 @@ fn sample_picker() -> crate::tui::InlineInteractiveState {
         column: 0,
         filter: String::new(),
         preview: false,
+        scoped_route_restore: Vec::new(),
+        effort_step: None,
         entries: vec![crate::tui::PickerEntry {
             name: "gpt-5.4".to_string(),
             options: vec![crate::tui::PickerOption {
@@ -79,9 +81,10 @@ fn model_suggestions_align_provider_and_method_columns() {
     picker.filtered.push(1);
     for preview in [false, true] {
         picker.preview = preview;
-        let lines = model_suggestion_lines(&picker, 3);
+        let lines = model_suggestion_lines(&picker, 4);
         let texts: Vec<String> = lines
             .iter()
+            .skip(usize::from(!preview))
             .take(2)
             .map(|line| {
                 line.spans
@@ -184,6 +187,8 @@ fn sample_account_picker(mixed_providers: bool) -> crate::tui::InlineInteractive
         column: 0,
         filter: String::new(),
         preview: false,
+        scoped_route_restore: Vec::new(),
+        effort_step: None,
         entries: models,
     }
 }
@@ -196,6 +201,8 @@ fn sample_agent_target_picker() -> crate::tui::InlineInteractiveState {
         column: 0,
         filter: String::new(),
         preview: false,
+        scoped_route_restore: Vec::new(),
+        effort_step: None,
         entries: vec![crate::tui::PickerEntry {
             name: "Swarm / subagent".to_string(),
             options: vec![crate::tui::PickerOption {
@@ -435,6 +442,59 @@ fn swarm_agent_model_picker_permanently_links_to_swarm_prompt_command() {
     assert!(hint.contains("swarm routing"));
 }
 
+#[test]
+fn account_picker_hint_separates_window_choice_from_default() {
+    let mut picker = sample_account_picker(false);
+    let hint = model_picker_top_hint(&picker).expect("account instructions");
+    assert!(hint.contains("Enter use in this window"));
+    assert!(hint.contains("Ctrl+D default for new windows"));
+    assert!(hint.contains("type to search"));
+    picker.entries[0].action =
+        crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Switch {
+            provider_id: "claude-code".to_string(),
+            label: "work".to_string(),
+        });
+    let hint = model_picker_top_hint(&picker).expect("Claude Code instructions");
+    assert!(hint.contains("default: config.toml"));
+    assert!(!hint.contains("Ctrl+D"));
+}
+
+#[test]
+fn account_picker_hint_describes_actions_without_offering_default_shortcut() {
+    use crate::tui::{AccountPickerAction, PickerAction};
+    let mut picker = sample_account_picker(false);
+    for (action, expected) in [
+        (
+            AccountPickerAction::Add {
+                provider_id: "claude".to_string(),
+            },
+            "Enter sign in to another account",
+        ),
+        (
+            AccountPickerAction::Replace {
+                provider_id: "claude".to_string(),
+                label: "claude-otter".to_string(),
+            },
+            "Enter refresh this saved login",
+        ),
+        (
+            AccountPickerAction::OpenCenter {
+                provider_filter: None,
+            },
+            "Enter open account center",
+        ),
+    ] {
+        picker.entries[0].action = PickerAction::Account(action);
+        let hint = model_picker_top_hint(&picker).unwrap();
+        assert!(hint.contains(expected), "{hint}");
+        assert!(!hint.contains("Ctrl+D"), "{hint}");
+    }
+    picker.filtered.clear();
+    let hint = model_picker_top_hint(&picker).unwrap();
+    assert!(hint.contains("Esc clear filter"));
+    assert!(!hint.contains("Enter"));
+}
+
 /// `/agents` must say which settings a choice changes and how to switch:
 /// the hint follows the `[session]` / `[global]` tags on the rows.
 #[test]
@@ -485,9 +545,8 @@ fn picker_entry_display_name_prettifies_known_model_families() {
     entry.name = "claude-opus-4-8".to_string();
     assert_eq!(picker_entry_display_name(entry), "Claude Opus 4.8");
 
-    entry.name = "gpt-5.5 (high)".to_string();
-    entry.effort = Some("high".to_string());
-    assert_eq!(picker_entry_display_name(entry), "GPT-5.5 (high)");
+    entry.name = "gpt-5.5".to_string();
+    assert_eq!(picker_entry_display_name(entry), "GPT-5.5");
 }
 
 #[test]

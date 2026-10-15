@@ -24,8 +24,8 @@ use crate::external_auth::{
 pub enum ProviderChoice {
     Jcode,
     /// Native Claude (Anthropic OAuth/API). `claude-subprocess` is kept as a
-    /// hidden alias for old scripts; the Claude Code CLI subprocess transport
-    /// has been removed.
+    /// hidden alias for old scripts. To run turns through the installed Claude
+    /// Code CLI instead, use `claude-code`.
     #[value(alias = "claude-subprocess")]
     Claude,
     #[value(alias = "claude-api", alias = "anthropic-key", alias = "claude-key")]
@@ -95,6 +95,10 @@ pub enum ProviderChoice {
     /// Grok Build subscription via the authenticated Grok CLI ACP transport.
     #[value(name = "grok-build")]
     GrokBuild,
+    /// Claude through the local Claude Code CLI (`claude`), side by side with
+    /// native Claude. The CLI owns login and tokens.
+    #[value(name = "claude-code", alias = "claude-code-cli")]
+    ClaudeCode,
     #[value(alias = "nvidia", alias = "nim")]
     NvidiaNim,
     #[value(alias = "xiaomi", alias = "mimo", alias = "xiaomi-mimo-api")]
@@ -183,6 +187,7 @@ impl ProviderChoice {
             Self::Minimax => "minimax",
             Self::Xai => "xai",
             Self::GrokBuild => "grok-build",
+            Self::ClaudeCode => "claude-code",
             Self::NvidiaNim => "nvidia-nim",
             Self::XiaomiMimo => "xiaomi-mimo",
             Self::MetaMuse => "meta-muse",
@@ -348,6 +353,10 @@ const PROVIDER_CHOICE_LOGIN_PROVIDERS: &[(ProviderChoice, LoginProviderDescripto
     (
         ProviderChoice::GrokBuild,
         crate::provider_catalog::GROK_BUILD_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::ClaudeCode,
+        crate::provider_catalog::CLAUDE_CODE_LOGIN_PROVIDER,
     ),
     (
         ProviderChoice::NvidiaNim,
@@ -1375,6 +1384,11 @@ pub async fn login_and_bootstrap_provider(
             )
             .ok_or_else(|| anyhow::anyhow!("Grok Build runtime is not registered"))?
         }
+        LoginProviderTarget::ClaudeCode => {
+            disable_subscription_runtime_mode();
+            select_initial_model_provider("claude-code");
+            Arc::new(provider::MultiProvider::new_fast())
+        }
         LoginProviderTarget::OpenAiApiKey => {
             disable_subscription_runtime_mode();
             select_initial_model_provider("openai");
@@ -1616,6 +1630,23 @@ async fn init_provider_with_model_policy(
                 crate::provider::external::GROK_BUILD_RUNTIME,
             )
             .ok_or_else(|| anyhow::anyhow!("Grok Build runtime is not registered"))?
+        }
+        ProviderChoice::ClaudeCode => {
+            disable_subscription_runtime_mode();
+            let binary = crate::auth::claude_code::binary();
+            if !crate::auth::claude_code::binary_available() {
+                anyhow::bail!(
+                    "Claude Code CLI `{binary}` was not found. Install Claude Code, or set [provider.claude_code].binary / JCODE_CLAUDE_CODE_BIN."
+                );
+            }
+            init_notice(&format!(
+                "Using Claude Code via the official CLI (`{binary}`, instance {}). Use /model to switch.",
+                crate::auth::claude_code::default_instance_id()
+            ));
+            // MultiProvider keeps native Claude and every other route available
+            // for /model; only the initial slot is Claude Code.
+            select_initial_model_provider("claude-code");
+            Arc::new(provider::MultiProvider::new_fast())
         }
         ProviderChoice::Openrouter => {
             disable_subscription_runtime_mode();

@@ -2,7 +2,7 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 use std::collections::HashMap;
 
@@ -35,6 +35,7 @@ pub struct AccountPicker {
     filter: String,
     summary: Option<AccountPickerSummary>,
     last_action_list_area: Option<Rect>,
+    removal_confirmation: Option<usize>,
 }
 
 pub enum OverlayAction {
@@ -90,6 +91,7 @@ impl AccountPicker {
             filter: String::new(),
             summary: Some(summary),
             last_action_list_area: None,
+            removal_confirmation: None,
         };
         picker.apply_filter();
         picker
@@ -101,48 +103,48 @@ impl AccountPicker {
             .and_then(|idx| self.items.get(*idx))
     }
 
-    fn visible_window_start(&self, available_items: usize) -> usize {
-        self.selected
-            .saturating_sub(available_items.saturating_sub(1).min(available_items / 2))
+    fn visible_rows(&self, height: u16) -> Vec<(usize, bool)> {
+        let capacity = height as usize;
+        if capacity == 0 || self.filtered.is_empty() {
+            return Vec::new();
+        }
+        let mut start = self.selected.saturating_sub(capacity / 2);
+        loop {
+            let mut rows = Vec::new();
+            let mut provider = None;
+            for index in start..self.filtered.len() {
+                let item = &self.items[self.filtered[index]];
+                if capacity > 1 && provider != Some(item.provider_id.as_str()) {
+                    if rows.len() + 2 > capacity {
+                        break;
+                    }
+                    rows.push((index, true));
+                }
+                provider = Some(item.provider_id.as_str());
+                if rows.len() == capacity {
+                    break;
+                }
+                rows.push((index, false));
+            }
+            if rows
+                .iter()
+                .any(|&(index, header)| index == self.selected && !header)
+                || start >= self.selected
+            {
+                return rows;
+            }
+            start += 1;
+        }
     }
 
     fn visible_index_for_action_row(&self, row: u16, list_height: u16) -> Option<usize> {
-        if self.filtered.is_empty() {
-            return None;
-        }
-
-        let available_items = (list_height as usize).max(1);
-        let start = self.visible_window_start(available_items);
-        let end = (start + available_items).min(self.filtered.len());
-        let mut current_provider: Option<&str> = None;
-        let mut rendered_row = 0u16;
-
-        for visible_idx in start..end {
-            let item = &self.items[self.filtered[visible_idx]];
-            if current_provider != Some(item.provider_id.as_str()) {
-                current_provider = Some(item.provider_id.as_str());
-                if rendered_row == row {
-                    return None;
-                }
-                rendered_row = rendered_row.saturating_add(1);
-                if rendered_row >= list_height {
-                    return None;
-                }
-            }
-
-            if rendered_row == row {
-                return Some(visible_idx);
-            }
-            rendered_row = rendered_row.saturating_add(1);
-            if rendered_row > row && rendered_row >= list_height {
-                return None;
-            }
-        }
-
-        None
+        self.visible_rows(list_height)
+            .get(row as usize)
+            .and_then(|&(index, header)| (!header).then_some(index))
     }
 
     fn apply_filter(&mut self) {
+        self.removal_confirmation = None;
         self.filtered = self
             .items
             .iter()
@@ -307,6 +309,22 @@ impl AccountPicker {
         code: KeyCode,
         modifiers: KeyModifiers,
     ) -> Result<OverlayAction> {
+        if let Some(target) = self.removal_confirmation {
+            if code == KeyCode::Char('y')
+                && modifiers.is_empty()
+                && self.filtered.get(self.selected) == Some(&target)
+            {
+                self.removal_confirmation = None;
+                return Ok(OverlayAction::Execute(self.items[target].command.clone()));
+            }
+            if code == KeyCode::Enter {
+                return Ok(OverlayAction::Continue);
+            }
+            self.removal_confirmation = None;
+            if code == KeyCode::Esc {
+                return Ok(OverlayAction::Continue);
+            }
+        }
         match code {
             KeyCode::Esc => {
                 if !self.filter.is_empty() {
@@ -316,16 +334,13 @@ impl AccountPicker {
                 }
                 return Ok(OverlayAction::Close);
             }
-            KeyCode::Char('q') if !modifiers.contains(KeyModifiers::CONTROL) => {
-                return Ok(OverlayAction::Close);
-            }
             KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
                 return Ok(OverlayAction::Close);
             }
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up => {
                 self.selected = self.selected.saturating_sub(1);
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Down => {
                 let max = self.filtered.len().saturating_sub(1);
                 self.selected = (self.selected + 1).min(max);
             }
@@ -335,17 +350,17 @@ impl AccountPicker {
             KeyCode::Right => {
                 self.select_next_provider_group();
             }
-            KeyCode::PageUp | KeyCode::Char('K') => {
+            KeyCode::PageUp => {
                 self.selected = self.selected.saturating_sub(6);
             }
-            KeyCode::PageDown | KeyCode::Char('J') => {
+            KeyCode::PageDown => {
                 let max = self.filtered.len().saturating_sub(1);
                 self.selected = (self.selected + 6).min(max);
             }
-            KeyCode::Home | KeyCode::Char('g') => {
+            KeyCode::Home => {
                 self.selected = 0;
             }
-            KeyCode::End | KeyCode::Char('G') => {
+            KeyCode::End => {
                 self.selected = self.filtered.len().saturating_sub(1);
             }
             KeyCode::Backspace => {
@@ -355,9 +370,27 @@ impl AccountPicker {
             }
             KeyCode::Enter => {
                 if let Some(item) = self.selected_item() {
+                    if action_section(item) == ActionSection::Remove {
+                        self.removal_confirmation = self.filtered.get(self.selected).copied();
+                        return Ok(OverlayAction::Continue);
+                    }
                     return Ok(OverlayAction::Execute(item.command.clone()));
                 }
-                return Ok(OverlayAction::Close);
+                return Ok(OverlayAction::Continue);
+            }
+            // Keep plain letters available for account search.
+            KeyCode::Char('d')
+                if modifiers.contains(KeyModifiers::CONTROL)
+                    && !modifiers.contains(KeyModifiers::ALT) =>
+            {
+                if let Some(AccountPickerCommand::Switch { provider, label }) =
+                    self.selected_item().map(|item| &item.command)
+                {
+                    return Ok(OverlayAction::Execute(AccountPickerCommand::SetDefault {
+                        provider: provider.clone(),
+                        label: label.clone(),
+                    }));
+                }
             }
             KeyCode::Char(c)
                 if !modifiers.contains(KeyModifiers::CONTROL)
@@ -372,6 +405,7 @@ impl AccountPicker {
     }
 
     pub fn handle_overlay_mouse(&mut self, mouse: MouseEvent) {
+        self.removal_confirmation = None;
         let Some(list_inner) = self.last_action_list_area else {
             return;
         };
@@ -400,7 +434,12 @@ impl AccountPicker {
     }
 
     pub fn render(&mut self, frame: &mut Frame) {
-        let area = centered_rect(OVERLAY_PERCENT_X, OVERLAY_PERCENT_Y, frame.area());
+        let compact = frame.area().height < 24 || frame.area().width < 70;
+        let area = if compact {
+            frame.area()
+        } else {
+            centered_rect(OVERLAY_PERCENT_X, OVERLAY_PERCENT_Y, frame.area())
+        };
 
         let block = Block::default()
             .title(format!(" {} ", self.title))
@@ -426,6 +465,16 @@ impl AccountPicker {
             width: area.width.saturating_sub(2),
             height: area.height.saturating_sub(2),
         };
+        if compact {
+            let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(3)]).split(inner);
+            frame.render_widget(
+                Paragraph::new(format!("Filter: {} | Ctrl+D default", self.filter)),
+                rows[0],
+            );
+            self.render_action_list(frame, rows[1]);
+            self.render_removal_confirmation(frame, inner);
+            return;
+        }
         let rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -448,11 +497,37 @@ impl AccountPicker {
         let footer = Paragraph::new(Line::from(vec![
             Span::styled("Focus ", Style::default().fg(MUTED_DARK)),
             Span::styled(
-                "saved accounts stay surfaced here; click actions to focus them, use Left/Right to jump provider groups, or use `/account <provider> settings` for the full text view.",
+                "Ctrl+D: default for new/unpinned windows. Left/Right: provider groups. Home/End, PageUp/PageDown: navigate. Type to search.",
                 Style::default().fg(MUTED),
             ),
         ]));
         frame.render_widget(footer, rows[2]);
+        self.render_removal_confirmation(frame, inner);
+    }
+
+    fn render_removal_confirmation(&self, frame: &mut Frame, area: Rect) {
+        let Some(target) = self
+            .removal_confirmation
+            .and_then(|index| self.items.get(index))
+        else {
+            return;
+        };
+        let exact_target = match &target.command {
+            AccountPickerCommand::Remove { label, .. } => {
+                format!("{} account `{label}`", target.provider_label)
+            }
+            AccountPickerCommand::SubmitInput(input) => input.clone(),
+            _ => return,
+        };
+        frame.render_widget(Clear, area);
+        let block = Block::bordered()
+            .title(" Confirm removal ")
+            .border_style(Style::default().fg(Color::Red));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        frame.render_widget(Paragraph::new(format!(
+            "Remove {exact_target}?\n\ny: confirm removal\nEsc: cancel\nEnter does not delete. Navigation, search or mouse cancels."
+        )).wrap(Wrap { trim: false }).style(Style::default().fg(Color::White).bg(PANEL_BG)), inner);
     }
 
     fn render_header(&self, frame: &mut Frame, area: Rect) {
@@ -517,10 +592,6 @@ impl AccountPicker {
         frame.render_widget(block, area);
         self.last_action_list_area = Some(list_inner);
 
-        let available_items = (list_inner.height as usize).max(1);
-        let start = self.visible_window_start(available_items);
-        let end = (start + available_items).min(self.filtered.len());
-
         let mut lines = Vec::new();
         if self.filtered.is_empty() {
             lines.push(Line::from(Span::styled(
@@ -532,20 +603,19 @@ impl AccountPicker {
                 Style::default().fg(MUTED),
             )));
         } else {
-            let mut current_provider: Option<&str> = None;
-            for visible_idx in start..end {
+            for (visible_idx, header) in self.visible_rows(list_inner.height) {
                 let idx = self.filtered[visible_idx];
                 let item = &self.items[idx];
                 let selected = visible_idx == self.selected;
 
-                if current_provider != Some(item.provider_id.as_str()) {
-                    current_provider = Some(item.provider_id.as_str());
+                if header {
                     lines.push(provider_header_line(
                         &item.provider_label,
                         self.filtered_provider_switch_count(&item.provider_id),
                         self.filtered_provider_secondary_count(&item.provider_id),
                         &item.provider_id,
                     ));
+                    continue;
                 }
 
                 let row_style = if selected {
@@ -555,9 +625,13 @@ impl AccountPicker {
                 };
                 let (icon, icon_color) = action_icon(item);
                 let title = compact_item_title(item);
-                let meta_width = list_inner.width.saturating_sub(16) as usize;
+                let badges = render_support::account_badges(item);
+                let badge_text: String = badges.iter().map(|badge| format!(" [{badge}]")).collect();
+                let meta_width = (list_inner.width as usize)
+                    .saturating_sub(16)
+                    .saturating_sub(badge_text.chars().count());
                 let meta = truncate_with_ellipsis(&item.subtitle, meta_width);
-                lines.push(Line::from(vec![
+                let mut spans = vec![
                     Span::styled(
                         if selected { "> " } else { "  " },
                         row_style.fg(Color::White),
@@ -567,13 +641,21 @@ impl AccountPicker {
                         truncate_with_ellipsis(&title, 22),
                         row_style.fg(Color::White),
                     ),
-                    Span::styled(" - ", row_style.fg(MUTED_DARK)),
-                    Span::styled(meta, row_style.fg(MUTED)),
-                ]));
+                ];
+                if !badge_text.is_empty() {
+                    spans.push(Span::styled(
+                        badge_text,
+                        row_style.fg(Color::Rgb(110, 214, 158)),
+                    ));
+                }
+                spans.push(Span::styled(" - ", row_style.fg(MUTED_DARK)));
+                spans.push(Span::styled(meta, row_style.fg(MUTED)));
+                lines.push(Line::from(spans));
             }
         }
 
-        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), list_inner);
+        // Each logical row must occupy exactly one physical line for mouse mapping.
+        frame.render_widget(Paragraph::new(lines), list_inner);
     }
 
     fn render_detail_pane(&self, frame: &mut Frame, area: Rect) {
@@ -853,9 +935,12 @@ fn estimate_command_bytes(command: &AccountPickerCommand) -> usize {
                 + status_notice.capacity()
         }
         AccountPickerCommand::Switch { label, .. }
+        | AccountPickerCommand::SetDefault { label, .. }
         | AccountPickerCommand::Login { label, .. }
         | AccountPickerCommand::Remove { label, .. } => label.capacity(),
-        AccountPickerCommand::PromptNew { .. } => 0,
+        AccountPickerCommand::PromptNew { .. }
+        | AccountPickerCommand::Unpin { .. }
+        | AccountPickerCommand::ToggleFailover => 0,
     }
 }
 
@@ -882,6 +967,296 @@ fn estimate_summary_bytes(summary: &AccountPickerSummary) -> usize {
 mod tests {
     use super::*;
     use ratatui::{Terminal, backend::TestBackend, widgets::Paragraph};
+
+    fn regression_items() -> Vec<AccountPickerItem> {
+        (0..12)
+            .map(|index| {
+                AccountPickerItem::action(
+                    format!("provider-{index}"),
+                    format!("Provider {index}"),
+                    format!("Action {index}"),
+                    "long subtitle that must never wrap into a mouse row",
+                    AccountPickerCommand::SubmitInput(format!("/account p{index} settings")),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn physical_rows_keep_every_selection_visible_and_map_mouse_exactly() {
+        let mut picker = AccountPicker::new("Accounts", regression_items());
+        for height in 1..9 {
+            for selection in 0..picker.filtered.len() {
+                picker.selected = selection;
+                let rows = picker.visible_rows(height);
+                assert!(rows.len() <= height as usize);
+                assert!(rows.contains(&(selection, false)));
+                let mut terminal = Terminal::new(TestBackend::new(32, height + 2)).unwrap();
+                terminal
+                    .draw(|frame| picker.render_action_list(frame, frame.area()))
+                    .unwrap();
+                let area = picker.last_action_list_area.unwrap();
+                for (row, &(index, header)) in rows.iter().enumerate() {
+                    assert_eq!(
+                        picker.visible_index_for_action_row(row as u16, height),
+                        (!header).then_some(index)
+                    );
+                    let marker =
+                        terminal.backend().buffer()[(area.x, area.y + row as u16)].symbol();
+                    assert_eq!(
+                        marker,
+                        if index == selection && !header {
+                            ">"
+                        } else {
+                            " "
+                        }
+                    );
+                    picker.selected = selection;
+                    picker.handle_overlay_mouse(MouseEvent {
+                        kind: MouseEventKind::Down(MouseButton::Left),
+                        column: area.x,
+                        row: area.y + row as u16,
+                        modifiers: KeyModifiers::empty(),
+                    });
+                    assert_eq!(picker.selected, if header { selection } else { index });
+                    picker.selected = selection;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn search_letters_and_empty_enter_never_execute() {
+        let mut picker = AccountPicker::new("Accounts", regression_items());
+        for letter in "Google work jqk default".chars() {
+            assert!(matches!(
+                picker
+                    .handle_overlay_key(KeyCode::Char(letter), KeyModifiers::empty())
+                    .unwrap(),
+                OverlayAction::Continue
+            ));
+        }
+        assert_eq!(picker.filter, "Google work jqk default");
+        assert!(picker.filtered.is_empty());
+        assert!(matches!(
+            picker
+                .handle_overlay_key(KeyCode::Enter, KeyModifiers::empty())
+                .unwrap(),
+            OverlayAction::Continue
+        ));
+        for code in [
+            KeyCode::Home,
+            KeyCode::End,
+            KeyCode::PageUp,
+            KeyCode::PageDown,
+        ] {
+            picker
+                .handle_overlay_key(code, KeyModifiers::empty())
+                .unwrap();
+            assert_eq!(picker.selected, 0);
+        }
+        picker
+            .handle_overlay_key(KeyCode::Esc, KeyModifiers::empty())
+            .unwrap();
+        for code in [KeyCode::End, KeyCode::PageDown] {
+            picker
+                .handle_overlay_key(code, KeyModifiers::empty())
+                .unwrap();
+            assert_eq!(picker.selected, 11);
+        }
+        picker
+            .handle_overlay_key(KeyCode::Home, KeyModifiers::empty())
+            .unwrap();
+        picker
+            .handle_overlay_key(KeyCode::PageUp, KeyModifiers::empty())
+            .unwrap();
+        assert_eq!(picker.selected, 0);
+    }
+
+    #[test]
+    fn removal_requires_y_and_changes_disarm_for_both_command_forms() {
+        for command in [
+            AccountPickerCommand::Remove {
+                provider: AccountProviderKind::OpenAi,
+                label: "exact-work".into(),
+            },
+            AccountPickerCommand::SubmitInput("/account openai remove exact-work".into()),
+        ] {
+            let item = AccountPickerItem::action(
+                "openai",
+                "OpenAI",
+                "Remove exact-work",
+                "saved",
+                command,
+            );
+            let mut picker = AccountPicker::new("Accounts", vec![item]);
+            for cancel in [
+                KeyCode::Esc,
+                KeyCode::Down,
+                KeyCode::Home,
+                KeyCode::End,
+                KeyCode::PageUp,
+                KeyCode::PageDown,
+                KeyCode::Backspace,
+            ] {
+                assert!(matches!(
+                    picker
+                        .handle_overlay_key(KeyCode::Enter, KeyModifiers::empty())
+                        .unwrap(),
+                    OverlayAction::Continue
+                ));
+                assert!(matches!(
+                    picker
+                        .handle_overlay_key(KeyCode::Enter, KeyModifiers::empty())
+                        .unwrap(),
+                    OverlayAction::Continue
+                ));
+                assert!(picker.removal_confirmation.is_some());
+                picker
+                    .handle_overlay_key(cancel, KeyModifiers::empty())
+                    .unwrap();
+                assert!(picker.removal_confirmation.is_none());
+            }
+            picker
+                .handle_overlay_key(KeyCode::Enter, KeyModifiers::empty())
+                .unwrap();
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            terminal.draw(|frame| picker.render(frame)).unwrap();
+            let buffer = terminal.backend().buffer();
+            let text = (0..24)
+                .flat_map(|y| (0..80).map(move |x| buffer[(x, y)].symbol()))
+                .collect::<String>();
+            assert!(text.contains("exact-work"));
+            assert!(text.contains("y: confirm removal"));
+            picker.handle_overlay_mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 0,
+                row: 0,
+                modifiers: KeyModifiers::empty(),
+            });
+            assert!(picker.removal_confirmation.is_none());
+            picker
+                .handle_overlay_key(KeyCode::Enter, KeyModifiers::empty())
+                .unwrap();
+            assert!(matches!(
+                picker
+                    .handle_overlay_key(KeyCode::Char('y'), KeyModifiers::empty())
+                    .unwrap(),
+                OverlayAction::Execute(_)
+            ));
+            let mut picker = picker.clone();
+            picker
+                .handle_overlay_key(KeyCode::Enter, KeyModifiers::empty())
+                .unwrap();
+            picker
+                .handle_overlay_key(KeyCode::Char('w'), KeyModifiers::empty())
+                .unwrap();
+            assert!(picker.removal_confirmation.is_none());
+        }
+    }
+
+    #[test]
+    fn compact_titles_preserve_login_intent_and_window_scope_in_details() {
+        for title in ["Sign in", "Refresh login"] {
+            let item = AccountPickerItem::action(
+                "openai",
+                "OpenAI",
+                title,
+                "OAuth",
+                AccountPickerCommand::SubmitInput("/account openai login".into()),
+            );
+            assert_eq!(compact_item_title(&item), title);
+        }
+        let item = AccountPickerItem::action(
+            "openai",
+            "OpenAI",
+            "Use work in this window",
+            "saved",
+            AccountPickerCommand::Switch {
+                provider: AccountProviderKind::OpenAi,
+                label: "work".into(),
+            },
+        );
+        assert_eq!(compact_item_title(&item), "work");
+        assert!(item.title.contains("in this window"));
+        let mut picker = AccountPicker::new("Accounts", vec![item]);
+        let mut terminal = Terminal::new(TestBackend::new(40, 8)).unwrap();
+        terminal.draw(|frame| picker.render(frame)).unwrap();
+        assert!(picker.last_action_list_area.unwrap().height >= 1);
+    }
+
+    #[test]
+    fn saved_account_enter_uses_in_window_and_ctrl_d_sets_default() {
+        let item = AccountPickerItem::action(
+            "claude",
+            "Claude",
+            "Switch account `claude-fox`",
+            "saved",
+            AccountPickerCommand::Switch {
+                provider: AccountProviderKind::Anthropic,
+                label: "claude-fox".into(),
+            },
+        );
+        let mut picker = AccountPicker::new("Accounts", vec![item.clone()]);
+        assert!(matches!(
+            picker.handle_overlay_key(KeyCode::Char('d'), KeyModifiers::CONTROL).unwrap(),
+            OverlayAction::Execute(AccountPickerCommand::SetDefault {
+                provider: AccountProviderKind::Anthropic,
+                ref label,
+            }) if label == "claude-fox"
+        ));
+        let mut picker = AccountPicker::new("Accounts", vec![item]);
+        assert!(matches!(
+            picker.handle_overlay_key(KeyCode::Enter, KeyModifiers::empty()).unwrap(),
+            OverlayAction::Execute(AccountPickerCommand::Switch { ref label, .. })
+                if label == "claude-fox"
+        ));
+        // With a filter typed, `d` keeps editing the filter.
+        let mut picker = AccountPicker::new(
+            "Accounts",
+            vec![AccountPickerItem::action(
+                "claude",
+                "Claude",
+                "Switch account `claude-fox`",
+                "saved default",
+                AccountPickerCommand::Switch {
+                    provider: AccountProviderKind::Anthropic,
+                    label: "claude-fox".into(),
+                },
+            )],
+        );
+        picker
+            .handle_overlay_key(KeyCode::Char('f'), KeyModifiers::empty())
+            .unwrap();
+        assert!(matches!(
+            picker
+                .handle_overlay_key(KeyCode::Char('d'), KeyModifiers::empty())
+                .unwrap(),
+            OverlayAction::Continue
+        ));
+    }
+
+    #[test]
+    fn saved_account_badges_mark_window_default_and_pinned() {
+        let item = |subtitle: &str| {
+            AccountPickerItem::action(
+                "claude",
+                "Claude",
+                "Switch account `claude-fox`",
+                subtitle,
+                AccountPickerCommand::Switch {
+                    provider: AccountProviderKind::Anthropic,
+                    label: "claude-fox".into(),
+                },
+            )
+        };
+        assert_eq!(
+            render_support::account_badges(&item("a@b - this window - pinned - default")),
+            vec!["this window", "pinned", "default"]
+        );
+        assert!(render_support::account_badges(&item("a@b - valid")).is_empty());
+        assert!(account_is_active(&item("a@b - this window")));
+    }
 
     #[test]
     fn account_usage_details_wrap_without_changing_switch_action() {
@@ -979,7 +1354,7 @@ mod tests {
             )],
         );
 
-        let backend = TestBackend::new(40, 12);
+        let backend = TestBackend::new(100, 30);
         let mut terminal = Terminal::new(backend).expect("failed to create terminal");
         terminal
             .draw(|frame| {
@@ -993,9 +1368,9 @@ mod tests {
         let overlay = centered_rect(
             OVERLAY_PERCENT_X,
             OVERLAY_PERCENT_Y,
-            Rect::new(0, 0, 40, 12),
+            Rect::new(0, 0, 100, 30),
         );
-        let probe = &terminal.backend().buffer()[(overlay.x + overlay.width - 3, overlay.y + 2)];
+        let probe = &terminal.backend().buffer()[(overlay.x.saturating_sub(1), overlay.y)];
         assert_eq!(probe.symbol(), "X");
         assert_ne!(probe.bg, Color::Rgb(18, 21, 30));
     }

@@ -182,28 +182,59 @@ fn test_ctrl_mouse_scroll_over_tool_side_panel_zooms_images() {
 
 #[test]
 fn test_mouse_scroll_events_are_classified_as_scroll_only() {
-    let mut app = create_test_app();
-    app.diff_mode = crate::config::DiffDisplayMode::File;
+    let _lock = scroll_render_test_lock();
+    let (mut app, mut terminal) = create_scroll_test_app(50, 12, 0, 36);
+    app.is_processing = true;
+    app.status = ProcessingStatus::Streaming;
 
-    crate::tui::ui::record_layout_snapshot(
-        Rect::new(0, 0, 40, 20),
-        None,
-        Some(Rect::new(40, 0, 20, 20)),
-        None,
+    let before_chat = render_and_snap(&app, &mut terminal);
+    assert!(
+        crate::tui::ui::last_max_scroll() > 2,
+        "chat fixture must have real rendered scrollable content"
     );
 
-    let scroll_only = app.handle_mouse_event(MouseEvent {
-        kind: MouseEventKind::ScrollDown,
-        column: 45,
+    // Chat scrolling intentionally redraws immediately while streaming. A
+    // changed offset and rendered viewport distinguish this from an ignored
+    // wheel event or a wheel event sent to an empty, unrendered transcript.
+    let chat_scroll_only = app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::ScrollUp,
+        column: 10,
         row: 5,
         modifiers: KeyModifiers::empty(),
     });
+    assert!(app.auto_scroll_paused);
+    assert!(app.scroll_offset > 0, "chat wheel must move the viewport");
+    assert!(
+        !chat_scroll_only,
+        "chat wheel events should request immediate redraw during streaming"
+    );
+    let after_chat = render_and_snap(&app, &mut terminal);
+    assert_ne!(after_chat, before_chat, "chat scroll must be visible");
 
+    // Overlays retain the deferrable scroll-only classification. Keep a
+    // positive classification check as well as actual scrolling so this test
+    // cannot pass if every event simply returns false or does nothing.
+    app.help_scroll = Some(0);
+    let before_help = render_and_snap(&app, &mut terminal);
+    let scroll_only = app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        column: 10,
+        row: 5,
+        modifiers: KeyModifiers::empty(),
+    });
     assert!(
         scroll_only,
-        "scroll wheel events should be deferrable during streaming"
+        "help overlay wheel events should remain deferrable during streaming"
     );
+    assert!(
+        app.help_scroll.is_some_and(|offset| offset > 0),
+        "help wheel must move the overlay"
+    );
+    let after_help = render_and_snap(&app, &mut terminal);
+    assert_ne!(after_help, before_help, "help scroll must be visible");
 
+    app.help_scroll = None;
+    render_and_snap(&app, &mut terminal);
     let non_scroll = app.handle_mouse_event(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
         column: 10,
@@ -1325,6 +1356,7 @@ fn configure_test_remote_models_with_openai_recommendations(app: &mut App) {
         })
         .cloned()
         .map(|model| crate::provider::ModelRoute {
+            catalog_metadata: None,
             model,
             provider: "OpenAI".to_string(),
             api_method: "openai-oauth".to_string(),
@@ -1335,6 +1367,7 @@ fn configure_test_remote_models_with_openai_recommendations(app: &mut App) {
         })
         .collect();
     app.remote_model_options.push(crate::provider::ModelRoute {
+        catalog_metadata: None,
         model: "claude-opus-4-8".to_string(),
         provider: "Anthropic".to_string(),
         api_method: "claude-oauth".to_string(),
@@ -1344,6 +1377,7 @@ fn configure_test_remote_models_with_openai_recommendations(app: &mut App) {
         cheapness: None,
     });
     app.remote_model_options.push(crate::provider::ModelRoute {
+        catalog_metadata: None,
         model: "claude-opus-4-8".to_string(),
         provider: "Anthropic".to_string(),
         api_method: "claude-api".to_string(),
@@ -1354,6 +1388,7 @@ fn configure_test_remote_models_with_openai_recommendations(app: &mut App) {
     });
     for api_method in ["claude-oauth", "claude-api"] {
         app.remote_model_options.push(crate::provider::ModelRoute {
+            catalog_metadata: None,
             model: jcode_provider_core::DEFAULT_CLAUDE_MODEL.to_string(),
             provider: "Anthropic".to_string(),
             api_method: api_method.to_string(),
@@ -1372,6 +1407,7 @@ fn configure_test_remote_openrouter_provider_routes(app: &mut App) {
     app.remote_available_entries = vec!["anthropic/claude-sonnet-4".to_string()];
     app.remote_model_options = vec![
         crate::provider::ModelRoute {
+            catalog_metadata: None,
             model: "anthropic/claude-sonnet-4".to_string(),
             provider: "auto".to_string(),
             api_method: "openrouter".to_string(),
@@ -1381,6 +1417,7 @@ fn configure_test_remote_openrouter_provider_routes(app: &mut App) {
             cheapness: None,
         },
         crate::provider::ModelRoute {
+            catalog_metadata: None,
             model: "anthropic/claude-sonnet-4".to_string(),
             provider: "Fireworks".to_string(),
             api_method: "openrouter".to_string(),
@@ -1390,6 +1427,7 @@ fn configure_test_remote_openrouter_provider_routes(app: &mut App) {
             cheapness: None,
         },
         crate::provider::ModelRoute {
+            catalog_metadata: None,
             model: "anthropic/claude-sonnet-4".to_string(),
             provider: "OpenAI".to_string(),
             api_method: "openrouter".to_string(),

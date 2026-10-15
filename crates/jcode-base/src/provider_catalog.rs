@@ -496,7 +496,6 @@ pub fn openai_compatible_profile_static_models(profile: OpenAiCompatibleProfile)
             push("step-3.7-flash");
             push("step-3.7-flash-novita");
             push("hy3");
-            push("hy3-tencent");
             push("hy3-novita");
             push("ling-3.0-flash");
             push("inkling");
@@ -738,7 +737,7 @@ fn conifer_context_limit(model: &str) -> Option<usize> {
         "grok-4.3" => 1_000_000,
         "seed-2.0-pro" | "seed-2.0-code" | "seed-2.0-mini" => 256_000,
         "step-3.7-flash" | "step-3.7-flash-novita" => 262_144,
-        "hy3" | "hy3-tencent" | "hy3-novita" => 262_144,
+        "hy3" | "hy3-novita" => 262_144,
         "ling-3.0-flash" => 131_072,
         "inkling" | "inkling-small" => 524_288,
         "nemotron-3-ultra" | "nemotron-3-super-120b" | "nemotron-3.5-lightning" => 262_144,
@@ -1180,7 +1179,12 @@ pub fn openai_compatible_profile_is_configured(profile: OpenAiCompatibleProfile)
     // env vars set by `apply_named_provider_profile_env`, not the built-in
     // `openai-compatible.env`. Honor those first so auth-test does not report a
     // false `not_configured` for a correctly-configured named profile (#402).
-    if let Some(configured) = active_named_provider_profile_is_configured() {
+    // The active named profile runs through the generic compatible endpoint.
+    // Built-in profiles must keep their own credential sources and local
+    // enablement, rather than inheriting the named endpoint's availability.
+    if profile.id == OPENAI_COMPAT_PROFILE.id
+        && let Some(configured) = active_named_provider_profile_is_configured()
+    {
         return configured;
     }
 

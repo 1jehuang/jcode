@@ -289,16 +289,138 @@ fn menubar_sandbox_fails_closed_without_passwd_home() {
     ));
 }
 
+fn menubar_args_fixture(exe: &[u8], argv: &[&[u8]]) -> Vec<u8> {
+    let mut bytes = (argv.len() as i32).to_ne_bytes().to_vec();
+    bytes.extend_from_slice(exe);
+    bytes.extend_from_slice(&[0, 0, 0]);
+    for arg in argv {
+        bytes.extend_from_slice(arg);
+        bytes.push(0);
+    }
+    bytes.extend_from_slice(b"ENV=menubar\0");
+    bytes
+}
+
 #[test]
 fn menubar_helper_pids_matches_only_exact_menubar_argv() {
-    let ps = "  100 /Users/me/.local/bin/jcode menubar\n\
-              101 /Users/me/.jcode/builds/versions/1.2/jcode menubar\n\
-              102 /Users/me/.local/bin/jcode serve\n\
-              103 /Users/me/.local/bin/jcode menubar --x\n\
-              104 /usr/bin/vim menubar\n\
-              105 /Users/me/.local/bin/jcode menubar\n\
-              junk\n";
-    assert_eq!(menubar_helper_pids(ps, 105), vec![100, 101]);
+    let ps = "100\n101\n102\n103\n104\n105\n106\njunk\n0\n";
+    let records = [
+        (
+            100,
+            menubar_args_fixture(b"/build/jcode", &[b"/build/jcode", b"menubar"]),
+        ),
+        (
+            101,
+            menubar_args_fixture(b"/My Builds/jcode", &[b"/My Builds/jcode", b"menubar"]),
+        ),
+        (
+            102,
+            menubar_args_fixture(b"/build/jcode", &[b"jcode", b"serve"]),
+        ),
+        (
+            103,
+            menubar_args_fixture(b"/build/jcode", &[b"jcode", b"menubar", b"--x"]),
+        ),
+        (
+            104,
+            menubar_args_fixture(b"/bin/vim", &[b"jcode", b"menubar"]),
+        ),
+    ];
+    assert_eq!(
+        menubar_helper_pids(ps, 105, |pid| records
+            .iter()
+            .find(|(id, _)| *id == pid)
+            .map(|(_, bytes)| bytes.clone())),
+        vec![100, 101]
+    );
+}
+
+#[test]
+fn menubar_process_args_preserves_non_utf8_executable_paths() {
+    assert!(is_menubar_process_args(&menubar_args_fixture(
+        b"/My\xff Builds/jcode",
+        &[b"jcode", b"menubar"]
+    )));
+}
+
+#[test]
+fn menubar_process_args_rejects_truncated_records() {
+    let bytes = menubar_args_fixture(b"/My Builds/jcode", &[b"jcode", b"menubar"]);
+    let required_len = bytes.len() - b"ENV=menubar\0".len();
+    assert!((0..required_len).all(|len| !is_menubar_process_args(&bytes[..len])));
+}
+
+#[test]
+fn menubar_process_args_rejects_combined_arguments() {
+    assert!(!is_menubar_process_args(&menubar_args_fixture(
+        b"/build/jcode",
+        &[b"jcode", b"menubar --once"]
+    )));
+}
+
+#[test]
+fn menubar_process_args_rejects_empty_argument() {
+    assert!(!is_menubar_process_args(&menubar_args_fixture(
+        b"/build/jcode",
+        &[b"jcode", b""]
+    )));
+}
+
+#[test]
+fn menubar_process_args_rejects_environment_only_menubar() {
+    let mut bytes = menubar_args_fixture(b"/build/jcode", &[b"jcode"]);
+    bytes.extend_from_slice(b"menubar\0");
+    assert!(!is_menubar_process_args(&bytes));
+}
+
+#[test]
+fn menubar_helper_pids_skips_self_before_reading_identity() {
+    assert!(
+        menubar_helper_pids("105\n0\njunk\n", 105, |_| panic!("unexpected process read"))
+            .is_empty()
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn menubar_helper_discovery_finds_disposable_executable_with_spaces() {
+    // This is a disposable link to cat, never Jcode or an AppKit helper.
+    // It reads a private stdin pipe via a symlink named menubar and exits on EOF.
+    // A copy of /bin/cat is sometimes SIGKILLed at launch by macOS, so link to it:
+    // the kernel records the linked path, which is all discovery inspects.
+    struct FixtureChild(std::process::Child);
+    impl Drop for FixtureChild {
+        fn drop(&mut self) {
+            drop(self.0.stdin.take());
+            let _ = self.0.wait();
+        }
+    }
+    let dir = tempfile::Builder::new()
+        .prefix("menubar discovery spaces ")
+        .tempdir()
+        .unwrap();
+    let exe = dir.path().join("jcode-discovery-fixture");
+    std::os::unix::fs::symlink("/bin/cat", &exe).unwrap();
+    std::os::unix::fs::symlink("/dev/stdin", dir.path().join("menubar")).unwrap();
+    let child = FixtureChild(
+        std::process::Command::new(&exe)
+            .arg("menubar")
+            .current_dir(dir.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    // The process listing can trail the spawn slightly.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !live_menubar_helper_pids().contains(&child.0.id()) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "fixture helper never appeared in the process listing"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
 }
 
 const PASSWD_PROBE_ENV: &str = "JCODE_MENUBAR_PASSWD_PROBE";

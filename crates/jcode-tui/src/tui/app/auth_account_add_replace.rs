@@ -23,7 +23,7 @@ impl App {
                 "claude",
                 "Claude",
                 "Add new account",
-                "Create the next numbered Claude account",
+                "Sign in to another Claude account. Existing saved accounts are kept.",
                 AccountPickerCommand::SubmitInput("/account claude add".to_string()),
             ));
             let accounts = match crate::auth::claude::list_accounts() {
@@ -40,8 +40,15 @@ impl App {
                 items.push(AccountPickerItem::action(
                     "claude",
                     "Claude",
-                    format!("Replace account {label}"),
-                    "Refresh this saved Claude account in place",
+                    format!("Refresh account {label}"),
+                    format!(
+                        "Sign in again as {}. Replaces the saved login for {label}.",
+                        account
+                            .email
+                            .as_deref()
+                            .map(mask_email)
+                            .unwrap_or_else(|| label.clone())
+                    ),
                     AccountPickerCommand::SubmitInput(format!("/account claude add {}", label)),
                 ));
             }
@@ -52,7 +59,7 @@ impl App {
                 "openai",
                 "OpenAI",
                 "Add new account",
-                "Create the next numbered OpenAI account",
+                "Sign in to another OpenAI account. Existing saved accounts are kept.",
                 AccountPickerCommand::SubmitInput("/account openai add".to_string()),
             ));
             let accounts = match crate::auth::codex::list_accounts() {
@@ -69,8 +76,15 @@ impl App {
                 items.push(AccountPickerItem::action(
                     "openai",
                     "OpenAI",
-                    format!("Replace account {label}"),
-                    "Refresh this saved OpenAI account in place",
+                    format!("Refresh account {label}"),
+                    format!(
+                        "Sign in again as {}. Replaces the saved login for {label}.",
+                        account
+                            .email
+                            .as_deref()
+                            .map(mask_email)
+                            .unwrap_or_else(|| label.clone())
+                    ),
                     AccountPickerCommand::SubmitInput(format!("/account openai add {}", label)),
                 ));
             }

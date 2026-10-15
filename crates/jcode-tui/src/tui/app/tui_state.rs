@@ -114,6 +114,20 @@ impl App {
         (provider, model)
     }
 
+    pub(super) fn remember_remote_effort_before_request(&mut self) {
+        if self.remote_reasoning_effort_before_request.is_none() {
+            self.remote_reasoning_effort_before_request =
+                Some(self.remote_reasoning_effort.clone());
+        }
+    }
+
+    pub(super) fn restore_rejected_remote_effort(&mut self) {
+        if let Some(confirmed) = self.remote_reasoning_effort_before_request.take() {
+            self.remote_reasoning_effort = confirmed;
+            self.invalidate_model_picker_cache();
+        }
+    }
+
     /// Best-known current reasoning effort for the remote session. Falls back
     /// to the configured provider-family default when the server has not
     /// reported one yet, so pre-settle effort cycling starts from the value the
@@ -485,7 +499,10 @@ impl App {
                     cache_read_tokens: None,
                     cache_write_tokens: None,
                     output_tps,
-                    available: usage.last_error.is_none(),
+                    // Before the first fetch lands, `get_sync` returns an
+                    // empty default (no error, 0% used). Showing that would
+                    // flash "100% left" for both limits, so wait for data.
+                    available: usage.last_error.is_none() && usage.fetched_at.is_some(),
                 })
             }
             WidgetProviderKind::OpenAI => {
@@ -1039,6 +1056,10 @@ impl crate::tui::TuiState for App {
         self.dictation_key_label().map(|s| s.to_string())
     }
 
+    fn jump_to_bottom_key_label(&self) -> Option<String> {
+        self.scroll_keys.to_bottom_label()
+    }
+
     fn animation_elapsed(&self) -> f32 {
         self.app_started.elapsed().as_secs_f32()
     }
@@ -1537,10 +1558,12 @@ impl crate::tui::TuiState for App {
             None
         };
 
-        // Gather background task info. Session-scoped rows come from task
-        // events (works when tasks run in the server process). The global
-        // manager only knows tasks spawned in this process.
-        let background_info = {
+        // Session-scoped task rows already have compact rows in the pinned
+        // band. Keep the overview fallback for local tasks that have not yet
+        // produced session events, without showing the same tasks twice.
+        let background_info = if !self.background_task_rows_ref().is_empty() {
+            None
+        } else {
             let bg_manager = crate::background::global();
             let (running_count, running_tasks, progress) = bg_manager.running_snapshot();
             let rows = self.background_task_rows_ref().to_vec();
@@ -1565,6 +1588,7 @@ impl crate::tui::TuiState for App {
         let route = self.widget_route_info(model.as_deref());
         let auth_method = self.widget_auth_method(route);
         let usage_info = self.widget_usage_info(route, auth_method);
+        let window_account = self.widget_window_account(auth_method);
 
         let tokens_per_second = if matches!(self.status, ProcessingStatus::Streaming) {
             self.compute_streaming_tps()
@@ -1589,11 +1613,10 @@ impl crate::tui::TuiState for App {
             read_tokens: history_read.saturating_add(self.token_accounting.total_cache_read_tokens),
             creation_tokens: history_write
                 .saturating_add(self.token_accounting.total_cache_creation_tokens),
-            optimal_input_tokens: if history_read == 0 {
-                self.token_accounting.total_cache_optimal_input_tokens
-            } else {
-                0
-            },
+            // History has no optimal denominator, so the yield uses live-only
+            // reads against live-only optimal input.
+            optimal_input_tokens: self.token_accounting.total_cache_optimal_input_tokens,
+            optimal_read_tokens: Some(self.token_accounting.total_cache_optimal_read_tokens),
             last_reported_input_tokens: self.token_accounting.last_cache_reported_input_tokens,
             last_read_tokens: self.token_accounting.last_cache_read_tokens,
             last_creation_tokens: self.token_accounting.last_cache_creation_tokens,
@@ -1706,6 +1729,7 @@ impl crate::tui::TuiState for App {
             },
             git_info: gather_git_info(),
             agent_edited: self.agent_edited_paths(),
+            window_account,
         }
     }
 
@@ -2020,6 +2044,10 @@ impl crate::tui::TuiState for App {
 
     fn copy_selection_range(&self) -> Option<crate::tui::CopySelectionRange> {
         self.normalized_copy_selection()
+    }
+
+    fn input_selection_range(&self) -> Option<(usize, usize)> {
+        self.input_selection()
     }
 
     fn copy_selection_status(&self) -> Option<crate::tui::CopySelectionStatus> {

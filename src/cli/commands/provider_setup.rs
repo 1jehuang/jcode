@@ -184,6 +184,9 @@ pub(crate) fn configure_provider_profile(
             input: Vec::new(),
         }],
         extra_body: None,
+        thinking_prefill: None,
+        prefill_name: None,
+        thinking_prefill_non_kimi: false,
         supports_reasoning_effort: None,
         disable_reasoning_heuristics: false,
     };

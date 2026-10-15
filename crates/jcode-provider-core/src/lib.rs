@@ -1,6 +1,8 @@
+pub mod account_pin;
 pub mod anthropic;
 pub mod attempt_tracker;
 pub mod auth_mode;
+pub mod catalog_metadata;
 pub mod catalog_refresh;
 pub mod failover;
 pub mod fallback_pick;
@@ -15,10 +17,15 @@ pub mod retry_after;
 pub mod selection;
 pub mod service_tier;
 pub mod transport;
+pub mod usage_limit;
 
 pub use jcode_usage_types::{ModelUsage, compare_model_usage};
 pub use transport::is_transient_transport_error;
+pub use usage_limit::{
+    AccountUsageLimit, account_usage_limit_marker, classify_account_usage_limit,
+};
 
+pub use account_pin::{AccountPin, AccountPinSlot, AccountProviderKind, AccountScope};
 pub use anthropic::{
     ANTHROPIC_OAUTH_BETA_HEADERS, ANTHROPIC_OAUTH_BETA_HEADERS_1M, AnthropicContextMode,
     AnthropicReasoningCaps, anthropic_context_mode, anthropic_effectively_1m,
@@ -30,10 +37,15 @@ pub use auth_mode::{
     AuthMode, AuthRoute, DualAuthProvider, pinned_mode_for, runtime_env_auth_route,
     runtime_env_pinned_mode,
 };
+pub use catalog_metadata::{
+    ModelMetadata, copilot_model_metadata, register_copilot_model_metadata,
+    register_copilot_route_metadata,
+};
 pub use catalog_refresh::{ModelCatalogRefreshSummary, summarize_model_catalog_refresh};
 pub use failover::{
     FailoverDecision, ProviderFailoverPrompt, classify_failover_error_message,
-    parse_failover_prompt_message,
+    is_billing_exhausted_error_message, is_provider_overload_message,
+    parse_failover_prompt_message, parse_http_status_message,
 };
 pub use fallback_pick::{
     FallbackPickOptions, error_looks_like_credential_failure, pick_next_fallback_route,
@@ -44,14 +56,15 @@ pub use models::{
     ALL_CLAUDE_MODELS, ALL_OPENAI_MODELS, CHATGPT_WEB_MODEL, DEFAULT_CLAUDE_MODEL,
     DEFAULT_CONTEXT_LIMIT, DEFAULT_OPENAI_MODEL, ModelCapabilities, OPENAI_API_ONLY_PRO_MODELS,
     context_limit_for_model, context_limit_for_model_with_provider,
-    context_limit_for_model_with_provider_and_cache, is_listable_model_name,
-    is_openai_api_only_pro_model, normalize_copilot_model_name,
+    context_limit_for_model_with_provider_and_cache, is_chatgpt_web_model, is_listable_model_name,
+    is_openai_api_only_pro_model, normalize_chatgpt_web_model_label, normalize_copilot_model_name,
     provider_for_model as core_provider_for_model,
     provider_for_model_with_hint as core_provider_for_model_with_hint, provider_key_from_hint,
 };
 pub use reasoning::{
     DEEPSEEK_SELECTABLE_EFFORTS, OPENAI_SELECTABLE_EFFORTS, OPENROUTER_SELECTABLE_EFFORTS,
-    canonical_reasoning_effort, inferred_reasoning_efforts,
+    canonical_reasoning_effort, inferred_reasoning_efforts, reasoning_effort_rank,
+    sort_reasoning_efforts,
 };
 pub use selection::{
     ActiveProvider, ProviderAvailability, auto_default_provider, cli_provider_arg_for_session_key,
@@ -59,6 +72,9 @@ pub use selection::{
     model_name_for_provider, parse_provider_hint, provider_from_model_key, provider_key,
     provider_label, strip_own_model_prefix,
 };
+
+/// When to resume a turn that stopped on a subscription usage limit.
+pub mod usage_limit_resume;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -329,6 +345,20 @@ pub trait Provider: Send + Sync {
         vec![]
     }
 
+    /// Metadata advertised by the active provider's model catalog.
+    fn model_metadata(&self, _model: &str) -> Option<ModelMetadata> {
+        None
+    }
+
+    /// Prompt budget, distinct from the combined input/output context window.
+    fn input_token_limit(&self) -> usize {
+        self.model_metadata(&self.model())
+            .and_then(|metadata| metadata.max_input_tokens)
+            .filter(|limit| *limit > 0)
+            .unwrap_or_else(|| self.context_window())
+            .min(self.context_window())
+    }
+
     /// Get the active service tier override (if applicable).
     fn service_tier(&self) -> Option<String> {
         None
@@ -375,6 +405,13 @@ pub trait Provider: Send + Sync {
         false
     }
 
+    /// Returns true if the provider runs its own agent loop and system prompt
+    /// (Claude Code). jcode then sends only the session's custom system prompt
+    /// and working directory instead of its own prompt.
+    fn uses_own_system_prompt(&self) -> bool {
+        false
+    }
+
     /// Invalidate any cached credentials.
     async fn invalidate_credentials(&self) {}
 
@@ -401,6 +438,41 @@ pub trait Provider: Send + Sync {
     /// by another process). Providers with in-memory credential caches override
     /// this; the default is a no-op.
     fn reload_credentials(&self) {}
+
+    /// Account pin for this provider instance (one per session fork).
+    /// `None` means the instance follows the default account.
+    fn account_pin(&self, _kind: AccountProviderKind) -> Option<AccountPin> {
+        None
+    }
+
+    /// Pin (or unpin with `None`) this instance to one stored account. Affects
+    /// only this instance, never other sessions or the stored default.
+    fn set_account_pin(&self, _kind: AccountProviderKind, _pin: Option<AccountPin>) -> Result<()> {
+        Ok(())
+    }
+
+    /// Account label the last request used (the pin, or the default account).
+    fn resolved_account_label(&self, _kind: AccountProviderKind) -> Option<String> {
+        None
+    }
+
+    /// Per-session same-provider account failover toggle. None = config default.
+    fn set_account_failover(&self, _enabled: Option<bool>) {}
+
+    /// Preferred pin to return to after an automatic failover move.
+    fn account_failover_home(&self, _kind: AccountProviderKind) -> Option<AccountPin> {
+        None
+    }
+
+    /// Restore the home pin (from the session on resume, or None to clear it).
+    fn set_account_failover_home(&self, _kind: AccountProviderKind, _home: Option<AccountPin>) {}
+
+    /// Called by the agent at turn start. When a home account's recorded reset
+    /// has passed (local check, config account_failover_return_home), re-pin
+    /// it, clear the home, and return the kinds that moved.
+    fn return_account_home_if_reset(&self) -> Vec<AccountProviderKind> {
+        Vec::new()
+    }
 
     /// Human-facing label for the runtime backing this provider instance.
     /// Unlike `display_name`, this reflects instance state (e.g. which
@@ -815,6 +887,8 @@ pub struct ModelRoute {
     pub available: bool,
     pub detail: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_metadata: Option<ModelMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cheapness: Option<RouteCheapnessEstimate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<jcode_usage_types::ModelUsage>,
@@ -849,6 +923,12 @@ pub enum RuntimeKey {
     RemoteCatalog,
     Current,
     GrokBuild,
+    /// Claude through the local Claude Code CLI. `instance` is `None` for the
+    /// configured default instance (`claude-code`), else `claude-code:<id>`.
+    ClaudeCode {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        instance: Option<String>,
+    },
     /// Catch-all for unrecognized `api_method` strings.
     ///
     /// This must be a struct variant, not `Other(String)`. Serde's internally
@@ -881,6 +961,9 @@ impl RuntimeKey {
             ModelRouteApiMethod::RemoteCatalog => Self::RemoteCatalog,
             ModelRouteApiMethod::Current => Self::Current,
             ModelRouteApiMethod::GrokBuild => Self::GrokBuild,
+            ModelRouteApiMethod::ClaudeCode { instance } => Self::ClaudeCode {
+                instance: instance.clone(),
+            },
             ModelRouteApiMethod::Other(method) => Self::Other {
                 method: method.clone(),
             },
@@ -908,6 +991,7 @@ impl RuntimeKey {
             Self::RemoteCatalog => "remote-catalog".to_string(),
             Self::Current => "current".to_string(),
             Self::GrokBuild => "grok-build".to_string(),
+            Self::ClaudeCode { instance } => claude_code_api_method(instance.as_deref()),
             Self::Other { method } => method.clone(),
         }
     }
@@ -993,6 +1077,7 @@ impl RouteSelection {
             RuntimeKey::Bedrock => format!("bedrock:{model}"),
             RuntimeKey::Antigravity => format!("antigravity:{model}"),
             RuntimeKey::GrokBuild => grok_build_model_spec(model),
+            RuntimeKey::ClaudeCode { .. } => claude_code_model_spec(model),
             RuntimeKey::Gemini
             | RuntimeKey::CodeAssistOAuth
             | RuntimeKey::RemoteCatalog
@@ -1008,6 +1093,24 @@ impl RouteSelection {
 pub fn grok_build_model_spec(model: &str) -> String {
     let bare = model.strip_prefix("grok-build:").unwrap_or(model).trim();
     format!("grok-build:{bare}")
+}
+
+/// Claude Code routing spec: `claude-opus-4-8` and `claude-code:claude-opus-4-8`
+/// both become `claude-code:claude-opus-4-8`, so `MultiProvider::set_model`
+/// dispatches to the Claude Code runtime and never to native Claude.
+pub fn claude_code_model_spec(model: &str) -> String {
+    let bare = model.trim();
+    let bare = bare.strip_prefix("claude-code:").unwrap_or(bare).trim();
+    format!("claude-code:{bare}")
+}
+
+/// Route api_method for a Claude Code instance: bare `claude-code` for the
+/// default instance, `claude-code:<id>` otherwise.
+pub fn claude_code_api_method(instance: Option<&str>) -> String {
+    match instance.map(str::trim).filter(|id| !id.is_empty()) {
+        Some(id) => format!("claude-code:{id}"),
+        None => "claude-code".to_string(),
+    }
 }
 
 /// OpenRouter catalog id for a bare model: claude models gain an `anthropic/`
@@ -1036,7 +1139,9 @@ pub enum ModelRouteApiMethod {
     OpenAIOAuth,
     OpenAIApiKey,
     OpenRouter,
-    OpenAiCompatible { profile_id: Option<String> },
+    OpenAiCompatible {
+        profile_id: Option<String>,
+    },
     Copilot,
     Cursor,
     Bedrock,
@@ -1045,6 +1150,10 @@ pub enum ModelRouteApiMethod {
     RemoteCatalog,
     Current,
     GrokBuild,
+    /// Claude Code CLI route. `instance` is `None` for the default instance.
+    ClaudeCode {
+        instance: Option<String>,
+    },
     Other(String),
 }
 
@@ -1080,6 +1189,18 @@ impl ModelRouteApiMethod {
             _ => trimmed,
         };
         let lower = trimmed.to_ascii_lowercase();
+        // Claude Code routes are checked first so the Claude auth alias table
+        // can never swallow them as native Claude OAuth.
+        if lower == "claude-code" {
+            return Self::ClaudeCode { instance: None };
+        }
+        if lower.starts_with("claude-code:") {
+            // Instance ids are case-sensitive slugs: keep the original casing.
+            let instance = trimmed["claude-code:".len()..].trim();
+            return Self::ClaudeCode {
+                instance: (!instance.is_empty()).then(|| instance.to_string()),
+            };
+        }
         // Dual-auth (Anthropic/OpenAI OAuth-vs-API) tokens share one canonical
         // alias table so the route vocabulary never drifts from the runtime/CLI
         // vocabularies. Anything else falls through to the route-only methods.
@@ -1140,6 +1261,20 @@ impl ModelRouteApiMethod {
         matches!(self, Self::Bedrock)
     }
 
+    pub fn is_claude_code(&self) -> bool {
+        matches!(self, Self::ClaudeCode { .. })
+    }
+
+    /// Instance id of a non-default Claude Code route.
+    pub fn claude_code_instance(&self) -> Option<&str> {
+        match self {
+            Self::ClaudeCode {
+                instance: Some(instance),
+            } => Some(instance.as_str()),
+            _ => None,
+        }
+    }
+
     pub fn matches_openai_compatible_profile(&self, provider_id: &str) -> bool {
         self.profile_id()
             .is_some_and(|profile_id| profile_id.eq_ignore_ascii_case(provider_id))
@@ -1168,6 +1303,7 @@ impl ModelRouteApiMethod {
             Self::RemoteCatalog => "remote-catalog".to_string(),
             Self::Current => "current".to_string(),
             Self::GrokBuild => "grok-build-acp".to_string(),
+            Self::ClaudeCode { .. } => "claude-code".to_string(),
             Self::Other(method) => method
                 .split_once(':')
                 .map(|(method, _)| method)

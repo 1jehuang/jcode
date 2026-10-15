@@ -460,6 +460,18 @@ pub(in crate::tui::app) fn handle_server_event(
         return true;
     }
 
+    // Replies to this window's account requests (/account switch, default,
+    // unpin, failover). Only these settle the change the user asked for.
+    match &event {
+        ServerEvent::Done { id } if app.settle_account_request(*id, Ok(())) => return true,
+        ServerEvent::Error { id, message, .. }
+            if app.settle_account_request(*id, Err(message.as_str())) =>
+        {
+            return true;
+        }
+        _ => {}
+    }
+
     let eager_stream_redraw = !crate::perf::tui_policy().enable_decorative_animations;
     if app.is_processing {
         app.last_stream_activity = Some(Instant::now());
@@ -531,6 +543,21 @@ pub(in crate::tui::app) fn handle_server_event(
     }
 
     let call_output_tokens_seen = remote.call_output_tokens_seen();
+
+    // Remember that this send already put model output on screen, so an
+    // overload failure after it is not answered with a full-turn resend.
+    // Reasoning only counts when it is displayed: hidden reasoning shows the
+    // user nothing, so a resend cannot duplicate anything on screen.
+    let shows_output = match &event {
+        ServerEvent::TextDelta { .. }
+        | ServerEvent::TextReplace { .. }
+        | ServerEvent::ToolStart { .. } => true,
+        ServerEvent::ReasoningDelta { .. } => crate::config::config().display.reasoning_enabled(),
+        _ => false,
+    };
+    if shows_output {
+        app.remote_turn_streamed_output = true;
+    }
 
     match event {
         ServerEvent::TextDelta { text } => {
@@ -799,13 +826,21 @@ pub(in crate::tui::app) fn handle_server_event(
                         .token_accounting
                         .total_cache_reported_input_tokens
                         .saturating_add(reported_delta);
-                    app.token_accounting.total_cache_read_tokens =
-                        app.token_accounting.total_cache_read_tokens.saturating_add(
-                            app.streaming
-                                .streaming_cache_read_tokens
-                                .unwrap_or(0)
-                                .saturating_sub(previous_cache_read.unwrap_or(0)),
-                        );
+                    let read_delta = app
+                        .streaming
+                        .streaming_cache_read_tokens
+                        .unwrap_or(0)
+                        .saturating_sub(previous_cache_read.unwrap_or(0));
+                    app.token_accounting.total_cache_read_tokens = app
+                        .token_accounting
+                        .total_cache_read_tokens
+                        .saturating_add(read_delta);
+                    if app.token_accounting.current_request_has_optimal {
+                        app.token_accounting.total_cache_optimal_read_tokens = app
+                            .token_accounting
+                            .total_cache_optimal_read_tokens
+                            .saturating_add(read_delta);
+                    }
                     app.token_accounting.total_cache_creation_tokens = app
                         .token_accounting
                         .total_cache_creation_tokens
@@ -937,6 +972,8 @@ pub(in crate::tui::app) fn handle_server_event(
                 attempt, max
             ));
             app.rollback_streaming_attempt();
+            // The partial output is gone, so the retried attempt starts clean.
+            app.remote_turn_streamed_output = false;
             remote.clear_pending();
             app.connection_phase_started = Some(Instant::now());
             app.status = ProcessingStatus::Connecting(crate::message::ConnectionPhase::Retrying {
@@ -1190,7 +1227,7 @@ pub(in crate::tui::app) fn handle_server_event(
             id,
             message,
             retry_after_secs,
-            ..
+            server_resumes,
         } => {
             if app.pending_agent_model_request_id == Some(id) {
                 app.pending_agent_model_request_id = None;
@@ -1201,6 +1238,32 @@ pub(in crate::tui::app) fn handle_server_event(
                 return false;
             }
             app.refresh_openai_usage_after_quota_error(&message);
+            let invalid_tool_calls_exhausted =
+                message.starts_with(crate::agent::Agent::MALFORMED_TOOL_CALL_ERROR_PREFIX);
+            // A server-initiated turn (scheduled task, swarm wake, DM) hit a
+            // usage limit and the server will resume it at the reset. Settle
+            // the adopted turn and say when it resumes. This client did not
+            // send the turn, so it must not hold or resend anything itself.
+            // Only the explicit `server_resumes` flag means that: an id-0
+            // error with just a retry hint is terminal and shown normally.
+            if !invalid_tool_calls_exhausted
+                && server_resumes
+                && let Some(resume_in) = retry_after_secs
+            {
+                let resume_in = resume_in.min(24 * 60 * 60);
+                if app.current_message_id.is_none() {
+                    app.handle_server_owned_usage_limit_resume(resume_in);
+                    remote.reset_call_output_tokens_seen();
+                } else {
+                    // The user's own turn is in flight. The notice is about a
+                    // different, server-owned turn: show it, but do not settle
+                    // the user's turn or spend its retry budget.
+                    app.push_display_message(DisplayMessage::system(
+                        App::server_usage_limit_resume_notice(resume_in),
+                    ));
+                }
+                return true;
+            }
             // The server rejects a Message request with this error while its
             // previous turn is still running. This typically happens when a
             // reload/reconnect raced the turn-end dispatch: the history
@@ -1238,45 +1301,61 @@ pub(in crate::tui::app) fn handle_server_event(
                 crate::provider::parse_failover_prompt_message(&message).is_some();
             let is_permanent_refresh_rejection =
                 crate::auth::refresh_state::error_is_permanent_rejection(&message);
-            let reset_duration = if is_failover_prompt || is_permanent_refresh_rejection {
+            let reset_duration = if invalid_tool_calls_exhausted
+                || is_failover_prompt
+                || is_permanent_refresh_rejection
+            {
                 None
             } else {
                 retry_after_secs
                     .map(|secs| Duration::from_secs(secs.min(MAX_TURN_HOLD_SECS)))
                     .or_else(|| parse_rate_limit_error(&message))
             };
-            // A stale reset or a limit that never clears must not resend the
-            // same turn forever. Rate-limit holds share the per-turn retry
-            // budget, which begin_remote_send carries across resends.
+            let previous_account_limit = app.turn_predates_credentials_change();
             let rate_limit_retry_exhausted = reset_duration.is_some()
+                && !previous_account_limit
                 && app
                     .rate_limit_pending_message
                     .as_ref()
                     .is_some_and(|pending| pending.retry_attempts >= App::AUTO_RETRY_MAX_ATTEMPTS);
-            if let Some(reset_duration) = reset_duration
-                && !rate_limit_retry_exhausted
-                && let Some(is_system) = app.rate_limit_pending_message.as_mut().map(|pending| {
+            if let Some(reset_duration) = reset_duration {
+                // The limit was hit by a turn sent before the account changed,
+                // so it reports the previous account's reset time (possibly
+                // hours away). Resend now on the new credentials instead.
+                if !rate_limit_retry_exhausted
+                    && let Some(pending) = app.rate_limit_pending_message.as_mut()
+                {
+                    // A stale reset timestamp or repeated 429 must not bypass
+                    // the normal retry budget forever. Carry this count through
+                    // begin_remote_send, just like other continuation retries.
+                    if previous_account_limit {
+                        pending.retry_attempts = 0;
+                    }
                     pending.retry_attempts = pending.retry_attempts.saturating_add(1);
-                    pending.is_system
-                })
-            {
-                app.rate_limit_reset = Some(Instant::now() + reset_duration);
-                let rate_limit_line = app.rate_limit_notice_with_nudge(reset_duration.as_secs());
-                app.push_display_message(DisplayMessage::system(rate_limit_line));
-                if is_system {
-                    app.set_status_notice("Rate limited; queued system retry");
-                } else {
-                    app.set_status_notice("Rate limited; queued retry");
+                    let is_system = pending.is_system;
+                    app.rate_limit_reset = Some(Instant::now() + reset_duration);
+                    if previous_account_limit {
+                        app.arm_account_change_resend(Instant::now());
+                    } else {
+                        let rate_limit_line =
+                            app.rate_limit_notice_with_nudge(reset_duration.as_secs());
+                        app.push_display_message(DisplayMessage::system(rate_limit_line));
+                        if is_system {
+                            app.set_status_notice("Rate limited; queued system retry");
+                        } else {
+                            app.set_status_notice("Rate limited; queued retry");
+                        }
+                    }
+                    app.is_processing = false;
+                    app.status = ProcessingStatus::Idle;
+                    app.stream_message_ended = false;
+                    app.processing_started = None;
+                    app.clear_visible_turn_started();
+                    app.current_message_id = None;
+                    remote.clear_pending();
+                    remote.reset_call_output_tokens_seen();
+                    return false;
                 }
-                app.is_processing = false;
-                app.status = ProcessingStatus::Idle;
-                app.stream_message_ended = false;
-                app.processing_started = None;
-                app.clear_visible_turn_started();
-                app.current_message_id = None;
-                remote.clear_pending();
-                remote.reset_call_output_tokens_seen();
-                return false;
             }
             // Snapshot the failed turn's payload before the cleanup below (and
             // the retry-budget bookkeeping) clears it, so a fallback offer
@@ -1326,16 +1405,23 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.offer_fallback_after_error_with_payload(&message, failed_fallback_payload);
                 return false;
             }
-            if rate_limit_retry_exhausted {
-                // Do not fall through to the generic retry or turn-end
-                // auto-poke: either would immediately restart the loop.
-                app.pause_exhausted_auto_resume(
-                    format!(
-                        "Rate-limit retry limit reached after {} automatic resumes. The provider still reports a limit. Your message is back in the input box. Wait for the limit to reset, check the provider account, or switch with /model.",
-                        App::AUTO_RETRY_MAX_ATTEMPTS
-                    ),
-                    "Paused: provider limit did not clear",
-                );
+            if rate_limit_retry_exhausted || invalid_tool_calls_exhausted {
+                // Do not fall through to generic retry or turn-end auto-poke:
+                // either would immediately restart the exhausted hold loop.
+                if invalid_tool_calls_exhausted {
+                    app.pause_exhausted_auto_resume(
+                        "Paused because the model kept sending invalid tool arguments. Your progress is saved. Re-send the message or switch with /model.".to_string(),
+                        "Paused: invalid tool arguments",
+                    );
+                } else {
+                    app.pause_exhausted_auto_resume(
+                        format!(
+                            "Rate-limit retry limit reached after {} automatic resumes. The provider still reports a limit. Your progress is saved. Wait for a valid reset, check the provider account, or switch with /model.",
+                            App::AUTO_RETRY_MAX_ATTEMPTS
+                        ),
+                        "Paused: provider limit did not clear",
+                    );
+                }
                 app.offer_fallback_after_error_with_payload(&message, failed_fallback_payload);
                 return false;
             }
@@ -1367,19 +1453,51 @@ pub(in crate::tui::app) fn handle_server_event(
                 return false;
             }
             if is_connectivity_error && app.rate_limit_pending_message.is_some() {
-                // The generic connectivity probe can succeed while this
-                // provider's host stays unreachable (for example a DNS
-                // failure for one endpoint). The budget is spent: pause
-                // instead of resending, and keep auto-poke from restarting it.
+                // Generic connectivity can be healthy while this provider's
+                // DNS remains broken. Do not let auto-poke reset the budget.
                 app.pause_exhausted_auto_resume(
                     format!(
-                        "Connection retry limit reached after {} automatic resumes. Your message is back in the input box. Check the provider endpoint or DNS, then re-send or switch with /model.",
+                        "Connection retry limit reached after {} automatic resumes. Your progress is saved. Check the provider endpoint or DNS, then re-send the message or switch with /model.",
                         App::AUTO_RETRY_MAX_ATTEMPTS
                     ),
                     "Paused: provider connection did not recover",
                 );
                 app.offer_fallback_after_error_with_payload(&message, failed_fallback_payload);
                 return false;
+            }
+            // Provider overload (5xx, 529 "heavy usage, try again in a
+            // moment"): the provider answered, so this is not a connectivity
+            // problem, but the same request usually succeeds a little later.
+            // Hold the turn and resend it, also for turns the user typed,
+            // before any path below can fail it or stop auto-poke.
+            // A turn that already streamed output or ran tools is continued
+            // from the server's saved history instead of resent in full.
+            if !is_connectivity_error
+                && crate::tui::app::commands::is_provider_overload_error(&message)
+            {
+                if app.schedule_pending_remote_overload_retry(&message) {
+                    return false;
+                }
+                // An exhausted overload budget must not fall through to the
+                // generic retry path, which would grant the same turn a new
+                // budget and let turn-end auto-poke restart it again.
+                if app
+                    .rate_limit_pending_message
+                    .as_ref()
+                    .is_some_and(|pending| {
+                        pending.overload_attempts >= App::OVERLOAD_RETRY_MAX_ATTEMPTS
+                    })
+                {
+                    app.pause_exhausted_auto_resume(
+                        format!(
+                            "Provider overload retry limit reached after {} automatic resumes. Your progress is saved. Re-send the message later or switch with /model.",
+                            App::OVERLOAD_RETRY_MAX_ATTEMPTS
+                        ),
+                        "Paused: provider overload did not recover",
+                    );
+                    app.offer_fallback_after_error_with_payload(&message, failed_fallback_payload);
+                    return false;
+                }
             }
             // Credential-failure circuit breaker: repeated auth failures mean
             // the login/API key is dead. Resending the identical request can
@@ -1445,8 +1563,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 );
                 return false;
             }
-            if !is_failover_prompt && !app.schedule_pending_remote_retry("⚠ Remote request failed.")
-            {
+            if !app.schedule_pending_remote_retry("⚠ Remote request failed.") {
                 app.clear_pending_remote_retry();
                 // No automatic retry will resend this turn, so restore the prompt the
                 // user typed back into the input box instead of dropping it.
@@ -1591,8 +1708,10 @@ pub(in crate::tui::app) fn handle_server_event(
             activity,
             token_usage_totals,
             side_panel,
+            account_labels,
             ..
         } => {
+            app.replace_window_accounts(account_labels);
             let prev_session_id = app.remote_session_id.clone();
             app.remote_provider_oauth_email = provider_oauth_email.clone();
             if resolved_credential == Some(jcode_provider_core::ResolvedCredential::Oauth)
@@ -1714,12 +1833,14 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.token_accounting.total_cache_read_tokens = 0;
                 app.token_accounting.total_cache_creation_tokens = 0;
                 app.token_accounting.total_cache_optimal_input_tokens = 0;
+                app.token_accounting.total_cache_optimal_read_tokens = 0;
                 app.token_accounting.last_cache_reported_input_tokens = None;
                 app.token_accounting.last_cache_prompt_tokens = None;
                 app.token_accounting.last_cache_read_tokens = None;
                 app.token_accounting.last_cache_creation_tokens = None;
                 app.token_accounting.last_cache_optimal_input_tokens = None;
                 app.token_accounting.cache_next_optimal_input_tokens = None;
+                app.token_accounting.current_request_has_optimal = false;
                 app.kv_cache.kv_cache_baseline = None;
                 app.kv_cache.pending_kv_cache_request = None;
                 app.kv_cache.kv_cache_turn_number = None;
@@ -1740,6 +1861,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.follow_chat_bottom();
                 if prev_session_id.is_some() {
                     app.queued_messages.clear();
+                    app.queued_message_images.clear();
                     app.queued_commands.clear();
                     app.interleave_message = None;
                     app.interleave_images.clear();
@@ -1801,6 +1923,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.status_detail = status_detail;
             }
             if session_changed || reasoning_effort.is_some() {
+                app.remote_reasoning_effort_before_request = None;
                 app.remote_reasoning_effort = reasoning_effort;
             }
             app.remote_service_tier = service_tier;
@@ -1869,6 +1992,12 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.token_accounting.total_cache_read_tokens = 0;
                 app.token_accounting.total_cache_creation_tokens = 0;
                 app.token_accounting.total_cache_optimal_input_tokens = 0;
+                app.token_accounting.total_cache_optimal_read_tokens = 0;
+                // Restart the yield window: a baseline from before the refresh
+                // must not become the denominator of the next request.
+                app.token_accounting.cache_next_optimal_input_tokens = None;
+                app.token_accounting.last_cache_optimal_input_tokens = None;
+                app.token_accounting.current_request_has_optimal = false;
                 // Token totals are restored from history above, but the dollar
                 // cost was never reconstructed, so resumed sessions showed `$0`
                 // in the cost widget until a new call happened. Price the
@@ -2422,6 +2551,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 // Always replace: the server reports the effort the new model
                 // runs with (`None` = cleared), so the chip must not keep the
                 // previous model's level.
+                app.remote_reasoning_effort_before_request = None;
                 app.remote_reasoning_effort = reasoning_effort;
                 app.invalidate_model_picker_cache();
                 app.persist_remote_header_hint();
@@ -2447,6 +2577,35 @@ pub(in crate::tui::app) fn handle_server_event(
                 }
             }
             app.invalidate_model_picker_cache();
+            true
+        }
+        ServerEvent::CredentialsChanged {
+            provider,
+            account_label,
+        } => {
+            if !app
+                .credential_change_is_for_this_window(provider.as_deref(), account_label.as_deref())
+            {
+                crate::logging::info(&format!(
+                    "Credentials changed for {:?} ({:?}), not this window's account; keeping hold",
+                    provider, account_label
+                ));
+                return false;
+            }
+            crate::logging::info(&format!(
+                "Credentials changed on server (provider={:?}); releasing any rate-limit hold",
+                provider
+            ));
+            app.release_rate_limit_hold_after_credentials_changed(provider.as_deref())
+        }
+        ServerEvent::SessionAccountChanged {
+            provider,
+            label,
+            pinned,
+            is_default,
+            reason,
+        } => {
+            app.handle_session_account_changed(provider, label, pinned, is_default, reason);
             true
         }
         ServerEvent::AvailableModelsUpdated {
@@ -2507,12 +2666,16 @@ pub(in crate::tui::app) fn handle_server_event(
         }
         ServerEvent::ReasoningEffortChanged { effort, error, .. } => {
             if let Some(err) = error {
+                app.restore_rejected_remote_effort();
+                app.set_status_notice("Effort switch failed");
                 app.push_display_message(DisplayMessage::error(format!(
                     "Failed to set effort: {}",
                     err
                 )));
             } else {
+                app.remote_reasoning_effort_before_request = None;
                 app.remote_reasoning_effort = effort.clone();
+                app.invalidate_model_picker_cache();
                 let label = effort
                     .as_deref()
                     .map(app_mod::effort_display_label)

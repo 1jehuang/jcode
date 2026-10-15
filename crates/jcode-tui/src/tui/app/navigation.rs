@@ -535,7 +535,9 @@ impl App {
     }
 
     pub(super) fn diff_pane_visible(&self) -> bool {
-        self.diff_mode.has_side_pane() || self.side_panel.focused_page().is_some()
+        !self.swarm_panel_full_page
+            && (self.side_panel.focused_page().is_some()
+                || (self.diff_mode.is_file() && self.display_edit_tool_message_count > 0))
     }
 
     pub(super) fn set_diff_pane_focus(&mut self, focus: bool) {
@@ -1140,6 +1142,26 @@ impl App {
         next
     }
 
+    pub(super) fn handle_side_command(&mut self, input: &str) -> bool {
+        let mut words = input.split_whitespace();
+        if words.next() != Some("/side") {
+            return false;
+        }
+        let arg = words.next().unwrap_or_default();
+        if words.next().is_some() {
+            self.set_status_notice("Usage: /side [on|off]");
+            return true;
+        }
+        match arg {
+            "off" => self.dismiss_side_panel(),
+            "on" if self.side_panel.focused_page().is_some() => {}
+            "" if self.side_panel.focused_page().is_some() => self.dismiss_side_panel(),
+            "" | "on" => self.toggle_side_panel(),
+            _ => self.set_status_notice("Usage: /side [on|off]"),
+        }
+        true
+    }
+
     pub(super) fn adjust_diagram_zoom(&mut self, delta: i8) {
         let next = (self.diagram_zoom as i16 + delta as i16).clamp(50, 200) as u8;
         if next != self.diagram_zoom {
@@ -1534,6 +1556,19 @@ impl App {
             finish_mouse_event!(false, "pinned_todos_expand");
         }
 
+        // The "Jump to bottom" pill. Checked before copy-selection so a click
+        // on it never arms a text selection anchor.
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && self.auto_scroll_paused
+            && crate::tui::ui::viewport::jump_to_bottom_area().is_some_and(|area| {
+                super::super::layout_utils::point_in_rect(mouse.column, mouse.row, area)
+            })
+        {
+            self.jump_to_chat_bottom();
+            crate::tui::ui::viewport::set_jump_to_bottom_area(None);
+            finish_mouse_event!(false, "jump_to_bottom_pill");
+        }
+
         // A left press in the composer moves the caret first (native text-field
         // behavior), then falls through so the shared copy-selection machinery
         // can arm a drag anchor: click repositions the cursor, drag selects the
@@ -1557,7 +1592,43 @@ impl App {
             self.reset_tab_completion();
         }
 
+        // Any left press drops the editable composer selection: a plain click
+        // just places the caret, a double/triple click re-selects below, and a
+        // press elsewhere starts a different (chat/side-pane) selection.
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            self.clear_input_selection();
+            let clicks = if clicked_input_cursor.is_some() {
+                self.input_selection_clicks.register(
+                    std::time::Instant::now(),
+                    mouse.column,
+                    mouse.row,
+                )
+            } else {
+                self.input_selection_clicks.reset();
+                1
+            };
+            if clicks >= 2 {
+                // Word/line selection keys off the character under the
+                // pointer, not the nearest caret boundary the click placed.
+                let pos = crate::tui::ui::copy_point_from_screen(mouse.column, mouse.row)
+                    .and_then(|point| {
+                        crate::tui::ui::input_byte_offset_for_copy_point(&self.input, point)
+                    })
+                    .unwrap_or(self.cursor_pos);
+                if self.select_input_for_click(pos, clicks) {
+                    // The composer selection owns this gesture; do not arm a
+                    // competing copy-selection drag over the same text.
+                    self.copy_selection_pending_anchor = None;
+                    self.copy_selection_dragging = false;
+                    self.copy_selection_anchor = None;
+                    self.copy_selection_cursor = None;
+                    finish_mouse_event!(false, "input_multi_click_select");
+                }
+            }
+        }
+
         if let Some(scroll_only) = self.handle_copy_selection_mouse(mouse) {
+            self.mirror_input_copy_selection(mouse.kind);
             finish_mouse_event!(scroll_only, "copy_selection");
         }
 

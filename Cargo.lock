@@ -3331,6 +3331,7 @@ dependencies = [
  "jcode-harness-api-server",
  "jcode-provider-anthropic-runtime",
  "jcode-provider-antigravity-runtime",
+ "jcode-provider-claude-code-runtime",
  "jcode-provider-copilot-runtime",
  "jcode-provider-core",
  "jcode-provider-cursor-runtime",
@@ -3418,6 +3419,7 @@ dependencies = [
  "jcode-pdf",
  "jcode-plan",
  "jcode-productivity-core",
+ "jcode-provider-anthropic-runtime",
  "jcode-provider-core",
  "jcode-schema-dialect",
  "jcode-selfdev-types",
@@ -3577,8 +3579,10 @@ dependencies = [
  "anyhow",
  "chrono",
  "jcode-core",
+ "jcode-logging",
  "jcode-selfdev-types",
  "jcode-storage",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",
@@ -3922,10 +3926,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "jcode-provider-claude-code-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "futures",
+ "jcode-base",
+ "jcode-message-types",
+ "jcode-provider-core",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "uuid",
+]
+
+[[package]]
 name = "jcode-provider-copilot"
 version = "0.1.0"
 dependencies = [
  "jcode-message-types",
+ "jcode-provider-core",
  "jcode-schema-dialect",
  "serde",
  "serde_json",

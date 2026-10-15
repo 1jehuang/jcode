@@ -549,6 +549,32 @@ fn overscroll_line_row(state: &TestState, width: u16) -> String {
 }
 
 #[test]
+fn overscroll_line_shows_this_windows_account_next_to_model() {
+    let mut state = overscroll_line_state();
+    state.info_widget_data.window_account = Some(info_widget::WindowAccount {
+        label: "openai-fox".to_string(),
+        pinned: true,
+        is_default: false,
+    });
+    let row = overscroll_line_row(&state, 200);
+    assert!(row.contains("GPT-5.6 Sol high · openai-fox"), "{row}");
+    assert!(!row.contains("(default)"), "{row}");
+
+    state.info_widget_data.window_account = Some(info_widget::WindowAccount {
+        label: "openai-otter".to_string(),
+        pinned: false,
+        is_default: true,
+    });
+    let row = overscroll_line_row(&state, 200);
+    assert!(row.contains("· openai-otter (default)"), "{row}");
+
+    // Narrow lines drop the account before the model.
+    let row = overscroll_line_row(&state, 40);
+    assert!(row.contains("GPT-5.6 Sol"), "{row}");
+    assert!(!row.contains("openai-otter"), "{row}");
+}
+
+#[test]
 fn overscroll_line_orders_dir_git_context_then_model_on_the_right() {
     let row = overscroll_line_row(&overscroll_line_state(), 200);
     let dir = row.find("~/jcode").expect("dir shown");
@@ -641,6 +667,9 @@ fn widgets_render_detail_layer_without_repeating_status_line_facts() {
     let _lock = viewport_snapshot_test_lock();
     clear_flicker_frame_history_for_tests();
     crate::tui::info_widget::clear_widget_placements_for_tests();
+    // This covers the floating detail layer. The docked info box is a fixed
+    // summary panel that intentionally leads with model, context, and branch.
+    crate::tui::info_widget::set_dock_disabled_for_test(true);
     let mut state = overscroll_line_state();
     state.suppress_info_widgets = false;
     state.info_widget_data.session_name = Some("sauropod".to_string());

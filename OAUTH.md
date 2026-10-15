@@ -115,6 +115,93 @@ The old Claude Code CLI shell-out transport has been removed. Jcode always talks
 to the Anthropic API directly. `--provider claude-subprocess` is accepted as an
 alias for `--provider claude`, and `JCODE_USE_CLAUDE_CLI` is ignored.
 
+### Claude Code mode (opt-in, side by side with native Claude)
+Claude Code mode runs Claude through the official Claude Code CLI (`claude`)
+instead of jcode's own Anthropic transport. It is a separate provider,
+`claude-code`, and it never replaces native Claude: both appear in `/model`, and
+a session picks one per turn.
+
+| | Native Claude (`claude`) | Claude Code mode (`claude-code`) |
+|---|---|---|
+| Transport | jcode calls the Anthropic API directly | jcode drives a long-lived `claude` process (stream-json) |
+| Credentials | `~/.jcode/auth.json` (jcode OAuth or imported) | Owned by Claude Code (`~/.claude` or the instance's `CLAUDE_CONFIG_DIR`); jcode never reads or imports them |
+| Tools | jcode executes its own tools | Claude Code runs its built-in tools; jcode-only tools are offered over an in-process MCP server |
+| Accounts | `claude-<n>` labels in `/account claude` | Instances from `[provider.claude_code]` in `/account claude-code` |
+| Model ids | `claude-opus-4-8`, `claude-oauth:...` | `claude-code:claude-opus-4-8` |
+
+Why use it: Claude Code keeps the login, makes every request and runs its own
+agent loop, tools, hooks and `CLAUDE.md` handling. jcode never reads or stores
+the credential. Anthropic's terms are the user's responsibility here too: its
+legal and compliance page says subscription (Free/Pro/Max) OAuth is for Claude
+Code and Claude.ai, and names the Agent SDK as not permitted with those tokens.
+This mode drives the `claude` CLI over that same SDK protocol, so check the
+current terms before using a subscription login with it. An API-key login
+(`ANTHROPIC_API_KEY` in the instance `env`) avoids the question. Native Claude
+stays the default and is unchanged.
+
+Enable it:
+
+```toml
+[provider]
+default_provider = "claude-code"   # optional; otherwise pick a Claude Code route in /model
+
+[provider.claude_code]
+binary = "claude"                  # path or name on PATH (env: JCODE_CLAUDE_CODE_BIN)
+permission_mode = "bypassPermissions"  # bypassPermissions | default | acceptEdits | plan | auto | dontAsk
+setting_sources = ["user", "project", "local"]
+expose_jcode_tools = true
+default_instance = "default"
+
+[[provider.claude_code.instances]]
+id = "default"                     # empty home = Claude Code's default login (~/.claude)
+display_name = "Claude (Max)"
+
+[[provider.claude_code.instances]]
+id = "personal"
+display_name = "Claude Personal"
+home = "~/.claude_personal"        # becomes CLAUDE_CONFIG_DIR for this instance
+```
+
+Without a `[provider.claude_code]` table there is one implicit `default`
+instance that uses Claude Code's default login.
+
+Login per instance (interactive terminal required, nothing is copied into jcode):
+
+```bash
+jcode login --provider claude-code                     # default instance: claude auth login
+jcode login --provider claude-code --account personal  # CLAUDE_CONFIG_DIR=~/.claude_personal claude auth login
+```
+
+Use it with `jcode --provider claude-code`, a `Claude Code` route in `/model`, or
+`/model claude-code:claude-opus-4-8`. `/account claude-code` lists the instances
+with the email and plan Claude Code cached for each login; picking one pins it
+for the current window. Each non-default instance also appears in `/model` as
+its own route (`claude-code:<instance>`), so picking a route picks the account.
+
+`jcode usage` and `/usage` list one `Claude Code` entry per instance, with the
+5-hour, weekly and model-scoped weekly windows, the account email and the
+plan. jcode reads them from an init-only `claude` process (`get_usage`, no
+prompt, no tokens). Instances that resolve to the same account are listed once.
+A signed-out instance shows its own `claude auth login` command.
+
+Permissions: the default `permission_mode = "bypassPermissions"` starts the
+CLI in that mode, so tools run without asking. In the other modes Claude Code
+first applies its own allow and deny rules. jcode has no approval prompt yet,
+so it answers the requests that are left. `acceptEdits` approves the built-in
+edit tools (`Write`, `Edit`, `MultiEdit`, `NotebookEdit`) and denies the rest.
+`default`, `auto`, `dontAsk` and `plan` deny every built-in tool request. An
+unknown mode counts as `default`. jcode's own `mcp__jcode__*` tools are always
+approved and keep jcode's own policy. `ExitPlanMode` always stops so the plan
+reaches you, and `AskUserQuestion` is turned into a normal reply.
+
+Limitations (first version):
+- No interactive per-tool approval prompt in jcode yet. Use `permission_mode`
+  and Claude Code's own permission rules.
+- No automatic same-provider failover between Claude Code instances yet.
+- jcode's `/compact` is not used; Claude Code compacts its own context.
+- Banked reset credits, history rewind/fork, Windows `.cmd` shims and Bedrock
+  instances are not supported.
+
 ## OpenAI / Codex OAuth
 
 ### Login steps
@@ -366,6 +453,57 @@ Cursor uses jcode's native HTTPS transport. Copilot uses GitHub device-flow auth
   - `CURSOR_API_KEY` (optional; overrides saved key)
 
 ### GitHub Copilot
+
+This local custom build supports GitHub Enterprise through
+`~/.jcode/config.toml`:
+
+```toml
+[provider]
+copilot_enterprise_url = "hiqfi.ghe.com"
+```
+
+Alternatively, configure the hostname through native login:
+
+```bash
+jcode login --provider copilot --enterprise-url hiqfi.ghe.com --no-browser
+```
+
+`--github-host` is an alias for `--enterprise-url`. Interactive CLI login offers
+public GitHub or an enterprise hostname and remembers the choice. Use
+`--enterprise-url github.com` to return to public GitHub. With an enterprise host
+configured, first-run onboarding opens that tenant's Copilot login rather than
+OpenAI sign-in or the Jcode subscription flow.
+
+No local proxy is needed: jcode itself performs device authentication, token
+refresh, model discovery, and inference. For this tenant the native paths are:
+
+| Purpose | Endpoint |
+| --- | --- |
+| Device authorization | `https://hiqfi.ghe.com/login/device/code` |
+| OAuth polling | `https://hiqfi.ghe.com/login/oauth/access_token` |
+| Copilot token exchange | `https://hiqfi.ghe.com/api/v3/copilot_internal/v2/token` |
+| Model catalog | `https://copilot-api.hiqfi.ghe.com/models` |
+| Responses inference | `https://copilot-api.hiqfi.ghe.com/responses` |
+| Chat inference | `https://copilot-api.hiqfi.ghe.com/chat/completions` |
+
+The value must be a bare DNS hostname or an HTTPS URL without a path or port.
+Login and OAuth polling use that host, GitHub REST and token exchange use
+`https://<host>/api/v3`, and models and inference use
+`https://copilot-api.<host>`. Leaving the option unset preserves public GitHub.
+The live catalog's `supported_endpoints` selects Chat Completions or Responses,
+including Responses-only models such as `gpt-6.1-sol`.
+Catalog metadata is retained in the host-specific cache and sent to local and
+remote model pickers. Reasoning controls use the advertised efforts rather than
+model-name guesses. Context windows, prompt budgets, output limits, vision,
+tool calls, parallel tools, streaming, structured outputs, and adaptive-thinking
+capabilities are preserved. The compaction budget uses the prompt limit, not the
+larger combined context window: for example GPT-6.1 Sol advertises 400,000 total
+tokens but 272,000 prompt tokens.
+Saved credentials and the model cache are scoped to the host; public-GitHub
+credentials are not automatically reused for an enterprise tenant. Explicit
+token environment variables still override stored credentials. Restart jcode
+after changing hosts; pending device logins must be restarted too.
+
 - Login: `jcode login --provider copilot`
   - Headless / SSH: `jcode login --provider copilot --no-browser`
   - Scriptable remote flow: `jcode login --provider copilot --print-auth-url`, then later `jcode login --provider copilot --complete`
@@ -377,11 +515,50 @@ Cursor uses jcode's native HTTPS transport. Copilot uses GitHub device-flow auth
   4. trusted `~/.copilot/config.json`
   5. trusted legacy `~/.config/github-copilot/hosts.json`
   6. trusted legacy `~/.config/github-copilot/apps.json`
-  7. trusted OpenCode/pi OAuth entries
-  8. `gh auth token`
+  7. trusted OpenCode/pi OAuth entries (public GitHub only)
+  8. `gh auth token --hostname <configured-host>` when
+     `JCODE_COPILOT_ALLOW_GH_AUTH_TOKEN=1`
 - Env vars:
   - `JCODE_COPILOT_CLI_PATH` (optional override for CLI path)
   - `JCODE_COPILOT_MODEL` (default: `claude-sonnet-4`)
+
+#### Installing and rolling back a custom build
+
+Disable automatic stock updates in `~/.jcode/config.toml` before installing:
+
+```toml
+[features]
+check_updates = false
+```
+
+From the source checkout, install an **already-built** binary (no build is run):
+
+```bash
+bash scripts/install_ghe.sh target/debug/jcode
+# With no argument, the installer uses target/selfdev/jcode.
+```
+
+The installer creates a SHA-256-addressed `versions/custom-ghe-<hash>/jcode`,
+promotes both `current` and `shared-server`, and points `~/.local/bin/jcode`
+at `current`. It preserves the stock `stable` channel and `versions/0.91.0`.
+Keep `~/.local/bin` before `~/.cargo/bin` in `PATH`; shell startup files and
+config are not modified. The shared server reload uses
+`JCODE_NO_AUTO_UPDATE=1 ... --no-update server reload --force` for graceful
+session handoff, including when the embedded version is unchanged.
+
+Channel changes are backed up and automatically restored if installation or
+reload fails. To undo a successful installation, use the exact rollback command
+printed by the installer, or:
+
+```bash
+bash scripts/install_ghe.sh --rollback ~/.jcode/builds/ghe-install-backups/<backup-directory>
+```
+
+Use the same `JCODE_INSTALL_DIR` if it was overridden. Rollback refuses to
+overwrite subsequently changed channels and retains the custom immutable
+payload. If server handoff cannot be confirmed, inspect server status rather
+than killing the daemon; filesystem rollback alone does not confirm runtime
+recovery. Keep automatic updates disabled while using the custom build.
 
 ### Antigravity
 - Login: `jcode login --provider antigravity` (native Google OAuth flow; does **not** require Antigravity to be installed)
