@@ -75,7 +75,10 @@ pub(crate) fn parse_model_info_value(value: &Value) -> Option<ModelInfo> {
                 .and_then(Value::as_object)
                 .and_then(|meta| first_u64_field(meta, &["n_ctx", "n_ctx_train"]))
         }),
-        pricing: parse_model_pricing(object.get("pricing")),
+        pricing: match object.get("pricing") {
+            Some(Value::Object(_)) => parse_model_pricing(object.get("pricing")),
+            _ => parse_flat_model_pricing(object),
+        },
         created: object.get("created").and_then(value_as_u64),
         input: parse_input_modalities(object),
     })
@@ -156,6 +159,22 @@ pub(crate) fn parse_model_pricing(value: Option<&Value>) -> ModelPricing {
     }
 }
 
+/// Read per-token prices published as flat top-level fields.
+///
+/// Requesty's `/v1/models` returns `pricing` as an array of context-length
+/// tiers and repeats the base tier as `input_price`, `output_price`,
+/// `cached_price` (cache read) and `caching_price` (cache write). The flat
+/// fields are the base rate, which is what `ModelPricing` can represent.
+pub(crate) fn parse_flat_model_pricing(object: &serde_json::Map<String, Value>) -> ModelPricing {
+    let price = |key: &str| object.get(key).and_then(value_as_pricing_string);
+    ModelPricing {
+        prompt: price("input_price"),
+        completion: price("output_price"),
+        input_cache_read: price("cached_price"),
+        input_cache_write: price("caching_price"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,5 +202,35 @@ mod tests {
         assert_eq!(models[0].pricing.prompt.as_deref(), Some("0.1"));
         assert_eq!(models[0].pricing.completion.as_deref(), Some("0.2"));
         assert_eq!(models[0].pricing.input_cache_read.as_deref(), Some("0.01"));
+    }
+
+    #[test]
+    fn requesty_flat_prices_are_parsed_when_pricing_is_a_tier_array() {
+        // Trimmed from a live router.requesty.ai/v1/models entry.
+        let models = parse_openai_compatible_models_response(
+            r#"{"object":"list","data":[{"id":"anthropic/claude-sonnet-4-5","object":"model","created":1759161676,"context_window":1000000,"input_price":0.000003,"caching_price":0.00000375,"cached_price":3e-7,"output_price":0.000015,"pricing":[{"prompt_tokens_threshold":0,"input_price":0.000003,"caching_price":0.00000375,"cached_price":3e-7,"output_price":0.000015},{"prompt_tokens_threshold":200000,"input_price":0.000006,"caching_price":0.0000075,"cached_price":6e-7,"output_price":0.0000225}],"supports_caching":true}]}"#,
+        )
+        .expect("Requesty catalog response should parse");
+
+        let pricing = &models[0].pricing;
+        let as_f64 = |v: Option<&str>| v.and_then(|v| v.parse::<f64>().ok());
+        assert_eq!(models[0].context_length, Some(1_000_000));
+        assert_eq!(as_f64(pricing.prompt.as_deref()), Some(0.000003));
+        assert_eq!(as_f64(pricing.completion.as_deref()), Some(0.000015));
+        assert_eq!(as_f64(pricing.input_cache_read.as_deref()), Some(3e-7));
+        assert_eq!(
+            as_f64(pricing.input_cache_write.as_deref()),
+            Some(0.00000375)
+        );
+    }
+
+    #[test]
+    fn model_without_any_pricing_fields_has_default_pricing() {
+        let models = parse_openai_compatible_models_response(
+            r#"{"data":[{"id":"my-policy","object":"model"}]}"#,
+        )
+        .expect("catalog response should parse");
+        assert!(models[0].pricing.prompt.is_none());
+        assert!(models[0].pricing.input_cache_read.is_none());
     }
 }
