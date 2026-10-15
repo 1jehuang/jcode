@@ -4,6 +4,157 @@
 use super::*;
 use chrono::{Duration as ChronoDuration, Utc};
 
+struct ProjectScopeRefreshEnv {
+    home: Option<std::ffi::OsString>,
+    scope: Option<std::ffi::OsString>,
+    temp: tempfile::TempDir,
+}
+
+impl ProjectScopeRefreshEnv {
+    fn new(enabled: bool) -> Self {
+        let temp = tempfile::tempdir().expect("test home");
+        let guard = Self {
+            home: std::env::var_os("JCODE_HOME"),
+            scope: std::env::var_os("JCODE_RESUME_PROJECT_SCOPE"),
+            temp,
+        };
+        crate::env::set_var("JCODE_HOME", guard.temp.path());
+        crate::env::set_var("JCODE_RESUME_PROJECT_SCOPE", enabled.to_string());
+        crate::config::Config::invalidate_cache();
+        guard
+    }
+}
+
+impl Drop for ProjectScopeRefreshEnv {
+    fn drop(&mut self) {
+        for (name, previous) in [
+            ("JCODE_HOME", &self.home),
+            ("JCODE_RESUME_PROJECT_SCOPE", &self.scope),
+        ] {
+            match previous {
+                Some(value) => crate::env::set_var(name, value),
+                None => crate::env::remove_var(name),
+            }
+        }
+        crate::config::Config::invalidate_cache();
+    }
+}
+
+fn project_scope_session(id: &str, dir: &str, minutes_ago: i64) -> SessionInfo {
+    let mut session = make_session(id, id, false, SessionStatus::Closed);
+    session.working_dir = Some(dir.to_string());
+    session.last_message_time = Utc::now() - ChronoDuration::minutes(minutes_ago);
+    session
+}
+
+fn assert_cached_project_scope_highlight_survives(enabled: bool) {
+    let _lock = crate::storage::lock_test_env();
+    let _env = ProjectScopeRefreshEnv::new(enabled);
+    let first = project_scope_session("outside_first", "/work/elsewhere", 1);
+    let chosen = project_scope_session("outside_chosen", "/work/elsewhere", 2);
+    let here = project_scope_session("fresh_project", "/work/project", 0);
+    let mut picker = SessionPicker::loading();
+    picker.set_current_dir(Some("/work/project".to_string()));
+    picker.focus_search_input();
+    picker
+        .apply_session_list_update(SessionListUpdate::Cached((
+            Vec::new(),
+            vec![first.clone(), chosen.clone()],
+        )))
+        .unwrap();
+    assert_eq!(picker.filter_mode, SessionFilterMode::All);
+    picker
+        .handle_overlay_key(KeyCode::Down, KeyModifiers::empty())
+        .unwrap();
+    assert_eq!(picker.selected_session().unwrap().id, "outside_chosen");
+    assert!(!picker.filter_mode_user_chosen);
+
+    picker
+        .apply_session_list_update(SessionListUpdate::Fresh(Ok((
+            Vec::new(),
+            vec![here, chosen, first],
+        ))))
+        .unwrap();
+    assert_eq!(picker.filter_mode, SessionFilterMode::All);
+    assert_eq!(picker.selected_session().unwrap().id, "outside_chosen");
+    let action = picker
+        .handle_overlay_key(KeyCode::Enter, KeyModifiers::empty())
+        .unwrap();
+    assert!(matches!(
+        action,
+        OverlayAction::Selected(
+            PickerResult::SelectedInCurrentTerminal(targets)
+                | PickerResult::SelectedInNewTerminal(targets)
+        ) if matches!(targets.as_slice(), [ResumeTarget::JcodeSession { session_id }]
+                if session_id == "outside_chosen")
+    ));
+}
+
+#[test]
+fn test_project_scope_refresh_keeps_cached_highlight_when_enabled() {
+    assert_cached_project_scope_highlight_survives(true);
+}
+
+#[test]
+fn test_project_scope_refresh_keeps_cached_highlight_when_disabled() {
+    assert_cached_project_scope_highlight_survives(false);
+}
+
+#[test]
+fn test_project_scope_refresh_scopes_first_nonempty_result_after_empty_cache() {
+    let _lock = crate::storage::lock_test_env();
+    let _env = ProjectScopeRefreshEnv::new(true);
+    let mut picker = SessionPicker::loading();
+    picker.set_current_dir(Some("/work/project".to_string()));
+    picker
+        .apply_session_list_update(SessionListUpdate::Cached((Vec::new(), Vec::new())))
+        .unwrap();
+    assert!(picker.selected_session().is_none());
+    picker
+        .apply_session_list_update(SessionListUpdate::Fresh(Ok((
+            Vec::new(),
+            vec![
+                project_scope_session("outside", "/work/elsewhere", 0),
+                project_scope_session("here", "/work/project", 1),
+            ],
+        ))))
+        .unwrap();
+    assert_eq!(picker.filter_mode, SessionFilterMode::CurrentDir);
+    assert_eq!(visible_ids(&picker), vec!["here".to_string()]);
+}
+
+#[test]
+fn test_project_scope_refresh_preserves_explicit_all_choice_after_empty_cache() {
+    let _lock = crate::storage::lock_test_env();
+    let _env = ProjectScopeRefreshEnv::new(true);
+    let mut picker = SessionPicker::loading();
+    picker.set_current_dir(Some("/work/project".to_string()));
+    picker.focus_search_input();
+    for modifiers in [
+        KeyModifiers::CONTROL,
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ] {
+        picker
+            .handle_overlay_key(KeyCode::Char('s'), modifiers)
+            .unwrap();
+    }
+    picker
+        .apply_session_list_update(SessionListUpdate::Cached((Vec::new(), Vec::new())))
+        .unwrap();
+    picker
+        .apply_session_list_update(SessionListUpdate::Fresh(Ok((
+            Vec::new(),
+            vec![
+                project_scope_session("outside", "/work/elsewhere", 0),
+                project_scope_session("here", "/work/project", 1),
+            ],
+        ))))
+        .unwrap();
+    assert!(picker.filter_mode_user_chosen);
+    assert_eq!(picker.filter_mode, SessionFilterMode::All);
+    assert_eq!(visible_ids(&picker).len(), 2);
+}
+
 fn type_to_search_picker() -> SessionPicker {
     let mut zebra = make_session("session_zebra", "zebra", false, SessionStatus::Closed);
     let mut otter = make_session("session_otter", "otter", false, SessionStatus::Closed);
