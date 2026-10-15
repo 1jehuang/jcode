@@ -1,5 +1,99 @@
 // Literal marker-looking text is never an attachment ownership token.
 #[test]
+fn image_provenance_prepared_context_command_keeps_pre_normalization_routing() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut app = create_test_app();
+    let png = paste_selection_test_png(&mut app, 96);
+    // Restored pending images may arrive with command text but no owned spans.
+    app.input = "/context".to_string();
+    app.cursor_pos = app.input.len();
+    app.input_image_markers = Default::default();
+    let prepared = super::input::take_prepared_input(&mut app);
+    assert_eq!(prepared.routing_input(), "/context");
+    assert_eq!(prepared.raw_input, "/context [image 1]");
+    assert_eq!(prepared.images, vec![("image/png".to_string(), png.clone())]);
+    app.is_remote = true;
+    app.runtime_mode = super::AppRuntimeMode::RemoteClient;
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    rt.block_on(super::remote::submit_remote_slash_input(&mut app, &mut remote, prepared)).unwrap();
+    assert_eq!(app.display_messages().last().unwrap().title.as_deref(), Some("Context"));
+    assert_eq!(app.pending_images, vec![("image/png".to_string(), png)]);
+    assert!(!app.pending_turn);
+    assert!(app.rate_limit_pending_message.is_none());
+}
+#[test]
+fn image_provenance_image_only_skill_sends_png_on_its_own_turn() {
+    let temp = tempfile::tempdir().unwrap();
+    let skill_dir = temp.path().join(".jcode/skills/provenance-skill");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(skill_dir.join("SKILL.md"), "---\nname: provenance-skill\ndescription: Image-only skill fixture\n---\nInspect the image.\n").unwrap();
+    let mut app = create_test_app();
+    app.session.working_dir = Some(temp.path().to_string_lossy().to_string());
+    app.refresh_skills_snapshot();
+    assert!(app.current_skills_snapshot().get("provenance-skill").is_some());
+    super::input::insert_input_text(&mut app, "/provenance-skill ");
+    let png = paste_selection_test_png(&mut app, 94);
+    let before = app.session.messages.len();
+    app.submit_input();
+    assert_eq!(app.session.messages.len(), before + 1, "image-only skill must send a turn");
+    assert_eq!(app.active_skill.as_deref(), Some("provenance-skill"));
+    assert!(app.pending_images.is_empty());
+    let first = app.session.messages.last().unwrap();
+    assert!(first.content.iter().any(|block| matches!(block,
+        crate::message::ContentBlock::Image { data, .. } if data == &png)));
+    assert!(first.content.iter().all(|block| !matches!(block,
+        crate::message::ContentBlock::Text { text, .. } if text.contains("[image"))));
+    app.is_processing = false;
+    app.pending_turn = false;
+    super::input::insert_input_text(&mut app, "later unrelated prompt");
+    app.submit_input();
+    assert_eq!(app.session.messages.len(), before + 2);
+    assert!(app.session.messages.last().unwrap().content.iter().all(|block|
+        !matches!(block, crate::message::ContentBlock::Image { .. })));
+    app.is_processing = false;
+    app.pending_turn = false;
+    let before_bare = app.session.messages.len();
+    super::input::insert_input_text(&mut app, "/provenance-skill");
+    app.submit_input();
+    assert_eq!(app.session.messages.len(), before_bare, "bare skill stays activation-only");
+    assert!(!app.is_processing);
+}
+
+#[test]
+fn image_provenance_repeated_multiline_paste_rebases_owned_marker() {
+    for image_before in [false, true] {
+    for text in ["one\ntwo\nthree\nfour\nfive", "a\nb\nc\nd\ne", "é\nβ\n图\n🌈\n[image 1]"] {
+        let mut app = create_test_app();
+        let png = if image_before {
+            let png = paste_selection_test_png(&mut app, 95);
+            super::input::handle_text_paste(&mut app, text.to_string());
+            png
+        } else {
+            super::input::handle_text_paste(&mut app, text.to_string());
+            paste_selection_test_png(&mut app, 95)
+        };
+        super::input::handle_text_paste(&mut app, text.to_string());
+        let raw = if image_before { format!("[image 1]{text}") } else { format!("{text}[image 1]") };
+        assert_eq!(app.input, raw);
+        let prepared = super::input::take_prepared_input(&mut app);
+        assert_eq!(prepared.raw_input, raw);
+        assert_eq!(prepared.expanded, text, "owned marker leaked after paste expansion");
+        assert_eq!(prepared.images, vec![("image/png".to_string(), png.clone())]);
+        super::remote::restore_prepared_remote_input(&mut app, prepared);
+        app.submit_input();
+        let message = app.session.messages.last().unwrap();
+        let sent: String = message.content.iter().filter_map(|block| match block {
+            crate::message::ContentBlock::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        }).collect();
+        assert_eq!(sent, text);
+        assert!(message.content.iter().any(|block| matches!(block,
+            crate::message::ContentBlock::Image { data, .. } if data == &png)));
+    }
+    }
+}
+#[test]
 fn image_provenance_collapsed_paste_fallback_retains_command_and_png() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();

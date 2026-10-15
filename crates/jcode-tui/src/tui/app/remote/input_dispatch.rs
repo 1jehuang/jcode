@@ -215,13 +215,13 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
 
     let Some(invocation) = snapshot.resolve_invocation(&raw_input) else {
         restore_prepared_remote_input(app, prepared);
-        app.submit_input();
+        app.submit_input_with_routing(raw_input);
         return Ok(());
     };
 
     let Some(trailing_prompt) = invocation.prompt else {
         restore_prepared_remote_input(app, prepared);
-        app.submit_input();
+        app.submit_input_with_routing(raw_input);
         return Ok(());
     };
 
@@ -235,7 +235,7 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
         // Preserve the existing unknown-skill and built-in slash-command
         // handling, including the helpful endorsed-skill installation hint.
         restore_prepared_remote_input(app, prepared);
-        app.submit_input();
+        app.submit_input_with_routing(raw_input);
         return Ok(());
     }
 
