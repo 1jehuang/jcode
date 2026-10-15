@@ -1150,7 +1150,15 @@ impl Provider for CopilotApiProvider {
             init_done: self.init_done.clone(),
             premium_mode: self.premium_mode.clone(),
             user_turn_count: self.user_turn_count.clone(),
-            reasoning_effort: self.reasoning_effort.clone(),
+            // Copy the stored effort into a fresh lock so the fork's knob
+            // (e.g. the memory sidecar pinning `agents.memory_effort`) never
+            // writes through to the live provider's setting.
+            reasoning_effort: Arc::new(RwLock::new(
+                self.reasoning_effort
+                    .read()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone(),
+            )),
             model_efforts: self.model_efforts.clone(),
             created_at: self.created_at,
         })

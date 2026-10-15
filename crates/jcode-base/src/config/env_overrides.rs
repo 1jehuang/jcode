@@ -211,6 +211,11 @@ impl Config {
                 self.display.centered = parsed;
             }
         }
+        if let Ok(v) = std::env::var("JCODE_SINGLE_OVERVIEW") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.display.single_overview = parsed;
+            }
+        }
         if let Ok(v) = std::env::var("JCODE_QUEUE_MODE") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.display.queue_mode = parsed;
@@ -459,6 +464,14 @@ impl Config {
         if let Ok(v) = std::env::var("JCODE_MEMORY_MODEL") {
             let trimmed = v.trim();
             self.agents.memory_model = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            };
+        }
+        if let Ok(v) = std::env::var("JCODE_MEMORY_EFFORT") {
+            let trimmed = v.trim();
+            self.agents.memory_effort = if trimmed.is_empty() {
                 None
             } else {
                 Some(trimmed.to_string())

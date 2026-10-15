@@ -1012,19 +1012,27 @@ fn contextual_subgraph_prefers_memory_hub() {
 
 #[test]
 fn overview_requires_multiple_sections() {
-    // Status-line facts (model identity) are never an overview section.
+    // The Overview is a single always-visible panel: any section is enough,
+    // no multi-section join threshold. The selected model + effort row (🏠)
+    // is a runtime section on its own.
     let identity_only = InfoWidgetData {
         model: Some("gpt-test".to_string()),
         queue_mode: Some(true),
         ..Default::default()
     };
-    assert!(!identity_only.has_data_for(WidgetKind::Overview));
+    assert!(identity_only.has_data_for(WidgetKind::Overview));
 
+    // A lone non-status-line section still places the overview.
     let one_section = InfoWidgetData {
-        session_name: Some("sauropod".to_string()),
+        queue_mode: Some(true),
         ..Default::default()
     };
-    assert!(!one_section.has_data_for(WidgetKind::Overview));
+    assert!(one_section.has_data_for(WidgetKind::Overview));
+
+    // Truly empty data has nothing to render: the overview stays out of the
+    // layout instead of placing an empty frame.
+    let no_sections = InfoWidgetData::default();
+    assert!(!no_sections.has_data_for(WidgetKind::Overview));
 
     let two_sections = InfoWidgetData {
         session_name: Some("sauropod".to_string()),
@@ -1032,6 +1040,81 @@ fn overview_requires_multiple_sections() {
         ..Default::default()
     };
     assert!(two_sections.has_data_for(WidgetKind::Overview));
+
+    // A disabled memory feature is not an overview section: `disabled` means
+    // no recall/extraction activity, so there is no detail to join.
+    let disabled_memory = InfoWidgetData {
+        memory_info: Some(MemoryInfo {
+            disabled: true,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    assert!(!disabled_memory.has_data_for(WidgetKind::Overview));
+    assert!(!disabled_memory.has_data_for(WidgetKind::MemoryActivity));
+
+    // End-to-end through the real public render path: place the overview
+    // dock with calculate_placements and render_all into a TestBackend,
+    // then assert at the cell level what the user would actually see.
+    // A disabled memory feature must not paint a 🧠 row; an enabled one
+    // must.
+    {
+        let _lock = crate::tui::ui::render_state_test_lock();
+        // Stateless placement (`calculate_placements_anchored`) instead of the
+        // shared-state `calculate_placements`: parallel tests mutate the
+        // global widget state, which would blank this draw non-deterministically.
+        let area = Rect::new(0, 0, 38, 24);
+        let margins = super::Margins {
+            right_widths: vec![38; 24],
+            ..Default::default()
+        };
+
+        let draw_overview = |data: &InfoWidgetData| -> String {
+            let outcome = super::super::info_widget_layout::calculate_placements_anchored(
+                area,
+                &margins,
+                data,
+                true,
+                &[],
+            );
+            let backend = ratatui::backend::TestBackend::new(38, 24);
+            let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+            terminal
+                .draw(|frame| {
+                    super::render_all(frame, &outcome.visible, data);
+                })
+                .expect("overview draw should not panic");
+            let buf = terminal.backend().buffer();
+            (0..buf.area.height)
+                .map(|y| {
+                    (0..buf.area.width)
+                        .map(|x| buf[(x, y)].symbol().to_string())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let mut disabled = disabled_memory.clone();
+        disabled.queue_mode = Some(true);
+        let rendered = draw_overview(&disabled);
+        assert!(
+            !rendered.contains('🧠'),
+            "disabled memory must not render a 🧠 row in the overview, got: {rendered:?}"
+        );
+
+        let mut enabled = disabled_memory.clone();
+        enabled.queue_mode = Some(true);
+        enabled.memory_info = Some(MemoryInfo {
+            total_count: 4,
+            ..Default::default()
+        });
+        let rendered = draw_overview(&enabled);
+        assert!(
+            rendered.contains('🧠'),
+            "enabled memory must render its 🧠 row in the overview, got: {rendered:?}"
+        );
+    }
 }
 
 #[test]
@@ -2230,5 +2313,491 @@ fn narrow_overview_background_row_keeps_progress_visible() {
     assert!(
         out.contains("20%"),
         "progress must fit at overview width:\n{out}"
+    );
+}
+
+#[test]
+fn overview_never_hides_memory_data() {
+    // The overview strips `memory_info` (the dedicated MemoryActivity widget
+    // owns that content, matching master). Regression: MemoryActivity must NOT
+    // be overview-mergeable, or placing the overview would suppress the only
+    // renderer of memory data.
+    let _lock = crate::tui::ui::render_state_test_lock();
+    let area = Rect::new(0, 0, 38, 24);
+    let margins = super::Margins {
+        right_widths: vec![38; 24],
+        ..Default::default()
+    };
+    let data = super::InfoWidgetData {
+        queue_mode: Some(true),
+        memory_info: Some(MemoryInfo {
+            total_count: 4,
+            ..Default::default()
+        }),
+        // A second section so the overview has content beyond memory and places.
+        usage_info: Some(super::UsageInfo {
+            provider: super::UsageProvider::CostBased,
+            available: true,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    assert!(!super::is_overview_mergeable(super::WidgetKind::Overview));
+    assert!(!super::is_overview_mergeable(
+        super::WidgetKind::MemoryActivity
+    ));
+
+    let outcome = super::super::info_widget_layout::calculate_placements_anchored(
+        area,
+        &margins,
+        &data,
+        true,
+        &[],
+    );
+    assert!(
+        outcome
+            .visible
+            .iter()
+            .any(|p| p.kind == super::WidgetKind::Overview),
+        "overview should place (queue_mode + usage sections): {:?}",
+        outcome.visible.iter().map(|p| p.kind).collect::<Vec<_>>()
+    );
+    assert!(
+        outcome
+            .visible
+            .iter()
+            .any(|p| p.kind == super::WidgetKind::MemoryActivity),
+        "memory activity must still place alongside the overview"
+    );
+
+    let backend = ratatui::backend::TestBackend::new(38, 24);
+    let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| {
+            super::render_all(frame, &outcome.visible, &data);
+        })
+        .expect("draw should not panic");
+    let buf = terminal.backend().buffer();
+    let rendered = (0..buf.area.height)
+        .map(|y| {
+            (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains('🧠'),
+        "memory row must be visible somewhere while the overview is placed, got:\n{rendered}"
+    );
+}
+
+#[test]
+fn mergeable_anchor_yields_when_overview_arrives() {
+    // `calculate_placements` mutates process-wide widget state (anchors,
+    // placements, swarm stand-down). Hold the shared render-state lock for the
+    // whole test so concurrent render tests (e.g.
+    // `swarm_strip_stands_down_through_dock_blinks`) cannot interleave their
+    // own placement calls between these frames.
+    let _lock = crate::tui::ui::render_state_test_lock();
+    use super::{GitInfo, RecentCommit, WidgetKind, calculate_placements};
+    crate::tui::info_widget::clear_widget_placements_for_tests();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let data = super::InfoWidgetData {
+        git_info: Some(GitInfo {
+            branch: "fix/info_fields".into(),
+            ahead: 2,
+            recent_commits: [
+                (
+                    "e4b4d3a",
+                    "tui: overview folds swarm and commits",
+                    120,
+                    true,
+                ),
+                ("fdad464", "tui: compact swarm rows", 300, true),
+            ]
+            .into_iter()
+            .map(|(hash, subject, ago, unpushed)| RecentCommit {
+                hash: hash.into(),
+                subject: subject.into(),
+                timestamp: now - ago,
+                unpushed,
+                added: None,
+                removed: None,
+            })
+            .collect(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let area = ratatui::layout::Rect::new(0, 0, 120, 30);
+    let kinds = |p: &[super::WidgetPlacement]| p.iter().map(|p| p.kind).collect::<Vec<_>>();
+
+    // Frame A: only a shallow pocket exists. Overview (min 8 rows) cannot
+    // fit, but a lone Commits dock (min 1 + chrome) can, so Commits anchors.
+    let shallow = super::Margins {
+        right_widths: vec![44, 44, 44, 44, 44, 44, 44, 0, 0, 0, 0, 0, 0],
+        scroll_top: 10,
+        ..Default::default()
+    };
+    let mut pa = Vec::new();
+    for _ in 0..6 {
+        pa = calculate_placements(area, &shallow, &data);
+    }
+    assert_eq!(
+        kinds(&pa),
+        vec![WidgetKind::Commits],
+        "frame A: only the shallow commits dock fits"
+    );
+
+    // Frame B: a deep pocket opens (terminal scrolled / wide lines gone) and
+    // usage data arrives. The Overview must take over the deep pocket and
+    // the mergeable Commits dock must fold in.
+    let mut data2 = data.clone();
+    data2.usage_info = Some(super::UsageInfo {
+        provider: super::UsageProvider::CostBased,
+        available: true,
+        ..Default::default()
+    });
+    let deep = super::Margins {
+        right_widths: vec![44; 30],
+        scroll_top: 10,
+        ..Default::default()
+    };
+    let pb = calculate_placements(area, &deep, &data2);
+    assert_eq!(
+        kinds(&pb),
+        vec![WidgetKind::Overview],
+        "frame B: overview must reclaim, commits fold in, got: {:?}",
+        kinds(&pb)
+    );
+}
+
+/// Regression (PR review): an anchored Overview must not silently swallow new
+/// sections it can no longer fit.
+///
+/// Frame A anchors a model-only Overview in a small pocket. Frame B adds
+/// commits and swarm members (sections that grow `compact_overview_height`
+/// beyond the anchor's height while the terminal geometry stays the same).
+/// The anchor must not hold its stale three-row rectangle: `render_overview_framed`
+/// would draw nothing (the compact page no longer fits the inner height), the
+/// mergeable standalone widgets stay suppressed, and `overview_carries_swarm`
+/// also stands the inline swarm strip down - the user loses the panel, recent
+/// commits, and managed-agent status, persisting on subsequent frames.
+///
+/// Expected behavior: either the anchor reflows to the new required height, or
+/// it yields so the standalone widgets and the inline strip can carry the
+/// content.
+#[test]
+fn anchored_overview_outgrown_by_new_activity_yields_or_reflows() {
+    let _lock = crate::tui::ui::render_state_test_lock();
+    use super::{
+        GitInfo, RecentCommit, WidgetKind, calculate_placements, calculate_widget_height,
+        swarm_strip_stands_down_for_dock,
+    };
+    crate::tui::info_widget::clear_widget_placements_for_tests();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let commit = |hash: &str, subject: &str, ago: i64| RecentCommit {
+        hash: hash.into(),
+        subject: subject.into(),
+        timestamp: now - ago,
+        unpushed: true,
+        added: None,
+        removed: None,
+    };
+    let member = |id: &str| crate::protocol::SwarmMemberStatus {
+        session_id: id.to_string(),
+        friendly_name: Some(id.to_string()),
+        status: "running".to_string(),
+        detail: None,
+        task_label: None,
+        role: None,
+        is_headless: Some(true),
+        live_attachments: None,
+        status_age_secs: Some(2),
+        output_tail: None,
+        report_back_to_session_id: None,
+        todo_progress: None,
+        todo_items: Vec::new(),
+        runtime: crate::protocol::SwarmMemberRuntime::default(),
+    };
+
+    // Frame A: model-only Overview (one runtime row + borders = 3 rows).
+    let data = super::InfoWidgetData {
+        model: Some("gpt-test".to_string()),
+        ..Default::default()
+    };
+    let area = ratatui::layout::Rect::new(0, 0, 120, 30);
+    let margins = super::Margins {
+        right_widths: vec![44; 30],
+        scroll_top: 10,
+        ..Default::default()
+    };
+    let mut pa = Vec::new();
+    for _ in 0..3 {
+        pa = calculate_placements(area, &margins, &data);
+    }
+    let overview_a = pa
+        .iter()
+        .find(|p| p.kind == WidgetKind::Overview)
+        .expect("frame A: model-only overview should anchor in the wide margin");
+    assert_eq!(
+        overview_a.rect.height, 3,
+        "frame A: model-only overview is a 3-row panel"
+    );
+
+    // Frame B: commits and managed swarm members arrive. The same geometry
+    // keeps a 30-row pocket, but the compact overview now needs more rows.
+    let mut data2 = data.clone();
+    data2.git_info = Some(GitInfo {
+        branch: "fix/info_fields".into(),
+        ahead: 1,
+        recent_commits: vec![commit(
+            "e4b4d3a",
+            "tui: overview folds swarm and commits",
+            120,
+        )],
+        ..Default::default()
+    });
+    data2.swarm_info = Some(super::SwarmInfo {
+        managed_members: vec![member("w1"), member("w2")],
+        ..Default::default()
+    });
+    let required = calculate_widget_height(WidgetKind::Overview, &data2, overview_a.rect.width, 30);
+    assert!(
+        required > overview_a.rect.height,
+        "frame B: new sections must grow the required overview height"
+    );
+
+    let pb = calculate_placements(area, &margins, &data2);
+    if let Some(overview_b) = pb.iter().find(|p| p.kind == WidgetKind::Overview) {
+        // Path 1: the anchor reflowed to a height that can actually show the
+        // (at least compact) overview content.
+        let inner = overview_b.rect.height.saturating_sub(2);
+        let mut overview_data = data2.clone();
+        overview_data.memory_info = None;
+        let compact = super::super::info_widget_overview::compute_page_layout(
+            &overview_data,
+            overview_b.rect.width.saturating_sub(2) as usize,
+            inner,
+        );
+        assert!(
+            compact.max_page_height > 0 && compact.max_page_height <= inner,
+            "kept overview must fit a page: rect {:?} max_page_height {} inner {}",
+            overview_b.rect,
+            compact.max_page_height,
+            inner
+        );
+        assert!(
+            swarm_strip_stands_down_for_dock(),
+            "a renderable overview carrying swarm rows keeps the strip down"
+        );
+    } else {
+        // Path 2: no renderable Overview could be placed, so the mergeable
+        // standalone widgets must come back and the swarm strip must be free
+        // to render the managed agents (no phantom `overview_carries_swarm`).
+        assert!(
+            pb.iter().any(|p| p.kind == WidgetKind::Commits),
+            "frame B: without a placeable overview the commits dock must return, got {:?}",
+            pb.iter().map(|p| p.kind).collect::<Vec<_>>()
+        );
+        assert!(
+            pb.iter().any(|p| p.kind == WidgetKind::SwarmStatus),
+            "frame B: without a placeable overview the swarm dock must return"
+        );
+        assert!(
+            !swarm_strip_stands_down_for_dock(),
+            "frame B: the strip must be free when no overview carries the swarm rows"
+        );
+    }
+}
+
+/// Regression (greptile P1, PR 1709): a placed Overview whose pocket fits
+/// only the front sections of the compact page must not suppress the
+/// standalone fallbacks for the tail sections it truncates away.
+///
+/// A 10-row margin pocket hosts the Overview; Runtime + Todos + Background +
+/// Usage rows fill its whole body, so the compact page truncates before the
+/// Changes/Commits/Swarm sections. Before the fix, `overview_carries_swarm`
+/// still stood the inline strip down and Phase 2 still suppressed the
+/// SwarmStatus and Commits docks, so a running worker and a fresh unpushed
+/// commit were visible nowhere (another pocket was available for them).
+///
+/// Expected, phase 1: with a second pocket free, the Commits/SwarmStatus
+/// fallbacks place into it and the (now real) SwarmStatus dock owns the strip.
+/// Expected, phase 2: with no other pocket at all, no dock can place, so the
+/// inline strip must come back up - the agents surface there.
+#[test]
+fn overview_truncated_tail_keeps_fallbacks_and_strip() {
+    let _lock = crate::tui::ui::render_state_test_lock();
+    use super::{
+        GitInfo, RecentCommit, WidgetKind, calculate_placements, swarm_strip_stands_down_for_dock,
+    };
+    use crate::tui::info_widget_overview::section_visibility;
+    crate::tui::info_widget::clear_widget_placements_for_tests();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let member = |id: &str| crate::protocol::SwarmMemberStatus {
+        session_id: id.to_string(),
+        friendly_name: Some(id.to_string()),
+        status: "running".to_string(),
+        detail: None,
+        task_label: None,
+        role: None,
+        is_headless: Some(true),
+        live_attachments: None,
+        status_age_secs: Some(2),
+        output_tail: None,
+        report_back_to_session_id: None,
+        todo_progress: None,
+        todo_items: Vec::new(),
+        runtime: crate::protocol::SwarmMemberRuntime::default(),
+    };
+    let commit = |hash: &str, subject: &str, ago: i64| RecentCommit {
+        hash: hash.into(),
+        subject: subject.into(),
+        timestamp: now - ago,
+        unpushed: true,
+        added: None,
+        removed: None,
+    };
+
+    let todo = |id: &str, status: &str| crate::todo::TodoItem {
+        group: None,
+        content: format!("task {id}"),
+        status: status.to_string(),
+        priority: "high".to_string(),
+        id: id.to_string(),
+        blocked_by: Vec::new(),
+        assigned_to: None,
+        confidence: None,
+        completion_confidence: None,
+        confidence_history: Vec::new(),
+    };
+
+    // Front sections: runtime rows (model) + todos (2 rows) + background
+    // (1 header + 1 task row) + usage (label + primary). Together they leave
+    // 1 free row of the 10-row pocket's 8 body rows, so only the tail
+    // (Changes/Commits/Swarm) is truncated away and usage still fits.
+    let data = super::InfoWidgetData {
+        model: Some("gpt-test".to_string()),
+        todos: vec![todo("a", "in_progress"), todo("b", "completed")],
+        background_info: Some(super::BackgroundInfo {
+            running_count: 1,
+            running_tasks: vec!["bash".to_string()],
+            ..Default::default()
+        }),
+        usage_info: Some(super::UsageInfo {
+            provider: super::UsageProvider::Anthropic,
+            available: true,
+            primary_limit_label: Some("5h".to_string()),
+            ..Default::default()
+        }),
+        git_info: Some(GitInfo {
+            branch: "fix/info_fields".into(),
+            ahead: 1,
+            recent_commits: vec![commit(
+                "e4b4d3a",
+                "tui: overview folds swarm and commits",
+                120,
+            )],
+            ..Default::default()
+        }),
+        swarm_info: Some(super::SwarmInfo {
+            managed_members: vec![member("w1"), member("w2")],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    // Right margin: a 10-row pocket (rows 0..10) and a second free pocket
+    // (rows 14..24) so the fallbacks have somewhere to place.
+    let area = ratatui::layout::Rect::new(0, 0, 120, 30);
+    let mut right_widths = vec![0u16; 30];
+    for w in right_widths.iter_mut().take(10) {
+        *w = 44;
+    }
+    for w in right_widths.iter_mut().skip(14).take(10) {
+        *w = 44;
+    }
+    let margins = super::Margins {
+        right_widths,
+        scroll_top: 10,
+        ..Default::default()
+    };
+
+    let mut placements = Vec::new();
+    for _ in 0..3 {
+        placements = calculate_placements(area, &margins, &data);
+    }
+
+    let overview = placements
+        .iter()
+        .find(|p| p.kind == WidgetKind::Overview)
+        .expect("the overview should anchor in the 10-row pocket");
+    let vis = section_visibility(&data, overview.rect);
+    assert!(
+        !vis.commits && !vis.swarm,
+        "pocket must truncate the tail sections before the fix's scenario, got {:?} for {:?}",
+        vis,
+        overview.rect
+    );
+
+    // Phase 1 - fallbacks released: with a second pocket free, Commits and
+    // SwarmStatus must place there even though the placed Overview truncates
+    // its tail sections. Before the fix they were suppressed and the agents
+    // were visible nowhere despite the free pocket.
+    assert!(
+        placements.iter().any(|p| p.kind == WidgetKind::Commits),
+        "the truncated overview must not suppress the Commits dock, got {:?}",
+        placements.iter().map(|p| p.kind).collect::<Vec<_>>()
+    );
+    assert!(
+        placements.iter().any(|p| p.kind == WidgetKind::SwarmStatus),
+        "the truncated overview must not suppress the SwarmStatus dock"
+    );
+    // The strip legitimately stands down now: the SwarmStatus dock (not a
+    // phantom overview) owns the swarm rows. This is the fixed steady state.
+    assert!(
+        swarm_strip_stands_down_for_dock(),
+        "the placed SwarmStatus dock should own the strip instead of the truncated overview"
+    );
+
+    // Phase 2 - no room anywhere: keep only the single 10-row pocket so no
+    // dock can place, and clear the anchors so the truncated Overview cannot
+    // linger as one either. The agents must surface somewhere: the inline
+    // swarm strip must come back up.
+    crate::tui::info_widget::clear_widget_placements_for_tests();
+    let mut right_widths = vec![0u16; 30];
+    for w in right_widths.iter_mut().take(10) {
+        *w = 44;
+    }
+    let margins = super::Margins {
+        right_widths,
+        scroll_top: 10,
+        ..Default::default()
+    };
+    let placements = calculate_placements(area, &margins, &data);
+    assert!(
+        placements.iter().any(|p| p.kind == WidgetKind::Overview),
+        "single-pocket frame: the truncated overview keeps its pocket, got {:?}",
+        placements.iter().map(|p| p.kind).collect::<Vec<_>>()
+    );
+    assert!(
+        !placements.iter().any(|p| p.kind == WidgetKind::SwarmStatus)
+            && !placements.iter().any(|p| p.kind == WidgetKind::Commits),
+        "single-pocket frame: no room for the docks, they must not phantom-place"
+    );
+    assert!(
+        !swarm_strip_stands_down_for_dock(),
+        "no dock owns the swarm rows, so the strip must come back up"
     );
 }

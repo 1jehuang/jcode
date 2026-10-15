@@ -2879,7 +2879,7 @@ fn parse_alignment_value(raw: &str) -> Option<bool> {
     }
 }
 
-fn parse_on_off_value(raw: &str) -> Option<bool> {
+pub(super) fn parse_on_off_value(raw: &str) -> Option<bool> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "on" | "compact" | "true" | "1" | "yes" | "enable" | "enabled" => Some(true),
         "off" | "full" | "false" | "0" | "no" | "disable" | "disabled" => Some(false),
@@ -3583,6 +3583,10 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
     }
 
     if handle_show_agentgrep_output_command(app, trimmed) {
+        return true;
+    }
+
+    if super::commands_overview::handle_overview_command(app, trimmed) {
         return true;
     }
 
