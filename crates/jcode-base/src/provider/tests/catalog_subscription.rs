@@ -109,6 +109,7 @@ fn test_openai_live_catalog_replaces_static_fallback_list() {
     crate::env::set_var("JCODE_HOME", temp_home.path());
     crate::env::remove_var("OPENAI_API_KEY");
     crate::auth::codex::set_active_account_override(Some("work".to_string()));
+    crate::provider::chatgpt_web::seed_observed_model_for_tests("GPT-5.6 Pro");
 
     populate_account_models(vec!["gpt-5.4-live-only".to_string()]);
     let models = known_openai_model_ids();

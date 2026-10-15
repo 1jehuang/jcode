@@ -210,7 +210,10 @@ fn test_websocket_continuation_delta_skips_reasoning_items() {
 
 #[test]
 fn max_and_swarm_efforts_are_preserved_at_the_strongest_api_level() {
-    let provider = OpenAIProvider::new_browser_only();
+    let _guard = jcode_base::storage::lock_test_env();
+    let provider = OpenAIProvider::new(api_key_creds("sk-api-effort-fixture"));
+    // This tests the API ladder, not a browser model's observed Power choices.
+    *provider.model.try_write().unwrap() = "gpt-5.4".to_string();
     // The swarm sentinel is a valid stored effort...
     assert_eq!(
         OpenAIProvider::normalize_reasoning_effort("swarm").as_deref(),

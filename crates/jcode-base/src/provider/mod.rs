@@ -6,10 +6,15 @@ pub mod anthropic;
 pub mod antigravity;
 pub mod bedrock;
 mod catalog_memo;
+mod catalog_prefetch;
+#[cfg(test)]
+use catalog_prefetch::prefetch_openai_or_web_catalog;
 mod catalog_routes;
 pub use catalog_memo::bump_catalog_generation;
 use catalog_memo::{RoutesMemoEntry, catalog_generation, next_catalog_scope};
 pub mod catalog_scheduler;
+pub mod chatgpt_web;
+mod chatgpt_web_catalog;
 pub mod copilot;
 pub mod cursor;
 mod dispatch;
@@ -65,8 +70,9 @@ pub use jcode_provider_core::{
     PremiumMode, Provider, RouteBillingKind, RouteCheapnessEstimate, RouteCostConfidence,
     RouteCostSource, RouteSelection, RuntimeKey, dedupe_model_routes,
     explicit_model_provider_prefix, fresh_transport_client, grok_build_model_spec,
-    inferred_reasoning_efforts, model_name_for_provider, normalize_copilot_model_name,
-    provider_from_model_key, shared_http_client, summarize_model_catalog_refresh,
+    inferred_reasoning_efforts, is_chatgpt_web_model, model_name_for_provider,
+    normalize_copilot_model_name, provider_from_model_key, shared_http_client,
+    summarize_model_catalog_refresh,
 };
 pub use jcode_provider_core::{
     FallbackPickOptions, error_looks_like_credential_failure, model_route_provider_labels_match,
@@ -624,7 +630,17 @@ impl MultiProvider {
                 continue;
             }
 
-            let cached_unavailability = provider_unavailability_detail_for_account(key);
+            // The ChatGPT web route runs in the browser session, not on the
+            // stored OpenAI account, so that account's usage must not gate it.
+            let browser_session = candidate == ActiveProvider::OpenAI
+                && self
+                    .openai_provider()
+                    .is_some_and(|provider| is_chatgpt_web_model(&provider.model()));
+            let cached_unavailability = if browser_session {
+                None
+            } else {
+                provider_unavailability_detail_for_account(key)
+            };
             if let Some(reason) = cached_unavailability
                 .clone()
                 .or_else(|| self.provider_precheck_unavailable_reason(candidate))
@@ -2282,132 +2298,7 @@ impl Provider for MultiProvider {
     }
 
     async fn prefetch_models(&self) -> Result<()> {
-        let anthropic = self.anthropic_provider();
-        let openai = self.openai_provider();
-        let openrouter = self.openrouter_provider();
-        let copilot = self
-            .copilot_api
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
-        let antigravity = self.antigravity_provider();
-        let gemini = self.gemini_provider();
-        let cursor = self.cursor_provider();
-        let bedrock = self.bedrock_provider();
-
-        let (
-            anthropic_result,
-            openai_result,
-            openrouter_result,
-            copilot_result,
-            antigravity_result,
-            gemini_result,
-            cursor_result,
-            bedrock_result,
-        ) = tokio::join!(
-            async {
-                match anthropic {
-                    Some(provider) => provider.prefetch_models().await,
-                    None => Ok(()),
-                }
-            },
-            async {
-                match openai {
-                    Some(provider) => provider.prefetch_models().await,
-                    None => Ok(()),
-                }
-            },
-            async {
-                match openrouter {
-                    Some(provider) => provider.prefetch_models().await,
-                    None => Ok(()),
-                }
-            },
-            async {
-                match copilot {
-                    Some(provider) => provider.prefetch_models().await,
-                    None => Ok(()),
-                }
-            },
-            async {
-                match antigravity {
-                    Some(provider) => provider.prefetch_models().await,
-                    None => Ok(()),
-                }
-            },
-            async {
-                match gemini {
-                    Some(provider) => provider.prefetch_models().await,
-                    None => Ok(()),
-                }
-            },
-            async {
-                match cursor {
-                    Some(provider) => provider.prefetch_models().await,
-                    None => Ok(()),
-                }
-            },
-            async {
-                match bedrock {
-                    Some(provider) => provider.prefetch_models().await,
-                    None => Ok(()),
-                }
-            },
-        );
-
-        let active_provider = self.active_provider();
-        let mut errors = Vec::new();
-        let mut optional_errors = Vec::new();
-        for (provider_name, result) in [
-            ("anthropic", anthropic_result),
-            ("openai", openai_result),
-            ("openrouter", openrouter_result),
-            ("copilot", copilot_result),
-            ("antigravity", antigravity_result),
-            ("gemini", gemini_result),
-            ("cursor", cursor_result),
-            ("bedrock", bedrock_result),
-        ] {
-            if let Err(err) = result {
-                let is_active = matches!(
-                    (active_provider, provider_name),
-                    (ActiveProvider::Claude, "anthropic" | "claude")
-                        | (ActiveProvider::OpenAI, "openai")
-                        | (ActiveProvider::OpenRouter, "openrouter")
-                        | (ActiveProvider::Copilot, "copilot")
-                        | (ActiveProvider::Antigravity, "antigravity")
-                        | (ActiveProvider::Gemini, "gemini")
-                        | (ActiveProvider::Cursor, "cursor")
-                        | (ActiveProvider::Bedrock, "bedrock")
-                );
-                if !is_active || matches!(provider_name, "bedrock") {
-                    optional_errors.push(format!("{provider_name}: {err}"));
-                } else {
-                    errors.push(format!("{provider_name}: {err}"));
-                }
-            }
-        }
-
-        if !optional_errors.is_empty() {
-            crate::logging::warn(&format!(
-                "Optional model catalog refresh failed: {}",
-                optional_errors.join("; ")
-            ));
-        }
-
-        // Bedrock's built-in default is a 2024 model; once its catalog (live
-        // or cached) is known, land on the newest usable Claude flagship.
-        if let Some(bedrock) = self.bedrock_provider() {
-            promote_bedrock_placeholder_default(&bedrock);
-        }
-
-        if !errors.is_empty() {
-            return Err(anyhow!("{}", errors.join("; ")));
-        }
-
-        // Fresh catalogs may have arrived; retire every memoized copy.
-        self.invalidate_routes_memo_globally();
-        Ok(())
+        self.prefetch_catalog_models().await
     }
 
     fn on_auth_changed(&self) {

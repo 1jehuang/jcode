@@ -160,14 +160,16 @@ impl Provider for OpenAIProvider {
         system: &str,
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
-        if let Some(label) = self.oauth_account_label() {
-            jcode_base::auth::codex::load_credentials_for_account(&label)?;
-        }
         let selected_model = self.model();
         if is_chatgpt_web_model(&selected_model) {
+            let effort = self.reasoning_effort();
+            let effort = self.api_reasoning_effort(effort.as_deref());
             return Arc::clone(&self.chatgpt_web)
-                .complete(messages, tools, system, &selected_model)
+                .complete(messages, tools, system, &selected_model, effort.as_deref())
                 .await;
+        }
+        if let Some(label) = self.oauth_account_label() {
+            jcode_base::auth::codex::load_credentials_for_account(&label)?;
         }
 
         let mut input = build_responses_input(messages);
@@ -848,31 +850,13 @@ impl Provider for OpenAIProvider {
 
     fn available_models(&self) -> Vec<&'static str> {
         if self.is_browser_only() {
-            return vec![CHATGPT_WEB_MODEL];
+            return Vec::new();
         }
         jcode_provider_core::ALL_OPENAI_MODELS.to_vec()
     }
 
     fn available_models_for_switching(&self) -> Vec<String> {
-        if self.is_browser_only() {
-            return vec![CHATGPT_WEB_MODEL.to_string()];
-        }
-        let mut models =
-            jcode_base::provider::cached_openai_model_ids_for_scope(&self.catalog_scope())
-                .unwrap_or_else(|| vec![self.model()]);
-        if !models.iter().any(|model| model == CHATGPT_WEB_MODEL) {
-            models.insert(0, CHATGPT_WEB_MODEL.to_string());
-        }
-        // Platform-API-only GPT Pro models are absent from the Codex OAuth
-        // catalog by design; surface them whenever an OPENAI_API_KEY exists.
-        if jcode_base::provider::openai_platform_api_key_configured() {
-            for pro in jcode_provider_core::OPENAI_API_ONLY_PRO_MODELS {
-                if !models.iter().any(|model| model == pro) {
-                    models.push((*pro).to_string());
-                }
-            }
-        }
-        models
+        self.models_with_browser_catalog()
     }
 
     fn available_models_display(&self) -> Vec<String> {
@@ -880,7 +864,7 @@ impl Provider for OpenAIProvider {
     }
 
     async fn prefetch_models(&self) -> Result<()> {
-        if self.is_browser_only() {
+        if self.prefetch_browser_models().await? {
             return Ok(());
         }
         // The loaded credential's *shape* is authoritative for which catalog
@@ -1021,6 +1005,9 @@ impl Provider for OpenAIProvider {
     }
 
     fn available_efforts(&self) -> Vec<&'static str> {
+        if is_chatgpt_web_model(&self.model()) {
+            return self.browser_efforts();
+        }
         let model = jcode_provider_core::model_id::canonical(&self.model());
         // Platform-API-only GPT Pro models never appear in the Codex catalog,
         // so their ladders are pinned from live Responses API behavior:
@@ -1228,6 +1215,9 @@ impl Provider for OpenAIProvider {
             prewarm: Arc::new(openai_websocket_prewarm::PrewarmSlot::default()),
             chatgpt_web: Arc::new(chatgpt_web::ChatGptWebState::new()),
             browser_only: Arc::new(AtomicBool::new(self.is_browser_only())),
+            browser_model_unset: AtomicBool::new(
+                self.browser_model_unset.load(AtomicOrdering::Acquire),
+            ),
         })
     }
 

@@ -2,18 +2,19 @@ use crate::auth::{AuthState, AuthStatus};
 
 use super::pricing::cheapness_for_route;
 use super::{
-    ALL_OPENAI_MODELS, AccountModelAvailabilityState, CHATGPT_WEB_MODEL, GROK_BUILD_PROFILE_ID,
-    ModelRoute, MultiProvider, Provider, ProviderRegistry, anthropic_api_key_route_availability,
-    anthropic_oauth_route_availability, bedrock, build_anthropic_oauth_route,
-    build_chatgpt_web_route, build_copilot_route, build_openai_api_key_route,
-    build_openai_oauth_route, build_openrouter_auto_route, build_openrouter_endpoint_route,
-    build_openrouter_fallback_provider_route, configured_standard_openrouter_profile_routes,
-    copilot, dedupe_model_routes, direct_openai_compatible_profile_routes,
-    format_account_model_availability_detail, is_listable_model_name, known_anthropic_model_ids,
-    known_openai_model_ids_for_scope, model_availability_for_account, model_availability_for_scope,
-    openrouter, openrouter_catalog_model_id, provider_for_model,
-    standard_openrouter_profile_configured,
+    ALL_OPENAI_MODELS, AccountModelAvailabilityState, GROK_BUILD_PROFILE_ID, ModelRoute,
+    MultiProvider, Provider, ProviderRegistry, anthropic_api_key_route_availability,
+    anthropic_oauth_route_availability, bedrock, build_anthropic_oauth_route, build_copilot_route,
+    build_openai_api_key_route, build_openai_oauth_route, build_openrouter_auto_route,
+    build_openrouter_endpoint_route, build_openrouter_fallback_provider_route,
+    configured_standard_openrouter_profile_routes, copilot, dedupe_model_routes,
+    direct_openai_compatible_profile_routes, format_account_model_availability_detail,
+    is_listable_model_name, known_anthropic_model_ids, known_openai_model_ids_for_scope,
+    model_availability_for_account, model_availability_for_scope, openrouter,
+    openrouter_catalog_model_id, provider_for_model, standard_openrouter_profile_configured,
 };
+
+use super::chatgpt_web_catalog::route_for_model as chatgpt_web_route_for_model;
 
 /// Build the fast local route snapshot used by the TUI model picker while the
 /// full provider catalog is hydrating.
@@ -30,8 +31,8 @@ pub fn simplified_model_routes_for_picker(
     let mut routes = Vec::new();
 
     for model in display_models {
-        if model == CHATGPT_WEB_MODEL {
-            routes.push(build_chatgpt_web_route());
+        if jcode_provider_core::is_chatgpt_web_model(&model) {
+            routes.push(chatgpt_web_route_for_model(&model));
             continue;
         }
         if !model.contains('/') && provider_for_model(&model) == Some("openai") {
@@ -153,17 +154,11 @@ pub fn simplified_model_routes_for_picker(
         });
     }
 
-    if routes.is_empty() && !current_model.is_empty() && current_model != "unknown" {
-        routes.push(ModelRoute {
-            model: current_model.to_string(),
-            provider: current_provider_name.to_string(),
-            api_method: "current".to_string(),
-            available: true,
-            detail: "simplified catalog".to_string(),
-            usage: None,
-            cheapness: None,
-        });
-    }
+    super::chatgpt_web_catalog::append_picker_routes(
+        &mut routes,
+        current_provider_name,
+        current_model,
+    );
 
     expand_saved_account_routes(routes)
 }
@@ -233,7 +228,7 @@ fn expand_saved_account_routes(mut routes: Vec<ModelRoute>) -> Vec<ModelRoute> {
         for account in openai {
             for model in known_openai_model_ids_for_scope(&account.label) {
                 if !is_listable_model_name(&model)
-                    || model == CHATGPT_WEB_MODEL
+                    || jcode_provider_core::is_chatgpt_web_model(&model)
                     || jcode_provider_core::is_openai_api_only_pro_model(&model)
                 {
                     continue;
@@ -372,6 +367,7 @@ pub(super) fn multiprovider_model_routes(provider: &MultiProvider) -> Vec<ModelR
 
     append_anthropic_routes(provider, &mut routes, has_oauth, has_api_key);
     append_openai_routes(provider, &mut routes, &openai_auth);
+    super::chatgpt_web_catalog::append_routes(&mut routes);
     let added_direct_openai_compatible_routes =
         append_openai_compatible_profile_routes(provider, &mut routes);
     append_copilot_routes(provider, &mut routes);
@@ -567,8 +563,7 @@ fn append_openai_routes(
     };
 
     for model in openai_models {
-        if model == CHATGPT_WEB_MODEL {
-            routes.push(build_chatgpt_web_route());
+        if jcode_provider_core::is_chatgpt_web_model(&model) {
             continue;
         }
         // GPT Pro models are platform-API-only: never offer an OAuth route
