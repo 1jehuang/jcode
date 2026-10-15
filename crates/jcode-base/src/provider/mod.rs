@@ -11,6 +11,7 @@ pub use catalog_memo::bump_catalog_generation;
 use catalog_memo::{RoutesMemoEntry, catalog_generation, next_catalog_scope};
 pub mod catalog_scheduler;
 pub mod chatgpt_web;
+pub mod chatgpt_web_instance;
 pub mod copilot;
 mod credit_failover;
 pub mod cursor;

@@ -464,7 +464,7 @@ pub(crate) enum Command {
 
     /// Browser automation setup and status
     Browser {
-        /// Action (setup, status, detect)
+        /// Action (setup, status, detect, chatgpt-login, chatgpt-status)
         #[arg(default_value = "setup")]
         action: String,
 

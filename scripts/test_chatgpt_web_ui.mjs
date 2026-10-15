@@ -27,8 +27,8 @@ class Element {
       if (part.startsWith('#')) return this.id === part.slice(1);
       const tag = part.match(/^[a-z]+/i)?.[0];
       if (tag && this.tagName !== tag.toUpperCase()) return false;
-      const attrs = [...part.matchAll(/\[([^=\]]+)(?:=["']?([^\]"']*)["']?)?\]/g)];
-      return attrs.length + (tag ? 1 : 0) > 0 && attrs.every(([,k,v]) => v === undefined ? this.hasAttribute(k) : this.getAttribute(k) === v);
+      const attrs = [...part.matchAll(/\[([^=\]^]+)(\^?=)?(?:["']?([^\]"']*)["']?)?\]/g)];
+      return attrs.length + (tag ? 1 : 0) > 0 && attrs.every(([,k,op,v]) => !op ? this.hasAttribute(k) : op === '^=' ? (this.getAttribute(k) ?? '').startsWith(v) : this.getAttribute(k) === v);
     });
   }
   closest(sel) { for (let e=this; e; e=e.parentElement) if (e.matches(sel)) return e; return null; }
@@ -93,7 +93,8 @@ function fixture({ temporary=true, hiddenDuplicate=false, locked=false, wrongSel
   let noticeAccepts=0; proceed.onClick=()=>{noticeAccepts++;notice.hidden=true;temporaryButton.hidden=false;};
   const extra = hiddenDuplicate ? [new Element('div', {'aria-hidden':'true'}, '', [new Element('div',{role:'menuitemradio','aria-checked':'true'},'GPT-999')])] : [];
   const body = new Element('body', {}, '', [main,menu,new Element('span',{id:'locked'},'Locked, opens access options'),login,access,notice, ...extra]);
-  const document = { body, querySelectorAll: sel => body.querySelectorAll(sel), querySelector: sel=>body.querySelector(sel), getElementById:id=>body.querySelector(`#${id}`), addEventListener() {} };
+  const document = { body, querySelectorAll: sel => body.querySelectorAll(sel), querySelector: sel=>body.querySelector(sel), getElementById:id=>body.querySelector(`#${id}`), addEventListener() {},
+    createRange: () => ({ selectNodeContents() {} }), execCommand: () => { editor.text=''; editor.children=[]; return true; } };
   return { document, rows, power, thumb, trigger, main, menu, editor, submit, close, login, access, powers, selected:()=>selected, submits:()=>submits, noticeAccepts:()=>noticeAccepts, triggerClicks:()=>triggerClicks };
 }
 
@@ -101,7 +102,29 @@ async function run(request, f, options = {}) {
   const source = readFileSync(path,'utf8');
   let now = 0;
   const globals = options.globals || {};
-  return await new Function('request','document','location','KeyboardEvent','setTimeout','globalThis','Date',source)(request,f.document,{hostname:'chatgpt.com',pathname:'/'},class {constructor(type,options){this.type=type;Object.assign(this,options);}}, (cb, ms) => {now += options.elapsedPerDelay ?? ms; options.onDelay?.(globals); cb();return 0;}, globals, {now:()=>now});
+  const location = { hostname:'chatgpt.com', pathname: options.pathname || '/' };
+  return await new Function('request','document','location','KeyboardEvent','setTimeout','globalThis','Date','getSelection','DataTransfer','ClipboardEvent','TextDecoder','Response',source)(request,f.document,location,class {constructor(type,options){this.type=type;Object.assign(this,options);}}, (cb, ms) => {now += options.elapsedPerDelay ?? ms; options.onDelay?.(globals); cb();return 0;}, globals, {now:()=>now},
+    () => ({ removeAllRanges() {}, addRange() {} }),
+    class { constructor() { this.data = {}; } setData(type, value) { this.data[type] = value; } getData(type) { return this.data[type] ?? ''; } },
+    class { constructor(type, options) { this.type = type; Object.assign(this, options); } },
+    TextDecoder, Response);
+}
+
+function conversation(turn, { temporary = true } = {}) {
+  const mapping = {};
+  let parent = null;
+  turn.forEach((message, index) => { const id = `n${index}`; mapping[id] = { parent, message }; parent = id; });
+  return { is_temporary_chat: temporary, current_node: parent, mapping };
+}
+const said = (role, text, extra = {}) => ({ author: { role }, recipient: 'all', status: 'finished_successfully', end_turn: null, content: { content_type: 'text', parts: [text] }, ...extra });
+function backend(data) {
+  const calls = [];
+  const fetch = async (url, init) => {
+    calls.push({ url, init });
+    if (url === '/api/auth/session') return { ok: true, status: 200, json: async () => ({ accessToken: 'token' }) };
+    return { ok: true, status: 200, json: async () => data };
+  };
+  return { fetch, calls };
 }
 
 for (const op of ['prepare','discover','probe']) {
@@ -247,4 +270,142 @@ test('stop cleanup clicks the current plain Stop button',async()=>{
 test('updated response markup returns complete assistant text, not user prompt',async()=>{
   const f=fixture(); const assistant=new Element('div',{'data-markdown-text-style':'assistant-message'},'JCODE_BRIDGE_OK'); const turn=new Element('div',{'data-talvt-turn-state':'complete'},'', [assistant,new Element('button',{'aria-label':'Copy'})]);f.main.children.push(turn);turn.parentElement=f.main;
   const result=await run({op:'response'},f);assert.equal(result.text,'JCODE_BRIDGE_OK');assert.equal(result.terminal,true);assert.equal(result.busy,false);assert.equal(result.model,'');
+});
+test('the composer Stop button marks generation busy and blocks completion',async()=>{
+  const f=fixture(); const assistant=new Element('div',{'data-markdown-text-style':'assistant-message'},'partial'); const turn=new Element('div',{'data-talvt-turn-state':'complete'},'', [assistant]);
+  const stop=new Element('button',{'aria-label':'Stop'});f.main.children.push(turn,stop);turn.parentElement=f.main;stop.parentElement=f.main;
+  const result=await run({op:'response'},f);assert.equal(result.busy,true);assert.equal(result.terminal,false);
+  const stopping=new Element('button',{'aria-label':'Stop dictation'});stop.hidden=true;f.main.children.push(stopping);stopping.parentElement=f.main;
+  assert.equal((await run({op:'response'},f)).busy,false,'only the exact Stop label means generation');
+});
+test('prompts are pasted as literal text in chunks and fingerprinted from the literal spans',async()=>{
+  const f=fixture(); f.editor.text=''; const pastes=[];
+  f.editor.dispatchEvent=e=>{ if(e.type!=='paste')return true; const text=e.clipboardData.getData('text/plain'); pastes.push(text);
+    const span=new Element('span',{'data-prompt-literal-paste':''},''); span.childNodes=[{nodeType:3,data:text}]; f.editor.children.push(span); span.parentElement=f.editor; return true; };
+  const prompt='# Head\nSee https://example.com/x and \\"q\\" `t`\n'.repeat(400)+'🙂';
+  const result=await run({op:'insert',text:prompt},f);
+  assert.ok(pastes.length>1,'large prompts are pasted in several chunks');
+  assert.ok(pastes.every(p=>p.length<=6000));assert.equal(pastes.join(''),prompt);
+  assert.equal(result.literal,true);assert.equal(result.attachments,0);
+  const expected=await run({op:'prompt'},f);assert.equal(expected.length,prompt.length);assert.equal(f.submits(),0);
+});
+test('a paste that ChatGPT turns into a file attachment fails closed',async()=>{
+  const f=fixture(); f.editor.text='';
+  f.editor.dispatchEvent=e=>{ if(e.type==='paste'){ const remove=new Element('button',{'aria-label':'Remove pasted text attachment'}); f.main.children.push(remove); remove.parentElement=f.main; } return true; };
+  await assert.rejects(run({op:'insert',text:'x'.repeat(100)},f),/attachment/);assert.equal(f.submits(),0);
+});
+test('transcript returns raw assistant text of the last turn, including wrapper markup the renderer hides',async()=>{
+  const f=fixture();
+  const envelope='<escape><jcode_tool_call>{"name":"bash","input":{"command":"printf \'a\\\\nb\'"}}</jcode_tool_call></escape>';
+  const data=conversation([said('user','old'),said('assistant','old answer',{end_turn:true}),said('user','prompt'),
+    { author:{role:'assistant'}, recipient:'container.exec', status:'finished_successfully', content:{content_type:'code',text:'ls'} },
+    { author:{role:'tool',name:'container.exec'}, recipient:'all', status:'finished_successfully', content:{content_type:'execution_output',text:'x'} },
+    said('assistant','Checking.'), { author:{role:'assistant'}, recipient:'all', status:'finished_successfully', content:{content_type:'thoughts',thoughts:[]} },
+    said('assistant',envelope,{end_turn:true})]);
+  const api=backend(data);
+  const result=await run({op:'transcript'},f,{pathname:'/c/6ad08967-29f4-83eb-8b81-c5ccaa17b323',globals:{fetch:api.fetch}});
+  assert.deepEqual(result.texts,['Checking.',envelope]);assert.equal(result.complete,true);assert.equal(result.temporary,true);
+  assert.deepEqual(result.builtin,['container.exec']);
+  assert.equal(api.calls[1].url,'/backend-api/conversation/6ad08967-29f4-83eb-8b81-c5ccaa17b323');
+  assert.equal(api.calls[1].init.headers.authorization,'Bearer token');assert.equal(f.submits(),0);
+});
+test('transcript reports an unfinished turn and an unknown conversation without guessing',async()=>{
+  const f=fixture();
+  const pending=backend(conversation([said('user','prompt'),said('assistant','partial',{status:'in_progress'})]));
+  const result=await run({op:'transcript'},f,{pathname:'/c/6ad08967-29f4-83eb-8b81-c5ccaa17b323',globals:{fetch:pending.fetch}});
+  assert.equal(result.complete,false);
+  const none=await run({op:'transcript'},f,{pathname:'/',globals:{fetch:pending.fetch}});
+  assert.equal(none.available,false);
+});
+
+// Network path: the page sends its own request (with its own sentinel
+// headers); jcode swaps the prompt in and reads a tee of the SSE stream.
+// The fixture is a scrubbed live capture of one temporary-chat turn.
+const streamFixture = readFileSync(new URL('./fixtures/chatgpt_web_stream_v1.sse', import.meta.url), 'utf8');
+function sseResponse(text, { chunk = 97, status = 200 } = {}) {
+  const bytes = new TextEncoder().encode(text);
+  return new Response(new ReadableStream({ start(c) { for (let i = 0; i < bytes.length; i += chunk) c.enqueue(bytes.slice(i, i + chunk)); c.close(); } }), { status });
+}
+const sendBody = text => JSON.stringify({ action: 'next', model: 'gpt-6', messages: [{ id: 'm1', author: { role: 'user' }, content: { content_type: 'text', parts: [text] } }] });
+async function settle() { for (let i = 0; i < 5; i++) await new Promise(r => setImmediate(r)); }
+const sseOf = events => events.map(e => `event: delta\ndata: ${JSON.stringify(e)}\n\n`).join('') + 'data: [DONE]\n\n';
+
+test('arm_send swaps the exact prompt into the page send and decodes the v1 stream',async()=>{
+  const f=fixture(); const sent=[];
+  const globals={ fetch: async (url, init) => { sent.push({ url, init }); return sseResponse(streamFixture); } };
+  const prompt=String.raw`# exact \"prompt\" \n with ` + '\u{1F642} and https://example.com';
+  await run({op:'arm_send',key:'jcode-t1',text:prompt,placeholder:'jcode turn jcode-t1'},f,{globals});
+  const response=await globals.fetch('https://chatgpt.com/backend-api/f/conversation',{method:'POST',headers:{a:'b'},body:sendBody('jcode turn jcode-t1\n')});
+  await response.text(); await settle();
+  assert.equal(sent.length,1); assert.deepEqual(sent[0].init.headers,{a:'b'},'page headers pass through untouched');
+  assert.equal(JSON.parse(sent[0].init.body).messages[0].content.parts[0],prompt);
+  const state=await run({op:'stream',key:'jcode-t1'},f,{globals});
+  assert.equal(state.complete,true); assert.equal(state.error,null); assert.deepEqual(state.builtin,[]);
+  assert.equal(state.substituted.length,prompt.length);
+  assert.equal(state.texts.length,1);
+  assert.ok(state.texts[0].startsWith('Rivers are among the most beautiful'));
+  assert.ok(state.texts[0].endsWith('future generations.'));
+  assert.equal(f.submits(),0);
+});
+test('arm_send refuses to send when the page body is not the owned placeholder',async()=>{
+  const f=fixture(); let sends=0;
+  const globals={ fetch: async () => { sends++; return sseResponse(streamFixture); } };
+  await run({op:'arm_send',key:'jcode-t2',text:'real prompt',placeholder:'jcode turn jcode-t2'},f,{globals});
+  await assert.rejects(globals.fetch('https://chatgpt.com/backend-api/f/conversation',{method:'POST',body:sendBody('something the user typed')}),/placeholder/);
+  assert.equal(sends,0,'nothing reaches the network');
+  const state=await run({op:'stream',key:'jcode-t2'},f,{globals});
+  assert.equal(state.started,false); assert.match(state.sendError,/placeholder/);
+});
+test('arm_send leaves unrelated requests alone and substitutes only once',async()=>{
+  const f=fixture(); const sent=[];
+  const globals={ fetch: async (url, init) => { sent.push({ url, init }); return sseResponse(streamFixture); } };
+  await run({op:'arm_send',key:'jcode-t3',text:'PROMPT',placeholder:'jcode turn jcode-t3'},f,{globals});
+  await globals.fetch('https://chatgpt.com/backend-api/f/conversation/prepare',{method:'POST',body:'{"x":1}'});
+  assert.equal(sent[0].init.body,'{"x":1}');
+  await (await globals.fetch('https://chatgpt.com/backend-api/f/conversation',{method:'POST',body:sendBody('jcode turn jcode-t3')})).text();
+  await (await globals.fetch('https://chatgpt.com/backend-api/f/conversation',{method:'POST',body:sendBody('jcode turn jcode-t3')})).text();
+  assert.equal(JSON.parse(sent[1].init.body).messages[0].content.parts[0],'PROMPT');
+  assert.equal(JSON.parse(sent[2].init.body).messages[0].content.parts[0],'jcode turn jcode-t3','a second send is never rewritten');
+});
+test('a placeholder is only sent while the network hook is armed, and the click is deferred',async()=>{
+  const f=fixture(); const placeholder='jcode turn jcode-t6'; f.editor.text=placeholder;
+  const prompt=await run({op:'prompt'},f);
+  const base={op:'submit',label:'GPT-6',effort:'medium',length:prompt.length,hash:prompt.hash,armedKey:'jcode-t6'};
+  await assert.rejects(run({...base,cancelKey:'jcode-t6-a'},f,{globals:{}}),/network hook is not armed/);
+  assert.equal(f.submits(),0,'unarmed placeholder never sent');
+  const globals={ fetch: async () => sseResponse(streamFixture) };
+  await run({op:'arm_send',key:'jcode-t6',text:'REAL',placeholder},f,{globals});
+  const timers=[];
+  const source=readFileSync(path,'utf8');
+  const result=await new Function('request','document','location','KeyboardEvent','setTimeout','globalThis','Date','getSelection','DataTransfer','ClipboardEvent','TextDecoder','Response',source)(
+    {...base,cancelKey:'jcode-t6-b'},f.document,{hostname:'chatgpt.com',pathname:'/'},class{constructor(t,o){this.type=t;Object.assign(this,o);}},
+    (cb,ms)=>{ if(ms===0){timers.push(cb);return 0;} cb(); return 0; },globals,{now:()=>0},()=>({}),class{},class{},TextDecoder,Response);
+  assert.equal(result.deferred,true); assert.equal(f.submits(),0,'click waits for the next task');
+  timers.forEach(cb=>cb()); assert.equal(f.submits(),1);
+});
+test('stream reports HTTP rejections such as unusual-activity blocks',async()=>{
+  const f=fixture();
+  const globals={ fetch: async () => sseResponse('{"detail":"Unusual activity has been detected"}',{status:403}) };
+  await run({op:'arm_send',key:'jcode-t4',text:'P',placeholder:'jcode turn jcode-t4'},f,{globals});
+  await (await globals.fetch('https://chatgpt.com/backend-api/f/conversation',{method:'POST',body:sendBody('jcode turn jcode-t4')})).text(); await settle();
+  const state=await run({op:'stream',key:'jcode-t4'},f,{globals});
+  assert.equal(state.complete,false); assert.match(state.error,/HTTP 403.*Unusual activity/);
+});
+test('stream decoding handles sandbox tool messages, raw wrapper markup and patch shorthand',async()=>{
+  const f=fixture();
+  const envelope='<escape><jcode_tool_call>{"name":"bash","input":{"command":"printf a"}}</jcode_tool_call></escape>';
+  const text=sseOf([
+    {p:'',o:'add',v:{message:{id:'u',author:{role:'user'},content:{content_type:'text',parts:['q']},status:'finished_successfully',recipient:'all'}}},
+    {v:{message:{id:'a1',author:{role:'assistant'},content:{content_type:'code',text:'ls'},status:'finished_successfully',recipient:'container.exec'}}},
+    {v:{message:{id:'a2',author:{role:'assistant'},content:{content_type:'text',parts:[envelope.slice(0,25)]},status:'in_progress',recipient:'all',end_turn:null}}},
+    {p:'/message/content/parts/0',o:'append',v:envelope.slice(25,60)},
+    {v:envelope.slice(60)},
+    {o:'patch',v:[{p:'/message/status',o:'replace',v:'finished_successfully'},{p:'/message/end_turn',o:'replace',v:true}]},
+    {type:'message_stream_complete'}]);
+  const globals={ fetch: async () => sseResponse(text,{chunk:13}) };
+  await run({op:'arm_stream',key:'jcode-t5'},f,{globals});
+  await (await globals.fetch('https://chatgpt.com/backend-api/f/conversation',{method:'POST',body:sendBody('x')})).text(); await settle();
+  const state=await run({op:'stream',key:'jcode-t5'},f,{globals});
+  assert.equal(state.complete,true); assert.deepEqual(state.builtin,['container.exec']);
+  assert.deepEqual(state.texts,[envelope]);
 });

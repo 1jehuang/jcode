@@ -5,12 +5,13 @@ return (async () => {
   const visible = e => !!e && e.getClientRects().length > 0 && !e.closest(hidden);
   const all = (selector, root = document) => Array.from(root.querySelectorAll(selector));
   const one = selector => all(selector).find(visible) || null;
-  // The bridge kills evaluation at 30 seconds. Stop work early enough to run
-  // preference restoration and return an error before that outer deadline.
+  // Every evaluation is bounded. jcode's DevTools command timeout is 60
+  // seconds, so stop early enough to run preference restoration and return
+  // an error first. A cold prepare is ~12s, so leave headroom for slow loads.
   const started = Date.now();
   let restoring = false;
   function checkBudget() {
-    if (Date.now() - started >= (restoring ? 27_000 : 18_000)) throw Error('ChatGPT UI evaluation exceeded its time budget');
+    if (Date.now() - started >= (restoring ? 55_000 : 40_000)) throw Error('ChatGPT UI evaluation exceeded its time budget');
   }
   // A hidden tab (occluded or background browser window) clamps timers to
   // ~1s steps, which overruns the budget. MessageChannel tasks are not throttled.
@@ -214,13 +215,61 @@ return (async () => {
   function promptState() {
     const editor = one(editorSelector);
     const submit = one(submitSelector);
-    const text = editor ? (editor.children.length ? Array.from(editor.children).map(e => e.textContent || '').join('\n') : editor.innerText) : '';
+    // Literal pastes keep the exact text in marked spans. ChatGPT sends
+    // those verbatim; read them directly, because innerText adds paragraph
+    // breaks and autolink chrome.
+    const literal = editor ? all('[data-prompt-literal-paste]', editor) : [];
+    const literalText = node => {
+      let text = '';
+      for (const child of node.childNodes || []) {
+        if (child.nodeType === 3) text += child.data;
+        else if (child.nodeName === 'BR') text += '\n';
+        else text += literalText(child);
+      }
+      return text;
+    };
+    const text = literal.length ? literal.map(literalText).join('')
+      : editor ? (editor.children.length ? Array.from(editor.children).map(e => e.textContent || '').join('\n') : editor.innerText) : '';
     let hash = 2166136261;
     for (let index=0; index<text.length; index++) hash = Math.imul(hash ^ text.charCodeAt(index), 16777619);
-    return { length: text.length, hash: hash >>> 0, submitDisabled: !submit || unavailable(submit) };
+    const attachments = all('button[aria-label^="Remove"]').filter(visible).length;
+    return { length: text.length, hash: hash >>> 0, submitDisabled: !submit || unavailable(submit), literal: literal.length > 0, attachments };
   }
-  // The current page labels the button just "Stop"; older pages said "Stop generating".
-  const isStopButton = e => /^stop( generating| streaming| response)?$/i.test((e.getAttribute('aria-label') || '').trim()) || e.getAttribute('data-testid') === 'stop-button';
+  // Typed text goes through ChatGPT's rich editor, which autolinks URLs and
+  // then re-serializes the whole prompt as escaped Markdown (\#, \`, \\").
+  // Paste the prompt as literal text instead. ChatGPT turns one large paste
+  // into a file attachment, so paste in chunks below that threshold.
+  async function insertLiteral(text) {
+    if (typeof text !== 'string' || !text) throw Error('Refusing to insert an empty ChatGPT prompt');
+    const editor = one(editorSelector);
+    if (!editor) throw Error('ChatGPT composer is not available');
+    editor.focus();
+    const selection = getSelection();
+    selection.removeAllRanges();
+    const range = document.createRange();
+    range.selectNodeContents(editor);
+    selection.addRange(range);
+    document.execCommand('delete', false, null);
+    // The editor drops a paste dispatched in the same task as focus or
+    // clearing. Let it settle first.
+    await delay();
+    const chunk = 6000;
+    for (let start = 0; start < text.length;) {
+      checkBudget();
+      let end = Math.min(text.length, start + chunk);
+      // Never split a UTF-16 surrogate pair across two pastes.
+      if (end < text.length && /[\uD800-\uDBFF]/.test(text[end - 1])) end--;
+      const data = new DataTransfer();
+      data.setData('text/plain', text.slice(start, end));
+      editor.dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }));
+      start = end;
+    }
+    await delay();
+    const state = promptState();
+    if (state.attachments) throw Error('ChatGPT turned the prompt into a file attachment instead of literal text');
+    if (!state.literal) throw Error('ChatGPT did not accept the prompt as literal pasted text');
+    return state;
+  }
   function responseState() {
     const root = one('main') || document;
     const current = all('[data-markdown-text-style="assistant-message"]', root).filter(visible).at(-1);
@@ -238,6 +287,167 @@ return (async () => {
       snippet: text ? '' : ((turn || root).innerText || '').trim().slice(-300),
       model: message?.getAttribute('data-message-model-slug') || '' };
   }
+  // The composer's Send button turns into a plain "Stop" button while a
+  // response generates. Older markup used longer labels or a test id.
+  function isStopButton(e) {
+    return /^stop( (generating|streaming|response))?$/i.test((e.getAttribute('aria-label') || '').trim()) || e.getAttribute('data-testid') === 'stop-button';
+  }
+  // The rendered DOM is lossy: markdown hides backslashes, and ChatGPT can
+  // render wrapped markup such as <escape>...</escape> as an empty message.
+  // Read the owned conversation's raw assistant text from the same-origin
+  // backend instead. The session token never leaves the page.
+  async function transcript() {
+    const id = location.pathname.match(/^\/c\/([0-9a-f-]{36})$/i)?.[1];
+    if (!id) return { available: false, reason: 'the owned tab has no conversation id yet' };
+    const session = await (await globalThis.fetch('/api/auth/session', { credentials: 'same-origin' })).json();
+    if (!session?.accessToken) return { available: false, reason: 'no ChatGPT session token' };
+    const response = await globalThis.fetch(`/backend-api/conversation/${id}`, { credentials: 'same-origin', headers: { authorization: `Bearer ${session.accessToken}` } });
+    if (!response.ok) return { available: false, reason: `conversation request failed with HTTP ${response.status}` };
+    const data = await response.json();
+    const chain = [];
+    for (let node = data.current_node, guard = 0; node && data.mapping?.[node] && guard < 10_000; node = data.mapping[node].parent, guard++) chain.push(data.mapping[node].message);
+    chain.reverse();
+    const turn = chain.slice(chain.findLastIndex(m => m?.author?.role === 'user') + 1).filter(Boolean);
+    const assistant = turn.filter(m => m.author?.role === 'assistant');
+    const texts = assistant.filter(m => (m.recipient ?? 'all') === 'all' && m.content?.content_type === 'text')
+      .map(m => (m.content.parts || []).filter(part => typeof part === 'string').join('')).filter(text => text.trim());
+    const last = turn.at(-1);
+    return { available: true, temporary: data.is_temporary_chat === true, texts,
+      complete: last?.author?.role === 'assistant' && last.end_turn === true && last.status === 'finished_successfully',
+      builtin: [...new Set(assistant.map(m => m.recipient).filter(r => r && r !== 'all'))] };
+  }
+  // Live view of the owned turn's own network stream. The page still sends
+  // the request itself (with its own sentinel checks); jcode only reads a tee
+  // of the response. Decodes the v1 delta encoding into per-message state.
+  function armStream(key) {
+    if (typeof key !== 'string' || !key.startsWith('jcode-')) throw Error('ChatGPT stream capture lacks its owned turn key');
+    const net = (globalThis.__jcodeChatGptWebStream ??= { key: null, original: null, turns: [], pending: null });
+    if (!net.original) {
+      net.original = globalThis.fetch;
+      globalThis.fetch = async function (input, init) {
+        const url = typeof input === 'string' ? input : input?.url || String(input);
+        const method = (init?.method || input?.method || 'GET').toUpperCase();
+        const isTurn = method === 'POST' && /\/backend-api\/f\/conversation(\?|$)/.test(url);
+        let substituted = null;
+        if (isTurn && net.pending) {
+          // Swap jcode's exact prompt into the page's own send, so the page
+          // still mints its sentinel headers. Fail closed: an unexpected body
+          // shape aborts the send rather than submitting the placeholder.
+          const pending = net.pending;
+          net.pending = null;
+          try {
+            if (typeof init?.body !== 'string') throw Error('unexpected ChatGPT send body type');
+            const body = JSON.parse(init.body);
+            const messages = Array.isArray(body.messages) ? body.messages : [];
+            const user = messages.length === 1 ? messages[0] : null;
+            if (!user || user.author?.role !== 'user' || user.content?.content_type !== 'text' || !Array.isArray(user.content.parts) || user.content.parts.length !== 1) {
+              throw Error('unexpected ChatGPT send body shape');
+            }
+            if (typeof user.content.parts[0] !== 'string' || user.content.parts[0].trim() !== pending.placeholder.trim()) throw Error('ChatGPT send did not carry the owned placeholder');
+            user.content.parts = [pending.text];
+            init = { ...init, body: JSON.stringify(body) };
+            let hash = 2166136261;
+            for (let index = 0; index < pending.text.length; index++) hash = Math.imul(hash ^ pending.text.charCodeAt(index), 16777619);
+            substituted = { key: pending.key, length: pending.text.length, hash: hash >>> 0, model: body.model || '', thinkingEffort: body.thinking_effort || '' };
+          } catch (error) {
+            // Nothing was sent. Record why, so jcode can fall back safely.
+            net.sendError = { key: pending.key, message: String(error?.message || error) };
+            throw error;
+          }
+        }
+        const response = await net.original.call(this ?? globalThis, input, init);
+        if (!isTurn || !response.body || !net.key) return response;
+        const turn = { key: net.key, status: response.status, substituted, buffer: '', events: 0, messages: {}, order: [], lastPath: null, current: null, done: false, error: null, started: Date.now(), firstToken: null };
+        net.turns.push(turn);
+        const [mine, theirs] = response.body.tee();
+        (async () => {
+          const reader = mine.getReader();
+          const decoder = new TextDecoder();
+          for (;;) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            turn.buffer += decoder.decode(value, { stream: true });
+            let end;
+            while ((end = turn.buffer.indexOf('\n\n')) >= 0) {
+              const block = turn.buffer.slice(0, end);
+              turn.buffer = turn.buffer.slice(end + 2);
+              for (const line of block.split('\n')) if (line.startsWith('data: ')) applyStreamData(turn, line.slice(6));
+            }
+          }
+          turn.done = true;
+          if (turn.status !== 200 && !turn.error) turn.error = `HTTP ${turn.status}: ${turn.buffer.slice(0, 300)}`;
+        })().catch(error => { if (!turn.done) turn.error = String(error?.message || error); });
+        return new Response(theirs, { status: response.status, statusText: response.statusText, headers: response.headers });
+      };
+      net.wrapper = globalThis.fetch;
+    }
+    net.key = key;
+    return { armed: true };
+  }
+  function armSend(key, text, placeholder) {
+    if (typeof text !== 'string' || !text) throw Error('Refusing to arm an empty ChatGPT prompt');
+    if (typeof placeholder !== 'string' || !placeholder.trim()) throw Error('ChatGPT send substitution lacks its placeholder');
+    armStream(key);
+    const net = globalThis.__jcodeChatGptWebStream;
+    net.sendError = null;
+    net.pending = { key, text, placeholder };
+    return { armed: true, length: text.length };
+  }
+  function applyStreamData(turn, data) {
+    if (data === '[DONE]') { turn.done = true; return; }
+    let event;
+    try { event = JSON.parse(data); } catch { return; }
+    if (!event || typeof event !== 'object') return;
+    turn.events++;
+    if (event.type) {
+      if (event.type === 'message_stream_complete') turn.done = true;
+      if (event.error) turn.error = String(event.error);
+      return;
+    }
+    const apply = (op, path, value) => {
+      const message = turn.current;
+      if (path === '' || (value && typeof value === 'object' && value.message && !path)) {
+        const m = value?.message;
+        if (!m?.id) return;
+        if (!turn.messages[m.id]) turn.order.push(m.id);
+        turn.messages[m.id] = { role: m.author?.role, recipient: m.recipient ?? 'all', channel: m.channel ?? null, type: m.content?.content_type,
+          text: (m.content?.parts || []).filter(p => typeof p === 'string').join(''), status: m.status, endTurn: m.end_turn };
+        turn.current = m.id;
+        if (value.error) turn.error = String(value.error);
+        return;
+      }
+      const entry = message && turn.messages[message];
+      if (!entry || !path) return;
+      turn.lastPath = path;
+      if (/^\/message\/content\/parts\/0$/.test(path)) {
+        entry.text = op === 'replace' ? String(value ?? '') : entry.text + String(value ?? '');
+        if (entry.role === 'assistant' && entry.text && !turn.firstToken) turn.firstToken = Date.now();
+      } else if (path === '/message/status' && op === 'replace') entry.status = value;
+      else if (path === '/message/end_turn' && op === 'replace') entry.endTurn = value;
+    };
+    const run = item => {
+      if (!item || typeof item !== 'object') return;
+      const op = item.o || 'append';
+      if (op === 'patch' && Array.isArray(item.v)) { item.v.forEach(run); return; }
+      apply(op, item.p ?? (typeof item.v === 'string' ? turn.lastPath : ''), item.v);
+    };
+    if (Array.isArray(event.v)) event.v.forEach(run);
+    else if (event.o === 'patch' && Array.isArray(event.v)) event.v.forEach(run);
+    else if (typeof event.v === 'string' && !event.p) apply('append', turn.lastPath, event.v);
+    else run(event);
+  }
+  function streamState(key) {
+    const net = globalThis.__jcodeChatGptWebStream;
+    const turn = net?.turns.filter(t => t.key === key).at(-1);
+    if (!turn) return { started: false, sendError: net?.sendError?.key === key ? net.sendError.message : null, pending: net?.pending?.key === key };
+    const assistant = turn.order.map(id => turn.messages[id]).filter(m => m.role === 'assistant');
+    const texts = assistant.filter(m => m.recipient === 'all' && m.type === 'text' && m.text.trim()).map(m => m.text);
+    const last = assistant.at(-1);
+    return { started: true, status: turn.status, done: turn.done, error: turn.error, events: turn.events, texts, substituted: turn.substituted,
+      complete: turn.done && !!last && last.endTurn === true && last.status === 'finished_successfully',
+      builtin: [...new Set(assistant.map(m => m.recipient).filter(r => r && r !== 'all'))],
+      firstTokenMs: turn.firstToken ? turn.firstToken - turn.started : null };
+  }
 
   checkOrigin();
   if (request.op === 'cancel') {
@@ -247,6 +457,10 @@ return (async () => {
     return { cancelled: true, quiescent: true };
   }
   if (request.op === 'response') return responseState();
+  if (request.op === 'transcript') return await transcript();
+  if (request.op === 'arm_stream') return armStream(request.key);
+  if (request.op === 'arm_send') return armSend(request.key, request.text, request.placeholder);
+  if (request.op === 'stream') return streamState(request.key);
   if (request.op === 'stop') {
     const root = one('main');
     if (!root) throw Error('ChatGPT owned conversation is unavailable for safe Stop');
@@ -256,6 +470,7 @@ return (async () => {
     return { stopped: !!stop, busy: false };
   }
   if (request.op === 'prompt') return promptState();
+  if (request.op === 'insert') { requireTemporary(true); return await insertLiteral(request.text); }
   if (request.op === 'restore') return await restore(request.original);
   if (request.op === 'verify') {
     if (request.requireTemporary !== false) requireTemporary();
@@ -278,8 +493,22 @@ return (async () => {
       requireTemporary(true);
       const prompt = promptState();
       if (prompt.submitDisabled || prompt.length !== request.length || prompt.hash !== request.hash) throw Error('ChatGPT prompt fingerprint or submit state changed before submission');
+      if (request.armedKey != null) {
+        // The composer only holds a placeholder. Never send it unless the
+        // network hook that swaps in the real prompt is still installed.
+        const net = globalThis.__jcodeChatGptWebStream;
+        if (net?.pending?.key !== request.armedKey || !net.wrapper || globalThis.fetch !== net.wrapper) throw Error('ChatGPT network hook is not armed for this turn');
+      }
       checkBudget(); checkCancelled();
-      one(submitSelector).click();
+      const send = one(submitSelector);
+      if (request.armedKey != null) {
+        // Clicking Send makes the page navigate to /c/<id>, which can collect
+        // this evaluation's promise before DevTools gets the result. Click
+        // on the next task instead and let `stream` observe the send.
+        setTimeout(() => send.click(), 0);
+        return { submitted: true, deferred: true, ...current };
+      }
+      send.click();
       return { submitted: true, ...current };
     } finally { pending.active = false; }
   }
