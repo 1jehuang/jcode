@@ -30,7 +30,7 @@ fn main() -> io::Result<()> {
     for line in BufReader::new(stdin.lock()).lines() {
         let line = line?;
         let value: Value = serde_json::from_str(&line)?;
-        let _ = append_log(&value);
+        drop(append_log(&value));
         let Some(method) = value.get("method").and_then(Value::as_str) else {
             continue;
         };

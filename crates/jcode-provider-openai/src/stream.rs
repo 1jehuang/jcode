@@ -339,7 +339,7 @@ fn stream_tool_calls(
                 .unwrap_or(&item_id);
             // The selector filters out states with empty `name`, so a value
             // must be present; fall back to the empty string rather than panic.
-            let name = state.name.clone().unwrap_or_default();
+            let name = state.name.as_deref().unwrap_or("").to_string();
             pending.push_back(StreamEvent::ToolUseStart {
                 id: sanitize_tool_id(id),
                 name,

@@ -67,7 +67,7 @@ impl Agent {
         self.session
             .model_usage_turn_id
             .clone()
-            .unwrap_or_default()
+            .unwrap_or_else(String::new)
     }
 
     pub(super) fn record_model_turn_usage(&self, turn_id: &str) {

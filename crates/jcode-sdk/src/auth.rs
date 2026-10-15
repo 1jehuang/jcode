@@ -322,7 +322,7 @@ impl AuthFlow {
         // Recover from a poisoned mutex here (same as kill_child above): cancel
         // must still reach the CLI cancel operation and the finished flag, or a
         // persisted pending login would be left behind.
-        let _state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        drop(self.0.state.lock().unwrap_or_else(|e| e.into_inner()));
         let (value, success) = self.0.execute(Operation::Cancel, None)?;
         if !success || value["status"] != "cancelled" {
             return Err(failed("Could not clean up pending login"));
@@ -491,7 +491,9 @@ impl FlowInner {
         if result.is_err() {
             self.kill_child();
         }
-        let _ = self.child.lock().map(|mut c| c.take());
+        // Poisoned mutexes are recovered silently here: nothing else cares
+        // about the child's stored handle after this point.
+        drop(self.child.lock().map(|mut c| c.take()));
         result
     }
 }

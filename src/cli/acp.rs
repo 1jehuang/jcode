@@ -143,13 +143,11 @@ impl TurnUsage {
             "outputTokens": self.output_tokens,
         });
         // `json!({...})` always produces an object; treat absence defensively.
-        if let Some(object) = usage.as_object_mut() {
-            if let Some(tokens) = self.cached_read_tokens {
-                object.insert("cachedReadTokens".to_string(), json!(tokens));
-            }
-            if let Some(tokens) = self.cached_write_tokens {
-                object.insert("cachedWriteTokens".to_string(), json!(tokens));
-            }
+        if let (Some(object), Some(tokens)) = (usage.as_object_mut(), self.cached_read_tokens) {
+            object.insert("cachedReadTokens".to_string(), json!(tokens));
+        }
+        if let (Some(object), Some(tokens)) = (usage.as_object_mut(), self.cached_write_tokens) {
+            object.insert("cachedWriteTokens".to_string(), json!(tokens));
         }
         Some(usage)
     }

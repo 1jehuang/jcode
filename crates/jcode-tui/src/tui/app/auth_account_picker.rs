@@ -749,28 +749,39 @@ impl App {
         if models.is_empty() {
             selected = 0;
         }
-        if !openai_accounts.is_empty() {
-            let Some(mut usage_entry) = models.last().cloned() else {
-                return (models, selected);
-            };
-            usage_entry.name = "OpenAI usage details".to_string();
-            usage_entry.options[0].detail =
-                "Today / lifetime API-equivalent cost and tokens by account".to_string();
-            usage_entry.options[0].provider = "OpenAI".to_string();
-            usage_entry.action = crate::tui::PickerAction::Usage {
-                id: "openai-oauth-accounts".to_string(),
-                title: "ChatGPT OAuth account usage".to_string(),
-                subtitle: "Today / lifetime API-equivalent estimates, not a bill".to_string(),
-                status: crate::tui::usage_overlay::UsageOverlayStatus::Info,
-                detail_lines: self
-                    .render_openai_accounts_markdown()
-                    .lines()
-                    .map(str::to_string)
-                    .collect(),
-            };
-            models.push(usage_entry);
+        if !openai_accounts.is_empty() && !self.push_openai_usage_entry(&mut models) {
+            return (models, selected);
         }
         (models, selected)
+    }
+
+    /// Appends the OpenAI usage entry, cloned from the last model entry so it
+    /// inherits that entry's display options. Returns false when there is no
+    /// entry to clone from, in which case the caller must return early.
+    fn push_openai_usage_entry(
+        &self,
+        models: &mut Vec<crate::tui::PickerEntry>,
+    ) -> bool {
+        let Some(mut usage_entry) = models.last().cloned() else {
+            return false;
+        };
+        usage_entry.name = "OpenAI usage details".to_string();
+        usage_entry.options[0].detail =
+            "Today / lifetime API-equivalent cost and tokens by account".to_string();
+        usage_entry.options[0].provider = "OpenAI".to_string();
+        usage_entry.action = crate::tui::PickerAction::Usage {
+            id: "openai-oauth-accounts".to_string(),
+            title: "ChatGPT OAuth account usage".to_string(),
+            subtitle: "Today / lifetime API-equivalent estimates, not a bill".to_string(),
+            status: crate::tui::usage_overlay::UsageOverlayStatus::Info,
+            detail_lines: self
+                .render_openai_accounts_markdown()
+                .lines()
+                .map(str::to_string)
+                .collect(),
+        };
+        models.push(usage_entry);
+        true
     }
 
     fn build_claude_inline_account_picker(&self) -> (Vec<crate::tui::PickerEntry>, usize) {
@@ -1076,26 +1087,8 @@ impl App {
         if accounts.is_empty() {
             selected = 0;
         }
-        if !accounts.is_empty() {
-            let Some(mut usage_entry) = models.last().cloned() else {
-                return (models, selected);
-            };
-            usage_entry.name = "OpenAI usage details".to_string();
-            usage_entry.options[0].detail =
-                "Today / lifetime API-equivalent cost and tokens by account".to_string();
-            usage_entry.options[0].provider = "OpenAI".to_string();
-            usage_entry.action = crate::tui::PickerAction::Usage {
-                id: "openai-oauth-accounts".to_string(),
-                title: "ChatGPT OAuth account usage".to_string(),
-                subtitle: "Today / lifetime API-equivalent estimates, not a bill".to_string(),
-                status: crate::tui::usage_overlay::UsageOverlayStatus::Info,
-                detail_lines: self
-                    .render_openai_accounts_markdown()
-                    .lines()
-                    .map(str::to_string)
-                    .collect(),
-            };
-            models.push(usage_entry);
+        if !accounts.is_empty() && !self.push_openai_usage_entry(&mut models) {
+            return (models, selected);
         }
         (models, selected)
     }

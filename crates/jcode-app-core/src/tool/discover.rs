@@ -670,11 +670,7 @@ impl Tool for DiscoverToolsTool {
         };
 
         if action == DiscoveryAction::Details {
-            let Some(tool_name) = tool_selection.as_deref() else {
-                return Err(anyhow::anyhow!(
-                    "internal error: details action reached without a tool selection"
-                ));
-            };
+            let tool_name = tool_selection.as_deref().ok_or_else(|| anyhow::anyhow!("internal error: details action reached without a tool selection"))?;
             let details = validate_details(&params)?;
             let fetched = match fetch_details(&discovery_request, tool_name, &details).await {
                 Ok(result) => result,

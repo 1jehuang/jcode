@@ -29,7 +29,14 @@ pub fn djb2_hash(s: &str) -> u64 {
 /// (`djb2("") == 5381`) rather than a panic. The fallback keeps cache
 /// lookups progressing instead of crashing the call site.
 pub fn compute_hash(data: &impl Serialize) -> u64 {
-    let json = serde_json::to_string(data).unwrap_or_default();
+    // Matched explicitly rather than via unwrap_or_default so the fallback is
+    // visible at the call site. This crate has no logging dependency, and a
+    // failed serialization is a degenerate-input case rather than an
+    // operational fault, so the empty-document hash is the whole behaviour.
+    let json = match serde_json::to_string(data) {
+        Ok(json) => json,
+        Err(_) => String::new(),
+    };
     djb2_hash(&json)
 }
 
