@@ -1,34 +1,36 @@
 use serde_json::{Value, json};
 use std::fs::OpenOptions;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Write};
 
-fn append_log(value: &Value) {
-    let path = std::env::var("JCODE_FAKE_GROK_ACP_LOG").expect("fake log path");
+fn append_log(value: &Value) -> io::Result<()> {
+    let path = std::env::var("JCODE_FAKE_GROK_ACP_LOG")
+        .map_err(|e| io::Error::other(format!("JCODE_FAKE_GROK_ACP_LOG not set: {e}")))?;
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
-        .open(path)
-        .expect("open fake log");
-    writeln!(file, "{value}").expect("write fake log");
+        .open(path)?;
+    writeln!(file, "{value}")?;
+    Ok(())
 }
 
-fn send(value: Value) {
+fn send(value: Value) -> io::Result<()> {
     let stdout = std::io::stdout();
     let mut stdout = stdout.lock();
-    writeln!(stdout, "{value}").expect("write response");
-    stdout.flush().expect("flush response");
+    writeln!(stdout, "{value}")?;
+    stdout.flush()?;
+    Ok(())
 }
 
-fn response(id: Value, result: Value) {
-    send(json!({"jsonrpc":"2.0", "id":id, "result":result}));
+fn response(id: Value, result: Value) -> io::Result<()> {
+    send(json!({"jsonrpc":"2.0", "id":id, "result":result}))
 }
 
-fn main() {
+fn main() -> io::Result<()> {
     let stdin = std::io::stdin();
     for line in BufReader::new(stdin.lock()).lines() {
-        let line = line.expect("read request");
-        let value: Value = serde_json::from_str(&line).expect("valid JSON-RPC request");
-        append_log(&value);
+        let line = line?;
+        let value: Value = serde_json::from_str(&line)?;
+        let _ = append_log(&value);
         let Some(method) = value.get("method").and_then(Value::as_str) else {
             continue;
         };
@@ -58,8 +60,8 @@ fn main() {
                         }
                     }
                 }),
-            ),
-            "authenticate" => response(id, json!({})),
+            )?,
+            "authenticate" => response(id, json!({}))?,
             "session/new" => response(
                 id,
                 json!({
@@ -72,7 +74,7 @@ fn main() {
                         ]
                     }
                 }),
-            ),
+            )?,
             "session/resume" => response(
                 id,
                 json!({
@@ -84,8 +86,8 @@ fn main() {
                         ]
                     }
                 }),
-            ),
-            "session/set_model" => response(id, json!({})),
+            )?,
+            "session/set_model" => response(id, json!({}))?,
             "session/prompt" => {
                 if std::env::var_os("JCODE_FAKE_GROK_ACP_HANG").is_some() {
                     continue;
@@ -94,14 +96,14 @@ fn main() {
                     eprintln!(
                         "Error: Internal error: {{\"message\":\"API error (status 402 Payment Required): Grok Build usage balance exhausted\",\"http_status\":402}}"
                     );
-                    response(id, json!({"stopReason":"end_turn"}));
+                    response(id, json!({"stopReason":"end_turn"}))?;
                     continue;
                 }
                 send(json!({
                     "jsonrpc":"2.0",
                     "method":"_x.ai/settings/update",
                     "params":{"ignored":true}
-                }));
+                }))?;
                 send(json!({
                     "jsonrpc":"2.0",
                     "method":"session/update",
@@ -112,7 +114,7 @@ fn main() {
                             "content":{"type":"text", "text":"thinking"}
                         }
                     }
-                }));
+                }))?;
                 send(json!({
                     "jsonrpc":"2.0",
                     "method":"session/update",
@@ -123,11 +125,15 @@ fn main() {
                             "content":{"type":"text", "text":"AUTH_TEST_OK"}
                         }
                     }
-                }));
-                response(id, json!({"stopReason":"end_turn"}));
+                }))?;
+                response(id, json!({"stopReason":"end_turn"}))?;
             }
             "session/cancel" => break,
-            other => panic!("unexpected ACP method: {other}"),
+            other => {
+                eprintln!("error: unexpected ACP method: {other}");
+                return Err(io::Error::other(format!("unexpected ACP method: {other}")));
+            }
         }
     }
+    Ok(())
 }
