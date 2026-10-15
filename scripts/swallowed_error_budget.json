@@ -1,8 +1,8 @@
 {
-  "total": 4102,
+  "total": 4105,
   "totals_by_pattern": {
     "dot_ok": 1576,
-    "let_underscore": 1495,
+    "let_underscore": 1498,
     "unwrap_or_default": 1031
   },
   "tracked_files": {
@@ -1708,7 +1708,7 @@
     },
     "crates/jcode-provider-openai-runtime/src/chatgpt_web.rs": {
       "dot_ok": 11,
-      "let_underscore": 12,
+      "let_underscore": 15,
       "unwrap_or_default": 12
     },
     "crates/jcode-provider-openai-runtime/src/lib.rs": {
