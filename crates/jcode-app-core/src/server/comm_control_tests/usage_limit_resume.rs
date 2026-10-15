@@ -407,3 +407,160 @@ async fn resumed_swarm_task_keeps_the_agent_reserved_until_finalized() {
         None => crate::env::remove_var("JCODE_HOME"),
     }
 }
+
+// A swarm worker's turn whose provider is still overloaded after the
+// runtime's own retries waits and resumes instead of failing the task.
+#[derive(Clone)]
+struct OverloadedUntilRecoveredProvider {
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+    recovered: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait]
+impl Provider for OverloadedUntilRecoveredProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if !self.recovered.load(std::sync::atomic::Ordering::SeqCst) {
+            let error = anyhow::anyhow!(
+                "OpenAI-compatible chat request failed\n  endpoint: https://provider.example/v1/chat/completions\n  model: glm-5.3\n  status: 503 Service Unavailable\n  response: {{\"error\":{{\"message\":\"Service temporarily unavailable\",\"type\":\"api_error\"}}}}"
+            );
+            return Ok(Box::pin(stream::iter(vec![Err(error)])));
+        }
+        Ok(Box::pin(stream::iter(vec![
+            Ok(StreamEvent::TextDelta(
+                "task finished after the overload".to_string(),
+            )),
+            Ok(StreamEvent::MessageEnd { stop_reason: None }),
+        ])))
+    }
+
+    fn name(&self) -> &str {
+        "test"
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn swarm_task_hitting_a_provider_overload_stays_in_progress_and_resumes() {
+    let (_env, _runtime) = RuntimeEnvGuard::new();
+    let home = tempfile::TempDir::new().expect("jcode home");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", home.path());
+
+    let swarm_id = "swarm-overload";
+    let coord = "coord-ol";
+    let worker = "worker-ol";
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let recovered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let provider: Arc<dyn Provider> = Arc::new(OverloadedUntilRecoveredProvider {
+        calls: Arc::clone(&calls),
+        recovered: Arc::clone(&recovered),
+    });
+    let registry = Registry::new(provider.clone()).await;
+    let agent = Arc::new(Mutex::new(Agent::new(provider, registry)));
+
+    let swarm_members = Arc::new(RwLock::new(HashMap::from([
+        (coord.to_string(), {
+            let mut m = member(coord, swarm_id, "ready");
+            m.role = "coordinator".to_string();
+            m
+        }),
+        (
+            worker.to_string(),
+            owned_member(worker, swarm_id, "queued", coord),
+        ),
+    ])));
+    let swarms_by_id = Arc::new(RwLock::new(HashMap::from([(
+        swarm_id.to_string(),
+        HashSet::from([coord.to_string(), worker.to_string()]),
+    )])));
+    let mut plan = VersionedPlan::new();
+    plan.items.push(plan_item("task-1", "queued", "high", &[]));
+    let swarm_plans = Arc::new(RwLock::new(HashMap::from([(swarm_id.to_string(), plan)])));
+    let swarm_coordinators = Arc::new(RwLock::new(HashMap::from([(
+        swarm_id.to_string(),
+        coord.to_string(),
+    )])));
+    let event_history = Arc::new(RwLock::new(VecDeque::new()));
+    let event_counter = Arc::new(AtomicU64::new(1));
+    let swarm_event_tx = broadcast::channel(256).0;
+
+    super::spawn_assigned_task_run(
+        Arc::clone(&agent),
+        worker.to_string(),
+        swarm_id.to_string(),
+        "task-1".to_string(),
+        "build the app".to_string(),
+        Arc::clone(&swarm_members),
+        Arc::clone(&swarms_by_id),
+        Arc::clone(&swarm_plans),
+        Arc::clone(&swarm_coordinators),
+        Arc::clone(&event_history),
+        Arc::clone(&event_counter),
+        swarm_event_tx,
+    );
+
+    let item_status = |plans: &HashMap<String, VersionedPlan>| {
+        plans[swarm_id]
+            .items
+            .iter()
+            .find(|item| item.id == "task-1")
+            .map(|item| item.status.clone())
+            .unwrap()
+    };
+
+    let mut waited = false;
+    for _ in 0..20_000 {
+        let member = swarm_members.read().await[worker].clone();
+        if member.status == "rate_limited" {
+            assert!(
+                member
+                    .detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("provider overloaded")),
+                "status detail names the overload: {:?}",
+                member.detail
+            );
+            waited = true;
+            break;
+        }
+        assert_ne!(member.status, "failed", "an overload must not fail the worker");
+        tokio::task::yield_now().await;
+    }
+    assert!(waited, "worker should wait out the overload");
+    assert_eq!(item_status(&*swarm_plans.read().await), "running");
+
+    // The provider recovers; the first resume runs 15 s later and finishes.
+    recovered.store(true, std::sync::atomic::Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_secs(20)).await;
+    let mut done = false;
+    for _ in 0..20_000 {
+        if item_status(&*swarm_plans.read().await) == "done" {
+            done = true;
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(done, "task should complete after the overload resume");
+    let worker_member = swarm_members.read().await[worker].clone();
+    assert_eq!(worker_member.status, "completed");
+    assert!(
+        worker_member
+            .latest_completion_report
+            .is_some_and(|report| report.contains("task finished after the overload"))
+    );
+
+    match prev_home {
+        Some(prev) => crate::env::set_var("JCODE_HOME", prev),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+}
