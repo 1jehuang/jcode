@@ -1085,6 +1085,7 @@ fn insert_input_text_with_undo(app: &mut App, text: &str, typed: bool) {
 
     app.input.insert_str(app.cursor_pos, text);
     app.cursor_pos += text.len();
+    app.reconcile_input_images();
     scrub_osc_color_replies(app);
 
     // Typing the final command character immediately arms picker filtering.
@@ -2271,8 +2272,7 @@ pub(super) fn delete_input_to_start(app: &mut App) {
     if app.cursor_pos > 0 {
         app.remember_input_undo_state();
     }
-    app.input.drain(..app.cursor_pos);
-    app.cursor_pos = 0;
+    app.remove_input_range(0, app.cursor_pos);
     app.sync_model_picker_preview_from_input();
 }
 
@@ -2280,7 +2280,7 @@ pub(super) fn delete_input_to_end(app: &mut App) {
     if app.cursor_pos < app.input.len() {
         app.remember_input_undo_state();
     }
-    app.input.truncate(app.cursor_pos);
+    app.remove_input_range(app.cursor_pos, app.input.len());
     app.sync_model_picker_preview_from_input();
 }
 
@@ -2347,7 +2347,7 @@ pub(super) fn try_ctrl_d_forward_delete(app: &mut App) -> bool {
     }
     let next = crate::tui::core::next_char_boundary(&app.input, app.cursor_pos);
     app.remember_input_undo_state();
-    app.input.drain(app.cursor_pos..next);
+    app.remove_input_range(app.cursor_pos, next);
     app.reset_tab_completion();
     app.sync_model_picker_preview_from_input();
     true
@@ -2358,8 +2358,7 @@ pub(super) fn delete_input_word_back(app: &mut App) {
     if start < app.cursor_pos {
         app.remember_input_undo_state();
     }
-    app.input.drain(start..app.cursor_pos);
-    app.cursor_pos = start;
+    app.remove_input_range(start, app.cursor_pos);
     app.sync_model_picker_preview_from_input();
 }
 
@@ -2379,7 +2378,7 @@ pub(super) fn handle_alt_key(app: &mut App, code: KeyCode) -> bool {
             if app.cursor_pos < end {
                 app.remember_input_undo_state();
             }
-            app.input.drain(app.cursor_pos..end);
+            app.remove_input_range(app.cursor_pos, end);
             app.sync_model_picker_preview_from_input();
             true
         }
@@ -2940,7 +2939,11 @@ pub(super) fn clear_draft_or_request_quit(app: &mut App) {
     }
     // Always push a snapshot (even for an image-only draft that matches the
     // previous entry) so the stashed images have their own undo step.
-    app.push_input_undo_snapshot((app.input.clone(), app.cursor_pos.min(app.input.len())));
+    app.push_input_undo_snapshot((
+        app.input.clone(),
+        app.cursor_pos.min(app.input.len()),
+        std::sync::Arc::new(app.pending_images.clone()),
+    ));
     if !app.pending_images.is_empty() {
         let depth = app.input_undo_stack.len();
         app.cleared_draft_images
@@ -3032,8 +3035,7 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
             if app.cursor_pos > 0 {
                 let prev = crate::tui::core::prev_char_boundary(&app.input, app.cursor_pos);
                 app.remember_input_undo_state();
-                app.input.drain(prev..app.cursor_pos);
-                app.cursor_pos = prev;
+                app.remove_input_range(prev, app.cursor_pos);
                 app.reset_tab_completion();
                 app.sync_model_picker_preview_from_input();
             }
@@ -3043,7 +3045,7 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
             if app.cursor_pos < app.input.len() {
                 let next = crate::tui::core::next_char_boundary(&app.input, app.cursor_pos);
                 app.remember_input_undo_state();
-                app.input.drain(app.cursor_pos..next);
+                app.remove_input_range(app.cursor_pos, next);
                 app.reset_tab_completion();
                 app.sync_model_picker_preview_from_input();
             }
@@ -3185,6 +3187,7 @@ fn attach_image(app: &mut App, media_type: String, base64_data: String) {
     // Snapshot before attaching, so undoing the paste detaches this image. An
     // image pasted over a selection replaces it, as text does: deleting the
     // selection records that same single undo step for the whole replacement.
+
     if !app.replace_input_selection_for_insert() {
         app.remember_input_undo_state();
     }
@@ -3192,6 +3195,7 @@ fn attach_image(app: &mut App, media_type: String, base64_data: String) {
     let placeholder = format!("[image {}]", app.pending_images.len());
     app.input.insert_str(app.cursor_pos, &placeholder);
     app.cursor_pos += placeholder.len();
+    app.reconcile_input_images();
     app.sync_model_picker_preview_from_input();
     app.set_status_notice(format!("Pasted {} ({} KB)", media_type, size_kb));
 }

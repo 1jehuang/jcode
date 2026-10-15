@@ -1730,7 +1730,17 @@ impl App {
 
     pub(super) fn remember_input_undo_state(&mut self) {
         self.input_typing_undo = None;
-        let snapshot = (self.input.clone(), self.cursor_pos.min(self.input.len()));
+        let images = self
+            .input_undo_stack
+            .last()
+            .filter(|snapshot| snapshot.2.as_ref() == &self.pending_images)
+            .map(|snapshot| std::sync::Arc::clone(&snapshot.2))
+            .unwrap_or_else(|| std::sync::Arc::new(self.pending_images.clone()));
+        let snapshot = (
+            self.input.clone(),
+            self.cursor_pos.min(self.input.len()),
+            images,
+        );
         if self.input_undo_stack.last() == Some(&snapshot)
             && self.input_undo_image_counts.last() == Some(&self.pending_images.len())
         {
@@ -1741,7 +1751,10 @@ impl App {
 
     /// Push an undo entry together with the current attachment count,
     /// trimming the oldest entry at the cap.
-    pub(super) fn push_input_undo_snapshot(&mut self, snapshot: (String, usize)) {
+    pub(super) fn push_input_undo_snapshot(
+        &mut self,
+        snapshot: super::input_images::InputUndoSnapshot,
+    ) {
         if self.input_undo_stack.len() >= Self::INPUT_UNDO_LIMIT {
             self.trim_oldest_input_undo_entry();
         }
@@ -1774,12 +1787,13 @@ impl App {
         let depth = self.input_undo_stack.len();
         self.input_selection_anchor = None;
         self.input_typing_undo = None;
-        if let Some((input, cursor_pos)) = self.input_undo_stack.pop() {
+        if let Some((input, cursor_pos, images)) = self.input_undo_stack.pop() {
             let image_count = self.input_undo_image_counts.pop();
             // The composer now holds a restored draft, so the copy stashed by a
             // history jump is stale: a later Down must not resurrect it.
             self.history_draft = None;
             self.input = input;
+            self.pending_images = std::sync::Arc::unwrap_or_clone(images);
             self.cursor_pos = cursor_pos.min(self.input.len());
             if self
                 .cleared_draft_images

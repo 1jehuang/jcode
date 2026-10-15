@@ -537,7 +537,7 @@ struct StashedDraft {
     cursor_pos: usize,
     pasted_contents: Vec<String>,
     pending_images: Vec<(String, String)>,
-    undo: Vec<(String, usize)>,
+    undo: Vec<super::super::input_images::InputUndoSnapshot>,
     undo_image_counts: Vec<usize>,
     cleared_draft_images: Vec<(usize, Vec<(String, String)>)>,
 }
