@@ -716,10 +716,9 @@ fn expand_matching_paste(app: &mut App, text: &str) -> bool {
 
     app.follow_chat_bottom_for_typing();
     app.remember_input_undo_state();
-    app.input.replace_range(
-        placeholder_start..placeholder_start + placeholder.len(),
-        text,
-    );
+    app.remove_input_range(placeholder_start, placeholder_start + placeholder.len());
+    app.input.insert_str(placeholder_start, text);
+    app.input_images_inserted(placeholder_start, text.len(), None);
     app.cursor_pos = placeholder_start + text.len();
     app.pasted_contents.remove(content_index);
     app.reset_tab_completion();
@@ -1508,7 +1507,7 @@ pub(super) fn restore_composer_draft(app: &mut App, draft: ComposerDraft) {
     }
 }
 
-fn expand_paste_placeholders_with(pasted_contents: &[String], input: &str) -> String {
+pub(super) fn expand_paste_placeholders_with(pasted_contents: &[String], input: &str) -> String {
     let mut result = input.to_string();
     for content in pasted_contents.iter().rev() {
         let placeholder = paste_placeholder(content);
@@ -4033,6 +4032,11 @@ impl App {
 
     /// Submit input - just sets up message and flags, processing happens in next loop iteration
     pub(super) fn submit_input(&mut self) {
+        let routing_input = expand_paste_placeholders_with(&self.pasted_contents, &self.input);
+        self.submit_input_with_routing(routing_input);
+    }
+
+    pub(super) fn submit_input_with_routing(&mut self, mut routing_input: String) {
         // Connected SSH input is dispatched through the wire client, never the
         // local submit fallback (which reads skills and persists prompts).
         if crate::tui::is_ssh_remote() {
@@ -4048,7 +4052,9 @@ impl App {
             }
             return;
         }
-        promote_dropped_images(self);
+        if promote_dropped_images(self) {
+            routing_input = expand_paste_placeholders_with(&self.pasted_contents, &self.input);
+        }
         if self.activate_picker_from_preview() {
             return;
         }
@@ -4060,7 +4066,6 @@ impl App {
         // commands, secret-intercept inputs, and oversized pastes).
         self.record_prompt_history(&raw_input);
         let mut input = self.expand_paste_placeholders(&transport_text);
-        let routing_input = self.expand_paste_placeholders(&raw_input);
         if let Some(notice) = input_exceeds_submit_limit(&input) {
             self.input = raw_input;
             self.cursor_pos = self.input.len();
@@ -4172,10 +4177,10 @@ impl App {
                     title: None,
                     tool_data: None,
                 });
-                if let Some(prompt) = trailing_prompt {
-                    input = prompt;
-                } else {
-                    return;
+                match trailing_prompt {
+                    Some(prompt) => input = prompt,
+                    None if self.pending_images.is_empty() => return,
+                    None => input.clear(),
                 }
             } else {
                 // Distinguish an endorsed-but-not-installed skill from a

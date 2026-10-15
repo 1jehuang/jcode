@@ -9,14 +9,20 @@ impl super::input::PreparedInput {
 }
 
 pub(super) fn take_prepared_input(app: &mut App) -> super::input::PreparedInput {
-    super::input::promote_dropped_images(app);
+    // Implicit restore markers must not change the user's command intent.
+    let mut routing_input =
+        super::input::expand_paste_placeholders_with(&app.pasted_contents, &app.input);
+    if super::input::promote_dropped_images(app) {
+        routing_input =
+            super::input::expand_paste_placeholders_with(&app.pasted_contents, &app.input);
+    }
     app.ensure_input_image_markers();
     let transport_text = app.input_without_owned_image_markers();
     let image_markers = std::mem::take(&mut app.input_image_markers);
     let raw_input = std::mem::take(&mut app.input);
     app.record_prompt_history(&raw_input);
     let expanded = super::input::expand_paste_placeholders(app, &transport_text);
-    let routing_input = Some(super::input::expand_paste_placeholders(app, &raw_input));
+    let routing_input = Some(routing_input);
     let pasted_contents = std::mem::take(&mut app.pasted_contents);
     let images = std::mem::take(&mut app.pending_images);
     app.cursor_pos = 0;
