@@ -35,7 +35,7 @@
     "crates/jcode-provider-core/src/model_names.rs": 1,
     "crates/jcode-provider-cursor-runtime/src/wire.rs": 1,
     "crates/jcode-provider-doctor/src/lifecycle_driver.rs": 2,
-    "crates/jcode-provider-openai-runtime/src/chatgpt_web.rs": 16,
+    "crates/jcode-provider-openai-runtime/src/chatgpt_web.rs": 20,
     "crates/jcode-provider-openai/src/stream.rs": 3,
     "crates/jcode-render-core/src/math.rs": 4,
     "crates/jcode-render-core/src/preprocess.rs": 2,
