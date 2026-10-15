@@ -1024,3 +1024,4 @@ fn failover_moves_only_this_session() {
 }
 
 include!("account_failover_session.rs");
+include!("account_failover_api_pin.rs");
