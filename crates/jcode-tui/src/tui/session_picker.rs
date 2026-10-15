@@ -2286,8 +2286,12 @@ impl SessionPicker {
             SessionListUpdate::Cached(sessions) => (sessions, false),
             SessionListUpdate::Fresh(sessions) => (sessions?, true),
         };
+        let apply_project_default = self.selected_session().is_none();
         self.reseed_grouped(sessions.0, sessions.1);
-        self.apply_resume_project_scope_default();
+        // Defaults may choose the first target, never replace one already shown.
+        if apply_project_default {
+            self.apply_resume_project_scope_default();
+        }
         Ok(finished)
     }
 
