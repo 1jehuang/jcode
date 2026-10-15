@@ -4018,7 +4018,6 @@ dependencies = [
  "jcode-message-types",
  "jcode-provider-core",
  "jcode-provider-metadata",
- "jcode-provider-openai",
  "jcode-provider-openrouter",
  "reqwest 0.12.28",
  "serde",
@@ -4213,7 +4212,6 @@ name = "jcode-tool-search"
 version = "0.1.0"
 dependencies = [
  "serde",
- "serde_json",
 ]
 
 [[package]]
