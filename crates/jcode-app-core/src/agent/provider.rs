@@ -320,7 +320,12 @@ impl Agent {
             .session
             .route_api_method
             .as_deref()
-            .is_some_and(|method| jcode_provider_core::oauth_account_label(method).is_some())
+            .is_some_and(|method| {
+                jcode_provider_core::oauth_account_label(method).is_some()
+                    || (self.provider.active_resolved_credential()
+                        == Some(jcode_provider_core::ResolvedCredential::ApiKey)
+                        && matches!(method, "claude-oauth" | "openai-oauth"))
+            })
         {
             self.session.route_api_method = None;
         }
