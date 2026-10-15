@@ -13,6 +13,10 @@
 //! - A reset in the past waits 60 s, an unknown reset waits 15 min. Never zero.
 //! - At most [`MAX_USAGE_LIMIT_RESUMES`] resumes per turn, then the turn fails.
 //! - A user message or cancellation request cancels its pending resume.
+//!
+//! A provider overload (HTTP 5xx, 529, "temporarily unavailable") that
+//! outlasts the runtime's own retries is resumed the same way, on the TUI's
+//! schedule of 15, 30, 60 and 120 s, at most [`MAX_OVERLOAD_RESUMES`] times.
 
 use super::live_turn::LiveTurnSwarmContext;
 use super::update_member_status;
@@ -32,15 +36,44 @@ use std::time::Duration;
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, mpsc};
 use tokio_util::sync::CancellationToken;
 
+/// Resumes for a turn whose provider stays overloaded (5xx, 529) after the
+/// runtime's own retries. Same budget and delays as the TUI's overload hold.
+pub(super) const MAX_OVERLOAD_RESUMES: u32 = 4;
+const OVERLOAD_RESUME_DELAYS_SECS: [u64; MAX_OVERLOAD_RESUMES as usize] = [15, 30, 60, 120];
+
+/// Why a server-initiated turn waits before resuming.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ResumeKind {
+    UsageLimit,
+    ProviderOverload,
+}
+
+impl ResumeKind {
+    fn max_resumes(self) -> u32 {
+        match self {
+            Self::UsageLimit => MAX_USAGE_LIMIT_RESUMES,
+            Self::ProviderOverload => MAX_OVERLOAD_RESUMES,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::UsageLimit => "usage limit",
+            Self::ProviderOverload => "provider overload",
+        }
+    }
+}
+
 /// What to do with a server-initiated turn that failed with `error`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum UsageLimitDecision {
-    /// Not a usage limit: the normal failure path owns it.
+    /// Neither a usage limit nor a provider overload: the normal failure
+    /// path owns it.
     NotUsageLimit,
     /// Wait `delay`, then resume. `attempt` is 1-based.
     Resume(UsageLimitResumePlan),
-    /// A usage limit, but the resume budget is spent.
-    GiveUp { resumes_used: u32 },
+    /// A usage limit or overload, but its resume budget is spent.
+    GiveUp { resumes_used: u32, kind: ResumeKind },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +81,7 @@ pub(super) struct UsageLimitResumePlan {
     pub delay: Duration,
     pub attempt: u32,
     pub resume_at: DateTime<Utc>,
+    pub kind: ResumeKind,
 }
 
 impl UsageLimitResumePlan {
@@ -56,13 +90,23 @@ impl UsageLimitResumePlan {
         self.delay.as_secs().max(1)
     }
 
-    /// Member status detail, e.g. "usage limit, resuming at 13:30 UTC (1/3)".
+    pub fn max_resumes(&self) -> u32 {
+        self.kind.max_resumes()
+    }
+
+    /// Member status detail, e.g. "usage limit, resuming at 13:30 UTC (1/3)"
+    /// or "provider overloaded, resuming at 13:30:15 UTC (1/4)".
     pub fn status_detail(&self) -> String {
+        let (reason, at) = match self.kind {
+            ResumeKind::UsageLimit => ("usage limit", self.resume_at.format("%H:%M")),
+            ResumeKind::ProviderOverload => {
+                ("provider overloaded", self.resume_at.format("%H:%M:%S"))
+            }
+        };
         format!(
-            "usage limit, resuming at {} UTC ({}/{})",
-            self.resume_at.format("%H:%M"),
+            "{reason}, resuming at {at} UTC ({}/{})",
             self.attempt,
-            MAX_USAGE_LIMIT_RESUMES
+            self.max_resumes()
         )
     }
 }
@@ -77,29 +121,65 @@ pub(super) fn decide_with_jitter(
     jitter: Duration,
 ) -> UsageLimitDecision {
     let Some(hint) = usage_limit_hint(error) else {
-        return UsageLimitDecision::NotUsageLimit;
+        return overload_decision(error, resumes_used);
     };
     plan_for_hint(hint, resumes_used, jitter)
 }
 
 fn plan_for_hint(hint: UsageLimitHint, resumes_used: u32, jitter: Duration) -> UsageLimitDecision {
     if resumes_used >= MAX_USAGE_LIMIT_RESUMES {
-        return UsageLimitDecision::GiveUp { resumes_used };
+        return UsageLimitDecision::GiveUp {
+            resumes_used,
+            kind: ResumeKind::UsageLimit,
+        };
     }
     let delay = usage_limit_resume_delay(hint.reset_in, jitter);
+    resume_plan(delay, resumes_used, ResumeKind::UsageLimit)
+}
+
+/// A provider that is still overloaded after the runtime's retries usually
+/// recovers within minutes, so wait and continue the turn instead of failing.
+fn overload_decision(error: &anyhow::Error, resumes_used: u32) -> UsageLimitDecision {
+    let message = crate::util::format_error_chain(error);
+    if !jcode_provider_core::is_provider_overload_message(&message) {
+        return UsageLimitDecision::NotUsageLimit;
+    }
+    let Some(&delay_secs) = OVERLOAD_RESUME_DELAYS_SECS.get(resumes_used as usize) else {
+        return UsageLimitDecision::GiveUp {
+            resumes_used,
+            kind: ResumeKind::ProviderOverload,
+        };
+    };
+    resume_plan(
+        Duration::from_secs(delay_secs),
+        resumes_used,
+        ResumeKind::ProviderOverload,
+    )
+}
+
+fn resume_plan(delay: Duration, resumes_used: u32, kind: ResumeKind) -> UsageLimitDecision {
     let resume_at = Utc::now()
         + chrono::Duration::from_std(delay).unwrap_or_else(|_| chrono::Duration::hours(24));
     UsageLimitDecision::Resume(UsageLimitResumePlan {
         delay,
         attempt: resumes_used + 1,
         resume_at,
+        kind,
     })
 }
 
 /// Message for a turn that gave up after spending its resume budget.
-pub(super) fn give_up_message(error: &anyhow::Error, resumes_used: u32) -> String {
+pub(super) fn give_up_message(
+    error: &anyhow::Error,
+    resumes_used: u32,
+    kind: ResumeKind,
+) -> String {
+    let still = match kind {
+        ResumeKind::UsageLimit => "Usage limit still reached",
+        ResumeKind::ProviderOverload => "Provider still overloaded",
+    };
     format!(
-        "Usage limit still reached after {} automatic resume{}; giving up. {}",
+        "{still} after {} automatic resume{}; giving up. {}",
         resumes_used,
         if resumes_used == 1 { "" } else { "s" },
         crate::util::format_error_chain(error)
@@ -339,12 +419,13 @@ async fn resume_turn_after_usage_limit_inner(
                     guard: held,
                 };
             }
-            UsageLimitDecision::GiveUp { resumes_used } => {
+            UsageLimitDecision::GiveUp { resumes_used, kind } => {
                 crate::logging::warn(&format!(
-                    "Usage-limit resume budget spent for {session_id} after {resumes_used} resumes: {error}"
+                    "{} resume budget spent for {session_id} after {resumes_used} resumes: {error}",
+                    kind.label()
                 ));
                 return ResumeOutcome::Failed {
-                    error: anyhow::anyhow!(give_up_message(&error, resumes_used)),
+                    error: anyhow::anyhow!(give_up_message(&error, resumes_used, kind)),
                     retry_after_secs: None,
                     guard: held,
                 };
@@ -353,11 +434,12 @@ async fn resume_turn_after_usage_limit_inner(
         };
 
         crate::logging::warn(&format!(
-            "Server-initiated turn for {session_id} hit a usage limit; resuming in {}s at {} (attempt {}/{}): {error}",
+            "Server-initiated turn for {session_id} hit a {}; resuming in {}s at {} (attempt {}/{}): {error}",
+            plan.kind.label(),
             plan.delay.as_secs(),
             plan.resume_at.format("%H:%M:%S UTC"),
             plan.attempt,
-            MAX_USAGE_LIMIT_RESUMES
+            plan.max_resumes()
         ));
         let ticket = register_pending_resume(session_id);
         let announce_wait = async {
@@ -412,8 +494,10 @@ async fn resume_turn_after_usage_limit_inner(
             session_id,
             "running",
             Some(format!(
-                "resuming after usage limit ({}/{})",
-                plan.attempt, MAX_USAGE_LIMIT_RESUMES
+                "resuming after {} ({}/{})",
+                plan.kind.label(),
+                plan.attempt,
+                plan.max_resumes()
             )),
             &swarm.members,
             &swarm.swarms_by_id,
@@ -512,11 +596,61 @@ mod tests {
     fn gives_up_after_the_budget_and_ignores_other_errors() {
         assert_eq!(
             decide_with_jitter(&limit(Some(Duration::from_secs(5))), 3, Duration::ZERO),
-            UsageLimitDecision::GiveUp { resumes_used: 3 }
+            UsageLimitDecision::GiveUp {
+                resumes_used: 3,
+                kind: ResumeKind::UsageLimit
+            }
         );
         assert_eq!(
             decide_with_jitter(
-                &anyhow::anyhow!("Anthropic API error (500): overloaded"),
+                &anyhow::anyhow!("Anthropic API error (400): prompt is too long"),
+                0,
+                Duration::ZERO
+            ),
+            UsageLimitDecision::NotUsageLimit
+        );
+    }
+
+    #[test]
+    fn provider_overload_resumes_on_the_tui_schedule_then_gives_up() {
+        let overloaded = anyhow::anyhow!(
+            "OpenAI-compatible chat request failed\n  endpoint: https://provider.example/v1/chat/completions\n  status: 503 Service Unavailable\n  response: {{\"error\":{{\"message\":\"Service temporarily unavailable\"}}}}"
+        );
+        for (resumes_used, secs) in [(0, 15), (1, 30), (2, 60), (3, 120)] {
+            match decide_with_jitter(&overloaded, resumes_used, Duration::ZERO) {
+                UsageLimitDecision::Resume(plan) => {
+                    assert_eq!(plan.delay, Duration::from_secs(secs));
+                    assert_eq!(plan.attempt, resumes_used + 1);
+                    assert_eq!(plan.kind, ResumeKind::ProviderOverload);
+                    assert!(
+                        plan.status_detail()
+                            .starts_with("provider overloaded, resuming at "),
+                        "{}",
+                        plan.status_detail()
+                    );
+                    assert!(
+                        plan.status_detail()
+                            .ends_with(&format!("({}/4)", resumes_used + 1))
+                    );
+                }
+                other => panic!("expected an overload resume, got {other:?}"),
+            }
+        }
+        assert_eq!(
+            decide_with_jitter(&overloaded, 4, Duration::ZERO),
+            UsageLimitDecision::GiveUp {
+                resumes_used: 4,
+                kind: ResumeKind::ProviderOverload
+            }
+        );
+        assert!(
+            give_up_message(&overloaded, 4, ResumeKind::ProviderOverload)
+                .starts_with("Provider still overloaded after 4 automatic resumes; giving up.")
+        );
+        // A permanent failure that uses overload wording is not an overload.
+        assert_eq!(
+            decide_with_jitter(
+                &anyhow::anyhow!("HTTP 404: model temporarily unavailable"),
                 0,
                 Duration::ZERO
             ),

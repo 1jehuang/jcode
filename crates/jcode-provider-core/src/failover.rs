@@ -223,6 +223,48 @@ pub fn parse_http_status_message(message: &str) -> Option<u16> {
     None
 }
 
+/// Whether a failed request means the provider is temporarily overloaded on
+/// its side: HTTP 5xx (including the non-standard 529 "overloaded"), or the
+/// wording providers use for a busy period ("heavy usage", "try again in a
+/// moment"). The provider answered, so this is not a network problem, but
+/// waiting and resending the same turn usually works.
+///
+/// Permanent failures are never an overload, even when their body happens
+/// to use overload wording (a 404 model-not-found saying "temporarily
+/// unavailable"): the statuses the provider runtime refuses to retry
+/// (400, 401, 402, 403, 404, 405, 406, 422) are rejected before the wording
+/// is checked.
+pub fn is_provider_overload_message(message: &str) -> bool {
+    let status = parse_http_status_message(message);
+    if matches!(status, Some(400 | 401 | 402 | 403 | 404 | 405 | 406 | 422)) {
+        return false;
+    }
+    let lower = message.to_ascii_lowercase();
+    status.is_some_and(|code| (500..=599).contains(&code))
+        || [
+            "overloaded",
+            "heavy usage",
+            "temporarily unavailable",
+            "temporary unavailability",
+            "try again in a moment",
+            "server is busy",
+            "at capacity",
+            "capacity constraints",
+            "503 service unavailable",
+            "502 bad gateway",
+            "504 gateway timeout",
+            // A provider mid-deploy ("We're deploying an update right now
+            // ... Please try again shortly.", "code":"DEPLOYING").
+            "deploying",
+            "try again shortly",
+            // The provider lost its own upstream mid-response ("The model
+            // provider's stream was interrupted. Please retry.").
+            "stream was interrupted",
+        ]
+        .iter()
+        .any(|marker| lower.contains(marker))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
