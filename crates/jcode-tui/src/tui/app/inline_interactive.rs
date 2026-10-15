@@ -432,6 +432,14 @@ fn model_route_effort_levels_with_config(
             })
             .unwrap_or_default();
     }
+    if route.api_method == "chatgpt-web" {
+        // The ChatGPT account catalog's ladder (Instant ... Pro). Routes with
+        // one fixed level (minis) have no level step.
+        return super::chatgpt_web_reasoning_efforts(model)
+            .into_iter()
+            .filter(|effort| !crate::prompt::is_swarm_mode_effort(effort))
+            .collect();
+    }
     if !route_supports_reasoning_effort(&route.api_method) {
         return Vec::new();
     }
@@ -3849,7 +3857,11 @@ impl App {
         let entries: Vec<PickerEntry> = levels
             .iter()
             .map(|effort| PickerEntry {
-                name: reasoning_effort_picker_label(effort).to_string(),
+                // ChatGPT web levels keep ChatGPT's names (Light, Extra High, Pro).
+                name: (route.api_method == "chatgpt-web")
+                    .then(|| super::chatgpt_web_effort_label(&model.name, effort))
+                    .flatten()
+                    .unwrap_or_else(|| reasoning_effort_picker_label(effort).to_string()),
                 options: Vec::new(),
                 action: PickerAction::Model,
                 selected_option: 0,
