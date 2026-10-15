@@ -49,9 +49,12 @@ pub fn spawn() {
         "jcode companion: global voice on {} device(s)",
         devices.len()
     );
-    let _ = std::thread::Builder::new()
+    if let Err(error) = std::thread::Builder::new()
         .name("jcode-companion-voice".into())
-        .spawn(move || run(listener));
+        .spawn(move || run(listener))
+    {
+        eprintln!("jcode companion: cannot start global voice worker: {error}");
+    }
 }
 
 struct Capture {
@@ -68,7 +71,15 @@ fn run(mut listener: Listener) {
     loop {
         if capture.is_none() && Instant::now() >= next_focus {
             next_focus = Instant::now() + FOCUS_REFRESH;
-            focused = jcode_voice::dictation::focused_cli_session().ok().flatten();
+            focused = match jcode_voice::dictation::focused_cli_session() {
+                Ok(session) => session,
+                Err(error) => {
+                    jcode_base::logging::warn(&format!(
+                        "companion voice: cannot inspect focused CLI session: {error:#}"
+                    ));
+                    None
+                }
+            };
             // Eligible and "focused" only while a Jcode CLI is in front, so a
             // focused Desktop window wins its own presses.
             listener.set_eligible(focused.is_some());
@@ -142,7 +153,7 @@ fn start(session: String) -> Option<Capture> {
 fn finish(capture: Capture) {
     capture.indicator.show("Transcribing…");
     capture.recording.stop();
-    let _ = std::thread::Builder::new()
+    if let Err(error) = std::thread::Builder::new()
         .name("jcode-companion-voice-send".into())
         .spawn(move || {
             let result = wait_final(&capture.recording);
@@ -169,7 +180,10 @@ fn finish(capture: Capture) {
                 Err(error) => failure_label(&error),
             };
             capture.indicator.show(&label);
-        });
+        })
+    {
+        eprintln!("jcode companion: cannot start voice delivery worker: {error}");
+    }
 }
 
 fn wait_final(recording: &NariRecording) -> Result<String, VoiceError> {

@@ -1,3 +1,6 @@
+#[path = "auth_subscription_status.rs"]
+mod subscription_status;
+
 #[path = "auth_account_commands.rs"]
 mod auth_account_commands;
 #[path = "auth_account_picker.rs"]
@@ -21,7 +24,10 @@ fn saved_account_route_selection(
     current_provider: &str,
     current_model: &str,
     configured_default: Option<&str>,
-) -> crate::provider::RouteSelection {
+) -> anyhow::Result<crate::provider::RouteSelection> {
+    if !matches!(provider_id, "claude" | "openai") {
+        anyhow::bail!("Saved OAuth accounts are not supported for provider {provider_id}");
+    }
     let (runtime_key, provider_label, method) = if provider_id == "claude" {
         (
             crate::provider::RuntimeKey::ClaudeOAuth,
@@ -53,94 +59,22 @@ fn saved_account_route_selection(
     let model = if same_provider && !current_model.trim().is_empty() {
         current_model
     } else {
-        configured_model.unwrap_or_else(|| {
-            crate::auth::lifecycle::default_model_for_provider(provider_id)
-                .expect("saved account provider has a default model")
-        })
+        configured_model
+            .or_else(|| crate::auth::lifecycle::default_model_for_provider(provider_id))
+            .ok_or_else(|| anyhow::anyhow!("No default model is configured for {provider_label}"))?
     };
-    crate::provider::RouteSelection {
+    Ok(crate::provider::RouteSelection {
         model: model.to_string(),
         runtime_key,
         api_method: format!("{method}@{label}"),
         provider_label: provider_label.to_string(),
         detail: format!("Saved account {label}"),
-    }
+    })
 }
 
 #[cfg(test)]
-mod saved_account_route_tests {
-    use super::*;
-
-    #[test]
-    fn account_switch_preserves_same_provider_model_and_replaces_account_pin() {
-        for (id, name, model, method) in [
-            ("claude", "Claude", "claude-custom-model", "claude-oauth"),
-            ("openai", "OpenAI", "gpt-custom-model", "openai-oauth"),
-        ] {
-            let selection = saved_account_route_selection(
-                id,
-                "work",
-                name,
-                model,
-                Some("openai-oauth:configured-other-model"),
-            );
-            assert_eq!(selection.model, model);
-            assert_eq!(selection.account_label(), Some("work"));
-            assert_eq!(
-                selection.routed_model_spec(),
-                format!("{method}@work:{model}")
-            );
-        }
-    }
-
-    #[test]
-    fn account_switch_uses_target_provider_default_for_cross_provider_selection() {
-        for (id, other) in [("claude", "OpenAI"), ("openai", "Claude")] {
-            let selection =
-                saved_account_route_selection(id, "personal", other, "foreign-model", None);
-            assert_eq!(
-                selection.model,
-                crate::auth::lifecycle::default_model_for_provider(id).unwrap()
-            );
-            assert_eq!(selection.account_label(), Some("personal"));
-            assert_ne!(selection.model, "foreign-model");
-        }
-    }
-
-    #[test]
-    fn cross_provider_account_switch_honors_matching_configured_default() {
-        let mut config = crate::config::Config::default();
-        config.provider.default_model = Some("openai-oauth:gpt-6.1-sol".to_string());
-        let configured = config.provider.default_model.as_deref();
-        let selection =
-            saved_account_route_selection("openai", "work", "Claude", "claude-current", configured);
-        assert_eq!(selection.model, "gpt-6.1-sol");
-        assert_eq!(
-            selection.routed_model_spec(),
-            "openai-oauth@work:gpt-6.1-sol"
-        );
-        let selection =
-            saved_account_route_selection("openai", "work", "OpenAI", "gpt-current", configured);
-        assert_eq!(selection.model, "gpt-current");
-        let selection =
-            saved_account_route_selection("claude", "work", "OpenAI", "gpt-current", configured);
-        assert_eq!(
-            selection.model,
-            crate::auth::lifecycle::default_model_for_provider("claude").unwrap()
-        );
-        let selection = saved_account_route_selection(
-            "claude",
-            "work",
-            "OpenAI",
-            "gpt-current",
-            Some("claude-api:claude-configured"),
-        );
-        assert_eq!(
-            selection.routed_model_spec(),
-            "claude-oauth@work:claude-configured"
-        );
-    }
-}
+#[path = "saved_account_route_tests.rs"]
+mod saved_account_route_tests;
 
 impl App {
     pub(super) fn open_auth_browser(url: &str) -> bool {
@@ -191,139 +125,6 @@ impl App {
             ));
         }
         notices.join("\n")
-    }
-
-    pub(super) fn show_jcode_subscription_status(&mut self) {
-        let configured_key = crate::subscription_catalog::configured_api_key().is_some();
-        let configured_base = crate::subscription_catalog::configured_api_base()
-            .unwrap_or_else(|| crate::subscription_catalog::DEFAULT_JCODE_API_BASE.to_string());
-        let runtime_mode = crate::subscription_catalog::is_runtime_mode_enabled();
-
-        let mut message = String::from("Jcode Hosted Model Status\n\n");
-        message.push_str(&format!(
-            "  - Credentials: {}\n",
-            if configured_key {
-                "configured"
-            } else {
-                "not configured (/login jcode)"
-            }
-        ));
-        message.push_str(&format!(
-            "  - Router base: {}{}\n",
-            configured_base,
-            if crate::subscription_catalog::has_router_base() {
-                ""
-            } else {
-                " (default)"
-            }
-        ));
-        message.push_str("  - Billing: pay as you go, no subscription fee\n");
-        message.push_str(&format!(
-            "  - Runtime mode: {}\n\n",
-            if runtime_mode {
-                "active for this session"
-            } else {
-                "inactive for this session"
-            }
-        ));
-
-        message.push_str("Catalog\n\n");
-        for model in crate::subscription_catalog::curated_models() {
-            let default_suffix = if model.default_enabled {
-                " (default)"
-            } else {
-                ""
-            };
-            let tier_suffix = String::new();
-            message.push_str(&format!(
-                "  - {} - {}{}{}\n      - {}\n      - {}\n",
-                model.display_name,
-                model.id,
-                default_suffix,
-                tier_suffix,
-                crate::subscription_catalog::routing_policy_detail(model),
-                model.note
-            ));
-        }
-
-        message.push_str("\nBilling\n\n");
-        message.push_str("  - Set the monthly spending limit you control in your Jcode account\n");
-        message.push_str("  - Email and account warnings are sent at usage milestones\n");
-        message.push_str("  - Warning milestones do not rate limit hosted requests\n");
-        message.push_str("  - Charges begin at $20, then use progressively larger tranches\n");
-        message.push_str("  - Any unbilled remainder is collected at your limit or month end\n");
-
-        if configured_key {
-            message.push_str("\nFetching hosted usage and spending limit...");
-        } else {
-            message.push_str(
-                "\nLog in with /login jcode to set a spending limit and connect hosted models.",
-            );
-        }
-
-        self.push_display_message(DisplayMessage::system(message));
-
-        // With credentials present, fetch live account status (/v1/me) in the
-        // background and surface it via a UiActivity card. Short timeout keeps
-        // this responsive; offline failures degrade to a quiet log line.
-        if configured_key {
-            let session_id = self.session.id.clone();
-            if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                handle.spawn(async move {
-                    match crate::subscription_api::fetch_subscription_me().await {
-                        Ok(me) => {
-                            let resets = me
-                                .usage
-                                .resets_at
-                                .as_deref()
-                                .map(|at| format!(", resets {}", at))
-                                .unwrap_or_default();
-                            crate::bus::Bus::global().publish(crate::bus::BusEvent::UiActivity(
-                                crate::bus::UiActivity::background(
-                                    Some(session_id),
-                                    format!(
-                                        "Jcode Hosted Model Account\n\n  - Email: {}\n  - Billing: {}\n  - Spend: ${:.2} of ${:.2} monthly limit\n  - Billed in tranches: ${:.2}{}{}",
-                                        me.email,
-                                        me.status,
-                                        me.usage.used_usd,
-                                        me.usage.budget_usd,
-                                        me.usage.billed_usd,
-                                        me.usage
-                                            .next_charge_at_usd
-                                            .map(|amount| format!("\n  - Next tranche at: ${amount:.2}"))
-                                            .unwrap_or_default(),
-                                        resets
-                                    ),
-                                    Some("Hosted usage: account status loaded"),
-                                ),
-                            ));
-                        }
-                        Err(error) => {
-                            let message = if error
-                                .downcast_ref::<crate::subscription_api::AccountApiError>()
-                                == Some(&crate::subscription_api::AccountApiError::Unauthorized)
-                            {
-                                let _ = crate::subscription_catalog::clear_account_credentials();
-                                "Jcode Account Status\n\nThe saved account key was revoked or expired. Local credentials were cleared. Use /account jcode login to sign in again."
-                                    .to_string()
-                            } else {
-                                format!(
-                                    "Jcode Account Status\n\nCould not load /v1/me: {}\n\nThe local credential was retained. Retry /account jcode status, open /account jcode manage, or use /account jcode logout.",
-                                    error
-                                )
-                            };
-                            crate::bus::Bus::global().publish(crate::bus::BusEvent::UiActivity(
-                                crate::bus::UiActivity::background(
-                                    Some(session_id),
-                                    message,
-                                    Some("Jcode account status unavailable"),
-                                ),
-                            ));
-                        }
-                    }
-                });
-            }
-        }
     }
 
     pub(super) fn show_auth_status(&mut self) {
@@ -1207,13 +1008,21 @@ impl App {
     }
 
     fn switch_saved_oauth_account(&mut self, provider_id: &str, label: &str) {
-        let selection = saved_account_route_selection(
+        let selection = match saved_account_route_selection(
             provider_id,
             label,
             self.provider.name(),
             &self.provider.model(),
             crate::config::config().provider.default_model.as_deref(),
-        );
+        ) {
+            Ok(selection) => selection,
+            Err(error) => {
+                self.push_display_message(DisplayMessage::error(format!(
+                    "Failed to select saved account {label}: {error}"
+                )));
+                return;
+            }
+        };
         let model_request = selection.routed_model_spec();
         if let Err(error) = self.provider.set_route_selection(&selection) {
             self.push_display_message(DisplayMessage::error(format!(

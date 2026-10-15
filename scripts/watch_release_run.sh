@@ -7,7 +7,9 @@
 set -uo pipefail
 
 RUN_ID="${1:?usage: watch_release_run.sh <run-id> [max-polls] [sleep-seconds]}"
-MAX_POLLS="${2:-100}"
+# A successful v0.97 run took 71 minutes, longer than the former 50-minute
+# default. Cover the 150-minute Windows timeout, finalization and queue delays.
+MAX_POLLS="${2:-480}"
 SLEEP_S="${3:-30}"
 
 for i in $(seq 1 "$MAX_POLLS"); do
@@ -19,7 +21,7 @@ for i in $(seq 1 "$MAX_POLLS"); do
             echo "RUN SUCCESS"
             exit 0
             ;;
-        "completed failure" | "completed cancelled" | "completed timed_out")
+        completed\ *)
             echo "RUN FAILED: $line"
             echo "--- failed jobs ---"
             gh run view "$RUN_ID" --json jobs \

@@ -251,6 +251,130 @@ async fn validates_inputs_before_browser_calls() {
         assert!(browser.calls.lock().unwrap().is_empty());
     }
 }
+struct FailingDecisionTransport {
+    first: Option<MockTransport>,
+    error: &'static str,
+}
+#[async_trait]
+impl DecisionTransport for FailingDecisionTransport {
+    fn model(&self) -> &str {
+        "typesafe/jev-1.13"
+    }
+    async fn decide(&self, request: &DecisionRequest) -> Result<Decision> {
+        if let Some(first) = &self.first
+            && !first.decisions.lock().unwrap().is_empty()
+        {
+            return first.decide(request).await;
+        }
+        anyhow::bail!(self.error)
+    }
+}
+
+#[tokio::test]
+async fn decision_provider_failure_requests_direct_actions_and_preserves_tab() {
+    for error in [
+        "Jev returned HTTP 502: selected provider is unavailable or rejected the request",
+        "Jev decision request failed or timed out; check the selected provider",
+        "Jev returned HTTP 403: selected provider denied access or the account is not entitled",
+    ] {
+        let browser = MockBrowser::new(vec![page("before")]);
+        let transport = FailingDecisionTransport { first: None, error };
+        let value = run(&browser, &transport, &input(), &ctx()).await.unwrap();
+        let result = value.metadata.unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&value.output).unwrap(),
+            result
+        );
+        assert_eq!(result["status"], "hand_back");
+        assert_eq!(result["requested_help"], "direct_actions");
+        assert_eq!(result["tab_id"], 7);
+        assert_eq!(result["frame_id"], 0);
+        assert_eq!(result["final_observation"]["text"], "before");
+        assert!(result["action_trace"].as_array().unwrap().is_empty());
+        let reason = result["reason"].as_str().unwrap();
+        assert!(reason.contains(error));
+        assert!(reason.contains("same tab_id and frame_id"));
+        assert!(reason.contains("do not replay completed actions"));
+        assert!(reason.contains("Do not ask the user to sign in or switch paid providers"));
+        assert!(
+            browser
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|call| call == "status" || call == "eval")
+        );
+    }
+}
+
+#[tokio::test]
+async fn decision_provider_failure_preserves_completed_action_progress() {
+    let browser = MockBrowser::new(vec![page("before"), page("before"), page("after")]);
+    let transport = FailingDecisionTransport {
+        first: Some(MockTransport::new(&[("a0", 0.99)])),
+        error: "Jev returned HTTP 502",
+    };
+    let value = run(&browser, &transport, &input(), &ctx())
+        .await
+        .unwrap()
+        .metadata
+        .unwrap();
+    assert_eq!(value["requested_help"], "direct_actions");
+    assert_eq!(value["tab_id"], 7);
+    assert_eq!(value["final_observation"]["text"], "after");
+    assert_eq!(value["action_trace"].as_array().unwrap().len(), 1);
+    assert_ne!(value["action_trace"][0]["status"], "started");
+}
+
+struct PendingDecisionTransport(Option<crate::agent::InterruptSignal>);
+#[async_trait]
+impl DecisionTransport for PendingDecisionTransport {
+    fn model(&self) -> &str {
+        "mock/jev"
+    }
+    async fn decide(&self, _: &DecisionRequest) -> Result<Decision> {
+        if let Some(signal) = &self.0 {
+            signal.fire();
+        }
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn decision_timeout_recovers_but_shutdown_does_not_request_more_actions() {
+    for cancelled in [false, true] {
+        let browser = MockBrowser::new(vec![page("before")]);
+        let mut context = ctx();
+        let signal = crate::agent::InterruptSignal::new();
+        if cancelled {
+            context.graceful_shutdown_signal = Some(signal.clone());
+        }
+        let transport = PendingDecisionTransport(cancelled.then_some(signal));
+        let mut args = input();
+        args.timeout_ms = Some(10);
+        let value = run(&browser, &transport, &args, &context)
+            .await
+            .unwrap()
+            .metadata
+            .unwrap();
+        assert_eq!(value["status"], "hand_back");
+        assert_eq!(value["tab_id"], 7);
+        assert_eq!(
+            value["requested_help"],
+            if cancelled {
+                "uncertain"
+            } else {
+                "direct_actions"
+            }
+        );
+        assert!(value["reason"].as_str().unwrap().contains(if cancelled {
+            "cancelled"
+        } else {
+            "timed out"
+        }));
+    }
+}
+
 #[tokio::test]
 async fn browser_errors_and_not_ready_hand_back() {
     let mut browser = MockBrowser::new(vec![page("before")]);
@@ -258,9 +382,11 @@ async fn browser_errors_and_not_ready_hand_back() {
     let value = result(&browser, &MockTransport::new(&[("a0", 0.99)]), &input()).await;
     assert_eq!(value["status"], "hand_back");
     assert!(value["reason"].as_str().unwrap().contains("mock failure"));
+    assert_eq!(value["requested_help"], "uncertain");
     browser.ready = false;
     let value = result(&browser, &MockTransport::new(&[]), &input()).await;
     assert!(value["reason"].as_str().unwrap().contains("not ready"));
+    assert_eq!(value["requested_help"], "uncertain");
 }
 #[test]
 fn rejects_scope_escapes_and_recursive_actions() {
@@ -1035,68 +1161,8 @@ async fn distinct_successful_actions_on_unchanged_page_do_not_stall() {
     assert_eq!(value["action_trace"].as_array().unwrap().len(), 4);
 }
 
-#[tokio::test(start_paused = true)]
-async fn observation_timeout_retains_last_connection_error_without_dispatch() {
-    for (timeout_ms, expected_ms) in [(100, 100), (60_000, 8_000)] {
-        let browser = MockBrowser::new(vec![
-            json!({"bridge_error":"message port closed: first connection"}),
-            json!({"bridge_error":"Could not establish connection. Receiving end does not exist."}),
-        ]);
-        let transport = MockTransport::new(&[]);
-        let mut input = input();
-        input.timeout_ms = Some(timeout_ms);
-        let start = tokio::time::Instant::now();
-        let value = result(&browser, &transport, &input).await;
-        assert_eq!(start.elapsed(), Duration::from_millis(expected_ms));
-        assert_eq!(value["status"], "hand_back");
-        assert!(value["action_trace"].as_array().unwrap().is_empty());
-        let reason = value["reason"].as_str().unwrap();
-        assert!(reason.contains("last connection error"), "{value}");
-        assert!(
-            reason.contains(if timeout_ms == 100 {
-                "first connection"
-            } else {
-                "Receiving end does not exist"
-            }),
-            "{value}"
-        );
-        assert!(!reason.contains("in-flight"), "{value}");
-        assert!(transport.requests.lock().unwrap().is_empty());
-        assert!(
-            browser
-                .calls
-                .lock()
-                .unwrap()
-                .iter()
-                .all(|call| matches!(call.as_str(), "status" | "eval"))
-        );
-    }
-}
-
-#[tokio::test(start_paused = true)]
-async fn pending_reconnect_retains_prior_connection_error() {
-    let browser = MockBrowser::new(vec![
-        json!({"bridge_error":"Receiving end does not exist"}),
-        json!({"bridge_pending":true}),
-    ]);
-    let transport = MockTransport::new(&[]);
-    let mut input = input();
-    input.timeout_ms = Some(1_000);
-    let start = tokio::time::Instant::now();
-    let value = result(&browser, &transport, &input).await;
-    assert_eq!(start.elapsed(), Duration::from_secs(1));
-    let reason = value["reason"].as_str().unwrap();
-    assert!(reason.contains("Receiving end does not exist"), "{value}");
-    assert!(reason.contains("timed out"), "{value}");
-    assert!(!reason.contains("in-flight"), "{value}");
-    assert_eq!(value["status"], "hand_back");
-    assert!(value["action_trace"].as_array().unwrap().is_empty());
-    assert_eq!(
-        *browser.calls.lock().unwrap(),
-        vec!["status", "eval", "eval"]
-    );
-    assert!(transport.requests.lock().unwrap().is_empty());
-}
+#[path = "browser_fast_tests/reconnect_timeout.rs"]
+mod reconnect_timeout;
 
 #[tokio::test]
 async fn initial_and_predecision_observation_disconnects_are_retried_read_only() {
