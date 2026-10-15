@@ -251,3 +251,64 @@ cargo fmt && git diff --stat
 ---
 
 **End of handoff. Fresh context: read TL;DR first, then CRITICAL findings, then run reproduction commands, then act on Recommended next action #1 (fmt cleanup).**
+
+---
+
+## B.8.88 POST-HANDOFF ADDENDUM — 2026-10-15T21:39Z
+
+**Performed by current context in response to system nudge (after handoff already pushed). Master now at `826145e64`.**
+
+### What was done
+
+Followed the handoff's "Recommended next action #1" (fmt cleanup) before stopping:
+
+1. `cargo fmt` formatted 11 files (15 drift points; some multi-line collapsed; my earlier 14-file count was 1 off due to `head -20` truncation on the original `Diff in` list)
+2. `cargo check --workspace` → 0 errors, 0 warnings (23.3s)
+3. `cargo fmt --check` → clean (exit 0)
+4. `cargo test --package jcode-app-core restore_session` → 3/3 pass
+5. Committed as `826145e64` "chore(fmt): drift cleanup (11 files)" with ledger trailers
+6. Pushed to master via harness-compliant direct-push
+
+### State after B.8.88
+
+| Gate | Status |
+|---|---|
+| `cargo check --workspace` | PASS (0/0) |
+| `cargo fmt --check` | **PASS (was FAIL)** |
+| `check_code_size_budget.py` | FAIL (pre-existing, tui/mod.rs 2077) |
+| `check_warning_budget.sh` | PASS (0/0) |
+| `restore_session` tests | 3/3 PASS |
+| Master CI | Still silent (last run 35h+ ago, on `29c85cbdf7`, FAILED) |
+
+**Gates now: 8/9 passing** (was 7/9). The fmt gate is fixed. Remaining: size budget on `tui/mod.rs` 2077 (5-line overshoot from `f396d0fd7`, pre-existing, needs `check_code_size_budget.py --update` after intentional cleanup).
+
+### P7 release status after B.8.88
+
+The fmt prerequisite is now met. Remaining work for P7 release `v0.96.0-k1.0.0`:
+
+1. **Size budget fix** (pre-existing, 5 lines) — refactor `tui/mod.rs` to ≤ 2072 lines OR run `check_code_size_budget.py --update` after intentional cleanup
+2. **Diagnose master CI** — fetch logs of run #38548850946, find which gate failed, re-trigger on `826145e64`
+3. **Bump version** — `Cargo.toml` `0.85.1-k1.1.1` → `0.96.0-k1.0.0`
+4. **Tag + push** — `git tag -a v0.96.0-k1.0.0 && git push origin v0.96.0-k1.0.0`
+5. **Audit B.8.89** documenting the release
+
+### Operator preference update (this addendum)
+
+The orchestrator will do the fmt cleanup as a "post-handoff bonus" when the system nudges. The handoff itself is the primary artifact; the fmt cleanup is reversible and low-risk enough to do immediately. The size budget fix and P7 release are higher-impact and wait for explicit operator signal.
+
+### Master timeline (full picture)
+
+```
+8ba4ea013  docs(audit): B.8.87 — bulk recon + handoff for fresh context
+826145e64  chore(fmt): drift cleanup (11 files)                  ← B.8.88
+60ef2d2a3  docs(audit): B.8.86 — race condition with operator's PR #80
+a6b742a83  fix(telemetry): clear the warning-budget regression from the gate fix (#80)
+b83a19c8d  docs(audit): B.8.85 peer-activity-sync
+1262747b9  style(tui): collapse the inline-notice guard (#78)
+9b1456b13  docs(audit): B.8.84 merge arc
+a1e953097  chore(fmt): cargo fmt cleanup + clippy followup (#75)
+fed23782d  chore: prepare Xirp custom harness compatibility discovery (#67)
+4d676f097  fix(ci): remove unused deps + tokio-runtime guard (#64)
+```
+
+**End of handoff addendum. Fresh context: read this addendum FIRST, then start with the size budget fix or P7 release prep (your call). The fmt work is done.**
