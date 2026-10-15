@@ -124,6 +124,10 @@ pub struct DisplayConfig {
     pub resume_project_scope: bool,
     /// Usage percentage wording: "left" (default) or "used".
     pub usage_display: String,
+    /// Show the streaming tokens/sec row in the info panel and status line
+    /// (default: true). Set false to hide live throughput everywhere.
+    #[serde(default = "default_true")]
+    pub show_tps: bool,
 }
 impl Default for DisplayConfig {
     fn default() -> Self {
@@ -163,6 +167,7 @@ impl Default for DisplayConfig {
             external_sessions: true,
             resume_project_scope: false,
             usage_display: "left".to_string(),
+            show_tps: true,
         }
     }
 }
