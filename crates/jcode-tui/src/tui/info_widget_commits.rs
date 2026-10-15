@@ -33,8 +33,58 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
-pub(super) fn commits_has_data(info: &GitInfo) -> bool {
+pub(crate) fn commits_has_data(info: &GitInfo) -> bool {
     commits_has_data_at(info, now_secs())
+}
+
+/// Rows the overview Commits section lists before collapsing the rest into an
+/// inline `+N more` row.
+pub(crate) const OVERVIEW_COMMITS_MAX_ROWS: usize = 3;
+
+/// Overview Commits section: a header line (`Commits ↑N unpushed`) plus up to
+/// [`OVERVIEW_COMMITS_MAX_ROWS`] recent commits and an overflow row. Mirrors
+/// [`super::info_widget_overview::compact_commits_height`].
+pub(super) fn render_commits_compact(info: &GitInfo, width: usize) -> Vec<Line<'static>> {
+    let now = now_secs();
+    if !commits_has_data_at(info, now) {
+        return Vec::new();
+    }
+
+    let mut lines = Vec::new();
+
+    let unpushed = info
+        .recent_commits
+        .iter()
+        .filter(|c| c.unpushed)
+        .count()
+        .max(info.ahead);
+    let mut header = vec![Span::styled(
+        "Commits",
+        Style::default().fg(rgb(180, 180, 190)).bold(),
+    )];
+    if unpushed > 0 {
+        header.push(Span::raw("  "));
+        header.push(Span::styled(
+            format!("↑{unpushed} unpushed"),
+            Style::default().fg(rgb(140, 180, 255)),
+        ));
+    }
+    lines.push(Line::from(header));
+
+    let rows = OVERVIEW_COMMITS_MAX_ROWS.min(info.recent_commits.len());
+    for commit in &info.recent_commits[..rows] {
+        lines.push(commit_line(commit, width, now));
+    }
+
+    let hidden = info.recent_commits.len().saturating_sub(rows);
+    if hidden > 0 {
+        lines.push(Line::from(vec![Span::styled(
+            format!("  +{hidden} more"),
+            Style::default().fg(rgb(110, 110, 125)),
+        )]));
+    }
+
+    lines
 }
 
 fn commits_has_data_at(info: &GitInfo, now: i64) -> bool {

@@ -91,6 +91,69 @@ fn runtime_rows(data: &InfoWidgetData) -> Vec<RuntimeRow> {
     let muted = rgb(140, 140, 150);
     let mut rows = Vec::new();
 
+    // Selected (default) model + effort first: the primary identity of the
+    // session. The home icon marks the default model the session runs on;
+    // the status line shows a shortened form, the panel carries the full name.
+    if let Some(model) = non_empty(data.model.as_deref()) {
+        let mut text = model.to_string();
+        if let Some(effort) = non_empty(data.reasoning_effort.as_deref()) {
+            text.push_str(&format!(" · {effort}"));
+        }
+        rows.push(RuntimeRow {
+            icon: "🏠",
+            icon_color: rgb(255, 135, 200),
+            text,
+            text_color: rgb(220, 220, 230),
+        });
+    }
+
+    // Agent model overrides from config. Only shown when actually set; the
+    // inherit default (None) is silent to keep the panel compact. Like the
+    // memory row below, the swarm row also appears for an effort-only
+    // setting (`agents.swarm_effort` without `agents.swarm_model`), so users
+    // can verify the worker effort in the panel.
+    if let Some(model) = non_empty(data.swarm_model_override.as_deref()) {
+        let mut text = model.to_string();
+        if let Some(effort) = non_empty(data.swarm_model_effort.as_deref()) {
+            text.push_str(&format!(" · {effort}"));
+        }
+        rows.push(RuntimeRow {
+            icon: "🐝",
+            icon_color: rgb(255, 200, 100),
+            text,
+            text_color: muted,
+        });
+    } else if let Some(effort) = non_empty(data.swarm_model_effort.as_deref()) {
+        rows.push(RuntimeRow {
+            icon: "🐝",
+            icon_color: rgb(255, 200, 100),
+            text: format!("· {effort}"),
+            text_color: muted,
+        });
+    }
+    // The memory row also appears for an effort-only setting
+    // (`agents.memory_effort` without a model override), so users can
+    // verify the sidecar effort in the panel.
+    if let Some(model) = non_empty(data.memory_model_override.as_deref()) {
+        let mut text = model.to_string();
+        if let Some(effort) = non_empty(data.memory_model_effort.as_deref()) {
+            text.push_str(&format!(" · {effort}"));
+        }
+        rows.push(RuntimeRow {
+            icon: "🧠",
+            icon_color: rgb(200, 150, 255),
+            text,
+            text_color: muted,
+        });
+    } else if let Some(effort) = non_empty(data.memory_model_effort.as_deref()) {
+        rows.push(RuntimeRow {
+            icon: "🧠",
+            icon_color: rgb(200, 150, 255),
+            text: format!("· {effort}"),
+            text_color: muted,
+        });
+    }
+
     let is_openai = data
         .provider_name
         .as_deref()
@@ -201,17 +264,21 @@ mod tests {
     }
 
     #[test]
-    fn runtime_widget_never_repeats_status_line_identity() {
+    fn runtime_widget_shows_model_and_effort_plus_runtime_detail() {
         let mut d = data();
         d.connection_type = Some("websocket".to_string());
         d.tokens_per_second = Some(61.7);
         let out = text(render_model_widget(&d, Rect::new(0, 0, 30, 8)).all_lines());
-        for owned in ["GPT", "codex", "high", "(hi)", "openai", "OAuth", "jcode"] {
+        // The panel leads with the selected model + effort (user-requested),
+        // then the runtime detail. Identity facts that only the status line
+        // owns (provider name, auth, dir) stay out.
+        for owned in ["openai", "OAuth", "jcode"] {
             assert!(
                 !out.contains(owned),
                 "{owned:?} belongs to the status line: {out}"
             );
         }
+        assert!(out.contains("gpt-5-codex · high"), "{out}");
         assert!(out.contains("fast tier"), "{out}");
         assert!(out.contains("websocket"), "{out}");
         assert!(out.contains("62 tok/s"), "{out}");
@@ -227,16 +294,21 @@ mod tests {
         for tier in [None, Some("off"), Some("default")] {
             let mut d = data();
             d.service_tier = tier.map(str::to_string);
-            assert!(!runtime_has_data(&d), "tier {tier:?}");
+            // The selected model row always renders, so the widget has data;
+            // the tier row must not.
+            assert!(runtime_has_data(&d), "tier {tier:?}");
+            let out = text(render_model_widget(&d, Rect::new(0, 0, 30, 8)).all_lines());
+            assert!(!out.contains("tier"), "tier {tier:?}: {out}");
         }
     }
 
     #[test]
-    fn identity_only_session_has_no_runtime_widget() {
+    fn identity_only_session_renders_just_the_model_row() {
         let mut d = data();
         d.service_tier = None;
-        assert!(!runtime_has_data(&d));
-        assert_eq!(runtime_height(&d), 0);
+        // With no runtime detail, the selected model + effort row still
+        // renders: the panel always shows what model the session runs on.
+        assert_eq!(runtime_height(&d), 1);
     }
 
     #[test]
@@ -247,6 +319,56 @@ mod tests {
         d.session_count = Some(3);
         let framed = render_model_widget(&d, Rect::new(0, 0, 30, 8));
         assert_eq!(framed.lines.len() as u16, runtime_height(&d));
-        assert!(text(framed.all_lines()).contains("sauropod · 3 sessions"));
+        assert!(text(framed.all_lines()).contains("via fireworks"));
+    }
+
+    #[test]
+    fn swarm_and_memory_override_rows_render_when_set() {
+        let mut d = data();
+        d.service_tier = None;
+        d.swarm_model_override = Some("glm-5.2".to_string());
+        d.swarm_model_effort = Some("low".to_string());
+        d.memory_model_override = Some("gemini-3.8-flash".to_string());
+        d.memory_model_effort = Some("none".to_string());
+        let out = text(render_model_widget(&d, Rect::new(0, 0, 40, 8)).all_lines());
+        assert!(out.contains("🐝 glm-5.2 · low"), "{out}");
+        assert!(out.contains("🧠 gemini-3.8-flash · none"), "{out}");
+        // Selected model row plus the two override rows.
+        assert_eq!(runtime_height(&d), 3);
+    }
+
+    #[test]
+    fn memory_effort_only_still_renders_memory_row() {
+        // `agents.memory_effort` without a model override must still show the
+        // memory row, so an effort-only setting is verifiable in the panel.
+        let mut d = data();
+        d.service_tier = None;
+        d.memory_model_effort = Some("low".to_string());
+        let out = text(render_model_widget(&d, Rect::new(0, 0, 40, 8)).all_lines());
+        assert!(out.contains("🧠 · low"), "{out}");
+        assert_eq!(runtime_height(&d), 2);
+    }
+
+    #[test]
+    fn swarm_effort_only_still_renders_swarm_row() {
+        // `agents.swarm_effort` without `agents.swarm_model` must still show
+        // the swarm row, so an effort-only setting is verifiable in the panel
+        // (mirrors the memory row's effort-only branch).
+        let mut d = data();
+        d.service_tier = None;
+        d.swarm_model_effort = Some("low".to_string());
+        let out = text(render_model_widget(&d, Rect::new(0, 0, 40, 8)).all_lines());
+        assert!(out.contains("🐝 · low"), "{out}");
+        // The Overview section renders the same rows via render_model_info.
+        let overview = text(render_model_info(&d, Rect::new(0, 0, 40, 8)));
+        assert!(overview.contains("🐝 · low"), "{overview}");
+        assert_eq!(runtime_height(&d), 2);
+    }
+
+    #[test]
+    fn inherit_overrides_render_no_row() {
+        let mut d = data();
+        d.service_tier = None;
+        assert_eq!(runtime_height(&d), 1);
     }
 }
