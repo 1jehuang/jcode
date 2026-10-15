@@ -3855,14 +3855,17 @@ pub(crate) fn render_tool_message(
         .as_ref()
         .map(|(label, _)| UnicodeWidthStr::width(label.as_str()))
         .unwrap_or(0);
-    // #1454: opt-in " · HH:MM:SS" (when the call ran) rides after the token
-    // count (and the duration badge when present). Width is reserved up front
-    // so the stamp survives summary truncation like the other badges.
-    let time_suffix = tool_row_time_suffix(msg);
-    let time_suffix_width = time_suffix
+    // #1454: the stamp (when the call ran) moves to the left edge, before the
+    // tool name, so rows read "clock, tool, description". Only the duration
+    // badge stays on the right. Width is reserved up front so the summary
+    // truncation accounts for both.
+    let time_segments = tool_row_time_segments(msg);
+    let stamp_prefix_width = time_segments
         .as_ref()
-        .map(|label| UnicodeWidthStr::width(label.as_str()))
+        .and_then(|segs| segs.stamp.as_deref())
+        .map(|stamp| UnicodeWidthStr::width(format!("{stamp} ").as_str()) - 1)
         .unwrap_or(0);
+    let time_suffix_width = 0;
     let edit_suffix_width = if is_edit_tool && has_diff_changes {
         UnicodeWidthStr::width(format!(" (+{} -{})", additions, deletions).as_str())
     } else {
@@ -3872,7 +3875,7 @@ pub(crate) fn render_tool_message(
         .saturating_sub(UnicodeWidthStr::width(base_prefix.as_str()))
         .saturating_sub(token_suffix_width)
         .saturating_sub(duration_suffix_width)
-        .saturating_sub(time_suffix_width)
+        .saturating_sub(stamp_prefix_width)
         .saturating_sub(edit_suffix_width);
 
     let intent = tc
@@ -3929,10 +3932,25 @@ pub(crate) fn render_tool_message(
         summary
     };
 
-    let mut tool_line = vec![
-        Span::styled(format!("  {} ", icon), Style::default().fg(icon_color)),
-        Span::styled(display_name, Style::default().fg(tool_color())),
-    ];
+    // #1454: the stamp leads the row (clock, then tool) in the neutral
+    // blue-grey so the clock never picks up severity colors.
+    let mut tool_line = Vec::with_capacity(8);
+    if let Some(stamp) = time_segments.as_ref().and_then(|segs| segs.stamp.as_deref()) {
+        tool_line.push(Span::styled(
+            format!("{stamp} "),
+            Style::default().fg(rgb(120, 130, 145)),
+        ));
+        tool_line.push(Span::styled(
+            format!("{} ", icon),
+            Style::default().fg(icon_color),
+        ));
+    } else {
+        tool_line.push(Span::styled(
+            format!("  {} ", icon),
+            Style::default().fg(icon_color),
+        ));
+    }
+    tool_line.push(Span::styled(display_name, Style::default().fg(tool_color())));
     if let Some(intent) = intent {
         tool_line.push(Span::styled(" · ", Style::default().fg(dim_color())));
         tool_line.push(Span::styled(
@@ -3977,20 +3995,6 @@ pub(crate) fn render_tool_message(
         let color = severity_badge_color(*severity, rgb(120, 130, 145));
         let mut spans = token_suffix.spans;
         spans.push(Span::styled(label.clone(), Style::default().fg(color)));
-        Line::from(spans)
-    } else {
-        token_suffix
-    };
-
-    // #1454: append the opt-in time-of-day stamp last so each tool row also
-    // answers "when did this run". The clock is always neutral blue-grey: it
-    // must never read as an error state, whatever the duration severity is.
-    let token_suffix = if let Some(label) = time_suffix.as_ref() {
-        let mut spans = token_suffix.spans;
-        spans.push(Span::styled(
-            label.clone(),
-            Style::default().fg(rgb(120, 130, 145)),
-        ));
         Line::from(spans)
     } else {
         token_suffix
@@ -4374,26 +4378,36 @@ fn tool_row_duration_suffix(
     ))
 }
 
-/// #1454: time-of-day badge for a tool row, rendered after the token count
-/// (and any duration badge): " · 17:32:05". Opt-in via
+/// #1454: split the time-of-day stamp (left edge, before the tool name) from
+/// the duration badge (rides with the token suffix). Opt-in via
 /// `display.show_tool_timestamp`; the stamp honors `display.timestamp_tz`
 /// (e.g. "UTC+3") and falls back to the machine's local timezone.
-fn tool_row_time_suffix(msg: &DisplayMessage) -> Option<String> {
+struct ToolRowTimeSegments {
+    stamp: Option<String>,
+    duration: Option<String>,
+}
+
+fn tool_row_time_segments(msg: &DisplayMessage) -> Option<ToolRowTimeSegments> {
     if !crate::config::config().display.show_tool_timestamp {
         return None;
     }
-    let ts = msg.timestamp?;
     let tz = crate::config::config()
         .display
         .timestamp_fixed_offset_secs();
-    let formatted = match tz.and_then(chrono::FixedOffset::east_opt) {
-        Some(offset) => ts.with_timezone(&offset).format("%H:%M:%S").to_string(),
-        None => ts
-            .with_timezone(&chrono::Local)
-            .format("%H:%M:%S")
-            .to_string(),
-    };
-    Some(format!(" · {formatted}"))
+    let stamp = msg.timestamp.map(|ts| {
+        match tz.and_then(chrono::FixedOffset::east_opt) {
+            Some(offset) => ts.with_timezone(&offset).format("%H:%M:%S").to_string(),
+            None => ts
+                .with_timezone(&chrono::Local)
+                .format("%H:%M:%S")
+                .to_string(),
+        }
+    });
+    let duration = tool_row_duration_suffix(msg).map(|(label, _)| label);
+    if stamp.is_none() && duration.is_none() {
+        return None;
+    }
+    Some(ToolRowTimeSegments { stamp, duration })
 }
 
 /// #1453: compact tool duration: milliseconds under a second ("45ms" — a

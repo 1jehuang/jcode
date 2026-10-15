@@ -61,8 +61,8 @@ fn test_tool_row_stamp_renders_when_enabled() {
     let dur_pos = row.find("48.3s").expect("duration present");
     let stamp_pos = row.find(&expected).expect("stamp present");
     assert!(
-        tok_pos < dur_pos && dur_pos < stamp_pos,
-        "order must be token -> duration -> stamp: {row}"
+        stamp_pos < tok_pos && tok_pos < dur_pos,
+        "order must be stamp (left) -> token -> duration (right): {row}"
     );
 }
 
@@ -183,8 +183,8 @@ fn test_tool_row_stamp_survives_narrow_width() {
         let tok_pos = row.find("tok").expect("tokens present");
         let stamp_pos = row.find("23:15:42").expect("stamp present");
         assert!(
-            tok_pos < stamp_pos,
-            "stamp must trail the token badge at width {width}: {row}"
+            stamp_pos < tok_pos,
+            "stamp must lead the row at width {width}: {row}"
         );
     }
 }
