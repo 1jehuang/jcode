@@ -569,8 +569,9 @@ pub(super) fn inferred_reasoning_efforts(
     jcode_provider_core::inferred_reasoning_efforts(provider_name, model_name)
 }
 
-/// Selectable levels of a ChatGPT web route, plus the swarm rungs every
-/// model offers. Empty when the account catalog has not been read yet.
+/// Selectable levels of a ChatGPT web route, plus the swarm rungs. Empty when
+/// the route has a single fixed level (minis) or the account catalog has not
+/// been read yet, so effort controls report that there is nothing to change.
 pub(super) fn chatgpt_web_reasoning_efforts(model: &str) -> Vec<&'static str> {
     let mut efforts: Vec<&'static str> =
         crate::provider::chatgpt_web::cached_reasoning_options(model)
@@ -579,9 +580,10 @@ pub(super) fn chatgpt_web_reasoning_efforts(model: &str) -> Vec<&'static str> {
             .filter_map(|option| jcode_provider_core::canonical_reasoning_effort(&option.value))
             .collect();
     efforts.dedup();
-    if !efforts.is_empty() {
-        efforts.extend(["swarm", "swarm-deep"]);
+    if efforts.len() < 2 {
+        return Vec::new();
     }
+    efforts.extend(["swarm", "swarm-deep"]);
     efforts
 }
 

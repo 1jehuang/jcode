@@ -110,15 +110,12 @@ fn test_chatgpt_web_efforts_come_from_the_account_catalog() {
             crate::tui::app::chatgpt_web_effort_label("gpt-6[web]", "xhigh").as_deref(),
             Some("Extra High")
         );
-        // Single-level routes offer no ladder to pick from.
-        let mini: Vec<_> = crate::tui::app::inferred_reasoning_efforts(
-            Some("OpenAI"),
-            Some("gpt-6-mini[web]"),
-        )
-        .into_iter()
-        .filter(|e| !e.starts_with("swarm"))
-        .collect();
-        assert_eq!(mini, ["none"]);
+        // Single-level routes offer no ladder, so effort hotkeys and /effort
+        // report nothing to change instead of jumping to a swarm rung.
+        assert!(
+            crate::tui::app::inferred_reasoning_efforts(Some("OpenAI"), Some("gpt-6-mini[web]"))
+                .is_empty()
+        );
     });
 }
 
