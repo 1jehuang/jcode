@@ -1386,8 +1386,7 @@ mod tests {
             &["bash".to_string()],
         )
         .await
-        .err()
-        .expect("unknown tool should fail");
+        .expect_err("unknown tool should fail");
         assert!(error.to_string().contains("unknown jcode tool 'python'"));
         drop(tx);
         assert!(rx.recv().await.is_none());
