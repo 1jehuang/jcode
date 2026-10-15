@@ -219,6 +219,36 @@ fn test_save_input_for_reload_persists_inflight_queued_continuation() {
 }
 
 #[test]
+fn test_quota_hold_survives_reload_without_immediate_submission() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let reset = Instant::now() + Duration::from_secs(3600);
+        app.rate_limit_reset = Some(reset);
+        app.rate_limit_pending_message = Some(PendingRemoteMessage {
+            content: "held user turn".to_string(),
+            images: vec![("image/png".to_string(), "payload".to_string())],
+            is_system: false,
+            system_reminder: None,
+            auto_retry: false,
+            retry_attempts: 0,
+            retry_at: None,
+        });
+        app.save_input_for_reload(&app.session.id);
+        let restored = App::restore_input_for_reload(&app.session.id).unwrap();
+        assert!(!restored.submit_on_restore, "quota holds must not become startup sends");
+        let mut reloaded = create_test_app();
+        reloaded.apply_restored_reload_input(restored);
+        assert!(reloaded.input.is_empty());
+        assert!(reloaded.rate_limit_reset.unwrap() > Instant::now() + Duration::from_secs(3500));
+        let pending = reloaded.rate_limit_pending_message.as_ref().unwrap();
+        assert_eq!(pending.content, "held user turn");
+        assert_eq!(pending.images, [("image/png".to_string(), "payload".to_string())]);
+        assert!(!pending.auto_retry);
+        assert_eq!(pending.retry_at, reloaded.rate_limit_reset);
+    });
+}
+
+#[test]
 fn test_reload_preserves_completed_confidence_spike_challenge() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
