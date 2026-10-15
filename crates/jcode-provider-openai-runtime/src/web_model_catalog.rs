@@ -74,10 +74,11 @@ impl OpenAIProvider {
             let guard = OptionalRefreshGuard;
             tokio::spawn(async move {
                 let _guard = guard;
-                if let Err(error) = refresh.await {
-                    jcode_base::logging::info(&format!(
+                match refresh.await {
+                    Ok(_) => jcode_base::bus::Bus::global().publish_models_updated(),
+                    Err(error) => jcode_base::logging::info(&format!(
                         "ChatGPT web models are unavailable: {error:#}"
-                    ));
+                    )),
                 }
             });
         }

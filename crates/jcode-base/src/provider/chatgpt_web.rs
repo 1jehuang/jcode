@@ -235,6 +235,14 @@ pub(crate) fn seed_observed_model_for_tests(label: &str) {
     store_cache(snapshot);
 }
 
+/// Offline discovery input for downstream refresh integration regressions.
+#[cfg(any(test, feature = "test-support"))]
+pub async fn refresh_models_from_discovery_for_tests(
+    discovery: serde_json::Value,
+) -> Result<Vec<ChatGptWebModel>> {
+    record_refresh(async { parse_discovery(discovery) }).await
+}
+
 pub fn find_model(model: &str) -> Option<ChatGptWebModel> {
     if !jcode_provider_core::is_chatgpt_web_model(model) {
         return None;
