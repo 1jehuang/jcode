@@ -2592,4 +2592,31 @@ e806b738a 16:54:08 commit amend: fix(agent)         ← operator's amend with e�
 8. **Phinbox health** — broken since 2026-10-14T07:00Z; affects `gh pr create` / `gh issue create`. Re-check before filing deer's PRs.
 9. **Operator's untracked dirs** — 4 dirs in working tree, NOT to be committed by orchestrator. Operator's call: stash, commit, or discard.
 
+**B.8.75 SESSION-PARKED 2026-10-15T00:02Z — Orchestrator role complete; 10 pending todos are all external-decision-blocked**
+
+Orchestrator's autonomous arc on the cleanup-arc session is COMPLETE. Master is fully synced at `c12dd60a0` (B.8.74 audit on top of `2ce3ae488` merge with operator's `013c3826e` `e`→`_e` fix). 5 ratchets PASS locally; lion's `restore_session` fix is preserved and verified PASS. Deer's panic-budget work is pushed to origin (branches at `4abfb6e15` and `4705118f1`); deer's purview to open PRs when phinbox is healthy.
+
+**10 pending todos — all blocked on external decision, NOT on orchestrator work:**
+
+| # | Todo | Blocker |
+|---|---|---|
+| 6 | PR #66 merge | HARNESS DEFERRAL GATE — operator must call `gh pr merge 66`. PR is now fully reviewed (Kilo SUCCESS, CodeRabbit SUCCESS, Socket SUCCESS x2, semgrep SUCCESS, Macroscope SKIPPED). Merge would bring master panic sites 140→130 (tui-auth crate). |
+| 7 | PR #62 conflict | operator Web UI conflict resolution (4278/-2308 across 126 files) — `docs/drafts/pr-fmt-blindness-decouple.md` plans the long-term fix |
+| 8 | PR #64 ready-for-review | peer agent (not orchestrator) |
+| 9 | PR #67 xirp-harness | operator's parallel work, not orchestrator's purview |
+| 11 | P7 release `v0.96.0-k1.0.0` | gated on master CI green + PR #62 disposition |
+| 12 | Orphan `-d` cleanup (17 merged) | operator approval required (destructive-commands blocklist) |
+| 13 | Dependabot triage (3 vulns) | API returns empty data; needs Web UI or phinbox |
+| 14 | Master CI watch | GitHub Actions billing per §24 — 14h+ since last actual run; not blocking |
+| 17 | Phinbox health | broken 2026-10-14T07:00Z; cannot self-repair |
+| 18 | System load down | load=138.75 (1-2 typical); cannot self-repair; do NOT trigger cargo |
+
+**Operator's untracked dirs in working tree** (NOT to be committed by orchestrator):
+- `docs/drafts/` (3 PR/issue drafts)
+- `docs/sessions/2026-10-12-cleanup-and-release/00_SESSION_OVERVIEW.md` (operator's session overview)
+- `docs/sessions/2026-10-12-cleanup-and-release/stash-dumps/` (~30 patches)
+- `docs/sessions/2026-10-14-m31-restore-fix/` (now-committed m3.1-restore-fallback session)
+
+**Orchestrator's standing offer**: if the operator says "go" or picks a specific gate (e.g., "merge #66", "delete the 17 orphans", "push the operator drafts as their own commit"), the orchestrator will execute autonomously. Otherwise parked.
+
 
