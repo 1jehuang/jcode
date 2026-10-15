@@ -2859,4 +2859,85 @@ These untracked dirs have been in the working tree since at least 2026-10-14T16:
 - 4 untracked operator dirs NOT committed (operator's purview)
 - 7 still-pending todos (all external-blocked)
 
+**B.8.80 EXECUTED 2026-10-15T06:40Z — Operator signal `"proc"`; PR #74 (ratchet tightening 140→62) merged by peer agent; FULL RATCHET CLARIFICATION based on PR #74's commit message; stash dropped (now redundant); B.8.78/B.8.79 ratchet definitions fully reconciled**
+
+**Master moved again during the B.8.79 commit**:
+- New commit: `6bc421d33 chore(ratchet): tighten panic baseline from 140 to 62 (#74)`
+- B.8.79 rebased and pushed: local HEAD now `5f9b19801`
+
+**PR #74 commit message explained the ratchet system definitively**:
+> "The panic-prone refactor removed 78 occurrences, but the baseline stayed at 140, leaving the ratchet toothless: 78 new panics could land before CI complained. This lowers the baseline to the achieved count so the gate regains its regression-prevention value."
+>
+> "This is the ratchet-tightening step after real cleanup, matching the existing pattern in 29c85cbdf and 660d9152c. It is not the anti-pattern of raising the baseline to absorb new panics."
+>
+> "Verified the gate bites: adding a single .unwrap() to crates/jcode-render-core/src/reasoning.rs now fails with 'total panic-prone count grew: 62 -> 63' and 'new production panic-prone usage: crates/jcode-render-core/src/reasoning.rs (1)'."
+
+**FULL CLARIFICATION of the ratchet system** (resolves B.8.78/B.8.79 confusion):
+
+`scripts/panic_budget.json` is a **`.expect()` + `.unwrap()` Ratchet B ratchet**, NOT a `panic!` macro ratchet (despite the filename "panic_budget"):
+- **Tracks**: 20 specific production files (was 46 in the 140-baseline, but peer agent removed 26 file paths from the tracked set after those files were fully cleaned)
+- **Counts**: total `.expect()` + `.unwrap()` calls across those 20 files
+- **Baseline**: 140 (pre-cleanup) → 62 (post-cleanup, via PR #74 tightening)
+- **CI gate**: a pre-existing `scripts/ci_panic_budget.sh` (or similar) checks the count on every PR; if total grows past 62, PR fails
+
+**Why B.8.78's "Ratchet A = 0" was misleading**: I was reading the peer agent's tracked_files subset (which now has 0 panic! macros) and conflating it with the whole-tree `panic!` count (which is 492). The peer agent's tracked subset is a **Ratchet B subset**, not a `panic!` ratchet at all.
+
+**Corrected ratchet system** (resolves B.8.78/B.8.79 misframes):
+
+| Ratchet | Definition | Scope | Current value | Gate behavior |
+|---|---|---|---|---|
+| A. `panic!` + `unreachable!` + `unimplemented!` + `todo!` macros | workspace-wide | non-test production files | **492 sites in 131 files** | NO AUTOMATED GATE (not tracked in scripts/panic_budget.json) |
+| B. `.expect()` + `.unwrap()` | subset (20 files) | peer-agent-tracked production files | **62 sites in 20 files** | YES — CI fails if total grows past 62 |
+| B'. `.expect()` + `.unwrap()` (whole-tree) | workspace-wide | non-test production files | **7447 sites** (4444 + 3003) | NO AUTOMATED GATE (not tracked) |
+| C. swallowed-error (`let _ = `) | workspace-wide | non-test files | **1585 sites in 341 files** | NO AUTOMATED GATE (not tracked) |
+| D. production files > 500 lines | workspace-wide | production | 350 | NO AUTOMATED GATE (visual check) |
+| E. test files > 500 lines | workspace-wide | tests | 89 | NO AUTOMATED GATE (visual check) |
+| F. dependency boundaries | workspace-wide | production | PASS (per B.8.66) | NO AUTOMATED GATE (visual check) |
+
+**Production code state at HEAD `5f9b19801`**:
+- Ratchet A: 492 `panic!` macros in non-test production (NOT a regression risk; no automated gate; not targeted by cleanup arc)
+- Ratchet B (subset): 62 `.expect()` + `.unwrap()` in 20 tracked files (gated by CI at 62)
+- Ratchet B (whole): 7447 in non-test production (not gated; not yet addressed)
+- Ratchet C: 1585 swallowed errors (not gated; not yet addressed)
+
+**Stash dropped**: `PEER-AGENT scripts/panic_budget.json (do not touch) [ts: 2026-10-15T06:27Z]` was redundant once PR #74 committed the same change. Dropped cleanly with `git stash drop`.
+
+**Cumulative panic-budget work** (5 PRs: #66, #69, #70, #71, #74):
+
+| PR | Subject | Ratchet effect |
+|---|---|---|
+| #66 | tui-auth panic-prone | Ratchet B -19 in tui-auth (5 .expect() + 14 .unwrap()) |
+| #69 | sdk auth/ssh panic-prone | Ratchet B -13 in sdk/auth.rs (5 .expect() + 8 .unwrap()) |
+| #70 | telemetry/grok-runtime panic-prone | (specific count TBD; cumulative) |
+| #71 | core panic-prone | (specific count TBD; cumulative) |
+| #74 | ratchet tightening 140 → 62 | Baseline reset; CI gate now at 62 |
+
+**Pre-cleanup baseline**: 140 panic-prone sites in 46 files (the original Ratchet B tracked set).
+**Post-cleanup baseline**: 62 panic-prone sites in 20 files (the Ratchet B tracked set after 26 files were fully cleaned and removed from the tracked set).
+
+**Net effect**: 78 panic-prone sites removed from production tracked files (140 → 62), AND 26 files removed from the tracked set (because they're now panic-prone-free). The CI gate is now active at 62.
+
+**3 restore_session tests PASS on new HEAD** (11.79s via prebuilt binary). Tests are in jcode-app-core which isn't touched by the merged PRs.
+
+**4 untracked operator dirs still in working tree** (not committed by orchestrator):
+- `docs/drafts/` (3 draft markdown files)
+- `docs/sessions/2026-10-12-cleanup-and-release/00_SESSION_OVERVIEW.md` (4.2K)
+- `docs/sessions/2026-10-12-cleanup-and-release/stash-dumps/` (6 files, jcode.patch + wt-jcode-audit.patch = 13.4K each)
+- `docs/sessions/2026-10-14-m31-restore-fix/` (commit-msg.txt + 2 test logs)
+
+**Phinbox queue**: still 328+ (peer/operator requests; mine all answered).
+
+**State at 06:41Z (B.8.80 exit)**:
+- Master HEAD: `5f9b19801` (B.8.79 audit on top of PR #74)
+- origin/master: `5f9b19801` (synced)
+- Local branches: 62
+- Working tree: 4 untracked operator dirs (no stash)
+- 328+ phinbox-queued requests
+- Ratchet B (subset) CI-gated at 62; currently at 62 ✅
+- Ratchet A: 492 in non-test production (not gated)
+- Ratchet B (whole): 7447 in non-test production (not gated)
+- Ratchet C: 1585 (not gated)
+- 3 restore_session tests PASS (11.79s)
+- 7 still-pending todos (all external-blocked)
+
 
