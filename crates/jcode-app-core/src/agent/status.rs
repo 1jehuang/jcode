@@ -178,13 +178,17 @@ impl Agent {
     }
 
     pub(super) fn provider_key_for_new_session(&self) -> Option<String> {
-        if let Some(label) = self.provider.oauth_account_label() {
-            let method = if self.provider.name().eq_ignore_ascii_case("openai") {
-                "openai-oauth"
-            } else {
-                "claude-oauth"
-            };
+        if let Some((method, label)) = self.observed_oauth_account_route() {
             return Some(format!("{method}@{label}"));
+        }
+        if self.provider.active_resolved_credential()
+            == Some(jcode_provider_core::ResolvedCredential::ApiKey)
+        {
+            match self.provider.name().to_ascii_lowercase().as_str() {
+                "openai" => return Some("openai-api".to_string()),
+                "claude" | "anthropic" => return Some("claude-api".to_string()),
+                _ => {}
+            }
         }
         if self
             .provider
