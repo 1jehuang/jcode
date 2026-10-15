@@ -1,7 +1,7 @@
 {
-  "total": 3718,
+  "total": 3716,
   "totals_by_pattern": {
-    "dot_ok": 1429,
+    "dot_ok": 1427,
     "let_underscore": 1355,
     "unwrap_or_default": 934
   },
@@ -797,7 +797,7 @@
       "unwrap_or_default": 0
     },
     "crates/jcode-base/src/config/config_file.rs": {
-      "dot_ok": 4,
+      "dot_ok": 2,
       "let_underscore": 4,
       "unwrap_or_default": 3
     },
