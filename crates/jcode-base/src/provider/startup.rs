@@ -93,11 +93,13 @@ impl MultiProvider {
             && std::env::var_os("JCODE_NAMED_PROVIDER_PROFILE").is_none()
             && let Some(pref) = provider_state.default_provider_key()
         {
-            if let Some(profile) =
-                crate::provider_catalog::resolve_openai_compatible_profile_selection(pref)
-            {
-                crate::provider_catalog::apply_openai_compatible_profile_env(Some(profile));
-            } else if cfg.providers.contains_key(pref) {
+            // A user-declared `[providers.<pref>]` block wins over a built-in
+            // login-provider profile with the same id. Without this ordering,
+            // a config block named after a built-in id (for example
+            // "openai-compatible") is unreachable: the built-in resolver
+            // always returns Some, so the config branch below was dead code
+            // and the user's declared models were silently discarded.
+            if cfg.providers.contains_key(pref) {
                 match crate::provider_catalog::apply_named_provider_profile_env_from_config(
                     pref, cfg,
                 ) {
@@ -106,11 +108,28 @@ impl MultiProvider {
                         crate::env::set_var("JCODE_PROVIDER_PROFILE_ACTIVE", "1");
                         default_named_provider_profile = Some(profile_name);
                     }
-                    Err(err) => crate::logging::warn(&format!(
-                        "Failed to apply default provider profile '{}': {}",
-                        pref, err
-                    )),
+                    Err(err) => {
+                        crate::logging::warn(&format!(
+                            "Failed to apply default provider profile '{}': {}",
+                            pref, err
+                        ));
+                        // Fall through to the built-in resolver so a malformed
+                        // user block still yields a usable provider.
+                        if let Some(profile) =
+                            crate::provider_catalog::resolve_openai_compatible_profile_selection(
+                                pref,
+                            )
+                        {
+                            crate::provider_catalog::apply_openai_compatible_profile_env(Some(
+                                profile,
+                            ));
+                        }
+                    }
                 }
+            } else if let Some(profile) =
+                crate::provider_catalog::resolve_openai_compatible_profile_selection(pref)
+            {
+                crate::provider_catalog::apply_openai_compatible_profile_env(Some(profile));
             }
         }
 
