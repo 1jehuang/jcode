@@ -206,6 +206,14 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         }
         needs_redraw = true;
     }
+    // The reply rebuilds the open picker via `refresh_open_model_picker_after_catalog_update`.
+    if app.take_stale_model_routes_fetch()
+        && let Err(error) = remote.request_model_catalog().await
+    {
+        crate::logging::warn(&format!(
+            "Failed to refetch stale model routes for /model: {error}"
+        ));
+    }
 
     let _ = check_debug_command(app, remote).await;
 
