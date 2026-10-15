@@ -62,6 +62,69 @@ impl MultiProvider {
         }
     }
 
+    /// Ledger source key for the credential `provider` will use right now.
+    /// Mirrors `active_resolved_credential` for the dual-auth providers and
+    /// the runtime profile resolution for the OpenRouter slot, but resolves
+    /// against the *passed* provider so failover candidates attribute
+    /// correctly even before `set_active_provider` runs.
+    pub(super) fn activity_source_key(&self, provider: ActiveProvider) -> String {
+        match provider {
+            ActiveProvider::Claude => {
+                let uses_api_key = self
+                    .anthropic_provider()
+                    .map(|anthropic| match anthropic.credential_mode() {
+                        anthropic::AnthropicCredentialMode::ApiKey => true,
+                        anthropic::AnthropicCredentialMode::OAuth => false,
+                        anthropic::AnthropicCredentialMode::Auto => {
+                            crate::auth::claude::load_credentials().is_err()
+                        }
+                    })
+                    .unwrap_or(false);
+                if uses_api_key {
+                    "claude:api-key".to_string()
+                } else {
+                    let label = self
+                        .resolved_account_label(AccountProviderKind::Claude)
+                        .or_else(crate::auth::claude::active_account_label)
+                        .unwrap_or_else(|| "default".to_string());
+                    format!("claude:oauth:{}", label)
+                }
+            }
+            ActiveProvider::OpenAI => {
+                let uses_api_key = self
+                    .openai_provider()
+                    .map(|openai| match openai.credential_mode() {
+                        openai::OpenAICredentialMode::ApiKey => true,
+                        openai::OpenAICredentialMode::OAuth => false,
+                        openai::OpenAICredentialMode::Auto => {
+                            crate::auth::codex::load_oauth_credentials().is_err()
+                        }
+                    })
+                    .unwrap_or(false);
+                if uses_api_key {
+                    "openai:api-key".to_string()
+                } else {
+                    let label = self
+                        .resolved_account_label(AccountProviderKind::OpenAi)
+                        .or_else(crate::auth::codex::active_account_label)
+                        .unwrap_or_else(|| "default".to_string());
+                    format!("openai:oauth:{}", label)
+                }
+            }
+            ActiveProvider::OpenRouter => {
+                // The OpenRouter slot multiplexes the public aggregator, the
+                // jcode subscription, and direct OpenAI-compatible profiles.
+                let label = self
+                    .active_openrouter_execution_provider()
+                    .map(|execution| execution.runtime_display_name())
+                    .unwrap_or_else(|| "OpenRouter".to_string());
+                let runtime = std::env::var("JCODE_RUNTIME_PROVIDER").ok();
+                crate::provider_activity::source_key_for_provider_label(&label, runtime.as_deref())
+            }
+            other => Self::provider_key(other).to_string(),
+        }
+    }
+
     /// Check the exact billing identity again when a countdown expires. A
     /// removed login or a newly excluded account must never be selected.
     pub fn is_failover_route_pool_approved(route: &str) -> bool {

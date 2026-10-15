@@ -1047,7 +1047,7 @@
       "unwrap_or_default": 0
     },
     "crates/jcode-base/src/provider/mod.rs": {
-      "dot_ok": 3,
+      "dot_ok": 2,
       "let_underscore": 1,
       "unwrap_or_default": 14
     },
@@ -1060,6 +1060,11 @@
       "dot_ok": 3,
       "let_underscore": 2,
       "unwrap_or_default": 8
+    },
+    "crates/jcode-base/src/provider/multi_provider.rs": {
+      "dot_ok": 1,
+      "let_underscore": 0,
+      "unwrap_or_default": 0
     },
     "crates/jcode-base/src/provider/openai.rs": {
       "dot_ok": 4,
