@@ -178,6 +178,7 @@ fn test_context_limit_claude() {
 
 #[test]
 fn test_context_limit_dynamic_cache() {
+    let _env = crate::storage::lock_test_env();
     populate_context_limits(
         [("test-model-xyz".to_string(), 64_000)]
             .into_iter()
