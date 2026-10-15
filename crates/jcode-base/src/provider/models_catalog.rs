@@ -166,15 +166,23 @@ pub struct OpenAICatalogTestEndpoint(Option<String>);
 #[cfg(any(test, feature = "test-support"))]
 impl Drop for OpenAICatalogTestEndpoint {
     fn drop(&mut self) {
-        *TEST_OPENAI_CATALOG_URL.lock().unwrap_or_else(|error| error.into_inner()) = self.0.take();
+        *TEST_OPENAI_CATALOG_URL
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = self.0.take();
     }
 }
 
 /// Loopback-only HTTP boundary for tests holding the shared test-env lock.
 #[cfg(any(test, feature = "test-support"))]
 pub fn openai_catalog_test_endpoint(url: String) -> Result<OpenAICatalogTestEndpoint> {
-    anyhow::ensure!(url.starts_with("http://127.0.0.1:"), "catalog test endpoint must be loopback HTTP");
-    let previous = TEST_OPENAI_CATALOG_URL.lock().unwrap_or_else(|error| error.into_inner()).replace(url);
+    anyhow::ensure!(
+        url.starts_with("http://127.0.0.1:"),
+        "catalog test endpoint must be loopback HTTP"
+    );
+    let previous = TEST_OPENAI_CATALOG_URL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .replace(url);
     Ok(OpenAICatalogTestEndpoint(previous))
 }
 
@@ -185,7 +193,11 @@ pub async fn fetch_openai_model_catalog(access_token: &str) -> Result<OpenAIMode
     let client = shared_http_client();
     let url = "https://chatgpt.com/backend-api/codex/models?client_version=1.0.0";
     #[cfg(any(test, feature = "test-support"))]
-    let url = TEST_OPENAI_CATALOG_URL.lock().unwrap_or_else(|error| error.into_inner()).clone().unwrap_or_else(|| url.to_string());
+    let url = TEST_OPENAI_CATALOG_URL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone()
+        .unwrap_or_else(|| url.to_string());
     let resp = client
         .get(url)
         .header("Authorization", format!("Bearer {}", access_token))

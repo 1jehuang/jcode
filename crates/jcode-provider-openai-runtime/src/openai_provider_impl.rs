@@ -20,10 +20,14 @@ impl OpenAIProvider {
     ) -> Result<()> {
         if self.browser_model_unset.load(AtomicOrdering::Acquire)
             && self.model() == CHATGPT_WEB_MODEL
-            && !models.iter().any(|model| model.available && model.model == CHATGPT_WEB_MODEL)
+            && !models
+                .iter()
+                .any(|model| model.available && model.model == CHATGPT_WEB_MODEL)
         {
             let model = models.iter().find(|model| model.available).ok_or_else(|| {
-                anyhow::anyhow!("No selectable ChatGPT web models were observed in the connected browser")
+                anyhow::anyhow!(
+                    "No selectable ChatGPT web models were observed in the connected browser"
+                )
             })?;
             self.set_model(&model.model)?;
         }
@@ -1000,7 +1004,9 @@ impl Provider for OpenAIProvider {
             tokio::spawn(async move {
                 let _guard = guard;
                 if let Err(error) = jcode_base::provider::chatgpt_web::refresh_models().await {
-                    jcode_base::logging::info(&format!("ChatGPT web models are unavailable: {error:#}"));
+                    jcode_base::logging::info(&format!(
+                        "ChatGPT web models are unavailable: {error:#}"
+                    ));
                 }
             });
         }
@@ -1142,7 +1148,9 @@ impl Provider for OpenAIProvider {
 
     fn available_efforts(&self) -> Vec<&'static str> {
         if is_chatgpt_web_model(&self.model()) {
-            if let Some((_, power)) = jcode_base::provider::chatgpt_web::legacy_web_alias(&self.model()) {
+            if let Some((_, power)) =
+                jcode_base::provider::chatgpt_web::legacy_web_alias(&self.model())
+            {
                 return vec![power, "swarm", "swarm-deep"];
             }
             let mut efforts: Vec<&'static str> =
@@ -1394,7 +1402,9 @@ impl OpenAIProvider {
             prewarm: Arc::new(openai_websocket_prewarm::PrewarmSlot::default()),
             chatgpt_web: Arc::new(chatgpt_web::ChatGptWebState::new()),
             browser_only: Arc::new(AtomicBool::new(self.is_browser_only())),
-            browser_model_unset: AtomicBool::new(self.browser_model_unset.load(AtomicOrdering::Acquire)),
+            browser_model_unset: AtomicBool::new(
+                self.browser_model_unset.load(AtomicOrdering::Acquire),
+            ),
         }
     }
 }
