@@ -1113,7 +1113,15 @@ async fn refresh_claude_tokens_inner(
     let save_label = label.map(ToString::to_string).unwrap_or_else(|| {
         claude_auth::active_account_label().unwrap_or_else(claude_auth::primary_account_label)
     });
+    let previous_access = stored_claude_tokens(&save_label).map(|tokens| tokens.access_token);
     save_claude_tokens_for_account(&oauth_tokens, &save_label)?;
+    if let Some(previous_access) = previous_access {
+        crate::usage::carry_anthropic_usage_across_token_refresh(
+            &save_label,
+            &previous_access,
+            &oauth_tokens.access_token,
+        );
+    }
 
     Ok(oauth_tokens)
 }

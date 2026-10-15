@@ -111,6 +111,7 @@ fn test_remote_error_without_retry_recovers_pending_followups() {
             id: 10,
             message: "provider failed hard".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         },
         &mut remote,
     );
@@ -172,6 +173,7 @@ fn test_remote_error_with_retryable_pending_schedules_retry() {
             id: 11,
             message: "provider failed hard".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         },
         &mut remote,
     );
@@ -227,6 +229,7 @@ fn test_remote_non_retryable_error_gets_short_auto_poke_retry() {
             id: 12,
             message: "OpenAI API error 400 Bad Request: {\"error\":{\"message\":\"Invalid 'input[0].encrypted_content': string too long. Expected a string with maximum length 10485760, but got a string with length 11237432 instead.\",\"type\":\"invalid_request_error\",\"code\":\"string_above_max_length\"}}".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         },
         &mut remote,
     );
@@ -249,6 +252,7 @@ fn test_remote_non_retryable_error_gets_short_auto_poke_retry() {
             id: 13,
             message: "OpenAI API error 400 Bad Request: {\"error\":{\"type\":\"invalid_request_error\",\"code\":\"string_above_max_length\"}}".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         },
         &mut remote,
     );
@@ -294,6 +298,7 @@ fn test_remote_non_retryable_error_stops_auto_poke_after_short_retry_budget() {
             id: 14,
             message: "OpenAI API error 400 Bad Request: {\"error\":{\"type\":\"invalid_request_error\",\"code\":\"string_above_max_length\"}}".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         },
         &mut remote,
     );
@@ -339,6 +344,7 @@ fn test_remote_fatal_model_endpoint_error_fails_fast_without_retry_budget() {
             id: 21,
             message: "OpenAI-compatible chat request failed\n  endpoint: https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions\n  model: volcengine:ark-code-latest\n  auth: ARK_API_KEY\n  status: 404 Not Found\n  response: {\"error\":{\"code\":\"UnsupportedModel\",\"message\":\"The requested model does not support the coding plan feature.\"}}".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         },
         &mut remote,
     );
@@ -394,6 +400,7 @@ fn test_remote_connectivity_error_waits_for_network_with_bounded_retry_budget() 
             id: 15,
             message: "Failed to send OpenAI-compatible chat request\n  endpoint: https://api.groq.com/openai/v1/chat/completions\n  model: llama-3.1-8b-instant\n  auth: GROQ_API_KEY\nHint: check network connectivity, DNS/TLS, and that the base URL includes the API version (usually /v1).: error sending request for url (https://api.groq.com/openai/v1/chat/completions): client error (Connect): dns error: failed to lookup address information: Name or service not known".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         },
         &mut remote,
     );
@@ -456,6 +463,7 @@ fn test_remote_connectivity_error_without_auto_retry_still_waits_for_network() {
             id: 16,
             message: "Failed to send request to Anthropic API: error sending request for url (https://api.anthropic.com/v1/messages): client error (Connect): dns error: failed to lookup address information: Name or service not known".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         },
         &mut remote,
     );
@@ -2313,6 +2321,7 @@ fn test_credential_failure_breaker_trips_after_consecutive_auth_errors() {
                 id: 100 + u64::from(attempt),
                 message: "401 Unauthorized: invalid api key".to_string(),
                 retry_after_secs: None,
+                server_resumes: false,
             },
             &mut remote,
         );
@@ -2393,6 +2402,7 @@ fn test_rejected_refresh_token_stops_all_automatic_resends_immediately() {
                         id: 30,
                         message: "Claude OAuth refresh token was previously rejected by Anthropic and cannot be refreshed. Run `jcode login --provider claude` to mint a fresh token.".to_string(),
                         retry_after_secs,
+                        server_resumes: false,
                     },
                     &mut remote,
                 ));

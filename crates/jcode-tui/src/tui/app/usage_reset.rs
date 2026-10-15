@@ -622,6 +622,7 @@ mod tests {
                 id: 43,
                 message: "cache refresh rejected".into(),
                 retry_after_secs: None,
+                server_resumes: false,
             },
             &mut remote
         ));

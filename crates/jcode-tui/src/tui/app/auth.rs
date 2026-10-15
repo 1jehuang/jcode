@@ -981,6 +981,11 @@ impl App {
                 selection.provider_label, label
             )));
         }
+        self.release_rate_limit_hold_after_credentials_changed(Some(if provider_id == "claude" {
+            "anthropic"
+        } else {
+            "openai"
+        }));
         crate::auth::AuthStatus::invalidate_cache();
         let provider = self.provider.clone();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {

@@ -184,6 +184,14 @@ impl Provider for OpenAIProvider {
             }
         }
         let input_item_count = input.len();
+        // Pick up an account switch or relogin before anything reads the
+        // cached credential, so a persistent websocket bound to the previous
+        // account is dropped by its identity check instead of reused.
+        super::openai_stream_runtime::sync_with_stored_credentials(
+            &self.credentials,
+            self.oauth_account_label().as_deref(),
+        )
+        .await;
         let request = self.response_request(&input, tools, system).await;
         let model_id = openai_request_model(&request);
         let is_chatgpt_mode = Self::is_chatgpt_mode(&*self.credentials.read().await);
@@ -342,7 +350,8 @@ impl Provider for OpenAIProvider {
         let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(100);
 
         let credentials = Arc::clone(&self.credentials);
-        let account_label = self.refresh_account_label();
+        // Unpinned runtimes follow whichever login is stored when they retry.
+        let account_label = self.oauth_account_label();
         let transport_mode = transport_mode_snapshot;
         let websocket_cooldowns = Arc::clone(&self.websocket_cooldowns);
         let websocket_failure_streaks = Arc::clone(&self.websocket_failure_streaks);
@@ -900,7 +909,7 @@ impl Provider for OpenAIProvider {
         };
         let catalog = if is_chatgpt_mode {
             let access_token =
-                openai_access_token(self.refresh_account_label(), &self.credentials).await?;
+                openai_access_token(self.oauth_account_label(), &self.credentials).await?;
             match jcode_base::provider::fetch_openai_model_catalog(&access_token).await {
                 Ok(catalog) => catalog,
                 // The server can reject a token that still looks fresh by its
@@ -923,7 +932,7 @@ impl Provider for OpenAIProvider {
                     let refreshed = super::openai_stream_runtime::force_refresh_openai_token(
                         &self.credentials,
                         &refresh_token,
-                        account_label.clone(),
+                        self.oauth_account_label(),
                     )
                     .await
                     .map_err(|refresh_err| {

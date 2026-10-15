@@ -457,12 +457,155 @@ const MAX_RETRIES: u32 = 3;
 /// Base delay for exponential backoff (in milliseconds)
 const RETRY_BASE_DELAY_MS: u64 = 1000;
 
+/// A subscription usage limit that resets later than this cannot clear during
+/// this turn's retries (about two minutes of capped Retry-After sleeps).
+const USAGE_LIMIT_FAIL_FAST_AFTER: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Marks a 429 whose subscription usage limit resets well beyond what the
+/// retry loop can wait. Retrying on the same credential is doomed.
+#[derive(Debug)]
+struct UsageLimitExhausted {
+    message: String,
+}
+
+impl std::fmt::Display for UsageLimitExhausted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for UsageLimitExhausted {}
+
+/// Seconds until a rejected unified (subscription) limit resets, from the
+/// `anthropic-ratelimit-unified-*` headers. `None` when the headers do not
+/// describe a rejected limit.
+fn unified_limit_reset_in(headers: &HeaderMap, now_secs: i64) -> Option<u64> {
+    let header = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+    };
+    if header("anthropic-ratelimit-unified-status") != Some("rejected") {
+        return None;
+    }
+    let reset = header("anthropic-ratelimit-unified-reset")?
+        .parse::<i64>()
+        .ok()?;
+    Some(reset.saturating_sub(now_secs).max(0) as u64)
+}
+
+/// "3h 17m" style duration that the TUI rate-limit hold parser understands.
+fn format_reset_duration(secs: u64) -> String {
+    let days = secs / 86_400;
+    let hours = (secs % 86_400) / 3600;
+    let minutes = (secs % 3600).div_ceil(60).min(59);
+    match (days, hours) {
+        (0, 0) => format!("{}m", minutes.max(1)),
+        (0, h) => format!("{h}h {minutes}m"),
+        (d, h) => format!("{d}d {h}h {minutes}m"),
+    }
+}
+
+/// Build the error for a failed Messages response. A 429 whose usage limit
+/// resets far in the future is tagged so the retry loop fails fast, with the
+/// reset time in the message.
+fn anthropic_status_error(
+    status: reqwest::StatusCode,
+    headers: &HeaderMap,
+    error_text: &str,
+) -> anyhow::Error {
+    let message = format!("Anthropic API error ({}): {}", status, error_text);
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        let reset_in = unified_limit_reset_in(headers, chrono::Utc::now().timestamp());
+        let usage_limit_body = error_text.to_ascii_lowercase().contains("usage limit");
+        let far = match reset_in {
+            Some(secs) => std::time::Duration::from_secs(secs) > USAGE_LIMIT_FAIL_FAST_AFTER,
+            None => usage_limit_body,
+        };
+        if far {
+            let detail = match reset_in {
+                Some(secs) => {
+                    let at = chrono::Utc::now() + chrono::Duration::seconds(secs as i64);
+                    format!(
+                        " Usage limit reached for this Claude account; resets in {} ({} UTC).",
+                        format_reset_duration(secs),
+                        at.format("%Y-%m-%d %H:%M")
+                    )
+                }
+                None => " Usage limit reached for this Claude account.".to_string(),
+            };
+            return anyhow::Error::new(UsageLimitExhausted {
+                message: format!("{message}{detail}"),
+            });
+        }
+    }
+    jcode_provider_core::retry_after::error_with_retry_after(
+        message,
+        jcode_provider_core::retry_after::retry_after(headers),
+    )
+}
+
+/// Attach the reset time to a far usage-limit error in machine-readable form,
+/// so a server-initiated turn can schedule its resume at the reset and
+/// clients receive `retry_after_secs`. Other errors pass through unchanged.
+fn tag_usage_limit_reset(error: anyhow::Error, headers: &HeaderMap) -> anyhow::Error {
+    if error.downcast_ref::<UsageLimitExhausted>().is_none() {
+        return error;
+    }
+    let reset_in = unified_limit_reset_in(headers, chrono::Utc::now().timestamp())
+        .map(std::time::Duration::from_secs);
+    jcode_provider_core::usage_limit_resume::with_usage_limit_reset(error, reset_in)
+}
+
+/// Sleep before a retry, but wake early when the stored Claude credential
+/// changes (a swap announced through the process-wide credential signal).
+/// Returns the new token when one is now stored, so the retry uses it.
+async fn sleep_until_retry_or_credential_swap(
+    delay: std::time::Duration,
+    mut generation: u64,
+    is_oauth: bool,
+    current_token: &str,
+    credentials: &Arc<RwLock<Option<CachedCredentials>>>,
+    account_label: Option<&str>,
+) -> Option<String> {
+    if !is_oauth {
+        tokio::time::sleep(delay).await;
+        return None;
+    }
+    let deadline = tokio::time::Instant::now() + delay;
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep_until(deadline) => return None,
+            _ = auth::credential_signal::changed_since(generation) => {
+                generation = auth::credential_signal::generation();
+                // Unrelated auth changes also bump the signal. Only cut the
+                // wait short when the Claude credential really changed.
+                if let Ok((token, true)) =
+                    resolve_oauth_access_token(credentials, account_label).await
+                    && token != current_token
+                {
+                    jcode_base::logging::info(
+                        "Claude credentials changed during retry wait; retrying now with the new account",
+                    );
+                    return Some(token);
+                }
+            }
+        }
+    }
+}
+
 /// Cached OAuth credentials
 #[derive(Clone)]
 struct CachedCredentials {
     access_token: String,
     refresh_token: String,
     expires_at: i64,
+    /// Access/refresh token pair of the stored credential this cache entry
+    /// was derived from. The cache is only reused while the stored credential
+    /// still matches, so a relogin, account switch, or external Claude Code
+    /// login is picked up by every live session on its next request.
+    source: (String, String),
 }
 
 /// Direct Anthropic API provider
@@ -617,7 +760,7 @@ impl AnthropicProvider {
                 Err(err) if is_oauth_catalog_auth_error(&err.to_string()) => {
                     let token = force_refresh_oauth_token(
                         Arc::clone(&self.credentials),
-                        &self.oauth_refresh_label(),
+                        &self.oauth_account_label(),
                     )
                     .await?;
                     jcode_base::provider::fetch_anthropic_model_catalog_oauth(&token).await?
@@ -1041,15 +1184,7 @@ impl AnthropicProvider {
     }
 
     fn load_oauth_credentials(&self) -> Result<auth::claude::ClaudeCredentials> {
-        match self.oauth_account_label() {
-            Some(label) => auth::claude::load_credentials_for_account(&label),
-            None => auth::claude::load_credentials(),
-        }
-    }
-
-    fn oauth_refresh_label(&self) -> Option<String> {
-        self.oauth_account_label()
-            .or_else(auth::claude::active_account_label)
+        load_claude_credentials(self.oauth_account_label().as_deref())
     }
 
     fn catalog_scope_for_route(&self, oauth: bool) -> String {
@@ -1061,107 +1196,9 @@ impl AnthropicProvider {
     }
 
     async fn get_oauth_access_token(&self) -> Result<(String, bool)> {
-        // A removed explicit account must fail closed, even with a fresh cache.
-        if let Some(label) = self.oauth_account_label() {
-            auth::claude::load_credentials_for_account(&label)?;
-        }
-        // Check cached credentials
-        {
-            let cached = self.credentials.read().await;
-            if let Some(ref creds) = *cached {
-                let now = chrono::Utc::now().timestamp_millis();
-                // Return cached token if not expired (with 5 min buffer)
-                if creds.expires_at > now + 300_000 {
-                    return Ok((creds.access_token.clone(), true));
-                }
-            }
-        }
-
-        // Load fresh credentials or refresh expired ones
-        let fresh_creds = self
-            .load_oauth_credentials()
-            .context("Failed to load Claude credentials")?;
-
-        if !fresh_creds.scopes.is_empty()
-            && !oauth::claude_scopes_have_inference(&fresh_creds.scopes)
-        {
-            anyhow::bail!(
-                "Claude OAuth credentials are missing the required user:inference scope (scopes: {}). Run `jcode login --provider claude` to mint a fresh Claude.ai OAuth token, or import/use a fresh Claude Code login.",
-                fresh_creds.scopes.join(" ")
-            );
-        }
-
-        let now = chrono::Utc::now().timestamp_millis();
-
-        // Check if token needs refresh (expired or expiring within 5 minutes)
-        if fresh_creds.expires_at < now + 300_000 && !fresh_creds.refresh_token.is_empty() {
-            // A refresh token the provider already rejected as unrecoverable
-            // cannot start working again. Retrying it added a doomed network
-            // round-trip to the critical path of every single turn, so fail
-            // straight through to the caller's API-key fallback instead.
-            if auth::refresh_state::refresh_token_is_known_rejected(
-                "claude",
-                &fresh_creds.refresh_token,
-            ) {
-                anyhow::bail!(
-                    "Claude OAuth refresh token was previously rejected by Anthropic and cannot be refreshed. Run `jcode login --provider claude` to mint a fresh token."
-                );
-            }
-
-            jcode_base::logging::info(
-                "OAuth token expired or expiring soon, attempting refresh...",
-            );
-
-            let active_label = self.oauth_refresh_label();
-            let refreshed = match active_label.as_deref() {
-                Some(label) => {
-                    oauth::refresh_claude_tokens_for_account(&fresh_creds.refresh_token, label)
-                        .await
-                }
-                None => oauth::refresh_claude_tokens(&fresh_creds.refresh_token).await,
-            };
-            match refreshed {
-                Ok(refreshed) => {
-                    jcode_base::logging::info("OAuth token refreshed successfully");
-
-                    // Cache the refreshed credentials
-                    let mut cached = self.credentials.write().await;
-                    *cached = Some(CachedCredentials {
-                        access_token: refreshed.access_token.clone(),
-                        refresh_token: refreshed.refresh_token,
-                        expires_at: refreshed.expires_at,
-                    });
-
-                    return Ok((refreshed.access_token, true));
-                }
-                Err(e) => {
-                    jcode_base::logging::error(&format!("OAuth token refresh failed: {}", e));
-                    // A still-unexpired token may remain usable until its
-                    // actual expiry even when a proactive refresh fails. Once
-                    // expired, however, returning it only guarantees a 401 and
-                    // prevents Auto mode from trying its API-key fallback.
-                    if fresh_creds.expires_at <= now {
-                        anyhow::bail!("Claude OAuth token is expired and refresh failed: {e:#}");
-                    }
-                }
-            }
-        }
-
-        if fresh_creds.expires_at <= now {
-            anyhow::bail!(
-                "Claude OAuth token is expired and no usable refresh token is available. Run `jcode login --provider claude` to refresh OAuth credentials"
-            );
-        }
-
-        // Cache and return the still-usable loaded credentials.
-        let mut cached = self.credentials.write().await;
-        *cached = Some(CachedCredentials {
-            access_token: fresh_creds.access_token.clone(),
-            refresh_token: fresh_creds.refresh_token,
-            expires_at: fresh_creds.expires_at,
-        });
-
-        Ok((fresh_creds.access_token, true))
+        // Loads the stored credential first, so a removed pinned account fails
+        // closed even with a fresh cache.
+        resolve_oauth_access_token(&self.credentials, self.oauth_account_label().as_deref()).await
     }
 
     pub(crate) fn set_credential_mode(&self, mode: AnthropicCredentialMode) -> Result<()> {
@@ -1384,7 +1421,7 @@ impl Provider for AnthropicProvider {
         // Clone what we need for the async task
         let client = self.client.clone();
         let credentials = Arc::clone(&self.credentials);
-        let oauth_account_label = self.oauth_refresh_label();
+        let oauth_account_label = self.oauth_account_label();
         let oauth_session_id = self.oauth_session_id.clone();
         let model_state = Arc::clone(&self.model);
         let direct_transport = self.direct_transport.clone();
@@ -1845,7 +1882,7 @@ impl Provider for AnthropicProvider {
         // Clone what we need for the async task
         let client = self.client.clone();
         let credentials = Arc::clone(&self.credentials);
-        let oauth_account_label = self.oauth_refresh_label();
+        let oauth_account_label = self.oauth_account_label();
         let oauth_session_id = self.oauth_session_id.clone();
         let model_state = Arc::clone(&self.model);
         let direct_transport = self.direct_transport.clone();
@@ -1910,6 +1947,9 @@ async fn run_stream_with_retries(
     // Track every model id we have already attempted so a retired/renamed
     // model only falls back to genuinely new candidates.
     let mut tried_models: Vec<String> = vec![original_model.clone()];
+    // Credential generation observed when the current attempt's token was
+    // chosen. A swap after this point wakes the retry wait.
+    let mut token_generation = auth::credential_signal::generation();
 
     for attempt in 0..MAX_RETRIES {
         if attempt > 0 {
@@ -1927,12 +1967,33 @@ async fn run_stream_with_retries(
                     },
                 }))
                 .await;
-            tokio::time::sleep(delay).await;
+            let swapped_token = sleep_until_retry_or_credential_swap(
+                delay,
+                token_generation,
+                is_oauth,
+                &token,
+                &credentials,
+                oauth_account_label.as_deref(),
+            )
+            .await;
             jcode_base::logging::info(&format!(
                 "Retrying Anthropic API request (attempt {}/{})",
                 attempt + 1,
                 MAX_RETRIES
             ));
+            token_generation = auth::credential_signal::generation();
+            // The user may have swapped Claude accounts while this request was
+            // failing (often because the old account hit its usage limit).
+            // Re-resolve so the retry uses the currently stored credential
+            // instead of the token captured when the turn started.
+            if let Some(swapped) = swapped_token {
+                token = swapped;
+            } else if is_oauth
+                && let Ok((current, true)) =
+                    resolve_oauth_access_token(&credentials, oauth_account_label.as_deref()).await
+            {
+                token = current;
+            }
         }
 
         // Track whether this attempt streams replay-visible output so a
@@ -1977,6 +2038,37 @@ async fn run_stream_with_retries(
                 // a connection reset) lives deeper than "Failed to send request to
                 // Anthropic API", and the retry classifier needs to see it.
                 let error_str = format!("{e:#}").to_lowercase();
+
+                // Usage limit that resets long after this turn's retries could
+                // end. Retrying the same account is doomed. If the stored
+                // credential already changed (a swap), retry right away on
+                // it. Otherwise fail fast with the reset time so the client
+                // holds the turn and resends when credentials change.
+                if is_oauth
+                    && !saw_output
+                    && e.chain()
+                        .any(|source| source.downcast_ref::<UsageLimitExhausted>().is_some())
+                {
+                    if let Ok((current, true)) =
+                        resolve_oauth_access_token(&credentials, oauth_account_label.as_deref())
+                            .await
+                        && current != token
+                        && attempt + 1 < MAX_RETRIES
+                    {
+                        jcode_base::logging::info(
+                            "Claude usage limit hit on a credential that was since replaced; retrying now with the new account",
+                        );
+                        token = current;
+                        next_retry_delay = Some(std::time::Duration::ZERO);
+                        last_error = Some(e);
+                        continue;
+                    }
+                    jcode_base::logging::warn(&format!(
+                        "Claude usage limit resets beyond the retry window; failing fast: {e}"
+                    ));
+                    let _ = tx.send(Err(e)).await;
+                    return;
+                }
 
                 // OAuth auth failures: force refresh and retry once immediately.
                 if is_oauth && is_oauth_auth_error(&error_str) && !attempted_forced_refresh {
@@ -2179,53 +2271,219 @@ async fn run_stream_with_retries(
     }
 }
 
+/// Stored Claude credential a runtime uses: its pinned account, else the
+/// active login.
+fn load_claude_credentials(account_label: Option<&str>) -> Result<auth::claude::ClaudeCredentials> {
+    match account_label {
+        Some(label) => auth::claude::load_credentials_for_account(label),
+        None => auth::claude::load_credentials(),
+    }
+}
+
+/// Account a refresh is saved to: the pinned account, else the active login.
+fn claude_refresh_label(account_label: Option<&str>) -> String {
+    account_label.map(str::to_string).unwrap_or_else(|| {
+        auth::claude::active_account_label().unwrap_or_else(auth::claude::primary_account_label)
+    })
+}
+
+/// Resolve the Claude OAuth access token for a request.
+///
+/// The stored credential is re-read on every call (a few small local file
+/// reads, no network). The in-memory cache is only reused while it was
+/// derived from the credential that is stored right now, so a same-label
+/// relogin, `/account switch`, or an external Claude Code relogin reaches
+/// every live session, fork, and retry without a restart.
+async fn resolve_oauth_access_token(
+    credentials: &Arc<RwLock<Option<CachedCredentials>>>,
+    account_label: Option<&str>,
+) -> Result<(String, bool)> {
+    let fresh_creds =
+        load_claude_credentials(account_label).context("Failed to load Claude credentials")?;
+    let source = (
+        fresh_creds.access_token.clone(),
+        fresh_creds.refresh_token.clone(),
+    );
+    {
+        let cached = credentials.read().await;
+        if let Some(ref creds) = *cached {
+            let now = chrono::Utc::now().timestamp_millis();
+            // Reuse the cached token (e.g. one we refreshed ourselves) only
+            // while it still belongs to the stored credential and is not
+            // about to expire.
+            if creds.source == source && creds.expires_at > now + 300_000 {
+                return Ok((creds.access_token.clone(), true));
+            }
+            if creds.source != source {
+                // The stored login changed under this cache (relogin, account
+                // switch, external Claude Code login). Wake retry loops that
+                // are still waiting on the previous account.
+                auth::credential_signal::bump();
+            }
+        }
+    }
+
+    if !fresh_creds.scopes.is_empty() && !oauth::claude_scopes_have_inference(&fresh_creds.scopes) {
+        anyhow::bail!(
+            "Claude OAuth credentials are missing the required user:inference scope (scopes: {}). Run `jcode login --provider claude` to mint a fresh Claude.ai OAuth token, or import/use a fresh Claude Code login.",
+            fresh_creds.scopes.join(" ")
+        );
+    }
+
+    let now = chrono::Utc::now().timestamp_millis();
+
+    // Check if token needs refresh (expired or expiring within 5 minutes)
+    if fresh_creds.expires_at < now + 300_000 && !fresh_creds.refresh_token.is_empty() {
+        // A refresh token the provider already rejected as unrecoverable
+        // cannot start working again. Retrying it added a doomed network
+        // round-trip to the critical path of every single turn, so fail
+        // straight through to the caller's API-key fallback instead.
+        if auth::refresh_state::refresh_token_is_known_rejected(
+            "claude",
+            &fresh_creds.refresh_token,
+        ) {
+            anyhow::bail!(
+                "Claude OAuth refresh token was previously rejected by Anthropic and cannot be refreshed. Run `jcode login --provider claude` to mint a fresh token."
+            );
+        }
+
+        jcode_base::logging::info("OAuth token expired or expiring soon, attempting refresh...");
+
+        let refresh_label = claude_refresh_label(account_label);
+        match oauth::refresh_claude_tokens_for_account(&fresh_creds.refresh_token, &refresh_label)
+            .await
+        {
+            Ok(refreshed) => {
+                jcode_base::logging::info("OAuth token refreshed successfully");
+                return Ok((
+                    commit_claude_refresh(credentials, account_label, source, refreshed).await,
+                    true,
+                ));
+            }
+            Err(e) => {
+                jcode_base::logging::error(&format!("OAuth token refresh failed: {}", e));
+                // A still-unexpired token may remain usable until its
+                // actual expiry even when a proactive refresh fails. Once
+                // expired, however, returning it only guarantees a 401 and
+                // prevents Auto mode from trying its API-key fallback.
+                if fresh_creds.expires_at <= now {
+                    anyhow::bail!("Claude OAuth token is expired and refresh failed: {e:#}");
+                }
+            }
+        }
+    }
+
+    if fresh_creds.expires_at <= now {
+        anyhow::bail!(
+            "Claude OAuth token is expired and no usable refresh token is available. Run `jcode login --provider claude` to refresh OAuth credentials"
+        );
+    }
+
+    // Cache and return the still-usable loaded credentials.
+    let mut cached = credentials.write().await;
+    *cached = Some(CachedCredentials {
+        access_token: fresh_creds.access_token.clone(),
+        refresh_token: fresh_creds.refresh_token,
+        expires_at: fresh_creds.expires_at,
+        source,
+    });
+
+    Ok((fresh_creds.access_token, true))
+}
+
 async fn force_refresh_oauth_token(
     credentials: Arc<RwLock<Option<CachedCredentials>>>,
     account_label: &Option<String>,
 ) -> Result<String> {
-    let refresh_from_cache = {
-        let cached = credentials.read().await;
-        cached
-            .as_ref()
-            .map(|c| c.refresh_token.clone())
-            .filter(|t| !t.is_empty())
-    };
-
-    let refresh_token = if let Some(token) = refresh_from_cache {
-        token
-    } else {
-        let loaded = match account_label.as_deref() {
-            Some(label) => auth::claude::load_credentials_for_account(label),
-            None => auth::claude::load_credentials(),
-        }
+    let account_label = account_label.as_deref();
+    // Always start from the stored credential: after a relogin or account
+    // switch the cache still holds the previous account's refresh token, and
+    // refreshing that would mint a token for the wrong account.
+    let loaded = load_claude_credentials(account_label)
         .context("Failed to load Claude credentials for forced refresh")?;
-        if loaded.refresh_token.is_empty() {
+    let source = (loaded.access_token.clone(), loaded.refresh_token.clone());
+    // A token we refreshed ourselves (e.g. from an external source that is not
+    // rewritten on refresh) rotates the refresh token, so prefer the cached one
+    // only while it still derives from the stored credential.
+    let (refresh_from_cache, stored_is_newer) = {
+        let cached = credentials.read().await;
+        let cached = cached.as_ref();
+        (
+            cached
+                .filter(|c| c.source == source)
+                .map(|c| c.refresh_token.clone())
+                .filter(|t| !t.is_empty()),
+            cached.is_some_and(|c| c.source != source && c.access_token != loaded.access_token),
+        )
+    };
+    // A relogin, account switch or another request's refresh already stored a
+    // different unexpired token for this account: use it instead of refreshing.
+    if stored_is_newer && loaded.expires_at > chrono::Utc::now().timestamp_millis() + 300_000 {
+        let mut cached = credentials.write().await;
+        *cached = Some(CachedCredentials {
+            access_token: loaded.access_token.clone(),
+            refresh_token: loaded.refresh_token,
+            expires_at: loaded.expires_at,
+            source,
+        });
+        return Ok(loaded.access_token);
+    }
+    let refresh_token = match refresh_from_cache {
+        Some(token) => token,
+        None if loaded.refresh_token.is_empty() => {
             anyhow::bail!("No refresh token available in Claude credentials");
         }
-        loaded.refresh_token
+        None => loaded.refresh_token,
     };
 
-    let result = match account_label.as_deref() {
-        Some(label) => oauth::refresh_claude_tokens_for_account(&refresh_token, label).await,
-        None => oauth::refresh_claude_tokens(&refresh_token).await,
-    };
-    let refreshed = match result {
+    let refreshed = match oauth::refresh_claude_tokens_for_account(
+        &refresh_token,
+        &claude_refresh_label(account_label),
+    )
+    .await
+    {
         Ok(refreshed) => refreshed,
         Err(err) => {
             anyhow::bail!("OAuth refresh endpoint rejected the refresh token: {err:#}");
         }
     };
 
-    {
-        let mut cached = credentials.write().await;
-        *cached = Some(CachedCredentials {
-            access_token: refreshed.access_token.clone(),
-            refresh_token: refreshed.refresh_token,
-            expires_at: refreshed.expires_at,
-        });
-    }
+    Ok(commit_claude_refresh(&credentials, account_label, source, refreshed).await)
+}
 
-    Ok(refreshed.access_token)
+/// Write a finished Claude refresh into the session cache and return the
+/// bearer the caller should use.
+///
+/// The login can change while the refresh awaits the OAuth response. The
+/// result is only cached while the stored credential is still the one the
+/// refresh started from (an external login that is not rewritten on refresh)
+/// or the refreshed tokens themselves (a stored account whose refresh was
+/// persisted). Otherwise another login is active now: leave the cache alone
+/// and return that login's token instead of the old account's bearer.
+async fn commit_claude_refresh(
+    credentials: &Arc<RwLock<Option<CachedCredentials>>>,
+    account_label: Option<&str>,
+    source: (String, String),
+    refreshed: oauth::OAuthTokens,
+) -> String {
+    let mut cached = credentials.write().await;
+    if let Ok(stored) = load_claude_credentials(account_label) {
+        let still_source = stored.access_token == source.0 && stored.refresh_token == source.1;
+        let persisted_refresh = stored.access_token == refreshed.access_token;
+        if !still_source && !persisted_refresh && !stored.access_token.is_empty() {
+            jcode_base::logging::info(
+                "Claude credentials changed while a token refresh was in flight; using the new login",
+            );
+            return stored.access_token;
+        }
+    }
+    *cached = Some(CachedCredentials {
+        access_token: refreshed.access_token.clone(),
+        refresh_token: refreshed.refresh_token,
+        expires_at: refreshed.expires_at,
+        source,
+    });
+    refreshed.access_token
 }
 
 /// Stream the response from Anthropic API
@@ -2357,12 +2615,10 @@ async fn stream_response(
 
     if !response.status().is_success() {
         let status = response.status();
-        let retry_after = jcode_provider_core::retry_after::retry_after(response.headers());
+        let headers = response.headers().clone();
         let error_text = jcode_base::util::http_error_body(response, "HTTP error").await;
-        return Err(jcode_provider_core::retry_after::error_with_retry_after(
-            format!("Anthropic API error ({}): {}", status, error_text),
-            retry_after,
-        ));
+        let error = anthropic_status_error(status, &headers, &error_text);
+        return Err(tag_usage_limit_reset(error, &headers));
     }
 
     *response_accepted = true;
@@ -2754,6 +3010,10 @@ mod native_web_search_sse_tests;
 #[allow(clippy::await_holding_lock)]
 #[path = "anthropic_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "usage_limit_reset_tests.rs"]
+mod usage_limit_reset_tests;
 
 #[cfg(test)]
 #[path = "late_tool_result_tests.rs"]

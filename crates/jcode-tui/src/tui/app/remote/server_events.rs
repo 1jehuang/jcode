@@ -1190,7 +1190,7 @@ pub(in crate::tui::app) fn handle_server_event(
             id,
             message,
             retry_after_secs,
-            ..
+            server_resumes,
         } => {
             if app.pending_agent_model_request_id == Some(id) {
                 app.pending_agent_model_request_id = None;
@@ -1201,6 +1201,20 @@ pub(in crate::tui::app) fn handle_server_event(
                 return false;
             }
             app.refresh_openai_usage_after_quota_error(&message);
+            // A server-initiated turn (scheduled task, swarm wake, DM) hit a
+            // usage limit and the server will resume it at the reset. Settle
+            // the adopted turn and say when it resumes. This client did not
+            // send the turn, so it must not hold or resend anything itself.
+            // Only the explicit `server_resumes` flag means that: an id-0
+            // error with just a retry hint is terminal and shown normally.
+            if server_resumes
+                && app.current_message_id.is_none()
+                && let Some(resume_in) = retry_after_secs
+            {
+                app.handle_server_owned_usage_limit_resume(resume_in);
+                remote.reset_call_output_tokens_seen();
+                return true;
+            }
             // The server rejects a Message request with this error while its
             // previous turn is still running. This typically happens when a
             // reload/reconnect raced the turn-end dispatch: the history
@@ -1260,13 +1274,22 @@ pub(in crate::tui::app) fn handle_server_event(
                     pending.is_system
                 })
             {
+                // The limit was hit by a turn sent before the account changed,
+                // so it reports the previous account's reset time (possibly
+                // hours away). Resend now on the new credentials instead.
+                let previous_account_limit = app.turn_predates_credentials_change();
                 app.rate_limit_reset = Some(Instant::now() + reset_duration);
-                let rate_limit_line = app.rate_limit_notice_with_nudge(reset_duration.as_secs());
-                app.push_display_message(DisplayMessage::system(rate_limit_line));
-                if is_system {
-                    app.set_status_notice("Rate limited; queued system retry");
+                if previous_account_limit {
+                    app.arm_account_change_resend(Instant::now());
                 } else {
-                    app.set_status_notice("Rate limited; queued retry");
+                    let rate_limit_line =
+                        app.rate_limit_notice_with_nudge(reset_duration.as_secs());
+                    app.push_display_message(DisplayMessage::system(rate_limit_line));
+                    if is_system {
+                        app.set_status_notice("Rate limited; queued system retry");
+                    } else {
+                        app.set_status_notice("Rate limited; queued retry");
+                    }
                 }
                 app.is_processing = false;
                 app.status = ProcessingStatus::Idle;
@@ -2448,6 +2471,13 @@ pub(in crate::tui::app) fn handle_server_event(
             }
             app.invalidate_model_picker_cache();
             true
+        }
+        ServerEvent::CredentialsChanged { provider } => {
+            crate::logging::info(&format!(
+                "Credentials changed on server (provider={:?}); releasing any rate-limit hold",
+                provider
+            ));
+            app.release_rate_limit_hold_after_credentials_changed(provider.as_deref())
         }
         ServerEvent::AvailableModelsUpdated {
             provider_name,

@@ -26,6 +26,7 @@ fn issue_1685_error(
         id,
         message: message.to_string(),
         retry_after_secs,
+        server_resumes: false,
     }
 }
 

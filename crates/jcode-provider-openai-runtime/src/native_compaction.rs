@@ -17,7 +17,7 @@ impl OpenAIProvider {
         }
 
         let access_token =
-            openai_access_token(self.refresh_account_label(), &self.credentials).await?;
+            openai_access_token(self.oauth_account_label(), &self.credentials).await?;
         let creds = self.credentials.read().await;
         let is_chatgpt_mode = Self::is_chatgpt_mode(&creds);
         let account_id = creds.account_id.clone();
