@@ -313,6 +313,7 @@ impl MultiProvider {
             active: RwLock::new(active),
             startup_notices: RwLock::new(Vec::new()),
             initial_provider,
+            catalog_scope: next_catalog_scope(),
             routes_memo: Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             account_failover: Default::default(),

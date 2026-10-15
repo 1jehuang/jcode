@@ -46,87 +46,7 @@ fn test_open_work_rearms_auto_poke_after_completion_gate_breaker() {
     });
 }
 
-#[test]
-fn test_model_picker_preview_arrow_keys_navigate() {
-    let mut app = create_test_app();
-    configure_test_remote_models(&mut app);
-
-    // Type /model to open preview
-    for c in "/model".chars() {
-        app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
-            .unwrap();
-    }
-
-    let picker = app
-        .inline_interactive_state
-        .as_ref()
-        .expect("model picker preview should be open");
-    assert!(picker.preview);
-    let initial_selected = picker.selected;
-
-    // Down arrow should navigate in preview mode
-    app.handle_key(KeyCode::Down, KeyModifiers::empty())
-        .unwrap();
-
-    let picker = app
-        .inline_interactive_state
-        .as_ref()
-        .expect("picker should still be open");
-    assert!(picker.preview, "should remain in preview mode");
-    assert_eq!(picker.selected, initial_selected + 1);
-
-    // Up arrow should navigate back
-    app.handle_key(KeyCode::Up, KeyModifiers::empty()).unwrap();
-
-    let picker = app
-        .inline_interactive_state
-        .as_ref()
-        .expect("picker should still be open");
-    assert!(picker.preview, "should remain in preview mode");
-    assert_eq!(picker.selected, initial_selected);
-
-    // Opening the preview should place the cursor in the model filter argument.
-    assert_eq!(app.input(), "/model ");
-}
-
-#[test]
-fn test_open_model_picker_without_routes_shows_actionable_guidance() {
-    with_temp_jcode_home(|| {
-        let mut app = create_test_app();
-
-        app.open_model_picker();
-        wait_for_model_picker_load(&mut app);
-
-        assert!(app.inline_interactive_state.is_none());
-        assert_eq!(app.status_notice(), Some("No models available".to_string()));
-
-        let last = app.display_messages.last().expect("display message");
-        assert_eq!(last.role, "system");
-        assert!(last.content.contains("/login"));
-        assert!(last.content.contains("/account"));
-        assert!(last.content.contains("/model"));
-    });
-}
-
-#[test]
-fn test_remote_model_picker_during_startup_waits_for_session_catalog() {
-    let mut app = create_test_app();
-    app.is_remote = true;
-    app.set_remote_startup_phase(crate::tui::app::RemoteStartupPhase::LoadingSession);
-    app.remote_provider_model = Some("gpt-5.6-sol".to_string());
-    app.remote_available_entries.clear();
-    app.remote_model_options.clear();
-
-    app.open_model_picker();
-
-    let picker = app
-        .inline_interactive_state
-        .as_ref()
-        .expect("loading model picker should be open");
-    assert_eq!(picker.entries.len(), 1);
-    assert_eq!(picker.entries[0].name, "gpt-5.6-sol");
-    assert_eq!(picker.entries[0].options[0].detail, "updating model list…");
-}
+include!("model_picker_startup_tests.rs");
 
 #[test]
 fn test_remote_model_command_opens_picker_without_catalog_request() {
@@ -591,11 +511,16 @@ fn test_subagent_model_large_catalog_uses_cached_searchable_picker() {
         app.handle_key(KeyCode::Char('3'), KeyModifiers::empty())
             .unwrap();
         let picker = app.inline_interactive_state.as_ref().unwrap();
-        assert!(!picker.filtered.is_empty(), "typed input should filter models");
+        assert!(
+            !picker.filtered.is_empty(),
+            "typed input should filter models"
+        );
         assert!(picker.filtered.len() < picker.entries.len());
 
-        app.handle_key(KeyCode::Enter, KeyModifiers::empty()).unwrap();
-        app.handle_key(KeyCode::Enter, KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+            .unwrap();
+        app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+            .unwrap();
         assert!(app.session.subagent_model.is_some());
         assert_eq!(app.provider.model(), "counting-a");
     });
@@ -1189,7 +1114,9 @@ fn test_tui_openai_compatible_empty_catalog_does_not_switch_to_profile_default()
                     Ok(Ok(crate::bus::BusEvent::LoginCompleted(login)))
                         if login.provider == "Cerebras" =>
                     {
-                        panic!("empty local catalog must not publish final login failure: {login:?}")
+                        panic!(
+                            "empty local catalog must not publish final login failure: {login:?}"
+                        )
                     }
                     Ok(Ok(crate::bus::BusEvent::UiActivity(activity)))
                         if activity.session_id.as_deref() == Some(own_session.as_str())
@@ -1969,14 +1896,16 @@ fn test_local_model_picker_render_shows_antigravity_models_exactly_as_user_sees_
             App::apply_inline_interactive_filter(picker);
             let _render_lock = scroll_render_test_lock();
             let backend = ratatui::backend::TestBackend::new(90, 14);
-            let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
+            let mut terminal =
+                ratatui::Terminal::new(backend).expect("failed to create test terminal");
             render_and_snap(app, &mut terminal)
         };
         let claude_text = render_filtered(&mut app, "claude-sonnet-4-6");
         let gpt_text = render_filtered(&mut app, "gpt-oss-120b-medium");
 
         assert!(
-            claude_text.contains("▸ Claude Sonnet 4.6") && claude_text.contains("Search: claude-sonnet-4-6"),
+            claude_text.contains("▸ Claude Sonnet 4.6")
+                && claude_text.contains("Search: claude-sonnet-4-6"),
             "rendered /model suggestions should show the selected row and navigation, got:
 {}",
             claude_text
@@ -2034,7 +1963,8 @@ fn test_login_smoke_model_picker_renders_unstacked_provider_rows() {
             App::apply_inline_interactive_filter(picker);
             let _render_lock = scroll_render_test_lock();
             let backend = ratatui::backend::TestBackend::new(180, 48);
-            let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
+            let mut terminal =
+                ratatui::Terminal::new(backend).expect("failed to create test terminal");
             render_and_snap(app, &mut terminal)
         };
 
@@ -2085,17 +2015,26 @@ fn test_login_smoke_model_picker_renders_unstacked_provider_rows() {
             copilot_text
         );
         assert!(
-            deepseek_text.contains("deepseek/deepseek-v4-pro") && deepseek_text.contains("openrouter"),
+            deepseek_text.contains("deepseek/deepseek-v4-pro")
+                && deepseek_text.contains("openrouter"),
             "OpenRouter route should be visible, got:\n{}",
             deepseek_text
         );
         let deepseek_auto_row = deepseek_text
             .lines()
-            .find(|line| !line.starts_with("Search:") && line.contains("deepseek/deepseek-v4-pro") && line.contains("auto"))
+            .find(|line| {
+                !line.starts_with("Search:")
+                    && line.contains("deepseek/deepseek-v4-pro")
+                    && line.contains("auto")
+            })
             .unwrap_or("");
         let deepseek_provider_row = deepseek_text
             .lines()
-            .find(|line| !line.starts_with("Search:") && line.contains("deepseek/deepseek-v4-pro") && line.contains("DeepSeek"))
+            .find(|line| {
+                !line.starts_with("Search:")
+                    && line.contains("deepseek/deepseek-v4-pro")
+                    && line.contains("DeepSeek")
+            })
             .unwrap_or("");
         assert!(
             !deepseek_auto_row.contains('★'),

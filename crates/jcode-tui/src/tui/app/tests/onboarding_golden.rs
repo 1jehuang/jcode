@@ -48,11 +48,7 @@ fn render_onboarding_text(app: &App, width: u16, height: u16) -> String {
 }
 
 /// Render the onboarding screen and return its styled offscreen buffer.
-fn render_onboarding_buffer(
-    app: &App,
-    width: u16,
-    height: u16,
-) -> ratatui::buffer::Buffer {
+fn render_onboarding_buffer(app: &App, width: u16, height: u16) -> ratatui::buffer::Buffer {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -324,7 +320,10 @@ fn onboarding_golden_walks_every_phase() {
         assert!(text.contains("Claude"), "provider 2: {text}");
         // A Yes/No header sits above the per-login circle columns, with the
         // filled circle marking the current (pre-selected: Yes) choice.
-        assert!(text.contains("Yes") && text.contains("No"), "yes/no header: {text}");
+        assert!(
+            text.contains("Yes") && text.contains("No"),
+            "yes/no header: {text}"
+        );
         assert!(text.contains('●'), "filled choice circle: {text}");
         assert!(text.contains('○'), "hollow choice circle: {text}");
         // A navigable "Continue" pill sits above the list (between the label and
@@ -340,9 +339,10 @@ fn onboarding_golden_walks_every_phase() {
 
     // 2c. A single detected login still renders the summary + one row.
     {
-        let review =
-            ImportReview::new(vec![ExternalAuthReviewCandidate::fixture("Cursor", "Cursor")])
-                .unwrap();
+        let review = ImportReview::new(vec![ExternalAuthReviewCandidate::fixture(
+            "Cursor", "Cursor",
+        )])
+        .unwrap();
         let app = app_in_phase(OnboardingPhase::Login {
             import: Some(review),
         });
@@ -433,10 +433,7 @@ fn onboarding_golden_walks_failure_and_async_states() {
             text.contains("Importing your logins"),
             "progress headline: {text}"
         );
-        assert!(
-            text.contains("Hang tight"),
-            "progress reassurance: {text}"
-        );
+        assert!(text.contains("Hang tight"), "progress reassurance: {text}");
         // The progress screen must NOT show the manual-login recovery copy.
         assert!(
             !text.contains("Press Enter to pick who to log in with"),
@@ -448,8 +445,7 @@ fn onboarding_golden_walks_failure_and_async_states() {
     // (b) Import failed: failure-aware recovery card with reason + next step.
     {
         let mut app = app_in_phase(OnboardingPhase::Login { import: None });
-        app.onboarding_import_error =
-            Some("the saved credential was rejected".to_string());
+        app.onboarding_import_error = Some("the saved credential was rejected".to_string());
         let text = render_onboarding_text(&app, width, height);
         dump("Login (import failed, recovery)", &text);
         assert!(
@@ -529,7 +525,9 @@ fn onboarding_golden_telemetry_settings_page() {
         "option 1: {text}"
     );
     assert!(
-        text.contains("Includes provider account email, prompts, responses, reasoning, code"),
+        text.contains(
+            "Includes provider account email, prompts, responses, reasoning, code, and tool"
+        ),
         "caption 1: {text}"
     );
     assert!(
@@ -575,10 +573,7 @@ fn onboarding_import_happy_path_images() {
             ExternalAuthReviewCandidate::fixture("OpenAI/Codex", "Codex auth.json"),
             ExternalAuthReviewCandidate::fixture("Claude", "Claude Code"),
             ExternalAuthReviewCandidate::fixture("Gemini", "Gemini CLI"),
-            ExternalAuthReviewCandidate::fixture(
-                "GitHub Copilot",
-                "GitHub Copilot CLI hosts.json",
-            ),
+            ExternalAuthReviewCandidate::fixture("GitHub Copilot", "GitHub Copilot CLI hosts.json"),
             ExternalAuthReviewCandidate::fixture("Cursor", "Cursor auth.json"),
         ]
     };
@@ -644,8 +639,7 @@ fn onboarding_import_happy_path_images() {
     // ---- login_failed: classified failure with actionable recovery ----
     {
         let mut app = app_in_phase(OnboardingPhase::Login { import: None });
-        app.onboarding_import_error =
-            Some("the OAuth flow did not complete".to_string());
+        app.onboarding_import_error = Some("the OAuth flow did not complete".to_string());
         write_onboarding_svg(&output_dir, "login-failed.svg", &app, width, height);
     }
 
@@ -723,9 +717,8 @@ fn onboarding_import_happy_path_images() {
         // The header shows a randomly drawn session mascot ("client: Goat 🐐"),
         // which would make the artifact differ run to run. Pin it.
         app.session.short_name = Some("sauropod".to_string());
-        let prompt = App::onboarding_recent_project_review_prompt(std::path::Path::new(
-            "~/projects/my-app",
-        ));
+        let prompt =
+            App::onboarding_recent_project_review_prompt(std::path::Path::new("~/projects/my-app"));
         app.push_display_message(DisplayMessage::user(prompt));
         app.is_processing = true;
         write_full_frame_svg(&output_dir, "review-turn.svg", &app, width, height);

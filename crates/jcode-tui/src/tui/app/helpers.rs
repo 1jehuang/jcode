@@ -1,6 +1,7 @@
 #![cfg_attr(test, allow(clippy::items_after_test_module))]
 
 mod clipboard_helper;
+mod git_line_cache;
 pub(crate) mod model_names;
 
 use crate::todo::TodoItem;
@@ -20,6 +21,8 @@ static AMBIENT_INFO_CACHE: Mutex<Option<AmbientInfoCacheEntry>> = Mutex::new(Non
 /// edits) instead of waiting out the TTL with a stale branch/dirty count.
 type GitInfoCacheEntry = (std::time::Instant, Option<GitInfo>, bool);
 static GIT_INFO_CACHE: Mutex<Option<GitInfoCacheEntry>> = Mutex::new(None);
+static GIT_LINE_CACHE: std::sync::LazyLock<Mutex<git_line_cache::GitLineCache>> =
+    std::sync::LazyLock::new(|| Mutex::new(git_line_cache::GitLineCache::default()));
 
 /// Stale-while-revalidate cache for per-session todos plus their goal-level
 /// assessments (closed feedback loop etc.). Module-level so the app can force a
@@ -1726,6 +1729,8 @@ pub(crate) fn gather_git_info_in(dir: Option<&std::path::Path>) -> Option<GitInf
         .unwrap_or_default();
     let mut added_total = 0usize;
     let mut removed_total = 0usize;
+    let mut line_cache = GIT_LINE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    line_cache.begin_scan();
     for file in &mut all_files {
         let key = file
             .path
@@ -1734,8 +1739,14 @@ pub(crate) fn gather_git_info_in(dir: Option<&std::path::Path>) -> Option<GitInf
             .unwrap_or(&file.path)
             .trim_matches('"');
         let abs = repo_root.as_ref().map(|root| root.join(key));
+        let metadata = abs
+            .as_deref()
+            .and_then(|p| std::fs::symlink_metadata(p).ok());
         if file.status == '?' {
-            file.added = abs.as_deref().and_then(count_text_lines);
+            file.added = abs
+                .as_deref()
+                .zip(metadata.as_ref())
+                .and_then(|(path, meta)| line_cache.count(path, meta));
             file.removed = file.added.map(|_| 0);
         } else if let Some(&(a, r)) = numstat.get(key) {
             file.added = a;
@@ -1743,11 +1754,10 @@ pub(crate) fn gather_git_info_in(dir: Option<&std::path::Path>) -> Option<GitInf
         }
         added_total += file.added.unwrap_or(0);
         removed_total += file.removed.unwrap_or(0);
-        file.modified_at = abs
-            .as_deref()
-            .and_then(|p| std::fs::symlink_metadata(p).ok())
-            .and_then(|m| m.modified().ok());
+        file.modified_at = metadata.and_then(|m| m.modified().ok());
     }
+    line_cache.finish_scan();
+    drop(line_cache);
     // Newest first, so the file being worked on stays visible under the cap.
     // Deleted files have no mtime and sort last.
     all_files.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
@@ -1850,26 +1860,6 @@ pub(crate) fn parse_numstat(
         out.insert(path, (a.parse().ok(), r.parse().ok()));
     }
     out
-}
-
-/// Line count of a small text file, for untracked files. Large or binary
-/// files return `None` so the widget shows no count rather than a bogus one.
-fn count_text_lines(path: &std::path::Path) -> Option<usize> {
-    const MAX_BYTES: u64 = 2 * 1024 * 1024;
-    let meta = std::fs::metadata(path).ok()?;
-    if !meta.is_file() || meta.len() > MAX_BYTES {
-        return None;
-    }
-    let bytes = std::fs::read(path).ok()?;
-    if bytes.contains(&0) {
-        return None;
-    }
-    let lines = bytes.iter().filter(|&&b| b == b'\n').count();
-    Some(if bytes.last().is_some_and(|&b| b != b'\n') {
-        lines + 1
-    } else {
-        lines
-    })
 }
 
 /// Collapse a porcelain `XY` pair into the single letter the Changes widget
