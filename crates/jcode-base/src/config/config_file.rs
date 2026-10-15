@@ -659,8 +659,12 @@ impl Config {
             return lists.clone();
         }
 
-        let Ok(mut cfg) = toml::from_str::<Self>(&content) else {
-            return empty();
+        let mut cfg = match toml::from_str::<Self>(&content) {
+            Ok(cfg) => cfg,
+            // Explicit process authorization replaces both trust lists, even
+            // when unrelated TOML is malformed, as with Config::load().
+            Err(_) if key.2.is_some() => Self::default(),
+            Err(_) => return empty(),
         };
         // Use the override captured in the key, not a second environment read.
         if let Some(value) = &key.2 {
