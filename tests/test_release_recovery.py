@@ -230,6 +230,32 @@ class RecoveryTests(unittest.TestCase):
                         self.assertEqual(eval(expression, {"__builtins__": {}}),
                                          create == "success" and build == "success")
 
+    def test_release_notes_disclose_actual_windows_signing(self):
+        import textwrap
+
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        notes = workflow.split("      - name: Add platform availability to release notes\n", 1)[1]
+        self.assertIn("WINDOWS_SIGNING_ENABLED: ${{ needs.publish-windows.outputs.signing_enabled }}", notes)
+        script = textwrap.dedent(notes.split("python3 - << 'PY'\n", 1)[1].split("\n          PY", 1)[0])
+        platforms = ("LINUX_X86_64", "LINUX_AARCH64", "MACOS_AARCH64", "MACOS_X86_64",
+                     "WINDOWS_X86_64", "WINDOWS_AARCH64", "FREEBSD_X86_64")
+        for enabled in ("true", "false", ""):
+            with self.subTest(enabled=enabled):
+                (self.repo / "release_notes.md").write_text("Release highlights\n")
+                env = dict(os.environ, WINDOWS_SIGNING_ENABLED=enabled,
+                           **{f"{platform}_AVAILABLE": "true" for platform in platforms})
+                for _ in range(2):
+                    subprocess.run(["python3", "-c", script], cwd=self.repo, env=env, check=True)
+                body = (self.repo / "release_notes.md").read_text()
+                self.assertEqual(body.count("## Platform availability"), 1)
+                self.assertIn("Release highlights", body)
+                if enabled == "true":
+                    self.assertIn("Authenticode signatures verified", body)
+                    self.assertNotIn("**unsigned**", body)
+                else:
+                    self.assertIn("**unsigned**", body)
+                    self.assertNotIn("Authenticode signatures verified", body)
+
     def test_workflow_identity_and_publication_gates(self):
         workflow = (ROOT / ".github/workflows/release.yml").read_text()
         self.assertNotIn("GITHUB_REF_NAME", workflow)

@@ -534,6 +534,8 @@ jobs:
     # still requiring both direct dependencies to succeed.
     if: always() && needs.create-release.result == 'success' && needs.build-windows.result == 'success'
     timeout-minutes: 30
+    outputs:
+      signing_enabled: ${{ steps.signing.outputs.enabled }}
     permissions:
       contents: write
       id-token: write
@@ -913,6 +915,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          WINDOWS_SIGNING_ENABLED: ${{ needs.publish-windows.outputs.signing_enabled }}
         run: |
           set -euo pipefail
           gh release view "${RELEASE_TAG}" --json body --jq .body > release_notes.md
@@ -936,6 +939,11 @@ jobs:
           def status(name: str) -> str:
               return "available" if os.environ[name] == "true" else "not available in this release"
 
+          windows_signature = (
+              "Authenticode signatures verified for both Windows architectures."
+              if os.environ.get("WINDOWS_SIGNING_ENABLED") == "true"
+              else "Windows executables are **unsigned**. Azure Artifact Signing is not configured and the repository's existing `WINDOWS_SIGNING_REQUIRED=false` override allowed unsigned publication. Windows may show publisher or SmartScreen warnings."
+          )
           availability = textwrap.dedent(f"""
               {start}
               ## Platform availability
@@ -947,6 +955,8 @@ jobs:
               - Windows x86_64: {status('WINDOWS_X86_64_AVAILABLE')}
               - Windows ARM64: {status('WINDOWS_AARCH64_AVAILABLE')}
               - FreeBSD x86_64: {status('FREEBSD_X86_64_AVAILABLE')}
+
+              {windows_signature}
               {end}
           """).strip("\n")
           path.write_text(f"{body}\n\n{availability}\n", encoding="utf-8")

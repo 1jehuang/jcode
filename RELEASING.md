@@ -136,6 +136,8 @@ The one-time setup is documented in [docs/WINDOWS.md](docs/WINDOWS.md#enable-aut
 
 Before announcing Defender or SmartScreen remediation, download both public Windows executables and confirm `Get-AuthenticodeSignature` reports `Valid`.
 
+At v0.98.1 publication, the repository had `WINDOWS_SIGNING_REQUIRED=false` and no Azure signing credentials or account configuration. Its Windows executables are unsigned, not Authenticode-verified. Release notes now disclose the actual signing mode, including this override. To enable signed future releases, an administrator must provision the Azure identity and signing account/profile listed above and remove the override. Do not claim that a successful packaging job proves signing occurred.
+
 ### Existing-tag recovery
 
 Normal retries still require successful CI on the existing tag's exact SHA. A newer green master commit does not authorize an older failed tag. Reviewed source recovery is a separate, explicitly constrained workflow-dispatch path with provenance, not a bypass available in `quick-release.sh`. Do not retag an existing version or broaden recovery permissions as part of a routine release.
