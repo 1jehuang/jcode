@@ -181,8 +181,9 @@ impl Agent {
         if let Some((method, label)) = self.observed_oauth_account_route() {
             return Some(format!("{method}@{label}"));
         }
-        if self.provider.active_resolved_credential()
-            == Some(jcode_provider_core::ResolvedCredential::ApiKey)
+        if self.provider.credential_mode() == jcode_provider_core::CredentialMode::ApiKey
+            && self.provider.active_resolved_credential()
+                == Some(jcode_provider_core::ResolvedCredential::ApiKey)
         {
             match self.provider.name().to_ascii_lowercase().as_str() {
                 "openai" => return Some("openai-api".to_string()),
