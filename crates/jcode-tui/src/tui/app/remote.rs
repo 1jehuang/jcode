@@ -550,9 +550,6 @@ async fn apply_terminal_event<B: Backend>(
                                         )));
                                     } else {
                                         crate::auth::AuthStatus::invalidate_cache();
-                                        app.set_context_limit_and_sync_budget(
-                                            app.provider.context_window(),
-                                        );
                                         let _ = remote.switch_anthropic_account(&label).await;
                                         app.push_display_message(DisplayMessage::system(format!(
                                             "Switched to Anthropic account `{}`.",
@@ -572,9 +569,6 @@ async fn apply_terminal_event<B: Backend>(
                                         )));
                                     } else {
                                         crate::auth::AuthStatus::invalidate_cache();
-                                        app.set_context_limit_and_sync_budget(
-                                            app.provider.context_window(),
-                                        );
                                         let _ = remote.switch_openai_account(&label).await;
                                         app.push_display_message(DisplayMessage::system(format!(
                                             "Switched to OpenAI account `{}`.",
@@ -2223,6 +2217,10 @@ fn handle_disconnected_key_internal(
 
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "remote_account_context_tests.rs"]
+mod account_context_tests;
 
 #[cfg(test)]
 #[path = "remote_stall_guard_tests.rs"]
