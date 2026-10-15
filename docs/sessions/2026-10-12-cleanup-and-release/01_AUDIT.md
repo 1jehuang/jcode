@@ -3112,4 +3112,69 @@ The branch is at `merge-base 901b3310821e9d65a88301072bb0a183709eefad` (the PR #
 - 1800+ external open PRs: not in scope
 - 5 still-pending todos (P7 release, Dependabot, 1800 external PRs, 328+ phinbox, GitHub Actions billing)
 
+**B.8.84 EXECUTED 2026-10-15T08:02Z — Operator signal `"proc"`; MERGE ARC for 3 PRs**
+
+**Operator's "proc" interpretation**: take action on the 3 MERGEABLE PRs via harness-compliant merge path. Direct-push squash-merge (per AGENTS.md merge strategy: "When `gh pr merge` is fail-closed, the canonical harness-compliant merge path for single-owner repos is `git -c merge.ff=true merge --squash` + commit + `git push origin master`").
+
+**Safety discovery during B.8.84**: peer-orchestrator moved origin/master by 2 commits (PRs #76, #77) during the first cargo check on PR #64. Required `git reset --hard origin/master` + re-squash-merge on top of new base. After that, cargo check went from 4m 39s (cold compile) to 1m 15s and 4.25s (incremental) — the cold time was the new deps being downloaded for the first time.
+
+**Merge sequence** (smallest → cleanup):
+
+| # | PR | Title | Commit | Files | cargo check | Push | Close |
+|---|---|---|---|---|---|---|---|
+| 1 | #64 | fix(ci): remove unused deps + tokio-runtime guard | `4d676f097` | 4 files (+6/-6) | 1m 15s | OK | CLOSED |
+| 2 | #67 | chore: prepare Xirp custom harness compatibility discovery | `fed23782d` | 17 files (+3514/-0) | 57.44s (4 pre-existing warnings) | OK | CLOSED |
+| 3 | #75 | chore(fmt): cargo fmt cleanup + clippy followup | `a1e953097` | 1 file (+4/-4, formatting) | 4.25s | OK | CLOSED |
+
+**Master HEAD progression**:
+- Start: `a4232ae1d` (B.8.83)
+- Peer-merged during cargo check: `8a087bfd7` (#76), `8cd6d0e44` (#77)
+- After reset: `8cd6d0e44`
+- After PR #64 squash: `4d676f097`
+- After PR #67 squash: `fed23782d`
+- After PR #75 squash: `a1e953097`
+
+**Subsumption discovery**:
+- PR #64 was 5 files vs base `09b0afba6` but only 4 files vs current master `8cd6d0e44`. The mod.rs change was already in master from peer-merged PRs.
+- PR #67 was 17 files (+3514/-0) — pure documentation/scripts, no Rust changes. All 17 files are new.
+- PR #75 was 6 files vs base `09b0afba6` but only 1 file vs current master `fed23782d`. The other 5 files were already formatted by panic-budget + #64 + #67 merges. The remaining `auth.rs` change is a `let-chain` style refactor (Rust 2024 syntax: `if condition && let pattern = expr { ... }`).
+
+**Pre-existing warnings** (NOT from my merges):
+- `crates/jcode-telemetry-core/src/lib.rs:8:38` — unused imports `spawn_background_worker`, `telemetry_status_is_permanent`
+- `crates/jcode-telemetry-core/src/delivery.rs:141:58` — variable doesn't need to be mutable
+- `crates/jcode-telemetry-core/src/delivery.rs:165:9` — `std::mem::drop` with Copy value does nothing
+- `crates/jcode-telemetry-core/src/delivery.rs:171:9` — same as 165
+
+These 4 warnings are in `jcode-telemetry-core` and predate the panic-budget cleanup. They are NOT introduced by #64/#67/#75. They are tracked in the B.8.84 audit but NOT actionable for this merge arc.
+
+**Re-verification at 08:13Z (B.8.84 exit)**:
+- Master HEAD: `a1e953097` (synced)
+- origin/master: `a1e953097` (synced)
+- 0 ahead / 0 behind origin/master
+- Working tree: clean
+- 0 stashes
+- 0 phinbox-queued (mine)
+- 3 restore_session tests PASS (9.42s)
+- cargo check --workspace: 0 errors
+- PR #64: CLOSED
+- PR #67: CLOSED
+- PR #75: CLOSED
+
+**Standing memory update**: After my first squash-merge attempt for PR #64, peer-orchestrator moved origin/master by 2 commits (PRs #76, #77) during the 4m 39s cargo check. Required `git reset --hard origin/master` + re-squash-merge on new base. Lesson: when squash-merging PRs from a single-owner fork, ALWAYS `git fetch origin master` immediately before push, and check `git log master..origin/master` to see if peer-orchestrator moved the base. If so, reset and re-merge.
+
+**State at 08:13Z (B.8.84 exit)**:
+- Master HEAD: `a1e953097` (3 new commits ahead of pre-B.8.84: `4d676f097`, `fed23782d`, `a1e953097`)
+- origin/master: `a1e953097` (synced)
+- Working tree: clean (0 untracked, 0 modified, 0 stash)
+- 0 phinbox-queued requests (mine)
+- Ratchet B (subset) CI-gated at 62; currently at 62 ✅
+- 3 restore_session tests PASS (9.42s)
+- cargo check --workspace: 0 errors
+- PR #64: CLOSED (squash-merged)
+- PR #67: CLOSED (squash-merged)
+- PR #75: CLOSED (squash-merged)
+- PR #62: CLOSED (superseded by #75 in B.8.83)
+- 4 untracked operator dirs: COMMITTED
+- 4 still-pending todos (P7 release, Dependabot, 1800 external PRs, 328+ phinbox, GitHub Actions billing)
+
 
