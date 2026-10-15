@@ -1028,6 +1028,13 @@ fn spawn_assigned_task_run(
                         // Requeue alone leaves an idle worker ineligible for
                         // assignment. Do not overwrite a successor turn that
                         // has already claimed the member's lifecycle state.
+                        // Hold the agent reservation through the status compare:
+                        // a running successor owns it, while a waiting successor
+                        // is protected by its pending resume ticket under the
+                        // member write lock.
+                        let Ok(_idle_guard) = Arc::clone(&agent_arc).try_lock_owned() else {
+                            return;
+                        };
                         super::swarm::update_member_status_if(
                             &target_session,
                             "rate_limited",

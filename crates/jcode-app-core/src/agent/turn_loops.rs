@@ -1337,37 +1337,6 @@ impl Agent {
 
         Ok(final_text)
     }
-
-    pub(super) fn messages_end_with_tool_result(messages: &[Message]) -> bool {
-        messages.iter().rev().any(|message| {
-            if !matches!(message.role, Role::User) {
-                return false;
-            }
-            if message
-                .content
-                .iter()
-                .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
-            {
-                return true;
-            }
-            message.content.iter().any(|block| match block {
-                ContentBlock::Text { text, .. } => {
-                    let trimmed = text.trim();
-                    trimmed.starts_with("<system-reminder>")
-                        // The empty-post-tool continuation is itself a
-                        // User-role `<system-reminder>`. Counting it would let the
-                        // injected instruction keep this predicate true on its own,
-                        // so every later whitespace-only response appends another
-                        // continuation and spends another call, with no tool result
-                        // anywhere near.
-                        && !trimmed.starts_with(
-                            Self::EMPTY_POST_TOOL_CONTINUATION_PREFIX
-                        )
-                }
-                _ => false,
-            })
-        })
-    }
 }
 
 #[cfg(test)]

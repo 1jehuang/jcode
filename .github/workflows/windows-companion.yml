@@ -1,0 +1,76 @@
+name: Windows Companion Compile
+
+on:
+  pull_request:
+    paths:
+      - 'crates/jcode-companion/**'
+      - 'crates/jcode-core/**'
+      - 'crates/jcode-base/**'
+      - 'crates/jcode-transport/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/windows-companion.yml'
+      - 'scripts/install_justrust_ci.sh'
+  push:
+    branches: [master]
+    paths:
+      - 'crates/jcode-companion/**'
+      - 'crates/jcode-core/**'
+      - 'crates/jcode-base/**'
+      - 'crates/jcode-transport/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/windows-companion.yml'
+      - 'scripts/install_justrust_ci.sh'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-companion-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  JCODE_CI: '1'
+  CARGO_BUILD_RUSTC_WRAPPER: ''
+  JUSTRUST_TOOLCHAIN: system
+  JUSTRUST_SLOTS: '0'
+  JUSTRUST_NO_TELEMETRY: '1'
+
+jobs:
+  compile:
+    name: Companion (${{ matrix.target }})
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      # alpha.17 Windows measurement can allocate 30 GiB before compilation.
+      # Execute the same local Cargo check without measurement until fixed.
+      JUSTRUST_DISABLE: "1"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            arch: amd64
+          - target: aarch64-pc-windows-msvc
+            arch: amd64_arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.arch }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-companion-${{ matrix.target }}
+      - name: Install pinned justrust
+        shell: bash
+        run: bash scripts/install_justrust_ci.sh
+      - name: Check companion and Windows acceptance loop
+        shell: pwsh
+        run: |
+          & justrust check --local --locked -p jcode-companion --target ${{ matrix.target }}
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

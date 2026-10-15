@@ -1,3 +1,4 @@
+mod available_models_cache;
 mod available_models_dedup;
 mod await_members_state;
 mod background_tasks;
@@ -14,6 +15,7 @@ mod client_lifecycle_logging;
 mod client_lightweight_control;
 mod client_session;
 mod client_state;
+mod session_connections;
 pub(crate) use client_state::provider_oauth_email;
 mod client_writer;
 mod comm_await;
@@ -22,6 +24,8 @@ mod comm_graph;
 mod comm_plan;
 mod comm_session;
 mod comm_sync;
+mod configured_name;
+use configured_name::normalize_configured_server_name;
 mod credential_watch;
 mod debug;
 mod debug_ambient;
@@ -407,37 +411,6 @@ fn configured_server_name_from_env() -> Option<String> {
         })
 }
 
-fn normalize_configured_server_name(raw: &str) -> Option<String> {
-    let mut normalized = String::new();
-    let mut previous_dash = false;
-
-    for ch in raw.trim().chars() {
-        let mapped = if ch.is_ascii_alphanumeric() {
-            ch.to_ascii_lowercase()
-        } else if ch == '.' || ch == '-' {
-            ch
-        } else {
-            '-'
-        };
-
-        if mapped == '-' {
-            if previous_dash {
-                continue;
-            }
-            previous_dash = true;
-        } else {
-            previous_dash = false;
-        }
-        normalized.push(mapped);
-        if normalized.len() >= MAX_CONFIGURED_SERVER_NAME_LEN {
-            break;
-        }
-    }
-
-    let trimmed = normalized.trim_matches(|ch| matches!(ch, '-' | '.'));
-    (!trimmed.is_empty()).then(|| trimmed.to_string())
-}
-
 #[derive(Default)]
 struct HeadlessRecoveryStats {
     candidates: usize,
@@ -623,6 +596,7 @@ async fn capture_runtime_memory_attribution_sample(
 }
 
 mod state;
+mod subscribe_working_dir;
 
 use self::state::latest_peer_touches;
 pub use self::state::{
