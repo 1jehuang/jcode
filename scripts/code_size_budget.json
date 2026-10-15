@@ -56,7 +56,7 @@
     "crates/jcode-provider-anthropic-runtime/src/lib.rs": 3119,
     "crates/jcode-provider-bedrock/src/lib.rs": 1492,
     "crates/jcode-provider-copilot-runtime/src/lib.rs": 1429,
-    "crates/jcode-provider-core/src/lib.rs": 1673,
+    "crates/jcode-provider-core/src/lib.rs": 1674,
     "crates/jcode-provider-cursor-runtime/src/agent_transport.rs": 1873,
     "crates/jcode-provider-cursor-runtime/src/wire.rs": 1431,
     "crates/jcode-provider-doctor/src/lifecycle_driver.rs": 1986,
