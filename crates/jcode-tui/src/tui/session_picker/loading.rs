@@ -462,21 +462,356 @@ pub(super) fn session_matches_query(session: &SessionInfo, query: &str) -> bool 
 /// This intentionally avoids transcript file I/O. Transcript-backed content can
 /// still become searchable after preview load because the picker refreshes the
 /// session's cached `search_index` from the loaded preview.
+///
+/// Tokens with a `key:value` shape are search qualifiers, not free text: they
+/// filter on structured session fields (see [`parse_search_query`]) instead of
+/// the search index, mirroring the `session_search` tool's filter options so the
+/// session list can express every filter the search exposes. Time qualifiers
+/// additionally accept relative offsets (`30m`, `2h`) beyond the tool's
+/// RFC3339/`YYYY-MM-DD` forms, since the search bar is typed character by
+/// character and fixed dates are awkward to compose live.
 pub(super) fn session_matches_picker_query(session: &SessionInfo, query: &str) -> bool {
-    let tokens = search_query_tokens(query);
-    tokens.is_empty()
-        || tokens
-            .iter()
-            .all(|token| session.search_index.contains(token))
+    let parsed = parse_search_query(query);
+    parsed.matches(session)
 }
 
-/// Split a raw query into normalized (lowercased, whitespace-trimmed) search
-/// tokens. Empty/whitespace-only queries yield no tokens (match everything).
-pub(super) fn search_query_tokens(query: &str) -> Vec<String> {
+/// A picker search query split into free-text tokens and structured qualifiers.
+///
+/// Qualifier tokens use a `key:value` shape; anything else is free text matched
+/// against the session's search index. Unknown keys and malformed values degrade
+/// gracefully: an unparseable qualifier is kept as free text so the query still
+/// does something predictable while typing (e.g. the half-typed `after:2`),
+/// while an unknown key like `foo:bar` falls back to plain text matching.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(super) struct ParsedSearchQuery {
+    /// Lowercased free-text tokens that must all appear in the search index.
+    pub free_tokens: Vec<String>,
+    /// Case-insensitive substring filter on the session model.
+    pub model: Option<String>,
+    /// Case-insensitive substring filter on the provider key.
+    pub provider: Option<String>,
+    /// Source filter using the same aliases as `session_search` (claude-code,
+    /// codex, pi, opencode, cursor, jcode, all).
+    pub source: Option<String>,
+    /// Case-insensitive substring filter on the working directory.
+    pub dir: Option<String>,
+    /// Saved-bookmark flag filter (`saved:yes`/`saved:no`, `saved:true`/`false`).
+    pub saved: Option<bool>,
+    /// Debug/test flag filter.
+    pub debug: Option<bool>,
+    /// Canary flag filter.
+    pub canary: Option<bool>,
+    /// Only sessions with last activity at or after this instant.
+    pub after: Option<chrono::DateTime<chrono::Utc>>,
+    /// Only sessions with last activity at or before this instant.
+    pub before: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl ParsedSearchQuery {
+    /// True when there is nothing to match on: every session qualifies.
+    pub fn is_empty(&self) -> bool {
+        self.free_tokens.is_empty()
+            && self.model.is_none()
+            && self.provider.is_none()
+            && self.source.is_none()
+            && self.dir.is_none()
+            && self.saved.is_none()
+            && self.debug.is_none()
+            && self.canary.is_none()
+            && self.after.is_none()
+            && self.before.is_none()
+    }
+
+    /// All-session reference point for the time window: live sessions publish
+    /// `last_active_at`, older ones fall back to the last stored message time.
+    fn last_activity(session: &SessionInfo) -> chrono::DateTime<chrono::Utc> {
+        session.last_active_at.unwrap_or(session.last_message_time)
+    }
+
+    fn source_label(session: &SessionInfo) -> &'static str {
+        match session.source {
+            SessionSource::Jcode => "jcode",
+            SessionSource::ClaudeCode => "claude",
+            SessionSource::Codex => "codex",
+            SessionSource::Pi => "pi",
+            SessionSource::OpenCode => "opencode",
+            SessionSource::Cursor => "cursor",
+        }
+    }
+
+    pub fn matches(&self, session: &SessionInfo) -> bool {
+        if self.is_empty() {
+            return true;
+        }
+        // Free-text tokens are a logical AND against the search index.
+        if !self
+            .free_tokens
+            .iter()
+            .all(|token| session.search_index.contains(token))
+        {
+            return false;
+        }
+        if let Some(model) = &self.model
+            && !session
+                .model
+                .as_deref()
+                .is_some_and(|m| m.to_ascii_lowercase().contains(model))
+        {
+            return false;
+        }
+        if let Some(provider) = &self.provider {
+            // Same shape as the tool's provider filter: the provider key can
+            // match, or the source label can stand in when no key is recorded
+            // (e.g. external Claude Code sessions carry source `claude`).
+            let key_matches = session
+                .provider_key
+                .as_deref()
+                .is_some_and(|p| p.to_ascii_lowercase().contains(provider));
+            let source_matches = Self::source_label(session).contains(provider);
+            if !key_matches && !source_matches {
+                return false;
+            }
+        }
+        if let Some(source) = &self.source
+            && !Self::source_label(session).eq_ignore_ascii_case(source)
+        {
+            return false;
+        }
+        if let Some(dir) = &self.dir {
+            // Same matcher as the tool's working-dir filter: normalized path
+            // equality/prefix for absolute filters, fragment fallback for
+            // project-name fragments like `jcode`.
+            let matches_dir = session
+                .working_dir
+                .as_deref()
+                .is_some_and(|d| jcode_session_types::session_search_working_dir_matches(d, dir));
+            if !matches_dir {
+                return false;
+            }
+        }
+        if self.saved.is_some_and(|expected| session.saved != expected) {
+            return false;
+        }
+        if self
+            .debug
+            .is_some_and(|expected| session.is_debug != expected)
+        {
+            return false;
+        }
+        if self
+            .canary
+            .is_some_and(|expected| session.is_canary != expected)
+        {
+            return false;
+        }
+        if let Some(after) = self.after
+            && Self::last_activity(session) < after
+        {
+            return false;
+        }
+        if let Some(before) = self.before
+            && Self::last_activity(session) > before
+        {
+            return false;
+        }
+        true
+    }
+}
+
+/// Split a raw query into free-text tokens and `key:value` qualifiers.
+///
+/// Known keys: `model:`, `provider:`, `source:`, `dir:`, `saved:`, `debug:`,
+/// `canary:`, `after:`, `before:`. Values are single whitespace-delimited tokens;
+/// unknown or malformed tokens stay free text. Repeating a key keeps the last
+/// occurrence (matches how a user edits the value in place). An unparseable
+/// time value imposes no constraint yet, so the list stays stable while a
+/// date is being typed (`after:2026-1` -> `after:2026-10-12`).
+pub(super) fn parse_search_query(query: &str) -> ParsedSearchQuery {
+    let mut parsed = ParsedSearchQuery::default();
+    for token in query.split_whitespace() {
+        let Some((key, value)) = token.split_once(':') else {
+            parsed.free_tokens.push(token.to_lowercase());
+            continue;
+        };
+        // An empty value means the qualifier is not typed yet: no constraint,
+        // and it must not fall back to free text either (that would flash the
+        // list empty between `saved:` and `saved:yes`). This only applies to
+        // *recognized* keys; an unknown colon token (`http:`) is not a
+        // qualifier at all, so it stays free text in both the parser and the
+        // incremental cache guard (`is_qualifier_token`), keeping cached and
+        // fresh searches consistent.
+        if value.is_empty() && qualifier_key(key).is_some() {
+            continue;
+        }
+        match qualifier_key(key) {
+            Some(QualifierKey::Model) => parsed.model = Some(value.to_ascii_lowercase()),
+            Some(QualifierKey::Provider) => parsed.provider = Some(value.to_ascii_lowercase()),
+            Some(QualifierKey::Dir) => parsed.dir = Some(value.to_ascii_lowercase()),
+            Some(QualifierKey::Source) => {
+                // `source:all` mirrors the tool's `all` option: it clears any
+                // earlier `source:` in the same query (last-value-wins, like
+                // every other repeated qualifier) instead of leaving a stale
+                // constraint active.
+                if value.eq_ignore_ascii_case("all") {
+                    parsed.source = None;
+                } else {
+                    parsed.source = Some(normalize_source_alias(value));
+                }
+            }
+            Some(QualifierKey::Saved) => match parse_bool_qualifier(value) {
+                Some(v) => parsed.saved = Some(v),
+                None => parsed.free_tokens.push(token.to_lowercase()),
+            },
+            Some(QualifierKey::Debug) => match parse_bool_qualifier(value) {
+                Some(v) => parsed.debug = Some(v),
+                None => parsed.free_tokens.push(token.to_lowercase()),
+            },
+            Some(QualifierKey::Canary) => match parse_bool_qualifier(value) {
+                Some(v) => parsed.canary = Some(v),
+                None => parsed.free_tokens.push(token.to_lowercase()),
+            },
+            Some(QualifierKey::After) | Some(QualifierKey::Before) => {
+                if let Ok(Some(dt)) = parse_time_qualifier(value) {
+                    if matches!(qualifier_key(key), Some(QualifierKey::After)) {
+                        parsed.after = Some(dt);
+                    } else {
+                        parsed.before = Some(dt);
+                    }
+                }
+            }
+            None => parsed.free_tokens.push(token.to_lowercase()),
+        }
+    }
+    parsed
+}
+
+/// The qualifier keys the picker search understands. `query_is_pure_free_text`
+/// and `parse_search_query` share this list so the cache guard and the parser
+/// can never drift apart on what counts as a qualifier.
+enum QualifierKey {
+    Model,
+    Provider,
+    Source,
+    Dir,
+    Saved,
+    Debug,
+    Canary,
+    After,
+    Before,
+}
+
+/// Recognize a qualifier key (case-insensitive). `None` means the token is
+/// free text, not a qualifier the picker interprets.
+fn qualifier_key(key: &str) -> Option<QualifierKey> {
+    match key.to_ascii_lowercase().as_str() {
+        "model" => Some(QualifierKey::Model),
+        "provider" => Some(QualifierKey::Provider),
+        "source" => Some(QualifierKey::Source),
+        "dir" => Some(QualifierKey::Dir),
+        "saved" => Some(QualifierKey::Saved),
+        "debug" => Some(QualifierKey::Debug),
+        "canary" => Some(QualifierKey::Canary),
+        "after" => Some(QualifierKey::After),
+        "before" => Some(QualifierKey::Before),
+        _ => None,
+    }
+}
+
+/// Normalize a `source:` value using the same aliases `session_search` accepts
+/// (e.g. `claude-code` -> `claude`). Unknown values are passed through: they
+/// simply match nothing, which keeps behavior obvious while typing.
+fn normalize_source_alias(value: &str) -> String {
+    let lower = value.to_ascii_lowercase();
+    match lower.as_str() {
+        "claude-code" => "claude".to_string(),
+        _ => lower,
+    }
+}
+
+/// `yes`/`no`/`true`/`false`/`1`/`0` qualifier values. Unrecognized values
+/// return `None` so the token degrades to free text instead of erroring.
+fn parse_bool_qualifier(value: &str) -> Option<bool> {
+    match value.to_ascii_lowercase().as_str() {
+        "yes" | "true" | "1" => Some(true),
+        "no" | "false" | "0" => Some(false),
+        _ => None,
+    }
+}
+
+/// Parse an `after:`/`before:` value: RFC3339 timestamps, `YYYY-MM-DD` dates
+/// (UTC midnight), or relative offsets like `2h`, `3d`, `1w`, `30m`.
+/// `Ok(None)` means no constraint: either an empty value or one that has not
+/// finished parsing (the caller keeps the list unfiltered until it does).
+fn parse_time_qualifier(value: &str) -> Result<Option<chrono::DateTime<chrono::Utc>>, ()> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(value) {
+        return Ok(Some(dt.with_timezone(&chrono::Utc)));
+    }
+    if let Ok(date) = chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d") {
+        return date
+            .and_hms_opt(0, 0, 0)
+            .map(|naive| {
+                Some(chrono::DateTime::from_naive_utc_and_offset(
+                    naive,
+                    chrono::Utc,
+                ))
+            })
+            .ok_or(());
+    }
+    // Relative: `30m`, `2h`, `3d`, `1w` from now. Strip a trailing ASCII
+    // unit letter explicitly: byte-based `split_at` on the last byte would cut
+    // inside a multibyte character (`after:é`) and panic before the match
+    // below could reject the value.
+    let lower = value.to_ascii_lowercase();
+    let (digits, unit) = lower
+        .strip_suffix(['m', 'h', 'd', 'w'])
+        .map(|digits| (digits, &lower[lower.len() - 1..]))
+        .unwrap_or((lower.as_str(), ""));
+    let Ok(count) = digits.parse::<i64>() else {
+        return Ok(None);
+    };
+    let duration = match unit {
+        "m" => chrono::Duration::try_minutes(count),
+        "h" => chrono::Duration::try_hours(count),
+        "d" => chrono::Duration::try_days(count),
+        "w" => chrono::Duration::try_weeks(count),
+        _ => return Ok(None),
+    };
+    // `before:` is rarely used with a relative past offset, but keep the math
+    // honest: both windows anchor to now and apply the offset toward the past.
+    // `checked_sub_signed` rejects offsets that would leave chrono's supported
+    // date range (e.g. `after:100000000d`) instead of panicking; the query then
+    // simply imposes no constraint while the user keeps typing.
+    duration
+        .and_then(|d| chrono::Utc::now().checked_sub_signed(d))
+        .map(Some)
+        .ok_or(())
+}
+
+/// True when every token is free text: no `key:value` qualifier appears. Used
+/// by the picker's incremental search cache to decide whether a prefix
+/// extension of a previous query is guaranteed to produce a subset of the
+/// previous matches (see `search_matched_session_refs`).
+pub(super) fn query_is_pure_free_text(query: &str) -> bool {
     query
         .split_whitespace()
-        .map(|token| token.to_lowercase())
-        .collect()
+        .all(|token| !is_qualifier_token(token))
+}
+
+/// A token counts as a qualifier when its key is one the picker interprets
+/// (`qualifier_key`). Anything else (including `foo:bar`) is free text, so the
+/// predicate matches the parser's behavior exactly.
+fn is_qualifier_token(token: &str) -> bool {
+    let Some((key, _)) = token.split_once(':') else {
+        return false;
+    };
+    // An empty value (`model:` while the value is being typed) still flips the
+    // guard off even though it imposes no constraint, because the *previous*
+    // free-text query may have filtered on the bare word `model`.
+    qualifier_key(key).is_some()
 }
 
 #[cfg(test)]
