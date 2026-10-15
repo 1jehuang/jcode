@@ -1272,6 +1272,10 @@ impl OpenAIProvider {
     }
 
     fn responses_url(credentials: &CodexCredentials) -> String {
+        #[cfg(test)]
+        if let Ok(url) = std::env::var("JCODE_TEST_OPENAI_RESPONSES_URL") {
+            return url;
+        }
         let base = if Self::is_chatgpt_mode(credentials) {
             // ChatGPT/Codex OAuth backend is fixed; a custom base only applies
             // to API-key usage of the native Responses API.
