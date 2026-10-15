@@ -194,14 +194,35 @@ fn chip_does_not_match_inside_longer_path_with_dot_suffix() {
 fn file_chip_matches_input_respects_path_boundaries() {
     use crate::tui::app::input::file_chip_matches_input;
 
-    assert!(file_chip_matches_input("see src/main.rs", &PathBuf::from("src/main.rs")));
-    assert!(file_chip_matches_input("src/main.rs now", &PathBuf::from("src/main.rs")));
-    assert!(file_chip_matches_input("look at main.rs", &PathBuf::from("main.rs")));
+    assert!(file_chip_matches_input(
+        "see src/main.rs",
+        &PathBuf::from("src/main.rs")
+    ));
+    assert!(file_chip_matches_input(
+        "src/main.rs now",
+        &PathBuf::from("src/main.rs")
+    ));
+    assert!(file_chip_matches_input(
+        "look at main.rs",
+        &PathBuf::from("main.rs")
+    ));
     // Mid-token inside a longer path: not a match.
-    assert!(!file_chip_matches_input("edit char_bag.rs", &PathBuf::from("bag")));
-    assert!(!file_chip_matches_input("edit src/main.rs.bak", &PathBuf::from("main.rs")));
+    assert!(!file_chip_matches_input(
+        "edit char_bag.rs",
+        &PathBuf::from("bag")
+    ));
+    assert!(!file_chip_matches_input(
+        "edit src/main.rs.bak",
+        &PathBuf::from("main.rs")
+    ));
     // Word-adjacent text without a boundary is not a match either.
-    assert!(!file_chip_matches_input("xxmain.rs", &PathBuf::from("main.rs")));
+    assert!(!file_chip_matches_input(
+        "xxmain.rs",
+        &PathBuf::from("main.rs")
+    ));
     // Slash-separated parents are fine: the boundary is a path separator.
-    assert!(file_chip_matches_input("src/main.rs", &PathBuf::from("main.rs")));
+    assert!(file_chip_matches_input(
+        "src/main.rs",
+        &PathBuf::from("main.rs")
+    ));
 }
