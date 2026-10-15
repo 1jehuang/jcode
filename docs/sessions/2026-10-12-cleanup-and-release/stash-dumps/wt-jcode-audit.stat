@@ -1,0 +1,8 @@
+ .../src/tui/app/tests/input_copy_selection.rs      | 20 ++++--
+ .../jcode-tui/src/tui/app/tests/onboarding_flow.rs |  2 +-
+ .../src/tui/app/tests/scroll_copy_01/part_01.rs    | 17 +++--
+ .../src/tui/app/tests/scroll_copy_02/part_01.rs    |  7 +-
+ .../tui/app/tests/state_model_poke_02/part_01.rs   |  9 ++-
+ crates/jcode-tui/src/tui/session_picker_tests.rs   | 18 ++++-
+ crates/jcode-tui/src/tui/ui_messages.rs            | 79 +++++++++++++++++++---
+ 7 files changed, 126 insertions(+), 26 deletions(-)
