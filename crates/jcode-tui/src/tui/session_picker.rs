@@ -533,14 +533,22 @@ impl SessionPicker {
     }
 
     /// Record the working directory `/resume` was opened from so sessions that
-    /// share it can be visually highlighted in the list.
+    /// share it can be visually highlighted in the list. Rebuilds the items
+    /// when the value actually changes, so callers that set this right after
+    /// construction (before the first render) still get the pinned group on
+    /// the first frame instead of waiting for an unrelated rebuild.
     pub fn set_current_dir(&mut self, dir: Option<String>) {
-        self.current_dir = dir.map(|d| normalize_dir(&d));
+        let normalized = dir.map(|d| normalize_dir(&d));
+        if normalized == self.current_dir {
+            return;
+        }
+        self.current_dir = normalized;
         self.current_repo = self
             .current_dir
             .as_deref()
             .and_then(|dir| git_common_dir(Path::new(dir)));
         self.same_project_cache.borrow_mut().clear();
+        self.rebuild_items();
     }
 
     /// Whether the given session belongs to the project the picker was opened
@@ -2294,7 +2302,12 @@ impl SessionPicker {
             chunk_idx += 1;
 
             let cursor_char = if self.search_active { "▎" } else { "" };
-            let search_line = Line::from(vec![
+            // Qualifier keys are advertised here, next to the caret, because
+            // this row has room at common widths (unlike the title bar). A
+            // long query can still crowd them out; Ctrl+U clears it.
+            let qualifier_hint =
+                " filters: model: provider: source: dir: saved: debug: canary: after: before: ";
+            let mut search_spans = vec![
                 Span::styled(" 🔍 ", Style::default().fg(rgb(186, 139, 255))),
                 Span::styled(
                     &self.search_query,
@@ -2303,12 +2316,25 @@ impl SessionPicker {
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(cursor_char, Style::default().fg(rgb(186, 139, 255))),
-                if self.search_active {
-                    Span::styled("  Esc to clear", Style::default().fg(rgb(60, 60, 60)))
-                } else {
-                    Span::styled("  / to edit", Style::default().fg(rgb(60, 60, 60)))
-                },
-            ]);
+            ];
+            if self.search_active {
+                search_spans.push(Span::styled(
+                    "  Esc to clear",
+                    Style::default().fg(rgb(60, 60, 60)),
+                ));
+            } else {
+                search_spans.push(Span::styled(
+                    "  / to edit",
+                    Style::default().fg(rgb(60, 60, 60)),
+                ));
+            }
+            // Rendered in both states so the qualifier keys stay discoverable
+            // even after Enter commits the query and the bar goes dormant.
+            search_spans.push(Span::styled(
+                qualifier_hint,
+                Style::default().fg(rgb(60, 60, 60)),
+            ));
+            let search_line = Line::from(search_spans);
             let search_widget =
                 Paragraph::new(search_line).style(Style::default().bg(rgb(25, 25, 30)));
             frame.render_widget(search_widget, search_area);
