@@ -744,3 +744,4 @@ async fn openai_refresh_writes_back_to_pinned_label_not_default() {
 }
 
 include!("openai_tests/persistent_cancellation.rs");
+include!("openai_tests/web_catalog_review.rs");

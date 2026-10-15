@@ -3,6 +3,8 @@ use crate::provider::cursor;
 
 #[path = "models_catalog.rs"]
 mod catalog;
+#[cfg(any(test, feature = "test-support"))]
+pub use catalog::{OpenAICatalogTestEndpoint, openai_catalog_test_endpoint};
 #[path = "model_catalog_service.rs"]
 mod catalog_service;
 

@@ -4,6 +4,34 @@ use super::openai_stream_runtime::{
 };
 use super::*;
 
+static OPTIONAL_BROWSER_REFRESH_RUNNING: AtomicBool = AtomicBool::new(false);
+
+struct OptionalBrowserRefreshGuard;
+impl Drop for OptionalBrowserRefreshGuard {
+    fn drop(&mut self) {
+        OPTIONAL_BROWSER_REFRESH_RUNNING.store(false, AtomicOrdering::Release);
+    }
+}
+
+impl OpenAIProvider {
+    pub(super) fn apply_browser_catalog_refresh(
+        &self,
+        models: Vec<jcode_base::provider::chatgpt_web::ChatGptWebModel>,
+    ) -> Result<()> {
+        if self.browser_model_unset.load(AtomicOrdering::Acquire)
+            && self.model() == CHATGPT_WEB_MODEL
+            && !models.iter().any(|model| model.available && model.model == CHATGPT_WEB_MODEL)
+        {
+            let model = models.iter().find(|model| model.available).ok_or_else(|| {
+                anyhow::anyhow!("No selectable ChatGPT web models were observed in the connected browser")
+            })?;
+            self.set_model(&model.model)?;
+        }
+        self.revalidate_reasoning_effort();
+        Ok(())
+    }
+}
+
 /// Whether a model catalog fetch error is an auth rejection (401/403) that a
 /// token force-refresh may fix, as opposed to a network/server failure.
 fn catalog_error_is_auth_rejection(err: &anyhow::Error) -> bool {
@@ -958,26 +986,23 @@ impl Provider for OpenAIProvider {
     }
 
     async fn prefetch_models(&self) -> Result<()> {
-        let web = jcode_base::provider::chatgpt_web::refresh_models().await;
         if self.is_browser_only() || is_chatgpt_web_model(&self.model()) {
-            let models = web?;
-            if self.model() == CHATGPT_WEB_MODEL
-                && !models
-                    .iter()
-                    .any(|model| model.available && model.model == CHATGPT_WEB_MODEL)
-            {
-                let model = models.iter().find(|model| model.available).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "No selectable ChatGPT web models were observed in the connected browser"
-                    )
-                })?;
-                self.set_model(&model.model)?;
-            }
-            self.revalidate_reasoning_effort();
-            return Ok(());
+            return self.apply_browser_catalog_refresh(
+                jcode_base::provider::chatgpt_web::refresh_models().await?,
+            );
         }
-        if let Err(error) = web {
-            jcode_base::logging::info(&format!("ChatGPT web models are unavailable: {error:#}"));
+        // Optional discovery must not wait for an unrelated active browser turn.
+        if OPTIONAL_BROWSER_REFRESH_RUNNING
+            .compare_exchange(false, true, AtomicOrdering::AcqRel, AtomicOrdering::Acquire)
+            .is_ok()
+        {
+            let guard = OptionalBrowserRefreshGuard;
+            tokio::spawn(async move {
+                let _guard = guard;
+                if let Err(error) = jcode_base::provider::chatgpt_web::refresh_models().await {
+                    jcode_base::logging::info(&format!("ChatGPT web models are unavailable: {error:#}"));
+                }
+            });
         }
         // The loaded credential's *shape* is authoritative for which catalog
         // endpoint to hit, not the requested credential mode. In Auto mode a
@@ -1117,6 +1142,9 @@ impl Provider for OpenAIProvider {
 
     fn available_efforts(&self) -> Vec<&'static str> {
         if is_chatgpt_web_model(&self.model()) {
+            if let Some((_, power)) = jcode_base::provider::chatgpt_web::legacy_web_alias(&self.model()) {
+                return vec![power, "swarm", "swarm-deep"];
+            }
             let mut efforts: Vec<&'static str> =
                 jcode_base::provider::chatgpt_web::cached_reasoning_options(&self.model())
                     .into_iter()
@@ -1366,6 +1394,7 @@ impl OpenAIProvider {
             prewarm: Arc::new(openai_websocket_prewarm::PrewarmSlot::default()),
             chatgpt_web: Arc::new(chatgpt_web::ChatGptWebState::new()),
             browser_only: Arc::new(AtomicBool::new(self.is_browser_only())),
+            browser_model_unset: AtomicBool::new(self.browser_model_unset.load(AtomicOrdering::Acquire)),
         }
     }
 }
