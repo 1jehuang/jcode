@@ -1659,6 +1659,42 @@ fn test_goals_show_command_focuses_goal_page() {
 }
 
 #[test]
+fn test_initiatives_commands_reopen_a_closed_side_panel() {
+    with_temp_jcode_home(|| {
+        let project = tempfile::tempdir().expect("project dir");
+        let goal = crate::goal::create_goal(
+            crate::goal::GoalCreateInput {
+                title: "Ship mobile MVP".to_string(),
+                scope: crate::goal::GoalScope::Project,
+                ..crate::goal::GoalCreateInput::default()
+            },
+            Some(project.path()),
+        )
+        .expect("create goal");
+
+        let mut app = create_test_app();
+        app.session.working_dir = Some(project.path().display().to_string());
+        app.side_panel = test_side_panel_snapshot("plan", "Plan");
+        for command in [
+            "/initiatives".to_string(),
+            "/initiatives resume".to_string(),
+            format!("/initiatives show {}", goal.id),
+        ] {
+            // The user closed the panel, then asks for initiatives.
+            app.dismiss_side_panel();
+            assert!(!app.diff_pane_visible());
+            app.input = command.clone();
+            app.submit_input();
+            assert!(
+                app.diff_pane_visible() && app.side_panel.focused_page().is_some(),
+                "{command} must show the side panel the user closed"
+            );
+            assert!(!app.side_panel_user_hidden, "{command}");
+        }
+    });
+}
+
+#[test]
 fn test_compact_mode_command_updates_local_session_mode() {
     let mut app = create_test_app();
 
