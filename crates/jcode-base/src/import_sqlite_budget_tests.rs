@@ -308,6 +308,82 @@ fn sqlite_budget_matches_existing_normalizer_for_multipart_unicode_tail() {
 }
 
 #[test]
+fn unreadable_opencode_db_does_not_block_other_store_resumes() {
+    let _lock = crate::storage::lock_test_env();
+    for wal in [false, true] {
+        let temp = tempfile::TempDir::new().unwrap();
+        let _home = HomeGuard::set(temp.path());
+        let external = temp.path().join("external");
+        let db = external.join(".local/share/opencode/opencode.db");
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        if wal {
+            let writer = temp.path().join("writer/opencode.db");
+            let f = fixture(&writer);
+            f.0.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+            add(&f, 0, "committed only in WAL");
+            std::fs::copy(&writer, &db).unwrap();
+            std::fs::copy(
+                writer.with_file_name("opencode.db-wal"),
+                db.with_file_name("opencode.db-wal"),
+            )
+            .unwrap();
+        } else {
+            std::fs::write(&db, b"this is not a sqlite database").unwrap();
+        }
+        let session_id = "22222222-3333-4444-5555-666666666666";
+        let transcript = external.join(format!(
+            ".cursor/projects/tmp-fallback/agent-transcripts/{session_id}/{session_id}.jsonl"
+        ));
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        std::fs::write(&transcript, "{\"role\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"cursor fallthrough\"}]}}\n").unwrap();
+        assert_eq!(
+            import_external_resume_id(session_id).unwrap(),
+            Some(imported_cursor_session_id(session_id))
+        );
+
+        let legacy =
+            external.join(".local/share/opencode/storage/session/global/ses_fallback.json");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(
+            &legacy,
+            r#"{"id":"ses_fallback","directory":"/tmp/demo","title":"Legacy"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            import_external_resume_id("ses_fallback").unwrap(),
+            Some(imported_opencode_session_id("ses_fallback"))
+        );
+        assert_eq!(
+            import_opencode_session("ses_fallback").unwrap().id,
+            imported_opencode_session_id("ses_fallback")
+        );
+
+        let pi = external.join(".pi/agent/sessions/project/fallback.jsonl");
+        std::fs::create_dir_all(pi.parent().unwrap()).unwrap();
+        std::fs::write(&pi, concat!(
+            "{\"type\":\"session\",\"id\":\"pi-fallback\",\"timestamp\":\"2026-04-05T19:00:00Z\",\"cwd\":\"/tmp/pi\"}\n",
+            "{\"type\":\"message\",\"timestamp\":\"2026-04-05T19:00:02Z\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"hello pi\"}]}}\n"
+        )).unwrap();
+        let pi_path = pi.to_str().unwrap();
+        assert_eq!(
+            import_external_resume_id(pi_path).unwrap(),
+            Some(imported_pi_session_id(pi_path))
+        );
+        for error in [
+            import_external_resume_id("ses_missing").unwrap_err(),
+            import_opencode_session("ses_missing").unwrap_err(),
+        ] {
+            let detail = format!("{error:#}");
+            assert!(
+                detail.contains(if wal { "nonempty WAL" } else { "database" }),
+                "{detail}"
+            );
+        }
+        assert!(!db.with_file_name("opencode.db-shm").exists());
+    }
+}
+
+#[test]
 fn sqlite_budget_invalid_limits_fail_before_opening_database() {
     let path = Path::new("/nonexistent/disposable-fixture/opencode.db");
     for (count, bytes, block) in [(0, 256, 128), (1, 0, 128), (1, 256, 0), (1, 128, 256)] {
