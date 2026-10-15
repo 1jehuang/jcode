@@ -2455,9 +2455,8 @@ impl App {
                                  {}{}",
                                 saved_label,
                                 crate::storage::app_config_dir()
-                                    .expect("config directory resolved while saving API key")
-                                    .join(&env_file)
-                                    .display(),
+                                    .map(|dir| dir.join(&env_file).display().to_string())
+                                    .unwrap_or_else(|_| env_file.clone()),
                                 guidance,
                                 model_hint
                             ),
@@ -2657,9 +2656,8 @@ impl App {
                                  Stored at {}.\n\
                                  jcode will use it with the native Cursor HTTPS transport.",
                                 crate::storage::app_config_dir()
-                                    .expect("config directory resolved while saving Cursor API key")
-                                    .join("cursor.env")
-                                    .display()
+                                    .map(|dir| dir.join("cursor.env").display().to_string())
+                                    .unwrap_or_else(|_| "cursor.env".to_string()),
                             ),
                         }));
                     }
@@ -3457,9 +3455,8 @@ impl App {
                  {}\n\n\
                  Use /model after your Azure deployment exists. If the model list looks stale, run /refresh-model-list.",
                 crate::storage::app_config_dir()
-                    .expect("config directory resolved while saving Azure configuration")
-                    .join(crate::auth::azure::ENV_FILE)
-                    .display(),
+                    .map(|dir| dir.join(crate::auth::azure::ENV_FILE).display().to_string())
+                    .unwrap_or_else(|_| crate::auth::azure::ENV_FILE.to_string()),
                 auth_note,
             ),
         }));

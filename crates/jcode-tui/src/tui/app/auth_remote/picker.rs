@@ -124,10 +124,9 @@ impl App {
             "Login on {host}: choose a provider or Import local login. Some methods require setup directly on the SSH host. Esc cancels."
         ));
         if tokio::runtime::Handle::try_current().is_ok() {
-            self.remote_login
-                .as_mut()
-                .unwrap()
-                .run(command::Operation::Status, None);
+            if let Some(login) = self.remote_login.as_mut() {
+                login.run(command::Operation::Status, None);
+            }
         } else {
             self.update_ssh_login_picker_status(None);
         }

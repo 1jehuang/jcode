@@ -750,7 +750,9 @@ impl App {
             selected = 0;
         }
         if !openai_accounts.is_empty() {
-            let mut usage_entry = models.last().expect("account center entry").clone();
+            let Some(mut usage_entry) = models.last().cloned() else {
+                return (models, selected);
+            };
             usage_entry.name = "OpenAI usage details".to_string();
             usage_entry.options[0].detail =
                 "Today / lifetime API-equivalent cost and tokens by account".to_string();
@@ -1075,7 +1077,9 @@ impl App {
             selected = 0;
         }
         if !accounts.is_empty() {
-            let mut usage_entry = models.last().expect("account center entry").clone();
+            let Some(mut usage_entry) = models.last().cloned() else {
+                return (models, selected);
+            };
             usage_entry.name = "OpenAI usage details".to_string();
             usage_entry.options[0].detail =
                 "Today / lifetime API-equivalent cost and tokens by account".to_string();

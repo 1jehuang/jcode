@@ -155,13 +155,10 @@ impl App {
                 .into_iter()
                 .find(|entry| entry.id == provider)
             {
-                let host = self
-                    .remote_login
-                    .as_ref()
-                    .unwrap()
-                    .target
-                    .host()
-                    .to_string();
+                let Some(login) = self.remote_login.as_ref() else {
+                    return;
+                };
+                let host = login.target.host().to_string();
                 self.finish_ssh_login_ui();
                 self.push_display_message(DisplayMessage::system(format!(
                     "{} setup on {host}\n\nThis login method is not yet supported by the native SSH login bridge. Run jcode login on that host and choose {}. No login was started on this computer and no local credentials were accessed.",
@@ -171,12 +168,16 @@ impl App {
             return;
         }
         self.inline_interactive_state = None;
-        if let Some(task) = self.remote_login.as_mut().unwrap().task.as_mut() {
-            task.cancel();
+        if let Some(login) = self.remote_login.as_mut() {
+            if let Some(task) = login.task.as_mut() {
+                task.cancel();
+            }
+            login.task = None;
         }
-        self.remote_login.as_mut().unwrap().task = None;
         if importing {
-            let login = self.remote_login.as_mut().unwrap();
+            let Some(login) = self.remote_login.as_mut() else {
+                return;
+            };
             login.provider = provider.into();
             login.phase = Phase::ImportConsent;
             login.operation = Some(Operation::Import);
@@ -341,22 +342,36 @@ impl App {
             .is_some_and(|login| matches!(login.phase, Phase::ImportOffer | Phase::ImportConsent))
             && self.inline_interactive_state.is_some()
         {
+            let current_selection = self
+                .inline_interactive_state
+                .as_ref()
+                .map(|state| state.selected);
             let selection = match code {
                 KeyCode::Up | KeyCode::Left => Some(0),
                 KeyCode::Down | KeyCode::Right => Some(1),
-                KeyCode::Tab | KeyCode::BackTab => {
-                    Some(1 - self.inline_interactive_state.as_ref().unwrap().selected)
-                }
+                KeyCode::Tab | KeyCode::BackTab => current_selection.map(|selected| 1 - selected),
                 _ => None,
             };
             if let Some(selection) = selection {
-                self.inline_interactive_state.as_mut().unwrap().selected = selection;
-                self.remote_login.as_mut().unwrap().input.clear();
+                if let Some(state) = self.inline_interactive_state.as_mut() {
+                    state.selected = selection;
+                }
+                if let Some(login) = self.remote_login.as_mut() {
+                    login.input.clear();
+                }
                 self.sync_ssh_login_input_mask();
                 return true;
             }
-            if code == KeyCode::Enter && self.remote_login.as_ref().unwrap().input.is_empty() {
-                let accept = self.inline_interactive_state.as_ref().unwrap().selected == 0;
+            if code == KeyCode::Enter
+                && self
+                    .remote_login
+                    .as_ref()
+                    .is_some_and(|login| login.input.is_empty())
+            {
+                let Some(state) = self.inline_interactive_state.as_ref() else {
+                    return true;
+                };
+                let accept = state.selected == 0;
                 self.select_ssh_import_decision(accept);
                 return true;
             }
@@ -366,7 +381,10 @@ impl App {
             .as_ref()
             .is_some_and(|login| login.phase == Phase::Choosing)
             && self.inline_interactive_state.is_some()
-            && self.remote_login.as_ref().unwrap().input.is_empty()
+            && self
+                .remote_login
+                .as_ref()
+                .is_some_and(|login| login.input.is_empty())
         {
             if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
                 self.cancel_ssh_login();
@@ -405,7 +423,9 @@ impl App {
                 self.cancel_ssh_login()
             }
             KeyCode::Char('u') if modifiers.contains(KeyModifiers::CONTROL) => {
-                self.remote_login.as_mut().unwrap().input.clear();
+                if let Some(login) = self.remote_login.as_mut() {
+                    login.input.clear();
+                }
                 self.sync_ssh_login_input_mask();
             }
             KeyCode::Char('v')
@@ -420,7 +440,9 @@ impl App {
                 }
             }
             KeyCode::Backspace => {
-                self.remote_login.as_mut().unwrap().input.pop();
+                if let Some(login) = self.remote_login.as_mut() {
+                    login.input.pop();
+                }
                 self.sync_ssh_login_input_mask();
             }
             KeyCode::Enter => self.submit_ssh_login_input(),
