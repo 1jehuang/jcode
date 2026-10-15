@@ -209,6 +209,13 @@ impl ChatGptWebState {
                 send_phase(tx, jcode_message_types::ConnectionPhase::WaitingForResponse).await?;
                 let answer = poll_network_stream(&browser, &selected, None, &stream_key, prompt, tx).await?;
                 verify_served(&answer, &slug, thinking.as_deref())?;
+                jcode_base::logging::info(&format!(
+                    "ChatGPT web turn served model={} thinking_effort={} (requested route {} effort {})",
+                    answer.served.as_deref().unwrap_or("unknown"),
+                    answer.served_effort.as_deref().unwrap_or("none"),
+                    model,
+                    effort.unwrap_or("default"),
+                ));
                 return Ok(answer);
             }
             let selection = browser.ui(json!({"op":"prepare", "label":selected.label, "effort":effort})).await?;

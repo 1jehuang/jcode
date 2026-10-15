@@ -557,7 +557,40 @@ pub(super) fn inferred_reasoning_efforts(
     provider_name: Option<&str>,
     model_name: Option<&str>,
 ) -> Vec<&'static str> {
+    // ChatGPT web routes have their own ladder (Instant ... Pro), read from
+    // the account catalog the server and this client share on disk. The
+    // generic OpenAI ladder would offer levels the route does not have and
+    // hide the ones it does.
+    if let Some(model) = model_name
+        && jcode_provider_core::is_chatgpt_web_model(model)
+    {
+        return chatgpt_web_reasoning_efforts(model);
+    }
     jcode_provider_core::inferred_reasoning_efforts(provider_name, model_name)
+}
+
+/// Selectable levels of a ChatGPT web route, plus the swarm rungs every
+/// model offers. Empty when the account catalog has not been read yet.
+pub(super) fn chatgpt_web_reasoning_efforts(model: &str) -> Vec<&'static str> {
+    let mut efforts: Vec<&'static str> =
+        crate::provider::chatgpt_web::cached_reasoning_options(model)
+            .into_iter()
+            .filter(|option| option.available)
+            .filter_map(|option| jcode_provider_core::canonical_reasoning_effort(&option.value))
+            .collect();
+    efforts.dedup();
+    if !efforts.is_empty() {
+        efforts.extend(["swarm", "swarm-deep"]);
+    }
+    efforts
+}
+
+/// The ChatGPT name of a web route's level ("Light", "Extra High", "Pro").
+pub(super) fn chatgpt_web_effort_label(model: &str, effort: &str) -> Option<String> {
+    crate::provider::chatgpt_web::cached_reasoning_options(model)
+        .into_iter()
+        .find(|option| option.value == effort)
+        .map(|option| option.label)
 }
 
 pub(super) fn effort_bar(index: usize, total: usize) -> String {

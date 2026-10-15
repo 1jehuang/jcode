@@ -1725,7 +1725,16 @@ impl App {
             let mut plain_routes = Vec::new();
             let mut model_efforts = Vec::new();
             for route in entry_routes {
-                let efforts = if route_supports_reasoning_effort(&route.api_method) {
+                let efforts = if route.api_method == "chatgpt-web" {
+                    // The account catalog's ladder for this route (Instant ...
+                    // Pro). Routes with one fixed level (minis) stay plain.
+                    let efforts = chatgpt_web_reasoning_efforts(name);
+                    let levels = efforts
+                        .iter()
+                        .filter(|e| !crate::prompt::is_swarm_mode_effort(e))
+                        .count();
+                    if levels > 1 { efforts } else { Vec::new() }
+                } else if route_supports_reasoning_effort(&route.api_method) {
                     inferred_reasoning_efforts(Some(&route.api_method), Some(name))
                 } else {
                     Vec::new()
@@ -1759,7 +1768,14 @@ impl App {
                         "none" => "none",
                         other => other,
                     };
-                    let display_name = format!("{} ({})", name, effort_label);
+                    // ChatGPT web levels keep ChatGPT's names, e.g.
+                    // "gpt-6[web] (Extra High)", "gpt-6[web] (Pro)".
+                    let display_name = match chatgpt_web_effort_label(name, effort) {
+                        Some(label) if jcode_provider_core::is_chatgpt_web_model(name) => {
+                            format!("{} ({})", name, label)
+                        }
+                        _ => format!("{} ({})", name, effort_label),
+                    };
                     let effort_matches_current =
                         *name == current_model && current_effort.as_deref() == Some(*effort);
                     let or_created = openrouter_created_timestamp(name);
