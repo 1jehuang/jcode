@@ -37,8 +37,7 @@ fn empty_regex() -> Regex {
 }
 
 /// `2>&1` – merge stderr into stdout. Allows arbitrary whitespace.
-static RE_FD_MERGE: LazyLock<Regex> =
-    LazyLock::new(|| compile_pattern(r"\s*2\s*>\s*&\s*1\s*"));
+static RE_FD_MERGE: LazyLock<Regex> = LazyLock::new(|| compile_pattern(r"\s*2\s*>\s*&\s*1\s*"));
 
 /// `[012]?> /dev/null` followed by digits, whitespace, or end-of-string.
 /// Alternation avoids look-ahead; `[0-9]+` ensures `/dev/nullo` doesn't match.
@@ -50,8 +49,7 @@ static RE_IN_NULL: LazyLock<Regex> =
     LazyLock::new(|| compile_pattern(r"\s*<\s*/dev/null(?:[0-9]+|\s|$)"));
 
 /// Broad redirect detector for [`has_redirection`].
-static RE_HAS_REDIRECT: LazyLock<Regex> =
-    LazyLock::new(|| compile_pattern(r"(?:2\s*&\s*1|[<>])"));
+static RE_HAS_REDIRECT: LazyLock<Regex> = LazyLock::new(|| compile_pattern(r"(?:2\s*&\s*1|[<>])"));
 
 /// Strip safe, harmless redirections from a command string.
 ///

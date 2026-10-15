@@ -5,10 +5,7 @@ use std::io::{self, BufRead, BufReader, Write};
 fn append_log(value: &Value) -> io::Result<()> {
     let path = std::env::var("JCODE_FAKE_GROK_ACP_LOG")
         .map_err(|e| io::Error::other(format!("JCODE_FAKE_GROK_ACP_LOG not set: {e}")))?;
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
     writeln!(file, "{value}")?;
     Ok(())
 }

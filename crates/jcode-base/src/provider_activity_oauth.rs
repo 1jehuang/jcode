@@ -123,8 +123,8 @@ fn priced_usage(
 ) -> Totals {
     let cached = cached.unwrap_or(0);
     let complete = input.is_some() && output.is_some() && cached <= input.unwrap_or(0);
-    let cost = jcode_provider_core::pricing::openai_api_pricing_with_tier(model, tier)
-        .and_then(|price| {
+    let cost =
+        jcode_provider_core::pricing::openai_api_pricing_with_tier(model, tier).and_then(|price| {
             if !complete {
                 return None;
             }

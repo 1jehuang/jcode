@@ -26,9 +26,7 @@ pub fn has_heredoc_substitution(command: &str) -> bool {
 fn heredoc_open_pattern() -> Regex {
     // SAFETY: the pattern is a compile-time constant; compilation cannot fail.
     // On the (unreachable) failure path, fall back to an empty regex.
-    match Regex::new(
-        r#"\$\(cat[ \t]*<<(-?)[ \t]*(?:'+([A-Za-z_]\w*)'+|\\([A-Za-z_]\w*))"#,
-    ) {
+    match Regex::new(r#"\$\(cat[ \t]*<<(-?)[ \t]*(?:'+([A-Za-z_]\w*)'+|\\([A-Za-z_]\w*))"#) {
         Ok(re) => re,
         // Fail closed: a never-matching pattern disables the heredoc fast
         // path (no openings found -> full scrutiny) instead of an empty

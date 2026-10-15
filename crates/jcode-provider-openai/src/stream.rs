@@ -330,7 +330,9 @@ fn stream_tool_calls(
         let Some(item_id) = next else { break };
         // The selection loop only picks IDs whose state was just observed in
         // the map, so the entry must still exist; treat absence defensively.
-        let Some(state) = calls.get_mut(&item_id) else { break };
+        let Some(state) = calls.get_mut(&item_id) else {
+            break;
+        };
         if !state.started {
             let id = state
                 .call_id

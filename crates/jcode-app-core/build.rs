@@ -22,9 +22,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut generated = String::from("pub(crate) static JCODE_DOCS: &[(&str, &str)] = &[\n");
     for path in files {
-        let relative = path
-            .strip_prefix(&repo)
-            .map_err(|e| format!("documentation path {} is not under repo {}: {}", path.display(), repo.display(), e))?;
+        let relative = path.strip_prefix(&repo).map_err(|e| {
+            format!(
+                "documentation path {} is not under repo {}: {}",
+                path.display(),
+                repo.display(),
+                e
+            )
+        })?;
         let relative = slash_path(relative);
         generated.push_str(&format!(
             "    ({relative:?}, include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/../../{relative}\"))),\n"

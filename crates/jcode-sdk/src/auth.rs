@@ -393,7 +393,12 @@ impl FlowInner {
     fn kill_child(&self) {
         // Recovery from a poisoned mutex is correct here: cleanup should proceed
         // even if another thread panicked while holding the lock.
-        if let Some(child) = self.child.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+        if let Some(child) = self
+            .child
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+        {
             let _ = child.kill();
             let _ = child.wait();
         }
@@ -414,14 +419,8 @@ impl FlowInner {
                 "Could not start the local Jcode login executable",
             )
         })?;
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| failed("piped stdin"))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| failed("piped stdout"))?;
+        let mut stdin = child.stdin.take().ok_or_else(|| failed("piped stdin"))?;
+        let stdout = child.stdout.take().ok_or_else(|| failed("piped stdout"))?;
         *locked(self.child.lock())? = Some(child);
         // Writing even a bounded payload can block on a full pipe. Keep it off the
         // cancellation thread, and never format the payload or I/O error.

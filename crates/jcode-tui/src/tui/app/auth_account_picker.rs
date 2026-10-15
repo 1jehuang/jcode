@@ -758,10 +758,7 @@ impl App {
     /// Appends the OpenAI usage entry, cloned from the last model entry so it
     /// inherits that entry's display options. Returns false when there is no
     /// entry to clone from, in which case the caller must return early.
-    fn push_openai_usage_entry(
-        &self,
-        models: &mut Vec<crate::tui::PickerEntry>,
-    ) -> bool {
+    fn push_openai_usage_entry(&self, models: &mut Vec<crate::tui::PickerEntry>) -> bool {
         let Some(mut usage_entry) = models.last().cloned() else {
             return false;
         };
