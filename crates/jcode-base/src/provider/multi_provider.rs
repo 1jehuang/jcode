@@ -407,16 +407,20 @@ fn saved_account_can_serve_model(provider: &str, label: &str, model: &str) -> bo
 
 fn saved_account_labels(provider: &str) -> Vec<String> {
     match provider {
-        "openai" => crate::auth::codex::list_accounts()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|a| a.label)
-            .collect(),
-        "claude" => crate::auth::claude::list_accounts()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|a| a.label)
-            .collect(),
+        "openai" => match crate::auth::codex::list_accounts() {
+            Ok(accounts) => accounts.into_iter().map(|account| account.label).collect(),
+            Err(error) => {
+                crate::logging::warn(&format!("Cannot list saved openai accounts: {error}"));
+                Vec::new()
+            }
+        },
+        "claude" => match crate::auth::claude::list_accounts() {
+            Ok(accounts) => accounts.into_iter().map(|account| account.label).collect(),
+            Err(error) => {
+                crate::logging::warn(&format!("Cannot list saved claude accounts: {error}"));
+                Vec::new()
+            }
+        },
         _ => Vec::new(),
     }
 }

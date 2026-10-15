@@ -1,6 +1,7 @@
 //! Recorded ChatGPT usage, deliberately separate from the API-key spend ledger.
 //! A stable sidecar lock serializes read/modify/atomic-replace across processes.
 use chrono::{DateTime, Local, Utc};
+use jcode_core::util::format_number_u64;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fs::OpenOptions, path::Path};
 
@@ -33,26 +34,41 @@ impl Totals {
 
     fn display(&self) -> String {
         if self.requests == 0 {
-            return "No recorded usage (API-equivalent estimate, not a bill)".into();
+            return "No recorded usage".into();
         }
+        let estimate = if self.known_usd > 0.0 && self.known_usd < 0.01 {
+            "<$0.01 est.".to_string()
+        } else {
+            format!("${:.2} est.", self.known_usd)
+        };
         let cost = if self.unpriced_requests == self.requests {
-            "cost unknown (pricing unavailable)".into()
+            "cost unknown".into()
         } else if self.unpriced_requests > 0 {
             format!(
-                "${:.4} known + unknown cost ({} unpriced responses)",
-                self.known_usd, self.unpriced_requests
+                "{} + unknown cost ({} unpriced)",
+                estimate,
+                format_number_u64(self.unpriced_requests)
             )
         } else {
-            format!("${:.4}", self.known_usd)
+            estimate
         };
         let partial = if self.incomplete_requests > 0 {
-            "; partial token counts"
+            " · partial tokens"
         } else {
             ""
         };
+        let cached = if self.cached > 0 {
+            format!(" · {} cached", format_number_u64(self.cached))
+        } else {
+            String::new()
+        };
         format!(
-            "{} input / {} output tokens ({} cached input), {} API-equivalent estimate, not a bill; recorded only{}",
-            self.input, self.output, self.cached, cost, partial
+            "{} in · {} out{} · {}{}",
+            format_number_u64(self.input),
+            format_number_u64(self.output),
+            cached,
+            cost,
+            partial
         )
     }
 }
@@ -199,12 +215,7 @@ pub fn openai_oauth_usage_summary(label: &str) -> Vec<(String, String)> {
         Err(_) => {
             return ["Today", "Lifetime"]
                 .into_iter()
-                .map(|key| {
-                    (
-                        key.into(),
-                        "Recorded usage unavailable (ledger could not be read)".into(),
-                    )
-                })
+                .map(|key| (key.into(), "Usage unavailable (unreadable ledger)".into()))
                 .collect();
         }
     };
@@ -225,16 +236,17 @@ fn summary(store: &Store, label: &str, now: DateTime<Local>) -> Vec<(String, Str
         .and_then(|ts| DateTime::<Utc>::from_timestamp(ts, 0))
     {
         lifetime.push_str(&format!(
-            "; since {}",
-            first.with_timezone(&Local).format("%Y-%m-%d %H:%M %:z")
+            " · since {}",
+            first.with_timezone(&Local).format("%Y-%m-%d")
         ));
     }
     vec![
-        (
-            "Today".into(),
-            format!("{}; since local midnight", today.display()),
-        ),
+        ("Today".into(), today.display()),
         ("Lifetime".into(), lifetime),
+        (
+            "Tracking".into(),
+            "Jcode only · API-equivalent cost, not a bill · today starts at local midnight".into(),
+        ),
     ]
 }
 
@@ -242,6 +254,45 @@ fn summary(store: &Store, label: &str, now: DateTime<Local>) -> Vec<(String, Str
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn display_groups_large_usage_counts_without_rounding() {
+        let totals = Totals {
+            requests: 12_346,
+            input: 12_345_678,
+            output: 999,
+            cached: 1_234_567,
+            known_usd: 12.3456,
+            unpriced_requests: 12_345,
+            incomplete_requests: 1,
+        };
+        assert_eq!(
+            totals.display(),
+            "12,345,678 in · 999 out · 1,234,567 cached · $12.35 est. + unknown cost (12,345 unpriced) · partial tokens"
+        );
+        let max = Totals {
+            requests: 1,
+            input: u64::MAX,
+            ..Totals::default()
+        };
+        assert!(
+            max.display()
+                .starts_with("18,446,744,073,709,551,615 in · 0 out")
+        );
+    }
+
+    #[test]
+    fn compact_display_omits_empty_cache_and_preserves_small_costs() {
+        let totals = Totals {
+            requests: 1,
+            input: 1_234,
+            output: 56,
+            known_usd: 0.0001,
+            ..Totals::default()
+        };
+        assert_eq!(totals.display(), "1,234 in · 56 out · <$0.01 est.");
+        assert_eq!(Totals::default().display(), "No recorded usage");
+    }
 
     #[test]
     fn cached_input_discount_and_output_semantics() {
@@ -310,7 +361,7 @@ mod tests {
             priced_usage("gpt-5.5", None, Some(2), Some(1), Some(3)),
         ] {
             assert_eq!(usage.unpriced_requests, 1);
-            assert!(usage.display().contains("partial token counts"));
+            assert!(usage.display().contains("partial tokens"));
         }
     }
 
@@ -326,9 +377,13 @@ mod tests {
         update(&path, "two", &usage, after).unwrap();
         let store = load(&path).unwrap();
         let rows = summary(&store, "one", after);
-        assert!(rows[0].1.contains("50 input / 20 output"));
-        assert!(rows[1].1.contains("100 input / 40 output"));
+        assert!(rows[0].1.contains("50 in · 20 out"));
+        assert!(rows[1].1.contains("100 in · 40 out"));
         assert!(rows[1].1.contains("since 2026-09-05"));
+        assert_eq!(rows[2].0, "Tracking");
+        assert!(rows[2].1.contains("not a bill"));
+        assert!(rows[2].1.contains("local midnight"));
+        assert!(!rows[0].1.contains("not a bill"));
         assert_eq!(store.accounts["two"].lifetime.input, 50);
         assert!(
             summary(&store, "absent", after)[0]

@@ -529,8 +529,13 @@ jobs:
     runs-on: windows-latest
     needs: [create-release, build-windows]
     # Signing failures keep the complete release draft, including recovery runs.
-    if: needs.create-release.result == 'success' && needs.build-windows.result == 'success'
+    # The optional recovery-preflight ancestor is skipped for normal releases.
+    # Override implicit success() so that skip does not suppress signing, while
+    # still requiring both direct dependencies to succeed.
+    if: always() && needs.create-release.result == 'success' && needs.build-windows.result == 'success'
     timeout-minutes: 30
+    outputs:
+      signing_enabled: ${{ steps.signing.outputs.enabled }}
     permissions:
       contents: write
       id-token: write
@@ -910,6 +915,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          WINDOWS_SIGNING_ENABLED: ${{ needs.publish-windows.outputs.signing_enabled }}
         run: |
           set -euo pipefail
           gh release view "${RELEASE_TAG}" --json body --jq .body > release_notes.md
@@ -933,6 +939,11 @@ jobs:
           def status(name: str) -> str:
               return "available" if os.environ[name] == "true" else "not available in this release"
 
+          windows_signature = (
+              "Authenticode signatures verified for both Windows architectures."
+              if os.environ.get("WINDOWS_SIGNING_ENABLED") == "true"
+              else "Windows executables are **unsigned**. Azure Artifact Signing is not configured and the repository's existing `WINDOWS_SIGNING_REQUIRED=false` override allowed unsigned publication. Windows may show publisher or SmartScreen warnings."
+          )
           availability = textwrap.dedent(f"""
               {start}
               ## Platform availability
@@ -944,11 +955,25 @@ jobs:
               - Windows x86_64: {status('WINDOWS_X86_64_AVAILABLE')}
               - Windows ARM64: {status('WINDOWS_AARCH64_AVAILABLE')}
               - FreeBSD x86_64: {status('FREEBSD_X86_64_AVAILABLE')}
+
+              {windows_signature}
               {end}
           """).strip("\n")
           path.write_text(f"{body}\n\n{availability}\n", encoding="utf-8")
           PY
           gh release edit "${RELEASE_TAG}" --notes-file release_notes.md
+
+      - name: Verify staged assets before publication
+        if: env.RELEASE_REPAIR == 'none'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW_SHA: ${{ github.sha }}
+          TAG_SHA: ${{ needs.create-release.outputs.tag_sha }}
+        run: |
+          set -euo pipefail
+          git show "$WORKFLOW_SHA:scripts/verify_public_release.py" > "$RUNNER_TEMP/verify-public-release.py"
+          python3 "$RUNNER_TEMP/verify-public-release.py" "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --sha "$TAG_SHA" --allow-draft
 
       - name: Publish completed release
         env:
@@ -964,6 +989,35 @@ jobs:
           else
             echo "Release ${RELEASE_TAG} is already public; leaving it public."
           fi
+
+      - name: Verify public assets and exact source provenance
+        if: env.RELEASE_REPAIR == 'none'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW_SHA: ${{ github.sha }}
+          TAG_SHA: ${{ needs.create-release.outputs.tag_sha }}
+        run: |
+          set -euo pipefail
+          git show "$WORKFLOW_SHA:scripts/verify_public_release.py" > "$RUNNER_TEMP/verify-public-release.py"
+          python3 "$RUNNER_TEMP/verify-public-release.py" "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --sha "$TAG_SHA"
+
+      - name: Smoke test public Linux installer in an isolated home
+        if: env.RELEASE_REPAIR == 'none'
+        shell: bash
+        run: |
+          set -euo pipefail
+          install_home="$(mktemp -d "$RUNNER_TEMP/jcode-install.XXXXXX")"
+          HOME="$install_home" XDG_CONFIG_HOME="$install_home/.config" \
+            JCODE_HOME="$install_home/.jcode" JCODE_INSTALL_DIR="$install_home/.local/bin" \
+            JCODE_VERSION="$RELEASE_TAG" JCODE_SKIP_SERVER_RELOAD=1 JCODE_NO_TELEMETRY=1 \
+            bash scripts/install.sh
+          reported_version="$("$install_home/.local/bin/jcode" --version)"
+          printf '%s\n' "$reported_version"
+          [[ "$reported_version" == "jcode $RELEASE_TAG "* ]] || {
+            echo "Installed binary does not match published version" >&2
+            exit 1
+          }
 
       # Releases created with GITHUB_TOKEN do not trigger `release: published`,
       # but workflow_dispatch is allowed. Queue the dedicated, per-tag

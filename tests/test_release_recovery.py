@@ -1,8 +1,10 @@
 """Exercise recovery against real tagged source in isolated local clones."""
 import hashlib
+import itertools
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
@@ -11,6 +13,102 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/apply_release_recovery.py"
 SOURCE = "crates/jcode-companion/src/server.rs"
 FIX = "d4f4c8c8d25c9f8e062773683adcc0c19cf26144"
+
+
+class WorkflowGraphTests(unittest.TestCase):
+    """Check real job predicates, including the implicit ancestor success gate.
+
+    This is a deliberately restricted model of the status predicates used here,
+    not a GitHub Actions emulator. Matrix results are terminal aggregate results.
+    """
+
+    def setUp(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        self.jobs = dict(re.findall(
+            r"^  ([\w-]+):\n(.*?)(?=^  [\w-]+:|\Z)",
+            workflow.split("\njobs:\n", 1)[1], re.M | re.S))
+        self.needs = {}
+        self.conditions = {}
+        for name, body in self.jobs.items():
+            needs = re.search(r"^    needs: (.+)$", body, re.M)
+            self.needs[name] = (needs.group(1).strip("[]").split(", ")
+                                if needs else [])
+            self.conditions[name] = re.search(r"^    if: (.+)$", body, re.M).group(1)
+
+    def ancestors(self, job):
+        return set(self.needs[job]).union(
+            *(self.ancestors(parent) for parent in self.needs[job]))
+
+    def eligible(self, job, results):
+        expression = self.conditions[job].removeprefix("${{ ").removesuffix(" }}")
+        # Without a status function, Actions implicitly requires success(),
+        # including transitive needs. This is what broke Windows publication.
+        if "always()" not in expression and any(
+                results[parent] != "success" for parent in self.ancestors(job)):
+            return False
+        expression = expression.replace("always()", "True")
+        expression = re.sub(r"needs\.([\w-]+)\.result",
+                            lambda match: repr(results[match.group(1)]), expression)
+        expression = expression.replace("&&", "and").replace("||", "or")
+        # Reject unexpected syntax rather than executing arbitrary workflow text.
+        residue = re.sub(r"'[^']*'|True|and|or|==|[()\s]", "", expression)
+        self.assertEqual(residue, "", expression)
+        return eval(expression, {"__builtins__": {}})
+
+    def test_complete_dependency_graph(self):
+        self.assertEqual(self.needs, {
+            "create-release": [],
+            "recovery-preflight": ["create-release"],
+            "build-linux-macos": ["create-release", "recovery-preflight"],
+            "build-windows": ["create-release", "recovery-preflight"],
+            "publish-windows": ["create-release", "build-windows"],
+            "build-freebsd": ["create-release", "recovery-preflight"],
+            "release": ["create-release", "build-linux-macos", "publish-windows", "build-freebsd"],
+        })
+        self.assertIn("github.repository == '1jehuang/jcode'", self.conditions["create-release"])
+        self.assertEqual(self.conditions["recovery-preflight"],
+                         "github.event_name == 'workflow_dispatch' && inputs.recovery == 'windows-listener'")
+
+    def test_all_terminal_ancestor_results(self):
+        for job in ("build-linux-macos", "build-windows", "build-freebsd",
+                    "publish-windows", "release"):
+            ancestors = sorted(self.ancestors(job))
+            for statuses in itertools.product(("success", "skipped", "failure", "cancelled"),
+                                              repeat=len(ancestors)):
+                results = dict(zip(ancestors, statuses))
+                expected = results["create-release"] == "success"
+                if job.startswith("build-"):
+                    expected &= results["recovery-preflight"] in ("success", "skipped")
+                elif job == "publish-windows":
+                    expected &= results["build-windows"] == "success"
+                # Finalization must run after platform failures to diagnose the
+                # incomplete asset set, not silently skip or publish partial sets.
+                with self.subTest(job=job, results=results):
+                    self.assertEqual(self.eligible(job, results), expected)
+
+    def test_missing_status_override_reproduces_skipped_ancestor_bug(self):
+        results = {"create-release": "success", "build-windows": "success",
+                   "recovery-preflight": "skipped"}
+        self.assertTrue(self.eligible("publish-windows", results))
+        self.conditions["publish-windows"] = self.conditions["publish-windows"].replace(
+            "always() && ", "")
+        self.assertFalse(self.eligible("publish-windows", results))
+        results["recovery-preflight"] = "success"
+        self.assertTrue(self.eligible("publish-windows", results))
+
+    def test_validation_triggers_and_executes_release_checks(self):
+        workflow = (ROOT / ".github/workflows/release-recovery.yml").read_text()
+        for event in ("pull_request", "push"):
+            section = re.search(rf"^  {event}:\n(.*?)(?=^  \w+:)", workflow, re.M | re.S).group(1)
+            for path in (".github/workflows/release.yml", ".github/workflows/release-recovery.yml",
+                         ".github/workflows/windows-companion.yml", ".github/scripts/verify_windows_install.ps1",
+                         "scripts/*release*", "scripts/test_*release*.py", "tests/*release*.py",
+                         "scripts/install.sh", "scripts/install_justrust_ci.sh", "scripts/build_linux_compat.sh"):
+                self.assertIn(f"- '{path}'", section, (event, path))
+        self.assertIn('fetch-depth: 0', workflow)
+        self.assertIn("python3 -m unittest discover -s tests -p '*release*.py'", workflow)
+        self.assertIn("python3 -m unittest discover -s scripts -p 'test_*release*.py'", workflow)
+        self.assertIn("bash scripts/test_install_release_metadata.sh", workflow)
 
 
 class RecoveryTests(unittest.TestCase):
@@ -110,6 +208,53 @@ class RecoveryTests(unittest.TestCase):
                 result = subprocess.run(["python3", str(SCRIPT), "--check-public-state", "v0.96.0"],
                                         cwd=self.repo, env=env, capture_output=True, text=True)
                 self.assertEqual(result.returncode == 0, succeeds, result.stderr)
+
+    def test_windows_signing_handles_skipped_recovery_ancestor(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        signing = workflow.split("  publish-windows:\n", 1)[1].split("  build-freebsd:\n", 1)[0]
+        condition = next(line.strip()[4:] for line in signing.splitlines()
+                         if line.startswith("    if: "))
+        self.assertEqual(condition, "always() && needs.create-release.result == 'success' && needs.build-windows.result == 'success'")
+        self.assertIn("needs: [create-release, build-windows]", signing)
+        # Exercise the checked-in predicate independently of ancestor status.
+        # A skipped optional preflight must not skip successful signing inputs,
+        # but failed/cancelled/skipped direct dependencies must stay blocked.
+        for ancestor in ("success", "skipped"):
+            for create in ("success", "failure", "cancelled", "skipped"):
+                for build in ("success", "failure", "cancelled", "skipped"):
+                    with self.subTest(ancestor=ancestor, create=create, build=build):
+                        expression = condition.replace("always()", "True")
+                        expression = expression.replace("needs.create-release.result", repr(create))
+                        expression = expression.replace("needs.build-windows.result", repr(build))
+                        expression = expression.replace("&&", "and")
+                        self.assertEqual(eval(expression, {"__builtins__": {}}),
+                                         create == "success" and build == "success")
+
+    def test_release_notes_disclose_actual_windows_signing(self):
+        import textwrap
+
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        notes = workflow.split("      - name: Add platform availability to release notes\n", 1)[1]
+        self.assertIn("WINDOWS_SIGNING_ENABLED: ${{ needs.publish-windows.outputs.signing_enabled }}", notes)
+        script = textwrap.dedent(notes.split("python3 - << 'PY'\n", 1)[1].split("\n          PY", 1)[0])
+        platforms = ("LINUX_X86_64", "LINUX_AARCH64", "MACOS_AARCH64", "MACOS_X86_64",
+                     "WINDOWS_X86_64", "WINDOWS_AARCH64", "FREEBSD_X86_64")
+        for enabled in ("true", "false", ""):
+            with self.subTest(enabled=enabled):
+                (self.repo / "release_notes.md").write_text("Release highlights\n")
+                env = dict(os.environ, WINDOWS_SIGNING_ENABLED=enabled,
+                           **{f"{platform}_AVAILABLE": "true" for platform in platforms})
+                for _ in range(2):
+                    subprocess.run(["python3", "-c", script], cwd=self.repo, env=env, check=True)
+                body = (self.repo / "release_notes.md").read_text()
+                self.assertEqual(body.count("## Platform availability"), 1)
+                self.assertIn("Release highlights", body)
+                if enabled == "true":
+                    self.assertIn("Authenticode signatures verified", body)
+                    self.assertNotIn("**unsigned**", body)
+                else:
+                    self.assertIn("**unsigned**", body)
+                    self.assertNotIn("Authenticode signatures verified", body)
 
     def test_workflow_identity_and_publication_gates(self):
         workflow = (ROOT / ".github/workflows/release.yml").read_text()

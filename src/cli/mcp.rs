@@ -77,14 +77,14 @@ fn render_list(rows: &[Value]) -> String {
     for row in rows {
         output.push_str(&format!(
             "  {} [{}; {}] {}\n",
-            row["name"].as_str().unwrap_or_default(),
-            row["transport"].as_str().unwrap_or_default(),
+            row["name"].as_str().unwrap_or("<unnamed>"),
+            row["transport"].as_str().unwrap_or("unknown"),
             if row["enabled"].as_bool().unwrap_or(false) {
                 "enabled"
             } else {
                 "disabled"
             },
-            row["auth"].as_str().unwrap_or_default()
+            row["auth"].as_str().unwrap_or("unknown")
         ));
     }
     output

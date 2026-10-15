@@ -199,27 +199,31 @@ fn search_result(n: usize, description_chars: usize) -> McpSearchResult {
 fn search_results_fit_the_budget_adaptively() {
     // Small results come back whole, long descriptions included.
     let small = vec![search_result(0, 2_000)];
-    let (out, detailed) = fit_search_results(&small, SEARCH_TOKEN_BUDGET);
+    let (out, detailed) =
+        fit_search_results(&small, SEARCH_TOKEN_BUDGET).expect("serializable search results");
     assert_eq!(detailed, 1);
     assert!(out.contains(&"d".repeat(2_000)));
 
     // Moderately over budget: every match keeps its schema, descriptions shrink.
     let medium: Vec<_> = (0..10).map(|n| search_result(n, 4_000)).collect();
-    let (out, detailed) = fit_search_results(&medium, SEARCH_TOKEN_BUDGET);
+    let (out, detailed) =
+        fit_search_results(&medium, SEARCH_TOKEN_BUDGET).expect("serializable search results");
     assert_eq!(detailed, 10);
     assert!(jcode_core::util::estimate_tokens(&out) <= SEARCH_TOKEN_BUDGET);
     assert!(!out.contains("more matches"));
 
     // Far over budget: leading matches keep detail, the rest are named.
     let large: Vec<_> = (0..400).map(|n| search_result(n, 1_000)).collect();
-    let (out, detailed) = fit_search_results(&large, SEARCH_TOKEN_BUDGET);
+    let (out, detailed) =
+        fit_search_results(&large, SEARCH_TOKEN_BUDGET).expect("serializable search results");
     assert!(detailed > 0 && detailed < 400, "{detailed}");
     assert!(out.contains(&format!("{} more matches", 400 - detailed)));
     assert!(out.contains("mcp__s__tool_399"));
     assert!(jcode_core::util::estimate_tokens(&out) <= SEARCH_TOKEN_BUDGET + 2_000);
 
     // Opting in returns everything.
-    let (_, detailed) = fit_search_results(&large, usize::MAX);
+    let (_, detailed) =
+        fit_search_results(&large, usize::MAX).expect("serializable search results");
     assert_eq!(detailed, 400);
 }
 
