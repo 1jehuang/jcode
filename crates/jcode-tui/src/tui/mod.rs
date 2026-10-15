@@ -121,9 +121,14 @@ pub use jcode_tui_messages::DisplayMessage;
 fn keyboard_enhancement_flags() -> crossterm::event::KeyboardEnhancementFlags {
     use crossterm::event::KeyboardEnhancementFlags;
 
+    if std::env::var_os("JCODE_DISABLE_KITTY_KEYBOARD").is_some() {
+        return KeyboardEnhancementFlags::empty();
+    }
+    // Only disambiguate escape codes. REPORT_EVENT_TYPES makes terminals emit
+    // press AND release events; hosts that half-support the kitty protocol
+    // (herdr/conpty panes) leak the release events into the prompt as raw
+    // "[<code>;1:3u" text. REPORT_ALTERNATE_KEYS is dropped for the same reason.
     KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-        | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
-        | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
 }
 
 /// Enable Kitty keyboard protocol for unambiguous key reporting.
