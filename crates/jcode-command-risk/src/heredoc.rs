@@ -30,9 +30,11 @@ fn heredoc_open_pattern() -> Regex {
         r#"\$\(cat[ \t]*<<(-?)[ \t]*(?:'+([A-Za-z_]\w*)'+|\\([A-Za-z_]\w*))"#,
     ) {
         Ok(re) => re,
-        Err(_) => match Regex::new("") {
+        // Fail closed: a never-matching pattern disables the heredoc fast
+        // path (no openings found -> full scrutiny) instead of an empty
+        // pattern that matches everywhere and bypasses validation.
+        Err(_) => match Regex::new(r"[^\s\S]") {
             Ok(re) => re,
-            // Empty pattern cannot fail; this branch is unreachable.
             Err(_) => loop {},
         },
     }

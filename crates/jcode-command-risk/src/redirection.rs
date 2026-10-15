@@ -27,7 +27,10 @@ fn empty_regex() -> Regex {
     // which case `loop {}` (the never type) satisfies the return type
     // without panicking. Prefer a hang over a panic here so that the panic
     // budget remains intact.
-    match Regex::new("") {
+    // Fail closed: never-match means no stripping/merging happens and the
+    // raw command keeps full redirect scrutiny. An empty pattern would
+    // match at every position and mangle the command.
+    match Regex::new(r"[^\s\S]") {
         Ok(re) => re,
         Err(_) => loop {},
     }
