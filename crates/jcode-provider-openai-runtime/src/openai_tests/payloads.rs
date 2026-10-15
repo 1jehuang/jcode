@@ -211,7 +211,8 @@ fn test_websocket_continuation_delta_skips_reasoning_items() {
 #[test]
 fn max_and_swarm_efforts_are_preserved_at_the_strongest_api_level() {
     let provider = OpenAIProvider::new_browser_only();
-    *provider.model.try_write().unwrap() = "unobserved-review-model[web]".to_string();
+    *provider.model.try_write().unwrap() = "gpt-9.9-unobserved[web]".to_string();
+    assert!(is_chatgpt_web_model(&provider.model()));
     // An unobserved web route must not invent a strongest enabled Power level.
     assert_eq!(
         provider.api_reasoning_effort_with_swarm_root(Some("swarm"), Some("max")),
