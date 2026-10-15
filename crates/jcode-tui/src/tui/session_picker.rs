@@ -329,6 +329,11 @@ pub struct SessionPicker {
     /// Set once the user cycles the filter, so async reloads never replace
     /// their choice with the automatic current-project default.
     filter_mode_user_chosen: bool,
+    /// Set once the user actually moves or marks the session selection
+    /// (keyboard navigation, list mouse wheel, or a mark toggle). The
+    /// automatic first-row highlight from `rebuild_items` is not intent, so
+    /// late async defaults may still apply until this is latched.
+    user_selection_intent: bool,
     /// Live process presence keyed by session ID (active-pid registry snapshot).
     /// Drives the working/ready badges in the list and the Active filter
     /// membership. Refreshed on load/reseed and periodically while the Active
@@ -390,6 +395,7 @@ impl SessionPicker {
             current_repo: None,
             same_project_cache: RefCell::new(HashMap::new()),
             filter_mode_user_chosen: false,
+            user_selection_intent: false,
             live_presence: std::collections::HashMap::new(),
             live_presence_refreshed_at: None,
             current_session_id: None,
@@ -438,6 +444,7 @@ impl SessionPicker {
             current_repo: None,
             same_project_cache: RefCell::new(HashMap::new()),
             filter_mode_user_chosen: false,
+            user_selection_intent: false,
             live_presence: std::collections::HashMap::new(),
             live_presence_refreshed_at: None,
             current_session_id: None,
@@ -518,6 +525,7 @@ impl SessionPicker {
             current_repo: None,
             same_project_cache: RefCell::new(HashMap::new()),
             filter_mode_user_chosen: false,
+            user_selection_intent: false,
             live_presence: std::collections::HashMap::new(),
             live_presence_refreshed_at: None,
             current_session_id: None,
@@ -835,24 +843,6 @@ impl SessionPicker {
         self.selected_session()
             .map(|session| vec![session.resume_target.clone()])
             .unwrap_or_default()
-    }
-
-    fn selection_count(&self) -> usize {
-        self.selected_session_ids.len()
-    }
-
-    fn toggle_selected_session(&mut self) {
-        let Some(session_id) = self.selected_session().map(|session| session.id.clone()) else {
-            return;
-        };
-
-        if !self.selected_session_ids.insert(session_id.clone()) {
-            self.selected_session_ids.remove(&session_id);
-        }
-    }
-
-    pub fn clear_selected_sessions(&mut self) {
-        self.selected_session_ids.clear();
     }
 
     fn selected_session_ref(&self) -> Option<SessionRef> {
@@ -2286,7 +2276,10 @@ impl SessionPicker {
             SessionListUpdate::Cached(sessions) => (sessions, false),
             SessionListUpdate::Fresh(sessions) => (sessions?, true),
         };
-        let apply_project_default = self.selected_session().is_none();
+        // Only an explicit user selection blocks the default; the automatic
+        // first-row highlight from a cached list must not. Navigated targets
+        // are still preserved below by ID-based reseeding.
+        let apply_project_default = !self.user_selection_intent;
         self.reseed_grouped(sessions.0, sessions.1);
         // Defaults may choose the first target, never replace one already shown.
         if apply_project_default {

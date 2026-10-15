@@ -155,6 +155,152 @@ fn test_project_scope_refresh_preserves_explicit_all_choice_after_empty_cache() 
     assert_eq!(visible_ids(&picker).len(), 2);
 }
 
+fn assert_project_scope_after_cached_input(
+    enabled: bool,
+    interact: impl FnOnce(&mut SessionPicker),
+    expected: &str,
+    scoped: bool,
+) {
+    let _lock = crate::storage::lock_test_env();
+    let _env = ProjectScopeRefreshEnv::new(enabled);
+    let first = project_scope_session("outside_first", "/work/elsewhere", 1);
+    let second = project_scope_session("outside_second", "/work/elsewhere", 2);
+    let mut picker = SessionPicker::loading();
+    picker.set_current_dir(Some("/work/project".to_string()));
+    picker.focus_search_input();
+    picker
+        .apply_session_list_update(SessionListUpdate::Cached((
+            Vec::new(),
+            vec![first.clone(), second.clone()],
+        )))
+        .unwrap();
+    assert!(rendered_text(&mut picker).contains("outside_first"));
+    assert_eq!(picker.selected_session().unwrap().id, "outside_first");
+    interact(&mut picker);
+    picker
+        .apply_session_list_update(SessionListUpdate::Fresh(Ok((
+            Vec::new(),
+            vec![
+                project_scope_session("fresh_project", "/work/project", 0),
+                second,
+                first,
+            ],
+        ))))
+        .unwrap();
+    assert_eq!(
+        picker.filter_mode,
+        if scoped {
+            SessionFilterMode::CurrentDir
+        } else {
+            SessionFilterMode::All
+        }
+    );
+    assert_eq!(picker.selected_session().unwrap().id, expected);
+    assert!(rendered_text(&mut picker).contains(expected));
+    let action = picker
+        .handle_overlay_key(KeyCode::Enter, KeyModifiers::empty())
+        .unwrap();
+    assert!(matches!(
+        action,
+        OverlayAction::Selected(
+            PickerResult::SelectedInCurrentTerminal(targets)
+                | PickerResult::SelectedInNewTerminal(targets)
+        ) if matches!(targets.as_slice(), [ResumeTarget::JcodeSession { session_id }]
+                if session_id == expected)
+    ));
+}
+
+#[test]
+fn test_project_scope_refresh_scopes_untouched_automatic_cached_highlight() {
+    assert_project_scope_after_cached_input(true, |_| {}, "fresh_project", true);
+}
+
+#[test]
+fn test_project_scope_refresh_keeps_automatic_highlight_when_scope_disabled() {
+    assert_project_scope_after_cached_input(false, |_| {}, "outside_first", false);
+}
+
+#[test]
+fn test_project_scope_refresh_keeps_boundary_and_returned_keyboard_selection() {
+    for keys in [vec![KeyCode::Up], vec![KeyCode::Down, KeyCode::Up]] {
+        assert_project_scope_after_cached_input(
+            true,
+            |picker| {
+                for key in keys {
+                    picker
+                        .handle_overlay_key(key, KeyModifiers::empty())
+                        .unwrap();
+                }
+            },
+            "outside_first",
+            false,
+        );
+    }
+}
+
+#[test]
+fn test_project_scope_refresh_keeps_mouse_selection_including_boundary() {
+    for (kind, expected) in [
+        (MouseEventKind::ScrollUp, "outside_first"),
+        (MouseEventKind::ScrollDown, "outside_second"),
+    ] {
+        assert_project_scope_after_cached_input(
+            true,
+            |picker| {
+                let area = picker.last_list_area.expect("rendered list area");
+                picker.handle_overlay_mouse(crossterm::event::MouseEvent {
+                    kind,
+                    column: area.x + 1,
+                    row: area.y + 1,
+                    modifiers: KeyModifiers::empty(),
+                });
+            },
+            expected,
+            false,
+        );
+    }
+}
+
+#[test]
+fn test_project_scope_refresh_keeps_marked_and_unmarked_cached_selection() {
+    for toggles in [1, 2] {
+        assert_project_scope_after_cached_input(
+            true,
+            |picker| {
+                picker
+                    .handle_overlay_key(KeyCode::Tab, KeyModifiers::empty())
+                    .unwrap();
+                for _ in 0..toggles {
+                    picker
+                        .handle_overlay_key(KeyCode::Char(' '), KeyModifiers::empty())
+                        .unwrap();
+                }
+            },
+            "outside_first",
+            false,
+        );
+    }
+}
+
+#[test]
+fn test_project_scope_refresh_keeps_explicit_all_choice_with_nonempty_cache() {
+    assert_project_scope_after_cached_input(
+        true,
+        |picker| {
+            for modifiers in [
+                KeyModifiers::CONTROL,
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ] {
+                picker
+                    .handle_overlay_key(KeyCode::Char('s'), modifiers)
+                    .unwrap();
+            }
+        },
+        "outside_first",
+        false,
+    );
+}
+
 fn type_to_search_picker() -> SessionPicker {
     let mut zebra = make_session("session_zebra", "zebra", false, SessionStatus::Closed);
     let mut otter = make_session("session_otter", "otter", false, SessionStatus::Closed);
