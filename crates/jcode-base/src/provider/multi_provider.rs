@@ -34,6 +34,34 @@ pub(super) enum AccountAttempt {
 }
 
 impl MultiProvider {
+    /// Record which login/credential just served a request in the
+    /// cross-provider activity ledger (drives `/usage` recency sorting).
+    /// Spawned off-thread: the ledger does file IO and a request was already
+    /// accepted, so this must never block or fail the completion path.
+    pub(super) fn record_provider_activity(&self, provider: ActiveProvider) {
+        let source_key = self.activity_source_key(provider);
+        tokio::task::spawn_blocking(move || {
+            crate::provider_activity::record_use(&source_key);
+        });
+    }
+
+    /// Recheck a marked exact account before rejecting a resumed request.
+    /// Fresh usage clears only the observations captured by its own generation.
+    pub(super) async fn revalidate_marked_openai_account(
+        &self,
+        provider: ActiveProvider,
+        label: Option<&str>,
+    ) {
+        if provider == ActiveProvider::OpenAI
+            && let Some(label) = label
+            && (models::provider_unavailability_detail_for_account_label("openai", Some(label))
+                .is_some()
+                || account_exhausted(AccountProviderKind::OpenAi, label).is_some())
+        {
+            crate::usage::revalidate_openai_account_exhaustion(label).await;
+        }
+    }
+
     /// Check the exact billing identity again when a countdown expires. A
     /// removed login or a newly excluded account must never be selected.
     pub fn is_failover_route_pool_approved(route: &str) -> bool {
