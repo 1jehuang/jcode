@@ -1,13 +1,11 @@
 // Pins how `[image N]` placeholders in the input buffer interact with
 // slash-command parsing in submit_input (crates/jcode-tui/src/tui/app/input.rs).
 //
-// Placeholders are plain text: expand_paste_placeholders only expands
-// `[pasted N lines]` markers, never `[image N]`. Command routing therefore
-// sees the placeholder literally.
+// Legacy marker-looking text has no ownership metadata and remains literal.
+// A fresh owned marker is added for its payload rather than claiming text.
 
 fn attach_test_image(app: &mut App) {
-    // Mirrors attach_image() in input.rs: push pending image, insert
-    // "[image N]" placeholder at the cursor.
+    // Simulate legacy input that saved text and PNGs without provenance.
     app.pending_images
         .push(("image/png".to_string(), "aGVsbG8=".to_string()));
     let placeholder = format!("[image {}]", app.pending_images.len());
@@ -38,7 +36,7 @@ fn test_image_placeholder_before_text_submits_as_user_turn_with_image() {
     );
     assert!(matches!(
         submitted.content.last(),
-        Some(ContentBlock::Text { text, .. }) if text == &prompt
+        Some(ContentBlock::Text { text, .. }) if text.trim_end() == prompt
     ));
 }
 

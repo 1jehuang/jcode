@@ -1176,6 +1176,7 @@ pub struct App {
     pasted_contents: Vec<String>,
     // Pending pasted images (media_type, base64_data) attached to next message
     pending_images: Vec<(String, String)>,
+    input_image_markers: input_images::InputImageMarkers,
     // One-shot flag: the next submitted prompt is routed to a new headed session.
     route_next_prompt_to_new_session: bool,
     // Restore-time flag: auto-submit restored input after startup.
@@ -1610,7 +1611,7 @@ pub struct App {
     // Scroll bookmark: stashed scroll position for quick teleport back
     scroll_bookmark: Option<usize>,
     // Stashed input: saved via Ctrl+S for later retrieval
-    stashed_input: Option<(String, usize)>,
+    stashed_input: Option<input_images::InputUndoSnapshot>,
     // Undo history for in-progress input editing (Ctrl+Z)
     input_undo_stack: Vec<input_images::InputUndoSnapshot>,
     /// Attachment count at each `input_undo_stack` entry (same length), so
@@ -1626,9 +1627,8 @@ pub struct App {
     /// Derives double/triple clicks for word/line selection in the composer.
     input_selection_clicks: input_selection::ClickCounter,
     input_typing_undo: Option<(Instant, usize)>,
-    // Draft replaced by an explicit jump into prompt history (Ctrl+Up),
-    // restored when Down walks back past the newest entry
-    history_draft: Option<(String, usize)>,
+    // Ctrl+Up's draft, restored when Down passes the newest history entry.
+    history_draft: Option<input_images::InputUndoSnapshot>,
     // Short-lived notice for status feedback (model switch, cycle diff mode, etc.)
     status_notice: Option<(String, Instant)>,
     // Distinct learned-keybinding nudge ("you keep doing X the slow way, press

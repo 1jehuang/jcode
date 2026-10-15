@@ -1729,6 +1729,7 @@ impl App {
     }
 
     pub(super) fn remember_input_undo_state(&mut self) {
+        self.ensure_input_image_markers();
         self.input_typing_undo = None;
         let images = self
             .input_undo_stack
@@ -1740,6 +1741,7 @@ impl App {
             self.input.clone(),
             self.cursor_pos.min(self.input.len()),
             images,
+            self.input_image_markers.clone(),
         );
         if self.input_undo_stack.last() == Some(&snapshot)
             && self.input_undo_image_counts.last() == Some(&self.pending_images.len())
@@ -1781,38 +1783,6 @@ impl App {
         self.cleared_draft_images.clear();
         self.input_typing_undo = None;
         self.history_draft = None;
-    }
-
-    pub(super) fn undo_input_change(&mut self) {
-        let depth = self.input_undo_stack.len();
-        self.input_selection_anchor = None;
-        self.input_typing_undo = None;
-        if let Some((input, cursor_pos, images)) = self.input_undo_stack.pop() {
-            let image_count = self.input_undo_image_counts.pop();
-            // The composer now holds a restored draft, so the copy stashed by a
-            // history jump is stale: a later Down must not resurrect it.
-            self.history_draft = None;
-            self.input = input;
-            self.pending_images = std::sync::Arc::unwrap_or_clone(images);
-            self.cursor_pos = cursor_pos.min(self.input.len());
-            if self
-                .cleared_draft_images
-                .last()
-                .is_some_and(|(at, _)| *at == depth)
-                && let Some((_, images)) = self.cleared_draft_images.pop()
-            {
-                self.pending_images = images;
-            } else if let Some(count) = image_count {
-                // Images attached after this snapshot (e.g. the paste being
-                // undone) go with it, so nothing stays attached invisibly.
-                self.pending_images.truncate(count);
-            }
-            self.reset_tab_completion();
-            self.sync_model_picker_preview_from_input();
-            self.set_status_notice("↶ Input restored");
-        } else {
-            self.set_status_notice("Nothing to undo");
-        }
     }
 
     pub(super) fn command_accepts_args(cmd: &str) -> bool {

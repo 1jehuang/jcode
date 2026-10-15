@@ -71,6 +71,7 @@ pub(in crate::tui::app) fn restore_prepared_remote_input(
     app.input = prepared.raw_input;
     app.cursor_pos = app.input.len();
     app.pending_images = prepared.images;
+    app.input_image_markers = prepared.image_markers;
     app.ensure_input_image_markers();
 }
 
@@ -259,6 +260,7 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
         app,
         remote,
         input::PreparedInput {
+            image_markers: prepared.image_markers,
             raw_input: prepared.raw_input,
             expanded: expanded_prompt,
             images: prepared.images,
@@ -291,6 +293,7 @@ pub(in crate::tui::app) async fn route_prepared_input_to_new_remote_session(
                 .pending_split_prompt
                 .take()
                 .map(|prompt| input::PreparedInput {
+                    image_markers: prepared.image_markers,
                     raw_input: prepared.raw_input,
                     expanded: prompt.content,
                     images: prompt.images,
@@ -313,6 +316,7 @@ pub(in crate::tui::app) async fn route_prepared_input_to_new_remote_session(
             .pending_split_prompt
             .take()
             .map(|prompt| input::PreparedInput {
+                image_markers: prepared.image_markers,
                 raw_input: prepared.raw_input,
                 expanded: prompt.content,
                 images: prompt.images,
@@ -538,6 +542,7 @@ struct StashedDraft {
     cursor_pos: usize,
     pasted_contents: Vec<String>,
     pending_images: Vec<(String, String)>,
+    image_markers: super::super::input_images::InputImageMarkers,
     undo: Vec<super::super::input_images::InputUndoSnapshot>,
     undo_image_counts: Vec<usize>,
     cleared_draft_images: Vec<(usize, Vec<(String, String)>)>,
@@ -549,6 +554,7 @@ fn stash_draft_for_voice(app: &mut App, transcript: &str) -> StashedDraft {
         cursor_pos: std::mem::take(&mut app.cursor_pos),
         pasted_contents: std::mem::take(&mut app.pasted_contents),
         pending_images: std::mem::take(&mut app.pending_images),
+        image_markers: std::mem::take(&mut app.input_image_markers),
         undo: std::mem::take(&mut app.input_undo_stack),
         undo_image_counts: std::mem::take(&mut app.input_undo_image_counts),
         cleared_draft_images: std::mem::take(&mut app.cleared_draft_images),
@@ -568,6 +574,7 @@ fn restore_draft_after_voice(app: &mut App, stash: StashedDraft) {
     app.cursor_pos = stash.cursor_pos.min(app.input.len());
     app.pasted_contents = stash.pasted_contents;
     app.pending_images = stash.pending_images;
+    app.input_image_markers = stash.image_markers;
     app.ensure_input_image_markers();
     app.input_undo_stack = stash.undo;
     app.input_undo_image_counts = stash.undo_image_counts;
