@@ -1,9 +1,99 @@
 use super::*;
 
+#[tokio::test]
+async fn same_email_workspace_pin_sends_its_own_bearer_and_account_header() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let _lock = jcode_base::storage::lock_test_env();
+    let _sandbox = AccountSandbox::new();
+    let personal = save_account(
+        "personal",
+        "personal-access",
+        "personal-refresh",
+        "personal-id",
+    );
+    let work = save_account("work", "work-access", "work-refresh", "work-id");
+    for label in [&personal, &work] {
+        jcode_base::auth::codex::update_account_profile(label, Some("same@example.com".into()))
+            .unwrap();
+    }
+    jcode_base::auth::codex::set_active_account(&personal).unwrap();
+    let provider =
+        OpenAIProvider::new(jcode_base::auth::codex::load_credentials_for_account(&work).unwrap());
+    provider.set_oauth_account(Some(&work)).unwrap();
+    provider
+        .set_credential_mode(OpenAICredentialMode::OAuth)
+        .unwrap();
+    let pin = jcode_base::auth::codex::pin_for_label(&work).unwrap();
+    // Refresh and email changes must not change a workspace's identity.
+    save_account(&work, "work-rotated", "work-refresh-rotated", "work-id");
+    jcode_base::auth::codex::update_account_profile(&work, Some("same@example.com".into()))
+        .unwrap();
+    assert_eq!(
+        jcode_base::auth::codex::resolve_pin(&pin).as_deref(),
+        Some(work.as_str())
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/responses", listener.local_addr().unwrap());
+    jcode_base::env::set_var("JCODE_TEST_OPENAI_RESPONSES_URL", &url);
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut bytes = Vec::new();
+        loop {
+            let mut chunk = [0; 4096];
+            let n = socket.read(&mut chunk).await.unwrap();
+            assert_ne!(n, 0);
+            bytes.extend_from_slice(&chunk[..n]);
+            if bytes.windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+        }
+        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 14\r\nConnection: close\r\n\r\ndata: [DONE]\n\n").await.unwrap();
+        String::from_utf8(bytes).unwrap().to_ascii_lowercase()
+    });
+    let (tx, mut rx) = mpsc::channel(64);
+    let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        openai_stream_runtime::stream_response(
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+            Arc::clone(&provider.credentials),
+            provider.account_pin.clone(),
+            serde_json::json!({"model":"gpt-5.4", "input":[], "stream":true}),
+            "test".into(),
+            tx,
+        ),
+    )
+    .await
+    .expect("local request must finish");
+    let request = server.await.unwrap();
+    assert!(
+        request.contains("authorization: bearer work-rotated\r\n"),
+        "{request}"
+    );
+    assert!(
+        request.contains("chatgpt-account-id: work-id\r\n"),
+        "{request}"
+    );
+    assert!(!request.contains("personal-access"));
+    jcode_base::auth::codex::update_account_profile(&work, Some("renamed@example.com".into()))
+        .unwrap();
+    assert_eq!(
+        jcode_base::auth::codex::resolve_pin(&pin).as_deref(),
+        Some(work.as_str())
+    );
+    // Pin removal must never retarget this workspace to the same-email account.
+    jcode_base::auth::codex::remove_account(&work).unwrap();
+    assert_eq!(jcode_base::auth::codex::resolve_pin(&pin), None);
+    let _ = result; // The assertion is the actual HTTP request, not SSE output.
+    drain.await.unwrap();
+}
+
 struct AccountSandbox {
     _home: tempfile::TempDir,
     previous_home: Option<std::ffi::OsString>,
     previous_runtime: Option<std::ffi::OsString>,
+    previous_url: Option<std::ffi::OsString>,
     previous_account: Option<String>,
 }
 
@@ -12,6 +102,7 @@ impl AccountSandbox {
         let home = tempfile::tempdir().unwrap();
         let previous_home = std::env::var_os("JCODE_HOME");
         let previous_runtime = std::env::var_os("JCODE_RUNTIME_PROVIDER");
+        let previous_url = std::env::var_os("JCODE_TEST_OPENAI_RESPONSES_URL");
         let previous_account = jcode_base::auth::codex::get_active_account_override();
         jcode_base::env::set_var("JCODE_HOME", home.path());
         jcode_base::env::set_var("JCODE_RUNTIME_PROVIDER", "openai-oauth");
@@ -20,6 +111,7 @@ impl AccountSandbox {
             _home: home,
             previous_home,
             previous_runtime,
+            previous_url,
             previous_account,
         }
     }
@@ -31,6 +123,7 @@ impl Drop for AccountSandbox {
         for (key, value) in [
             ("JCODE_HOME", self.previous_home.take()),
             ("JCODE_RUNTIME_PROVIDER", self.previous_runtime.take()),
+            ("JCODE_TEST_OPENAI_RESPONSES_URL", self.previous_url.take()),
         ] {
             match value {
                 Some(value) => jcode_base::env::set_var(key, value),
@@ -38,6 +131,44 @@ impl Drop for AccountSandbox {
             }
         }
     }
+}
+
+#[tokio::test]
+async fn legacy_email_workspace_pin_is_unique_or_fails_closed() {
+    let _lock = jcode_base::storage::lock_test_env();
+    let _sandbox = AccountSandbox::new();
+    let first = save_account("first", "first-token", "first-refresh", "first-id");
+    jcode_base::auth::codex::update_account_profile(&first, Some("same@example.com".into()))
+        .unwrap();
+    let legacy = jcode_base::auth::AccountPin::new(&first, Some("same@example.com".into()));
+    assert_eq!(
+        jcode_base::auth::codex::resolve_pin(&legacy).as_deref(),
+        Some(first.as_str())
+    );
+    let second = save_account("second", "second-token", "second-refresh", "second-id");
+    jcode_base::auth::codex::update_account_profile(&second, Some("SAME@example.com".into()))
+        .unwrap();
+    assert_eq!(jcode_base::auth::codex::resolve_pin(&legacy), None);
+    let provider =
+        OpenAIProvider::new(jcode_base::auth::codex::load_credentials_for_account(&first).unwrap());
+    provider.account_pin.set(Some(legacy.clone()));
+    assert!(
+        openai_access_token(&provider.credentials, &provider.account_pin)
+            .await
+            .is_err()
+    );
+    assert_eq!(provider.account_pin.get(), Some(legacy));
+    let stable = jcode_base::auth::codex::pin_for_label(&second).unwrap();
+    assert_eq!(stable.identity.as_deref(), Some("id:second-id"));
+    jcode_base::auth::codex::remove_account(&first).unwrap();
+    let relabeled = jcode_base::auth::codex::resolve_pin(&stable).unwrap();
+    assert_eq!(
+        jcode_base::auth::codex::load_credentials_for_account(&relabeled)
+            .unwrap()
+            .account_id
+            .as_deref(),
+        Some("second-id")
+    );
 }
 
 fn save_account(label: &str, token: &str, refresh: &str, identity: &str) -> String {

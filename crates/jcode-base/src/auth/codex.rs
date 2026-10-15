@@ -344,11 +344,11 @@ pub fn account_identity(account: &OpenAiAccount) -> Option<String> {
         .email
         .clone()
         .or_else(|| account.id_token.as_deref().and_then(extract_email));
-    crate::auth::account_store::account_identity(
-        email.as_deref(),
-        account_id.as_deref(),
-        &account.refresh_token,
-    )
+    // A login email can own multiple ChatGPT workspaces/subscriptions. The
+    // provider account ID identifies the workspace and survives token refresh.
+    crate::auth::account_store::account_identity(None, account_id.as_deref(), "").or_else(|| {
+        crate::auth::account_store::account_identity(email.as_deref(), None, &account.refresh_token)
+    })
 }
 
 /// Load OAuth credentials for `scope`, returning the jcode account label they
@@ -377,6 +377,9 @@ pub fn load_oauth_credentials_scoped(
         crate::auth::AccountScope::Pinned(pin) => {
             let auth = load_auth_file()?;
             let label = resolve_pin_in(pin, &auth).ok_or_else(|| {
+                if pin.identity.as_deref().is_some_and(|id| id.contains('@') && !id.starts_with("id:") && !id.starts_with("rt:")) {
+                    return anyhow::anyhow!("OpenAI email-only account pin is missing or ambiguous; select the workspace account again");
+                }
                 anyhow::Error::new(crate::auth::account_store::PinnedAccountMissing(
                     pin.label.clone(),
                 ))
@@ -392,6 +395,24 @@ pub fn load_oauth_credentials_scoped(
 }
 
 fn resolve_pin_in(pin: &crate::auth::AccountPin, auth: &JcodeOpenAiAuthFile) -> Option<String> {
+    // Older sessions stored email-only pins. Migrate only when the email names
+    // exactly one saved account, never use the positional label to guess a
+    // workspace when multiple subscriptions share that email.
+    if let Some(identity) = pin.identity.as_deref()
+        && identity.contains('@')
+        && !identity.starts_with("id:")
+        && !identity.starts_with("rt:")
+    {
+        let mut matches = auth.openai_accounts.iter().filter(|account| {
+            account
+                .email
+                .clone()
+                .or_else(|| account.id_token.as_deref().and_then(extract_email))
+                .is_some_and(|email| email.trim().eq_ignore_ascii_case(identity))
+        });
+        let account = matches.next()?;
+        return matches.next().is_none().then(|| account.label.clone());
+    }
     crate::auth::account_store::resolve_pin(
         pin,
         &auth.openai_accounts,
