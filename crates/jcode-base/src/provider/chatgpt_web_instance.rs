@@ -72,6 +72,7 @@ pub fn find_chrome() -> Option<PathBuf> {
     find_chrome_in(
         std::env::var_os("JCODE_CHATGPT_WEB_CHROME").map(PathBuf::from),
         std::env::var_os("PATH"),
+        APP_CANDIDATES,
         dirs::home_dir(),
     )
 }
@@ -95,6 +96,7 @@ const APP_CANDIDATES: &[&str] = &[];
 fn find_chrome_in(
     explicit: Option<PathBuf>,
     path: Option<std::ffi::OsString>,
+    apps: &[&str],
     home: Option<PathBuf>,
 ) -> Option<PathBuf> {
     if let Some(explicit) = explicit {
@@ -113,11 +115,7 @@ fn find_chrome_in(
     if on_path.is_some() {
         return on_path;
     }
-    if let Some(app) = APP_CANDIDATES
-        .iter()
-        .map(PathBuf::from)
-        .find(|app| app.is_file())
-    {
+    if let Some(app) = apps.iter().map(PathBuf::from).find(|app| app.is_file()) {
         return Some(app);
     }
     // Playwright's downloaded Chromium (`npx playwright install chromium`),
@@ -402,7 +400,7 @@ pub struct Instance {
 impl Instance {
     #[cfg(unix)]
     async fn launch(chrome: &Path, profile: &Path, headless: bool) -> Result<Self> {
-        use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
+        use std::os::unix::io::{AsRawFd, OwnedFd};
         let lock = ProfileLock::acquire(profile).await?;
         std::fs::create_dir_all(profile)
             .with_context(|| format!("Failed to create {}", profile.display()))?;
@@ -415,16 +413,10 @@ impl Instance {
             }
         }
         // Chrome reads commands on fd 3 and writes replies on fd 4.
+        // std::io::pipe is close-on-exec on every Unix; macOS has no pipe2.
         let pipe = || -> Result<(OwnedFd, OwnedFd)> {
-            let mut fds = [0; 2];
-            // SAFETY: pipe2 fills two new descriptors on success.
-            anyhow::ensure!(
-                unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } == 0,
-                "Failed to create a DevTools pipe: {}",
-                std::io::Error::last_os_error()
-            );
-            // SAFETY: both descriptors were just created and are owned here.
-            Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
+            let (reader, writer) = std::io::pipe().context("Failed to create a DevTools pipe")?;
+            Ok((reader.into(), writer.into()))
         };
         let (to_chrome_read, to_chrome_write) = pipe()?;
         let (from_chrome_read, from_chrome_write) = pipe()?;
@@ -1131,12 +1123,12 @@ mod tests {
         }
         let newest = home.join(".cache/ms-playwright/chromium-1243/chrome-linux/chrome");
         assert_eq!(
-            find_chrome_in(None, Some(bin.clone().into()), Some(home.clone())),
+            find_chrome_in(None, Some(bin.clone().into()), &[], Some(home.clone())),
             Some(newest)
         );
         std::fs::write(bin.join("chromium"), "").unwrap();
         assert_eq!(
-            find_chrome_in(None, Some(bin.clone().into()), Some(home.clone())),
+            find_chrome_in(None, Some(bin.clone().into()), &[], Some(home.clone())),
             Some(bin.join("chromium"))
         );
         let explicit = temp.path().join("custom-chrome");
@@ -1145,6 +1137,7 @@ mod tests {
             find_chrome_in(
                 Some(explicit.clone()),
                 Some(bin.clone().into()),
+                &[],
                 Some(home.clone())
             ),
             Some(explicit)
@@ -1153,6 +1146,7 @@ mod tests {
             find_chrome_in(
                 Some(temp.path().join("missing")),
                 Some(bin.into()),
+                &[],
                 Some(home)
             ),
             None
