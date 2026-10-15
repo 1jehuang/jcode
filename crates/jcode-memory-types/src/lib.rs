@@ -271,6 +271,12 @@ pub struct MemoryEntry {
     /// Confidence score (0.0-1.0) - decays over time, boosted by use
     #[serde(default = "default_confidence")]
     pub confidence: f32,
+    /// Provenance citation: the exact source span this memory was drawn
+    /// from. `None` for memories banked before citations or from
+    /// non-file sources. Serde-defaulted: old entries load unchanged and
+    /// recall ignores uncited memories for verification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub citation: Option<SourceCitation>,
 }
 
 /// Model id used for memories embedded before model tagging existed. These were
@@ -328,6 +334,7 @@ impl MemoryEntry {
             embedding: None,
             embedding_model: None,
             confidence: 1.0,
+            citation: None,
         }
     }
 
@@ -387,6 +394,11 @@ impl MemoryEntry {
 
     pub fn with_source(mut self, source: impl Into<String>) -> Self {
         self.source = Some(source.into());
+        self
+    }
+
+    pub fn with_citation(mut self, citation: SourceCitation) -> Self {
+        self.citation = Some(citation);
         self
     }
 
@@ -649,16 +661,454 @@ fn selected_entries_for_prompt(entries: &[MemoryEntry], limit: usize) -> Vec<&Me
     selected
 }
 
+/// Walk up from `start` to the enclosing repository root (a directory
+/// containing `.git`). Falls back to `start` itself for non-git trees so
+/// callers keep working without a repository. Used to anchor citation paths
+/// so nested working directories bank and verify against the same root.
+pub fn find_repo_root(start: &std::path::Path) -> std::path::PathBuf {
+    let mut cursor = if start.is_file() {
+        start.parent().map(|p| p.to_path_buf())
+    } else {
+        Some(start.to_path_buf())
+    };
+    while let Some(dir) = cursor {
+        if dir.join(".git").exists() {
+            return dir;
+        }
+        match dir.parent() {
+            Some(parent) if parent != dir => cursor = Some(parent.to_path_buf()),
+            _ => break,
+        }
+    }
+    start.to_path_buf()
+}
+
+/// Upstream remote URL for `root` (`remote.origin.url`), best-effort, with
+/// credentials stripped. HTTPS remotes can embed `user:token@` userinfo;
+/// persisting that would leak secrets into memory JSON and model prompts.
+/// Two clones share history (same root commit) but not provenance: the
+/// clone's origin points at its source, the original's at upstream. Moves
+/// preserve it; re-clones from the same upstream reproduce it. Absent
+/// outside git.
+pub fn repo_origin(root: &std::path::Path) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["config", "--get", "remote.origin.url"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if url.is_empty() {
+        None
+    } else {
+        Some(strip_url_credentials(&url))
+    }
+}
+
+/// Remove `user[:password]@` userinfo from a remote URL. Malformed input
+/// passes through unchanged (fail-soft: identity, never auth).
+fn strip_url_credentials(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_string();
+    };
+    let Some((userinfo, host)) = rest.split_once('@') else {
+        return url.to_string();
+    };
+    // Only strip when the part before @ holds no '/': userinfo never
+    // contains one, so a slash means the @ belongs to the path.
+    if userinfo.contains('/') {
+        return url.to_string();
+    }
+    format!("{scheme}://{host}")
+}
+
+/// Stable repository identity for `root`: `git:<root-commit-hash>` when
+/// determinable, else `path:<canonical-root>`. The root commit survives
+/// renames and moves of the checkout (same .git, same history); the path
+/// fallback preserves behavior for non-git trees and missing git.
+pub fn repo_identity(root: &std::path::Path) -> String {
+    let git_id = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-list", "--max-parents=0", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|h| !h.is_empty())
+        .map(|h| format!("git:{h}"));
+    git_id.unwrap_or_else(|| {
+        let path = root
+            .canonicalize()
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| root.to_string_lossy().into_owned());
+        format!("path:{path}")
+    })
+}
+
+/// Best-effort short git HEAD for `root` (`rev-parse --short HEAD`).
+/// `None` outside a repo, without git, or on any failure: revision is
+/// advisory metadata, never a banking requirement.
+pub fn git_head_for(root: &std::path::Path) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let head = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if head.is_empty() { None } else { Some(head) }
+}
+
+/// Provenance citation for a memory: the exact source span the fact was
+/// drawn from. A tripwire, not a judge: it answers whether the cited lines
+/// changed, never whether the meaning changed.
+///
+/// Design follows the evidence-object pattern (source id + revision +
+/// passage + locator; cf. VeriCite 2025 deterministic quote-matching):
+/// the citation binds path, bytes, originating repository, and revision,
+/// and verification is deterministic — no model call, no fuzzy matching.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SourceCitation {
+    /// Repo-relative path (e.g. `src/agent/turn_loops.rs`). Absolute paths
+    /// and any `..` component are rejected at verify time.
+    pub path: String,
+    /// 0-based start line of the span (inclusive).
+    pub start_line: usize,
+    /// 0-based end line of the span (exclusive).
+    pub end_line: usize,
+    /// sha256 hex of the EXACT span bytes (raw file bytes from the first
+    /// byte of start_line through the last byte of end_line-1, line
+    /// endings included). No normalization: CRLF/LF swaps, trailing
+    /// newlines, string-literal bytes, and whitespace-sensitive indentation
+    /// all read as real changes.
+    pub span_hash: String,
+    /// The span text at bank time (lines joined with `\n`). Used to find
+    /// a moved block by content search when offsets shift.
+    pub span_text: String,
+    /// Up to 5 lines immediately before the span at bank time (joined with
+    /// `\n`). Relocation context only.
+    #[serde(default)]
+    pub context_before: String,
+    /// Up to 5 lines immediately after the span at bank time (joined with
+    /// `\n`). Relocation context only.
+    #[serde(default)]
+    pub context_after: String,
+    /// Stable repo identity at bank time (`git:<root-commit>` normally,
+    /// `path:<canonical-root>` fallback). Verified on read: a global memory
+    /// resolved under a different repo reads as Unverifiable, while a mere
+    /// checkout move keeps verifying. Empty means legacy/unknown: skipped.
+    #[serde(default)]
+    pub repo_id: String,
+    /// Upstream remote at bank time. Clones share the root commit but not
+    /// the origin (a clone's origin points at its source): when the history
+    /// matches but the origin doesn't, the checkout is foreign and the mark
+    /// says so instead of silently presenting the fact as locally backed.
+    /// None means legacy/unknown or no remote: no foreign check.
+    #[serde(default)]
+    pub origin: Option<String>,
+    /// Short git HEAD at bank time (`rev-parse --short HEAD`), best-effort.
+    /// Advisory only: when the tree moved on, the stale mark names both
+    /// revisions so the model knows how far behind the memory is.
+    #[serde(default)]
+    pub git_head: Option<String>,
+}
+
+/// Lines of file context stored each side of a cited span for relocation.
+pub const CITATION_CONTEXT_LINES: usize = 5;
+
+/// Outcome of checking a citation against the current tree.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CitationStatus {
+    /// Span bytes hash equal at the stored offsets.
+    Fresh,
+    /// Span moved; content found at the returned offsets. Offsets are NOT
+    /// persisted (the entry is never rewritten by verification); the fresh
+    /// location is used for this check only.
+    Relocated { start_line: usize, end_line: usize },
+    /// Span content no longer matches anywhere in the file.
+    Stale,
+    /// File missing, unreadable, or the path escapes the repo root.
+    /// Treated as no mark (never blocks recall).
+    Unverifiable,
+}
+
+impl SourceCitation {
+    /// sha256 hex of raw bytes. The citation hash covers the exact span
+    /// bytes (line endings included): LF-to-CRLF conversion or a
+    /// trailing-newline add/remove changes the hash and reads as Stale.
+    pub fn hash_span_bytes(bytes: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(bytes);
+        format!("{:x}", hasher.finalize())
+    }
+
+    /// sha256 hex of lines joined with a single `\n`. Used only as a fast
+    /// prefilter for relocation search (normalization-tolerant); the verdict
+    /// always confirms against the raw-byte hash.
+    pub fn hash_span_lines(lines: &[&str]) -> String {
+        Self::hash_span_bytes(lines.join("\n").as_bytes())
+    }
+
+    /// Byte offset where each line starts, plus EOF as the final sentinel,
+    /// so a line span maps to an exact byte window (line endings intact).
+    fn line_byte_offsets(text: &str) -> Vec<usize> {
+        let mut offsets = vec![0];
+        for (i, b) in text.bytes().enumerate() {
+            if b == b'\n' {
+                offsets.push(i + 1);
+            }
+        }
+        if *offsets.last().unwrap() != text.len() {
+            offsets.push(text.len());
+        }
+        offsets
+    }
+
+    /// Confine a repo-relative path under `repo_root`. Rejects absolute
+    /// paths and any `..` component, then canonicalizes and requires the
+    /// result to stay under the canonicalized root (symlink escape safe).
+    fn confined_path(&self, repo_root: &std::path::Path) -> Option<std::path::PathBuf> {
+        let rel = std::path::Path::new(&self.path);
+        if rel.is_absolute()
+            || rel.components().any(|c| {
+                matches!(
+                    c,
+                    std::path::Component::ParentDir | std::path::Component::Prefix(_)
+                )
+            })
+        {
+            return None;
+        }
+        let root = repo_root.canonicalize().ok()?;
+        let full = root.join(rel).canonicalize().ok()?;
+        if full.starts_with(&root) {
+            Some(full)
+        } else {
+            None
+        }
+    }
+
+    /// Check the citation against the current tree. Pure read: never writes
+    /// the entry, never deletes, never blocks.
+    pub fn verify(&self, repo_root: &std::path::Path) -> CitationStatus {
+        if self.end_line <= self.start_line {
+            return CitationStatus::Unverifiable;
+        }
+        let path = match self.confined_path(repo_root) {
+            Some(path) => path,
+            None => return CitationStatus::Unverifiable,
+        };
+        // A global memory banked in another repo must not verify against an
+        // unrelated file that happens to share the relative path. Empty
+        // repo_id means legacy/unknown: skip the check.
+        if !self.repo_id.is_empty() && repo_identity(repo_root) != self.repo_id {
+            return CitationStatus::Unverifiable;
+        }
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(_) => return CitationStatus::Unverifiable,
+        };
+        let lines: Vec<&str> = text.lines().collect();
+        // Persisted citations are untrusted input (hand-edited JSON, older
+        // versions): validate stored bounds against the live file BEFORE any
+        // arithmetic or indexing. end_line = usize::MAX overflowed
+        // `end_line + 1` and indexed the offset table out of bounds.
+        if self.end_line > lines.len() {
+            return CitationStatus::Unverifiable;
+        }
+        let offsets = Self::line_byte_offsets(&text);
+        // Exact window first, on raw bytes (line-ending faithful). Safe now:
+        // end_line <= lines.len() < usize::MAX, so end_line + 1 cannot
+        // overflow and both offsets indices are in range.
+        if self.end_line + 1 <= offsets.len() {
+            let window = &text.as_bytes()[offsets[self.start_line]..offsets[self.end_line]];
+            if Self::hash_span_bytes(window) == self.span_hash {
+                return CitationStatus::Fresh;
+            }
+        }
+        // Relocation: exact content search for the banked span lines. A
+        // span match alone is not enough: an identical twin elsewhere must
+        // not mask the original's edit. The stored 5-line context each side
+        // disambiguates: full context match relocates, span match with
+        // context mismatch reads as Stale.
+        let span_lines: Vec<&str> = self.span_text.lines().collect();
+        if !span_lines.is_empty() && span_lines.len() == self.end_line - self.start_line {
+            let n = span_lines.len();
+            if n <= lines.len() {
+                let before: Vec<&str> = self.context_before.lines().collect();
+                let after: Vec<&str> = self.context_after.lines().collect();
+                for start in 0..=lines.len() - n {
+                    if lines[start..start + n] != span_lines[..] {
+                        continue;
+                    }
+                    let raw = &text.as_bytes()[offsets[start]..offsets[start + n]];
+                    if Self::hash_span_bytes(raw) != self.span_hash {
+                        continue;
+                    }
+                    let end = start + n;
+                    // Strict: the candidate must offer exactly the stored
+                    // context on both sides. A file-start span (empty
+                    // stored context) only relocates to file start; a
+                    // mid-file twin with different surroundings reads as
+                    // Stale, never Relocated. No vacuous empty matches.
+                    let before_ok = if before.is_empty() {
+                        start == 0
+                    } else {
+                        start >= before.len() && lines[start - before.len()..start] == before[..]
+                    };
+                    let after_ok = if after.is_empty() {
+                        end == lines.len()
+                    } else {
+                        lines.len() - end >= after.len()
+                            && lines[end..end + after.len()] == after[..]
+                    };
+                    if before_ok && after_ok {
+                        return CitationStatus::Relocated {
+                            start_line: start,
+                            end_line: end,
+                        };
+                    }
+                }
+            }
+        }
+        CitationStatus::Stale
+    }
+
+    /// Bank a citation: confine `path` under `repo_root`, read the file,
+    /// hash the exact span bytes, and capture the span text plus 5 lines of
+    /// context each side for relocation. Returns `None` (fail-soft: the
+    /// memory stores uncited) on any failure — bad range, missing file,
+    /// path escape, oversized span.
+    pub fn bank(
+        repo_root: &std::path::Path,
+        path: &str,
+        start_line: usize,
+        end_line: usize,
+    ) -> Option<SourceCitation> {
+        if end_line <= start_line || end_line - start_line > 200 {
+            return None;
+        }
+        let probe = SourceCitation {
+            path: path.to_string(),
+            start_line,
+            end_line,
+            span_hash: String::new(),
+            span_text: String::new(),
+            context_before: String::new(),
+            context_after: String::new(),
+            repo_id: String::new(),
+            git_head: None,
+            origin: None,
+        };
+        let full = probe.confined_path(repo_root)?;
+        let text = std::fs::read_to_string(&full).ok()?;
+        let repo_id = repo_identity(repo_root);
+        let git_head = git_head_for(repo_root);
+        let origin = repo_origin(repo_root);
+        let lines: Vec<&str> = text.lines().collect();
+        if end_line > lines.len() {
+            return None;
+        }
+        // Raw span bytes (line endings intact): LF/CRLF and trailing
+        // newlines participate in the hash.
+        let offsets = Self::line_byte_offsets(&text);
+        let span_bytes = &text.as_bytes()[offsets[start_line]..offsets[end_line]];
+        let span = &lines[start_line..end_line];
+        let from = start_line.saturating_sub(CITATION_CONTEXT_LINES);
+        let to = (end_line + CITATION_CONTEXT_LINES).min(lines.len());
+        Some(SourceCitation {
+            path: path.to_string(),
+            start_line,
+            end_line,
+            span_hash: Self::hash_span_bytes(span_bytes),
+            span_text: span.join("\n"),
+            context_before: lines[from..start_line].join("\n"),
+            context_after: lines[end_line..to].join("\n"),
+            repo_id,
+            git_head,
+            origin,
+        })
+    }
+}
+
 pub fn format_entries_for_prompt(entries: &[MemoryEntry], limit: usize) -> Option<String> {
-    format_entries_for_prompt_with_header(entries, limit, false, false)
+    format_entries_for_prompt_with_header(entries, limit, false, false, None)
 }
 
 pub fn format_relevant_prompt(entries: &[MemoryEntry], limit: usize) -> Option<String> {
     format_entries_for_prompt(entries, limit).map(|formatted| format!("# Memory\n\n{formatted}"))
 }
 
+/// Recall-facing formatter: verifies cited entries against `repo_root` and
+/// carries an advisory stale mark on drifted ones. Never withholds a memory.
+pub fn format_relevant_prompt_verified(
+    entries: &[MemoryEntry],
+    limit: usize,
+    repo_root: &std::path::Path,
+) -> Option<String> {
+    format_entries_for_prompt_with_header(entries, limit, false, false, Some(repo_root))
+        .map(|formatted| format!("# Memory\n\n{formatted}"))
+}
+
 pub fn format_relevant_display_prompt(entries: &[MemoryEntry], limit: usize) -> Option<String> {
-    format_entries_for_prompt_with_header(entries, limit, true, true)
+    format_entries_for_prompt_with_header(entries, limit, true, true, None)
+}
+
+/// True when the citation verifies under matching history but the checkout
+/// is foreign: same root commit, different upstream remote (a clone, a fork
+/// checkout, a re-pointed remote). The bytes back the fact, but the project
+/// context may not — the mark says so instead of silent Fresh.
+pub fn is_foreign_checkout(citation: &SourceCitation, repo_root: &std::path::Path) -> bool {
+    match (&citation.origin, repo_origin(repo_root)) {
+        (Some(banked), Some(current)) => banked != &current,
+        _ => false,
+    }
+}
+
+/// Advisory stale mark for a cited memory, or `None` when no mark applies.
+/// Fresh, relocated, unverifiable, and uncited memories render unmarked:
+/// staleness never blocks recall, it only informs the model that the source
+/// changed since banking so it can re-verify before relying on the fact.
+pub fn citation_stale_mark(
+    entry: &MemoryEntry,
+    repo_root: Option<&std::path::Path>,
+) -> Option<String> {
+    let citation = entry.citation.as_ref()?;
+    let root = repo_root?;
+    if is_foreign_checkout(citation, root)
+        && matches!(
+            citation.verify(root),
+            CitationStatus::Fresh | CitationStatus::Relocated { .. }
+        )
+    {
+        return Some(format!(
+            "  (source verified in a different checkout of this history (origin {}) — re-read the file if the project context matters)",
+            // Defense in depth: origins are redacted at capture, but a
+            // citation banked before the redaction still carries secrets.
+            strip_url_credentials(citation.origin.as_deref().unwrap_or("unknown")),
+        ));
+    }
+    if citation.verify(root) == CitationStatus::Stale {
+        let commit_note = match (&citation.git_head, git_head_for(root)) {
+            (Some(old), Some(new)) if old != &new => {
+                format!(" (recorded at {old}, tree now at {new})")
+            }
+            _ => String::new(),
+        };
+        Some(format!(
+            "  (source changed since this was recorded: {} — re-read the file before relying on it{})",
+            citation.path, commit_note
+        ))
+    } else {
+        None
+    }
 }
 
 fn format_entries_for_prompt_with_header(
@@ -666,6 +1116,7 @@ fn format_entries_for_prompt_with_header(
     limit: usize,
     include_header: bool,
     include_updated_at_comments: bool,
+    repo_root: Option<&std::path::Path>,
 ) -> Option<String> {
     let mut sections: HashMap<MemoryCategory, Vec<&MemoryEntry>> = HashMap::new();
 
@@ -695,6 +1146,10 @@ fn format_entries_for_prompt_with_header(
         output.push_str(&format!("## {title}\n"));
         for (idx, item) in items.into_iter().enumerate() {
             output.push_str(&format!("{}. {}\n", idx + 1, item.content.trim()));
+            if let Some(mark) = citation_stale_mark(item, repo_root) {
+                output.push_str(&mark);
+                output.push('\n');
+            }
             if include_updated_at_comments {
                 output.push_str(&format!(
                     "<!-- updated_at: {} -->\n",
@@ -985,6 +1440,11 @@ pub mod ranking {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use crate::{
+            CitationStatus, MemoryCategory, MemoryEntry, SourceCitation, citation_stale_mark,
+            find_repo_root, format_relevant_prompt, format_relevant_prompt_verified, git_head_for,
+            is_foreign_checkout, strip_url_credentials,
+        };
 
         #[test]
         fn top_k_by_score_keeps_highest_scores_in_order() {
@@ -1002,6 +1462,615 @@ pub mod ranking {
         fn top_k_zero_limit_is_empty() {
             assert!(top_k_by_score([("a", 1.0)], 0).is_empty());
             assert!(top_k_by_ord([("a", 1)], 0).is_empty());
+        }
+
+        fn write_tree(files: &[(&str, &str)]) -> tempfile::TempDir {
+            let dir = tempfile::TempDir::new().expect("temp dir");
+            for (name, content) in files {
+                let path = dir.path().join(name);
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent).expect("mkdir");
+                }
+                std::fs::write(&path, content).expect("write file");
+            }
+            dir
+        }
+
+        fn cite(path: &str, start: usize, end: usize, text: &str) -> SourceCitation {
+            // Mirrors SourceCitation::bank: raw span bytes plus 5 lines each side.
+            let lines: Vec<&str> = text.lines().collect();
+            let span: Vec<&str> = lines[start..end].to_vec();
+            let from = start.saturating_sub(5);
+            let to = (end + 5).min(lines.len());
+            let offsets = SourceCitation::line_byte_offsets(text);
+            SourceCitation {
+                path: path.to_string(),
+                start_line: start,
+                end_line: end,
+                span_hash: SourceCitation::hash_span_bytes(
+                    &text.as_bytes()[offsets[start]..offsets[end]],
+                ),
+                span_text: span.join("\n"),
+                context_before: lines[from..start].join("\n"),
+                context_after: lines[end..to].join("\n"),
+                // Tests opt out of repo binding (legacy path); binding is
+                // covered by dedicated bank tests below.
+                repo_id: String::new(),
+                git_head: None,
+                origin: None,
+            }
+        }
+
+        fn cited_entry(path: &str, start: usize, end: usize, text: &str) -> MemoryEntry {
+            let mut entry = MemoryEntry::new(MemoryCategory::Fact, "banked fact");
+            entry.citation = Some(cite(path, start, end, text));
+            entry
+        }
+
+        const SAMPLE: &str = "line0\nfn alpha() {\n    let x = 1;\n}\nline4\n";
+
+        #[test]
+        fn citation_fresh_on_unchanged_span() {
+            let dir = write_tree(&[("a.rs", SAMPLE)]);
+            let entry = cited_entry("a.rs", 1, 4, SAMPLE);
+            assert_eq!(
+                entry.citation.as_ref().unwrap().verify(dir.path()),
+                CitationStatus::Fresh
+            );
+        }
+
+        #[test]
+        fn citation_stale_on_content_edit() {
+            let dir = write_tree(&[("a.rs", SAMPLE)]);
+            let entry = cited_entry("a.rs", 1, 4, SAMPLE);
+            std::fs::write(
+                dir.path().join("a.rs"),
+                SAMPLE.replace("let x = 1;", "let x = 2;"),
+            )
+            .unwrap();
+            assert_eq!(
+                entry.citation.as_ref().unwrap().verify(dir.path()),
+                CitationStatus::Stale
+            );
+        }
+
+        #[test]
+        fn citation_stale_on_whitespace_only_edit() {
+            // Exact bytes: an indentation change is a real change.
+            let dir = write_tree(&[("a.rs", SAMPLE)]);
+            let entry = cited_entry("a.rs", 1, 4, SAMPLE);
+            std::fs::write(
+                dir.path().join("a.rs"),
+                SAMPLE.replace("    let x", "  let x"),
+            )
+            .unwrap();
+            assert_eq!(
+                entry.citation.as_ref().unwrap().verify(dir.path()),
+                CitationStatus::Stale
+            );
+        }
+
+        #[test]
+        fn citation_stale_on_string_literal_edit() {
+            let dir = write_tree(&[("s.py", "a = 1\nname = \"old\"\nb = 2\n")]);
+            let text = "a = 1\nname = \"old\"\nb = 2\n";
+            let entry = cited_entry("s.py", 1, 2, text);
+            std::fs::write(dir.path().join("s.py"), text.replace("old", "new")).unwrap();
+            assert_eq!(
+                entry.citation.as_ref().unwrap().verify(dir.path()),
+                CitationStatus::Stale
+            );
+        }
+
+        #[test]
+        fn citation_relocated_when_block_moves() {
+            let dir = write_tree(&[("a.rs", SAMPLE)]);
+            let entry = cited_entry("a.rs", 1, 4, SAMPLE);
+            let moved = "// header\n// more\n".to_string() + SAMPLE;
+            std::fs::write(dir.path().join("a.rs"), &moved).unwrap();
+            assert_eq!(
+                entry.citation.as_ref().unwrap().verify(dir.path()),
+                CitationStatus::Relocated {
+                    start_line: 3,
+                    end_line: 6
+                }
+            );
+        }
+
+        #[test]
+        fn citation_unverifiable_paths() {
+            let dir = write_tree(&[("a.rs", SAMPLE)]);
+            let entry = cited_entry("a.rs", 1, 4, SAMPLE);
+            // Absolute path rejected.
+            let mut abs = entry.clone();
+            abs.citation.as_mut().unwrap().path =
+                dir.path().join("a.rs").to_string_lossy().to_string();
+            assert_eq!(
+                abs.citation.as_ref().unwrap().verify(dir.path()),
+                CitationStatus::Unverifiable
+            );
+            // Parent traversal rejected.
+            let mut trav = entry.clone();
+            trav.citation.as_mut().unwrap().path = "../a.rs".to_string();
+            assert_eq!(
+                trav.citation.as_ref().unwrap().verify(dir.path()),
+                CitationStatus::Unverifiable
+            );
+            // Missing file.
+            let mut missing = entry.clone();
+            missing.citation.as_mut().unwrap().path = "gone.rs".to_string();
+            assert_eq!(
+                missing.citation.as_ref().unwrap().verify(dir.path()),
+                CitationStatus::Unverifiable
+            );
+            // Degenerate range.
+            let mut degen = entry;
+            degen.citation.as_mut().unwrap().end_line = 1;
+            assert_eq!(
+                degen.citation.as_ref().unwrap().verify(dir.path()),
+                CitationStatus::Unverifiable
+            );
+        }
+
+        #[test]
+        fn citation_symlink_escape_rejected() {
+            #[cfg(unix)]
+            {
+                let outside = write_tree(&[("secret.rs", SAMPLE)]);
+                let dir = write_tree(&[("a.rs", SAMPLE)]);
+                std::os::unix::fs::symlink(
+                    outside.path().join("secret.rs"),
+                    dir.path().join("link.rs"),
+                )
+                .unwrap();
+                let entry = cited_entry("link.rs", 1, 4, SAMPLE);
+                assert_eq!(
+                    entry.citation.as_ref().unwrap().verify(dir.path()),
+                    CitationStatus::Unverifiable
+                );
+            }
+        }
+
+        #[test]
+        fn verified_prompt_marks_only_stale() {
+            let dir = write_tree(&[("a.rs", SAMPLE)]);
+            let fresh = cited_entry("a.rs", 1, 4, SAMPLE);
+            let mut stale = cited_entry("a.rs", 1, 4, SAMPLE);
+            stale.content = "drifted fact".to_string();
+            std::fs::write(
+                dir.path().join("a.rs"),
+                SAMPLE.replace("let x = 1;", "let x = 9;"),
+            )
+            .unwrap();
+            let plain = MemoryEntry::new(MemoryCategory::Fact, "plain fact");
+            // After the edit both cited entries verify Stale; relocate the
+            // fresh one's target back so it reads Fresh.
+            std::fs::write(dir.path().join("a.rs"), SAMPLE).unwrap();
+            let out = format_relevant_prompt_verified(
+                &[fresh.clone(), stale.clone(), plain.clone()],
+                10,
+                dir.path(),
+            )
+            .expect("prompt");
+            assert!(!out.contains("source changed"), "fresh + plain unmarked");
+            // Now drift again: only the mark path matters.
+            std::fs::write(
+                dir.path().join("a.rs"),
+                SAMPLE.replace("let x = 1;", "let x = 9;"),
+            )
+            .unwrap();
+            let out = format_relevant_prompt_verified(&[stale], 10, dir.path()).expect("prompt");
+            assert!(out.contains("drifted fact"));
+            assert!(out.contains("source changed since this was recorded: a.rs"));
+        }
+
+        #[test]
+        fn relocated_entry_renders_unmarked() {
+            let dir = write_tree(&[("a.rs", SAMPLE)]);
+            let entry = cited_entry("a.rs", 1, 4, SAMPLE);
+            let moved = "// header\n".to_string() + SAMPLE;
+            std::fs::write(dir.path().join("a.rs"), &moved).unwrap();
+            let out = format_relevant_prompt_verified(std::slice::from_ref(&entry), 10, dir.path())
+                .expect("prompt");
+            assert!(!out.contains("source changed"));
+        }
+
+        #[test]
+        fn bank_hashes_exact_span_with_context() {
+            let dir = write_tree(&[("a.rs", SAMPLE)]);
+            let cited = SourceCitation::bank(dir.path(), "a.rs", 1, 4).expect("bank");
+            assert_eq!((cited.start_line, cited.end_line), (1, 4));
+            assert_eq!(cited.span_text, "fn alpha() {\n    let x = 1;\n}");
+            assert_eq!(cited.context_before, "line0");
+            assert_eq!(cited.context_after, "line4");
+            assert_eq!(cited.verify(dir.path()), CitationStatus::Fresh);
+        }
+
+        #[test]
+        fn bank_rejects_bad_ranges_and_escapes() {
+            let dir = write_tree(&[("a.rs", SAMPLE)]);
+            assert!(SourceCitation::bank(dir.path(), "a.rs", 4, 1).is_none());
+            assert!(SourceCitation::bank(dir.path(), "a.rs", 0, 99).is_none());
+            assert!(SourceCitation::bank(dir.path(), "../a.rs", 1, 2).is_none());
+            assert!(SourceCitation::bank(dir.path(), "gone.rs", 1, 2).is_none());
+        }
+
+        #[test]
+        fn relocation_uses_context_to_break_twin_ties() {
+            // Two identical blocks; the cited (first) one is edited. The twin
+            // still matches the span text but its context differs, so the
+            // verdict must be Stale, not Relocated.
+            let text =
+                "fn twin() {\n    let v = 1;\n}\n// between\nfn twin() {\n    let v = 1;\n}\n";
+            let dir = write_tree(&[("t.rs", text)]);
+            let cited = SourceCitation::bank(dir.path(), "t.rs", 4, 7).expect("bank");
+            // Edit the CITED (second) block only: line 5 v=1 -> v=9.
+            let mut edited_lines: Vec<&str> = text.lines().collect();
+            edited_lines[5] = "    let v = 9;";
+            let edited = edited_lines.join("\n") + "\n";
+            std::fs::write(dir.path().join("t.rs"), &edited).unwrap();
+            assert_eq!(cited.verify(dir.path()), CitationStatus::Stale);
+        }
+
+        #[test]
+        fn relocation_finds_moved_block_with_intact_context() {
+            let text =
+                "fn twin() {\n    let v = 1;\n}\n// between\nfn other() {\n    let w = 0;\n}\n";
+            let dir = write_tree(&[("t.rs", text)]);
+            let cited = SourceCitation::bank(dir.path(), "t.rs", 4, 7).expect("bank");
+            // Prepend lines: the block moves but its context moves with it.
+            let moved = "// h0\n// h1\n".to_string() + text;
+            std::fs::write(dir.path().join("t.rs"), &moved).unwrap();
+            assert_eq!(
+                cited.verify(dir.path()),
+                CitationStatus::Relocated {
+                    start_line: 6,
+                    end_line: 9
+                }
+            );
+        }
+
+        #[test]
+        fn find_repo_root_walks_up_and_falls_back() {
+            let dir = write_tree(&[("sub/nested/a.rs", "fn a() {}\n")]);
+            // No .git: falls back to the start dir itself.
+            let nested = dir.path().join("sub").join("nested");
+            assert_eq!(find_repo_root(&nested), nested);
+            // With .git at top: nested sessions anchor at the root.
+            std::fs::create_dir_all(dir.path().join(".git")).unwrap();
+            assert_eq!(find_repo_root(&nested), dir.path().to_path_buf());
+        }
+
+        #[test]
+        fn crlf_to_lf_conversion_reads_stale() {
+            let crlf = "a = 1\r\nb = 2\r\n";
+            let dir = write_tree(&[("w.py", crlf)]);
+            let cited = SourceCitation::bank(dir.path(), "w.py", 0, 2).expect("bank");
+            assert_eq!(cited.verify(dir.path()), CitationStatus::Fresh);
+            std::fs::write(dir.path().join("w.py"), "a = 1\nb = 2\n").unwrap();
+            assert_eq!(cited.verify(dir.path()), CitationStatus::Stale);
+        }
+
+        #[test]
+        fn trailing_newline_add_remove_reads_stale() {
+            let dir = write_tree(&[("t.rs", "fn a() {}\n")]);
+            let cited = SourceCitation::bank(dir.path(), "t.rs", 0, 1).expect("bank");
+            assert_eq!(cited.verify(dir.path()), CitationStatus::Fresh);
+            std::fs::write(dir.path().join("t.rs"), "fn a() {}").unwrap();
+            assert_eq!(cited.verify(dir.path()), CitationStatus::Stale);
+            // Appending a line AFTER the cited span leaves the span bytes
+            // intact: Fresh is correct, the citation covers line 0 only.
+            std::fs::write(dir.path().join("t.rs"), "fn a() {}\n\n").unwrap();
+            assert_eq!(
+                SourceCitation::bank(dir.path(), "t.rs", 0, 1)
+                    .expect("re-bank")
+                    .verify(dir.path()),
+                CitationStatus::Fresh
+            );
+        }
+
+        #[test]
+        fn repo_binding_rejects_foreign_root() {
+            let dir_a = write_tree(&[("s.rs", "fn same() {}\n")]);
+            let dir_b = write_tree(&[("s.rs", "fn same() {}\n")]);
+            let cited = SourceCitation::bank(dir_a.path(), "s.rs", 0, 1).expect("bank");
+            assert!(!cited.repo_id.is_empty());
+            assert_eq!(cited.verify(dir_a.path()), CitationStatus::Fresh);
+            // Identical bytes, different repo: must not verify.
+            assert_eq!(cited.verify(dir_b.path()), CitationStatus::Unverifiable);
+        }
+
+        #[test]
+        fn legacy_citation_without_repo_id_verifies_normally() {
+            let dir = write_tree(&[("s.rs", "fn same() {}\n")]);
+            let mut cited = SourceCitation::bank(dir.path(), "s.rs", 0, 1).expect("bank");
+            cited.repo_id.clear();
+            assert_eq!(cited.verify(dir.path()), CitationStatus::Fresh);
+        }
+
+        #[test]
+        fn old_json_without_identity_fields_loads() {
+            let raw = r#"{"path":"s.rs","start_line":0,"end_line":1,"span_hash":"ab","span_text":"x","context_before":"","context_after":""}"#;
+            let cited: SourceCitation = serde_json::from_str(raw).expect("legacy loads");
+            assert!(cited.repo_id.is_empty());
+            assert!(cited.git_head.is_none());
+        }
+
+        #[test]
+        fn git_head_recorded_and_drift_named_in_mark() {
+            if std::process::Command::new("git")
+                .arg("--version")
+                .output()
+                .is_err()
+            {
+                return;
+            }
+            let dir = write_tree(&[("s.rs", "fn v1() {}\n")]);
+            let run = |args: &[&str]| {
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(dir.path())
+                    .env("GIT_CONFIG_NOSYSTEM", "1")
+                    .env("GIT_AUTHOR_NAME", "t")
+                    .env("GIT_AUTHOR_EMAIL", "t@t")
+                    .env("GIT_COMMITTER_NAME", "t")
+                    .env("GIT_COMMITTER_EMAIL", "t@t")
+                    .output()
+                    .expect("git")
+            };
+            assert!(run(&["init", "-q"]).status.success());
+            assert!(run(&["add", "."]).status.success());
+            assert!(run(&["commit", "-qm", "one"]).status.success());
+            let cited = SourceCitation::bank(dir.path(), "s.rs", 0, 1).expect("bank");
+            let head_one = cited.git_head.clone().expect("head recorded");
+            // Edit the span and commit again: stale with both revisions named.
+            std::fs::write(dir.path().join("s.rs"), "fn v2() {}\n").unwrap();
+            assert!(run(&["add", "."]).status.success());
+            assert!(run(&["commit", "-qm", "two"]).status.success());
+            let head_two = git_head_for(dir.path()).expect("head now");
+            assert_ne!(head_one, head_two);
+            let entry = MemoryEntry {
+                citation: Some(cited),
+                ..MemoryEntry::new(MemoryCategory::Fact, "v thing")
+            };
+            let mark =
+                citation_stale_mark(&entry, Some(dir.path())).expect("stale mark with drift");
+            assert!(mark.contains(&head_one), "{mark}");
+            assert!(mark.contains(&head_two), "{mark}");
+            assert!(mark.contains("re-read"), "{mark}");
+        }
+
+        #[test]
+        fn malformed_bounds_verify_unverifiable_never_panic() {
+            let dir = write_tree(&[("s.rs", "fn a() {}\n")]);
+            for (start, end) in [
+                (0usize, usize::MAX),
+                (usize::MAX, usize::MAX),
+                (5, 9),
+                (2, 2),
+            ] {
+                let bad = SourceCitation {
+                    path: "s.rs".to_string(),
+                    start_line: start,
+                    end_line: end,
+                    span_hash: "00".to_string(),
+                    span_text: String::new(),
+                    context_before: String::new(),
+                    context_after: String::new(),
+                    repo_id: String::new(),
+                    git_head: None,
+                    origin: None,
+                };
+                assert_eq!(bad.verify(dir.path()), CitationStatus::Unverifiable);
+                // Recall-level: malformed citations render unmarked, no panic.
+                let entry = MemoryEntry {
+                    citation: Some(bad),
+                    ..MemoryEntry::new(MemoryCategory::Fact, "fragile fact")
+                };
+                let out = format_relevant_prompt_verified(&[entry], 10, dir.path())
+                    .expect("recall renders");
+                assert!(out.contains("fragile fact"));
+                assert!(!out.contains("source changed"));
+            }
+        }
+
+        #[test]
+        fn checkout_move_keeps_verifying() {
+            if std::process::Command::new("git")
+                .arg("--version")
+                .output()
+                .is_err()
+            {
+                return;
+            }
+            let outer = tempfile::TempDir::new().expect("temp");
+            let repo = outer.path().join("checkout");
+            std::fs::create_dir_all(&repo).unwrap();
+            std::fs::write(repo.join("s.rs"), "fn a() {}\n").unwrap();
+            let run = |args: &[&str], dir: &std::path::Path| {
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(dir)
+                    .env("GIT_CONFIG_NOSYSTEM", "1")
+                    .env("GIT_AUTHOR_NAME", "t")
+                    .env("GIT_AUTHOR_EMAIL", "t@t")
+                    .env("GIT_COMMITTER_NAME", "t")
+                    .env("GIT_COMMITTER_EMAIL", "t@t")
+                    .output()
+                    .expect("git")
+            };
+            assert!(run(&["init", "-q"], &repo).status.success());
+            assert!(run(&["add", "."], &repo).status.success());
+            assert!(run(&["commit", "-qm", "one"], &repo).status.success());
+            let cited = SourceCitation::bank(&repo, "s.rs", 0, 1).expect("bank");
+            assert!(cited.repo_id.starts_with("git:"));
+            assert_eq!(cited.verify(&repo), CitationStatus::Fresh);
+            // Rename the checkout: identity follows the history, not the path.
+            let moved = outer.path().join("renamed");
+            std::fs::rename(&repo, &moved).unwrap();
+            assert_eq!(cited.verify(&moved), CitationStatus::Fresh);
+        }
+
+        #[test]
+        fn foreign_clone_verifies_fresh_but_marked() {
+            if std::process::Command::new("git")
+                .arg("--version")
+                .output()
+                .is_err()
+            {
+                return;
+            }
+            let outer = tempfile::TempDir::new().expect("temp");
+            let repo_a = outer.path().join("a");
+            std::fs::create_dir_all(&repo_a).unwrap();
+            std::fs::write(repo_a.join("s.rs"), "fn a() {}\n").unwrap();
+            let run = |args: &[&str], dir: &std::path::Path| {
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(dir)
+                    .env("GIT_CONFIG_NOSYSTEM", "1")
+                    .env("GIT_AUTHOR_NAME", "t")
+                    .env("GIT_AUTHOR_EMAIL", "t@t")
+                    .env("GIT_COMMITTER_NAME", "t")
+                    .env("GIT_COMMITTER_EMAIL", "t@t")
+                    .output()
+                    .expect("git")
+            };
+            assert!(run(&["init", "-q"], &repo_a).status.success());
+            assert!(run(&["add", "."], &repo_a).status.success());
+            assert!(run(&["commit", "-qm", "one"], &repo_a).status.success());
+            // A pretends to be pushed upstream: origin is the upstream URL.
+            assert!(
+                run(
+                    &["remote", "add", "origin", "https://example.com/up.git"],
+                    &repo_a
+                )
+                .status
+                .success()
+            );
+            let cited = SourceCitation::bank(&repo_a, "s.rs", 0, 1).expect("bank");
+            assert_eq!(cited.origin.as_deref(), Some("https://example.com/up.git"));
+            // Clone B: same history, but its origin points at A, not upstream.
+            let repo_b = outer.path().join("b");
+            assert!(
+                run(
+                    &[
+                        "clone",
+                        "-q",
+                        repo_a.to_str().unwrap(),
+                        repo_b.to_str().unwrap()
+                    ],
+                    outer.path()
+                )
+                .status
+                .success()
+            );
+            assert_eq!(cited.verify(&repo_b), CitationStatus::Fresh);
+            assert!(is_foreign_checkout(&cited, &repo_b));
+            assert!(!is_foreign_checkout(&cited, &repo_a));
+            let entry = MemoryEntry {
+                citation: Some(cited),
+                ..MemoryEntry::new(MemoryCategory::Fact, "cloned fact")
+            };
+            let out = format_relevant_prompt_verified(&[entry], 10, &repo_b).expect("renders");
+            assert!(out.contains("different checkout"), "{out}");
+        }
+
+        #[test]
+        fn credentialed_origins_never_persist_or_render() {
+            assert_eq!(
+                strip_url_credentials("https://user:s3cret@host.com/a.git"),
+                "https://host.com/a.git"
+            );
+            assert_eq!(
+                strip_url_credentials("https://user@host.com/a.git"),
+                "https://host.com/a.git"
+            );
+            assert_eq!(
+                strip_url_credentials("https://host.com/a.git"),
+                "https://host.com/a.git"
+            );
+            // No scheme or no userinfo: untouched.
+            assert_eq!(
+                strip_url_credentials("git@host.com:a.git"),
+                "git@host.com:a.git"
+            );
+            assert_eq!(
+                strip_url_credentials("/local/path@weird"),
+                "/local/path@weird"
+            );
+            if std::process::Command::new("git")
+                .arg("--version")
+                .output()
+                .is_err()
+            {
+                return;
+            }
+            // Bank under a credentialed origin, then re-point it clean: the
+            // stored origin must already be redacted, and the foreign mark
+            // must never render the secret.
+            let dir = write_tree(&[("s.rs", "fn a() {}\n")]);
+            let run = |args: &[&str]| {
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(dir.path())
+                    .env("GIT_CONFIG_NOSYSTEM", "1")
+                    .env("GIT_AUTHOR_NAME", "t")
+                    .env("GIT_AUTHOR_EMAIL", "t@t")
+                    .env("GIT_COMMITTER_NAME", "t")
+                    .env("GIT_COMMITTER_EMAIL", "t@t")
+                    .output()
+                    .expect("git")
+            };
+            assert!(run(&["init", "-q"]).status.success());
+            assert!(run(&["add", "."]).status.success());
+            assert!(run(&["commit", "-qm", "one"]).status.success());
+            assert!(
+                run(&[
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://user:s3cret@host.com/a.git"
+                ])
+                .status
+                .success()
+            );
+            let cited = SourceCitation::bank(dir.path(), "s.rs", 0, 1).expect("bank");
+            assert_eq!(
+                cited.origin.as_deref(),
+                Some("https://host.com/a.git"),
+                "secret stripped at capture"
+            );
+            // Legacy-shaped citation that still holds the secret (banked
+            // before redaction): the mark must scrub it at render.
+            let mut legacy = cited.clone();
+            legacy.origin = Some("https://user:s3cret@host.com/a.git".to_string());
+            let entry = MemoryEntry {
+                citation: Some(legacy),
+                ..MemoryEntry::new(MemoryCategory::Fact, "old fact")
+            };
+            // Point the checkout elsewhere so the mark fires as foreign.
+            assert!(
+                run(&["remote", "set-url", "origin", "https://other.com/b.git"])
+                    .status
+                    .success()
+            );
+            let out = format_relevant_prompt_verified(&[entry], 10, dir.path()).expect("renders");
+            assert!(out.contains("different checkout"), "{out}");
+            assert!(!out.contains("s3cret"), "{out}");
+            assert!(!out.contains("user@"), "{out}");
+        }
+
+        #[test]
+        fn uncited_entries_load_and_recall_unchanged() {
+            // Old JSON without `citation` loads with None (no migration).
+            let json = r#"{"id":"m1","category":"fact","content":"c","tags":[],"search_text":"","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","access_count":0}"#;
+            let entry: MemoryEntry = serde_json::from_str(json).expect("old json loads");
+            assert!(entry.citation.is_none());
+            // Unverified formatter ignores citations entirely.
+            let out = format_relevant_prompt(std::slice::from_ref(&entry), 10).expect("prompt");
+            assert!(out.contains('c'));
+            assert!(!out.contains("source changed"));
         }
     }
 }
