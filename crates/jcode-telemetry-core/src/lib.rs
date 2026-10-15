@@ -4,10 +4,11 @@ mod concurrency;
 mod delivery;
 mod lifecycle;
 pub use concurrency::{ConcurrencySession, begin_concurrency_session};
-pub(crate) use delivery::{
-    background_sender, post_payload, spawn_background_worker, telemetry_status_is_permanent,
-    transcript_background_sender,
-};
+pub(crate) use delivery::{background_sender, post_payload, transcript_background_sender};
+// Only the test module reaches for these two; re-exporting them unconditionally
+// leaves production builds with unused-import warnings.
+#[cfg(test)]
+pub(crate) use delivery::{spawn_background_worker, telemetry_status_is_permanent};
 pub mod onboarding_trace;
 mod state_support;
 use chrono::{DateTime, NaiveDate, Utc};

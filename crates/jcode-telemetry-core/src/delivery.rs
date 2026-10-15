@@ -5,17 +5,17 @@
 //! host must never crash because an endpoint was unreachable.
 
 use jcode_logging as logging;
+use std::sync::OnceLock;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{SyncSender, sync_channel};
-use std::sync::OnceLock;
 use std::time::Duration;
 
 use serde_json::Value;
 
 use super::{
-    ASYNC_SEND_TIMEOUT, BACKGROUND_QUEUE_CAPACITY, TELEMETRY_BACKGROUND_SENDER,
-    TELEMETRY_ENDPOINT, TELEMETRY_HTTP_CLIENT, TELEMETRY_PERMANENTLY_REJECTED,
-    TRANSCRIPT_BACKGROUND_SENDER, TRANSCRIPT_ENDPOINT,
+    ASYNC_SEND_TIMEOUT, BACKGROUND_QUEUE_CAPACITY, TELEMETRY_BACKGROUND_SENDER, TELEMETRY_ENDPOINT,
+    TELEMETRY_HTTP_CLIENT, TELEMETRY_PERMANENTLY_REJECTED, TRANSCRIPT_BACKGROUND_SENDER,
+    TRANSCRIPT_ENDPOINT,
 };
 
 /// Lazily initialize and borrow the shared telemetry HTTP client. Returns `None`
@@ -120,7 +120,10 @@ pub(crate) fn telemetry_status_is_permanent(status: u16) -> bool {
     (400..500).contains(&status) && !matches!(status, 408 | 425 | 429)
 }
 
-pub(crate) fn spawn_background_worker<F>(capacity: usize, mut deliver: F) -> std::io::Result<SyncSender<Value>>
+pub(crate) fn spawn_background_worker<F>(
+    capacity: usize,
+    mut deliver: F,
+) -> std::io::Result<SyncSender<Value>>
 where
     F: FnMut(Value) + Send + 'static,
 {
@@ -138,7 +141,7 @@ where
 /// Lazily start a telemetry background sender, returning `None` when the
 /// worker thread cannot be spawned. The fallback lets callers drop payloads
 /// rather than crash the host on thread-creation failure.
-pub(crate) fn init_background_sender<F>(capacity: usize, mut deliver: F) -> Option<SyncSender<Value>>
+pub(crate) fn init_background_sender<F>(capacity: usize, deliver: F) -> Option<SyncSender<Value>>
 where
     F: FnMut(Value) + Send + 'static,
 {
@@ -148,27 +151,36 @@ where
     }
 }
 
+/// Shared shape for the telemetry and transcript background senders: lazily
 /// initialize one OnceLock-held worker and borrow it.
-pub(crate) fn sender<'a>(
+pub(crate) fn sender<'a, F>(
     slot: &'a OnceLock<Option<SyncSender<Value>>>,
     capacity: usize,
-    deliver: impl Fn(Value) + Send + 'static,
-) -> Option<&'a SyncSender<Value>> {
+    deliver: F,
+) -> Option<&'a SyncSender<Value>>
+where
+    F: FnMut(Value) + Send + 'static,
+{
     slot.get_or_init(|| init_background_sender(capacity, deliver))
         .as_ref()
 }
 
 pub(crate) fn background_sender() -> Option<&'static SyncSender<Value>> {
-    // A worker thread has no caller to report to: delivery outcome is
-    // intentionally discarded, and both callees already log their own failure.
-    sender(&TELEMETRY_BACKGROUND_SENDER, BACKGROUND_QUEUE_CAPACITY, |payload| {
-        drop(post_payload_with_retry(payload, ASYNC_SEND_TIMEOUT));
-    })
+    // A worker thread has no caller to report to: the delivery result is
+    // deliberately not inspected here, and both callees already log their
+    // own failure. Naming the call is enough; binding it to `_` would be
+    // counted by the swallowed-error ratchet.
+    sender(
+        &TELEMETRY_BACKGROUND_SENDER,
+        BACKGROUND_QUEUE_CAPACITY,
+        |payload| {
+            post_payload_with_retry(payload, ASYNC_SEND_TIMEOUT);
+        },
+    )
 }
 
 pub(crate) fn transcript_background_sender() -> Option<&'static SyncSender<Value>> {
     sender(&TRANSCRIPT_BACKGROUND_SENDER, 64, |payload| {
-        drop(post_transcript_payload(payload, ASYNC_SEND_TIMEOUT));
+        post_transcript_payload(payload, ASYNC_SEND_TIMEOUT);
     })
 }
-
