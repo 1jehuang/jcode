@@ -1,9 +1,9 @@
 {
-  "total": 4067,
+  "total": 4100,
   "totals_by_pattern": {
-    "dot_ok": 1569,
-    "let_underscore": 1473,
-    "unwrap_or_default": 1025
+    "dot_ok": 1575,
+    "let_underscore": 1495,
+    "unwrap_or_default": 1030
   },
   "tracked_files": {
     "crates/jcode-app-core/src/agent.rs": {
@@ -1076,6 +1076,11 @@
       "let_underscore": 2,
       "unwrap_or_default": 3
     },
+    "crates/jcode-base/src/provider/chatgpt_web_instance.rs": {
+      "dot_ok": 5,
+      "let_underscore": 15,
+      "unwrap_or_default": 1
+    },
     "crates/jcode-base/src/provider/credit_failover.rs": {
       "dot_ok": 1,
       "let_underscore": 0,
@@ -1702,9 +1707,9 @@
       "unwrap_or_default": 0
     },
     "crates/jcode-provider-openai-runtime/src/chatgpt_web.rs": {
-      "dot_ok": 10,
-      "let_underscore": 5,
-      "unwrap_or_default": 8
+      "dot_ok": 11,
+      "let_underscore": 12,
+      "unwrap_or_default": 12
     },
     "crates/jcode-provider-openai-runtime/src/lib.rs": {
       "dot_ok": 5,

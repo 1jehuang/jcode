@@ -1,5 +1,5 @@
 {
-  "total": 185,
+  "total": 202,
   "tracked_files": {
     "crates/jcode-app-core/build.rs": 4,
     "crates/jcode-app-core/src/agent/provider.rs": 1,
@@ -23,6 +23,7 @@
     "crates/jcode-base/src/mcp/oauth.rs": 2,
     "crates/jcode-base/src/memory_jev.rs": 1,
     "crates/jcode-base/src/opencode_db.rs": 6,
+    "crates/jcode-base/src/provider/chatgpt_web_instance.rs": 1,
     "crates/jcode-base/src/provider_activity_oauth.rs": 3,
     "crates/jcode-base/src/subscription_notice.rs": 1,
     "crates/jcode-base/src/voice_intent.rs": 5,
@@ -34,6 +35,7 @@
     "crates/jcode-provider-core/src/model_names.rs": 1,
     "crates/jcode-provider-cursor-runtime/src/wire.rs": 1,
     "crates/jcode-provider-doctor/src/lifecycle_driver.rs": 2,
+    "crates/jcode-provider-openai-runtime/src/chatgpt_web.rs": 16,
     "crates/jcode-provider-openai/src/stream.rs": 3,
     "crates/jcode-render-core/src/math.rs": 4,
     "crates/jcode-render-core/src/preprocess.rs": 2,
