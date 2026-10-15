@@ -67,6 +67,7 @@ impl Drop for EnvVarGuard {
 fn detects_env_credentials_requires_region_and_credential_hint() {
     let _guard = lock_test_env();
     let temp = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path().as_os_str());
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
     let _removed = [
         "JCODE_BEDROCK_ENABLE",
@@ -100,6 +101,7 @@ fn explicit_enable_marks_configured_for_instance_metadata_credentials() {
 fn detects_bedrock_login_env_file_credentials() {
     let _guard = lock_test_env();
     let temp = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path().as_os_str());
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
     for key in [
         "JCODE_BEDROCK_ENABLE",
