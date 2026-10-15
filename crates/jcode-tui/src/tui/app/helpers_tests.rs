@@ -177,21 +177,21 @@ fn swarm_effort_display_labels_use_configured_root_and_preserve_modes() {
         );
         assert_eq!(
             effort_display_label_with_root("swarm-deep", Some(level)),
-            format!("Swarm Deep ({title} + task graph) [Beta]")
+            format!("☢ Swarm Deep ({title} + task graph, WARNING: recursive agents / high token cost) [Beta]")
         );
         assert_eq!(effort_display_label_with_root("high", Some(level)), "High");
     }
 }
 
 #[test]
-fn swarm_effort_display_labels_default_to_max() {
+fn swarm_effort_display_labels_default_to_low() {
     assert_eq!(
         effort_display_label_with_root("swarm", None),
-        "Swarm (Max + light fan-out) [Beta]"
+        "Swarm (Low + light fan-out) [Beta]"
     );
     assert_eq!(
         effort_display_label_with_root("swarm-deep", None),
-        "Swarm Deep (Max + task graph) [Beta]"
+        "☢ Swarm Deep (Low + task graph, WARNING: recursive agents / high token cost) [Beta]"
     );
     assert_eq!(effort_display_label("high"), "High");
     assert_eq!(effort_display_label("future"), "future");

@@ -572,10 +572,10 @@ pub struct AgentsConfig {
     /// call does not pass an explicit `effort`. Leave unset to let workers
     /// inherit the provider-wide reasoning effort.
     pub swarm_effort: Option<String>,
-    /// Root reasoning effort in light swarm mode. Unset or invalid means `max`.
+    /// Root reasoning effort in light swarm mode. Unset or invalid means `low`.
     /// This does not change worker effort (`swarm_effort`).
     pub swarm_root_effort: Option<String>,
-    /// Root reasoning effort in deep swarm mode. Unset or invalid means `max`.
+    /// Root reasoning effort in deep swarm mode. Unset or invalid means `low`.
     pub swarm_deep_root_effort: Option<String>,
     /// Default terminal mode for swarm-created agents.
     pub swarm_spawn_mode: SwarmSpawnMode,
@@ -716,19 +716,19 @@ impl Default for AgentsConfig {
 
 impl AgentsConfig {
     /// Resolve a swarm mode's root effort without allowing orchestration
-    /// sentinels to recurse into another mode. Unknown values preserve the
-    /// historical maximum-effort behavior without invalidating other settings.
+    /// sentinels to recurse into another mode. Unknown values use the low-effort
+    /// default without invalidating other settings.
     pub fn root_effort_for_swarm(&self, deep: bool) -> &'static str {
         let configured = if deep {
             self.swarm_deep_root_effort.as_deref()
         } else {
             self.swarm_root_effort.as_deref()
         };
-        let value = configured.unwrap_or("max").trim();
+        let value = configured.unwrap_or("low").trim();
         ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
             .into_iter()
             .find(|level| level.eq_ignore_ascii_case(value))
-            .unwrap_or("max")
+            .unwrap_or("low")
     }
 }
 
