@@ -2,25 +2,6 @@
 
 use super::*;
 
-/// Account-local limits can be escaped by selecting another OAuth pool member.
-/// Do not classify model/transport overload or arbitrary server failures here.
-pub(super) fn is_account_limit_error(error: &str) -> bool {
-    [
-        "429 too many requests",
-        "rate limit",
-        "rate_limit",
-        "quota",
-        "usage exhausted",
-        "usage limit",
-        "limit reached",
-        "billing",
-        "credit balance",
-        "payment required",
-    ]
-    .iter()
-    .any(|needle| error.contains(needle))
-}
-
 /// Check if an error is transient and should be retried
 pub(super) fn is_retryable_error(error_str: &str) -> bool {
     jcode_provider_core::is_transient_transport_error(error_str)
