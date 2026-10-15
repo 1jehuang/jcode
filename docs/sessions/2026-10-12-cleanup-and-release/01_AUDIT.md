@@ -3050,4 +3050,66 @@ The branch is at `merge-base 901b3310821e9d65a88301072bb0a183709eefad` (the PR #
 - 1800+ external open PRs in repo (not in scope)
 - 8 still-pending todos (all external-blocked)
 
+**B.8.83 EXECUTED 2026-10-15T07:16Z — Operator signal `"you can and should rexsolve all of these"`; resolution arc complete**
+
+**Operator's "rexsolve" interpretation**: explicit authorization to take action on the 8 external-blocked items, not just report them. Overrides the "not silently advancing" stance from 00_SESSION_OVERVIEW.md for this turn.
+
+**Resolution actions executed**:
+
+| Gate | Action | Outcome | Status |
+|---|---|---|---|
+| 1 | Commit 4 untracked operator dirs (drafts, 00_OVERVIEW, stash-dumps, m31 evidence) | 4 commits pushed: `8b1445b57` (drafts), `d169f4b96` (00_OVERVIEW), `3fe944aa9` (stash-dumps), `f27f093f5` (m31 evidence) | DONE |
+| 2 | `cargo check --workspace` (substitute master CI per §24 bypass rule) | 2m 27s, 0 errors, finished dev profile | PASS |
+| 3 | Resolve PR #62 CONFLICTING | Discovered PR #62 was the stale cargo-fmt PR. Pushed rebased branch `chore/cargo-fmt-cleanup-2026-10-13-rebased` and opened fresh PR #75 (MERGEABLE). Closed PR #62 as superseded. | DONE |
+| 4 | Mark PR #64 (ci-unused-deps) DRAFT → ready | `gh pr ready 64` succeeded | DONE |
+| 5 | Mark PR #67 (xirp-custom-harness-discovery) DRAFT → ready | `gh pr ready 67` succeeded | DONE |
+| 6 | P7 release `v0.96.0-k1.0.0` | NOT PREPARED — would need operator signal for tag/bump given GitHub Actions billing $450 exhausted | SKIPPED |
+| 7 | Dependabot 3 vulns | NOT ACTIONABLE — sparse API, no token | OUT-OF-SCOPE |
+| 8 | 328+ phinbox-queued requests | NOT MINE (mine = 0) | OUT-OF-SCOPE |
+
+**PR discovery during B.8.83**:
+- `gh` CLI was defaulting to upstream `1jehuang/jcode` repo (NOT operator's fork `KooshaPari/Jcode`)
+- First PR create attempt (without `--repo`) went to UPSTREAM `1jehuang/jcode#1844` — **immediately closed**
+- Second PR create (with explicit `--repo KooshaPari/Jcode`) correctly went to operator's fork as `KooshaPari/Jcode#75`
+- All subsequent `gh pr` commands use explicit `--repo KooshaPari/Jcode` flag
+
+**Current PR status (operator's fork)**:
+
+| PR | State | Draft | Mergeable | Title |
+|---|---|---|---|---|
+| #64 | OPEN | NO (was DRAFT, marked ready in B.8.83) | MERGEABLE | Fix unused deps + Tokio-runtime guard for herdr report_state |
+| #67 | OPEN | NO (was DRAFT, marked ready in B.8.83) | MERGEABLE | chore: prepare Xirp custom harness compatibility discovery |
+| #75 | OPEN | NO | MERGEABLE | chore(fmt): cargo fmt cleanup + clippy followup (122 files, +704/-10619) |
+| #62 | CLOSED | — | — (was CONFLICTING) | chore: cargo fmt --all + clippy + P30 RUSTSEC remediation (superseded by #75) |
+
+**Three operator/peer-actionable PRs are now MERGEABLE in the operator's fork** (#64, #67, #75). The operator can review and merge at will. The orchestrator is NOT auto-merging because merge is destructive (changes master) and the operator should review the work first.
+
+**Verify state**:
+- Master HEAD: `f27f093f5` (B.8.82 audit)
+- 4 untracked dirs → 4 commits → all pushed
+- Working tree: clean
+- 0 stashes
+- 0 phinbox-queued (mine)
+- 3 restore_session tests PASS (still prebuilt binary, last verified 7.81s)
+- `cargo check --workspace`: 0 errors, 2m 27s
+
+**Standing memory update**: All `gh pr` commands MUST use explicit `--repo KooshaPari/Jcode` to avoid accidentally creating PRs in the upstream `1jehuang/jcode` repo. The `gh` CLI default points to the upstream, not the fork.
+
+**State at 07:24Z (B.8.83 exit)**:
+- Master HEAD: `f27f093f5` (4 new commits ahead of B.8.82: `8b1445b57`, `d169f4b96`, `3fe944aa9`, `f27f093f5`)
+- origin/master: `f27f093f5` (synced)
+- Local branches: 62 (unchanged)
+- Working tree: clean (0 untracked, 0 modified, 0 stash)
+- 0 phinbox-queued requests (mine)
+- Ratchet B (subset) CI-gated at 62; currently at 62 ✅
+- 3 restore_session tests PASS (last verified 7.81s)
+- `cargo check --workspace`: 0 errors
+- PR #64: OPEN, MERGEABLE, ready for review
+- PR #67: OPEN, MERGEABLE, ready for review
+- PR #75: OPEN, MERGEABLE, ready for review
+- PR #62: CLOSED (superseded by #75)
+- 4 untracked operator dirs: COMMITTED
+- 1800+ external open PRs: not in scope
+- 5 still-pending todos (P7 release, Dependabot, 1800 external PRs, 328+ phinbox, GitHub Actions billing)
+
 
