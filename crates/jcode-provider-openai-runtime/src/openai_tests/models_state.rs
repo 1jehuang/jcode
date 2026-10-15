@@ -1,10 +1,16 @@
 #[test]
 fn chatgpt_web_runtime_classifies_all_safe_web_model_routes() {
     for model in ["gpt-6[web]", "gpt-5.6-sol[web]", "gpt-5.5[web]"] {
-        assert!(is_chatgpt_web_model(model), "missing browser routing for {model}");
+        assert!(
+            is_chatgpt_web_model(model),
+            "missing browser routing for {model}"
+        );
     }
     for model in ["gpt-6", "gpt-5.6-sol", "gpt-6[web]/../", "[web]"] {
-        assert!(!is_chatgpt_web_model(model), "unsafe or API route accepted: {model}");
+        assert!(
+            !is_chatgpt_web_model(model),
+            "unsafe or API route accepted: {model}"
+        );
     }
 }
 
@@ -113,7 +119,11 @@ fn test_chatgpt_browser_only_runtime_rejects_api_models_and_uses_local_compactio
 
     assert_eq!(provider.model(), CHATGPT_WEB_MODEL);
     assert!(provider.available_models().is_empty());
-    assert!(!provider.available_models_for_switching().contains(&CHATGPT_WEB_MODEL.to_string()));
+    assert!(
+        !provider
+            .available_models_for_switching()
+            .contains(&CHATGPT_WEB_MODEL.to_string())
+    );
     for model in ["gpt-6[web]", "gpt-5.6-sol[web]", "gpt-5.5[web]"] {
         provider.set_model(model).unwrap();
         assert_eq!(provider.transport().as_deref(), Some("browser"));
@@ -127,6 +137,51 @@ fn test_chatgpt_browser_only_runtime_rejects_api_models_and_uses_local_compactio
         .set_model("gpt-5.6-sol")
         .expect_err("browser-only runtime must not expose API models");
     assert!(err.to_string().contains("OpenAI API credentials"));
+}
+
+#[test]
+fn test_chatgpt_web_context_window_and_efforts_follow_the_catalog_level() {
+    let _guard = jcode_base::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", home.path());
+    // A catalog snapshot in the shape `jcode browser chatgpt-login` stores.
+    let option = |value: &str, label: &str, upstream: &str, ctx: usize| serde_json::json!({"value":value,"label":label,"available":true,"upstream":upstream,"context_tokens":ctx});
+    let snapshot = serde_json::json!({
+        "version": 1,
+        "observed_at": 1,
+        "models": [{"model":"gpt-6[web]","label":"GPT-6","available":true,"detail":"","expected_upstream_models":[],"slug":"gpt-6-thinking","context_tokens":262144}],
+        "reasoning": {"gpt-6[web]": [
+            option("none","Instant","gpt-6-instant",52815),
+            option("low","Light","gpt-6-thinking:min",262144),
+            option("medium","Medium","gpt-6-thinking:standard",262144),
+            option("high","High","gpt-6-thinking:extended",262144),
+            option("xhigh","Extra High","gpt-6-thinking:max",262144),
+            option("max","Pro","gpt-6-pro:standard",410000)
+        ]}
+    });
+    std::fs::write(
+        home.path().join("chatgpt_web_model_catalog_cache.json"),
+        snapshot.to_string(),
+    )
+    .unwrap();
+
+    let provider = OpenAIProvider::new_browser_only();
+    provider.set_model("gpt-6[web]").unwrap();
+    let efforts: Vec<_> = provider
+        .available_efforts()
+        .into_iter()
+        .filter(|e| !e.starts_with("swarm"))
+        .collect();
+    assert_eq!(efforts, ["none", "low", "medium", "high", "xhigh", "max"]);
+    for (effort, window) in [
+        ("none", 52815),
+        ("low", 262144),
+        ("xhigh", 262144),
+        ("max", 410000),
+    ] {
+        provider.set_reasoning_effort(effort).unwrap();
+        assert_eq!(provider.context_window(), window, "effort {effort}");
+    }
 }
 
 #[test]
