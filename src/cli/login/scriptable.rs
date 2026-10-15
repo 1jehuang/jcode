@@ -623,12 +623,20 @@ pub(super) async fn complete_scriptable_copilot_login(
     let PendingScriptableLogin::Copilot {
         device_code,
         interval,
+        verification_uri,
         ..
     } = load_pending_login(&pending_path, "copilot")?
     else {
         anyhow::bail!("Pending Copilot login state is invalid.");
     };
 
+    let endpoints = auth::copilot::CopilotEndpoints::load()?;
+    let verification_url = reqwest::Url::parse(&verification_uri)
+        .context("Invalid pending Copilot verification URL")?;
+    anyhow::ensure!(
+        verification_url.host_str() == Some(endpoints.host.as_str()),
+        "Copilot login host changed. Start a new login with --print-auth-url."
+    );
     let client = crate::provider::shared_http_client();
     let token = auth::copilot::poll_for_access_token(&client, &device_code, interval).await?;
     let username = auth::copilot::fetch_github_username(&client, &token)

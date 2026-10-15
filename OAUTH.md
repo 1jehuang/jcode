@@ -453,6 +453,57 @@ Cursor uses jcode's native HTTPS transport. Copilot uses GitHub device-flow auth
   - `CURSOR_API_KEY` (optional; overrides saved key)
 
 ### GitHub Copilot
+
+This local custom build supports GitHub Enterprise through
+`~/.jcode/config.toml`:
+
+```toml
+[provider]
+copilot_enterprise_url = "hiqfi.ghe.com"
+```
+
+Alternatively, configure the hostname through native login:
+
+```bash
+jcode login --provider copilot --enterprise-url hiqfi.ghe.com --no-browser
+```
+
+`--github-host` is an alias for `--enterprise-url`. Interactive CLI login offers
+public GitHub or an enterprise hostname and remembers the choice. Use
+`--enterprise-url github.com` to return to public GitHub. With an enterprise host
+configured, first-run onboarding opens that tenant's Copilot login rather than
+OpenAI sign-in or the Jcode subscription flow.
+
+No local proxy is needed: jcode itself performs device authentication, token
+refresh, model discovery, and inference. For this tenant the native paths are:
+
+| Purpose | Endpoint |
+| --- | --- |
+| Device authorization | `https://hiqfi.ghe.com/login/device/code` |
+| OAuth polling | `https://hiqfi.ghe.com/login/oauth/access_token` |
+| Copilot token exchange | `https://hiqfi.ghe.com/api/v3/copilot_internal/v2/token` |
+| Model catalog | `https://copilot-api.hiqfi.ghe.com/models` |
+| Responses inference | `https://copilot-api.hiqfi.ghe.com/responses` |
+| Chat inference | `https://copilot-api.hiqfi.ghe.com/chat/completions` |
+
+The value must be a bare DNS hostname or an HTTPS URL without a path or port.
+Login and OAuth polling use that host, GitHub REST and token exchange use
+`https://<host>/api/v3`, and models and inference use
+`https://copilot-api.<host>`. Leaving the option unset preserves public GitHub.
+The live catalog's `supported_endpoints` selects Chat Completions or Responses,
+including Responses-only models such as `gpt-6.1-sol`.
+Catalog metadata is retained in the host-specific cache and sent to local and
+remote model pickers. Reasoning controls use the advertised efforts rather than
+model-name guesses. Context windows, prompt budgets, output limits, vision,
+tool calls, parallel tools, streaming, structured outputs, and adaptive-thinking
+capabilities are preserved. The compaction budget uses the prompt limit, not the
+larger combined context window: for example GPT-6.1 Sol advertises 400,000 total
+tokens but 272,000 prompt tokens.
+Saved credentials and the model cache are scoped to the host; public-GitHub
+credentials are not automatically reused for an enterprise tenant. Explicit
+token environment variables still override stored credentials. Restart jcode
+after changing hosts; pending device logins must be restarted too.
+
 - Login: `jcode login --provider copilot`
   - Headless / SSH: `jcode login --provider copilot --no-browser`
   - Scriptable remote flow: `jcode login --provider copilot --print-auth-url`, then later `jcode login --provider copilot --complete`
@@ -464,11 +515,50 @@ Cursor uses jcode's native HTTPS transport. Copilot uses GitHub device-flow auth
   4. trusted `~/.copilot/config.json`
   5. trusted legacy `~/.config/github-copilot/hosts.json`
   6. trusted legacy `~/.config/github-copilot/apps.json`
-  7. trusted OpenCode/pi OAuth entries
-  8. `gh auth token`
+  7. trusted OpenCode/pi OAuth entries (public GitHub only)
+  8. `gh auth token --hostname <configured-host>` when
+     `JCODE_COPILOT_ALLOW_GH_AUTH_TOKEN=1`
 - Env vars:
   - `JCODE_COPILOT_CLI_PATH` (optional override for CLI path)
   - `JCODE_COPILOT_MODEL` (default: `claude-sonnet-4`)
+
+#### Installing and rolling back a custom build
+
+Disable automatic stock updates in `~/.jcode/config.toml` before installing:
+
+```toml
+[features]
+check_updates = false
+```
+
+From the source checkout, install an **already-built** binary (no build is run):
+
+```bash
+bash scripts/install_ghe.sh target/debug/jcode
+# With no argument, the installer uses target/selfdev/jcode.
+```
+
+The installer creates a SHA-256-addressed `versions/custom-ghe-<hash>/jcode`,
+promotes both `current` and `shared-server`, and points `~/.local/bin/jcode`
+at `current`. It preserves the stock `stable` channel and `versions/0.91.0`.
+Keep `~/.local/bin` before `~/.cargo/bin` in `PATH`; shell startup files and
+config are not modified. The shared server reload uses
+`JCODE_NO_AUTO_UPDATE=1 ... --no-update server reload --force` for graceful
+session handoff, including when the embedded version is unchanged.
+
+Channel changes are backed up and automatically restored if installation or
+reload fails. To undo a successful installation, use the exact rollback command
+printed by the installer, or:
+
+```bash
+bash scripts/install_ghe.sh --rollback ~/.jcode/builds/ghe-install-backups/<backup-directory>
+```
+
+Use the same `JCODE_INSTALL_DIR` if it was overridden. Rollback refuses to
+overwrite subsequently changed channels and retains the custom immutable
+payload. If server handoff cannot be confirmed, inspect server status rather
+than killing the daemon; filesystem rollback alone does not confirm runtime
+recovery. Keep automatic updates disabled while using the custom build.
 
 ### Antigravity
 - Login: `jcode login --provider antigravity` (native Google OAuth flow; does **not** require Antigravity to be installed)

@@ -1,5 +1,6 @@
 fn openai_oauth_route(model: &str) -> crate::provider::ModelRoute {
     crate::provider::ModelRoute {
+        catalog_metadata: None,
         model: model.to_string(),
         provider: "OpenAI".to_string(),
         api_method: "openai-oauth".to_string(),
@@ -12,6 +13,7 @@ fn openai_oauth_route(model: &str) -> crate::provider::ModelRoute {
 
 fn claude_oauth_route(model: &str) -> crate::provider::ModelRoute {
     crate::provider::ModelRoute {
+        catalog_metadata: None,
         model: model.to_string(),
         provider: "Anthropic".to_string(),
         api_method: "claude-oauth".to_string(),

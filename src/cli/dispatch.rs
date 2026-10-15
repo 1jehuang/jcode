@@ -341,6 +341,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             provider: login_provider,
             account,
             make_default,
+            enterprise_url,
             no_browser,
             claude_code,
             oauth,
@@ -384,6 +385,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             };
             let before = default_family.map(login_account_labels);
             let mut options = login::LoginOptions {
+                copilot_enterprise_url: enterprise_url,
                 no_browser,
                 claude_code,
                 print_auth_url,

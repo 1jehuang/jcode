@@ -2,6 +2,7 @@ pub mod account_pin;
 pub mod anthropic;
 pub mod attempt_tracker;
 pub mod auth_mode;
+pub mod catalog_metadata;
 pub mod catalog_refresh;
 pub mod failover;
 pub mod fallback_pick;
@@ -35,6 +36,10 @@ pub use anthropic::{
 pub use auth_mode::{
     AuthMode, AuthRoute, DualAuthProvider, pinned_mode_for, runtime_env_auth_route,
     runtime_env_pinned_mode,
+};
+pub use catalog_metadata::{
+    ModelMetadata, copilot_model_metadata, register_copilot_model_metadata,
+    register_copilot_route_metadata,
 };
 pub use catalog_refresh::{ModelCatalogRefreshSummary, summarize_model_catalog_refresh};
 pub use failover::{
@@ -337,6 +342,20 @@ pub trait Provider: Send + Sync {
     /// Get ordered list of available reasoning effort levels.
     fn available_efforts(&self) -> Vec<&'static str> {
         vec![]
+    }
+
+    /// Metadata advertised by the active provider's model catalog.
+    fn model_metadata(&self, _model: &str) -> Option<ModelMetadata> {
+        None
+    }
+
+    /// Prompt budget, distinct from the combined input/output context window.
+    fn input_token_limit(&self) -> usize {
+        self.model_metadata(&self.model())
+            .and_then(|metadata| metadata.max_input_tokens)
+            .filter(|limit| *limit > 0)
+            .unwrap_or_else(|| self.context_window())
+            .min(self.context_window())
     }
 
     /// Get the active service tier override (if applicable).
@@ -866,6 +885,8 @@ pub struct ModelRoute {
     pub api_method: String,
     pub available: bool,
     pub detail: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_metadata: Option<ModelMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cheapness: Option<RouteCheapnessEstimate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

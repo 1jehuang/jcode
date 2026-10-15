@@ -245,6 +245,13 @@ impl App {
         if self.onboarding_flow.is_some() {
             return;
         }
+        if let Some(host) = super::onboarding_flow::configured_enterprise_copilot_host() {
+            self.onboarding_flow = Some(OnboardingFlow::begin_at_login(None));
+            self.set_status_notice(format!(
+                "Log in to GitHub Copilot on {host}? Yes/No - Enter to choose"
+            ));
+            return;
+        }
         // Detect importable external logins and, if any, build a per-candidate
         // yes/no walkthrough rendered by the onboarding welcome screen. A
         // rehearsal lists every login on this machine, as a fresh install would,
@@ -284,8 +291,12 @@ impl App {
     /// picker is still reachable via `/login`.
     pub(super) fn onboarding_start_default_login(&mut self) {
         crate::telemetry::record_setup_step_once("login_picker_opened");
-        self.start_login_provider(crate::provider_catalog::OPENAI_LOGIN_PROVIDER);
-        self.set_status_notice("Login: opening OpenAI sign-in (or type /login for others)");
+        let provider = super::onboarding_flow::default_onboarding_login_provider();
+        self.start_login_provider(provider);
+        self.set_status_notice(format!(
+            "Login: opening {} sign-in (or type /login for others)",
+            provider.display_name
+        ));
     }
 
     /// Advance out of a login phase once credentials are available. Prompt and

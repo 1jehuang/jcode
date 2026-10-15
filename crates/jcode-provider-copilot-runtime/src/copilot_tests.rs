@@ -1,8 +1,122 @@
 use super::*;
 
+fn make_metadata_provider() -> CopilotApiProvider {
+    let provider = make_test_provider(vec!["gpt-6.1-sol".into(), "claude-sonnet-5.5".into()]);
+    let models: Vec<copilot_auth::CopilotModelInfo> = serde_json::from_value(json!([
+        {
+            "id": "gpt-6.1-sol",
+            "supported_endpoints": ["/responses"],
+            "capabilities": {
+                "limits": {"max_context_window_tokens": 400000, "max_prompt_tokens": 272000, "max_output_tokens": 128000},
+                "supports": {"reasoning_effort": ["none", "low", "medium", "high", "xhigh", "max"], "vision": true, "tool_calls": true, "parallel_tool_calls": true, "streaming": true}
+            }
+        },
+        {
+            "id": "claude-sonnet-5.5",
+            "supported_endpoints": ["/chat/completions"],
+            "capabilities": {
+                "limits": {"max_context_window_tokens": 328000, "max_prompt_tokens": 200000, "max_output_tokens": 128000},
+                "supports": {"reasoning_effort": ["low", "medium", "high", "xhigh", "max"], "vision": true, "tool_calls": true, "streaming": true}
+            }
+        }
+    ])).unwrap();
+    provider.install_model_metadata(
+        models
+            .iter()
+            .map(|model| (model.id.clone(), model.metadata()))
+            .collect(),
+    );
+    provider.set_model("gpt-6.1-sol").unwrap();
+    provider
+}
+
+#[test]
+fn should_use_enterprise_catalog_context_window() {
+    let provider = make_metadata_provider();
+    assert_eq!(provider.context_window(), 400_000);
+}
+
+#[test]
+fn should_budget_prompt_below_total_context_window() {
+    let provider = make_metadata_provider();
+    assert_eq!(provider.input_token_limit(), 272_000);
+}
+
+#[test]
+fn should_use_enterprise_catalog_output_limit() {
+    let provider = make_metadata_provider();
+    assert_eq!(provider.max_output_tokens_for("gpt-6.1-sol"), 128_000);
+}
+
+#[test]
+fn should_expose_only_advertised_claude_reasoning_levels() {
+    let provider = make_metadata_provider();
+    provider.set_model("claude-sonnet-5.5").unwrap();
+    assert_eq!(
+        provider.available_efforts(),
+        vec!["low", "medium", "high", "xhigh", "max"]
+    );
+}
+
+#[test]
+fn should_change_prompt_budget_when_model_changes() {
+    let provider = make_metadata_provider();
+    provider.set_model("claude-sonnet-5.5").unwrap();
+    assert_eq!(provider.input_token_limit(), 200_000);
+}
+
+#[test]
+fn should_support_images_advertised_by_catalog() {
+    let provider = make_metadata_provider();
+    assert!(provider.supports_image_input());
+}
+
+#[test]
+fn should_preserve_metadata_in_fork() {
+    let provider = make_metadata_provider();
+    assert_eq!(
+        provider.fork().model_metadata("gpt-6.1-sol"),
+        provider.model_metadata("gpt-6.1-sol")
+    );
+}
+
+#[test]
+fn should_restore_metadata_from_serialized_catalog() {
+    let provider = make_metadata_provider();
+    let metadata = provider.model_metadata.read().unwrap().clone();
+    let catalog = PersistedCatalog {
+        models: provider.available_models_display(),
+        fetched_at_rfc3339: Utc::now().to_rfc3339(),
+        model_metadata: metadata.clone(),
+    };
+    let restored: PersistedCatalog =
+        serde_json::from_slice(&serde_json::to_vec(&catalog).unwrap()).unwrap();
+    let restored_provider = make_test_provider(restored.models);
+    restored_provider.install_model_metadata(restored.model_metadata);
+    assert_eq!(
+        restored_provider.model_metadata("gpt-6.1-sol"),
+        metadata.get("gpt-6.1-sol").cloned()
+    );
+}
+
+#[test]
+fn should_include_image_data_in_native_chat_payload() {
+    let messages = vec![make_msg(
+        Role::User,
+        vec![ContentBlock::Image {
+            media_type: "image/png".into(),
+            data: "aW1hZ2U=".into(),
+        }],
+    )];
+    assert_eq!(
+        CopilotApiProvider::build_messages("", &messages)[0]["content"][0]["image_url"]["url"],
+        "data:image/png;base64,aW1hZ2U="
+    );
+}
 fn make_test_provider(fetched: Vec<String>) -> CopilotApiProvider {
     CopilotApiProvider {
         client: jcode_base::provider::shared_http_client(),
+        endpoints: copilot_auth::CopilotEndpoints::from_enterprise_url(None).unwrap(),
         model: Arc::new(RwLock::new(DEFAULT_MODEL.to_string())),
         github_token: "test-token".to_string(),
         bearer_token: Arc::new(tokio::sync::RwLock::new(None)),
@@ -16,8 +130,260 @@ fn make_test_provider(fetched: Vec<String>) -> CopilotApiProvider {
         user_turn_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         reasoning_effort: Arc::new(RwLock::new(None)),
         model_efforts: Arc::new(RwLock::new(Default::default())),
+        model_endpoints: Arc::new(RwLock::new(Default::default())),
+        model_metadata: Arc::new(RwLock::new(Default::default())),
         created_at: std::time::Instant::now(),
     }
+}
+
+#[test]
+fn should_reject_unsupported_none_effort_for_claude() {
+    let provider = make_metadata_provider();
+    provider.set_model("claude-sonnet-5.5").unwrap();
+    assert!(provider.set_reasoning_effort("none").is_err());
+}
+
+#[test]
+fn should_clear_unsupported_effort_when_switching_models() {
+    let provider = make_metadata_provider();
+    provider.set_reasoning_effort("none").unwrap();
+    provider.set_model("claude-sonnet-5.5").unwrap();
+    assert_ne!(provider.reasoning_effort(), Some("none".into()));
+}
+
+#[tokio::test]
+async fn should_reject_non_streaming_model_before_network_request() {
+    let provider = make_metadata_provider();
+    let mut metadata = provider.model_metadata.read().unwrap().clone();
+    metadata.get_mut("gpt-6.1-sol").unwrap().supports_streaming = Some(false);
+    provider.install_model_metadata(metadata);
+
+    assert!(matches!(
+        provider.complete(&[], &[], "", None).await,
+        Err(error) if error.to_string().contains("does not support streaming")
+    ));
+}
+
+#[test]
+fn should_keep_public_chat_endpoint_unchanged() {
+    let provider = make_test_provider(Vec::new());
+
+    assert_eq!(
+        provider.inference_url(false),
+        "https://api.githubcopilot.com/chat/completions"
+    );
+}
+
+#[test]
+fn should_keep_public_responses_endpoint_unchanged() {
+    let provider = make_test_provider(Vec::new());
+
+    assert_eq!(
+        provider.inference_url(true),
+        "https://api.githubcopilot.com/responses"
+    );
+}
+
+#[test]
+fn should_route_enterprise_chat_to_captured_endpoint() {
+    let mut provider = make_test_provider(Vec::new());
+    provider.endpoints =
+        copilot_auth::CopilotEndpoints::from_enterprise_url(Some("hiqfi.ghe.com")).unwrap();
+
+    assert_eq!(
+        provider.inference_url(false),
+        "https://copilot-api.hiqfi.ghe.com/chat/completions"
+    );
+}
+
+#[test]
+fn should_route_enterprise_responses_to_captured_endpoint() {
+    let mut provider = make_test_provider(Vec::new());
+    provider.endpoints =
+        copilot_auth::CopilotEndpoints::from_enterprise_url(Some("hiqfi.ghe.com")).unwrap();
+
+    assert_eq!(
+        provider.inference_url(true),
+        "https://copilot-api.hiqfi.ghe.com/responses"
+    );
+}
+
+#[test]
+fn should_keep_public_catalog_cache_filename_unchanged() {
+    let provider = make_test_provider(Vec::new());
+
+    assert_eq!(
+        provider.persisted_catalog_filename(),
+        "copilot_models_cache.json"
+    );
+}
+
+#[test]
+fn should_namespace_enterprise_catalog_cache_by_host() {
+    let mut provider = make_test_provider(Vec::new());
+    provider.endpoints =
+        copilot_auth::CopilotEndpoints::from_enterprise_url(Some("hiqfi.ghe.com")).unwrap();
+
+    assert_eq!(
+        provider.persisted_catalog_filename(),
+        "copilot_models_cache.hiqfi.ghe.com.json"
+    );
+}
+
+#[test]
+fn should_isolate_catalog_caches_between_enterprise_hosts() {
+    let mut first = make_test_provider(Vec::new());
+    first.endpoints =
+        copilot_auth::CopilotEndpoints::from_enterprise_url(Some("first.ghe.com")).unwrap();
+    let mut second = make_test_provider(Vec::new());
+    second.endpoints =
+        copilot_auth::CopilotEndpoints::from_enterprise_url(Some("second.ghe.com")).unwrap();
+
+    assert_ne!(
+        first.persisted_catalog_filename(),
+        second.persisted_catalog_filename()
+    );
+}
+
+#[test]
+fn should_share_catalog_cache_for_normalized_enterprise_host() {
+    let mut first = make_test_provider(Vec::new());
+    first.endpoints =
+        copilot_auth::CopilotEndpoints::from_enterprise_url(Some("hiqfi.ghe.com")).unwrap();
+    let mut second = make_test_provider(Vec::new());
+    second.endpoints =
+        copilot_auth::CopilotEndpoints::from_enterprise_url(Some("https://HIQFI.GHE.COM/"))
+            .unwrap();
+
+    assert_eq!(
+        first.persisted_catalog_filename(),
+        second.persisted_catalog_filename()
+    );
+}
+
+#[test]
+fn should_preserve_selected_enterprise_model_in_live_catalog() {
+    let mut provider = make_test_provider(Vec::new());
+    provider.endpoints =
+        copilot_auth::CopilotEndpoints::from_enterprise_url(Some("hiqfi.ghe.com")).unwrap();
+    provider.set_model("gpt-6.1-sol").unwrap();
+    let models: Vec<copilot_auth::CopilotModelInfo> = serde_json::from_value(json!([
+        {"id": "claude-sonnet-5.5", "model_picker_enabled": true},
+        {"id": "gpt-6.1-sol", "model_picker_enabled": true}
+    ]))
+    .unwrap();
+
+    assert_eq!(provider.choose_catalog_default(&models), "gpt-6.1-sol");
+}
+
+#[test]
+fn should_choose_available_enterprise_picker_model_when_legacy_default_is_missing() {
+    let mut provider = make_test_provider(Vec::new());
+    provider.endpoints =
+        copilot_auth::CopilotEndpoints::from_enterprise_url(Some("hiqfi.ghe.com")).unwrap();
+    let models: Vec<copilot_auth::CopilotModelInfo> = serde_json::from_value(json!([
+        {"id": "hidden-model"},
+        {"id": "claude-sonnet-5.5", "model_picker_enabled": true}
+    ]))
+    .unwrap();
+
+    assert_eq!(
+        provider.choose_catalog_default(&models),
+        "claude-sonnet-5.5"
+    );
+}
+
+#[test]
+fn should_choose_available_enterprise_model_when_no_picker_models_exist() {
+    let mut provider = make_test_provider(Vec::new());
+    provider.endpoints =
+        copilot_auth::CopilotEndpoints::from_enterprise_url(Some("hiqfi.ghe.com")).unwrap();
+    let models: Vec<copilot_auth::CopilotModelInfo> =
+        serde_json::from_value(json!([{"id": "gpt-6.1-sol"}])).unwrap();
+
+    assert_eq!(provider.choose_catalog_default(&models), "gpt-6.1-sol");
+}
+
+#[test]
+fn should_preserve_public_legacy_default_selection() {
+    let provider = make_test_provider(Vec::new());
+    provider.set_model("gpt-6.1-sol").unwrap();
+    let models: Vec<copilot_auth::CopilotModelInfo> = serde_json::from_value(json!([
+        {"id": "gpt-6.1-sol", "model_picker_enabled": true},
+        {"id": "claude-opus-4.6", "model_picker_enabled": true}
+    ]))
+    .unwrap();
+
+    assert_eq!(provider.choose_catalog_default(&models), "claude-opus-4.6");
+}
+
+#[test]
+fn should_refresh_expired_bearer_at_captured_enterprise_endpoint() {
+    use std::io::{Read, Write};
+
+    const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+    const ACCEPT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
+    const RESPONSE_BODY: &str = r#"{"token":"refreshed-test-bearer","expires_at":4102444800}"#;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let request = std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + REQUEST_TIMEOUT;
+        let mut socket = loop {
+            match listener.accept() {
+                Ok((socket, _)) => break socket,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "runtime did not contact the captured endpoint"
+                    );
+                    std::thread::sleep(ACCEPT_POLL_INTERVAL);
+                }
+                Err(error) => panic!("failed to accept token exchange: {error}"),
+            }
+        };
+        socket.set_read_timeout(Some(REQUEST_TIMEOUT)).unwrap();
+        let mut received = Vec::new();
+        let mut buffer = [0; 1024];
+        while !received.windows(4).any(|window| window == b"\r\n\r\n") {
+            let count = socket.read(&mut buffer).unwrap();
+            assert_ne!(count, 0, "token exchange closed before sending headers");
+            received.extend_from_slice(&buffer[..count]);
+        }
+        write!(
+            socket,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            RESPONSE_BODY.len(),
+            RESPONSE_BODY
+        )
+        .unwrap();
+        String::from_utf8(received).unwrap()
+    });
+    let mut provider = make_test_provider(Vec::new());
+    provider.endpoints =
+        copilot_auth::CopilotEndpoints::from_enterprise_url(Some("hiqfi.ghe.com")).unwrap();
+    provider.endpoints.token_url = format!("http://{address}/api/v3/copilot_internal/v2/token");
+    provider.client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(REQUEST_TIMEOUT)
+        .build()
+        .unwrap();
+    *provider.bearer_token.blocking_write() = Some(copilot_auth::CopilotApiToken {
+        token: "expired-test-bearer".to_string(),
+        expires_at: 0,
+    });
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    runtime.block_on(provider.get_bearer_token()).unwrap();
+
+    assert_eq!(
+        request.join().unwrap().lines().next(),
+        Some("GET /api/v3/copilot_internal/v2/token HTTP/1.1")
+    );
 }
 
 #[test]
@@ -108,6 +474,90 @@ fn only_gpt_5_6_family_uses_responses_api() {
     assert!(!copilot_model_uses_responses_api("claude-sonnet-4.6"));
     assert_eq!(copilot_api_path(true), "responses");
     assert_eq!(copilot_api_path(false), "chat/completions");
+}
+
+#[test]
+fn should_route_response_only_catalog_model_to_responses() {
+    let catalog = std::collections::HashMap::from([(
+        "gpt-6.1-sol".to_string(),
+        vec!["/responses".to_string()],
+    )]);
+
+    assert!(copilot_model_uses_responses_api_with_catalog(
+        &catalog,
+        "gpt-6.1-sol"
+    ));
+}
+
+#[test]
+fn should_route_chat_only_catalog_model_to_chat_despite_name_fallback() {
+    let catalog = std::collections::HashMap::from([(
+        "gpt-5.6-sol".to_string(),
+        vec!["/chat/completions".to_string()],
+    )]);
+
+    assert!(!copilot_model_uses_responses_api_with_catalog(
+        &catalog,
+        "gpt-5.6-sol"
+    ));
+}
+
+#[test]
+fn should_keep_legacy_routing_when_both_endpoints_are_advertised() {
+    let catalog = std::collections::HashMap::from([(
+        "gpt-5.6-sol".to_string(),
+        vec!["/responses".to_string(), "/chat/completions".to_string()],
+    )]);
+
+    assert!(copilot_model_uses_responses_api_with_catalog(
+        &catalog,
+        "gpt-5.6-sol"
+    ));
+}
+
+#[test]
+fn should_keep_legacy_routing_when_endpoint_metadata_is_empty() {
+    let catalog = std::collections::HashMap::from([("gpt-5.6-sol".to_string(), Vec::new())]);
+
+    assert!(copilot_model_uses_responses_api_with_catalog(
+        &catalog,
+        "gpt-5.6-sol"
+    ));
+}
+
+#[test]
+fn should_keep_claude_on_chat_when_catalog_is_unavailable() {
+    let catalog = std::collections::HashMap::new();
+
+    assert!(!copilot_model_uses_responses_api_with_catalog(
+        &catalog,
+        "claude-sonnet-5.5"
+    ));
+}
+
+#[test]
+fn should_accept_advertised_endpoint_without_leading_slash() {
+    let catalog = std::collections::HashMap::from([(
+        "gpt-6.1-sol".to_string(),
+        vec!["responses".to_string()],
+    )]);
+
+    assert!(copilot_model_uses_responses_api_with_catalog(
+        &catalog,
+        "gpt-6.1-sol"
+    ));
+}
+
+#[test]
+fn should_use_provider_catalog_for_modern_model_routing() {
+    let provider = make_test_provider(Vec::new());
+    provider
+        .model_endpoints
+        .write()
+        .unwrap()
+        .insert("gpt-6.1-sol".to_string(), vec!["/responses".to_string()]);
+
+    assert!(provider.uses_responses_api("gpt-6.1-sol"));
 }
 
 #[test]

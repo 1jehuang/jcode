@@ -170,6 +170,7 @@ mod tests {
 
     fn route(model: &str, provider: &str, api_method: &str, available: bool) -> ModelRoute {
         ModelRoute {
+            catalog_metadata: None,
             model: model.to_string(),
             provider: provider.to_string(),
             api_method: api_method.to_string(),

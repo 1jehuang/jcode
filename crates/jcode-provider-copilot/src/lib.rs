@@ -40,6 +40,8 @@ pub const FALLBACK_MODELS: &[&str] = &[
 pub struct PersistedCatalog {
     pub models: Vec<String>,
     pub fetched_at_rfc3339: String,
+    #[serde(default)]
+    pub model_metadata: HashMap<String, jcode_provider_core::ModelMetadata>,
 }
 
 pub fn is_known_display_model(model: &str) -> bool {
@@ -94,10 +96,17 @@ pub fn build_messages(system: &str, messages: &[ChatMessage]) -> Vec<Value> {
         match msg.role {
             Role::User => {
                 let mut text_parts: Vec<&str> = Vec::new();
+                let mut images = Vec::new();
                 for block in &msg.content {
                     match block {
                         ContentBlock::Text { text, .. } => {
                             text_parts.push(text.as_str());
+                        }
+                        ContentBlock::Image { media_type, data } => {
+                            images.push(json!({
+                                "type": "image_url",
+                                "image_url": {"url": format!("data:{media_type};base64,{data}")},
+                            }));
                         }
                         ContentBlock::ToolResult {
                             tool_use_id,
@@ -130,7 +139,14 @@ pub fn build_messages(system: &str, messages: &[ChatMessage]) -> Vec<Value> {
                 }
 
                 let text = text_parts.join("\n");
-                if !text.is_empty() {
+                if !images.is_empty() {
+                    let mut content = Vec::new();
+                    if !text.is_empty() {
+                        content.push(json!({"type": "text", "text": text}));
+                    }
+                    content.extend(images);
+                    result.push(json!({"role": "user", "content": content}));
+                } else if !text.is_empty() {
                     result.push(json!({
                         "role": "user",
                         "content": text,

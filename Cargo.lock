@@ -3949,6 +3949,7 @@ name = "jcode-provider-copilot"
 version = "0.1.0"
 dependencies = [
  "jcode-message-types",
+ "jcode-provider-core",
  "jcode-schema-dialect",
  "serde",
  "serde_json",

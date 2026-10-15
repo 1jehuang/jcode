@@ -264,6 +264,7 @@ fn direct_openai_compatible_profile_routes(
         }
 
         routes.push(ModelRoute {
+            catalog_metadata: None,
             model,
             provider: provider.clone(),
             api_method: api_method.clone(),
@@ -2704,6 +2705,13 @@ impl Provider for MultiProvider {
         }
     }
 
+    fn model_metadata(&self, model: &str) -> Option<jcode_provider_core::ModelMetadata> {
+        if matches!(self.active_provider(), ActiveProvider::Copilot) {
+            return self.copilot_provider()?.model_metadata(model);
+        }
+        None
+    }
+
     fn service_tier(&self) -> Option<String> {
         match self.active_provider() {
             ActiveProvider::Claude => self.anthropic_provider().and_then(|a| a.service_tier()),
@@ -3272,6 +3280,7 @@ mod bedrock_placeholder_default_tests {
 
     fn route(model: &str, available: bool) -> ModelRoute {
         ModelRoute {
+            catalog_metadata: None,
             model: model.to_string(),
             provider: "AWS Bedrock".to_string(),
             api_method: "bedrock".to_string(),

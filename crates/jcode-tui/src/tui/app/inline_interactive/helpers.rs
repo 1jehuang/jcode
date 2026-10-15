@@ -161,6 +161,7 @@ pub(super) fn picker_route_selection(
     route: &PickerOption,
 ) -> crate::provider::RouteSelection {
     crate::provider::RouteSelection::from_model_route(&crate::provider::ModelRoute {
+        catalog_metadata: None,
         model: model_entry_base_name(entry),
         provider: route.provider.clone(),
         api_method: route.api_method.clone(),

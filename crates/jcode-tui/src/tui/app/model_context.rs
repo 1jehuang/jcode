@@ -1052,7 +1052,7 @@ impl App {
         {
             let compaction = self.registry.compaction();
             if let Ok(mut manager) = compaction.try_write() {
-                manager.set_budget(limit);
+                manager.set_budget(self.prompt_budget_for_context_limit(limit));
             };
         }
     }
@@ -1069,8 +1069,28 @@ impl App {
         self.context_warning_shown = false;
         let compaction = self.registry.compaction();
         if let Ok(mut manager) = compaction.try_write() {
-            manager.set_budget(limit);
+            manager.set_budget(self.prompt_budget_for_context_limit(limit));
         };
+    }
+
+    fn prompt_budget_for_context_limit(&self, limit: usize) -> usize {
+        let metadata = if self.is_remote {
+            if jcode_provider_core::provider_key_from_hint(self.remote_provider_name.as_deref())
+                != Some("copilot")
+            {
+                return limit;
+            }
+            self.remote_provider_model
+                .as_deref()
+                .and_then(jcode_provider_core::copilot_model_metadata)
+        } else {
+            self.provider.model_metadata(&self.provider.model())
+        };
+        metadata
+            .and_then(|metadata| metadata.max_input_tokens)
+            .filter(|budget| *budget > 0)
+            .unwrap_or(limit)
+            .min(limit)
     }
 
     pub(super) fn effective_context_tokens_from_usage(
