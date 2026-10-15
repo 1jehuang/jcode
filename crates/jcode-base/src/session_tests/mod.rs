@@ -1,6 +1,12 @@
 use super::*;
 use std::ffi::OsString;
 
+// current_dir() reports the resolved path, and macOS keeps the temp dir under the
+// /var -> /private/var symlink, so cwd tests start from the real temp path.
+fn real_temp_dir() -> std::path::PathBuf {
+    std::fs::canonicalize(std::env::temp_dir()).unwrap()
+}
+
 fn lock_env() -> std::sync::MutexGuard<'static, ()> {
     crate::storage::lock_test_env()
 }
