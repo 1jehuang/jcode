@@ -145,6 +145,44 @@ fn api_route_with_saved_pin_stays_api_through_sync_model_and_resume() {
         oauth_saved.route_api_method.as_deref(),
         Some("claude-oauth@claude-fox")
     );
+
+    // Generic OAuth routes are valid persisted selections too. An explicit API
+    // model switch must not leave that older route ahead of the new API key.
+    resumed
+        .set_route_selection(&crate::provider::RouteSelection {
+            model: model.clone(),
+            runtime_key: crate::provider::RuntimeKey::ClaudeOAuth,
+            api_method: "claude-oauth".to_string(),
+            provider_label: "Claude".to_string(),
+            detail: String::new(),
+        })
+        .unwrap();
+    resumed.set_model(&format!("claude-api:{model}")).unwrap();
+    assert_eq!(
+        resumed_provider.active_resolved_credential(),
+        Some(ResolvedCredential::ApiKey)
+    );
+    assert_ne!(
+        resumed.session_route_api_method().as_deref(),
+        Some("claude-oauth")
+    );
+    let api_saved = Session::load(&resumed.session.id).unwrap();
+    let api_resumed_provider: Arc<dyn Provider> =
+        Arc::new(crate::provider::MultiProvider::new_fast());
+    let api_resumed = Agent::new_with_session(
+        Arc::clone(&api_resumed_provider),
+        Registry::empty(),
+        api_saved,
+        None,
+    );
+    assert_eq!(
+        api_resumed_provider.active_resolved_credential(),
+        Some(ResolvedCredential::ApiKey)
+    );
+    assert_eq!(
+        api_resumed.session.account_pins.get("claude"),
+        Some(&fox_pin())
+    );
 }
 
 /// Fake provider that records `set_account_pin` calls. When `failover_to` is
