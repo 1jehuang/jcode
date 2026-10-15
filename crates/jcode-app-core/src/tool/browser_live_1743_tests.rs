@@ -88,7 +88,7 @@ async fn live_issue_1743_acceptance() {
         slow.as_ref().is_ok_and(|o| o.output.contains("Dashboard")),
         format!(
             "{:?} after {:?}",
-            slow.as_ref().map(|o| &o.output).map_err(|e| e),
+            slow.as_ref().map(|o| &o.output),
             started.elapsed()
         ),
     );

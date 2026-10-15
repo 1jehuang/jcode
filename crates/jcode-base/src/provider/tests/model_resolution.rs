@@ -97,6 +97,7 @@ fn test_available_models_display_uses_route_models_and_filters_placeholder_rows(
             active: RwLock::new(ActiveProvider::OpenAI),
             startup_notices: RwLock::new(Vec::new()),
             initial_provider: None,
+            catalog_scope: next_catalog_scope(),
             routes_memo: std::sync::Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
@@ -144,6 +145,7 @@ fn test_cerebras_model_routes_are_profile_scoped_and_unique() {
                 active: RwLock::new(ActiveProvider::OpenRouter),
                 startup_notices: RwLock::new(Vec::new()),
                 initial_provider: Some(ActiveProvider::OpenRouter),
+                catalog_scope: next_catalog_scope(),
                 routes_memo: std::sync::Mutex::new(None),
                 post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             };
@@ -239,6 +241,7 @@ fn test_direct_chutes_ignores_legacy_openrouter_catalog_cache() {
                     active: RwLock::new(ActiveProvider::OpenRouter),
                     startup_notices: RwLock::new(Vec::new()),
                     initial_provider: Some(ActiveProvider::OpenRouter),
+                    catalog_scope: next_catalog_scope(),
                     routes_memo: std::sync::Mutex::new(None),
                     post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 };
@@ -296,6 +299,7 @@ fn test_auth_changed_preserves_existing_direct_profile_session() {
             active: RwLock::new(ActiveProvider::OpenRouter),
             startup_notices: RwLock::new(Vec::new()),
             initial_provider: Some(ActiveProvider::OpenRouter),
+            catalog_scope: next_catalog_scope(),
             routes_memo: std::sync::Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
@@ -355,6 +359,7 @@ fn test_auth_changed_replaces_template_direct_profile_for_new_logins() {
             active: RwLock::new(ActiveProvider::OpenRouter),
             startup_notices: RwLock::new(Vec::new()),
             initial_provider: Some(ActiveProvider::OpenRouter),
+            catalog_scope: next_catalog_scope(),
             routes_memo: std::sync::Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
@@ -406,6 +411,7 @@ fn test_state_space_openrouter_default_survives_switch_to_nvidia_nim() {
             active: RwLock::new(ActiveProvider::OpenRouter),
             startup_notices: RwLock::new(Vec::new()),
             initial_provider: None,
+            catalog_scope: next_catalog_scope(),
             routes_memo: std::sync::Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
@@ -591,6 +597,7 @@ fn test_openrouter_and_compatible_profile_transition_invariants() {
             active: RwLock::new(ActiveProvider::OpenRouter),
             startup_notices: RwLock::new(Vec::new()),
             initial_provider: None,
+            catalog_scope: next_catalog_scope(),
             routes_memo: std::sync::Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
@@ -662,6 +669,7 @@ fn test_set_model_accepts_bare_openai_openrouter_pin_when_openrouter_available()
                 active: RwLock::new(ActiveProvider::OpenAI),
                 startup_notices: RwLock::new(Vec::new()),
                 initial_provider: None,
+                catalog_scope: next_catalog_scope(),
                 routes_memo: std::sync::Mutex::new(None),
                 post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             };
@@ -703,6 +711,7 @@ fn test_active_compatible_route_treats_claude_like_bare_model_as_provider_local(
                             active: RwLock::new(ActiveProvider::OpenRouter),
                             startup_notices: RwLock::new(Vec::new()),
                             initial_provider: Some(ActiveProvider::OpenRouter),
+                            catalog_scope: next_catalog_scope(),
                             routes_memo: std::sync::Mutex::new(None),
                             post_auth_refreshes_pending: Arc::new(
                                 std::sync::atomic::AtomicUsize::new(0),
@@ -737,6 +746,7 @@ fn test_multi_provider_with_openrouter(openrouter: Arc<dyn Provider>) -> MultiPr
         active: RwLock::new(ActiveProvider::OpenRouter),
         startup_notices: RwLock::new(Vec::new()),
         initial_provider: Some(ActiveProvider::OpenRouter),
+        catalog_scope: next_catalog_scope(),
         routes_memo: std::sync::Mutex::new(None),
         post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     }
@@ -832,6 +842,7 @@ fn test_active_compatible_route_preserves_custom_at_sign_model_ids() {
                             active: RwLock::new(ActiveProvider::OpenRouter),
                             startup_notices: RwLock::new(Vec::new()),
                             initial_provider: Some(ActiveProvider::OpenRouter),
+                            catalog_scope: next_catalog_scope(),
                             routes_memo: std::sync::Mutex::new(None),
                             post_auth_refreshes_pending: Arc::new(
                                 std::sync::atomic::AtomicUsize::new(0),
@@ -881,6 +892,7 @@ fn test_config_default_provider_openai_compatible_keeps_gpt_model_provider_local
                             active: RwLock::new(ActiveProvider::OpenRouter),
                             startup_notices: RwLock::new(Vec::new()),
                             initial_provider: None,
+                            catalog_scope: next_catalog_scope(),
                             routes_memo: std::sync::Mutex::new(None),
                             post_auth_refreshes_pending: Arc::new(
                                 std::sync::atomic::AtomicUsize::new(0),
@@ -933,6 +945,7 @@ fn test_custom_compatible_model_routes_do_not_request_openrouter_rewrite() {
                             active: RwLock::new(ActiveProvider::OpenRouter),
                             startup_notices: RwLock::new(Vec::new()),
                             initial_provider: Some(ActiveProvider::OpenRouter),
+                            catalog_scope: next_catalog_scope(),
                             routes_memo: std::sync::Mutex::new(None),
                             post_auth_refreshes_pending: Arc::new(
                                 std::sync::atomic::AtomicUsize::new(0),
@@ -980,6 +993,7 @@ fn test_configured_direct_compatible_profiles_are_listed_without_openrouter_key(
                     active: RwLock::new(ActiveProvider::OpenAI),
                     startup_notices: RwLock::new(Vec::new()),
                     initial_provider: None,
+                    catalog_scope: next_catalog_scope(),
                     routes_memo: std::sync::Mutex::new(None),
                     post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 };
@@ -1061,6 +1075,7 @@ input = ["image"]
             active: RwLock::new(ActiveProvider::Claude),
             startup_notices: RwLock::new(Vec::new()),
             initial_provider: None,
+            catalog_scope: next_catalog_scope(),
             routes_memo: std::sync::Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
@@ -1107,6 +1122,7 @@ input = ["image"]
             active: RwLock::new(ActiveProvider::Claude),
             startup_notices: RwLock::new(Vec::new()),
             initial_provider: None,
+            catalog_scope: next_catalog_scope(),
             routes_memo: std::sync::Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
@@ -1141,6 +1157,7 @@ fn test_config_default_provider_deepseek_applies_without_openrouter_key() {
                 active: RwLock::new(ActiveProvider::Claude),
                 startup_notices: RwLock::new(Vec::new()),
                 initial_provider: None,
+                catalog_scope: next_catalog_scope(),
                 routes_memo: std::sync::Mutex::new(None),
                 post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             };
@@ -1174,6 +1191,7 @@ fn test_profile_prefixed_model_switch_reinitializes_direct_compatible_runtime() 
                     active: RwLock::new(ActiveProvider::OpenAI),
                     startup_notices: RwLock::new(Vec::new()),
                     initial_provider: None,
+                    catalog_scope: next_catalog_scope(),
                     routes_memo: std::sync::Mutex::new(None),
                     post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 };
@@ -1229,6 +1247,7 @@ fn test_openai_auth_mode_prefixed_model_switch_changes_credentials() {
             active: RwLock::new(ActiveProvider::OpenAI),
             startup_notices: RwLock::new(Vec::new()),
             initial_provider: None,
+            catalog_scope: next_catalog_scope(),
             routes_memo: std::sync::Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
@@ -1297,6 +1316,7 @@ fn test_initial_openai_provider_can_switch_to_anthropic_auth_routes() {
             active: RwLock::new(ActiveProvider::OpenAI),
             startup_notices: RwLock::new(Vec::new()),
             initial_provider: Some(ActiveProvider::OpenAI),
+            catalog_scope: next_catalog_scope(),
             routes_memo: std::sync::Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
@@ -1371,6 +1391,7 @@ fn test_config_default_provider_anthropic_api_pins_api_credential() {
                 active: RwLock::new(ActiveProvider::Claude),
                 startup_notices: RwLock::new(Vec::new()),
                 initial_provider: None,
+                catalog_scope: next_catalog_scope(),
                 routes_memo: std::sync::Mutex::new(None),
                 post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             };
@@ -1448,6 +1469,7 @@ fn test_config_default_model_with_credential_prefix_applies_model_and_pin() {
                 active: RwLock::new(ActiveProvider::Claude),
                 startup_notices: RwLock::new(Vec::new()),
                 initial_provider: None,
+                catalog_scope: next_catalog_scope(),
                 routes_memo: std::sync::Mutex::new(None),
                 post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             };
@@ -1520,6 +1542,7 @@ fn test_multi_provider_fork_switch_request_preserves_route_identity_state_space(
             active: RwLock::new(ActiveProvider::OpenAI),
             startup_notices: RwLock::new(Vec::new()),
             initial_provider: None,
+            catalog_scope: next_catalog_scope(),
             routes_memo: std::sync::Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
@@ -1591,6 +1614,7 @@ fn test_multi_provider_fork_switch_request_preserves_route_identity_state_space(
             active: RwLock::new(ActiveProvider::Claude),
             startup_notices: RwLock::new(Vec::new()),
             initial_provider: None,
+            catalog_scope: next_catalog_scope(),
             routes_memo: std::sync::Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
@@ -1629,6 +1653,7 @@ fn test_multi_provider_fork_switch_request_preserves_route_identity_state_space(
             active: RwLock::new(ActiveProvider::OpenAI),
             startup_notices: RwLock::new(Vec::new()),
             initial_provider: None,
+            catalog_scope: next_catalog_scope(),
             routes_memo: std::sync::Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
@@ -1661,6 +1686,7 @@ fn test_multi_provider_fork_switch_request_preserves_route_identity_state_space(
                 active: RwLock::new(ActiveProvider::OpenRouter),
                 startup_notices: RwLock::new(Vec::new()),
                 initial_provider: None,
+                catalog_scope: next_catalog_scope(),
                 routes_memo: std::sync::Mutex::new(None),
                 post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             };
@@ -1694,6 +1720,7 @@ fn test_deepseek_direct_profile_supports_reasoning_effort_via_multi_provider() {
                 active: RwLock::new(ActiveProvider::OpenAI),
                 startup_notices: RwLock::new(Vec::new()),
                 initial_provider: None,
+                catalog_scope: next_catalog_scope(),
                 routes_memo: std::sync::Mutex::new(None),
                 post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             };
@@ -1740,6 +1767,7 @@ fn test_explicit_copilot_prefix_treats_claude_like_model_as_provider_local() {
             active: RwLock::new(ActiveProvider::Copilot),
             startup_notices: RwLock::new(Vec::new()),
             initial_provider: Some(ActiveProvider::Copilot),
+            catalog_scope: next_catalog_scope(),
             routes_memo: std::sync::Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
@@ -1773,6 +1801,7 @@ fn test_initial_provider_does_not_block_provider_specific_model_switch() {
                 active: RwLock::new(ActiveProvider::OpenRouter),
                 startup_notices: RwLock::new(Vec::new()),
                 initial_provider: Some(ActiveProvider::OpenRouter),
+                catalog_scope: next_catalog_scope(),
                 routes_memo: std::sync::Mutex::new(None),
                 post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             };
@@ -1787,194 +1816,8 @@ fn test_initial_provider_does_not_block_provider_specific_model_switch() {
     });
 }
 
-#[test]
-fn test_provider_for_model_unknown() {
-    assert_eq!(provider_for_model("unknown-model"), None);
-}
-
-#[test]
-fn test_provider_for_model_cursor() {
-    assert_eq!(provider_for_model("composer-2-fast"), Some("cursor"));
-    assert_eq!(provider_for_model("composer-2"), Some("cursor"));
-    assert_eq!(provider_for_model("sonnet-4.6"), Some("cursor"));
-    assert_eq!(provider_for_model("gpt-5"), Some("openai"));
-}
-
-#[test]
-fn test_context_limit_spark_vs_codex() {
-    assert_eq!(
-        context_limit_for_model("gpt-5.3-codex-spark"),
-        Some(128_000)
-    );
-    assert_eq!(context_limit_for_model("gpt-5.5"), Some(272_000));
-    assert_eq!(context_limit_for_model("gpt-5.3-codex"), Some(272_000));
-    assert_eq!(context_limit_for_model("gpt-5.2-codex"), Some(272_000));
-    assert_eq!(context_limit_for_model("gpt-5-codex"), Some(272_000));
-}
-
-#[test]
-fn test_context_limit_gpt_5_4() {
-    assert_eq!(context_limit_for_model("gpt-5.4"), Some(1_000_000));
-    assert_eq!(context_limit_for_model("gpt-5.4-pro"), Some(1_000_000));
-    assert_eq!(context_limit_for_model("gpt-5.4[1m]"), Some(1_000_000));
-}
-
-#[test]
-fn test_context_limit_respects_provider_hint() {
-    assert_eq!(
-        context_limit_for_model_with_provider("gpt-5.4", Some("openai")),
-        Some(1_000_000)
-    );
-    assert_eq!(
-        context_limit_for_model_with_provider("gpt-5.4", Some("copilot")),
-        Some(128_000)
-    );
-    assert_eq!(
-        context_limit_for_model_with_provider("claude-sonnet-4-6[1m]", Some("claude")),
-        Some(1_048_576)
-    );
-}
-
-#[test]
-fn test_resolve_model_capabilities_uses_provider_hint() {
-    let openai = resolve_model_capabilities("gpt-5.4", Some("openai"));
-    assert_eq!(openai.provider.as_deref(), Some("openai"));
-    assert_eq!(openai.context_window, Some(1_000_000));
-
-    let copilot = resolve_model_capabilities("gpt-5.4", Some("copilot"));
-    assert_eq!(copilot.provider.as_deref(), Some("copilot"));
-    assert_eq!(copilot.context_window, Some(128_000));
-
-    let gemini = resolve_model_capabilities("gemini-2.5-pro", Some("gemini"));
-    assert_eq!(gemini.provider.as_deref(), Some("gemini"));
-    assert_eq!(gemini.context_window, Some(1_000_000));
-}
-
-#[test]
-fn test_normalize_model_id_strips_1m_suffix() {
-    assert_eq!(models::normalize_model_id("gpt-5.4[1m]"), "gpt-5.4");
-    assert_eq!(models::normalize_model_id(" GPT-5.4[1M] "), "gpt-5.4");
-}
-
-#[test]
-fn test_merge_openai_model_ids_appends_dynamic_oauth_models() {
-    let models = models::merge_openai_model_ids(vec![
-        "gpt-5.4".to_string(),
-        "gpt-5.4-fast-preview".to_string(),
-        "gpt-5.4-fast-preview".to_string(),
-        " gpt-5.5-experimental ".to_string(),
-    ]);
-
-    assert!(models.iter().any(|model| model == "gpt-5.4"));
-    assert!(models.iter().any(|model| model == "gpt-5.4-fast-preview"));
-    assert!(models.iter().any(|model| model == "gpt-5.5-experimental"));
-    assert_eq!(
-        models
-            .iter()
-            .filter(|model| model.as_str() == "gpt-5.4-fast-preview")
-            .count(),
-        1
-    );
-}
-
-#[test]
-fn test_merge_anthropic_model_ids_appends_dynamic_models() {
-    let models = models::merge_anthropic_model_ids(vec![
-        "claude-opus-4-6".to_string(),
-        "claude-sonnet-5-preview".to_string(),
-        "claude-sonnet-5-preview".to_string(),
-        " claude-haiku-5-beta ".to_string(),
-    ]);
-
-    assert!(models.iter().any(|model| model == "claude-opus-4-6"));
-    assert!(models.iter().any(|model| model == "claude-opus-4-6[1m]"));
-    assert!(
-        models
-            .iter()
-            .any(|model| model == "claude-sonnet-5-preview")
-    );
-    assert!(models.iter().any(|model| model == "claude-haiku-5-beta"));
-    assert_eq!(
-        models
-            .iter()
-            .filter(|model| model.as_str() == "claude-sonnet-5-preview")
-            .count(),
-        1
-    );
-}
-
-#[test]
-fn test_parse_anthropic_model_catalog_reads_context_limits() {
-    let data = serde_json::json!({
-        "data": [
-            {
-                "id": "claude-opus-4-6",
-                "max_input_tokens": 1_048_576
-            },
-            {
-                "id": "claude-sonnet-5-preview",
-                "max_input_tokens": 333_000
-            }
-        ]
-    });
-
-    let catalog = models::parse_anthropic_model_catalog(&data);
-    assert!(
-        catalog
-            .available_models
-            .contains(&"claude-opus-4-6".to_string())
-    );
-    assert!(
-        catalog
-            .available_models
-            .contains(&"claude-sonnet-5-preview".to_string())
-    );
-    assert_eq!(
-        catalog.context_limits.get("claude-opus-4-6"),
-        Some(&1_048_576)
-    );
-    assert_eq!(
-        catalog.context_limits.get("claude-sonnet-5-preview"),
-        Some(&333_000)
-    );
-}
-
-#[test]
-fn test_context_limit_claude() {
-    with_clean_provider_test_env(|| {
-        assert_eq!(context_limit_for_model("claude-opus-4-6"), Some(200_000));
-        assert_eq!(context_limit_for_model("claude-sonnet-4-6"), Some(200_000));
-        assert_eq!(
-            context_limit_for_model("claude-opus-4-6[1m]"),
-            Some(1_048_576)
-        );
-        assert_eq!(
-            context_limit_for_model("claude-sonnet-4-6[1m]"),
-            Some(1_048_576)
-        );
-        // Opus 4.8 / 4.7 expose a 1M window natively (no `[1m]` opt-in needed),
-        // matching the live Anthropic catalog's `max_input_tokens: 1000000`.
-        assert_eq!(context_limit_for_model("claude-opus-4-8"), Some(1_000_000));
-        assert_eq!(
-            context_limit_for_model("claude-opus-4-8[1m]"),
-            Some(1_000_000)
-        );
-        assert_eq!(context_limit_for_model("claude-opus-4-7"), Some(1_000_000));
-    });
-}
-
-#[test]
-fn test_context_limit_dynamic_cache() {
-    populate_context_limits(
-        [("test-model-xyz".to_string(), 64_000)]
-            .into_iter()
-            .collect(),
-    );
-    assert_eq!(context_limit_for_model("test-model-xyz"), Some(64_000));
-}
-
-// --- Migrated from the OpenRouter runtime tests: these exercise MultiProvider
-// --- routing/identity with a real OpenRouter runtime via the registry.
+#[path = "model_metadata.rs"]
+mod model_metadata;
 
 struct OrEnvVarGuard {
     key: &'static str,
@@ -2346,6 +2189,7 @@ fn bare_openai_compatible_model_ids_route_to_their_profile_not_the_active_provid
             active: RwLock::new(ActiveProvider::Claude),
             startup_notices: RwLock::new(Vec::new()),
             initial_provider: None,
+            catalog_scope: next_catalog_scope(),
             routes_memo: std::sync::Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };

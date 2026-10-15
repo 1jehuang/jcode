@@ -197,15 +197,14 @@ pub(super) fn swarm_delivery_display_message(content: &str) -> Option<crate::tui
             return None;
         }
         (format!("Broadcast · {}", sender), body)
-    } else if let Some(rest) = trimmed.strip_prefix('#') {
+    } else {
+        let rest = trimmed.strip_prefix('#')?;
         let (head, body) = rest.split_once(": ")?;
         let (channel, sender) = head.split_once(" from ")?;
         if channel.contains(char::is_whitespace) {
             return None;
         }
         (format!("#{} · {}", channel, sender.trim()), body)
-    } else {
-        return None;
     };
     if title.contains('\n') {
         return None;
