@@ -8,6 +8,7 @@ impl App {
         self.input = restored.input;
         self.cursor_pos = restored.cursor;
         self.pending_images = restored.pending_images;
+        self.ensure_input_image_markers();
         self.submit_input_on_startup = restored.submit_on_restore
             && (!self.input.is_empty() || !self.pending_images.is_empty());
         crate::logging::info(&format!(

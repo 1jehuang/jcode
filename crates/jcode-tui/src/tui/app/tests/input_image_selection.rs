@@ -213,3 +213,59 @@ fn image_text_only_undo_snapshots_share_large_payloads() {
         "text-only undo entries must share, not clone multi-MB base64 payloads"
     );
 }
+
+#[test]
+fn image_restored_prepared_draft_keeps_png_when_editing_markerless_text() {
+    for raw in ["", "restored prompt"] {
+        let mut app = create_test_app();
+        let png = paste_selection_test_png(&mut app, 10);
+        super::remote::restore_prepared_remote_input(
+            &mut app,
+            super::input::PreparedInput {
+                raw_input: raw.to_string(),
+                expanded: raw.to_string(),
+                images: vec![("image/png".to_string(), png.clone())],
+            },
+        );
+        super::input::insert_input_text(&mut app, " more");
+        assert_eq!(app.pending_images, vec![("image/png".to_string(), png)]);
+        assert!(
+            app.input.contains("[image 1]"),
+            "restored image must stay visible"
+        );
+    }
+}
+
+#[test]
+fn image_restored_startup_draft_keeps_png_when_editing() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let png = paste_selection_test_png(&mut app, 11);
+        let session = format!("image-marker-restore-{}", std::process::id());
+        App::save_startup_submission_for_session(
+            &session,
+            "photo".to_string(),
+            vec![("image/png".to_string(), png.clone())],
+        );
+        let restored = App::restore_input_for_reload(&session).expect("saved startup input");
+        app.apply_restored_reload_input(restored);
+        app.handle_key(KeyCode::Char('!'), KeyModifiers::empty())
+            .unwrap();
+        assert_eq!(app.pending_images, vec![("image/png".to_string(), png)]);
+        assert!(app.input.contains("[image 1]"));
+    });
+}
+
+#[test]
+fn image_retrieved_interleave_draft_keeps_png_when_editing() {
+    let mut app = create_test_app();
+    let png = paste_selection_test_png(&mut app, 12);
+    app.input.clear();
+    app.cursor_pos = 0;
+    app.interleave_message = Some("restored followup".to_string());
+    app.interleave_images = std::mem::take(&mut app.pending_images);
+    assert!(super::input::retrieve_pending_message_for_edit(&mut app));
+    super::input::insert_input_text(&mut app, " more");
+    assert_eq!(app.pending_images, vec![("image/png".to_string(), png)]);
+    assert!(app.input.contains("[image 1]"));
+}

@@ -1372,6 +1372,7 @@ pub(super) fn fork_session_with_prompt_local(app: &mut App, prompt: Option<&str>
     if let Err(error) = launch_forked_session_local(app, staged) {
         if !images.is_empty() {
             app.pending_images = images;
+            app.ensure_input_image_markers();
         }
         app.push_display_message(DisplayMessage::error(format!(
             "Failed to fork session: {}",

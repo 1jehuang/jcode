@@ -921,6 +921,7 @@ fn insert_input_text_with_undo(app: &mut App, text: &str, typed: bool) {
     // Shift+Enter, rather than relying on individual key dispatchers to remember
     // to reconcile the transcript viewport.
     app.follow_chat_bottom_for_typing();
+    app.ensure_input_image_markers();
 
     // Typing or pasting over a composer selection replaces it. Record a single
     // undo step for the whole replacement so one Ctrl+Z restores the original.
@@ -1361,12 +1362,14 @@ pub(super) fn restore_composer_draft(app: &mut App, draft: ComposerDraft) {
         app.input = draft.input;
         app.cursor_pos = draft.cursor_pos.min(app.input.len());
         app.pending_images = draft.pending_images;
+        app.ensure_input_image_markers();
         app.pasted_contents = draft.pasted_contents;
         app.sync_model_picker_preview_from_input();
     } else {
         let expanded = expand_paste_placeholders_with(&draft.pasted_contents, &draft.input);
         app.record_prompt_history(&expanded);
         app.pending_images.extend(draft.pending_images);
+        app.ensure_input_image_markers();
     }
 }
 
@@ -1427,6 +1430,7 @@ pub(super) fn retrieve_pending_message_for_edit(app: &mut App) -> bool {
     if !parts.is_empty() {
         app.input = parts.join("\n\n");
         app.cursor_pos = app.input.len();
+        app.ensure_input_image_markers();
         let count = parts.len();
         app.set_status_notice(format!(
             "Retrieved {} pending message{} for editing",
@@ -2027,6 +2031,7 @@ fn route_prompt_to_new_session_local(app: &mut App) -> bool {
             app.input = restored_raw;
             app.cursor_pos = app.input.len();
             app.pending_images = restored_images;
+            app.ensure_input_image_markers();
             app.set_status_notice("Prompt launch failed");
             app.push_display_message(DisplayMessage::error(format!(
                 "Failed to launch prompt in a new session: {}",
@@ -2964,6 +2969,7 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
                     // Queued follow-ups are text-only, so carry staged images
                     // back to the composer instead of dropping them silently.
                     app.pending_images.append(&mut app.interleave_images);
+                    app.ensure_input_image_markers();
                 }
                 app.interleave_images.clear();
                 followups.append(&mut app.queued_messages);
