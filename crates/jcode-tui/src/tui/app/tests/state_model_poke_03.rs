@@ -105,6 +105,9 @@ fn should_show_exact_enterprise_efforts_in_remote_picker() {
         let mut app = create_enterprise_metadata_test_app();
         app.open_model_picker();
         wait_for_model_picker_load(&mut app);
+        // Enter on the model opens the level step with the catalog's levels.
+        select_model_row(&mut app, "claude-sonnet-5.5", "copilot");
+        press(&mut app, KeyCode::Enter);
         let efforts: std::collections::BTreeSet<&str> = app
             .inline_interactive_state
             .as_ref()
@@ -119,8 +122,6 @@ fn should_show_exact_enterprise_efforts_in_remote_picker() {
         );
     });
 }
-
-
 
 #[test]
 fn test_remote_model_command_opens_picker_without_catalog_request() {
