@@ -3,6 +3,33 @@ use super::*;
 use crate::usage::{OpenAIUsageData, OpenAIUsageWindow};
 use std::sync::Barrier;
 
+#[test]
+fn aggregate_usage_report_does_not_bypass_scoped_mark_clearing() {
+    with_account_failover_env(|| {
+        store_openai_accounts(1);
+        let rt = enter_test_runtime();
+        for reason in ["401 unauthorized: token rejected", "429 quota exhausted"] {
+            record_provider_unavailable_for_account("openai", reason);
+            let generation = crate::usage::openai_usage_generation();
+            let report = crate::usage::ProviderUsage {
+                provider_name: "OpenAI (ChatGPT)".into(),
+                limits: vec![crate::usage::UsageLimit {
+                    name: "Weekly".into(),
+                    usage_percent: 0.0,
+                    resets_at: None,
+                }],
+                ..Default::default()
+            };
+            rt.block_on(crate::usage::sync_openai_usage_reports_for_tests(&[report], generation));
+            assert!(
+                provider_unavailability_detail_for_account("openai").is_some(),
+                "aggregate display synchronization must not clear {reason}; exact-label generation-bound cache storage owns clearing"
+            );
+            clear_provider_unavailable_for_account("openai");
+        }
+    });
+}
+
 const LABEL: &str = "openai-otter";
 
 fn available() -> OpenAIUsageData {

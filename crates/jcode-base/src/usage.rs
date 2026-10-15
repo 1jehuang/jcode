@@ -730,6 +730,14 @@ async fn sync_active_anthropic_usage_from_reports(
     }
 }
 
+#[cfg(test)]
+pub(crate) async fn sync_openai_usage_reports_for_tests(
+    results: &[ProviderUsage],
+    generation: u64,
+) {
+    sync_openai_usage_from_reports(results, generation).await;
+}
+
 async fn sync_openai_usage_from_reports(results: &[ProviderUsage], generation: u64) {
     let report = active_openai_usage_report(results);
     let usage = get_openai_usage_cell().await;
@@ -740,10 +748,9 @@ async fn sync_openai_usage_from_reports(results: &[ProviderUsage], generation: u
 
     match report {
         Some(report) => {
+            // Exact-label cache storage owns generation-bound quota clearing.
+            // Aggregate display synchronization must preserve newer and auth markers.
             *cached = openai_usage_data_from_provider_report(report);
-            if report.error.is_none() {
-                crate::provider::clear_provider_unavailable_for_account("openai");
-            }
         }
         None => {
             *cached = OpenAIUsageData {
