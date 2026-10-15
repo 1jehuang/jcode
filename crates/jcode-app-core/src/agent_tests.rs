@@ -1116,6 +1116,76 @@ async fn restore_session_resets_runtime_interrupt_and_queue_state() {
     assert!(agent.locked_tools.is_none());
 }
 
+/// Regression for: a session saved with a model the active provider
+/// rejects on resume must be migrated to the provider's current
+/// default and re-persisted, not silently left with the rejected
+/// saved value.
+///
+/// Repro shape: operator's m3.1 sessions
+/// (e.g. `~/.jcode/sessions/session_deer_1791971005300_*.json` saved
+/// with `model = "MiniMax-M3.1-Flash-Preview"` on the openai
+/// provider) were silently resuming on the provider's current
+/// default while keeping the saved `MiniMax-M3.1-Flash-Preview` in
+/// `session.model`. The visible symptom was an Active session
+/// running on a model the user did not pick. The bug was in
+/// `restore_session_with_working_dir`
+/// (`crates/jcode-app-core/src/agent/turn_execution.rs:727-747`):
+/// `set_model_with_auth_refresh` errors were logged at `error` and
+/// the session was marked active without correcting
+/// `self.session.model` or re-persisting.
+#[tokio::test]
+async fn restore_session_falls_back_to_provider_default_when_saved_model_is_rejected() {
+    let _guard = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+
+    // Saved session: a model the active provider does not know
+    // about. The default `Provider::set_model` returns
+    // Err("This provider does not support model switching"), which
+    // is the same error class a real provider would surface if the
+    // saved id is no longer in its live catalog (e.g. an m3.1
+    // session resumed after the operator removed the m3.1 entry
+    // from `~/.jcode/config.toml`).
+    let mut saved_session = crate::session::Session::create_with_id(
+        "session_restore_falls_back_to_provider_default_when_saved_model_is_rejected".to_string(),
+        None,
+        Some("test".to_string()),
+    );
+    saved_session.model = Some("MiniMax-M3.1-Flash-Preview".to_string());
+    saved_session.provider_key = Some("openai".to_string());
+    saved_session.route_api_method = Some("openai".to_string());
+    saved_session
+        .save()
+        .expect("save session with rejected model");
+
+    let status = agent
+        .restore_session(&saved_session.id)
+        .expect("restore session should succeed");
+
+    assert_eq!(status, crate::session::SessionStatus::Active);
+    assert_eq!(agent.session_id(), saved_session.id);
+    // The provider's default `Provider::model` is "unknown"; the
+    // saved "MiniMax-M3.1-Flash-Preview" must be replaced, not
+    // left in place.
+    assert_eq!(
+        agent.session.model.as_deref(),
+        Some("unknown"),
+        "agent.session.model should be the provider's default after set_model failure, not the rejected saved value"
+    );
+    // And the migration must be re-persisted so the next resume
+    // (or a future `Session::load`) sees the corrected model, not
+    // the rejected one. This is the part that prevents the
+    // operator's next resume from re-triggering the same bug.
+    let reloaded =
+        crate::session::Session::load(&saved_session.id).expect("reload session from disk");
+    assert_eq!(
+        reloaded.model.as_deref(),
+        Some("unknown"),
+        "session must be re-persisted with the provider's default after set_model failure"
+    );
+}
+
 #[tokio::test]
 async fn explicit_provider_pin_is_persisted_and_reapplied_on_restore() {
     let _guard = crate::storage::lock_test_env();
