@@ -102,7 +102,7 @@
     "crates/jcode-tui/src/tui/backend.rs": 1650,
     "crates/jcode-tui/src/tui/info_widget.rs": 2297,
     "crates/jcode-tui/src/tui/mod.rs": 2571,
-    "crates/jcode-tui/src/tui/session_picker.rs": 2458,
+    "crates/jcode-tui/src/tui/session_picker.rs": 2462,
     "crates/jcode-tui/src/tui/session_picker/loading.rs": 3205,
     "crates/jcode-tui/src/tui/ui.rs": 3646,
     "crates/jcode-tui/src/tui/ui_frame_metrics.rs": 1434,
