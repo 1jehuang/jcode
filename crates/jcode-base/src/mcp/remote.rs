@@ -171,8 +171,9 @@ impl RemoteState {
                     Ok(response) => {
                         if let Some(id) = response.id
                             && let Some(tx) = self.pending.lock().await.remove(&id)
+                            && tx.send(response).is_err()
                         {
-                            let _ = tx.send(response);
+                            crate::logging::debug("MCP response receiver already closed");
                         }
                     }
                     Err(err) => crate::logging::debug(&format!(
@@ -190,17 +191,22 @@ impl RemoteState {
     async fn fail(&self, id: Option<u64>, message: String) {
         crate::logging::warn(&format!("MCP [{}]: {message}", self.name));
         let Some(id) = id else { return };
-        if let Some(tx) = self.pending.lock().await.remove(&id) {
-            let _ = tx.send(JsonRpcResponse {
-                jsonrpc: "2.0".to_string(),
-                id: Some(id),
-                result: None,
-                error: Some(JsonRpcError {
-                    code: TRANSPORT_ERROR_CODE,
-                    message,
-                    data: None,
-                }),
-            });
+        if let Some(tx) = self.pending.lock().await.remove(&id)
+            && tx
+                .send(JsonRpcResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id: Some(id),
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: TRANSPORT_ERROR_CODE,
+                        message,
+                        data: None,
+                    }),
+                })
+                .is_err()
+        {
+            // Requests may have timed out or been cancelled during shutdown.
+            crate::logging::debug("MCP error response receiver already closed");
         }
     }
 
@@ -213,16 +219,22 @@ impl RemoteState {
         self.mark_closed();
         let pending = std::mem::take(&mut *self.pending.lock().await);
         for (id, tx) in pending {
-            let _ = tx.send(JsonRpcResponse {
-                jsonrpc: "2.0".to_string(),
-                id: Some(id),
-                result: None,
-                error: Some(JsonRpcError {
-                    code: TRANSPORT_ERROR_CODE,
-                    message: message.to_string(),
-                    data: None,
-                }),
-            });
+            if tx
+                .send(JsonRpcResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id: Some(id),
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: TRANSPORT_ERROR_CODE,
+                        message: message.to_string(),
+                        data: None,
+                    }),
+                })
+                .is_err()
+            {
+                // Requests may have timed out or been cancelled during shutdown.
+                crate::logging::debug("MCP error response receiver already closed");
+            }
         }
     }
 
@@ -323,7 +335,11 @@ impl RemoteConnection {
             task.abort();
         }
         for task in self.tasks.drain(..) {
-            let _ = task.await;
+            if let Err(error) = task.await
+                && !error.is_cancelled()
+            {
+                crate::logging::warn(&format!("MCP worker failed during shutdown: {error}"));
+            }
         }
         let session = self
             .state
@@ -335,7 +351,20 @@ impl RemoteConnection {
             let request = self
                 .state
                 .request(reqwest::Method::DELETE, self.state.url.clone());
-            let _ = tokio::time::timeout(Duration::from_secs(2), request.send()).await;
+            match tokio::time::timeout(Duration::from_secs(2), request.send()).await {
+                Ok(Ok(response))
+                    if response.status().is_success()
+                        || response.status() == StatusCode::NOT_FOUND => {}
+                Ok(Ok(response)) => crate::logging::debug(&format!(
+                    "MCP session termination returned HTTP {}",
+                    response.status()
+                )),
+                Ok(Err(error)) => crate::logging::debug(&format!(
+                    "MCP session termination failed: {}",
+                    error.without_url()
+                )),
+                Err(_) => crate::logging::debug("MCP session termination timed out"),
+            }
         }
     }
 }
@@ -642,7 +671,7 @@ async fn streamable_post_inner(
         }
         let text = read_body(response, MAX_ERROR_BYTES)
             .await
-            .unwrap_or_default();
+            .map_err(|error| format!("MCP HTTP {status} error body could not be read: {error}"))?;
         return Err(format!(
             "MCP server '{}' returned HTTP {}: {}",
             state.name,
@@ -655,7 +684,9 @@ async fn streamable_post_inner(
         && let Some(session) = response
             .headers()
             .get(SESSION_HEADER)
-            .and_then(|v| v.to_str().ok())
+            .map(|value| value.to_str())
+            .transpose()
+            .map_err(|_| "MCP server returned a non-text session ID".to_string())?
     {
         if session.is_empty() || !session.bytes().all(|b| (0x21..=0x7e).contains(&b)) {
             return Err("MCP server returned an invalid session ID".to_string());
@@ -673,7 +704,9 @@ async fn streamable_post_inner(
     let content_type = response
         .headers()
         .get(CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
+        .map(|value| value.to_str())
+        .transpose()
+        .map_err(|_| "MCP response Content-Type is not valid text".to_string())?
         .unwrap_or("")
         .to_ascii_lowercase();
 
@@ -777,13 +810,17 @@ async fn open_sse_stream(state: &Arc<RemoteState>) -> Result<reqwest::Response> 
     if !status.is_success() {
         let text = read_body(response, MAX_ERROR_BYTES)
             .await
-            .unwrap_or_default();
+            .map_err(|error| {
+                anyhow::anyhow!("SSE HTTP {status} error body could not be read: {error}")
+            })?;
         bail!("SSE connect returned HTTP {status}: {}", snippet(&text));
     }
     if response
         .headers()
         .get(CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
+        .map(|value| value.to_str())
+        .transpose()
+        .context("MCP SSE Content-Type is not valid text")?
         .is_none_or(|v| {
             !v.split(';')
                 .next()
@@ -826,7 +863,9 @@ async fn sse_reader(
                     if let Some(tx) = endpoint_tx.take() {
                         let endpoint = validate_endpoint(&state.url, &event.data);
                         let valid = endpoint.is_ok();
-                        let _ = tx.send(endpoint);
+                        if tx.send(endpoint).is_err() {
+                            crate::logging::debug("MCP SSE endpoint receiver already closed");
+                        }
                         if !valid {
                             bail!("invalid MCP SSE endpoint");
                         }
@@ -852,10 +891,14 @@ async fn sse_reader(
         Ok(())
     }
     .await;
-    if let Some(tx) = endpoint_tx {
-        let _ = tx.send(Err(anyhow::anyhow!(
-            "MCP SSE stream ended before announcing an endpoint"
-        )));
+    if let Some(tx) = endpoint_tx
+        && tx
+            .send(Err(anyhow::anyhow!(
+                "MCP SSE stream ended before announcing an endpoint"
+            )))
+            .is_err()
+    {
+        crate::logging::debug("MCP SSE endpoint receiver closed before stream ended");
     }
     let message = match result {
         Ok(()) => "MCP SSE stream closed".to_string(),
@@ -896,7 +939,7 @@ async fn sse_post_inner(
         let status = response.status();
         let text = read_body(response, MAX_ERROR_BYTES)
             .await
-            .unwrap_or_default();
+            .map_err(|error| format!("MCP HTTP {status} error body could not be read: {error}"))?;
         return Err(format!(
             "MCP server '{}' returned HTTP {status}: {}",
             state.name,

@@ -1,5 +1,5 @@
 {
-  "total": 169,
+  "total": 162,
   "tracked_files": {
     "crates/jcode-app-core/build.rs": 4,
     "crates/jcode-app-core/src/agent/provider.rs": 1,
@@ -16,16 +16,12 @@
     "crates/jcode-app-core/src/tool/discover.rs": 1,
     "crates/jcode-app-core/src/tool/mod.rs": 1,
     "crates/jcode-app-core/src/tool/sdk.rs": 1,
-    "crates/jcode-base/examples/voice_recorder.rs": 2,
-    "crates/jcode-base/examples/voice_startup_profile.rs": 2,
     "crates/jcode-base/src/auth/oauth.rs": 3,
     "crates/jcode-base/src/hooks.rs": 1,
     "crates/jcode-base/src/mcp/manager.rs": 2,
     "crates/jcode-base/src/memory_jev.rs": 1,
     "crates/jcode-base/src/provider_activity_oauth.rs": 3,
     "crates/jcode-base/src/subscription_notice.rs": 1,
-    "crates/jcode-base/src/voice.rs": 1,
-    "crates/jcode-base/src/voice/nari.rs": 2,
     "crates/jcode-base/src/voice_intent.rs": 5,
     "crates/jcode-harness-api-server/src/translate.rs": 3,
     "crates/jcode-harness-api/examples/harness_repl.rs": 15,

@@ -146,6 +146,8 @@ export interface ConnectOptions {
   socketPath?: string;
   /** Client identity sent in the handshake, e.g. "my-app/1.0". */
   clientName?: string;
+  /** Enable only when this client renders user_response tool calls inline. */
+  supportsUserResponse?: boolean;
   /** Supply a custom transport instead of dialing a Unix socket. */
   transport?: Transport;
   /** Milliseconds before a request without a reply rejects. 0 disables. */
@@ -327,6 +329,7 @@ export class JcodeClient extends EventEmitter {
       min_version: API_VERSION_MAJOR,
       max_version: API_VERSION_MAJOR,
       client: clientName,
+      supports_user_response: options.supportsUserResponse ?? false,
     });
     if (frame.ev !== "hello_ok") {
       client.close();

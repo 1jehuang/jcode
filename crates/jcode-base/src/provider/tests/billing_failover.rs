@@ -1,6 +1,5 @@
-// A 402 (out of credit) from one OpenAI-compatible profile must resend the
-// turn to another configured profile that serves the same model id, and later
-// turns must go straight to that profile.
+// A 402 (out of credit) offers another configured profile serving the same
+// model. Nothing is resent until the user manually selects that profile.
 
 const BILLING_402_BODY: &str =
     r#"{"error":{"message":"Insufficient credits","type":"insufficient_quota","code":402}}"#;
@@ -80,6 +79,7 @@ fn billing_failover_test_provider() -> MultiProvider {
         active: RwLock::new(ActiveProvider::OpenRouter),
         startup_notices: RwLock::new(Vec::new()),
         initial_provider: None,
+        catalog_scope: Default::default(),
         routes_memo: std::sync::Mutex::new(None),
         post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     }
@@ -509,4 +509,3 @@ id = "glm-5.3"
         crate::provider::models::clear_provider_unavailable_for_account("openai-compatible:prof-a");
     });
 }
-

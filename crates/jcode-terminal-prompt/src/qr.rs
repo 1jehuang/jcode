@@ -5,13 +5,17 @@ use qrcode::{Color, QrCode, types::QrError};
 const QUIET_ZONE_WIDTH: usize = 2;
 
 fn env_truthy(key: &str) -> bool {
-    std::env::var(key)
-        .ok()
-        .map(|value| {
+    match std::env::var(key) {
+        Ok(value) => {
             let trimmed = value.trim();
             !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
-        })
-        .unwrap_or(false)
+        }
+        Err(std::env::VarError::NotPresent) => false,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            eprintln!("Ignoring non-Unicode QR preference {key}");
+            false
+        }
+    }
 }
 
 fn qr_rendering_enabled() -> bool {
@@ -64,11 +68,21 @@ fn qr_color_at(code: &QrCode, code_size: usize, col: usize, row: usize) -> Color
     code[(col - QUIET_ZONE_WIDTH, row - QUIET_ZONE_WIDTH)]
 }
 
+fn render_login_qr(data: &str) -> Option<String> {
+    match render_unicode_qr(data) {
+        Ok(qr) => Some(qr),
+        Err(error) => {
+            eprintln!("Cannot render login QR code: {error}. Use the login URL instead.");
+            None
+        }
+    }
+}
+
 pub fn markdown_section(data: &str, heading: &str) -> Option<String> {
     if !qr_rendering_enabled() {
         return None;
     }
-    let qr = render_unicode_qr(data).ok()?;
+    let qr = render_login_qr(data)?;
     Some(format!("{heading}\n\n```text\n{qr}\n```"))
 }
 
@@ -76,7 +90,7 @@ pub fn markdown_section_for_tui(data: &str, heading: &str) -> Option<String> {
     if !tui_qr_rendering_enabled() {
         return None;
     }
-    let qr = render_unicode_qr(data).ok()?;
+    let qr = render_login_qr(data)?;
     Some(format!("{heading}\n\n```text\n{qr}\n```"))
 }
 
@@ -91,7 +105,7 @@ pub fn indented_section(
     if !browser_suppressed && !qr_rendering_enabled() {
         return None;
     }
-    let qr = render_unicode_qr(data).ok()?;
+    let qr = render_login_qr(data)?;
     let mut out = String::new();
     out.push_str(heading);
     out.push_str("\n\n");

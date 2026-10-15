@@ -461,6 +461,11 @@ pub enum ErrorCode {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SessionInfo {
+    /// A non-headless user client is connected in the source daemon right now.
+    /// Independent of lifecycle `status`, processing, and this API connection.
+    /// False when unavailable from an older daemon.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub user_connected: bool,
     /// Cumulative built-in file-tool changes. Absent when unavailable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edit_stats: Option<crate::SessionEditStats>,

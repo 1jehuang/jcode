@@ -233,10 +233,13 @@ fn clean_instructions(text: Option<String>) -> Result<Option<String>> {
 }
 
 fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or_default()
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(duration) => duration.as_millis() as u64,
+        Err(error) => {
+            eprintln!("Collection creation clock is before Unix epoch: {error}");
+            0
+        }
+    }
 }
 
 /// `collections.json` in the user's jcode home.
@@ -308,7 +311,11 @@ fn write(path: &Path, store: &Collections) -> Result<()> {
         anyhow::Ok(())
     })();
     if result.is_err() {
-        let _ = fs::remove_file(&temporary);
+        if let Err(cleanup_error) = fs::remove_file(&temporary)
+            && cleanup_error.kind() != std::io::ErrorKind::NotFound
+        {
+            eprintln!("Could not remove unsaved collection temporary file: {cleanup_error}");
+        }
     }
     result.context("Could not save collections")
 }

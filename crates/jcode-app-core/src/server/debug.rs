@@ -299,15 +299,12 @@ pub(super) async fn handle_debug_client(
 
         match request {
             Request::Ping { id } => {
-                let event = ServerEvent::Pong {
+                let event = super::session_connections::connection_presence_pong(
                     id,
-                    native_ssh_protocol: Some(1),
-                    capabilities: vec![
-                        "session_tools".into(),
-                        "soft_interrupt_ids".into(),
-                        "runtime_commands".into(),
-                    ],
-                };
+                    &client_connections,
+                    &swarm_members,
+                )
+                .await;
                 let json = encode_event(&event);
                 writer.write_all(json.as_bytes()).await?;
             }

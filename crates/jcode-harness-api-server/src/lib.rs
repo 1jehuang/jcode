@@ -21,6 +21,8 @@ pub mod background_progress;
 pub mod translate;
 
 #[cfg(all(test, unix))]
+mod session_presence_tests;
+#[cfg(all(test, unix))]
 mod stdio_tests;
 
 use anyhow::{Context, Result};
@@ -85,6 +87,42 @@ async fn daemon_capabilities(socket: &std::path::Path) -> Vec<String> {
         .ok()
         .flatten()
         .unwrap_or_default()
+}
+
+/// Fresh source-daemon connections. A disposable Ping never subscribes,
+/// resumes, or creates a session. Failed snapshots clear connection presence.
+async fn daemon_user_connections(socket: &std::path::Path) -> std::collections::HashSet<String> {
+    let probe = async {
+        let mut stream = Stream::connect(socket)
+            .await
+            .context("connect presence probe")?;
+        write_json_line(&mut stream, &serde_json::json!({"type":"ping", "id":0})).await?;
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        read_frame(&mut reader, &mut line).await?;
+        let reply: Value = serde_json::from_str(&line).context("parse presence pong")?;
+        if reply["type"] != "pong" || reply["id"] != 0 {
+            anyhow::bail!("presence probe received an uncorrelated reply");
+        }
+        // Older daemons do not advertise connection presence.
+        if reply["user_connected_session_ids"].is_null() {
+            return Ok(std::collections::HashSet::new());
+        }
+        let ids: Vec<String> = serde_json::from_value(reply["user_connected_session_ids"].clone())
+            .context("parse connected session IDs")?;
+        Ok::<_, anyhow::Error>(ids.into_iter().filter(|id| !id.is_empty()).collect())
+    };
+    match tokio::time::timeout(std::time::Duration::from_millis(500), probe).await {
+        Ok(Ok(ids)) => ids,
+        Ok(Err(error)) => {
+            eprintln!("Harness presence snapshot unavailable: {error:#}");
+            std::collections::HashSet::new()
+        }
+        Err(_) => {
+            eprintln!("Harness presence probe timed out, clearing connection presence");
+            std::collections::HashSet::new()
+        }
+    }
 }
 
 /// Largest single request frame accepted from an API client, in bytes.
@@ -328,6 +366,7 @@ where
         .await
         .with_context(|| format!("connect legacy socket {}", legacy_socket.display()))?;
     let daemon_caps = daemon_capabilities(&legacy_socket).await;
+    let user_connections_supported = daemon_caps.iter().any(|cap| cap == "session_connections");
     let runtime_commands_supported = daemon_caps.iter().any(|cap| cap == "runtime_commands");
     let session_tools_supported = daemon_caps.iter().any(|cap| cap == "session_tools");
     let soft_interrupt_ids_supported = daemon_caps.iter().any(|cap| cap == "soft_interrupt_ids");
@@ -355,6 +394,7 @@ where
             ]
             .into_iter()
             .map(str::to_string)
+            .chain(user_connections_supported.then(|| "session_connections".to_string()))
             .chain(runtime_commands_supported.then(|| "runtime_commands".to_string()))
             .chain(session_tools_supported.then(|| "session_tools".to_string()))
             .chain(
@@ -375,6 +415,7 @@ where
     let mut state =
         translate::BridgeState::with_crash_on_disconnect(client_name.starts_with("jcode-desktop-"));
     state.session_tools_supported = session_tools_supported;
+    state.supports_user_response = hello["supports_user_response"].as_bool().unwrap_or(false);
     state.runtime_commands_supported = runtime_commands_supported;
     state.soft_interrupt_ids_supported = soft_interrupt_ids_supported;
 
@@ -423,6 +464,11 @@ where
                         continue;
                     }
                 };
+                if request["req"] == "list_sessions" {
+                    state.user_connected_sessions = if user_connections_supported {
+                        daemon_user_connections(&legacy_socket).await
+                    } else { Default::default() };
+                }
                 // Translation may inspect persisted session/archive files. Tell
                 // Tokio before entering that synchronous region so it can keep
                 // the accept loop and fresh-client handshakes scheduled.

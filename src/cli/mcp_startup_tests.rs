@@ -17,10 +17,9 @@ fn headless_mcp_cold_wait_excludes_disabled_and_cached_servers() {
     assert_eq!(uncached_enabled_mcp_servers(&config, &cache), vec!["cold"]);
     let mut changed = config.clone();
     changed.servers.get_mut("warm").unwrap().url = Some("https://example.test/new".into());
-    assert_eq!(
-        uncached_enabled_mcp_servers(&changed, &cache),
-        vec!["cold", "warm"]
-    );
+    let mut uncached = uncached_enabled_mcp_servers(&changed, &cache);
+    uncached.sort();
+    assert_eq!(uncached, vec!["cold", "warm"]);
 }
 
 fn echo_definition() -> McpToolDef {

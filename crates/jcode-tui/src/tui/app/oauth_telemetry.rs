@@ -52,11 +52,10 @@ impl App {
             .get()
             .is_some_and(|area| notice_visible_in_area(buffer, area))
             && let Some(notice) = crate::telemetry::pending_oauth_account_notice()
+            && crate::telemetry::acknowledge_oauth_account_notice_displayed(&notice)
         {
-            if crate::telemetry::acknowledge_oauth_account_notice_displayed(&notice) {
-                self.oauth_notice_displayed_at
-                    .get_or_insert_with(std::time::Instant::now);
-            }
+            self.oauth_notice_displayed_at
+                .get_or_insert_with(std::time::Instant::now);
         }
     }
 }
