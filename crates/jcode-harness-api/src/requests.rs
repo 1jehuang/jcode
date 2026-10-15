@@ -36,6 +36,9 @@ pub enum ApiRequest {
         max_version: u32,
         /// Client name and version, e.g. "external-client/0.1.0".
         client: String,
+        /// Opt in only when this client renders user_response tool calls.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        supports_user_response: bool,
     },
 
     /// List sessions visible to this client.

@@ -88,6 +88,7 @@ fn test_on_auth_changed_hot_initializes_openai_and_marks_routes_available() {
             active: RwLock::new(ActiveProvider::OpenAI),
             startup_notices: RwLock::new(Vec::new()),
             initial_provider: Some(ActiveProvider::OpenAI),
+            catalog_scope: next_catalog_scope(),
             routes_memo: std::sync::Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
@@ -158,6 +159,7 @@ fn test_on_auth_changed_refreshes_existing_openai_provider_credentials() {
             active: RwLock::new(ActiveProvider::OpenAI),
             startup_notices: RwLock::new(Vec::new()),
             initial_provider: Some(ActiveProvider::OpenAI),
+            catalog_scope: next_catalog_scope(),
             routes_memo: std::sync::Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
@@ -194,6 +196,7 @@ fn test_on_auth_changed_hot_initializes_anthropic_and_marks_routes_available() {
             active: RwLock::new(ActiveProvider::Claude),
             startup_notices: RwLock::new(Vec::new()),
             initial_provider: Some(ActiveProvider::Claude),
+            catalog_scope: next_catalog_scope(),
             routes_memo: std::sync::Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
@@ -242,6 +245,7 @@ fn test_on_auth_changed_hot_initializes_anthropic_from_api_key_and_marks_routes_
             active: RwLock::new(ActiveProvider::Claude),
             startup_notices: RwLock::new(Vec::new()),
             initial_provider: Some(ActiveProvider::Claude),
+            catalog_scope: next_catalog_scope(),
             routes_memo: std::sync::Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
@@ -305,6 +309,7 @@ fn test_anthropic_model_routes_keep_plain_4_6_available_without_extra_usage() {
             active: RwLock::new(ActiveProvider::Claude),
             startup_notices: RwLock::new(Vec::new()),
             initial_provider: Some(ActiveProvider::Claude),
+            catalog_scope: next_catalog_scope(),
             routes_memo: std::sync::Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
@@ -377,6 +382,7 @@ fn test_on_auth_changed_hot_initializes_openrouter_and_marks_routes_available() 
                     active: RwLock::new(ActiveProvider::OpenRouter),
                     startup_notices: RwLock::new(Vec::new()),
                     initial_provider: Some(ActiveProvider::OpenRouter),
+                    catalog_scope: next_catalog_scope(),
                     routes_memo: std::sync::Mutex::new(None),
                     post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 };
@@ -416,6 +422,7 @@ fn test_on_auth_changed_preserves_openrouter_model_and_explicit_provider_pin() {
                     active: RwLock::new(ActiveProvider::OpenRouter),
                     startup_notices: RwLock::new(Vec::new()),
                     initial_provider: Some(ActiveProvider::OpenRouter),
+                    catalog_scope: next_catalog_scope(),
                     routes_memo: std::sync::Mutex::new(None),
                     post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 };
@@ -472,6 +479,7 @@ fn test_on_auth_changed_hot_initializes_copilot_and_marks_routes_available() {
                 active: RwLock::new(ActiveProvider::Copilot),
                 startup_notices: RwLock::new(Vec::new()),
                 initial_provider: Some(ActiveProvider::Copilot),
+                catalog_scope: next_catalog_scope(),
                 routes_memo: std::sync::Mutex::new(None),
                 post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             };
@@ -552,6 +560,7 @@ fn test_on_auth_changed_hot_initializes_antigravity_when_tokens_exist_but_are_ex
             active: RwLock::new(ActiveProvider::Antigravity),
             startup_notices: RwLock::new(Vec::new()),
             initial_provider: Some(ActiveProvider::Antigravity),
+            catalog_scope: next_catalog_scope(),
             routes_memo: std::sync::Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
@@ -581,6 +590,7 @@ fn test_multi_provider_antigravity_routes_do_not_include_legacy_duplicate_entrie
         active: RwLock::new(ActiveProvider::Antigravity),
         startup_notices: RwLock::new(Vec::new()),
         initial_provider: Some(ActiveProvider::Antigravity),
+        catalog_scope: next_catalog_scope(),
         routes_memo: std::sync::Mutex::new(None),
         post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     };
@@ -718,6 +728,7 @@ fn test_on_auth_changed_hot_initializes_gemini_and_marks_routes_available() {
             active: RwLock::new(ActiveProvider::Gemini),
             startup_notices: RwLock::new(Vec::new()),
             initial_provider: Some(ActiveProvider::Gemini),
+            catalog_scope: next_catalog_scope(),
             routes_memo: std::sync::Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
@@ -760,6 +771,7 @@ fn test_on_auth_changed_hot_initializes_cursor_and_marks_routes_available() {
                 active: RwLock::new(ActiveProvider::Cursor),
                 startup_notices: RwLock::new(Vec::new()),
                 initial_provider: Some(ActiveProvider::Cursor),
+                catalog_scope: next_catalog_scope(),
                 routes_memo: std::sync::Mutex::new(None),
                 post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             };

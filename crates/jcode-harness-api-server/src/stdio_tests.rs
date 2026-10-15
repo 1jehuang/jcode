@@ -29,6 +29,7 @@ async fn stdio_stream_handshake_ping_and_eof_release_daemon_connection() {
                 min_version: API_VERSION_MAJOR,
                 max_version: API_VERSION_MAJOR,
                 client: "stdio-test".into(),
+                supports_user_response: false,
             },
         ),
     )
