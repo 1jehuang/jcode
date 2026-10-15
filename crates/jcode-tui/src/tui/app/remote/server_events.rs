@@ -2439,6 +2439,15 @@ pub(in crate::tui::app) fn handle_server_event(
                 )));
             } else {
                 app.remote_reasoning_effort = effort.clone();
+                // ChatGPT web levels have their own context window (Instant
+                // 52K, Thinking 262K, Pro 410K) from the shared catalog.
+                if let Some(model) = app.effective_remote_provider_model()
+                    && jcode_provider_core::is_chatgpt_web_model(&model)
+                    && let Some(window) =
+                        crate::provider::chatgpt_web::context_tokens(&model, effort.as_deref())
+                {
+                    app.update_context_limit_for_model(&model, Some(window as u64));
+                }
                 let label = effort
                     .as_deref()
                     .map(app_mod::effort_display_label)

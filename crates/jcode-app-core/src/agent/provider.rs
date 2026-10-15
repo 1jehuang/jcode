@@ -240,6 +240,9 @@ impl Agent {
     pub fn set_reasoning_effort(&mut self, effort: &str) -> Result<Option<String>> {
         self.provider.set_reasoning_effort(effort)?;
         let current = self.provider.reasoning_effort();
+        // Some routes change their context window with the level (ChatGPT
+        // web: Instant 52K, Thinking 262K, Pro 410K).
+        self.refresh_compaction_budget();
         self.session.reasoning_effort = current.clone();
         // Keep the side-table in sync (see `restore_reasoning_effort_from_session`).
         crate::session_effort::record_session_effort(&self.session.id, current.as_deref());
