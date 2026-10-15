@@ -532,7 +532,7 @@ pub(crate) fn effort_display_label(effort: &str) -> &str {
 fn effort_display_label_with_root<'a>(effort: &'a str, root: Option<&str>) -> &'a str {
     macro_rules! swarm_label {
         ($mode:literal, $detail:literal) => {
-            match root.unwrap_or("max") {
+            match root.unwrap_or("low") {
                 "none" => concat!($mode, " (None + ", $detail, ") [Beta]"),
                 "minimal" => concat!($mode, " (Minimal + ", $detail, ") [Beta]"),
                 "low" => concat!($mode, " (Low + ", $detail, ") [Beta]"),
@@ -545,7 +545,10 @@ fn effort_display_label_with_root<'a>(effort: &'a str, root: Option<&str>) -> &'
     }
     match effort {
         "swarm" => swarm_label!("Swarm", "light fan-out"),
-        "swarm-deep" => swarm_label!("Swarm Deep", "task graph"),
+        "swarm-deep" => swarm_label!(
+            "☢ Swarm Deep",
+            "task graph, WARNING: recursive agents / high token cost"
+        ),
         "max" => "Max",
         "xhigh" => "xHigh",
         "high" => "High",
