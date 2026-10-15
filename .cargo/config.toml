@@ -1,6 +1,25 @@
 [build]
-# Set RUSTC_WRAPPER=sccache in your shell env; no hardcoded path needed.
-# CI overrides this file, so leaving rustc-wrapper unset here is safe.
+# Compile local, unoptimized crates with rustc's parallel front-end
+# (-Zthreads). jcode-base, jcode-app-core and jcode-tui spend nearly all of a
+# check/test rebuild in the single-threaded front-end. Measured on a 16-thread
+# machine, a non-incremental `check -p jcode-tui` went 45s -> 24s (app-core
+# 18s -> 10s, base 11s -> 6s, tui 10s -> 5s). Registry dependencies,
+# optimized builds and compiler probes pass through unchanged. See the script
+# header for details.
+#
+# scripts/dev_cargo.sh already exported this wrapper, but plain `cargo`,
+# `justrust`, and rust-analyzer bypass dev_cargo.sh, so they compiled
+# single-threaded. Setting it here covers every entry point and keeps the
+# incremental cache from flipping between threaded and unthreaded builds.
+#
+# The wrapper is a POSIX shell script. Native Windows builds disable it with
+# CARGO_BUILD_RUSTC_WRAPPER="" (set in every CI workflow's env and in
+# scripts/install.ps1). Set JCODE_PARALLEL_FRONTEND=0 to keep the wrapper but
+# skip the extra threads. An explicit RUSTC_WRAPPER (for example sccache)
+# replaces it.
+rustc-wrapper = "scripts/rustc-parallel-frontend"
+#
+# Linux CI overwrites this file, so it builds without the wrapper.
 # Local fast-linker selection is handled by scripts/dev_cargo.sh so we don't
 # hard-force a linker mode that may be broken on a contributor machine.
 #

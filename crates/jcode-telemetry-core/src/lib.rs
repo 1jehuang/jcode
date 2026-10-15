@@ -1,6 +1,13 @@
 use jcode_logging as logging;
 use jcode_storage as storage;
 mod concurrency;
+mod desktop;
+pub use desktop::{record_desktop_active, record_desktop_update};
+mod oauth_account;
+pub use oauth_account::{
+    OAUTH_ACCOUNT_NOTICE_TEXT, OAuthAccountNotice, acknowledge_oauth_account_notice_displayed,
+    enqueue_oauth_account, pending_oauth_account_notice,
+};
 mod lifecycle;
 pub use concurrency::{ConcurrencySession, begin_concurrency_session};
 pub mod onboarding_trace;
@@ -1022,100 +1029,8 @@ fn update_turn_activity_timestamp(turn: &mut TurnTelemetry, now: Instant) {
     }
 }
 
-fn min_optional_ms(values: impl IntoIterator<Item = Option<u64>>) -> Option<u64> {
-    values.into_iter().flatten().min()
-}
-
-fn time_to_first_agent_action_ms(state: &SessionTelemetry) -> Option<u64> {
-    min_optional_ms([
-        state.first_assistant_response_ms,
-        state.first_tool_call_ms,
-        state.first_tool_success_ms,
-        state.first_file_edit_ms,
-        state.first_test_pass_ms,
-    ])
-}
-
-fn time_to_first_useful_action_ms(state: &SessionTelemetry) -> Option<u64> {
-    min_optional_ms([
-        state.first_tool_success_ms,
-        state.first_file_edit_ms,
-        state.first_test_pass_ms,
-    ])
-    .or(state.first_assistant_response_ms)
-}
-
-fn infer_agent_role(state: &SessionTelemetry) -> &'static str {
-    if state.feature_swarm_used || state.tool_cat_swarm > 0 {
-        "swarm"
-    } else if state.feature_subagent_used || state.tool_cat_subagent > 0 {
-        "subagent"
-    } else if state.feature_background_used || state.background_task_count > 0 {
-        "background"
-    } else {
-        "foreground"
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn infer_session_stop_reason(
-    event_name: &'static str,
-    reason: SessionEndReason,
-    state: &SessionTelemetry,
-    errors: &ErrorCounts,
-    duration_secs: u64,
-    session_success: bool,
-    abandoned_before_response: bool,
-    workflow_coding_used: bool,
-) -> &'static str {
-    if event_name == "session_crash"
-        || matches!(reason, SessionEndReason::Panic | SessionEndReason::Signal)
-    {
-        return "crash";
-    }
-    if errors.auth_failed > 0 {
-        return "auth_blocked";
-    }
-    if errors.rate_limited > 0 {
-        return "rate_limited";
-    }
-    if errors.provider_timeout > 0 {
-        return "provider_timeout";
-    }
-    if !state.had_user_prompt {
-        return "never_prompted";
-    }
-    if abandoned_before_response {
-        return "no_first_response";
-    }
-    if state.user_cancelled_count > 0 || matches!(reason, SessionEndReason::Disconnect) {
-        return "user_interrupted";
-    }
-    if matches!(state.first_assistant_response_ms, Some(ms) if ms > 60_000)
-        && time_to_first_useful_action_ms(state).is_none_or(|ms| ms > 60_000)
-    {
-        return "too_slow";
-    }
-    if state.executed_tool_failures >= 3 && state.executed_tool_successes == 0 {
-        return "tool_error_loop";
-    }
-    if errors.tool_error > 0 && state.executed_tool_successes == 0 {
-        return "tool_failures";
-    }
-    if workflow_coding_used && state.file_write_calls == 0 {
-        return "no_file_change";
-    }
-    if state.tests_run > 0 && state.tests_passed == 0 {
-        return "test_failure_unresolved";
-    }
-    if !session_success && duration_secs >= 300 && state.agent_active_ms_total >= 300_000 {
-        return "agent_got_stuck";
-    }
-    if !session_success {
-        return "no_useful_action";
-    }
-    "completed_successfully"
-}
+mod session_outcome;
+use session_outcome::*;
 
 fn mark_command_family_usage(state: &mut SessionTelemetry, command: &str) {
     let family = command
@@ -1398,8 +1313,23 @@ fn telemetry_status_is_permanent(status: u16) -> bool {
 fn payload_is_breaker_exempt(payload: &serde_json::Value) -> bool {
     matches!(
         payload.get("event").and_then(|value| value.as_str()),
-        Some("usage_report")
+        Some("usage_report" | "desktop_active" | "desktop_upgrade" | "desktop_update")
     )
+}
+
+/// Background payloads queued but not yet delivered (or abandoned).
+static TELEMETRY_IN_FLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Block until queued background telemetry has been delivered, or `timeout`
+/// elapses. For short-lived processes, such as `jcode-desktop --update`, that
+/// exit right after recording an event.
+pub fn flush_pending(timeout: std::time::Duration) {
+    let deadline = std::time::Instant::now() + timeout;
+    while TELEMETRY_IN_FLIGHT.load(std::sync::atomic::Ordering::Acquire) > 0
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
 }
 
 fn spawn_background_worker<F>(capacity: usize, mut deliver: F) -> std::io::Result<SyncSender<Value>>
@@ -1422,6 +1352,7 @@ fn background_sender() -> &'static SyncSender<Value> {
     TELEMETRY_BACKGROUND_SENDER.get_or_init(|| {
         spawn_background_worker(BACKGROUND_QUEUE_CAPACITY, |payload| {
             let _ = post_payload_with_retry(payload, ASYNC_SEND_TIMEOUT);
+            TELEMETRY_IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
         })
         .expect("telemetry background worker should start")
     })
@@ -1479,12 +1410,14 @@ fn send_payload(mut payload: serde_json::Value, mode: DeliveryMode) -> bool {
                 return false;
             }
             logging::debug("queueing telemetry payload for background delivery");
+            TELEMETRY_IN_FLIGHT.fetch_add(1, Ordering::AcqRel);
             match background_sender().try_send(payload) {
                 Ok(()) => {
                     TELEMETRY_QUEUE_OVERFLOW_WARNED.store(false, Ordering::Relaxed);
                     true
                 }
                 Err(TrySendError::Full(_)) => {
+                    TELEMETRY_IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
                     if !TELEMETRY_QUEUE_OVERFLOW_WARNED.swap(true, Ordering::Relaxed) {
                         logging::warn(&format!(
                             "telemetry background queue is full (capacity={BACKGROUND_QUEUE_CAPACITY}); dropping events until delivery catches up"
@@ -1493,6 +1426,7 @@ fn send_payload(mut payload: serde_json::Value, mode: DeliveryMode) -> bool {
                     false
                 }
                 Err(TrySendError::Disconnected(_)) => {
+                    TELEMETRY_IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
                     logging::warn("telemetry background worker stopped; dropping payload");
                     false
                 }

@@ -35,7 +35,9 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 pub use jcode_provider_core::AccountPin;
+mod agent_models;
 mod crash;
+pub use agent_models::AgentModelOverrides;
 mod journal;
 mod load_telemetry;
 mod maintenance;
@@ -75,6 +77,15 @@ pub use {jcode_session_types::prompt_title, persistence::drain_saves_for_shutdow
 
 fn stored_messages_to_messages(messages: &[StoredMessage]) -> Vec<Message> {
     messages.iter().map(StoredMessage::to_message).collect()
+}
+
+fn message_has_tool_image(content: &[ContentBlock]) -> bool {
+    content
+        .iter()
+        .any(|block| matches!(block, ContentBlock::Image { .. }))
+        && content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
 }
 
 fn is_internal_system_reminder_message(message: &StoredMessage) -> bool {
@@ -154,6 +165,9 @@ pub struct Session {
     /// Optional fixed model to use for subagents launched from this session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_model: Option<String>,
+    /// Session worker routing. Missing keys follow saved global defaults.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub agent_model_overrides: AgentModelOverrides,
     /// Last requested `/improve` mode for this session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub improve_mode: Option<SessionImproveMode>,
@@ -255,6 +269,8 @@ struct SessionStartupStub {
     account_failover_home: BTreeMap<String, AccountPin>,
     #[serde(default)]
     subagent_model: Option<String>,
+    #[serde(default)]
+    agent_model_overrides: AgentModelOverrides,
     #[serde(default)]
     improve_mode: Option<SessionImproveMode>,
     #[serde(default)]
@@ -372,6 +388,7 @@ impl Session {
         session.account_failover = stub.account_failover;
         session.account_failover_home = stub.account_failover_home;
         session.subagent_model = stub.subagent_model;
+        session.agent_model_overrides = stub.agent_model_overrides;
         session.improve_mode = stub.improve_mode;
         session.autoreview_enabled = stub.autoreview_enabled;
         session.autojudge_enabled = stub.autojudge_enabled;
@@ -413,6 +430,7 @@ impl Session {
         session.account_failover = snapshot.account_failover;
         session.account_failover_home = snapshot.account_failover_home;
         session.subagent_model = snapshot.subagent_model;
+        session.agent_model_overrides = snapshot.agent_model_overrides;
         session.improve_mode = snapshot.improve_mode;
         session.autoreview_enabled = snapshot.autoreview_enabled;
         session.autojudge_enabled = snapshot.autojudge_enabled;
@@ -555,6 +573,7 @@ impl Session {
             account_failover: self.account_failover,
             account_failover_home: self.account_failover_home.clone(),
             subagent_model: self.subagent_model.clone(),
+            agent_model_overrides: self.agent_model_overrides.clone(),
             improve_mode: self.improve_mode,
             autoreview_enabled: self.autoreview_enabled,
             autojudge_enabled: self.autojudge_enabled,
@@ -762,6 +781,7 @@ impl Session {
         self.account_failover = meta.account_failover;
         self.account_failover_home = meta.account_failover_home;
         self.subagent_model = meta.subagent_model;
+        self.agent_model_overrides = meta.agent_model_overrides;
         self.improve_mode = meta.improve_mode;
         self.autoreview_enabled = meta.autoreview_enabled;
         self.autojudge_enabled = meta.autojudge_enabled;
@@ -807,6 +827,7 @@ impl Session {
             account_failover: None,
             account_failover_home: BTreeMap::new(),
             subagent_model: None,
+            agent_model_overrides: AgentModelOverrides::new(),
             improve_mode: None,
             autoreview_enabled: None,
             autojudge_enabled: None,
@@ -867,6 +888,7 @@ impl Session {
             account_failover: None,
             account_failover_home: BTreeMap::new(),
             subagent_model: None,
+            agent_model_overrides: AgentModelOverrides::new(),
             improve_mode: None,
             autoreview_enabled: None,
             autojudge_enabled: None,
@@ -1365,8 +1387,28 @@ request in this new forked session, using the inherited conversation only as con
             .message_stats
             .merge_from(&summarize_blocks(&message.content));
         self.adopt_prompt_title(&message);
+        let adds_tool_image = message_has_tool_image(&message.content);
         self.messages.push(message);
         self.mark_messages_append_dirty();
+        if adds_tool_image {
+            self.decay_old_tool_images();
+        }
+    }
+
+    /// Replace inline screenshots from older tool results with short text
+    /// markers once they exceed the tool image budget, so computer-use and
+    /// browser sessions do not grow the transcript without bound (#1680). The
+    /// newest screenshots keep their data and are still sent to the provider.
+    /// Returns the number of images replaced.
+    pub fn decay_old_tool_images(&mut self) -> usize {
+        let mut contents: Vec<&mut Vec<ContentBlock>> =
+            self.messages.iter_mut().map(|m| &mut m.content).collect();
+        let stripped = jcode_compaction_core::decay_old_tool_images_in_contents(&mut contents);
+        if stripped > 0 {
+            self.mark_memory_profile_dirty();
+            self.mark_messages_full_dirty();
+        }
+        stripped
     }
 
     /// Name an untitled session after its first real user prompt so lists show
@@ -1763,6 +1805,8 @@ struct RemoteStartupSessionSnapshot {
     account_failover_home: BTreeMap<String, AccountPin>,
     #[serde(default)]
     subagent_model: Option<String>,
+    #[serde(default)]
+    agent_model_overrides: AgentModelOverrides,
     #[serde(default)]
     improve_mode: Option<SessionImproveMode>,
     #[serde(default)]

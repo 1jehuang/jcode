@@ -23,7 +23,7 @@ pub struct Worktree {
 }
 
 fn git(working_dir: &str, args: &[&str]) -> Result<Vec<u8>> {
-    let output = Command::new("git")
+    let output = crate::process::no_console_window(&mut Command::new("git"))
         .current_dir(working_dir)
         .args(args)
         .output()

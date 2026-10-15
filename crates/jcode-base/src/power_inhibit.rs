@@ -37,13 +37,30 @@ const INHIBIT_TTL: Duration = Duration::from_secs(150);
 /// below `INHIBIT_TTL` so coverage never lapses between reconcile ticks.
 const INHIBIT_REFRESH_AFTER: Duration = Duration::from_secs(90);
 
+/// How long a replaced helper is kept alive after its successor is spawned.
+/// logind re-evaluates a closed lid on every event, so even a few milliseconds
+/// without a registered lock suspends the machine. The new helper needs time to
+/// register over D-Bus before the old one may go.
+const HANDOVER_OVERLAP: Duration = Duration::from_secs(3);
+
+/// First retry delay after the systemd helper fails (for example because logind
+/// refuses new locks while a suspend/resume is still in progress). Doubles on
+/// each consecutive failure up to [`MAX_RETRY_BACKOFF`].
+const INITIAL_RETRY_BACKOFF: Duration = Duration::from_secs(10);
+const MAX_RETRY_BACKOFF: Duration = Duration::from_secs(600);
+
 /// Best-effort inhibitor that keeps the machine awake while jcode is actively
 /// streaming/processing.
 pub struct PowerInhibitor {
     handle: Option<InhibitHandle>,
     acquired_at: Option<Instant>,
+    /// Previous helper kept alive until its replacement has had time to register.
+    retiring: Option<InhibitHandle>,
     platform: Option<InhibitPlatform>,
     available: bool,
+    /// After a helper failure, do not respawn before this instant.
+    retry_at: Option<Instant>,
+    retry_backoff: Duration,
 }
 
 enum InhibitHandle {
@@ -88,8 +105,11 @@ impl PowerInhibitor {
         Self {
             handle: None,
             acquired_at: None,
+            retiring: None,
             platform,
             available: power_inhibit_available(std::env::var_os(DISABLE_ENV).is_some(), platform),
+            retry_at: None,
+            retry_backoff: INITIAL_RETRY_BACKOFF,
         }
     }
 
@@ -121,15 +141,33 @@ impl PowerInhibitor {
                 .and_then(|status| status.exit_status.as_ref())
                 .is_some_and(|status| !status.success())
         {
-            crate::logging::warn(
-                "power_inhibit: systemd inhibitor exited unsuccessfully; disabling for this process",
-            );
+            // Usually transient: logind rejects new locks while a suspend or
+            // resume is in progress. Back off and retry rather than giving up
+            // for the rest of the process lifetime.
+            crate::logging::warn(&format!(
+                "power_inhibit: systemd inhibitor exited unsuccessfully; retrying in {}s",
+                self.retry_backoff.as_secs()
+            ));
             self.release();
-            self.available = false;
+            self.retry_at = Some(now + self.retry_backoff);
+            self.retry_backoff = (self.retry_backoff * 2).min(MAX_RETRY_BACKOFF);
+            return;
+        }
+        if self.retry_at.is_some_and(|at| now < at) {
             return;
         }
 
         let healthy = handle_status.is_some_and(|status| status.running);
+        if healthy
+            && self
+                .acquired_at
+                .is_some_and(|at| now.saturating_duration_since(at) >= HANDOVER_OVERLAP)
+        {
+            // The replacement has had time to register: a lock that survived
+            // this long is working, so reset the failure backoff too.
+            self.retire_previous();
+            self.retry_backoff = INITIAL_RETRY_BACKOFF;
+        }
         let fresh = self.platform.is_some_and(|platform| {
             !platform.requires_refresh()
                 || self
@@ -140,9 +178,18 @@ impl PowerInhibitor {
             return;
         }
 
-        // Either there is no helper, it exited, or its TTL is close to expiring:
-        // (re)spawn a fresh one and drop the old.
-        self.release();
+        // Either there is no helper, it exited, or its TTL is close to expiring.
+        // Make before break: keep a still-running helper alive until the new one
+        // has registered, otherwise a closed lid suspends in the gap.
+        self.retire_previous();
+        self.acquired_at = None;
+        if let Some(handle) = self.handle.take() {
+            if healthy {
+                self.retiring = Some(handle);
+            } else {
+                stop_handle(handle);
+            }
+        }
 
         let Some(platform) = self.platform else {
             self.available = false;
@@ -174,28 +221,39 @@ impl PowerInhibitor {
 
     fn release(&mut self) {
         self.acquired_at = None;
+        self.retire_previous();
         if let Some(handle) = self.handle.take() {
-            match handle {
-                InhibitHandle::Child(mut child) => {
-                    if let Err(error) = child.kill() {
-                        crate::logging::warn(&format!(
-                            "power_inhibit: failed to stop inhibitor process: {error}"
-                        ));
-                    }
-                    if let Err(error) = child.wait() {
-                        crate::logging::warn(&format!(
-                            "power_inhibit: failed to reap inhibitor process: {error}"
-                        ));
-                    }
-                }
-                #[cfg(windows)]
-                InhibitHandle::Windows(mut guard) => {
-                    if let Err(error) = guard.stop() {
-                        crate::logging::warn(&format!(
-                            "power_inhibit: failed to release Windows execution state: {error}"
-                        ));
-                    }
-                }
+            stop_handle(handle);
+        }
+    }
+
+    fn retire_previous(&mut self) {
+        if let Some(handle) = self.retiring.take() {
+            stop_handle(handle);
+        }
+    }
+}
+
+fn stop_handle(handle: InhibitHandle) {
+    match handle {
+        InhibitHandle::Child(mut child) => {
+            if let Err(error) = child.kill() {
+                crate::logging::warn(&format!(
+                    "power_inhibit: failed to stop inhibitor process: {error}"
+                ));
+            }
+            if let Err(error) = child.wait() {
+                crate::logging::warn(&format!(
+                    "power_inhibit: failed to reap inhibitor process: {error}"
+                ));
+            }
+        }
+        #[cfg(windows)]
+        InhibitHandle::Windows(mut guard) => {
+            if let Err(error) = guard.stop() {
+                crate::logging::warn(&format!(
+                    "power_inhibit: failed to release Windows execution state: {error}"
+                ));
             }
         }
     }
@@ -495,7 +553,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn failed_linux_inhibitor_disables_retries_for_process_lifetime() {
+    fn failed_linux_inhibitor_backs_off_instead_of_disabling_forever() {
         let mut child = std::process::Command::new("sh")
             .args(["-c", "exit 1"])
             .spawn()
@@ -505,14 +563,60 @@ mod tests {
         let mut inhibitor = super::PowerInhibitor {
             handle: Some(super::InhibitHandle::Child(child)),
             acquired_at: Some(Instant::now()),
+            retiring: None,
             platform: Some(InhibitPlatform::LinuxSystemd),
             available: true,
+            retry_at: None,
+            retry_backoff: super::INITIAL_RETRY_BACKOFF,
         };
 
         inhibitor.set_active(true);
 
-        assert!(!inhibitor.is_available());
+        // A failure after suspend/resume must not kill lid blocking for the
+        // rest of the daemon's life.
+        assert!(inhibitor.is_available());
         assert!(inhibitor.handle.is_none());
+        assert!(inhibitor.retry_at.is_some());
+        assert_eq!(inhibitor.retry_backoff, super::INITIAL_RETRY_BACKOFF * 2);
+
+        // Still inside the backoff window: no respawn yet.
+        inhibitor.set_active(true);
+        assert!(inhibitor.handle.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refresh_keeps_previous_helper_alive_until_successor_registers() {
+        let old = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn stand-in helper");
+        let old_pid = old.id();
+        let mut inhibitor = super::PowerInhibitor {
+            handle: Some(super::InhibitHandle::Child(old)),
+            // Old enough that a refresh is due.
+            acquired_at: Some(Instant::now() - super::INHIBIT_REFRESH_AFTER),
+            retiring: None,
+            // Mac platform so the respawn uses a harmless command in tests on
+            // Linux (`caffeinate` is missing there, which simply fails spawn).
+            platform: Some(InhibitPlatform::MacosCaffeinate),
+            available: true,
+            retry_at: None,
+            retry_backoff: super::INITIAL_RETRY_BACKOFF,
+        };
+
+        inhibitor.set_active(true);
+
+        // Whatever happened to the successor, the old lock must not have been
+        // dropped first if the successor spawned. If spawn failed (no
+        // caffeinate), the old helper is still parked as retiring until release.
+        let retiring_pid = match inhibitor.retiring.as_ref() {
+            Some(super::InhibitHandle::Child(child)) => Some(child.id()),
+            _ => None,
+        };
+        assert_eq!(retiring_pid, Some(old_pid));
+        inhibitor.release();
+        assert!(inhibitor.retiring.is_none());
     }
 
     #[test]

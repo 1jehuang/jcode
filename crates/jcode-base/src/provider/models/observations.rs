@@ -12,6 +12,7 @@ pub fn clear_openai_usage_limit_for_account_label(account_label: &str) {
             .is_some_and(|entry| is_usage_limit_cooldown_reason(&entry.reason))
     {
         unavailable.remove(&key);
+        crate::provider::bump_catalog_generation();
     }
     crate::provider::account_failover::clear_account_exhausted(
         jcode_provider_core::AccountProviderKind::OpenAi,
@@ -64,6 +65,7 @@ pub(crate) fn clear_openai_unavailability_through_generation(label: &str, genera
         })
     {
         unavailable.remove(&key);
+        crate::provider::bump_catalog_generation();
     }
     crate::provider::account_failover::clear_openai_account_exhausted_through_generation(
         label, generation,

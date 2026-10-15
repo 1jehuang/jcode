@@ -580,6 +580,8 @@ async fn openai_refresh_without_account_switch_updates_cache() {
     assert_eq!(cached.account_id.as_deref(), Some("same-account-id"));
 }
 
+include!("openai_tests/persistent_cancellation.rs");
+
 fn seed_two_pinnable_openai_accounts(expires_at: i64) -> (String, String) {
     let account = |label: &str, access: &str, refresh: &str, email: &str| {
         let mut acc = stored_openai_account(label, access, refresh);

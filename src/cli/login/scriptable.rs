@@ -276,7 +276,7 @@ pub(super) async fn start_scriptable_login(
     // provider functions. Keep stdout machine-readable and never add a QR to
     // JSON output, but offer it on stderr for human-readable headless login.
     if !options.json
-        && let Some(qr) = crate::login_qr::indented_section(
+        && let Some(qr) = jcode_terminal_prompt::qr::indented_section(
             &auth_url,
             "Scan this QR on another device to sign in:",
             "    ",

@@ -1,0 +1,32 @@
+[package]
+name = "jcode-companion"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "jcode companion: per-login helper for desktop-only effects (open, terminals, lid override, global voice, browser bridge updates)"
+
+# Runs in the user's graphical session. The harness server reaches it only
+# through jcode_base::companion_client and never links this crate.
+[lib]
+name = "jcode_companion"
+path = "src/lib.rs"
+
+[dependencies]
+jcode-base = { path = "../jcode-base", default-features = false }
+jcode-desktop-open = { path = "../jcode-desktop-open" }
+jcode-transport = { path = "../jcode-transport" }
+jcode-voice = { path = "../jcode-voice" }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+async-io = "2.6"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Power", "Win32_System_SystemServices"] }
+
+[dev-dependencies]
+jcode-base = { path = "../jcode-base", default-features = false, features = ["test-support"] }
+tempfile = "3"

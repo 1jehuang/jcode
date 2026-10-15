@@ -30,10 +30,11 @@ pub use jcode_tui_mermaid::{
     render_pending_terminal_image_cleanup, reset_debug_stats, restore_active_diagrams,
     result_to_content, result_to_lines, set_log_hooks, set_memory_snapshot_hook,
     set_mermaid_inline_expand_level, set_render_completed_hook, set_streaming_preview_diagram,
-    set_video_export_mode, snapshot_active_diagrams, take_terminal_image_cleanup_payload,
-    text_image_fallback_note_line, transcript_preferred_aspect_ratio,
-    transcript_preferred_aspect_ratio_with_font, uses_text_image_fallback,
-    with_image_protocol_override, with_preferred_aspect_ratio, write_video_export_marker,
+    set_video_export_mode, snapshot_active_diagrams, step_distinct_mermaid_inline_level,
+    take_terminal_image_cleanup_payload, text_image_fallback_note_line,
+    transcript_preferred_aspect_ratio, transcript_preferred_aspect_ratio_with_font,
+    uses_text_image_fallback, with_image_protocol_override, with_preferred_aspect_ratio,
+    write_video_export_marker,
 };
 pub use jcode_tui_mermaid::{ImageScrollBenchmark, cache_stat_syscalls};
 

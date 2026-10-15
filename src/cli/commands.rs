@@ -1083,8 +1083,10 @@ fn run_cloud_sessions_dashboard(request: CloudSessionsDashboardRequest) -> Resul
         items.len(),
         output_path.display()
     );
-    if request.open {
-        let _ = open::that(&output_path);
+    if request.open
+        && let Err(error) = open::that(&output_path)
+    {
+        eprintln!("Dashboard saved, but could not open it: {error}");
     }
     Ok(())
 }
@@ -1431,6 +1433,13 @@ pub async fn run_transcript_command(
         trimmed.to_string()
     };
 
+    // Focused-window lookup needs the user's compositor, so it happens here in
+    // the client rather than in the (possibly remote) server.
+    let session = session.or_else(|| {
+        jcode_voice::dictation::focused_jcode_session()
+            .ok()
+            .flatten()
+    });
     let mut client = crate::server::Client::connect_debug().await?;
     let request_id = client.send_transcript(&text, mode, session).await?;
 
@@ -1446,11 +1455,34 @@ pub async fn run_transcript_command(
     }
 }
 
+pub async fn run_companion_command(status: bool, no_voice: bool) -> Result<()> {
+    use crate::companion_client::{CompanionRequest, request_async};
+    if status {
+        match request_async(CompanionRequest::Status, std::time::Duration::from_secs(2)).await {
+            Ok(response) => {
+                println!(
+                    "{} at {} (capabilities: {})",
+                    response.message,
+                    crate::companion_client::socket_path().display(),
+                    response.capabilities.join(", ")
+                );
+                return Ok(());
+            }
+            Err(error) => anyhow::bail!("{error}"),
+        }
+    }
+    jcode_companion::run(jcode_companion::CompanionOptions {
+        voice: !no_voice,
+        ..Default::default()
+    })
+    .await
+}
+
 pub async fn run_dictate_command(type_output: bool) -> Result<()> {
-    let run = crate::dictation::run_configured().await?;
+    let run = jcode_voice::dictation::run_configured().await?;
 
     if type_output {
-        crate::dictation::type_text(&run.text)
+        jcode_voice::dictation::type_text(&run.text)
     } else {
         run_transcript_command(Some(run.text), run.mode, None).await
     }
@@ -1883,7 +1915,7 @@ pub fn run_pair_command(list: bool, revoke: Option<String>) -> Result<()> {
 
     eprintln!();
     eprintln!("  \x1b[1mScan with the jcode iOS app:\x1b[0m\n");
-    match crate::login_qr::render_unicode_qr(&pair_uri) {
+    match jcode_terminal_prompt::qr::render_unicode_qr(&pair_uri) {
         Ok(qr) => {
             for line in qr.lines() {
                 eprintln!("  {line}");
@@ -1999,6 +2031,9 @@ pub async fn run_browser(action: &str, requested: Option<&str>) -> Result<()> {
                 "  compatibility: {}",
                 if status.compatible {
                     "ok"
+                } else if !status.responding {
+                    // Nothing answered, so there is no extension to compare.
+                    "unknown (bridge not responding)"
                 } else {
                     "extension/bridge mismatch"
                 }
@@ -2007,7 +2042,22 @@ pub async fn run_browser(action: &str, requested: Option<&str>) -> Result<()> {
                 println!("  missing actions: {}", status.missing_actions.join(", "));
             }
 
-            if status.ready {
+            if status.ready && !browser::status_answered_by(&status, target.kind) {
+                let answering = status
+                    .connected_browser
+                    .as_deref()
+                    .unwrap_or("another browser");
+                println!(
+                    "\n{name} is not connected: the bridge that answered belongs to {answering}. Browser actions with browser={} will fail until {name} runs the Browser Agent Bridge extension. Run `jcode browser setup {}` to set it up.",
+                    target.kind.id(),
+                    target.kind.id()
+                );
+                if browser::is_browser_running(target.kind)
+                    && let Some(diagnosis) = browser::diagnose_silent_chromium_bridge(target.kind)
+                {
+                    println!("{diagnosis}");
+                }
+            } else if status.ready {
                 println!("\nBuilt-in browser tool is ready.");
             } else if status.responding && !status.compatible {
                 println!(
@@ -2024,6 +2074,9 @@ pub async fn run_browser(action: &str, requested: Option<&str>) -> Result<()> {
                     name,
                     target.kind.extensions_page()
                 );
+                if let Some(diagnosis) = browser::diagnose_silent_chromium_bridge(target.kind) {
+                    println!("{diagnosis}");
+                }
             } else {
                 println!("\nRun `jcode browser setup` to install or repair it.");
             }
@@ -2529,12 +2582,10 @@ pub async fn run_single_message_command(
     emit_ndjson: bool,
     account_pins: &[(String, String)],
 ) -> Result<()> {
-    let provider = if emit_json || emit_ndjson {
-        super::provider_init::init_provider_quiet(choice, model).await?
-    } else {
-        super::provider_init::init_provider_for_validation(choice, model).await?
-    };
-    // `jcode run --account`: this run only; the stored default is unchanged.
+    let provider =
+        super::provider_init::init_provider_for_run(choice, model, emit_json || emit_ndjson)
+            .await?;
+    // This run only. The stored default is unchanged.
     super::account_pins::apply_to_provider(&provider, account_pins)?;
     let registry = crate::tool::Registry::new(provider.clone()).await;
     // Load MCP servers from ~/.jcode/mcp.json so headless `jcode run` has the
@@ -2565,6 +2616,29 @@ pub async fn run_single_message_command(
     run_single_message_with_agent(&mut agent, provider, message, emit_json, emit_ndjson).await
 }
 
+/// Provider id for `jcode run --json`/`--ndjson` output.
+///
+/// Every direct OpenAI-compatible profile (Ollama, LM Studio, DeepSeek, custom
+/// endpoints, ...) runs on the OpenRouter transport, whose `name()` is the
+/// fixed slot id `openrouter`. Reporting that attributed purely local runs to
+/// a paid third-party aggregator (#804). The session already records the
+/// resolved route identity, so prefer it for that slot and leave every other
+/// provider's established value unchanged.
+fn run_report_provider_name(
+    provider: &dyn crate::provider::Provider,
+    session_provider_key: Option<&str>,
+) -> String {
+    let name = provider.name();
+    if name.eq_ignore_ascii_case("openrouter")
+        && let Some(key) = session_provider_key
+            .map(str::trim)
+            .filter(|key| !key.is_empty())
+    {
+        return key.to_string();
+    }
+    name.to_string()
+}
+
 async fn run_single_message_with_agent(
     agent: &mut crate::agent::Agent,
     provider: std::sync::Arc<dyn crate::provider::Provider>,
@@ -2577,7 +2651,10 @@ async fn run_single_message_with_agent(
             let text = run_single_message_command_capture_with_auto_poke(agent, message).await?;
             let report = RunCommandReport {
                 session_id: agent.session_id().to_string(),
-                provider: provider.name().to_string(),
+                provider: run_report_provider_name(
+                    provider.as_ref(),
+                    agent.session_provider_key().as_deref(),
+                ),
                 model: provider.model(),
                 text,
                 usage: agent.last_usage().clone(),
@@ -2660,17 +2737,25 @@ fn run_command_mcp_cold_wait() -> std::time::Duration {
 /// would otherwise miss the single-turn snapshot.
 fn cold_cache_mcp_servers() -> Vec<String> {
     let config = crate::mcp::McpConfig::load();
-    if config.servers.is_empty() {
-        return Vec::new();
-    }
     let cache = crate::mcp::McpSchemaCache::load();
+    uncached_enabled_mcp_servers(&config, &cache)
+}
+
+fn uncached_enabled_mcp_servers(
+    config: &crate::mcp::McpConfig,
+    cache: &crate::mcp::McpSchemaCache,
+) -> Vec<String> {
     config
         .servers
         .iter()
-        .filter(|(name, cfg)| cache.tools_for(name, cfg).is_none())
+        .filter(|(name, cfg)| cfg.is_enabled() && cache.tools_for(name, cfg).is_none())
         .map(|(name, _)| name.clone())
         .collect()
 }
+
+#[cfg(test)]
+#[path = "mcp_startup_tests.rs"]
+mod mcp_startup_tests;
 
 /// Bridge the cold-cache gap for `jcode run`: if any configured MCP server has
 /// no cached schema, briefly poll the registry until its `mcp__*` tools appear
@@ -2693,11 +2778,9 @@ async fn wait_for_cold_cache_mcp_tools(registry: &crate::tool::Registry) {
     ));
     let deadline = std::time::Instant::now() + budget;
     loop {
-        let names = registry.tool_names().await;
-        let covered = cold_servers.iter().all(|server| {
-            let prefix = format!("mcp__{}__", server);
-            names.iter().any(|name| name.starts_with(&prefix))
-        });
+        let covered = cold_servers
+            .iter()
+            .all(|server| registry.has_mcp_tools_for_server(server));
         if covered {
             crate::logging::info(
                 "jcode run: cold-cache MCP server(s) registered tools; proceeding",
@@ -3045,6 +3128,8 @@ async fn run_single_message_command_ndjson(
 ) -> Result<()> {
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
     let session_id = agent.session_id().to_string();
+    let provider_name =
+        run_report_provider_name(provider.as_ref(), agent.session_provider_key().as_deref());
     let mut stdout = std::io::stdout().lock();
     let mut state = NdjsonRunState {
         session_id: Some(session_id.clone()),
@@ -3055,7 +3140,7 @@ async fn run_single_message_command_ndjson(
         &serde_json::json!({
             "type": "start",
             "session_id": session_id,
-            "provider": provider.name(),
+            "provider": provider_name,
             "model": provider.model(),
         }),
     )?;
@@ -3199,7 +3284,7 @@ async fn run_single_message_command_ndjson(
                 &serde_json::json!({
                     "type": "done",
                     "session_id": session_id,
-                    "provider": provider.name(),
+                    "provider": provider_name,
                     "model": provider.model(),
                     "text": state.text,
                     "usage": state.usage,
@@ -3217,7 +3302,7 @@ async fn run_single_message_command_ndjson(
                 &serde_json::json!({
                     "type": "error",
                     "session_id": session_id,
-                    "provider": provider.name(),
+                    "provider": provider_name,
                     "model": provider.model(),
                     "message": format!("{err:#}"),
                 }),
@@ -3247,6 +3332,15 @@ fn emit_ndjson_event(
             write_json_line(
                 stdout,
                 &serde_json::json!({ "type": "text_replace", "text": text }),
+            )
+        }
+        ServerEvent::TextSuffixReplace { old_text, new_text } => {
+            crate::message::replace_text_suffix(&mut state.text, &old_text, &new_text);
+            write_json_line(
+                stdout,
+                &serde_json::json!({
+                    "type": "text_suffix_replace", "old_text": old_text, "new_text": new_text,
+                }),
             )
         }
         ServerEvent::ToolStart { id, name } => write_json_line(
@@ -3385,6 +3479,7 @@ fn emit_ndjson_event(
             display_role,
             point,
             tools_skipped,
+            client_ids,
         } => write_json_line(
             stdout,
             &serde_json::json!({
@@ -3393,6 +3488,7 @@ fn emit_ndjson_event(
                 "display_role": display_role,
                 "point": point,
                 "tools_skipped": tools_skipped,
+                "client_ids": client_ids,
             }),
         ),
         ServerEvent::BatchProgress { progress } => write_json_line(
@@ -3491,87 +3587,9 @@ pub async fn run_model_command(
     Ok(())
 }
 
-fn cli_api_method_display(raw: &str) -> String {
-    crate::provider::ModelRouteApiMethod::parse(raw).display_label()
-}
+mod model_routes;
+use model_routes::*;
 
-fn cli_route_provider_display(provider: &str, api_method: &str) -> String {
-    if crate::provider::ModelRouteApiMethod::parse(api_method).is_openrouter()
-        && provider != "auto"
-        && !provider.contains("OpenRouter")
-    {
-        format!("OpenRouter/{}", provider)
-    } else {
-        provider.to_string()
-    }
-}
-
-fn collect_cli_model_names(
-    routes: &[crate::provider::ModelRoute],
-    display_models: Vec<String>,
-) -> Vec<String> {
-    let mut deduped = Vec::new();
-    let mut seen = BTreeSet::new();
-
-    fn push_model(deduped: &mut Vec<String>, seen: &mut BTreeSet<String>, model: &str) {
-        let trimmed = model.trim();
-        if !crate::provider::is_listable_model_name(trimmed) {
-            return;
-        }
-        if seen.insert(trimmed.to_string()) {
-            deduped.push(trimmed.to_string());
-        }
-    }
-
-    for route in routes.iter().filter(|route| route.available) {
-        push_model(&mut deduped, &mut seen, &route.model);
-    }
-
-    if deduped.is_empty() {
-        for route in routes {
-            push_model(&mut deduped, &mut seen, &route.model);
-        }
-    }
-
-    for model in display_models {
-        push_model(&mut deduped, &mut seen, &model);
-    }
-
-    deduped
-}
-
-#[allow(deprecated)]
-fn filter_cli_model_routes_for_choice(
-    choice: &super::provider_init::ProviderChoice,
-    routes: &[crate::provider::ModelRoute],
-) -> Vec<crate::provider::ModelRoute> {
-    use super::provider_init::ProviderChoice;
-
-    let keep = |route: &&crate::provider::ModelRoute| match choice {
-        ProviderChoice::Claude => route.api_method_kind().is_anthropic_credential_route(),
-        ProviderChoice::Openai => {
-            let method = route.api_method_kind();
-            matches!(method, crate::provider::ModelRouteApiMethod::OpenAIOAuth)
-                || matches!(method, crate::provider::ModelRouteApiMethod::Other(ref value) if value == "chatgpt-web")
-        }
-        ProviderChoice::OpenaiApi => matches!(
-            route.api_method_kind(),
-            crate::provider::ModelRouteApiMethod::OpenAIApiKey
-        ),
-        ProviderChoice::Openrouter | ProviderChoice::Azure => {
-            route.api_method_kind().is_openrouter()
-        }
-        ProviderChoice::Copilot => route.api_method_kind().is_copilot(),
-        _ => true,
-    };
-
-    let filtered: Vec<_> = routes.iter().filter(keep).cloned().collect();
-    if filtered.is_empty() {
-        routes.to_vec()
-    } else {
-        filtered
-    }
-}
 #[cfg(test)]
 #[path = "commands_tests.rs"]
 mod tests;

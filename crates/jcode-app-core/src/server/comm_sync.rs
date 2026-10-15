@@ -176,6 +176,7 @@ async fn ensure_same_swarm_access(
                 target_session, req_session_id
             ),
             retry_after_secs: None,
+            server_resumes: false,
         });
         false
     }
@@ -231,6 +232,7 @@ pub(super) async fn handle_comm_summary(
                     target_session
                 ),
                 retry_after_secs: Some(1),
+                server_resumes: false,
             });
             return;
         };
@@ -284,6 +286,7 @@ pub(super) async fn handle_comm_status(
                 id,
                 message: format!("Unknown session '{target_session}'"),
                 retry_after_secs: None,
+                server_resumes: false,
             });
             return;
         };
@@ -321,6 +324,7 @@ pub(super) async fn handle_comm_status(
             live_attachments: Some(member.event_txs.len()),
             status_age_secs: Some(member.last_status_change.elapsed().as_secs()),
             last_activity_age_secs: crate::session_metrics::last_activity_age_secs(&target_session),
+            stalled_secs: super::swarm_watchdog::stalled_for_secs(&target_session),
             joined_age_secs: Some(member.joined_at.elapsed().as_secs()),
             files_touched,
             activity,
@@ -357,6 +361,7 @@ pub(super) async fn handle_comm_read_context(
             id,
             message: "Only the coordinator, worktree manager, or the target session may read full context. Use summary for lightweight access.".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         });
         return;
     }
@@ -373,6 +378,7 @@ pub(super) async fn handle_comm_read_context(
                     target_session
                 ),
                 retry_after_secs: Some(1),
+                server_resumes: false,
             });
             return;
         };
@@ -386,6 +392,7 @@ pub(super) async fn handle_comm_read_context(
             id,
             message: format!("Unknown session '{target_session}'"),
             retry_after_secs: None,
+            server_resumes: false,
         });
     }
 }
@@ -409,6 +416,7 @@ pub(super) async fn handle_comm_plan_status(
             id,
             message: "Not in a swarm.".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         });
         return;
     };
@@ -496,6 +504,7 @@ pub(super) async fn handle_comm_resync_plan(
                 id,
                 message: "No swarm plan exists for this swarm.".to_string(),
                 retry_after_secs: None,
+                server_resumes: false,
             });
         }
     } else {
@@ -503,6 +512,7 @@ pub(super) async fn handle_comm_resync_plan(
             id,
             message: "Not in a swarm.".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         });
     }
 }

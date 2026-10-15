@@ -244,3 +244,107 @@ async fn keyed_tool_streaming_rollback_discards_all_partial_calls() {
         assert_eq!(*log.lock().unwrap(), vec![json!({"fresh":true})]);
     }
 }
+
+fn native_citation_events() -> Vec<StreamEvent> {
+    let mut events = vec![
+        StreamEvent::TextDelta("Earlier commentary.".into()),
+        StreamEvent::TextDone,
+        StreamEvent::ProviderNative {
+            provider: "openai".into(),
+            item: json!({"type":"web_search_call", "id":"ws_citation", "status":"completed",
+                "action":{"type":"search", "query":"native citation test"}}),
+        },
+    ];
+    for label in ["B", "C"] {
+        let old_text = format!("{label}. \u{e200}cite\u{e202}turn0search12\u{e201}");
+        let new_text = format!("{label}. [{label}](<https://source.example/{label}>)");
+        events.push(StreamEvent::TextDelta(old_text.clone()));
+        events.push(StreamEvent::TextSuffixReplace { old_text, new_text });
+        events.push(StreamEvent::TextDone);
+    }
+    events
+}
+
+#[tokio::test]
+async fn native_citation_corrections_preserve_earlier_text_and_native_replay() {
+    let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    for streaming in [false, true] {
+        let (mut agent, tx, _) = setup().await;
+        for event in native_citation_events()
+            .into_iter()
+            .chain([StreamEvent::MessageEnd { stop_reason: None }])
+        {
+            tx.send(Ok(event)).await.unwrap();
+        }
+        drop(tx);
+        let (out, mut rx) = tokio_mpsc::unbounded_channel();
+        if streaming {
+            agent.run_turn_streaming_mpsc(out).await.unwrap();
+        } else {
+            agent.run_turn(false).await.unwrap();
+        }
+        let assistant = agent
+            .session
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == Role::Assistant)
+            .unwrap();
+        assert!(matches!(&assistant.content[..], [
+            ContentBlock::Text { text: a, .. },
+            ContentBlock::ProviderNative { provider, item },
+            ContentBlock::Text { text: bc, .. },
+        ] if a == "Earlier commentary." && provider == "openai" && item["id"] == "ws_citation"
+            && bc == "B. [B](<https://source.example/B>)C. [C](<https://source.example/C>)"));
+        if streaming {
+            let mut corrections = 0;
+            let mut correction_pending = false;
+            while let Ok(event) = rx.try_recv() {
+                match event {
+                    ServerEvent::TextSuffixReplace { old_text, new_text } => {
+                        assert!(old_text.contains("turn0search12"));
+                        assert!(new_text.contains("https://source.example/"));
+                        corrections += 1;
+                        correction_pending = true;
+                    }
+                    ServerEvent::TextDone => correction_pending = false,
+                    _ => assert!(!correction_pending, "correction must precede TextDone"),
+                }
+            }
+            assert_eq!(corrections, 2);
+        }
+    }
+}
+
+#[tokio::test]
+async fn retry_after_native_citation_correction_discards_the_entire_attempt() {
+    let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    for streaming in [false, true] {
+        let (mut agent, tx, _) = setup().await;
+        for event in native_citation_events().into_iter().chain([
+            StreamEvent::RetryRollback { attempt: 1, max: 2 },
+            StreamEvent::TextDelta("Fresh response.".into()),
+            StreamEvent::MessageEnd { stop_reason: None },
+        ]) {
+            tx.send(Ok(event)).await.unwrap();
+        }
+        drop(tx);
+        if streaming {
+            let (out, _rx) = tokio_mpsc::unbounded_channel();
+            agent.run_turn_streaming_mpsc(out).await.unwrap();
+        } else {
+            agent.run_turn(false).await.unwrap();
+        }
+        let assistant = agent
+            .session
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == Role::Assistant)
+            .unwrap();
+        assert!(
+            matches!(&assistant.content[..], [ContentBlock::Text { text, .. }]
+            if text == "Fresh response.")
+        );
+    }
+}

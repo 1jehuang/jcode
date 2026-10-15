@@ -53,6 +53,7 @@ pub(super) async fn handle_comm_list_channels(
             id,
             message: "Not in a swarm. Use a git repository to enable swarm features.".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         });
     }
 }
@@ -94,6 +95,7 @@ pub(super) async fn handle_comm_channel_members(
                     live_attachments: Some(member.event_txs.len()),
                     status_age_secs: Some(member.last_status_change.elapsed().as_secs()),
                     last_activity_age_secs: crate::session_metrics::last_activity_age_secs(sid),
+                    stalled_secs: super::swarm_watchdog::stalled_for_secs(sid),
                     ..Default::default()
                 })
             })
@@ -108,6 +110,7 @@ pub(super) async fn handle_comm_channel_members(
             id,
             message: "Not in a swarm. Use a git repository to enable swarm features.".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         });
     }
 }
@@ -193,6 +196,7 @@ pub(super) async fn handle_comm_subscribe_channel(
             id,
             message: "Not in a swarm.".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         });
     }
 }
@@ -278,6 +282,7 @@ pub(super) async fn handle_comm_unsubscribe_channel(
             id,
             message: "Not in a swarm.".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         });
     }
 }

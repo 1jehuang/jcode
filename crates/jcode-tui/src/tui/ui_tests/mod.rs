@@ -151,10 +151,14 @@ struct TestState {
     transcript_swarm_members: Option<Vec<crate::protocol::SwarmMemberStatus>>,
     swarm_panel_selected: usize,
     swarm_panel_focused: bool,
+    pinned_todos_payload: Option<String>,
     swarm_panel_full_page: bool,
 }
 
 impl crate::tui::TuiState for TestState {
+    fn pinned_todos_payload(&self) -> Option<&str> {
+        self.pinned_todos_payload.as_deref()
+    }
     fn display_messages(&self) -> &[DisplayMessage] {
         &self.display_messages
     }
@@ -505,6 +509,9 @@ fn reset_prompt_viewport_state_for_test() {
         *state.borrow_mut() = PromptViewportState::default();
     });
 }
+
+#[path = "pinned_todo_regressions.rs"]
+mod pinned_todo_regressions;
 
 #[path = "basic.rs"]
 mod basic;

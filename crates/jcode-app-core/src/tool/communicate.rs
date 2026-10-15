@@ -2874,10 +2874,10 @@ impl Tool for CommunicateTool {
                     Ok(ServerEvent::CommSpawnResponse { new_session_id, .. })
                         if !new_session_id.is_empty() =>
                     {
-                        Ok(ToolOutput::new(format!(
-                            "Spawned new agent: {}",
-                            new_session_id
-                        )))
+                        Ok(
+                            ToolOutput::new(format!("Spawned new agent: {}", new_session_id))
+                                .with_metadata(serde_json::json!({"session_id": new_session_id})),
+                        )
                     }
                     Ok(response) => {
                         ensure_success(&response)?;

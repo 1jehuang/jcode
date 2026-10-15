@@ -560,3 +560,137 @@ async fn bridge_cli_is_pointed_at_the_target_browsers_host() {
         None => crate::env::remove_var("FAB_BROWSER"),
     }
 }
+
+#[test]
+fn bridge_updates_only_to_strictly_newer_releases() {
+    use super::browser_update::is_newer_release;
+    assert!(is_newer_release(Some("v0.10.0"), "v0.10.1"));
+    assert!(is_newer_release(Some("v0.9.9"), "v0.10.0"));
+    assert!(!is_newer_release(Some("v0.10.1"), "v0.10.1"));
+    assert!(!is_newer_release(Some("v0.10.1"), "v0.10.0"));
+    // Installs from before jcode recorded a version update once.
+    assert!(is_newer_release(None, "v0.10.1"));
+    assert!(is_newer_release(Some("garbage"), "v0.10.1"));
+    // A malformed latest tag never triggers a download.
+    assert!(!is_newer_release(None, "nightly"));
+}
+
+#[test]
+fn bridge_update_check_is_throttled() {
+    use super::browser_update::check_due;
+    let now = std::time::SystemTime::now();
+    let hour = std::time::Duration::from_secs(60 * 60);
+    assert!(check_due(None, now));
+    assert!(!check_due(Some(now - hour), now));
+    assert!(check_due(Some(now - 7 * hour), now));
+    // A clock that moved backwards must not block checks forever.
+    assert!(check_due(Some(now + hour), now));
+}
+
+#[test]
+fn bridge_update_is_skipped_until_the_bridge_is_installed() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let temp = tempfile::TempDir::new().expect("create temp dir");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    // No network call happens: first-time installs stay an explicit setup.
+    let update = rt
+        .block_on(update_bridge_if_newer(BrowserKind::Firefox, true))
+        .unwrap();
+    assert_eq!(update, BridgeUpdate::Skipped);
+    assert_eq!(installed_bridge_version(), None);
+    match prev_home {
+        Some(v) => crate::env::set_var("JCODE_HOME", v),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+}
+
+/// After an update only hosts still running the replaced binary are stopped;
+/// a host the reloaded extension already started from the new file survives.
+#[cfg(target_os = "linux")]
+#[test]
+fn update_stops_only_hosts_running_the_replaced_binary() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let host = temp.path().join("firefox-agent-bridge-host");
+    let sleep = std::path::Path::new("/bin/sleep");
+    std::fs::copy(sleep, &host).expect("copy sleep");
+    let mut old = std::process::Command::new(&host)
+        .arg("30")
+        .spawn()
+        .expect("old host");
+    // Replace the binary the way the updater does (rename over it).
+    let staged = temp.path().join(".staged");
+    std::fs::copy(sleep, &staged).expect("stage");
+    std::fs::rename(&staged, &host).expect("replace");
+    let mut new = std::process::Command::new(&host)
+        .arg("30")
+        .spawn()
+        .expect("new host");
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    super::browser_update::stop_hosts_running(&host);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let old_exited = old.try_wait().expect("poll old").is_some();
+    let new_running = new.try_wait().expect("poll new").is_none();
+    let _ = new.kill();
+    let _ = new.wait();
+    let _ = old.kill();
+    let _ = old.wait();
+    assert!(
+        old_exited,
+        "host running the replaced binary must be stopped"
+    );
+    assert!(new_running, "host running the new binary must be kept");
+}
+
+// #1743: readiness probes ran in the user's focused tab before every action.
+#[test]
+fn current_extensions_skip_the_per_action_probes() {
+    let ping = |v: &str| serde_json::json!({"pong": true, "extensionVersion": v});
+    assert!(ping_reports_current_extension(&ping("0.10.1")));
+    assert!(ping_reports_current_extension(&ping("1.0.0")));
+    assert!(!ping_reports_current_extension(&ping("0.9.7")));
+    assert!(!ping_reports_current_extension(
+        &serde_json::json!({"pong": true})
+    ));
+}
+
+#[test]
+fn capability_probes_do_not_move_the_users_page() {
+    for (action, params) in REQUIRED_BRIDGE_ACTION_PROBES {
+        let params: serde_json::Value = serde_json::from_str(params).unwrap();
+        if *action == "scroll" {
+            assert!(params.get("position").is_none(), "{params}");
+            assert!(params["selector"].as_str().unwrap().contains("jcode"));
+        }
+    }
+}
+
+#[test]
+fn stale_session_errors_are_recognized() {
+    assert!(is_stale_session_target_error("No tab with id: 1251116074."));
+    assert!(is_stale_session_target_error(
+        "Error: No active tab found in window 1251116073"
+    ));
+    assert!(!is_stale_session_target_error("Element not found: #save"));
+}
+
+// #1743: with Chrome requested, a ping answered by the Firefox host must not
+// count as Chrome being ready.
+#[test]
+fn a_bridge_answered_by_another_browser_is_not_the_requested_one() {
+    let mut status = status_fixture(true, true, true);
+    status.connected_browser = Some("firefox".into());
+    assert!(!status_answered_by(&status, BrowserKind::Chrome));
+    assert!(status_answered_by(&status, BrowserKind::Firefox));
+    status.connected_browser = Some("chrome".into());
+    assert!(
+        status_answered_by(&status, BrowserKind::Brave),
+        "same Chromium family"
+    );
+}

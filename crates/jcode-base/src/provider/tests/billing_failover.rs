@@ -80,6 +80,7 @@ fn billing_failover_test_provider() -> MultiProvider {
         active: RwLock::new(ActiveProvider::OpenRouter),
         startup_notices: RwLock::new(Vec::new()),
         initial_provider: None,
+        catalog_scope: Default::default(),
         routes_memo: std::sync::Mutex::new(None),
         post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         account_failover: Default::default(),

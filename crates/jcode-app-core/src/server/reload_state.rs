@@ -26,9 +26,39 @@ pub fn clear_reload_marker() {
     let _ = std::fs::remove_file(reload_marker_path());
 }
 
-pub(super) fn clear_reload_marker_if_stale_for_pid(current_pid: u32) {
+/// Whether a server may delete a reload marker another process owns.
+///
+/// `jcode.reload` is one file per runtime dir, shared by every socket, but a
+/// reload belongs to the process that started it. The split is by *owner*, not
+/// by socket: advancing or clearing our own marker is always legitimate, while
+/// deleting a marker another live process wrote erases its in-flight
+/// `Starting` state and drops the guard that makes clients wait out its drain.
+///
+/// Guarding at the call site instead, skipping the marker calls wholesale for
+/// custom sockets, also suppressed a custom server's own socket-ready
+/// publish, stranding its marker in `Starting` after a reload and making it
+/// reject messages until the marker expired (review of #1768).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ForeignMarkerPolicy {
+    /// The shared daemon owns the runtime-dir marker and cleans up after
+    /// stale predecessors.
+    MayClear,
+    /// A custom-socket server shares the file but not the ownership.
+    Preserve,
+}
+
+impl ForeignMarkerPolicy {
+    fn preserves(self, state_pid: u32, current_pid: u32) -> bool {
+        self == Self::Preserve && state_pid != current_pid
+    }
+}
+
+pub(super) fn clear_reload_marker_if_stale_for_pid(current_pid: u32, policy: ForeignMarkerPolicy) {
     if let Some(state) = ReloadState::load() {
         if state.phase == ReloadPhase::Starting && state.pid == current_pid {
+            return;
+        }
+        if policy.preserves(state.pid, current_pid) {
             return;
         }
         clear_reload_marker();
@@ -85,7 +115,7 @@ pub fn write_reload_state(
     .write();
 }
 
-pub fn publish_reload_socket_ready() {
+pub(super) fn publish_reload_socket_ready(policy: ForeignMarkerPolicy) {
     let Some(state) = ReloadState::load() else {
         crate::logging::warn(
             "Server reached socket-ready publish point, but no reload marker was present",
@@ -119,6 +149,13 @@ pub fn publish_reload_socket_ready() {
             state.phase, state.pid, current_pid
         ));
     } else if state.pid != current_pid {
+        if policy.preserves(state.pid, current_pid) {
+            crate::logging::warn(&format!(
+                "Server reached socket-ready publish point, but reload marker pid {} did not match current pid {}; leaving it to its owner",
+                state.pid, current_pid
+            ));
+            return;
+        }
         crate::logging::warn(&format!(
             "Server reached socket-ready publish point, but reload marker pid {} did not match current pid {}; clearing stale marker",
             state.pid, current_pid
@@ -803,7 +840,7 @@ mod tests {
         }
         .write();
 
-        clear_reload_marker_if_stale_for_pid(current);
+        clear_reload_marker_if_stale_for_pid(current, ForeignMarkerPolicy::MayClear);
         assert!(
             reload_marker_exists(),
             "an in-flight Starting marker owned by this pid must survive cleanup"
@@ -829,7 +866,7 @@ mod tests {
             detail: None,
         }
         .write();
-        clear_reload_marker_if_stale_for_pid(current);
+        clear_reload_marker_if_stale_for_pid(current, ForeignMarkerPolicy::MayClear);
         assert!(
             !reload_marker_exists(),
             "a foreign Starting marker must be cleared"
@@ -845,7 +882,7 @@ mod tests {
             detail: None,
         }
         .write();
-        clear_reload_marker_if_stale_for_pid(current);
+        clear_reload_marker_if_stale_for_pid(current, ForeignMarkerPolicy::MayClear);
         assert!(
             !reload_marker_exists(),
             "a completed marker must be cleared on stale check"
@@ -865,7 +902,7 @@ mod tests {
             ReloadPhase::Failed,
             Some("boom".to_string()),
         );
-        publish_reload_socket_ready();
+        publish_reload_socket_ready(ForeignMarkerPolicy::MayClear);
 
         let state = ReloadState::load().expect("marker should still exist");
         assert_eq!(

@@ -242,6 +242,7 @@ fn remote_account_request_rejection_keeps_old_display() {
                 id: switch_id,
                 message: "pin refused".to_string(),
                 retry_after_secs: None,
+            server_resumes: false,
             },
             &mut remote,
         );
@@ -271,6 +272,7 @@ fn remote_account_request_rejection_keeps_old_display() {
                 id: failover_id,
                 message: "session busy".to_string(),
                 retry_after_secs: None,
+            server_resumes: false,
             },
             &mut remote,
         );
@@ -308,6 +310,7 @@ fn remote_account_request_rejection_keeps_old_display() {
                 id: default_id,
                 message: "store locked".to_string(),
                 retry_after_secs: None,
+            server_resumes: false,
             },
             &mut remote,
         );
@@ -559,6 +562,7 @@ fn rejected_switch_does_not_hide_older_confirmation() {
                 id: 2,
                 message: "no such account".to_string(),
                 retry_after_secs: None,
+            server_resumes: false,
             },
             &mut remote,
         );
@@ -599,6 +603,7 @@ fn independent_move_beats_late_older_confirmation() {
                 id: 2,
                 message: "no such account".to_string(),
                 retry_after_secs: None,
+            server_resumes: false,
             },
             &mut remote,
         );

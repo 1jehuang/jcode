@@ -12,6 +12,14 @@ pub(super) fn set_active_usage_key(key: Option<String>) {
     *USAGE_KEY.lock().unwrap_or_else(|e| e.into_inner()) = key;
 }
 
+/// Follow a token refresh of the login the active snapshot was fetched for.
+pub(super) fn rename_active_usage_key(from: &str, to: &str) {
+    let mut key = USAGE_KEY.lock().unwrap_or_else(|e| e.into_inner());
+    if key.as_deref() == Some(from) {
+        *key = Some(to.to_string());
+    }
+}
+
 /// Usage cache key for whichever Claude login requests would use right now.
 pub(super) fn current_anthropic_usage_key() -> Option<String> {
     let creds = auth::claude::load_credentials().ok()?;

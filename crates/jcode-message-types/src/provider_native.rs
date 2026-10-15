@@ -274,6 +274,32 @@ impl ProviderNativeItems {
         self.items.clear();
     }
 
+    /// Correct trailing text without moving native items to stale byte offsets.
+    /// A native item inside the replaced message is an ambiguous boundary, so
+    /// leave that unexpected snapshot untouched rather than reorder replay.
+    pub fn replace_text_suffix(&mut self, text: &mut String, old: &str, new: &str) -> bool {
+        let Some(start) = text.len().checked_sub(old.len()) else {
+            return false;
+        };
+        let end = text.len();
+        if self
+            .items
+            .iter()
+            .any(|(offset, _, _)| *offset > start && *offset < end)
+        {
+            return false;
+        }
+        if crate::replace_text_suffix(text, old, new).is_none() {
+            return false;
+        }
+        for (offset, _, _) in &mut self.items {
+            if *offset >= end {
+                *offset = text.len();
+            }
+        }
+        true
+    }
+
     /// Input of the recorded call start with this id, for rendering its result.
     pub fn call_input(&self, id: &str) -> Value {
         self.items
@@ -347,6 +373,42 @@ fn format_results<'a>(results: impl Iterator<Item = &'a Value>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn suffix_correction_keeps_native_item_end_offsets_in_sync() {
+        let mut items = ProviderNativeItems::default();
+        let mut text = "Earlier.raw".to_string();
+        items.push(
+            "Earlier.".len(),
+            "openai".into(),
+            serde_json::json!({"id":"before"}),
+        );
+        items.push(
+            text.len(),
+            "openai".into(),
+            serde_json::json!({"id":"after"}),
+        );
+        assert!(items.replace_text_suffix(&mut text, "raw", "longer source link"));
+        let blocks = items.interleave(&text);
+        assert!(matches!(&blocks[..], [
+            crate::ContentBlock::Text { text: a, .. }, crate::ContentBlock::ProviderNative { .. },
+            crate::ContentBlock::Text { text: b, .. }, crate::ContentBlock::ProviderNative { .. },
+        ] if a == "Earlier." && b == "longer source link"));
+        assert!(!items.replace_text_suffix(&mut text, "raw", "stale"));
+    }
+
+    #[test]
+    fn suffix_correction_rejects_ambiguous_native_item_inside_message() {
+        let mut items = ProviderNativeItems::default();
+        let mut text = "Earlier.raw".to_string();
+        items.push(
+            text.len() - 1,
+            "openai".into(),
+            serde_json::json!({"id":"inside"}),
+        );
+        assert!(!items.replace_text_suffix(&mut text, "raw", "source"));
+        assert_eq!(text, "Earlier.raw");
+    }
     use serde_json::json;
 
     #[test]

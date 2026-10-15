@@ -1,14 +1,17 @@
 //! MCP (Model Context Protocol) client implementation
 //!
-//! Connects to MCP servers that provide tools via JSON-RPC over stdio.
+//! Connects to MCP servers via JSON-RPC over stdio, Streamable HTTP, or legacy
+//! HTTP+SSE. Remote servers support static headers and explicit OAuth login.
 //! Supports shared server pools so multiple sessions reuse the same
 //! MCP server processes instead of spawning duplicates.
 
 pub mod budget;
 mod client;
 mod manager;
+pub mod oauth;
 pub mod pool;
 mod protocol;
+mod remote;
 pub mod schema_cache;
 mod tool;
 

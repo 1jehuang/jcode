@@ -17,6 +17,97 @@ use tokio::sync::{Mutex, RwLock, mpsc};
 
 struct MockProvider(Option<&'static str>);
 
+struct IdentityProvider {
+    credential: Option<jcode_provider_core::ResolvedCredential>,
+    label: Option<&'static str>,
+}
+
+#[async_trait]
+impl Provider for IdentityProvider {
+    async fn complete(
+        &self,
+        _: &[Message],
+        _: &[ToolDefinition],
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<EventStream> {
+        anyhow::bail!("not used")
+    }
+    fn name(&self) -> &str {
+        "openai"
+    }
+    fn model(&self) -> String {
+        "test-model".into()
+    }
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self {
+            credential: self.credential,
+            label: self.label,
+        })
+    }
+    fn active_resolved_credential(&self) -> Option<jcode_provider_core::ResolvedCredential> {
+        self.credential
+    }
+    fn oauth_account_label(&self) -> Option<String> {
+        self.label.map(str::to_owned)
+    }
+    fn active_oauth_account_email(&self) -> Option<String> {
+        self.label.map(|label| format!("{label}@example.test"))
+    }
+}
+
+#[test]
+fn provider_oauth_email_uses_exact_live_account() {
+    let provider = IdentityProvider {
+        credential: Some(jcode_provider_core::ResolvedCredential::Oauth),
+        label: Some("work"),
+    };
+    let email = super::selected_provider_oauth_email(&provider, true, || {
+        provider.active_oauth_account_email()
+    })
+    .unwrap();
+    assert_eq!(email.as_str(), "work@example.test");
+}
+
+#[test]
+fn provider_oauth_email_never_probes_disabled_api_key_or_unknown_accounts() {
+    use jcode_provider_core::ResolvedCredential::{ApiKey, Oauth};
+    for (enabled, credential, label) in [
+        (false, Some(Oauth), Some("work")),
+        (true, Some(ApiKey), Some("work")),
+    ] {
+        let provider = IdentityProvider { credential, label };
+        assert!(
+            super::selected_provider_oauth_email(&provider, enabled, || {
+                panic!("identity lookup must not run")
+            })
+            .is_none()
+        );
+    }
+}
+
+#[test]
+fn provider_oauth_email_accepts_authoritative_oauth_only_and_skips_unknown_identity() {
+    let provider = IdentityProvider {
+        credential: None,
+        label: Some("effective"),
+    };
+    let email = super::selected_provider_oauth_email(&provider, true, || {
+        provider.active_oauth_account_email()
+    })
+    .unwrap();
+    assert_eq!(email.as_str(), "effective@example.test");
+    let unknown = IdentityProvider {
+        credential: Some(jcode_provider_core::ResolvedCredential::Oauth),
+        label: None,
+    };
+    assert!(
+        super::selected_provider_oauth_email(&unknown, true, || unknown
+            .active_oauth_account_email())
+        .is_none()
+    );
+}
+
 #[async_trait]
 impl Provider for MockProvider {
     async fn complete(
