@@ -2692,4 +2692,58 @@ Operator signal at 04:44Z: `"go"` then `"g0 ajd do all"` (typo for "go and do al
 - 5 ratchets re-baselined with corrected numbers
 - All other state unchanged
 
+**B.8.77 EXECUTED 2026-10-15T06:26Z — Operator signal `"proc"`; verified PR #66 actual effect: -5 `.expect()` + -14 `.unwrap()` in tui-auth, NOT -7 `panic!` macros**
+
+**CORRECTION to B.8.76's "-7 panic sites" claim**: the actual `panic!`/`unreachable!` macro count in PR #66's 5 files is **unchanged** (1 `unreachable!` in auth.rs, 0 in others; same pre and post merge). PR #66's real effect is removing **runtime panic sources**:
+
+| File | `.expect(` pre → post | `.unwrap(` pre → post |
+|---|---|---|
+| `crates/jcode-tui/src/tui/app/auth.rs` | 3 → 0 (**-3**) | 0 → 0 |
+| `crates/jcode-tui/src/tui/app/auth_account_picker.rs` | 2 → 0 (**-2**) | 0 → 0 |
+| `crates/jcode-tui/src/tui/app/auth_remote.rs` | 0 → 0 | 12 → 0 (**-12**) |
+| `crates/jcode-tui/src/tui/app/auth_remote/onboarding.rs` | 0 → 0 | 14 → 13 (**-1**) |
+| `crates/jcode-tui/src/tui/app/auth_remote/picker.rs` | 0 → 0 | 1 → 0 (**-1**) |
+| **TOTAL** | **-5 `.expect()`** | **-14 `.unwrap()`** |
+
+**Whole-tree ratchet comparison** (`git show d2cf911ef^` vs `git show d2cf911ef`):
+- `panic!` macro count: **439 → 439 (delta 0)** — unchanged
+- `unreachable!` macro count: **29 → 29 (delta 0)** — unchanged
+- `.expect(` count: **4227 → 4222 (delta -5)** — matches PR #66
+- `.unwrap(` count: **2833 → 2819 (delta -14)** — matches PR #66
+
+**Why the discrepancy**: the PR's title and description say "remove panic-prone call sites" and the bot-facing audit narratives ("-7 sites", "140→133") conflated the **runtime panic source** category (`.expect()`/`.unwrap()`) with the **`panic!` macro** category. These are two different ratchets:
+- **Ratchet A (panic! macros)**: explicit `panic!("reason")` / `unreachable!` / `unimplemented!` / `todo!` — 468 sites
+- **Ratchet B (runtime panic sources)**: `.expect("msg")` (panics on Err) + `.unwrap()` (panics on None) — 7041 sites (4232 + 2819)
+
+PR #66 reduced **Ratchet B by 19 sites in tui-auth** (a real and meaningful reduction), but did not touch Ratchet A. The B.8.66-B.8.70 + B.8.76 narratives incorrectly attributed the reduction to Ratchet A.
+
+**Updated panic-prone ratchet definition** (proposed for B.8.78):
+- **Ratchet A** = `panic!` / `unreachable!` / `unimplemented!` / `todo!` macros
+- **Ratchet B** = `.expect(` + `.unwrap(` (runtime panic sources)
+- **Ratchet C** = `let _ = <expr that returns Result/Option>` (silently-swallowed)
+
+All three ratchets need to be tracked separately. The current `swallowed-error` ratchet (Ratchet C-ish, but with a broader pattern) is at 8431 / 785 files — overlapping with Ratchet B but not equivalent.
+
+**Whole-tree ratchet re-baseline on new HEAD `50f91b72c`** (with the corrected two-ratchet definition):
+
+| Ratchet | Sites | Files |
+|---|---|---|
+| A. `panic!` + `unreachable!` + `unimplemented!` + `todo!` | 468 | 132 |
+| B. `.expect(` + `.unwrap(` | 7041 | (would need re-count) |
+| C. `let _ = ` + swallowed patterns | 8431 | 785 |
+
+PR #66 specifically reduced Ratchet B by 19 in tui-auth (5+14); Ratchet A unchanged.
+
+**This correction affects the P7 release gating**: the ratchet target of "140 panic sites" in prior B.8.66-B.8.70 was based on a wrong category. The real panic-prone count is 468 (Ratchet A) + 7041 (Ratchet B) = **7509 sites across the workspace**. P7 release should target Ratchet A (the more easily-fixable category) separately from Ratchet B.
+
+**State at 06:26Z (B.8.77 exit)**:
+- Master HEAD: `50f91b72c` (B.8.76 audit + PR #66 merge)
+- origin/master: `50f91b72c` (synced)
+- Local branches: 62
+- Working tree: 4 untracked dirs (unchanged)
+- 322 phinbox-queued requests (322 peer/operator, 0 mine)
+- 5 ratchets RE-DEFINED: A (panic macros), B (runtime sources), C (silently swallowed)
+- 3 restore_session tests PASS (7.33s)
+- Operator's 4 untracked dirs still in working tree (not committed by orchestrator)
+
 
