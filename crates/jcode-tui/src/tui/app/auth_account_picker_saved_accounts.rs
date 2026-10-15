@@ -14,7 +14,16 @@ pub(super) fn saved_login_picker_entries(
         selected_label,
         crate::auth::claude::active_account_label(),
     );
-    for account in crate::auth::claude::list_accounts().unwrap_or_default() {
+    let accounts = match crate::auth::claude::list_accounts() {
+        Ok(accounts) => accounts,
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "Could not load saved Claude login choices: {error}"
+            ));
+            Vec::new()
+        }
+    };
+    for account in accounts {
         entries.push(saved_login_entry(
             "claude",
             "Claude",
@@ -31,7 +40,16 @@ pub(super) fn saved_login_picker_entries(
         selected_label,
         crate::auth::codex::active_account_label(),
     );
-    for account in crate::auth::codex::list_accounts().unwrap_or_default() {
+    let accounts = match crate::auth::codex::list_accounts() {
+        Ok(accounts) => accounts,
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "Could not load saved OpenAI login choices: {error}"
+            ));
+            Vec::new()
+        }
+    };
+    for account in accounts {
         entries.push(saved_login_entry(
             "openai",
             "OpenAI",

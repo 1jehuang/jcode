@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Release helper with three modes:
+# Release helper. Every non-dry-run release requires successful exact-SHA CI:
 # - --prepare-fast: refresh target/selfdev before the release metadata commit.
-# - --fast-local: package that prepared binary, publish Linux immediately, then
+# - --fast-local: package that prepared binary and stage Linux on a draft, then
 #   let CI replace it with portable/signoff assets and add every other platform.
 # - --prepare-fast-macos/--fast-macos-local: do the same for macOS arm64 using
 #   the local osxcross cache.
-# - --remote: push the tag immediately and let CI gate publication.
+# - --remote: check CI, push the tag, and let the release workflow publish.
 # - default: build Linux + macOS locally and stage them on the CI-owned draft.
 #
 # Usage:
 #   scripts/quick-release.sh --prepare-fast v0.5.5 # warm selfdev before bump
-#   scripts/quick-release.sh --fast-local v0.5.5  # package it, public now
+#   scripts/quick-release.sh --fast-local v0.5.5  # package it on a draft
 #   scripts/quick-release.sh --prepare-fast-macos v0.5.5
 #   scripts/quick-release.sh --fast-macos-local v0.5.5
-#   scripts/quick-release.sh --remote v0.5.5      # tag now, CI-gated publication
+#   scripts/quick-release.sh --remote v0.5.5      # green CI, then tag
 #   scripts/quick-release.sh v0.5.5               # local Linux + macOS draft
 #   scripts/quick-release.sh --dry-run v0.5.5     # standard local build only
 
@@ -72,6 +72,7 @@ if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
 fi
 
 cd "$(git rev-parse --show-toplevel)"
+RELEASE_COMMIT="$(git rev-parse HEAD)"
 
 # Ad-hoc sign a macOS binary with a stable code-signing identifier. The linker
 # signature otherwise uses cargo's hashed output name, which macOS Tahoe treats
@@ -109,6 +110,9 @@ case "$MODE" in
         $DRY_RUN || required_commands+=(gh)
         ;;
 esac
+if ! $DRY_RUN && [[ "$MODE" != "prepare-fast" && "$MODE" != "prepare-fast-macos" ]]; then
+    required_commands+=(gh python3)
+fi
 for cmd in "${required_commands[@]}"; do
     command -v "$cmd" &>/dev/null || { echo "Error: $cmd not found."; exit 1; }
 done
@@ -125,18 +129,13 @@ fi
 working_tree_changes="$(git status --porcelain)"
 if [[ -n "$working_tree_changes" ]]; then
     case "$MODE" in
-        fast-local|prepare-fast|fast-macos-local|prepare-fast-macos)
+        standard|fast-local|prepare-fast|fast-macos-local|prepare-fast-macos)
             echo "Error: --$MODE requires a clean working tree so the binary matches committed source." >&2
             printf '%s\n' "$working_tree_changes" >&2
             exit 1
             ;;
         remote)
             echo "Warning: working-tree changes are not included; only committed HEAD will be tagged."
-            ;;
-        standard)
-            echo "Warning: uncommitted changes are present."
-            read -rp "Continue anyway? [y/N] " confirm
-            [[ "$confirm" =~ ^[Yy]$ ]] || exit 1
             ;;
     esac
 fi
@@ -168,32 +167,75 @@ elapsed() {
 }
 
 tag_and_push() {
-    echo "▸ Tagging $VERSION..."
-    local head_commit remote_tags remote_commit local_commit
+    local head_commit remote_tags remote_commit local_commit repository origin_url package_version
     head_commit="$(git rev-parse HEAD)"
+    [[ "$head_commit" == "$RELEASE_COMMIT" ]] || {
+        echo "Error: HEAD changed during release preparation. Start again at the intended release commit." >&2
+        exit 1
+    }
+    if [[ "$MODE" != "remote" && -n "$(git status --porcelain)" ]]; then
+        echo "Error: working tree changed during release preparation." >&2
+        exit 1
+    fi
+    # Read committed metadata, not a possibly dirty remote-mode working copy.
+    package_version="$(git show "$head_commit:Cargo.toml" | python3 -c 'import sys, tomllib; print(tomllib.load(sys.stdin.buffer)["package"]["version"])')"
+    [[ "$package_version" == "$VERSION_NUM" ]] || {
+        echo "Error: committed package version $package_version does not match requested tag $VERSION." >&2
+        exit 1
+    }
 
-    remote_tags="$(git ls-remote --tags origin "refs/tags/$VERSION" "refs/tags/$VERSION^{}" 2>/dev/null || true)"
+    remote_tags="$(git ls-remote --tags origin "refs/tags/$VERSION" "refs/tags/$VERSION^{}")"
     if [[ -n "$remote_tags" ]]; then
         remote_commit="$(printf '%s\n' "$remote_tags" | awk '$2 ~ /\^\{\}$/ { print $1; found=1 } END { if (!found) print first } NR == 1 { first=$1 }')"
         if [[ "$remote_commit" != "$head_commit" ]]; then
             echo "Error: Remote tag $VERSION already points to a different commit." >&2
             exit 1
         fi
-        echo "  Remote tag already exists at HEAD"
-        return
     fi
 
-    if git tag -l "$VERSION" | grep -qx "$VERSION"; then
-        local_commit="$(git rev-list -n 1 "$VERSION")"
+    if git show-ref --verify --quiet "refs/tags/$VERSION"; then
+        local_commit="$(git rev-parse "refs/tags/$VERSION^{commit}")"
         if [[ "$local_commit" != "$head_commit" ]]; then
             echo "Error: Local tag $VERSION already points to a different commit." >&2
             exit 1
         fi
-        echo "  Local tag already exists at HEAD"
-    else
-        git tag "$VERSION" -m "$TITLE"
     fi
-    git push origin "$VERSION"
+
+    # The workflow's publication gate is too late to prevent premature tags.
+    # Check the latest exact-commit main/master push CI run and every mandatory
+    # job before either creating a local tag or touching the remote. Fail fast:
+    # push the release commit first, wait for CI, then rerun this command.
+    echo "▸ Requiring successful exact-SHA CI for $head_commit..."
+    origin_url="$(git remote get-url origin)"
+    repository="$(gh repo view "$origin_url" --json nameWithOwner --jq .nameWithOwner)"
+    if ! python3 scripts/check_release_ci.py "$head_commit" --repo "$repository" --timeout 0; then
+        echo "Error: release blocked. Push this commit to main/master and wait for all CI checks to succeed, then retry." >&2
+        exit 1
+    fi
+    [[ "$(git rev-parse HEAD)" == "$head_commit" ]] || {
+        echo "Error: HEAD changed during CI preflight. No tag was pushed." >&2
+        exit 1
+    }
+    if [[ "$MODE" != "remote" && -n "$(git status --porcelain)" ]]; then
+        echo "Error: working tree changed during CI preflight. No tag was pushed." >&2
+        exit 1
+    fi
+
+    if [[ -n "$remote_tags" ]]; then
+        echo "  Remote tag already exists at the CI-verified commit"
+        return
+    fi
+    echo "▸ Tagging $VERSION..."
+    if ! git show-ref --verify --quiet "refs/tags/$VERSION"; then
+        git tag "$VERSION" "$head_commit" -m "$TITLE"
+    fi
+    # Recheck existing local tags in case another process changed one while CI
+    # was queried. Never push an unverified commit or a same-named branch.
+    [[ "$(git rev-parse "refs/tags/$VERSION^{commit}")" == "$head_commit" ]] || {
+        echo "Error: Local tag changed during CI preflight. No tag was pushed." >&2
+        exit 1
+    }
+    git push origin "refs/tags/$VERSION:refs/tags/$VERSION"
     TAG_PUSHED=true
     echo "  Tag pushed"
 }
@@ -217,6 +259,10 @@ ensure_release_draft() {
             gh release view "$VERSION" >/dev/null
         fi
     fi
+    [[ "$(gh release view "$VERSION" --json isDraft --jq .isDraft)" == "true" ]] || {
+        echo "Error: $VERSION is already public. Refusing to replace published assets with local staging files." >&2
+        exit 1
+    }
     gh release edit "$VERSION" --title "$TITLE" --notes-file "$NOTES_FILE"
 }
 
@@ -350,20 +396,19 @@ WRAPPER
     fi
 
     tag_and_push
-    echo "▸ Publishing immediate Linux release..."
+    echo "▸ Staging prepared Linux asset on the draft release..."
     ensure_release_draft
     gh release upload "$VERSION" \
         "$DIST/jcode-linux-x86_64.tar.gz" \
         "$DIST/SHA256SUMS" \
         --clobber
-    gh release edit "$VERSION" --draft=false --latest
 
     echo ""
-    echo "=== Fast release published in $(elapsed)s ==="
-    echo "  ✅ Linux x86_64: public now from the warm selfdev cache"
+    echo "=== Fast release staged in $(elapsed)s ==="
+    echo "  ✅ Linux x86_64: attached to draft from the warm selfdev cache"
     echo "  ⏳ CI: replacing Linux with the portable build and adding macOS, Windows, FreeBSD, signatures, and final checksums"
     echo ""
-    echo "The immediate Linux asset targets this build host's runtime baseline until CI replaces it."
+    echo "The staged Linux asset targets this build host's runtime baseline until CI replaces it."
     exit 0
 fi
 
@@ -401,13 +446,12 @@ if [[ "$MODE" == "fast-macos-local" ]]; then
         exit 0
     fi
     tag_and_push
-    echo "▸ Publishing immediate macOS arm64 release..."
+    echo "▸ Staging prepared macOS arm64 asset on the draft release..."
     ensure_release_draft
     gh release upload "$VERSION" "$DIST/jcode-macos-aarch64.tar.gz" "$DIST/SHA256SUMS" --clobber
-    gh release edit "$VERSION" --draft=false --latest
     echo ""
-    echo "=== Fast macOS release published in $(elapsed)s ==="
-    echo "  ✅ macOS arm64: public now from the prepared osxcross build"
+    echo "=== Fast macOS release staged in $(elapsed)s ==="
+    echo "  ✅ macOS arm64: attached to draft from the prepared osxcross build"
     echo "  ⏳ CI: replacing it with the signoff build and adding Linux, macOS Intel, Windows, FreeBSD, signatures, and final checksums"
     exit 0
 fi
@@ -459,6 +503,6 @@ gh release upload "$VERSION" \
 echo ""
 echo "=== Staged $VERSION in $(elapsed)s ==="
 echo "  ✅ Linux + macOS: attached to draft"
-echo "  ⏳ CI: building optional platforms, checksums, and publishing"
+echo "  ⏳ CI: building every required platform, checksums, and publishing"
 echo ""
-echo "The release becomes visible when at least one platform asset and its checksum are ready."
+echo "The release becomes visible only when every required platform asset and checksum is ready."
