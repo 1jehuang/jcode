@@ -493,6 +493,20 @@ pub const YOLO_AUTO_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     requires_api_key: true,
 };
 
+// Standard Compute is an OpenAI-compatible gateway. `standardcompute` is its
+// cost-routing model (it picks a model and provider per request); the public
+// `/v1/models` catalog also lists the individual models the key can call.
+pub const STANDARDCOMPUTE_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
+    id: "standardcompute",
+    display_name: "Standard Compute",
+    api_base: "https://api.stdcmpt.com/v1",
+    api_key_env: "STANDARDCOMPUTE_API_KEY",
+    env_file: "standardcompute.env",
+    setup_url: "https://standardcompute.com/dashboard/api-keys",
+    default_model: Some("standardcompute"),
+    requires_api_key: true,
+};
+
 pub const OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     id: "openai-compatible",
     display_name: "OpenAI-compatible",
@@ -504,7 +518,7 @@ pub const OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfi
     requires_api_key: true,
 };
 
-pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 43] = [
+pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 44] = [
     OPENCODE_PROFILE,
     OPENCODE_GO_PROFILE,
     ZAI_PROFILE,
@@ -545,6 +559,7 @@ pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 43] = [
     META_MUSE_PROFILE,
     CELERIS_PROFILE,
     YOLO_AUTO_PROFILE,
+    STANDARDCOMPUTE_PROFILE,
     LMSTUDIO_PROFILE,
     OLLAMA_PROFILE,
     OPENAI_COMPAT_PROFILE,
@@ -1270,6 +1285,19 @@ pub const YOLO_AUTO_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescr
     order: LoginProviderSurfaceOrder::new(Some(38), Some(38), Some(38), Some(38), Some(38)),
 };
 
+pub const STANDARDCOMPUTE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
+    id: "standardcompute",
+    display_name: "Standard Compute",
+    auth_kind: LoginProviderAuthKind::ApiKey,
+    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
+    auth_status_method: "API key",
+    aliases: &["standard-compute"],
+    menu_detail: "API key, OpenAI-compatible cost-routing gateway",
+    recommended: false,
+    target: LoginProviderTarget::OpenAiCompatible(STANDARDCOMPUTE_PROFILE),
+    order: LoginProviderSurfaceOrder::new(Some(38), Some(38), Some(38), Some(38), Some(38)),
+};
+
 pub const GOOGLE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
     id: "google",
     display_name: "Google/Gmail",
@@ -1283,7 +1311,7 @@ pub const GOOGLE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescript
     order: LoginProviderSurfaceOrder::new(Some(13), None, None, None, None),
 };
 
-pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 55] = [
+pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 56] = [
     AUTO_IMPORT_LOGIN_PROVIDER,
     CLAUDE_LOGIN_PROVIDER,
     ANTHROPIC_API_LOGIN_PROVIDER,
@@ -1330,6 +1358,7 @@ pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 55] = [
     META_MUSE_LOGIN_PROVIDER,
     CELERIS_LOGIN_PROVIDER,
     YOLO_AUTO_LOGIN_PROVIDER,
+    STANDARDCOMPUTE_LOGIN_PROVIDER,
     LMSTUDIO_LOGIN_PROVIDER,
     OLLAMA_LOGIN_PROVIDER,
     OPENAI_COMPAT_LOGIN_PROVIDER,

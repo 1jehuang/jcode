@@ -341,6 +341,15 @@ Notable presets include:
 - Default model hint: `MiniMax-M2.7`
 - Docs: <https://platform.minimax.io/docs/guides/text-generation>
 
+### Standard Compute
+- Login: `jcode login --provider standardcompute`
+- Stored env file: `~/.config/jcode/standardcompute.env`
+- API key env var: `STANDARDCOMPUTE_API_KEY`
+- Base URL: `https://api.stdcmpt.com/v1`
+- Default model hint: `standardcompute` (routes each request to a model and provider to keep cost down; individual models are listed at <https://api.stdcmpt.com/v1/models>)
+- Get a key: <https://standardcompute.com/dashboard/api-keys>
+- Docs: <https://docs.standardcompute.com>
+
 These are first-class jcode provider presets, not just manual custom endpoint examples.
 You can still use `openai-compatible` for arbitrary custom providers when there is not a built-in preset.
 
