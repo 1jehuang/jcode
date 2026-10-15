@@ -1,0 +1,7 @@
+crates/jcode-tui/src/tui/app/tests/input_copy_selection.rs
+crates/jcode-tui/src/tui/app/tests/onboarding_flow.rs
+crates/jcode-tui/src/tui/app/tests/scroll_copy_01/part_01.rs
+crates/jcode-tui/src/tui/app/tests/scroll_copy_02/part_01.rs
+crates/jcode-tui/src/tui/app/tests/state_model_poke_02/part_01.rs
+crates/jcode-tui/src/tui/session_picker_tests.rs
+crates/jcode-tui/src/tui/ui_messages.rs
