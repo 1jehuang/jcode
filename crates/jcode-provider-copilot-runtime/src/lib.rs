@@ -368,7 +368,12 @@ impl CopilotApiProvider {
                     picker_models.join(", "),
                     all_ids.join(", ")
                 ));
-                if let Ok(mut m) = self.model.try_write() {
+                // Only replace the placeholder default (or a model the live
+                // catalog no longer serves). A model the user or session already
+                // chose must survive the periodic tier re-detection.
+                if let Ok(mut m) = self.model.try_write()
+                    && (m.as_str() == DEFAULT_MODEL || !all_ids.iter().any(|id| id == m.as_str()))
+                {
                     *m = default;
                 }
                 let display_models = if picker_models.is_empty() {

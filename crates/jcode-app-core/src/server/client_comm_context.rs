@@ -159,6 +159,7 @@ pub(super) async fn handle_comm_share(
             id,
             message: "Not in a swarm. Use a git repository to enable swarm features.".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         });
     }
 }
@@ -295,6 +296,7 @@ pub(super) async fn handle_comm_list(
             )
             .await;
 
+            let stalled_secs = super::swarm_watchdog::stalled_for_secs(&m.session_id);
             member_list.push(AgentInfo {
                 session_id: m.session_id,
                 friendly_name: m.friendly_name,
@@ -309,6 +311,7 @@ pub(super) async fn handle_comm_list(
                 live_attachments: Some(m.live_attachments),
                 status_age_secs: Some(m.status_age_secs),
                 last_activity_age_secs: extras.last_activity_age_secs,
+                stalled_secs,
                 activity: extras.activity,
                 provider_name: extras.provider_name,
                 provider_model: extras.provider_model,
@@ -332,6 +335,7 @@ pub(super) async fn handle_comm_list(
             id,
             message: "Not in a swarm. Use a git repository to enable swarm features.".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         });
     }
 }

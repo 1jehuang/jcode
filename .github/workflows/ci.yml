@@ -12,6 +12,9 @@ concurrency:
 
 env:
   JCODE_CI: "1"
+  # CI builds without the local parallel-frontend rustc wrapper from
+  # .cargo/config.toml (a POSIX shell script; see scripts/rustc-parallel-frontend).
+  CARGO_BUILD_RUSTC_WRAPPER: ""
   CARGO_TERM_COLOR: always
   SCCACHE_GHA_ENABLED: "true"
 
@@ -41,56 +44,79 @@ jobs:
         run: python3 scripts/check_module_files.py
 
       - name: Check formatting
+        # These gates are independent. Report every failure in one run instead
+        # of letting a Clippy error hide stale lockfiles or budget violations.
+        # No continue-on-error: any failed check still fails the quality job.
+        if: ${{ !cancelled() }}
         run: cargo fmt --all -- --check
 
       - name: Check all targets and all features
-        run: cargo check --all-targets --all-features
+        if: ${{ !cancelled() }}
+        run: cargo check --locked --all-targets --all-features
 
       - name: Run clippy with warnings denied
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        if: ${{ !cancelled() }}
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
       - name: Enforce Cargo.lock is up to date
+        if: ${{ !cancelled() }}
         shell: bash
         # Adding a dependency without regenerating Cargo.lock breaks every
         # `--locked` build. Only the Windows jobs pass `--locked`, so such a
         # commit passes 8 of 9 CI jobs and fails Windows at "Build release
         # binary", skipping all of its validation steps. This catches it in
         # seconds, on the job that already owns dependency hygiene.
-        run: cargo metadata --locked --format-version 1 > /dev/null
+        run: |
+          cargo metadata --locked --format-version 1 > /dev/null
+          git diff --exit-code -- Cargo.lock
+
+      - name: Warning budget gate contract tests
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: scripts/test_check_warning_budget.sh
 
       - name: Enforce warning budget
+        if: ${{ !cancelled() }}
         shell: bash
         run: scripts/check_warning_budget.sh
 
       - name: Enforce oversized-file ratchet
+        if: ${{ !cancelled() }}
         shell: bash
         run: python3 scripts/check_code_size_budget.py
 
       - name: Enforce oversized-test ratchet
+        if: ${{ !cancelled() }}
         shell: bash
         run: python3 scripts/check_test_size_budget.py
 
       - name: Enforce panic-prone usage ratchet
+        if: ${{ !cancelled() }}
         shell: bash
         run: python3 scripts/check_panic_budget.py
 
       - name: Enforce swallowed-error usage ratchet
+        if: ${{ !cancelled() }}
         shell: bash
         run: python3 scripts/check_swallowed_error_budget.py
 
       - name: Enforce crate dependency boundaries
+        if: ${{ !cancelled() }}
         shell: bash
         run: python3 scripts/check_dependency_boundaries.py
 
       - name: Enforce Rust and TypeScript SDK surface parity
+        if: ${{ !cancelled() }}
         shell: bash
-        run: cargo test -p jcode-sdk parity -- --nocapture
+        run: cargo test --locked -p jcode-sdk parity -- --nocapture
 
       - name: Enforce wildcard re-export ratchet
+        if: ${{ !cancelled() }}
         shell: bash
         run: python3 scripts/check_wildcard_reexport_budget.py
 
       - name: Enforce no unused dependencies
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           cargo install cargo-machete --locked
@@ -105,6 +131,17 @@ jobs:
 
       - name: Test Discord release announcements
         run: python3 -m unittest -v scripts/test_post_discord_release.py
+
+      - name: Test justrust release installation and routing
+        run: |
+          python3 tests/test_ci_workflow_guards.py
+          python3 tests/test_install_justrust_ci.py
+          python3 tests/test_public_release_builds.py
+          python3 tests/test_release_ci.py
+          python3 scripts/test_quick_release.py
+          python3 tests/test_verify_public_release.py
+          python3 tests/test_watch_release_run.py
+          bash -n scripts/install_justrust_ci.sh scripts/build_linux_compat.sh scripts/quick-release.sh
 
       - name: Compile release automation scripts
         run: python3 -m py_compile scripts/post_discord_release.py scripts/test_post_discord_release.py
@@ -186,15 +223,16 @@ jobs:
           # ("compiled by an incompatible version of rustc"). rust-cache already
           # caches target/ across runs, so a clean, wrapper-consistent build is
           # both correct and fast enough.
-          export RUSTC="$(rustup which rustc)"
+          RUSTC="$(rustup which rustc)"
+          export RUSTC
           CARGO_BIN="$(rustup which cargo)"
-          "$CARGO_BIN" build --release --target ${{ matrix.target }}
+          "$CARGO_BIN" build --locked --release --target ${{ matrix.target }}
 
       - name: Compile library and binary tests
         shell: bash
         run: |
           python3 .github/scripts/run_with_timeout.py 900 \
-            "$(rustup which cargo)" test --target ${{ matrix.target }} --lib --bins --no-run
+            "$(rustup which cargo)" test --locked --target ${{ matrix.target }} --lib --bins --no-run
 
       - name: Run deterministic retention-readiness cohort
         shell: bash
@@ -203,7 +241,7 @@ jobs:
           # dependencies and can exceed three minutes on hosted runners. The
           # cohort itself runs in under a second once the lib test is built.
           python3 .github/scripts/run_with_timeout.py 600 \
-            "$(rustup which cargo)" test --target ${{ matrix.target }} \
+            "$(rustup which cargo)" test --locked --target ${{ matrix.target }} \
             -p jcode-app-core --lib retention_readiness -- --nocapture
 
       - name: Run secret-input pty cohort (all platforms with a pty)
@@ -222,8 +260,14 @@ jobs:
         # runner (run 30591536707) while the cohort itself runs in a second.
         run: |
           python3 .github/scripts/run_with_timeout.py 600 \
-            "$(rustup which cargo)" test --target ${{ matrix.target }} \
+            "$(rustup which cargo)" test --locked --target ${{ matrix.target }} \
             -p jcode-base --lib secret_input -- --nocapture
+
+      - name: Run browser session liveness and reuse regressions
+        shell: bash
+        run: |
+          cargo test --locked --target ${{ matrix.target }} -p jcode-base --lib browser_session -- --nocapture
+          cargo test --locked --target ${{ matrix.target }} -p jcode-app-core --lib browser_session -- --nocapture
 
       - name: Run embedding numeric-stability cohort (Linux only)
         if: runner.os == 'Linux'
@@ -250,7 +294,7 @@ jobs:
           test -s "$model_dir/model.onnx"
           test -s "$model_dir/tokenizer.json"
           python3 .github/scripts/run_with_timeout.py 600 \
-            "$(rustup which cargo)" test --target ${{ matrix.target }} \
+            "$(rustup which cargo)" test --locked --target ${{ matrix.target }} \
             -p jcode-embedding --lib -- --nocapture \
             | tee /tmp/embedding-cohort.log
           # The test is present and the harness ran it (rather than the binary
@@ -282,7 +326,7 @@ jobs:
         # provide; the Windows detector still has no test coverage.
         run: |
           python3 .github/scripts/run_with_timeout.py 600 \
-            "$(rustup which cargo)" test --target ${{ matrix.target }} \
+            "$(rustup which cargo)" test --locked --target ${{ matrix.target }} \
             -p jcode-app-core --lib tool::bash::tests::test_stdin_forwarding -- --nocapture
 
       - name: Run TUI library tests (Linux only)
@@ -318,7 +362,7 @@ jobs:
           COLORTERM: truecolor
         run: |
           python3 .github/scripts/run_with_timeout.py 600 \
-            "$(rustup which cargo)" test --target ${{ matrix.target }} \
+            "$(rustup which cargo)" test --locked --target ${{ matrix.target }} \
             -p jcode-tui --lib -- --test-threads=1 \
             --skip test_prompt_entry_shimmer_color_moves_across_positions \
             --skip right_fact_stack_uses_neutral_gray_except_for_context_usage
@@ -331,14 +375,14 @@ jobs:
         # budget was pushing slower hosted ubuntu/macos runners over the limit.
         run: |
           python3 .github/scripts/run_with_timeout.py 900 \
-            "$(rustup which cargo)" test --target ${{ matrix.target }} \
+            "$(rustup which cargo)" test --locked --target ${{ matrix.target }} \
             --test provider_matrix --test e2e --no-run
 
       - name: Run provider matrix tests
         shell: bash
         run: |
           python3 .github/scripts/run_with_timeout.py 600 \
-            "$(rustup which cargo)" test --target ${{ matrix.target }} --test provider_matrix
+            "$(rustup which cargo)" test --locked --target ${{ matrix.target }} --test provider_matrix
 
       - name: Run e2e tests
         shell: bash
@@ -347,7 +391,7 @@ jobs:
           # against an occasional slow hosted runner. Compilation is already done
           # in the dedicated compile step above.
           python3 .github/scripts/run_with_timeout.py 600 \
-            "$(rustup which cargo)" test --target ${{ matrix.target }} --test e2e
+            "$(rustup which cargo)" test --locked --target ${{ matrix.target }} --test e2e
 
       - name: Check PowerShell script syntax (Windows)
         if: runner.os == 'Windows'
@@ -616,6 +660,47 @@ jobs:
         shell: pwsh
         run: |
           & ./scripts/check_powershell_syntax.ps1
+
+  windows-arm64-check:
+    name: Windows ARM64 Release Configuration
+    runs-on: windows-latest
+    timeout-minutes: 35
+    env:
+      # Native Windows hosted routing is unsupported. Keep execution on the
+      # runner and bypass alpha.17's sampler until a fixed client is validated.
+      JUSTRUST_TOOLCHAIN: system
+      JUSTRUST_SLOTS: "0"
+      JUSTRUST_NO_TELEMETRY: "1"
+      JUSTRUST_DISABLE: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64_arm64
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-arm64-release-check
+          cache-all-crates: "true"
+
+      - name: Install pinned justrust
+        shell: bash
+        run: bash scripts/install_justrust_ci.sh
+
+      - name: Check full Windows ARM64 release configuration
+        shell: pwsh
+        # Unlike the advisory Linux cross-check, this uses the native MSVC
+        # toolchain and the release feature graph, including the companion.
+        run: |
+          & justrust check --local --locked -p jcode --bins --target aarch64-pc-windows-msvc --no-default-features --features pdf
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   windows-cross-check:
     name: Windows Cross-Target Check (Linux)

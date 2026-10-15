@@ -9,6 +9,38 @@ fn math_display_count(markdown: &str) -> usize {
 }
 
 #[test]
+fn escaped_short_prose_lists_do_not_render_as_math() {
+    for source in [
+        r#"after encountering “\[old, new\]”. This leads to a third side effect"#,
+        r"\[old, new\]",
+        r"compare \(old, new\) before editing",
+        r"choose \[yes, no, off\] here",
+    ] {
+        assert_eq!(normalize_latex_math(source), source);
+        assert_eq!(math_display_count(source), 0, "{source:?}");
+        let visible = parse_markdown(source)
+            .blocks
+            .iter()
+            .flat_map(|block| &block.lines)
+            .map(|line| line.plain_text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!visible.contains('\\'), "{visible:?}");
+    }
+
+    for source in [
+        r"\[x, y\]",
+        r"\[ab, cd\]",
+        r"\[old, new = x\]",
+        r"\[\mathrm{old}, \mathrm{new}\]",
+        "\\[\nold, new\n\\]",
+        "$$old, new$$",
+    ] {
+        assert_eq!(math_display_count(source), 1, "{source:?}");
+    }
+}
+
+#[test]
 fn parses_the_exact_multiline_equation_response_from_the_tui() {
     let response = concat!(
         "\\[\n\\boxed{\ne^{i\\pi}+1=0\n}\n\\]\n\n",

@@ -34,6 +34,16 @@ fn take_sse_event(buffer: &mut String) -> Option<String> {
     Some(event)
 }
 
+/// Kimi endpoints (OpenRouter `moonshotai/kimi-k2*`, the Kimi coding
+/// endpoint's `kimi-for-coding`) are the only known senders of cumulative
+/// reasoning snapshots, where every chunk repeats the full text so far and the
+/// previous chunk must be stripped as a prefix (introduced for #322). Every
+/// other backend streams incremental deltas that must be appended verbatim;
+/// stripping unconditionally corrupted adjacent repeated deltas (#1779).
+fn sends_cumulative_reasoning_snapshots(model: &str) -> bool {
+    crate::is_kimi_model(model) || model.to_ascii_lowercase().contains("kimi")
+}
+
 pub struct OpenRouterStream {
     inner: Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>,
     buffer: String,
@@ -387,8 +397,17 @@ impl OpenRouterStream {
                             .and_then(|c| c.as_str())
                             && !reasoning_content.is_empty()
                         {
+                            // Only Kimi endpoints are known to stream reasoning
+                            // as cumulative snapshots (each chunk repeats the
+                            // full text so far). Everywhere else deltas are
+                            // incremental and must be appended verbatim:
+                            // stripping any chunk that starts with the previous
+                            // one silently dropped adjacent repeated deltas
+                            // ("9","4","4","0" arrived as "940", #1779).
                             let reasoning_delta =
-                                if reasoning_content.starts_with(&self.reasoning_buffer) {
+                                if sends_cumulative_reasoning_snapshots(&self.model)
+                                    && reasoning_content.starts_with(&self.reasoning_buffer)
+                                {
                                     &reasoning_content[self.reasoning_buffer.len()..]
                                 } else {
                                     reasoning_content

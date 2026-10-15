@@ -1,5 +1,9 @@
 #![cfg_attr(test, allow(clippy::items_after_test_module))]
 
+#[path = "input/shell_commands.rs"]
+mod shell_commands;
+use shell_commands::*;
+
 use super::{
     App, ContentBlock, DisplayMessage, Message, ProcessingStatus, Role, SendAction, commands,
     ctrl_bracket_fallback_to_esc, is_context_limit_error, is_request_payload_too_large_error,
@@ -86,99 +90,6 @@ fn merge_turn_reminders(a: Option<String>, b: Option<String>) -> Option<String> 
 
 pub(super) fn extract_input_shell_command(input: &str) -> Option<&str> {
     input.trim().strip_prefix('!').map(str::trim)
-}
-
-fn build_input_shell_command(command: &str) -> std::process::Command {
-    #[cfg(windows)]
-    {
-        let mut cmd = std::process::Command::new("cmd.exe");
-        cmd.arg("/C").arg(command);
-        cmd
-    }
-
-    #[cfg(not(windows))]
-    {
-        let mut cmd = std::process::Command::new("bash");
-        cmd.arg("-c").arg(command);
-        cmd
-    }
-}
-
-fn combine_shell_output(stdout: &[u8], stderr: &[u8]) -> (String, bool) {
-    let stdout = String::from_utf8_lossy(stdout);
-    let stderr = String::from_utf8_lossy(stderr);
-    let mut output = String::new();
-
-    if !stdout.is_empty() {
-        output.push_str(&stdout);
-    }
-    if !stderr.is_empty() {
-        if !output.is_empty() && !output.ends_with('\n') {
-            output.push('\n');
-        }
-        output.push_str("[stderr]\n");
-        output.push_str(&stderr);
-    }
-
-    let truncated = if output.len() > INPUT_SHELL_MAX_OUTPUT_LEN {
-        output = truncate_str(&output, INPUT_SHELL_MAX_OUTPUT_LEN).to_string();
-        if !output.ends_with('\n') {
-            output.push('\n');
-        }
-        output.push_str("… output truncated");
-        true
-    } else {
-        false
-    };
-
-    (output, truncated)
-}
-
-fn spawn_input_shell_command(session_id: String, command: String, cwd: Option<String>) {
-    std::thread::spawn(move || {
-        let started = std::time::Instant::now();
-        let mut cmd = build_input_shell_command(&command);
-        cmd.stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        if let Some(dir) = cwd.as_ref() {
-            cmd.current_dir(dir);
-        }
-
-        let event = match cmd.output() {
-            Ok(output) => {
-                let (combined_output, truncated) =
-                    combine_shell_output(&output.stdout, &output.stderr);
-                InputShellCompleted {
-                    session_id,
-                    result: crate::message::InputShellResult {
-                        command,
-                        cwd,
-                        output: combined_output,
-                        exit_code: output.status.code(),
-                        duration_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64,
-                        truncated,
-                        failed_to_start: false,
-                    },
-                }
-            }
-            Err(error) => InputShellCompleted {
-                session_id,
-                result: crate::message::InputShellResult {
-                    command,
-                    cwd,
-                    output: format!("Failed to run command: {}", error),
-                    exit_code: None,
-                    duration_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64,
-                    truncated: false,
-                    failed_to_start: true,
-                },
-            },
-        };
-
-        Bus::global().publish(BusEvent::InputShellCompleted(event));
-    });
 }
 
 pub(super) struct PreparedInput {
@@ -1369,8 +1280,87 @@ pub(super) fn clear_input_for_escape(app: &mut App) {
 }
 
 pub(super) fn expand_paste_placeholders(app: &mut App, input: &str) -> String {
+    expand_paste_placeholders_with(&app.pasted_contents, input)
+}
+
+pub(super) fn queue_message(app: &mut App) {
+    let prepared = take_prepared_input(app);
+    app.queued_messages.push(prepared.expanded);
+}
+
+/// True for composer text that runs as a client command rather than a prompt:
+/// a slash command (`/compact`) or an input-line shell command (`!ls`).
+pub(super) fn is_queueable_command_input(input: &str) -> bool {
+    let trimmed = input.trim();
+    trimmed.starts_with('/') || extract_input_shell_command(trimmed).is_some()
+}
+
+/// Ctrl+Enter on a slash or shell command while a turn is running: hold the
+/// command and run it as a real command once the turn ends, instead of
+/// running it now. Returns true when the command was queued.
+pub(super) fn try_queue_command(app: &mut App) -> bool {
+    if !app.is_processing() || !is_queueable_command_input(&app.input) {
+        return false;
+    }
+    let raw_input = std::mem::take(&mut app.input);
+    let expanded = expand_paste_placeholders(app, &raw_input);
+    app.pasted_contents.clear();
+    app.cursor_pos = 0;
+    app.clear_input_undo_history();
+    app.reset_tab_completion();
+    // Close any picker preview the command text opened (e.g. `/model`).
+    app.sync_model_picker_preview_from_input();
+    let command = expanded.trim().to_string();
+    app.set_status_notice(format!("Queued {} to run after this turn", command));
+    app.queued_commands.push(command);
+    true
+}
+
+/// The composer state a queued command temporarily displaces while it runs.
+pub(super) struct ComposerDraft {
+    input: String,
+    cursor_pos: usize,
+    pending_images: Vec<(String, String)>,
+    pasted_contents: Vec<String>,
+}
+
+/// Put `command` in the composer so the normal Enter path can run it,
+/// returning whatever the user was drafting so it can be restored afterwards.
+pub(super) fn swap_in_queued_command(app: &mut App, command: String) -> ComposerDraft {
+    app.set_status_notice(format!("Running queued {}", command));
+    let draft = ComposerDraft {
+        input: std::mem::replace(&mut app.input, command),
+        cursor_pos: app.cursor_pos,
+        pending_images: std::mem::take(&mut app.pending_images),
+        pasted_contents: std::mem::take(&mut app.pasted_contents),
+    };
+    app.cursor_pos = app.input.len();
+    draft
+}
+
+/// Restore the user's draft after a queued command ran. A command that left
+/// its own text in the composer (e.g. one that pre-fills input) wins; the
+/// draft then goes to prompt history so Up recalls it instead of losing it.
+pub(super) fn restore_composer_draft(app: &mut App, draft: ComposerDraft) {
+    if draft.input.is_empty() && draft.pending_images.is_empty() {
+        return;
+    }
+    if app.input.is_empty() {
+        app.input = draft.input;
+        app.cursor_pos = draft.cursor_pos.min(app.input.len());
+        app.pending_images = draft.pending_images;
+        app.pasted_contents = draft.pasted_contents;
+        app.sync_model_picker_preview_from_input();
+    } else {
+        let expanded = expand_paste_placeholders_with(&draft.pasted_contents, &draft.input);
+        app.record_prompt_history(&expanded);
+        app.pending_images.extend(draft.pending_images);
+    }
+}
+
+fn expand_paste_placeholders_with(pasted_contents: &[String], input: &str) -> String {
     let mut result = input.to_string();
-    for content in app.pasted_contents.iter().rev() {
+    for content in pasted_contents.iter().rev() {
         let placeholder = paste_placeholder(content);
         if let Some(pos) = result.rfind(&placeholder) {
             result.replace_range(pos..pos + placeholder.len(), content);
@@ -1379,9 +1369,19 @@ pub(super) fn expand_paste_placeholders(app: &mut App, input: &str) -> String {
     result
 }
 
-pub(super) fn queue_message(app: &mut App) {
-    let prepared = take_prepared_input(app);
-    app.queued_messages.push(prepared.expanded);
+/// Run commands queued with Ctrl+Enter in a local (non-remote) session. Stops
+/// as soon as one starts a turn; the rest wait for that turn to end.
+pub(super) fn run_queued_commands_local(app: &mut App) {
+    while !app.is_processing
+        && !app.pending_turn
+        && !app.should_quit
+        && !app.queued_commands.is_empty()
+    {
+        let command = app.queued_commands.remove(0);
+        let draft = swap_in_queued_command(app, command);
+        app.submit_input();
+        restore_composer_draft(app, draft);
+    }
 }
 
 pub(super) fn retrieve_pending_message_for_edit(app: &mut App) -> bool {
@@ -1421,6 +1421,14 @@ pub(super) fn retrieve_pending_message_for_edit(app: &mut App) -> bool {
             count,
             if count == 1 { "" } else { "s" }
         ));
+    } else if let Some(command) = app.queued_commands.pop() {
+        // Commands are recalled one at a time (newest first): joining several
+        // would turn them into a single malformed command.
+        app.input = command;
+        app.cursor_pos = app.input.len();
+        app.sync_model_picker_preview_from_input();
+        app.set_status_notice("Retrieved queued command for editing");
+        return true;
     }
 
     had_pending
@@ -1841,6 +1849,65 @@ impl App {
         true
     }
 
+    /// Fingerprint of the current open todos, matching the one auto-poke
+    /// records when it nudges, so a poke sent elsewhere can be credited here.
+    fn current_incomplete_poke_fingerprint(&self) -> Option<String> {
+        let incomplete: Vec<_> = super::commands::poke_todos(self)
+            .into_iter()
+            .filter(super::commands::is_incomplete_poke_todo)
+            .collect();
+        if incomplete.is_empty() {
+            return None;
+        }
+        serde_json::to_string(&incomplete).ok()
+    }
+
+    /// Another window attached to this session started a turn. Show what it
+    /// sent, and when it was an auto-poke, treat the nudge as already given so
+    /// this window does not send a duplicate one for the same open work.
+    pub(super) fn handle_peer_user_message(&mut self, content: &str) {
+        let text = content.trim();
+        if text.is_empty() {
+            return;
+        }
+        if !super::commands::is_poke_message(text) {
+            if let Some(swarm) = super::remote_notifications::swarm_delivery_display_message(text) {
+                self.push_display_message(swarm);
+                return;
+            }
+            self.push_display_message(DisplayMessage::user(text.to_string()));
+            return;
+        }
+        let notice = crate::todo::auto_poke_display_summary(text)
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                let count = text
+                    .strip_prefix("You have ")
+                    .and_then(|rest| rest.split_whitespace().next())
+                    .and_then(|n| n.parse::<usize>().ok());
+                match count {
+                    Some(count) => format!(
+                        "👉 {} incomplete todo{}. We poked it for you. /poke off to stop.",
+                        count,
+                        if count == 1 { "" } else { "s" },
+                    ),
+                    None => text.to_string(),
+                }
+            });
+        self.push_display_message(DisplayMessage::system(notice));
+        // Drop an identical continuation this window queued but has not sent.
+        let before = self.queued_messages.len();
+        self.queued_messages.retain(|queued| queued.trim() != text);
+        if self.queued_messages.len() != before && !self.has_queued_followups() {
+            self.pending_queued_dispatch = false;
+        }
+        if let Some(fingerprint) = self.current_incomplete_poke_fingerprint()
+            && text.starts_with("You have ")
+        {
+            self.last_auto_poke_fingerprint = Some(fingerprint);
+        }
+    }
+
     pub(super) fn schedule_queued_dispatch_after_interrupt(&mut self) {
         if self.has_queued_followups() {
             self.pending_queued_dispatch = true;
@@ -1959,6 +2026,10 @@ fn route_prompt_to_new_session_local(app: &mut App) -> bool {
 }
 
 pub(super) fn handle_alternate_enter(app: &mut App) {
+    if try_queue_command(app) {
+        return;
+    }
+
     if app.activate_picker_from_preview() {
         return;
     }
@@ -2080,8 +2151,8 @@ pub(super) fn delete_input_to_end(app: &mut App) {
 
 pub(super) fn handle_super_key(app: &mut App, code: KeyCode) -> bool {
     match code {
-        // Cmd+5 toggles the onboarding simulator (a dev aid for walking through
-        // every first-run onboarding screen without touching real auth state).
+        // Cmd+5 toggles the onboarding rehearsal (the real first-run flow, run
+        // as if jcode were new on this machine).
         KeyCode::Char('5') => {
             app.toggle_onboarding_simulator();
             true
@@ -2233,6 +2304,11 @@ pub(super) fn handle_navigation_shortcuts(
         return true;
     }
 
+    if app.toggle_keys.commit_log.matches(code, modifiers) {
+        app.toggle_commit_log_overlay();
+        return true;
+    }
+
     if app.toggle_keys.diff_mode_cycle.matches(code, modifiers) {
         app.diff_mode = app.diff_mode.cycle();
         if !app.diff_pane_visible() {
@@ -2251,13 +2327,16 @@ pub(super) fn is_scroll_only_key(app: &App, code: KeyCode, modifiers: KeyModifie
     let mut modifiers = modifiers;
     ctrl_bracket_fallback_to_esc(&mut code, &mut modifiers);
 
+    if app.toggle_keys.commit_log.matches(code, modifiers) {
+        return false;
+    }
+
     if app.scroll_keys.scroll_amount(code, modifiers).is_some()
         || app.scroll_keys.prompt_jump(code, modifiers).is_some()
         || App::ctrl_side_panel_ratio_preset(&code, modifiers).is_some()
         || App::ctrl_prompt_rank(&code, modifiers).is_some()
         || app.scroll_keys.is_bookmark(code, modifiers)
-        || (modifiers.contains(KeyModifiers::ALT)
-            && matches!(code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&'g')))
+        || app.toggle_keys.diff_mode_cycle.matches(code, modifiers)
     {
         return true;
     }
@@ -2448,6 +2527,10 @@ pub(super) fn handle_pre_control_shortcuts(
     if let Some(direction) = app.effort_switch_keys.direction_for(code, modifiers) {
         app.record_keybinding_fast(super::shortcut_hints::LearnableAction::EffortCycle);
         app.cycle_effort(direction);
+        return true;
+    }
+    if let Some(direction) = app.speed_switch_keys.direction_for(code, modifiers) {
+        app.cycle_speed_tier(direction);
         return true;
     }
     if cfg!(target_os = "macos")
@@ -2679,11 +2762,7 @@ pub(super) fn handle_modal_key(
         return Ok(true);
     }
 
-    if app.handle_inline_interactive_preview_key(&code, modifiers)? {
-        return Ok(true);
-    }
-
-    Ok(false)
+    app.handle_inline_interactive_preview_key(&code, modifiers)
 }
 
 pub(super) fn handle_scroll_overlay_key(app: &mut App, code: KeyCode) -> Result<bool> {
@@ -2692,6 +2771,8 @@ pub(super) fn handle_scroll_overlay_key(app: &mut App, code: KeyCode) -> Result<
         if matches!(code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q')) {
             app.close_panel_image_preview();
         }
+    } else if app.commit_log_overlay.is_some() {
+        app.handle_commit_log_key(code)?;
     } else if app.changelog_scroll.is_some() {
         app.handle_changelog_key(code)?;
     } else if app.help_scroll.is_some() {
@@ -2965,8 +3046,11 @@ impl App {
             if matches!(
                 event.kind,
                 crossterm::event::KeyEventKind::Press | crossterm::event::KeyEventKind::Repeat
-            ) {
-                let _ = self.handle_key_press_event(event);
+            ) && let Err(error) = self.handle_key_press_event(event)
+            {
+                self.push_display_message(DisplayMessage::error(format!(
+                    "Could not handle key input: {error}"
+                )));
             }
             return;
         }
@@ -2995,8 +3079,11 @@ impl App {
         if matches!(
             event.kind,
             crossterm::event::KeyEventKind::Press | crossterm::event::KeyEventKind::Repeat
-        ) {
-            let _ = self.handle_key_press_event(event);
+        ) && let Err(error) = self.handle_key_press_event(event)
+        {
+            self.push_display_message(DisplayMessage::error(format!(
+                "Could not handle key input: {error}"
+            )));
         }
     }
 
@@ -3032,7 +3119,7 @@ impl App {
             return Ok(());
         }
 
-        // Alt+5 always starts the onboarding simulator from a pristine first
+        // Alt+5 always starts the onboarding rehearsal from a pristine first
         // screen, even when another modal or a previous sim screen is active.
         if self.handle_onboarding_sim_reset_shortcut(code, modifiers) {
             return Ok(());
@@ -3040,11 +3127,13 @@ impl App {
         if self.handle_update_sim_shortcut(code, modifiers) {
             return Ok(());
         }
+        if self.handle_update_rehearsal_shortcut(code, modifiers) {
+            return Ok(());
+        }
 
-        // The onboarding simulator owns all key handling while active so the
-        // real onboarding handlers and simulated modal overlays never fire (no
-        // real logins/imports or action selection).
-        if self.handle_onboarding_sim_key(code, modifiers) {
+        // Cmd+5 toggles the onboarding rehearsal. Every other key goes to the
+        // real onboarding handlers, exactly as on a first run.
+        if self.handle_onboarding_sim_toggle_shortcut(code, modifiers) {
             return Ok(());
         }
 
@@ -3123,7 +3212,9 @@ impl App {
         // for editing and then walk prompt history. We accept any of the three
         // single modifiers so the gesture works regardless of which one a given
         // terminal forwards (some send Option as Alt, some forward Command as
-        // Super), without the user having to rebind anything.
+        // Super), without the user having to rebind anything. Alt+Up/Down are
+        // claimed earlier by the speed-tier keys by default; unbinding
+        // speed_increase/speed_decrease restores the Alt alias here.
         if code == KeyCode::Up && is_prompt_recall_modifier(modifiers) {
             if retrieve_pending_message_for_edit(self) {
                 return Ok(());
@@ -3956,6 +4047,11 @@ impl App {
         if super::remote::stage_turn_for_remote_tick_loop(self, &input) {
             return;
         }
+        // A new prompt supersedes a local turn held on a usage limit; that
+        // held turn's context is sent with this one.
+        self.rate_limit_reset = None;
+        self.local_usage_limit_resume_attempts = 0;
+        self.account_change_resend_at = None;
 
         self.push_display_message(DisplayMessage {
             role: "user".to_string(),
@@ -4120,6 +4216,7 @@ impl App {
             {
                 Ok(()) => {
                     self.last_stream_error = None;
+                    self.local_usage_limit_resume_attempts = 0;
                     self.last_submitted_input = None;
                 }
                 Err(e) => {
@@ -4146,6 +4243,9 @@ impl App {
                 }
             }
             self.current_turn_system_reminder = None;
+            if self.local_usage_limit_resume_attempts > 0 {
+                break;
+            }
             // Loop will check if more messages were queued during this turn
         }
     }

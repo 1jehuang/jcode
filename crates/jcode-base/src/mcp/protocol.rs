@@ -188,8 +188,8 @@ pub struct ResourceContent {
 /// MCP server configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct McpServerConfig {
-    /// Command for stdio servers. Empty for HTTP/SSE servers, which jcode does
-    /// not yet support (such entries are skipped at load time).
+    /// Command for stdio servers. Empty for remote (HTTP/SSE) servers, which
+    /// are reached at `url` instead.
     #[serde(default)]
     pub command: String,
     #[serde(default)]
@@ -201,15 +201,18 @@ pub struct McpServerConfig {
     /// Stateful servers (Playwright browser) should not be shared.
     #[serde(default = "default_shared")]
     pub shared: bool,
-    /// Transport type from Claude Code configs ("stdio", "http", "sse"). Used
-    /// only to recognize and skip non-stdio servers; defaults to stdio.
+    /// Transport type, Claude Code compatible: "stdio" (default), "http" /
+    /// "streamable-http" (MCP Streamable HTTP, falling back to legacy SSE),
+    /// or "sse" (legacy HTTP+SSE). An entry with a `url` and no `command` is
+    /// treated as "http" even without an explicit type.
     #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
     pub transport: Option<String>,
-    /// URL for HTTP/SSE servers (Claude Code compat). Unused by jcode today.
+    /// Endpoint URL for remote (HTTP/SSE) servers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-    /// Headers for HTTP/SSE servers (Claude Code compat). Unused by jcode today,
-    /// but retained so environment expansion is ready when those transports are.
+    /// Extra HTTP headers sent with every request to a remote server (for
+    /// example a static `Authorization: Bearer ...`). When no `Authorization`
+    /// header is configured, jcode uses OAuth tokens from `jcode mcp login`.
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub headers: std::collections::HashMap<String, String>,
     /// Whether this server is enabled (default: true). Disabled servers stay
@@ -230,17 +233,94 @@ pub struct McpServerConfig {
 }
 
 impl McpServerConfig {
-    /// jcode currently only supports stdio (command-based) MCP servers. A config
-    /// entry is stdio when it has a command and is not explicitly an http/sse
-    /// transport.
+    /// A config entry is stdio when it has a command and is not explicitly a
+    /// remote (http/sse) transport.
     pub fn is_stdio(&self) -> bool {
-        if let Some(t) = &self.transport {
-            let t = t.to_ascii_lowercase();
-            if t == "http" || t == "sse" || t == "streamable-http" {
-                return false;
+        let transport = self.transport.as_deref().map(str::trim);
+        transport.is_none_or(|kind| kind.is_empty() || kind.eq_ignore_ascii_case("stdio"))
+            && !self.command.trim().is_empty()
+    }
+
+    fn explicit_remote_transport(&self) -> Option<RemoteTransport> {
+        match self
+            .transport
+            .as_deref()?
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "http" | "streamable-http" | "streamable_http" | "streamablehttp" => {
+                Some(RemoteTransport::StreamableHttp)
             }
+            "sse" => Some(RemoteTransport::LegacySse),
+            _ => None,
         }
-        !self.command.trim().is_empty()
+    }
+
+    /// The remote transport for this entry, or `None` for stdio servers.
+    /// An entry with only a `url` (no command, no type) is Streamable HTTP.
+    pub fn remote_transport(&self) -> Option<RemoteTransport> {
+        if let Some(kind) = self.explicit_remote_transport() {
+            return Some(kind);
+        }
+        // Only infer HTTP when the transport is omitted. Explicit stdio or an
+        // unknown type must not silently turn into a remote connection.
+        if self
+            .transport
+            .as_deref()
+            .is_some_and(|kind| !kind.trim().is_empty())
+        {
+            return None;
+        }
+        let has_url = self.url.as_deref().is_some_and(|u| !u.trim().is_empty());
+        (has_url && self.command.trim().is_empty()).then_some(RemoteTransport::StreamableHttp)
+    }
+
+    /// Whether this is a remote (HTTP/SSE) server.
+    pub fn is_remote(&self) -> bool {
+        self.remote_transport().is_some()
+    }
+
+    /// Whether jcode can connect to this entry: a stdio command, or a remote
+    /// transport with a URL.
+    pub fn is_runnable(&self) -> bool {
+        if self.is_stdio() {
+            return true;
+        }
+        self.is_remote() && self.url.as_deref().is_some_and(|u| !u.trim().is_empty())
+    }
+
+    /// Short human description of where this server runs, safe to log (URL
+    /// query strings are dropped because they may carry credentials).
+    pub fn display_target(&self) -> String {
+        if let Some(kind) = self.remote_transport() {
+            let target = self
+                .url
+                .as_deref()
+                .and_then(|raw| match url::Url::parse(raw) {
+                    Ok(url) => Some(url),
+                    Err(_) => {
+                        crate::logging::debug("Cannot display invalid MCP target URL");
+                        None
+                    }
+                });
+            let target = target.and_then(|mut url| {
+                if url.set_username("").is_err() || url.set_password(None).is_err() {
+                    // Never display userinfo from an opaque, unsanitizable URL.
+                    return None;
+                }
+                url.set_query(None);
+                url.set_fragment(None);
+                Some(url.to_string())
+            });
+            format!(
+                "{} {}",
+                kind.label(),
+                target.as_deref().unwrap_or("[invalid URL]")
+            )
+        } else {
+            format!("{} {:?}", self.command, self.args)
+        }
     }
 
     /// Whether this server should be spawned/connected automatically.
@@ -252,6 +332,25 @@ impl McpServerConfig {
             return !disabled;
         }
         self.enabled.unwrap_or(true)
+    }
+}
+
+/// Remote MCP transport flavors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteTransport {
+    /// MCP Streamable HTTP (spec 2025-03-26 and later). Falls back to legacy
+    /// SSE when the server rejects the initial POST.
+    StreamableHttp,
+    /// Legacy HTTP+SSE transport (spec 2024-11-05).
+    LegacySse,
+}
+
+impl RemoteTransport {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::StreamableHttp => "http",
+            Self::LegacySse => "sse",
+        }
     }
 }
 
@@ -677,20 +776,18 @@ impl McpConfig {
         }
 
         // Claude Code expands environment references after source precedence is
-        // resolved. Keep this before transport filtering so future HTTP/SSE
-        // support receives already-expanded URLs and headers as well.
+        // resolved, so remote servers receive already-expanded URLs and headers.
         merged.expand_environment_variables();
 
-        // jcode only supports stdio servers today. Drop HTTP/SSE entries (common
-        // in Claude Code configs) so they don't fail to spawn, but log them so
-        // the omission is visible.
+        // Drop entries jcode cannot run (unknown transport, or a remote entry
+        // without a URL) so they don't fail to connect, but log them so the
+        // omission is visible.
         merged.servers.retain(|name, cfg| {
-            let keep = cfg.is_stdio();
+            let keep = cfg.is_runnable();
             if !keep {
                 crate::logging::info(&format!(
-                    "MCP: Skipping non-stdio server '{}' ({}); HTTP/SSE transports are not yet supported",
-                    name,
-                    cfg.transport.as_deref().unwrap_or("http")
+                    "MCP: Skipping server '{}' (type {:?}): needs a `command` or a remote `url`",
+                    name, cfg.transport
                 ));
             }
             keep
@@ -699,12 +796,14 @@ impl McpConfig {
         merged
     }
 
-    /// Merge `incoming` over `existing`, except that an entry jcode cannot run
-    /// (HTTP/SSE) never displaces a working stdio entry for the same name.
+    /// Merge `incoming` over `existing`, except that a remote (HTTP/SSE) entry
+    /// never displaces a local stdio entry for the same name.
     ///
-    /// Without this, a `type: http` entry in `~/.claude.json` would overwrite a
-    /// working stdio server from `~/.jcode/mcp.json` and then be dropped by the
-    /// non-stdio filter, silently losing the server (issue #653).
+    /// Issue #653: a `type: http` entry in `~/.claude.json` used to overwrite a
+    /// working stdio server from `~/.jcode/mcp.json`. Remote servers are now
+    /// runnable, but a remote twin of a working local server typically needs a
+    /// separate login, so the local server keeps winning to avoid surprising
+    /// existing setups.
     fn merge_servers_preferring_runnable(
         existing: &mut std::collections::HashMap<String, McpServerConfig>,
         incoming: std::collections::HashMap<String, McpServerConfig>,

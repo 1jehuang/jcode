@@ -29,6 +29,9 @@ fn soft_interrupt_protocol_display_role(source: SoftInterruptSource) -> Option<S
 pub(super) struct InjectedSoftInterrupt {
     pub(super) content: String,
     pub(super) source: SoftInterruptSource,
+    /// Caller ids of the queued messages combined into this injection, in
+    /// queue order. Messages queued without an id contribute nothing.
+    pub(super) client_ids: Vec<String>,
 }
 
 pub(super) enum NoToolCallOutcome {
@@ -126,6 +129,19 @@ impl Agent {
         urgent: bool,
         source: SoftInterruptSource,
     ) {
+        self.queue_soft_interrupt_with_id(content, images, urgent, source, None);
+    }
+
+    /// Like [`queue_soft_interrupt`](Self::queue_soft_interrupt), with an
+    /// opaque caller id echoed back in `SoftInterruptInjected`.
+    pub fn queue_soft_interrupt_with_id(
+        &self,
+        content: String,
+        images: Vec<(String, String)>,
+        urgent: bool,
+        source: SoftInterruptSource,
+        client_id: Option<String>,
+    ) {
         let content_bytes = content.len();
         let content_chars = content.chars().count();
         let image_count = images.len();
@@ -136,6 +152,7 @@ impl Agent {
                 images,
                 urgent,
                 source,
+                client_id,
             });
             logging::info(&format!(
                 "AGENT_SOFT_INTERRUPT_QUEUE_PUSH session={} source={:?} urgent={} content_bytes={} content_chars={} image_count={} pending_before={} pending_after={}",
@@ -374,13 +391,16 @@ impl Agent {
         let mut current_source: Option<SoftInterruptSource> = None;
         let mut current_parts: Vec<String> = Vec::new();
         let mut current_images: Vec<(String, String)> = Vec::new();
+        let mut current_ids: Vec<String> = Vec::new();
 
         let flush_group = |agent: &mut Self,
                            injected: &mut Vec<InjectedSoftInterrupt>,
                            source: SoftInterruptSource,
                            parts: &mut Vec<String>,
-                           images: &mut Vec<(String, String)>| {
+                           images: &mut Vec<(String, String)>,
+                           ids: &mut Vec<String>| {
             if parts.is_empty() && images.is_empty() {
+                ids.clear();
                 return;
             }
             let content = parts.join("\n\n");
@@ -400,7 +420,11 @@ impl Agent {
                 blocks,
                 soft_interrupt_session_display_role(source),
             );
-            injected.push(InjectedSoftInterrupt { content, source });
+            injected.push(InjectedSoftInterrupt {
+                content,
+                source,
+                client_ids: std::mem::take(ids),
+            });
         };
 
         for message in messages {
@@ -412,6 +436,7 @@ impl Agent {
                         source,
                         &mut current_parts,
                         &mut current_images,
+                        &mut current_ids,
                     );
                     current_source = Some(message.source);
                 }
@@ -420,6 +445,7 @@ impl Agent {
             }
             current_parts.push(message.content);
             current_images.extend(message.images);
+            current_ids.extend(message.client_id);
         }
 
         if let Some(source) = current_source {
@@ -429,6 +455,7 @@ impl Agent {
                 source,
                 &mut current_parts,
                 &mut current_images,
+                &mut current_ids,
             );
         }
 
@@ -502,6 +529,7 @@ impl Agent {
                 display_role: soft_interrupt_protocol_display_role(interrupt.source),
                 point: point.to_string(),
                 tools_skipped: if idx == 0 { tools_skipped } else { None },
+                client_ids: interrupt.client_ids,
             })
             .collect()
     }

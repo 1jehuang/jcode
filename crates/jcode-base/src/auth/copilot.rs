@@ -963,15 +963,63 @@ pub async fn fetch_available_models(
     Ok(models_resp.data)
 }
 
-/// Determine the best default model based on available models.
-/// - If claude-opus-4.6 is available -> paid tier -> use claude-opus-4.6
-/// - Otherwise -> free/basic tier -> use claude-sonnet-4.6 or claude-sonnet-4
+/// Determine the best default model from the live Copilot catalog.
+///
+/// Uses the same flagship-first ranking and new-release auto-promotion as every
+/// other provider's post-login selection, so the newest Claude/GPT flagship the
+/// account can access wins (e.g. `claude-opus-5.5` over `claude-opus-4.6`) without
+/// a code change per release. Picker-enabled models are preferred when the
+/// catalog marks any, since the rest are often embeddings or internal ids.
+/// Returns the Copilot catalog id (dot-separated), which is what the Copilot API
+/// accepts. Falls back to Sonnet when nothing in the catalog is recognized.
 pub fn choose_default_model(available_models: &[CopilotModelInfo]) -> String {
-    let model_ids: Vec<&str> = available_models.iter().map(|m| m.id.as_str()).collect();
+    let picker_enabled = available_models.iter().any(|m| m.model_picker_enabled);
+    let candidates: Vec<&str> = available_models
+        .iter()
+        .filter(|m| !picker_enabled || m.model_picker_enabled)
+        .map(|m| m.id.as_str())
+        .collect();
 
-    if model_ids.contains(&"claude-opus-4.6") {
-        "claude-opus-4.6".to_string()
-    } else if model_ids.contains(&"claude-sonnet-4.6") {
+    // Copilot ids are dot-separated (`claude-opus-4.6`); the shared ranking is
+    // keyed on canonical hyphenated ids (`claude-opus-4-6`). Rank canonical
+    // forms, then map the winner back to the original Copilot id.
+    let canonical_of = |id: &str| -> String {
+        jcode_provider_core::normalize_copilot_model_name(id)
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                if id.starts_with("claude-") {
+                    id.replace('.', "-")
+                } else {
+                    id.to_string()
+                }
+            })
+    };
+    let routes: Vec<crate::provider::ModelRoute> = candidates
+        .iter()
+        .filter(|id| id.starts_with("claude-") || id.starts_with("gpt-"))
+        .map(|id| crate::provider::ModelRoute {
+            model: canonical_of(id),
+            provider: "Copilot".to_string(),
+            api_method: "copilot".to_string(),
+            available: true,
+            detail: String::new(),
+            usage: None,
+            cheapness: None,
+        })
+        .collect();
+    let activation = crate::auth::lifecycle::AuthActivationResult {
+        provider_id: Some("copilot".to_string()),
+        ..Default::default()
+    };
+    if let Some(best) =
+        crate::auth::lifecycle::provider_model_to_select_after_auth(&activation, None, &routes)
+        && let Some(original) = candidates.iter().find(|id| canonical_of(id) == best)
+    {
+        return (*original).to_string();
+    }
+
+    let model_ids: Vec<&str> = available_models.iter().map(|m| m.id.as_str()).collect();
+    if model_ids.contains(&"claude-sonnet-4.6") {
         "claude-sonnet-4.6".to_string()
     } else {
         "claude-sonnet-4".to_string()

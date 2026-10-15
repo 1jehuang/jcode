@@ -34,6 +34,7 @@ impl Transport for PairTransport {
 fn session(id: &str) -> SessionInfo {
     SessionInfo {
         edit_stats: None,
+        user_connected: false,
         parent_session_id: None,
         agent_label: None,
         swarm_status: None,
@@ -118,50 +119,8 @@ fn the_handshake_reports_the_server_and_its_capabilities() {
     );
 }
 
-#[test]
-fn soft_interrupt_with_images_preserves_attachments_and_legacy_helper() {
-    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let seen = std::sync::Arc::clone(&requests);
-    let client = fake_harness(move |frame, writer| {
-        seen.lock()
-            .expect("request log")
-            .push(frame.request.clone());
-        reply(frame, ApiEvent::Ok, writer);
-    });
-
-    client
-        .soft_interrupt_with_images(
-            "s1",
-            "look",
-            vec![("image/png".into(), "aW1hZ2U=".into())],
-            true,
-        )
-        .expect("image interrupt");
-    client
-        .soft_interrupt("s1", "text only", false)
-        .expect("legacy helper");
-
-    let requests = requests.lock().expect("request log");
-    assert!(matches!(
-        &requests[0],
-        ApiRequest::SoftInterrupt {
-            session_id,
-            content,
-            images,
-            urgent: true,
-        } if session_id == "s1"
-            && content == "look"
-            && images == &vec![("image/png".into(), "aW1hZ2U=".into())]
-    ));
-    assert!(matches!(
-        &requests[1],
-        ApiRequest::SoftInterrupt {
-            images,
-            urgent: false,
-            ..
-        } if images.is_empty()
-    ));
-}
+#[path = "client_behavior/soft_interrupt_tests.rs"]
+mod soft_interrupt_tests;
 
 /// GA session-management, runtime, credential, and file methods must preserve
 /// the stable protocol shapes while returning ergonomic SDK-owned values.
@@ -454,6 +413,7 @@ fn every_subscriber_sees_every_event() {
             push(
                 ApiEvent::TurnDone {
                     session_id: "s1".to_string(),
+                    pending_soft_interrupts: None,
                 },
                 writer,
             );
@@ -575,7 +535,13 @@ fn run_collects_one_turn() {
                 },
                 writer,
             );
-            push(ApiEvent::TurnDone { session_id: s }, writer);
+            push(
+                ApiEvent::TurnDone {
+                    session_id: s,
+                    pending_soft_interrupts: None,
+                },
+                writer,
+            );
         }
     });
 
@@ -616,6 +582,7 @@ fn run_usage_is_latest_call_and_does_not_retain_previous_cache_counters() {
             push(
                 ApiEvent::TurnDone {
                     session_id: session_id.clone(),
+                    pending_soft_interrupts: None,
                 },
                 writer,
             );
@@ -938,6 +905,7 @@ fn run_collects_framed_final_answer_and_retracts_completed_retry_output() {
             push(
                 ApiEvent::TurnDone {
                     session_id: "s1".into(),
+                    pending_soft_interrupts: None,
                 },
                 writer,
             );
@@ -1256,6 +1224,7 @@ fn run_retains_abnormal_stop_and_filters_other_sessions() {
             push(
                 ApiEvent::TurnDone {
                     session_id: session_id.clone(),
+                    pending_soft_interrupts: None,
                 },
                 writer,
             );
@@ -1299,6 +1268,7 @@ fn failure_callback_receives_structured_stop_before_error() {
             push(
                 ApiEvent::TurnDone {
                     session_id: session_id.clone(),
+                    pending_soft_interrupts: None,
                 },
                 writer,
             );

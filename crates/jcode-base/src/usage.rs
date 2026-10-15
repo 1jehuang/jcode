@@ -21,6 +21,7 @@ pub use anthropic_reset::{
     invalidate_anthropic_usage_reset_state, prepare_anthropic_limit_reset,
 };
 use api_keys::enqueue_api_key_usage_tasks;
+pub use cache::carry_anthropic_usage_across_token_refresh;
 use cache::*;
 pub use jcode_usage_types::{OpenAiResetCredits, ProviderUsage, ProviderUsageProgress, UsageLimit};
 pub use model::*;
@@ -74,8 +75,8 @@ async fn fetch_anthropic_usage_data(access_token: String, cache_key: String) -> 
     if let Some(shared) = disk_cache::fresh(&cache_key) {
         store_anthropic_usage(cache_key, shared.clone());
         return match &shared.last_error {
-            Some(error) => Err(anyhow::anyhow!(error.clone())),
-            None => Ok(shared),
+            Some(error) if shared.fetched_at.is_none() => Err(anyhow::anyhow!(error.clone())),
+            _ => Ok(shared),
         };
     }
 
@@ -99,11 +100,9 @@ async fn fetch_anthropic_usage_data(access_token: String, cache_key: String) -> 
     let response = match response {
         Ok(response) => response,
         Err(e) => {
-            let err = anthropic_usage_error(format!("Failed to fetch usage data: {}", e));
-            store_anthropic_usage(cache_key, err.clone());
-            anyhow::bail!(
-                err.last_error
-                    .unwrap_or_else(|| "Failed to fetch usage data".into())
+            return cache_anthropic_usage_failure(
+                cache_key,
+                format!("Failed to fetch usage data: {}", e),
             );
         }
     };
@@ -112,23 +111,18 @@ async fn fetch_anthropic_usage_data(access_token: String, cache_key: String) -> 
         let status = response.status();
         let error_text = response.text().await.unwrap_or_default();
         let message = format!("Usage API error ({}): {}", status, error_text);
-        disk_cache::store_error(&cache_key, &message);
-        // A throttled usage endpoint does not change the real quota: keep
-        // showing the last good limits rather than blanking the meters.
-        if let Some(mut last_good) = disk_cache::last_good(&cache_key) {
-            last_good.fetched_at = Some(Instant::now());
-            store_anthropic_usage(cache_key, last_good.clone());
-            return Ok(last_good);
-        }
-        let err = anthropic_usage_error(message);
-        store_anthropic_usage(cache_key, err.clone());
-        anyhow::bail!(err.last_error.unwrap_or_else(|| "Usage API error".into()));
+        return cache_anthropic_usage_failure(cache_key, message);
     }
 
-    let data: UsageResponse = response
-        .json()
-        .await
-        .context("Failed to parse usage response")?;
+    let data: UsageResponse = match response.json().await {
+        Ok(data) => data,
+        Err(error) => {
+            return cache_anthropic_usage_failure(
+                cache_key,
+                format!("Failed to parse usage response: {error}"),
+            );
+        }
+    };
 
     let usage = UsageData {
         five_hour: data
@@ -175,6 +169,22 @@ async fn fetch_anthropic_usage_data(access_token: String, cache_key: String) -> 
     disk_cache::store_success(&cache_key, &usage);
     store_anthropic_usage(cache_key, usage.clone());
     Ok(usage)
+}
+
+/// A failed request keeps any last-known limits, but marks them as stale and
+/// shares the error timestamp for cross-process endpoint backoff.
+fn cache_anthropic_usage_failure(cache_key: String, message: String) -> Result<UsageData> {
+    disk_cache::store_error(&cache_key, &message);
+    if let Some(mut last_good) = disk_cache::last_good(&cache_key) {
+        last_good.fetched_at = Some(Instant::now());
+        last_good.last_error = Some(message);
+        store_anthropic_usage(cache_key, last_good.clone());
+        return Ok(last_good);
+    }
+    let mut err = anthropic_usage_error(message.clone());
+    err.fetched_at = Some(Instant::now());
+    store_anthropic_usage(cache_key, err);
+    Err(anyhow::anyhow!(message))
 }
 
 /// Fetch usage from all connected providers with OAuth credentials.

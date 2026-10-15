@@ -9,6 +9,74 @@ ever installed jcode OR did meaningful work in it. Run it with:
 wrangler d1 execute jcode-telemetry --remote --file=users.sql
 ```
 
+## Private model-provider OAuth account telemetry
+
+This worker also receives identifiable OAuth account email telemetry, separately
+from anonymous event analytics. Client telemetry opt-out and the one-time status
+notice are handled by the client, not this worker. Only model providers
+`anthropic`, `openai`, `gemini`, `copilot`, and `antigravity` are accepted.
+Clients map aliases such as Claude/Codex/GitHub to these canonical labels.
+Do not send tokens, refresh tokens, JWTs, API keys, OAuth callback parameters,
+provider profile bodies, or unrelated Gmail/calendar/MCP identities.
+
+Protocol:
+
+- `POST /v1/oauth-account/check` accepts exactly `{id, provider, email_hash}`.
+  `id` is an installation UUID. `email_hash` is the lowercase 64-character
+  SHA256 hex digest of the UTF-8 bytes of `email.trim().toLowerCase()`.
+  Returns only `{installation_known, email_tracked}` booleans. Known means
+  that UUID exists in `events`, retained `daily_active_users`, or
+  `oauth_accounts`. Tracked means the candidate provider/digest is stored
+  **for this installation**, never global account membership.
+- Clients preflight before sending raw email. The notice eligibility condition
+  is `installation_known && !email_tracked`; raw upload occurs after the client
+  has handled any required notice. New installations may upload without a
+  notice. This known-install check is not an upload authorization mechanism.
+- `POST /v1/oauth-account` accepts exactly `{id, provider, email, email_hash?}`.
+  Email is trimmed/lowercased and validated as a bounded ASCII mailbox with
+  a dotted domain (254 characters maximum, 64-character local part).
+  If supplied, the digest must match the server-computed SHA256 value.
+  The insert is atomically deduplicated by installation/provider/digest.
+  Successful inserts and duplicates both return opaque `{ok:true}`.
+
+Both endpoints require JSON POST bodies capped at 1 KiB, reject unknown fields,
+refuse browser Origin headers and CORS preflights, and return `Cache-Control:
+no-store`. Neither emails nor digests enter ordinary events, Firehose, response
+bodies, or application logs. A SHA256 email digest is **identifiable private
+data**, not anonymization. Installation UUIDs are correlation identifiers, not
+credentials: anyone who possesses a UUID could probe that installation's
+account presence. Installation-scoped lookup and opaque upload responses avoid
+global email enumeration, but do not authenticate a caller or prove email
+ownership. Before enabling publicly, operators should review edge abuse/rate
+limits for these paths without introducing IP or request-body application logs.
+Do not reuse the permissive anonymous-event CORS policy here.
+
+Migration `0030_oauth_accounts.sql` and `npm run migrate:oauth-accounts` add the
+private table and lookup indexes. The command targets production, so run it
+only during an explicitly authorized rollout before deploying the worker.
+No deployment or remote migration is required to run `npm test`.
+
+### OAuth account retention and deletion
+
+The existing nightly cron deletes private account records older than 90 days
+from `created_at`, in bounded batches. Repeated uploads do not refresh expiry.
+A maintenance backlog or cron failure can delay physical deletion, so monitor
+cron health and use a narrowly scoped private-data operation for urgent
+requests. After expiry or explicit deletion, server tracking is forgotten;
+clients may still have their own upload/notice markers. This worker has no
+public list, export, or deletion endpoint.
+
+Delete records by installation ID with a parameterized private D1 operation:
+`DELETE FROM oauth_accounts WHERE telemetry_id = ?`. Verify the corresponding
+`SELECT COUNT(*)` is zero. For an account-wide deletion request, remove matching
+provider/digest rows across all installations, including any historical copies.
+Only authorized operators may compute or use the digest for that operation.
+The digest and raw email must be deleted together, not merely redact `email`.
+Access to this table must be private and least-privilege, excluded from ordinary
+anonymous analytics dashboards and exports. Coordinate deletion of backups or
+copies according to their retention policy. Ordinary telemetry-event pruning
+or client opt-out does not retroactively remove these account records.
+
 ## Storage architecture
 
 Events are dual-written to two stores with different jobs:

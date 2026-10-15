@@ -218,6 +218,17 @@ pub fn assess(command: &str, ctx: &RiskContext) -> RiskAssessment {
         assess_segment(&segment, ctx, &mut findings);
     }
 
+    // `"$(...)"`, backticks and unquoted heredoc bodies run commands the
+    // word tokenizer flattens into literals (#1753). Each body is strictly
+    // shorter than its parent, so the recursion terminates.
+    for source in tokenize::embedded_substitutions(command) {
+        for finding in assess(&source, ctx).findings {
+            if !findings.contains(&finding) {
+                findings.push(finding);
+            }
+        }
+    }
+
     if findings.is_empty() {
         return RiskAssessment::safe();
     }

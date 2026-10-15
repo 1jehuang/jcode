@@ -32,7 +32,7 @@ const STDIN_INITIAL_DELAY_MS: u64 = 300;
 const PROGRESS_MARKER_PREFIX: &str = "JCODE_PROGRESS ";
 const CHECKPOINT_MARKER_PREFIX: &str = "JCODE_CHECKPOINT ";
 const BACKGROUND_PROGRESS_GUIDANCE: &str = "For long-running background commands, prefer scripts or commands that periodically print progress updates. Best format: print lines starting with `JCODE_PROGRESS ` followed by JSON like {\"percent\":42,\"message\":\"Running\"} or {\"current\":120,\"total\":1000,\"unit\":\"batches\",\"message\":\"Epoch 2/5\",\"eta_seconds\":30}. Supported JSON fields are `percent`, `message`, `current`, `total`, `unit`, `eta_seconds`, and optional `kind`=`indeterminate` or `kind`=`checkpoint`. For milestone-style wakeups, print `JCODE_CHECKPOINT {\"message\":\"Unit tests passed\"}`. Generic fallback output that can be parsed includes `42%`, `3/10 tests`, `3 of 10 steps`, `1.5/3.0 GiB`, or phase lines like `Compiling ...`, `Downloading ...`, `Running ...`, and `Building ...`. If you are writing the script yourself, add these progress/checkpoint lines explicitly. Put large temporary files, worktrees, and virtual environments under `$JCODE_SCRATCH_DIR`, not `/tmp`, because `/tmp` may be RAM-backed.";
-const BASH_TOOL_DESCRIPTION: &str = "Run a bash command.";
+const BASH_TOOL_DESCRIPTION: &str = "Run a bash command. For repository searches, prefer agentgrep or rg over grep -r. rg skips hidden and ignored files by default, not all untracked files. Use --hidden --no-ignore when those files must be searched.";
 const WINDOWS_SHELL_TOOL_DESCRIPTION: &str =
     "Run a Windows cmd.exe command (compatibility name `bash`). Use cmd.exe syntax, not Bash.";
 
@@ -904,12 +904,11 @@ impl Tool for BashTool {
         if crate::browser::is_browser_command(&params.command) {
             params.command = crate::browser::rewrite_command_with_full_path(&params.command);
 
-            // Start/attach a browser session for this jcode session.
-            // This gives each agent its own browser tab, preventing
-            // multi-agent conflicts when using the browser bridge.
+            // Give each agent its own browser session without blocking async workers.
             if !cfg!(windows)
                 && std::env::var("BROWSER_SESSION").is_err()
-                && let Some(session_name) = crate::browser::ensure_browser_session(&ctx.session_id)
+                && let Some(session_name) =
+                    crate::browser::ensure_browser_session_for_async(&ctx.session_id, None).await
             {
                 params.command = format!("BROWSER_SESSION={} {}", session_name, params.command);
             }

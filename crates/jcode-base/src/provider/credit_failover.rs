@@ -243,6 +243,7 @@ impl MultiProvider {
                 reason,
                 estimated_input_chars: chars,
                 estimated_input_tokens: tokens,
+                target_route: None,
             }
             .to_error_message()
         ))

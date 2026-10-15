@@ -1,0 +1,219 @@
+//! Unicode QR codes for terminal login prompts (half-block glyphs, no ANSI).
+
+use qrcode::{Color, QrCode, types::QrError};
+
+const QUIET_ZONE_WIDTH: usize = 2;
+
+fn env_truthy(key: &str) -> bool {
+    match std::env::var(key) {
+        Ok(value) => {
+            let trimmed = value.trim();
+            !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
+        }
+        Err(std::env::VarError::NotPresent) => false,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            eprintln!("Ignoring non-Unicode QR preference {key}");
+            false
+        }
+    }
+}
+
+fn qr_rendering_enabled() -> bool {
+    env_truthy("JCODE_SHOW_LOGIN_QR") || env_truthy("JCODE_LOGIN_QR")
+}
+
+fn tui_qr_rendering_enabled() -> bool {
+    env_truthy("JCODE_SHOW_TUI_LOGIN_QR") || env_truthy("JCODE_TUI_LOGIN_QR")
+}
+
+pub fn render_unicode_qr(data: &str) -> Result<String, QrError> {
+    let code = QrCode::new(data.as_bytes())?;
+    let code_size = code.width();
+    let size = code_size + QUIET_ZONE_WIDTH * 2;
+    let mut out = String::new();
+
+    for row in (0..size).step_by(2) {
+        for col in 0..size {
+            let top = qr_color_at(&code, code_size, col, row);
+            let bottom = if row + 1 < size {
+                qr_color_at(&code, code_size, col, row + 1)
+            } else {
+                Color::Light
+            };
+
+            let ch = match (top, bottom) {
+                (Color::Dark, Color::Dark) => '█',
+                (Color::Dark, Color::Light) => '▀',
+                (Color::Light, Color::Dark) => '▄',
+                (Color::Light, Color::Light) => ' ',
+            };
+            out.push(ch);
+        }
+        if row + 2 < size {
+            out.push('\n');
+        }
+    }
+
+    Ok(out)
+}
+
+fn qr_color_at(code: &QrCode, code_size: usize, col: usize, row: usize) -> Color {
+    if col < QUIET_ZONE_WIDTH
+        || row < QUIET_ZONE_WIDTH
+        || col >= code_size + QUIET_ZONE_WIDTH
+        || row >= code_size + QUIET_ZONE_WIDTH
+    {
+        return Color::Light;
+    }
+    code[(col - QUIET_ZONE_WIDTH, row - QUIET_ZONE_WIDTH)]
+}
+
+fn render_login_qr(data: &str) -> Option<String> {
+    match render_unicode_qr(data) {
+        Ok(qr) => Some(qr),
+        Err(error) => {
+            eprintln!("Cannot render login QR code: {error}. Use the login URL instead.");
+            None
+        }
+    }
+}
+
+pub fn markdown_section(data: &str, heading: &str) -> Option<String> {
+    if !qr_rendering_enabled() {
+        return None;
+    }
+    let qr = render_login_qr(data)?;
+    Some(format!("{heading}\n\n```text\n{qr}\n```"))
+}
+
+pub fn markdown_section_for_tui(data: &str, heading: &str) -> Option<String> {
+    if !tui_qr_rendering_enabled() {
+        return None;
+    }
+    let qr = render_login_qr(data)?;
+    Some(format!("{heading}\n\n```text\n{qr}\n```"))
+}
+
+/// CLI login QR output is automatic when the browser is suppressed. Browser-based
+/// login remains opt-in, and the TUI keeps its separate rendering policy.
+pub fn indented_section(
+    data: &str,
+    heading: &str,
+    indent: &str,
+    browser_suppressed: bool,
+) -> Option<String> {
+    if !browser_suppressed && !qr_rendering_enabled() {
+        return None;
+    }
+    let qr = render_login_qr(data)?;
+    let mut out = String::new();
+    out.push_str(heading);
+    out.push_str("\n\n");
+    for line in qr.lines() {
+        out.push_str(indent);
+        out.push_str(line);
+        out.push('\n');
+    }
+    Some(out.trim_end_matches('\n').to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn lock_test_env() -> MutexGuard<'static, ()> {
+        ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn set_var(key: &str, value: &str) {
+        // SAFETY: test-only, serialized by ENV_LOCK.
+        unsafe { std::env::set_var(key, value) }
+    }
+
+    fn remove_var(key: &str) {
+        // SAFETY: test-only, serialized by ENV_LOCK.
+        unsafe { std::env::remove_var(key) }
+    }
+
+    #[test]
+    fn render_unicode_qr_uses_block_glyphs_without_ansi() {
+        let qr = render_unicode_qr("https://example.com/login").unwrap();
+        assert!(qr.contains('█') || qr.contains('▀') || qr.contains('▄'));
+        assert!(qr.contains('\n'));
+        assert!(!qr.contains("\u{1b}["));
+    }
+
+    #[test]
+    fn markdown_section_wraps_qr_in_code_block() {
+        let _guard = lock_test_env();
+        set_var("JCODE_SHOW_LOGIN_QR", "1");
+        let section =
+            markdown_section("https://example.com/login", "Scan this on another device:").unwrap();
+        assert!(section.starts_with("Scan this on another device:\n\n```text\n"));
+        assert!(section.ends_with("\n```"));
+        remove_var("JCODE_SHOW_LOGIN_QR");
+    }
+
+    #[test]
+    fn tui_markdown_section_is_opt_in_even_when_general_qr_is_enabled() {
+        let _guard = lock_test_env();
+        set_var("JCODE_SHOW_LOGIN_QR", "1");
+        remove_var("JCODE_SHOW_TUI_LOGIN_QR");
+        remove_var("JCODE_TUI_LOGIN_QR");
+        assert!(markdown_section_for_tui("https://example.com/login", "Scan:").is_none());
+        remove_var("JCODE_SHOW_LOGIN_QR");
+    }
+
+    #[test]
+    fn tui_markdown_section_uses_dedicated_env_flag() {
+        let _guard = lock_test_env();
+        set_var("JCODE_SHOW_TUI_LOGIN_QR", "1");
+        let section = markdown_section_for_tui("https://example.com/login", "Scan:")
+            .expect("tui qr should be enabled");
+        assert!(section.starts_with("Scan:\n\n```text\n"));
+        assert!(section.ends_with("\n```"));
+        remove_var("JCODE_SHOW_TUI_LOGIN_QR");
+    }
+
+    #[test]
+    fn indented_section_prefixes_each_line() {
+        let _guard = lock_test_env();
+        set_var("JCODE_SHOW_LOGIN_QR", "1");
+        let section =
+            indented_section("https://example.com/login", "Scan:", "    ", false).unwrap();
+        assert!(section.starts_with("Scan:\n\n    "));
+        assert!(
+            section
+                .lines()
+                .skip(2)
+                .all(|line| line.is_empty() || line.starts_with("    "))
+        );
+        remove_var("JCODE_SHOW_LOGIN_QR");
+    }
+
+    #[test]
+    fn browserless_cli_qr_is_enabled_without_env_opt_in() {
+        let _guard = lock_test_env();
+        remove_var("JCODE_SHOW_LOGIN_QR");
+        remove_var("JCODE_LOGIN_QR");
+        let section = indented_section("https://example.com/login", "Scan:", "    ", true)
+            .expect("browserless CLI login should always offer a QR");
+        assert!(section.starts_with("Scan:\n\n    "));
+        assert!(section.contains('█') || section.contains('▀') || section.contains('▄'));
+        assert!(markdown_section("https://example.com/login", "Scan:").is_none());
+    }
+
+    #[test]
+    fn qr_sections_are_disabled_by_default() {
+        let _guard = lock_test_env();
+        remove_var("JCODE_SHOW_LOGIN_QR");
+        remove_var("JCODE_LOGIN_QR");
+        assert!(markdown_section("https://example.com/login", "Scan:").is_none());
+        assert!(indented_section("https://example.com/login", "Scan:", "    ", false).is_none());
+    }
+}

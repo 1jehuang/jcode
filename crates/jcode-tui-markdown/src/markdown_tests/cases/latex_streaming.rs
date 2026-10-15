@@ -10,6 +10,23 @@ fn exact_multiline_latex_response() -> &'static str {
 }
 
 #[test]
+fn empty_math_bypasses_native_and_image_rendering() {
+    latex_image::with_handterm_native_latex_override(true, || {
+        latex_image::reset_test_render_attempts();
+        for source in ["", " ", "\n\t "] {
+            for display in [false, true] {
+                assert!(latex_image_lines(source, display, Some(90)).is_none());
+            }
+        }
+        for _ in 0..20 {
+            let _ = render_markdown_with_width("$$ $$\n\n$$\n \t\n$$", Some(90));
+            let _ = with_streaming_render_context(|| render_markdown_with_width("$$ $$", Some(90)));
+        }
+        assert_eq!(latex_image::test_render_attempts(), 0);
+    });
+}
+
+#[test]
 fn latex_foreground_is_white_and_styles_inline_math() {
     assert_eq!(MATH_FOREGROUND, (255, 255, 255));
     assert_eq!(MATH_INLINE_FOREGROUND, (255, 255, 255));

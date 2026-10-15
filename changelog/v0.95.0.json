@@ -1,0 +1,30 @@
+{
+  "version": "0.95.0",
+  "date": "2026-10-11",
+  "highlights": [
+    "OpenCode Go models, including grok-4.7 and gpt-6-luna, now route over the Responses API",
+    "Hooks expose turn-end token usage, and turn_start/turn_end now fire for one-shot jcode run turns",
+    "/agents supports per-session worker model overrides"
+  ],
+  "improvements": [
+    "/resume can open scoped to the current project when display.resume_project_scope is enabled",
+    "Swarm gains a stalled-worker watchdog, and headless run --socket sessions can join swarms",
+    "The macOS menu bar helper uses a stable signing identity, draws the streaming icon green, and can be turned off with [menubar] enabled = false",
+    "Inline images fit their reserved box and the info widget hugs its content",
+    "Command risk assessment now inspects commands inside $(...), backticks, and heredocs",
+    "SDK-launched private instances no longer auto-update mid-session and give shorter, more accurate connect errors"
+  ],
+  "fixes": [
+    "Ctrl/Alt/Cmd shortcuts work on the Korean 2-Set input source",
+    "The terminal keyboard protocol and TUI modes are restored when jcode exits on a signal",
+    "Rate-limit and provider reconnect auto-resumes are bounded instead of retrying indefinitely",
+    "OpenAI streams recover faster from stalls and OAuth token refresh no longer hangs",
+    "Tool calls emitted as DSML/invoke markup text are recovered instead of lost",
+    "Kimi reasoning via OpenRouter no longer loses text from non-cumulative snapshots",
+    "Resumed sessions heal a stale credential route so swarm workers inherit the live one",
+    "Computer-use screenshots kept in transcripts are bounded in size",
+    "The browser tool reuses persistent sessions on macOS without opening repeated windows",
+    "Only one menu bar helper runs when jcode is started with an overridden HOME",
+    "Swarm member attribution and restart notices are correct"
+  ]
+}

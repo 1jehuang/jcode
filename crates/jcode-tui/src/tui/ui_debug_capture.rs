@@ -38,8 +38,20 @@ pub(super) fn build_info_widget_summary(data: &info_widget::InfoWidgetData) -> I
         .as_ref()
         .and_then(|s| s.subagent_status.clone());
 
-    let background_running = data.background_info.as_ref().map(|b| b.running_count);
-    let background_tasks = data.background_info.as_ref().map(|b| b.running_tasks.len());
+    let background_running = data.background_info.as_ref().map(|b| {
+        if b.rows.is_empty() {
+            b.running_count
+        } else {
+            b.rows
+                .iter()
+                .filter(|row| row.status == crate::tui::BackgroundTaskRowStatus::Running)
+                .count()
+        }
+    });
+    let background_tasks = data
+        .background_info
+        .as_ref()
+        .map(|b| b.running_tasks.len().max(b.rows.len()));
 
     let usage_available = data.usage_info.as_ref().map(|u| u.available);
     let usage_provider = data

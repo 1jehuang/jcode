@@ -84,7 +84,9 @@ terminal-colorsaurus = "1.0"
 jcode-tui-permissions = { path = "../jcode-tui-permissions" }
 jcode-tui-tool-display = { path = "../jcode-tui-tool-display" }
 jcode-tui-usage-overlay = { path = "../jcode-tui-usage-overlay" }
-jcode-terminal-image = { path = "../jcode-terminal-image" }
+jcode-terminal-image = { path = "../jcode-terminal-image", features = ["display"] }
+jcode-terminal-prompt = { path = "../jcode-terminal-prompt" }
+jcode-voice = { path = "../jcode-voice" }
 jcode-productivity-core = { path = "../jcode-productivity-core" }
 jcode-tui-workspace = { path = "../jcode-tui-workspace" }
 
@@ -120,4 +122,4 @@ global-hotkey = "0.7"
 # an external recorder (pw-record, parecord, arecord, ...) so release builds
 # need no ALSA development headers.
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
-jcode-base = { path = "../jcode-base", default-features = false, features = ["voice-capture"] }
+jcode-voice = { path = "../jcode-voice", features = ["voice-capture"] }

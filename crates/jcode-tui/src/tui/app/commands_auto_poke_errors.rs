@@ -1,6 +1,12 @@
 //! Deterministic non-retryable auto-poke error classification.
 
 pub(crate) fn is_non_retryable_auto_poke_error(error: &str) -> bool {
+    // Include locally cached refresh rejections, which have neither an HTTP
+    // status nor the original provider error code. Do not classify generic
+    // refresh failures here: network and 5xx failures must remain retryable.
+    if crate::auth::refresh_state::error_is_permanent_rejection(error) {
+        return true;
+    }
     let lower = error.to_ascii_lowercase();
 
     // These failures are deterministic for the current request/session shape. Retrying the same

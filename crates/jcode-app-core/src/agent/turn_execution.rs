@@ -5,6 +5,19 @@ impl Agent {
     /// Refuse to run a model turn when this session moved to another machine
     /// or this in-memory copy is older than the transcript on disk.
     pub(crate) fn ensure_session_lease(&self) -> Result<()> {
+        let account_route = self
+            .session
+            .route_api_method
+            .as_deref()
+            .or(self.session.provider_key.as_deref());
+        if let Some(expected) = account_route.and_then(jcode_provider_core::oauth_account_label)
+            && self.provider.oauth_account_label().as_deref() != Some(expected)
+        {
+            anyhow::bail!(
+                "Saved account '{}' could not be restored for this session. Select an available account using /model or /login before sending a request.",
+                expected
+            );
+        }
         match self.session.migration_lease_block() {
             Some(block) => Err(anyhow::anyhow!("Session is not runnable here: {block}")),
             None => Ok(()),
@@ -37,8 +50,14 @@ impl Agent {
         if trace_enabled() {
             eprintln!("[trace] session_id {}", self.session.id);
         }
-        let _ = self.run_turn(true).await?;
-        Ok(())
+        let turn_started_at = Instant::now();
+        let start_message_index = self.message_count();
+        self.fire_turn_start_hook("run");
+        let result = self.run_turn(true).await.map(|_| ());
+        // `jcode run` uses this path, so headless turns fire the same
+        // lifecycle hooks as streaming turns (docs/HOOKS.md).
+        self.fire_turn_end_hook(&result, turn_started_at, start_message_index);
+        result
     }
 
     pub async fn run_once_capture(&mut self, user_message: &str) -> Result<String> {
@@ -114,16 +133,58 @@ impl Agent {
             );
         }
 
-        self.current_turn_system_reminder =
-            system_reminder.filter(|value| !value.trim().is_empty());
+        let system_reminder = system_reminder.filter(|value| !value.trim().is_empty());
+        // A reminder-only turn (e.g. reload recovery) used to persist an empty
+        // user message, so the model saw a blank prompt and asked about it.
+        // Carry the reminder as the turn's message instead.
+        let (user_message, system_reminder, display_role, continues_turn) = match system_reminder {
+            Some(reminder) if user_message.trim().is_empty() && images.is_empty() => (
+                std::borrow::Cow::Owned(format!("[auto] {}", reminder.trim())),
+                None,
+                display_role.or(Some(crate::session::StoredDisplayRole::System)),
+                true,
+            ),
+            reminder => (
+                std::borrow::Cow::Borrowed(user_message),
+                reminder,
+                display_role,
+                false,
+            ),
+        };
+        self.current_turn_system_reminder = system_reminder;
 
         self.announce_late_mcp_tools().await;
         self.announce_late_skills();
-        self.append_user_context_message_with_display_role(user_message, images, display_role)?;
+        self.append_user_context_message_with_display_role(
+            &user_message,
+            images,
+            display_role,
+            continues_turn,
+        )?;
         crate::telemetry::record_turn();
         let turn_started_at = Instant::now();
         let start_message_index = self.message_count();
         self.fire_turn_start_hook("chat");
+        let result = self.run_turn_streaming_mpsc(event_tx).await;
+        self.current_turn_system_reminder = None;
+        self.fire_turn_end_hook(&result, turn_started_at, start_message_index);
+        result
+    }
+
+    /// Continue the current turn from the stored transcript without adding a
+    /// new user message. Resumes a turn that stopped on a usage limit: its
+    /// message is already in the transcript, so sending it again would
+    /// duplicate it.
+    pub(crate) async fn resume_turn_streaming_mpsc(
+        &mut self,
+        system_reminder: Option<String>,
+        event_tx: mpsc::UnboundedSender<ServerEvent>,
+    ) -> Result<()> {
+        self.current_turn_system_reminder =
+            system_reminder.filter(|value| !value.trim().is_empty());
+        let turn_started_at = Instant::now();
+        let start_message_index = self.message_count();
+        self.fire_turn_start_hook("usage_limit_resume");
         let result = self.run_turn_streaming_mpsc(event_tx).await;
         self.current_turn_system_reminder = None;
         self.fire_turn_end_hook(&result, turn_started_at, start_message_index);
@@ -136,7 +197,7 @@ impl Agent {
         user_message: &str,
         images: Vec<(String, String)>,
     ) -> Result<()> {
-        self.append_user_context_message_with_display_role(user_message, images, None)
+        self.append_user_context_message_with_display_role(user_message, images, None, false)
     }
 
     fn append_user_context_message_with_display_role(
@@ -144,6 +205,9 @@ impl Agent {
         user_message: &str,
         images: Vec<(String, String)>,
         display_role: Option<crate::session::StoredDisplayRole>,
+        // A synthetic continuation (reload recovery) resumes the previous
+        // turn, so it must not start a new model-usage turn.
+        continues_turn: bool,
     ) -> Result<()> {
         let mut blocks: Vec<ContentBlock> = images
             .into_iter()
@@ -161,7 +225,7 @@ impl Agent {
             ));
         }
 
-        let starts_turn = blocks.len() > 1 || !user_message.trim().is_empty();
+        let starts_turn = !continues_turn && (blocks.len() > 1 || !user_message.trim().is_empty());
         let input_id = self.add_message_with_display_role(Role::User, blocks, display_role);
         if starts_turn {
             self.begin_model_usage_turn(&input_id);
@@ -214,114 +278,26 @@ impl Agent {
             let snippet: String = text.chars().take(LAST_TEXT_LIMIT).collect();
             event = event.field("LAST_ASSISTANT_TEXT", snippet);
         }
+        if let Some(usage) = turn_token_usage_after(&self.session.messages, start_message_index) {
+            if let Some(value) = usage.prompt_tokens {
+                event = event.field("PROMPT_TOKENS", value.to_string());
+            }
+            event = event
+                .field("INPUT_TOKENS", usage.input_tokens.to_string())
+                .field("OUTPUT_TOKENS", usage.output_tokens.to_string());
+            if let Some(value) = usage.cache_read_input_tokens {
+                event = event.field("CACHE_READ_TOKENS", value.to_string());
+            }
+            if let Some(value) = usage.cache_creation_input_tokens {
+                event = event.field("CACHE_WRITE_TOKENS", value.to_string());
+            }
+        }
         if let Err(error) = result {
             const ERROR_LIMIT: usize = 1000;
             let message: String = error.to_string().chars().take(ERROR_LIMIT).collect();
             event = event.field("ERROR", message);
         }
         crate::hooks::dispatch_observer(event);
-    }
-
-    /// Clear conversation history
-    pub fn clear(&mut self) {
-        let preserve_canary = self.session.is_canary;
-        let preserve_testing_build = self.session.testing_build.clone();
-        let preserve_debug = self.session.is_debug;
-        let preserve_working_dir = self.session.working_dir.clone();
-
-        self.session.mark_closed();
-        self.finish_concurrency_tracking();
-        self.persist_session_best_effort("pre-clear session close state");
-
-        let mut new_session = Session::create(None, None);
-        new_session.mark_active();
-        new_session.model = Some(self.provider_model());
-        new_session.provider_key = self.provider_key_for_new_session();
-        new_session.is_canary = preserve_canary;
-        new_session.testing_build = preserve_testing_build;
-        new_session.is_debug = preserve_debug;
-        new_session.working_dir = preserve_working_dir;
-        new_session.ensure_initial_session_context_message();
-
-        self.session = new_session;
-        self.begin_concurrency_tracking();
-        self._tool_policy_registration = crate::tool::register_session_tool_policy(
-            &self.session.id,
-            self.allowed_tools.clone(),
-            self.disabled_tools.clone(),
-        );
-        self.refresh_agents_md_snapshot();
-        self.reconcile_explicit_provider_pin_route();
-        self.reset_runtime_state_for_session_change();
-        self.provider_session_id = None;
-        self.seed_compaction_from_session();
-    }
-
-    /// Clear provider session so the next turn sends full context.
-    pub fn reset_provider_session(&mut self) {
-        self.provider_session_id = None;
-        self.session.provider_session_id = None;
-        self.persist_session_best_effort("provider session reset");
-    }
-
-    /// Rewind the conversation to a 1-based visible transcript message index.
-    ///
-    /// The index is interpreted against the same rendered transcript the TUI
-    /// numbers in `/rewind` (user/assistant entries only, tool cards and
-    /// system notices excluded). Mapping through raw stored messages instead
-    /// would count tool-result messages the UI never numbers, sending
-    /// `/rewind N` far earlier than the on-screen message N (issue #432).
-    ///
-    /// Provider-side resumable sessions are reset so the next request sends the
-    /// truncated context from scratch instead of continuing from a stale upstream
-    /// conversation.
-    pub fn rewind_to_message(&mut self, message_index: usize) -> Result<usize, String> {
-        let targets = self.session.rewind_target_stored_indices();
-        let message_count = targets.len();
-        if message_index == 0 || message_index > message_count {
-            return Err(format!(
-                "Invalid message number: {}. Valid range: 1-{}",
-                message_index, message_count
-            ));
-        }
-        let stored_len = targets[message_index - 1] + 1;
-
-        let removed = message_count - message_index;
-        self.rewind_undo_snapshot = Some(RewindUndoSnapshot {
-            messages: self.session.messages.clone(),
-            provider_session_id: self.provider_session_id.clone(),
-            session_provider_session_id: self.session.provider_session_id.clone(),
-            visible_message_count: message_count,
-        });
-        self.session.truncate_messages(stored_len);
-        self.session.updated_at = chrono::Utc::now();
-        self.provider_session_id = None;
-        self.session.provider_session_id = None;
-        self.cache_tracker.reset();
-        self.kv_cache_monitor.reset();
-        self.locked_tools = None;
-        self.reset_tool_output_tracking();
-        self.persist_session_best_effort("conversation rewind");
-        Ok(removed)
-    }
-
-    pub fn undo_rewind(&mut self) -> Result<usize, String> {
-        let Some(snapshot) = self.rewind_undo_snapshot.take() else {
-            return Err("No rewind to undo.".to_string());
-        };
-
-        let current_count = self.session.rewind_target_count();
-        let restored = snapshot.visible_message_count.saturating_sub(current_count);
-        self.session.replace_messages(snapshot.messages);
-        self.provider_session_id = snapshot.provider_session_id;
-        self.session.provider_session_id = snapshot.session_provider_session_id;
-        self.session.updated_at = chrono::Utc::now();
-        self.cache_tracker.reset();
-        self.kv_cache_monitor.reset();
-        self.locked_tools = None;
-        self.reset_tool_output_tracking();
-        self.persist_session_best_effort("conversation rewind undo");
-        Ok(restored)
     }
 
     /// Unlock the tool list so the next API request picks up any new tools.
@@ -922,12 +898,70 @@ impl Agent {
         self.kv_cache_monitor.reset();
     }
 
+    pub(crate) async fn set_desktop_response_capability(&mut self, enabled: bool) {
+        let was_enabled = self
+            .registry
+            .tool_names()
+            .await
+            .iter()
+            .any(|n| n == "user_response");
+        if was_enabled != enabled {
+            self.registry.set_user_response_enabled(enabled).await;
+            self.invalidate_sdk_tools();
+        }
+    }
+
     pub async fn tool_names(&self) -> Vec<String> {
         self.tool_definitions_for_debug()
             .await
             .into_iter()
             .map(|tool| tool.name)
             .collect()
+    }
+
+    /// Per-server MCP tool names the session can see, for the client header's
+    /// `mcp:` inventory.
+    ///
+    /// Equivalent to filtering [`Self::tool_names`] for `mcp__*`, but reads only
+    /// registry keys: building full definitions (every schema, sorted, SDK
+    /// overlay applied) just to count names took up to ~40ms on the bootstrap
+    /// History path that gates the client's first settled frame.
+    pub async fn visible_mcp_tool_names(&self) -> Vec<String> {
+        // Mirrors `apply_mcp_tool_exposure`: on the fixed `mcp_search` /
+        // `mcp_call` surface per-server definitions are not exposed.
+        if !self.native_deferred_mcp()
+            && !matches!(self.mcp_tools_mode, crate::config::McpToolsMode::Eager)
+        {
+            return Vec::new();
+        }
+        let sdk = crate::tool::sdk::config(&self.session.id);
+        let enabled: Option<HashSet<String>> = sdk
+            .as_ref()
+            .and_then(|c| c.enabled.as_ref())
+            .map(|names| names.iter().cloned().collect());
+        let allowed = enabled.as_ref().or(self.allowed_tools.as_ref());
+        let sdk_disabled: HashSet<String> = sdk
+            .as_ref()
+            .map(|c| c.disabled.iter().cloned().collect())
+            .unwrap_or_default();
+        let mut names: Vec<String> = self
+            .registry
+            .tool_names()
+            .await
+            .into_iter()
+            .filter(|name| name.starts_with("mcp__"))
+            .filter(|name| allowed.is_none_or(|set| self.registry.tool_is_allowed(set, name)))
+            .filter(|name| {
+                enabled.is_some()
+                    || self.disabled_tools.is_empty()
+                    || !self.registry.tool_is_disabled(&self.disabled_tools, name)
+            })
+            .filter(|name| {
+                sdk_disabled.is_empty() || !self.registry.tool_is_disabled(&sdk_disabled, name)
+            })
+            .collect();
+        names.sort();
+        names
     }
 
     /// Get full tool definitions for debug introspection (bypasses lock)
@@ -1118,26 +1152,7 @@ impl Agent {
         let reset_ms = reset_start.elapsed().as_millis();
 
         let model_start = Instant::now();
-        if let Some(model) = self.session.model.clone() {
-            let model_request =
-                crate::provider::MultiProvider::model_switch_request_for_session_route(
-                    &model,
-                    self.session.provider_key.as_deref(),
-                    self.session.route_api_method.as_deref(),
-                );
-            if let Err(e) =
-                crate::provider::set_model_with_auth_refresh(self.provider.as_ref(), &model_request)
-            {
-                logging::error(&format!(
-                    "Failed to restore session model '{}' via '{}': {}",
-                    model, model_request, e
-                ));
-            } else {
-                self.reconcile_explicit_provider_pin_route();
-            }
-        } else {
-            self.session.model = Some(self.provider_model());
-        }
+        self.restore_session_model_from_session();
         self.restore_reasoning_effort_from_session();
         self.restore_account_pins_from_session();
         let model_ms = model_start.elapsed().as_millis();
@@ -1420,7 +1435,7 @@ impl Agent {
         }
 
         // Extract using sidecar
-        let sidecar = crate::sidecar::Sidecar::new();
+        let sidecar = crate::sidecar::Sidecar::for_session(&self.session);
         match sidecar.extract_memories(&transcript).await {
             Ok(extracted) if !extracted.is_empty() => {
                 let manager = self
@@ -1463,6 +1478,60 @@ impl Agent {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TurnTokenUsage {
+    prompt_tokens: Option<u64>,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_input_tokens: Option<u64>,
+    cache_creation_input_tokens: Option<u64>,
+}
+
+fn turn_token_usage_after(
+    messages: &[crate::session::StoredMessage],
+    start_message_index: usize,
+) -> Option<TurnTokenUsage> {
+    let mut usage = TurnTokenUsage {
+        prompt_tokens: None,
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_input_tokens: None,
+        cache_creation_input_tokens: None,
+    };
+    let mut saw_usage = false;
+
+    for message in messages.iter().skip(start_message_index) {
+        if !matches!(&message.role, Role::Assistant) {
+            continue;
+        }
+        let Some(message_usage) = message.token_usage.as_ref() else {
+            continue;
+        };
+
+        saw_usage = true;
+        let add = |acc: Option<u64>, v: Option<u64>| {
+            v.map(|v| acc.unwrap_or(0).saturating_add(v)).or(acc)
+        };
+        usage.prompt_tokens = add(usage.prompt_tokens, message_usage.prompt_tokens);
+        usage.input_tokens = usage
+            .input_tokens
+            .saturating_add(message_usage.input_tokens);
+        usage.output_tokens = usage
+            .output_tokens
+            .saturating_add(message_usage.output_tokens);
+        usage.cache_read_input_tokens = add(
+            usage.cache_read_input_tokens,
+            message_usage.cache_read_input_tokens,
+        );
+        usage.cache_creation_input_tokens = add(
+            usage.cache_creation_input_tokens,
+            message_usage.cache_creation_input_tokens,
+        );
+    }
+
+    saw_usage.then_some(usage)
+}
+
 /// Cap on tools listed in one late-MCP transcript announcement.
 const MAX_ANNOUNCED_MCP_TOOLS: usize = 32;
 
@@ -1481,3 +1550,7 @@ const LATE_MCP_ANNOUNCEMENT_MARKER: &str = "New MCP tools are available.";
 /// Stable header of the late-skill transcript announcement; used to recognize
 /// earlier announcements when a session is restored.
 const LATE_SKILL_ANNOUNCEMENT_MARKER: &str = "New skills were installed.";
+
+#[cfg(test)]
+#[path = "turn_token_usage_tests.rs"]
+mod turn_token_usage_tests;
