@@ -56,15 +56,15 @@ pub(super) fn classify_record(
 
 /// Profile directories listed in `Local State`, falling back to `Default`.
 fn profile_dirs(user_data: &Path) -> Vec<String> {
-    let listed = std::fs::read(user_data.join("Local State"))
-        .ok()
-        .and_then(|raw| serde_json::from_slice::<Value>(&raw).ok())
-        .and_then(|state| {
-            state["profile"]["info_cache"]
-                .as_object()
-                .map(|profiles| profiles.keys().cloned().collect::<Vec<_>>())
-        })
-        .unwrap_or_default();
+    let listed = read_profile_json(&user_data.join("Local State")).and_then(|state| {
+        state["profile"]["info_cache"]
+            .as_object()
+            .map(|profiles| profiles.keys().cloned().collect::<Vec<_>>())
+    });
+    // A new or incomplete Chromium profile only has the Default directory.
+    let Some(listed) = listed else {
+        return vec!["Default".to_string()];
+    };
     if listed.is_empty() {
         vec!["Default".to_string()]
     } else {
@@ -72,12 +72,37 @@ fn profile_dirs(user_data: &Path) -> Vec<String> {
     }
 }
 
+// Optional profile files may not exist. Corrupt or unreadable files are
+// diagnosed in the log while the remaining profile files are still inspected.
+fn read_profile_json(path: &Path) -> Option<Value> {
+    let raw = match std::fs::read(path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => {
+            crate::logging::debug(&format!(
+                "Cannot read Chromium profile {}: {error}",
+                path.display()
+            ));
+            return None;
+        }
+    };
+    match serde_json::from_slice(&raw) {
+        Ok(value) => Some(value),
+        Err(error) => {
+            crate::logging::debug(&format!(
+                "Invalid Chromium profile JSON {}: {error}",
+                path.display()
+            ));
+            None
+        }
+    }
+}
+
 fn extension_record(profile_dir: &Path) -> Option<Value> {
     ["Secure Preferences", "Preferences"]
         .iter()
         .find_map(|file| {
-            let raw = std::fs::read(profile_dir.join(file)).ok()?;
-            let prefs: Value = serde_json::from_slice(&raw).ok()?;
+            let prefs = read_profile_json(&profile_dir.join(file))?;
             let record = prefs["extensions"]["settings"][CHROMIUM_EXTENSION_ID].clone();
             record.is_object().then_some(record)
         })
@@ -221,6 +246,21 @@ mod tests {
             inspect_user_data(user_data, expected),
             Some(ChromiumExtensionState::Installed {
                 profile: "Profile 1".into()
+            })
+        );
+    }
+
+    #[test]
+    fn corrupt_optional_profile_files_still_inspect_default_preferences() {
+        let temp = tempfile::tempdir().unwrap();
+        let expected = Path::new("/x");
+        write_profile(temp.path(), "Default", Some(json!({"path": expected})));
+        std::fs::write(temp.path().join("Local State"), "not json").unwrap();
+        std::fs::write(temp.path().join("Default/Secure Preferences"), "not json").unwrap();
+        assert_eq!(
+            inspect_user_data(temp.path(), expected),
+            Some(ChromiumExtensionState::Installed {
+                profile: "Default".into()
             })
         );
     }

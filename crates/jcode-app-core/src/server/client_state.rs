@@ -267,17 +267,20 @@ pub(super) async fn handle_get_model_catalog(
         provider_oauth_email,
     ) = {
         match agent.try_lock() {
-            Ok(agent_guard) => (
-                Some(agent_guard.provider_name()),
-                Some(agent_guard.provider_model()),
-                agent_guard.available_models_display(),
-                agent_guard.model_routes(),
-                agent_guard.active_resolved_credential(),
-                agent_guard.provider_handle().service_tier(),
-                agent_guard.provider_handle().reasoning_effort(),
-                "live",
-                provider_oauth_email(agent_guard.provider_handle().as_ref()),
-            ),
+            Ok(agent_guard) => {
+                let catalog = super::available_models_cache::for_agent(&agent_guard).snapshot();
+                (
+                    Some(agent_guard.provider_name()),
+                    Some(agent_guard.provider_model()),
+                    catalog.available_models,
+                    catalog.model_routes,
+                    agent_guard.active_resolved_credential(),
+                    agent_guard.provider_handle().service_tier(),
+                    agent_guard.provider_handle().reasoning_effort(),
+                    "live",
+                    provider_oauth_email(agent_guard.provider_handle().as_ref()),
+                )
+            }
             Err(_) => {
                 crate::logging::warn(&format!(
                     "handle_get_model_catalog: session {} busy, using provider/persisted fallback",
