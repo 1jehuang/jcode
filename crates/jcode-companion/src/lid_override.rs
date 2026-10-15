@@ -87,7 +87,15 @@ impl LidOverride {
     /// (Linux handles the lid via `systemd-inhibit`) or not supported.
     pub fn for_current_platform() -> Option<Self> {
         let backend = platform_backend()?;
-        let journal_path = jcode_base::storage::jcode_dir().ok()?.join(JOURNAL_FILE);
+        let journal_path = match jcode_base::storage::jcode_dir() {
+            Ok(dir) => dir.join(JOURNAL_FILE),
+            Err(error) => {
+                jcode_base::logging::warn(&format!(
+                    "lid_override: cannot resolve recovery journal: {error}"
+                ));
+                return None;
+            }
+        };
         // A sandboxed JCODE_HOME (tests, isolated profiles) must never touch
         // machine-wide power settings.
         if jcode_base::storage::running_with_sandboxed_home() {
@@ -181,8 +189,20 @@ impl LidOverride {
             },
         )?;
         if let Err(error) = self.backend.block(&snapshot) {
-            let _ = self.backend.restore(&snapshot);
-            let _ = std::fs::remove_file(&self.journal_path);
+            // Keep the recovery journal if rollback fails so another run can restore it.
+            if let Err(restore_error) = self.backend.restore(&snapshot) {
+                return Err(io::Error::new(
+                    error.kind(),
+                    format!("lid override failed: {error}; rollback failed: {restore_error}"),
+                ));
+            }
+            if let Err(cleanup_error) = std::fs::remove_file(&self.journal_path)
+                && cleanup_error.kind() != io::ErrorKind::NotFound
+            {
+                jcode_base::logging::warn(&format!(
+                    "lid_override: rollback succeeded but journal cleanup failed: {cleanup_error}"
+                ));
+            }
             return Err(error);
         }
         self.engaged = true;
@@ -242,7 +262,16 @@ impl LidOverride {
     }
 
     fn read_journal(&self) -> Option<Journal> {
-        let bytes = std::fs::read(&self.journal_path).ok()?;
+        let bytes = match std::fs::read(&self.journal_path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return None,
+            Err(error) => {
+                jcode_base::logging::warn(&format!(
+                    "lid_override: cannot read recovery journal: {error}"
+                ));
+                return None;
+            }
+        };
         match serde_json::from_slice(&bytes) {
             Ok(journal) => Some(journal),
             Err(error) => {
@@ -391,7 +420,15 @@ fn parse_guid(text: &str) -> Option<(u32, u16, u16, [u8; 8])> {
     if hex.len() != 32 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
         return None;
     }
-    let value = u128::from_str_radix(&hex, 16).ok()?;
+    // Exactly 32 validated hex digits fit in u128. Decode without a fallible reparse.
+    let value = hex.bytes().fold(0u128, |value, digit| {
+        let digit = match digit {
+            b'0'..=b'9' => digit - b'0',
+            b'a'..=b'f' => digit - b'a' + 10,
+            _ => digit - b'A' + 10,
+        };
+        (value << 4) | u128::from(digit)
+    });
     Some((
         (value >> 96) as u32,
         (value >> 80) as u16,

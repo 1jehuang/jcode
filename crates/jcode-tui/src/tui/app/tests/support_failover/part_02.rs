@@ -1037,8 +1037,9 @@ fn test_local_failover_revalidates_runtime_source_pool_at_expiry() {
 /// profile. Countdown mode shows the same manual offer as manual mode.
 #[test]
 fn remote_out_of_credit_profile_offer_never_arms_countdown() {
+    for mode in ["manual", "countdown"] {
     with_temp_jcode_home(|| {
-        write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
+        write_test_config(&format!("[provider]\ncross_provider_failover = \"{mode}\"\n"));
         let rt = tokio::runtime::Runtime::new().expect("runtime");
         let _guard = rt.enter();
         let mut remote = crate::tui::backend::RemoteConnection::dummy();
@@ -1079,8 +1080,12 @@ fn remote_out_of_credit_profile_offer_never_arms_countdown() {
         assert!(
             app.display_messages
                 .iter()
-                .any(|message| message.content.contains("Use /model to switch to prof-b (glm-5.3)")),
+                .any(|message| message.content.contains("Use /model prof-b:glm-5.3 to switch and resend")),
             "manual offer names the sibling profile"
         );
+        assert!(!app.pending_turn);
+        assert!(!app.maybe_progress_provider_failover_countdown());
+        assert!(!app.display_messages.iter().any(|message| message.content.contains("retrying in 3s")));
     });
+    }
 }

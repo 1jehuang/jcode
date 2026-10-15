@@ -58,6 +58,7 @@ input = ["text"]
             active: RwLock::new(ActiveProvider::Claude),
             startup_notices: RwLock::new(Vec::new()),
             initial_provider: None,
+            catalog_scope: next_catalog_scope(),
             routes_memo: std::sync::Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
