@@ -53,7 +53,7 @@ fn test_retrieving_redirect_for_edit_restores_text_and_images_together() {
     assert_eq!(
         (app.input, app.pending_images, app.queued_message_images),
         (
-            "describe this image".to_string(),
+            "describe this image [image 1]".to_string(),
             vec![("image/png".to_string(), "aGk=".to_string())],
             vec![]
         )

@@ -400,7 +400,7 @@ fn test_rejected_remote_automatic_route_retains_old_identity_and_drops_payload()
         assert!(app.pending_automatic_failover_route.is_none());
         assert!(app.pending_fallback_resend.is_none());
         assert!(!app.remote_model_switch_in_flight);
-        assert_eq!(app.input, "hi");
+        assert_eq!(app.input, "hi [image 1]");
         assert_eq!(
             app.pending_images,
             vec![("image/png".into(), "image-data".into())]
