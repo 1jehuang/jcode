@@ -591,6 +591,43 @@ fn test_loading_picker_ctrl_s_choice_beats_project_scope_default() {
 }
 
 #[test]
+fn test_loading_tab_preserves_list_focus_through_cached_and_fresh_updates() {
+    for query in ["", "quota"] {
+        let mut picker = SessionPicker::loading();
+        picker.focus_search_input();
+        for c in query.chars() {
+            picker
+                .handle_overlay_key(KeyCode::Char(c), KeyModifiers::empty())
+                .unwrap();
+        }
+        picker
+            .handle_overlay_key(KeyCode::Tab, KeyModifiers::empty())
+            .unwrap();
+        assert!(!picker.search_input_focused());
+        assert_eq!(picker.search_query, query);
+
+        for fresh in [false, true] {
+            let session = make_session("session_quota", "quota", false, SessionStatus::Closed);
+            let sessions = (Vec::new(), vec![session]);
+            let update = if fresh {
+                SessionListUpdate::Fresh(Ok(sessions))
+            } else {
+                SessionListUpdate::Cached(sessions)
+            };
+            picker.apply_session_list_update(update).unwrap();
+            assert!(!picker.search_input_focused());
+            assert_eq!(picker.search_query, query);
+            assert!(matches!(
+                picker
+                    .handle_overlay_key(KeyCode::Char('q'), KeyModifiers::empty())
+                    .unwrap(),
+                OverlayAction::Close
+            ));
+        }
+    }
+}
+
+#[test]
 fn test_search_query_and_filter_survive_cached_and_fresh_session_updates() {
     let mut picker = SessionPicker::loading();
     picker.focus_search_input();
