@@ -166,6 +166,9 @@ pub async fn run(options: CompanionOptions) -> Result<()> {
     jcode_base::env::set_var("JCODE_COMPANION", "1");
 
     let listener = bind(&options.socket)?;
+    // Windows named-pipe acceptance replaces the listening pipe instance.
+    #[cfg(windows)]
+    let mut listener = listener;
     let mut capabilities = vec![
         "open".to_string(),
         "reveal".to_string(),
@@ -221,7 +224,7 @@ pub async fn run(options: CompanionOptions) -> Result<()> {
 
     let result = tokio::select! {
         result = accept => result,
-        () = shutdown_signal() => Ok(()),
+        result = shutdown_signal() => result,
     };
     companion.release_power();
     jcode_transport::remove_socket(&options.socket);
@@ -230,7 +233,12 @@ pub async fn run(options: CompanionOptions) -> Result<()> {
 
 fn bind(path: &Path) -> Result<jcode_transport::Listener> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).ok();
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create companion socket directory {}",
+                parent.display()
+            )
+        })?;
     }
     if jcode_transport::is_socket_path(path) {
         // A live companion answers. Only a stale socket file may be replaced.
@@ -280,19 +288,20 @@ async fn serve(stream: jcode_transport::Stream, companion: &Companion) -> Result
     }
 }
 
-async fn shutdown_signal() {
+async fn shutdown_signal() -> Result<()> {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};
-        let mut term = signal(SignalKind::terminate()).expect("SIGTERM handler");
+        let mut term = signal(SignalKind::terminate()).context("install SIGTERM handler")?;
         tokio::select! {
-            _ = term.recv() => {}
-            _ = tokio::signal::ctrl_c() => {}
+            received = term.recv() => received.context("SIGTERM signal stream closed")?,
+            result = tokio::signal::ctrl_c() => result.context("wait for Ctrl-C")?,
         }
+        Ok(())
     }
     #[cfg(not(unix))]
     {
-        let _ = tokio::signal::ctrl_c().await;
+        tokio::signal::ctrl_c().await.context("wait for Ctrl-C")
     }
 }
 
