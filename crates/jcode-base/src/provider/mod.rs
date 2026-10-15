@@ -482,7 +482,9 @@ impl MultiProvider {
         let active = self.active_provider();
         // An explicit saved-account route is a billing choice: a removed login
         // fails closed instead of healing onto another account.
-        if let Some(bound_label) = self.selected_account_for_provider(active) {
+        if self.provider_uses_oauth_accounts(active)
+            && let Some(bound_label) = self.selected_account_for_provider(active)
+        {
             let exists = match active {
                 ActiveProvider::OpenAI => crate::auth::codex::list_accounts()?
                     .iter()
@@ -1671,7 +1673,9 @@ impl MultiProvider {
     }
 
     fn fork_model_switch_request(&self, active: ActiveProvider, current_model: &str) -> String {
-        if let Some(label) = self.selected_account_for_provider(active) {
+        if self.provider_uses_oauth_accounts(active)
+            && let Some(label) = self.selected_account_for_provider(active)
+        {
             let method = if active == ActiveProvider::Claude {
                 "claude-oauth"
             } else {
