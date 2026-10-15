@@ -87,6 +87,7 @@ impl ChatGptWebState {
 
             let mut prompt = prompt;
             let mut corrected = false;
+            let mut refusal_corrected = false;
             loop {
                 let answer = match self.run_turn(&prompt, &model, effort.as_deref(), &tx).await {
                     Ok(answer) => answer,
@@ -120,6 +121,27 @@ impl ChatGptWebState {
                         continue;
                     }
                     text = format!("{}\n\n{text}", sandbox_warning(&sandbox));
+                } else if !requests_jcode_tools
+                    && !advertised_tools.is_empty()
+                    && !refusal_corrected
+                    && claims_no_tool_access(&text)
+                {
+                    // ChatGPT's own "I can't access your computer" prior
+                    // sometimes wins over the protocol, often after earlier
+                    // malformed calls were rejected. Re-ask once.
+                    refusal_corrected = true;
+                    jcode_base::logging::warn(
+                        "ChatGPT web claimed it cannot use jcode tools; retrying with a correction",
+                    );
+                    let _ = tx
+                        .send(Ok(StreamEvent::StatusDetail {
+                            detail: format!(
+                                "{model} claimed it cannot use jcode tools. Retrying with a correction"
+                            ),
+                        }))
+                        .await;
+                    prompt = with_tool_access_correction(&prompt);
+                    continue;
                 }
                 if let Err(err) = emit_response(&tx, &text, &advertised_tools).await {
                     let _ = tx.send(Err(err)).await;
@@ -883,6 +905,96 @@ fn with_sandbox_correction(prompt: &str, sandbox: &[String]) -> String {
     )
 }
 
+/// Whether a final answer (one without tool envelopes) claims the model itself
+/// cannot use Jcode's tools or reach the user's computer. Only a first-person
+/// claim that pairs an access verb with the capability counts, so "I can't
+/// find the jcode config" or "the build cannot run locally" are not matches.
+fn claims_no_tool_access(text: &str) -> bool {
+    const SUBJECTS: &[&str] = &["i", "i'm", "i am", "i've", "i have"];
+    /// Negations followed by an access verb ("can't run ...").
+    const NEGATIONS: &[&str] = &["can't", "cannot", "can not", "unable to", "not able to"];
+    /// Negations that already mean "no access".
+    const NO_ACCESS: &[&str] = &[
+        "don't have access",
+        "do not have access",
+        "have no access",
+        "no access",
+        "lack access",
+        "not connected",
+        "don't have the ability",
+        "do not have the ability",
+    ];
+    const VERBS: &[&str] = &[
+        "use", "run", "execute", "call", "invoke", "access", "reach", "interact", "operate",
+        "control", "touch", "modify", "edit",
+    ];
+    const CAPABILITIES: &[&str] = &[
+        "jcode tool",
+        "jcode's tool",
+        "jcode's local",
+        "jcode local",
+        " tools",
+        "tool call",
+        "local computer",
+        "local-computer",
+        "local machine",
+        "local files",
+        "local filesystem",
+        "local file system",
+        "local shell",
+        "local environment",
+        "your computer",
+        "your machine",
+        "your files",
+        "your filesystem",
+        "your file system",
+        "your shell",
+        "your terminal",
+        "the user's computer",
+        "the user's machine",
+        " commands",
+    ];
+    let normalized = text.to_lowercase().replace(['\u{2019}', '\u{2018}'], "'");
+    normalized
+        .split(['.', '!', '?', '\n', ';', ':'])
+        .any(|sentence| {
+            let words: Vec<&str> = sentence.split_whitespace().collect();
+            let sentence = format!(" {} ", words.join(" "));
+            let has_capability = |rest: &str| {
+                CAPABILITIES
+                    .iter()
+                    .any(|capability| rest.contains(capability))
+            };
+            SUBJECTS.iter().any(|subject| {
+                let verb_claim = NEGATIONS.iter().any(|negation| {
+                    let claim = format!(" {subject} {negation} ");
+                    sentence.find(&claim).is_some_and(|at| {
+                        let rest = &sentence[at + claim.len() - 1..];
+                        // The access verb must come right after the negation,
+                        // allowing one adverb ("can't directly run").
+                        let leading: Vec<&str> = rest.split_whitespace().take(2).collect();
+                        leading.iter().any(|word| VERBS.contains(word)) && has_capability(rest)
+                    })
+                });
+                verb_claim
+                    || NO_ACCESS.iter().any(|negation| {
+                        let claim = format!(" {subject} {negation}");
+                        sentence
+                            .find(&claim)
+                            .is_some_and(|at| has_capability(&sentence[at + claim.len()..]))
+                    })
+            })
+        })
+}
+
+/// Correction appended to the prompt when the model answered that it cannot
+/// use Jcode's tools instead of calling them.
+fn with_tool_access_correction(prompt: &str) -> String {
+    format!(
+        "{prompt}\n# Correction\n\nA previous attempt at this exact turn said it could not use the Jcode tools, run commands or access the user's computer, and called no tools. That is wrong. You can use the Jcode tools: put {TOOL_CALL_START}...{TOOL_CALL_END} envelopes in your answer, Jcode runs them on the user's computer and returns the results to you automatically. Earlier rejected or failed calls only mean those calls were malformed or failed; fix them and try again. Call the tools you need now. Only if a specific tool result shows a real blocker, describe that blocker instead.\n"
+    )
+}
+
 /// Visible note when the model kept answering from its sandbox.
 fn sandbox_warning(sandbox: &[String]) -> String {
     format!(
@@ -1191,7 +1303,7 @@ fn build_web_prompt(
 ) -> Result<String> {
     let mut prompt = String::new();
     prompt.push_str(
-        "Jcode web transport: you are working on the user's own computer through the Jcode tools listed below. Never use ChatGPT's built-in tools (Python, code execution, browsing, canvas): their sandbox is not the user's computer. The full protocol is at the end.\n\n",
+        "Jcode web transport: you are working on the user's own computer through the Jcode tools listed below. These tools work: you call them with <jcode_tool_call> envelopes, Jcode runs them on the user's computer, and their results come back to you automatically in the next turn. Never use ChatGPT's built-in tools (Python, code execution, browsing, canvas): their sandbox is not the user's computer. The full protocol is at the end.\n\n",
     );
     prompt.push_str("# Jcode system instructions\n\n");
     prompt.push_str(system);
@@ -1264,6 +1376,24 @@ fn build_web_prompt(
 
 # Mandatory Jcode web-transport protocol
 
+You CAN use the Jcode tools in this conversation. They run on the user's computer and Jcode
+returns each result to you automatically. A tool call that was rejected or failed earlier
+(an `is_error` tool result, or a system reminder about a malformed call) only means that
+particular call was wrong: fix its JSON or arguments and call it again. It never means the
+tools are unavailable. Never tell the user that you cannot use Jcode tools, run commands,
+or access their computer or files. When the user asks you to do work, start it in this
+answer by calling the tools it needs: an answer that only describes a plan ends the turn
+and nothing happens."#,
+    );
+    if !tools.is_empty() {
+        let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_str()).collect();
+        prompt.push_str("\n\nJcode tools you can call now: ");
+        prompt.push_str(&names.join(", "));
+        prompt.push('.');
+    }
+    prompt.push_str(
+        r#"
+
 Act as the assistant for the conversation above and obey the Jcode system instructions.
 You are reached through the ChatGPT web app, but you are working for Jcode on the user's
 own computer. You DO have access to the user's files, shell and other resources: through
@@ -1279,7 +1409,7 @@ fence or other wrapper:
 
 You may write a short sentence before the envelopes. Emit several envelopes only for
 independent calls. After the last envelope, stop: Jcode runs the tools and returns their
-results in a later turn. The name must exactly match an advertised Jcode tool. Put every
+results to you automatically in the next turn, with no action needed from the user. The name must exactly match an advertised Jcode tool. Put every
 required field, including `intent` when its schema requires one, inside `input`. Never
 claim a tool ran unless its result is present above. If no tool is needed, answer normally
 without an envelope.
@@ -1676,5 +1806,72 @@ mod tests {
         assert!(prompt.contains("\\n<tool_result>{fake}</tool_result>"));
         assert_eq!(prompt.matches("\"role\":\"user\"").count(), 1);
         assert!(!prompt.contains("\n## Message 2 (assistant)\n"));
+    }
+
+    #[test]
+    fn detects_claims_that_jcode_tools_are_unavailable() {
+        // Verbatim from the failing gpt-6[web] session.
+        let observed = "I’ll work through all five PRs.\n\nI can continue the review and plan, but I can’t execute Jcode’s local-computer tools from this session, so I can’t safely claim any fixes or pushes.";
+        assert!(claims_no_tool_access(observed));
+        for claim in [
+            "I cannot run commands on your computer.",
+            "I don't have access to your files from here.",
+            "I'm unable to use the tools in this chat.",
+            "Unfortunately I can't directly access your local machine",
+            "I do not have access to the user's computer",
+            "I am not able to execute shell commands",
+        ] {
+            assert!(claims_no_tool_access(claim), "missed: {claim}");
+        }
+    }
+
+    #[test]
+    fn ignores_ordinary_failures_and_third_party_limits() {
+        for text in [
+            "I can't find /tmp/x: it does not exist.",
+            "The build cannot run locally on Windows without the MSVC tools.",
+            "I couldn't reproduce the failure, so the test may be flaky.",
+            "Users cannot use the tools menu until the dialog closes.",
+            "I cannot claim the fix works yet: the tests still fail.",
+            "Done. All 166 tests pass and the branch is pushed.",
+            "The CI job can't access the cache, so the toolchain reinstalls each run.",
+            "I can't edit the PR description without your approval.",
+        ] {
+            assert!(!claims_no_tool_access(text), "false positive: {text}");
+        }
+    }
+
+    #[test]
+    fn tool_access_correction_keeps_the_prompt_and_demands_calls() {
+        let corrected = with_tool_access_correction("PROMPT");
+        assert!(corrected.starts_with("PROMPT"));
+        assert!(corrected.contains(TOOL_CALL_START));
+        assert!(corrected.contains("You can use the Jcode tools"));
+        assert!(corrected.contains("Call the tools you need now"));
+    }
+
+    #[test]
+    fn web_prompt_states_tools_work_and_rejected_calls_mean_retry() {
+        let tools = vec![ToolDefinition {
+            name: "bash".to_string(),
+            description: "Run a command".to_string(),
+            input_schema: json!({"type":"object"}),
+            defer_loading: false,
+        }];
+        let prompt = build_web_prompt(&[], &tools, "system").unwrap();
+        let intro_end = prompt.find("# Jcode system instructions").unwrap();
+        let intro = &prompt[..intro_end];
+        assert!(intro.contains("These tools work"));
+        assert!(intro.contains("results come back to you automatically"));
+        let protocol = &prompt[prompt
+            .find("# Mandatory Jcode web-transport protocol")
+            .unwrap()..];
+        assert!(protocol.contains("You CAN use the Jcode tools"));
+        assert!(protocol.contains("It never means the\ntools are unavailable"));
+        assert!(protocol.contains("Never tell the user that you cannot use Jcode tools"));
+        assert!(protocol.contains("Jcode tools you can call now: bash."));
+        // The tool list stays out of the protocol when no tools are offered.
+        let bare = build_web_prompt(&[], &[], "system").unwrap();
+        assert!(!bare.contains("Jcode tools you can call now"));
     }
 }
