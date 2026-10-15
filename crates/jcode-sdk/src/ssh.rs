@@ -297,7 +297,10 @@ impl SshTransport {
             })?;
         let reader = child.stdout.take();
         let writer = child.stdin.take();
-        let mut stderr_pipe = child.stderr.take().expect("piped stderr");
+        let mut stderr_pipe = child
+            .stderr
+            .take()
+            .ok_or_else(|| Error::new(ErrorKind::ConnectFailed, "piped stderr"))?;
         let stderr = Arc::new(Mutex::new(Vec::new()));
         let buffer = Arc::clone(&stderr);
         let (done_tx, done_rx) = std::sync::mpsc::channel();
@@ -343,10 +346,15 @@ impl Transport for SshTransport {
     }
 
     fn split(mut self: Box<Self>) -> Result<(Box<dyn BufRead + Send>, Box<dyn Write + Send>)> {
-        Ok((
-            Box::new(BufReader::new(self.reader.take().expect("SSH stdout"))),
-            Box::new(self.writer.take().expect("SSH stdin")),
-        ))
+        let reader = self
+            .reader
+            .take()
+            .ok_or_else(|| Error::new(ErrorKind::ConnectFailed, "SSH stdout"))?;
+        let writer = self
+            .writer
+            .take()
+            .ok_or_else(|| Error::new(ErrorKind::ConnectFailed, "SSH stdin"))?;
+        Ok((Box::new(BufReader::new(reader)), Box::new(writer)))
     }
 }
 
