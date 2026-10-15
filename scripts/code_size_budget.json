@@ -37,7 +37,7 @@
     "crates/jcode-base/src/jev.rs": 1987,
     "crates/jcode-base/src/memory.rs": 1572,
     "crates/jcode-base/src/provider/catalog_routes.rs": 1596,
-    "crates/jcode-base/src/provider/mod.rs": 3232,
+    "crates/jcode-base/src/provider/mod.rs": 3162,
     "crates/jcode-base/src/provider/models.rs": 1349,
     "crates/jcode-base/src/provider_catalog.rs": 1309,
     "crates/jcode-base/src/session.rs": 1840,
