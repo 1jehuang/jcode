@@ -1077,7 +1077,7 @@ fn test_account_switch_short_form_runs_on_one_enter() {
 
         // The suggestion list offers `/account claude switch <label>`, a
         // different spelling of the same command. One Enter must run it.
-        app.set_input_for_test(&format!("/account switch {second}"));
+        app.set_input_for_test(format!("/account switch {second}"));
         app.handle_key(KeyCode::Enter, KeyModifiers::empty()).unwrap();
         assert!(app.input.is_empty(), "command ran, input: {:?}", app.input);
         let window = app.window_account("claude").expect("window account");
