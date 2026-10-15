@@ -10,12 +10,14 @@ use futures::stream;
 use std::sync::Mutex as StdMutex;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+type PinCalls = Arc<StdMutex<Vec<(AccountProviderKind, Option<String>)>>>;
+
 /// Provider fork that keeps its own pin (like the real runtimes) and records
 /// every `set_account_pin` call in a log shared by all forks.
 #[derive(Clone)]
 struct PinRecordingProvider {
     pin: Arc<StdMutex<BTreeMap<AccountProviderKind, AccountPin>>>,
-    calls: Arc<StdMutex<Vec<(AccountProviderKind, Option<String>)>>>,
+    calls: PinCalls,
 }
 
 use std::collections::BTreeMap;
