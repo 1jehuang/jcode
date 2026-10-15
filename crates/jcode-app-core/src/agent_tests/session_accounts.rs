@@ -10,6 +10,80 @@ use std::sync::Mutex as StdMutex;
 type PinCalls = Arc<StdMutex<Vec<(AccountProviderKind, Option<String>)>>>;
 
 #[test]
+fn automatic_api_fallback_stays_automatic_across_disk_resume() {
+    use crate::provider::external::{
+        ANTHROPIC_RUNTIME, instantiate_external_provider, register_external_provider,
+        register_external_provider_fallible,
+    };
+    use jcode_provider_core::{CredentialMode, ResolvedCredential};
+
+    let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    crate::env::set_var(
+        "ANTHROPIC_API_KEY",
+        "sk-ant-test-auto-fallback-metadata-only",
+    );
+    crate::env::remove_var("JCODE_RUNTIME_PROVIDER");
+    // Never drive constructor catalog tasks or make a network request.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let _entered = runtime.enter();
+    struct RestoreFactory(Option<Arc<dyn Provider>>);
+    impl Drop for RestoreFactory {
+        fn drop(&mut self) {
+            let previous = self.0.take();
+            register_external_provider_fallible(ANTHROPIC_RUNTIME, move || previous.clone());
+        }
+    }
+    let _factory = RestoreFactory(instantiate_external_provider(ANTHROPIC_RUNTIME));
+    register_external_provider(ANTHROPIC_RUNTIME, || {
+        Arc::new(jcode_provider_anthropic_runtime::AnthropicProvider::new())
+    });
+    let provider: Arc<dyn Provider> = Arc::new(crate::provider::MultiProvider::new_fast());
+    assert_eq!(provider.credential_mode(), CredentialMode::Auto);
+    assert_eq!(
+        provider.active_resolved_credential(),
+        Some(ResolvedCredential::ApiKey)
+    );
+    let mut agent = Agent::new(Arc::clone(&provider), Registry::empty());
+    agent.session.model = Some(provider.model());
+    agent.session.save_prepared().unwrap();
+    let saved = Session::load(&agent.session.id).unwrap();
+    assert_ne!(saved.provider_key.as_deref(), Some("claude-api"));
+    assert!(saved.route_api_method.is_none());
+    assert_eq!(provider.credential_mode(), CredentialMode::Auto);
+    let fresh = Agent::new(Arc::clone(&provider), Registry::empty());
+    assert_ne!(fresh.session.provider_key.as_deref(), Some("claude-api"));
+
+    // An OAuth login returns before the next startup. Auto must be free to
+    // prefer it rather than restoring the temporary API fallback as a choice.
+    store_claude_accounts();
+    assert_eq!(provider.credential_mode(), CredentialMode::Auto);
+    assert_ne!(
+        agent.provider_key_for_new_session().as_deref(),
+        Some("claude-api")
+    );
+    let resumed_provider: Arc<dyn Provider> = Arc::new(crate::provider::MultiProvider::new_fast());
+    assert_eq!(resumed_provider.credential_mode(), CredentialMode::Auto);
+    assert_eq!(
+        resumed_provider.active_resolved_credential(),
+        Some(ResolvedCredential::Oauth)
+    );
+    let _resumed = Agent::new_with_session(
+        Arc::clone(&resumed_provider),
+        Registry::empty(),
+        saved,
+        None,
+    );
+    assert_eq!(resumed_provider.credential_mode(), CredentialMode::Auto);
+    assert_eq!(
+        resumed_provider.active_resolved_credential(),
+        Some(ResolvedCredential::Oauth)
+    );
+}
+
+#[test]
 fn api_route_with_saved_pin_stays_api_through_sync_model_and_resume() {
     use crate::provider::external::{
         ANTHROPIC_RUNTIME, instantiate_external_provider, register_external_provider,
