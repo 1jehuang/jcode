@@ -36,7 +36,7 @@
     "crates/jcode-tui/src/tui/app/tests/remote_events_reload_01/part_01.rs": 1696,
     "crates/jcode-tui/src/tui/app/tests/remote_events_reload_03/part_02.rs": 1222,
     "crates/jcode-tui/src/tui/app/tests/remote_events_reload_04.rs": 2693,
-    "crates/jcode-tui/src/tui/app/tests/remote_startup_input_02/part_01.rs": 2338,
+    "crates/jcode-tui/src/tui/app/tests/remote_startup_input_02/part_01.rs": 2337,
     "crates/jcode-tui/src/tui/app/tests/remote_startup_input_03/part_01.rs": 1347,
     "crates/jcode-tui/src/tui/app/tests/scroll_copy_01/part_01.rs": 1586,
     "crates/jcode-tui/src/tui/app/tests/scroll_copy_02/part_01.rs": 1580,

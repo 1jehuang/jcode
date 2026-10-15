@@ -15,8 +15,9 @@ impl Drop for OptionalBrowserRefreshGuard {
 
 pub(super) fn spawn_optional_browser_catalog_refresh<F>(refresh: F)
 where
-    F: std::future::Future<Output = Result<Vec<jcode_base::provider::chatgpt_web::ChatGptWebModel>>>
-        + Send
+    F: std::future::Future<
+            Output = Result<Vec<jcode_base::provider::chatgpt_web::ChatGptWebModel>>,
+        > + Send
         + 'static,
 {
     if OPTIONAL_BROWSER_REFRESH_RUNNING

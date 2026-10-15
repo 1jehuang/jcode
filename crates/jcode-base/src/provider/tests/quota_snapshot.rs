@@ -296,7 +296,7 @@ fn accepted_default_snapshot_clears_only_older_default_quota() {
         assert!(default_cooldown().is_some());
         store_default_available();
         assert_eq!(default_cooldown(), None);
-        assert!(provider_unavailability_detail_for_label("openai", LABEL).is_some());
+        assert!(provider_unavailability_detail_for_account_label("openai", Some(LABEL)).is_some());
         assert!(
             crate::provider::account_failover::account_exhausted(
                 AccountProviderKind::OpenAi,

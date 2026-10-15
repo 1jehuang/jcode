@@ -62,7 +62,7 @@
     "crates/jcode-provider-gemini-runtime/src/lib.rs": 1266,
     "crates/jcode-provider-metadata/src/catalog.rs": 1359,
     "crates/jcode-provider-openai-runtime/src/lib.rs": 1587,
-    "crates/jcode-provider-openai-runtime/src/openai_provider_impl.rs": 1410,
+    "crates/jcode-provider-openai-runtime/src/openai_provider_impl.rs": 1421,
     "crates/jcode-provider-openai-runtime/src/openai_stream_runtime.rs": 2055,
     "crates/jcode-provider-openai/src/stream.rs": 1205,
     "crates/jcode-provider-openrouter-runtime/src/lib.rs": 3037,
