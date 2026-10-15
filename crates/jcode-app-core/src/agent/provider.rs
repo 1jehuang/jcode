@@ -64,8 +64,24 @@ impl Agent {
         self.session.model_usage_turn_id.clone().unwrap()
     }
 
+    /// A retained saved-account pin is not evidence that requests use OAuth.
+    /// Explicit API-key routes keep their pin for later subscription selection.
+    pub(super) fn observed_oauth_account_route(&self) -> Option<(&'static str, String)> {
+        if self.provider.active_resolved_credential()
+            != Some(jcode_provider_core::ResolvedCredential::Oauth)
+        {
+            return None;
+        }
+        let method = match self.provider.name().to_ascii_lowercase().as_str() {
+            "openai" => "openai-oauth",
+            "claude" | "anthropic" => "claude-oauth",
+            _ => return None,
+        };
+        Some((method, self.provider.oauth_account_label()?))
+    }
+
     pub(super) fn sync_bound_account_route(&mut self) {
-        let Some(label) = self.provider.oauth_account_label() else {
+        let Some((method, label)) = self.observed_oauth_account_route() else {
             return;
         };
         if self
@@ -80,11 +96,6 @@ impl Agent {
             );
             return;
         }
-        let method = match self.provider.name().to_ascii_lowercase().as_str() {
-            "openai" => "openai-oauth",
-            "claude" | "anthropic" => "claude-oauth",
-            _ => return,
-        };
         let route = format!("{method}@{label}");
         if self.session.route_api_method.as_deref() == Some(route.as_str()) {
             return;
@@ -267,18 +278,18 @@ impl Agent {
                 self.provider.name(),
                 self.session.provider_key.as_deref(),
             );
-        if let Some(label) = self.provider.oauth_account_label() {
-            let method = if self.provider.name().eq_ignore_ascii_case("openai") {
-                "openai-oauth"
-            } else {
-                "claude-oauth"
-            };
+        if let Some((method, label)) = self.observed_oauth_account_route() {
             self.session.route_api_method = Some(format!("{method}@{label}"));
         } else if self
             .session
             .route_api_method
             .as_deref()
-            .is_some_and(|method| jcode_provider_core::oauth_account_label(method).is_some())
+            .is_some_and(|method| {
+                jcode_provider_core::oauth_account_label(method).is_some()
+                    || (self.provider.active_resolved_credential()
+                        == Some(jcode_provider_core::ResolvedCredential::ApiKey)
+                        && matches!(method, "claude-oauth" | "openai-oauth"))
+            })
         {
             self.session.route_api_method = None;
         }
@@ -540,12 +551,7 @@ impl Agent {
     /// swarm agents inherit this so they reconstruct the coordinator's exact
     /// auth route instead of falling back to the config default.
     pub fn session_route_api_method(&self) -> Option<String> {
-        if let Some(label) = self.provider.oauth_account_label() {
-            let method = if self.provider.name().eq_ignore_ascii_case("openai") {
-                "openai-oauth"
-            } else {
-                "claude-oauth"
-            };
+        if let Some((method, label)) = self.observed_oauth_account_route() {
             return Some(format!("{method}@{label}"));
         }
         self.session.route_api_method.clone()

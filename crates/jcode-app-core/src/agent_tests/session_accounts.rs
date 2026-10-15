@@ -9,6 +9,195 @@ use std::sync::Mutex as StdMutex;
 
 type PinCalls = Arc<StdMutex<Vec<(AccountProviderKind, Option<String>)>>>;
 
+#[test]
+fn api_route_with_saved_pin_stays_api_through_sync_model_and_resume() {
+    use crate::provider::external::{
+        ANTHROPIC_RUNTIME, instantiate_external_provider, register_external_provider,
+        register_external_provider_fallible,
+    };
+    use jcode_provider_core::ResolvedCredential;
+
+    let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    store_claude_accounts();
+    crate::env::set_var("ANTHROPIC_API_KEY", "sk-ant-test-pin-metadata-only");
+    crate::env::set_var("JCODE_RUNTIME_PROVIDER", "claude-api");
+    // Enter but never drive this current-thread executor. Constructor catalog
+    // tasks can be queued, but no HTTP request or completion can run.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let _entered = runtime.enter();
+    struct RestoreFactory(Option<Arc<dyn Provider>>);
+    impl Drop for RestoreFactory {
+        fn drop(&mut self) {
+            let previous = self.0.take();
+            register_external_provider_fallible(ANTHROPIC_RUNTIME, move || previous.clone());
+        }
+    }
+    let _factory = RestoreFactory(instantiate_external_provider(ANTHROPIC_RUNTIME));
+    register_external_provider(ANTHROPIC_RUNTIME, || {
+        Arc::new(jcode_provider_anthropic_runtime::AnthropicProvider::new())
+    });
+    let provider: Arc<dyn Provider> = Arc::new(crate::provider::MultiProvider::new_fast());
+    let model = provider.model();
+    provider.set_model(&format!("claude-api:{model}")).unwrap();
+    let mut agent = Agent::new(Arc::clone(&provider), Registry::empty());
+    agent.session.route_api_method = Some("claude-api".to_string());
+    agent.session.provider_key = Some("claude-api".to_string());
+    agent.session.model = Some(model.clone());
+    agent.session.save_prepared().unwrap();
+    agent
+        .set_account_pin(AccountProviderKind::Claude, Some(fox_pin()))
+        .unwrap();
+    assert_eq!(
+        provider.oauth_account_label().as_deref(),
+        Some("claude-fox")
+    );
+    assert_eq!(
+        provider.active_resolved_credential(),
+        Some(ResolvedCredential::ApiKey)
+    );
+    agent.sync_bound_account_route();
+    assert_eq!(
+        agent.session.route_api_method.as_deref(),
+        Some("claude-api")
+    );
+    assert_eq!(agent.session.provider_key.as_deref(), Some("claude-api"));
+    assert_eq!(
+        agent.session_route_api_method().as_deref(),
+        Some("claude-api")
+    );
+
+    // Bare model selection retains the runtime's pin and credential mode.
+    agent.set_model(&model).unwrap();
+    assert_eq!(
+        provider.oauth_account_label().as_deref(),
+        Some("claude-fox")
+    );
+    assert_eq!(
+        provider.active_resolved_credential(),
+        Some(ResolvedCredential::ApiKey)
+    );
+    assert_eq!(
+        agent.session.route_api_method.as_deref(),
+        Some("claude-api")
+    );
+    let saved = Session::load(&agent.session.id).unwrap();
+    assert_eq!(saved.route_api_method.as_deref(), Some("claude-api"));
+    assert_eq!(saved.provider_key.as_deref(), Some("claude-api"));
+    assert_eq!(saved.account_pins.get("claude"), Some(&fox_pin()));
+
+    let fork = provider.fork();
+    assert_eq!(
+        fork.active_resolved_credential(),
+        Some(ResolvedCredential::ApiKey)
+    );
+    assert_eq!(
+        fork.account_pin(AccountProviderKind::Claude),
+        provider.account_pin(AccountProviderKind::Claude)
+    );
+    assert_eq!(
+        provider.active_resolved_credential(),
+        Some(ResolvedCredential::ApiKey)
+    );
+
+    // Ambient startup preference must not rewrite actual API billing identity.
+    crate::env::set_var("JCODE_RUNTIME_PROVIDER", "claude-oauth");
+    assert_eq!(
+        agent.provider_key_for_new_session().as_deref(),
+        Some("claude-api")
+    );
+    let fresh = Agent::new(Arc::clone(&provider), Registry::empty());
+    assert_eq!(fresh.session.provider_key.as_deref(), Some("claude-api"));
+    let resumed_provider: Arc<dyn Provider> = Arc::new(crate::provider::MultiProvider::new_fast());
+    let mut resumed = Agent::new_with_session(
+        Arc::clone(&resumed_provider),
+        Registry::empty(),
+        saved,
+        None,
+    );
+    assert_eq!(
+        resumed_provider.active_resolved_credential(),
+        Some(ResolvedCredential::ApiKey)
+    );
+    assert_eq!(
+        resumed_provider.oauth_account_label().as_deref(),
+        Some("claude-fox")
+    );
+    assert_eq!(
+        resumed.session_route_api_method().as_deref(),
+        Some("claude-api")
+    );
+    resumed.sync_bound_account_route();
+    assert_eq!(
+        resumed.session.route_api_method.as_deref(),
+        Some("claude-api")
+    );
+    assert_eq!(resumed.session.account_pins.get("claude"), Some(&fox_pin()));
+
+    // A deliberate OAuth route still qualifies and persists the exact account.
+    resumed
+        .set_model(&format!("claude-oauth@claude-fox:{model}"))
+        .unwrap();
+    resumed.sync_bound_account_route();
+    assert_eq!(
+        resumed_provider.active_resolved_credential(),
+        Some(ResolvedCredential::Oauth)
+    );
+    assert_eq!(
+        resumed.session_route_api_method().as_deref(),
+        Some("claude-oauth@claude-fox")
+    );
+    assert_eq!(
+        resumed.provider_key_for_new_session().as_deref(),
+        Some("claude-oauth@claude-fox")
+    );
+    let oauth_saved = Session::load(&resumed.session.id).unwrap();
+    assert_eq!(
+        oauth_saved.route_api_method.as_deref(),
+        Some("claude-oauth@claude-fox")
+    );
+
+    // Generic OAuth routes are valid persisted selections too. An explicit API
+    // model switch must not leave that older route ahead of the new API key.
+    resumed
+        .set_route_selection(&crate::provider::RouteSelection {
+            model: model.clone(),
+            runtime_key: crate::provider::RuntimeKey::ClaudeOAuth,
+            api_method: "claude-oauth".to_string(),
+            provider_label: "Claude".to_string(),
+            detail: String::new(),
+        })
+        .unwrap();
+    resumed.set_model(&format!("claude-api:{model}")).unwrap();
+    assert_eq!(
+        resumed_provider.active_resolved_credential(),
+        Some(ResolvedCredential::ApiKey)
+    );
+    assert_ne!(
+        resumed.session_route_api_method().as_deref(),
+        Some("claude-oauth")
+    );
+    let api_saved = Session::load(&resumed.session.id).unwrap();
+    let api_resumed_provider: Arc<dyn Provider> =
+        Arc::new(crate::provider::MultiProvider::new_fast());
+    let api_resumed = Agent::new_with_session(
+        Arc::clone(&api_resumed_provider),
+        Registry::empty(),
+        api_saved,
+        None,
+    );
+    assert_eq!(
+        api_resumed_provider.active_resolved_credential(),
+        Some(ResolvedCredential::ApiKey)
+    );
+    assert_eq!(
+        api_resumed.session.account_pins.get("claude"),
+        Some(&fox_pin())
+    );
+}
+
 /// Fake provider that records `set_account_pin` calls. When `failover_to` is
 /// set, `complete` moves its own pin there (like same-provider failover) and
 /// then fails the stream.
