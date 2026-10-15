@@ -772,7 +772,7 @@ fn spawn_assigned_task_run(
     swarm_event_tx: broadcast::Sender<SwarmEvent>,
 ) {
     let assignment_text = append_swarm_completion_report_instructions(&assignment_text);
-    tokio::spawn(async move {
+    crate::runtime_activity::spawn(async move {
         {
             let now_ms = now_unix_ms();
             let mut plans = swarm_plans.write().await;

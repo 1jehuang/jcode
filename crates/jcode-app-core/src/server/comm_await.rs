@@ -186,6 +186,7 @@ async fn finalize_await(
     members: Vec<AwaitedMemberStatus>,
     summary: String,
 ) {
+    let _activity = crate::runtime_activity::global().enter().await;
     // Deliver with the latest persisted prefs: a duplicate request may have
     // changed background/notify/wake after the caller captured this copy.
     let state = refresh_pending_state(state).unwrap_or_else(|| state.clone());

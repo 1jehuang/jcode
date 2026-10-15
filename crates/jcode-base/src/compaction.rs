@@ -921,7 +921,7 @@ impl CompactionManager {
         self.pending_trigger = Some(mode_label.clone());
 
         // Spawn background task that notifies via Bus when done
-        self.pending_task = Some(tokio::spawn(async move {
+        self.pending_task = crate::runtime_activity::spawn(async move {
             let start = std::time::Instant::now();
             let result =
                 generate_compaction_artifact(provider, messages_to_summarize, existing_summary)
@@ -939,7 +939,7 @@ impl CompactionManager {
                 result.summarized_messages = msg_count;
                 result
             })
-        }));
+        });
     }
 
     /// Ensure context fits before an API call.
@@ -1135,7 +1135,7 @@ impl CompactionManager {
         self.pending_cutoff = cutoff;
         self.pending_trigger = Some("manual".to_string());
 
-        self.pending_task = Some(tokio::spawn(async move {
+        self.pending_task = crate::runtime_activity::spawn(async move {
             let start = std::time::Instant::now();
             let result =
                 generate_compaction_artifact(provider, messages_to_summarize, existing_summary)
@@ -1152,7 +1152,7 @@ impl CompactionManager {
                 result.summarized_messages = msg_count;
                 result
             })
-        }));
+        });
 
         Ok(())
     }

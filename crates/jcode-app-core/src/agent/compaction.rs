@@ -1,6 +1,27 @@
 use super::*;
 
 impl Agent {
+    /// Flush an idle session before optional process replacement. Never abandon
+    /// a pending compaction or lose a completed summary that has not been polled.
+    pub(crate) fn checkpoint_idle_runtime_upgrade(&mut self) -> Result<()> {
+        self.poll_compaction_completion_event();
+        let compaction = self.registry.compaction();
+        let manager = compaction
+            .try_read()
+            .map_err(|_| anyhow::anyhow!("compaction state is busy"))?;
+        anyhow::ensure!(!manager.is_compacting(), "compaction is still running");
+        self.session.compaction = manager.persisted_state();
+        // Prepared blank sessions also have externally visible IDs. Ordinary
+        // save intentionally skips these until the first user message.
+        self.session.save_prepared()?;
+        let pending = self
+            .soft_interrupt_queue
+            .try_lock()
+            .map_err(|_| anyhow::anyhow!("queued input is busy or poisoned"))?;
+        crate::soft_interrupt_store::overwrite(self.session_id(), &pending)?;
+        Ok(())
+    }
+
     pub(super) fn note_compaction_applied(&mut self) {
         self.cache_tracker.reset();
         self.kv_cache_monitor.reset();

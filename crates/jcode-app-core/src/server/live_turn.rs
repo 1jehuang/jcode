@@ -102,7 +102,10 @@ pub(super) async fn spawn_tracked_live_turn(
     display_role: Option<crate::session::StoredDisplayRole>,
     status_detail: Option<String>,
     swarm: LiveTurnSwarmContext,
-) {
+) -> bool {
+    let Ok(_admission) = crate::runtime_activity::global().try_enter() else {
+        return false;
+    };
     update_member_status(
         session_id,
         "running",
@@ -117,7 +120,7 @@ pub(super) async fn spawn_tracked_live_turn(
 
     let event_tx = session_event_fanout_sender(session_id.to_string(), Arc::clone(&swarm.members));
     let session_id = session_id.to_string();
-    tokio::spawn(async move {
+    crate::runtime_activity::spawn(async move {
         let start_message_index = agent.message_count();
         let pending_queue = agent.soft_interrupt_queue();
         let (result, stop_reason) = catch_live_turn_panic(async {
@@ -202,7 +205,8 @@ pub(super) async fn spawn_tracked_live_turn(
             }
         }
         drop(reservation);
-    });
+    })
+    .is_some()
 }
 
 /// Run `message` immediately as a tracked turn if the session is live and
@@ -227,8 +231,7 @@ pub(super) async fn run_live_turn_if_idle(
         detail,
         swarm,
     )
-    .await;
-    true
+    .await
 }
 
 pub(super) async fn run_live_system_turn_if_idle(
@@ -250,8 +253,7 @@ pub(super) async fn run_live_system_turn_if_idle(
         detail,
         swarm,
     )
-    .await;
-    true
+    .await
 }
 
 /// Catch only unwind panics. A killed process cannot emit a trustworthy event.

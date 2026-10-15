@@ -136,10 +136,11 @@ pub(super) async fn run_debug_message_with_timeout(
     timeout_secs: u64,
 ) -> Result<String> {
     let msg = msg.to_string();
-    let mut handle = tokio::spawn(async move {
+    let mut handle = crate::runtime_activity::spawn(async move {
         let mut agent = agent.lock().await;
         agent.run_once_capture(&msg).await
-    });
+    })
+    .ok_or_else(|| anyhow::anyhow!("Runtime is upgrading; debug message not accepted"))?;
 
     tokio::select! {
         join_result = &mut handle => {

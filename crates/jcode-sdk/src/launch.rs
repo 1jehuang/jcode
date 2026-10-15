@@ -17,6 +17,10 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
+#[path = "launch_upgrade.rs"]
+mod shared_upgrade;
+
 const CREDENTIAL_FILES: &[&str] = &[
     "auth.json",
     "openai-auth.json",
@@ -531,14 +535,21 @@ pub fn ensure_runtime(options: &LaunchOptions, progress: &Progress<'_>) -> Resul
         .api_socket
         .clone()
         .unwrap_or_else(jcode_harness_api::api_socket_path);
-    if socket_accepts(&api) {
-        return Ok(());
-    }
-    let legacy = jcode_harness_api::legacy_socket_path();
     let jcode = options
         .binary
         .clone()
         .unwrap_or_else(|| sibling_exe("jcode"));
+    let legacy = jcode_harness_api::legacy_socket_path();
+    // A custom API socket may be a forwarded remote endpoint. Only the normal
+    // local shared runtime can be offered our explicit packaged companion. A
+    // PATH fallback is intentionally not an upgrade candidate.
+    #[cfg(unix)]
+    if shared_upgrade::is_local_shared(&api, &legacy, &jcode) && socket_accepts(&legacy) {
+        shared_upgrade::offer(&legacy, &jcode, options.start_timeout, progress);
+    }
+    if socket_accepts(&api) {
+        return Ok(());
+    }
     if !socket_accepts(&legacy) {
         progress("starting jcode runtime...");
         spawn_detached(&jcode, &["serve"]).map_err(|error| {

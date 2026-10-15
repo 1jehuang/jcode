@@ -451,6 +451,7 @@ pub(super) async fn handle_client(
         }
     };
 
+    let mut initialization_activity = Some(crate::runtime_activity::global().try_enter()?);
     let initial_working_dir =
         match resolve_target_subscribe_working_dir(&mut initial_request, &sessions, &swarm_members)
             .await
@@ -880,6 +881,24 @@ pub(super) async fn handle_client(
             }
         };
         let request_decoded_at = Instant::now();
+        // Reserve before Ack or any session mutation, not just when the turn
+        // eventually polls. Upgrade requests themselves must not reserve work.
+        let _request_activity = if matches!(&request, Request::UpgradeRuntime { .. }) {
+            None
+        } else {
+            match crate::runtime_activity::global().try_enter() {
+                Ok(activity) => Some(activity),
+                Err(error) => {
+                    let _ = client_event_tx.send(ServerEvent::Error {
+                        id: request.id(), message: error.to_string(), retry_after_secs: None,
+                    });
+                    continue;
+                }
+            }
+        };
+        // The first request now owns its admission reservation. Setup can stop
+        // holding its own without leaving a registration-to-dispatch gap.
+        drop(initialization_activity.take());
         let request_id = request.id();
         let request_kind = request_type_from_line(&line);
         let request_lifecycle_logged = !request_type_is_read_only(&request_kind);
@@ -1818,6 +1837,10 @@ pub(super) async fn handle_client(
                     message: "debug_command is only supported on the debug socket".to_string(),
                     retry_after_secs: None,
                 });
+            }
+
+            Request::UpgradeRuntime { id, candidate } => {
+                super::runtime_upgrade::handle(id, &candidate, &writer, &sessions).await?;
             }
 
             Request::Reload { id, force } => {
@@ -3481,7 +3504,7 @@ async fn start_processing_message(
     );
     let done_tx = processing_done_tx.clone();
     crate::logging::info(&format!("Processing message id={} spawning task", id));
-    *state.task = Some(tokio::spawn(async move {
+    *state.task = crate::runtime_activity::spawn(async move {
         let event_tx = tx.clone();
         let mut stop_reason = crate::protocol::TurnStopReason::Failure;
         let result = match std::panic::AssertUnwindSafe(crate::hooks::with_client_terminal_env(
@@ -3554,7 +3577,7 @@ async fn start_processing_message(
         }
         let _ = tx.send(terminal_event);
         let _ = done_tx.send((id, result, completion_report));
-    }));
+    });
 }
 
 async fn cancel_processing_message(

@@ -440,6 +440,7 @@ impl BackgroundTaskManager {
         F: FnOnce(PathBuf) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<TaskResult>> + Send,
     {
+        let runtime_activity = crate::runtime_activity::global().enter().await;
         let (notify, wake) = normalize_delivery(notify, wake);
         let task_id = Self::generate_task_id();
         let output_path = self.output_dir.join(format!("{}.output", task_id));
@@ -493,6 +494,7 @@ impl BackgroundTaskManager {
 
         // Spawn the background task
         let handle = tokio::spawn(async move {
+            let _runtime_activity = runtime_activity;
             let result = execute_fn(output_path_clone.clone()).await;
 
             let duration_secs = started_at.elapsed().as_secs_f64();
@@ -646,6 +648,8 @@ impl BackgroundTaskManager {
         wake: bool,
         handle: JoinHandle<Result<jcode_tool_types::ToolOutput>>,
     ) -> BackgroundTaskInfo {
+        // Reserve before the foreground caller can release its turn/tool guard.
+        let runtime_activity = crate::runtime_activity::global().enter().await;
         let (notify, wake) = normalize_delivery(notify, wake);
         let task_id = Self::generate_task_id();
         let output_path = self.output_dir.join(format!("{}.output", task_id));
@@ -702,6 +706,7 @@ impl BackgroundTaskManager {
         let (registered_tx, registered_rx) = tokio::sync::oneshot::channel::<()>();
 
         let wrapper_handle = tokio::spawn(async move {
+            let _runtime_activity = runtime_activity;
             let tool_result = handle.await;
             let duration_secs = started_at.elapsed().as_secs_f64();
 
