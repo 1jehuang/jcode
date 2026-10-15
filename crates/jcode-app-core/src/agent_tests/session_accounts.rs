@@ -7,13 +7,15 @@ use crate::provider::{AccountPin, AccountProviderKind};
 use std::collections::BTreeMap;
 use std::sync::Mutex as StdMutex;
 
+type PinCalls = Arc<StdMutex<Vec<(AccountProviderKind, Option<String>)>>>;
+
 /// Fake provider that records `set_account_pin` calls. When `failover_to` is
 /// set, `complete` moves its own pin there (like same-provider failover) and
 /// then fails the stream.
 #[derive(Clone)]
 struct PinProvider {
     pins: Arc<StdMutex<BTreeMap<AccountProviderKind, AccountPin>>>,
-    calls: Arc<StdMutex<Vec<(AccountProviderKind, Option<String>)>>>,
+    calls: PinCalls,
     failover: Arc<StdMutex<Option<bool>>>,
     failover_to: Option<AccountPin>,
 }
