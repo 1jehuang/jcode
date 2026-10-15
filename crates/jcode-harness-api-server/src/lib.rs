@@ -93,26 +93,36 @@ async fn daemon_capabilities(socket: &std::path::Path) -> Vec<String> {
 /// resumes, or creates a session. Failed snapshots clear connection presence.
 async fn daemon_user_connections(socket: &std::path::Path) -> std::collections::HashSet<String> {
     let probe = async {
-        let mut stream = Stream::connect(socket).await.ok()?;
-        write_json_line(&mut stream, &serde_json::json!({"type":"ping", "id":0}))
+        let mut stream = Stream::connect(socket)
             .await
-            .ok()?;
+            .context("connect presence probe")?;
+        write_json_line(&mut stream, &serde_json::json!({"type":"ping", "id":0})).await?;
         let mut reader = BufReader::new(stream);
         let mut line = String::new();
-        read_frame(&mut reader, &mut line).await.ok()?;
-        let reply: Value = serde_json::from_str(&line).ok()?;
+        read_frame(&mut reader, &mut line).await?;
+        let reply: Value = serde_json::from_str(&line).context("parse presence pong")?;
         if reply["type"] != "pong" || reply["id"] != 0 {
-            return None;
+            anyhow::bail!("presence probe received an uncorrelated reply");
         }
-        let ids: Vec<String> =
-            serde_json::from_value(reply["user_connected_session_ids"].clone()).ok()?;
-        Some(ids.into_iter().filter(|id| !id.is_empty()).collect())
+        // Older daemons do not advertise connection presence.
+        if reply["user_connected_session_ids"].is_null() {
+            return Ok(std::collections::HashSet::new());
+        }
+        let ids: Vec<String> = serde_json::from_value(reply["user_connected_session_ids"].clone())
+            .context("parse connected session IDs")?;
+        Ok::<_, anyhow::Error>(ids.into_iter().filter(|id| !id.is_empty()).collect())
     };
-    tokio::time::timeout(std::time::Duration::from_millis(500), probe)
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or_default()
+    match tokio::time::timeout(std::time::Duration::from_millis(500), probe).await {
+        Ok(Ok(ids)) => ids,
+        Ok(Err(error)) => {
+            eprintln!("Harness presence snapshot unavailable: {error:#}");
+            std::collections::HashSet::new()
+        }
+        Err(_) => {
+            eprintln!("Harness presence probe timed out, clearing connection presence");
+            std::collections::HashSet::new()
+        }
+    }
 }
 
 /// Largest single request frame accepted from an API client, in bytes.

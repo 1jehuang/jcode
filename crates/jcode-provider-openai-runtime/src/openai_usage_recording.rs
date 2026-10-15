@@ -189,9 +189,7 @@ mod tests {
         }
         let rows = jcode_base::provider_activity::openai_oauth_usage_summary("captured");
         assert!(
-            rows[1]
-                .1
-                .contains("100 input / 20 output tokens (40 cached input)"),
+            rows[1].1.contains("100 in · 20 out · 40 cached"),
             "{rows:?}"
         );
         assert!(!temp.path().join("provider_activity.json").exists());

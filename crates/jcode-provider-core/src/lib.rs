@@ -127,6 +127,17 @@ pub trait Provider: Send + Sync {
         self.name().to_string()
     }
 
+    /// Opaque process-local identity for safely sharing a complete catalog.
+    ///
+    /// Equal identities must imply equal catalog rows, availability, display
+    /// names and active selection. Include configuration scope and every auth,
+    /// account and catalog revision affecting those values. Never include raw
+    /// credentials. Consumers must still bound reuse by a short TTL and account
+    /// for their own enrichment revisions. Arbitrary providers opt out by default.
+    fn catalog_sharing_identity(&self) -> Option<String> {
+        None
+    }
+
     /// Get the model identifier being used.
     fn model(&self) -> String {
         "unknown".to_string()
