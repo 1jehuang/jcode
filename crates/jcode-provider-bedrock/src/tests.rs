@@ -141,6 +141,7 @@ fn detects_bedrock_login_env_file_credentials() {
 fn configured_profile_from_bedrock_env_overrides_stale_bearer_token() {
     let _guard = lock_test_env();
     let temp = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path().as_os_str());
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
     let _removed = [
         "JCODE_BEDROCK_ENABLE",
@@ -196,6 +197,7 @@ fn switches_arbitrary_model_ids() {
 fn maps_profile_required_foundation_model_to_inference_profile() {
     let _guard = lock_test_env();
     let temp = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path().as_os_str());
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
     let p = BedrockProvider::new();
     p.profile_required_models
@@ -216,6 +218,7 @@ fn maps_profile_required_foundation_model_to_inference_profile() {
 fn maps_foundation_model_from_stale_cached_profile_list() {
     let _guard = lock_test_env();
     let temp = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path().as_os_str());
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
     let p = BedrockProvider::new();
     *p.fetched_inference_profiles.write().unwrap() = vec![
@@ -232,6 +235,7 @@ fn maps_foundation_model_from_stale_cached_profile_list() {
 fn hides_profile_required_foundation_model_when_profile_route_exists() {
     let _guard = lock_test_env();
     let temp = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path().as_os_str());
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
     let p = BedrockProvider::new();
     *p.fetched_models.write().unwrap() = vec!["amazon.nova-2-lite-v1:0".to_string()];
@@ -263,6 +267,7 @@ fn hides_profile_required_foundation_model_when_profile_route_exists() {
 fn hides_foundation_model_when_profile_route_exists() {
     let _guard = lock_test_env();
     let temp = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path().as_os_str());
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
     let p = BedrockProvider::new();
     *p.fetched_models.write().unwrap() = vec!["amazon.nova-2-lite-v1:0".to_string()];
@@ -290,6 +295,7 @@ fn hides_foundation_model_when_profile_route_exists() {
 fn profile_required_foundation_model_without_profile_route_is_disabled() {
     let _guard = lock_test_env();
     let temp = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path().as_os_str());
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
     let p = BedrockProvider::new();
     *p.fetched_models.write().unwrap() = vec!["amazon.nova-2-lite-v1:0".to_string()];
@@ -334,6 +340,7 @@ fn global_inference_profiles_use_foundation_capabilities_and_detail() {
 fn ignores_persisted_bedrock_catalog_from_different_region() {
     let _guard = lock_test_env();
     let temp = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path().as_os_str());
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
     {
         let _region = EnvVarGuard::set(REGION_ENV, "us-east-1");
@@ -449,6 +456,7 @@ fn missing_credentials_error_omits_sdk_blob() {
 fn legacy_model_route_is_unavailable_with_reason() {
     let _guard = lock_test_env();
     let temp = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path().as_os_str());
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
     let p = BedrockProvider::new();
     *p.fetched_models.write().unwrap() = vec!["anthropic.claude-3-haiku-20240307-v1:0".to_string()];
