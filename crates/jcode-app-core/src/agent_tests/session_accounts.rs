@@ -125,9 +125,10 @@ fn api_route_with_saved_pin_stays_api_through_sync_model_and_resume() {
         Some(ResolvedCredential::ApiKey)
     );
     assert_eq!(
-        resumed_provider.oauth_account_label().as_deref(),
-        Some("claude-fox")
+        resumed_provider.account_pin(AccountProviderKind::Claude),
+        Some(fox_pin())
     );
+    assert_eq!(resumed_provider.oauth_account_label(), None);
     assert_eq!(
         resumed.session_route_api_method().as_deref(),
         Some("claude-api")
