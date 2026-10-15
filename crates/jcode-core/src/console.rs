@@ -15,17 +15,26 @@
 /// to plain text instead of printing escape garbage.
 pub fn stderr_supports_ansi() -> bool {
     use std::io::IsTerminal;
-    if !std::io::stderr().is_terminal() {
-        return false;
-    }
-
     #[cfg(windows)]
     {
-        enable_stderr_vt_processing()
+        std::io::stderr().is_terminal() && enable_stderr_vt_processing()
     }
     #[cfg(not(windows))]
     {
-        true
+        std::io::stderr().is_terminal()
+    }
+}
+
+#[cfg(all(test, not(windows)))]
+mod tests {
+    use std::io::IsTerminal;
+
+    #[test]
+    fn ansi_support_matches_stderr_terminal_detection() {
+        assert_eq!(
+            super::stderr_supports_ansi(),
+            std::io::stderr().is_terminal()
+        );
     }
 }
 

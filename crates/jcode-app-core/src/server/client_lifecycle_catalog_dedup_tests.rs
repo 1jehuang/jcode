@@ -64,6 +64,73 @@ fn age_normalization_handles_trailing_digits_and_unicode() {
     );
 }
 
+#[test]
+fn age_normalization_handles_long_non_age_digit_runs() {
+    let digits = "1234567890".repeat(10_000);
+    assert_eq!(strip_relative_age_text(&digits), digits);
+    let text = format!("{digits}ms p50 · 2m ago");
+    assert_eq!(
+        strip_relative_age_text(&text),
+        format!("{digits}ms p50 · <age>")
+    );
+}
+
+#[test]
+fn catalog_dedup_keeps_model_and_auth_route_changes() {
+    let baseline = ServerEvent::AvailableModelsUpdated {
+        provider_name: Some("test 12m ago".into()),
+        provider_model: Some("model 12m ago".into()),
+        available_models: vec!["model 12m ago".into()],
+        available_model_routes: vec![crate::provider::ModelRoute {
+            model: "model 12m ago".into(),
+            provider: "test 12m ago".into(),
+            api_method: "oauth".into(),
+            available: true,
+            detail: "cached 12m ago".into(),
+            usage: None,
+            cheapness: None,
+        }],
+    };
+    let key = available_models_dedup_key(&baseline);
+    // Every semantic catalog field must invalidate dedup immediately, with no
+    // time-based caching that could mask login/logout or a model switch.
+    for field in 0..9 {
+        let mut changed = baseline.clone();
+        let ServerEvent::AvailableModelsUpdated {
+            provider_name,
+            provider_model,
+            available_models,
+            available_model_routes,
+        } = &mut changed
+        else {
+            unreachable!()
+        };
+        let route = &mut available_model_routes[0];
+        match field {
+            0 => *provider_name = Some("test 41m ago".into()),
+            1 => *provider_model = Some("model 41m ago".into()),
+            2 => available_models[0] = "model 41m ago".into(),
+            3 => route.model = "model 41m ago".into(),
+            4 => route.provider = "test 41m ago".into(),
+            5 => route.api_method = "api-key".into(),
+            6 => route.available = false,
+            7 => route.usage = Some(Default::default()),
+            8 => {
+                route.cheapness = Some(crate::provider::RouteCheapnessEstimate::metered(
+                    crate::provider::RouteCostSource::PublicApiPricing,
+                    crate::provider::RouteCostConfidence::Exact,
+                    300_000,
+                    2_500_000,
+                    None,
+                    None,
+                ));
+            }
+            _ => unreachable!(),
+        }
+        assert_ne!(key, available_models_dedup_key(&changed), "field {field}");
+    }
+}
+
 /// Real route detail strings captured from a production OpenRouter catalog
 /// cache. These carry both self-ticking cache ages and endpoint stats
 /// (`p50`, `tps`) that only move when the endpoint cache genuinely refreshes.

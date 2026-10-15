@@ -52,7 +52,7 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use tokio::sync::{RwLock, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
@@ -62,21 +62,6 @@ const API_URL: &str = "https://api.anthropic.com/v1/messages";
 
 /// OAuth endpoint (with beta=true query param)
 const API_URL_OAUTH: &str = "https://api.anthropic.com/v1/messages?beta=true";
-
-#[cfg(test)]
-static OAUTH_API_URL_OVERRIDE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
-
-fn oauth_api_url() -> String {
-    #[cfg(test)]
-    if let Some(url) = OAUTH_API_URL_OVERRIDE
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clone()
-    {
-        return url;
-    }
-    API_URL_OAUTH.to_string()
-}
 
 fn direct_api_url() -> String {
     let base = std::env::var("JCODE_ANTHROPIC_API_BASE")
@@ -132,6 +117,8 @@ fn direct_auth_mode() -> String {
 #[derive(Clone)]
 struct DirectTransportConfig {
     api_url: String,
+    #[cfg(test)]
+    oauth_api_url: Option<String>,
     headers: std::result::Result<HeaderMap, String>,
     auth_mode: String,
     auth_header: String,
@@ -141,6 +128,8 @@ impl DirectTransportConfig {
     fn from_env() -> Self {
         Self {
             api_url: direct_api_url(),
+            #[cfg(test)]
+            oauth_api_url: None,
             headers: configured_direct_headers().map_err(|err| format!("{err:#}")),
             auth_mode: direct_auth_mode(),
             auth_header: std::env::var("JCODE_ANTHROPIC_AUTH_HEADER")
@@ -564,6 +553,18 @@ fn anthropic_status_error(
     )
 }
 
+/// Attach the reset time to a far usage-limit error in machine-readable form,
+/// so a server-initiated turn can schedule its resume at the reset and
+/// clients receive `retry_after_secs`. Other errors pass through unchanged.
+fn tag_usage_limit_reset(error: anyhow::Error, headers: &HeaderMap) -> anyhow::Error {
+    if error.downcast_ref::<UsageLimitExhausted>().is_none() {
+        return error;
+    }
+    let reset_in = unified_limit_reset_in(headers, chrono::Utc::now().timestamp())
+        .map(std::time::Duration::from_secs);
+    jcode_provider_core::usage_limit_resume::with_usage_limit_reset(error, reset_in)
+}
+
 /// Sleep before a retry, but wake early when the stored Claude credential
 /// changes (a swap announced through the process-wide credential signal).
 /// Returns the new token when one is now stored, so the retry uses it.
@@ -627,6 +628,9 @@ pub struct AnthropicProvider {
     /// pin change takes effect on the next request or retry.
     account_pin: AccountPinSlot,
     credential_mode: Arc<RwLock<AnthropicCredentialMode>>,
+    /// Actual credential resolved for this runtime's latest request: unknown,
+    /// OAuth, or API key. Auto may fall back after a failed OAuth refresh.
+    request_credential: Arc<AtomicU8>,
     /// Explicit `JCODE_ANTHROPIC_MAX_TOKENS` override. When unset, the output
     /// budget is derived per model so newer generations are not clamped to the
     /// legacy 32K default.
@@ -731,8 +735,8 @@ impl AnthropicProvider {
     /// live `GET /v1/models` endpoint works and that the model under test is in
     /// the live catalog.
     pub async fn fetch_live_model_ids_for_doctor(&self) -> Result<Vec<String>> {
-        let oauth_scope = jcode_base::provider::anthropic_catalog_scope_for_route(true);
-        let api_scope = jcode_base::provider::anthropic_catalog_scope_for_route(false);
+        let oauth_scope = self.catalog_scope_for_route(true);
+        let api_scope = self.catalog_scope_for_route(false);
         let (token, is_oauth) = self.get_access_token().await?;
         let scope = if is_oauth { oauth_scope } else { api_scope };
         if token.trim().is_empty() {
@@ -794,11 +798,16 @@ impl AnthropicProvider {
         });
 
         // Trigger background usage fetch so extra_usage is known before first API call
-        let _ = tokio::runtime::Handle::try_current().map(|_| {
-            tokio::spawn(async {
-                let _ = jcode_base::usage::get().await;
-            })
-        });
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn(async {
+                    let _ = jcode_base::usage::get().await;
+                });
+            }
+            Err(error) => {
+                jcode_base::logging::debug(&format!("Anthropic usage prewarm deferred: {error}"))
+            }
+        }
 
         let max_tokens_override = std::env::var("JCODE_ANTHROPIC_MAX_TOKENS")
             .ok()
@@ -825,6 +834,7 @@ impl AnthropicProvider {
             credential_mode: Arc::new(RwLock::new(AnthropicCredentialMode::from_runtime_env(
                 jcode_provider_core::DualAuthProvider::Anthropic,
             ))),
+            request_credential: Arc::new(AtomicU8::new(0)),
             max_tokens_override,
             oauth_session_id: Uuid::new_v4().to_string(),
             oauth_preflight_done: Arc::new(AtomicBool::new(false)),
@@ -1140,6 +1150,16 @@ impl AnthropicProvider {
     /// Supports both OAuth tokens and direct API keys
     /// Automatically refreshes OAuth tokens when expired
     async fn get_access_token(&self) -> Result<(String, bool)> {
+        self.request_credential.store(0, Ordering::Release);
+        let result = self.resolve_access_token().await;
+        if let Ok((_, is_oauth)) = &result {
+            self.request_credential
+                .store(if *is_oauth { 1 } else { 2 }, Ordering::Release);
+        }
+        result
+    }
+
+    async fn resolve_access_token(&self) -> Result<(String, bool)> {
         let mode = *self.credential_mode.read().await;
 
         // Explicit API-key mode: use the direct API key and surface an error if
@@ -1173,7 +1193,25 @@ impl AnthropicProvider {
         self.get_oauth_access_token().await
     }
 
+    fn load_oauth_credentials(&self) -> Result<auth::claude::ClaudeCredentials> {
+        load_scoped_claude_credentials(&self.account_pin).map(|(credentials, _)| credentials)
+    }
+
+    fn catalog_scope_for_route(&self, oauth: bool) -> String {
+        if oauth && let Some(label) = self.oauth_account_label() {
+            format!("oauth::{label}")
+        } else {
+            jcode_base::provider::anthropic_catalog_scope_for_route(oauth)
+        }
+    }
+
     async fn get_oauth_access_token(&self) -> Result<(String, bool)> {
+        // Explicit saved-account routes must not keep a deleted login's cached bearer.
+        if *self.credential_mode.read().await == AnthropicCredentialMode::OAuth
+            && let Some(pin) = self.account_pin.get()
+        {
+            auth::claude::load_credentials_scoped(AccountScope::Pinned(&pin))?;
+        }
         resolve_oauth_access_token(&self.credentials, &self.account_pin).await
     }
 
@@ -1192,7 +1230,8 @@ impl AnthropicProvider {
             service_tier: Arc::new(std::sync::RwLock::new(self.service_tier())),
             credentials: Arc::new(RwLock::new(None)),
             account_pin: self.account_pin.fork(),
-            credential_mode: Arc::clone(&self.credential_mode),
+            credential_mode: Arc::new(RwLock::new(self.credential_mode_snapshot())),
+            request_credential: Arc::new(AtomicU8::new(0)),
             max_tokens_override: self.max_tokens_override,
             oauth_session_id: self.oauth_session_id.clone(),
             oauth_preflight_done: Arc::new(AtomicBool::new(
@@ -1211,7 +1250,8 @@ impl AnthropicProvider {
                 load_anthropic_api_key()?;
             }
             AnthropicCredentialMode::OAuth => {
-                auth::claude::load_credentials().context("Failed to load Claude credentials")?;
+                self.load_oauth_credentials()
+                    .context("Failed to load Claude credentials")?;
             }
         }
         let mut mode_guard = self.credential_mode.try_write().map_err(|_| {
@@ -1220,6 +1260,7 @@ impl AnthropicProvider {
             )
         })?;
         *mode_guard = mode;
+        self.request_credential.store(0, Ordering::Release);
         drop(mode_guard);
         if let Ok(mut cached) = self.credentials.try_write() {
             *cached = None;
@@ -1471,6 +1512,75 @@ impl Provider for AnthropicProvider {
         self.credential_mode_snapshot()
     }
 
+    fn active_resolved_credential(&self) -> Option<jcode_provider_core::ResolvedCredential> {
+        use jcode_provider_core::ResolvedCredential;
+        match self.credential_mode_snapshot() {
+            AnthropicCredentialMode::OAuth => Some(ResolvedCredential::Oauth),
+            AnthropicCredentialMode::ApiKey => Some(ResolvedCredential::ApiKey),
+            AnthropicCredentialMode::Auto => {
+                match self.request_credential.load(Ordering::Acquire) {
+                    1 => Some(ResolvedCredential::Oauth),
+                    2 => Some(ResolvedCredential::ApiKey),
+                    _ => None,
+                }
+            }
+        }
+    }
+
+    fn set_oauth_account(&self, label: Option<&str>) -> Result<()> {
+        let pin = match label {
+            Some(label) => {
+                auth::claude::load_credentials_for_account(label)?;
+                let identity = auth::claude::list_accounts()?
+                    .iter()
+                    .find(|account| account.label == label)
+                    .and_then(auth::claude::account_identity);
+                Some(AccountPin::new(label, identity))
+            }
+            None => None,
+        };
+        self.set_account_pin(AccountProviderKind::Claude, pin)?;
+        self.request_credential.store(0, Ordering::Release);
+        self.oauth_preflight_done.store(false, Ordering::Release);
+        Ok(())
+    }
+
+    fn oauth_account_label(&self) -> Option<String> {
+        self.account_pin.get().map(|pin| pin.label)
+    }
+
+    fn active_oauth_account_email(&self) -> Option<String> {
+        if self.active_resolved_credential() != Some(jcode_provider_core::ResolvedCredential::Oauth)
+        {
+            return None;
+        }
+        let cached = match self.credentials.try_read() {
+            Ok(cached) => cached,
+            Err(error) => {
+                jcode_base::logging::debug(&format!(
+                    "Anthropic account identity deferred while credentials are in use: {error}"
+                ));
+                return None;
+            }
+        };
+        let cached = cached.as_ref()?;
+        let accounts = match auth::claude::list_accounts() {
+            Ok(accounts) => accounts,
+            Err(error) => {
+                jcode_base::logging::warn(&format!(
+                    "Cannot read Anthropic OAuth account identities: {error:#}"
+                ));
+                return None;
+            }
+        };
+        accounts.into_iter().find_map(|account| {
+            let matches = (!cached.access_token.is_empty()
+                && account.access == cached.access_token)
+                || (!cached.refresh_token.is_empty() && account.refresh == cached.refresh_token);
+            matches.then_some(account.email).flatten()
+        })
+    }
+
     fn set_credential_mode(&self, mode: jcode_provider_core::CredentialMode) -> Result<()> {
         AnthropicProvider::set_credential_mode(self, mode)
     }
@@ -1666,7 +1776,7 @@ impl Provider for AnthropicProvider {
             if !configured {
                 continue;
             }
-            let scope = jcode_base::provider::anthropic_catalog_scope_for_route(oauth);
+            let scope = self.catalog_scope_for_route(oauth);
             if !jcode_base::provider::begin_anthropic_model_catalog_refresh_for_scope(&scope) {
                 continue;
             }
@@ -1741,6 +1851,7 @@ impl Provider for AnthropicProvider {
     }
 
     async fn invalidate_credentials(&self) {
+        self.request_credential.store(0, Ordering::Release);
         let mut cached = self.credentials.write().await;
         *cached = None;
     }
@@ -1955,6 +2066,7 @@ async fn run_stream_with_retries(
             jcode_provider_core::fresh_transport_client()
         };
 
+        let mut response_accepted = false;
         match stream_response(
             attempt_client,
             token.clone(),
@@ -1964,6 +2076,7 @@ async fn run_stream_with_retries(
             &model_name,
             &oauth_session_id,
             &direct_transport,
+            &mut response_accepted,
         )
         .await
         {
@@ -2139,6 +2252,24 @@ async fn run_stream_with_retries(
                     continue;
                 }
 
+                // Account routing owns pre-output OAuth quota/auth failures when
+                // other pool members exist, even if they are cooling down. Let
+                // the router decide whether to rotate or report exhaustion.
+                // Waiting through this runtime's Retry-After backoff would hide
+                // the error for up to two minutes. Preserve refresh/model recovery
+                // above and retain transport and post-output retries below.
+                // WaitingForResponse commits routing to this runtime after HTTP
+                // success, so early SSE errors still belong to its inner retry.
+                if is_oauth
+                    && !saw_output
+                    && !response_accepted
+                    && (is_account_limit_error(&error_str) || is_oauth_auth_error(&error_str))
+                    && jcode_base::provider::has_alternate_account_in_pool("claude")
+                {
+                    let _ = tx.send(Err(e)).await;
+                    return;
+                }
+
                 // Check if this is a transient/retryable error
                 if is_retryable_error(&error_str) && attempt + 1 < MAX_RETRIES {
                     if saw_output {
@@ -2307,14 +2438,29 @@ async fn force_refresh_oauth_token(
     // A token we refreshed ourselves (e.g. from an external source that is not
     // rewritten on refresh) rotates the refresh token, so prefer the cached one
     // only while it still derives from the stored credential.
-    let refresh_from_cache = {
+    let (refresh_from_cache, stored_is_newer) = {
         let cached = credentials.read().await;
-        cached
-            .as_ref()
-            .filter(|c| c.source == source)
-            .map(|c| c.refresh_token.clone())
-            .filter(|t| !t.is_empty())
+        let cached = cached.as_ref();
+        (
+            cached
+                .filter(|c| c.source == source)
+                .map(|c| c.refresh_token.clone())
+                .filter(|t| !t.is_empty()),
+            cached.is_some_and(|c| c.source != source && c.access_token != loaded.access_token),
+        )
     };
+    // A relogin, account switch or another request's refresh already stored a
+    // different unexpired token for this account: use it instead of refreshing.
+    if stored_is_newer && loaded.expires_at > chrono::Utc::now().timestamp_millis() + 300_000 {
+        let mut cached = credentials.write().await;
+        *cached = Some(CachedCredentials {
+            access_token: loaded.access_token.clone(),
+            refresh_token: loaded.refresh_token,
+            expires_at: loaded.expires_at,
+            source,
+        });
+        return Ok(loaded.access_token);
+    }
     let refresh_token = match refresh_from_cache {
         Some(token) => token,
         None if loaded.refresh_token.is_empty() => {
@@ -2424,6 +2570,7 @@ async fn stream_response(
     model_name: &str,
     oauth_session_id: &str,
     direct_transport: &DirectTransportConfig,
+    response_accepted: &mut bool,
 ) -> Result<()> {
     use jcode_message_types::ConnectionPhase;
     let requested_model_base = strip_1m_suffix(&request.model).to_ascii_lowercase();
@@ -2445,12 +2592,20 @@ async fn stream_response(
     let stream_idle_timeout = jcode_base::provider::stream_idle_timeout();
     // Build request with appropriate auth headers
     let url = if is_oauth {
-        oauth_api_url()
+        API_URL_OAUTH
     } else {
-        direct_transport.api_url.clone()
+        direct_transport.api_url.as_str()
+    };
+    // Local HTTP regressions exercise the real OAuth retry loop without
+    // permitting a production environment override of the OAuth endpoint.
+    #[cfg(test)]
+    let url = if is_oauth {
+        direct_transport.oauth_api_url.as_deref().unwrap_or(url)
+    } else {
+        url
     };
 
-    let mut req = client.post(&url);
+    let mut req = client.post(url);
     if !is_oauth {
         req = req.headers(
             direct_transport
@@ -2532,9 +2687,11 @@ async fn stream_response(
         let status = response.status();
         let headers = response.headers().clone();
         let error_text = jcode_base::util::http_error_body(response, "HTTP error").await;
-        return Err(anthropic_status_error(status, &headers, &error_text));
+        let error = anthropic_status_error(status, &headers, &error_text);
+        return Err(tag_usage_limit_reset(error, &headers));
     }
 
+    *response_accepted = true;
     let _ = tx
         .send(Ok(StreamEvent::ConnectionPhase {
             phase: ConnectionPhase::WaitingForResponse,
@@ -2610,242 +2767,8 @@ async fn stream_response(
     Ok(())
 }
 
-/// Check if an error is transient and should be retried
-fn is_retryable_error(error_str: &str) -> bool {
-    jcode_provider_core::is_transient_transport_error(error_str)
-        // Server errors (5xx)
-        || error_str.contains("500 internal server error")
-        || error_str.contains("502 bad gateway")
-        || error_str.contains("503 service unavailable")
-        || error_str.contains("504 gateway timeout")
-        || error_str.contains("overloaded")
-        // Rate limiting (429)
-        || error_str.contains("429 too many requests")
-        || error_str.contains("rate limit")
-        || error_str.contains("rate_limit")
-        // API-level server errors (SSE error events)
-        || error_str.contains("api_error")
-        || error_str.contains("internal server error")
-}
-
-fn is_fable_scoped_limit_error(model: &str, error: &str) -> bool {
-    let model = strip_1m_suffix(model).to_ascii_lowercase();
-    if !model.contains("fable") {
-        return false;
-    }
-    let error = error.to_ascii_lowercase();
-    let is_limit = error.contains("rate_limit")
-        || error.contains("rate limit")
-        || error.contains("usage_limit")
-        || error.contains("usage limit");
-    let is_scoped = error.contains("fable")
-        || error.contains("weekly")
-        || error.contains("week limit")
-        || error.contains("7-day")
-        || error.contains("7 day");
-    is_limit && is_scoped
-}
-
-/// Detect an Anthropic "model not found" rejection.
-///
-/// Anthropic returns HTTP 404 with `"type":"not_found_error"` when a model id
-/// has been retired or renamed (e.g. `claude-fable-5` after it was folded into
-/// Opus 4.8). The message text varies, so match on the stable structural
-/// markers. `error_str` is expected to already be lowercased.
-fn is_model_not_found_error(error_str: &str) -> bool {
-    let mentions_model = error_str.contains("model");
-    let is_not_found = error_str.contains("not_found_error")
-        || error_str.contains("404 not found")
-        || error_str.contains("(404 ");
-    is_not_found
-        && (mentions_model
-            || error_str.contains("is not available")
-            || error_str.contains("please use"))
-}
-
-/// Detect an Anthropic rejection of an explicit reasoning request.
-///
-/// Some models are listed with reasoning capabilities in `GET /v1/models` but
-/// the live Messages API still rejects them with a 400 `invalid_request_error`:
-///
-/// - an adaptive `thinking` block -> "adaptive thinking is not supported on
-///   this model"
-/// - an `output_config` effort -> "This model does not support the effort
-///   parameter."
-///
-/// (e.g. `claude-fable-5`). When we hit either we can self-heal by dropping the
-/// offending reasoning fields and retrying, rather than hard-failing the turn.
-/// `error_str` is expected to already be lowercased.
-fn is_reasoning_unsupported_error(error_str: &str) -> bool {
-    let is_bad_request =
-        error_str.contains("invalid_request_error") || error_str.contains("400 bad request");
-    let mentions_reasoning_field = error_str.contains("thinking")
-        || error_str.contains("effort")
-        || error_str.contains("output_config");
-    let mentions_unsupported =
-        error_str.contains("not supported") || error_str.contains("does not support");
-    is_bad_request && mentions_reasoning_field && mentions_unsupported
-}
-
-/// Models that have been retired and must never be chosen as a fallback target
-/// (the server 404s them, so picking one just loops). Matched as a substring of
-/// the normalized id so dated variants are covered too. `claude-fable` was
-/// briefly on this list while retired, but the model is live again.
-const RETIRED_ANTHROPIC_MODEL_MARKERS: &[&str] = &["claude-mythos"];
-
-fn anthropic_model_is_retired(model: &str) -> bool {
-    let normalized = AnthropicProvider::normalized_model_key(model);
-    RETIRED_ANTHROPIC_MODEL_MARKERS
-        .iter()
-        .any(|marker| normalized.contains(marker))
-}
-
-/// Quality rank for an Anthropic model id: lower is better. Uses the curated
-/// flagship-first `ALL_CLAUDE_MODELS` order (Opus > Sonnet > Haiku > older), so
-/// fallback never silently downgrades to a cheaper tier when a stronger model is
-/// available. Unknown/uncurated ids sort after every curated one but before
-/// retired models, which sort last.
-fn anthropic_model_quality_rank(model: &str) -> usize {
-    if anthropic_model_is_retired(model) {
-        return usize::MAX;
-    }
-    let normalized = jcode_provider_core::model_id::strip_date_suffix(
-        &jcode_provider_core::model_id::canonical(model),
-    )
-    .to_string();
-    jcode_provider_core::ALL_CLAUDE_MODELS
-        .iter()
-        .position(|candidate| {
-            jcode_provider_core::model_id::strip_date_suffix(
-                &jcode_provider_core::model_id::canonical(candidate),
-            ) == normalized
-        })
-        // Curated models keep their position; unknown-but-not-retired models sort
-        // just after the curated list so they only win when nothing curated is
-        // available.
-        .unwrap_or(jcode_provider_core::ALL_CLAUDE_MODELS.len())
-}
-
-/// Parse a server-recommended replacement model from a 404 body, e.g.
-/// "Claude Fable 5 is not available. Please use Opus 4.8." -> the catalog id
-/// `claude-opus-4-8`. Returns the best matching known catalog id, if any.
-/// `error_str` is expected to already be lowercased.
-fn anthropic_recommended_model_from_error(error_str: &str) -> Option<String> {
-    // Look for the phrase after "please use" / "use " and try to match it against
-    // the known catalog by collapsing it to a comparable token form. The server
-    // phrases the recommendation in prose ("Opus 4.8"), so compare on the digits
-    // and family word rather than exact ids.
-    let hint = error_str
-        .split("please use")
-        .nth(1)
-        .or_else(|| error_str.split("use ").nth(1))?;
-    // A decimal point inside a model version is not a sentence boundary.
-    // Truncating "Opus 4.8" to "Opus 4" selected an arbitrary older release
-    // whenever catalog ordering changed.
-    let bytes = hint.as_bytes();
-    let end = hint.char_indices().find_map(|(i, c)| {
-        let version_dot = c == '.'
-            && i > 0
-            && bytes[i - 1].is_ascii_digit()
-            && bytes.get(i + 1).is_some_and(u8::is_ascii_digit);
-        (matches!(c, '.' | '!' | '\n') && !version_dot).then_some(i)
-    });
-    let hint = hint[..end.unwrap_or(hint.len())].trim();
-    if hint.is_empty() {
-        return None;
-    }
-    // Reduce the hint to alphanumeric tokens (e.g. "opus", "4", "8").
-    let hint_tokens: Vec<String> = hint
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .filter(|t| !t.is_empty())
-        .map(|t| t.to_ascii_lowercase())
-        .collect();
-    if hint_tokens.is_empty() {
-        return None;
-    }
-    // Score each known catalog model by how many hint tokens it contains.
-    jcode_base::provider::known_anthropic_model_ids()
-        .into_iter()
-        .filter(|candidate| !anthropic_model_is_retired(candidate))
-        .map(|candidate| {
-            let key = AnthropicProvider::normalized_model_key(&candidate);
-            // The catalog id uses hyphenated digits ("claude-opus-4-8"), so the
-            // hint tokens ["opus","4","8"] should all appear.
-            let mut candidate_tokens: Vec<&str> = key.split('-').collect();
-            let score = hint_tokens
-                .iter()
-                .filter(|token| {
-                    if let Some(index) = candidate_tokens
-                        .iter()
-                        .position(|part| *part == token.as_str())
-                    {
-                        candidate_tokens.remove(index);
-                        true
-                    } else {
-                        false
-                    }
-                })
-                .count();
-            (candidate, score)
-        })
-        // Require at least the family word plus one version digit to match so we
-        // do not pick an arbitrary model from a single shared token.
-        .filter(|(_, score)| *score >= 2)
-        .max_by_key(|(_, score)| *score)
-        .map(|(candidate, _)| candidate)
-}
-
-/// Pick the next Anthropic model to try after a "model not found" failure.
-///
-/// Strategy (most authoritative first):
-///   1. Honor any server "Please use X" recommendation parsed from the error.
-///   2. Otherwise pick the highest-quality untried model from the curated
-///      flagship-first catalog, skipping retired families so we never downgrade
-///      to a cheaper tier (e.g. Haiku) while a stronger model is available.
-///
-/// Returns `None` once every viable candidate is exhausted so the caller can
-/// surface the original error.
-fn anthropic_fallback_model(tried: &[String], error_str: &str) -> Option<String> {
-    let already_tried = |candidate: &str| {
-        tried.iter().any(|model| {
-            AnthropicProvider::normalized_model_key(model)
-                == AnthropicProvider::normalized_model_key(candidate)
-        })
-    };
-
-    // 1. Server recommendation wins when it points at an untried, non-retired
-    //    model.
-    if let Some(recommended) = anthropic_recommended_model_from_error(error_str)
-        && !already_tried(&recommended)
-        && !anthropic_model_is_retired(&recommended)
-    {
-        return Some(recommended);
-    }
-
-    // 2. Best available by curated quality order, skipping retired and tried.
-    jcode_base::provider::known_anthropic_model_ids()
-        .into_iter()
-        .filter(|candidate| !already_tried(candidate) && !anthropic_model_is_retired(candidate))
-        .min_by_key(|candidate| anthropic_model_quality_rank(candidate))
-}
-
-fn is_oauth_auth_error(error_str: &str) -> bool {
-    error_str.contains("oauth token has expired")
-        || error_str.contains("token has expired")
-        || error_str.contains("authentication_error")
-        || error_str.contains("invalid token")
-        || error_str.contains("invalid_grant")
-        || error_str.contains("does not meet scope requirement")
-        || ((error_str.contains("401 unauthorized") || error_str.contains("403 forbidden"))
-            && (error_str.contains("oauth") || error_str.contains("token")))
-}
-
-fn is_oauth_catalog_auth_error(error_str: &str) -> bool {
-    let lower = error_str.to_ascii_lowercase();
-    lower.contains("401 unauthorized")
-        || lower.contains("403 forbidden")
-        || is_oauth_auth_error(&lower)
-}
+mod error_classification;
+use error_classification::*;
 
 fn anthropic_beta_header_with_thinking(base: &str, thinking_enabled: bool) -> String {
     if thinking_enabled && !base.contains("interleaved-thinking-2025-05-14") {
@@ -3159,5 +3082,15 @@ mod native_web_search_sse_tests;
 mod tests;
 
 #[cfg(test)]
+#[path = "usage_limit_reset_tests.rs"]
+mod usage_limit_reset_tests;
+
+#[cfg(test)]
 #[path = "late_tool_result_tests.rs"]
 mod late_tool_result_tests;
+
+#[cfg(test)]
+mod account_failover_tests;
+
+#[cfg(test)]
+mod account_binding_tests;

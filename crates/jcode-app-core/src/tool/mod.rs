@@ -8,6 +8,7 @@ mod bg;
 pub(crate) mod bridge_reload;
 mod browser;
 mod calendar;
+mod codemode;
 mod communicate;
 mod compile_remote;
 #[cfg(target_os = "macos")]
@@ -34,6 +35,7 @@ mod jcode_docs;
 mod ls;
 pub mod mcp;
 mod memory;
+mod name_suggestions;
 mod open;
 mod panel;
 mod patch;
@@ -47,6 +49,7 @@ pub(crate) mod session_search_index;
 mod side_panel;
 mod skill;
 mod todo;
+mod user_response;
 mod webfetch;
 mod websearch;
 mod write;
@@ -319,6 +322,21 @@ impl Clone for Registry {
 }
 
 impl Registry {
+    /// Desktop opts in through its inline response renderer capability.
+    /// Keep this out of the base map so terminal/headless registries never
+    /// advertise or execute it, including through batch and codemode.
+    pub(crate) async fn set_user_response_enabled(&self, enabled: bool) {
+        if enabled {
+            self.register(
+                "user_response".into(),
+                Arc::new(user_response::UserResponseTool),
+            )
+            .await;
+        } else {
+            self.unregister("user_response").await;
+        }
+    }
+
     fn downgrade(&self) -> WeakRegistry {
         WeakRegistry {
             tools: Arc::downgrade(&self.tools),
@@ -528,6 +546,15 @@ impl Registry {
             "conversation_search",
             conversation_search::ConversationSearchTool::new(compaction),
         );
+        // Codemode is opt-in (`[tools] codemode = true`). When off, the tool
+        // is never registered, so it costs nothing and never reaches a model.
+        if codemode::enabled() {
+            Self::insert_tool(
+                &mut tools_map,
+                "codemode",
+                codemode::CodemodeTool::new(registry.downgrade()),
+            );
+        }
         // Integration discovery is on by default (opt-out); when disabled the
         // tool is never registered and no discovery endpoint is ever
         // contacted.
@@ -587,6 +614,21 @@ impl Registry {
         tools.keys().cloned().collect()
     }
 
+    /// Tool definitions a session may call, honoring its registered allow and
+    /// deny policy. Per-server MCP tools are always listed individually and
+    /// the fixed `mcp_search`/`mcp_call` surface is omitted, because scripts
+    /// address MCP tools directly. Used by `codemode`.
+    pub(crate) async fn definitions_for_session(&self, session_id: &str) -> Vec<ToolDefinition> {
+        let policy = session_tool_policy(session_id);
+        let allowed = policy.as_ref().and_then(|p| p.allowed_tools.clone());
+        let mut defs = self.definitions(allowed.as_ref()).await;
+        if let Some(policy) = policy.as_ref() {
+            defs.retain(|def| !self.tool_is_disabled(&policy.disabled_tools, &def.name));
+        }
+        defs.retain(|def| !is_fixed_mcp_tool(&def.name));
+        defs
+    }
+
     /// Enable test mode for memory tools (isolated storage)
     /// Called when session is marked as debug
     pub async fn enable_memory_test_mode(&self) {
@@ -616,49 +658,86 @@ impl Registry {
         jcode_tool_types::resolve_tool_name(name)
     }
 
-    /// Suggest up to 3 available tool names that look similar to `name`.
-    /// Uses cheap, dependency-free heuristics: case-insensitive equality,
-    /// prefix/substring containment, then bounded edit distance. Helps the
-    /// model recover from hallucinated tool names (#104).
-    fn closest_tool_names(name: &str, available: &[&str]) -> Vec<String> {
-        let needle = name.trim().to_ascii_lowercase();
-        if needle.is_empty() {
-            return Vec::new();
-        }
-        let mut scored: Vec<(usize, &str)> = available
-            .iter()
-            .filter_map(|candidate| {
-                let hay = candidate.to_ascii_lowercase();
-                let score = if hay == needle {
-                    0
-                } else if hay.starts_with(&needle) || needle.starts_with(&hay) {
-                    1
-                } else if hay.contains(&needle) || needle.contains(&hay) {
-                    2
-                } else {
-                    let dist = levenshtein(&needle, &hay);
-                    // Only suggest near-misses, scaled to the longer name.
-                    let threshold = (hay.len().max(needle.len()) / 3).max(2);
-                    if dist <= threshold {
-                        3 + dist
-                    } else {
-                        return None;
-                    }
-                };
-                Some((score, *candidate))
-            })
-            .collect();
-        scored.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(b.1)));
-        scored
-            .into_iter()
-            .take(3)
-            .map(|(_, name)| name.to_string())
-            .collect()
-    }
-
     /// Estimate token count for a string (chars / 4, matching compaction heuristic)
     fn estimate_tokens(s: &str) -> usize {
         crate::util::estimate_tokens(s)
+    }
+
+    /// Paths a tool call names in its input, labelled by the input key they
+    /// came from, resolved against the session working directory. Covers the
+    /// common path keys, `paths` arrays (first 8), and `apply_patch` file
+    /// headers (Codex envelope and unified diff).
+    fn touched_paths(input: &Value, ctx: &ToolContext) -> Vec<(&'static str, std::path::PathBuf)> {
+        let mut touched = Vec::new();
+        let Some(object) = input.as_object() else {
+            return touched;
+        };
+        let resolve = |path: &str| ctx.resolve_path(std::path::Path::new(path));
+        for key in [
+            "file_path",
+            "path",
+            "target",
+            "target_path",
+            "old_path",
+            "new_path",
+        ] {
+            if let Some(path) = object.get(key).and_then(Value::as_str) {
+                touched.push((key, resolve(path)));
+            }
+        }
+        if let Some(paths) = object.get("paths").and_then(Value::as_array) {
+            for path in paths.iter().filter_map(Value::as_str).take(8) {
+                touched.push(("paths", resolve(path)));
+            }
+        }
+        if let Some(patch) = object.get("patch_text").and_then(Value::as_str) {
+            for path in Self::patch_paths(patch) {
+                if !touched
+                    .iter()
+                    .any(|(_, existing)| *existing == resolve(path))
+                {
+                    touched.push(("patch", resolve(path)));
+                }
+            }
+        }
+        touched
+    }
+
+    /// File paths named in patch headers. Deletions are included because the
+    /// path was still touched; `/dev/null` sides of unified diffs are not.
+    fn patch_paths(patch: &str) -> Vec<&str> {
+        let mut paths = Vec::new();
+        for line in patch.lines() {
+            let path = [
+                "*** Add File: ",
+                "*** Update File: ",
+                "*** Delete File: ",
+                "*** Move to: ",
+            ]
+            .iter()
+            .find_map(|prefix| line.strip_prefix(prefix))
+            .or_else(|| {
+                let header = line
+                    .strip_prefix("+++ ")
+                    .or_else(|| line.strip_prefix("--- "))?;
+                let header = header.split('\t').next().unwrap_or(header).trim();
+                if header == "/dev/null" {
+                    return None;
+                }
+                Some(
+                    header
+                        .strip_prefix("a/")
+                        .or_else(|| header.strip_prefix("b/"))
+                        .unwrap_or(header),
+                )
+            });
+            if let Some(path) = path.map(str::trim).filter(|path| !path.is_empty())
+                && !paths.contains(&path)
+            {
+                paths.push(path);
+            }
+        }
+        paths
     }
 
     fn tool_lifecycle_fields(
@@ -694,31 +773,10 @@ impl Registry {
             keys.sort();
             fields.push(("input_keys".to_string(), keys.join(",")));
 
-            let path_fields = [
-                "file_path",
-                "path",
-                "target",
-                "target_path",
-                "old_path",
-                "new_path",
-            ];
-            let mut touched_paths = Vec::new();
-            for key in path_fields {
-                if let Some(path) = object.get(key).and_then(Value::as_str) {
-                    touched_paths.push(format!(
-                        "{key}:{}",
-                        ctx.resolve_path(std::path::Path::new(path)).display()
-                    ));
-                }
-            }
-            if let Some(paths) = object.get("paths").and_then(Value::as_array) {
-                for path in paths.iter().filter_map(Value::as_str).take(8) {
-                    touched_paths.push(format!(
-                        "paths:{}",
-                        ctx.resolve_path(std::path::Path::new(path)).display()
-                    ));
-                }
-            }
+            let touched_paths = Self::touched_paths(input, ctx)
+                .into_iter()
+                .map(|(key, path)| format!("{key}:{}", path.display()))
+                .collect::<Vec<_>>();
             if !touched_paths.is_empty() {
                 fields.push(("touched_paths".to_string(), touched_paths.join(",")));
                 fields.push((
@@ -745,20 +803,32 @@ impl Registry {
     /// Outputs that would push total context beyond this are truncated.
     const CONTEXT_GUARD_THRESHOLD: f32 = 0.90;
 
-    /// Fire the `post_tool` observer hook with tool outcome metadata.
-    /// No-op (without building the payload) when the hook is not configured.
-    fn fire_post_tool_hook(
+    /// Event payload shared by the `post_tool` observer and the
+    /// `post_tool_feedback` hook.
+    fn post_tool_event(
+        event_name: &'static str,
         resolved_name: &str,
+        input: &Value,
         ctx: &ToolContext,
-        result: &Result<ToolOutput>,
+        result: std::result::Result<&ToolOutput, &anyhow::Error>,
         latency_ms: u64,
-    ) {
-        if !crate::hooks::hook_configured("post_tool") {
-            return;
+    ) -> crate::hooks::HookEvent {
+        let mut unique_paths: Vec<String> = Vec::new();
+        for (_, path) in Self::touched_paths(input, ctx) {
+            let path = path.display().to_string();
+            if !unique_paths.contains(&path) {
+                unique_paths.push(path);
+            }
         }
-        let mut event = crate::hooks::HookEvent::new("post_tool")
+        let mut event = crate::hooks::HookEvent::new(event_name)
             .session_id(ctx.session_id.clone())
             .field("TOOL_NAME", resolved_name)
+            .field("TOOL_CALL_ID", ctx.tool_call_id.clone())
+            .field(
+                "TOOL_INPUT",
+                crate::hooks::truncate_tool_input(&input.to_string()),
+            )
+            .field("TOUCHED_PATHS", unique_paths.join("\n"))
             .field("STATUS", if result.is_ok() { "ok" } else { "error" })
             .field("DURATION_MS", latency_ms.to_string());
         if let Some(dir) = &ctx.working_dir {
@@ -774,7 +844,61 @@ impl Registry {
                 event = event.field("ERROR", message);
             }
         }
-        crate::hooks::dispatch_observer(event);
+        event
+    }
+
+    /// Fire the `post_tool` observer hook with tool outcome metadata.
+    /// No-op (without building the payload) when the hook is not configured.
+    fn fire_post_tool_hook(
+        resolved_name: &str,
+        input: &Value,
+        ctx: &ToolContext,
+        result: &Result<ToolOutput>,
+        latency_ms: u64,
+    ) {
+        if !crate::hooks::hook_configured("post_tool") {
+            return;
+        }
+        crate::hooks::dispatch_observer(Self::post_tool_event(
+            "post_tool",
+            resolved_name,
+            input,
+            ctx,
+            result.as_ref(),
+            latency_ms,
+        ));
+    }
+
+    /// Run the synchronous `post_tool_feedback` hooks after a successful tool
+    /// call and append whatever they print to the tool result, so linters and
+    /// checkers can feed findings straight back to the model.
+    async fn apply_post_tool_feedback(
+        resolved_name: &str,
+        input: &Value,
+        ctx: &ToolContext,
+        latency_ms: u64,
+        output: &mut ToolOutput,
+    ) {
+        if !crate::hooks::hook_configured("post_tool_feedback") {
+            return;
+        }
+        let event = Self::post_tool_event(
+            "post_tool_feedback",
+            resolved_name,
+            input,
+            ctx,
+            Ok(output),
+            latency_ms,
+        );
+        if let Some(feedback) =
+            crate::hooks::run_post_tool_feedback(&event, &input.to_string()).await
+        {
+            if !output.output.is_empty() && !output.output.ends_with('\n') {
+                output.output.push('\n');
+            }
+            output.output.push_str("\n[post_tool_feedback]\n");
+            output.output.push_str(&feedback);
+        }
     }
 
     /// Maximum fraction of context budget a single tool output may occupy.
@@ -963,7 +1087,7 @@ impl Registry {
         let latency_ms = started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
 
         crate::telemetry::record_tool_execution(resolved_name, &input, result.is_ok(), latency_ms);
-        Self::fire_post_tool_hook(resolved_name, &ctx, &result, latency_ms);
+        Self::fire_post_tool_hook(resolved_name, &input, &ctx, &result, latency_ms);
 
         let mut output = match result {
             Ok(output) => output,
@@ -976,6 +1100,8 @@ impl Registry {
                 return Err(error);
             }
         };
+
+        Self::apply_post_tool_feedback(resolved_name, &input, &ctx, latency_ms, &mut output).await;
 
         // Context overflow guard: check if this output would push us over the limit
         output = self
@@ -1216,6 +1342,18 @@ impl Registry {
             .current
             .get(alias)
             .cloned()
+    }
+
+    /// Whether this exact configured server has registered tools. Dispatch
+    /// aliases are normalized and may be collision-suffixed, so callers must
+    /// not infer server membership by matching a name prefix.
+    pub fn has_mcp_tools_for_server(&self, server: &str) -> bool {
+        self.mcp_policy
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .current
+            .values()
+            .any(|(owner, _)| owner == server)
     }
 
     fn mcp_dispatch_is_allowed(
@@ -1464,105 +1602,121 @@ impl Registry {
                 }
             }
 
-            // Spawn connection and tool registration in background
+            // Publish each completed connection independently. A slow handshake
+            // must not hide an already-connected peer until an entire batch ends.
             let registry = self.clone();
             tokio::spawn(async move {
-                let (successes, failures) = {
-                    // `connect_all` mutates the manager's internal connection
-                    // maps but does not mutate the manager object itself. A
-                    // read guard lets MCP list and other management actions
-                    // inspect those maps while a slow initialize handshake is
-                    // in flight.
-                    let manager = mcp_manager.read().await;
-                    manager.connect_all().await.unwrap_or((0, Vec::new()))
-                };
+                use futures::StreamExt;
 
-                if successes > 0 {
-                    crate::logging::info(&format!("MCP: Connected to {} server(s)", successes));
+                let configs: Vec<_> = mcp_manager
+                    .read()
+                    .await
+                    .config()
+                    .servers
+                    .iter()
+                    .filter(|(_, cfg)| cfg.is_enabled())
+                    .map(|(name, cfg)| (name.clone(), cfg.clone()))
+                    .collect();
+                let mut connections = futures::stream::FuturesUnordered::new();
+                for (name, config) in configs {
+                    let manager = Arc::clone(&mcp_manager);
+                    connections.push(async move {
+                        let result = manager.read().await.connect(&name, &config).await;
+                        (name, result)
+                    });
                 }
-                if !failures.is_empty() {
-                    for (name, error) in &failures {
+
+                while let Some((name, result)) = connections.next().await {
+                    if let Err(error) = result {
                         crate::logging::event_rate_limited(
                             crate::logging::LogLevel::Error,
                             &format!("mcp_register_failed:{name}"),
                             std::time::Duration::from_secs(60),
                             "MCP_REGISTER_FAILED",
-                            vec![("server", name.to_string()), ("error", error.to_string())],
+                            vec![("server", name), ("error", format!("{error:#}"))],
                         );
+                        continue;
                     }
-                }
+                    crate::logging::info(&format!("MCP: Connected to '{name}'"));
 
-                // Register MCP server tools and collect server info
-                let tools = crate::mcp::create_mcp_tools(Arc::clone(&mcp_manager)).await;
-                let mut server_counts: std::collections::BTreeMap<String, usize> =
-                    std::collections::BTreeMap::new();
-                for (_, tool) in &tools {
-                    if let Some((server, _)) = tool.mcp_identity() {
-                        *server_counts.entry(server.to_string()).or_default() += 1;
-                    }
-                }
-                let connected = mcp_manager.read().await.connected_servers().await;
-                registry.refresh_mcp_tools(tools, &connected).await;
-
-                // Reconcile the on-disk schema cache with the live schemas so the
-                // next spawn can advertise the up-to-date tools with zero cache
-                // miss. Group live tool defs by server and update each entry
-                // under the current config fingerprint; prune servers that are
-                // no longer configured. (#206 Phase 2)
-                {
-                    // Live tool defs grouped by server, plus a snapshot of the
-                    // configured servers, captured under one read lock.
-                    type LiveToolsByServer =
-                        std::collections::BTreeMap<String, Vec<crate::mcp::McpToolDef>>;
-                    type ConfigSnapshot = Vec<(String, crate::mcp::McpServerConfig)>;
-                    let (live_by_server, config_snapshot): (LiveToolsByServer, ConfigSnapshot) = {
-                        let manager = mcp_manager.read().await;
-                        let mut grouped: std::collections::BTreeMap<
-                            String,
-                            Vec<crate::mcp::McpToolDef>,
-                        > = std::collections::BTreeMap::new();
-                        for (server, def) in manager.all_tools().await {
-                            grouped.entry(server).or_default().push(def);
+                    // Register MCP server tools and collect server info
+                    let tools = crate::mcp::create_mcp_tools(Arc::clone(&mcp_manager)).await;
+                    let mut server_counts: std::collections::BTreeMap<String, usize> =
+                        std::collections::BTreeMap::new();
+                    for (_, tool) in &tools {
+                        if let Some((server, _)) = tool.mcp_identity() {
+                            *server_counts.entry(server.to_string()).or_default() += 1;
                         }
-                        let configs = manager
-                            .config()
-                            .servers
-                            .iter()
-                            .map(|(name, cfg)| (name.clone(), cfg.clone()))
-                            .collect();
-                        (grouped, configs)
-                    };
+                    }
+                    let connected = mcp_manager.read().await.connected_servers().await;
+                    registry.refresh_mcp_tools(tools, &connected).await;
 
-                    let mut cache = crate::mcp::McpSchemaCache::load();
-                    let mut dirty = false;
-                    for (server, cfg) in &config_snapshot {
-                        if let Some(defs) = live_by_server.get(server) {
-                            // Only cache servers that actually exposed tools.
-                            if cache.update(server, cfg, defs.clone()) {
-                                dirty = true;
+                    // Reconcile the on-disk schema cache with the live schemas so the
+                    // next spawn can advertise the up-to-date tools with zero cache
+                    // miss. Group live tool defs by server and update each entry
+                    // under the current config fingerprint; prune servers that are
+                    // no longer configured. (#206 Phase 2)
+                    {
+                        // Live tool defs grouped by server, plus a snapshot of the
+                        // configured servers, captured under one read lock.
+                        type LiveToolsByServer =
+                            std::collections::BTreeMap<String, Vec<crate::mcp::McpToolDef>>;
+                        type ConfigSnapshot = Vec<(String, crate::mcp::McpServerConfig)>;
+                        let (live_by_server, config_snapshot): (LiveToolsByServer, ConfigSnapshot) = {
+                            let manager = mcp_manager.read().await;
+                            let mut grouped: std::collections::BTreeMap<
+                                String,
+                                Vec<crate::mcp::McpToolDef>,
+                            > = std::collections::BTreeMap::new();
+                            for (server, def) in manager.all_tools().await {
+                                grouped.entry(server).or_default().push(def);
+                            }
+                            // A connected server with zero tools is a valid live
+                            // catalog, not an offline server. Cache its empty list
+                            // so a later startup cannot advertise removed tools.
+                            for server in manager.connected_servers().await {
+                                grouped.entry(server).or_default();
+                            }
+                            let configs = manager
+                                .config()
+                                .servers
+                                .iter()
+                                .map(|(name, cfg)| (name.clone(), cfg.clone()))
+                                .collect();
+                            (grouped, configs)
+                        };
+
+                        let mut cache = crate::mcp::McpSchemaCache::load();
+                        let mut dirty = false;
+                        for (server, cfg) in &config_snapshot {
+                            if let Some(defs) = live_by_server.get(server) {
+                                // Only cache connected servers, including empty catalogs.
+                                if cache.update(server, cfg, defs.clone()) {
+                                    dirty = true;
+                                }
                             }
                         }
+                        let configured_names: Vec<String> =
+                            config_snapshot.iter().map(|(n, _)| n.clone()).collect();
+                        if cache.retain_servers(&configured_names) {
+                            dirty = true;
+                        }
+                        if dirty {
+                            cache.save();
+                            crate::logging::info(
+                                "MCP: updated on-disk tool-schema cache from live connection (#206)",
+                            );
+                        }
                     }
-                    let configured_names: Vec<String> =
-                        config_snapshot.iter().map(|(n, _)| n.clone()).collect();
-                    if cache.retain_servers(&configured_names) {
-                        dirty = true;
-                    }
-                    if dirty {
-                        cache.save();
-                        crate::logging::info(
-                            "MCP: updated on-disk tool-schema cache from live connection (#206)",
-                        );
-                    }
-                }
 
-                // Notify client of MCP status
-                if let Some(tx) = event_tx {
-                    let servers: Vec<String> = server_counts
-                        .into_iter()
-                        .map(|(name, count)| format!("{}:{}", name, count))
-                        .collect();
-                    let _ = tx.send(crate::protocol::ServerEvent::McpStatus { servers });
+                    // Notify client of MCP status
+                    if let Some(ref tx) = event_tx {
+                        let servers: Vec<String> = server_counts
+                            .into_iter()
+                            .map(|(name, count)| format!("{}:{}", name, count))
+                            .collect();
+                        let _ = tx.send(crate::protocol::ServerEvent::McpStatus { servers });
+                    }
                 }
             });
         }
@@ -1646,31 +1800,6 @@ impl Registry {
     pub fn compaction(&self) -> Arc<RwLock<CompactionManager>> {
         self.compaction.clone()
     }
-}
-
-/// Classic Levenshtein edit distance over Unicode scalar values.
-/// Used only for tool-name "did you mean" suggestions, so the simple
-/// O(n*m) two-row implementation is more than sufficient.
-fn levenshtein(a: &str, b: &str) -> usize {
-    let a: Vec<char> = a.chars().collect();
-    let b: Vec<char> = b.chars().collect();
-    if a.is_empty() {
-        return b.len();
-    }
-    if b.is_empty() {
-        return a.len();
-    }
-    let mut prev: Vec<usize> = (0..=b.len()).collect();
-    let mut curr: Vec<usize> = vec![0; b.len() + 1];
-    for (i, &ca) in a.iter().enumerate() {
-        curr[0] = i + 1;
-        for (j, &cb) in b.iter().enumerate() {
-            let cost = if ca == cb { 0 } else { 1 };
-            curr[j + 1] = (prev[j + 1] + 1).min(curr[j] + 1).min(prev[j] + cost);
-        }
-        std::mem::swap(&mut prev, &mut curr);
-    }
-    prev[b.len()]
 }
 
 #[cfg(test)]

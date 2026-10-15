@@ -1,6 +1,7 @@
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 
 mod compaction;
+mod conversation_reset;
 mod environment;
 mod inline_tail;
 mod interrupts;
@@ -12,6 +13,7 @@ mod provider;
 mod response_recovery;
 mod status;
 mod streaming;
+mod tool_markup_recovery;
 mod tools;
 mod turn_execution;
 mod turn_loops;
@@ -103,6 +105,11 @@ fn kv_cache_request_event(
     system_static: &str,
     ephemeral_messages: &[Message],
 ) -> ServerEvent {
+    // Provider-native deferred definitions are outside the cached prefix.
+    // Late MCP discovery must not look like a harness-induced tools change
+    // when the provider reports a cache miss for some unrelated reason.
+    // Borrow definitions rather than cloning potentially large MCP schemas.
+    let eager_tools: Vec<_> = tools.iter().filter(|tool| !tool.defer_loading).collect();
     let ephemeral_hash = if ephemeral_messages.is_empty() {
         None
     } else {
@@ -110,13 +117,13 @@ fn kv_cache_request_event(
     };
     ServerEvent::KvCacheRequest {
         system_static_hash: stable_hash_str(system_static),
-        tools_hash: stable_hash_json(tools),
+        tools_hash: stable_hash_json(&eager_tools),
         messages_hash: stable_hash_json(&crate::message::cache_relevant_messages(messages)),
         message_hashes: message_hashes(messages),
         message_count: messages.len(),
-        tool_count: tools.len(),
+        tool_count: eager_tools.len(),
         system_static_chars: system_static.chars().count(),
-        tools_json_chars: stable_json_len(tools),
+        tools_json_chars: stable_json_len(&eager_tools),
         messages_json_chars: stable_json_len(messages),
         ephemeral_hash,
         ephemeral_chars: stable_json_len(ephemeral_messages),
@@ -621,27 +628,7 @@ impl Agent {
         if agent.session.provider_key.is_none() {
             agent.session.provider_key = agent.provider_key_for_new_session();
         }
-        if let Some(model) = agent.session.model.clone() {
-            let model_request =
-                crate::provider::MultiProvider::model_switch_request_for_session_route(
-                    &model,
-                    agent.session.provider_key.as_deref(),
-                    agent.session.route_api_method.as_deref(),
-                );
-            if let Err(e) = crate::provider::set_model_with_auth_refresh(
-                agent.provider.as_ref(),
-                &model_request,
-            ) {
-                logging::error(&format!(
-                    "Failed to restore session model '{}' via '{}': {}",
-                    model, model_request, e
-                ));
-            } else {
-                agent.reconcile_explicit_provider_pin_route();
-            }
-        } else {
-            agent.session.model = Some(agent.provider_model());
-        }
+        agent.restore_session_model_from_session();
         agent.restore_reasoning_effort_from_session();
         agent.restore_account_pins_from_session();
         agent.session.ensure_initial_session_context_message();
@@ -1198,6 +1185,15 @@ impl Agent {
         }
     }
 
+    /// Detach the concurrency telemetry guard so the caller can finish it off
+    /// a latency-sensitive path. `finish` performs a blocking delivery (up to
+    /// ~800ms) that must not run under server-wide locks.
+    pub(crate) fn take_concurrency_session(
+        &mut self,
+    ) -> Option<crate::telemetry::ConcurrencySession> {
+        self.concurrency_session.take()
+    }
+
     #[cfg(test)]
     pub(crate) fn has_concurrency_tracking(&self) -> bool {
         self.concurrency_session.is_some()
@@ -1233,76 +1229,6 @@ impl Agent {
 
     pub fn token_usage_totals(&self) -> crate::protocol::TokenUsageTotals {
         self.session.token_usage_totals()
-    }
-
-    /// Export the full conversation as a markdown transcript.
-    pub fn export_conversation_markdown(&self) -> String {
-        let mut md = String::new();
-        for msg in &self.session.messages {
-            let role_label = match msg.role {
-                Role::User => "User",
-                Role::Assistant => "Assistant",
-            };
-            md.push_str(&format!("### {}\n\n", role_label));
-            for block in &msg.content {
-                match block {
-                    ContentBlock::Text { text, .. } => {
-                        md.push_str(text);
-                        md.push_str("\n\n");
-                    }
-                    ContentBlock::Reasoning { text } => {
-                        md.push_str(&format!("*Thinking:* {}\n\n", text));
-                    }
-                    ContentBlock::ReasoningTrace { text } => {
-                        md.push_str(&format!("*Thinking:* {}\n\n", text));
-                    }
-                    ContentBlock::AnthropicThinking { thinking, .. } => {
-                        md.push_str(&format!("*Thinking:* {}\n\n", thinking));
-                    }
-                    ContentBlock::OpenAIReasoning { summary, .. } => {
-                        if !summary.is_empty() {
-                            md.push_str(&format!("*Thinking:* {}\n\n", summary.join("\n")));
-                        }
-                    }
-                    ContentBlock::ToolUse { name, input, .. } => {
-                        let input_str = serde_json::to_string_pretty(input)
-                            .unwrap_or_else(|_| input.to_string());
-                        md.push_str(&format!(
-                            "**Tool: `{}`**\n```json\n{}\n```\n\n",
-                            name, input_str
-                        ));
-                    }
-                    ContentBlock::ToolResult {
-                        content, is_error, ..
-                    } => {
-                        let label = if is_error == &Some(true) {
-                            "Error"
-                        } else {
-                            "Result"
-                        };
-                        // Truncate very long results
-                        let display = if content.len() > 2000 {
-                            format!(
-                                "{}... (truncated, {} chars total)",
-                                crate::util::truncate_str(content, 2000),
-                                content.len()
-                            )
-                        } else {
-                            content.clone()
-                        };
-                        md.push_str(&format!("**{}:**\n```\n{}\n```\n\n", label, display));
-                    }
-                    ContentBlock::Image { .. } => {
-                        md.push_str("[Image]\n\n");
-                    }
-                    ContentBlock::OpenAICompaction { .. } => {
-                        md.push_str("[OpenAI native compaction]\n\n");
-                    }
-                    ContentBlock::ToolReference { .. } | ContentBlock::ProviderNative { .. } => {}
-                }
-            }
-        }
-        md
     }
 }
 

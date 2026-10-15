@@ -1,3 +1,7 @@
+#[path = "app/cache_fingerprints.rs"]
+mod cache_fingerprints;
+use cache_fingerprints::*;
+
 use super::DisplayMessageRoleExt;
 use super::keybind::{
     CenteredToggleKeys, ModelSwitchKeys, OptionalBinding, ScrollKeys, WorkspaceNavigationKeys,
@@ -55,8 +59,11 @@ mod auth_account_picker_saved_accounts;
 mod auth_remote;
 mod catchup;
 mod commands;
+mod commit_log;
+pub(crate) use commit_log::CommitLogOverlay;
 mod commands_cloud;
 mod commands_colors;
+mod commands_desktop;
 mod commands_dispatch;
 mod commands_improve;
 mod commands_overnight;
@@ -80,6 +87,7 @@ mod local;
 mod misc_ui;
 mod model_context;
 mod navigation;
+pub(crate) mod oauth_telemetry;
 mod observe;
 pub(crate) mod onboarding_flow;
 mod onboarding_flow_control;
@@ -89,6 +97,7 @@ mod onboarding_sim;
 mod productivity;
 mod prompt_history;
 mod remote;
+mod remote_header_hint;
 mod remote_notifications;
 mod replay;
 pub(crate) mod run_shell;
@@ -98,7 +107,9 @@ mod slash_command_parser;
 mod split_view;
 mod state_ui;
 mod state_ui_input_helpers;
+mod update_rehearsal;
 mod update_sim;
+mod usage_limit_notice;
 mod usage_reset;
 mod voice_input;
 pub(crate) mod window_account;
@@ -342,8 +353,6 @@ struct PreparedTransferSession {
 struct PendingProviderFailover {
     prompt: crate::provider::ProviderFailoverPrompt,
     deadline: Instant,
-    /// Remote sessions only: the failed turn's payload, resent through the
-    /// server once it confirms the switch to `prompt.to_provider`.
     remote_resend: Option<FallbackResendPayload>,
 }
 
@@ -435,6 +444,8 @@ pub(super) enum PendingReloadReconnectStatus {
 }
 
 const MEMORY_INJECTION_SUPPRESSION_SECS: u64 = 90;
+/// How long a transient status notice stays on screen.
+const STATUS_NOTICE_TTL: Duration = Duration::from_secs(3);
 
 /// Current processing status
 #[derive(Clone, Default, Debug)]
@@ -628,6 +639,7 @@ pub(super) enum MouseScrollTarget {
     HelpOverlay,
     ChangelogOverlay,
     ModelStatusOverlay,
+    CommitLogOverlay,
     /// The right-hand preview pane of the /resume session picker overlay.
     SessionPickerPreview,
 }
@@ -892,6 +904,8 @@ pub struct App {
     mcp_manager: Arc<RwLock<McpManager>>,
     messages: Vec<Message>,
     session: Session,
+    agent_models_global_scope: bool,
+    pending_agent_model_request_id: Option<u64>,
     display_messages: Vec<DisplayMessage>,
     display_messages_version: u64,
     display_user_message_count: usize,
@@ -930,6 +944,9 @@ pub struct App {
     should_quit: bool,
     // Message queueing
     queued_messages: Vec<String>,
+    /// Slash (`/...`) and shell (`!...`) commands queued with Ctrl+Enter while
+    /// a turn was running. They run as real commands once the turn ends.
+    queued_commands: Vec<String>,
     hidden_queued_system_messages: Vec<String>,
     current_turn_system_reminder: Option<String>,
     // Upstream provider (e.g., which provider OpenRouter routed to)
@@ -1148,11 +1165,9 @@ pub struct App {
     startup_submit_deferred_reason: Option<&'static str>,
     /// One-shot/session-local preview of the first-run onboarding empty state.
     onboarding_preview_mode: bool,
-    /// Active onboarding simulator: `Some(index)` is the current simulated
-    /// screen (driven by `onboarding_sim.rs`); `None` when not simulating. The
-    /// simulator seeds synthetic phases so a developer can step through every
-    /// first-run screen via Alt+5 reset or Cmd+5 toggle without touching real auth state.
-    onboarding_sim: Option<usize>,
+    /// Whether an onboarding rehearsal is running (see `onboarding_sim.rs`):
+    /// the real first-run flow, started as if this install were new.
+    onboarding_sim: bool,
     /// Active time-based, non-destructive update experience preview.
     update_sim: Option<update_sim::UpdateSimulator>,
     /// Active guided first-run onboarding flow (model select -> continue ->
@@ -1238,6 +1253,12 @@ pub struct App {
     /// subscription vs cost-based usage display for remote sessions without
     /// re-deriving it from the provider name.
     remote_resolved_credential: Option<jcode_provider_core::ResolvedCredential>,
+    remote_provider_oauth_email: Option<crate::protocol::ProviderOAuthEmail>,
+    oauth_notice_displayed_at: Option<Instant>,
+    /// Remote model/provider/context/effort/credential were seeded from the
+    /// last launch's `remote_header_hint` and have not yet been confirmed by
+    /// the server. Cleared (and re-derived) when History arrives.
+    remote_session_facts_provisional: bool,
     remote_startup_phase: Option<RemoteStartupPhase>,
     remote_startup_phase_started: Option<Instant>,
     remote_reasoning_effort: Option<String>,
@@ -1359,7 +1380,7 @@ pub struct App {
     swarm_panel_focused: bool,
     // Whether the focused swarm panel owns the main transcript viewport.
     swarm_panel_full_page: bool,
-    // Diff display mode (toggle with Alt+G)
+    // Diff display mode (cycle with /diff)
     diff_mode: crate::config::DiffDisplayMode,
     // Center all content (from config)
     pub(crate) centered: bool,
@@ -1487,6 +1508,8 @@ pub struct App {
     // Pending model switch from picker (for remote mode async processing)
     pending_model_switch: Option<String>,
     pending_route_selection: Option<crate::provider::RouteSelection>,
+    pending_automatic_failover_route: Option<crate::provider::RouteSelection>,
+    pending_automatic_failover_request_id: Option<u64>,
     // Reasoning-effort variant chosen together with a model in the picker
     // (e.g. "gpt-5.5 (high)"), staged for remote mode alongside the model
     // switch. Without forwarding this to the server, it keeps its configured
@@ -1523,6 +1546,7 @@ pub struct App {
     model_switch_keys: ModelSwitchKeys,
     // Keybindings for effort switching
     effort_switch_keys: super::keybind::EffortSwitchKeys,
+    speed_switch_keys: super::keybind::SpeedSwitchKeys,
     // Keybindings for scrolling
     scroll_keys: ScrollKeys,
     // Keybinding for centered-mode toggle
@@ -1660,6 +1684,8 @@ pub struct App {
     client_binary_mtime: Option<std::time::SystemTime>,
     // Rate limit state: when rate limit resets (if rate limited)
     rate_limit_reset: Option<Instant>,
+    // Automatic quota resumes reserved for the current local logical turn.
+    local_usage_limit_resume_attempts: u8,
     // When the server last reported a credential change (login, account
     // switch, credential file edit). A limit error for a turn sent before this
     // belongs to the previous account and must not hold the turn.
@@ -1724,6 +1750,8 @@ pub struct App {
     help_scroll: Option<usize>,
     model_status_scroll: Option<usize>,
     model_status_content: String,
+    /// Commit log overlay (None = not visible)
+    commit_log_overlay: Option<commit_log::CommitLogOverlay>,
     /// Session picker overlay (None = not visible)
     session_picker_overlay: Option<RefCell<super::session_picker::SessionPicker>>,
     session_picker_mode: SessionPickerMode,
@@ -2675,46 +2703,12 @@ impl App {
     }
 }
 
-fn stable_hash_str(value: &str) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    value.hash(&mut hasher);
-    hasher.finish()
-}
-
-fn stable_hash_json<T: serde::Serialize + ?Sized>(value: &T) -> u64 {
-    let encoded = serde_json::to_string(value).unwrap_or_default();
-    stable_hash_str(&encoded)
-}
-
-fn stable_json_len<T: serde::Serialize + ?Sized>(value: &T) -> usize {
-    serde_json::to_string(value)
-        .map(|encoded| encoded.len())
-        .unwrap_or_default()
-}
-
 // The cache-relevant projection lives in `jcode-message-types` (re-exported
 // through `crate::message`) so this local path and the server event path in
 // `jcode-app-core::agent::kv_cache_request_event` hash messages identically.
 // If the two projections drift, remote sessions report false
 // `harness:_prefix_changed` KV-cache misses.
 use crate::message::{cache_relevant_message_value, cache_relevant_messages};
-
-fn message_hashes(messages: &[Message]) -> Vec<u64> {
-    messages
-        .iter()
-        .map(|message| stable_hash_json(&cache_relevant_message_value(message)))
-        .collect()
-}
-
-fn ratio_pct(numerator: u64, denominator: u64) -> u8 {
-    if denominator == 0 {
-        0
-    } else {
-        ((numerator as f32 / denominator as f32) * 100.0)
-            .round()
-            .clamp(0.0, 100.0) as u8
-    }
-}
 
 #[cfg(test)]
 mod tests;
