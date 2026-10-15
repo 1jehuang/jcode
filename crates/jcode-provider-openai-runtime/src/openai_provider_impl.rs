@@ -1215,6 +1215,9 @@ impl Provider for OpenAIProvider {
             prewarm: Arc::new(openai_websocket_prewarm::PrewarmSlot::default()),
             chatgpt_web: Arc::new(chatgpt_web::ChatGptWebState::new()),
             browser_only: Arc::new(AtomicBool::new(self.is_browser_only())),
+            browser_model_unset: AtomicBool::new(
+                self.browser_model_unset.load(AtomicOrdering::Acquire),
+            ),
         })
     }
 

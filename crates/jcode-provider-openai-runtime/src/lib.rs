@@ -725,6 +725,7 @@ pub struct OpenAIProvider {
     /// True when this runtime was created without API credentials. It can still
     /// serve browser-backed models and upgrades in place after a successful login.
     browser_only: Arc<AtomicBool>,
+    browser_model_unset: AtomicBool,
 }
 
 impl OpenAIProvider {
@@ -774,13 +775,16 @@ impl OpenAIProvider {
 
         // Check for model override from environment
         let catalog_scope = Self::catalog_scope_for(&credentials);
-        let mut model = if browser_only {
-            Self::initial_browser_model()
+        let (mut model, browser_model_unset) = if browser_only {
+            Self::initial_browser_selection()
         } else {
-            std::env::var("JCODE_OPENAI_MODEL")
-                .unwrap_or_else(|_| DEFAULT_MODEL.to_string())
-                .trim()
-                .to_string()
+            (
+                std::env::var("JCODE_OPENAI_MODEL")
+                    .unwrap_or_else(|_| DEFAULT_MODEL.to_string())
+                    .trim()
+                    .to_string(),
+                false,
+            )
         };
         if !is_chatgpt_web_model(&model)
             && !jcode_base::provider::known_openai_model_ids_for_scope(&catalog_scope)
@@ -861,6 +865,7 @@ impl OpenAIProvider {
             prewarm: Arc::new(openai_websocket_prewarm::PrewarmSlot::default()),
             chatgpt_web: Arc::new(chatgpt_web::ChatGptWebState::new()),
             browser_only: Arc::new(AtomicBool::new(browser_only)),
+            browser_model_unset: AtomicBool::new(browser_model_unset),
         };
         provider.revalidate_reasoning_effort();
         provider

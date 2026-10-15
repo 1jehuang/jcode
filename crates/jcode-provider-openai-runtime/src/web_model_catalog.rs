@@ -3,19 +3,30 @@
 use super::*;
 use jcode_base::provider::chatgpt_web as web_catalog;
 
+static OPTIONAL_REFRESH_RUNNING: AtomicBool = AtomicBool::new(false);
+
+struct OptionalRefreshGuard;
+impl Drop for OptionalRefreshGuard {
+    fn drop(&mut self) {
+        OPTIONAL_REFRESH_RUNNING.store(false, AtomicOrdering::Release);
+    }
+}
+
 impl OpenAIProvider {
-    pub(super) fn initial_browser_model() -> String {
+    pub(super) fn initial_browser_selection() -> (String, bool) {
         if let Ok(model) = std::env::var("JCODE_OPENAI_MODEL") {
             let model = model.trim();
             if is_chatgpt_web_model(model) {
-                return model.to_string();
+                return (model.to_string(), false);
             }
         }
-        web_catalog::cached_models()
+        match web_catalog::cached_models()
             .into_iter()
             .find(|entry| entry.available)
-            .map(|entry| entry.model)
-            .unwrap_or_else(|| CHATGPT_WEB_MODEL.to_string())
+        {
+            Some(entry) => (entry.model, false),
+            None => (CHATGPT_WEB_MODEL.to_string(), true),
+        }
     }
     pub(super) fn models_with_browser_catalog(&self) -> Vec<String> {
         let web_models = web_catalog::cached_models()
@@ -43,7 +54,34 @@ impl OpenAIProvider {
 
     /// True means the selected transport needs no credential-backed catalog.
     pub(super) async fn prefetch_browser_models(&self) -> Result<bool> {
-        self.apply_browser_catalog_refresh(web_catalog::refresh_models().await)
+        self.prefetch_browser_models_with(web_catalog::refresh_models())
+            .await
+    }
+
+    pub(super) async fn prefetch_browser_models_with<F>(&self, refresh: F) -> Result<bool>
+    where
+        F: std::future::Future<Output = Result<Vec<web_catalog::ChatGptWebModel>>> + Send + 'static,
+    {
+        if self.is_browser_only() || is_chatgpt_web_model(&self.model()) {
+            return self.apply_browser_catalog_refresh(refresh.await);
+        }
+        // Optional browser discovery must never delay a credential-backed catalog.
+        // Coalesce refreshes while discovery is waiting on an active browser turn.
+        if OPTIONAL_REFRESH_RUNNING
+            .compare_exchange(false, true, AtomicOrdering::AcqRel, AtomicOrdering::Acquire)
+            .is_ok()
+        {
+            let guard = OptionalRefreshGuard;
+            tokio::spawn(async move {
+                let _guard = guard;
+                if let Err(error) = refresh.await {
+                    jcode_base::logging::info(&format!(
+                        "ChatGPT web models are unavailable: {error:#}"
+                    ));
+                }
+            });
+        }
+        Ok(false)
     }
 
     pub(super) fn apply_browser_catalog_refresh(
@@ -52,7 +90,8 @@ impl OpenAIProvider {
     ) -> Result<bool> {
         if self.is_browser_only() || is_chatgpt_web_model(&self.model()) {
             let models = web?;
-            if self.model() == CHATGPT_WEB_MODEL
+            if self.browser_model_unset.load(AtomicOrdering::Acquire)
+                && self.model() == CHATGPT_WEB_MODEL
                 && !models
                     .iter()
                     .any(|entry| entry.available && entry.model == CHATGPT_WEB_MODEL)
@@ -72,6 +111,9 @@ impl OpenAIProvider {
     }
 
     pub(super) fn browser_efforts(&self) -> Vec<&'static str> {
+        if let Some((_, power)) = web_catalog::legacy_web_alias(&self.model()) {
+            return vec![power, "swarm", "swarm-deep"];
+        }
         let mut efforts: Vec<_> = web_catalog::cached_reasoning_options(&self.model())
             .into_iter()
             .filter(|option| option.available)
@@ -83,6 +125,9 @@ impl OpenAIProvider {
 
     /// Browser models default only to observed Medium Power. API defaults stay unchanged.
     pub(super) fn default_reasoning_effort_for_model(model: &str) -> Option<String> {
+        if let Some((_, power)) = web_catalog::legacy_web_alias(model) {
+            return Some(power.to_string());
+        }
         if is_chatgpt_web_model(model) {
             return web_catalog::cached_reasoning_options(model)
                 .iter()

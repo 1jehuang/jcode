@@ -44,14 +44,15 @@ fn chatgpt_web_refresh_failure_is_returned_for_browser_transport() {
 }
 
 #[test]
-fn chatgpt_web_refresh_replaces_legacy_default_with_an_observed_model() {
+fn chatgpt_web_refresh_replaces_only_an_unset_default_with_an_observed_model() {
     let _guard = jcode_base::storage::lock_test_env();
     let temp = tempfile::tempdir().unwrap();
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
-    let _model = EnvVarGuard::set("JCODE_OPENAI_MODEL", CHATGPT_WEB_MODEL);
-    seed_browser_catalog(temp.path(), "gpt-6[web]", "GPT-6");
+    let _model = EnvVarGuard::remove("JCODE_OPENAI_MODEL");
     let provider = OpenAIProvider::new_browser_only();
-    let models = jcode_base::provider::chatgpt_web::cached_models();
+    seed_browser_catalog(temp.path(), "gpt-6[web]", "GPT-6");
+    let snapshot: serde_json::Value = jcode_base::storage::read_json(&temp.path().join("chatgpt_web_model_catalog_cache.json")).unwrap();
+    let models = serde_json::from_value(snapshot["models"].clone()).unwrap();
     assert!(provider.apply_browser_catalog_refresh(Ok(models)).unwrap());
     assert_eq!(provider.model(), "gpt-6[web]");
 }
@@ -61,7 +62,7 @@ fn chatgpt_web_empty_refresh_does_not_invent_an_available_default() {
     let _guard = jcode_base::storage::lock_test_env();
     let temp = tempfile::tempdir().unwrap();
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
-    let _model = EnvVarGuard::set("JCODE_OPENAI_MODEL", CHATGPT_WEB_MODEL);
+    let _model = EnvVarGuard::remove("JCODE_OPENAI_MODEL");
     let provider = OpenAIProvider::new_browser_only();
     assert!(
         provider

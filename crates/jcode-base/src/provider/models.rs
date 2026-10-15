@@ -7,6 +7,8 @@ mod catalog;
 mod catalog_service;
 
 use anyhow::Result;
+#[cfg(any(test, feature = "test-support"))]
+pub use catalog::openai_catalog_test_endpoint;
 #[cfg(test)]
 pub(crate) use catalog::parse_anthropic_model_catalog;
 pub use catalog::{
