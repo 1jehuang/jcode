@@ -1,0 +1,13 @@
+dev_cargo: using sccache
+dev_cargo: acquired host-wide Cargo gate (waited 0ms)
+dev_cargo: limiting cargo to 1 job(s) under memory pressure (3418MiB available, ~1792MiB/job); override with JCODE_BUILD_JOBS
+   Compiling aws-lc-sys v0.45.0
+   Compiling aws-lc-rs v1.18.1
+   Compiling rustls v0.23.45
+   Compiling rustls-webpki v0.103.15
+   Compiling tokio-rustls v0.26.4
+   Compiling hyper-rustls v0.27.7
+   Compiling serde_core v1.0.228
+   Compiling libm v0.2.15
+   Compiling matrixmultiply v0.3.10
+   Compiling syn v3.0.3

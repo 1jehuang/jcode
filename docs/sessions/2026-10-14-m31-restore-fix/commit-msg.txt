@@ -1,0 +1,18 @@
+fix(agent): fall back to provider default when restoring a session model
+
+restore_session logged an error and kept the stale model in the persisted
+session when the saved model was no longer available in the provider
+catalog, so every resume repeated the failure. Fall back to the
+provider's current model, persist the correction, and downgrade the log
+to warn since this is graceful degradation rather than an error.
+
+Fixes the operator repro on session_deer_1791971005300_1667b54dc8bfc158
+(model "MiniMax-M3.1-Flash-Preview" no longer in catalog).
+Test: restore_session_falls_back_to_provider_default_when_saved_model_is_rejected
+(added in eb0949585).
+
+tx-agent: jcode
+tx-task: m3.1-restore-fallback
+tx-validated: cargo-test
+tx-scope: crates/jcode-app-core/src/agent/turn_execution.rs
+tx-intent: make session restore degrade gracefully to the provider default instead of persisting a dead model
