@@ -46,6 +46,7 @@ mod model_selection;
 mod native_compaction;
 mod openai_stream_cancellation;
 mod openai_stream_diagnostics;
+mod web_model_catalog;
 
 const CHATGPT_API_BASE: &str = "https://chatgpt.com/backend-api/codex";
 const RESPONSES_PATH: &str = "responses";
@@ -55,7 +56,7 @@ const ORIGINATOR: &str = "codex_cli_rs";
 pub(crate) const CHATGPT_WEB_MODEL: &str = jcode_provider_core::CHATGPT_WEB_MODEL;
 
 pub(crate) fn is_chatgpt_web_model(model: &str) -> bool {
-    model.trim() == CHATGPT_WEB_MODEL
+    jcode_provider_core::is_chatgpt_web_model(model)
 }
 
 /// Whether the hosted `image_generation` tool can be attached for `model_id`.
@@ -774,7 +775,7 @@ impl OpenAIProvider {
         // Check for model override from environment
         let catalog_scope = Self::catalog_scope_for(&credentials);
         let mut model = if browser_only {
-            CHATGPT_WEB_MODEL.to_string()
+            Self::initial_browser_model()
         } else {
             std::env::var("JCODE_OPENAI_MODEL")
                 .unwrap_or_else(|_| DEFAULT_MODEL.to_string())
@@ -1061,20 +1062,6 @@ impl OpenAIProvider {
                 ));
                 None
             }
-        }
-    }
-
-    /// Default reasoning effort to apply when the user has *not* explicitly
-    /// configured one. GPT-5.6 Sol defaults to `low`: it is strong enough at
-    /// low effort for day-to-day coding/agentic work, and users can cycle up
-    /// when they want deeper reasoning. Every other model keeps the model's
-    /// own API-side default (no forced effort).
-    fn default_reasoning_effort_for_model(model: &str) -> Option<String> {
-        let key = jcode_provider_core::model_id::canonical(model);
-        if key.starts_with("gpt-5.6-sol") {
-            Some("low".to_string())
-        } else {
-            None
         }
     }
 

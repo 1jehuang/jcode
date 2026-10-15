@@ -48,7 +48,9 @@ pub fn is_chatgpt_web_model(model: &str) -> bool {
         return false;
     };
     let mut parts = stem.split('-');
-    let version = parts.next().unwrap_or_default();
+    let Some(version) = parts.next() else {
+        return false;
+    };
     !version.is_empty()
         && (allow_dots || !version.contains('.'))
         && version
