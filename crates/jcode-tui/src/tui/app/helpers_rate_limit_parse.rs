@@ -165,8 +165,8 @@ pub(crate) fn parse_quota_window_reset(
         // Reset instant already passed: resend promptly.
         Err(_) => Duration::ZERO,
     };
-    let wait = until_reset + QUOTA_WINDOW_RESET_SLACK;
-    (wait <= Duration::from_secs(MAX_TURN_HOLD_SECS)).then_some(wait)
+    let max_wait = Duration::from_secs(MAX_TURN_HOLD_SECS);
+    (until_reset <= max_wait).then(|| (until_reset + QUOTA_WINDOW_RESET_SLACK).min(max_wait))
 }
 
 /// Value of a JSON `"resets_at"`-style string field inside an error body.
@@ -189,7 +189,7 @@ fn reset_instant_field(error: &str) -> Option<&str> {
 #[cfg(test)]
 #[cfg(test)]
 mod rate_limit_parse_tests {
-    use super::{parse_quota_window_reset, parse_rate_limit_error};
+    use super::{MAX_TURN_HOLD_SECS, parse_quota_window_reset, parse_rate_limit_error};
     use std::time::Duration;
 
     const OPENFERENCE_WINDOW_ERROR: &str = "OpenAI-compatible chat request failed\n  endpoint: https://api.openference.com/v1/chat/completions\n  model: GLM-5.3\n  auth: JCODE_PROVIDER_OPENCODE_OPENFERENCE_API_KEY\n  status: 402 Payment Required\n  response: {\"error\":\"Request limit exceeded (1500 per 5 hours). Top up your balance to continue.\",\"type\":\"insufficient_quota\",\"code\":\"window_quota_exceeded\",\"resets_at\":\"2026-09-24T09:00:00.000Z\"}\nHint: check network connectivity";
@@ -216,6 +216,24 @@ mod rate_limit_parse_tests {
     fn resets_at_beyond_a_day_is_not_held() {
         let wait = parse_quota_window_reset(OPENFERENCE_WINDOW_ERROR, at("2026-09-22T09:00:00Z"));
         assert_eq!(wait, None);
+    }
+
+    #[test]
+    fn quota_reset_within_day_caps_clock_skew_allowance() {
+        let reset = at("2026-09-24T09:00:00Z");
+        for seconds in [MAX_TURN_HOLD_SECS - 14, MAX_TURN_HOLD_SECS] {
+            let now = reset - chrono::Duration::seconds(seconds as i64);
+            assert_eq!(
+                parse_quota_window_reset(OPENFERENCE_WINDOW_ERROR, now),
+                Some(Duration::from_secs(MAX_TURN_HOLD_SECS)),
+                "reset in {seconds} seconds must be held"
+            );
+        }
+        let now = reset - chrono::Duration::seconds(MAX_TURN_HOLD_SECS as i64 + 1);
+        assert_eq!(
+            parse_quota_window_reset(OPENFERENCE_WINDOW_ERROR, now),
+            None
+        );
     }
 
     #[test]
