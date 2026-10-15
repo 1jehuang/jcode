@@ -1215,5 +1215,6 @@ fn openai_early_reset_clears_usage_limit_mark_and_resume_is_sent() {
     });
 }
 
+include!("account_failover_api_pin.rs");
 #[path = "quota_snapshot.rs"]
 mod quota_snapshot;
