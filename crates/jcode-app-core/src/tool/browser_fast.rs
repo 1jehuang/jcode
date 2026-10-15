@@ -422,6 +422,7 @@ async fn observe_page(
             Err(error)
                 if transition_disconnect(&error) && tokio::time::Instant::now() < deadline =>
             {
+                let disconnect_details = format!("{error:#}");
                 last_disconnect = Some(error);
                 if let Err(error) = bounded(
                     ctx,
@@ -434,7 +435,7 @@ async fn observe_page(
                 .await {
                     return Err(error.context(format!(
                         "Page observation could not reconnect; last connection error: {:#}. The page may have no content script; navigate to a supported page first",
-                        last_disconnect.as_ref().unwrap()
+                        disconnect_details
                     )));
                 }
             }

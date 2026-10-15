@@ -218,6 +218,11 @@ fn remote_display_target_does_not_expose_url_credentials() {
     }))
     .unwrap();
     assert_eq!(config.display_target(), "http https://example.com/mcp");
+    let opaque: McpServerConfig = serde_json::from_value(serde_json::json!({
+        "url": "mailto:user:secret@example.com?token=secret",
+    }))
+    .unwrap();
+    assert_eq!(opaque.display_target(), "http [invalid URL]");
 }
 
 #[test]

@@ -101,8 +101,10 @@ pub fn canonical_resource(url: &str) -> String {
     };
     parsed.set_query(None);
     parsed.set_fragment(None);
-    let _ = parsed.set_username("");
-    let _ = parsed.set_password(None);
+    if parsed.set_username("").is_err() || parsed.set_password(None).is_err() {
+        // Opaque URLs cannot be safely canonicalized as an HTTP resource.
+        return String::new();
+    }
     parsed.to_string().trim_end_matches('/').to_string()
 }
 
@@ -167,7 +169,7 @@ fn private_directory(path: &Path) -> Result<()> {
         .context("could not secure OAuth credential directory")
 }
 
-fn secure_file(file: &File, path: &Path) -> Result<()> {
+fn secure_file(file: &File, _path: &Path) -> Result<()> {
     let metadata = file.metadata()?;
     if !metadata.is_file() {
         bail!("OAuth credential path must be a regular file");
@@ -180,10 +182,9 @@ fn secure_file(file: &File, path: &Path) -> Result<()> {
         }
         // Repair legacy permissive files through the already-open descriptor.
         file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-        let _ = path;
     }
     #[cfg(not(unix))]
-    jcode_core::fs::set_permissions_owner_only(path)?;
+    jcode_core::fs::set_permissions_owner_only(_path)?;
     Ok(())
 }
 
@@ -325,7 +326,16 @@ fn checked_stored(url: &str) -> Result<Option<StoredOAuth>> {
 /// Compatibility accessor. Use `status` when a malformed/unreadable store must
 /// be distinguished from being logged out. Never print this object's fields.
 pub fn stored(url: &str) -> Option<StoredOAuth> {
-    checked_stored(url).ok().flatten()
+    match checked_stored(url) {
+        Ok(entry) => entry,
+        Err(_) => {
+            // Do not log URL or store contents, both may contain credentials.
+            crate::logging::warn(
+                "Cannot read stored MCP OAuth credentials; use OAuth status for details",
+            );
+            None
+        }
+    }
 }
 
 pub fn status(url: &str) -> Result<OAuthStatus> {
@@ -494,7 +504,7 @@ async fn post_token(
             .clone()
             .unwrap_or_else(|| canonical_resource(resource)),
     ));
-    let response = http_for(&endpoint)
+    let response = http_for(&endpoint)?
         .post(endpoint)
         .header(reqwest::header::ACCEPT, "application/json")
         .form(&form)
@@ -579,36 +589,37 @@ async fn refresh(url: &str, reason: RefreshReason) -> Result<Option<String>> {
     Ok(access_token)
 }
 
-fn http_for(endpoint: &url::Url) -> reqwest::Client {
+fn http_for(endpoint: &url::Url) -> Result<reqwest::Client> {
     if is_loopback(endpoint) {
         return http();
     }
     static REMOTE_HTTP: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-    REMOTE_HTTP
-        .get_or_init(|| {
-            reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .timeout(DISCOVERY_TIMEOUT)
-                .build()
-                .expect("OAuth HTTP client configuration is valid")
-        })
-        .clone()
+    if let Some(client) = REMOTE_HTTP.get() {
+        return Ok(client.clone());
+    }
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(DISCOVERY_TIMEOUT)
+        .build()
+        .context("could not configure OAuth HTTP client")?;
+    Ok(REMOTE_HTTP.get_or_init(|| client).clone())
 }
 
-fn http() -> reqwest::Client {
+fn http() -> Result<reqwest::Client> {
     static HTTP: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-    HTTP.get_or_init(|| {
-        reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            // Never proxy plaintext loopback credentials via environment proxies.
-            .no_proxy()
-            // Pin localhost rather than trusting a DNS lookup for this exception.
-            .resolve("localhost", std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
-            .timeout(DISCOVERY_TIMEOUT)
-            .build()
-            .expect("OAuth HTTP client configuration is valid")
-    })
-    .clone()
+    if let Some(client) = HTTP.get() {
+        return Ok(client.clone());
+    }
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        // Never proxy plaintext loopback credentials via environment proxies.
+        .no_proxy()
+        // Pin localhost rather than trusting a DNS lookup for this exception.
+        .resolve("localhost", std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+        .timeout(DISCOVERY_TIMEOUT)
+        .build()
+        .context("could not configure loopback OAuth HTTP client")?;
+    Ok(HTTP.get_or_init(|| client).clone())
 }
 
 // Discovery -----------------------------------------------------------------
@@ -743,7 +754,7 @@ fn auth_metadata_urls(issuer: &url::Url) -> Vec<String> {
 
 async fn get_json<T: for<'de> Deserialize<'de>>(value: &str, local: bool) -> Result<Option<T>> {
     let endpoint = checked_url(value, local)?;
-    let response = http_for(&endpoint)
+    let response = http_for(&endpoint)?
         .get(endpoint)
         .header(reqwest::header::ACCEPT, "application/json")
         .send()
@@ -797,7 +808,7 @@ async fn discover(mcp_url: &str) -> Result<Discovery> {
     let parsed = checked_url(mcp_url, true)?;
     let local = is_loopback(&parsed);
     let resource = canonical_resource(mcp_url);
-    let probe = http_for(&parsed)
+    let probe = http_for(&parsed)?
         .post(parsed.clone())
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .header(
@@ -816,9 +827,9 @@ async fn discover(mcp_url: &str) -> Result<Discovery> {
             .headers()
             .get_all(reqwest::header::WWW_AUTHENTICATE)
             .iter()
-            .filter_map(|header| header.to_str().ok())
-            .map(str::to_owned)
-            .collect::<Vec<_>>()
+            .map(|header| header.to_str().map(str::to_owned))
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("OAuth challenge header is not valid text")?
     } else {
         Vec::new()
     };
@@ -893,7 +904,7 @@ async fn register_client(
         "response_types": ["code"],
         "token_endpoint_auth_method": "none",
     });
-    let response = http_for(&endpoint)
+    let response = http_for(&endpoint)?
         .post(endpoint)
         .json(&body)
         .send()
@@ -1025,11 +1036,18 @@ async fn wait_for_callback(
             "HTTP/1.1 {status}\r\nContent-Type: text/plain\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         );
-        let _ = tokio::time::timeout(
+        // The authorization code remains valid even if the browser disconnects
+        // before receiving this cosmetic acknowledgement.
+        match tokio::time::timeout(
             Duration::from_secs(2),
             stream.write_all(response.as_bytes()),
         )
-        .await;
+        .await
+        {
+            Ok(Ok(())) => (),
+            Ok(Err(_)) => crate::logging::debug("OAuth callback acknowledgement connection closed"),
+            Err(_) => crate::logging::debug("OAuth callback acknowledgement timed out"),
+        }
         match result {
             Ok(Some(code)) => return Ok(code),
             Err(error) => return Err(error),
@@ -1103,8 +1121,11 @@ pub async fn login(mcp_url: &str, browser: BrowserMode, on_url: impl FnOnce(&str
     }
     let auth_url = auth_url.to_string();
     on_url(&auth_url);
-    if matches!(browser, BrowserMode::Open) {
-        let _ = open::that(&auth_url);
+    if matches!(browser, BrowserMode::Open) && open::that(&auth_url).is_err() {
+        // on_url already presented the URL, so manual opening still works.
+        crate::logging::warn(
+            "Could not open OAuth browser; open the displayed authorization URL manually",
+        );
     }
     let code = tokio::time::timeout(
         LOGIN_TIMEOUT,

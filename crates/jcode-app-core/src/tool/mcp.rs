@@ -88,9 +88,9 @@ fn match_rank(
 /// first: every match in full, then shorter descriptions, then full detail for
 /// only the leading matches with the rest listed by name. The first rendering
 /// that fits wins, so small results are never trimmed.
-fn fit_search_results(matches: &[McpSearchResult], budget: usize) -> (String, usize) {
+fn fit_search_results(matches: &[McpSearchResult], budget: usize) -> Result<(String, usize)> {
     use jcode_core::util::estimate_tokens;
-    let render = |detailed: usize, description_chars: Option<usize>| {
+    let render = |detailed: usize, description_chars: Option<usize>| -> Result<String> {
         let head: Vec<McpSearchResult> = matches[..detailed]
             .iter()
             .map(|m| McpSearchResult {
@@ -104,7 +104,7 @@ fn fit_search_results(matches: &[McpSearchResult], budget: usize) -> (String, us
                 input_schema: m.input_schema.clone(),
             })
             .collect();
-        let mut out = serde_json::to_string(&head).unwrap_or_default();
+        let mut out = serde_json::to_string(&head)?;
         if detailed < matches.len() {
             let rest: Vec<&str> = matches[detailed..]
                 .iter()
@@ -116,13 +116,13 @@ fn fit_search_results(matches: &[McpSearchResult], budget: usize) -> (String, us
                 rest.join(", ")
             ));
         }
-        out
+        Ok(out)
     };
     let fits = |out: &String| estimate_tokens(out) <= budget;
 
-    let full = render(matches.len(), None);
+    let full = render(matches.len(), None)?;
     if fits(&full) {
-        return (full, matches.len());
+        return Ok((full, matches.len()));
     }
     // Shorten descriptions progressively, keeping every schema.
     let longest = matches
@@ -132,9 +132,9 @@ fn fit_search_results(matches: &[McpSearchResult], budget: usize) -> (String, us
         .unwrap_or(0);
     let mut chars = longest / 2;
     while chars >= MIN_SEARCH_DESCRIPTION_CHARS {
-        let out = render(matches.len(), Some(chars));
+        let out = render(matches.len(), Some(chars))?;
         if fits(&out) {
-            return (out, matches.len());
+            return Ok((out, matches.len()));
         }
         chars /= 2;
     }
@@ -142,13 +142,13 @@ fn fit_search_results(matches: &[McpSearchResult], budget: usize) -> (String, us
     let (mut lo, mut hi) = (0usize, matches.len());
     while lo < hi {
         let mid = (lo + hi).div_ceil(2);
-        if fits(&render(mid, Some(MIN_SEARCH_DESCRIPTION_CHARS))) {
+        if fits(&render(mid, Some(MIN_SEARCH_DESCRIPTION_CHARS))?) {
             lo = mid;
         } else {
             hi = mid - 1;
         }
     }
-    (render(lo, Some(MIN_SEARCH_DESCRIPTION_CHARS)), lo)
+    Ok((render(lo, Some(MIN_SEARCH_DESCRIPTION_CHARS))?, lo))
 }
 
 /// Fixed MCP discovery surface used when individual server definitions are deferred.
@@ -205,16 +205,13 @@ impl Tool for McpSearchTool {
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty());
-        let query = params
+        // Tokenize the optional query directly, avoiding a lowercased copy of
+        // the entire query and an artificial empty-query sentinel.
+        let query_terms: Vec<String> = params
             .query
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_ascii_lowercase);
-        let query_terms: Vec<String> = query
-            .as_deref()
-            .map(|q| q.split_whitespace().map(str::to_string).collect())
-            .unwrap_or_default();
+            .iter()
+            .flat_map(|query| query.split_whitespace().map(str::to_ascii_lowercase))
+            .collect();
         let manager = self.manager.read().await;
         let catalog = manager.searchable_tools().await;
         drop(manager);
@@ -287,7 +284,7 @@ impl Tool for McpSearchTool {
         } else {
             SEARCH_TOKEN_BUDGET
         };
-        let (output, detailed) = fit_search_results(&matches, budget);
+        let (output, detailed) = fit_search_results(&matches, budget)?;
 
         // Ask the agent to load the matched definitions natively. With
         // provider-native deferred loading these become directly callable

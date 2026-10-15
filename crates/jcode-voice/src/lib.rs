@@ -355,8 +355,12 @@ mod capture {
             let worker = std::thread::spawn(move || {
                 let result = run(rx, &ready, worker_cancel);
                 // If setup failed, return a redacted setup error to start().
-                if let Err(error) = &result {
-                    let _ = ready.try_send(Err(error.clone()));
+                if let Err(error) = &result
+                    && ready.try_send(Err(error.clone())).is_err()
+                {
+                    eprintln!(
+                        "Microphone setup error could not reach the startup receiver: {error}"
+                    );
                 }
                 result
             });
@@ -367,11 +371,15 @@ mod capture {
                     worker: Some(worker),
                 }),
                 Ok(Err(error)) => {
-                    let _ = worker.join();
+                    if worker.join().is_err() {
+                        return Err(VoiceError::CaptureFailed);
+                    }
                     Err(error)
                 }
                 _ => {
-                    let _ = worker.join();
+                    if worker.join().is_err() {
+                        return Err(VoiceError::CaptureFailed);
+                    }
                     Err(VoiceError::MicrophoneUnavailable)
                 }
             }
@@ -384,7 +392,9 @@ mod capture {
         /// Finish capture and return its WAV without cancelling the caller's
         /// shared operation token. Any cancellation already requested is preserved.
         pub fn stop(mut self) -> Result<Vec<u8>, VoiceError> {
-            let _ = self.command.send(Command::Stop);
+            if self.command.send(Command::Stop).is_err() {
+                eprintln!("Microphone worker already stopped before the stop request");
+            }
             self.worker
                 .take()
                 .ok_or(VoiceError::CaptureFailed)?
@@ -401,8 +411,14 @@ mod capture {
             // not cancel the shared recording/transcription operation afterward.
             if let Some(worker) = self.worker.take() {
                 self.cancel.store(true, Ordering::SeqCst);
-                let _ = self.command.send(Command::Cancel);
-                let _ = worker.join();
+                if self.command.send(Command::Cancel).is_err() {
+                    eprintln!("Microphone worker already stopped before cancellation");
+                }
+                match worker.join() {
+                    Ok(Ok(_)) | Ok(Err(VoiceError::Cancelled)) => {}
+                    Ok(Err(error)) => eprintln!("Microphone worker failed during cleanup: {error}"),
+                    Err(_) => eprintln!("Microphone worker panicked during cleanup"),
+                }
             }
         }
     }
@@ -467,7 +483,7 @@ mod capture {
             return Err(VoiceError::Cancelled);
         }
         let deadline = std::time::Instant::now() + MAX_RECORDING_DURATION;
-        let _ = ready.send(Ok(()));
+        ready.send(Ok(())).map_err(|_| VoiceError::Cancelled)?;
         let mut cancel = false;
         loop {
             if cancelled.load(Ordering::SeqCst) {

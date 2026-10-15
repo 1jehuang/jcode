@@ -1,3 +1,7 @@
+#[path = "commands_release_prompts.rs"]
+mod release_prompts;
+pub(super) use release_prompts::*;
+
 pub(super) use super::commands_improve::{
     build_improve_prompt, build_improve_resume_prompt, build_refactor_prompt,
     build_refactor_resume_prompt, format_improve_status, format_refactor_status,
@@ -2267,44 +2271,6 @@ pub(super) fn build_commit_push_prompt() -> String {
         "After creating the commits, push them to the remote tracking branch with git push (set the upstream with git push -u if the branch has no upstream yet). If the push fails, report the error instead of force-pushing, and never force-push or rewrite already-pushed history. Finally, report the commits created and the push result.",
     );
     prompt
-}
-
-fn build_release_prompt(before_bump_instruction: &str, release_instruction: &str) -> String {
-    let mut prompt = build_commit_push_prompt();
-    prompt.push(' ');
-    prompt.push_str("Then cut a release. Find the last release tag (git describe --tags --abbrev=0 or gh release list) and review everything that changed since it to pick the semver bump: patch for fixes and small internal changes, minor for new features, major only for breaking changes. ");
-    if !before_bump_instruction.is_empty() {
-        prompt.push_str(before_bump_instruction);
-        prompt.push(' ');
-    }
-    prompt.push_str("Bump the version in the root Cargo.toml, refresh Cargo.lock (for example with cargo check), and, if the repo has a changelog/ directory, write a user-facing changelog entry changelog/v<version>.json following changelog/README.md (translate commits into user-visible effects, skip internal-only changes, update changelog/index.json). Commit the version bump together with the changelog entry as one release-metadata commit, and push. ");
-    prompt.push_str(release_instruction);
-    prompt.push_str(" Do not force-push or move existing tags. Finally, report the new version, the commits created, the tag push, and the release status.");
-    prompt
-}
-
-pub(super) fn build_fast_release_prompt() -> String {
-    build_release_prompt(
-        "Before editing Cargo.toml or the changelog for the version bump, run scripts/quick-release.sh --prepare-fast v<version>. It must refresh the warm target/selfdev cache for the Linux x86_64 binary while the existing Cargo version is unchanged and record the prepared commit.",
-        "Then run scripts/quick-release.sh --fast-local v<version>. It must wrap the prepared selfdev binary with the release identity, publish that Linux asset and the GitHub release immediately, and let CI replace it with the portable Linux artifact while adding macOS, Windows, FreeBSD, signatures, and final checksums. Do not run the separate local macOS cross-build or wait for release optimization. If preparation is stale or the release-metadata commit contains code changes, stop instead of publishing a binary that differs from the tag.",
-    )
-}
-
-pub(super) fn build_fast_macos_release_prompt() -> String {
-    build_release_prompt(
-        "Before editing Cargo.toml or the changelog for the version bump, run scripts/quick-release.sh --prepare-fast-macos v<version>. It must cross-build and record the macOS arm64 binary with the future release identity while the release metadata is still unchanged.",
-        "Then run scripts/quick-release.sh --fast-macos-local v<version>. It must validate and publish the prepared macOS arm64 asset and GitHub release immediately, while CI replaces it with the signoff artifact and adds macOS Intel, Linux, Windows, FreeBSD, signatures, and final checksums. If preparation is stale or the release-metadata commit contains code changes, stop instead of publishing a binary that differs from the tag.",
-    )
-}
-
-pub(super) fn build_remote_release_prompt() -> String {
-    let jcode_release = build_release_prompt(
-        "",
-        "Then run scripts/quick-release.sh --remote v<version> to push the tag immediately without any local build. Let the release workflow build, sign, checksum, and publish every platform, and leave publication gated on those remote checks.",
-    );
-    format!(
-        "First identify the repository in the current working directory from its git remote, release documentation, package manifests, existing tags, and CI workflows. Only use the following Jcode-specific procedure when this is the Jcode self-development repository and scripts/quick-release.sh exists: {jcode_release} Otherwise, use the repository's own established release conventions. Inspect its release documentation, workflows, scripts, manifests, tag format, and recent releases before changing anything. Make logical commits for current work without disturbing unrelated changes and push them normally. Determine the next version from this repository's versioning scheme and user-visible changes, update only the version files and changelog formats it actually uses, validate the metadata, commit and push it, then trigger the repository's documented remote release mechanism. Prefer a tag-triggered or workflow-dispatch CI release that performs builds and publication remotely. Do not assume the project uses Cargo, changelog JSON, v-prefixed tags, or scripts/quick-release.sh. Do not build release artifacts locally unless this repository explicitly requires it and no remote release path exists. Never force-push, move an existing tag, bypass remote release gates, or invent a release process. Report the detected release convention, version, commits, tag or workflow invocation, and remote release status."
-    )
 }
 
 pub(super) fn build_triage_prompt(focus: &str) -> String {

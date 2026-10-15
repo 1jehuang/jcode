@@ -68,9 +68,16 @@ pub fn pending_oauth_account_notice() -> Option<OAuthAccountNotice> {
     if !super::is_enabled() {
         return None;
     }
-    PENDING
-        .try_lock()
-        .ok()?
+    let pending = match PENDING.try_lock() {
+        Ok(pending) => pending,
+        // Render-time reads are deliberately nonblocking. A later frame retries.
+        Err(std::sync::TryLockError::WouldBlock) => return None,
+        Err(std::sync::TryLockError::Poisoned(_)) => {
+            super::logging::warn("OAuth telemetry notice state is poisoned, withholding notice");
+            return None;
+        }
+    };
+    pending
         .as_ref()
         .filter(|p| !p.acknowledged)
         .map(|p| p.notice.clone())
@@ -98,7 +105,7 @@ fn send(command: Command) -> bool {
     SENDER
         .get_or_init(|| {
             let (tx, rx) = sync_channel(32);
-            std::thread::Builder::new()
+            let worker = std::thread::Builder::new()
                 .name("oauth-telemetry".into())
                 .spawn(move || {
                     let Ok(client) = reqwest::blocking::Client::builder()
@@ -126,9 +133,14 @@ fn send(command: Command) -> bool {
                         }
                         handle(command, &transport);
                     }
-                })
-                .ok()
-                .map(|_| tx)
+                });
+            match worker {
+                Ok(_) => Some(tx),
+                Err(_) => {
+                    super::logging::warn("OAuth telemetry worker could not start");
+                    None
+                }
+            }
         })
         .as_ref()
         .is_some_and(|tx| tx.try_send(command).is_ok())
@@ -142,10 +154,10 @@ fn valid_email(email: &str) -> bool {
     {
         return false;
     }
-    let mut parts = email.split('@');
-    let local = parts.next().unwrap_or_default();
-    let domain = parts.next().unwrap_or_default();
-    !local.is_empty() && !domain.is_empty() && parts.next().is_none() && domain.contains('.')
+    let Some((local, domain)) = email.split_once('@') else {
+        return false;
+    };
+    !local.is_empty() && !domain.is_empty() && !domain.contains('@') && domain.contains('.')
 }
 fn canonical_email(email: &str) -> String {
     email.trim().to_lowercase()
@@ -168,16 +180,24 @@ impl Transport for Http {
         if cfg!(test) {
             return None;
         }
-        let response: Value = self
-            .0
-            .post("https://telemetry.jcode.sh/v1/oauth-account/check")
-            .json(&json!({"id":id,"provider":c.provider,"email_hash":hash(&c.email)}))
-            .send()
-            .ok()?
-            .error_for_status()
-            .ok()?
-            .json()
-            .ok()?;
+        let response = (|| {
+            self.0
+                .post("https://telemetry.jcode.sh/v1/oauth-account/check")
+                .json(&json!({"id":id,"provider":c.provider,"email_hash":hash(&c.email)}))
+                .send()?
+                .error_for_status()?
+                .json::<Value>()
+        })();
+        let response = match response {
+            Ok(response) => response,
+            Err(_) => {
+                // Never include response bodies, URLs, or identity values.
+                super::logging::debug(
+                    "OAuth telemetry preflight failed, identity delivery deferred",
+                );
+                return None;
+            }
+        };
         Some(Check {
             installation_known: response.get("installation_known")?.as_bool()?,
             email_tracked: response.get("email_tracked")?.as_bool()?,
@@ -188,11 +208,16 @@ impl Transport for Http {
             return;
         }
         // Never log requests, responses, errors, or raw identity values.
-        let _ = self
+        if self
             .0
             .post("https://telemetry.jcode.sh/v1/oauth-account")
             .json(&json!({"id":id,"provider":c.provider,"email":c.email}))
-            .send();
+            .send()
+            .and_then(reqwest::blocking::Response::error_for_status)
+            .is_err()
+        {
+            super::logging::debug("OAuth telemetry identity upload failed");
+        }
     }
 }
 #[derive(Debug, PartialEq)]
@@ -221,7 +246,13 @@ fn private_file(path: &Path) -> Option<File> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    options.open(path).ok()
+    match options.open(path) {
+        Ok(file) => Some(file),
+        Err(_) => {
+            super::logging::warn("OAuth telemetry notice file could not be opened");
+            None
+        }
+    }
 }
 fn notice_displayed(path: &Path) -> bool {
     std::fs::read(path).is_ok_and(|v| v == b"displayed\n")
@@ -241,7 +272,13 @@ fn handle(command: Command, transport: &impl Transport) {
         &|| {
             Some((
                 super::get_or_create_id()?,
-                super::storage::jcode_dir().ok()?,
+                match super::storage::jcode_dir() {
+                    Ok(dir) => dir,
+                    Err(_) => {
+                        super::logging::warn("OAuth telemetry home could not be resolved");
+                        return None;
+                    }
+                },
             ))
         },
         &PENDING,
@@ -268,7 +305,10 @@ fn handle_in(
             let Some((id, dir)) = identity() else {
                 return;
             };
-            let _ = std::fs::create_dir_all(&dir);
+            if std::fs::create_dir_all(&dir).is_err() {
+                super::logging::warn("OAuth telemetry notice directory could not be created");
+                return;
+            }
             // A kernel lease is released on crash. Never unlink the lock inode.
             let key = hash(&id);
             let Some(lease) = private_file(&dir.join(format!("oauth_notice_{key}.lock"))) else {

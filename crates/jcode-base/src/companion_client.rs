@@ -133,7 +133,9 @@ pub fn request_at(
 ) -> Result<CompanionResponse, CompanionError> {
     let mut stream =
         jcode_transport::SyncStream::connect(path).map_err(|_| CompanionError::Unavailable)?;
-    let _ = stream.set_read_timeout(Some(timeout.max(CONNECT_TIMEOUT)));
+    stream
+        .set_read_timeout(Some(timeout.max(CONNECT_TIMEOUT)))
+        .map_err(CompanionError::Io)?;
     let mut line = serde_json::to_string(request).map_err(|e| CompanionError::Io(e.into()))?;
     line.push('\n');
     stream

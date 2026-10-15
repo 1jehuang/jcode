@@ -406,7 +406,7 @@ async fn browser_login(auth_url: String, inject_bad_callbacks: bool) -> Result<(
         .map(|(k, v)| (k.into_owned(), v.into_owned()))
         .collect();
     let callback = url::Url::parse(query.get("redirect_uri").unwrap())?;
-    let client = http();
+    let client = http()?;
     if inject_bad_callbacks {
         let state = query.get("state").unwrap();
         for target in [
@@ -471,6 +471,9 @@ fn canonical_resource_redacts_query_fragment_and_userinfo() {
         "https://mcp.example.com"
     );
     assert_eq!(canonical_resource("bad?secret=secret"), "");
+    for opaque in ["mailto:user:secret@example.com", "data:text/plain,secret"] {
+        assert_eq!(canonical_resource(opaque), "");
+    }
 }
 
 #[test]
@@ -674,6 +677,7 @@ async fn localhost_full_login_pkce_callback_401_refresh_rotation_and_logout() {
         Some("access-0")
     );
     let rejected = http()
+        .expect("loopback OAuth HTTP client")
         .post(&resource)
         .bearer_auth("access-0")
         .body("{}")
@@ -698,6 +702,7 @@ async fn localhost_full_login_pkce_callback_401_refresh_rotation_and_logout() {
     );
     assert_eq!(
         http()
+            .expect("loopback OAuth HTTP client")
             .post(&resource)
             .bearer_auth("access-1")
             .body("{}")

@@ -347,9 +347,17 @@ impl WebSearchTool {
             .filter(|u| !u.trim().is_empty())
             .map(|u| u.to_string())
             .or_else(|| {
-                std::env::var(&config.websearch.searxng_url_env)
-                    .ok()
-                    .filter(|u| !u.trim().is_empty())
+                match std::env::var(&config.websearch.searxng_url_env) {
+                    Ok(url) => Some(url).filter(|u| !u.trim().is_empty()),
+                    Err(std::env::VarError::NotPresent) => None,
+                    Err(std::env::VarError::NotUnicode(_)) => {
+                        // Report the configuration problem, not its potentially secret bytes.
+                        crate::logging::warn(
+                            "SearXNG URL environment variable is not valid Unicode",
+                        );
+                        None
+                    }
+                }
             })
             .ok_or_else(|| {
                 anyhow::anyhow!(
@@ -529,7 +537,21 @@ async fn search_custom(
         .build()
         .map_err(|_| anyhow::anyhow!("Custom search HTTP client initialization failed"))?;
     let request = custom_request(&client, config, query, count, |name| {
-        std::env::var(name).ok()
+        match std::env::var(name) {
+            Ok(value) => Some(value),
+            Err(error) => {
+                // The request builder returns the missing-credential error to the
+                // caller. Record why resolution failed without exposing credentials.
+                let reason = match error {
+                    std::env::VarError::NotPresent => "not set",
+                    std::env::VarError::NotUnicode(_) => "not valid Unicode",
+                };
+                crate::logging::warn(&format!(
+                    "Custom search credential variable {name} is {reason}"
+                ));
+                None
+            }
+        }
     })?;
     let response = client
         .execute(request)

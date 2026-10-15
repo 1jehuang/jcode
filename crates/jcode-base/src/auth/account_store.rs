@@ -62,7 +62,7 @@ fn legacy_account_ordinal(prefix: &str, label: &str) -> Option<usize> {
     if suffix.is_empty() || !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
-    suffix.parse::<usize>().ok().filter(|index| *index > 0)
+    parse_account_ordinal(suffix).filter(|index| *index > 0)
 }
 
 fn account_ordinal(prefix: &str, label: &str) -> Option<usize> {
@@ -71,8 +71,21 @@ fn account_ordinal(prefix: &str, label: &str) -> Option<usize> {
         .iter()
         .position(|animal| *animal == suffix)
         .map(|index| index + 1)
-        .or_else(|| suffix.strip_prefix("animal-")?.parse::<usize>().ok())
+        .or_else(|| parse_account_ordinal(suffix.strip_prefix("animal-")?))
         .or_else(|| legacy_account_ordinal(prefix, label))
+}
+
+// User-chosen labels and out-of-range suffixes are not numbered accounts.
+fn parse_account_ordinal(suffix: &str) -> Option<usize> {
+    match suffix.parse() {
+        Ok(index) => Some(index),
+        Err(error) => {
+            crate::logging::debug(&format!(
+                "Account label suffix is not a representable ordinal: {error}"
+            ));
+            None
+        }
+    }
 }
 
 pub fn next_account_label<'a>(prefix: &str, labels: impl IntoIterator<Item = &'a str>) -> String {
