@@ -52,9 +52,10 @@ fn api_route_with_saved_pin_stays_api_through_sync_model_and_resume() {
         .set_account_pin(AccountProviderKind::Claude, Some(fox_pin()))
         .unwrap();
     assert_eq!(
-        provider.oauth_account_label().as_deref(),
-        Some("claude-fox")
+        provider.account_pin(AccountProviderKind::Claude),
+        Some(fox_pin())
     );
+    assert_eq!(provider.oauth_account_label(), None);
     assert_eq!(
         provider.active_resolved_credential(),
         Some(ResolvedCredential::ApiKey)
@@ -73,9 +74,10 @@ fn api_route_with_saved_pin_stays_api_through_sync_model_and_resume() {
     // Bare model selection retains the runtime's pin and credential mode.
     agent.set_model(&model).unwrap();
     assert_eq!(
-        provider.oauth_account_label().as_deref(),
-        Some("claude-fox")
+        provider.account_pin(AccountProviderKind::Claude),
+        Some(fox_pin())
     );
+    assert_eq!(provider.oauth_account_label(), None);
     assert_eq!(
         provider.active_resolved_credential(),
         Some(ResolvedCredential::ApiKey)
