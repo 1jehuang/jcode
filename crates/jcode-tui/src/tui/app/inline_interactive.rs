@@ -1728,12 +1728,7 @@ impl App {
                 let efforts = if route.api_method == "chatgpt-web" {
                     // The account catalog's ladder for this route (Instant ...
                     // Pro). Routes with one fixed level (minis) stay plain.
-                    let efforts = chatgpt_web_reasoning_efforts(name);
-                    let levels = efforts
-                        .iter()
-                        .filter(|e| !crate::prompt::is_swarm_mode_effort(e))
-                        .count();
-                    if levels > 1 { efforts } else { Vec::new() }
+                    chatgpt_web_reasoning_efforts(name)
                 } else if route_supports_reasoning_effort(&route.api_method) {
                     inferred_reasoning_efforts(Some(&route.api_method), Some(name))
                 } else {
