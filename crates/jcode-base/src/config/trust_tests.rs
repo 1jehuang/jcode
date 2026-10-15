@@ -161,6 +161,73 @@ fn trust_revocation_observes_missing_config() {
 }
 
 #[test]
+fn trust_revocation_malformed_config_honors_explicit_override_and_revocation() {
+    let _lock = crate::storage::lock_test_env();
+    let env = TrustEnv::new();
+    let (auth, _) = env.warm();
+    let entry = Config::trusted_external_auth_path_entry("sample", &auth).unwrap();
+    std::fs::write(Config::path().unwrap(), "[invalid TOML").unwrap();
+    let decisions = || {
+        (
+            Config::external_auth_source_allowed("sample"),
+            Config::external_auth_source_allowed_for_path("sample", &auth),
+            Config::external_auth_source_allowed_for_path_cached("sample", &auth),
+        )
+    };
+
+    assert_eq!(decisions(), (false, false, false));
+    crate::env::set_var(
+        "JCODE_TRUSTED_EXTERNAL_AUTH_SOURCES",
+        format!(" SAMPLE,\n{entry}, ,\n"),
+    );
+    // Config::load has always applied explicit overrides after parse fallback.
+    assert_eq!(Config::load().auth.trusted_external_sources, ["sample"]);
+    assert_eq!(decisions(), (true, true, true));
+    let first = Config::trusted_external_auth_lists();
+    assert!(std::sync::Arc::ptr_eq(
+        &first,
+        &Config::trusted_external_auth_lists()
+    ));
+
+    crate::env::set_var("JCODE_TRUSTED_EXTERNAL_AUTH_SOURCES", "");
+    assert_eq!(decisions(), (false, false, false));
+    crate::env::remove_var("JCODE_TRUSTED_EXTERNAL_AUTH_SOURCES");
+    assert_eq!(decisions(), (false, false, false));
+    crate::env::set_var("JCODE_TRUSTED_EXTERNAL_AUTH_SOURCES", "sample");
+    assert_eq!(decisions(), (true, false, false));
+    crate::env::set_var("JCODE_TRUSTED_EXTERNAL_AUTH_SOURCES", "denied");
+    assert_eq!(decisions(), (false, false, false));
+}
+
+#[test]
+fn trust_revocation_explicit_override_does_not_bypass_config_read_errors() {
+    let _lock = crate::storage::lock_test_env();
+    let env = TrustEnv::new();
+    let (auth, _) = env.warm();
+    let entry = Config::trusted_external_auth_path_entry("sample", &auth).unwrap();
+    crate::env::set_var(
+        "JCODE_TRUSTED_EXTERNAL_AUTH_SOURCES",
+        format!("sample,{entry}"),
+    );
+    let path = Config::path().unwrap();
+    std::fs::write(&path, [0xff]).unwrap();
+    for directory in [false, true] {
+        if directory {
+            std::fs::remove_file(&path).unwrap();
+            std::fs::create_dir(&path).unwrap();
+        }
+        assert_eq!(
+            (
+                Config::external_auth_source_allowed("sample"),
+                Config::external_auth_source_allowed_for_path("sample", &auth),
+                Config::external_auth_source_allowed_for_path_cached("sample", &auth),
+            ),
+            (false, false, false)
+        );
+    }
+}
+
+#[test]
 fn trust_revocation_fails_closed_on_invalid_utf8() {
     let _lock = crate::storage::lock_test_env();
     let env = TrustEnv::new();
