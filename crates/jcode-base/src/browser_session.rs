@@ -200,8 +200,16 @@ fn spawn_browser_session(
                 "[browser] session '{}' did not start within 10s",
                 session_name
             );
-            let _ = child.kill();
-            let _ = child.wait();
+            if let Err(error) = child.kill() {
+                crate::logging::warn(&format!(
+                    "Cannot terminate failed browser session {session_name}: {error}"
+                ));
+            }
+            if let Err(error) = child.wait() {
+                crate::logging::warn(&format!(
+                    "Cannot reap failed browser session {session_name}: {error}"
+                ));
+            }
             None
         }
         Err(e) => {

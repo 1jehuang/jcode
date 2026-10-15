@@ -1,51 +1,7 @@
 use super::response_recovery::{MalformedToolCallInfo, TextToolRecovery};
 use super::*;
 
-/// Largest byte index `<= index` that is a UTF-8 char boundary in `text`.
-/// Equivalent to the unstable `str::floor_char_boundary`, reimplemented so the
-/// incremental marker scan can clamp its scan-window start onto a valid
-/// boundary without re-scanning the whole accumulated response.
-fn floor_char_boundary(text: &str, index: usize) -> usize {
-    if index >= text.len() {
-        return text.len();
-    }
-    let mut boundary = index;
-    while boundary > 0 && !text.is_char_boundary(boundary) {
-        boundary -= 1;
-    }
-    boundary
-}
-
-/// The wrapped-tool-call markers emitted by some models inside plain text.
-const WRAP_TOOL_MARKERS: [&str; 2] = ["to=functions.", "+#+#"];
-
-#[path = "partial_stream_usage.rs"]
-mod partial_stream_usage;
-use partial_stream_usage::record_partial_stream_usage;
-
-/// Find the first wrapped-tool-call marker in `accumulated`, scanning only the
-/// newly appended `delta` plus a short overlap from the previous tail (so a
-/// marker straddling the append boundary is still found).
-///
-/// This avoids re-scanning the entire accumulated response on every streamed
-/// delta, which was O(response) per token and O(response^2) over a full answer.
-fn find_wrap_marker_incremental(accumulated: &str, appended_len: usize) -> Option<usize> {
-    let max_marker_len = WRAP_TOOL_MARKERS
-        .iter()
-        .map(|marker| marker.len())
-        .max()
-        .unwrap_or(0);
-    let scan_start = accumulated
-        .len()
-        .saturating_sub(appended_len + max_marker_len.saturating_sub(1));
-    let scan_start = floor_char_boundary(accumulated, scan_start);
-    let window = &accumulated[scan_start..];
-    WRAP_TOOL_MARKERS
-        .iter()
-        .filter_map(|marker| window.find(marker))
-        .min()
-        .map(|rel_idx| scan_start + rel_idx)
-}
+use super::streaming::{find_wrap_marker_incremental, record_partial_stream_usage};
 
 fn reload_interrupted_tool_result(tc: &ToolCall, elapsed_secs: f64) -> (String, bool) {
     if tc.name == "selfdev" {
@@ -1083,7 +1039,13 @@ impl Agent {
                             Err(e) => NativeToolResult::error(request_id, e.to_string()),
                         };
                         if let Some(sender) = self.provider.native_result_sender() {
-                            let _ = sender.send(native_result).await;
+                            // The provider can end its stream before the tool completes.
+                            // Keep the completed tool result in history, but expose the delivery failure.
+                            if let Err(error) = sender.send(native_result).await {
+                                logging::warn(&format!(
+                                    "Could not deliver native tool result to provider: {error}"
+                                ));
+                            }
                         }
                     }
                     StreamEvent::UpstreamProvider { provider } => {

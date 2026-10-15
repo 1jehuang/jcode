@@ -157,7 +157,7 @@ docker run --rm \
 	      export PATH="$JUSTRUST_INSTALL_DIR:$PATH"
 	      build_command=(justrust build --local)
 	    fi
-	    "${build_command[@]}" --profile "$JCODE_COMPAT_PROFILE" --target "$JCODE_COMPAT_TARGET" \
+	    "${build_command[@]}" --locked --profile "$JCODE_COMPAT_PROFILE" --target "$JCODE_COMPAT_TARGET" \
 	      -p jcode --bin jcode --features linux-compat-vendored-openssl
 
 	    cp "$CARGO_TARGET_DIR/$JCODE_COMPAT_TARGET/$JCODE_COMPAT_PROFILE/jcode" "/out/'"$artifact"'.bin"

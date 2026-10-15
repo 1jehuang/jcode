@@ -5,6 +5,7 @@
 //! headless or remote server never pops windows on the wrong machine.
 
 use anyhow::{Context, Result};
+#[cfg(any(test, all(unix, not(target_os = "macos"))))]
 use serde::Deserialize;
 use std::collections::HashSet;
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -297,11 +298,15 @@ async fn focus_browser_window_after_open(ctx: Option<BrowserFocusContext>) {
             return;
         };
         // niri IPC is synchronous subprocess work; keep it off the async runtime.
-        let _ = tokio::task::spawn_blocking(move || focus_browser_window_niri(&ctx)).await;
+        if let Err(error) =
+            tokio::task::spawn_blocking(move || focus_browser_window_niri(&ctx)).await
+        {
+            eprintln!("Browser focus worker failed: {error}");
+        }
     }
     #[cfg(not(all(unix, not(target_os = "macos"))))]
     {
-        let _ = ctx;
+        drop(ctx);
     }
 }
 
@@ -441,12 +446,18 @@ fn browser_app_stems() -> Vec<String> {
 
 #[cfg(all(unix, not(target_os = "macos")))]
 fn run_capture(program: &str, args: &[&str]) -> Option<String> {
-    let output = Command::new(program)
+    let output = match Command::new(program)
         .args(args)
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
-        .ok()?;
+    {
+        Ok(output) => output,
+        Err(error) => {
+            eprintln!("Cannot query browser focus using {program}: {error}");
+            return None;
+        }
+    };
     if !output.status.success() {
         return None;
     }
@@ -483,13 +494,18 @@ fn focus_browser_window_niri(ctx: &BrowserFocusContext) {
             return;
         };
         if let Some(id) = select_window_to_focus(&windows, &ctx.stems, &ctx.pre_ids) {
-            let _ = Command::new("niri")
+            let result = Command::new("niri")
                 .args(["msg", "action", "focus-window", "--id"])
                 .arg(id.to_string())
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .status();
+            match result {
+                Ok(status) if status.success() => {}
+                Ok(status) => eprintln!("Browser focus command exited with {status}"),
+                Err(error) => eprintln!("Browser focus command failed: {error}"),
+            }
             return;
         }
     }

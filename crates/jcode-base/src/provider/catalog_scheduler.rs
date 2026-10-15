@@ -38,7 +38,7 @@ static SCHEDULER_STARTED: OnceLock<()> = OnceLock::new();
 /// catalogs change out-of-band (refresh completion, auth changes), which is
 /// what keeps the route memo TTL a backstop rather than the mechanism.
 pub fn bump_catalog_generation() {
-    super::CATALOG_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    super::bump_catalog_generation();
 }
 
 /// Start the background catalog sweeper once per process.

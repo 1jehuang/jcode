@@ -636,12 +636,18 @@ fn test_account_switch_shorthand_switches_openai_account_by_label() {
             "the first inserted account is the active one before the switch"
         );
 
-        let mut app = create_test_app();
+        // Account switching now requires a provider that accepts exact route selections.
+        let (mut app, applied_route) = create_dual_method_test_app();
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             app.input = format!("/account switch {second}");
             app.submit_input();
 
+            assert_eq!(
+                applied_route.lock().unwrap().as_deref(),
+                Some(format!("openai-oauth@{second}").as_str()),
+                "the shorthand must select the requested account-qualified runtime route"
+            );
             assert_eq!(
                 crate::auth::codex::active_account_label().as_deref(),
                 Some(second.as_str()),
@@ -930,8 +936,10 @@ fn test_improve_resume_uses_saved_mode_and_current_todos() {
 #[test]
 fn test_openai_account_usage_details_are_discoverable_and_keep_switching() {
     with_temp_jcode_home(|| {
-        for label in ["openai-otter", "openai-fox"] {
-            crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
+        // New accounts receive canonical labels from the store, not the requested label.
+        let labels: Vec<String> = ["openai-otter", "openai-fox"]
+            .into_iter()
+            .map(|label| crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
                 label: label.to_string(),
                 access_token: "acc".into(),
                 refresh_token: "ref".into(),
@@ -940,10 +948,10 @@ fn test_openai_account_usage_details_are_discoverable_and_keep_switching() {
                 expires_at: None,
                 email: None,
             })
-            .unwrap();
-        }
+            .unwrap())
+            .collect();
         crate::provider_activity::record_openai_oauth_usage(
-            "openai-otter",
+            &labels[0],
             "gpt-5.4",
             None,
             Some(12345),
@@ -952,11 +960,11 @@ fn test_openai_account_usage_details_are_discoverable_and_keep_switching() {
         );
         let mut app = create_test_app();
         let settings = app.render_openai_accounts_markdown();
-        assert!(settings.contains("12345 input"));
+        assert!(settings.contains("12,345 in · 678 out · 123 cached"), "recorded account usage: {settings}");
         assert!(settings.contains("No recorded usage"));
         assert!(settings.contains("local midnight"));
         assert!(settings.contains("not your subscription bill"));
-        for label in ["openai-otter", "openai-fox"] {
+        for label in &labels {
             assert!(settings.contains(&format!("(`{label}`)")));
             for (key, value) in crate::provider_activity::openai_oauth_usage_summary(label) {
                 assert!(settings.contains(&format!("- **{key}:** {value}")));
@@ -965,7 +973,7 @@ fn test_openai_account_usage_details_are_discoverable_and_keep_switching() {
         for filter in [None, Some("openai")] {
             app.open_account_picker(filter);
             let state = app.inline_interactive_state.as_ref().unwrap();
-            for label in ["openai-otter", "openai-fox"] {
+            for label in &labels {
                 assert!(state.entries.iter().any(|entry| matches!(&entry.action,
                     crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Switch { provider_id, label: actual })
                         if provider_id == "openai" && actual == label)));
@@ -1003,7 +1011,7 @@ fn test_openai_account_usage_details_are_discoverable_and_keep_switching() {
             .unwrap();
         let mut items = Vec::new();
         app.append_openai_account_picker_items(&mut items, provider);
-        for label in ["openai-otter", "openai-fox"] {
+        for label in &labels {
             let command = format!("/account openai switch {label}");
             let item = items.iter().find(|item| matches!(&item.command,
                 crate::tui::account_picker::AccountPickerCommand::SubmitInput(input) if input == &command)).unwrap();
