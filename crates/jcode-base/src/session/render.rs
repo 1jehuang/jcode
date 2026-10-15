@@ -527,11 +527,6 @@ pub fn render_messages_and_images_with_compacted_history(
                     });
                     current_tool = tool_data.clone();
 
-                    // Provider-native items carry no wall-clock time of their
-                    // own; stamping the assistant message's time would show
-                    // earlier searches in the same response as finishing at
-                    // response end. Leave None: the badge hides when the true
-                    // run time is unknown.
                     rendered.push(RenderedMessage {
                         response_stats: None,
                         role: "tool".to_string(),
@@ -539,7 +534,7 @@ pub fn render_messages_and_images_with_compacted_history(
                         tool_calls: Vec::new(),
                         tool_data,
                         stored_index: Some(stored_index),
-                        timestamp: None,
+                        timestamp: msg.timestamp,
                         tool_duration_ms: msg.tool_duration_ms,
                     });
                 }
@@ -615,6 +610,11 @@ pub fn render_messages_and_images_with_compacted_history(
                             thought_signature: None,
                         }
                     });
+                    // Provider-native items carry no wall-clock time of their
+                    // own; stamping the assistant message's time would show
+                    // earlier searches in the same response as finishing at
+                    // response end. Leave None: the badge hides when the true
+                    // run time is unknown.
                     rendered.push(RenderedMessage {
                         response_stats: None,
                         role: "tool".to_string(),
@@ -622,7 +622,7 @@ pub fn render_messages_and_images_with_compacted_history(
                         tool_calls: Vec::new(),
                         tool_data: Some(tool_data),
                         stored_index: Some(stored_index),
-                        timestamp: msg.timestamp,
+                        timestamp: None,
                         tool_duration_ms: None,
                     });
                 }
