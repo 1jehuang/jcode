@@ -67,11 +67,11 @@ pub(in crate::tui::app) fn restore_prepared_remote_input(
     prepared: input::PreparedInput,
 ) {
     app.input = prepared.raw_input;
-    app.cursor_pos = app.input.len();
     app.pending_images = prepared.images;
     app.input_image_markers = prepared.image_markers;
     app.pasted_contents = prepared.pasted_contents;
     app.ensure_input_image_markers();
+    app.cursor_pos = app.input.len();
 }
 
 pub(in crate::tui::app) fn history_matches_pending_startup_prompt(app: &App) -> bool {
