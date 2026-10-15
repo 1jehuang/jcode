@@ -11,17 +11,17 @@ use std::{
     time::{Duration, Instant},
 };
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     // SAFETY: single-threaded before any other thread starts.
     unsafe { std::env::set_var("JCODE_VOICE_TIMING", "1") };
     let secs: u64 = std::env::args()
         .nth(1)
-        .and_then(|s| s.parse().ok())
+        .map(|s| s.parse())
+        .transpose()?
         .unwrap_or(4);
-    let key = nari_api_key().expect("Nari key not configured");
+    let key = nari_api_key().ok_or(jcode_voice::VoiceError::NariNotConfigured)?;
     timing::begin();
-    let recording = NariRecording::start_cancellable(Arc::new(AtomicBool::new(false)), &key)
-        .expect("start failed");
+    let recording = NariRecording::start_cancellable(Arc::new(AtomicBool::new(false)), &key)?;
     timing::mark("start_cancellable returned");
     let until = Instant::now() + Duration::from_secs(secs);
     let mut chars = 0;
@@ -38,8 +38,9 @@ fn main() {
     }
     if let Some(r) = early {
         // Setup or network failure before the simulated release.
-        eprintln!("finished before release: {:?}", r.err());
-        return;
+        r?;
+        eprintln!("finished before release");
+        return Ok(());
     }
     timing::release();
     recording.stop();
@@ -49,7 +50,7 @@ fn main() {
                 timing::mark("finished observed by caller");
                 match r {
                     Ok(t) => eprintln!("transcript_chars={} (live {chars})", t.chars().count()),
-                    Err(e) => eprintln!("error: {e}"),
+                    Err(e) => return Err(e.into()),
                 }
                 break;
             }
@@ -57,4 +58,5 @@ fn main() {
             None => std::thread::sleep(Duration::from_millis(2)),
         }
     }
+    Ok(())
 }
