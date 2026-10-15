@@ -58,20 +58,20 @@ return (async () => {
   function checkOrigin() {
     if (location.hostname !== 'chatgpt.com') throw Error('ChatGPT bridge refused a non-ChatGPT page');
   }
-  function checkAccess() {
+  const isTemporaryNotice = dialog => /temporary chat/i.test(dialog.innerText || '') && /(won[’']t appear|not appear).*(history|conversation)/i.test(dialog.innerText || '');
+  function checkAccess(allowTemporaryNotice = false) {
     if (all('button,a').filter(visible).some(e => /^(log in|sign up)$/i.test((e.innerText || '').trim()))) {
       throw Error('ChatGPT is signed out. Log in in the connected browser');
     }
     for (const dialog of all('[role="dialog"]').filter(visible)) {
       // A read-only chat side panel is not onboarding or an access decision.
-      if (dialog.getAttribute('aria-label') === 'Chat') continue;
+      if (dialog.getAttribute('aria-label') === 'Chat' || (allowTemporaryNotice && isTemporaryNotice(dialog))) continue;
       throw Error('ChatGPT is waiting for an onboarding or access choice. The bridge will not accept it');
     }
   }
   async function acknowledgeTemporaryNotice() {
     for (const dialog of all('[role="dialog"]').filter(visible)) {
-      const text = dialog.innerText || '';
-      if (/temporary chat/i.test(text) && /(won[’']t appear|not appear).*(history|conversation)/i.test(text)) {
+      if (isTemporaryNotice(dialog)) {
         const button = all('button', dialog).find(e => visible(e) && (e.innerText || '').trim() === 'Continue');
         if (button) { button.click(); await delay(); }
       }
@@ -284,10 +284,10 @@ return (async () => {
     } finally { pending.active = false; }
   }
   if (request.op === 'prepare' || request.op === 'discover' || request.op === 'probe') {
-    await until(() => temporary() || all('[role="dialog"]').filter(visible).some(e => /temporary chat/i.test(e.innerText || '')), 'loading Temporary Chat');
+    await until(() => { checkAccess(true); return temporary() || all('[role="dialog"]').filter(visible).some(isTemporaryNotice); }, 'loading Temporary Chat');
     await acknowledgeTemporaryNotice();
-    await until(() => temporary() && !!one(editorSelector), 'loading the temporary composer');
-    await until(() => !!trigger() && !unavailable(trigger()), 'loading the available model picker');
+    await until(() => { checkAccess(); return temporary() && !!one(editorSelector); }, 'loading the temporary composer');
+    await until(() => { checkAccess(); return !!trigger() && !unavailable(trigger()); }, 'loading the available model picker');
     requireTemporary(true);
     const original = await observation();
     if (request.op === 'prepare') {
