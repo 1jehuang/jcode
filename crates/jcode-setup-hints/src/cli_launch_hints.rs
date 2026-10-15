@@ -166,17 +166,17 @@ fn binary_on_path(binary: &str) -> bool {
         return false;
     };
     std::env::split_paths(&path).any(|dir| {
-        if dir.join(binary).is_file() {
-            return true;
-        }
         #[cfg(windows)]
         {
-            return dir.join(format!("{binary}.exe")).is_file()
+            dir.join(binary).is_file()
+                || dir.join(format!("{binary}.exe")).is_file()
                 || dir.join(format!("{binary}.cmd")).is_file()
-                || dir.join(format!("{binary}.bat")).is_file();
+                || dir.join(format!("{binary}.bat")).is_file()
         }
         #[cfg(not(windows))]
-        false
+        {
+            dir.join(binary).is_file()
+        }
     })
 }
 

@@ -234,8 +234,14 @@ fn terminate(child: &mut Child) {
     unsafe {
         libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
     }
-    let _ = child.kill();
-    let _ = child.wait();
+    if let Err(error) = child.kill()
+        && error.kind() != std::io::ErrorKind::InvalidInput
+    {
+        eprintln!("Voice recorder termination failed: {error}");
+    }
+    if let Err(error) = child.wait() {
+        eprintln!("Voice recorder reaping failed: {error}");
+    }
 }
 
 fn run_recorder(
@@ -300,7 +306,9 @@ fn run_recorder(
                 if !signalled {
                     signalled = true;
                     super::timing::mark("recorder delivered first audio");
-                    let _ = ready.send(Ok(()));
+                    ready
+                        .send(Ok(()))
+                        .map_err(|_| Fatal(VoiceError::Cancelled))?;
                 }
                 for chunk in pcm.push(&bytes, level) {
                     // Never block. Fail closed rather than silently lose audio.
@@ -476,14 +484,23 @@ mod tests {
             vec![shell("while :; do printf '\\001\\000\\001\\000'; done")],
         )
         .expect("recorder starts");
+        // The real service drains PCM continuously. This unpaced fixture can
+        // fill the bounded channel in 100ms unless the test does the same.
+        let consumer = thread::spawn(move || {
+            let mut samples = Vec::new();
+            while let Some(chunk) = rx.blocking_recv() {
+                samples.extend(chunk);
+            }
+            samples
+        });
         thread::sleep(Duration::from_millis(100));
         let started = Instant::now();
         recording.finish().expect("clean stop");
         assert!(started.elapsed() < Duration::from_secs(2));
-        let samples = drain(&mut rx);
+        let samples = consumer.join().expect("audio consumer completes");
         assert!(!samples.is_empty());
         assert!(samples.iter().all(|s| *s == 1));
-        assert!(rx.try_recv().is_err(), "EOF after stop");
+        // The consumer only completes after EOF, proving stop closed the stream.
     }
 
     #[cfg(unix)]

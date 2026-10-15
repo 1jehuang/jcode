@@ -48,17 +48,13 @@ impl App {
             return;
         }
 
-        if self.side_panel.focused_page().is_some() {
+        if let Some(page) = self.side_panel.focused_page() {
+            let title = page.title.clone();
             // Alt+M cycle: split -> fullscreen -> hidden -> split.
             if !self.side_panel_fullscreen {
                 self.side_panel_fullscreen = true;
                 self.sync_diagram_fit_context();
                 crate::tui::clear_side_panel_render_caches();
-                let title = self
-                    .side_panel
-                    .focused_page()
-                    .map(|page| page.title.clone())
-                    .unwrap_or_default();
                 self.set_status_notice(format!("Side panel: {title} (fullscreen)"));
                 return;
             }

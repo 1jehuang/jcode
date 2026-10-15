@@ -35,7 +35,9 @@ pub fn remember_last_focused_session(session_id: &str) -> Result<()> {
     }
     // Best effort: lets a global voice hold map a focused terminal window to
     // exactly this client's session, even with several CLIs open.
-    let _ = remember_client_session(std::process::id(), session_id);
+    if let Err(error) = remember_client_session(std::process::id(), session_id) {
+        crate::logging::warn(&format!("Cannot record focused client session: {error:#}"));
+    }
 
     if let Ok(mut cache) = last_focused_session_write_cache().lock() {
         *cache = Some(session_id.to_string());
@@ -79,10 +81,24 @@ fn remember_client_session(pid: u32, session_id: &str) -> Result<()> {
             let alive = entry
                 .file_name()
                 .to_str()
-                .and_then(|name| name.parse::<u32>().ok())
+                .and_then(|name| match name.parse::<u32>() {
+                    Ok(pid) => Some(pid),
+                    Err(error) => {
+                        crate::logging::debug(&format!(
+                            "Invalid client session marker filename: {error}"
+                        ));
+                        None
+                    }
+                })
                 .is_some_and(|pid| std::path::Path::new(&format!("/proc/{pid}")).exists());
-            if !alive && cfg!(target_os = "linux") {
-                let _ = std::fs::remove_file(entry.path());
+            if !alive
+                && cfg!(target_os = "linux")
+                && let Err(error) = std::fs::remove_file(entry.path())
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                crate::logging::debug(&format!(
+                    "Cannot remove stale client session marker: {error}"
+                ));
             }
         }
     }
@@ -91,8 +107,24 @@ fn remember_client_session(pid: u32, session_id: &str) -> Result<()> {
 }
 
 pub fn registered_client_session(pid: u32) -> Option<String> {
-    let path = client_sessions_dir().ok()?.join(pid.to_string());
-    let session_id = std::fs::read_to_string(path).ok()?.trim().to_string();
+    let path = match client_sessions_dir() {
+        Ok(dir) => dir.join(pid.to_string()),
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "Cannot resolve client session directory: {error:#}"
+            ));
+            return None;
+        }
+    };
+    let session_id = match std::fs::read_to_string(path) {
+        Ok(text) => text.trim().to_string(),
+        // A client that has not focused a session has no marker yet.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => {
+            crate::logging::warn(&format!("Cannot read registered client session: {error}"));
+            return None;
+        }
+    };
     (!session_id.is_empty()).then_some(session_id)
 }
 

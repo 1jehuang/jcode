@@ -30,7 +30,11 @@ static PRESENTER: OnceLock<Box<dyn LoginPresenter>> = OnceLock::new();
 
 /// Install the process-wide presenter. Later calls are ignored.
 pub fn install(presenter: Box<dyn LoginPresenter>) {
-    let _ = PRESENTER.set(presenter);
+    if PRESENTER.set(presenter).is_err() {
+        crate::logging::debug(
+            "Login presenter already installed, retaining the original presenter",
+        );
+    }
 }
 
 pub fn qr_section(

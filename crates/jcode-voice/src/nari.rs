@@ -124,12 +124,15 @@ fn corrections() -> &'static [(regex::Regex, &'static str)] {
     CORRECTIONS.get_or_init(|| {
         BUILTIN_CORRECTIONS
             .iter()
-            .map(|(pattern, fixed)| {
+            .filter_map(|(pattern, fixed)| {
                 let pattern = format!(r"(?i)\b{pattern}\b");
-                (
-                    regex::Regex::new(&pattern).expect("valid correction"),
-                    *fixed,
-                )
+                match regex::Regex::new(&pattern) {
+                    Ok(regex) => Some((regex, *fixed)),
+                    Err(error) => {
+                        eprintln!("Voice correction rule could not compile: {error}");
+                        None
+                    }
+                }
             })
             .collect()
     })
@@ -330,7 +333,14 @@ impl NariSession {
         let setup = async {
             // Standalone library callers may not have initialized TLS. Preserve
             // any installed provider, otherwise use the same one as Jcode main.
-            let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+            if rustls::crypto::CryptoProvider::get_default().is_none()
+                && rustls::crypto::aws_lc_rs::default_provider()
+                    .install_default()
+                    .is_err()
+                && rustls::crypto::CryptoProvider::get_default().is_none()
+            {
+                return Err(VoiceError::Network);
+            }
             let mut request = url.into_client_request().map_err(|_| VoiceError::Network)?;
             let mut auth = format!("Bearer {key}")
                 .parse::<tokio_tungstenite::tungstenite::http::HeaderValue>()
@@ -564,7 +574,7 @@ impl TranscriptState {
                 self.items
                     .iter_mut()
                     .find(|(item, _)| item == id)
-                    .unwrap()
+                    .ok_or(VoiceError::InvalidResponse)?
                     .1 = text.to_owned();
             }
             if kind == "transcript.completed" {
