@@ -123,11 +123,15 @@ fn priced_usage(
 ) -> Totals {
     let cached = cached.unwrap_or(0);
     let complete = input.is_some() && output.is_some() && cached <= input.unwrap_or(0);
-    let cost =
-        jcode_provider_core::pricing::openai_api_pricing_with_tier(model, tier).and_then(|price| {
+    let cost = jcode_provider_core::pricing::openai_api_pricing_with_tier(model, tier)
+        .and_then(|price| {
             if !complete {
                 return None;
             }
+            let (input, output) = match (input, output) {
+                (Some(input), Some(output)) => (input, output),
+                _ => return None,
+            };
             let input_price = price.input_price_per_mtok_micros?;
             let output_price = price.output_price_per_mtok_micros?;
             let cache_price = if cached > 0 {
@@ -143,15 +147,15 @@ fn priced_usage(
             let has_context_surcharge = base_model == "gpt-6-astra"
                 || (base_model == "gpt-5.5"
                     && !tier.is_some_and(|tier| tier.trim().eq_ignore_ascii_case("priority")));
-            let long_context = has_context_surcharge && input.unwrap() > 272_000;
+            let long_context = has_context_surcharge && input > 272_000;
             let input_multiplier = if long_context { 2.0 } else { 1.0 };
             let output_multiplier = if long_context { 1.5 } else { 1.0 };
             // OpenAI input_tokens INCLUDES cached input, output includes reasoning.
             Some(
-                (((input.unwrap() - cached) as f64 * input_price as f64
+                (((input - cached) as f64 * input_price as f64
                     + cached as f64 * cache_price as f64)
                     * input_multiplier
-                    + output.unwrap() as f64 * output_price as f64 * output_multiplier)
+                    + output as f64 * output_price as f64 * output_multiplier)
                     / 1_000_000_000_000.0,
             )
         });

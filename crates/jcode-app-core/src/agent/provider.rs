@@ -61,7 +61,13 @@ impl Agent {
             .map(|message| message.id.clone())
             .unwrap_or_else(|| "initial".to_string());
         self.begin_model_usage_turn(&message_id);
-        self.session.model_usage_turn_id.clone().unwrap()
+        // begin_model_usage_turn unconditionally sets model_usage_turn_id; fall
+        // back to an empty anchor only as a defensive guard against future
+        // refactors that could regress that invariant.
+        self.session
+            .model_usage_turn_id
+            .clone()
+            .unwrap_or_default()
     }
 
     pub(super) fn record_model_turn_usage(&self, turn_id: &str) {

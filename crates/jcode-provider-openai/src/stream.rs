@@ -328,16 +328,21 @@ fn stream_tool_calls(
             .min_by_key(|(_, state)| (!state.started, state.order))
             .map(|(id, _)| id.clone());
         let Some(item_id) = next else { break };
-        let state = calls.get_mut(&item_id).expect("selected tool call");
+        // The selection loop only picks IDs whose state was just observed in
+        // the map, so the entry must still exist; treat absence defensively.
+        let Some(state) = calls.get_mut(&item_id) else { break };
         if !state.started {
             let id = state
                 .call_id
                 .as_deref()
                 .filter(|id| !id.is_empty())
                 .unwrap_or(&item_id);
+            // The selector filters out states with empty `name`, so a value
+            // must be present; fall back to the empty string rather than panic.
+            let name = state.name.clone().unwrap_or_default();
             pending.push_back(StreamEvent::ToolUseStart {
                 id: sanitize_tool_id(id),
-                name: state.name.clone().expect("named tool call"),
+                name,
             });
             state.started = true;
         }

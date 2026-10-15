@@ -181,11 +181,8 @@ pub async fn run_tui_client(
                 "local reload/update actions are unavailable during SSH attach; reconnect after updating explicitly"
             );
         }
-        if run_result.exit_code.is_some_and(|code| code != 0) {
-            anyhow::bail!(
-                "SSH client exited with code {}",
-                run_result.exit_code.unwrap()
-            );
+        if let Some(code) = run_result.exit_code.filter(|code| *code != 0) {
+            anyhow::bail!("SSH client exited with code {code}");
         }
         if let Some(ref session_id) = run_result.session_id {
             print_session_resume_hint(session_id);

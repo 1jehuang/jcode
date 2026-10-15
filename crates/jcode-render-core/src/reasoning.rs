@@ -30,7 +30,13 @@ pub fn reasoning_line_content(line: &str) -> Option<String> {
                 .peek()
                 .is_some_and(|ch| REASONING_ESCAPES.contains(*ch))
         {
-            content.push(chars.next().unwrap());
+            // Peek already confirmed the next char is present; fall back
+            // to keeping the backslash on the (unreachable) empty case.
+            if let Some(escaped) = chars.next() {
+                content.push(escaped);
+            } else {
+                content.push(ch);
+            }
         } else {
             content.push(ch);
         }

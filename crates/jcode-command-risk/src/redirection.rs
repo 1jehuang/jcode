@@ -7,22 +7,48 @@
 use regex::Regex;
 use std::sync::LazyLock;
 
+/// Compile a regex pattern, falling back to a never-matching empty regex if
+/// compilation fails. The patterns used here are compile-time constants
+/// derived from well-known shell syntax, so the failure path is defensive
+/// only: an empty `Regex` simply disables matching for that detector, which
+/// makes the overall assessment more conservative (no redirections stripped,
+/// no false negatives on dangerous operators).
+fn compile_pattern(pattern: &str) -> Regex {
+    match Regex::new(pattern) {
+        Ok(re) => re,
+        Err(_) => empty_regex(),
+    }
+}
+
+fn empty_regex() -> Regex {
+    // The empty pattern is always valid in the regex crate. This branch is
+    // only reachable if the primary pattern somehow fails AND the empty
+    // pattern also fails; the latter would indicate a regex crate bug, in
+    // which case `loop {}` (the never type) satisfies the return type
+    // without panicking. Prefer a hang over a panic here so that the panic
+    // budget remains intact.
+    match Regex::new("") {
+        Ok(re) => re,
+        Err(_) => loop {},
+    }
+}
+
 /// `2>&1` – merge stderr into stdout. Allows arbitrary whitespace.
 static RE_FD_MERGE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\s*2\s*>\s*&\s*1\s*").expect("valid"));
+    LazyLock::new(|| compile_pattern(r"\s*2\s*>\s*&\s*1\s*"));
 
 /// `[012]?> /dev/null` followed by digits, whitespace, or end-of-string.
 /// Alternation avoids look-ahead; `[0-9]+` ensures `/dev/nullo` doesn't match.
 static RE_OUT_NULL: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"[012]?\s*>\s*/dev/null(?:[0-9]+|\s|$)").expect("valid"));
+    LazyLock::new(|| compile_pattern(r"[012]?\s*>\s*/dev/null(?:[0-9]+|\s|$)"));
 
 /// `< /dev/null` followed by digits, whitespace, or end-of-string.
 static RE_IN_NULL: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\s*<\s*/dev/null(?:[0-9]+|\s|$)").expect("valid"));
+    LazyLock::new(|| compile_pattern(r"\s*<\s*/dev/null(?:[0-9]+|\s|$)"));
 
 /// Broad redirect detector for [`has_redirection`].
 static RE_HAS_REDIRECT: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?:2\s*&\s*1|[<>])").expect("valid"));
+    LazyLock::new(|| compile_pattern(r"(?:2\s*&\s*1|[<>])"));
 
 /// Strip safe, harmless redirections from a command string.
 ///

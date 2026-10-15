@@ -47,18 +47,34 @@ impl HerdrEnv {
         self.active && self.pane_id.is_some() && self.socket_path.is_some()
     }
 
-    /// Returns the pane ID, panicking if not in a HERDR pane.
-    pub fn pane_id(&self) -> &str {
-        self.pane_id
-            .as_deref()
-            .expect("HERDR_PANE_ID not set; call is_valid() first")
+    /// Returns the pane ID, or `None` if not in a HERDR pane. Callers should
+    /// gate behind [`Self::is_valid`] to preserve the previous
+    /// precondition-on-call semantics; this method no longer panics.
+    pub fn pane_id(&self) -> Option<&str> {
+        self.pane_id.as_deref()
     }
 
-    /// Returns the socket path, panicking if not in a HERDR pane.
-    pub fn socket_path(&self) -> &PathBuf {
-        self.socket_path
-            .as_ref()
-            .expect("HERDR_SOCKET_PATH not set; call is_valid() first")
+    /// Returns the socket path, or `None` if not in a HERDR pane. Callers
+    /// should gate behind [`Self::is_valid`]; this method no longer panics.
+    pub fn socket_path(&self) -> Option<&PathBuf> {
+        self.socket_path.as_ref()
+    }
+
+    /// Convenience accessor for callers that have already checked
+    /// [`Self::is_active`]. Returns an empty string when the pane ID is
+    /// absent, which should not occur post-guard but keeps the call panic
+    /// free.
+    pub fn pane_id_or_empty(&self) -> &str {
+        self.pane_id.as_deref().unwrap_or("")
+    }
+
+    /// Convenience accessor for callers that have already checked
+    /// [`Self::is_active`]. Returns an empty path when the socket path is
+    /// absent; this fallback is only reached when the active guard is
+    /// bypassed.
+    pub fn socket_path_or_default(&self) -> &PathBuf {
+        static EMPTY_PATHBUF: PathBuf = PathBuf::new();
+        self.socket_path.as_ref().unwrap_or(&EMPTY_PATHBUF)
     }
 }
 
@@ -101,8 +117,8 @@ mod tests {
         let env = HerdrEnv::capture();
         assert!(env.active);
         assert!(env.is_valid());
-        assert_eq!(env.pane_id(), "w1:p1");
-        assert_eq!(env.socket_path(), &PathBuf::from("/tmp/herdr.sock"));
+        assert_eq!(env.pane_id(), Some("w1:p1"));
+        assert_eq!(env.socket_path(), Some(&PathBuf::from("/tmp/herdr.sock")));
 
         // Restore original values.
         match saved_env {

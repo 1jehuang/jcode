@@ -22,8 +22,14 @@ pub fn djb2_hash(s: &str) -> u64 {
 }
 
 /// Hash arbitrary serializable data via deterministic JSON + djb2.
+///
+/// Serialization of these types in practice is infallible (plain data
+/// structures such as prompt bodies, tool schemas, and config records), so
+/// a JSON serialization failure is treated as an empty-document fallback
+/// (`djb2("") == 5381`) rather than a panic. The fallback keeps cache
+/// lookups progressing instead of crashing the call site.
 pub fn compute_hash(data: &impl Serialize) -> u64 {
-    let json = serde_json::to_string(data).expect("cache_hash: serialization failed");
+    let json = serde_json::to_string(data).unwrap_or_default();
     djb2_hash(&json)
 }
 

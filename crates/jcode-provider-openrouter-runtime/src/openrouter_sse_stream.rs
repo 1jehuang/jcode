@@ -29,7 +29,9 @@ fn convert_to_responses_format(mut request: Value) -> Value {
         // Pass messages through as-is: the Responses API accepts
         // `{role, content}` format directly for input items.
         request["input"] = messages;
-        request.as_object_mut().unwrap().remove("messages");
+        if let Some(obj) = request.as_object_mut() {
+            obj.remove("messages");
+        }
     }
 
     // Convert tools from chat-completions format to Responses API format

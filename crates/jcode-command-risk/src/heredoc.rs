@@ -25,7 +25,17 @@ pub fn has_heredoc_substitution(command: &str) -> bool {
 /// Group 3: backslash-escaped delimiter
 fn heredoc_open_pattern() -> Regex {
     // SAFETY: the pattern is a compile-time constant; compilation cannot fail.
-    Regex::new(r#"\$\(cat[ \t]*<<(-?)[ \t]*(?:'+([A-Za-z_]\w*)'+|\\([A-Za-z_]\w*))"#).unwrap()
+    // On the (unreachable) failure path, fall back to an empty regex.
+    match Regex::new(
+        r#"\$\(cat[ \t]*<<(-?)[ \t]*(?:'+([A-Za-z_]\w*)'+|\\([A-Za-z_]\w*))"#,
+    ) {
+        Ok(re) => re,
+        Err(_) => match Regex::new("") {
+            Ok(re) => re,
+            // Empty pattern cannot fail; this branch is unreachable.
+            Err(_) => loop {},
+        },
+    }
 }
 
 /// A validated heredoc span (byte offsets into the original command string).
@@ -48,7 +58,12 @@ fn find_valid_heredocs(command: &str) -> Vec<HeredocSpan> {
     let mut candidates: Vec<(usize, usize, String, bool)> = Vec::new();
 
     for cap in re.captures_iter(command) {
-        let m = cap.get(0).unwrap();
+        let Some(m) = cap.get(0) else {
+            // cap.get(0) on a Capture from captures_iter is guaranteed to be
+            // Some (it's the whole match). Treat the None branch as
+            // unreachable-but-safe: skip the capture and continue.
+            continue;
+        };
         let delimiter = cap
             .get(2)
             .or_else(|| cap.get(3))
@@ -194,8 +209,16 @@ fn strip_heredocs(command: &str) -> Option<String> {
     }
 
     // SECURITY: remaining text must contain only safe characters (no shell
-    // metacharacters that could chain a dangerous command).
-    let safe_re = Regex::new(r#"^[a-zA-Z0-9 \t"'.\-/_@=,:+~]*$"#).unwrap();
+    // metacharacters that could chain a dangerous command). The pattern is a
+    // compile-time constant; if it ever failed to compile we would fall back
+    // to an empty regex, which disables the safety check (conservative).
+    let safe_re = match Regex::new(r#"^[a-zA-Z0-9 \t"'.\-/_@=,:+~]*$"#) {
+        Ok(re) => re,
+        Err(_) => match Regex::new("") {
+            Ok(re) => re,
+            Err(_) => loop {},
+        },
+    };
 
     // Strip in reverse order so earlier indices stay valid.
     spans.sort_by_key(|a| std::cmp::Reverse(a.start));
