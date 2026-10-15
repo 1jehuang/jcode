@@ -1,4 +1,3 @@
-use super::available_models_dedup::available_models_dedup_key;
 use super::client_actions::{
     AgentTaskContext, NotifySessionContext, handle_agent_task, handle_compact, handle_input_shell,
     handle_notify_session, handle_rename_session, handle_run_subagent, handle_set_feature,
@@ -44,7 +43,7 @@ use super::provider_control::{
     handle_notify_auth_changed, handle_refresh_models, handle_set_compaction_mode,
     handle_set_model, handle_set_premium_mode, handle_set_reasoning_effort, handle_set_route,
     handle_set_service_tier, handle_set_transport, handle_switch_anthropic_account,
-    handle_switch_openai_account, try_available_models_updated_event,
+    handle_switch_openai_account, try_available_models_catalog,
 };
 use super::{
     AwaitMembersRuntime, ClientConnectionInfo, ClientDebugState, FileTouchService,
@@ -78,110 +77,9 @@ type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<S
 const RELOAD_STARTING_GUARD_MAX_AGE: Duration = Duration::from_secs(30);
 const REQUEST_HANDLER_STALL_THRESHOLDS_MS: [u64; 3] = [2_000, 10_000, 60_000];
 
-fn required_subscribe_working_dir(working_dir: Option<&str>) -> std::result::Result<&str, String> {
-    let working_dir = working_dir
-        .map(str::trim)
-        .filter(|dir| !dir.is_empty())
-        .ok_or_else(|| "Subscribe requires the client's working directory".to_string())?;
-    if !Path::new(working_dir).is_absolute() {
-        return Err("Subscribe working_dir must be an absolute path".to_string());
-    }
-    Ok(working_dir)
-}
-
-fn initial_subscribe_working_dir(request: &Request) -> std::result::Result<String, String> {
-    match request {
-        Request::Subscribe {
-            working_dir,
-            continue_on_disconnect,
-            ..
-        } => validated_subscribe_working_dir(working_dir.as_deref(), *continue_on_disconnect)
-            .map(str::to_string),
-        _ => Err(
-            "Client must Subscribe with a working_dir before sending stateful requests".to_string(),
-        ),
-    }
-}
-
-/// A reattachment names an existing session, not a new client working directory.
-/// Resolve an omitted cwd before provisional initialization, never from the
-/// daemon/bridge process cwd. Idle empty sessions may exist only in memory.
-async fn resolve_target_subscribe_working_dir(
-    request: &mut Request,
-    sessions: &SessionAgents,
-    members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
-) -> std::result::Result<(), String> {
-    let Request::Subscribe {
-        working_dir,
-        target_session_id: Some(target),
-        ..
-    } = request
-    else {
-        return Ok(());
-    };
-    if working_dir.is_some() {
-        return Ok(());
-    }
-    let live = sessions.read().await.get(target).cloned();
-    let resolved = if let Some(live) = live {
-        let idle_cwd = live
-            .try_lock()
-            .ok()
-            .and_then(|agent| agent.working_dir().map(str::to_string));
-        if idle_cwd.is_some() {
-            idle_cwd
-        } else {
-            // A generating Agent owns its mutex. The member records the same
-            // session root, so attaching must not wait for the model turn.
-            members
-                .read()
-                .await
-                .get(target)
-                .and_then(|member| member.working_dir.as_ref())
-                .map(|path| path.to_string_lossy().into_owned())
-        }
-    } else {
-        crate::session::Session::load_startup_stub(target)
-            .ok()
-            .and_then(|session| session.working_dir)
-    };
-    *working_dir = Some(resolved.ok_or_else(|| {
-        format!("Unknown session '{target}' or session has no working directory")
-    })?);
-    Ok(())
-}
-
-fn validated_subscribe_working_dir(
-    working_dir: Option<&str>,
-    remote_continuation: bool,
-) -> std::result::Result<&str, String> {
-    let working_dir = required_subscribe_working_dir(working_dir)?;
-    if remote_continuation && !Path::new(working_dir).is_dir() {
-        return Err(format!(
-            "Remote working directory must exist and be a directory on the server: {working_dir}"
-        ));
-    }
-    Ok(working_dir)
-}
-
-fn new_session_system_prompt<'a>(
-    provisional_session: bool,
-    target_session_id: Option<&str>,
-    system_prompt: Option<&'a str>,
-) -> Option<&'a str> {
-    if provisional_session && target_session_id.is_none() {
-        system_prompt
-    } else {
-        None
-    }
-}
-
-fn initial_subscribe_terminal_env(request: &Request) -> Vec<(String, String)> {
-    match request {
-        Request::Subscribe { terminal_env, .. } => terminal_env.clone(),
-        _ => Vec::new(),
-    }
-}
+#[path = "client_subscribe_context.rs"]
+mod subscribe_context;
+use subscribe_context::*;
 
 struct ProcessingMessage {
     id: u64,
@@ -594,6 +492,7 @@ pub(super) async fn handle_client(
     let mut continue_on_disconnect = false;
     let mut model_usage_updates_enabled = false;
     let mut supports_pdf_panels = false;
+    let mut supports_user_response = false;
     // Client selfdev status is determined by Subscribe request, not server's env
     let mut client_selfdev = false;
 
@@ -606,8 +505,7 @@ pub(super) async fn handle_client(
     let registry_ms = t0.elapsed().as_millis();
 
     let mut swarm_enabled = crate::config::config().features.swarm;
-    let mut last_available_models_snapshot: Option<String> = None;
-    const MAX_LIVE_AVAILABLE_MODELS_UPDATE_BYTES: usize = 64 * 1024;
+    let mut last_available_models_snapshot: Option<Arc<str>> = None;
 
     // Create a new session for this client
     let t0 = std::time::Instant::now();
@@ -897,56 +795,27 @@ pub(super) async fn handle_client(
                         }
                     }
                     Ok(BusEvent::ModelsUpdated) => {
-                        let Some(event) = try_available_models_updated_event(&agent) else {
-                            crate::logging::info(&format!(
-                                "Skipping ModelsUpdated push for busy connection {}",
-                                client_connection_id
-                            ));
+                        let Some(catalog) = try_available_models_catalog(&agent) else {
                             continue;
                         };
-                        // Compare on an age-insensitive key: route details carry
-                        // cosmetic "12m ago" cache ages that tick on their own,
-                        // and a raw byte compare treated that drift as a real
-                        // catalog change, fanning a full repaint out to every
-                        // connected client.
-                        let dedup_key = available_models_dedup_key(&event);
-                        if last_available_models_snapshot.as_ref() == Some(&dedup_key) {
+                        // Equivalent clients share the snapshot, normalized key,
+                        // and size/downgrade decision. Pointer equality makes an
+                        // unchanged shared catalog a constant-time fast path.
+                        if last_available_models_snapshot.as_ref().is_some_and(|previous| {
+                            Arc::ptr_eq(previous, &catalog.dedup_key)
+                                || previous.as_ref() == catalog.dedup_key.as_ref()
+                        }) {
                             continue;
                         }
-                        let encoded_len = crate::protocol::encode_event(&event).len();
-                        if encoded_len > MAX_LIVE_AVAILABLE_MODELS_UPDATE_BYTES {
-                            // Don't drop the catalog update entirely: clients still
-                            // need fresh model names for the picker. Strip the heavy
-                            // route expansion and ship a names-only snapshot; the TUI
-                            // rebuilds fallback routes for missing models locally.
-                            let slim_event = names_only_available_models_event(&event);
-                            let slim_encoded =
-                                slim_event.as_ref().map(crate::protocol::encode_event);
-                            match (slim_event, slim_encoded) {
-                                (Some(slim_event), Some(slim_encoded))
-                                    if slim_encoded.len()
-                                        <= MAX_LIVE_AVAILABLE_MODELS_UPDATE_BYTES =>
-                                {
-                                    crate::logging::info(&format!(
-                                        "Downgrading oversized bus AvailableModelsUpdated frame to names-only for connection {} ({} -> {} bytes)",
-                                        client_connection_id,
-                                        encoded_len,
-                                        slim_encoded.len()
-                                    ));
-                                    let _ = client_event_tx.send(slim_event);
-                                }
-                                _ => {
-                                    crate::logging::warn(&format!(
-                                        "Skipping oversized bus AvailableModelsUpdated frame for connection {} ({} bytes)",
-                                        client_connection_id, encoded_len
-                                    ));
-                                }
-                            }
-                            last_available_models_snapshot = Some(dedup_key);
-                            continue;
+                        if let Some(event) = catalog.live_event() {
+                            let _ = client_event_tx.send(event.clone());
+                        } else {
+                            crate::logging::warn(&format!(
+                                "Skipping oversized catalog for connection {} ({} bytes)",
+                                client_connection_id, catalog.encoded_len
+                            ));
                         }
-                        let _ = client_event_tx.send(event);
-                        last_available_models_snapshot = Some(dedup_key);
+                        last_available_models_snapshot = Some(Arc::clone(&catalog.dedup_key));
                     }
                     Ok(BusEvent::CredentialsChanged { provider }) => {
                         let _ = client_event_tx.send(ServerEvent::CredentialsChanged { provider });
@@ -1647,7 +1516,8 @@ pub(super) async fn handle_client(
             }
 
             Request::Ping { id } => {
-                let json = encode_event(&ServerEvent::Pong { id, native_ssh_protocol: Some(1), capabilities: vec!["session_tools".into(), "soft_interrupt_ids".into(), "runtime_commands".into()] });
+                let event = super::session_connections::connection_presence_pong(id, &client_connections, &swarm_members).await;
+                let json = encode_event(&event);
                 let mut w = writer.lock().await;
                 if w.write_all(json.as_bytes()).await.is_err() {
                     break;
@@ -1683,6 +1553,7 @@ pub(super) async fn handle_client(
                 id,
                 system_prompt,
                 supports_pdf_panels: requested_pdf_panels,
+                supports_user_response: requested_user_response,
                 working_dir: subscribe_working_dir,
                 selfdev,
                 target_session_id,
@@ -1720,6 +1591,7 @@ pub(super) async fn handle_client(
                 // rather than retaining a prior pane's values.
                 continue_on_disconnect = requested_continuation;
                 supports_pdf_panels = requested_pdf_panels;
+                supports_user_response = requested_user_response;
                 active_terminal_env = terminal_env;
                 current_client_instance_id = client_instance_id.clone();
                 {
@@ -1890,6 +1762,11 @@ pub(super) async fn handle_client(
                     // front of the client's GetHistory, delaying first paint.
                     last_available_models_snapshot = None;
                 }
+                super::client_session::apply_or_defer_desktop_response_capability(
+                    &agent,
+                    supports_user_response,
+                )
+                .await;
                 client_subscribed = true;
                 provisional_session = false;
             }
@@ -2040,6 +1917,11 @@ pub(super) async fn handle_client(
                 if client_session_id != pre_resume_session_id {
                     provisional_session = false;
                 }
+                super::client_session::apply_or_defer_desktop_response_capability(
+                    &agent,
+                    supports_user_response,
+                )
+                .await;
                 session_control = refresh_session_control_handle(
                     &client_session_id,
                     &agent,
@@ -3920,30 +3802,8 @@ async fn cancel_processing_message(
     }
 }
 
-fn try_available_models_snapshot(agent: &Arc<Mutex<Agent>>) -> Option<String> {
-    let event = try_available_models_updated_event(agent)?;
-    Some(available_models_dedup_key(&event))
-}
-
-/// Build a names-only copy of an `AvailableModelsUpdated` event by dropping the
-/// per-model route expansion. Used when the fully-routed frame exceeds the live
-/// update size cap so clients still receive fresh model names.
-fn names_only_available_models_event(event: &ServerEvent) -> Option<ServerEvent> {
-    let ServerEvent::AvailableModelsUpdated {
-        provider_name,
-        provider_model,
-        available_models,
-        ..
-    } = event
-    else {
-        return None;
-    };
-    Some(ServerEvent::AvailableModelsUpdated {
-        provider_name: provider_name.clone(),
-        provider_model: provider_model.clone(),
-        available_models: available_models.clone(),
-        available_model_routes: Vec::new(),
-    })
+fn try_available_models_snapshot(agent: &Arc<Mutex<Agent>>) -> Option<Arc<str>> {
+    Some(Arc::clone(&try_available_models_catalog(agent)?.dedup_key))
 }
 
 fn queue_soft_interrupt(

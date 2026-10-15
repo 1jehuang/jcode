@@ -297,13 +297,21 @@ impl McpServerConfig {
             let target = self
                 .url
                 .as_deref()
-                .and_then(|raw| url::Url::parse(raw).ok());
-            let target = target.map(|mut url| {
-                let _ = url.set_username("");
-                let _ = url.set_password(None);
+                .and_then(|raw| match url::Url::parse(raw) {
+                    Ok(url) => Some(url),
+                    Err(_) => {
+                        crate::logging::debug("Cannot display invalid MCP target URL");
+                        None
+                    }
+                });
+            let target = target.and_then(|mut url| {
+                if url.set_username("").is_err() || url.set_password(None).is_err() {
+                    // Never display userinfo from an opaque, unsanitizable URL.
+                    return None;
+                }
                 url.set_query(None);
                 url.set_fragment(None);
-                url.to_string()
+                Some(url.to_string())
             });
             format!(
                 "{} {}",

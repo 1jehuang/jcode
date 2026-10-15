@@ -1017,37 +1017,9 @@ fn login_openai_compatible_flow(
 
 pub use jcode_terminal_prompt::read_secret_line;
 
-/// Terminal implementation of the shared auth flows' login presenter.
-struct TerminalLoginPresenter;
-
-impl crate::auth::login_ui::LoginPresenter for TerminalLoginPresenter {
-    fn qr_section(
-        &self,
-        data: &str,
-        heading: &str,
-        indent: &str,
-        browser_suppressed: bool,
-    ) -> Option<String> {
-        jcode_terminal_prompt::qr::indented_section(data, heading, indent, browser_suppressed)
-    }
-
-    fn read_secret_line(&self) -> Result<String> {
-        jcode_terminal_prompt::read_secret_line()
-    }
-}
-
-pub fn install_terminal_login_presenter() {
-    crate::auth::login_ui::install(Box::new(TerminalLoginPresenter));
-}
-
-fn read_line_trimmed(prompt: &str) -> Result<String> {
-    print!("{}", prompt);
-    io::stdout().flush()?;
-
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    Ok(input.trim().to_string())
-}
+mod presenter;
+pub use presenter::install_terminal_login_presenter;
+use presenter::read_line_trimmed;
 
 fn save_named_env_vars(env_file: &str, vars: &[(&str, String)]) -> Result<()> {
     if !crate::provider_catalog::is_safe_env_file_name(env_file) {

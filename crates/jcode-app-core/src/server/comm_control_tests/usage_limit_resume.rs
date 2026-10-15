@@ -232,9 +232,12 @@ async fn superseded_usage_limit_worker_status(successor_status: Option<&str>) ->
         )
         .await;
     }
-    assert!(crate::server::usage_limit_resume::cancel_pending_resume(
-        worker
-    ));
+    let replacement_ticket = if successor_status == Some("rate_limited") {
+        Some(crate::server::usage_limit_resume::register_pending_resume(worker))
+    } else {
+        assert!(crate::server::usage_limit_resume::cancel_pending_resume(worker));
+        None
+    };
     task_run.await.expect("assigned task runner finished");
 
     let item = |plans: &HashMap<String, VersionedPlan>| {
@@ -248,7 +251,8 @@ async fn superseded_usage_limit_worker_status(successor_status: Option<&str>) ->
     let mut released = false;
     for _ in 0..20_000 {
         if item(&*swarm_plans.read().await).status == "queued"
-            && swarm_members.read().await[worker].status != "rate_limited"
+            && (successor_status == Some("rate_limited")
+                || swarm_members.read().await[worker].status != "rate_limited")
         {
             released = true;
             break;
@@ -264,6 +268,7 @@ async fn superseded_usage_limit_worker_status(successor_status: Option<&str>) ->
     assert_eq!(item.assigned_to, None);
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     let worker_status = swarm_members.read().await[worker].status.clone();
+    drop(replacement_ticket);
     match prev_home {
         Some(prev) => crate::env::set_var("JCODE_HOME", prev),
         None => crate::env::remove_var("JCODE_HOME"),
@@ -289,5 +294,13 @@ async fn superseded_usage_limit_resume_preserves_stopped_successor() {
     assert_eq!(
         superseded_usage_limit_worker_status(Some("stopped")).await,
         "stopped"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn superseded_usage_limit_resume_preserves_rate_limited_replacement() {
+    assert_eq!(
+        superseded_usage_limit_worker_status(Some("rate_limited")).await,
+        "rate_limited"
     );
 }

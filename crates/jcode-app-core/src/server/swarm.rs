@@ -1578,6 +1578,7 @@ pub(super) async fn update_member_status_with_report_tldr(
 }
 
 /// Compare and update under the member write lock, preserving newer turns.
+/// A successor resume owns even an identical `rate_limited` status.
 #[expect(
     clippy::too_many_arguments,
     reason = "status update needs shared swarm and event sinks"
@@ -1638,10 +1639,12 @@ async fn update_member_status_inner(
         report_back_to_session_id,
     ) = {
         let mut members = swarm_members.write().await;
-        if let Some(member) = members
-            .get_mut(session_id)
-            .filter(|member| expected.is_none_or(|expected| member.status == expected))
-        {
+        if let Some(member) = members.get_mut(session_id).filter(|member| {
+            expected.is_none_or(|expected| {
+                member.status == expected
+                    && !super::usage_limit_resume::has_pending_resume(session_id)
+            })
+        }) {
             let previous_status = member.status.clone();
             let status_changed = member.status != status;
             let detail_changed = member.detail != detail;
