@@ -185,6 +185,16 @@ fn scroll_to_bottom_keybinding_is_read_from_config() {
 }
 
 #[test]
+fn scroll_to_bottom_empty_bindings_disable_shortcuts_and_label() {
+    let _env_lock = crate::storage::lock_test_env();
+    let mut keys = crate::tui::keybind::load_scroll_keys();
+    keys.to_bottom.clear();
+    assert!(!keys.is_to_bottom(KeyCode::End, KeyModifiers::CONTROL));
+    assert!(!keys.is_to_bottom(KeyCode::Char('q'), KeyModifiers::ALT));
+    assert_eq!(keys.to_bottom_label(), None);
+}
+
+#[test]
 fn scroll_to_bottom_default_binds_ctrl_end_and_alt_q() {
     let _env_lock = crate::storage::lock_test_env();
     let keys = crate::tui::keybind::load_scroll_keys();
