@@ -3419,6 +3419,7 @@ dependencies = [
  "jcode-pdf",
  "jcode-plan",
  "jcode-productivity-core",
+ "jcode-provider-anthropic-runtime",
  "jcode-provider-core",
  "jcode-schema-dialect",
  "jcode-selfdev-types",
