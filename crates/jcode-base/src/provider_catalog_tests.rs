@@ -5,7 +5,7 @@ fn conifer_static_fallback_preserves_catalog_except_unverified_together_alias() 
     let profile = openai_compatible_profile_by_id("conifer").expect("Conifer profile");
     let models = openai_compatible_profile_static_models(profile);
 
-    assert_eq!(models.len(), 95);
+    assert_eq!(models.len(), 94);
     assert_eq!(models.first().map(String::as_str), Some("claude-fable-5"));
     assert_eq!(models.last().map(String::as_str), Some("gemma-3-27b"));
     assert!(models.iter().any(|model| model == "gpt-5.6-sol"));
@@ -15,6 +15,7 @@ fn conifer_static_fallback_preserves_catalog_except_unverified_together_alias() 
             .iter()
             .any(|model| model == "nemotron-3-ultra-together")
     );
+    assert!(!models.iter().any(|model| model == "hy3-tencent"));
     assert_eq!(
         openai_compatible_profile_context_limit("conifer", "nemotron-3-ultra-together"),
         None,
@@ -36,7 +37,6 @@ fn conifer_context_limits_match_public_catalog_snapshot() {
         ("step-3.7-flash", 262_144),
         ("step-3.7-flash-novita", 262_144),
         ("hy3", 262_144),
-        ("hy3-tencent", 262_144),
         ("hy3-novita", 262_144),
         ("ling-3.0-flash", 131_072),
         ("inkling", 524_288),
