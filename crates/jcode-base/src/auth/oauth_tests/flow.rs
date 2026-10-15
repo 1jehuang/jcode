@@ -637,21 +637,20 @@ async fn claude_exchange_rejects_state_mismatch() -> Result<()> {
 #[test]
 fn openai_docs_reference_current_callback_uri() -> Result<()> {
     // `CARGO_MANIFEST_DIR` is the crate directory (`crates/jcode-base`), but
-    // OAUTH.md / README.md live at the workspace root. Walk up to the workspace
-    // root so this test keeps working after the crate split.
+    // OAUTH.md lives at the workspace root. The README is intentionally a
+    // provider overview, so callback details belong in the canonical guide.
+    // Walk up to the workspace root after the crate split.
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let repo_root = manifest_dir
         .ancestors()
-        .find(|dir| dir.join("OAUTH.md").exists() && dir.join("README.md").exists())
+        .find(|dir| dir.join("OAUTH.md").exists())
         .unwrap_or(manifest_dir);
     let expected = openai::default_redirect_uri();
-    for relative in ["OAUTH.md", "README.md"] {
-        let content = std::fs::read_to_string(repo_root.join(relative))?;
-        assert!(
-            content.contains(&expected),
-            "{relative} should mention current OpenAI callback URI {expected}"
-        );
-    }
+    let content = std::fs::read_to_string(repo_root.join("OAUTH.md"))?;
+    assert!(
+        content.contains(&expected),
+        "OAUTH.md should mention current OpenAI callback URI {expected}"
+    );
     Ok(())
 }
 
