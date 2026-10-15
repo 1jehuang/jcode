@@ -1,5 +1,31 @@
 use super::*;
 
+pub(in crate::tui::app) struct RestoredReloadInput {
+    pub input: String,
+    pub cursor: usize,
+    pub pending_images: Vec<(String, String)>,
+    pub image_markers: super::super::input_images::InputImageMarkers,
+    pub submit_on_restore: bool,
+    pub queued_messages: Vec<String>,
+    pub queued_commands: Vec<String>,
+    pub hidden_queued_system_messages: Vec<String>,
+    pub startup_status_notice: Option<String>,
+    pub startup_display_message: Option<(String, String)>,
+    pub interleave_message: Option<String>,
+    pub pending_soft_interrupts: Vec<String>,
+    pub pending_soft_interrupt_resend: Option<Vec<String>>,
+    pub rate_limit_pending_message: Option<super::super::PendingRemoteMessage>,
+    pub rate_limit_reset: Option<Instant>,
+    pub observe_mode_enabled: bool,
+    pub observe_page_markdown: String,
+    pub observe_page_updated_at_ms: u64,
+    pub split_view_enabled: bool,
+    pub todos_view_enabled: bool,
+    pub todo_confidence_spike_challenged: bool,
+    pub last_todo_ownership_fingerprint: Option<String>,
+    pub final_response_todo_fingerprint: Option<String>,
+}
+
 impl App {
     pub(in crate::tui::app) fn apply_restored_reload_input(
         &mut self,
@@ -8,6 +34,7 @@ impl App {
         self.input = restored.input;
         self.cursor_pos = restored.cursor;
         self.pending_images = restored.pending_images;
+        self.input_image_markers = restored.image_markers;
         self.ensure_input_image_markers();
         self.submit_input_on_startup = restored.submit_on_restore
             && (!self.input.is_empty() || !self.pending_images.is_empty());

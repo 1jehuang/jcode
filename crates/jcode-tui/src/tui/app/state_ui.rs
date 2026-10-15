@@ -3,30 +3,7 @@ use super::*;
 use crate::tui::ui::tools_ui;
 use crate::tui::{TuiState, backend};
 
-pub(super) struct RestoredReloadInput {
-    pub input: String,
-    pub cursor: usize,
-    pub pending_images: Vec<(String, String)>,
-    pub submit_on_restore: bool,
-    pub queued_messages: Vec<String>,
-    pub queued_commands: Vec<String>,
-    pub hidden_queued_system_messages: Vec<String>,
-    pub startup_status_notice: Option<String>,
-    pub startup_display_message: Option<(String, String)>,
-    pub interleave_message: Option<String>,
-    pub pending_soft_interrupts: Vec<String>,
-    pub pending_soft_interrupt_resend: Option<Vec<String>>,
-    pub rate_limit_pending_message: Option<super::PendingRemoteMessage>,
-    pub rate_limit_reset: Option<Instant>,
-    pub observe_mode_enabled: bool,
-    pub observe_page_markdown: String,
-    pub observe_page_updated_at_ms: u64,
-    pub split_view_enabled: bool,
-    pub todos_view_enabled: bool,
-    pub todo_confidence_spike_challenged: bool,
-    pub last_todo_ownership_fingerprint: Option<String>,
-    pub final_response_todo_fingerprint: Option<String>,
-}
+pub(super) use super::tui_lifecycle::reload_input::RestoredReloadInput;
 
 impl App {
     pub(super) fn append_live_inline_images(
@@ -338,6 +315,7 @@ impl App {
                     "media_type": media_type,
                     "data": data,
                 })).collect::<Vec<_>>(),
+                "image_markers": if resume_prompt.is_some() { super::input_images::InputImageMarkers::default() } else { self.input_image_markers.clone() },
                 "submit_on_restore": resume_prompt.is_some(),
                 "queued_messages": queued_messages,
                 "queued_commands": self.queued_commands,
@@ -590,6 +568,7 @@ impl App {
                 input,
                 cursor,
                 pending_images,
+                image_markers: super::input_images::InputImageMarkers::from_saved(&value),
                 submit_on_restore,
                 queued_messages,
                 queued_commands,
@@ -625,6 +604,7 @@ impl App {
             input: input.to_string(),
             cursor,
             pending_images: Vec::new(),
+            image_markers: Default::default(),
             submit_on_restore: false,
             queued_messages: Vec::new(),
             queued_commands: Vec::new(),

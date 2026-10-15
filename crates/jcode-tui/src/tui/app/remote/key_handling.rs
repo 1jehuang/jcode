@@ -1863,6 +1863,7 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
             // parent's next message.
             let images = std::mem::take(&mut app.pending_images);
             let prepared = input::PreparedInput {
+                image_markers: Default::default(),
                 raw_input: prompt.to_string(),
                 expanded: prompt.to_string(),
                 images,

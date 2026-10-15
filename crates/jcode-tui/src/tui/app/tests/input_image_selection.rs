@@ -1,4 +1,5 @@
 // Real clipboard images must track their visible selection through edits and undo.
+include!("input_image_provenance.rs");
 fn paste_selection_test_png(app: &mut App, value: u8) -> String {
     use base64::Engine;
     let image = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
@@ -173,18 +174,18 @@ fn image_typing_inside_marker_drops_payload_and_undo_restores_it() {
 fn image_renumbering_before_caret_preserves_unicode_and_payload_order() {
     let mut app = create_test_app();
     let mut images = Vec::new();
-    for value in 1..=11 {
+    for value in 1..=10 {
         images.push((
             "image/png".to_string(),
             paste_selection_test_png(&mut app, value),
         ));
         super::input::insert_input_text(&mut app, " ");
     }
-    // Move image 11 before image 1 to exercise renumbering before the caret.
-    app.input = format!(
-        "[image 11] é {}",
-        (1..=10).map(|n| format!("[image {n}]")).collect::<String>()
-    );
+    // Insert image 11 before image 1 through the real paste path, so its
+    // provenance moves with the edit rather than being inferred from text.
+    app.cursor_pos = 0;
+    images.push(("image/png".to_string(), paste_selection_test_png(&mut app, 11)));
+    super::input::insert_input_text(&mut app, " é ");
     let at = app.input.find("[image 1]").unwrap();
     app.set_input_selection(at, at + "[image 1]".len());
     app.handle_key(KeyCode::Delete, KeyModifiers::empty())
@@ -222,6 +223,7 @@ fn image_restored_prepared_draft_keeps_png_when_editing_markerless_text() {
         super::remote::restore_prepared_remote_input(
             &mut app,
             super::input::PreparedInput {
+            image_markers: Default::default(),
                 raw_input: raw.to_string(),
                 expanded: raw.to_string(),
                 images: vec![("image/png".to_string(), png.clone())],

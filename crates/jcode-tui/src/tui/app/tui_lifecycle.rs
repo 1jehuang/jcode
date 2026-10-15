@@ -1,7 +1,6 @@
 #[path = "tui_lifecycle_reload_input.rs"]
-mod reload_input;
+pub(super) mod reload_input;
 
-use super::state_ui::RestoredReloadInput;
 use super::*;
 use crate::tui::{backend, keybind};
 
@@ -11,11 +10,9 @@ impl App {
     /// The parsed bindings are cached on `App` for cheap per-keystroke lookup,
     /// so without this poll a config.toml keybinding edit would only take
     /// effect after a restart. Called from the idle tick in both local and
-    /// remote run loops, and again immediately before dispatching a key press
-    /// so an edit lands on the very next keystroke even when the run loop is
-    /// sitting at the 5s deep-idle cadence. The generation check makes the
-    /// no-change path a single atomic load. Returns true when bindings were
-    /// re-parsed.
+    /// remote run loops and before each key press, including at the 5s idle
+    /// cadence. The generation check is one atomic load when unchanged.
+    /// Returns true when bindings were re-parsed.
     pub(super) fn refresh_keybindings_if_config_reloaded(&mut self) -> bool {
         // config() performs the throttled file-fingerprint staleness check and
         // bumps the reload generation when config.toml changed on disk.
@@ -461,6 +458,7 @@ impl App {
             cloud_handoff_requested: None,
             pasted_contents: Vec::new(),
             pending_images: Vec::new(),
+            input_image_markers: Default::default(),
             route_next_prompt_to_new_session: false,
             submit_input_on_startup: false,
             startup_submit_deferred_reason: None,
@@ -934,6 +932,7 @@ impl App {
             cloud_handoff_requested: None,
             pasted_contents: Vec::new(),
             pending_images: Vec::new(),
+            input_image_markers: Default::default(),
             route_next_prompt_to_new_session: false,
             submit_input_on_startup: false,
             startup_submit_deferred_reason: None,
