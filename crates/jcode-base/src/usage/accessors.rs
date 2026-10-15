@@ -496,10 +496,16 @@ pub async fn revalidate_openai_account_exhaustion(label: &str) {
         }
         checked.insert(label.to_string(), Instant::now());
     }
-    let Some(account) = auth::codex::list_accounts()
-        .ok()
-        .and_then(|accounts| accounts.into_iter().find(|account| account.label == label))
-    else {
+    let accounts = match auth::codex::list_accounts() {
+        Ok(accounts) => accounts,
+        Err(_) => {
+            crate::logging::warn(
+                "Cannot revalidate OpenAI quota because saved accounts could not be read",
+            );
+            return;
+        }
+    };
+    let Some(account) = accounts.into_iter().find(|account| account.label == label) else {
         return;
     };
     // Unit tests without a mock usage server never reach the real endpoint.
@@ -519,7 +525,17 @@ pub async fn revalidate_openai_account_exhaustion(label: &str) {
         Some(label),
     );
     // Never hold a turn hostage to a slow usage endpoint.
-    let _ = tokio::time::timeout(Duration::from_secs(8), fetch).await;
+    match tokio::time::timeout(Duration::from_secs(8), fetch).await {
+        Ok(report) if report.error.is_some() => {
+            crate::logging::info(
+                "OpenAI quota revalidation could not confirm availability; keeping account markers",
+            );
+        }
+        Err(_) => {
+            crate::logging::info("OpenAI quota revalidation timed out; keeping account markers");
+        }
+        Ok(_) => {}
+    }
 }
 
 /// Treat `label` as just rechecked, so its throttle skips the next recheck.

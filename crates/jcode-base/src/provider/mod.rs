@@ -496,20 +496,8 @@ impl MultiProvider {
                     bound_label
                 );
             }
-            if active == ActiveProvider::OpenAI
-                && (models::provider_unavailability_detail_for_account_label(
-                    key,
-                    Some(&bound_label),
-                )
-                .is_some()
-                    || account_failover::account_exhausted(
-                        jcode_provider_core::AccountProviderKind::OpenAi,
-                        &bound_label,
-                    )
-                    .is_some())
-            {
-                crate::usage::revalidate_openai_account_exhaustion(&bound_label).await;
-            }
+            self.revalidate_marked_openai_account(active, Some(&bound_label))
+                .await;
             if let Some(reason) =
                 models::provider_unavailability_detail_for_account_label(key, Some(&bound_label))
             {
@@ -642,20 +630,8 @@ impl MultiProvider {
 
             let session_label = account_failover::account_kind(candidate)
                 .and_then(|kind| self.session_account_label(kind));
-            // A usage-limit mark holds until the reset the provider reported.
-            // If the OpenAI account was reset early, recheck live usage first
-            // so a resume is not skipped against a stale mark.
-            if candidate == ActiveProvider::OpenAI
-                && let Some(label) = session_label.as_deref()
-                && (provider_unavailability_detail_for_label(key, label).is_some()
-                    || account_failover::account_exhausted(
-                        jcode_provider_core::AccountProviderKind::OpenAi,
-                        label,
-                    )
-                    .is_some())
-            {
-                crate::usage::revalidate_openai_account_exhaustion(label).await;
-            }
+            self.revalidate_marked_openai_account(candidate, session_label.as_deref())
+                .await;
             let cached_unavailability = match session_label.as_deref() {
                 Some(label) => provider_unavailability_detail_for_label(key, label),
                 None => provider_unavailability_detail_for_account(key),
@@ -787,17 +763,6 @@ impl MultiProvider {
         }
 
         Err(self.no_provider_available_error(&notes))
-    }
-
-    /// Record which login/credential just served a request in the
-    /// cross-provider activity ledger (drives `/usage` recency sorting).
-    /// Spawned off-thread: the ledger does file IO and a request was already
-    /// accepted, so this must never block or fail the completion path.
-    fn record_provider_activity(&self, provider: ActiveProvider) {
-        let source_key = self.activity_source_key(provider);
-        tokio::task::spawn_blocking(move || {
-            crate::provider_activity::record_use(&source_key);
-        });
     }
 
     /// Ledger source key for the credential `provider` will use right now.
