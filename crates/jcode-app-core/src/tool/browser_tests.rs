@@ -1,6 +1,26 @@
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 use super::*;
 
+#[test]
+fn best_effort_bridge_diagnostics_never_persist_page_payloads() {
+    let secret = "https://private.example/?token=secret-token page text and script contents";
+    let bridge = anyhow::anyhow!(secret.to_string()).context("getContent failed");
+    let transport = anyhow::Error::new(std::io::Error::other(secret))
+        .context(format!("getActiveTab failed: {secret}"));
+    let json = anyhow::Error::new(
+        serde_json::from_str::<Value>("not json with secret-token").unwrap_err(),
+    )
+    .context(secret);
+    for error in [bridge, transport, json] {
+        let diagnostic = browser_error_diagnostic(&error);
+        assert!(!diagnostic.contains("secret-token"), "{diagnostic}");
+        assert!(!diagnostic.contains("private.example"), "{diagnostic}");
+        assert!(!diagnostic.contains("page text"), "{diagnostic}");
+        assert!(!diagnostic.contains("script contents"), "{diagnostic}");
+        assert!(diagnostic.contains("failure") || diagnostic.contains("failed"));
+    }
+}
+
 #[cfg(unix)]
 #[path = "browser_session_tests.rs"]
 mod browser_session_tests;

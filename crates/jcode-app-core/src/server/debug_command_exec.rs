@@ -640,6 +640,25 @@ pub(super) async fn execute_debug_command(
         return Ok(serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string()));
     }
 
+    if trimmed == "catalog_cache:stats" {
+        return Ok(super::available_models_cache::stats().to_string());
+    }
+    if trimmed == "catalog_cache:clear" {
+        super::available_models_cache::invalidate();
+        return Ok(super::available_models_cache::stats().to_string());
+    }
+    if trimmed == "catalog_cache:reannounce" {
+        crate::bus::Bus::global().publish(crate::bus::BusEvent::ModelsUpdated);
+        return Ok(super::available_models_cache::stats().to_string());
+    }
+    if trimmed == "catalog_cache:invalidate" {
+        super::available_models_cache::invalidate();
+        // Reannounce without provider refresh or network I/O, so equivalent
+        // connected clients exercise the same catalog broadcast path.
+        crate::bus::Bus::global().publish(crate::bus::BusEvent::ModelsUpdated);
+        return Ok(super::available_models_cache::stats().to_string());
+    }
+
     if trimmed == "available_models" {
         let agent = agent.lock().await;
         let models = agent.available_models_display();

@@ -121,6 +121,7 @@ fn run_demo() {
                     ApiEvent::Attached {
                         session: jcode_harness_api::SessionInfo {
                             edit_stats: None,
+                            user_connected: false,
                             parent_session_id: None,
                             agent_label: None,
                             swarm_status: None,

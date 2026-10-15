@@ -29,6 +29,54 @@ mod concurrency;
 
 struct MockProvider;
 
+#[tokio::test]
+async fn user_response_capability_does_not_block_busy_attachment() {
+    let _env = crate::storage::lock_test_env();
+    let agent = Arc::new(Mutex::new(Agent::new(
+        Arc::new(MockProvider),
+        Registry::empty(),
+    )));
+    let busy = agent.lock().await;
+    let registry = busy.registry();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        super::apply_or_defer_desktop_response_capability(&agent, true),
+    )
+    .await
+    .expect("busy attachment must not wait for the running turn");
+    assert!(
+        !registry
+            .tool_names()
+            .await
+            .iter()
+            .any(|n| n == "user_response")
+    );
+    drop(busy);
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            if registry
+                .tool_names()
+                .await
+                .iter()
+                .any(|n| n == "user_response")
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("capability applied after the turn releases the lock");
+    super::apply_or_defer_desktop_response_capability(&agent, false).await;
+    assert!(
+        !registry
+            .tool_names()
+            .await
+            .iter()
+            .any(|n| n == "user_response")
+    );
+}
+
 struct IdlePrewarmProvider(Arc<tokio::sync::Notify>, bool);
 
 #[async_trait]
