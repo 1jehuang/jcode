@@ -36,9 +36,10 @@ class BuildPortabilityTests(unittest.TestCase):
             PATH=str(self.root / "bin") + os.pathsep + os.environ["PATH"],
             JCODE_REMOTE_CONFIG=str(self.root / "absent"), JCODE_REMOTE_CARGO="0",
             JCODE_CARGO_NICED="1", JCODE_BUILD_GIT_HASH="fixture",
-            JCODE_SCCACHE="off", JCODE_BUILD_JOBS="2", JCODE_FAST_LINKER="off",
+            JCODE_SCCACHE="off", JCODE_BUILD_JOBS="2", JCODE_FAST_LINKER="system",
             JCODE_RUST_ACTION_LOG_PATH=str(self.root / "actions.jsonl"),
             JCODE_CARGO_GATE_PATH=str(self.root / "gate.lock"),
+            LC_ALL="C",
         )
         self.script("cargo", 'printf "%s\\n" "${RUSTC_WRAPPER-UNSET}" > "$PROBE_WRAPPER"\n'
                     'printf "%s\\n" "${CARGO_BUILD_JOBS-UNSET}" > "$PROBE_JOBS"\n'
@@ -60,6 +61,36 @@ class BuildPortabilityTests(unittest.TestCase):
                               cwd=self.root, env=dict(self.env, **env),
                               capture_output=True, text=True, timeout=30)
 
+    def use_linux_x86_64_path(self):
+        # Select script branches only. Cargo/rustc still run on the real host.
+        self.script("uname", 'case "$1" in\n'
+                    '  -s) echo Linux ;;\n'
+                    '  -m) echo x86_64 ;;\n'
+                    '  *) exit 1 ;;\nesac\n')
+
+    def assert_gate_open_failure(self):
+        result = self.dev("check", JCODE_CARGO_GATE_PATH=str(self.root))
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        self.assertIn(str(self.root) + ": Is a directory", result.stderr)
+        self.assertNotIn("unsupported JCODE_FAST_LINKER", result.stderr)
+        self.assertFalse((self.root / "wrapper").exists())
+        self.assertFalse((self.root / "flock.log").exists())
+        record = json.loads((self.root / "actions.jsonl").read_text())
+        self.assertEqual(record["exit_code"], result.returncode)
+
+    def test_controlled_linux_path_reaches_cargo_with_system_linker(self):
+        self.use_linux_x86_64_path()
+        setup = self.dev("--print-setup")
+        self.assertEqual(setup.returncode, 0, setup.stderr)
+        self.assertIn("linker_mode=system", setup.stdout)
+        result = self.dev("check")
+        self.assertEqual((result.returncode, "cargo-ran" in result.stdout), (0, True), result.stderr)
+        self.assertEqual((self.root / "flock.log").read_text().strip(), "-n 9")
+
+    def test_controlled_linux_gate_open_failure_is_not_linker_rejection(self):
+        self.use_linux_x86_64_path()
+        self.assert_gate_open_failure()
+
     def test_gate_reaches_cargo(self):
         result = self.dev("check")
         self.assertEqual((result.returncode, "cargo-ran" in result.stdout), (0, True), result.stderr)
@@ -76,9 +107,7 @@ class BuildPortabilityTests(unittest.TestCase):
         self.assertEqual(json.loads((self.root / "actions.jsonl").read_text())["exit_code"], 42)
 
     def test_gate_open_failure_does_not_report_success(self):
-        result = self.dev("check", JCODE_CARGO_GATE_PATH=str(self.root))
-        self.assertNotEqual(result.returncode, 0, result.stderr)
-        self.assertFalse((self.root / "wrapper").exists())
+        self.assert_gate_open_failure()
 
     def test_explicit_wrapper_is_preserved(self):
         for wrapper in ["/custom/sccache", "/custom/wrapper", ""]:

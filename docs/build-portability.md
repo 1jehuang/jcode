@@ -51,8 +51,13 @@ bash scripts/test_dev_cargo_jobs.sh
 The Python suite copies only the scripts and Cargo config into a temporary,
 dependency-free crate. It checks real Cargo wrapper selection, explicit POSIX
 opt-in, shell gate behavior, override precedence, and exit-status propagation.
-It never builds the Jcode workspace or contacts a remote builder. Gate policy
-checks use a stub `flock`, with an additional real-lock check when available.
+It never builds the Jcode workspace or contacts a remote builder. The fixture
+uses the supported `JCODE_FAST_LINKER=system` setting. Controlled `uname` fixtures
+exercise Linux x86_64 linker-policy branches on any POSIX host. Gate-open checks
+require the actual directory-open error and matching failure log, so an earlier
+linker rejection cannot make them pass. These branch checks are not native Linux
+execution. Gate policy checks use a stub `flock`, with an additional real-lock
+check when available.
 The compiler wrapper remains POSIX shell. `dev_cargo.sh` requires Bash, not `sh`.
 Native Windows execution needs a separate Windows host and is not established
 by the POSIX fixture results.
