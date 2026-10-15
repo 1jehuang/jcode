@@ -891,7 +891,7 @@ impl App {
         } else if cmd == "input" {
             format!(
                 "input: {:?} cursor={} file_chips={:?}",
-                self.input, self.cursor_pos, &self.file_chips
+                self.input, self.cursor_pos, self.file_chips
             )
         } else if cmd.starts_with("set_input:") {
             let new_input = cmd.strip_prefix("set_input:").unwrap_or("");
