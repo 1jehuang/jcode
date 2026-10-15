@@ -43,8 +43,10 @@ pub fn read_secret_line() -> Result<String> {
     struct RawModeGuard(bool);
     impl Drop for RawModeGuard {
         fn drop(&mut self) {
-            if self.0 {
-                let _ = crossterm::terminal::disable_raw_mode();
+            if self.0
+                && let Err(error) = crossterm::terminal::disable_raw_mode()
+            {
+                eprintln!("Failed to restore terminal input mode: {error}");
             }
         }
     }
