@@ -94,6 +94,12 @@ pub(super) async fn openai_access_token(
     credentials: &Arc<RwLock<CodexCredentials>>,
     account_pin: &AccountPinSlot,
 ) -> anyhow::Result<String> {
+    // Invalid legacy email-only pins must fail closed, not use a cached bearer
+    // or silently follow the default workspace. Missing modern pins retain the
+    // existing explicit removal/default-account behavior.
+    if account_pin.get().is_some() {
+        load_scoped_openai_oauth_credentials(account_pin)?;
+    }
     sync_with_stored_credentials(credentials, account_pin).await;
     let (access_token, refresh_token, needs_refresh) = {
         let tokens = credentials.read().await;

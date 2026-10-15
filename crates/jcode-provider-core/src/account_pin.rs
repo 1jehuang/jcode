@@ -10,8 +10,9 @@ use std::sync::{Arc, RwLock};
 /// Stable account pin: a label plus an identity so relabeling (labels are
 /// positional) cannot silently move a session to another subscription.
 ///
-/// `identity` is the account email, else the OpenAI account id, else a short
-/// sha256 prefix of the refresh token captured when the pin was made.
+/// OpenAI uses its workspace account id first, then email. Other providers use
+/// email first. Without either, identity is a short sha256 prefix of the
+/// refresh token captured when the pin was made.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AccountPin {
     pub label: String,
