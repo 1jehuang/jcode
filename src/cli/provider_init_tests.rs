@@ -126,10 +126,6 @@ fn novita_cli_aliases_select_the_builtin_profile() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[expect(
-    clippy::await_holding_lock,
-    reason = "test env locks intentionally stay held across provider init to isolate process-global auth env"
-)]
 async fn explicit_anthropic_api_choice_pins_api_key_over_available_oauth() {
     let _guard = lock_env();
     let dir = TempDir::new().expect("temp dir");
@@ -196,10 +192,6 @@ async fn explicit_anthropic_api_choice_pins_api_key_over_available_oauth() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[expect(
-    clippy::await_holding_lock,
-    reason = "test env locks intentionally stay held across provider init to isolate process-global auth env"
-)]
 async fn explicit_openai_api_choice_overrides_configured_compatible_default() {
     let _guard = lock_env();
     let dir = TempDir::new().expect("temp dir");
@@ -805,10 +797,6 @@ fn apply_login_provider_profile_env_preserves_compatible_profile_for_auto_spawn(
 }
 
 #[tokio::test]
-#[expect(
-    clippy::await_holding_lock,
-    reason = "test env locks intentionally stay held across provider init to isolate process-global runtime env"
-)]
 async fn init_provider_for_ollama_reapplies_local_compat_runtime_env_after_disabling_subscription_mode()
  {
     let _guard = lock_env();
@@ -889,10 +877,6 @@ async fn init_provider_for_ollama_reapplies_local_compat_runtime_env_after_disab
 }
 
 #[tokio::test]
-#[expect(
-    clippy::await_holding_lock,
-    reason = "test env locks intentionally stay held across provider init to isolate process-global runtime env"
-)]
 async fn auto_provider_uses_config_default_named_no_auth_provider() {
     let _guard = lock_env();
     let dir = TempDir::new().expect("temp dir");
@@ -987,10 +971,6 @@ id = "llama3.1:8b"
 }
 
 #[tokio::test]
-#[expect(
-    clippy::await_holding_lock,
-    reason = "test env locks intentionally stay held across provider init to isolate process-global auth env"
-)]
 async fn auto_provider_noninteractive_skips_untrusted_external_auth_instead_of_blocking() {
     let _guard = lock_env();
     let dir = TempDir::new().expect("temp dir");
