@@ -519,11 +519,7 @@ impl CompactionManager {
         }
 
         // 5. Cooldown: too soon after the last compaction.
-        if self.turns_since_last_compact < cfg.min_turns_between_compactions {
-            return true;
-        }
-
-        false
+        self.turns_since_last_compact < cfg.min_turns_between_compactions
     }
 
     // ── Proactive mode trigger ──────────────────────────────────────────────

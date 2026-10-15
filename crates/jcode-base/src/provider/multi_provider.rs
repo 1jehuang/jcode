@@ -230,13 +230,13 @@ impl MultiProvider {
                     .collect();
                 let first = *group.first()?;
                 let current_model = self.model();
-                if !context_only && first.1 == from {
-                    if let Some(preserved) = group
+                if !context_only
+                    && first.1 == from
+                    && let Some(preserved) = group
                         .iter()
                         .find(|candidate| candidate_model(candidate) == current_model)
-                    {
-                        return Some(*preserved);
-                    }
+                {
+                    return Some(*preserved);
                 }
                 if let Some(configured) = configured_model.as_deref()
                     && let Some(preferred) = group
@@ -252,13 +252,11 @@ impl MultiProvider {
                 if let Some(preferred) = crate::auth::lifecycle::preferred_model_for_provider(
                     Self::provider_key(first.1),
                     &models,
-                ) {
-                    if let Some(flagship) = group
-                        .iter()
-                        .find(|candidate| candidate_model(candidate) == preferred)
-                    {
-                        return Some(*flagship);
-                    }
+                ) && let Some(flagship) = group
+                    .iter()
+                    .find(|candidate| candidate_model(candidate) == preferred)
+                {
+                    return Some(*flagship);
                 }
                 // Capacity is eligibility, not quality. Never pick an unknown
                 // model by maximum context, catalog position or lexical order.
@@ -409,16 +407,20 @@ fn saved_account_can_serve_model(provider: &str, label: &str, model: &str) -> bo
 
 fn saved_account_labels(provider: &str) -> Vec<String> {
     match provider {
-        "openai" => crate::auth::codex::list_accounts()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|a| a.label)
-            .collect(),
-        "claude" => crate::auth::claude::list_accounts()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|a| a.label)
-            .collect(),
+        "openai" => match crate::auth::codex::list_accounts() {
+            Ok(accounts) => accounts.into_iter().map(|account| account.label).collect(),
+            Err(error) => {
+                crate::logging::warn(&format!("Cannot list saved openai accounts: {error}"));
+                Vec::new()
+            }
+        },
+        "claude" => match crate::auth::claude::list_accounts() {
+            Ok(accounts) => accounts.into_iter().map(|account| account.label).collect(),
+            Err(error) => {
+                crate::logging::warn(&format!("Cannot list saved claude accounts: {error}"));
+                Vec::new()
+            }
+        },
         _ => Vec::new(),
     }
 }
