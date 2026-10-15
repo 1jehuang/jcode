@@ -477,6 +477,7 @@ pub(super) fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
     let temp = tempfile::tempdir().expect("tempdir");
     let env_guard = EnvSnapshotGuard::capture();
     crate::env::set_var("JCODE_HOME", temp.path());
+    crate::env::remove_var("JCODE_NAMED_PROVIDER_PROFILE");
     // Preserve inherited telemetry opt-out env. In this crate telemetry-core is
     // a dependency, so cfg(test) does not stub its HTTP delivery path; inherited
     // opt-out must keep blocking delivery for tests that exercise onboarding.
