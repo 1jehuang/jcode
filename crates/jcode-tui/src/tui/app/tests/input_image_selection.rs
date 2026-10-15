@@ -224,6 +224,8 @@ fn image_restored_prepared_draft_keeps_png_when_editing_markerless_text() {
             &mut app,
             super::input::PreparedInput {
             image_markers: Default::default(),
+            routing_input: None,
+            pasted_contents: Vec::new(),
                 raw_input: raw.to_string(),
                 expanded: raw.to_string(),
                 images: vec![("image/png".to_string(), png.clone())],
