@@ -1,0 +1,67 @@
+event: delta_encoding
+data: "v1"
+
+data: {"type":"resume_conversation_token"}
+
+event: delta
+data: {"p":"","o":"add","v":{"message":{"id":"fd4b8b50-6a49-41de-8add-30d8cb6af01c","author":{"role":"user","name":null,"metadata":{}},"create_time":1792059387.779,"update_time":null,"content":{"content_type":"text","parts":["Write a 120-word paragraph about rivers, then call no tools."]},"status":"finished_successfully","end_turn":null,"weight":1.0,"metadata":{},"recipient":"all","channel":null},"conversation_id":"conv","error":null,"error_code":null},"c":0}
+
+event: delta
+data: {"v":{"message":{"id":"65cea6d6-ca72-48f2-a59b-6383423e901b","author":{"role":"system","name":null,"metadata":{}},"create_time":null,"update_time":null,"content":{"content_type":"text","parts":[""]},"status":"finished_successfully","end_turn":true,"weight":0.0,"metadata":{"is_visually_hidden_from_conversation":true},"recipient":"all","channel":null},"conversation_id":"conv","error":null,"error_code":null},"c":1}
+
+event: delta
+data: {"v":{"message":{"id":"f3f81129-619d-4436-aa27-18060db4fd17","author":{"role":"system","name":null,"metadata":{}},"create_time":null,"update_time":null,"content":{"content_type":"text","parts":[""]},"status":"finished_successfully","end_turn":true,"weight":0.0,"metadata":{"is_visually_hidden_from_conversation":true},"recipient":"all","channel":null},"conversation_id":"conv","error":null,"error_code":null},"c":2}
+
+event: delta
+data: {"v":{"message":{"id":"b97d719b-62b6-4951-a97f-428af2308708","author":{"role":"system","name":null,"metadata":{}},"create_time":null,"update_time":null,"content":{"content_type":"text","parts":[""]},"status":"finished_successfully","end_turn":true,"weight":0.0,"metadata":{"is_visually_hidden_from_conversation":true},"recipient":"all","channel":null},"conversation_id":"conv","error":null,"error_code":null},"c":3}
+
+event: delta
+data: {"v":{"message":{"id":"072706d4-97db-48d6-b9f9-775a46248670","author":{"role":"system","name":null,"metadata":{}},"create_time":1792059388.472883,"update_time":null,"content":{"content_type":"text","parts":[""]},"status":"finished_successfully","end_turn":null,"weight":1.0,"metadata":{"is_visually_hidden_from_conversation":true},"recipient":"all","channel":null},"conversation_id":"conv","error":null,"error_code":null},"c":4}
+
+event: delta
+data: {"v":{"message":{"id":"0247cb91-f267-423f-bda4-311e343f4a01","author":{"role":"system","name":null,"metadata":{}},"create_time":1792059388.4732385,"update_time":null,"content":{"content_type":"text","parts":[""]},"status":"finished_successfully","end_turn":null,"weight":1.0,"metadata":{"is_visually_hidden_from_conversation":true},"recipient":"all","channel":null},"conversation_id":"conv","error":null,"error_code":null},"c":5}
+
+event: delta
+data: {"v":{"message":{"id":"5963eda2-995d-4ae3-bdb7-b7cf3583b8c2","author":{"role":"system","name":null,"metadata":{}},"create_time":null,"update_time":null,"content":{"content_type":"text","parts":[""]},"status":"finished_successfully","end_turn":true,"weight":0.0,"metadata":{"is_visually_hidden_from_conversation":true},"recipient":"all","channel":null},"conversation_id":"conv","error":null,"error_code":null},"c":6}
+
+event: delta
+data: {"v":{"message":{"id":"821e5ebe-242d-4524-84c9-7335ad40405c","author":{"role":"system","name":null,"metadata":{}},"create_time":null,"update_time":null,"content":{"content_type":"text","parts":[""]},"status":"finished_successfully","end_turn":null,"weight":1.0,"metadata":{"is_visually_hidden_from_conversation":true},"recipient":"all","channel":null},"conversation_id":"conv","error":null,"error_code":null},"c":7}
+
+data: {"type":"message_marker","conversation_id":"conv","message_id":"27be523d-113e-4017-8725-e7b689d02272","marker":"user_visible_token","event":"first"}
+
+data: {"type":"message_marker","conversation_id":"conv","message_id":"27be523d-113e-4017-8725-e7b689d02272","marker":"final_channel_token","event":"first"}
+
+event: delta
+data: {"v":{"message":{"id":"27be523d-113e-4017-8725-e7b689d02272","author":{"role":"assistant","name":null,"metadata":{}},"create_time":1792059388.640239,"update_time":null,"content":{"content_type":"text","parts":["Rivers are among"]},"status":"in_progress","end_turn":null,"weight":1.0,"metadata":{},"recipient":"all","channel":"final"},"conversation_id":"conv","error":null,"error_code":null},"c":8}
+
+event: delta
+data: {"o":"patch","v":[{"p":"/message/content/parts/0","o":"append","v":" the most beautiful and important natural features on Earth. They flow through mountains, forests, valleys, and cities, providing fresh"}]}
+
+event: delta
+data: {"v":[{"p":"/message/content/parts/0","o":"append","v":" water for humans, animals, and plants. Rivers play a vital role in agriculture"}]}
+
+event: delta
+data: {"v":[{"p":"/message/content/parts/0","o":"append","v":" by supplying water for irrigation and helping farmers grow crops"}]}
+
+event: delta
+data: {"v":[{"p":"/message/content/parts/0","o":"append","v":". They also support diverse ecosystems, offering habitats for fish, birds, and other wildlife. Throughout history, civilizations have developed near rivers because they provide transportation, food, and opportunities for trade. Famous rivers such as the Nile, Amazon"}]}
+
+event: delta
+data: {"v":[{"p":"/message/content/parts/0","o":"append","v":", and Ganges hold great cultural and environmental significance. However, pollution, deforestation, and climate change threaten many rivers today. Protecting rivers through conservation and"}]}
+
+event: delta
+data: {"v":[{"p":"/message/content/parts/0","o":"append","v":" responsible water management is essential for maintaining biodiversity, supporting communities, and ensuring a healthier planet for future generations."}]}
+
+event: delta
+data: {"v":[{"p":"/message/status","o":"replace","v":"finished_successfully"},{"p":"/message/end_turn","o":"replace","v":true},{"p":"/message/metadata","o":"append","v":{"is_complete":true,"can_save":true,"search_result_groups":[],"finish_details":{"type":"stop","stop_tokens":[200002]}}}]}
+
+data: {"type":"message_marker","conversation_id":"conv","message_id":"27be523d-113e-4017-8725-e7b689d02272","marker":"last_token","event":"last"}
+
+data: {"type":"server_ste_metadata"}
+
+data: {"type":"message_stream_complete","conversation_id":"conv"}
+
+data: {"type":"conversation_detail_metadata"}
+
+data: [DONE]
+

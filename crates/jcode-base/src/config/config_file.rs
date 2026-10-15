@@ -106,6 +106,15 @@ impl Config {
         Ok(())
     }
 
+    /// Persist a validated Copilot login hostname without changing other settings.
+    pub fn set_copilot_enterprise_url(host: Option<&str>) -> anyhow::Result<()> {
+        let endpoints = crate::auth::copilot::CopilotEndpoints::from_enterprise_url(host)?;
+        let mut cfg = Self::load_for_update()?;
+        cfg.provider.copilot_enterprise_url =
+            (endpoints.host != "github.com").then_some(endpoints.host);
+        cfg.save()
+    }
+
     /// Update just the default model and provider in the config file.
     /// This reloads, patches, and saves so it doesn't clobber other fields.
     pub fn set_default_model(model: Option<&str>, provider: Option<&str>) -> anyhow::Result<()> {

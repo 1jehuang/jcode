@@ -2,6 +2,39 @@ use super::*;
 use crate::cli::provider_init::ProviderChoice;
 
 #[test]
+fn should_parse_native_enterprise_copilot_login() {
+    let args = Args::try_parse_from([
+        "jcode",
+        "login",
+        "--provider",
+        "copilot",
+        "--enterprise-url",
+        "hiqfi.ghe.com",
+        "--no-browser",
+    ])
+    .unwrap();
+    assert!(
+        matches!(args.command, Some(Command::Login { enterprise_url: Some(host), no_browser: true, .. }) if host == "hiqfi.ghe.com")
+    );
+}
+
+#[test]
+fn should_parse_github_host_alias_for_native_login() {
+    let args = Args::try_parse_from([
+        "jcode",
+        "login",
+        "--provider",
+        "copilot",
+        "--github-host",
+        "hiqfi.ghe.com",
+    ])
+    .unwrap();
+    assert!(
+        matches!(args.command, Some(Command::Login { enterprise_url: Some(host), .. }) if host == "hiqfi.ghe.com")
+    );
+}
+
+#[test]
 fn credential_import_cli_requires_stdin_and_preserves_explicit_provider() {
     for provider in ["openai", "claude"] {
         let args = Args::try_parse_from([
@@ -467,6 +500,7 @@ fn login_no_browser_flag_parses() {
         Some(Command::Login {
             provider,
             account,
+            enterprise_url: _,
             no_browser,
             print_auth_url,
             callback_url,

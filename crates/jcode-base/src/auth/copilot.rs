@@ -10,22 +10,33 @@ use std::sync::{LazyLock, RwLock};
 /// time it was cached. Env vars are intentionally NOT served from this cache:
 /// they are cheap to read and must take effect immediately when they change.
 /// The TTL bounds how long a deleted/changed credential file keeps working.
-static GITHUB_TOKEN_CACHE: LazyLock<RwLock<Option<(String, std::time::Instant)>>> =
+static GITHUB_TOKEN_CACHE: LazyLock<RwLock<Option<CachedGithubToken>>> =
     LazyLock::new(|| RwLock::new(None));
 const GITHUB_TOKEN_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 const FAILED_VALIDATION_AUTO_USE_TTL_MS: i64 = 24 * 60 * 60 * 1000;
 
-fn cached_github_token() -> Option<String> {
+struct CachedGithubToken {
+    host: String,
+    token: String,
+    cached_at: std::time::Instant,
+}
+
+fn cached_github_token(host: &str) -> Option<String> {
     GITHUB_TOKEN_CACHE.read().ok().and_then(|value| {
-        value.as_ref().and_then(|(token, cached_at)| {
-            (cached_at.elapsed() < GITHUB_TOKEN_CACHE_TTL).then(|| token.clone())
+        value.as_ref().and_then(|cached| {
+            (cached.host == host && cached.cached_at.elapsed() < GITHUB_TOKEN_CACHE_TTL)
+                .then(|| cached.token.clone())
         })
     })
 }
 
-fn cache_github_token(token: &str) {
+fn cache_github_token(host: &str, token: &str) {
     if let Ok(mut cache) = GITHUB_TOKEN_CACHE.write() {
-        *cache = Some((token.to_string(), std::time::Instant::now()));
+        *cache = Some(CachedGithubToken {
+            host: host.to_string(),
+            token: token.to_string(),
+            cached_at: std::time::Instant::now(),
+        });
     }
 }
 
@@ -46,6 +57,75 @@ pub const COPILOT_TOKEN_URL: &str = "https://api.github.com/copilot_internal/v2/
 
 /// Copilot API base URL
 pub const COPILOT_API_BASE: &str = "https://api.githubcopilot.com";
+const PUBLIC_GITHUB_HOST: &str = "github.com";
+
+/// Host-scoped endpoints shared by login, token refresh, catalogs, and inference.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CopilotEndpoints {
+    pub host: String,
+    pub device_code_url: String,
+    pub access_token_url: String,
+    pub token_url: String,
+    pub github_api_base: String,
+    pub api_base: String,
+}
+
+impl CopilotEndpoints {
+    pub fn load() -> Result<Self> {
+        let config = crate::config::Config::load_strict()?;
+        Self::from_enterprise_url(config.provider.copilot_enterprise_url.as_deref())
+    }
+
+    pub fn from_enterprise_url(enterprise_url: Option<&str>) -> Result<Self> {
+        let Some(raw) = enterprise_url else {
+            return Ok(Self {
+                host: PUBLIC_GITHUB_HOST.to_string(),
+                device_code_url: GITHUB_DEVICE_CODE_URL.to_string(),
+                access_token_url: GITHUB_ACCESS_TOKEN_URL.to_string(),
+                token_url: COPILOT_TOKEN_URL.to_string(),
+                github_api_base: "https://api.github.com".to_string(),
+                api_base: COPILOT_API_BASE.to_string(),
+            });
+        };
+        let host = raw
+            .strip_prefix("https://")
+            .unwrap_or(raw)
+            .trim_end_matches('/');
+        anyhow::ensure!(
+            !host.is_empty()
+                && !host.chars().any(|c| c.is_whitespace() || c.is_control())
+                && !host.contains(['/', '\\', '@', '?', '#', ':']),
+            "provider.copilot_enterprise_url must be an HTTPS hostname without a path or port"
+        );
+        let url = reqwest::Url::parse(&format!("https://{host}"))
+            .context("Invalid provider.copilot_enterprise_url")?;
+        let host = url
+            .host_str()
+            .context("Missing Copilot enterprise hostname")?;
+        anyhow::ensure!(
+            host.contains('.') && matches!(url::Host::parse(host)?, url::Host::Domain(_)),
+            "provider.copilot_enterprise_url must be a DNS hostname"
+        );
+        if host == PUBLIC_GITHUB_HOST {
+            return Self::from_enterprise_url(None);
+        }
+        let github_base = format!("https://{host}");
+        let github_api_base = format!("{github_base}/api/v3");
+        Ok(Self {
+            host: host.to_string(),
+            device_code_url: format!("{github_base}/login/device/code"),
+            access_token_url: format!("{github_base}/login/oauth/access_token"),
+            token_url: format!("{github_api_base}/copilot_internal/v2/token"),
+            github_api_base,
+            api_base: format!("https://copilot-api.{host}"),
+        })
+    }
+
+    pub fn is_enterprise(&self) -> bool {
+        self.host != PUBLIC_GITHUB_HOST
+    }
+}
+
 pub const COPILOT_CONFIG_JSON_SOURCE_ID: &str = "copilot_config_json";
 pub const COPILOT_HOSTS_AUTH_SOURCE_ID: &str = "copilot_hosts_json";
 pub const COPILOT_APPS_AUTH_SOURCE_ID: &str = "copilot_apps_json";
@@ -154,6 +234,17 @@ impl CopilotApiToken {
 /// 7. trusted OpenCode/pi auth.json OAuth entries
 /// 8. optional `gh auth token` fallback when JCODE_COPILOT_ALLOW_GH_AUTH_TOKEN=1
 pub fn load_github_token() -> Result<String> {
+    load_github_token_with_endpoints(&CopilotEndpoints::load()?)
+}
+
+pub fn load_github_token_with_endpoints(endpoints: &CopilotEndpoints) -> Result<String> {
+    load_github_token_inner(endpoints, true)
+}
+
+fn load_github_token_inner(
+    endpoints: &CopilotEndpoints,
+    should_allow_gh_cli: bool,
+) -> Result<String> {
     // Env vars first: cheap to read and they must win immediately when the
     // user changes them, so they are never served from (or shadowed by) the
     // file-source cache below.
@@ -165,7 +256,7 @@ pub fn load_github_token() -> Result<String> {
         }
     }
 
-    if let Some(token) = cached_github_token() {
+    if let Some(token) = cached_github_token(&endpoints.host) {
         return Ok(token);
     }
 
@@ -173,9 +264,9 @@ pub fn load_github_token() -> Result<String> {
     if crate::config::Config::external_auth_source_allowed_for_path(
         COPILOT_CONFIG_JSON_SOURCE_ID,
         &config_path,
-    ) && let Ok(token) = load_token_from_config_json(&config_path)
+    ) && let Ok(token) = load_token_from_config_json_with_host(&config_path, endpoints)
     {
-        cache_github_token(&token);
+        cache_github_token(&endpoints.host, &token);
         return Ok(token);
     }
 
@@ -183,9 +274,9 @@ pub fn load_github_token() -> Result<String> {
     if crate::config::Config::external_auth_source_allowed_for_path(
         COPILOT_HOSTS_AUTH_SOURCE_ID,
         &hosts_path,
-    ) && let Ok(token) = load_token_from_json(&hosts_path)
+    ) && let Ok(token) = load_token_from_json_with_host(&hosts_path, &endpoints.host)
     {
-        cache_github_token(&token);
+        cache_github_token(&endpoints.host, &token);
         return Ok(token);
     }
 
@@ -193,21 +284,24 @@ pub fn load_github_token() -> Result<String> {
     if crate::config::Config::external_auth_source_allowed_for_path(
         COPILOT_APPS_AUTH_SOURCE_ID,
         &apps_path,
-    ) && let Ok(token) = load_token_from_json(&apps_path)
+    ) && let Ok(token) = load_token_from_json_with_host(&apps_path, &endpoints.host)
     {
-        cache_github_token(&token);
+        cache_github_token(&endpoints.host, &token);
         return Ok(token);
     }
 
-    if let Some(token) = crate::auth::external::load_copilot_oauth_token() {
-        cache_github_token(&token);
+    if !endpoints.is_enterprise()
+        && let Some(token) = crate::auth::external::load_copilot_oauth_token()
+    {
+        cache_github_token(&endpoints.host, &token);
         return Ok(token);
     }
 
-    if allow_gh_cli_fallback()
-        && let Some(token) = load_token_from_gh_cli()
+    if should_allow_gh_cli
+        && allow_gh_cli_fallback()
+        && let Some(token) = load_token_from_gh_cli(&endpoints.host)
     {
-        cache_github_token(&token);
+        cache_github_token(&endpoints.host, &token);
         return Ok(token);
     }
 
@@ -287,73 +381,9 @@ pub fn has_copilot_credentials() -> bool {
 /// This intentionally avoids the `gh auth token` fallback because spawning the
 /// GitHub CLI is too expensive for the fast auth snapshot.
 pub fn has_copilot_credentials_fast() -> bool {
-    use crate::auth::external::{ExternalAuthSource, source_has_copilot_oauth};
-
-    for env_key in ["COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"] {
-        if let Ok(token) = std::env::var(env_key)
-            && !token.trim().is_empty()
-        {
-            cache_github_token(token.trim());
-            return true;
-        }
-    }
-
-    let config_path = ExternalCopilotAuthSource::ConfigJson.path();
-    if config_path.exists()
-        && crate::config::Config::external_auth_source_allowed_for_path_cached(
-            COPILOT_CONFIG_JSON_SOURCE_ID,
-            &config_path,
-        )
-        && let Ok(token) = load_token_from_config_json(&config_path)
-    {
-        cache_github_token(&token);
-        return true;
-    }
-
-    let hosts_path = ExternalCopilotAuthSource::HostsJson.path();
-    if hosts_path.exists()
-        && crate::config::Config::external_auth_source_allowed_for_path_cached(
-            COPILOT_HOSTS_AUTH_SOURCE_ID,
-            &hosts_path,
-        )
-        && let Ok(token) = load_token_from_json(&hosts_path)
-    {
-        cache_github_token(&token);
-        return true;
-    }
-
-    let apps_path = ExternalCopilotAuthSource::AppsJson.path();
-    if apps_path.exists()
-        && crate::config::Config::external_auth_source_allowed_for_path_cached(
-            COPILOT_APPS_AUTH_SOURCE_ID,
-            &apps_path,
-        )
-        && let Ok(token) = load_token_from_json(&apps_path)
-    {
-        cache_github_token(&token);
-        return true;
-    }
-
-    for source in [ExternalAuthSource::OpenCode, ExternalAuthSource::Pi] {
-        let Ok(path) = source.path() else {
-            continue;
-        };
-        if !path.exists() {
-            continue;
-        }
-        if crate::config::Config::external_auth_source_allowed_for_path_cached(
-            source.source_id(),
-            &path,
-        ) && source_has_copilot_oauth(source)
-        {
-            if let Some(token) = crate::auth::external::load_copilot_oauth_token() {
-                cache_github_token(&token);
-            }
-            return true;
-        }
-    }
-
-    false
+    CopilotEndpoints::load()
+        .and_then(|endpoints| load_github_token_inner(&endpoints, false))
+        .is_ok()
 }
 
 pub fn preferred_external_auth_source() -> Option<ExternalCopilotAuthSource> {
@@ -465,14 +495,43 @@ pub fn saved_hosts_path() -> PathBuf {
     legacy_copilot_config_dir().join("hosts.json")
 }
 
+#[cfg(test)]
 fn load_token_from_config_json(path: &Path) -> Result<String> {
+    load_token_from_config_json_with_host(path, &CopilotEndpoints::from_enterprise_url(None)?)
+}
+
+fn load_token_from_config_json_with_host(
+    path: &Path,
+    endpoints: &CopilotEndpoints,
+) -> Result<String> {
     let path = crate::storage::validate_external_auth_file(path)?;
     let data = std::fs::read_to_string(&path)
         .with_context(|| format!("Failed to read {}", path.display()))?;
     let value: Value = serde_json::from_str(&data)
         .with_context(|| format!("Failed to parse {}", path.display()))?;
-    find_token_in_value(&value)
-        .ok_or_else(|| anyhow::anyhow!("No GitHub token found in {}", path.display()))
+    let token = if endpoints.is_enterprise() {
+        find_enterprise_token(&value, &endpoints.host)
+    } else {
+        find_token_in_value(&value)
+    };
+    token.ok_or_else(|| anyhow::anyhow!("No GitHub token found in {}", path.display()))
+}
+
+fn find_enterprise_token(value: &Value, host: &str) -> Option<String> {
+    if let Some(entry) = value.get(host) {
+        return find_token_in_value(entry);
+    }
+    value
+        .get("logged_in_users")?
+        .as_array()?
+        .iter()
+        .find_map(|entry| {
+            let entry_host = entry.get("github_host")?.as_str()?;
+            (entry_host.trim_end_matches('/') == host
+                || entry_host.trim_end_matches('/') == format!("https://{host}"))
+            .then(|| find_token_in_value(entry))
+            .flatten()
+        })
 }
 
 fn find_token_in_value(value: &Value) -> Option<String> {
@@ -508,12 +567,15 @@ fn normalize_candidate_token(token: &str) -> Option<String> {
     None
 }
 
-fn load_token_from_gh_cli() -> Option<String> {
+fn load_token_from_gh_cli(host: &str) -> Option<String> {
     if !crate::auth::command_exists("gh") {
         return None;
     }
 
-    let output = Command::new("gh").args(["auth", "token"]).output().ok()?;
+    let output = Command::new("gh")
+        .args(["auth", "token", "--hostname", host])
+        .output()
+        .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -524,7 +586,12 @@ fn load_token_from_gh_cli() -> Option<String> {
 
 /// Parse a Copilot config JSON file to extract the oauth_token.
 /// Format: { "github.com": { "oauth_token": "gho_xxxx", "user": "..." } }
+#[cfg(test)]
 fn load_token_from_json(path: &Path) -> Result<String> {
+    load_token_from_json_with_host(path, PUBLIC_GITHUB_HOST)
+}
+
+fn load_token_from_json_with_host(path: &Path, host: &str) -> Result<String> {
     let path = crate::storage::validate_external_auth_file(path)?;
     let data = std::fs::read_to_string(&path)
         .with_context(|| format!("Failed to read {}", path.display()))?;
@@ -533,15 +600,16 @@ fn load_token_from_json(path: &Path) -> Result<String> {
         serde_json::from_str(&data)
             .with_context(|| format!("Failed to parse {}", path.display()))?;
 
-    let token = select_preferred_token(&config)
+    let token = select_preferred_token(&config, host)
         .ok_or_else(|| anyhow::anyhow!("No oauth_token found in {}", path.display()))?;
 
     Ok(token.clone())
 }
 
-fn select_preferred_token(
-    config: &HashMap<String, HashMap<String, serde_json::Value>>,
-) -> Option<&String> {
+fn select_preferred_token<'a>(
+    config: &'a HashMap<String, HashMap<String, serde_json::Value>>,
+    selected_host: &str,
+) -> Option<&'a String> {
     config
         .iter()
         .filter_map(|(host, value)| {
@@ -550,7 +618,19 @@ fn select_preferred_token(
                 _ => return None,
             };
 
-            let normalized_host = normalize_github_host_key(host)?;
+            let normalized_host = if selected_host == PUBLIC_GITHUB_HOST {
+                normalize_github_host_key(host)?
+            } else {
+                let key = host.trim().strip_prefix("https://").unwrap_or(host.trim());
+                let key = key.trim_end_matches('/');
+                let key = key
+                    .strip_suffix(&format!(":{GITHUB_COPILOT_CLIENT_ID}"))
+                    .unwrap_or(key);
+                if !key.eq_ignore_ascii_case(selected_host) {
+                    return None;
+                }
+                selected_host.to_string()
+            };
             let raw_host = host.trim().to_ascii_lowercase();
             Some((
                 github_host_priority(&raw_host, &normalized_host),
@@ -634,13 +714,24 @@ pub async fn exchange_github_token(
     client: &reqwest::Client,
     github_token: &str,
 ) -> Result<CopilotApiToken> {
+    exchange_github_token_with_endpoints(client, github_token, &CopilotEndpoints::load()?).await
+}
+
+pub async fn exchange_github_token_with_endpoints(
+    client: &reqwest::Client,
+    github_token: &str,
+    endpoints: &CopilotEndpoints,
+) -> Result<CopilotApiToken> {
     let mut attempt: u32 = 0;
     loop {
         attempt += 1;
         let resp = client
-            .get(COPILOT_TOKEN_URL)
+            .get(&endpoints.token_url)
             .header("Authorization", format!("Token {}", github_token))
             .header("User-Agent", EDITOR_VERSION)
+            .header("Editor-Version", EDITOR_VERSION)
+            .header("Editor-Plugin-Version", EDITOR_PLUGIN_VERSION)
+            .header("Accept", "application/json")
             .send()
             .await
             .context("Failed to exchange GitHub token for Copilot token")?;
@@ -727,8 +818,9 @@ pub async fn verify_copilot_credentials_live_default() -> Result<()> {
 /// Initiate GitHub OAuth device flow for Copilot authentication.
 /// Returns the device code response with user instructions.
 pub async fn initiate_device_flow(client: &reqwest::Client) -> Result<DeviceCodeResponse> {
+    let endpoints = CopilotEndpoints::load()?;
     let resp = client
-        .post(GITHUB_DEVICE_CODE_URL)
+        .post(&endpoints.device_code_url)
         .header("Accept", "application/json")
         .form(&[
             ("client_id", GITHUB_COPILOT_CLIENT_ID),
@@ -755,11 +847,12 @@ pub async fn poll_for_access_token(
     device_code: &str,
     interval: u64,
 ) -> Result<String> {
+    let endpoints = CopilotEndpoints::load()?;
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
 
         let resp = client
-            .post(GITHUB_ACCESS_TOKEN_URL)
+            .post(&endpoints.access_token_url)
             .header("Accept", "application/json")
             .form(&[
                 ("client_id", GITHUB_COPILOT_CLIENT_ID),
@@ -804,6 +897,7 @@ pub async fn poll_for_access_token(
 
 /// Save a GitHub OAuth token to the standard Copilot config location.
 pub fn save_github_token(token: &str, username: &str) -> Result<()> {
+    let endpoints = CopilotEndpoints::load()?;
     let config_dir = legacy_copilot_config_dir();
     std::fs::create_dir_all(&config_dir)
         .with_context(|| format!("Failed to create {}", config_dir.display()))?;
@@ -822,7 +916,7 @@ pub fn save_github_token(token: &str, username: &str) -> Result<()> {
     let mut entry = HashMap::new();
     entry.insert("user".to_string(), username.to_string());
     entry.insert("oauth_token".to_string(), token.to_string());
-    config.insert("github.com".to_string(), entry);
+    config.insert(endpoints.host, entry);
 
     let json = serde_json::to_string_pretty(&config)?;
     crate::storage::write_text_secret(&hosts_path, &json)
@@ -869,7 +963,7 @@ pub struct CopilotSubscriptionInfo {
 }
 
 /// Model info from the Copilot /models endpoint
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CopilotModelInfo {
     pub id: String,
     #[serde(default)]
@@ -881,10 +975,12 @@ pub struct CopilotModelInfo {
     #[serde(default)]
     pub model_picker_enabled: bool,
     #[serde(default)]
+    pub supported_endpoints: Vec<String>,
+    #[serde(default)]
     pub capabilities: Option<CopilotModelCapabilities>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CopilotModelCapabilities {
     #[serde(default)]
     pub limits: Option<CopilotModelLimits>,
@@ -892,14 +988,60 @@ pub struct CopilotModelCapabilities {
     pub supports: Option<CopilotModelSupports>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CopilotModelSupports {
     /// Advertised reasoning effort levels, e.g. `["low","medium","high"]`.
     #[serde(default)]
     pub reasoning_effort: Option<Value>,
+    #[serde(default)]
+    pub vision: Option<bool>,
+    #[serde(default)]
+    pub tool_calls: Option<bool>,
+    #[serde(default)]
+    pub parallel_tool_calls: Option<bool>,
+    #[serde(default)]
+    pub streaming: Option<bool>,
+    #[serde(default)]
+    pub structured_outputs: Option<bool>,
+    #[serde(default)]
+    pub adaptive_thinking: Option<bool>,
 }
 
 impl CopilotModelInfo {
+    pub fn metadata(&self) -> jcode_provider_core::ModelMetadata {
+        let limits = self
+            .capabilities
+            .as_ref()
+            .and_then(|caps| caps.limits.as_ref());
+        let supports = self
+            .capabilities
+            .as_ref()
+            .and_then(|caps| caps.supports.as_ref());
+        jcode_provider_core::ModelMetadata {
+            context_window: limits
+                .and_then(|limits| limits.max_context_window_tokens)
+                .filter(|value| *value > 0),
+            max_input_tokens: limits
+                .and_then(|limits| limits.max_prompt_tokens)
+                .filter(|value| *value > 0),
+            max_output_tokens: limits
+                .and_then(|limits| limits.max_output_tokens)
+                .filter(|value| *value > 0),
+            max_non_streaming_output_tokens: limits
+                .and_then(|limits| limits.max_non_streaming_output_tokens)
+                .filter(|value| *value > 0),
+            reasoning_efforts: self.reasoning_efforts(),
+            supports_image_input: supports.and_then(|supports| supports.vision),
+            supports_tool_calls: supports.and_then(|supports| supports.tool_calls),
+            supports_parallel_tool_calls: supports
+                .and_then(|supports| supports.parallel_tool_calls),
+            supports_streaming: supports.and_then(|supports| supports.streaming),
+            supports_structured_outputs: supports.and_then(|supports| supports.structured_outputs),
+            supports_adaptive_thinking: supports.and_then(|supports| supports.adaptive_thinking),
+            supported_endpoints: self.supported_endpoints.clone(),
+        }
+    }
+
     /// Reasoning effort levels advertised in the catalog, lowercased.
     /// Empty when the model does not advertise any.
     pub fn reasoning_efforts(&self) -> Vec<String> {
@@ -920,12 +1062,16 @@ impl CopilotModelInfo {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CopilotModelLimits {
     #[serde(default)]
     pub max_context_window_tokens: Option<usize>,
     #[serde(default)]
     pub max_output_tokens: Option<usize>,
+    #[serde(default)]
+    pub max_prompt_tokens: Option<usize>,
+    #[serde(default)]
+    pub max_non_streaming_output_tokens: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -939,8 +1085,16 @@ pub async fn fetch_available_models(
     client: &reqwest::Client,
     bearer_token: &str,
 ) -> Result<Vec<CopilotModelInfo>> {
+    fetch_available_models_with_endpoints(client, bearer_token, &CopilotEndpoints::load()?).await
+}
+
+pub async fn fetch_available_models_with_endpoints(
+    client: &reqwest::Client,
+    bearer_token: &str,
+    endpoints: &CopilotEndpoints,
+) -> Result<Vec<CopilotModelInfo>> {
     let resp = client
-        .get(format!("{}/models", COPILOT_API_BASE))
+        .get(format!("{}/models", endpoints.api_base))
         .header("Authorization", format!("Bearer {}", bearer_token))
         .header("Editor-Version", EDITOR_VERSION)
         .header("Editor-Plugin-Version", EDITOR_PLUGIN_VERSION)
@@ -965,7 +1119,7 @@ pub async fn fetch_available_models(
 
 /// Determine the best default model based on available models.
 /// - If claude-opus-4.6 is available -> paid tier -> use claude-opus-4.6
-/// - Otherwise -> free/basic tier -> use claude-sonnet-4.6 or claude-sonnet-4
+/// - Otherwise -> use Sonnet when available, then the live picker's first model.
 pub fn choose_default_model(available_models: &[CopilotModelInfo]) -> String {
     let model_ids: Vec<&str> = available_models.iter().map(|m| m.id.as_str()).collect();
 
@@ -973,6 +1127,13 @@ pub fn choose_default_model(available_models: &[CopilotModelInfo]) -> String {
         "claude-opus-4.6".to_string()
     } else if model_ids.contains(&"claude-sonnet-4.6") {
         "claude-sonnet-4.6".to_string()
+    } else if model_ids.contains(&"claude-sonnet-4") {
+        "claude-sonnet-4".to_string()
+    } else if let Some(model) = available_models
+        .iter()
+        .find(|model| model.model_picker_enabled)
+    {
+        model.id.clone()
     } else {
         "claude-sonnet-4".to_string()
     }
@@ -980,8 +1141,9 @@ pub fn choose_default_model(available_models: &[CopilotModelInfo]) -> String {
 
 /// Fetch the authenticated GitHub username using an OAuth token.
 pub async fn fetch_github_username(client: &reqwest::Client, token: &str) -> Result<String> {
+    let endpoints = CopilotEndpoints::load()?;
     let resp = client
-        .get("https://api.github.com/user")
+        .get(format!("{}/user", endpoints.github_api_base))
         .header("Authorization", format!("Bearer {}", token))
         .header("User-Agent", EDITOR_VERSION)
         .send()

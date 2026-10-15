@@ -21,6 +21,32 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+pub(crate) fn configured_enterprise_copilot_host() -> Option<String> {
+    let host = crate::config::config()
+        .provider
+        .copilot_enterprise_url
+        .clone()?;
+    let endpoints =
+        crate::auth::copilot::CopilotEndpoints::from_enterprise_url(Some(&host)).ok()?;
+    (endpoints.host != "github.com").then_some(endpoints.host)
+}
+
+pub(crate) fn default_onboarding_login_provider() -> crate::provider_catalog::LoginProviderDescriptor
+{
+    onboarding_login_provider_for_host(configured_enterprise_copilot_host().as_deref())
+}
+
+pub(crate) fn onboarding_login_provider_for_host(
+    enterprise_host: Option<&str>,
+) -> crate::provider_catalog::LoginProviderDescriptor {
+    if enterprise_host.is_some() {
+        crate::provider_catalog::resolve_login_provider("copilot")
+            .expect("Copilot login provider must be registered")
+    } else {
+        crate::provider_catalog::OPENAI_LOGIN_PROVIDER
+    }
+}
+
 /// How long we wait on a yes/no decision phase (login import, telemetry
 /// consent) before auto-selecting the highlighted default. We keep this short
 /// enough that the user doesn't get stuck deliberating, but long enough to

@@ -1270,6 +1270,7 @@ fn configure_test_remote_models_with_openai_recommendations(app: &mut App) {
         .filter(|model| model.as_str() != "claude-opus-4-8")
         .cloned()
         .map(|model| crate::provider::ModelRoute {
+            catalog_metadata: None,
             model,
             provider: "OpenAI".to_string(),
             api_method: "openai-oauth".to_string(),
@@ -1280,6 +1281,7 @@ fn configure_test_remote_models_with_openai_recommendations(app: &mut App) {
         })
         .collect();
     app.remote_model_options.push(crate::provider::ModelRoute {
+        catalog_metadata: None,
         model: "claude-opus-4-8".to_string(),
         provider: "Anthropic".to_string(),
         api_method: "claude-oauth".to_string(),
@@ -1289,6 +1291,7 @@ fn configure_test_remote_models_with_openai_recommendations(app: &mut App) {
         cheapness: None,
     });
     app.remote_model_options.push(crate::provider::ModelRoute {
+        catalog_metadata: None,
         model: "claude-opus-4-8".to_string(),
         provider: "Anthropic".to_string(),
         api_method: "claude-api".to_string(),
@@ -1306,6 +1309,7 @@ fn configure_test_remote_openrouter_provider_routes(app: &mut App) {
     app.remote_available_entries = vec!["anthropic/claude-sonnet-4".to_string()];
     app.remote_model_options = vec![
         crate::provider::ModelRoute {
+            catalog_metadata: None,
             model: "anthropic/claude-sonnet-4".to_string(),
             provider: "auto".to_string(),
             api_method: "openrouter".to_string(),
@@ -1315,6 +1319,7 @@ fn configure_test_remote_openrouter_provider_routes(app: &mut App) {
             cheapness: None,
         },
         crate::provider::ModelRoute {
+            catalog_metadata: None,
             model: "anthropic/claude-sonnet-4".to_string(),
             provider: "Fireworks".to_string(),
             api_method: "openrouter".to_string(),
@@ -1324,6 +1329,7 @@ fn configure_test_remote_openrouter_provider_routes(app: &mut App) {
             cheapness: None,
         },
         crate::provider::ModelRoute {
+            catalog_metadata: None,
             model: "anthropic/claude-sonnet-4".to_string(),
             provider: "OpenAI".to_string(),
             api_method: "openrouter".to_string(),

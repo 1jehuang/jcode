@@ -25,6 +25,24 @@ pub(crate) fn copilot_model_uses_responses_api(model: &str) -> bool {
     model.trim().to_ascii_lowercase().starts_with("gpt-5.6")
 }
 
+pub(crate) fn copilot_model_uses_responses_api_with_catalog(
+    catalog: &std::collections::HashMap<String, Vec<String>>,
+    model: &str,
+) -> bool {
+    if let Some(endpoints) = catalog.get(model) {
+        let has_responses = endpoints
+            .iter()
+            .any(|endpoint| endpoint.trim_start_matches('/') == copilot_api_path(true));
+        let has_chat = endpoints
+            .iter()
+            .any(|endpoint| endpoint.trim_start_matches('/') == copilot_api_path(false));
+        if has_responses != has_chat {
+            return has_responses;
+        }
+    }
+    copilot_model_uses_responses_api(model)
+}
+
 pub(crate) fn copilot_api_path(uses_responses_api: bool) -> &'static str {
     if uses_responses_api {
         "responses"

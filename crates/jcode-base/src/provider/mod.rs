@@ -6,6 +6,8 @@ pub mod antigravity;
 pub mod bedrock;
 mod catalog_routes;
 pub mod catalog_scheduler;
+pub mod chatgpt_web;
+pub mod chatgpt_web_instance;
 pub mod copilot;
 pub mod cursor;
 mod dispatch;
@@ -222,6 +224,7 @@ fn direct_openai_compatible_profile_routes(
         }
 
         routes.push(ModelRoute {
+            catalog_metadata: None,
             model,
             provider: provider.clone(),
             api_method: api_method.clone(),
@@ -1710,6 +1713,19 @@ impl Default for MultiProvider {
     }
 }
 
+async fn prefetch_openai_or_web_catalog<F>(
+    openai: Option<Arc<dyn Provider>>,
+    browser_refresh: F,
+) -> Result<()>
+where
+    F: std::future::Future<Output = Result<()>>,
+{
+    match openai {
+        Some(provider) => provider.prefetch_models().await,
+        None => browser_refresh.await,
+    }
+}
+
 #[async_trait]
 impl Provider for MultiProvider {
     async fn prewarm(&self, tools: &[ToolDefinition], system_static: &str) {
@@ -2266,10 +2282,10 @@ impl Provider for MultiProvider {
                 }
             },
             async {
-                match openai {
-                    Some(provider) => provider.prefetch_models().await,
-                    None => Ok(()),
-                }
+                prefetch_openai_or_web_catalog(openai, async {
+                    chatgpt_web::refresh_models().await.map(|_| ())
+                })
+                .await
             },
             async {
                 match openrouter {
@@ -2464,6 +2480,13 @@ impl Provider for MultiProvider {
             },
             _ => vec![],
         }
+    }
+
+    fn model_metadata(&self, model: &str) -> Option<jcode_provider_core::ModelMetadata> {
+        if matches!(self.active_provider(), ActiveProvider::Copilot) {
+            return self.copilot_provider()?.model_metadata(model);
+        }
+        None
     }
 
     fn service_tier(&self) -> Option<String> {

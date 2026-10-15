@@ -640,6 +640,7 @@ impl Provider for CursorCliProvider {
         self.available_models_display()
             .into_iter()
             .map(|model| jcode_provider_core::ModelRoute {
+                catalog_metadata: None,
                 model,
                 provider: "Cursor".to_string(),
                 api_method: "cursor".to_string(),

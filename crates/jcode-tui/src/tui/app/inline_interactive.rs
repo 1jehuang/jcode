@@ -650,6 +650,9 @@ impl App {
         &mut self,
         snapshot: jcode_provider_core::ModelCatalogSnapshot,
     ) -> CatalogReplaceOutcome {
+        if !snapshot.model_routes.is_empty() {
+            jcode_provider_core::register_copilot_route_metadata(&snapshot.model_routes);
+        }
         let mut provider_meta_changed = false;
         let mut provider_name_changed = false;
         if let Some(name) = snapshot.provider_name
@@ -690,6 +693,9 @@ impl App {
         self.remote_available_entries = snapshot.available_models;
         if replace_routes {
             self.remote_model_options = snapshot.model_routes;
+        }
+        if let Some(model) = self.remote_provider_model.clone() {
+            self.update_context_limit_for_model(&model, None);
         }
         self.invalidate_model_picker_cache();
         CatalogReplaceOutcome {
@@ -741,6 +747,7 @@ impl App {
             })
         {
             routes.push(crate::provider::ModelRoute {
+                catalog_metadata: None,
                 model: model.id.to_string(),
                 provider: crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME.to_string(),
                 api_method: crate::subscription_catalog::JCODE_ROUTE_API_METHOD.to_string(),
@@ -1563,6 +1570,7 @@ impl App {
 
         let routes = if routes.is_empty() && self.is_remote && current_model != "unknown" {
             vec![crate::provider::ModelRoute {
+                catalog_metadata: None,
                 model: current_model.clone(),
                 provider: self
                     .remote_provider_name
@@ -1725,7 +1733,19 @@ impl App {
             let mut plain_routes = Vec::new();
             let mut model_efforts = Vec::new();
             for route in entry_routes {
-                let efforts = if route_supports_reasoning_effort(&route.api_method) {
+                let efforts: Vec<&'static str> = if route.api_method == "copilot" {
+                    jcode_provider_core::copilot_model_metadata(name)
+                        .map(|metadata| {
+                            metadata
+                                .reasoning_efforts
+                                .iter()
+                                .filter_map(|effort| {
+                                    jcode_provider_core::canonical_reasoning_effort(effort)
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                } else if route_supports_reasoning_effort(&route.api_method) {
                     inferred_reasoning_efforts(Some(&route.api_method), Some(name))
                 } else {
                     Vec::new()
@@ -4569,6 +4589,7 @@ mod tests {
 
     fn model_route(model: &str, provider: &str, api_method: &str) -> crate::provider::ModelRoute {
         crate::provider::ModelRoute {
+            catalog_metadata: None,
             model: model.to_string(),
             provider: provider.to_string(),
             api_method: api_method.to_string(),

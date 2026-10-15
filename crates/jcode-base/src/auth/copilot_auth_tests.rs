@@ -3,6 +3,191 @@ use anyhow::{Result, anyhow};
 
 use tempfile::TempDir;
 
+const TEST_ENTERPRISE_HOST: &str = "hiqfi.ghe.com";
+
+#[test]
+fn should_preserve_response_only_model_endpoints_from_the_live_catalog() -> Result<()> {
+    let model: CopilotModelInfo = serde_json::from_value(serde_json::json!({
+        "id": "gpt-6.1-sol",
+        "supported_endpoints": ["/responses", "ws:/responses"]
+    }))?;
+
+    assert_eq!(model.supported_endpoints, ["/responses", "ws:/responses"]);
+    Ok(())
+}
+
+#[test]
+fn should_choose_a_live_picker_model_when_legacy_models_are_unavailable() -> Result<()> {
+    let model: CopilotModelInfo = serde_json::from_value(serde_json::json!({
+        "id": "gpt-6.1-sol",
+        "model_picker_enabled": true
+    }))?;
+
+    assert_eq!(choose_default_model(&[model]), "gpt-6.1-sol");
+    Ok(())
+}
+
+#[test]
+fn should_preserve_public_endpoints_without_enterprise_configuration() -> Result<()> {
+    let endpoints = CopilotEndpoints::from_enterprise_url(None)?;
+
+    assert_eq!(
+        endpoints,
+        CopilotEndpoints {
+            host: "github.com".to_string(),
+            device_code_url: GITHUB_DEVICE_CODE_URL.to_string(),
+            access_token_url: GITHUB_ACCESS_TOKEN_URL.to_string(),
+            token_url: COPILOT_TOKEN_URL.to_string(),
+            github_api_base: "https://api.github.com".to_string(),
+            api_base: COPILOT_API_BASE.to_string(),
+        }
+    );
+    Ok(())
+}
+
+#[test]
+fn should_route_all_enterprise_endpoints_to_the_configured_tenant() -> Result<()> {
+    let endpoints = CopilotEndpoints::from_enterprise_url(Some(TEST_ENTERPRISE_HOST))?;
+
+    assert_eq!(
+        endpoints,
+        CopilotEndpoints {
+            host: TEST_ENTERPRISE_HOST.to_string(),
+            device_code_url: "https://hiqfi.ghe.com/login/device/code".to_string(),
+            access_token_url: "https://hiqfi.ghe.com/login/oauth/access_token".to_string(),
+            token_url: "https://hiqfi.ghe.com/api/v3/copilot_internal/v2/token".to_string(),
+            github_api_base: "https://hiqfi.ghe.com/api/v3".to_string(),
+            api_base: "https://copilot-api.hiqfi.ghe.com".to_string(),
+        }
+    );
+    Ok(())
+}
+
+#[test]
+fn should_normalize_https_enterprise_configuration() -> Result<()> {
+    let endpoints = CopilotEndpoints::from_enterprise_url(Some("https://HIQFI.ghe.com/"))?;
+
+    assert_eq!(endpoints.host, TEST_ENTERPRISE_HOST);
+    Ok(())
+}
+
+#[test]
+fn should_reject_an_enterprise_url_with_a_path() {
+    assert!(CopilotEndpoints::from_enterprise_url(Some("hiqfi.ghe.com/api/v3")).is_err());
+}
+
+#[test]
+fn should_reject_an_insecure_enterprise_url() {
+    assert!(CopilotEndpoints::from_enterprise_url(Some("http://hiqfi.ghe.com")).is_err());
+}
+
+#[test]
+fn should_reject_enterprise_url_credentials() {
+    assert!(CopilotEndpoints::from_enterprise_url(Some("user@hiqfi.ghe.com")).is_err());
+}
+
+#[test]
+fn should_reject_enterprise_url_whitespace() {
+    assert!(CopilotEndpoints::from_enterprise_url(Some("hiqfi.ghe.com\n")).is_err());
+}
+
+#[test]
+fn should_reject_enterprise_ip_addresses() {
+    assert!(CopilotEndpoints::from_enterprise_url(Some("127.0.0.1")).is_err());
+}
+
+#[test]
+fn should_select_only_the_configured_enterprise_host_token() -> Result<()> {
+    let config = serde_json::from_value(serde_json::json!({
+        "github.com": {"oauth_token": "gho_public"},
+        "other.ghe.com": {"oauth_token": "gho_other"},
+        "hiqfi.ghe.com": {"oauth_token": "gho_enterprise"}
+    }))?;
+
+    assert_eq!(
+        select_preferred_token(&config, TEST_ENTERPRISE_HOST).map(String::as_str),
+        Some("gho_enterprise")
+    );
+    Ok(())
+}
+
+#[test]
+fn should_accept_enterprise_apps_json_client_id_suffix() -> Result<()> {
+    let config = serde_json::from_value(serde_json::json!({
+        "https://hiqfi.ghe.com:Iv1.b507a08c87ecfe98": {"oauth_token": "gho_enterprise"}
+    }))?;
+
+    assert_eq!(
+        select_preferred_token(&config, TEST_ENTERPRISE_HOST).map(String::as_str),
+        Some("gho_enterprise")
+    );
+    Ok(())
+}
+
+#[test]
+fn should_not_reuse_public_credentials_for_enterprise() -> Result<()> {
+    let config = serde_json::from_value(serde_json::json!({
+        "github.com": {"oauth_token": "gho_public"}
+    }))?;
+
+    assert_eq!(select_preferred_token(&config, TEST_ENTERPRISE_HOST), None);
+    Ok(())
+}
+
+#[test]
+fn should_extract_the_matching_enterprise_cli_account() {
+    let value = serde_json::json!({
+        "logged_in_users": [
+            {"github_host": "https://github.com", "token": "gho_public"},
+            {"github_host": "https://hiqfi.ghe.com", "token": "gho_enterprise"}
+        ]
+    });
+
+    assert_eq!(
+        find_enterprise_token(&value, TEST_ENTERPRISE_HOST),
+        Some("gho_enterprise".to_string())
+    );
+}
+
+#[test]
+fn should_reject_unscoped_cli_tokens_for_enterprise() {
+    let value = serde_json::json!({"auth": {"token": "gho_public"}});
+
+    assert_eq!(find_enterprise_token(&value, TEST_ENTERPRISE_HOST), None);
+}
+
+#[test]
+fn should_not_reuse_cached_credentials_after_switching_hosts() {
+    let _guard = crate::storage::lock_test_env();
+    cache_github_token("github.com", "gho_public");
+
+    assert_eq!(cached_github_token(TEST_ENTERPRISE_HOST), None);
+    invalidate_github_token_cache();
+}
+
+#[test]
+fn should_save_enterprise_credentials_under_the_tenant_host() -> Result<()> {
+    let _guard = crate::storage::lock_test_env();
+    let _restore = EnvRestore::capture("JCODE_HOME");
+    let dir = TempDir::new()?;
+    crate::env::set_var("JCODE_HOME", dir.path());
+    let mut config = crate::config::Config::default();
+    config.provider.copilot_enterprise_url = Some(TEST_ENTERPRISE_HOST.to_string());
+    config.save()?;
+
+    save_github_token("gho_enterprise", "testuser")?;
+    let saved: Value = serde_json::from_str(&std::fs::read_to_string(saved_hosts_path())?)?;
+
+    assert_eq!(
+        saved,
+        serde_json::json!({
+            "hiqfi.ghe.com": {"oauth_token": "gho_enterprise", "user": "testuser"}
+        })
+    );
+    invalidate_github_token_cache();
+    Ok(())
+}
+
 #[test]
 fn copilot_api_token_not_expired() {
     let future_ts = chrono::Utc::now().timestamp() + 3600;
@@ -352,6 +537,7 @@ fn choose_default_model_with_opus() {
             vendor: String::new(),
             version: String::new(),
             model_picker_enabled: false,
+            supported_endpoints: Vec::new(),
             capabilities: Default::default(),
         },
         CopilotModelInfo {
@@ -360,6 +546,7 @@ fn choose_default_model_with_opus() {
             vendor: String::new(),
             version: String::new(),
             model_picker_enabled: false,
+            supported_endpoints: Vec::new(),
             capabilities: Default::default(),
         },
     ];
@@ -374,6 +561,7 @@ fn choose_default_model_without_opus() {
         vendor: String::new(),
         version: String::new(),
         model_picker_enabled: false,
+        supported_endpoints: Vec::new(),
         capabilities: Default::default(),
     }];
     assert_eq!(choose_default_model(&models), "claude-sonnet-4.6");
@@ -387,6 +575,7 @@ fn choose_default_model_with_sonnet_4_only() {
         vendor: String::new(),
         version: String::new(),
         model_picker_enabled: false,
+        supported_endpoints: Vec::new(),
         capabilities: Default::default(),
     }];
     assert_eq!(choose_default_model(&models), "claude-sonnet-4");

@@ -626,6 +626,7 @@ impl Provider for OpenRouterProvider {
                     detail.clone()
                 };
                 jcode_provider_core::ModelRoute {
+                    catalog_metadata: None,
                     model,
                     provider: provider_label.clone(),
                     api_method: api_method.clone(),

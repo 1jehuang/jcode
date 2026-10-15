@@ -298,6 +298,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
         Some(Command::Login {
             provider: login_provider,
             account,
+            enterprise_url,
             no_browser,
             print_auth_url,
             callback_url,
@@ -313,6 +314,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             api_key_env,
         }) => {
             let mut options = login::LoginOptions {
+                copilot_enterprise_url: enterprise_url,
                 no_browser,
                 print_auth_url,
                 callback_url,

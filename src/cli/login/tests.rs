@@ -1,6 +1,54 @@
 use super::*;
 
 #[test]
+fn should_normalize_enterprise_login_hostname() {
+    assert_eq!(
+        copilot_host::normalize_login_host(" https://HIQFI.GHE.COM/ ").unwrap(),
+        Some("hiqfi.ghe.com".into())
+    );
+}
+
+#[test]
+fn should_select_public_github_without_enterprise_override() {
+    assert_eq!(
+        copilot_host::normalize_login_host("github.com").unwrap(),
+        None
+    );
+}
+
+#[test]
+fn should_reject_proxy_url_as_enterprise_login_hostname() {
+    assert!(copilot_host::normalize_login_host("http://localhost:4141/v1").is_err());
+}
+
+#[test]
+fn should_persist_native_enterprise_login_without_changing_default_model() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let previous = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    crate::config::Config::set_default_model(Some("gpt-6.1-sol"), Some("copilot")).unwrap();
+    let provider = crate::provider_catalog::resolve_login_provider("copilot").unwrap();
+    copilot_host::configure_login_host(
+        provider,
+        &LoginOptions {
+            copilot_enterprise_url: Some("hiqfi.ghe.com".into()),
+            ..LoginOptions::default()
+        },
+    )
+    .unwrap();
+    let config = crate::config::Config::load_strict().unwrap();
+    set_or_clear_env("JCODE_HOME", previous);
+
+    assert_eq!(
+        (
+            config.provider.copilot_enterprise_url.as_deref(),
+            config.provider.default_model.as_deref()
+        ),
+        (Some("hiqfi.ghe.com"), Some("gpt-6.1-sol"))
+    );
+}
+#[test]
 fn novita_login_saves_private_key_and_rejects_empty_replacement() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().unwrap();

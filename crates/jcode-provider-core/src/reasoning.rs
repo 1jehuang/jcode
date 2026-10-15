@@ -67,6 +67,16 @@ pub fn inferred_reasoning_efforts(
     let provider = provider_name.unwrap_or_default().to_ascii_lowercase();
     let model = model_name.unwrap_or_default().to_ascii_lowercase();
 
+    if provider.contains("copilot")
+        && let Some(metadata) = crate::copilot_model_metadata(&model)
+    {
+        return metadata
+            .reasoning_efforts
+            .iter()
+            .filter_map(|effort| canonical_reasoning_effort(effort))
+            .collect();
+    }
+
     if provider.contains("openrouter") {
         return OPENROUTER_SELECTABLE_EFFORTS.to_vec();
     }

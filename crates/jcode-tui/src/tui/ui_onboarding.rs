@@ -574,9 +574,14 @@ fn welcome_body_lines(app: &dyn TuiState) -> Vec<Line<'static>> {
             return lines;
         }
         OnboardingWelcomeKind::LoginOpenAi { yes_highlighted } => {
+            let prompt =
+                match crate::tui::app::onboarding_flow::configured_enterprise_copilot_host() {
+                    Some(host) => format!("Log in to GitHub Copilot on {host}?"),
+                    None => "Log in to OpenAI?".to_string(),
+                };
             lines.push(
                 Line::from(Span::styled(
-                    "Log in to OpenAI?",
+                    prompt,
                     Style::default()
                         .fg(welcome_accent())
                         .add_modifier(Modifier::BOLD),

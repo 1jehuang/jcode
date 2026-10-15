@@ -191,10 +191,11 @@ fn test_remote_error_with_retryable_pending_schedules_retry() {
         .expect("retry should surface a connection status message");
     assert_eq!(retry_notice.role, "system");
     assert!(retry_notice.content.contains("Connection lost - retrying"));
-    assert!(retry_notice.content.contains(&format!(
-        "attempt 1/{}",
-        App::AUTO_RETRY_MAX_ATTEMPTS
-    )));
+    assert!(
+        retry_notice
+            .content
+            .contains(&format!("attempt 1/{}", App::AUTO_RETRY_MAX_ATTEMPTS))
+    );
     assert!(retry_notice.content.contains("Remote request failed"));
 }
 
@@ -483,6 +484,7 @@ fn test_remote_connectivity_error_without_auto_retry_still_waits_for_network() {
 
 fn openai_oauth_route(model: &str) -> crate::provider::ModelRoute {
     crate::provider::ModelRoute {
+        catalog_metadata: None,
         model: model.to_string(),
         provider: "OpenAI".to_string(),
         api_method: "openai-oauth".to_string(),
@@ -495,6 +497,7 @@ fn openai_oauth_route(model: &str) -> crate::provider::ModelRoute {
 
 fn claude_oauth_route(model: &str) -> crate::provider::ModelRoute {
     crate::provider::ModelRoute {
+        catalog_metadata: None,
         model: model.to_string(),
         provider: "Anthropic".to_string(),
         api_method: "claude-oauth".to_string(),
@@ -792,6 +795,7 @@ fn test_guardrail_reroute_prefers_native_anthropic_route() {
     app.remote_model_options = vec![
         openai_oauth_route("gpt-5.5"),
         crate::provider::ModelRoute {
+            catalog_metadata: None,
             model: "claude-opus-4-8".to_string(),
             provider: "OpenRouter".to_string(),
             api_method: "openrouter".to_string(),
@@ -1273,10 +1277,7 @@ fn test_tui_grok_build_login_starts_managed_oauth_flow() {
 
     app.start_login_provider(crate::provider_catalog::GROK_BUILD_LOGIN_PROVIDER);
 
-    assert!(matches!(
-        app.pending_login,
-        Some(PendingLogin::GrokBuild)
-    ));
+    assert!(matches!(app.pending_login, Some(PendingLogin::GrokBuild)));
     let rendered = app
         .display_messages()
         .iter()
@@ -1327,7 +1328,10 @@ fn test_remote_context_limit_survives_a_later_local_re_derivation() {
     app.remote_provider_model = Some("stealth/space-bunny-alpha@Stealth".to_string());
 
     app.update_context_limit_for_model("stealth/space-bunny-alpha@Stealth", Some(1_000_000));
-    assert_eq!(app.context_limit, 1_000_000, "server window must be adopted");
+    assert_eq!(
+        app.context_limit, 1_000_000,
+        "server window must be adopted"
+    );
 
     // A later local re-derivation must not undo it.
     app.update_context_limit_for_model("stealth/space-bunny-alpha@Stealth", None);
@@ -2023,7 +2027,9 @@ fn test_debug_command_side_panel_latency_bench_reports_immediate_redraw() {
     // against 16.0ms purely from machine load, while passing in isolation. The
     // behavioral assertions above are the real subject, so gate only the timing
     // (refs #592).
-    let p95 = value["summary"]["latency_ms"]["p95"].as_f64().unwrap_or(0.0);
+    let p95 = value["summary"]["latency_ms"]["p95"]
+        .as_f64()
+        .unwrap_or(0.0);
     assert_perf_budget(p95 < 16.0, || {
         format!("side-panel p95 should stay within a 60fps frame budget: {result}")
     });
@@ -2310,7 +2316,10 @@ fn test_externally_started_turn_adopts_processing_state_and_settles_on_done() {
         app.status
     );
 
-    app.handle_server_event(crate::protocol::ServerEvent::MessageEnd { stop_reason: None }, &mut remote);
+    app.handle_server_event(
+        crate::protocol::ServerEvent::MessageEnd { stop_reason: None },
+        &mut remote,
+    );
     app.handle_server_event(crate::protocol::ServerEvent::Done { id: 0 }, &mut remote);
 
     // Streaming text is revealed at a paced rate, so a `Done` that arrives with
@@ -2607,8 +2616,16 @@ fn test_setting_context_limit_also_syncs_the_compaction_budget() {
 
     app.set_context_limit_and_sync_budget(1_000_000);
 
-    assert_eq!(app.context_limit, 1_000_000, "panel must show the new window");
-    let budget = app.registry.compaction().try_read().expect("compaction lock").token_budget();
+    assert_eq!(
+        app.context_limit, 1_000_000,
+        "panel must show the new window"
+    );
+    let budget = app
+        .registry
+        .compaction()
+        .try_read()
+        .expect("compaction lock")
+        .token_budget();
     assert_eq!(
         budget, 1_000_000,
         "compaction budget must follow the panel limit, or the session compacts early"

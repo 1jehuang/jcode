@@ -1,6 +1,7 @@
 pub mod anthropic;
 pub mod attempt_tracker;
 pub mod auth_mode;
+pub mod catalog_metadata;
 pub mod catalog_refresh;
 pub mod failover;
 pub mod fallback_pick;
@@ -30,6 +31,10 @@ pub use auth_mode::{
     AuthMode, AuthRoute, DualAuthProvider, pinned_mode_for, runtime_env_auth_route,
     runtime_env_pinned_mode,
 };
+pub use catalog_metadata::{
+    ModelMetadata, copilot_model_metadata, register_copilot_model_metadata,
+    register_copilot_route_metadata,
+};
 pub use catalog_refresh::{ModelCatalogRefreshSummary, summarize_model_catalog_refresh};
 pub use failover::{
     FailoverDecision, ProviderFailoverPrompt, classify_failover_error_message,
@@ -44,8 +49,8 @@ pub use models::{
     ALL_CLAUDE_MODELS, ALL_OPENAI_MODELS, CHATGPT_WEB_MODEL, DEFAULT_CLAUDE_MODEL,
     DEFAULT_CONTEXT_LIMIT, DEFAULT_OPENAI_MODEL, ModelCapabilities, OPENAI_API_ONLY_PRO_MODELS,
     context_limit_for_model, context_limit_for_model_with_provider,
-    context_limit_for_model_with_provider_and_cache, is_listable_model_name,
-    is_openai_api_only_pro_model, normalize_copilot_model_name,
+    context_limit_for_model_with_provider_and_cache, is_chatgpt_web_model, is_listable_model_name,
+    is_openai_api_only_pro_model, normalize_chatgpt_web_model_label, normalize_copilot_model_name,
     provider_for_model as core_provider_for_model,
     provider_for_model_with_hint as core_provider_for_model_with_hint, provider_key_from_hint,
 };
@@ -295,6 +300,20 @@ pub trait Provider: Send + Sync {
     /// Get ordered list of available reasoning effort levels.
     fn available_efforts(&self) -> Vec<&'static str> {
         vec![]
+    }
+
+    /// Metadata advertised by the active provider's model catalog.
+    fn model_metadata(&self, _model: &str) -> Option<ModelMetadata> {
+        None
+    }
+
+    /// Prompt budget, distinct from the combined input/output context window.
+    fn input_token_limit(&self) -> usize {
+        self.model_metadata(&self.model())
+            .and_then(|metadata| metadata.max_input_tokens)
+            .filter(|limit| *limit > 0)
+            .unwrap_or_else(|| self.context_window())
+            .min(self.context_window())
     }
 
     /// Get the active service tier override (if applicable).
@@ -779,6 +798,8 @@ pub struct ModelRoute {
     pub api_method: String,
     pub available: bool,
     pub detail: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_metadata: Option<ModelMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cheapness: Option<RouteCheapnessEstimate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1718,6 +1739,7 @@ mod tests {
 
         fn model_routes(&self) -> Vec<ModelRoute> {
             vec![ModelRoute {
+                catalog_metadata: None,
                 model: "snapshot-model".to_string(),
                 provider: "Snapshot".to_string(),
                 api_method: "snapshot-api".to_string(),
@@ -1764,6 +1786,7 @@ mod tests {
     #[test]
     fn route_selection_preserves_runtime_identity_from_model_route() {
         let selection = RouteSelection::from_model_route(&ModelRoute {
+            catalog_metadata: None,
             model: "openrouter/owl-alpha".to_string(),
             provider: "OpenRouter".to_string(),
             api_method: "openrouter".to_string(),
@@ -1777,6 +1800,7 @@ mod tests {
         assert_eq!(selection.api_method, "openrouter");
 
         let selection = RouteSelection::from_model_route(&ModelRoute {
+            catalog_metadata: None,
             model: "nvidia/example".to_string(),
             provider: "NVIDIA NIM".to_string(),
             api_method: "openai-compatible:nvidia-nim".to_string(),
@@ -1797,6 +1821,7 @@ mod tests {
     #[test]
     fn grok_build_route_selection_is_a_first_class_runtime() {
         let selection = RouteSelection::from_model_route(&ModelRoute {
+            catalog_metadata: None,
             model: "grok-4.6".to_string(),
             provider: "Grok Build".to_string(),
             api_method: "grok-build-acp".to_string(),
@@ -1810,6 +1835,7 @@ mod tests {
         assert_eq!(selection.routed_model_spec(), "grok-build:grok-4.6");
 
         let prefixed = RouteSelection::from_model_route(&ModelRoute {
+            catalog_metadata: None,
             model: "grok-build:grok-4.6".to_string(),
             provider: "Grok Build".to_string(),
             api_method: "grok-build-acp".to_string(),

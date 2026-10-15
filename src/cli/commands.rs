@@ -2028,9 +2028,77 @@ pub async fn run_browser(action: &str, requested: Option<&str>) -> Result<()> {
                 println!("\nRun `jcode browser setup` to install or repair it.");
             }
         }
+        "chatgpt-login" => {
+            use crate::provider::chatgpt_web_instance as web;
+            let chrome = web::find_chrome().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "ChatGPT web models need Google Chrome or Chromium for this system (on WSL: the Linux build inside WSL). Install one, or set JCODE_CHATGPT_WEB_CHROME"
+                )
+            })?;
+            println!("ChatGPT web sign-in");
+            println!("  browser: {}", chrome.display());
+            println!("  private profile: {}", web::profile_dir()?.display());
+            // Copies the session from your main browser through the bridge
+            // when possible. A private sign-in window is the last resort.
+            let (instance, page) = web::open_signed_in_page(web::SignIn::Interactive).await?;
+            let _ = instance.close_page(&page).await;
+            drop(instance);
+            println!("\nSigned in. [web] models run invisibly.");
+            let models = crate::provider::chatgpt_web::refresh_models().await?;
+            let available: Vec<_> = models
+                .iter()
+                .filter(|m| m.available)
+                .map(|m| m.model.as_str())
+                .collect();
+            println!(
+                "  available: {}",
+                if available.is_empty() {
+                    "none".to_string()
+                } else {
+                    available.join(", ")
+                }
+            );
+            web::shutdown().await;
+        }
+        "chatgpt-status" => {
+            use crate::provider::chatgpt_web_instance as web;
+            println!("ChatGPT web models");
+            match web::find_chrome() {
+                Some(chrome) => println!("  browser: {}", chrome.display()),
+                None => {
+                    println!(
+                        "  browser: missing (install Google Chrome or Chromium, or set JCODE_CHATGPT_WEB_CHROME)"
+                    );
+                    return Ok(());
+                }
+            }
+            println!("  private profile: {}", web::profile_dir()?.display());
+            println!(
+                "  sign-in window: {}",
+                if web::display_available() {
+                    "available"
+                } else {
+                    "no display (DISPLAY/WAYLAND_DISPLAY unset)"
+                }
+            );
+            let access = web::signed_in_status().await;
+            web::shutdown().await;
+            println!(
+                "  session: {}",
+                match access {
+                    Ok(web::PageAccess::SignedIn) => "signed in".to_string(),
+                    Ok(web::PageAccess::SignedOut) =>
+                        "signed out (run `jcode browser chatgpt-login`)".to_string(),
+                    Ok(web::PageAccess::Loading) => "ChatGPT did not load".to_string(),
+                    Err(error) => format!("error: {error:#}"),
+                }
+            );
+        }
         other => {
             eprintln!("Unknown browser action: {}", other);
-            eprintln!("Available: setup [browser], status [browser], detect");
+            eprintln!(
+                "Available: setup [browser], status [browser], detect, chatgpt-login, chatgpt-status"
+            );
             std::process::exit(1);
         }
     }
