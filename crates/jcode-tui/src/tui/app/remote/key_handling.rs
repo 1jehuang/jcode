@@ -1048,9 +1048,8 @@ async fn handle_remote_key_internal(
     Ok(())
 }
 
-/// Everything a plain Enter does with the composer contents in a remote
-/// session: slash commands, shell commands, and prompts. Shared by the key
-/// handler and by the turn-end dispatcher for commands queued with Ctrl+Enter.
+/// Remote Enter dispatch for commands and prompts, shared by key handling
+/// and turn-end replay of commands queued with Ctrl+Enter.
 pub(in crate::tui::app) async fn submit_remote_enter_input(
     app: &mut App,
     remote: &mut RemoteConnection,
@@ -1060,7 +1059,7 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
     }
     if !app.input.is_empty() {
         let prepared = input::take_prepared_input(app);
-        let trimmed = prepared.expanded.trim();
+        let trimmed = prepared.routing_input().trim();
 
         // Before the SSH gate: `/local` must work from a client attached
         // to the cloud copy, because the return is coordinated locally.
@@ -1859,11 +1858,12 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
                 ));
                 return Ok(());
             }
-            // Attached images belong to the forked prompt, not the
-            // parent's next message.
+            // Attached images belong to the forked prompt, not its parent.
             let images = std::mem::take(&mut app.pending_images);
             let prepared = input::PreparedInput {
                 image_markers: Default::default(),
+                routing_input: None,
+                pasted_contents: Vec::new(),
                 raw_input: prompt.to_string(),
                 expanded: prompt.to_string(),
                 images,

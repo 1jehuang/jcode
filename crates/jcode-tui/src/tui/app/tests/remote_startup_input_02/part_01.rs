@@ -1945,14 +1945,13 @@ fn test_interleave_submission_preserves_pending_images() {
     let mut app = create_test_app();
     app.is_processing = true;
     app.queue_mode = false;
-    app.input = "[image 1] describe this".to_string();
-    app.cursor_pos = app.input.len();
-    let images = vec![("image/png".to_string(), "ZmFrZQ==".to_string())];
-    app.pending_images = images.clone();
+    let png = paste_selection_test_png(&mut app, 84);
+    input::insert_input_text(&mut app, " describe this");
+    let images = vec![("image/png".to_string(), png)];
 
     assert!(input::handle_enter(&mut app));
 
-    assert_eq!(app.interleave_message.as_deref(), Some("[image 1] describe this"));
+    assert_eq!(app.interleave_message.as_deref(), Some(" describe this"));
     assert_eq!(app.interleave_images, images);
     assert!(app.pending_images.is_empty());
 }

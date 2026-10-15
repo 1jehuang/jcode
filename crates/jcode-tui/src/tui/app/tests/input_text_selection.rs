@@ -515,6 +515,9 @@ fn test_input_double_click_selects_word_with_info_dock_drawn() {
     let _render_lock = scroll_render_test_lock();
     let clipboard = CapturedClipboard::new();
     let mut app = create_test_app();
+    app.onboarding_flow = None;
+    app.onboarding_preview_mode = false;
+    app.push_display_message(DisplayMessage::user("existing conversation"));
     app.input = "hello big world".to_string();
     app.cursor_pos = app.input.len();
     let (width, height) = (120, 36);

@@ -3,6 +3,7 @@
 #[path = "input/shell_commands.rs"]
 mod shell_commands;
 use super::input_images::attach_image;
+pub(super) use super::input_images::take_prepared_input;
 use shell_commands::*;
 
 use super::{
@@ -95,9 +96,14 @@ pub(super) fn extract_input_shell_command(input: &str) -> Option<&str> {
 
 pub(super) struct PreparedInput {
     pub raw_input: String,
+    // Expanded transport text excludes only explicitly owned image markers.
     pub expanded: String,
     pub images: Vec<(String, String)>,
     pub image_markers: super::input_images::InputImageMarkers,
+    // Normal preparation saves expanded raw text for command classification.
+    // Legacy synthetic drafts fall back to raw_input, never transport text.
+    pub routing_input: Option<String>,
+    pub pasted_contents: Vec<String>,
 }
 
 // Roughly 500k English words at ~6 bytes/word including spaces. This is still
@@ -3014,26 +3020,6 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
             true
         }
         _ => false,
-    }
-}
-
-pub(super) fn take_prepared_input(app: &mut App) -> PreparedInput {
-    promote_dropped_images(app);
-    app.ensure_input_image_markers();
-    let transport_text = app.input_without_owned_image_markers();
-    let image_markers = std::mem::take(&mut app.input_image_markers);
-    let raw_input = std::mem::take(&mut app.input);
-    app.record_prompt_history(&raw_input);
-    let expanded = expand_paste_placeholders(app, &transport_text);
-    app.pasted_contents.clear();
-    let images = std::mem::take(&mut app.pending_images);
-    app.cursor_pos = 0;
-    app.clear_input_undo_history();
-    PreparedInput {
-        raw_input,
-        expanded,
-        images,
-        image_markers,
     }
 }
 

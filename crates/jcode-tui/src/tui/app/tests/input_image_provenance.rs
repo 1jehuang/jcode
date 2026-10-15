@@ -1,5 +1,52 @@
 // Literal marker-looking text is never an attachment ownership token.
 #[test]
+fn image_provenance_collapsed_paste_fallback_retains_command_and_png() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    for command in ["/help", "/definitely-no-provenance-skill"] {
+        let mut app = create_test_app();
+        super::input::handle_text_paste(&mut app, format!("{command} {}", "argument\n".repeat(6)));
+        assert_eq!(app.pasted_contents.len(), 1);
+        let png = paste_selection_test_png(&mut app, 86);
+        let prepared = super::input::take_prepared_input(&mut app);
+        app.is_remote = true;
+        app.runtime_mode = super::AppRuntimeMode::RemoteClient;
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        remote.mark_history_loaded();
+        rt.block_on(super::remote::submit_remote_slash_input(&mut app, &mut remote, prepared)).unwrap();
+        assert_eq!(app.display_messages().last().unwrap().role, "error");
+        assert!(app.queued_messages.is_empty(), "collapsed command became a model prompt");
+        assert_eq!(app.pending_images, vec![("image/png".into(), png)]);
+    }
+}
+#[test]
+fn image_provenance_remote_owned_prefix_does_not_activate_commands() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let temp = tempfile::tempdir().unwrap();
+    let skill_dir = temp.path().join(".jcode/skills/provenance-skill");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(skill_dir.join("SKILL.md"), "---\nname: provenance-skill\ndescription: Marker routing fixture\n---\nKeep prompt text.\n").unwrap();
+    for text in ["!echo must-remain-prompt", "/help", "/model", "/provenance-skill prompt"] {
+        let mut app = create_test_app();
+        let png = paste_selection_test_png(&mut app, 85);
+        app.session.working_dir = Some(temp.path().to_string_lossy().to_string());
+        app.refresh_skills_snapshot();
+        assert!(app.current_skills_snapshot().get("provenance-skill").is_some());
+        app.is_remote = true;
+        app.runtime_mode = super::AppRuntimeMode::RemoteClient;
+        super::input::insert_input_text(&mut app, text);
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        remote.mark_history_loaded();
+        rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote)).unwrap();
+        let pending = app.rate_limit_pending_message.as_ref().expect("must send a prompt, not run a command");
+        assert_eq!(pending.content, text);
+        assert_eq!(pending.images, vec![("image/png".into(), png)]);
+        assert!(app.help_scroll.is_none());
+        assert!(app.active_skill.is_none());
+    }
+}
+#[test]
 fn image_provenance_stash_and_escape_undo_preserve_exact_association() {
     for before in [true, false] {
         let (mut app, png, owned, literal) = provenance_collision_draft(before);
@@ -194,6 +241,8 @@ fn image_provenance_legacy_restore_does_not_claim_literal_marker() {
         &mut next,
         super::input::PreparedInput {
             image_markers: Default::default(),
+            routing_input: None,
+            pasted_contents: Vec::new(),
             raw_input: "[image 1]".into(),
             expanded: "[image 1]".into(),
             images: vec![("image/png".into(), png.clone())],
