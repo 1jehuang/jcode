@@ -56,6 +56,7 @@ fn ctx(session: &str) -> ToolContext {
         tool_call_id: "codemode-call".to_string(),
         working_dir: None,
         stdin_request_tx: None,
+        decision_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: super::super::ToolExecutionMode::Direct,
     }

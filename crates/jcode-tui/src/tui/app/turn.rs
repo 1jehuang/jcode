@@ -1143,6 +1143,7 @@ impl App {
                                             tool_call_id: request_id.clone(),
                                             working_dir: self.session.working_dir.as_deref().map(PathBuf::from),
                                             stdin_request_tx: None,
+                                            decision_request_tx: None,
                                             graceful_shutdown_signal: None,
                                             execution_mode: crate::tool::ToolExecutionMode::AgentTurn,
                                         };
@@ -1435,6 +1436,7 @@ impl App {
                     tool_call_id: tc.id.clone(),
                     working_dir: self.session.working_dir.as_deref().map(PathBuf::from),
                     stdin_request_tx: None,
+                    decision_request_tx: None,
                     graceful_shutdown_signal: None,
                     execution_mode: crate::tool::ToolExecutionMode::AgentTurn,
                 };

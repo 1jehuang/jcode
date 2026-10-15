@@ -1961,6 +1961,10 @@ impl crate::tui::TuiState for App {
         self.inline_view_state.as_ref()
     }
 
+    fn pending_decision(&self) -> Option<&crate::tui::app::PendingDecision> {
+        self.pending_decision.as_ref()
+    }
+
     fn changelog_scroll(&self) -> Option<usize> {
         self.changelog_scroll
     }

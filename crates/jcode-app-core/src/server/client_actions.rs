@@ -415,6 +415,7 @@ pub(super) fn handle_run_subagent(
             tool_call_id: tool_call_id.clone(),
             working_dir,
             stdin_request_tx: None,
+            decision_request_tx: None,
             graceful_shutdown_signal: None,
             execution_mode: crate::tool::ToolExecutionMode::Direct,
         };
@@ -1262,6 +1263,31 @@ pub(super) async fn handle_stdin_response(
 ) {
     if let Some(tx) = stdin_responses.lock().await.remove(&request_id) {
         let _ = tx.send(input);
+    }
+    let _ = client_event_tx.send(ServerEvent::Done { id });
+}
+
+/// Deliver the user's answer to a blocking `ask_user` decision request.
+pub(super) async fn handle_decision_response(
+    id: u64,
+    request_id: String,
+    choice: crate::protocol::DecisionChoice,
+    decision_responses: &Arc<
+        Mutex<HashMap<String, tokio::sync::oneshot::Sender<crate::tool::DecisionInputResponse>>>,
+    >,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    let answer = match choice {
+        crate::protocol::DecisionChoice::Option { index } => {
+            crate::tool::DecisionInputResponse::Option(index)
+        }
+        crate::protocol::DecisionChoice::Text { text } => {
+            crate::tool::DecisionInputResponse::Text(text)
+        }
+        crate::protocol::DecisionChoice::Dismissed => crate::tool::DecisionInputResponse::Dismissed,
+    };
+    if let Some(tx) = decision_responses.lock().await.remove(&request_id) {
+        let _ = tx.send(answer);
     }
     let _ = client_event_tx.send(ServerEvent::Done { id });
 }

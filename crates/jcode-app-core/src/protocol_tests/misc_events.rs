@@ -201,6 +201,7 @@ fn test_subscribe_request_roundtrip_preserves_session_takeover_flags() -> Result
         system_prompt: None,
         supports_pdf_panels: false,
         supports_user_response: false,
+        supports_decisions: false,
         id: 89,
         working_dir: Some("/tmp/project".to_string()),
         selfdev: Some(true),

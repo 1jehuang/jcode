@@ -35,7 +35,7 @@ use helpers::*;
 use jcode_tui_messages::DisplayMessage;
 use ratatui::DefaultTerminal;
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -73,6 +73,8 @@ mod commands_review;
 mod conversation_state;
 mod copy_selection;
 mod debug;
+mod decision;
+mod decision_osc9;
 mod dictation;
 mod event_wrappers;
 mod handterm_native_scroll;
@@ -352,6 +354,39 @@ struct PendingProviderFailover {
     prompt: crate::provider::ProviderFailoverPrompt,
     deadline: Instant,
     remote_resend: Option<FallbackResendPayload>,
+}
+
+/// A blocking decision request from the agent's `ask_user` tool: shown as
+/// an inline chooser above the input, answered with number keys + Enter or
+/// arrow keys + Enter. The last row is an "Your answer" free-form entry,
+/// like the ask_user tool's own free-form option, so the main input box can
+/// stay disabled while the chooser is visible. Esc dismisses.
+#[derive(Debug, Clone)]
+pub struct PendingDecision {
+    /// Matches the server's DecisionRequest request_id
+    pub request_id: String,
+    /// What is being decided, phrased for the user
+    pub question: String,
+    /// Offered options (label + optional one-line detail)
+    pub options: Vec<(String, Option<String>)>,
+    /// Selected option index (0-based into options)
+    pub selected: usize,
+    /// Draft text for the "Your answer" free-form row.
+    pub answer_draft: String,
+}
+
+impl PendingDecision {
+    /// Index of the extra free-form "Your answer" row.
+    pub const ANSWER_ROW: usize = usize::MAX;
+
+    /// Total selectable rows: the numbered options plus the free-form row.
+    pub fn row_count(&self) -> usize {
+        self.options.len() + 1
+    }
+
+    pub fn selected_is_answer_row(&self) -> bool {
+        self.selected == Self::ANSWER_ROW
+    }
 }
 
 /// An interactive "switch to the next best model/method and resend" offer shown
@@ -1065,6 +1100,13 @@ pub struct App {
     // Interactive "switch to next best model/method and resend" offer surfaced
     // after a provider turn error; accepted with a keypress.
     pending_fallback_offer: Option<PendingFallbackOffer>,
+    // Blocking decision request from the agent's ask_user tool, rendered as an
+    // inline chooser above the input until the user answers.
+    pub(crate) pending_decision: Option<PendingDecision>,
+    // Decision requests that arrived while another chooser was already open
+    // (e.g. two ask_user calls inside one batch). They are answered in order
+    // after the visible one resolves, so no question is silently dropped.
+    pub(crate) pending_decision_queue: VecDeque<PendingDecision>,
     // Remote sessions: the failed turn payload staged by an accepted fallback
     // offer, dispatched once the server confirms the route switch.
     pending_fallback_resend: Option<FallbackResendPayload>,

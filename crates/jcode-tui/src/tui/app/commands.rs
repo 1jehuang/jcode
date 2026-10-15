@@ -710,6 +710,7 @@ fn launch_manual_subagent(app: &mut App, spec: ManualSubagentSpec) {
             tool_call_id: tool_call_for_task.id.clone(),
             working_dir: working_dir.as_deref().map(PathBuf::from),
             stdin_request_tx: None,
+            decision_request_tx: None,
             graceful_shutdown_signal: None,
             execution_mode: crate::tool::ToolExecutionMode::Direct,
         };
@@ -3569,12 +3570,183 @@ fn handle_reasoning_display_command(app: &mut App, trimmed: &str) -> bool {
     true
 }
 
+fn handle_settings_command(app: &mut App, trimmed: &str) -> bool {
+    if trimmed != "/settings" && !trimmed.starts_with("/settings ") {
+        return false;
+    }
+
+    let rest = trimmed.strip_prefix("/settings").unwrap_or_default().trim();
+
+    if rest.is_empty() || matches!(rest, "show" | "status") {
+        // The "Saved default" lines must show what the file says, not the
+        // effective values: `Config::load()` already applies env overrides,
+        // so using it here labeled a temporary JCODE_DECISIONS=... override
+        // as the persisted default.
+        let saved_config = crate::config::Config::load_saved();
+        let decisions_saved = saved_config.features.decisions;
+        let decision_timeout_saved = saved_config.features.decision_timeout_secs;
+        let decisions_env = std::env::var("JCODE_DECISIONS").ok();
+        let timeout_env = std::env::var("JCODE_DECISION_TIMEOUT_SECS").ok();
+        let decisions_effective = match &decisions_env {
+            // Same parsing as env_overrides::parse_env_bool: an unrecognized
+            // value leaves the saved default in force, it does not flip the
+            // feature on.
+            Some(raw) => match raw.trim().to_lowercase().as_str() {
+                "1" | "true" | "yes" | "on" => true,
+                "0" | "false" | "no" | "off" => false,
+                _ => decisions_saved,
+            },
+            None => decisions_saved,
+        };
+        let timeout_effective = match &timeout_env {
+            Some(raw) => raw.trim().parse::<u64>().unwrap_or(decision_timeout_saved),
+            None => decision_timeout_saved,
+        };
+        let mut msg = String::from("Settings:\n");
+        msg.push_str(&format!(
+            "\nDecision Chooser ..... {}\n",
+            if decisions_effective {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        ));
+        msg.push_str(&format!(
+            "Saved default: {}\n",
+            if decisions_saved {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        ));
+        if let Some(env) = &decisions_env {
+            let recognized = matches!(
+                env.trim().to_lowercase().as_str(),
+                "1" | "true" | "yes" | "on" | "0" | "false" | "no" | "off"
+            );
+            if recognized {
+                msg.push_str(&format!("Env override (JCODE_DECISIONS={}): active\n", env));
+            } else {
+                msg.push_str(&format!(
+                    "Env override (JCODE_DECISIONS={}): ignored (unrecognized value)\n",
+                    env
+                ));
+            }
+        }
+        msg.push_str(&format!(
+            "Decision Timeout ..... {}\n",
+            if timeout_effective == 0 {
+                "wait forever".to_string()
+            } else {
+                format!("{}s", timeout_effective)
+            }
+        ));
+        msg.push_str(&format!("Saved default: {}s\n", decision_timeout_saved));
+        if let Some(env) = &timeout_env {
+            msg.push_str(&format!(
+                "Env override (JCODE_DECISION_TIMEOUT_SECS={}): active\n",
+                env
+            ));
+        }
+
+        msg.push_str(
+            "\nUse /settings decisions on|off and /settings decision-timeout <secs|0> for the chooser.",
+        );
+        app.push_display_message(DisplayMessage::system(msg));
+        return true;
+    }
+
+    if let Some(value) = rest.strip_prefix("decisions ") {
+        let enabled = match value.trim().to_lowercase().as_str() {
+            "on" | "true" | "enable" | "enabled" | "1" => true,
+            "off" | "false" | "disable" | "disabled" | "0" => false,
+            _ => {
+                app.push_display_message(DisplayMessage::error(
+                    "Usage: /settings decisions on|off".to_string(),
+                ));
+                return true;
+            }
+        };
+        match crate::config::Config::set_decisions_enabled(enabled) {
+            Ok(()) => {
+                app.push_display_message(DisplayMessage::system(format!(
+                    "✓ Decision Chooser ..... {}\nSaved to config.toml. New sessions will inherit this setting.",
+                    if enabled { "enabled" } else { "disabled" }
+                )));
+                app.set_status_notice(format!(
+                    "Decision Chooser: {}",
+                    if enabled { "on" } else { "off" }
+                ));
+            }
+            Err(error) => {
+                app.push_display_message(DisplayMessage::error(format!(
+                    "Failed to save decisions setting: {error}"
+                )));
+            }
+        }
+        return true;
+    }
+
+    if rest == "decisions" {
+        app.push_display_message(DisplayMessage::error(
+            "Usage: /settings decisions on|off".to_string(),
+        ));
+        return true;
+    }
+
+    if let Some(value) = rest.strip_prefix("decision-timeout ") {
+        let Some(secs) = value.trim().parse::<u64>().ok() else {
+            app.push_display_message(DisplayMessage::error(
+                "Usage: /settings decision-timeout <secs> (0 = wait forever)".to_string(),
+            ));
+            return true;
+        };
+        match crate::config::Config::set_decision_timeout_secs(secs) {
+            Ok(()) => {
+                let label = if secs == 0 {
+                    "wait forever".to_string()
+                } else {
+                    format!("{}s", secs)
+                };
+                app.push_display_message(DisplayMessage::system(format!(
+                    "✓ Decision Timeout ..... {}\nSaved to config.toml. New sessions will inherit this setting.",
+                    label
+                )));
+                app.set_status_notice(format!("Decision Timeout: {}", label));
+            }
+            Err(error) => {
+                app.push_display_message(DisplayMessage::error(format!(
+                    "Failed to save decision timeout setting: {error}"
+                )));
+            }
+        }
+        return true;
+    }
+
+    if rest == "decision-timeout" {
+        app.push_display_message(DisplayMessage::error(
+            "Usage: /settings decision-timeout <secs> (0 = wait forever)".to_string(),
+        ));
+        return true;
+    }
+
+    app.push_display_message(DisplayMessage::error(
+        "Usage: /settings (show), /settings decisions on|off, /settings decision-timeout <secs|0>"
+            .to_string(),
+    ));
+    true
+}
+
 pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
     if handle_alignment_command(app, trimmed) {
         return true;
     }
 
     if handle_reasoning_display_command(app, trimmed) {
+        return true;
+    }
+
+    if handle_settings_command(app, trimmed) {
         return true;
     }
 
