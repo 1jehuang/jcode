@@ -30,7 +30,7 @@
 |---|---|
 | Repo | `/Users/kooshapari/CodeProjects/Phenotype/repos/jcode` |
 | Branch | `master` |
-| HEAD | `aef4b0150` — *docs(audit): B.8.88 — post-handoff fmt cleanup + addendum* |
+| HEAD | `a9b8ce357` — *refactor(size): satisfy the code-size LOC ratchet by shrinking, not loosening* |
 | Sync | 0 ahead / 0 behind `origin/master` |
 | origin | `https://github.com/KooshaPari/Jcode.git` |
 | upstream | `https://github.com/1jehuang/jcode` |
@@ -41,9 +41,12 @@
 **Last 3 commits on master:**
 
 ```
+a9b8ce357  refactor(size): satisfy the code-size LOC ratchet by shrinking, not loosening
+d23be0cd0  docs(handoff): correct stale branch, worktree, and merge-path claims (#84)
+3bc65e65c  docs: tighten two oversized doc comments to satisfy the LOC ratchet (#83)
+95aea518c  style: apply cargo fmt to two files the panic refactor left unformatted (#82)
+778b4fd7a  docs(handoff): project-ownership handoff for fresh context to take over KooshaPari/Jcode
 aef4b0150  docs(audit): B.8.88 — post-handoff fmt cleanup + addendum
-826145e64  chore(fmt): drift cleanup (11 files)
-8ba4ea013  docs(audit): B.8.87 — bulk recon + handoff for fresh context
 ```
 
 **Historical corrections to prior notes (verify before trusting older docs):**
@@ -99,6 +102,8 @@ Plain `cargo test` — there is **no `cargo nextest`**. CI wraps calls in `pytho
 
 **Ratchet discipline:** a baseline may only rise via `--update`, and only after *intentional* cleanup. When asked to fix a failing gate, **refactor — do not loosen the ratchet.** The operator's current direction is explicitly to *tighten* (PR #72 took panic 145 → 62). Running `--update` to make a gate green is against that direction.
 
+**Gate gotcha worth knowing:** several ratchets are counted **per file**, so a pure code *move* can read as "new usage" and fail a gate even though total usage is flat. When you split a file, re-run the per-file ratchets — `check_swallowed_error_budget.py` in particular rejected a move of 8 pre-existing `.ok()` calls into a new file, which is why `bash.rs` was shrunk surgically instead of split.
+
 ### CI workflows
 
 | File | Trigger | Purpose |
@@ -123,9 +128,9 @@ Plain `cargo test` — there is **no `cargo nextest`**. CI wraps calls in `pytho
 
 | # | Blocker | State |
 |---|---|---|
-| 1 | `check_code_size_budget.py` fails | **verified live 2026-10-15T21:55Z** — the gate reports **THREE** grown files, not one: `crates/jcode-app-core/src/tool/bash.rs` (1496 → **1502**), `crates/jcode-tui/src/tui/mod.rs` (2072 → **2077**), `crates/jcode-tui/src/tui/ui_inline_interactive.rs` (1382 → **1384**). Prior notes citing only `tui/mod.rs` are incomplete. Fix = shrink the files; `--update` only if the growth was intentional. Operator policy leans refactor. |
+| 1 | `check_code_size_budget.py` fails | **RESOLVED** by `a9b8ce357` (2026-10-15T23:50Z). Three files were shrunk: `bash.rs` 1502→1490, `tui/mod.rs` 2077→1944, `ui_inline_interactive.rs` 1384→1377. No baseline was edited. All 7 gate scripts PASS. |
 | 2 | fmt drift | **RESOLVED** by `826145e64` (11 files cleaned). Do not re-report as open. |
-| 3 | master CI re-run | needs a fresh trigger on `aef4b0150`; see masking note above. |
+| 3 | master CI re-run | needs a fresh trigger on `a9b8ce357`; see masking note above. |
 | 4 | tag/bump | operator signal required. |
 
 ### Fork PRs — 13 open on `KooshaPari/Jcode`
@@ -301,11 +306,11 @@ All agent work artifacts go in `docs/sessions/<YYYY-MM-DD-name>/`. Never create 
 
 ```bash
 cd ~/CodeProjects/Phenotype/repos/jcode
-git fetch origin && git status -sb          # expect: master...origin/master, clean, aef4b0150
+git fetch origin && git status -sb          # expect: master...origin/master, clean, a9b8ce357
 git worktree list                            # 29 worktrees, 7 dirty — see §3
 gh pr list --repo KooshaPari/Jcode --state open
 gh issue list --repo KooshaPari/Jcode --state open
-python3 scripts/check_code_size_budget.py    # the one known-failing gate (3 files: bash.rs, tui/mod.rs, ui_inline_interactive.rs)
+python3 scripts/check_code_size_budget.py    # PASS as of a9b8ce357 (was the last known-failing gate)
 ```
 
 Then read, in order: this doc → `docs/sessions/2026-10-12-cleanup-and-release/00_HANDOFF.md` → `docs/CI-STATUS.md`.
@@ -327,7 +332,7 @@ Then read, in order: this doc → `docs/sessions/2026-10-12-cleanup-and-release/
 
 ## 8. Open questions for the operator
 
-1. **Size budget:** shrink all three grown files (`bash.rs` −6, `tui/mod.rs` −5, `ui_inline_interactive.rs` −2), or accept `--update`? Policy leans refactor. Note the two small overshoots (2 and 6 lines) are cheap to fix and the 1200-line ratchet is trivially satisfiable by extracting one helper each.
+1. ~~**Size budget:**~~ **RESOLVED** in `a9b8ce357` by shrinking all three files. No operator decision needed.
 2. **PR #8:** rebase the 2,254-file mega-merge first, or dispose of it? #23, #34, #35 all chain behind it.
 3. **Stale branches:** approve deleting the ~60 `remotes/upstream/*` mirrors and the >2-week-old branches? (Do not do this unilaterally.)
 4. **Dirty worktrees:** salvage, commit, or discard the 7 uncommitted sets?
