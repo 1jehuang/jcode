@@ -8,16 +8,19 @@ mod auth_account_picker;
 #[path = "auth_types.rs"]
 mod auth_types;
 pub(crate) use self::auth_account_commands::{
-    account_command_from_picker, execute_account_command_local, execute_account_command_remote,
-    handle_account_command_remote, handle_auth_command, resolve_account_provider_descriptor,
-    save_openai_fast_setting_local,
+    account_command_from_inline_action, account_command_from_picker, execute_account_command_local,
+    execute_account_command_remote, handle_account_command_remote, handle_auth_command,
+    resolve_account_provider_descriptor, same_account_command, save_openai_fast_setting_local,
 };
-pub(super) use self::auth_types::{AccountCommand, PendingAccountInput, PendingLogin};
+pub(super) use self::auth_types::{
+    AccountCommand, AccountFailoverMode, PendingAccountInput, PendingLogin,
+};
 
 use super::*;
 use crossterm::event::{KeyCode, KeyModifiers};
 use std::sync::Arc;
 
+#[cfg(test)]
 fn saved_account_route_selection(
     provider_id: &str,
     label: &str,
@@ -934,87 +937,6 @@ impl App {
         Self::claude_token_exchange(verifier, code, &label, Some(redirect_uri)).await
     }
 
-    pub(super) fn switch_account(&mut self, label: &str) {
-        self.switch_saved_oauth_account("claude", label);
-    }
-
-    fn switch_saved_oauth_account(&mut self, provider_id: &str, label: &str) {
-        let selection = match saved_account_route_selection(
-            provider_id,
-            label,
-            self.provider.name(),
-            &self.provider.model(),
-            crate::config::config().provider.default_model.as_deref(),
-        ) {
-            Ok(selection) => selection,
-            Err(error) => {
-                self.push_display_message(DisplayMessage::error(format!(
-                    "Failed to select saved account {label}: {error}"
-                )));
-                return;
-            }
-        };
-        let model_request = selection.routed_model_spec();
-        if let Err(error) = self.provider.set_route_selection(&selection) {
-            self.push_display_message(DisplayMessage::error(format!(
-                "Failed to switch {} account: {}",
-                selection.provider_label, error
-            )));
-            return;
-        }
-        // Reset upstream conversation state and persist the qualified account
-        // route, not just the process-wide saved-login preference.
-        self.finalize_model_switch(&model_request);
-        let saved = if provider_id == "claude" {
-            crate::auth::claude::set_active_account(label)
-        } else {
-            crate::auth::codex::set_active_account(label)
-        };
-        if let Err(error) = saved {
-            self.push_display_message(DisplayMessage::error(format!(
-                "Selected {} account {} for this session, but could not save the active login: {}",
-                selection.provider_label, label, error
-            )));
-        } else {
-            self.push_display_message(DisplayMessage::system(format!(
-                "Switched to {} account {}.",
-                selection.provider_label, label
-            )));
-        }
-        crate::auth::AuthStatus::invalidate_cache();
-        let provider = self.provider.clone();
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(async move {
-                provider.invalidate_credentials().await;
-            });
-        }
-        self.set_context_limit_and_sync_budget(self.provider.context_window());
-    }
-
-    pub(super) fn switch_account_by_label(&mut self, label: &str) {
-        let has_anthropic = crate::auth::claude::list_accounts()
-            .unwrap_or_default()
-            .iter()
-            .any(|account| account.label == label);
-        let has_openai = crate::auth::codex::list_accounts()
-            .unwrap_or_default()
-            .iter()
-            .any(|account| account.label == label);
-
-        match (has_anthropic, has_openai) {
-            (true, false) => self.switch_account(label),
-            (false, true) => self.switch_openai_account(label),
-            (true, true) => self.push_display_message(DisplayMessage::error(format!(
-                "Account label {} exists for both Anthropic and OpenAI. Use /account switch {} or /account openai switch {} explicitly.",
-                label, label, label
-            ))),
-            (false, false) => self.push_display_message(DisplayMessage::error(format!(
-                "No Anthropic or OpenAI account with label {} found.",
-                label
-            ))),
-        }
-    }
-
     pub(super) fn remove_account(&mut self, label: &str) {
         match crate::auth::claude::remove_account(label) {
             Ok(()) => {
@@ -1030,10 +952,6 @@ impl App {
                 )));
             }
         }
-    }
-
-    pub(super) fn switch_openai_account(&mut self, label: &str) {
-        self.switch_saved_oauth_account("openai", label);
     }
 
     pub(super) fn remove_openai_account(&mut self, label: &str) {

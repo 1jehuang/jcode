@@ -1,6 +1,27 @@
 use super::*;
 
 #[test]
+fn usage_limit_reached_stream_error_carries_account_marker() {
+    let error = serde_json::json!({
+        "type": "usage_limit_reached",
+        "message": "The usage limit has been reached",
+        "resets_in_seconds": 7200
+    });
+    let (message, _) = extract_error_with_retry(&None, &Some(error));
+    let limit = jcode_provider_core::classify_account_usage_limit(&message)
+        .unwrap_or_else(|| panic!("marker missing: {message}"));
+    assert!(limit.resets_at.is_some());
+    let short = serde_json::json!({
+        "type": "usage_limit_reached", "message": "limit", "resets_in_seconds": 20
+    });
+    let (message, _) = extract_error_with_retry(&None, &Some(short));
+    assert_eq!(
+        jcode_provider_core::classify_account_usage_limit(&message),
+        None
+    );
+}
+
+#[test]
 fn usage_preserves_inclusive_input_and_optional_cache_details() {
     for (usage, expected_read, expected_write) in [
         (

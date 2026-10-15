@@ -135,13 +135,22 @@ pub(crate) enum AccountCommand {
         provider_id: String,
         label: Option<String>,
     },
-    Switch {
+    /// Pin THIS window to a stored account (`/account switch <label>`).
+    UseInWindow {
         provider_id: String,
         label: String,
     },
-    SwitchShorthand {
+    /// Change the default account for new and unpinned windows.
+    SetDefault {
+        provider_id: String,
         label: String,
     },
+    /// Unpin this window (`None` = every provider) so it follows the default.
+    Unpin {
+        provider_id: Option<String>,
+    },
+    /// Per-window same-provider account failover.
+    Failover(AccountFailoverMode),
     Remove {
         provider_id: String,
         label: String,
@@ -156,4 +165,13 @@ pub(crate) enum AccountCommand {
     SetOpenAiCompatApiKeyName(Option<String>),
     SetOpenAiCompatEnvFile(Option<String>),
     SetOpenAiCompatDefaultModel(Option<String>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AccountFailoverMode {
+    On,
+    Off,
+    /// Clear the per-window override and use the config default.
+    Default,
+    Status,
 }

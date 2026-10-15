@@ -1,4 +1,5 @@
 pub mod account;
+pub mod account_pins;
 pub mod acp;
 pub mod args;
 pub mod auth_import;

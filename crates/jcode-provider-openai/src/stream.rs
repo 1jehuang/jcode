@@ -103,6 +103,35 @@ fn extract_error_with_retry(
                 .and_then(|v| v.as_u64())
         });
 
+    // Codex subscription exhaustion delivered as a stream error event (the
+    // WebSocket transport): add the stable account-usage-limit marker so
+    // account failover can react, unless the reset is only moments away.
+    let message = if error_type == Some("usage_limit_reached") {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let number = |key: &str| {
+            error.get(key).and_then(|v| {
+                v.as_i64()
+                    .or_else(|| v.as_str().and_then(|s| s.trim().parse::<i64>().ok()))
+            })
+        };
+        let resets_at =
+            number("resets_at").or_else(|| number("resets_in_seconds").map(|s| now + s));
+        if jcode_provider_core::usage_limit::is_far_usage_limit_reset(resets_at.map(|at| at - now))
+        {
+            format!(
+                "{message} {}",
+                jcode_provider_core::account_usage_limit_marker(resets_at)
+            )
+        } else {
+            message
+        }
+    } else {
+        message
+    };
+
     (message, retry_after)
 }
 pub fn parse_text_wrapped_tool_call(text: &str) -> Option<(String, String, String, String)> {

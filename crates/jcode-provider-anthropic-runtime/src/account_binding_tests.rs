@@ -125,8 +125,8 @@ async fn oauth_account_binding_survives_global_switch_refresh_and_fork() {
         format!("oauth::{personal}")
     );
     assert_eq!(
-        provider.oauth_refresh_label().as_deref(),
-        Some(personal.as_str())
+        provider.resolved_account_label(AccountProviderKind::Claude),
+        Some(personal.clone())
     );
 
     // Another request already rotated personal's refresh token. Forced refresh
@@ -134,7 +134,7 @@ async fn oauth_account_binding_survives_global_switch_refresh_and_fork() {
     save_account(&personal, "personal-access-rotated", "personal-refresh-new");
     let token = force_refresh_oauth_token(
         Arc::clone(&provider.credentials),
-        &provider.oauth_refresh_label(),
+        provider.account_pin.clone(),
     )
     .await
     .unwrap();

@@ -18,19 +18,14 @@ impl MultiProvider {
         self.reconcile_auth_if_provider_missing(provider)
     }
 
+    /// Pre-request check: is the account *this session* would use known to
+    /// be out of usage? Per label for Claude and OpenAI, so one window's
+    /// exhausted account never blocks a window pinned to another account.
     pub(super) fn provider_precheck_unavailable_reason(
         &self,
         provider: ActiveProvider,
     ) -> Option<String> {
-        match provider {
-            ActiveProvider::Claude
-                if self.provider_uses_oauth_accounts(provider)
-                    && self.is_claude_usage_exhausted() =>
-            {
-                Some("OAuth usage exhausted".to_string())
-            }
-            _ => None,
-        }
+        self.session_account_exhausted(provider)
     }
 
     pub(super) fn build_failover_prompt(

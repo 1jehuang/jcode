@@ -69,6 +69,7 @@ fn test_remote_account_failover_prompt_does_not_hold_or_retry_same_account() {
             id: 21,
             message: prompt.to_error_message(),
             retry_after_secs: Some(60),
+            server_resumes: false,
         },
         &mut remote,
     );
@@ -146,6 +147,7 @@ fn remote_exact_failover_fixture() -> (App, crate::tui::backend::RemoteConnectio
             id: 21,
             message: prompt.to_error_message(),
             retry_after_secs: None,
+            server_resumes: false,
         },
         &mut remote,
     );
@@ -507,6 +509,7 @@ fn test_remote_auth_error_arms_fallback_offer_with_resend_payload() {
             id: 21,
             message: "OpenAI token refresh failed; run /login to re-authenticate: {\"error\":{\"message\":\"Your session has ended. Please log in again.\",\"type\":\"invalid_request_error\",\"code\":\"refresh_token_invalidated\"}}".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         },
         &mut remote,
     );
@@ -568,6 +571,7 @@ fn test_remote_fallback_offer_accept_stages_switch_and_resends() {
             id: 22,
             message: "OpenAI token refresh failed; run /login to re-authenticate: refresh_token_invalidated".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         },
         &mut remote,
     );

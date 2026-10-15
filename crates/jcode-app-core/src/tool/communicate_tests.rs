@@ -36,6 +36,7 @@ fn task_graph_seed_collision_is_detected_from_server_error() {
         id: 1,
         message: "Seed rejected: duplicate node id 'final-synthesis'".to_string(),
         retry_after_secs: None,
+        server_resumes: false,
     };
     assert_eq!(
         super::seed_node_id_collision(&response),
@@ -1494,6 +1495,8 @@ impl RawClient {
             crash_on_disconnect: false,
             continue_on_disconnect: false,
             terminal_env: Vec::new(),
+            account_pins: Vec::new(),
+            supports_session_accounts: false,
         })
         .await?;
         self.read_until(

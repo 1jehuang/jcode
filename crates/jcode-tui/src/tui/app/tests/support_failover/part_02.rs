@@ -1031,3 +1031,39 @@ fn test_local_failover_revalidates_runtime_source_pool_at_expiry() {
         });
     }
 }
+
+#[test]
+fn remote_out_of_credit_profile_offer_never_arms_countdown() {
+    for mode in ["manual", "countdown"] {
+        with_temp_jcode_home(|| {
+            write_test_config(&format!("[provider]\ncross_provider_failover = \"{mode}\"\n"));
+            let rt = tokio::runtime::Runtime::new().expect("runtime");
+            let _guard = rt.enter();
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            let mut app = create_test_app();
+            app.is_remote = true;
+            app.last_submitted_input = Some("say hi".to_string());
+            app.rate_limit_pending_message = Some(PendingRemoteMessage {
+                content: "say hi".to_string(), images: vec![], is_system: false,
+                system_reminder: None, auto_retry: false, retry_attempts: 0, retry_at: None,
+            });
+            let prompt = crate::provider::ProviderFailoverPrompt {
+                from_provider: "prof-a:glm-5.3".to_string(), from_label: "prof-a".to_string(),
+                to_provider: "prof-b:glm-5.3".to_string(), to_label: "prof-b (glm-5.3)".to_string(),
+                reason: "out of credit (HTTP 402: Insufficient credits)".to_string(),
+                estimated_input_chars: 400, estimated_input_tokens: 100, target_route: None,
+            };
+            app.handle_server_event(crate::protocol::ServerEvent::Error {
+                id: 1, message: failover_error_message(&prompt), retry_after_secs: None,
+                server_resumes: false,
+            }, &mut remote);
+            assert!(app.pending_provider_failover.is_none());
+            assert!(app.pending_automatic_failover_route.is_none());
+            assert!(app.display_messages.iter().any(|message| message.content.contains(
+                "Use /model prof-b:glm-5.3 to switch and resend")));
+            assert!(!app.pending_turn);
+            assert!(!app.maybe_progress_provider_failover_countdown());
+            assert!(!app.display_messages.iter().any(|message| message.content.contains("retrying in 3s")));
+        });
+    }
+}

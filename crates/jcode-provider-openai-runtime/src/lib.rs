@@ -21,6 +21,7 @@ use jcode_base::provider::openai_request::{
 #[cfg(test)]
 use jcode_message_types::TOOL_OUTPUT_MISSING_TEXT;
 use jcode_message_types::{Message as ChatMessage, StreamEvent, ToolDefinition};
+use jcode_provider_core::{AccountPin, AccountPinSlot, AccountProviderKind};
 use jcode_provider_core::{EventStream, Provider};
 
 #[cfg(test)]
@@ -229,12 +230,37 @@ enum OpenAINativeCompactionMode {
 /// The OpenAI-specific alias is kept so existing call sites read naturally.
 pub(crate) use jcode_provider_core::CredentialMode as OpenAICredentialMode;
 
-/// Load Codex credentials for the given credential pin.
-pub(crate) fn load_credentials_for_mode(mode: OpenAICredentialMode) -> Result<CodexCredentials> {
+/// Load Codex credentials for the given credential mode and account pin.
+///
+/// Unpinned behaves exactly as before. A pinned instance uses its pinned
+/// jcode account for OAuth, and Auto still falls back to the API key when the
+/// pinned OAuth account cannot load (mirroring `codex::load_credentials`).
+pub(crate) fn load_credentials_for_mode(
+    mode: OpenAICredentialMode,
+    account_pin: &AccountPinSlot,
+) -> Result<CodexCredentials> {
+    if account_pin.get().is_none() {
+        let result = match mode {
+            OpenAICredentialMode::Auto => jcode_base::auth::codex::load_credentials(),
+            OpenAICredentialMode::OAuth => jcode_base::auth::codex::load_oauth_credentials(),
+            OpenAICredentialMode::ApiKey => jcode_base::auth::codex::load_api_key_credentials(),
+        };
+        if !matches!(mode, OpenAICredentialMode::ApiKey) {
+            account_pin.set_resolved_label(jcode_base::auth::codex::default_account_label());
+        }
+        return result;
+    }
     match mode {
-        OpenAICredentialMode::Auto => jcode_base::auth::codex::load_credentials(),
-        OpenAICredentialMode::OAuth => jcode_base::auth::codex::load_oauth_credentials(),
         OpenAICredentialMode::ApiKey => jcode_base::auth::codex::load_api_key_credentials(),
+        OpenAICredentialMode::OAuth => {
+            openai_stream_runtime::load_scoped_openai_oauth_credentials(account_pin)
+                .map(|(creds, _)| creds)
+        }
+        OpenAICredentialMode::Auto => {
+            openai_stream_runtime::load_scoped_openai_oauth_credentials(account_pin)
+                .map(|(creds, _)| creds)
+                .or_else(|_| jcode_base::auth::codex::load_api_key_credentials())
+        }
     }
 }
 
@@ -702,8 +728,10 @@ fn spawn_persistent_ws_keepalive_with_interval(
 pub struct OpenAIProvider {
     client: Client,
     credentials: Arc<RwLock<CodexCredentials>>,
+    /// Per-session account pin, read on every credential resolution
+    /// (including the spawned stream task and its retries).
+    account_pin: AccountPinSlot,
     credential_mode: Arc<RwLock<OpenAICredentialMode>>,
-    oauth_account: StdRwLock<Option<String>>,
     model: Arc<RwLock<String>>,
     prompt_cache_key: Option<String>,
     prompt_cache_retention: Option<String>,
@@ -766,7 +794,8 @@ impl OpenAIProvider {
             match credential_mode {
                 OpenAICredentialMode::Auto => credentials,
                 OpenAICredentialMode::OAuth | OpenAICredentialMode::ApiKey => {
-                    load_credentials_for_mode(credential_mode).unwrap_or(credentials)
+                    load_credentials_for_mode(credential_mode, &AccountPinSlot::default())
+                        .unwrap_or(credentials)
                 }
             }
         };
@@ -842,8 +871,8 @@ impl OpenAIProvider {
         let provider = Self {
             client: jcode_provider_core::shared_http_client(),
             credentials: Arc::new(RwLock::new(credentials)),
+            account_pin: AccountPinSlot::default(),
             credential_mode: Arc::new(RwLock::new(credential_mode)),
-            oauth_account: StdRwLock::new(None),
             model: Arc::new(RwLock::new(model)),
             prompt_cache_key,
             prompt_cache_retention,
@@ -869,27 +898,13 @@ impl OpenAIProvider {
         self.browser_only.load(AtomicOrdering::Acquire)
     }
 
-    fn load_selected_credentials(&self, mode: OpenAICredentialMode) -> Result<CodexCredentials> {
-        match (mode, self.oauth_account_label()) {
-            (OpenAICredentialMode::Auto | OpenAICredentialMode::OAuth, Some(label)) => {
-                jcode_base::auth::codex::load_credentials_for_account(&label)
-            }
-            _ => load_credentials_for_mode(mode),
-        }
-    }
-
-    fn refresh_account_label(&self) -> Option<String> {
-        self.oauth_account_label()
-            .or_else(jcode_base::auth::codex::active_account_label)
-    }
-
     pub(crate) fn reload_credentials_now(&self) {
         let mode = self
             .credential_mode
             .try_read()
             .map(|mode| *mode)
             .unwrap_or(OpenAICredentialMode::Auto);
-        if let Ok(credentials) = self.load_selected_credentials(mode) {
+        if let Ok(credentials) = load_credentials_for_mode(mode, &self.account_pin) {
             match self.credentials.try_write() {
                 Ok(mut guard) => {
                     *guard = credentials;
@@ -897,9 +912,20 @@ impl OpenAIProvider {
                     self.reload_cached_reasoning_efforts();
                 }
                 Err(_) => {
+                    // A request holds the lock right now. Apply the new
+                    // credentials as soon as it is released instead of
+                    // silently keeping the previous account's token.
                     jcode_base::logging::info(
-                        "OpenAI credentials were updated on disk, but the in-memory credential lock was busy; async refresh will retry",
+                        "OpenAI credentials were updated on disk while the in-memory credential lock was busy; applying once it is free",
                     );
+                    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                        let slot = Arc::clone(&self.credentials);
+                        let browser_only = Arc::clone(&self.browser_only);
+                        handle.spawn(async move {
+                            *slot.write().await = credentials;
+                            browser_only.store(false, AtomicOrdering::Release);
+                        });
+                    }
                 }
             }
         }
@@ -908,7 +934,7 @@ impl OpenAIProvider {
     }
 
     pub(crate) fn set_credential_mode(&self, mode: OpenAICredentialMode) -> Result<()> {
-        let credentials = self.load_selected_credentials(mode)?;
+        let credentials = load_credentials_for_mode(mode, &self.account_pin)?;
         match self.credentials.try_write() {
             Ok(mut guard) => {
                 *guard = credentials;
@@ -984,6 +1010,12 @@ impl OpenAIProvider {
             jcode_base::logging::info(&format!("Clearing persistent OpenAI WS state: {}", reason));
         }
         *persistent_ws = None;
+    }
+
+    /// Access token the next request from this session would send.
+    #[cfg(test)]
+    async fn resolve_access_token(&self) -> Result<String> {
+        openai_access_token(&self.credentials, &self.account_pin).await
     }
 
     fn is_chatgpt_mode(credentials: &CodexCredentials) -> bool {
@@ -1224,6 +1256,10 @@ impl OpenAIProvider {
     }
 
     fn responses_url(credentials: &CodexCredentials) -> String {
+        #[cfg(test)]
+        if let Ok(url) = std::env::var("JCODE_TEST_OPENAI_RESPONSES_URL") {
+            return url;
+        }
         let base = if Self::is_chatgpt_mode(credentials) {
             // ChatGPT/Codex OAuth backend is fixed; a custom base only applies
             // to API-key usage of the native Responses API.
@@ -1436,9 +1472,7 @@ impl OpenAIProvider {
                     // back to the raw snapshot if refresh fails; the fetch
                     // will then fail and finish the in-flight marker.
                     let token =
-                        match openai_access_token(self.refresh_account_label(), &self.credentials)
-                            .await
-                        {
+                        match openai_access_token(&self.credentials, &self.account_pin).await {
                             Ok(token) => token,
                             Err(_) if self.oauth_account_label().is_some() => String::new(),
                             Err(_) => self.credentials.read().await.access_token.clone(),

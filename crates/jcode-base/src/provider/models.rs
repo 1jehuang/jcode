@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::RwLock;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const OPENAI_MODEL_CATALOG_CACHE_FILE: &str = "openai_model_catalog_cache.json";
 const ANTHROPIC_MODEL_CATALOG_CACHE_FILE: &str = "anthropic_model_catalog_cache.json";
@@ -86,13 +86,6 @@ pub(crate) fn ensure_model_allowed_for_subscription(model: &str) -> Result<()> {
 static CONTEXT_LIMIT_CACHE: std::sync::LazyLock<RwLock<HashMap<String, usize>>> =
     std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
 
-#[derive(Debug, Clone)]
-struct RuntimeProviderUnavailability {
-    reason: String,
-    recorded_at: Instant,
-    observed_at: SystemTime,
-}
-
 /// Dynamic cache of models actually available for this account (populated from provider APIs).
 /// When populated, only models in this set should be offered/accepted for that account/provider.
 static OPENAI_MODEL_CATALOG_SERVICE: std::sync::LazyLock<ModelCatalogService> =
@@ -111,12 +104,8 @@ static ANTHROPIC_MODEL_CATALOG_SERVICE: std::sync::LazyLock<ModelCatalogService>
             RUNTIME_UNAVAILABLE_TTL,
         )
     });
-static ACCOUNT_RUNTIME_UNAVAILABLE_PROVIDERS: std::sync::LazyLock<
-    RwLock<HashMap<String, RuntimeProviderUnavailability>>,
-> = std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
 const ACCOUNT_MODEL_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
 const RUNTIME_UNAVAILABLE_TTL: Duration = Duration::from_secs(10 * 60);
-const PROVIDER_RUNTIME_UNAVAILABLE_TTL: Duration = Duration::from_secs(5 * 60);
 const ACCOUNT_MODEL_REFRESH_RETRY_INTERVAL: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1079,6 +1068,7 @@ pub fn clear_model_unavailable_for_scope(scope: &str, model: &str) {
 
 #[path = "model_provider_availability.rs"]
 mod provider_availability;
+pub(crate) use provider_availability::clear_openai_unavailability_through_generation;
 pub use provider_availability::*;
 pub fn model_unavailability_detail_for_account(model: &str) -> Option<String> {
     let availability = model_availability_for_account(model);
