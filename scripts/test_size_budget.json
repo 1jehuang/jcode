@@ -16,7 +16,7 @@
     "crates/jcode-base/src/config_tests.rs": 1752,
     "crates/jcode-base/src/live_tests.rs": 3087,
     "crates/jcode-base/src/provider/tests.rs": 1279,
-    "crates/jcode-base/src/provider/tests/account_failover.rs": 1219,
+    "crates/jcode-base/src/provider/tests/account_failover.rs": 1220,
     "crates/jcode-base/src/provider/tests/model_resolution.rs": 2495,
     "crates/jcode-base/src/provider_catalog_tests.rs": 1448,
     "crates/jcode-base/src/session_tests/cases.rs": 3037,
