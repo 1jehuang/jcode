@@ -185,6 +185,7 @@ impl App {
                 self.pending_images.push(image);
             }
         }
+        self.ensure_input_image_markers();
     }
 
     /// Out-of-credit failover between OpenAI-compatible profiles names an

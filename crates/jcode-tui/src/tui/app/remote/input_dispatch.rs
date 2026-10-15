@@ -71,6 +71,7 @@ pub(in crate::tui::app) fn restore_prepared_remote_input(
     app.input = prepared.raw_input;
     app.cursor_pos = app.input.len();
     app.pending_images = prepared.images;
+    app.ensure_input_image_markers();
 }
 
 pub(in crate::tui::app) fn history_matches_pending_startup_prompt(app: &App) -> bool {
@@ -567,6 +568,7 @@ fn restore_draft_after_voice(app: &mut App, stash: StashedDraft) {
     app.cursor_pos = stash.cursor_pos.min(app.input.len());
     app.pasted_contents = stash.pasted_contents;
     app.pending_images = stash.pending_images;
+    app.ensure_input_image_markers();
     app.input_undo_stack = stash.undo;
     app.input_undo_image_counts = stash.undo_image_counts;
     app.cleared_draft_images = stash.cleared_draft_images;
