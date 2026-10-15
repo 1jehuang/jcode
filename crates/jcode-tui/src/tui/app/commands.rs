@@ -166,39 +166,11 @@ pub(super) fn is_auto_poke_connectivity_error(error: &str) -> bool {
 /// to use overload wording (a 404 model-not-found saying "temporarily
 /// unavailable"): the statuses the provider runtime refuses to retry
 /// (400, 401, 402, 403, 404, 405, 406, 422) and model/endpoint mismatches are
-/// rejected before the wording is checked.
+/// rejected before the wording is checked. The server's resume of headless
+/// turns shares [`jcode_provider_core::is_provider_overload_message`].
 pub(super) fn is_provider_overload_error(error: &str) -> bool {
-    let lower = error.to_ascii_lowercase();
-    let status = jcode_provider_core::parse_http_status_message(error);
-    if matches!(status, Some(400 | 401 | 402 | 403 | 404 | 405 | 406 | 422))
-        || is_fatal_model_endpoint_error(error)
-    {
-        return false;
-    }
-    let status_5xx = status.is_some_and(|code| (500..=599).contains(&code));
-    status_5xx
-        || [
-            "overloaded",
-            "heavy usage",
-            "temporarily unavailable",
-            "temporary unavailability",
-            "try again in a moment",
-            "server is busy",
-            "at capacity",
-            "capacity constraints",
-            "503 service unavailable",
-            "502 bad gateway",
-            "504 gateway timeout",
-            // A provider mid-deploy ("We're deploying an update right now
-            // ... Please try again shortly.", "code":"DEPLOYING").
-            "deploying",
-            "try again shortly",
-            // The provider lost its own upstream mid-response ("The model
-            // provider's stream was interrupted. Please retry.").
-            "stream was interrupted",
-        ]
-        .iter()
-        .any(|marker| lower.contains(marker))
+    !is_fatal_model_endpoint_error(error)
+        && jcode_provider_core::is_provider_overload_message(error)
 }
 
 /// Whether `error` is a deterministic model/endpoint-capability failure that can
