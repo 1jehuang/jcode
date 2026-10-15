@@ -284,9 +284,11 @@ return (async () => {
   async function transcript() {
     const id = location.pathname.match(/^\/c\/([0-9a-f-]{36})$/i)?.[1];
     if (!id) return { available: false, reason: 'the owned tab has no conversation id yet' };
-    const session = await (await globalThis.fetch('/api/auth/session', { credentials: 'same-origin' })).json();
+    // jcode reads the unmasked transcript; the page sees the placeholder.
+    const fetch = globalThis.__jcodeChatGptWebStream?.original || globalThis.fetch;
+    const session = await (await fetch('/api/auth/session', { credentials: 'same-origin' })).json();
     if (!session?.accessToken) return { available: false, reason: 'no ChatGPT session token' };
-    const response = await globalThis.fetch(`/backend-api/conversation/${id}`, { credentials: 'same-origin', headers: { authorization: `Bearer ${session.accessToken}` } });
+    const response = await fetch(`/backend-api/conversation/${id}`, { credentials: 'same-origin', headers: { authorization: `Bearer ${session.accessToken}` } });
     if (!response.ok) return { available: false, reason: `conversation request failed with HTTP ${response.status}` };
     const data = await response.json();
     const chain = [];
@@ -313,7 +315,9 @@ return (async () => {
         const url = typeof input === 'string' ? input : input?.url || String(input);
         const method = (init?.method || input?.method || 'GET').toUpperCase();
         const isTurn = method === 'POST' && /\/backend-api\/f\/conversation(\?|$)/.test(url);
+        const isConversationRead = method === 'GET' && /\/backend-api\/conversation\/[0-9a-f-]{36}(\?|$)/i.test(url);
         let substituted = null;
+        let mask = null;
         if (isTurn && net.pending) {
           // Swap jcode's exact prompt into the page's own send, so the page
           // still mints its sentinel headers. Fail closed: an unexpected body
@@ -330,10 +334,21 @@ return (async () => {
             }
             if (typeof user.content.parts[0] !== 'string' || user.content.parts[0].trim() !== pending.placeholder.trim()) throw Error('ChatGPT send did not carry the owned placeholder');
             user.content.parts = [pending.text];
+            // Pick the exact model and thinking level in the request itself.
+            // The page's picker shows only part of the account's catalog.
+            if (pending.route) {
+              body.model = pending.route.slug;
+              if (pending.route.effort) body.thinking_effort = pending.route.effort;
+              else delete body.thinking_effort;
+            }
             init = { ...init, body: JSON.stringify(body) };
             let hash = 2166136261;
             for (let index = 0; index < pending.text.length; index++) hash = Math.imul(hash ^ pending.text.charCodeAt(index), 16777619);
             substituted = { key: pending.key, length: pending.text.length, hash: hash >>> 0, model: body.model || '', thinkingEffort: body.thinking_effort || '' };
+            // The page must never render jcode's prompt: its Markdown renderer
+            // can stall for minutes on one long line, which freezes the tab.
+            mask = { text: pending.text, placeholder: pending.placeholder };
+            net.mask = mask;
           } catch (error) {
             // Nothing was sent. Record why, so jcode can fall back safely.
             net.sendError = { key: pending.key, message: String(error?.message || error) };
@@ -341,6 +356,7 @@ return (async () => {
           }
         }
         const response = await net.original.call(this ?? globalThis, input, init);
+        if (isConversationRead && net.mask && response.ok) return maskedResponse(response, await response.text(), net.mask);
         if (!isTurn || !response.body || !net.key) return response;
         const turn = { key: net.key, status: response.status, substituted, buffer: '', events: 0, messages: {}, order: [], lastPath: null, current: null, done: false, error: null, started: Date.now(), firstToken: null };
         net.turns.push(turn);
@@ -361,21 +377,74 @@ return (async () => {
           }
           turn.done = true;
           if (turn.status !== 200 && !turn.error) turn.error = `HTTP ${turn.status}: ${turn.buffer.slice(0, 300)}`;
-        })().catch(error => { if (!turn.done) turn.error = String(error?.message || error); });
-        return new Response(theirs, { status: response.status, statusText: response.statusText, headers: response.headers });
+        })().catch(error => { if (!turn.done && !turn.error) turn.error = String(error?.message || error); });
+        const pageBody = mask ? theirs.pipeThrough(maskStream(mask)) : theirs;
+        return new Response(pageBody, { status: response.status, statusText: response.statusText, headers: response.headers });
       };
       net.wrapper = globalThis.fetch;
     }
     net.key = key;
     return { armed: true };
   }
-  function armSend(key, text, placeholder) {
+  // Replaces every string equal to jcode's prompt with its placeholder.
+  function maskValue(value, mask, depth = 0) {
+    if (typeof value === 'string') return value === mask.text ? { value: mask.placeholder, changed: true } : { value, changed: false };
+    if (!value || typeof value !== 'object' || depth > 64) return { value, changed: false };
+    let changed = false;
+    for (const key of Object.keys(value)) {
+      const result = maskValue(value[key], mask, depth + 1);
+      if (result.changed) { value[key] = result.value; changed = true; }
+    }
+    return { value, changed };
+  }
+  // A JSON text that may contain the prompt is at least as long as it.
+  function maskJsonText(text, mask) {
+    if (text.length < mask.text.length) return text;
+    try {
+      const result = maskValue(JSON.parse(text), mask);
+      return result.changed ? JSON.stringify(result.value) : text;
+    } catch { return text; }
+  }
+  function maskSseBlock(block, mask) {
+    if (block.length < mask.text.length) return block;
+    return block.split('\n').map(line => line.startsWith('data: ') ? `data: ${maskJsonText(line.slice(6), mask)}` : line).join('\n');
+  }
+  // The page's copy of the turn stream, with the echoed prompt masked.
+  function maskStream(mask) {
+    const decoder = new TextDecoder();
+    const encoder = new TextEncoder();
+    let buffer = '';
+    return new TransformStream({
+      transform(chunk, controller) {
+        buffer += decoder.decode(chunk, { stream: true });
+        let end, out = '';
+        while ((end = buffer.indexOf('\n\n')) >= 0) {
+          out += maskSseBlock(buffer.slice(0, end), mask) + '\n\n';
+          buffer = buffer.slice(end + 2);
+        }
+        if (out) controller.enqueue(encoder.encode(out));
+      },
+      flush(controller) {
+        buffer += decoder.decode();
+        if (buffer) controller.enqueue(encoder.encode(maskSseBlock(buffer, mask)));
+      },
+    });
+  }
+  function maskedResponse(response, text, mask) {
+    const headers = new Headers(response.headers);
+    headers.delete('content-length');
+    headers.delete('content-encoding');
+    return new Response(maskJsonText(text, mask), { status: response.status, statusText: response.statusText, headers });
+  }
+  function armSend(key, text, placeholder, route) {
     if (typeof text !== 'string' || !text) throw Error('Refusing to arm an empty ChatGPT prompt');
     if (typeof placeholder !== 'string' || !placeholder.trim()) throw Error('ChatGPT send substitution lacks its placeholder');
+    if (route != null && (typeof route.slug !== 'string' || !/^[a-z0-9][a-z0-9.-]{0,63}$/.test(route.slug)
+      || (route.effort != null && !/^[a-z]{1,16}$/.test(route.effort)))) throw Error('ChatGPT send route is invalid');
     armStream(key);
     const net = globalThis.__jcodeChatGptWebStream;
     net.sendError = null;
-    net.pending = { key, text, placeholder };
+    net.pending = { key, text, placeholder, route: route ?? null };
     return { armed: true, length: text.length };
   }
   function applyStreamData(turn, data) {
@@ -384,6 +453,8 @@ return (async () => {
     try { event = JSON.parse(data); } catch { return; }
     if (!event || typeof event !== 'object') return;
     turn.events++;
+    // The server reports a failed turn as {message:null, error:"..."}.
+    if (typeof event.error === 'string' && event.error && !event.type) { turn.error = event.error; return; }
     if (event.type) {
       if (event.type === 'message_stream_complete') turn.done = true;
       if (event.error) turn.error = String(event.error);
@@ -397,6 +468,13 @@ return (async () => {
         if (!turn.messages[m.id]) turn.order.push(m.id);
         turn.messages[m.id] = { role: m.author?.role, recipient: m.recipient ?? 'all', channel: m.channel ?? null, type: m.content?.content_type,
           text: (m.content?.parts || []).filter(p => typeof p === 'string').join(''), status: m.status, endTurn: m.end_turn };
+        // The server reports which model and thinking level actually ran.
+        const meta = m.metadata || {};
+        if (m.author?.role !== 'user') {
+          const served = meta.resolved_model_slug || meta.model_slug;
+          if (typeof served === 'string' && served) turn.served = served;
+          if (typeof meta.thinking_effort === 'string' && meta.thinking_effort) turn.servedEffort = meta.thinking_effort;
+        }
         turn.current = m.id;
         if (value.error) turn.error = String(value.error);
         return;
@@ -429,9 +507,36 @@ return (async () => {
     const texts = assistant.filter(m => m.recipient === 'all' && m.type === 'text' && m.text.trim()).map(m => m.text);
     const last = assistant.at(-1);
     return { started: true, status: turn.status, done: turn.done, error: turn.error, events: turn.events, texts, substituted: turn.substituted,
+      served: turn.served || null, servedEffort: turn.servedEffort || null,
       complete: turn.done && !!last && last.endTurn === true && last.status === 'finished_successfully',
       builtin: [...new Set(assistant.map(m => m.recipient).filter(r => r && r !== 'all'))],
       firstTokenMs: turn.firstToken ? turn.firstToken - turn.started : null };
+  }
+  // The account's full model catalog, from the same endpoint the picker uses.
+  // Reading it sends no message. Only non-secret catalog fields are returned.
+  async function catalog() {
+    const session = await (await globalThis.fetch('/api/auth/session', { credentials: 'same-origin' })).json();
+    if (!session?.accessToken) throw Error('ChatGPT is signed out. Log in in the connected browser');
+    const response = await globalThis.fetch('/backend-api/models?iim=false&include_icons=false&is_gizmo=false', { credentials: 'same-origin', headers: { authorization: `Bearer ${session.accessToken}` } });
+    if (!response.ok) throw Error(`ChatGPT model catalog request failed with HTTP ${response.status}`);
+    const data = await response.json();
+    if (!Array.isArray(data?.models)) throw Error('ChatGPT model catalog has no models');
+    const number = v => Number.isFinite(Number(v)) && Number(v) > 0 ? Math.floor(Number(v)) : null;
+    return {
+      defaultSlug: typeof data.default_model_slug === 'string' ? data.default_model_slug : null,
+      versions: (data.versions || []).filter(v => v && v.enabled !== false).map(v => ({
+        id: String(v.id ?? ''), title: String(v.display_text_for_intelligence || v.display_text || ''),
+        presets: (v.intelligence_presets || []).filter(p => p?.preset_type === 'available').map(p => ({
+          title: String(p.title || ''), slug: String(p.model_slug || ''), effort: p.thinking_effort ? String(p.thinking_effort) : null, lane: String(p.lane || '') })),
+      })),
+      models: data.models.map(m => ({
+        slug: String(m.slug || ''), title: String(m.title || ''), reasoningType: String(m.reasoning_type || ''),
+        contextTokens: number(m.max_tokens), workMode: m.is_work_mode_model === true,
+        efforts: (m.thinking_efforts || []).map(t => ({ value: String(t.thinking_effort || ''), label: String(t.short_label || t.full_label || ''), description: String(t.description || '') })),
+        tools: Array.isArray(m.enabled_tools) ? m.enabled_tools.map(String) : [],
+        imageInput: !!m.product_features?.attachments?.image_mime_types?.length,
+      })),
+    };
   }
 
   checkOrigin();
@@ -444,7 +549,8 @@ return (async () => {
   if (request.op === 'response') return responseState();
   if (request.op === 'transcript') return await transcript();
   if (request.op === 'arm_stream') return armStream(request.key);
-  if (request.op === 'arm_send') return armSend(request.key, request.text, request.placeholder);
+  if (request.op === 'arm_send') return armSend(request.key, request.text, request.placeholder, request.route);
+  if (request.op === 'catalog') return await catalog();
   if (request.op === 'stream') return streamState(request.key);
   if (request.op === 'stop') {
     const root = one('main');
@@ -463,6 +569,15 @@ return (async () => {
     if (current.model !== request.label || (request.effort && current.effort !== request.effort)) throw Error('ChatGPT exact model or thinking effort changed before verification');
     return current;
   }
+  if (request.op === 'ready') {
+    // Network-route turns choose the model in the request body, so the
+    // picker is left alone. Only require an empty owned Temporary Chat.
+    await until(() => temporary() || all('[role="dialog"]').filter(visible).some(e => /temporary chat/i.test(e.innerText || '')), 'loading Temporary Chat');
+    await acknowledgeTemporaryNotice();
+    await until(() => temporary() && !!one(editorSelector), 'loading the temporary composer');
+    requireTemporary(true);
+    return { ready: true, temporary: true };
+  }
   if (request.op === 'submit') {
     if (typeof request.cancelKey !== 'string' || !request.cancelKey.startsWith('jcode-')) throw Error('ChatGPT submission lacks its owned cancellation key');
     const checkCancelled = () => {
@@ -472,9 +587,12 @@ return (async () => {
     try {
       checkCancelled();
       requireTemporary(true);
-      const current = await observation();
+      // Network-route turns pick the model in the request body; the picker
+      // state is irrelevant and is not compared.
+      const current = request.route ? { model: null, effort: null, temporary: true } : await observation();
       checkCancelled();
-      if (current.model !== request.label || current.effort !== request.effort) throw Error('ChatGPT exact model or effort changed before submission');
+      if (!request.route && (current.model !== request.label || current.effort !== request.effort)) throw Error('ChatGPT exact model or effort changed before submission');
+      if (request.route && request.armedKey == null) throw Error('ChatGPT route submission requires the network hook');
       requireTemporary(true);
       const prompt = promptState();
       if (prompt.submitDisabled || prompt.length !== request.length || prompt.hash !== request.hash) throw Error('ChatGPT prompt fingerprint or submit state changed before submission');

@@ -16,6 +16,8 @@ const TOOL_CALL_END: &str = "</jcode_tool_call>";
 const POLL_INTERVAL: Duration = Duration::from_millis(750);
 const NETWORK_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const PREVIEW_INTERVAL: Duration = Duration::from_millis(1000);
+/// Pro turns finish in the background; their transcript is polled this often.
+const BACKGROUND_POLL_INTERVAL: Duration = Duration::from_secs(3);
 
 /// One-line live preview of a streaming web answer: its size and the tail
 /// of the latest text, whitespace collapsed.
@@ -171,6 +173,44 @@ impl ChatGptWebState {
         let mut early_cleanup_error = None;
         let cancel_key = format!("{}-submit", next_owned_tab_name());
         let result = async {
+            // Catalog routes name the exact ChatGPT model and thinking level in
+            // the request body; the picker (which shows only part of the
+            // catalog) is not touched. Picker-only routes use the old path.
+            let route = network_path_enabled()
+                .then(|| web_catalog::request_route(model, effort))
+                .flatten();
+            if let Some((slug, thinking)) = route.clone() {
+                browser.ui(json!({"op":"ready"})).await?;
+                let stream_key = format!("{cancel_key}-stream");
+                let route_json = json!({"slug": slug, "effort": thinking});
+                arm_network_send_route(&browser, &stream_key, prompt, Some(&route_json)).await?;
+                let composer_text = placeholder_for(&stream_key);
+                insert_prompt(&browser, &composer_text).await?;
+                arm_network_send_route(&browser, &stream_key, prompt, Some(&route_json)).await
+                    .context("ChatGPT network hook could not be re-armed before Send")?;
+                if tx.is_closed() { anyhow::bail!("ChatGPT web response consumer was closed before submission"); }
+                send_phase(tx, jcode_message_types::ConnectionPhase::SendingRequest).await?;
+                let (length, hash) = utf16_fingerprint(&composer_text);
+                submission_started = true;
+                let submission = browser.ui(json!({"op":"submit", "route": route_json, "length":length, "hash":hash, "cancelKey":cancel_key, "armedKey": stream_key}));
+                tokio::pin!(submission);
+                tokio::select! {
+                    biased;
+                    _ = tx.closed() => {
+                        if let Err(error) = cancel_submission(&browser, &cancel_key).await {
+                            restoration_allowed = false;
+                            return Err(error.context("Pending submission could not be cancelled, so its owned tab was closed"));
+                        }
+                        let _ = submission.await;
+                        anyhow::bail!("ChatGPT web response consumer was closed before submission");
+                    },
+                    response = &mut submission => { response.context("Failed to submit the temporary ChatGPT prompt")?; }
+                }
+                send_phase(tx, jcode_message_types::ConnectionPhase::WaitingForResponse).await?;
+                let answer = poll_network_stream(&browser, &selected, None, &stream_key, prompt, tx).await?;
+                verify_served(&answer, &slug, thinking.as_deref())?;
+                return Ok(answer);
+            }
             let selection = browser.ui(json!({"op":"prepare", "label":selected.label, "effort":effort})).await?;
             original = selection.get("original").cloned();
             let effective_effort = selection.get("effort").and_then(Value::as_str)
@@ -216,13 +256,20 @@ impl ChatGptWebState {
             }
             send_phase(tx, jcode_message_types::ConnectionPhase::WaitingForResponse).await?;
             if network {
-                poll_network_stream(&browser, &selected, effective_effort, &stream_key, prompt, tx).await
+                poll_network_stream(&browser, &selected, Some(effective_effort), &stream_key, prompt, tx).await
             } else {
                 poll_for_response(&browser, &selected, effective_effort, tx).await
             }
         }.await;
         if let Err(error) = &result {
             debug_dump(&browser, prompt, error).await;
+        }
+        // A page that stopped answering DevTools cannot run the cancel, stop
+        // or restore steps either; each would wait out its own timeout.
+        // Closing the owned tab ends its generation.
+        let unresponsive = result.as_ref().err().is_some_and(page_unresponsive);
+        if unresponsive {
+            restoration_allowed = false;
         }
         // Every post-submit failure must quiesce generation before changing
         // account-wide preferences.
@@ -247,6 +294,9 @@ impl ChatGptWebState {
                 .ui(json!({"op":"restore", "original":original}))
                 .await
                 .map(|_| ()),
+            Some(_) if unresponsive => Err(anyhow::anyhow!(
+                "the ChatGPT model picker could not be restored because the page stopped responding"
+            )),
             Some(_) => Err(anyhow::anyhow!(
                 "Original preferences were not restored because pending browser execution could not be safely quiesced"
             )),
@@ -270,13 +320,15 @@ impl ChatGptWebState {
         };
         match (result, cleanup) {
             (Ok(response), Ok(())) => Ok(response),
-            (Err(error), Ok(())) => Err(error),
+            (Err(error), Ok(())) => Err(explain_turn_error(error)),
             (Ok(_), Err(error)) => Err(error.context(
                 "ChatGPT answered, but its owned browser state could not be cleaned up safely",
             )),
-            (Err(error), Err(cleanup_error)) => {
-                Err(error.context(format!("Browser cleanup also failed: {cleanup_error:#}")))
-            }
+            // Lead with the cause; cleanup trouble is secondary detail.
+            (Err(error), Err(cleanup_error)) => Err(anyhow::anyhow!(
+                "{:#} (browser cleanup also failed: {cleanup_error:#})",
+                explain_turn_error(error)
+            )),
         }
     }
 }
@@ -320,6 +372,9 @@ async fn debug_dump(browser: &Tab<'_>, prompt: &str, error: &anyhow::Error) {
     }
     let _ = std::fs::write(dir.join("prompt.txt"), prompt);
     let _ = std::fs::write(dir.join("error.txt"), format!("{error:#}"));
+    if page_unresponsive(error) {
+        return;
+    }
     let dom = browser
         .instance
         .evaluate(
@@ -342,6 +397,29 @@ fn next_owned_tab_name() -> String {
         .unwrap_or_default()
         .as_millis();
     format!("jcode-chatgpt-web-{millis}-{sequence}")
+}
+
+/// The page stopped answering DevTools (a frozen renderer), so no further
+/// in-page step can run.
+fn page_unresponsive(error: &anyhow::Error) -> bool {
+    format!("{error:#}").contains("DevTools Runtime.evaluate timed out")
+}
+
+/// Rewrites ChatGPT web failures into errors jcode can act on.
+fn explain_turn_error(error: anyhow::Error) -> anyhow::Error {
+    let text = format!("{error:#}");
+    if text.contains("message_length_exceeds_limit") || text.contains("HTTP 413") {
+        // Worded as a context-limit error so jcode compacts and retries.
+        return error.context(
+            "ChatGPT web rejected the prompt: the conversation exceeds the context length limit of a single ChatGPT message. Compact the conversation to continue",
+        );
+    }
+    if page_unresponsive(&error) {
+        return error.context(
+            "The ChatGPT web page stopped responding during the turn, so its tab was closed. Retry the message",
+        );
+    }
+    error
 }
 
 async fn cancel_submission(browser: &Tab<'_>, cancel_key: &str) -> Result<()> {
@@ -486,7 +564,12 @@ async fn poll_for_response(
             // checked-radio and power-slider evidence again instead of inventing one.
             browser.ui(json!({"op":"verify", "label":selected.label, "effort":effort, "requireTemporary":false})).await
                 .context("The requested ChatGPT model or thinking effort changed during the response")?;
-            return Ok(WebAnswer { text, builtin });
+            return Ok(WebAnswer {
+                text,
+                builtin,
+                served: None,
+                served_effort: None,
+            });
         } else {
             terminal_since = None;
         }
@@ -523,8 +606,17 @@ fn placeholder_for(stream_key: &str) -> String {
 }
 
 async fn arm_network_send(browser: &Tab<'_>, stream_key: &str, prompt: &str) -> Result<()> {
+    arm_network_send_route(browser, stream_key, prompt, None).await
+}
+
+async fn arm_network_send_route(
+    browser: &Tab<'_>,
+    stream_key: &str,
+    prompt: &str,
+    route: Option<&Value>,
+) -> Result<()> {
     let armed = browser
-        .ui(json!({"op":"arm_send", "key": stream_key, "text": prompt, "placeholder": placeholder_for(stream_key)}))
+        .ui(json!({"op":"arm_send", "key": stream_key, "text": prompt, "placeholder": placeholder_for(stream_key), "route": route}))
         .await?;
     anyhow::ensure!(
         armed.get("armed").and_then(Value::as_bool) == Some(true),
@@ -533,12 +625,31 @@ async fn arm_network_send(browser: &Tab<'_>, stream_key: &str, prompt: &str) -> 
     Ok(())
 }
 
+/// ChatGPT reports the model and thinking level that actually ran. A
+/// different model means the request was silently rerouted, so the answer is
+/// not from the route the user picked.
+fn verify_served(answer: &WebAnswer, slug: &str, thinking: Option<&str>) -> Result<()> {
+    if let Some(served) = answer.served.as_deref() {
+        anyhow::ensure!(
+            served == slug,
+            "ChatGPT answered with '{served}' instead of the requested '{slug}'"
+        );
+    }
+    if let (Some(served), Some(thinking)) = (answer.served_effort.as_deref(), thinking) {
+        anyhow::ensure!(
+            served == thinking,
+            "ChatGPT used thinking level '{served}' instead of the requested '{thinking}'"
+        );
+    }
+    Ok(())
+}
+
 /// Streams the page's own response for this turn. Emits text as it arrives
 /// and verifies the request carried exactly jcode's prompt.
 async fn poll_network_stream(
     browser: &Tab<'_>,
     selected: &ChatGptWebModel,
-    effort: &str,
+    effort: Option<&str>,
     stream_key: &str,
     prompt: &str,
     tx: &mpsc::Sender<Result<StreamEvent>>,
@@ -638,17 +749,75 @@ async fn poll_network_stream(
                         }
                     );
                 }
-                browser.ui(json!({"op":"verify", "label":selected.label, "effort":effort, "requireTemporary":false})).await
-                    .context("The requested ChatGPT model or thinking effort changed during the response")?;
-                return Ok(WebAnswer { text, builtin });
+                // Picker turns re-check the picker; route turns are checked
+                // against the model the server reports instead.
+                if let Some(effort) = effort {
+                    browser.ui(json!({"op":"verify", "label":selected.label, "effort":effort, "requireTemporary":false})).await
+                        .context("The requested ChatGPT model or thinking effort changed during the response")?;
+                }
+                let served = state
+                    .get("served")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                let served_effort = state
+                    .get("servedEffort")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                return Ok(WebAnswer {
+                    text,
+                    builtin,
+                    served,
+                    served_effort,
+                });
             }
             if state.get("done").and_then(Value::as_bool) == Some(true) {
-                // Stream ended without a finished assistant message (aborted
-                // or interrupted). The transcript decides what happened.
-                return match read_transcript(browser).await? {
-                    Transcript::Final { text, builtin } => Ok(WebAnswer { text, builtin }),
-                    _ => anyhow::bail!("ChatGPT web stream ended before the answer finished"),
-                };
+                // The stream ended without a finished assistant message. Pro
+                // models run as a background job: the stream closes early
+                // and the answer lands in the conversation later. Aborted
+                // turns end up here too; the transcript decides which.
+                let served = state
+                    .get("served")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                let served_effort = state
+                    .get("servedEffort")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                let mut last_reason = String::from("the stream ended before the answer finished");
+                while Instant::now() < deadline {
+                    if tx.is_closed() {
+                        anyhow::bail!("ChatGPT web response consumer was closed");
+                    }
+                    match read_transcript(browser).await? {
+                        Transcript::Final { text, builtin } => {
+                            return Ok(WebAnswer {
+                                text,
+                                builtin,
+                                served,
+                                served_effort,
+                            });
+                        }
+                        Transcript::Pending => {}
+                        Transcript::Unavailable(reason) => last_reason = reason,
+                    }
+                    let elapsed = started.elapsed().as_secs();
+                    if elapsed >= last_status_second + 10 {
+                        last_status_second = elapsed;
+                        let _ = tx
+                            .send(Ok(StreamEvent::StatusDetail {
+                                detail: format!(
+                                    "{} is working in ChatGPT web ({elapsed}s)",
+                                    selected.label
+                                ),
+                            }))
+                            .await;
+                    }
+                    tokio::time::sleep(BACKGROUND_POLL_INTERVAL).await;
+                }
+                anyhow::bail!(
+                    "{} web response timed out after {timeout_secs} seconds while ChatGPT finished it in the background ({last_reason})",
+                    selected.label
+                );
             }
         } else if started.elapsed() > Duration::from_secs(45) {
             anyhow::bail!("ChatGPT web did not start a response stream within 45 seconds");
@@ -682,6 +851,9 @@ struct WebAnswer {
     text: String,
     /// ChatGPT built-in tools used for this answer. Empty when unknown.
     builtin: Vec<String>,
+    /// Model slug and thinking level the server reports it used, when known.
+    served: Option<String>,
+    served_effort: Option<String>,
 }
 
 /// ChatGPT built-ins that execute in OpenAI's remote sandbox. Their view of
@@ -1421,6 +1593,39 @@ mod tests {
                 "medium"
             ));
         }
+    }
+
+    #[test]
+    fn over_long_prompt_is_reported_as_a_context_limit_so_jcode_compacts() {
+        let raw = anyhow::anyhow!(
+            "ChatGPT web rejected the request: HTTP 413: {{\"detail\":{{\"code\":\"message_length_exceeds_limit\"}}}}"
+        );
+        let text = format!("{:#}", explain_turn_error(raw)).to_lowercase();
+        // Same predicate as jcode's context-limit auto-compaction.
+        assert!(text.contains("context length"), "{text}");
+        assert!(
+            text.starts_with("chatgpt web rejected the prompt"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn frozen_page_errors_lead_with_the_cause() {
+        let raw = anyhow::anyhow!("DevTools Runtime.evaluate timed out")
+            .context("ChatGPT UI step 'stream'")
+            .context("Failed to read the owned ChatGPT web stream");
+        assert!(page_unresponsive(&raw));
+        let text = format!("{:#}", explain_turn_error(raw));
+        assert!(
+            text.starts_with("The ChatGPT web page stopped responding"),
+            "{text}"
+        );
+        let other = anyhow::anyhow!("ChatGPT web did not start a response stream");
+        assert!(!page_unresponsive(&other));
+        assert_eq!(
+            format!("{:#}", explain_turn_error(other)),
+            "ChatGPT web did not start a response stream"
+        );
     }
 
     #[test]

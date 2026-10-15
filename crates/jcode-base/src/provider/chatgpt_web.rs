@@ -12,6 +12,19 @@ pub struct ChatGptWebModel {
     pub available: bool,
     pub detail: String,
     pub expected_upstream_models: Vec<String>,
+    /// ChatGPT's own model slug, sent in the request body. Present for routes
+    /// discovered from the account catalog; picker-only routes have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slug: Option<String>,
+    /// Context window reported by ChatGPT for this model, in tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_tokens: Option<usize>,
+    /// ChatGPT's built-in tools for this model (search, canvas, ...). Shown
+    /// for information; jcode's web transport tells the model not to use them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
+    #[serde(default)]
+    pub image_input: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -19,6 +32,14 @@ pub struct ChatGptWebReasoningOption {
     pub value: String,
     pub label: String,
     pub available: bool,
+    /// ChatGPT's own `thinking_effort` value for this choice, sent in the
+    /// request body. Absent for picker-only choices.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream: Option<String>,
+    /// Context window of the model this choice runs on. Instant and thinking
+    /// variants of one family differ (e.g. 52K vs 262K).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_tokens: Option<usize>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -116,9 +137,319 @@ fn parse_discovery(value: serde_json::Value) -> Result<Snapshot> {
             label: observed.label,
             available: observed.available,
             detail: observed.detail,
+            slug: None,
+            context_tokens: None,
+            capabilities: Vec::new(),
+            image_input: false,
         });
     }
     Ok(snapshot)
+}
+
+/// Converts the account catalog from `/backend-api/models` into routes. Each
+/// picker family (ChatGPT's "versions") becomes one route whose effort ladder
+/// spans its presets: Instant (the instant model), every thinking level the
+/// thinking model accepts, and Pro. Standalone models with their own context
+/// (the minis) become their own routes. Work-mode `-wm` models are skipped:
+/// a live probe showed ChatGPT silently serves them as the default model.
+fn parse_catalog(value: serde_json::Value) -> Result<Snapshot> {
+    #[derive(Deserialize)]
+    struct Catalog {
+        versions: Vec<Version>,
+        models: Vec<CatalogModel>,
+    }
+    #[derive(Deserialize)]
+    struct Version {
+        title: String,
+        presets: Vec<Preset>,
+    }
+    #[derive(Deserialize)]
+    struct Preset {
+        slug: String,
+        effort: Option<String>,
+        lane: String,
+    }
+    #[derive(Deserialize, Clone)]
+    struct CatalogModel {
+        slug: String,
+        title: String,
+        #[serde(rename = "reasoningType")]
+        reasoning_type: String,
+        #[serde(rename = "contextTokens")]
+        context_tokens: Option<usize>,
+        #[serde(rename = "workMode")]
+        work_mode: bool,
+        efforts: Vec<CatalogEffort>,
+        tools: Vec<String>,
+        #[serde(rename = "imageInput")]
+        image_input: bool,
+    }
+    #[derive(Deserialize, Clone)]
+    struct CatalogEffort {
+        value: String,
+    }
+
+    let catalog: Catalog = serde_json::from_value(value)?;
+    let by_slug: BTreeMap<&str, &CatalogModel> = catalog
+        .models
+        .iter()
+        .map(|m| (m.slug.as_str(), m))
+        .collect();
+    let safe_slug = |slug: &str| {
+        !slug.is_empty()
+            && slug.len() <= 64
+            && slug
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'.')
+    };
+    let capabilities = |model: &CatalogModel| {
+        model
+            .tools
+            .iter()
+            .filter_map(|tool| match tool.as_str() {
+                "search" => Some("web search"),
+                "canvas" => Some("canvas"),
+                "image_gen_tool_enabled" => Some("image generation"),
+                "tools" | "tools2" => Some("code execution"),
+                _ => None,
+            })
+            .map(str::to_string)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+    };
+
+    let mut snapshot = Snapshot {
+        version: 1,
+        observed_at: now_secs(),
+        ..Default::default()
+    };
+    let mut used_slugs = std::collections::BTreeSet::new();
+    let push = |snapshot: &mut Snapshot,
+                label: String,
+                model: &CatalogModel,
+                options: Vec<ChatGptWebReasoningOption>,
+                detail: String|
+     -> Result<()> {
+        let Some(route) = jcode_provider_core::normalize_chatgpt_web_model_label(&label) else {
+            anyhow::bail!("Unsafe ChatGPT model title: {label:?}");
+        };
+        if snapshot.models.iter().any(|m| m.model == route) {
+            return Ok(());
+        }
+        snapshot.reasoning.insert(route.clone(), options);
+        snapshot.models.push(ChatGptWebModel {
+            model: route,
+            expected_upstream_models: accepted_upstream_models_for_label(&label),
+            label,
+            available: true,
+            detail,
+            slug: Some(model.slug.clone()),
+            context_tokens: model.context_tokens,
+            capabilities: capabilities(model),
+            image_input: model.image_input,
+        });
+        Ok(())
+    };
+
+    // Picker families: one route, the full preset ladder as efforts.
+    for version in &catalog.versions {
+        let mut options = Vec::new();
+        let mut anchor: Option<&CatalogModel> = None;
+        let mut thinking: Option<&CatalogModel> = None;
+        for preset in &version.presets {
+            let Some(model) = by_slug.get(preset.slug.as_str()).copied() else {
+                continue;
+            };
+            if !safe_slug(&model.slug) || model.work_mode {
+                continue;
+            }
+            used_slugs.insert(model.slug.clone());
+            match preset.lane.as_str() {
+                "instant" => options.push(
+                    effort_option("none", "Instant", &model.slug, None)
+                        .with_context(model.context_tokens),
+                ),
+                "thinking" => {
+                    thinking = Some(model);
+                    anchor.get_or_insert(model);
+                }
+                "pro" => {
+                    let upstream = model.efforts.first().map(|e| e.value.clone());
+                    options.push(
+                        effort_option("max", "Pro", &model.slug, upstream)
+                            .with_context(model.context_tokens),
+                    );
+                }
+                _ => {}
+            }
+            let _ = &preset.effort;
+        }
+        // Every thinking level the thinking model accepts, not only the
+        // levels the picker happens to show.
+        if let Some(model) = thinking {
+            for effort in &model.efforts {
+                if let Some((value, label)) = thinking_level(&effort.value) {
+                    options.push(
+                        effort_option(value, label, &model.slug, Some(effort.value.clone()))
+                            .with_context(model.context_tokens),
+                    );
+                }
+            }
+        }
+        options.sort_by_key(|option| effort_rank(&option.value));
+        options.dedup_by(|a, b| a.value == b.value);
+        let anchor = anchor.or_else(|| {
+            version
+                .presets
+                .iter()
+                .find_map(|p| by_slug.get(p.slug.as_str()).copied())
+        });
+        let (Some(anchor), false) = (anchor, options.is_empty()) else {
+            continue;
+        };
+        push(
+            &mut snapshot,
+            version.title.clone(),
+            anchor,
+            options,
+            String::new(),
+        )?;
+    }
+
+    // Standalone models the picker groups hide (minis). Skip auto routers,
+    // work-mode models, and anything already covered by a family.
+    for model in &catalog.models {
+        if used_slugs.contains(&model.slug)
+            || model.work_mode
+            || model.reasoning_type == "auto"
+            || model.reasoning_type == "pro"
+            || !safe_slug(&model.slug)
+            || TEMPORARY_CHAT_FAILURES.contains(&model.slug.as_str())
+        {
+            continue;
+        }
+        let suffix = match (
+            model.slug.ends_with("-t-mini"),
+            model.slug.ends_with("-mini"),
+        ) {
+            (true, _) => " Thinking mini",
+            (false, true) => " mini",
+            _ => "",
+        };
+        if suffix.is_empty() && !model.slug.contains("mini") {
+            // Instant/thinking variants of a family are reached through its
+            // effort ladder, not as separate routes.
+            continue;
+        }
+        let label = if model.title.to_ascii_lowercase().contains("mini") {
+            model.title.clone()
+        } else {
+            format!("{}{suffix}", model.title)
+        };
+        let options = if model.reasoning_type == "reasoning" {
+            vec![
+                effort_option("medium", "Thinking", &model.slug, None)
+                    .with_context(model.context_tokens),
+            ]
+        } else {
+            vec![
+                effort_option("none", "Instant", &model.slug, None)
+                    .with_context(model.context_tokens),
+            ]
+        };
+        push(
+            &mut snapshot,
+            label,
+            model,
+            options,
+            format!("ChatGPT model {}", model.slug),
+        )?;
+    }
+    anyhow::ensure!(
+        !snapshot.models.is_empty(),
+        "ChatGPT catalog contained no usable models"
+    );
+    Ok(snapshot)
+}
+
+/// Catalog models the server rejects in a Temporary Chat (every jcode turn
+/// is one), observed 2026-10-15: `research` answers HTTP 500, and
+/// `gpt-5-3-mini` ends every turn with "Error in message stream".
+const TEMPORARY_CHAT_FAILURES: &[&str] = &["research", "gpt-5-3-mini"];
+
+/// jcode effort value and label for a ChatGPT `thinking_effort`.
+fn thinking_level(upstream: &str) -> Option<(&'static str, &'static str)> {
+    match upstream {
+        "min" => Some(("low", "Light")),
+        "standard" => Some(("medium", "Medium")),
+        "extended" => Some(("high", "High")),
+        "max" => Some(("xhigh", "Extra High")),
+        _ => None,
+    }
+}
+
+fn effort_rank(value: &str) -> usize {
+    ["none", "low", "medium", "high", "xhigh", "max"]
+        .iter()
+        .position(|v| *v == value)
+        .unwrap_or(usize::MAX)
+}
+
+/// An effort choice that maps to an exact model slug and thinking level.
+/// `slug` is stored in `upstream` as `slug` or `slug:thinking_effort`.
+fn effort_option(
+    value: &str,
+    label: &str,
+    slug: &str,
+    thinking_effort: Option<String>,
+) -> ChatGptWebReasoningOption {
+    ChatGptWebReasoningOption {
+        value: value.to_string(),
+        label: label.to_string(),
+        available: true,
+        upstream: Some(match thinking_effort {
+            Some(effort) => format!("{slug}:{effort}"),
+            None => slug.to_string(),
+        }),
+        context_tokens: None,
+    }
+}
+
+impl ChatGptWebReasoningOption {
+    fn with_context(mut self, tokens: Option<usize>) -> Self {
+        self.context_tokens = tokens;
+        self
+    }
+}
+
+/// Context window for a route at the given jcode effort: the window of the
+/// exact model that effort runs on, else the route's own.
+pub fn context_tokens(model: &str, effort: Option<&str>) -> Option<usize> {
+    let options = cached_reasoning_options(model);
+    effort
+        .and_then(|effort| options.iter().find(|o| o.value == effort))
+        .or_else(|| options.iter().find(|o| o.value == "medium"))
+        .and_then(|o| o.context_tokens)
+        .or_else(|| find_model(model).and_then(|m| m.context_tokens))
+}
+
+/// The exact ChatGPT model slug and thinking level for a route and jcode
+/// effort, when the route came from the account catalog.
+pub fn request_route(model: &str, effort: Option<&str>) -> Option<(String, Option<String>)> {
+    let options = cached_reasoning_options(model);
+    let option = match effort {
+        Some(effort) => options.iter().find(|o| o.available && o.value == effort),
+        None => None,
+    }
+    .or_else(|| options.iter().find(|o| o.available && o.value == "medium"))
+    .or_else(|| options.iter().find(|o| o.available))?;
+    let upstream = option.upstream.as_deref()?;
+    let (slug, effort) = match upstream.split_once(':') {
+        Some((slug, effort)) => (slug, Some(effort.to_string())),
+        None => (upstream, None),
+    };
+    Some((slug.to_string(), effort))
 }
 
 /// Availability is the last successful picker observation. Age, restarts and
@@ -241,7 +572,11 @@ pub fn cached_reasoning_options(model: &str) -> Vec<ChatGptWebReasoningOption> {
         .get(model)
         .into_iter()
         .flatten()
-        .filter(|option| reasoning_value(&option.label) == Some(option.value.as_str()))
+        .filter(|option| {
+            // Catalog-derived choices carry their exact upstream route.
+            option.upstream.is_some()
+                || reasoning_value(&option.label) == Some(option.value.as_str())
+        })
         .cloned()
         .map(|mut option| {
             option.available &= available;
@@ -336,10 +671,28 @@ impl DiscoveryPage for InstanceTab<'_> {
     }
 }
 
+/// Reads the account's model catalog, which lists every model with its
+/// thinking levels and context window. Falls back to reading the picker if
+/// the catalog cannot be read. Never sends a message.
+async fn discover_on(page: &impl DiscoveryPage) -> Result<Snapshot> {
+    use serde_json::json;
+    match page
+        .ui(json!({"op":"catalog"}))
+        .await
+        .and_then(parse_catalog)
+    {
+        Ok(snapshot) => return Ok(snapshot),
+        Err(error) => crate::logging::warn(&format!(
+            "ChatGPT model catalog unavailable, reading the picker instead: {error:#}"
+        )),
+    }
+    discover_from_picker(page).await
+}
+
 /// Reads the picker's models, then probes each available model's Power
 /// choices. Never sends a message. The UI script restores the original model
 /// and Power after every probe.
-async fn discover_on(page: &impl DiscoveryPage) -> Result<Snapshot> {
+async fn discover_from_picker(page: &impl DiscoveryPage) -> Result<Snapshot> {
     use serde_json::json;
     let mut discovered = page.ui(json!({"op":"discover"})).await?;
     // Validate labels and shape before using any page-derived probe input.
@@ -464,6 +817,10 @@ mod tests {
     impl DiscoveryPage for FakePage {
         async fn ui(&self, request: serde_json::Value) -> Result<serde_json::Value> {
             let op = request["op"].as_str().unwrap().to_string();
+            if op == "catalog" {
+                // This fake exercises the picker fallback path.
+                anyhow::bail!("catalog unavailable");
+            }
             self.ops.lock().unwrap().push(op.clone());
             match op.as_str() {
                 "discover" => Ok(json!({"models":[
@@ -625,6 +982,188 @@ mod tests {
             "Locked · last refresh failed: bridge failed"
         );
         assert!(snapshot.reasoning["gpt-6[web]"][0].available);
+    }
+
+    fn catalog_fixture() -> serde_json::Value {
+        let thinking = |slug: &str, title: &str, ctx: usize| {
+            json!({"slug":slug,"title":title,"reasoningType":"reasoning","contextTokens":ctx,"workMode":false,
+            "efforts":[{"value":"min"},{"value":"standard"},{"value":"extended"},{"value":"max"}],"tools":["tools","search","canvas"],"imageInput":true})
+        };
+        let plain = |slug: &str, title: &str, kind: &str, ctx: usize| json!({"slug":slug,"title":title,"reasoningType":kind,"contextTokens":ctx,"workMode":false,"efforts":[],"tools":["search"],"imageInput":true});
+        json!({
+            "versions":[
+                {"id":"latest","title":"GPT-6","presets":[
+                    {"title":"Instant","slug":"gpt-6-instant","effort":null,"lane":"instant"},
+                    {"title":"Medium","slug":"gpt-6-thinking","effort":"standard","lane":"thinking"},
+                    {"title":"High","slug":"gpt-6-thinking","effort":"extended","lane":"thinking"},
+                    {"title":"Extra High","slug":"gpt-6-thinking","effort":"max","lane":"thinking"},
+                    {"title":"Pro","slug":"gpt-6-pro","effort":null,"lane":"pro"}]},
+                {"id":"5.6","title":"GPT-5.6 Sol","presets":[
+                    {"title":"Instant","slug":"gpt-5-6-instant","effort":null,"lane":"instant"},
+                    {"title":"Medium","slug":"gpt-5-6-thinking","effort":"standard","lane":"thinking"}]}],
+            "models":[
+                plain("gpt-6","GPT-6","auto",52815),
+                plain("gpt-6-instant","GPT-6","none",52815),
+                thinking("gpt-6-thinking","GPT-6",262144),
+                {"slug":"gpt-6-pro","title":"GPT-6 Pro","reasoningType":"pro","contextTokens":410000,"workMode":false,"efforts":[{"value":"standard"}],"tools":["search"],"imageInput":true},
+                plain("gpt-6-mini","GPT-6","none",137000),
+                plain("gpt-6-t-mini","GPT-6","reasoning",262144),
+                plain("gpt-5-6-instant","GPT-5.6 Sol","none",52815),
+                thinking("gpt-5-6-thinking","GPT-5.6 Sol",262144),
+                plain("gpt-5-3-mini","GPT-5.3 Mini","none",52815),
+                {"slug":"gpt-6.1-sol-wm","title":"GPT-6.1 Sol","reasoningType":"reasoning","contextTokens":262144,"workMode":true,"efforts":[{"value":"min"}],"tools":[],"imageInput":true},
+                plain("research","Deep Research","none",34815)
+            ]
+        })
+    }
+
+    #[test]
+    fn catalog_routes_cover_every_served_model_and_thinking_level() {
+        let snapshot = parse_catalog(catalog_fixture()).unwrap();
+        let routes: Vec<_> = snapshot.models.iter().map(|m| m.model.as_str()).collect();
+        // Existing route IDs stay stable; minis appear; work-mode, auto,
+        // research and models that fail in Temporary Chat do not.
+        assert_eq!(
+            routes,
+            [
+                "gpt-6[web]",
+                "gpt-5.6-sol[web]",
+                "gpt-6-mini[web]",
+                "gpt-6-thinking-mini[web]",
+            ]
+        );
+        let gpt6: Vec<_> = snapshot.reasoning["gpt-6[web]"]
+            .iter()
+            .map(|o| {
+                (
+                    o.value.as_str(),
+                    o.label.as_str(),
+                    o.upstream.as_deref().unwrap(),
+                    o.context_tokens.unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            gpt6,
+            [
+                ("none", "Instant", "gpt-6-instant", 52815),
+                ("low", "Light", "gpt-6-thinking:min", 262144),
+                ("medium", "Medium", "gpt-6-thinking:standard", 262144),
+                ("high", "High", "gpt-6-thinking:extended", 262144),
+                ("xhigh", "Extra High", "gpt-6-thinking:max", 262144),
+                ("max", "Pro", "gpt-6-pro:standard", 410000),
+            ]
+        );
+        let gpt6_model = &snapshot.models[0];
+        assert_eq!(gpt6_model.slug.as_deref(), Some("gpt-6-thinking"));
+        assert_eq!(gpt6_model.context_tokens, Some(262144));
+        assert!(gpt6_model.image_input);
+        assert!(gpt6_model.capabilities.contains(&"web search".to_string()));
+        // A family without Pro in its presets does not invent one.
+        assert!(
+            !snapshot.reasoning["gpt-5.6-sol[web]"]
+                .iter()
+                .any(|o| o.value == "max")
+        );
+        assert!(
+            snapshot.reasoning["gpt-5.6-sol[web]"]
+                .iter()
+                .any(|o| o.value == "low" && o.upstream.as_deref() == Some("gpt-5-6-thinking:min"))
+        );
+    }
+
+    #[test]
+    fn catalog_request_routes_and_context_follow_the_selected_effort() {
+        let _home = HomeGuard::new();
+        store_cache(parse_catalog(catalog_fixture()).unwrap());
+        assert_eq!(
+            request_route("gpt-6[web]", Some("low")),
+            Some(("gpt-6-thinking".to_string(), Some("min".to_string())))
+        );
+        assert_eq!(
+            request_route("gpt-6[web]", Some("none")),
+            Some(("gpt-6-instant".to_string(), None))
+        );
+        assert_eq!(
+            request_route("gpt-6[web]", Some("max")),
+            Some(("gpt-6-pro".to_string(), Some("standard".to_string())))
+        );
+        // Unknown or missing efforts fall back to Medium, never to Pro.
+        assert_eq!(
+            request_route("gpt-6[web]", None),
+            Some(("gpt-6-thinking".to_string(), Some("standard".to_string())))
+        );
+        assert_eq!(
+            request_route("gpt-6-mini[web]", Some("high")),
+            Some(("gpt-6-mini".to_string(), None))
+        );
+        assert_eq!(context_tokens("gpt-6[web]", Some("none")), Some(52815));
+        assert_eq!(context_tokens("gpt-6[web]", Some("high")), Some(262144));
+        assert_eq!(context_tokens("gpt-6[web]", Some("max")), Some(410000));
+        assert_eq!(request_route("gpt-9[web]", None), None);
+        // Picker-only snapshots (old caches) have no request routes.
+        store_cache(observed_gpt6());
+        assert_eq!(request_route("gpt-6[web]", Some("medium")), None);
+    }
+
+    #[test]
+    fn catalog_rejects_unsafe_slugs_and_empty_catalogs() {
+        let mut bad = catalog_fixture();
+        bad["models"][2]["slug"] = json!("gpt-6-thinking\"; drop");
+        bad["versions"][0]["presets"][1]["slug"] = json!("gpt-6-thinking\"; drop");
+        let snapshot = parse_catalog(bad).unwrap();
+        assert!(
+            snapshot.reasoning["gpt-6[web]"].iter().all(|o| !o
+                .upstream
+                .as_deref()
+                .unwrap()
+                .contains('"'))
+        );
+        assert!(parse_catalog(json!({"versions":[],"models":[]})).is_err());
+    }
+
+    #[tokio::test]
+    async fn discovery_prefers_the_catalog_and_falls_back_to_the_picker() {
+        struct CatalogPage {
+            catalog_ok: bool,
+            ops: std::sync::Mutex<Vec<String>>,
+        }
+        #[async_trait::async_trait]
+        impl DiscoveryPage for CatalogPage {
+            async fn ui(&self, request: serde_json::Value) -> Result<serde_json::Value> {
+                let op = request["op"].as_str().unwrap().to_string();
+                self.ops.lock().unwrap().push(op.clone());
+                match op.as_str() {
+                    "catalog" if self.catalog_ok => Ok(catalog_fixture()),
+                    "catalog" => anyhow::bail!("HTTP 403"),
+                    "discover" => Ok(
+                        json!({"models":[{"label":"GPT-6","available":true,"detail":"","reasoning_options":[]}]}),
+                    ),
+                    "probe" => Ok(
+                        json!({"reasoning_options":[{"value":"none","label":"Instant","available":true}]}),
+                    ),
+                    other => panic!("unexpected {other}"),
+                }
+            }
+        }
+        let page = CatalogPage {
+            catalog_ok: true,
+            ops: Default::default(),
+        };
+        let snapshot = discover_on(&page).await.unwrap();
+        assert_eq!(
+            *page.ops.lock().unwrap(),
+            ["catalog"],
+            "no picker clicks when the catalog works"
+        );
+        assert_eq!(snapshot.models.len(), 4);
+        let page = CatalogPage {
+            catalog_ok: false,
+            ops: Default::default(),
+        };
+        let snapshot = discover_on(&page).await.unwrap();
+        assert_eq!(*page.ops.lock().unwrap(), ["catalog", "discover", "probe"]);
+        assert_eq!(snapshot.models[0].model, "gpt-6[web]");
     }
 
     #[tokio::test]
