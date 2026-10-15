@@ -93,7 +93,7 @@ fn chatgpt_web_dynamic_model_selection_uses_discovered_power() {
     assert_eq!(provider.reasoning_effort().as_deref(), Some("high"));
     assert!(provider.set_reasoning_effort("max").is_err());
     assert!(provider.set_reasoning_effort("low").is_err());
-    assert!(!provider.supports_images());
+    assert!(!provider.supports_image_input());
 }
 
 #[test]
