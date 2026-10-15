@@ -20,15 +20,25 @@ pub(super) fn render_annotated_text(text: &str, annotations: Option<&Value>) -> 
             continue;
         }
         let Some((start, end, link, destination)) = (|| {
-            let start = usize::try_from(annotation.get("start_index")?.as_u64()?).ok()?;
-            let end = usize::try_from(annotation.get("end_index")?.as_u64()?).ok()?;
-            let start = *boundaries.get(start)?;
-            let end = *boundaries.get(end)?;
+            let start = annotation.get("start_index")?.as_u64()?;
+            let end = annotation.get("end_index")?.as_u64()?;
+            // Validate against the actual character table before narrowing offsets.
+            if start >= boundaries.len() as u64 || end >= boundaries.len() as u64 {
+                return None;
+            }
+            let start = boundaries[start as usize];
+            let end = boundaries[end as usize];
             if start > end {
                 return None;
             }
             let url = annotation.get("url")?.as_str()?;
-            let parsed = reqwest::Url::parse(url).ok()?;
+            let parsed = match reqwest::Url::parse(url) {
+                Ok(parsed) => parsed,
+                Err(_) => {
+                    eprintln!("Ignoring citation annotation with an invalid URL");
+                    return None;
+                }
+            };
             // Never make file:, javascript:, or terminal-control payloads clickable.
             if !matches!(parsed.scheme(), "http" | "https")
                 || parsed.host_str().is_none()
