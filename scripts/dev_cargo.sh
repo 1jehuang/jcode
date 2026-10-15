@@ -43,15 +43,26 @@ rust_action_log_path=""
 rust_action_log_execution="local"
 cargo_gate_wait_ms=0
 
-# BSD date prints a literal N for %N. Keep nanosecond units for arithmetic,
-# with second precision when the host date has no nanosecond support.
+# Some BSD date versions print a literal N for %N. Try an optional subsecond
+# clock before falling back to clearly identified whole-second precision.
 now_ns() {
   local value
   value=$(date +%s%N)
   case "$value" in
-    ''|*[!0-9]*) printf '%s000000000\n' "$(date +%s)" ;;
-    *) printf '%s\n' "$value" ;;
+    ''|*[!0-9]*) ;;
+    *) printf '%s\n' "$value"; return ;;
   esac
+  # Python is already optional for the action log. Missing interpreters,
+  # unsupported versions and failed probes must never prevent Cargo running.
+  if command -v python3 >/dev/null 2>&1 \
+    && value=$(python3 -c 'import time; print(time.time_ns())' 2>/dev/null); then
+    case "$value" in
+      ''|*[!0-9]*) ;;
+      *) printf '%s\n' "$value"; return ;;
+    esac
+  fi
+  log "subsecond clock unavailable; elapsed timing has 1s precision"
+  printf '%s000000000\n' "$(date +%s)"
 }
 
 start_rust_action_log() {

@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -173,15 +174,79 @@ class BuildPortabilityTests(unittest.TestCase):
         result = self.dev("check", "--offline", JCODE_FRONTEND_THREADS="2")
         self.assertEqual(result.returncode, 101, result.stderr)
 
-    def test_bsd_date_fallback_keeps_failure_status(self):
+    def use_bsd_date(self):
         self.script("date", 'case "$1" in\n'
                     '  +%s%N) echo 1700000000N ;;\n'
                     '  +%s) echo 1700000000 ;;\n'
                     '  *) echo 2023-11-14T22:13:20Z ;;\nesac\n')
+
+    def clock_python(self, body):
+        # Intercept only the optional clock, not the existing JSON logger.
+        python = shlex.quote(shutil.which("python3"))
+        self.script("python3", 'if [ "$1" = -c ]; then\n' + body + '\nfi\n'
+                    'exec ' + python + ' "$@"\n')
+
+    def test_bsd_date_uses_subsecond_optional_clock(self):
+        self.use_bsd_date()
+        self.env["PROBE_CLOCK_STATE"] = str(self.root / "clock-state")
+        self.clock_python('n=0\n[ ! -f "$PROBE_CLOCK_STATE" ] || read -r n < "$PROBE_CLOCK_STATE"\n'
+                          'n=$((n + 1))\nprintf "%s\\n" "$n" > "$PROBE_CLOCK_STATE"\n'
+                          'case "$n" in\n'
+                          '  1) echo 1700000000100000000 ;;\n'
+                          '  2) echo 1700000000120000000 ;;\n'
+                          '  3) echo 1700000000245000000 ;;\n'
+                          '  4) echo 1700000000475000000 ;;\n'
+                          '  *) exit 1 ;;\nesac\nexit 0')
         result = self.dev("check", PROBE_EXIT="42", PROBE_CONTENDED="1")
         self.assertEqual(result.returncode, 42, result.stderr)
         record = json.loads((self.root / "actions.jsonl").read_text())
-        self.assertEqual((record["duration_ms"], record["gate_wait_ms"]), (0, 0))
+        self.assertEqual((record["duration_ms"], record["gate_wait_ms"],
+                          record["execution_duration_ms"], record["exit_code"]), (375, 125, 250, 42))
+        self.assertNotIn("1s precision", result.stderr)
+
+    def test_numeric_date_does_not_probe_optional_clock(self):
+        self.script("date", 'case "$1" in\n'
+                    '  +%s%N) echo 1700000000123000000 ;;\n'
+                    '  *) echo 2023-11-14T22:13:20Z ;;\nesac\n')
+        self.env["PROBE_CLOCK_STATE"] = str(self.root / "clock-state")
+        self.clock_python('echo unexpected > "$PROBE_CLOCK_STATE"\nexit 23')
+        result = self.dev("check", PROBE_EXIT="42")
+        self.assertEqual(result.returncode, 42, result.stderr)
+        self.assertFalse((self.root / "clock-state").exists())
+        self.assertNotIn("1s precision", result.stderr)
+
+    def test_bsd_date_uses_real_optional_python_clock(self):
+        self.use_bsd_date()
+        self.script("cargo", 'sleep 0.2\nexit 42\n')
+        result = self.dev("check")
+        self.assertEqual(result.returncode, 42, result.stderr)
+        record = json.loads((self.root / "actions.jsonl").read_text())
+        self.assertGreaterEqual(record["duration_ms"], 200)
+        self.assertNotIn("1s precision", result.stderr)
+
+    def test_bsd_date_failed_or_invalid_clock_warns_and_preserves_failure(self):
+        self.use_bsd_date()
+        for body in ["exit 23", "echo invalid-clock; exit 0"]:
+            with self.subTest(clock=body):
+                self.clock_python(body)
+                result = self.dev("check", PROBE_EXIT="42", PROBE_CONTENDED="1")
+                self.assertEqual(result.returncode, 42, result.stderr)
+                self.assertIn("cargo-ran", result.stdout)
+                self.assertIn("elapsed timing has 1s precision", result.stderr)
+                record = json.loads((self.root / "actions.jsonl").read_text().splitlines()[-1])
+                self.assertEqual((record["duration_ms"], record["gate_wait_ms"], record["exit_code"]),
+                                 (0, 0, 42))
+
+    def test_bsd_date_missing_python_still_runs_cargo_with_coarse_warning(self):
+        self.use_bsd_date()
+        # A real restricted PATH, not a stub claiming Python is absent.
+        for command in ["dirname", "mkdir", "uname"]:
+            (self.root / "bin" / command).symlink_to(shutil.which(command))
+        result = self.dev("check", PATH=str(self.root / "bin"), PROBE_EXIT="42", PROBE_CONTENDED="1")
+        self.assertEqual(result.returncode, 42, result.stderr)
+        self.assertIn("cargo-ran", result.stdout)
+        self.assertIn("elapsed timing has 1s precision", result.stderr)
+        self.assertFalse((self.root / "actions.jsonl").exists())
 
     def test_disabled_and_inherited_gates_skip_lock(self):
         for env in [{"JCODE_CARGO_GATE": "off"}, {"JCODE_CARGO_GATE_HELD": "1"}]:

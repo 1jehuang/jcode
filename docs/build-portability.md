@@ -12,6 +12,13 @@ Cargo job sizing and the host-wide build gate when `flock` is available. Without
 `flock`, it reports that the gate is unavailable and still applies job sizing.
 No shell or toolchain upgrade is needed.
 
+Elapsed Cargo/gate timing uses numeric `date +%s%N` when supported. Date versions
+that return a literal `N` instead try optional Python3 `time.time_ns()` and accept
+only numeric output. Missing Python, unsupported clock APIs, or failed probes do
+not block Cargo. If neither clock works, the script warns that elapsed timing
+has 1s precision before using whole seconds. Python remains optional, as it was
+for the best-effort action logger. No interpreter installation is required.
+
 For local unoptimized crates, the dev script still selects
 `scripts/rustc-parallel-frontend` automatically. The existing measurements in the
 wrapper record substantial Linux frontend speedups. Registry/git dependencies,
