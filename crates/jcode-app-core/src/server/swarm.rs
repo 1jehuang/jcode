@@ -1569,11 +1569,14 @@ pub(super) async fn update_member_status_with_report_tldr(
         member_changed,
         status_changed,
         old_status,
-        _is_headless,
         report_back_to_session_id,
     ) = {
         let mut members = swarm_members.write().await;
         if let Some(member) = members.get_mut(session_id) {
+            // A late turn must not make a still-stopping worker reusable.
+            if member.status == "stopping" && matches!(status, "running" | "ready" | "failed") {
+                return;
+            }
             let previous_status = member.status.clone();
             let status_changed = member.status != status;
             let detail_changed = member.detail != detail;
@@ -1591,9 +1594,6 @@ pub(super) async fn update_member_status_with_report_tldr(
                     member.runtime.elapsed_secs = Some(member.joined_at.elapsed().as_secs());
                 }
             }
-            let name = member.friendly_name.clone();
-            let is_headless = member.is_headless;
-            let report_back_to_session_id = member.report_back_to_session_id.clone();
             member.status = status.to_string();
             member.detail = detail;
             // Clear any live output tail when the worker reaches a terminal or
@@ -1610,15 +1610,14 @@ pub(super) async fn update_member_status_with_report_tldr(
             }
             (
                 member.swarm_id.clone(),
-                name,
+                member.friendly_name.clone(),
                 member_changed,
                 status_changed,
                 previous_status,
-                is_headless,
-                report_back_to_session_id,
+                member.report_back_to_session_id.clone(),
             )
         } else {
-            (None, None, false, false, String::new(), false, None)
+            (None, None, false, false, String::new(), None)
         }
     };
     if let Some(ref id) = swarm_id {

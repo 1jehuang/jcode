@@ -1,16 +1,16 @@
 use super::ClientConnectionInfo;
 use super::client_lifecycle::process_message_streaming_mpsc;
+use super::live_turn::quiesce_and_stop_session;
+use super::state::complete_session_interrupt_stop;
 use super::swarm_mutation_state::{
-    PersistedSwarmMutationResponse, SwarmMutationRuntime, begin_or_replay, finish_request,
-    request_key,
+    PersistedSwarmMutationResponse, SwarmMutationRuntime, begin_or_join_in_flight, begin_or_replay,
+    finish_request, request_key,
 };
 use super::{
     SessionInterruptQueues, SwarmEvent, SwarmEventType, SwarmMember, SwarmState, VersionedPlan,
     append_swarm_completion_report_instructions, broadcast_swarm_plan, broadcast_swarm_status,
-    create_headless_session, fanout_session_event, persist_swarm_state_for, record_swarm_event,
-    record_swarm_event_for_session, remove_background_tool_signal,
-    remove_session_channel_subscriptions, remove_session_from_swarm,
-    remove_session_interrupt_queue, set_member_task_label, truncate_detail, update_member_status,
+    create_headless_session, fanout_session_event, persist_swarm_state_for,
+    record_swarm_event_for_session, set_member_task_label, truncate_detail, update_member_status,
     update_member_status_with_report,
 };
 use crate::agent::Agent;
@@ -1132,7 +1132,7 @@ pub(super) async fn handle_comm_stop(
     .await;
 
     let mutation_key = request_key(&req_session_id, "stop", &[swarm_id, target_session.clone()]);
-    let Some(mutation_state) = begin_or_replay(
+    let Some(mutation_state) = begin_or_join_in_flight(
         swarm_mutation_runtime,
         &mutation_key,
         "stop",
@@ -1145,79 +1145,32 @@ pub(super) async fn handle_comm_stop(
         return;
     };
 
-    let removed_agent = super::remove_session_entry(sessions, &target_session).await;
-    let removed_live_agent = removed_agent.is_some();
-    if let Some(agent_arc) = removed_agent {
-        remove_session_interrupt_queue(soft_interrupt_queues, &target_session).await;
-        remove_background_tool_signal(&target_session);
-        if let Ok(mut agent) = agent_arc.try_lock() {
-            agent.mark_closed();
-            let memory_enabled = agent.memory_enabled();
-            let transcript = if memory_enabled {
-                Some(agent.build_transcript_for_extraction())
-            } else {
-                None
-            };
-            let sid = target_session.clone();
-            let working_dir = agent.working_dir().map(|dir| dir.to_string());
-            drop(agent);
-            if let Some(transcript) = transcript {
-                crate::memory_agent::trigger_final_extraction_with_dir(
-                    transcript,
-                    sid,
-                    working_dir,
-                );
-            }
-        }
-    }
-
-    let (removed_swarm_id, removed_name) = {
-        let mut members = swarm_members.write().await;
-        if let Some(member) = members.remove(&target_session) {
-            (member.swarm_id, member.friendly_name)
-        } else {
-            (None, None)
-        }
-    };
-    if let Some(ref swarm_id) = removed_swarm_id {
-        record_swarm_event(
-            event_history,
-            event_counter,
-            swarm_event_tx,
-            target_session.clone(),
-            removed_name.clone(),
-            Some(swarm_id.clone()),
-            SwarmEventType::MemberChange {
-                action: "left".to_string(),
-            },
-        )
-        .await;
-        remove_session_from_swarm(
-            &target_session,
-            swarm_id,
-            swarm_members,
-            swarms_by_id,
-            swarm_coordinators,
-            swarm_plans,
-        )
-        .await;
-    }
-    remove_session_channel_subscriptions(
+    let (response, terminal_agent) = quiesce_and_stop_session(
         &target_session,
+        &req_session_id,
+        sessions,
+        soft_interrupt_queues,
+        swarm_members,
+        swarms_by_id,
+        swarm_coordinators,
+        swarm_plans,
         channel_subscriptions,
         channel_subscriptions_by_session,
+        event_history,
+        event_counter,
+        swarm_event_tx,
     )
     .await;
-
-    let response = if removed_live_agent || removed_swarm_id.is_some() {
-        PersistedSwarmMutationResponse::Done
-    } else {
-        PersistedSwarmMutationResponse::Error {
-            message: format!("Unknown session '{target_session}'"),
-            retry_after_secs: None,
-        }
-    };
+    // Terminal lifecycle only once the stop actually succeeded. A failed stop
+    // stays in `stopping` so a retry resumes where it left off instead of
+    // reporting a session that no longer exists.
+    if matches!(response, PersistedSwarmMutationResponse::Done) {
+        complete_session_interrupt_stop(&target_session);
+    }
+    // The Agent guard is retained across response persistence and delivery so no
+    // local turn or tool dispatch can reacquire the Agent before Done is visible.
     finish_request(swarm_mutation_runtime, &mutation_state, response).await;
+    drop(terminal_agent);
 }
 
 fn swarm_stop_allowed_by_owner(
@@ -1492,3 +1445,7 @@ async fn ensure_spawn_coordinator_swarm(
 #[cfg(test)]
 #[path = "comm_session_tests.rs"]
 mod comm_session_tests;
+
+#[cfg(test)]
+#[path = "comm_session_stop_tests.rs"]
+mod comm_session_stop_tests;
