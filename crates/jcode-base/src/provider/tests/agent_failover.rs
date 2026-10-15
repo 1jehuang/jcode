@@ -3,6 +3,8 @@ fn agent_failover_set_default_model(model: &str) -> anyhow::Result<()> {
 }
 
 fn agent_failover_catalog(provider: &MultiProvider, routes: Vec<ModelRoute>) {
+    // Loading a changed default can advance the catalog's config generation.
+    let _ = crate::config::config();
     *provider.routes_memo.lock().unwrap() = Some(RoutesMemoEntry {
         built_at: std::time::Instant::now(),
         scope_key: provider.routes_memo_key(),
@@ -38,6 +40,17 @@ fn agent_failover_fixture(models: &[&str]) -> MultiProvider {
 }
 
 fn agent_failover_target(provider: &MultiProvider, tokens: usize, reason: &str) -> Option<String> {
+    // Preserve the fixture catalog when a test edits the configured default.
+    // Otherwise its stale scope causes a rebuild from the real model catalog.
+    let routes = provider
+        .routes_memo
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .routes
+        .clone();
+    agent_failover_catalog(provider, routes);
     provider
         .cross_provider_pool_prompt(
             ActiveProvider::Claude,
