@@ -893,9 +893,11 @@ fn parse_envelope(after: &str) -> Result<(ParsedToolCall, usize)> {
                 anyhow::bail!("ChatGPT started a jcode tool-call envelope without closing it");
             };
             let between = tail[..end].trim();
-            // Tolerate a stray wrapper fragment, never real content.
+            // Tolerate a stray wrapper fragment (observed: `}`, `\`, a fence
+            // backtick, and GPT-5.6 Sol's `>` from `}}></jcode_tool_call>`),
+            // never real content.
             anyhow::ensure!(
-                between.chars().all(|c| matches!(c, '`' | '}' | '\\')),
+                between.chars().all(|c| matches!(c, '`' | '}' | '\\' | '>')),
                 "ChatGPT emitted unexpected text inside a jcode tool-call envelope: {between:?}"
             );
             let consumed = after.len() - tail.len() + end + TOOL_CALL_END.len();
@@ -1170,6 +1172,15 @@ mod tests {
             r#"<jcode_tool_call>{"name":"bash","input":{"command":"printf 'a\\nb'"}}</jcode_tool_call>"#,
         );
         assert_eq!(valid.input["command"], r#"printf 'a\nb'"#);
+    }
+
+    #[test]
+    fn stray_angle_bracket_before_closing_tag_is_tolerated() {
+        // Observed live from GPT-5.6 Sol: `}}></jcode_tool_call>`.
+        let parsed = only_call(
+            r#"<jcode_tool_call>{"name":"bash","input":{"command":"uname -r","intent":"x"}}></jcode_tool_call>"#,
+        );
+        assert_eq!(parsed.input["command"], "uname -r");
     }
 
     #[test]
