@@ -140,8 +140,16 @@ pub(super) fn is_usage_limit_cooldown_reason(reason: &str) -> bool {
 
 /// Compare and remove under each owning lock. No locks are nested, and a
 /// snapshot accepted before a new mark cannot remove that newer observation.
-pub(crate) fn clear_openai_unavailability_through_generation(label: &str, generation: u64) {
-    let key = provider_runtime_scope_key("openai", Some(label));
+pub(crate) fn clear_openai_unavailability_through_generation<'a>(
+    label: impl Into<Option<&'a str>>,
+    generation: u64,
+) {
+    clear_openai_scope_unavailability_through_generation(label.into(), generation);
+}
+
+/// `None` is the literal default scope, not the globally selected saved login.
+fn clear_openai_scope_unavailability_through_generation(label: Option<&str>, generation: u64) {
+    let key = provider_runtime_scope_key("openai", label);
     if let Ok(mut unavailable) = ACCOUNT_RUNTIME_UNAVAILABLE_PROVIDERS.write()
         && unavailable.get(&key).is_some_and(|entry| {
             entry.generation <= generation && is_usage_limit_cooldown_reason(&entry.reason)
@@ -150,9 +158,11 @@ pub(crate) fn clear_openai_unavailability_through_generation(label: &str, genera
         unavailable.remove(&key);
         crate::provider::bump_catalog_generation();
     }
-    crate::provider::account_failover::clear_openai_account_exhausted_through_generation(
-        label, generation,
-    );
+    if let Some(label) = label {
+        crate::provider::account_failover::clear_openai_account_exhausted_through_generation(
+            label, generation,
+        );
+    }
 }
 
 /// Clear the quota cooldown for the exact Claude login whose limits were reset.
