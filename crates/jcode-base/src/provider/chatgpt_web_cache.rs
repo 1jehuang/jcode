@@ -39,10 +39,10 @@ pub(super) fn load_cache() -> Cache {
     let path = best_effort_cache_path();
     let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
     if cache.path != path {
-        cache.snapshot = path
-            .as_deref()
-            .and_then(read_cached_snapshot)
-            .unwrap_or_else(Snapshot::default);
+        cache.snapshot = Snapshot::default();
+        if let Some(snapshot) = path.as_deref().and_then(read_cached_snapshot) {
+            cache.snapshot = snapshot;
+        }
         cache.path = path.clone();
     }
     Cache {
