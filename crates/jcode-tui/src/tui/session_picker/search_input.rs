@@ -176,6 +176,10 @@ impl SessionPicker {
             return false;
         }
         match code {
+            KeyCode::Tab => {
+                self.search_active = false;
+                true
+            }
             KeyCode::Esc if !self.search_query.is_empty() => {
                 self.search_query.clear();
                 true
