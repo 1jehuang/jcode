@@ -50,6 +50,7 @@ mod reload_trace;
 mod runtime;
 mod runtime_commands;
 mod runtime_special_commands;
+mod runtime_upgrade;
 mod socket;
 mod swarm;
 mod swarm_channels;
@@ -1309,6 +1310,9 @@ impl Server {
         server_start_time: Instant,
         temporary_server_policy: Option<lifecycle::TemporaryServerPolicy>,
     ) {
+        // Register before any producer is spawned, not on the monitor's first
+        // poll. Startup reconciliation and resumed awaits may publish at once.
+        let monitor_receiver = Bus::global().subscribe_runtime();
         // Jev memory recall does not need a local embedding model. Optional
         // embedding consumers (such as semantic compaction) load it on demand.
 
@@ -1379,6 +1383,7 @@ impl Server {
         let monitor_swarm_event_tx = self.swarm_event_tx.clone();
         tokio::spawn(async move {
             Self::monitor_bus(
+                monitor_receiver,
                 monitor_file_touch,
                 monitor_swarm_members,
                 monitor_swarms_by_id,
@@ -2028,6 +2033,7 @@ impl Server {
         reason = "bus monitor needs file state, swarm state, sessions, queues, and event history sinks"
     )]
     async fn monitor_bus(
+        mut receiver: tokio::sync::mpsc::UnboundedReceiver<crate::bus::RuntimeBusDelivery>,
         file_touch: FileTouchService,
         swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
         swarms_by_id: Arc<RwLock<HashMap<String, HashSet<String>>>>,
@@ -2040,7 +2046,6 @@ impl Server {
         event_counter: Arc<std::sync::atomic::AtomicU64>,
         swarm_event_tx: broadcast::Sender<SwarmEvent>,
     ) {
-        let mut receiver = Bus::global().subscribe();
         let mut last_cleanup = Instant::now();
         const TOUCH_EXPIRY: Duration = Duration::from_secs(30 * 60); // 30 min
         const CLEANUP_INTERVAL: Duration = Duration::from_secs(5 * 60); // 5 min
@@ -2052,8 +2057,13 @@ impl Server {
                 last_cleanup = Instant::now();
             }
 
-            match receiver.recv().await {
-                Ok(BusEvent::FileTouch(touch)) => {
+            let Some(delivery) = receiver.recv().await else {
+                break;
+            };
+            // Keep the envelope alive through asynchronous queue delivery, not
+            // just receipt. An idle upgrade must include every accepted wake.
+            match delivery.event.clone() {
+                BusEvent::FileTouch(touch) => {
                     let path = touch.path.clone();
                     let session_id = touch.session_id.clone();
 
@@ -2276,7 +2286,7 @@ impl Server {
                         }
                     }
                 }
-                Ok(BusEvent::BackgroundTaskCompleted(task)) => {
+                BusEvent::BackgroundTaskCompleted(task) => {
                     dispatch_background_task_completion(
                         &task,
                         &sessions,
@@ -2289,10 +2299,10 @@ impl Server {
                     )
                     .await;
                 }
-                Ok(BusEvent::BackgroundTaskProgress(task)) => {
+                BusEvent::BackgroundTaskProgress(task) => {
                     dispatch_background_task_progress(&task, &swarm_members).await;
                 }
-                Ok(BusEvent::BackgroundTaskStalled(task)) => {
+                BusEvent::BackgroundTaskStalled(task) => {
                     dispatch_background_task_stalled(
                         &task,
                         &sessions,
@@ -2305,7 +2315,7 @@ impl Server {
                     )
                     .await;
                 }
-                Ok(BusEvent::SwarmAwaitCompleted(event)) => {
+                BusEvent::SwarmAwaitCompleted(event) => {
                     dispatch_swarm_await_completion(
                         &event,
                         &sessions,
@@ -2318,37 +2328,32 @@ impl Server {
                     )
                     .await;
                 }
-                Ok(BusEvent::UiActivity(activity)) => {
+                BusEvent::UiActivity(activity) => {
                     dispatch_ui_activity(&activity, &swarm_members).await;
                 }
-                Ok(BusEvent::ToolUpdated(event)) => {
+                BusEvent::ToolUpdated(event) => {
                     dispatch_swarm_tool_activity(&event, &swarm_members, &swarms_by_id).await;
                 }
-                Ok(BusEvent::SubagentStatus(event)) => {
+                BusEvent::SubagentStatus(event) => {
                     dispatch_swarm_runtime_status(&event, &swarm_members, &swarms_by_id).await;
                 }
-                Ok(BusEvent::BatchProgress(progress)) => {
+                BusEvent::BatchProgress(progress) => {
                     dispatch_swarm_batch_progress(&progress, &swarm_members, &swarms_by_id).await;
                 }
                 // Session todos are private to the session's transcript, but the
                 // Compact todo names and progress are surfaced on the inline
                 // swarm strip so a coordinator can see each managed agent's work.
-                Ok(BusEvent::TodoUpdated(event)) => {
+                BusEvent::TodoUpdated(event) => {
                     dispatch_swarm_todo_progress(&event, &swarm_members, &swarms_by_id).await;
                 }
-                Ok(BusEvent::SwarmOutputTail(tail)) => {
+                BusEvent::SwarmOutputTail(tail) => {
                     dispatch_swarm_output_tail(&tail, &swarm_members, &swarms_by_id).await;
                 }
-                Ok(_) => {
+                _ => {
                     // Ignore other events
                 }
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    crate::logging::info(&format!("Bus monitor lagged by {} events", n));
-                }
-                Err(broadcast::error::RecvError::Closed) => {
-                    break;
-                }
             }
+            drop(delivery);
         }
     }
 

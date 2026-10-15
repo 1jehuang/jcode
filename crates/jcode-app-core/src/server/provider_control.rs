@@ -170,7 +170,7 @@ fn spawn_deferred_agent_mutation<F>(
     F: FnOnce(&mut Agent, &mpsc::UnboundedSender<ServerEvent>) + Send + 'static,
 {
     let queued_at = log_provider_control_deferred(operation, id);
-    tokio::spawn(async move {
+    crate::runtime_activity::spawn(async move {
         let mut agent_guard = agent.lock().await;
         log_provider_control_lock_acquired(operation, id, queued_at);
         apply(&mut agent_guard, &client_event_tx);
@@ -188,7 +188,7 @@ fn spawn_deferred_provider_operation<F>(
     F: FnOnce(Arc<dyn Provider>, &mpsc::UnboundedSender<ServerEvent>) + Send + 'static,
 {
     let queued_at = log_provider_control_deferred(operation, id);
-    tokio::spawn(async move {
+    crate::runtime_activity::spawn(async move {
         let provider = {
             let agent_guard = agent.lock().await;
             log_provider_control_lock_acquired(operation, id, queued_at);
@@ -257,7 +257,7 @@ async fn auth_refresh_targets(
 
 fn spawn_deferred_auth_refreshes(agents: Vec<Arc<Mutex<Agent>>>) {
     for agent in agents {
-        tokio::spawn(async move {
+        crate::runtime_activity::spawn(async move {
             let provider = {
                 let agent_guard = agent.lock().await;
                 agent_guard.provider_handle()
@@ -766,7 +766,7 @@ pub(super) async fn handle_refresh_models(
     let provider_clone = provider.clone();
     let agent_clone = agent.clone();
     let client_event_tx_clone = client_event_tx.clone();
-    tokio::spawn(async move {
+    crate::runtime_activity::spawn(async move {
         send_catalog_activity(
             &client_event_tx_clone,
             &crate::message::format_model_refresh_progress_markdown(
@@ -901,7 +901,7 @@ fn spawn_deferred_reasoning_effort_change(
     client_event_tx: mpsc::UnboundedSender<ServerEvent>,
 ) {
     let queued_at = log_provider_control_deferred("set_reasoning_effort", id);
-    tokio::spawn(async move {
+    crate::runtime_activity::spawn(async move {
         let mut agent_guard = agent.lock().await;
         log_provider_control_lock_acquired("set_reasoning_effort", id, queued_at);
         let result = agent_guard.set_reasoning_effort(&effort);
@@ -1049,7 +1049,7 @@ fn spawn_deferred_set_compaction_mode(
     client_event_tx: mpsc::UnboundedSender<ServerEvent>,
 ) {
     let queued_at = log_provider_control_deferred("set_compaction_mode", id);
-    tokio::spawn(async move {
+    crate::runtime_activity::spawn(async move {
         let registry = {
             let agent_guard = agent.lock().await;
             log_provider_control_lock_acquired("set_compaction_mode", id, queued_at);
@@ -1108,7 +1108,7 @@ pub(super) async fn handle_notify_auth_changed(
     let targets = auth_refresh_targets(provider_template, provider, agent, sessions).await;
     let client_event_tx_clone = client_event_tx.clone();
     let agent_clone = agent.clone();
-    tokio::spawn(async move {
+    crate::runtime_activity::spawn(async move {
         if !auth_refresh_is_current(&session_id, auth_refresh_generation) {
             return;
         }
@@ -1430,7 +1430,7 @@ fn spawn_account_switch_refresh(
         }
         _ => {}
     }
-    tokio::spawn(async move {
+    crate::runtime_activity::spawn(async move {
         let started = Instant::now();
         crate::logging::event_info(
             "SERVER_PROVIDER_CONTROL_ACCOUNT_SWITCH",

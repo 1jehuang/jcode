@@ -273,6 +273,10 @@ pub(super) async fn handle_lightweight_control_request(
         await_members_runtime,
         swarm_mutation_runtime,
     } = context;
+    if let Request::UpgradeRuntime { id, ref candidate } = request {
+        return super::runtime_upgrade::handle(id, candidate, &writer, sessions).await;
+    }
+    let _request_activity = crate::runtime_activity::global().try_enter()?;
     if let Request::Ping { id } = request {
         let event = super::session_connections::connection_presence_pong(
             id,

@@ -297,6 +297,22 @@ pub(super) async fn handle_debug_client(
             }
         };
 
+        let _request_activity = match crate::runtime_activity::global().try_enter() {
+            Ok(activity) => activity,
+            Err(error) => {
+                writer
+                    .write_all(
+                        encode_event(&ServerEvent::Error {
+                            id: request.id(),
+                            message: error.to_string(),
+                            retry_after_secs: None,
+                        })
+                        .as_bytes(),
+                    )
+                    .await?;
+                continue;
+            }
+        };
         match request {
             Request::Ping { id } => {
                 let event = super::session_connections::connection_presence_pong(

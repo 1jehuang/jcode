@@ -647,6 +647,7 @@ impl Request {
             Request::GetModelCatalog { id, .. } => *id,
             Request::GetCompactedHistory { id, .. } => *id,
             Request::Reload { id, .. } => *id,
+            Request::UpgradeRuntime { id, .. } => *id,
             Request::ResumeSession { id, .. } => *id,
             Request::ResumeAllSessions { id } => *id,
             Request::NotifySession { id, .. } => *id,
@@ -720,6 +721,7 @@ impl Request {
         matches!(
             self,
             Request::Ping { .. }
+                | Request::UpgradeRuntime { .. }
                 // Usage invalidation only touches process-wide caches, so a
                 // one-shot client can send it without subscribing to a session.
                 | Request::InvalidateOpenAiUsage { .. }

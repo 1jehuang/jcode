@@ -489,7 +489,7 @@ fn apply_or_defer_subscribe_working_dir(
     let agent = Arc::clone(agent);
     let working_dir = working_dir.to_string();
     let session_id = session_id.to_string();
-    tokio::spawn(async move {
+    crate::runtime_activity::spawn(async move {
         let mut agent_guard = agent.lock().await;
         match subscribe_working_dir_replacement(
             agent_guard.working_dir(),
@@ -524,7 +524,7 @@ fn apply_or_defer_subscribe_selfdev(agent: &Arc<Mutex<Agent>>, session_id: &str)
 
     let agent = Arc::clone(agent);
     let session_id = session_id.to_string();
-    tokio::spawn(async move {
+    crate::runtime_activity::spawn(async move {
         let mut agent_guard = agent.lock().await;
         if !agent_guard.is_canary() {
             agent_guard.set_canary("self-dev");
@@ -549,7 +549,7 @@ pub(super) async fn apply_or_defer_desktop_response_capability(
         return;
     }
     let agent = Arc::clone(agent);
-    tokio::spawn(async move {
+    crate::runtime_activity::spawn(async move {
         agent
             .lock()
             .await

@@ -243,6 +243,13 @@ pub enum Request {
         force: bool,
     },
 
+    /// Optional local packaged-runtime upgrade. Distinct from `reload` so old
+    /// daemons reject it without invoking the legacy interrupting reload path.
+    /// The server validates this explicit executable and only replaces itself
+    /// if it is strictly newer and an atomic idle reservation succeeds.
+    #[serde(rename = "upgrade_runtime")]
+    UpgradeRuntime { id: u64, candidate: String },
+
     /// Resume a specific session by ID
     #[serde(rename = "resume_session")]
     ResumeSession {
