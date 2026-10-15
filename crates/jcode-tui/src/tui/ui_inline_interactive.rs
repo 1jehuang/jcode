@@ -439,10 +439,8 @@ pub(super) fn model_suggestion_lines(
         }
         lines.push(Line::from(spans));
     }
-    if notice_rows > 0 {
-        if let Some((text, _)) = notice.as_ref() {
-            lines.push(Line::from(Span::styled(text.clone(), dim)));
-        }
+    if notice_rows > 0 && let Some((text, _)) = notice.as_ref() {
+        lines.push(Line::from(Span::styled(text.clone(), dim)));
     }
     if hint_rows > 0 {
         let filter = if !picker.preview && !picker.filter.is_empty() {
