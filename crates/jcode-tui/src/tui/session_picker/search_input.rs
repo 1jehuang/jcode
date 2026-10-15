@@ -154,7 +154,13 @@ impl SessionPicker {
         modifiers: KeyModifiers,
     ) -> bool {
         if !self.search_active {
-            return false;
+            if code == KeyCode::Char('/')
+                && !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+            {
+                self.focus_search_input();
+                return true;
+            }
+            return self.start_search_from_list_key(code, modifiers);
         }
         // Ctrl+S / Ctrl+Shift+S pick the filter while the index loads too; the
         // mode survives `reseed_grouped` and applies to the loaded list.
