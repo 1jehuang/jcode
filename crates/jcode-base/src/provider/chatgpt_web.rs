@@ -459,6 +459,7 @@ pub fn context_tokens(model: &str, effort: Option<&str>) -> Option<usize> {
     effort
         .and_then(|effort| options.iter().find(|o| o.value == effort))
         .or_else(|| options.iter().find(|o| o.value == "medium"))
+        .or_else(|| (options.len() == 1).then(|| &options[0]))
         .and_then(|o| o.context_tokens)
         .or_else(|| find_model(model).and_then(|m| m.context_tokens))
 }
@@ -1137,6 +1138,19 @@ mod tests {
         assert_eq!(context_tokens("gpt-6[web]", Some("none")), Some(52815));
         assert_eq!(context_tokens("gpt-6[web]", Some("high")), Some(262144));
         assert_eq!(context_tokens("gpt-6[web]", Some("max")), Some(410000));
+        // The shared resolver (remote panels, compaction) uses the catalog,
+        // not the GPT-6 API family's 1M fallback.
+        assert_eq!(
+            crate::provider::context_limit_for_model_with_provider("gpt-6[web]", Some("OpenAI")),
+            Some(262144)
+        );
+        assert_eq!(
+            crate::provider::context_limit_for_model_with_provider(
+                "gpt-6-mini[web]",
+                Some("OpenAI")
+            ),
+            Some(137000)
+        );
         assert_eq!(request_route("gpt-9[web]", None), None);
         // Picker-only snapshots (old caches) have no request routes.
         store_cache(observed_gpt6());
