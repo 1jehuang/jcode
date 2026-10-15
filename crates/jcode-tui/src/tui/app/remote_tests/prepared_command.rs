@@ -14,6 +14,8 @@ fn remote_multiple_known_slash_commands_use_the_local_command_boundary() {
         &mut remote,
         crate::tui::app::input::PreparedInput {
             image_markers: Default::default(),
+            routing_input: None,
+            pasted_contents: Vec::new(),
             raw_input: "/help compact /test help".to_string(),
             expanded: "/help compact /test help".to_string(),
             images: vec![],

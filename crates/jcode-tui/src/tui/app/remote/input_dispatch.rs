@@ -72,6 +72,7 @@ pub(in crate::tui::app) fn restore_prepared_remote_input(
     app.cursor_pos = app.input.len();
     app.pending_images = prepared.images;
     app.input_image_markers = prepared.image_markers;
+    app.pasted_contents = prepared.pasted_contents;
     app.ensure_input_image_markers();
 }
 
@@ -137,8 +138,10 @@ pub(in crate::tui::app) async fn submit_prepared_remote_input(
         return Ok(());
     }
 
-    if let Some(command) = input::extract_input_shell_command(&prepared.expanded) {
-        submit_remote_input_shell(app, remote, prepared.raw_input, command.to_string()).await?;
+    if let Some(command) =
+        input::extract_input_shell_command(prepared.routing_input()).map(str::to_string)
+    {
+        submit_remote_input_shell(app, remote, prepared.raw_input, command).await?;
         return Ok(());
     }
 
@@ -174,10 +177,10 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
     remote: &mut RemoteConnection,
     prepared: input::PreparedInput,
 ) -> Result<()> {
-    let raw_input = prepared.raw_input.clone();
+    let raw_input = prepared.routing_input().to_string();
 
     if crate::tui::is_ssh_remote() {
-        let trimmed = prepared.expanded.trim();
+        let trimmed = prepared.routing_input().trim();
         if app_mod::commands_dispatch::handle_ssh_unsupported_command(app, trimmed) {
             return Ok(());
         }
@@ -213,15 +216,13 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
     }
 
     let Some(invocation) = snapshot.resolve_invocation(&raw_input) else {
-        app.input = raw_input;
-        app.cursor_pos = app.input.len();
+        restore_prepared_remote_input(app, prepared);
         app.submit_input();
         return Ok(());
     };
 
     let Some(trailing_prompt) = invocation.prompt else {
-        app.input = raw_input;
-        app.cursor_pos = app.input.len();
+        restore_prepared_remote_input(app, prepared);
         app.submit_input();
         return Ok(());
     };
@@ -235,8 +236,7 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
     if skill.is_none() {
         // Preserve the existing unknown-skill and built-in slash-command
         // handling, including the helpful endorsed-skill installation hint.
-        app.input = raw_input;
-        app.cursor_pos = app.input.len();
+        restore_prepared_remote_input(app, prepared);
         app.submit_input();
         return Ok(());
     }
@@ -254,13 +254,14 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
         .current_skills_snapshot()
         .resolve_invocation(&prepared.expanded)
         .and_then(|invocation| invocation.prompt)
-        .unwrap_or(trailing_prompt)
-        .to_string();
+        .map_or_else(String::new, str::to_string);
     submit_prepared_remote_input(
         app,
         remote,
         input::PreparedInput {
             image_markers: prepared.image_markers,
+            routing_input: Some(trailing_prompt.to_string()),
+            pasted_contents: prepared.pasted_contents,
             raw_input: prepared.raw_input,
             expanded: expanded_prompt,
             images: prepared.images,
@@ -294,6 +295,8 @@ pub(in crate::tui::app) async fn route_prepared_input_to_new_remote_session(
                 .take()
                 .map(|prompt| input::PreparedInput {
                     image_markers: prepared.image_markers,
+                    routing_input: prepared.routing_input,
+                    pasted_contents: prepared.pasted_contents,
                     raw_input: prepared.raw_input,
                     expanded: prompt.content,
                     images: prompt.images,
@@ -317,6 +320,8 @@ pub(in crate::tui::app) async fn route_prepared_input_to_new_remote_session(
             .take()
             .map(|prompt| input::PreparedInput {
                 image_markers: prepared.image_markers,
+                routing_input: prepared.routing_input,
+                pasted_contents: prepared.pasted_contents,
                 raw_input: prepared.raw_input,
                 expanded: prompt.content,
                 images: prompt.images,
