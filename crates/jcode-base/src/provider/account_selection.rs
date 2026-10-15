@@ -1,3 +1,4 @@
+use super::account_failover::account_kind;
 use super::*;
 
 impl MultiProvider {
@@ -5,6 +6,12 @@ impl MultiProvider {
     /// fall back to an API key when refresh fails. Bind the subscription before
     /// sending anything so only the pool/countdown router may change billing.
     pub(super) fn bind_auto_account_for_request(&self, target: ActiveProvider) -> Result<()> {
+        if account_kind(target)
+            .and_then(|kind| self.account_pin(kind))
+            .is_some()
+        {
+            return Ok(());
+        }
         if target == ActiveProvider::Claude
             && std::env::var("CLAUDE_CODE_OAUTH_TOKEN").is_ok_and(|token| !token.trim().is_empty())
         {
@@ -84,6 +91,7 @@ impl MultiProvider {
             }
             ActiveProvider::OpenAI
         };
+        let switch_origin = self.approved_account_switch_origin(target);
         self.reconcile_auth_if_provider_missing(target);
         let runtime = match target {
             ActiveProvider::Claude => self.anthropic_provider(),
@@ -103,10 +111,14 @@ impl MultiProvider {
         *slot.write().unwrap_or_else(|p| p.into_inner()) = Some(replacement);
         self.set_active_provider(target);
         self.invalidate_routes_memo();
+        self.record_approved_account_switch(switch_origin, label);
         Ok(())
     }
 
     pub(super) fn selected_account_for_provider(&self, target: ActiveProvider) -> Option<String> {
+        if let Some(pin) = account_kind(target).and_then(|kind| self.account_pin(kind)) {
+            return Some(pin.label);
+        }
         let runtime = match target {
             ActiveProvider::Claude => self.anthropic_provider(),
             ActiveProvider::OpenAI => self.openai_provider(),

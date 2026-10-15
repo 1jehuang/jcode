@@ -191,6 +191,7 @@ fn test_initial_provider_allows_cross_provider_switch_and_reports_target_credent
             catalog_scope: next_catalog_scope(),
             routes_memo: std::sync::Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            account_failover: Default::default(),
         };
 
         let err = provider
@@ -308,6 +309,7 @@ fn test_no_provider_error_mentions_tokens_and_details() {
         catalog_scope: next_catalog_scope(),
         routes_memo: std::sync::Mutex::new(None),
         post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        account_failover: Default::default(),
     };
     let err = provider.no_provider_available_error(&[
         "OpenAI: rate limited".to_string(),
@@ -347,6 +349,7 @@ fn test_active_compat_profile_counts_as_configured_openrouter_slot() {
                 catalog_scope: next_catalog_scope(),
                 routes_memo: std::sync::Mutex::new(None),
                 post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                account_failover: Default::default(),
             };
 
             // Activate a direct compat profile exactly like

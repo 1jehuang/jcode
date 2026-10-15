@@ -62,14 +62,17 @@ pub(super) fn invalidate_anthropic_usage_after_reset(account_label: Option<&str>
             .filter(|label| !label.is_empty())
         {
             Some(label) => {
-                map.remove(&format!("label:{label}"));
-                let key = format!("label:{label}");
-                super::disk_cache::invalidate(|candidate| candidate == key);
+                let prefix = anthropic_label_key_prefix(label);
+                map.retain(|key, _| !key.starts_with(&prefix));
+                super::disk_cache::invalidate(|key| key.starts_with(&prefix));
             }
             None => {
-                map.retain(|key, _| !key.starts_with("token:") && key != "label:default");
+                let default_prefix = anthropic_label_key_prefix("default");
+                map.retain(|key, _| {
+                    !key.starts_with("token:") && !key.starts_with(&default_prefix)
+                });
                 super::disk_cache::invalidate(|key| {
-                    key.starts_with("token:") || key == "label:default"
+                    key.starts_with("token:") || key.starts_with(&default_prefix)
                 });
             }
         }
@@ -82,20 +85,56 @@ pub(super) fn invalidate_anthropic_usage_after_reset(account_label: Option<&str>
     }
 }
 
+/// Key prefix shared by every credential stored under one Claude label.
+fn anthropic_label_key_prefix(label: &str) -> String {
+    format!("label:{label}:")
+}
+
+/// Short, non-reversible fingerprint of an access token.
+fn anthropic_token_fingerprint(access_token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(access_token.trim().as_bytes());
+    format!("{:x}", digest)[..16].to_string()
+}
+
+/// Usage is keyed by the label *and* the credential. A relogin that reuses a
+/// label (often "default") for a different Claude account must not inherit
+/// the old account's exhausted limits or its shared 429 backoff, while the
+/// same credential keeps one key so the cross-process backoff still applies.
 pub(super) fn anthropic_usage_cache_key(access_token: &str, account_label: Option<&str>) -> String {
-    if let Some(label) = account_label
+    let fingerprint = anthropic_token_fingerprint(access_token);
+    match account_label
         .map(str::trim)
         .filter(|label| !label.is_empty())
     {
-        return format!("label:{}", label);
+        Some(label) => format!("{}{fingerprint}", anthropic_label_key_prefix(label)),
+        None => format!("token:{fingerprint}"),
     }
+}
 
-    let prefix = access_token
-        .get(..20)
-        .unwrap_or(access_token)
-        .trim()
-        .to_string();
-    format!("token:{}", prefix)
+/// A token refresh rotates the access token of the same Claude login, which
+/// changes its usage cache key. Carry the cached usage and the shared 429
+/// backoff over to the new key so the refreshed login is not refetched (and
+/// rejected) as if it were a new account. A relogin under the same label does
+/// not go through here and still starts with a clean key.
+pub fn carry_anthropic_usage_across_token_refresh(
+    account_label: &str,
+    old_access_token: &str,
+    new_access_token: &str,
+) {
+    if old_access_token.trim().is_empty() || old_access_token == new_access_token {
+        return;
+    }
+    let from = anthropic_usage_cache_key(old_access_token, Some(account_label));
+    let to = anthropic_usage_cache_key(new_access_token, Some(account_label));
+    if let Ok(mut map) = anthropic_usage_cache().lock()
+        && !map.contains_key(&to)
+        && let Some(entry) = map.remove(&from)
+    {
+        map.insert(to.clone(), entry);
+    }
+    super::disk_cache::rename(&from, &to);
+    super::accessors::rename_active_usage_key(&from, &to);
 }
 
 pub(super) fn openai_usage_cache_key(access_token: &str, account_label: Option<&str>) -> String {
@@ -119,6 +158,21 @@ pub(super) fn cached_anthropic_usage(cache_key: &str) -> Option<UsageData> {
     let map = cache.lock().ok()?;
     let cached = map.get(cache_key)?.clone();
     (!cached.is_stale()).then_some(cached)
+}
+
+/// Fresh cached usage for a Claude account label (any credential under it).
+pub(super) fn cached_anthropic_usage_for_label(label: &str) -> Option<UsageData> {
+    let prefix = anthropic_label_key_prefix(label);
+    let map = anthropic_usage_cache().lock().ok()?;
+    map.iter()
+        .filter(|(key, data)| key.starts_with(&prefix) && !data.is_stale())
+        .max_by_key(|(_, data)| data.fetched_at)
+        .map(|(_, data)| data.clone())
+}
+
+/// Fresh cached usage for an OpenAI account label.
+pub(super) fn cached_openai_usage_for_label(label: &str) -> Option<OpenAIUsageData> {
+    cached_openai_usage(&openai_usage_cache_key("", Some(label)))
 }
 
 pub(super) fn store_anthropic_usage(cache_key: String, data: UsageData) {

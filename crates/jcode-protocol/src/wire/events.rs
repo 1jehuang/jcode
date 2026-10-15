@@ -421,6 +421,12 @@ pub enum ServerEvent {
         message: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         retry_after_secs: Option<u64>,
+        /// Set only when the server scheduled an automatic resume of this
+        /// (server-initiated) turn after a usage-limit reset. Clients show a
+        /// "server will resume" notice only when this is true; otherwise the
+        /// error is terminal and shown normally.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        server_resumes: bool,
     },
 
     /// Pong response
@@ -566,6 +572,9 @@ pub enum ServerEvent {
         /// Service tier override for OpenAI models
         #[serde(skip_serializing_if = "Option::is_none")]
         service_tier: Option<String>,
+        /// Per-provider account this session uses (pin or default).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        account_labels: Vec<SessionAccountInfo>,
         /// Session-scoped preferred model for subagents.
         #[serde(skip_serializing_if = "Option::is_none")]
         subagent_model: Option<String>,
@@ -719,6 +728,32 @@ pub enum ServerEvent {
     #[serde(rename = "model_usage_updated")]
     ModelUsageUpdated {
         route: jcode_provider_core::ModelRoute,
+    },
+
+    /// Credentials changed server-wide (login, account switch, or an external
+    /// edit of a credential file). Broadcast to every connected client so a
+    /// turn held on the previous account's rate/usage limit can resend now.
+    #[serde(rename = "credentials_changed")]
+    CredentialsChanged {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account_label: Option<String>,
+    },
+
+    /// The account this session uses changed. Only sent to clients that
+    /// advertise supports_session_accounts.
+    #[serde(rename = "session_account_changed")]
+    SessionAccountChanged {
+        provider: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        pinned: bool,
+        #[serde(default, skip_serializing_if = "is_false")]
+        is_default: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
 
     /// Available models updated (pushed after auth changes)

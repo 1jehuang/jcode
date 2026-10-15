@@ -584,6 +584,18 @@ fn test_comm_list_models_roundtrip() -> Result<()> {
 
 #[test]
 fn targeted_notification_does_not_require_subscription() -> Result<()> {
+    let auth_changed = Request::NotifyAuthChanged {
+        id: 93,
+        provider: Some("claude".to_string()),
+        auth: None,
+        prefer_strongest: false,
+    };
+    let decoded = parse_request_json(&serde_json::to_string(&auth_changed)?)?;
+    assert!(
+        decoded.is_lightweight_control_request(),
+        "a lone notify_auth_changed from `jcode login` must not need a Subscribe"
+    );
+
     let request = Request::NotifySession {
         id: 92,
         session_id: "existing-session".to_string(),

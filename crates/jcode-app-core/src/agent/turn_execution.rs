@@ -171,6 +171,26 @@ impl Agent {
         result
     }
 
+    /// Continue the current turn from the stored transcript without adding a
+    /// new user message. Resumes a turn that stopped on a usage limit: its
+    /// message is already in the transcript, so sending it again would
+    /// duplicate it.
+    pub(crate) async fn resume_turn_streaming_mpsc(
+        &mut self,
+        system_reminder: Option<String>,
+        event_tx: mpsc::UnboundedSender<ServerEvent>,
+    ) -> Result<()> {
+        self.current_turn_system_reminder =
+            system_reminder.filter(|value| !value.trim().is_empty());
+        let turn_started_at = Instant::now();
+        let start_message_index = self.message_count();
+        self.fire_turn_start_hook("usage_limit_resume");
+        let result = self.run_turn_streaming_mpsc(event_tx).await;
+        self.current_turn_system_reminder = None;
+        self.fire_turn_end_hook(&result, turn_started_at, start_message_index);
+        result
+    }
+
     /// Append and persist a user message without starting a model turn.
     pub(crate) fn append_user_context_message(
         &mut self,
@@ -1134,6 +1154,7 @@ impl Agent {
         let model_start = Instant::now();
         self.restore_session_model_from_session();
         self.restore_reasoning_effort_from_session();
+        self.restore_account_pins_from_session();
         let model_ms = model_start.elapsed().as_millis();
 
         let mark_active_start = Instant::now();

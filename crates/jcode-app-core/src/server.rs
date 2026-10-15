@@ -26,6 +26,7 @@ mod comm_session;
 mod comm_sync;
 mod configured_name;
 use configured_name::normalize_configured_server_name;
+mod credential_watch;
 mod debug;
 mod debug_ambient;
 mod debug_command_exec;
@@ -57,6 +58,7 @@ mod swarm_labels;
 mod swarm_mutation_state;
 mod swarm_persistence;
 mod swarm_watchdog;
+mod usage_limit_resume;
 mod util;
 
 pub(super) use self::await_members_state::AwaitMembersRuntime;
@@ -659,6 +661,9 @@ mod queue_tests;
 #[cfg(test)]
 mod file_activity_tests;
 
+#[cfg(test)]
+mod usage_limit_resume_tests;
+
 /// Idle timeout for the shared server when no clients are connected (5 minutes)
 const IDLE_TIMEOUT_SECS: u64 = 300;
 
@@ -1010,9 +1015,11 @@ impl Server {
                 )
                 .await;
 
+            let agent_provider = Arc::clone(&provider);
             let agent = Arc::new(Mutex::new(Agent::new_with_session(
                 provider, registry, session, None,
             )));
+            self::client_state::register_agent_provider(&agent, agent_provider);
 
             {
                 let mut sessions = self.sessions.write().await;
@@ -1316,6 +1323,10 @@ impl Server {
         // keeps the first agent `session_search` call from paying the cold
         // indexing cost while leaving exhaustive searches available on demand.
         crate::tool::spawn_recent_index_warmup();
+
+        // Announce account swaps made outside this server (CLI switch, another
+        // process, manual auth-file edit) so held turns resend promptly.
+        credential_watch::spawn();
 
         // Reconcile background-task status files orphaned by a previous
         // process image (crash or exec-based reload). Non-detached tasks die

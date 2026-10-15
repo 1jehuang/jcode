@@ -40,6 +40,29 @@ pub fn record_provider_unavailable_for_account_label(
     record_provider_unavailable_for_key(provider_runtime_scope_key(provider, label), reason);
 }
 
+/// Mark only this session's billing account unavailable.
+pub fn record_provider_unavailable_for_label(provider: &str, account_label: &str, reason: &str) {
+    record_provider_unavailable_for_account_label(provider, Some(account_label), reason);
+}
+
+/// Clear the unavailability of `provider` for one account label.
+pub fn clear_provider_unavailable_for_label(provider: &str, account_label: &str) {
+    let key = provider_runtime_scope_key(provider, Some(account_label));
+    if let Ok(mut unavailable) = ACCOUNT_RUNTIME_UNAVAILABLE_PROVIDERS.write()
+        && unavailable.remove(&key).is_some()
+    {
+        crate::provider::bump_catalog_generation();
+    }
+}
+
+/// Read only this session's billing account without changing global selection.
+pub fn provider_unavailability_detail_for_label(
+    provider: &str,
+    account_label: &str,
+) -> Option<String> {
+    provider_unavailability_detail_for_account_label(provider, Some(account_label))
+}
+
 pub(super) fn record_provider_unavailable_for_key(key: String, reason: &str) {
     if key.trim().is_empty() {
         return;
@@ -101,12 +124,18 @@ pub fn clear_all_model_unavailability_for_account() {
     crate::provider::bump_catalog_generation();
 }
 
-/// Clear all runtime provider unavailability markers.
+/// Clear the runtime provider unavailability markers of the active accounts.
+///
+/// Called on account switches and relogins. Claude markers are keyed by label,
+/// and a relogin often reuses the label for a different account, so the
+/// active Claude login's marker (for example an old usage-limit 429) must be
+/// dropped here too, or the precheck keeps skipping Claude for the new login.
 pub fn clear_all_provider_unavailability_for_account() {
-    let scope = current_openai_account_scope();
+    let openai_prefix = format!("openai::{}", current_openai_account_scope());
+    let claude_key = provider_runtime_scope_key("claude", None);
     if let Ok(mut unavailable) = ACCOUNT_RUNTIME_UNAVAILABLE_PROVIDERS.write() {
         let before = unavailable.len();
-        unavailable.retain(|key, _| !key.starts_with(&format!("openai::{}", scope)));
+        unavailable.retain(|key, _| !key.starts_with(&openai_prefix) && *key != claude_key);
         if unavailable.len() != before {
             crate::provider::bump_catalog_generation();
         }

@@ -243,6 +243,7 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         provider_oauth_email: None,
         reasoning_effort: None,
         service_tier: None,
+        account_labels: Vec::new(),
         subagent_model: None,
         autoreview_enabled: None,
         autojudge_enabled: None,

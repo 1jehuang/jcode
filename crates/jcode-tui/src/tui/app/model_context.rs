@@ -304,10 +304,17 @@ impl App {
         self.pending_automatic_failover_route = None;
         self.clear_pending_fallback_offer();
         let reason = Self::compact_provider_failure(&prompt.reason);
-        let manual_message = format!(
-            "{} unavailable: {}\nUse /model to switch to {} and resend.",
-            prompt.from_label, reason, prompt.to_label,
-        );
+        let manual_message = if prompt.target_route.is_none() && prompt.to_provider.contains(':') {
+            format!(
+                "{} unavailable: {}\nUse /model {} to switch and resend. Metered profiles require a manual switch.",
+                prompt.from_label, reason, prompt.to_provider,
+            )
+        } else {
+            format!(
+                "{} unavailable: {}\nUse /model to switch to {} and resend.",
+                prompt.from_label, reason, prompt.to_label,
+            )
+        };
 
         match crate::config::Config::load()
             .provider
@@ -1169,6 +1176,12 @@ impl App {
             self.restore_failed_input_to_box();
             return;
         }
+        // A usage limit with a known reset is a pause: hold the turn and run
+        // it again after the reset (local mode). A failover offer above is
+        // not, even when its reason names the reset.
+        if self.hold_local_turn_for_usage_limit(&error) {
+            return;
+        }
         self.restore_failed_input_to_box();
 
         let visible_error = Self::compact_provider_failure(&error);
@@ -1376,6 +1389,7 @@ impl App {
         match retry_result {
             Ok(()) => {
                 self.last_stream_error = None;
+                self.local_usage_limit_resume_attempts = 0;
                 true
             }
             Err(e) => {

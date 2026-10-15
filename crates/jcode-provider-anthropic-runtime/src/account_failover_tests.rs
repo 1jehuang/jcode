@@ -256,6 +256,7 @@ fn http_retry_decision(
                     Err(error) => panic!("local HTTP accept failed: {error}"),
                 }
             };
+            socket.set_nonblocking(false).unwrap();
             socket
                 .set_read_timeout(Some(std::time::Duration::from_secs(3)))
                 .unwrap();
@@ -541,6 +542,8 @@ fn http_retry_decision(
             .expect("router must switch accounts without 60s sleep")
         } else {
             let (tx, mut rx) = mpsc::channel(64);
+            let account_pin = AccountPinSlot::default();
+            account_pin.set(Some(auth::claude::pin_for_label(&account_labels[0]).unwrap()));
             let task = tokio::spawn(run_stream_with_retries(
                 Client::builder().no_proxy().build().unwrap(),
                 "test-token".into(),
@@ -560,7 +563,7 @@ fn http_retry_decision(
                 },
                 tx,
                 Arc::new(RwLock::new(None)),
-                Some(account_labels[0].clone()),
+                account_pin,
                 "claude-sonnet-4-6".into(),
                 "test-session".into(),
                 Arc::new(std::sync::RwLock::new("claude-sonnet-4-6".into())),

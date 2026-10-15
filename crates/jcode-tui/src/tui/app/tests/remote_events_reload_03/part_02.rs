@@ -65,6 +65,7 @@ fn test_metadata_only_history_preserves_fast_restored_startup_state() {
             resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,
+            account_labels: Vec::new(),
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
@@ -146,6 +147,7 @@ fn test_duplicate_history_for_same_session_is_ignored_after_fast_path_restore() 
             resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,
+            account_labels: Vec::new(),
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
@@ -376,6 +378,7 @@ fn test_remote_error_with_retry_after_keeps_pending_for_auto_retry() {
             id: 9,
             message: "rate limited".to_string(),
             retry_after_secs: Some(3),
+            server_resumes: false,
         },
         &mut remote,
     );
