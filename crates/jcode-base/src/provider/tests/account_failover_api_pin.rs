@@ -21,6 +21,7 @@ impl RetainedPinBillingRuntime {
             model: Mutex::new(match kind {
                 AccountProviderKind::Claude => "claude-opus-4-6".into(),
                 AccountProviderKind::OpenAi => "gpt-5.4".into(),
+                AccountProviderKind::ClaudeCode => unreachable!("Claude Code has no API-key credential route"),
             }),
             attempts,
         }
@@ -45,6 +46,7 @@ impl Provider for RetainedPinBillingRuntime {
         match self.kind {
             AccountProviderKind::Claude => "Anthropic",
             AccountProviderKind::OpenAi => "OpenAI",
+            AccountProviderKind::ClaudeCode => unreachable!("Claude Code has no API-key credential route"),
         }
     }
     fn model(&self) -> String {
@@ -126,6 +128,7 @@ fn retained_pin_billing_fixture(
             *provider.openai.write().unwrap() = Some(runtime);
             provider.set_active_provider(ActiveProvider::OpenAI);
         }
+        AccountProviderKind::ClaudeCode => unreachable!("Claude Code has no API-key credential route"),
     }
     provider.set_account_failover(Some(false));
     (provider, attempts)
@@ -136,10 +139,11 @@ fn retained_api_pin_public_requests_ignore_missing_login_and_preserve_oauth_cool
     with_account_failover_env(|| {
         let rt = enter_test_runtime();
         rt.block_on(async {
-            for kind in AccountProviderKind::ALL {
+            for kind in [AccountProviderKind::Claude, AccountProviderKind::OpenAi] {
                 let label = match kind {
                     AccountProviderKind::Claude => store_claude_accounts(1).remove(0),
                     AccountProviderKind::OpenAi => store_openai_accounts(1).remove(0),
+                    AccountProviderKind::ClaudeCode => unreachable!("Claude Code has no API-key credential route"),
                 };
                 for missing in [false, true] {
                     for split in [false, true] {
@@ -188,10 +192,11 @@ fn retained_oauth_pin_still_fails_closed_on_missing_login_or_cooldown() {
     with_account_failover_env(|| {
         let rt = enter_test_runtime();
         rt.block_on(async {
-            for kind in AccountProviderKind::ALL {
+            for kind in [AccountProviderKind::Claude, AccountProviderKind::OpenAi] {
                 let label = match kind {
                     AccountProviderKind::Claude => store_claude_accounts(1).remove(0),
                     AccountProviderKind::OpenAi => store_openai_accounts(1).remove(0),
+                    AccountProviderKind::ClaudeCode => unreachable!("Claude Code has no API-key credential route"),
                 };
                 for missing in [false, true] {
                     let pin = AccountPin::new(if missing { "deleted-login" } else { &label }, None);
@@ -237,10 +242,11 @@ fn retained_api_pin_public_fork_preserves_billing_mode_and_account_pin() {
     with_account_failover_env(|| {
         let rt = enter_test_runtime();
         let _entered = rt.enter();
-        for kind in AccountProviderKind::ALL {
+        for kind in [AccountProviderKind::Claude, AccountProviderKind::OpenAi] {
             let label = match kind {
                 AccountProviderKind::Claude => store_claude_accounts(1).remove(0),
                 AccountProviderKind::OpenAi => store_openai_accounts(1).remove(0),
+                    AccountProviderKind::ClaudeCode => unreachable!("Claude Code has no API-key credential route"),
             };
             let pin = AccountPin::new(label, None);
             let (provider, attempts) =
@@ -248,6 +254,7 @@ fn retained_api_pin_public_fork_preserves_billing_mode_and_account_pin() {
             let key = match kind {
                 AccountProviderKind::Claude => external::ANTHROPIC_RUNTIME,
                 AccountProviderKind::OpenAi => external::OPENAI_RUNTIME,
+                AccountProviderKind::ClaudeCode => unreachable!("Claude Code has no API-key credential route"),
             };
             struct RestoreFactory(&'static str, Option<Arc<dyn Provider>>);
             impl Drop for RestoreFactory {
