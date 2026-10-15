@@ -83,6 +83,7 @@ impl Client {
         let request = Request::Subscribe {
             system_prompt: None,
             supports_pdf_panels: false,
+            supports_user_response: false,
             id,
             working_dir: Some(working_dir),
             selfdev,
@@ -196,6 +197,7 @@ impl Client {
             id,
             message: "History response not received".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         })
     }
 

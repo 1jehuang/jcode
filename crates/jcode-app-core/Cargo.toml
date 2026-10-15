@@ -52,6 +52,7 @@ jcode-applet-types = { path = "../jcode-applet-types" }
 # Embeddings (local inference) live in jcode-base; this crate forwards the
 # `embeddings` feature to jcode-base rather than depending on jcode-embedding.
 jcode-harness-api = { path = "../jcode-harness-api" }
+jcode-productivity-core = { path = "../jcode-productivity-core" }
 jcode-import-core = { path = "../jcode-import-core" }
 
 # OAuth
@@ -59,7 +60,8 @@ base64 = "0.22"
 sha2 = "0.10"
 rand = "0.9.3"
 url = "2"
-open = "5"               # Open URLs in browser
+# Local fallback for the open tool when no `jcode companion` is running.
+jcode-desktop-open = { path = "../jcode-desktop-open" }
 jcode-agent-runtime = { path = "../jcode-agent-runtime" }
 jcode-ambient-types = { path = "../jcode-ambient-types" }
 jcode-notify-email = { path = "../jcode-notify-email" }
@@ -69,17 +71,12 @@ jcode-schema-dialect = { path = "../jcode-schema-dialect" }
 # unused dead dependency edges here (the TUI declares them itself). Removing
 # them stops a jcode-tui-* edit from cascading a recompile through app-core.
 jcode-update-core = { path = "../jcode-update-core" }
-jcode-terminal-image = { path = "../jcode-terminal-image" }
 
 # Streaming
 tokio-stream = "0.1"
 
-# TUI
-ratatui = "0.30"
-crossterm = { version = "0.29", features = ["event-stream"] }
-
-# Markdown & syntax highlighting
-unicode-width = "0.2"   # Unicode character display width
+# NOTE: no ratatui/crossterm here. Terminal rendering and prompts belong to the
+# CLI and jcode-tui, so the shared runtime never touches a terminal.
 
 # PDF parsing (behind feature flag)
 jcode-pdf = { path = "../jcode-pdf", optional = true }
@@ -101,6 +98,7 @@ jcode-session-types = { path = "../jcode-session-types" }
 jcode-setup-hints = { path = "../jcode-setup-hints" }
 jcode-task-types = { path = "../jcode-task-types" }
 jcode-tool-core = { path = "../jcode-tool-core" }
+jcode-codemode = { path = "../jcode-codemode" }
 jcode-tool-types = { path = "../jcode-tool-types" }
 
 # Archive extraction (for auto-update)
@@ -129,6 +127,9 @@ pdf = ["dep:jcode-pdf"]
 test-support = ["jcode-base/test-support"]
 
 [dev-dependencies]
+# Paused-time browser tests must compile when this package is tested alone,
+# without inheriting test-util from another workspace package's dev-dependencies.
+tokio = { version = "1", features = ["test-util"] }
 # Used by async streaming tests (ambient/runner_tests, server/client_actions_tests).
 async-stream = "0.3"
 # Enables jcode-base's test-support helpers (storage::lock_test_env,

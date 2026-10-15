@@ -1,3 +1,4 @@
+mod citations;
 pub mod request;
 pub mod stream;
 pub mod websocket_health;

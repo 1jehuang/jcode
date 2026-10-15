@@ -82,6 +82,7 @@ impl Agent {
         let mut sequential_single_tool_rounds = 0u32;
         let mut batch_nudge_pending = false;
         let mut consecutive_malformed_tool_rounds = 0u32;
+        let mut unparsed_tool_markup_nudges = 0u32;
 
         loop {
             // Do not start another provider request once a cancel has been
@@ -208,7 +209,7 @@ impl Agent {
             let send_messages = stamped.as_deref().unwrap_or(&messages_with_memory);
             let prompt_has_recent_tool_result = Self::messages_end_with_tool_result(send_messages);
             self.last_status_detail = None;
-            let mut stream = match self
+            let completion = self
                 .provider
                 .complete_split(
                     send_messages,
@@ -217,10 +218,12 @@ impl Agent {
                     &split_prompt.dynamic_part,
                     self.provider_session_id.as_deref(),
                 )
-                .await
-            {
+                .await;
+            self.sync_bound_account_route();
+            let mut stream = match completion {
                 Ok(stream) => stream,
                 Err(e) => {
+                    self.record_failed_account_route(&e.to_string());
                     if self.try_auto_compact_after_context_limit(&e.to_string()) {
                         context_limit_retries += 1;
                         if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
@@ -300,6 +303,7 @@ impl Agent {
                     Ok(event) => event,
                     Err(e) => {
                         let err_str = e.to_string();
+                        self.record_failed_account_route(&err_str);
                         if self.try_auto_compact_after_context_limit(&err_str) {
                             log_agent_provider_stream_lifecycle(
                                 logging::LogLevel::Warn,
@@ -379,6 +383,19 @@ impl Agent {
                             io::stdout().flush()?;
                         }
                         text_content.push_str(&text);
+                    }
+                    StreamEvent::TextSuffixReplace { old_text, new_text } => {
+                        if provider_native_items.replace_text_suffix(
+                            &mut text_content,
+                            &old_text,
+                            &new_text,
+                        ) && print_output
+                        {
+                            // Plain stdout cannot retract already printed deltas.
+                            // Still surface the real source links to CLI users.
+                            crate::terminal_print!("\n{}", new_text);
+                            io::stdout().flush()?;
+                        }
                     }
                     StreamEvent::ToolUseStart { id, name } => {
                         if streaming_tools.contains_key(&id)
@@ -890,7 +907,8 @@ impl Agent {
                 cache_creation_input_tokens: usage_cache_creation,
             };
 
-            self.recover_text_wrapped_tool_call(&mut text_content, &mut tool_calls);
+            let text_tool_recovery =
+                self.recover_text_wrapped_tool_call(&mut text_content, &mut tool_calls);
 
             let visible_text_is_empty = text_content.trim().is_empty();
 
@@ -970,6 +988,18 @@ impl Agent {
 
             // If no tool calls, we're done
             if tool_calls.is_empty() {
+                // Unparseable tool-call markup in the text (issue #1702):
+                // surface it and ask the model to re-issue the call natively.
+                if let Some(notice) = self.maybe_nudge_unparsed_tool_markup(
+                    &text_tool_recovery,
+                    stop_reason.as_deref(),
+                    &mut unparsed_tool_markup_nudges,
+                )? {
+                    if print_output {
+                        println!("\n{}", notice);
+                    }
+                    continue;
+                }
                 if self.maybe_reconsider_fable_guardrail(
                     stop_reason.as_deref(),
                     &mut fable_guardrail_reconsiderations,
@@ -1314,37 +1344,6 @@ impl Agent {
         }
 
         Ok(final_text)
-    }
-
-    pub(super) fn messages_end_with_tool_result(messages: &[Message]) -> bool {
-        messages.iter().rev().any(|message| {
-            if !matches!(message.role, Role::User) {
-                return false;
-            }
-            if message
-                .content
-                .iter()
-                .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
-            {
-                return true;
-            }
-            message.content.iter().any(|block| match block {
-                ContentBlock::Text { text, .. } => {
-                    let trimmed = text.trim();
-                    trimmed.starts_with("<system-reminder>")
-                        // The empty-post-tool continuation is itself a
-                        // User-role `<system-reminder>`. Counting it would let the
-                        // injected instruction keep this predicate true on its own,
-                        // so every later whitespace-only response appends another
-                        // continuation and spends another call, with no tool result
-                        // anywhere near.
-                        && !trimmed.starts_with(
-                            Self::EMPTY_POST_TOOL_CONTINUATION_PREFIX
-                        )
-                }
-                _ => false,
-            })
-        })
     }
 }
 

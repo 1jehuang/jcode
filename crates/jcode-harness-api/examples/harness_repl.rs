@@ -70,7 +70,7 @@ fn run_session<R: BufRead, W: Write>(mut client: HarnessClient<R, W>, message: &
     loop {
         let frame = client.recv().expect("recv");
         print_event(&frame);
-        if matches!(&frame.event, ApiEvent::TurnDone { session_id: s } if *s == session_id) {
+        if matches!(&frame.event, ApiEvent::TurnDone { session_id: s, .. } if *s == session_id) {
             break;
         }
         if matches!(frame.event, ApiEvent::Error { .. }) {
@@ -121,6 +121,7 @@ fn run_demo() {
                     ApiEvent::Attached {
                         session: jcode_harness_api::SessionInfo {
                             edit_stats: None,
+                            user_connected: false,
                             parent_session_id: None,
                             agent_label: None,
                             swarm_status: None,
@@ -148,6 +149,7 @@ fn run_demo() {
                     }
                     reply(&ServerFrame::event(ApiEvent::TurnDone {
                         session_id: "demo-1".into(),
+                        pending_soft_interrupts: None,
                     }));
                     return;
                 }

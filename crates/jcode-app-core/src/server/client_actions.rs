@@ -11,7 +11,7 @@ use crate::agent::Agent;
 use crate::protocol::{FeatureToggle, NotificationType, ServerEvent};
 use crate::session::Session;
 use crate::util::truncate_str;
-use jcode_agent_runtime::{SoftInterruptSource, StreamError};
+use jcode_agent_runtime::SoftInterruptSource;
 use std::collections::{HashMap, HashSet};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -170,6 +170,7 @@ pub(super) async fn handle_notify_session(
             id,
             message: format!("Session '{}' is not currently live", session_id),
             retry_after_secs: None,
+            server_resumes: false,
         });
     }
 }
@@ -192,6 +193,7 @@ pub(super) async fn handle_applet_action(
                 id,
                 message: error.to_string(),
                 retry_after_secs: None,
+                server_resumes: false,
             });
             return;
         }
@@ -229,6 +231,7 @@ pub(super) fn handle_close_applet(
                 id,
                 message: error.to_string(),
                 retry_after_secs: None,
+                server_resumes: false,
             });
         }
     }
@@ -288,6 +291,40 @@ pub(super) fn handle_input_shell(
     });
 }
 
+/// Routing for future workers is metadata, so it can be updated during a turn.
+pub(super) async fn set_session_agent_model(
+    agent: &Arc<Mutex<Agent>>,
+    session_id: &str,
+    target: &str,
+    model: Option<String>,
+) -> anyhow::Result<crate::session::AgentModelOverrides> {
+    if let Ok(mut guard) = agent.try_lock() {
+        guard.set_agent_model_override(target, model)?;
+        Ok(guard.session_for_split().agent_model_overrides.clone())
+    } else {
+        let mut session = Session::load_startup_stub(session_id)?;
+        session.set_agent_model_override(target, model)?;
+        Ok(session.agent_model_overrides)
+    }
+}
+
+/// Save a worker-model default in the server's own configuration, so remote
+/// clients change the default that server-side workers actually use.
+pub(super) async fn set_global_agent_model(
+    agent: &Arc<Mutex<Agent>>,
+    session_id: &str,
+    target: &str,
+    model: Option<String>,
+) -> anyhow::Result<crate::session::AgentModelOverrides> {
+    crate::config::Config::set_agent_model_default(target, model.as_deref())?;
+    // Report the session's current overrides so the client view stays exact.
+    if let Ok(guard) = agent.try_lock() {
+        Ok(guard.session_for_split().agent_model_overrides.clone())
+    } else {
+        Ok(Session::load_startup_stub(session_id)?.agent_model_overrides)
+    }
+}
+
 pub(super) async fn handle_set_subagent_model(
     id: u64,
     model: Option<String>,
@@ -304,6 +341,7 @@ pub(super) async fn handle_set_subagent_model(
                 id,
                 message: crate::util::format_error_chain(&error),
                 retry_after_secs: None,
+                server_resumes: false,
             });
         }
     }
@@ -347,6 +385,7 @@ pub(super) fn handle_run_subagent(
                         id,
                         message: crate::util::format_error_chain(&error),
                         retry_after_secs: None,
+                        server_resumes: false,
                     });
                     return;
                 }
@@ -415,6 +454,7 @@ pub(super) fn handle_run_subagent(
                         id,
                         message: crate::util::format_error_chain(&error),
                         retry_after_secs: None,
+                        server_resumes: false,
                     });
                     return;
                 }
@@ -437,6 +477,7 @@ pub(super) fn handle_run_subagent(
                         id,
                         message: crate::util::format_error_chain(&persist_error),
                         retry_after_secs: None,
+                        server_resumes: false,
                     });
                     return;
                 }
@@ -499,6 +540,7 @@ pub(super) async fn handle_set_feature(
                         id,
                         message: crate::util::format_error_chain(&error),
                         retry_after_secs: None,
+                        server_resumes: false,
                     });
                 }
             }
@@ -514,6 +556,7 @@ pub(super) async fn handle_set_feature(
                         id,
                         message: crate::util::format_error_chain(&error),
                         retry_after_secs: None,
+                        server_resumes: false,
                     });
                 }
             }
@@ -620,6 +663,7 @@ pub(super) async fn handle_set_session_saved(
             id,
             message: crate::util::format_error_chain(&error),
             retry_after_secs: None,
+            server_resumes: false,
         });
         return;
     }
@@ -721,6 +765,7 @@ pub(super) async fn handle_rename_session(
                     id,
                     message: crate::util::format_error_chain(&error),
                     retry_after_secs: None,
+                    server_resumes: false,
                 });
                 return;
             }
@@ -896,6 +941,7 @@ pub(super) async fn handle_split(
                 id,
                 message: format!("Failed to save split session: {e}"),
                 retry_after_secs: None,
+                server_resumes: false,
             });
             return;
         }
@@ -950,6 +996,7 @@ pub(super) async fn handle_transfer(
                 id,
                 message: format!("Failed to load session for transfer: {error}"),
                 retry_after_secs: None,
+                server_resumes: false,
             });
             return;
         }
@@ -983,6 +1030,7 @@ pub(super) async fn handle_transfer(
                 id,
                 message: format!("Failed to compact session for transfer: {error}"),
                 retry_after_secs: None,
+                server_resumes: false,
             });
             return;
         }
@@ -1006,6 +1054,7 @@ pub(super) async fn handle_transfer(
                     id,
                     message: format!("Failed to create transfer session: {error}"),
                     retry_after_secs: None,
+                    server_resumes: false,
                 });
                 return;
             }
@@ -1297,13 +1346,12 @@ pub(super) async fn handle_agent_task(
                 Some(ctx.swarm_event_tx),
             )
             .await;
-            let retry_after_secs = e
-                .downcast_ref::<StreamError>()
-                .and_then(|stream_error| stream_error.retry_after_secs);
+            let retry_after_secs = super::usage_limit_resume::error_retry_after_secs(&e);
             let _ = ctx.client_event_tx.send(ServerEvent::Error {
                 id,
                 message: crate::util::format_error_chain(&e),
                 retry_after_secs,
+                server_resumes: false,
             });
         }
     }

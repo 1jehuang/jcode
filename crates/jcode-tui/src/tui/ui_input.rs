@@ -1,3 +1,7 @@
+#[path = "ui_input/command_suggestions.rs"]
+mod command_suggestions;
+use command_suggestions::*;
+
 use super::inline_interactive_ui::format_elapsed;
 use super::selection_highlight::highlight_line_selection;
 use super::tools_ui::{get_tool_activity_detail, summarize_batch_running_tools_compact};
@@ -253,71 +257,6 @@ pub(super) fn draw_command_suggestions_overlay(frame: &mut Frame, app: &dyn TuiS
     frame.render_widget(Paragraph::new(lines), rect);
 }
 
-fn command_suggestion_lines(
-    app: &dyn TuiState,
-    suggestions: &[(String, &'static str)],
-) -> Vec<Line<'static>> {
-    // Highlight the characters of each command that the typed query matched.
-    // We only highlight the command token itself (the part before the first
-    // space), matched against the corresponding leading token of the input.
-    let needle = command_suggestion_needle(app.input());
-    let highlight = |cmd: &str, base: Style| -> Vec<Span<'static>> {
-        highlight_command_spans(cmd, needle.as_deref(), base)
-    };
-
-    let mut lines = Vec::new();
-    if suggestions.len() == 1 {
-        let (cmd, desc) = &suggestions[0];
-        let base = Style::default().fg(rgb(255, 213, 128));
-        let mut spans = highlight(cmd, base);
-        spans.push(Span::styled(format!("  {}", desc), base));
-        lines.push(Line::from(spans));
-    } else if !suggestions.is_empty() {
-        let selected = app
-            .command_suggestion_selected()
-            .min(suggestions.len().saturating_sub(1));
-        let window_start = command_suggestion_window_start(selected, suggestions.len());
-        let limited: Vec<_> = suggestions
-            .iter()
-            .skip(window_start)
-            .take(app::COMMAND_SUGGESTION_VISIBLE_LIMIT)
-            .collect();
-        let window_end = window_start + limited.len();
-        let more_count = suggestions.len().saturating_sub(window_end);
-        let selected_visible = selected.saturating_sub(window_start);
-
-        for (i, (cmd, desc)) in limited.iter().enumerate() {
-            let is_selected = i == selected_visible;
-            let description_style = if is_selected {
-                Style::default().fg(rgb(255, 213, 128))
-            } else {
-                Style::default().fg(dim_color())
-            };
-            let command_style = if is_selected {
-                Style::default().fg(rgb(255, 213, 128))
-            } else {
-                Style::default().fg(rgb(128, 203, 196))
-            };
-            let mut spans = highlight(cmd, command_style);
-            spans.push(Span::styled(format!("  {}", desc), description_style));
-            if i == 0 && window_start > 0 {
-                spans.push(Span::styled(
-                    format!("  ↑{}", window_start),
-                    Style::default().fg(dim_color()),
-                ));
-            }
-            if i + 1 == limited.len() && more_count > 0 {
-                spans.push(Span::styled(
-                    format!("  +{} more", more_count),
-                    Style::default().fg(dim_color()),
-                ));
-            }
-            lines.push(Line::from(spans));
-        }
-    }
-    lines
-}
-
 /// Extract the slash-command portion of the typed input that should be matched
 /// against suggestion command tokens for highlighting purposes.
 fn command_suggestion_needle(input: &str) -> Option<String> {
@@ -326,49 +265,6 @@ fn command_suggestion_needle(input: &str) -> Option<String> {
         return None;
     }
     Some(trimmed.to_string())
-}
-
-/// Build spans for a suggestion command, recoloring the characters that the
-/// fuzzy matcher aligned with the typed query. Falls back to a single
-/// unhighlighted span when there is nothing (useful) to highlight.
-fn highlight_command_spans(cmd: &str, needle: Option<&str>, base: Style) -> Vec<Span<'static>> {
-    let positions: Vec<usize> = match needle {
-        Some(n) if !n.is_empty() && n != "/" => crate::tui::fuzzy::fuzzy_match_positions(n, cmd),
-        _ => Vec::new(),
-    };
-    if positions.is_empty() {
-        return vec![Span::styled(cmd.to_string(), base)];
-    }
-
-    // Recolor (rather than underline) the matched characters so they stay in
-    // the command palette's own hue: matched chars are a brighter version of
-    // the line's base color, while unmatched chars are dimmed so the match
-    // visually pops.
-    let highlight_style = base
-        .fg(brighten_command_color(base.fg))
-        .add_modifier(Modifier::BOLD);
-    let rest_style = base.fg(dim_command_color(base.fg));
-    let chars: Vec<char> = cmd.chars().collect();
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    let mut run_start = 0usize;
-    let mut run_is_match = !chars.is_empty() && positions.contains(&0);
-    for i in 1..=chars.len() {
-        let cur_is_match = i < chars.len() && positions.contains(&i);
-        if cur_is_match != run_is_match || i == chars.len() {
-            let chunk: String = chars[run_start..i].iter().collect();
-            spans.push(Span::styled(
-                chunk,
-                if run_is_match {
-                    highlight_style
-                } else {
-                    rest_style
-                },
-            ));
-            run_start = i;
-            run_is_match = cur_is_match;
-        }
-    }
-    spans
 }
 
 /// Blend a palette color toward white to emphasize a matched character while
@@ -471,7 +367,10 @@ pub(super) fn pending_prompt_count(app: &dyn TuiState) -> usize {
             .interleave_message()
             .map(|msg| !msg.is_empty())
             .unwrap_or(false);
-    app.queued_messages().len() + pending_count + if interleave { 1 } else { 0 }
+    app.queued_messages().len()
+        + app.queued_commands().len()
+        + pending_count
+        + if interleave { 1 } else { 0 }
 }
 
 pub(super) fn pending_queue_preview(app: &dyn TuiState) -> Vec<String> {
@@ -496,6 +395,13 @@ pub(super) fn pending_queue_preview(app: &dyn TuiState) -> Vec<String> {
             ));
         }
     }
+    for msg in app.queued_commands() {
+        let normalized = normalize_repaint_sensitive_notice_text(msg);
+        previews.push(format!(
+            "⏳ {}",
+            normalized.chars().take(100).collect::<String>()
+        ));
+    }
     for msg in app.queued_messages() {
         let normalized = normalize_repaint_sensitive_notice_text(msg);
         previews.push(format!(
@@ -519,6 +425,9 @@ pub(super) fn draw_queued(frame: &mut Frame, app: &dyn TuiState, area: Rect, sta
         {
             items.push((QueuedMsgType::Interleave, msg));
         }
+    }
+    for msg in app.queued_commands() {
+        items.push((QueuedMsgType::Queued, msg.as_str()));
     }
     for msg in app.queued_messages() {
         items.push((QueuedMsgType::Queued, msg.as_str()));
@@ -772,6 +681,15 @@ fn append_batch_progress_spans(
 }
 
 pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pending_count: usize) {
+    if app.status_notice().as_deref() == Some(crate::telemetry::OAUTH_ACCOUNT_NOTICE_TEXT) {
+        crate::tui::app::oauth_telemetry::note_status_render(area);
+        frame.render_widget(
+            Paragraph::new(crate::telemetry::OAUTH_ACCOUNT_NOTICE_TEXT)
+                .style(Style::default().fg(accent_color())),
+            area,
+        );
+        return;
+    }
     let elapsed = app.elapsed().map(|d| d.as_secs_f32()).unwrap_or(0.0);
     let stale_secs = app.time_since_activity().map(|d| d.as_secs_f32());
     let (cache_read, cache_creation) = app.streaming_cache_tokens();

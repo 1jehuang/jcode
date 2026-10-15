@@ -130,7 +130,7 @@ pub(super) fn fresh(key: &str) -> Option<UsageData> {
             return Some(match good {
                 // Report stale-but-real limits and note why they are stale.
                 Some(good) => {
-                    let mut usage = to_usage(good, None);
+                    let mut usage = to_usage(good, Some(error.clone()));
                     usage.fetched_at = Some(instant_for(at));
                     usage
                 }
@@ -182,6 +182,21 @@ pub(super) fn store_error(key: &str, error: &str) {
     });
 }
 
+/// Move persisted data from `from` to `to` (a refreshed token of the same
+/// login), unless `to` already has its own entry.
+pub(super) fn rename(from: &str, to: &str) {
+    let Some(path) = path() else { return };
+    let mut map = load();
+    if map.contains_key(to) {
+        return;
+    }
+    let Some(entry) = map.remove(from) else {
+        return;
+    };
+    map.insert(to.to_string(), entry);
+    let _ = crate::storage::write_json_secret(&path, &map);
+}
+
 /// Forget persisted data for a login after a limit reset.
 pub(super) fn invalidate(matches: impl Fn(&str) -> bool) {
     let Some(path) = path() else { return };
@@ -231,7 +246,16 @@ mod tests {
             store_error("label:a", "Usage API error (429 Too Many Requests)");
             let throttled = fresh("label:a").expect("backoff is shared");
             assert_eq!(throttled.five_hour, 0.4);
-            assert!(throttled.last_error.is_none());
+            assert!(
+                throttled
+                    .last_error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("429"))
+            );
+            // The backoff timestamp, rather than the old successful fetch,
+            // is used for retry timing. The returned data must still signal
+            // that the displayed limits were not freshly confirmed.
+            assert!(throttled.fetched_at.unwrap().elapsed() < Duration::from_secs(1));
             assert_eq!(last_good("label:a").unwrap().seven_day, 0.2);
         });
     }

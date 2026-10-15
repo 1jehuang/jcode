@@ -3,9 +3,26 @@ use std::time::Duration;
 
 use super::parse_clock_time_to_duration;
 
+/// Longest wait a held turn will be parked for before its automatic resume.
+/// Server and body hints beyond this are clamped so a bogus or hostile value
+/// cannot park a turn for days.
+pub(crate) const MAX_TURN_HOLD_SECS: u64 = 24 * 60 * 60;
+
+/// Find a JSON object embedded in a formatted provider error (for example
+/// after `response:` or `OpenAI API error 429:`) and read its numeric
+/// `retry_after_seconds`. Sibling limit fields such as `max_rpm` are ignored.
+fn structured_retry_after_seconds(error: &str) -> Option<u64> {
+    error.match_indices('{').take(8).find_map(|(idx, _)| {
+        jcode_provider_core::retry_after::retry_after_body_seconds(&error[idx..])
+    })
+}
+
 /// Parse rate limit reset time from error message
 /// Returns the Duration until rate limit resets, if this is a rate limit error
 pub(crate) fn parse_rate_limit_error(error: &str) -> Option<Duration> {
+    if crate::provider::parse_failover_prompt_message(error).is_some() {
+        return None;
+    }
     let error_lower = error.to_lowercase();
 
     if !error_lower.contains("rate limit")
@@ -15,6 +32,15 @@ pub(crate) fn parse_rate_limit_error(error: &str) -> Option<Duration> {
         && !error_lower.contains("hit your limit")
     {
         return None;
+    }
+
+    // A compact JSON object is one whitespace token. Scanning its digits can
+    // miss retry_after_seconds entirely or accidentally pick max_rpm instead.
+    if error.contains("\"retry_after_seconds\"") {
+        // Invalid structured delays stay invalid rather than falling through
+        // to a loose numeric scan, which could mistake -1 for one second.
+        return structured_retry_after_seconds(error)
+            .map(|secs| Duration::from_secs(secs.min(MAX_TURN_HOLD_SECS)));
     }
 
     if let Some(idx) = error_lower.find("retry") {
@@ -102,6 +128,25 @@ mod rate_limit_parse_tests {
     use std::time::Duration;
 
     #[test]
+    fn account_pool_failover_prompt_never_schedules_same_account_retry() {
+        let prompt = jcode_provider_core::ProviderFailoverPrompt {
+            from_provider: "claude".into(),
+            from_label: "Anthropic".into(),
+            to_provider: "openai".into(),
+            to_label: "OpenAI".into(),
+            target_route: None,
+            reason: "429 rate limit exceeded; retry in 60 seconds".into(),
+            estimated_input_chars: 400,
+            estimated_input_tokens: 100,
+        };
+        assert_eq!(parse_rate_limit_error(&prompt.to_error_message()), None);
+        assert_eq!(
+            parse_rate_limit_error("429 rate limit exceeded; retry in 60 seconds"),
+            Some(Duration::from_secs(60)),
+        );
+    }
+
+    #[test]
     fn usage_limit_reset_in_days_does_not_schedule_bogus_short_retry() {
         // "30d" must not be misread as 30 seconds.
         let err = "Rate limited: The usage limit has been reached. Plan: team. \
@@ -122,6 +167,22 @@ mod rate_limit_parse_tests {
     fn plain_retry_seconds_still_parse() {
         let err = "429 Too Many Requests: retry after 30 seconds";
         assert_eq!(parse_rate_limit_error(err), Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn openference_json_retry_after_seconds_is_parsed() {
+        let err = "OpenAI-compatible chat request failed\n  status: 429 Too Many Requests\n  response: {\"error\":\"Rate limit exceeded. Too many requests per minute.\",\"type\":\"rate_limit_error\",\"code\":\"rate_limit_exceeded\",\"retry_after_seconds\":2,\"max_rpm\":25}\nHint: check network connectivity";
+        assert_eq!(parse_rate_limit_error(err), Some(Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn invalid_json_retry_after_does_not_use_max_rpm() {
+        for value in ["-1", "null", "true", "\"soon\""] {
+            let err = format!(
+                "status: 429 Too Many Requests\n  response: {{\"retry_after_seconds\": {value}, \"max_rpm\": 25}}"
+            );
+            assert_eq!(parse_rate_limit_error(&err), None, "{err}");
+        }
     }
 }
 
