@@ -88,13 +88,134 @@ version_dir="$builds_dir/versions/$hash"
 mkdir -p "$version_dir"
 install -m 755 "$bin" "$version_dir/jcode"
 
-# Update stable symlink
 stable_dir="$builds_dir/stable"
 mkdir -p "$stable_dir"
-ln -sfn "$version_dir/jcode" "$stable_dir/jcode"
 
-# Update stable-version marker
-printf '%s\n' "$hash" > "$builds_dir/stable-version"
+# Stable channel writes (symlink + stable-version marker). Kept as a
+# function so the locked manifest update below can run the exact same
+# sequence inside the lock as the unlocked fallback, keeping the marker,
+# symlink, and manifest "stable" field consistent even under concurrent
+# installs (no interleaving of one installer's marker with the other's
+# manifest value). These writes are the REQUIRED part of an install (the
+# launcher follows them), so unlike the manifest sync they must not fail
+# silently: a read-only/full builds directory would otherwise leave the
+# launcher running the previous stable binary while the installer claims
+# success. Returns nonzero on any channel-write failure.
+update_stable_channel_files() {
+  channel_failed=0
+  ln -sfn "$version_dir/jcode" "$stable_dir/jcode" || channel_failed=1
+  printf '%s\n' "$hash" > "$builds_dir/stable-version" || channel_failed=1
+  [ "$channel_failed" = 0 ]
+}
+
+# Keep builds/manifest.json's "stable" field in sync with the marker and
+# symlink. Nothing else writes this field (the selfdev promote flow that did
+# was removed), so without this the manifest drifts stale and points at a
+# pruned version.
+#
+# The update runs under a cross-process lock (manifest.json.lock): a plain
+# lock file created with exclusive-create semantics. Today only the installers
+# take this lock (master's runtime BuildManifest::save is an unlocked write),
+# so this serializes concurrent installs; the holder format and prove-gone
+# recovery rule are kept compatible with the cross-runtime file-lock protocol
+# proposed for the jcode-storage side, so the runtime can adopt the same lock
+# later without changing the installers. Recovery never guesses from age
+# alone: holders record their PID in the lock, and a lock is broken only when
+# its recorded PID is provably gone; PID-less locks fall back to the 60s age
+# rule.
+manifest="$builds_dir/manifest.json"
+if [ -f "$manifest" ] && command -v jq >/dev/null 2>&1; then
+  lock="${manifest}.lock"
+  lock_acquired=0
+  lock_deadline=$(( $(date +%s) + 65 ))
+  while [ "$(date +%s)" -lt "$lock_deadline" ]; do
+    if (set -C; printf 'pid=%s\n' "$$" > "$lock") 2>/dev/null; then
+      lock_acquired=1
+      break
+    fi
+    if [ -f "$lock" ]; then
+      # Tolerant holder parse: accept "pid=<n> started=<marker>" / "pid=<n>
+      # acquired_at=..." (cross-runtime protocol holders) as well as bare
+      # "pid=<n>" (shell/legacy writers), so any future runtime holder is
+      # recognized by PID and never falls through to the age rule. pid=0 is
+      # rejected outright: kill(0) targets a whole process group, not a
+      # process.
+      holder_pid=$(sed -n 's/^pid=\(0*[1-9][0-9]*\).*/\1/p' "$lock" 2>/dev/null | head -1) || true
+      if [ -n "$holder_pid" ]; then
+        # Liveness probe mirroring the cross-runtime protocol: prove-gone
+        # only. kill -0 failure is ambiguous (ESRCH = gone, EPERM = exists but
+        # another user's), so confirm with ps (lists any user's process);
+        # without ps presume the holder lives: a lock is never broken on
+        # "cannot tell".
+        holder_alive=0
+        if kill -0 "$holder_pid" 2>/dev/null; then
+          holder_alive=1
+        elif ! command -v ps >/dev/null 2>&1; then
+          holder_alive=1
+        elif ps -p "$holder_pid" >/dev/null 2>&1; then
+          holder_alive=1
+        fi
+        if [ "$holder_alive" != 1 ]; then
+          # Double-break guard: two installers can observe the same dead
+          # holder; re-read and compare before removing so the slower rm
+          # cannot delete a lock the faster one already re-acquired.
+          lock_now=$(cat "$lock" 2>/dev/null) || true
+          if [ "$lock_now" = "pid=$holder_pid" ] \
+            || printf '%s\n' "$lock_now" | grep -q "^pid=$holder_pid"; then
+            rm -f "$lock" 2>/dev/null || true
+          fi
+          continue
+        fi
+      else
+        # PID-less lock (legacy writer): fall back to the age rule.
+        # GNU stat comes first: its -f is filesystem mode, and "stat -f %m"
+        # fails (rc=1) while still printing filesystem status to stdout, which
+        # a $(...) would capture as non-numeric garbage and then blow up the
+        # age arithmetic below with a fatal error. BSD stat fails -c cleanly
+        # (empty stdout), so trying -c before -f works on both platforms.
+        lock_mtime=$(stat -c %Y "$lock" 2>/dev/null || stat -f %m "$lock" 2>/dev/null || echo 0) || true
+        lock_age=$(( $(date +%s) - lock_mtime ))
+        if [ "$lock_age" -ge 60 ]; then
+          lock_now=$(cat "$lock" 2>/dev/null) || true
+          if ! printf '%s\n' "$lock_now" | grep -q '^pid='; then
+            rm -f "$lock" 2>/dev/null || true
+          fi
+          continue
+        fi
+      fi
+    fi
+    # Fractional sleep when the platform supports it, else 1s granularity.
+    sleep 0.025 2>/dev/null || sleep 1
+  done
+  if [ "$lock_acquired" = 1 ]; then
+    if ! update_stable_channel_files; then
+      rm -f "$lock"
+      echo "error: failed to write the stable channel (symlink/marker) under $stable_dir; the launcher would keep the previous version. Fix the builds directory permissions or free disk space and rerun." >&2
+      exit 1
+    fi
+    if jq --arg s "$hash" '.stable = $s' "$manifest" > "$manifest.tmp.$$" \
+      && jq -e . "$manifest.tmp.$$" >/dev/null 2>&1; then
+      mv -f "$manifest.tmp.$$" "$manifest" 2>/dev/null || true
+    else
+      rm -f "$manifest.tmp.$$"
+    fi
+    rm -f "$lock"
+  else
+    # Lock timeout (or unbreakable holder): do the channel writes unlocked
+    # rather than aborting the install over the optional manifest sync.
+    if ! update_stable_channel_files; then
+      echo "error: failed to write the stable channel (symlink/marker) under $stable_dir; the launcher would keep the previous version. Fix the builds directory permissions or free disk space and rerun." >&2
+      exit 1
+    fi
+  fi
+else
+  # No manifest yet or no jq: the manifest sync is best-effort, but the
+  # stable channel writes are the primary job and must always happen.
+  if ! update_stable_channel_files; then
+    echo "error: failed to write the stable channel (symlink/marker) under $stable_dir; the launcher would keep the previous version. Fix the builds directory permissions or free disk space and rerun." >&2
+    exit 1
+  fi
+fi
 
 # Update current symlink + marker
 current_dir="$builds_dir/current"
