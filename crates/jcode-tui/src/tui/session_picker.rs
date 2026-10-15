@@ -3,6 +3,9 @@
 //! Shows a list of sessions on the left, with a preview of the selected session's
 //! conversation on the right. Sessions are grouped by server for multi-server support.
 
+#[path = "session_picker_presence.rs"]
+mod presence;
+
 use super::color_support::rgb;
 use crate::session::{CrashedSessionsInfo, Session};
 use crate::tui::{DisplayMessage, markdown};
@@ -49,6 +52,13 @@ const SEARCH_CONTENT_BUDGET_BYTES: usize = 12_000;
 const DEFAULT_SESSION_SCAN_LIMIT: usize = 400;
 const MIN_SESSION_SCAN_LIMIT: usize = 50;
 const MAX_SESSION_SCAN_LIMIT: usize = 10_000;
+
+type GroupedSessionList = (Vec<ServerGroup>, Vec<SessionInfo>);
+
+enum SessionListUpdate {
+    Cached(GroupedSessionList),
+    Fresh(Result<GroupedSessionList>),
+}
 
 #[derive(Clone, Debug)]
 pub enum PickerResult {
@@ -581,59 +591,6 @@ impl SessionPicker {
         self.rebuild_items();
     }
 
-    /// Snapshot the active-pid registry + streaming markers into the picker.
-    pub(super) fn refresh_live_presence(&mut self) {
-        self.live_presence = crate::session::session_presence()
-            .into_iter()
-            .map(|presence| (presence.session_id.clone(), presence))
-            .collect();
-        if let Ok(sessions) = crate::claude_live::live_claude_sessions() {
-            for session in sessions {
-                let session_id = format!("claude:{}", session.session_id);
-                self.live_presence.insert(
-                    session_id.clone(),
-                    crate::session::SessionPresence {
-                        session_id,
-                        pid: session.pid,
-                        streaming: false,
-                        streaming_since: None,
-                        internal: false,
-                    },
-                );
-            }
-        }
-        self.live_presence_refreshed_at = Some(std::time::Instant::now());
-    }
-
-    /// Periodically re-snapshot live presence while the picker is on screen so
-    /// working/ready badges track reality. Rebuilds the list when the Active
-    /// view is showing and membership or streaming state changed (a session
-    /// finished its turn, went idle, or exited). Returns true when anything
-    /// changed so callers can redraw.
-    pub fn maybe_refresh_live_presence(&mut self) -> bool {
-        if self.loading_message.is_some() {
-            return false;
-        }
-        let due = self
-            .live_presence_refreshed_at
-            .is_none_or(|at| at.elapsed() >= LIVE_PRESENCE_REFRESH_INTERVAL);
-        if !due {
-            return false;
-        }
-        let before = std::mem::take(&mut self.live_presence);
-        self.refresh_live_presence();
-        let changed = before != self.live_presence;
-        if changed && self.filter_mode == SessionFilterMode::Active {
-            self.rebuild_items();
-        }
-        changed
-    }
-
-    /// Whether the session has a live process right now.
-    pub(super) fn session_is_live(&self, session: &SessionInfo) -> bool {
-        self.live_presence.contains_key(&session.id)
-    }
-
     fn selected_live_claude_target(&self) -> Option<ResumeTarget> {
         let session = self.selected_session()?;
         if session.source != SessionSource::ClaudeCode || !self.session_is_live(session) {
@@ -683,29 +640,11 @@ impl SessionPicker {
         self.filter_mode
     }
 
-    /// Whether the session's live process is streaming a model response.
-    pub(super) fn session_is_streaming(&self, session: &SessionInfo) -> bool {
-        self.live_presence
-            .get(&session.id)
-            .is_some_and(|presence| presence.streaming)
-    }
-
     /// Whether the current picker view contains a running session whose status
     /// glyph needs animated redraws.
     pub(crate) fn has_visible_running_sessions(&self) -> bool {
         self.visible_session_iter()
             .any(|session| self.session_is_streaming(session))
-    }
-
-    /// How long the session's current streaming turn has been running.
-    pub(super) fn session_streaming_duration(
-        &self,
-        session: &SessionInfo,
-    ) -> Option<std::time::Duration> {
-        self.live_presence
-            .get(&session.id)
-            .and_then(|presence| presence.streaming_since)
-            .and_then(|since| std::time::SystemTime::now().duration_since(since).ok())
     }
 
     /// Test-only: inject a synthetic live-presence snapshot so Active-view
@@ -2338,7 +2277,24 @@ impl SessionPicker {
     }
 
     /// Run the interactive picker, returns selected session ID or None if cancelled
-    pub fn run(mut self) -> Result<Option<PickerResult>> {
+    pub fn run(self) -> Result<Option<PickerResult>> {
+        self.run_with_session_updates(None)
+    }
+
+    fn apply_session_list_update(&mut self, update: SessionListUpdate) -> Result<bool> {
+        let (sessions, finished) = match update {
+            SessionListUpdate::Cached(sessions) => (sessions, false),
+            SessionListUpdate::Fresh(sessions) => (sessions?, true),
+        };
+        self.reseed_grouped(sessions.0, sessions.1);
+        self.apply_resume_project_scope_default();
+        Ok(finished)
+    }
+
+    fn run_with_session_updates(
+        mut self,
+        mut updates: Option<std::sync::mpsc::Receiver<SessionListUpdate>>,
+    ) -> Result<Option<PickerResult>> {
         if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
             anyhow::bail!(
                 "session picker requires an interactive terminal (stdin/stdout must be a TTY)"
@@ -2371,7 +2327,8 @@ impl SessionPicker {
             crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
         }
 
-        let result = loop {
+        let mut no_sessions_found = false;
+        let result = 'picker: loop {
             // Keep live working/ready badges current while the picker idles.
             self.maybe_refresh_live_presence();
             terminal.draw(|frame| {
@@ -2381,6 +2338,35 @@ impl SessionPicker {
                 jcode_tui_style::adapt_buffer_for_display(frame.buffer_mut());
                 crate::tui::ui::adapt_buffer_for_emoji_preference(frame.buffer_mut());
             })?;
+            // Always paint before polling, including on a cold cache. Neither
+            // disk-cache parsing nor the full transcript scan may hold up the
+            // first frame or prevent Escape from cancelling the picker.
+            if let Some(receiver) = updates.as_ref() {
+                match receiver.try_recv() {
+                    Ok(update) => match self.apply_session_list_update(update) {
+                        Ok(finished) => {
+                            if finished {
+                                updates = None;
+                                if self.all_sessions.is_empty()
+                                    && self.all_server_groups.iter().all(|g| g.sessions.is_empty())
+                                    && self.all_orphan_sessions.is_empty()
+                                {
+                                    no_sessions_found = true;
+                                    break 'picker Ok(None);
+                                }
+                            }
+                            continue;
+                        }
+                        Err(err) => break 'picker Err(err),
+                    },
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        break 'picker Err(anyhow::anyhow!(
+                            "session list loader stopped unexpectedly"
+                        ));
+                    }
+                }
+            }
             if event::poll(Duration::from_millis(100))? {
                 match event::read()? {
                     Event::Key(key) if key.kind == KeyEventKind::Press => {
@@ -2412,6 +2398,10 @@ impl SessionPicker {
         jcode_tui_style::restore_terminal_quietly();
         super::mermaid::clear_image_state();
 
+        if no_sessions_found {
+            eprintln!("No sessions found.");
+        }
+
         result
     }
 }
@@ -2426,22 +2416,27 @@ pub fn pick_session() -> Result<Option<PickerResult>> {
         );
     }
 
-    // Load sessions grouped by server
-    let (server_groups, orphan_sessions) = load_sessions_grouped()?;
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("jcode-session-list-loader".to_string())
+        .spawn(move || {
+            // Even the cache can be tens of MB on long-lived installations.
+            // Read it off the UI thread, then refresh without resetting the
+            // user's selection, search, or explicitly chosen filter.
+            if let Some(cached) = load_cached_sessions_grouped()
+                && sender.send(SessionListUpdate::Cached(cached)).is_err()
+            {
+                return;
+            }
+            if sender
+                .send(SessionListUpdate::Fresh(load_sessions_grouped()))
+                .is_err()
+            {
+                crate::logging::debug("Session picker closed before session scan finished");
+            }
+        })?;
 
-    // Check if there are any sessions at all
-    let total_sessions: usize = server_groups
-        .iter()
-        .map(|g| g.sessions.len())
-        .sum::<usize>()
-        + orphan_sessions.len();
-
-    if total_sessions == 0 {
-        eprintln!("No sessions found.");
-        return Ok(None);
-    }
-
-    let mut picker = SessionPicker::new_grouped(server_groups, orphan_sessions);
+    let mut picker = SessionPicker::loading();
     picker.set_current_dir(
         std::env::current_dir()
             .ok()
@@ -2450,7 +2445,7 @@ pub fn pick_session() -> Result<Option<PickerResult>> {
     picker.apply_resume_project_scope_default();
     // The standalone picker is the CLI resume flow: open search-first.
     picker.focus_search_input();
-    picker.run()
+    picker.run_with_session_updates(Some(receiver))
 }
 
 #[cfg(test)]
