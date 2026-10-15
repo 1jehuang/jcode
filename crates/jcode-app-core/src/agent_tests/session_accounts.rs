@@ -89,6 +89,20 @@ fn api_route_with_saved_pin_stays_api_through_sync_model_and_resume() {
     assert_eq!(saved.provider_key.as_deref(), Some("claude-api"));
     assert_eq!(saved.account_pins.get("claude"), Some(&fox_pin()));
 
+    let fork = provider.fork();
+    assert_eq!(
+        fork.active_resolved_credential(),
+        Some(ResolvedCredential::ApiKey)
+    );
+    assert_eq!(
+        fork.account_pin(AccountProviderKind::Claude),
+        provider.account_pin(AccountProviderKind::Claude)
+    );
+    assert_eq!(
+        provider.active_resolved_credential(),
+        Some(ResolvedCredential::ApiKey)
+    );
+
     // Ambient startup preference must not rewrite actual API billing identity.
     crate::env::set_var("JCODE_RUNTIME_PROVIDER", "claude-oauth");
     assert_eq!(
