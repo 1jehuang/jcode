@@ -181,6 +181,7 @@ async fn automatic_failover_revalidates_after_waiting_for_agent_lock() {
     let _guard = crate::storage::lock_test_env();
     let _runtime = IsolatedRuntimeDir::new();
     let (provider, agent, tx, mut rx) = test_agent("session_rejected_auto_route").await;
+    let original_model = provider.model();
     let selection = crate::provider::RouteSelection {
         model: "gpt-6.1-sol".to_string(),
         runtime_key: jcode_provider_core::RuntimeKey::OpenAIOAuth,
@@ -205,7 +206,7 @@ async fn automatic_failover_revalidates_after_waiting_for_agent_lock() {
         matches!(event, ServerEvent::ModelChanged { id: 29, error: Some(error), .. }
         if error.contains("Auto-switch canceled"))
     );
-    assert_eq!(provider.model(), "test-model-a");
+    assert_eq!(provider.model(), original_model);
 }
 
 #[tokio::test]
