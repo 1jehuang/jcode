@@ -752,6 +752,7 @@ pub struct OpenAIProvider {
     /// True when this runtime was created without API credentials. It can still
     /// serve browser-backed models and upgrades in place after a successful login.
     browser_only: Arc<AtomicBool>,
+    browser_model_unset: AtomicBool,
 }
 
 impl OpenAIProvider {
@@ -802,8 +803,8 @@ impl OpenAIProvider {
 
         // Check for model override from environment
         let catalog_scope = Self::catalog_scope_for(&credentials);
-        let mut model = if browser_only {
-            std::env::var("JCODE_OPENAI_MODEL")
+        let (mut model, browser_model_unset) = if browser_only {
+            let selection = std::env::var("JCODE_OPENAI_MODEL")
                 .ok()
                 .map(|model| model.trim().to_string())
                 .filter(|model| is_chatgpt_web_model(model))
@@ -812,13 +813,19 @@ impl OpenAIProvider {
                         .into_iter()
                         .find(|model| model.available)
                         .map(|model| model.model)
-                })
-                .unwrap_or_else(|| CHATGPT_WEB_MODEL.to_string())
+                });
+            match selection {
+                Some(model) => (model, false),
+                None => (CHATGPT_WEB_MODEL.to_string(), true),
+            }
         } else {
-            std::env::var("JCODE_OPENAI_MODEL")
-                .unwrap_or_else(|_| DEFAULT_MODEL.to_string())
-                .trim()
-                .to_string()
+            (
+                std::env::var("JCODE_OPENAI_MODEL")
+                    .unwrap_or_else(|_| DEFAULT_MODEL.to_string())
+                    .trim()
+                    .to_string(),
+                false,
+            )
         };
         if !is_chatgpt_web_model(&model)
             && !jcode_base::provider::known_openai_model_ids_for_scope(&catalog_scope)
@@ -899,6 +906,7 @@ impl OpenAIProvider {
             prewarm: Arc::new(openai_websocket_prewarm::PrewarmSlot::default()),
             chatgpt_web: Arc::new(chatgpt_web::ChatGptWebState::new()),
             browser_only: Arc::new(AtomicBool::new(browser_only)),
+            browser_model_unset: AtomicBool::new(browser_model_unset),
         };
         provider.revalidate_reasoning_effort();
         provider
@@ -1112,6 +1120,9 @@ impl OpenAIProvider {
     /// when they want deeper reasoning. Every other model keeps the model's
     /// own API-side default (no forced effort).
     fn default_reasoning_effort_for_model(model: &str) -> Option<String> {
+        if let Some((_, power)) = jcode_base::provider::chatgpt_web::legacy_web_alias(model) {
+            return Some(power.to_string());
+        }
         if is_chatgpt_web_model(model) {
             return jcode_base::provider::chatgpt_web::cached_reasoning_options(model)
                 .iter()
