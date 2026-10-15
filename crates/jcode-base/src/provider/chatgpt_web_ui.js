@@ -238,6 +238,9 @@ return (async () => {
     range.selectNodeContents(editor);
     selection.addRange(range);
     document.execCommand('delete', false, null);
+    // The editor drops a paste dispatched in the same task as focus or
+    // clearing. Let it settle first.
+    await delay();
     const chunk = 6000;
     for (let start = 0; start < text.length;) {
       checkBudget();
