@@ -2177,8 +2177,7 @@ fn handle_disconnected_key_internal(
             if app.cursor_pos > 0 {
                 let prev = super::super::core::prev_char_boundary(&app.input, app.cursor_pos);
                 app.remember_input_undo_state();
-                app.input.drain(prev..app.cursor_pos);
-                app.cursor_pos = prev;
+                app.remove_input_range(prev, app.cursor_pos);
                 app.reset_tab_completion();
                 app.sync_model_picker_preview_from_input();
             }
@@ -2187,7 +2186,7 @@ fn handle_disconnected_key_internal(
             if app.cursor_pos < app.input.len() {
                 let next = super::super::core::next_char_boundary(&app.input, app.cursor_pos);
                 app.remember_input_undo_state();
-                app.input.drain(app.cursor_pos..next);
+                app.remove_input_range(app.cursor_pos, next);
                 app.reset_tab_completion();
                 app.sync_model_picker_preview_from_input();
             }

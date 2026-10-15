@@ -83,6 +83,7 @@ mod idle_heap_release;
 mod inline_interactive;
 mod input;
 mod input_help;
+mod input_images;
 mod input_selection;
 mod local;
 mod misc_ui;
@@ -1579,7 +1580,7 @@ pub struct App {
     // Stashed input: saved via Ctrl+S for later retrieval
     stashed_input: Option<(String, usize)>,
     // Undo history for in-progress input editing (Ctrl+Z)
-    input_undo_stack: Vec<(String, usize)>,
+    input_undo_stack: Vec<input_images::InputUndoSnapshot>,
     /// Anchor (byte offset into `input`) of the editable composer selection;
     /// the other end is `cursor_pos`. `None` means no selection.
     input_selection_anchor: Option<input_selection::InputSelectionAnchor>,

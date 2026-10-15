@@ -962,6 +962,7 @@ fn insert_input_text_with_undo(app: &mut App, text: &str, typed: bool) {
 
     app.input.insert_str(app.cursor_pos, text);
     app.cursor_pos += text.len();
+    app.reconcile_input_images();
     scrub_osc_color_replies(app);
 
     // Typing the final command character immediately arms picker filtering.
@@ -2147,8 +2148,7 @@ pub(super) fn delete_input_to_start(app: &mut App) {
     if app.cursor_pos > 0 {
         app.remember_input_undo_state();
     }
-    app.input.drain(..app.cursor_pos);
-    app.cursor_pos = 0;
+    app.remove_input_range(0, app.cursor_pos);
     app.sync_model_picker_preview_from_input();
 }
 
@@ -2156,7 +2156,7 @@ pub(super) fn delete_input_to_end(app: &mut App) {
     if app.cursor_pos < app.input.len() {
         app.remember_input_undo_state();
     }
-    app.input.truncate(app.cursor_pos);
+    app.remove_input_range(app.cursor_pos, app.input.len());
     app.sync_model_picker_preview_from_input();
 }
 
@@ -2223,7 +2223,7 @@ pub(super) fn try_ctrl_d_forward_delete(app: &mut App) -> bool {
     }
     let next = crate::tui::core::next_char_boundary(&app.input, app.cursor_pos);
     app.remember_input_undo_state();
-    app.input.drain(app.cursor_pos..next);
+    app.remove_input_range(app.cursor_pos, next);
     app.reset_tab_completion();
     app.sync_model_picker_preview_from_input();
     true
@@ -2234,8 +2234,7 @@ pub(super) fn delete_input_word_back(app: &mut App) {
     if start < app.cursor_pos {
         app.remember_input_undo_state();
     }
-    app.input.drain(start..app.cursor_pos);
-    app.cursor_pos = start;
+    app.remove_input_range(start, app.cursor_pos);
     app.sync_model_picker_preview_from_input();
 }
 
@@ -2255,7 +2254,7 @@ pub(super) fn handle_alt_key(app: &mut App, code: KeyCode) -> bool {
             if app.cursor_pos < end {
                 app.remember_input_undo_state();
             }
-            app.input.drain(app.cursor_pos..end);
+            app.remove_input_range(app.cursor_pos, end);
             app.sync_model_picker_preview_from_input();
             true
         }
@@ -2882,8 +2881,7 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
             if app.cursor_pos > 0 {
                 let prev = crate::tui::core::prev_char_boundary(&app.input, app.cursor_pos);
                 app.remember_input_undo_state();
-                app.input.drain(prev..app.cursor_pos);
-                app.cursor_pos = prev;
+                app.remove_input_range(prev, app.cursor_pos);
                 app.reset_tab_completion();
                 app.sync_model_picker_preview_from_input();
             }
@@ -2893,7 +2891,7 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
             if app.cursor_pos < app.input.len() {
                 let next = crate::tui::core::next_char_boundary(&app.input, app.cursor_pos);
                 app.remember_input_undo_state();
-                app.input.drain(app.cursor_pos..next);
+                app.remove_input_range(app.cursor_pos, next);
                 app.reset_tab_completion();
                 app.sync_model_picker_preview_from_input();
             }
@@ -3033,15 +3031,16 @@ pub(super) fn stage_local_interleave(
 
 fn attach_image(app: &mut App, media_type: String, base64_data: String) {
     let size_kb = base64_data.len() / 1024;
-    app.pending_images.push((media_type.clone(), base64_data));
-    let placeholder = format!("[image {}]", app.pending_images.len());
     // An image pasted over a selection replaces it, as text does. Deleting the
     // selection records the undo step for the whole replacement.
     if !app.replace_input_selection_for_insert() {
         app.remember_input_undo_state();
     }
+    app.pending_images.push((media_type.clone(), base64_data));
+    let placeholder = format!("[image {}]", app.pending_images.len());
     app.input.insert_str(app.cursor_pos, &placeholder);
     app.cursor_pos += placeholder.len();
+    app.reconcile_input_images();
     app.sync_model_picker_preview_from_input();
     app.set_status_notice(format!("Pasted {} ({} KB)", media_type, size_kb));
 }
