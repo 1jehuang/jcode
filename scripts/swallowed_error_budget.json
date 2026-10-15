@@ -1,9 +1,9 @@
 {
-  "total": 3725,
+  "total": 3714,
   "totals_by_pattern": {
-    "dot_ok": 1434,
-    "let_underscore": 1357,
-    "unwrap_or_default": 934
+    "dot_ok": 1429,
+    "let_underscore": 1355,
+    "unwrap_or_default": 930
   },
   "tracked_files": {
     "crates/jcode-app-core/src/agent.rs": {
@@ -1012,9 +1012,9 @@
       "unwrap_or_default": 2
     },
     "crates/jcode-base/src/provider/chatgpt_web.rs": {
-      "dot_ok": 5,
-      "let_underscore": 2,
-      "unwrap_or_default": 3
+      "dot_ok": 0,
+      "let_underscore": 0,
+      "unwrap_or_default": 0
     },
     "crates/jcode-base/src/provider/image_clamp.rs": {
       "dot_ok": 4,
@@ -1499,7 +1499,7 @@
     "crates/jcode-provider-core/src/models.rs": {
       "dot_ok": 1,
       "let_underscore": 0,
-      "unwrap_or_default": 1
+      "unwrap_or_default": 0
     },
     "crates/jcode-provider-core/src/openai_schema.rs": {
       "dot_ok": 0,

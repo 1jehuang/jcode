@@ -182,10 +182,15 @@ pub fn bridge_error_detail(stderr: &str) -> String {
 }
 
 fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(elapsed) => elapsed.as_secs(),
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "ChatGPT catalog clock is before the Unix epoch, using zero timestamp: {error}"
+            ));
+            0
+        }
+    }
 }
 
 const CACHE_FILE: &str = "chatgpt_web_model_catalog_cache.json";
@@ -202,33 +207,9 @@ fn cache_path() -> Result<std::path::PathBuf> {
     Ok(crate::storage::jcode_dir()?.join(CACHE_FILE))
 }
 
-fn load_cache() -> Cache {
-    let path = cache_path().ok();
-    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    if cache.path != path {
-        cache.snapshot = path
-            .as_ref()
-            .and_then(|p| crate::storage::read_json(p).ok())
-            .unwrap_or_default();
-        cache.path = path.clone();
-    }
-    Cache {
-        path,
-        snapshot: cache.snapshot.clone(),
-    }
-}
-
-fn store_cache(snapshot: Snapshot) {
-    let path = cache_path().ok();
-    if let Some(path) = &path
-        && let Err(error) = crate::storage::write_json(path, &snapshot)
-    {
-        crate::logging::warn(&format!(
-            "Failed to persist ChatGPT browser catalog: {error:#}"
-        ));
-    }
-    *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Cache { path, snapshot };
-}
+#[path = "chatgpt_web_cache.rs"]
+mod cache;
+use cache::{best_effort_cache_path, load_cache, read_cached_snapshot, store_cache};
 
 /// Models from the last successful picker observation. Their availability
 /// decides which routes can be selected. Every browser turn still proves the
@@ -311,8 +292,11 @@ pub async fn refresh_models() -> Result<Vec<ChatGptWebModel>> {
     .context("ChatGPT catalog discovery task failed")?;
     if let Err(error) = &result
         && needs_user_attention(error)
+        && let Err(login_error) = show_chatgpt_for_login().await
     {
-        let _ = show_chatgpt_for_login().await;
+        crate::logging::warn(&format!(
+            "Failed to show ChatGPT login after catalog refresh failure: {login_error:#}"
+        ));
     }
     result
 }
@@ -332,9 +316,9 @@ async fn record_refresh(
             // Another jcode process (CLI or daemon) may have stored a newer
             // observation. Annotate the newest one instead of overwriting it.
             let memory = load_cache().snapshot;
-            let disk = cache_path()
-                .ok()
-                .and_then(|path| crate::storage::read_json::<Snapshot>(&path).ok());
+            let disk = best_effort_cache_path()
+                .as_deref()
+                .and_then(read_cached_snapshot);
             let mut previous = match disk {
                 Some(disk) if disk.version == 1 && disk.observed_at > memory.observed_at => disk,
                 _ => memory,
@@ -422,10 +406,14 @@ async fn background_anchor_with_bridge(bridge: &impl BridgeTransport) -> Result<
         .await
         .context("Failed to open jcode's background ChatGPT window")?;
     // newSession makes its tab the bridge's default target; hand that back.
-    if let Some(previous) = listing.get("activeTabId").and_then(Value::as_u64) {
-        let _ = bridge
+    if let Some(previous) = listing.get("activeTabId").and_then(Value::as_u64)
+        && let Err(error) = bridge
             .command("setActiveTab", json!({"tabId": previous}))
-            .await;
+            .await
+    {
+        crate::logging::warn(&format!(
+            "Failed to restore browser bridge target after opening ChatGPT background window: {error:#}"
+        ));
     }
     created
         .get("tabId")
@@ -620,10 +608,10 @@ async fn discover_with_bridge(bridge: &impl BridgeTransport) -> Result<Snapshot>
                     "Owned fork ID unknown, cannot blank fallback"
                 ))
             };
-            let original = result
-                .err()
-                .map(|e| format!("Discovery also failed: {e:#}. "))
-                .unwrap_or_default();
+            let original = match result {
+                Err(error) => format!("Discovery also failed: {error:#}. "),
+                Ok(_) => String::new(),
+            };
             anyhow::bail!(
                 "{original}Failed to close owned ChatGPT discovery fork: {cleanup_error:#}. Blank fallback: {}",
                 match blank {

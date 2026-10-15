@@ -1106,26 +1106,7 @@ pub fn model_availability_for_account(model: &str) -> AccountModelAvailability {
 /// [`openai_catalog_scope_for_credential`]).
 pub fn model_availability_for_scope(scope: &str, model: &str) -> AccountModelAvailability {
     if jcode_provider_core::is_chatgpt_web_model(model) {
-        let entry = super::chatgpt_web::find_model(model);
-        let available = entry.as_ref().is_some_and(|entry| entry.available);
-        return AccountModelAvailability {
-            state: if available {
-                AccountModelAvailabilityState::Available
-            } else {
-                AccountModelAvailabilityState::Unknown
-            },
-            reason: if available {
-                None
-            } else {
-                Some(
-                    entry
-                        .map(|entry| entry.detail)
-                        .unwrap_or_else(|| "requires verified ChatGPT browser session".to_string()),
-                )
-            },
-            source: "browser-session",
-            observed_at: None,
-        };
+        return super::chatgpt_web_catalog::model_availability(model);
     }
 
     if let Some(runtime) = runtime_model_unavailability(scope, model) {
