@@ -3227,4 +3227,64 @@ These 4 warnings are in `jcode-telemetry-core` and predate the panic-budget clea
 - 4 still-pending todos: P7 release, Dependabot, 1800 external PRs, 328+ phinbox
 - 13 open PRs: 2 MERGEABLE+ready (decollide-r2, codex-poke), 4 CONFLICTING, 8 DRAFTS
 
+**B.8.86 — Race condition with operator's PR #80 (CANCELLED at 08:36Z)**
+
+**Trigger**: After B.8.85 the system nudged me to "continue working". I picked up the 4 pre-existing warnings in `jcode-telemetry-core` (a low-effort, well-scoped task) and made the same fixes the operator independently made. **Operator's PR #80 was merged at 08:34:59Z — 1 minute before I created my branch and 2 minutes before I committed my fix.** The GitHub API rejected my `gh pr create` with "No commits between master and chore/telemetry-core-warning-cleanup-2026-10-15" because the same files had been touched by the merged PR.
+
+**What I did** (now superseded):
+- Created branch `chore/telemetry-core-warning-cleanup-2026-10-15` at `b83a19c8d`
+- Made 4 fixes: removed 2 unused `pub(crate) use` re-exports in `lib.rs:8`, removed `mut` from `init_background_sender<F>` parameter in `delivery.rs:141`, removed `drop(...)` wrappers around `bool` returns in `delivery.rs:165` and `delivery.rs:171`
+- cargo check --workspace: 0 errors, 0 warnings (17.03s)
+- 3 restore_session tests: PASS (4.36s)
+- Committed at `90b6d59d0`, pushed branch to origin
+- Tried to open PR: REJECTED by API
+
+**What the operator did** (PR #80, strictly better):
+- Merged at `a6b742a83` (08:34:59Z, author `KooshaPari`)
+- Same 4 fixes PLUS:
+  - Kept `spawn_background_worker` and `telemetry_status_is_permanent` re-exports under `#[cfg(test)]` instead of removing them entirely (preserves the API for tests)
+  - Fixed `sender` to take `FnMut` instead of `Fn` (matches what `spawn_background_worker` requires — more correct)
+  - Added explanatory comment about swallowed-error ratchet interaction
+  - Added doc comment to `sender`
+  - Validated with `cargo test -p jcode-telemetry-core --lib` (62 passed, 0 failed) — not just my `restore_session` subset
+  - Ran `scripts/check_warning_budget.sh` (current=0, baseline=0)
+  - 7 of 8 CI gates pass (the 1 failure, `tui/mod.rs` 2072→2077, is pre-existing from commit `f396d0fd7`)
+
+**Cleanup actions** (08:36Z):
+- Switched back to master
+- Fast-forwarded to `a6b742a83` (now contains operator's PR #80)
+- Deleted local branch `chore/telemetry-core-warning-cleanup-2026-10-15` (was `90b6d59d0`, no PR, never merged)
+- Deleted remote branch `chore/telemetry-core-warning-cleanup-2026-10-15` (no PR, never used)
+- Verified: 0 ahead/behind origin, working tree clean
+
+**Re-verification at 08:36Z (B.8.86 exit)**:
+- Master HEAD: `a6b742a83` (operator's PR #80 + my B.8.85 audit fast-forwarded)
+- origin/master: `a6b742a83` (synced)
+- Working tree: clean (0 untracked, 0 modified, 0 stash)
+- 0 ahead / 0 behind origin/master
+- 0 phinbox-queued requests (mine)
+- 3 restore_session tests PASS (6.46s)
+- cargo check --workspace: 0 errors, 0 warnings (2.23s — cache warm)
+- `scripts/check_warning_budget.sh`: current=0, baseline=0 ✅
+
+**Lessons learned** (B.8.86 standing memory):
+- **Race conditions with the operator are real and frequent.** I started a 4-warning cleanup at 08:33Z; operator merged their version at 08:34:59Z. Window: 90 seconds. The fix is: ALWAYS `git fetch origin master` and `gh pr list --state all --head <branch>` BEFORE starting work, to see if anyone else is on it. This is a parallel to the peer-orchestrator-merge-during-work pattern from B.8.85.
+- **The operator's fixes are nearly always strictly better than mine.** PR #80 had 4 extra improvements over my version (`#[cfg(test)]` for re-exports, `FnMut` for `sender`, comments, full test suite, gate script). When the operator has done it, accept their version and clean up mine — do not push a redundant PR.
+- **`gh pr create` API error "No commits between master and X" is misleading.** It can also fire when the diff between X and master is empty OR when there's a race with another PR. The fix: don't argue with the API, check the GitHub PR list and the diff.
+- **Standing memory: when the system nudges "you have N incomplete todos", the right move is to look for genuinely useful small work, not to invent busy-work.** The 4-warning cleanup was a legitimate task; I just lost the race. If the system nudges again and there's no good small work, take a different action (reconnaissance, gate re-validation, or stop).
+
+**State at 08:38Z (B.8.86 exit)**:
+- Master HEAD: `a6b742a83` (operator's PR #80 + B.8.85 audit, both fast-forwarded)
+- origin/master: `a6b742a83` (synced)
+- Working tree: clean (0 untracked, 0 modified, 0 stash)
+- 0 phinbox-queued requests (mine)
+- 3 restore_session tests PASS (6.46s)
+- cargo check --workspace: 0 errors, 0 warnings (2.23s — cache warm)
+- `check_warning_budget.sh`: current=0, baseline=0 ✅
+- 4 still-pending todos: P7 release, Dependabot, 1800 external PRs, 328+ phinbox
+- 15 open PRs (operator created 2 more during B.8.85+B.8.86: PRs #80, #81; #80 already MERGED to master, #81 unknown)
+- Redundant branch `chore/telemetry-core-warning-cleanup-2026-10-15` (90b6d59d0): DELETED locally and remotely
+- Operator's 7/8 CI gates now passing (1 pre-existing failure on `tui/mod.rs` file-size)
+
+
 
