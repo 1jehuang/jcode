@@ -43,7 +43,7 @@ fn keep_recent_from_env() -> Option<usize> {
 
 /// Versions that must never be removed: active channels, the build manifest's
 /// canary/stable/pending-activation rollback targets.
-fn protected_versions() -> HashSet<String> {
+fn protected_versions() -> Result<HashSet<String>> {
     let mut protected = HashSet::new();
     for version in [
         read_current_version(),
@@ -63,7 +63,8 @@ fn protected_versions() -> HashSet<String> {
             }
         }
     }
-    if let Ok(manifest) = BuildManifest::load() {
+    let manifest = BuildManifest::load()?;
+    {
         protected.extend(manifest.stable.clone());
         protected.extend(manifest.canary.clone());
         if let Some(pending) = manifest.pending_activation.as_ref() {
@@ -72,7 +73,7 @@ fn protected_versions() -> HashSet<String> {
             protected.extend(pending.previous_shared_server_version.clone());
         }
     }
-    protected
+    Ok(protected)
 }
 
 /// Resolve `<channel>/jcode -> versions/<v>/jcode` to `<v>`.
@@ -96,9 +97,22 @@ fn version_from_binary_path(path: &Path) -> Option<String> {
     (parent == "versions").then_some(version)
 }
 
+/// Match the actual executable file, not a label in an unrelated build store.
+#[cfg(unix)]
+fn running_version_in(versions_dir: &Path, executable: &Path) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    let version = version_from_binary_path(executable)?;
+    let candidate = versions_dir.join(&version).join(executable.file_name()?);
+    let (Ok(running), Ok(stored)) = (std::fs::metadata(executable), std::fs::metadata(candidate))
+    else {
+        return None;
+    };
+    (running.dev() == stored.dev() && running.ino() == stored.ino()).then_some(version)
+}
+
 /// Versions whose binary is the executable of a live process.
 #[cfg(target_os = "linux")]
-fn running_versions() -> HashSet<String> {
+fn running_versions(versions_dir: &Path) -> HashSet<String> {
     let Ok(entries) = std::fs::read_dir("/proc") else {
         return HashSet::new();
     };
@@ -109,7 +123,7 @@ fn running_versions() -> HashSet<String> {
             // A deleted-but-running binary reads as "<path> (deleted)".
             let text = exe.to_string_lossy();
             let trimmed = text.strip_suffix(" (deleted)").unwrap_or(&text);
-            version_from_binary_path(Path::new(trimmed))
+            running_version_in(versions_dir, Path::new(trimmed))
         })
         .collect()
 }
@@ -117,7 +131,7 @@ fn running_versions() -> HashSet<String> {
 /// Versions whose binary is the executable of a live process. macOS has no
 /// `/proc`; libproc reports each process's executable path instead.
 #[cfg(target_os = "macos")]
-fn running_versions() -> HashSet<String> {
+fn running_versions(versions_dir: &Path) -> HashSet<String> {
     use std::os::unix::ffi::OsStrExt;
     // SAFETY: a null buffer only asks libproc for the number of pids.
     let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
@@ -141,13 +155,13 @@ fn running_versions() -> HashSet<String> {
                 unsafe { libc::proc_pidpath(pid, path.as_mut_ptr().cast(), path.len() as u32) };
             // A failed lookup (for example another user's process) returns 0 or less.
             let exe = std::ffi::OsStr::from_bytes(path.get(..usize::try_from(len).unwrap_or(0))?);
-            version_from_binary_path(Path::new(exe))
+            running_version_in(versions_dir, Path::new(exe))
         })
         .collect()
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn running_versions() -> HashSet<String> {
+fn running_versions(_versions_dir: &Path) -> HashSet<String> {
     HashSet::new()
 }
 
@@ -163,15 +177,22 @@ pub fn prune_old_versions() {
     if !prune_due(&dir) {
         return;
     }
-    let mut protected = protected_versions();
-    protected.extend(running_versions());
-    let _ = prune_old_versions_in(
+    let Ok(mut protected) = protected_versions() else {
+        return;
+    };
+    protected.extend(running_versions(&dir.join("versions")));
+    let _ = prune_and_mark(&dir, &protected, keep_recent);
+}
+
+fn prune_and_mark(dir: &Path, protected: &HashSet<String>, keep_recent: usize) -> Result<()> {
+    prune_old_versions_in(
         &dir.join("versions"),
-        &protected,
+        protected,
         keep_recent,
         SystemTime::now(),
-    );
-    mark_pruned(&dir);
+    )?;
+    mark_pruned(dir);
+    Ok(())
 }
 
 /// True when the last completed pass is older than the interval. The marker
@@ -201,10 +222,9 @@ pub fn prune_old_versions_in(
     now: SystemTime,
 ) -> Result<VersionPruneReport> {
     let mut candidates: Vec<(SystemTime, String, PathBuf)> = Vec::new();
-    for entry in std::fs::read_dir(versions_dir)?.flatten() {
-        let Ok(kind) = entry.file_type() else {
-            continue;
-        };
+    for entry in std::fs::read_dir(versions_dir)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
         if !kind.is_dir() {
             continue;
         }
@@ -221,6 +241,7 @@ pub fn prune_old_versions_in(
     candidates.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
 
     let mut report = VersionPruneReport::default();
+    let mut failed = false;
     let mut recent_kept = 0usize;
     for (modified, name, path) in candidates {
         let too_new = now
@@ -239,9 +260,11 @@ pub fn prune_old_versions_in(
         if std::fs::remove_dir_all(&path).is_ok() {
             report.removed.push(name);
         } else {
+            failed = true;
             report.kept.push(name);
         }
     }
+    anyhow::ensure!(!failed, "some old build directories could not be removed");
     Ok(report)
 }
 
@@ -307,21 +330,57 @@ mod tests {
         let mut running = HashSet::new();
         for _ in 0..100 {
             std::thread::sleep(Duration::from_millis(20));
-            running = running_versions();
+            running = running_versions(versions);
             if running.contains("v-running") {
                 break;
             }
         }
 
         let report = prune_old_versions_in(versions, &running, 0, SystemTime::now()).unwrap();
+        let unrelated = temp.path().join("unrelated/versions");
+        make_version(&unrelated, "v-running", DAY * 3);
+        let unrelated_running = running_versions(&unrelated);
+        let unrelated_report =
+            prune_old_versions_in(&unrelated, &unrelated_running, 0, SystemTime::now()).unwrap();
         child.kill().unwrap();
         child.wait().unwrap();
+        assert!(!unrelated_running.contains("v-running"));
+        assert_eq!(unrelated_report.removed, vec!["v-running"]);
 
         assert_eq!(report.removed, vec!["v-idle".to_string()]);
         assert!(
             versions.join("v-running").exists(),
             "a running build must be kept"
         );
+    }
+
+    #[test]
+    fn failed_daily_pass_does_not_stamp_success() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(prune_and_mark(temp.path(), &HashSet::new(), 0).is_err());
+        assert!(!temp.path().join(PRUNE_MARKER).exists());
+        assert!(prune_due(temp.path()));
+        fs::create_dir(temp.path().join("versions")).unwrap();
+        prune_and_mark(temp.path(), &HashSet::new(), 0).unwrap();
+        assert!(!prune_due(temp.path()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn same_label_in_another_store_is_not_protected() {
+        let temp = tempfile::tempdir().unwrap();
+        let own = temp.path().join("own/versions");
+        let other = temp.path().join("other/versions");
+        make_version(&own, "same", DAY * 3);
+        make_version(&other, "same", DAY * 3);
+        let executable = other.join("same/jcode");
+        assert_eq!(running_version_in(&own, &executable), None);
+        assert_eq!(running_version_in(&other, &executable), Some("same".into()));
+        let alias = temp.path().join("alias");
+        std::os::unix::fs::symlink(&other, &alias).unwrap();
+        assert_eq!(running_version_in(&alias, &executable), Some("same".into()));
+        let report = prune_old_versions_in(&own, &HashSet::new(), 0, SystemTime::now()).unwrap();
+        assert_eq!(report.removed, vec!["same"]);
     }
 
     #[test]
