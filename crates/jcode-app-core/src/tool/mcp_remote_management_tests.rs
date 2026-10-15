@@ -38,6 +38,7 @@ fn remote_management_configuration_preserves_transport_and_static_headers() {
         }
         let config = connection_config(&serde_json::from_value(input).unwrap(), None).unwrap();
         assert!(config.is_remote());
+        assert_eq!(config.url.as_deref(), Some("https://example.com/mcp"));
         assert_eq!(config.headers["aUtHoRiZaTiOn"], "Bearer static");
         assert_eq!(config.headers["X-Test"], "value");
         assert_eq!(config.transport.as_deref(), transport);
@@ -53,6 +54,8 @@ fn remote_management_configuration_preserves_transport_and_static_headers() {
 #[test]
 fn remote_management_rejects_ambiguous_or_ignored_connection_options() {
     for input in [
+        json!({}),
+        json!({"url": ""}),
         json!({"command": "test", "url": "https://example.com/mcp"}),
         json!({"command": ""}),
         json!({"command": "test", "headers": {}}),

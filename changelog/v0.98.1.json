@@ -1,0 +1,22 @@
+{
+  "version": "0.98.1",
+  "date": "2026-10-14",
+  "title": "Faster idle sessions and richer responses",
+  "highlights": [
+    "Reduce idle CPU and disk reads in repositories with many untracked files",
+    "Share model catalog processing across equivalent clients while keeping usage and account state fresh",
+    "Allow Desktop-capable clients to receive Markdown responses through the new user_response tool"
+  ],
+  "improvements": [
+    "Show compact context usage before and after compaction",
+    "Open the resume picker immediately while session scanning continues in the background",
+    "Disable automatic memory recall while retaining explicit memory search",
+    "Display large recorded token and cost summaries compactly"
+  ],
+  "fixes": [
+    "Recover browser handoffs from runtime provider failures using direct browser actions",
+    "Restore Windows companion connections over named pipes",
+    "Expose global user-session connection presence to SDK clients",
+    "Keep worker emoji placement consistent in the swarm status strip"
+  ]
+}
