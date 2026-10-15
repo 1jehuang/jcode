@@ -161,17 +161,12 @@ fn summarize_background_command(description: Option<&str>, command: &str) -> Str
     {
         return truncate_str(description, 28).to_string();
     }
-
     let trimmed = command.trim();
     if trimmed.is_empty() {
         return "bash".to_string();
     }
-
     let tokens: Vec<&str> = trimmed.split_whitespace().collect();
-    let start = tokens
-        .iter()
-        .position(|token| !token.contains('='))
-        .unwrap_or(0);
+    let start = tokens.iter().position(|t| !t.contains('=')).unwrap_or(0);
     let tokens = &tokens[start..];
     if tokens.is_empty() {
         return truncate_str(trimmed, 28).to_string();
@@ -200,14 +195,13 @@ fn parse_progress_marker_with_checkpoint(line: &str) -> Option<(BackgroundTaskPr
     let marker: ProgressMarker = serde_json::from_str(payload).ok()?;
     let is_checkpoint =
         marker.checkpoint.unwrap_or(false) || matches!(marker.kind.as_deref(), Some("checkpoint"));
-    let kind = if marker.percent.is_some()
-        || matches!((marker.current, marker.total), (_, Some(total)) if total > 0)
-    {
+    let warm = marker.percent.is_some()
+        || matches!((marker.current, marker.total), (_, Some(total)) if total > 0);
+    let kind = if warm {
         BackgroundTaskProgressKind::Determinate
     } else {
         parse_progress_kind(marker.kind.as_deref())
     };
-
     Some((
         BackgroundTaskProgress {
             kind,
