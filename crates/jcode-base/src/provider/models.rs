@@ -1292,6 +1292,14 @@ pub fn context_limit_for_model_with_provider(
     model: &str,
     provider_hint: Option<&str>,
 ) -> Option<usize> {
+    // ChatGPT web routes are not API models: the GPT-6 family fallback below
+    // (1M) is wrong for them. The account catalog knows the real window
+    // (Instant 52K, minis 137K, Thinking 262K, Pro 410K).
+    if jcode_provider_core::is_chatgpt_web_model(model) {
+        if let Some(tokens) = super::chatgpt_web::context_tokens(model, None) {
+            return Some(tokens);
+        }
+    }
     context_limit_for_model_with_provider_and_cache(
         model,
         provider_hint,

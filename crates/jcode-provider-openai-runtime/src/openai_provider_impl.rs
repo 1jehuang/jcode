@@ -1322,6 +1322,14 @@ impl Provider for OpenAIProvider {
 
     fn context_window(&self) -> usize {
         let model = self.model();
+        if is_chatgpt_web_model(&model)
+            && let Some(tokens) = jcode_base::provider::chatgpt_web::context_tokens(
+                &model,
+                self.reasoning_effort().as_deref(),
+            )
+        {
+            return tokens;
+        }
         jcode_provider_core::context_limit_for_model_with_provider(&model, Some(self.name()))
             .unwrap_or(jcode_provider_core::DEFAULT_CONTEXT_LIMIT)
     }

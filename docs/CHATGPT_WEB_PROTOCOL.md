@@ -123,3 +123,49 @@ and still gives jcode an exact prompt and a raw, live answer stream.
   exact prompt (UTF-16 length and FNV hash), streams progress, and returns the
   final answer. If arming fails, jcode falls back to pasting the full prompt
   and reading the transcript. `JCODE_CHATGPT_WEB_NETWORK=0` forces that path.
+
+## Model catalog and request routes
+
+- `GET /backend-api/models` lists every model the account may use. `versions`
+  are the picker families; each has `intelligence_presets` in the lanes
+  `instant`, `thinking` and `pro`. Thinking models accept the
+  `thinking_effort` values `min`, `standard`, `extended` and `max`.
+  `max_tokens` is the context window (52,815 for Instant models, 137,000 for
+  minis, 262,144 for Thinking, 410,000 for Pro).
+- The send body selects the model with `model` (a slug such as
+  `gpt-6-thinking`) and `thinking_effort`. The page picker exposes only part
+  of the catalog, so jcode sets both in the hooked request instead of clicking
+  the picker. The server reports what ran in each message's
+  `metadata.resolved_model_slug` and `metadata.thinking_effort`; jcode rejects
+  an answer from any other model or level.
+- jcode efforts map to: Instant = `none`, `min` = `low`, `standard` =
+  `medium`, `extended` = `high`, `max` = `xhigh`, Pro = `max`. Minis are
+  separate routes.
+- Excluded: `-wm` work-mode models (silently served as the default model),
+  `research` (HTTP 500 in a Temporary Chat) and `gpt-5-3-mini` (every
+  Temporary Chat turn ends with `{"message":null,"error":"Error in message
+  stream"}`).
+
+## Pro models answer in the background
+
+A Pro turn's stream closes after a few seconds with only a `tool` message in
+progress. The conversation then reports `async_status` 3 (running) and later
+4 (done), and the answer appears in `GET /backend-api/conversation/{id}`
+(about 10 to 20 seconds for a one-word reply). jcode keeps polling the
+transcript after such a stream ends, until the turn timeout.
+
+## Limits and failure modes
+
+- One message is limited by the model's context window. A Temporary Chat
+  message over the limit is refused with HTTP 413
+  `message_length_exceeds_limit` (Instant: refused at about 200,000
+  characters; Thinking: 400,000 characters accepted). jcode reports this as a
+  context-length error, so its compaction runs and the turn is retried.
+- The server echoes the user message back in the stream and in conversation
+  reads. Rendering a long jcode prompt (one 200,000-character JSON line) froze
+  the page's main thread in its Markdown lexer for minutes, so every DevTools
+  call timed out. The fetch hook therefore replaces the echoed prompt with the
+  placeholder in the page's copy of the stream and of conversation reads;
+  jcode reads the unmasked tee and transcript.
+- When DevTools calls time out, jcode skips in-page cleanup (it cannot run)
+  and closes the tab.
