@@ -227,18 +227,21 @@ pub(crate) fn store_openai_usage_for_generation_then(
     data: OpenAIUsageData,
     before_clear: impl FnOnce(),
 ) {
-    // A label whose fresh usage confirms the limit is open again. Cleared
-    // after the cache lock is released to keep lock order flat.
-    let mut reset_label: Option<String> = None;
+    // Some(None) identifies an accepted token-key snapshot for the literal
+    // default scope. None means no confirmed scope should be cleared.
+    // Clear after the cache lock is released to keep lock order flat.
+    let mut reset_scope: Option<Option<String>> = None;
     if let Ok(mut map) = openai_usage_cache().lock() {
         // A request begun before a reset must not reinstate the old exhausted quota.
         if generation != openai_usage_generation() {
             return;
         }
-        if data.confirms_usage_available()
-            && let Some(label) = cache_key.strip_prefix("label:")
-        {
-            reset_label = Some(label.to_string());
+        if data.confirms_usage_available() {
+            if let Some(label) = cache_key.strip_prefix("label:") {
+                reset_scope = Some(Some(label.to_string()));
+            } else if cache_key.starts_with("token:") {
+                reset_scope = Some(None);
+            }
         }
         let previous = map.get(&cache_key).cloned();
         let previous_exhausted = previous
@@ -266,12 +269,14 @@ pub(crate) fn store_openai_usage_for_generation_then(
         }
         map.insert(cache_key, data);
     }
-    if let Some(label) = reset_label {
+    if let Some(scope) = reset_scope {
         before_clear();
-        // Fresh usage says this account is open again (an early or banked
-        // reset, or the window rolled over). Drop the usage-limit mark and
-        // the provider cooldown so the next resume is actually sent.
-        crate::provider::models::clear_openai_unavailability_through_generation(&label, generation);
+        // Fresh usage says this exact scope is open again (an early or banked
+        // reset, or the window rolled over). Only named scopes have a ledger.
+        crate::provider::models::clear_openai_unavailability_through_generation(
+            scope.as_deref(),
+            generation,
+        );
     }
 }
 

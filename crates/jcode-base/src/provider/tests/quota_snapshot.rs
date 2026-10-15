@@ -41,6 +41,10 @@ fn store_available() {
 /// The barrier is inside the real production store, after cache unlock and
 /// before deferred removal. No sleeps, network, live credentials, or mock locks.
 fn deferred_snapshot(mark: impl FnOnce()) {
+    deferred_snapshot_for_key(format!("label:{LABEL}"), mark);
+}
+
+fn deferred_snapshot_for_key(cache_key: String, mark: impl FnOnce()) {
     let (accepted, accepted_rx) = std::sync::mpsc::channel();
     let resume = Barrier::new(2);
     std::thread::scope(|scope| {
@@ -48,7 +52,7 @@ fn deferred_snapshot(mark: impl FnOnce()) {
         let snapshot = scope.spawn(move || {
             crate::usage::store_openai_usage_for_generation_then(
                 crate::usage::openai_usage_generation(),
-                format!("label:{LABEL}"),
+                cache_key,
                 available(),
                 || {
                     accepted.send(()).unwrap();
@@ -226,5 +230,128 @@ fn snapshot_started_before_exhaustion_cannot_clear_it() {
             )
             .is_some()
         );
+    });
+}
+
+struct DefaultQuotaScope;
+
+impl Drop for DefaultQuotaScope {
+    fn drop(&mut self) {
+        crate::provider::models::clear_openai_provider_unavailability_for_account_label(None);
+    }
+}
+
+fn with_default_quota_env(f: impl FnOnce()) {
+    with_account_failover_env(|| {
+        crate::provider::models::clear_openai_provider_unavailability_for_account_label(None);
+        let _scope = DefaultQuotaScope;
+        f();
+    });
+}
+
+fn default_cooldown() -> Option<String> {
+    provider_unavailability_detail_for_account_label("openai", None)
+}
+
+fn mark_default(reason: &str) {
+    record_provider_unavailable_for_account_label("openai", None, reason);
+}
+
+fn store_default_available() {
+    crate::usage::store_openai_usage_for_generation_then(
+        crate::usage::openai_usage_generation(),
+        "token:default-snapshot".to_string(),
+        available(),
+        || {},
+    );
+}
+
+#[test]
+fn accepted_default_snapshot_clears_only_older_default_quota() {
+    with_default_quota_env(|| {
+        store_openai_accounts(1);
+        mark_exhausted();
+        mark_cooldown();
+        mark_default("429 out of usage");
+        assert!(default_cooldown().is_some());
+        store_default_available();
+        assert_eq!(default_cooldown(), None);
+        assert!(provider_unavailability_detail_for_label("openai", LABEL).is_some());
+        assert!(
+            crate::provider::account_failover::account_exhausted(
+                AccountProviderKind::OpenAi,
+                LABEL,
+            )
+            .is_some()
+        );
+    });
+}
+
+#[test]
+fn accepted_default_snapshot_preserves_auth_quota_cooldown() {
+    with_default_quota_env(|| {
+        store_openai_accounts(1);
+        for reason in [
+            "401 unauthorized quota endpoint".to_string(),
+            format!(
+                "401 unauthorized {}",
+                jcode_provider_core::account_usage_limit_marker(None)
+            ),
+        ] {
+            mark_default(&reason);
+            store_default_available();
+            assert!(default_cooldown().is_some());
+        }
+    });
+}
+
+#[test]
+fn deferred_default_snapshot_preserves_newer_quota_cooldown() {
+    with_default_quota_env(|| {
+        store_openai_accounts(1);
+        mark_default("out of usage");
+        deferred_snapshot_for_key("token:default-race".to_string(), || {
+            mark_default("429 newer quota limit");
+        });
+        assert!(default_cooldown().is_some_and(|reason| reason.starts_with("429 newer quota limit")));
+    });
+}
+
+#[test]
+fn snapshot_started_before_default_quota_cannot_clear_it() {
+    with_default_quota_env(|| {
+        let generation = crate::usage::openai_usage_generation();
+        mark_default("out of usage");
+        crate::usage::store_openai_usage_for_generation_then(
+            generation,
+            "token:stale-default".to_string(),
+            available(),
+            || panic!("stale default snapshot must not reach clearing"),
+        );
+        assert!(default_cooldown().is_some());
+    });
+}
+
+#[test]
+fn accepted_label_snapshot_does_not_clear_default_quota() {
+    with_default_quota_env(|| {
+        store_openai_accounts(1);
+        mark_default("out of usage");
+        store_available();
+        assert!(default_cooldown().is_some());
+    });
+}
+
+#[test]
+fn unconfirmed_default_snapshot_does_not_clear_quota() {
+    with_default_quota_env(|| {
+        mark_default("out of usage");
+        crate::usage::store_openai_usage_for_generation_then(
+            crate::usage::openai_usage_generation(),
+            "token:missing-usage".to_string(),
+            OpenAIUsageData::default(),
+            || panic!("missing usage must not reach clearing"),
+        );
+        assert!(default_cooldown().is_some());
     });
 }
