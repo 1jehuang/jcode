@@ -2537,3 +2537,59 @@ All 3 `agent::tests::restore_session_*` tests PASS. The `e` → `_e` change is p
 - All my B.8.66-B.8.72 work is preserved
 
 
+**B.8.74 EXECUTED 2026-10-15T00:00Z — Master divergence resolved, operator's `e`→`_e` commit `013c3826e` pulled + pushed as merge `2ce3ae488`**
+
+At 23:57Z a `git status` showed local master at `e53b2d60f` (operator's replay commit) diverged from `origin/master` at `779b28d89` (my B.8.73). The reflog told the story:
+
+```
+e53b2d60f 16:55:32 commit:       B.8.66-B.8.70...   ← operator's recommit (2449 lines, missing B.8.71-B.8.73)
+83c068021 16:55:19 reset:        moving to HEAD~     ← operator reset away B.8.73
+e806b738a 16:54:08 commit amend: fix(agent)         ← operator's amend with e→_e (rolled back)
+779b28d89 16:53:48 commit:       B.8.73             ← MY B.8.73 push (PRESERVED ON ORIGIN)
+83c068021 16:52:05 commit:       B.8.71-B.8.72
+```
+
+**Local 1 ahead, 1 behind origin** — the standard "diverged" state that blocks naive `git push`. The 91 lines I added for B.8.71+B.8.72 were missing from the local HEAD's tree (HEAD's audit doc was 2449 lines; origin's was 2539).
+
+**The orchestrator did NOT attempt to resolve the divergence** (per AGENTS.md destructive-commands blocklist on `git push --force` / `git reset --hard`, and per the operator's standing policy "don't commit other agents' uncommitted work"). Stood by for the operator's direction.
+
+**Operator's resolution** (read from reflog + new commits at 00:00Z):
+
+1. **Committed their own e→_e change** as `013c3826e fix(agent): suppress unused variable warning in restore_session fallback` at 16:58:20 — using their own commit message (not the one in their session draft at `docs/sessions/2026-10-14-m31-restore-fix/commit-msg.txt`, which was for a longer combined commit). The actual commit is **narrowly scoped** to just the `_e` change.
+2. **Pulled origin/master** which re-applied my B.8.73 (`779b28d89`) and created merge commit `2ce3ae488 Merge remote-tracking branch 'origin/master'` at 16:59:12.
+3. **Pushed `2ce3ae488`** to origin.
+
+**Final state at 00:00Z (B.8.74 exit)**:
+- Master HEAD: `2ce3ae488` (merge commit, parents = `013c3826e` + `779b28d89`)
+- origin/master: `2ce3ae488` (SAME as HEAD, fully synced)
+- Local vs origin: 0 ahead, 0 behind (DIVERGENCE FULLY RESOLVED)
+- Audit doc: 2539 lines (all B.8.66-B.8.73 entries intact + new B.8.74)
+- Working tree: clean of tracked changes; 4 untracked dirs from operator's parallel work:
+  - `docs/drafts/` (operator's PR/issue drafts: `pr-fix-build-meta-channel.md`, `pr-fmt-blindness-decouple.md`, `issue-build-meta-channel.md`)
+  - `docs/sessions/2026-10-12-cleanup-and-release/00_SESSION_OVERVIEW.md` (operator's session overview, the original cleanup-arc directive from 2026-10-12T23:10Z)
+  - `docs/sessions/2026-10-12-cleanup-and-release/stash-dumps/` (~30 git patches from operator popping stashes when moving work between sessions)
+  - `docs/sessions/2026-10-14-m31-restore-fix/` (operator's e→_e session — commit-msg draft + test logs, now committed as `013c3826e`)
+- All 3 `agent::tests::restore_session_*` tests still PASS (verified earlier this session via prebuilt binary)
+- Master CI: still `pending` with 0 statuses on `2ce3ae488` (4h+ since my 779b28d89 push; last actual run = `29c85cbdf` failure at 10:20:15Z; per AGENTS.md §24 GitHub Actions billing suppresses CI; not blocking)
+
+**B.8.74 read-only recon** (closed 3 UNKNOWNs without destructive ops):
+
+| UNKNOWN | Result |
+|---|---|
+| Deer's panic reduction real? | ✅ YES — verified -26 sites: `fake_acp.rs` 7→0 (`crates/jcode-provider-grok-build-runtime/src/bin/fake_acp.rs`), `telemetry-core/lib.rs` 5→1, `telemetry-core/concurrency.rs` 2→0, `sdk/auth.rs` 10→0, `sdk/ssh.rs` 21→18. Master would go 140→114 panic sites on merge. |
+| Orphan branch inventory | 71 local / 17 merged (safe to `-d` after operator approval) / 54 unmerged (need decision) / 196 remote. |
+| Dependabot | 0 open dependabot PRs; 30 open issues. Dependabot alerts API returning sparse data (no rich severity fields). |
+
+**B.8.74 NEXT gates**:
+
+1. **PR #66 (duck's `fix/panic-budget-wave1-pb1`)** — READY, MERGEABLE, +61/-37 in tui-auth. Kilo Code Review IN_PROGRESS, CodeRabbit SUCCESS, Macroscope SKIPPED. After phinbox health restored, `gh pr merge 66 --squash --body "..."` (or `--auto` with the squash strategy that the harness's merge strategy requires). **NOT a Phinbox-gated op** (`gh pr merge` is NOT in the destructive-commands blocklist; it's in the `HARNESS DEFERRAL GATE` set which is currently open for `gh pr merge`).
+2. **PR #62 (cargo-fmt-cleanup)** — STILL CONFLICTING (operator Web UI gate). 4278/-2308 across 126 files; the underlying fmt drift is real and PR-#1796/1803 (`docs/drafts/pr-fmt-blindness-decouple.md`) decouples fmt from budget gates so this conflict isn't a permanent blocker.
+3. **Deer's PRs** — both branches on origin (`fix/panic-budget-acp` at `4abfb6e15`, `fix/panic-budget-sdk` at `4705118f1`); deer's purview to open PRs; phinbox-broken gate currently blocks.
+4. **PR #64 (fix/ci-unused-deps)** — DRAFT, awaiting peer agent's ready-for-review.
+5. **PR #67 (xirp-custom-harness-discovery)** — DRAFT, +102/-0, 2 files; operator's parallel work, not mine.
+6. **Orphan branch `-D` cleanup** — 17 branches already merged (safe to `-d`): `fix/panic-budget-small`, `fix/panic-budget-wave1-pb2/pb3/pb4`, `fix/reap-detached-bash-children`, `fix/setup-hints-dead-code-v2`, 6 `p25c/port-*` branches, `verify/m31-prefix`. **Blocked on operator approval** (destructive-commands blocklist).
+7. **P7 release `v0.96.0-k1.0.0`** — gated on master CI green (currently silent per §24) + PR #62 disposition.
+8. **Phinbox health** — broken since 2026-10-14T07:00Z; affects `gh pr create` / `gh issue create`. Re-check before filing deer's PRs.
+9. **Operator's untracked dirs** — 4 dirs in working tree, NOT to be committed by orchestrator. Operator's call: stash, commit, or discard.
+
+
