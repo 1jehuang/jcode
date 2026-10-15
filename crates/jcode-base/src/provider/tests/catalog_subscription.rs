@@ -680,6 +680,26 @@ fn test_anthropic_pro_explicit_oauth_catalog_wins_in_both_pickers() {
 }
 
 #[test]
+fn test_anthropic_oauth_gate_accepts_dotted_claude_ids() {
+    with_clean_provider_test_env(|| {
+        configure_catalog_pro_account();
+        populate_anthropic_models_for_scope(
+            &anthropic_catalog_scope_for_route(true),
+            vec!["claude-opus-5-5".into(), "claude-sonnet-5-5".into()],
+        );
+        for model in ["claude-opus-5-5", "claude-opus-5.5", "claude-sonnet-5.5"] {
+            let (available, detail) = anthropic_oauth_route_availability(model);
+            assert!(available, "{model}: {detail}");
+        }
+        // A genuinely missing model is still rejected, dotted or not.
+        assert_eq!(
+            anthropic_oauth_route_availability("claude-opus-6.1"),
+            (false, "not in OAuth model catalog".into())
+        );
+    });
+}
+
+#[test]
 fn test_anthropic_pro_api_catalog_cannot_override_oauth_absence() {
     with_clean_provider_test_env(|| {
         configure_catalog_pro_account();

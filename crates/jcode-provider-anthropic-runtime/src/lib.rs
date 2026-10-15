@@ -1509,6 +1509,10 @@ impl Provider for AnthropicProvider {
     }
 
     fn set_model(&self, model: &str) -> Result<()> {
+        // Config, favorites, and other providers spell versions with dots
+        // (`claude-opus-5.5`). Anthropic's catalog and API use dashes.
+        let dashed = jcode_provider_core::model_id::claude_dashed_version(model);
+        let model: &str = dashed.as_str();
         // Native-1M models (Opus 4.8/4.7) no longer carry a redundant `[1m]`
         // alias. Gracefully migrate a stale `<model>[1m]` id (from old config or
         // a restored session) to its canonical form, since the suffix is a no-op

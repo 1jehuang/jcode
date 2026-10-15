@@ -49,6 +49,20 @@ pub fn strip_date_suffix(model: &str) -> &str {
     }
 }
 
+/// Rewrite a dotted Claude version (`claude-opus-5.5`) to the dashed form
+/// Anthropic's own catalog uses (`claude-opus-5-5`). Ids that are not
+/// `claude-*` are returned unchanged, so dotted ids from other providers
+/// (`gpt-5.5`, `qwen3.6`) are never rewritten. The `[1m]` suffix and case are
+/// preserved.
+pub fn claude_dashed_version(model: &str) -> String {
+    let trimmed = model.trim();
+    if trimmed.len() >= 7 && trimmed[..7].eq_ignore_ascii_case("claude-") {
+        trimmed.replace('.', "-")
+    } else {
+        trimmed.to_string()
+    }
+}
+
 /// Final path segment of a slash-qualified id
 /// (`openrouter/anthropic/claude-x` -> `claude-x`). Ids without `/` are
 /// returned unchanged.
@@ -103,6 +117,18 @@ mod tests {
         );
         assert_eq!(strip_date_suffix("claude-haiku-4-5"), "claude-haiku-4-5");
         assert_eq!(strip_date_suffix("gpt-4-1106"), "gpt-4-1106");
+    }
+
+    #[test]
+    fn claude_dashed_version_only_rewrites_claude_ids() {
+        assert_eq!(claude_dashed_version("claude-opus-5.5"), "claude-opus-5-5");
+        assert_eq!(
+            claude_dashed_version(" Claude-Sonnet-5.5[1m] "),
+            "Claude-Sonnet-5-5[1m]"
+        );
+        assert_eq!(claude_dashed_version("claude-opus-5-5"), "claude-opus-5-5");
+        assert_eq!(claude_dashed_version("gpt-5.5"), "gpt-5.5");
+        assert_eq!(claude_dashed_version("qwen3.6-27b"), "qwen3.6-27b");
     }
 
     #[test]

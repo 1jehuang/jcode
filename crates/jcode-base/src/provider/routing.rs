@@ -31,7 +31,11 @@ pub(crate) fn anthropic_api_key_route_availability(model: &str) -> (bool, String
 
 fn anthropic_catalog_allows_route(model: &str, oauth: bool) -> bool {
     let scope = super::anthropic_catalog_scope_for_route(oauth);
+    // Anthropic's catalog uses dashed versions (`claude-opus-5-5`), but ids
+    // from config, favorites, and other providers arrive dotted
+    // (`claude-opus-5.5`). Compare on the dashed form so they match.
+    let wanted = jcode_provider_core::model_id::claude_dashed_version(model);
     super::known_anthropic_model_ids_for_scope(&scope)
         .iter()
-        .any(|id| id == model)
+        .any(|id| id == model || *id == wanted)
 }
