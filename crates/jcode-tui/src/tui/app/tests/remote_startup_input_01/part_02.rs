@@ -401,92 +401,83 @@ fn test_model_picker_copilot_models_have_copilot_route() {
     // An ambient named provider profile (a session started with a corporate
     // OpenAI-compatible gateway) makes the picker include the built-in
     // openai-compatible static catalogs, so firmware claims grok-code-fast-1
-    // and the expected copilot route never appears. The test asserts pure
-    // copilot routing, so clear the profile lock for its duration.
-    let _env_guard = EnvRestoreGuard::capture([
-        "JCODE_NAMED_PROVIDER_PROFILE",
-        "JCODE_PROVIDER_PROFILE_ACTIVE",
-        "JCODE_PROVIDER_PROFILE_NAME",
-    ]);
-    crate::env::remove_var("JCODE_NAMED_PROVIDER_PROFILE");
-    crate::env::remove_var("JCODE_PROVIDER_PROFILE_ACTIVE");
-    crate::env::remove_var("JCODE_PROVIDER_PROFILE_NAME");
-    let mut app = create_test_app();
-    configure_test_remote_models_with_copilot(&mut app);
+    // and the expected copilot route never appears. Clearing the env vars
+    // without the test env lock is not enough: a concurrent locked test's
+    // guard drop restores the ambient profile mid-window, so run the whole
+    // body under with_temp_jcode_home, which holds the lock and clears the
+    // profile envs for the duration.
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        configure_test_remote_models_with_copilot(&mut app);
 
-    app.open_model_picker();
+        app.open_model_picker();
 
-    let picker = app
-        .inline_interactive_state
-        .as_ref()
-        .expect("model picker should be open");
+        let picker = app
+            .inline_interactive_state
+            .as_ref()
+            .expect("model picker should be open");
 
-    // grok-code-fast-1 is NOT in ALL_CLAUDE_MODELS or ALL_OPENAI_MODELS,
-    // so it should get a copilot route
-    let grok_entry = picker
-        .entries
-        .iter()
-        .find(|m| m.name == "grok-code-fast-1")
-        .expect("grok-code-fast-1 should be in picker");
+        // grok-code-fast-1 is NOT in ALL_CLAUDE_MODELS or ALL_OPENAI_MODELS,
+        // so it should get a copilot route
+        let grok_entry = picker
+            .entries
+            .iter()
+            .find(|m| m.name == "grok-code-fast-1")
+            .expect("grok-code-fast-1 should be in picker");
 
-    assert!(
-        grok_entry.options.iter().any(|r| r.api_method == "copilot"),
-        "grok-code-fast-1 should have a copilot route, got: {:?}",
-        grok_entry.options
-    );
+        assert!(
+            grok_entry.options.iter().any(|r| r.api_method == "copilot"),
+            "grok-code-fast-1 should have a copilot route, got: {:?}",
+            grok_entry.options
+        );
+    });
 }
 
 #[test]
 fn test_model_picker_remote_comtegra_model_uses_comtegra_route_not_copilot() {
-    // Same ambient-profile hazard as the copilot picker tests: with an
-    // exported JCODE_NAMED_PROVIDER_PROFILE the configured-check takes the
-    // named-profile path and the Comtegra route is dropped for copilot.
-    let _env_guard = EnvRestoreGuard::capture([
-        "JCODE_NAMED_PROVIDER_PROFILE",
-        "JCODE_PROVIDER_PROFILE_ACTIVE",
-        "JCODE_PROVIDER_PROFILE_NAME",
-    ]);
-    crate::env::remove_var("JCODE_NAMED_PROVIDER_PROFILE");
-    crate::env::remove_var("JCODE_PROVIDER_PROFILE_ACTIVE");
-    crate::env::remove_var("JCODE_PROVIDER_PROFILE_NAME");
-    let prev_key = std::env::var("COMTEGRA_API_KEY").ok();
-    crate::env::set_var("COMTEGRA_API_KEY", "test-key");
+    // Same ambient-profile hazard as the copilot picker tests, plus the same
+    // guard-drop race: the profile envs must stay cleared for the whole
+    // picker build, so hold the test env lock via with_temp_jcode_home.
+    with_temp_jcode_home(|| {
+        let prev_key = std::env::var("COMTEGRA_API_KEY").ok();
+        crate::env::set_var("COMTEGRA_API_KEY", "test-key");
 
-    let mut app = create_test_app();
-    app.is_remote = true;
-    app.remote_available_entries = vec!["glm-51-nvfp4".to_string()];
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.remote_available_entries = vec!["glm-51-nvfp4".to_string()];
 
-    app.open_model_picker();
+        app.open_model_picker();
 
-    match prev_key {
-        Some(value) => crate::env::set_var("COMTEGRA_API_KEY", value),
-        None => crate::env::remove_var("COMTEGRA_API_KEY"),
-    }
+        match prev_key {
+            Some(value) => crate::env::set_var("COMTEGRA_API_KEY", value),
+            None => crate::env::remove_var("COMTEGRA_API_KEY"),
+        }
 
-    let picker = app
-        .inline_interactive_state
-        .as_ref()
-        .expect("model picker should be open");
-    let glm_entry = picker
-        .entries
-        .iter()
-        .find(|m| m.name == "glm-51-nvfp4")
-        .expect("glm-51-nvfp4 should be in picker");
+        let picker = app
+            .inline_interactive_state
+            .as_ref()
+            .expect("model picker should be open");
+        let glm_entry = picker
+            .entries
+            .iter()
+            .find(|m| m.name == "glm-51-nvfp4")
+            .expect("glm-51-nvfp4 should be in picker");
 
-    assert!(
-        glm_entry.options.iter().any(|r| {
-            r.provider == "Comtegra GPU Cloud"
-                && r.api_method == "openai-compatible:comtegra"
-                && r.available
-        }),
-        "glm route should be Comtegra/api key, got: {:?}",
-        glm_entry.options
-    );
-    assert!(
-        !glm_entry.options.iter().any(|r| r.api_method == "copilot"),
-        "glm route should not fall back to Copilot, got: {:?}",
-        glm_entry.options
-    );
+        assert!(
+            glm_entry.options.iter().any(|r| {
+                r.provider == "Comtegra GPU Cloud"
+                    && r.api_method == "openai-compatible:comtegra"
+                    && r.available
+            }),
+            "glm route should be Comtegra/api key, got: {:?}",
+            glm_entry.options
+        );
+        assert!(
+            !glm_entry.options.iter().any(|r| r.api_method == "copilot"),
+            "glm route should not fall back to Copilot, got: {:?}",
+            glm_entry.options
+        );
+    });
 }
 
 #[test]
