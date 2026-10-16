@@ -133,11 +133,17 @@ fn normalize_batch_input(mut input: Value) -> Value {
     if let Some(calls) = input.get_mut("tool_calls").and_then(|v| v.as_array_mut()) {
         for call in calls.iter_mut() {
             if let Some(obj) = call.as_object_mut() {
-                // Normalize "name" -> "tool" if the model used the wrong key
-                if !obj.contains_key("tool")
-                    && let Some(name_val) = obj.remove("name")
-                {
-                    obj.insert("tool".to_string(), name_val);
+                // Normalize "name" -> "tool" if the model used the wrong key.
+                // If both keys are present, drop "name": `ToolCallInput.tool`
+                // treats "name" as a serde alias, so keeping both fails
+                // deserialization with ``duplicate field `tool` `` (issue
+                // #1811). "tool" is the canonical wrapper selector.
+                if !obj.contains_key("tool") {
+                    if let Some(name_val) = obj.remove("name") {
+                        obj.insert("tool".to_string(), name_val);
+                    }
+                } else {
+                    obj.remove("name");
                 }
 
                 if !obj.contains_key("parameters") {
@@ -182,7 +188,11 @@ fn normalize_batch_input(mut input: Value) -> Value {
                 if !obj.contains_key("parameters") && obj.contains_key("tool") {
                     let tool_name = obj.get("tool").cloned();
                     let mut params = serde_json::Map::new();
-                    let keys: Vec<String> = obj.keys().filter(|k| *k != "tool").cloned().collect();
+                    let keys: Vec<String> = obj
+                        .keys()
+                        .filter(|k| *k != "tool" && *k != "name")
+                        .cloned()
+                        .collect();
                     for key in keys {
                         if let Some(val) = obj.remove(&key) {
                             params.insert(key, val);

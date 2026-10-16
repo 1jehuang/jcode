@@ -219,6 +219,62 @@ fn test_normalize_mixed_tool_and_name_keys() {
 }
 
 #[test]
+fn test_normalize_wrapper_name_and_child_tool_keys_collide() {
+    // Issue #1811: an MCP sub-call carries `name` (the batch child dispatcher)
+    // beside `tool` (the raw MCP tool name). `ToolCallInput.tool` treats
+    // `name` as an alias, so leaving both keys in place makes serde fail with
+    // ``duplicate field `tool` `` before any request is sent. The wrapper
+    // `name` must be discarded when `tool` is present.
+    let input = json!({
+        "intent": "Run an MCP lookup",
+        "tool_calls": [
+            {
+                "name": "mcp_call",
+                "tool": "example_lookup",
+                "server": "example_server",
+                "arguments": {},
+                "intent": "Look up an example record"
+            }
+        ]
+    });
+
+    let normalized = normalize_batch_input(input);
+    let parsed: BatchInput = serde_json::from_value(normalized)
+        .expect("colliding name/tool keys must deserialize after normalization");
+    assert_eq!(parsed.tool_calls.len(), 1);
+    assert_eq!(parsed.tool_calls[0].tool, "example_lookup");
+    let raw = &parsed.tool_calls[0];
+    assert!(
+        raw.parameters.is_some(),
+        "arguments alias becomes parameters"
+    );
+}
+
+#[test]
+fn test_normalize_fold_keeps_name_out_of_child_parameters() {
+    // When the flat form is folded into `parameters`, a leftover `name` key
+    // must be excluded like `tool` itself: it selects the wrapper, not the
+    // child tool's input.
+    let input = json!({
+        "tool_calls": [
+            {"tool": "example_lookup", "name": "mcp_call", "server": "example_server"}
+        ]
+    });
+
+    let normalized = normalize_batch_input(input);
+    let call = &normalized["tool_calls"][0];
+    assert!(
+        call.get("name").is_none(),
+        "leftover `name` must not survive normalization"
+    );
+    assert_eq!(call["parameters"]["server"], "example_server");
+    assert!(
+        call["parameters"].get("name").is_none(),
+        "`name` must not be folded into the child parameters"
+    );
+}
+
+#[test]
 fn test_normalize_arguments_aliases_to_parameters() {
     let input = json!({
         "tool_calls": [
