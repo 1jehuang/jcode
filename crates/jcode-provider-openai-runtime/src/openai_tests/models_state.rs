@@ -1,18 +1,12 @@
 #[test]
 fn test_openai_supports_codex_models() {
     let _guard = jcode_base::storage::lock_test_env();
-    jcode_base::auth::codex::set_active_account_override(Some(
-        "openai-supports-codex-models".to_string(),
-    ));
-    jcode_base::provider::populate_account_models(vec![
-        "gpt-5.6-sol".to_string(),
-        "gpt-5.1-codex".to_string(),
-        "gpt-5.1-codex-mini".to_string(),
-        "gpt-5.2-codex".to_string(),
-    ]);
+    let home = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", home.path());
+    let _model = EnvVarGuard::remove("JCODE_OPENAI_MODEL");
 
     let creds = CodexCredentials {
-        access_token: "test".to_string(),
+        access_token: "catalog-codex-models-test".to_string(),
         refresh_token: String::new(),
         id_token: None,
         account_id: None,
@@ -20,6 +14,17 @@ fn test_openai_supports_codex_models() {
     };
 
     let provider = OpenAIProvider::new(creds);
+    // Model validation uses the loaded credential's catalog, not the active
+    // account's generic slot. Seed exactly that scope under an isolated home.
+    jcode_base::provider::populate_account_models_for_scope(
+        &provider.catalog_scope(),
+        vec![
+            "gpt-5.6-sol".to_string(),
+            "gpt-5.1-codex".to_string(),
+            "gpt-5.1-codex-mini".to_string(),
+            "gpt-5.2-codex".to_string(),
+        ],
+    );
     assert!(provider.available_models().contains(&"gpt-5.2-codex"));
     assert!(provider.available_models().contains(&"gpt-5.1-codex-mini"));
     assert!(provider.available_models().contains(&"gpt-5.6-sol"));
@@ -32,8 +37,6 @@ fn test_openai_supports_codex_models() {
 
     provider.set_model("gpt-5.1-codex-mini").unwrap();
     assert_eq!(provider.model(), "gpt-5.1-codex-mini");
-
-    jcode_base::auth::codex::set_active_account_override(None);
 }
 
 #[test]
@@ -65,18 +68,22 @@ fn test_openai_switching_models_include_dynamic_catalog_entries() {
 #[test]
 fn test_chatgpt_web_model_bypasses_live_api_catalog() {
     let _guard = jcode_base::storage::lock_test_env();
-    jcode_base::auth::codex::set_active_account_override(Some("web-model-test".to_string()));
-    jcode_base::provider::populate_account_models(vec!["gpt-5.6-sol".to_string()]);
+    let home = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", home.path());
     let _model = EnvVarGuard::set("JCODE_OPENAI_MODEL", CHATGPT_WEB_MODEL);
 
     let provider = OpenAIProvider::new(CodexCredentials {
-        access_token: "test".to_string(),
+        access_token: "catalog-web-model-test".to_string(),
         refresh_token: String::new(),
         id_token: None,
         account_id: None,
         expires_at: None,
     });
 
+    jcode_base::provider::populate_account_models_for_scope(
+        &provider.catalog_scope(),
+        vec!["gpt-5.6-sol".to_string()],
+    );
     assert_eq!(provider.model(), CHATGPT_WEB_MODEL);
     assert_eq!(provider.transport().as_deref(), Some("browser"));
     assert!(
@@ -87,8 +94,6 @@ fn test_chatgpt_web_model_bypasses_live_api_catalog() {
     provider.set_model("gpt-5.6-sol").unwrap();
     provider.set_model(CHATGPT_WEB_MODEL).unwrap();
     assert_eq!(provider.model(), CHATGPT_WEB_MODEL);
-
-    jcode_base::auth::codex::set_active_account_override(None);
 }
 
 #[test]
