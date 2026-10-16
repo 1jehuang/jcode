@@ -13,7 +13,7 @@ use jcode_base::provider::chatgpt_web_instance as web_instance;
 
 #[path = "chatgpt_web/refusal.rs"]
 mod refusal;
-use refusal::claims_no_tool_access;
+use refusal::{claims_no_tool_access, only_announces_action};
 #[path = "chatgpt_web/sandbox.rs"]
 mod sandbox;
 use sandbox::{SandboxCall, sandbox_tools, sandbox_warning, with_sandbox_correction};
@@ -176,14 +176,15 @@ impl ChatGptWebState {
                 } else if !requests_jcode_tools
                     && !advertised_tools.is_empty()
                     && !refusal_corrected
-                    && claims_no_tool_access(&text)
+                    && (claims_no_tool_access(&text) || only_announces_action(&text))
                 {
                     // ChatGPT's own "I can't access your computer" prior
                     // sometimes wins over the protocol, often after earlier
-                    // malformed calls were rejected. Re-ask once.
+                    // malformed calls were rejected. It may also stop right
+                    // after "I'll check the machine." Re-ask once.
                     refusal_corrected = true;
                     jcode_base::logging::warn(
-                        "ChatGPT web claimed it cannot use jcode tools; retrying with a correction",
+                        "ChatGPT web called no jcode tools (claimed no access or only announced an action); retrying with a correction",
                     );
                     let _ = tx
                         .send(Ok(StreamEvent::StatusDetail {
@@ -1035,7 +1036,7 @@ struct WebAnswer {
 /// use Jcode's tools instead of calling them.
 fn with_tool_access_correction(prompt: &str) -> String {
     format!(
-        "{prompt}\n# Correction\n\nA previous attempt at this exact turn said it could not use the Jcode tools, run commands or access the user's computer, and called no tools. That is wrong. You can use the Jcode tools: put {TOOL_CALL_START}...{TOOL_CALL_END} envelopes in your answer, Jcode runs them on the user's computer and returns the results to you automatically. Earlier rejected or failed calls only mean those calls were malformed or failed; fix them and try again. Call the tools you need now. Only if a specific tool result shows a real blocker, describe that blocker instead.\n"
+        "{prompt}\n# Correction\n\nA previous attempt at this exact turn called no tools: it either said it could not use the Jcode tools, run commands or access the user's computer, or only said what it would do next and stopped. You can use the Jcode tools: put {TOOL_CALL_START}...{TOOL_CALL_END} envelopes in your answer, Jcode runs them on the user's computer and returns the results to you automatically. Earlier rejected or failed calls only mean those calls were malformed or failed; fix them and try again. Call the tools you need now, in this answer. Only if a specific tool result shows a real blocker, describe that blocker instead.\n"
     )
 }
 
@@ -1232,10 +1233,13 @@ fn parse_envelope(after: &str) -> Result<(ParsedToolCall, usize)> {
             };
             let between = tail[..end].trim();
             // Tolerate a stray wrapper fragment (observed: `}`, `\`, a fence
-            // backtick, and GPT-5.6 Sol's `>` from `}}></jcode_tool_call>`),
-            // never real content.
+            // backtick, and GPT-5.6 Sol's `>` and `/>` from
+            // `}}></jcode_tool_call>` and `}}/></jcode_tool_call>`), never
+            // real content.
             anyhow::ensure!(
-                between.chars().all(|c| matches!(c, '`' | '}' | '\\' | '>')),
+                between
+                    .chars()
+                    .all(|c| matches!(c, '`' | '}' | '\\' | '>' | '/')),
                 "ChatGPT emitted unexpected text inside a jcode tool-call envelope: {between:?}"
             );
             let consumed = after.len() - tail.len() + end + TOOL_CALL_END.len();
@@ -1517,6 +1521,11 @@ mod tests {
             r#"<jcode_tool_call>{"name":"bash","input":{"command":"uname -r","intent":"x"}}></jcode_tool_call>"#,
         );
         assert_eq!(parsed.input["command"], "uname -r");
+        // Also observed live from GPT-5.6 Sol: a self-closing `/>`.
+        let parsed = only_call(
+            r#"<jcode_tool_call>{"name":"bash","input":{"command":"nproc","intent":"x"}}/></jcode_tool_call>"#,
+        );
+        assert_eq!(parsed.input["command"], "nproc");
     }
 
     #[test]
