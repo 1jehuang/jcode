@@ -140,3 +140,25 @@ scope instead of the constructed provider's credential scope. Commit
 consecutive hosted full runtime-suite runs then each passed 170 tests with
 three ignored. No live upstream Sol completion, entitlement, latency, or billing
 claim is made.
+
+## Authorized live activation, 22:21 UTC
+
+The user subsequently authorized reload. The other active operator confirmed
+all workers checkpointed and idle-ready, with no active build/test jobs. A
+current-source executable was built in local run `20261016-151846617-649830`
+(the prior hosted artifact retrieval failure remained the local-build reason).
+It reported `v0.98.20-dev (a45b0c122)`, SHA-256
+`921ea0a4be7ad06b1e75aeee0ec09e635257a0528e090a0959bf8d55fad4ac63`.
+It was installed under the immutable version directory, published to `current`,
+and promoted using `jcode server promote a45b0c122 --json`, then activated with
+`jcode server reload --json`. The stable channel was not changed.
+
+After handoff, actual `server:info` reported the new hash and version. Both the
+requesting session and other operator's session were present, and the operator
+was notified to resume. `/proc` inspection observed the daemon and 71 client
+processes executing the new immutable binary. The requesting client's native
+connection was re-established. The reload command's own background receipt was
+marked interrupted by server replacement, so the live version and reconnected
+clients, not that task's exit status, establish successful activation. This
+closes the deployment blocker but does not establish live Sol entitlement or
+upstream throughput.
