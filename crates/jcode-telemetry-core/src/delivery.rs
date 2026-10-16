@@ -147,17 +147,22 @@ where
 {
     match spawn_background_worker(capacity, deliver) {
         Ok(sender) => Some(sender),
-        Err(_) => None,
+        Err(err) => {
+            logging::warn(&format!(
+                "telemetry background worker failed to start: {err}"
+            ));
+            None
+        }
     }
 }
 
 /// Shared shape for the telemetry and transcript background senders: lazily
 /// initialize one OnceLock-held worker and borrow it.
-pub(crate) fn sender<'a, F>(
-    slot: &'a OnceLock<Option<SyncSender<Value>>>,
+pub(crate) fn sender<F>(
+    slot: &OnceLock<Option<SyncSender<Value>>>,
     capacity: usize,
     deliver: F,
-) -> Option<&'a SyncSender<Value>>
+) -> Option<&SyncSender<Value>>
 where
     F: FnMut(Value) + Send + 'static,
 {

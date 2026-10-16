@@ -208,7 +208,7 @@ fn live_records(dir: &Path, exclude: Option<&Path>) -> io::Result<Vec<(String, R
     if !live.is_empty()
         && stale.iter().any(|path| {
             path.file_name()
-                .and_then(|name| Some(!snapshot.contains_key(name.to_string_lossy().as_ref())))
+                .map(|name| !snapshot.contains_key(name.to_string_lossy().as_ref()))
                 .unwrap_or(false)
         })
     {
