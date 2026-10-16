@@ -277,3 +277,58 @@ fn cache_report_exposes_actual_expiry_notification_policy() {
         "{stats}"
     );
 }
+
+#[test]
+fn replay_runtime_suppresses_local_agent_model_override_rows() {
+    // Replay playback shows the recording's own model; today's local
+    // `agents.swarm_model`/`agents.memory_model` overrides belong to a live
+    // session and would mislead if rendered against a recording. Both remote
+    // and replay suppress the rows, so drive the config through a temp home
+    // and assert each runtime mode in isolation.
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    crate::config::invalidate_config_cache();
+    let config_path = crate::config::Config::path().expect("config path");
+    std::fs::create_dir_all(config_path.parent().expect("config parent"))
+        .expect("create config parent");
+    std::fs::write(
+        &config_path,
+        "[agents]\nswarm_model = \"glm-5.2\"\nswarm_effort = \"low\"\nmemory_model = \"gemini-3.8-flash\"\nmemory_effort = \"none\"\n",
+    )
+    .expect("write config");
+    crate::config::invalidate_config_cache();
+
+    let overrides_visible = |app: &App| {
+        let data = crate::tui::TuiState::info_widget_data(app);
+        (
+            data.swarm_model_override.is_some(),
+            data.swarm_model_effort.is_some(),
+            data.memory_model_override.is_some(),
+            data.memory_model_effort.is_some(),
+        )
+    };
+
+    // Local runtime: rows render from config.
+    let app = create_test_app();
+    assert_eq!(overrides_visible(&app), (true, true, true, true));
+
+    // Replay runtime: the recording is the truth; overrides stay hidden.
+    let mut replay = create_test_app();
+    replay.runtime_mode = AppRuntimeMode::Replay;
+    assert_eq!(overrides_visible(&replay), (false, false, false, false));
+
+    // Remote client: server owns the settings (pre-existing behavior).
+    let mut remote = create_test_app();
+    remote.is_remote = true;
+    remote.runtime_mode = AppRuntimeMode::RemoteClient;
+    assert_eq!(overrides_visible(&remote), (false, false, false, false));
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    crate::config::invalidate_config_cache();
+}

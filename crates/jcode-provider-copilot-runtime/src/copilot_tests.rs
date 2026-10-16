@@ -763,6 +763,23 @@ fn fork_preserves_reasoning_effort() {
 }
 
 #[test]
+fn fork_effort_writes_do_not_reach_live_provider() {
+    // The memory sidecar pins `agents.memory_effort` on a fork. That write
+    // must stay inside the fork: sharing the effort lock with the live
+    // provider would change the effort of main-agent requests.
+    let provider = sonnet5_provider();
+    Provider::set_reasoning_effort(&provider, "high").unwrap();
+    let forked = Provider::fork(&provider);
+    Provider::set_reasoning_effort(forked.as_ref(), "low").unwrap();
+    assert_eq!(forked.reasoning_effort().as_deref(), Some("low"));
+    assert_eq!(
+        provider.reasoning_effort().as_deref(),
+        Some("high"),
+        "fork effort writes must not change the live provider effort"
+    );
+}
+
+#[test]
 fn catalog_reasoning_efforts_parse_from_models_payload() {
     let info: copilot_auth::CopilotModelInfo = serde_json::from_value(json!({
         "id": "gpt-6.1-sol",

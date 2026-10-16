@@ -198,6 +198,9 @@ impl App {
             "show-agentgrep-output" => {
                 "/show-agentgrep-output\nShow whether full agentgrep search output renders inline in the transcript.\n\n/show-agentgrep-output on\nRender the full agentgrep search results inline beneath each agentgrep call instead of just the one-line summary.\n\n/show-agentgrep-output off\nShow only the compact one-line agentgrep summary."
             }
+            "overview" => {
+                "/overview\nToggle between the consolidated single Overview panel and the classic separate info widgets, and save the choice to config.toml.\n\n/overview status\nShow the current style.\n\n/overview on\nOne consolidated Overview panel in the transcript margins.\n\n/overview off\nSeparate widgets (Todos, Swarm, Background, Compaction, Runtime, Usage, KV cache, Git, Commits) each dock on their own.\n\nThe same choice can be set in config.toml as display.single_overview, or overridden with JCODE_SINGLE_OVERVIEW=0/1."
+            }
             "tool-call-details" => {
                 "/tool-call-details\nShow whether the dimmed technical detail (command, path, args) renders next to the model-provided intent on tool rows.\n\n/tool-call-details on\nShow the technical detail after the intent, e.g. `bash · Run tests · $ cargo test`.\n\n/tool-call-details off\nShow only the intent on tool rows that have one. Rows without an intent still show the technical detail, and error summaries always render."
             }

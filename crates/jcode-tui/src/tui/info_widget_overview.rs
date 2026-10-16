@@ -1,7 +1,8 @@
 use super::info_widget::{
-    InfoWidgetData, UsageProvider, changes_section_height, is_traceworthy_memory_event,
-    model_info_height,
+    InfoWidgetData, OVERVIEW_COMMITS_MAX_ROWS, OVERVIEW_SWARM_MAX_ROWS, UsageProvider,
+    changes_section_height, commits_has_data, is_traceworthy_memory_event, model_info_height,
 };
+use ratatui::layout::Rect;
 
 pub(crate) const MAX_TODO_LINES: usize = 12;
 
@@ -23,6 +24,132 @@ pub(crate) struct PageLayout {
     pub max_page_height: u16,
     /// Page dots, drawn on the widget's bottom border (they take no row).
     pub show_dots: bool,
+}
+
+/// Which tail sections of the compact Overview page a placed rect can actually
+/// show. The compact page renders sections in a fixed order (Runtime → Todos
+/// → Memory → Background → Usage → KV cache → Compaction → Changes → Commits
+/// → Swarm) and `render_overview_framed` truncates whatever the inner height
+/// cannot fit. A section that lands entirely in the truncated tail is *not*
+/// shown by that Overview, so its standalone fallback must stay available
+/// (greptile: a 10-row pocket whose rows Runtime/Todos/Background/Usage filled
+/// suppressed the Commits and SwarmStatus fallbacks while the placed Overview
+/// truncated both sections away, hiding worker status everywhere).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SectionVisibility {
+    /// The Runtime (model info) section fits fully in the rect.
+    pub model_info: bool,
+    /// The Todos section fits fully in the rect.
+    pub todos: bool,
+    /// The Background section fits fully in the rect.
+    pub background: bool,
+    /// The Usage section fits fully in the rect.
+    pub usage: bool,
+    /// The KV cache section fits fully in the rect.
+    pub kv_cache: bool,
+    /// The Compaction section fits fully in the rect.
+    pub compaction: bool,
+    /// The Changes (dirty files) section fits fully in the rect.
+    pub changes: bool,
+    /// The Commits section fits fully in the rect.
+    pub commits: bool,
+    /// The Swarm section fits fully in the rect.
+    pub swarm: bool,
+}
+
+/// Which sections a placed Overview rect (outer rect, borders included) can
+/// show. Sections that would only be partially visible count as not shown:
+/// the render truncates at inner height, and a half-drawn section header is
+/// worse than the standalone fallback that shows the content in full.
+/// The rect "shows" a section only when every page it can rotate through
+/// shows it: the strip and fallback suppression span the whole widget, not
+/// one page, so a section truncated on any page must keep its fallback.
+pub(crate) fn section_visibility(data: &InfoWidgetData, rect: Rect) -> SectionVisibility {
+    // Mirror render_overview_framed: memory is the dedicated widget's content,
+    // so the Overview strips it before rendering (and the MemoryExpanded
+    // page therefore never exists here).
+    let mut overview = data.clone();
+    overview.memory_info = None;
+    let inner_height = rect.height.saturating_sub(2);
+    let model_h = model_info_height(&overview);
+    let todos_h = compact_todos_height(&overview);
+    let background_h = compact_background_height(&overview);
+    let usage_h = compact_usage_height(&overview);
+    let kv_h = compact_kv_cache_height(&overview);
+    let compaction_h = compact_compaction_height(&overview);
+    let changes_h = changes_section_height(&overview);
+    let commits_h = compact_commits_height(&overview);
+    let swarm_h = compact_swarm_height(&overview);
+    let fits = |front: u16, section: u16| section > 0 && front + section <= inner_height;
+    // Sections render front-to-back in a fixed order; a section is shown only
+    // when it and everything before it fits, exactly like the truncating render.
+    // Returns (total front height, per-section fits flags).
+    let front_sections = |expanded_todos: bool| -> (u16, [bool; 6]) {
+        let todos = if expanded_todos {
+            expanded_todos_height(&overview)
+        } else {
+            todos_h
+        };
+        let sections = [
+            (model_h, model_h > 0),
+            (todos, todos > 0),
+            (background_h, background_h > 0),
+            (usage_h, usage_h > 0),
+            (kv_h, kv_h > 0),
+            (compaction_h, compaction_h > 0),
+        ];
+        let mut front = 0u16;
+        let mut flags = [false; 6];
+        for (idx, (height, present)) in sections.iter().enumerate() {
+            flags[idx] = *present
+                && front
+                    .checked_add(*height)
+                    .is_some_and(|end| end <= inner_height);
+            front = front.saturating_add(*height);
+        }
+        (front, flags)
+    };
+    let per_page = |expanded_todos: bool| {
+        let (front, [model_info, todos, background, usage, kv_cache, compaction]) =
+            front_sections(expanded_todos);
+        SectionVisibility {
+            model_info,
+            todos,
+            background,
+            usage,
+            kv_cache,
+            compaction,
+            changes: fits(front, changes_h),
+            commits: fits(front + changes_h, commits_h),
+            swarm: fits(front + changes_h + commits_h, swarm_h),
+        }
+    };
+    let compact = per_page(false);
+    let layout = compute_page_layout(&overview, 0, inner_height);
+    if layout.pages.is_empty() {
+        // The slot is shorter than even the compact page: the renderer falls
+        // back to the truncated compact page (see render_overview_framed),
+        // so only that page's tail visibility matters.
+        return compact;
+    }
+    let mut combined = compact;
+    if layout
+        .pages
+        .iter()
+        .any(|page| page.kind == InfoPageKind::TodosExpanded)
+    {
+        let expanded = per_page(true);
+        combined.model_info &= expanded.model_info;
+        combined.todos &= expanded.todos;
+        combined.background &= expanded.background;
+        combined.usage &= expanded.usage;
+        combined.kv_cache &= expanded.kv_cache;
+        combined.compaction &= expanded.compaction;
+        combined.changes &= expanded.changes;
+        combined.commits &= expanded.commits;
+        combined.swarm &= expanded.swarm;
+    }
+    combined
 }
 
 pub(crate) fn compute_page_layout(
@@ -144,6 +271,47 @@ fn compact_kv_cache_height(data: &InfoWidgetData) -> u16 {
     if data.cache_hit_info.is_some() { 1 } else { 0 }
 }
 
+/// Overview rows used by the Compaction section, mirroring [`render_sections`].
+fn compact_compaction_height(data: &InfoWidgetData) -> u16 {
+    u16::from(data.compaction_info.is_some())
+}
+
+/// Overview rows used by the Commits section, mirroring [`render_sections`].
+/// Must mirror `render_commits_compact` exactly: header + shown commits +
+/// overflow row.
+fn compact_commits_height(data: &InfoWidgetData) -> u16 {
+    let Some(info) = data.git_info.as_ref() else {
+        return 0;
+    };
+    if !commits_has_data(info) || info.recent_commits.is_empty() {
+        return 0;
+    }
+    let rows = OVERVIEW_COMMITS_MAX_ROWS.min(info.recent_commits.len());
+    let overflow = u16::from(info.recent_commits.len() > rows);
+    1 + rows as u16 + overflow
+}
+
+/// Overview rows used by the Swarm section, mirroring [`render_sections`].
+/// Must mirror `render_swarm_compact` exactly: header + shown agents +
+/// overflow row + plan meter.
+fn compact_swarm_height(data: &InfoWidgetData) -> u16 {
+    let Some(info) = data.swarm_info.as_ref() else {
+        return 0;
+    };
+    let members = info.managed_members.len();
+    if members == 0 {
+        return 0;
+    }
+    let rows = members.min(OVERVIEW_SWARM_MAX_ROWS);
+    let overflow = u16::from(members > rows);
+    let plan = u16::from(
+        info.plan_progress
+            .map(|(_, _, total)| total > 0)
+            .unwrap_or(false),
+    );
+    1 + rows as u16 + overflow + plan
+}
+
 /// Overview height. Status-line facts (model identity, context %, branch and
 /// counts) are not sections here, only the detail behind them.
 fn compact_overview_height(data: &InfoWidgetData) -> u16 {
@@ -153,7 +321,10 @@ fn compact_overview_height(data: &InfoWidgetData) -> u16 {
         + compact_background_height(data)
         + compact_usage_height(data)
         + compact_kv_cache_height(data)
+        + compact_compaction_height(data)
         + changes_section_height(data)
+        + compact_commits_height(data)
+        + compact_swarm_height(data)
 }
 
 fn expanded_todos_height(data: &InfoWidgetData) -> u16 {
