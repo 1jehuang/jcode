@@ -303,6 +303,7 @@ mod tests {
         DeviceRegistry {
             devices,
             pending_codes: Vec::new(),
+            failed_pairing_attempts: 0,
         }
     }
 
