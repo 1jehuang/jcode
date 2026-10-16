@@ -1249,6 +1249,10 @@ fn test_new_for_remote_restores_split_view_from_reload_state() {
 
 #[test]
 fn test_restore_reload_state_supports_legacy_input_format() {
+    // Reads and writes jcode_dir(), which follows JCODE_HOME: without the
+    // env lock a concurrent with_temp_jcode_home test can rotate the home
+    // between this test's write and read, failing the restore.
+    let _env_guard = crate::storage::lock_test_env();
     let session_id = format!("test-reload-legacy-{}", std::process::id());
     let jcode_dir = crate::storage::jcode_dir().unwrap();
     let path = jcode_dir.join(format!("client-input-{}", session_id));
