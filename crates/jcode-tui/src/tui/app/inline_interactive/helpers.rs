@@ -305,16 +305,29 @@ mod tests {
     #[test]
     fn agent_model_chord_targets_macos_option_chars() {
         // macOS terminals often deliver Option+S / Option+M as the inserted
-        // character (ß / µ) with no ALT modifier; the fallback must still
-        // resolve the chord.
-        assert_eq!(
-            agent_model_chord_target(KeyCode::Char('ß'), KeyModifiers::empty()),
-            Some(AgentModelTarget::Swarm)
-        );
-        assert_eq!(
-            agent_model_chord_target(KeyCode::Char('µ'), KeyModifiers::empty()),
-            Some(AgentModelTarget::Memory)
-        );
+        // character (ß / µ) with no ALT modifier; the fallback is
+        // macOS-only (see shortcut_char_for_macos_option_key), so the chord
+        // must only resolve there. Plain German/Greek letters elsewhere must
+        // never open a picker.
+        if cfg!(target_os = "macos") {
+            assert_eq!(
+                agent_model_chord_target(KeyCode::Char('ß'), KeyModifiers::empty()),
+                Some(AgentModelTarget::Swarm),
+            );
+            assert_eq!(
+                agent_model_chord_target(KeyCode::Char('µ'), KeyModifiers::empty()),
+                Some(AgentModelTarget::Memory),
+            );
+        } else {
+            assert_eq!(
+                agent_model_chord_target(KeyCode::Char('ß'), KeyModifiers::empty()),
+                None,
+            );
+            assert_eq!(
+                agent_model_chord_target(KeyCode::Char('µ'), KeyModifiers::empty()),
+                None,
+            );
+        }
     }
 
     #[test]

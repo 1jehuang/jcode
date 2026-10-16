@@ -321,3 +321,73 @@ fn test_remote_model_picker_alt_chords_open_sub_pickers() {
         )));
     });
 }
+
+#[test]
+fn test_agent_model_chord_shadows_user_remap_only_inside_model_picker() {
+    // A user remapping model_switch_next to alt+s must not lose the chord's
+    // picker meaning: inside the runtime /model picker the chord wins (the
+    // picker dispatches before the config bindings), while anywhere else the
+    // user's remap keeps working. Pin the precedence so a future reorder of
+    // handle_key_core / handle_remote_key_internal cannot silently flip it.
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    crate::config::Config::invalidate_cache();
+
+    let config_path = crate::config::Config::path().expect("config path");
+    std::fs::create_dir_all(config_path.parent().expect("config parent"))
+        .expect("create config parent");
+    std::fs::write(
+        &config_path,
+        "[keybindings]\nmodel_switch_next = \"alt+s\"\n",
+    )
+    .expect("write config");
+
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.remote_available_entries = vec!["gpt-5.5".to_string()];
+    app.remote_model_options = vec![crate::provider::ModelRoute {
+        model: "gpt-5.5".to_string(),
+        provider: "OpenAI".to_string(),
+        api_method: "openai".to_string(),
+        available: true,
+        detail: String::new(),
+        cheapness: None,
+        usage: None,
+    }];
+    app.open_model_picker();
+
+    // Inside the picker the hardcoded chord wins even though the user
+    // remapped model_switch_next to the same chord.
+    app.handle_key(KeyCode::Char('s'), KeyModifiers::ALT).unwrap();
+    assert!(
+        app.inline_interactive_state
+            .as_ref()
+            .is_some_and(|p| p.entries.iter().any(|e| matches!(
+                e.action,
+                crate::tui::PickerAction::AgentModelChoice {
+                    target: crate::tui::AgentModelTarget::Swarm,
+                    ..
+                }
+            ))),
+        "the agent-model chord must win inside the model picker even when a user remap collides"
+    );
+
+    // Close the picker; outside the picker the remap must still fire as
+    // model switching, not open anything.
+    app.handle_key(KeyCode::Esc, KeyModifiers::empty()).unwrap();
+    assert!(app.inline_interactive_state.is_none());
+    app.handle_key(KeyCode::Char('s'), KeyModifiers::ALT).unwrap();
+    assert!(
+        app.inline_interactive_state.is_none(),
+        "outside the picker the user's alt+s remap must not open a sub-picker"
+    );
+
+    if let Some(home) = prev_home {
+        crate::env::set_var("JCODE_HOME", home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    crate::config::Config::invalidate_cache();
+}
