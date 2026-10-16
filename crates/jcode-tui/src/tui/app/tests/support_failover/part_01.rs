@@ -410,6 +410,19 @@ fn clear_persisted_test_ui_state() {
         let _ = std::fs::remove_file(ambient_dir.join("state.json"));
         let _ = std::fs::remove_file(ambient_dir.join("directives.json"));
         let _ = std::fs::remove_file(ambient_dir.join("visible_cycle.json"));
+        // A remote-mode test that handled AvailableModelsUpdated persisted
+        // its mock catalog (e.g. Copilot claude-opus-4.6) into the shared
+        // home. Any later test whose picker hydrates the cache (empty
+        // remote_model_options + is_remote) then preselects those ghost
+        // models instead of its own configured ones. The cache is ambient
+        // per-run state, so drop it alongside the other ambient files. No
+        // test hydrates across app instances from this home.
+        let _ = std::fs::remove_file(
+            shared_test_jcode_home()
+                .join("config")
+                .join("jcode")
+                .join("remote_model_catalog_cache.json"),
+        );
     }
     crate::tui::app::helpers::clear_ambient_info_cache_for_tests();
     crate::auth::AuthStatus::invalidate_cache();
