@@ -95,7 +95,7 @@ async fn apply_remote_speed_direction(
     Ok(())
 }
 
-async fn apply_remote_effort_direction(
+pub(super) async fn apply_remote_effort_direction(
     app: &mut App,
     remote: &mut RemoteConnection,
     direction: i8,
@@ -113,23 +113,10 @@ async fn apply_remote_effort_direction(
     }
     let current = app.remote_reasoning_effort_hint();
     let current = current.as_deref();
-    let current_index = current
-        .and_then(|c| efforts.iter().position(|e| *e == c))
-        .unwrap_or(efforts.len() - 1);
-    let len = efforts.len();
-    let next_index = if direction > 0 {
-        if current_index + 1 >= len {
-            current_index
-        } else {
-            current_index + 1
-        }
-    } else if current_index == 0 {
-        0
-    } else {
-        current_index - 1
-    };
-    let next_effort = efforts[next_index];
-    if Some(next_effort) == current {
+    let cycled = app_mod::effort_cycling::cycle_effort_index(&efforts, current, direction);
+    let next_effort = cycled.effort;
+
+    if !cycled.changed {
         let label = app_mod::effort_display_label(next_effort);
         app.set_status_notice(format!(
             "Effort: {} (already at {})",
@@ -137,13 +124,18 @@ async fn apply_remote_effort_direction(
             if direction > 0 { "max" } else { "min" }
         ));
     } else {
+        app.remember_remote_effort_before_request();
         app.remote_reasoning_effort = Some(next_effort.to_string());
         app.invalidate_model_picker_cache();
         app.set_status_notice(format!(
             "Effort: {} (will apply to next request)",
             app_mod::effort_display_label(next_effort)
         ));
-        remote.set_reasoning_effort(next_effort).await?;
+        if let Err(error) = remote.set_reasoning_effort(next_effort).await {
+            app.restore_rejected_remote_effort();
+            app.set_status_notice("Effort switch failed");
+            return Err(error);
+        }
     }
     Ok(())
 }
@@ -1373,6 +1365,7 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
                 provider_model.as_deref(),
             );
             if efforts.contains(&level) {
+                app.remember_remote_effort_before_request();
                 app.remote_reasoning_effort = Some(level.to_string());
                 app.invalidate_model_picker_cache();
                 app.set_status_notice(format!(
@@ -1380,7 +1373,11 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
                     app_mod::effort_display_label(level)
                 ));
             }
-            remote.set_reasoning_effort(level).await?;
+            if let Err(error) = remote.set_reasoning_effort(level).await {
+                app.restore_rejected_remote_effort();
+                app.set_status_notice("Effort switch failed");
+                return Err(error);
+            }
             return Ok(());
         }
 
