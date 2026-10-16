@@ -8,7 +8,6 @@ use jcode_message_types::{ContentBlock, Role};
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::PathBuf;
-use std::sync::MutexGuard;
 use std::time::{Duration, Instant};
 const BRIGHT_PEARL_WRAPPED_TOOL_CALL_FIXTURE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -152,7 +151,7 @@ async fn test_persistent_ws_state_with_ping_notify() -> (
 }
 
 struct LiveOpenAITestEnv {
-    _lock: MutexGuard<'static, ()>,
+    _lock: jcode_base::storage::TestEnvGuard,
     _jcode_home: EnvVarGuard,
     _transport: EnvVarGuard,
     _temp: tempfile::TempDir,

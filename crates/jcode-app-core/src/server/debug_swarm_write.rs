@@ -719,7 +719,7 @@ mod tests {
     use std::time::Duration;
 
     struct EnvGuard {
-        _lock: std::sync::MutexGuard<'static, ()>,
+        _lock: jcode_base::storage::TestEnvGuard,
         runtime: Option<std::ffi::OsString>,
     }
 
