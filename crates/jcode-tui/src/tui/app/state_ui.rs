@@ -1902,6 +1902,30 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
         return true;
     }
 
+    if trimmed == "/mcp" {
+        let servers = app.mcp_servers();
+        if servers.is_empty() {
+            app.push_display_message(
+                DisplayMessage::system("No MCP servers are currently connected.\n\nAdd MCP servers in ~/.jcode/mcp.json or the workspace .jcode/mcp.json, then use /server-reload to apply.").with_title("MCP Servers"),
+            );
+        } else {
+            let mut report = String::from("Connected MCP servers\n\n");
+            for (name, tool_count) in servers {
+                report.push_str(&format!(
+                    "- **{}**: {} tool{}\n",
+                    name,
+                    tool_count,
+                    if tool_count == 1 { "" } else { "s" }
+                ));
+            }
+            app.push_display_message(
+                DisplayMessage::system(report).with_title("MCP Servers"),
+            );
+        }
+        app.set_status_notice("MCP servers");
+        return true;
+    }
+
     if trimmed == "/version" {
         let version = jcode_build_meta::version();
         let is_canary = if app.session.is_canary {
