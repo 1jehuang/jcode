@@ -435,7 +435,9 @@ openai_reasoning_effort = "low"
 # anthropic_reasoning_effort = "medium"
 # OpenAI transport mode (auto|websocket|https)
 # openai_transport = "auto"
-# OpenAI service tier override (priority|flex|off)
+# OpenAI service tier override (priority|ultrafast|flex|off)
+# Ultrafast is opt-in, costs more, and requires a supported model/account.
+# See docs/OPENAI_ULTRAFAST.md for API and Codex restrictions.
 # Defaults to `priority` to match Codex /fast behavior for OpenAI OAuth
 # (higher speed, higher usage). Set to "off" (or "standard") to disable.
 openai_service_tier = "priority"

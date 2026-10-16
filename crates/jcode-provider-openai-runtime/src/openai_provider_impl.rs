@@ -1050,10 +1050,15 @@ impl Provider for OpenAIProvider {
     }
 
     fn service_tier(&self) -> Option<String> {
-        self.service_tier
+        let tier = self
+            .service_tier
             .read()
             .map(|guard| guard.clone())
-            .unwrap_or_else(|poisoned| poisoned.into_inner().clone())
+            .unwrap_or_else(|poisoned| poisoned.into_inner().clone());
+        tier.filter(|tier| {
+            tier != "ultrafast"
+                || jcode_provider_core::service_tier::openai_model_supports_ultrafast(&self.model())
+        })
     }
 
     fn native_compaction_mode(&self) -> Option<String> {
@@ -1067,6 +1072,14 @@ impl Provider for OpenAIProvider {
 
     fn set_service_tier(&self, service_tier: &str) -> Result<()> {
         let normalized = Self::normalize_service_tier(service_tier)?;
+        if normalized.as_deref() == Some("ultrafast")
+            && !jcode_provider_core::service_tier::openai_model_supports_ultrafast(&self.model())
+        {
+            anyhow::bail!(
+                "Ultrafast is not supported for OpenAI model '{}'",
+                self.model()
+            );
+        }
         let mut guard = self
             .service_tier
             .write()
