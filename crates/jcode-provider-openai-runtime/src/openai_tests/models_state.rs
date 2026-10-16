@@ -491,35 +491,71 @@ fn resolve_api_base_precedence_and_validation() {
 
 #[test]
 fn test_ultrafast_service_tier_round_trips_into_request_payload() {
-    let provider = OpenAIProvider::new(CodexCredentials {
-        access_token: "test".to_string(),
-        refresh_token: String::new(),
-        id_token: None,
-        account_id: None,
-        expires_at: None,
-    });
-    // Write the model directly: set_model validates against the machine's
-    // cached account catalog, which is not what this test is about.
-    *provider.model.try_write().unwrap() = "gpt-6-astra".to_string();
-    assert_eq!(
-        provider.available_service_tiers(),
-        vec!["priority", "ultrafast", "flex"]
-    );
-
-    for alias in ["ultrafast", "ultra", "Ultra-Fast"] {
-        provider.set_service_tier(alias).unwrap();
-        assert_eq!(provider.service_tier().as_deref(), Some("ultrafast"));
+    let _guard = jcode_base::storage::lock_test_env();
+    for credentials in [api_key_creds("sk-ultrafast-test"), oauth_creds()] {
+        let provider = OpenAIProvider::new(credentials);
+        for model in ["gpt-6-astra", "gpt-6.1-sol", "gpt-5.6-sol"] {
+            // Avoid depending on the machine's cached account catalog.
+            *provider.model.try_write().unwrap() = model.to_string();
+            assert_eq!(
+                provider.available_service_tiers(),
+                vec!["priority", "ultrafast", "flex"]
+            );
+            for alias in ["ultrafast", "ultra", "Ultra-Fast"] {
+                provider.set_service_tier(alias).unwrap();
+                assert_eq!(provider.service_tier().as_deref(), Some("ultrafast"));
+            }
+            for is_chatgpt_mode in [false, true] {
+                let request = provider.response_request_for_model(model, &[], &[], "sys", is_chatgpt_mode);
+                assert_eq!(request["service_tier"], serde_json::json!("ultrafast"));
+            }
+            let fork = provider.fork();
+            assert_eq!(fork.service_tier().as_deref(), Some("ultrafast"));
+            provider.set_service_tier("off").unwrap();
+            assert_eq!(provider.service_tier(), None);
+            assert_eq!(fork.service_tier().as_deref(), Some("ultrafast"));
+            let request = provider.response_request_for_model(model, &[], &[], "sys", true);
+            assert!(request.get("service_tier").is_none());
+        }
+        *provider.model.try_write().unwrap() = "gpt-5.5".to_string();
+        assert_eq!(provider.available_service_tiers(), vec!["priority", "flex"]);
     }
-    let request = provider.response_request_for_model("gpt-6-astra", &[], &[], "sys", true);
-    assert_eq!(request["service_tier"], serde_json::json!("ultrafast"));
+}
 
-    provider.set_service_tier("off").unwrap();
-    assert_eq!(provider.service_tier(), None);
-    let request = provider.response_request_for_model("gpt-6-astra", &[], &[], "sys", true);
-    assert!(request.get("service_tier").is_none());
+#[test]
+fn test_ultrafast_rejects_unsupported_models_and_filters_saved_or_retained_tiers() {
+    let _guard = jcode_base::storage::lock_test_env();
+    for credentials in [api_key_creds("sk-ultrafast-test"), oauth_creds()] {
+        let provider = OpenAIProvider::new(credentials);
+        *provider.model.try_write().unwrap() = "gpt-5.5".to_string();
+        provider.set_service_tier("priority").unwrap();
+        for alias in ["ultrafast", "ultra", "ultra-fast"] {
+            assert!(provider.set_service_tier(alias).is_err());
+            assert_eq!(provider.service_tier().as_deref(), Some("priority"));
+        }
 
-    *provider.model.try_write().unwrap() = "gpt-5.5".to_string();
-    assert_eq!(provider.available_service_tiers(), vec!["priority", "flex"]);
+        // Exercise exactly the normalized state a saved config override loads.
+        *provider.service_tier.write().unwrap() = OpenAIProvider::load_service_tier(Some("ultra"));
+        assert_eq!(provider.service_tier(), None);
+        for is_chatgpt_mode in [false, true] {
+            let request = provider.response_request_for_model("gpt-5.5", &[], &[], "sys", is_chatgpt_mode);
+            assert!(request.get("service_tier").is_none());
+        }
+
+        *provider.model.try_write().unwrap() = "gpt-6.1-sol".to_string();
+        assert_eq!(provider.service_tier().as_deref(), Some("ultrafast"));
+        provider.set_service_tier("ultrafast").unwrap();
+        // Gate against the actual request model, not only the selected model.
+        let request = provider.response_request_for_model("gpt-5.5", &[], &[], "sys", false);
+        assert!(request.get("service_tier").is_none());
+        *provider.model.try_write().unwrap() = "gpt-5.5".to_string();
+        assert_eq!(provider.service_tier(), None);
+        *provider.model.try_write().unwrap() = "gpt-6.1-sol".to_string();
+        let request = provider.response_request_for_model("gpt-6.1-sol", &[], &[], "sys", false);
+        assert_eq!(request["service_tier"], "ultrafast");
+        provider.set_service_tier("off").unwrap();
+        assert_eq!(provider.service_tier(), None);
+    }
 }
 
 fn api_key_creds(key: &str) -> CodexCredentials {

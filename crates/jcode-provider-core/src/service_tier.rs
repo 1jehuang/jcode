@@ -29,11 +29,15 @@ fn base_model(model: &str) -> String {
 
 /// Whether OpenAI offers the Ultrafast service tier for `model`.
 ///
-/// Ultrafast is GA for GPT-6 Astra and in preview for GPT-5.6 Sol
-/// (https://developers.openai.com/api/docs/guides/ultrafast-mode, 2026-10).
+/// Ultrafast is broadly available for GPT-6 Astra and GPT-6.1 Sol.
+/// Retain GPT-5.6 Sol preview support documented by the Responses reference.
+/// Verified against the Ultrafast guide and Responses reference, 2026-10-16.
 pub fn openai_model_supports_ultrafast(model: &str) -> bool {
     let model = base_model(model);
-    matches!(model.as_str(), "gpt-6-astra" | "gpt-5.6-sol")
+    matches!(
+        model.as_str(),
+        "gpt-6-astra" | "gpt-6.1-sol" | "gpt-5.6-sol"
+    ) || model.starts_with("gpt-6.1-sol-")
         || model.starts_with("gpt-6-astra-")
         || model.starts_with("gpt-5.6-sol-")
 }
@@ -163,6 +167,28 @@ mod tests {
             speed_tier_ladder(None, Some("gpt-6-astra")),
             vec!["off", "priority", "ultrafast"]
         );
+    }
+
+    #[test]
+    fn sol_ultrafast_accepts_qualified_snapshots_and_context_suffixes() {
+        for model in [
+            "gpt-6.1-sol",
+            "openai/gpt-6.1-sol",
+            "gpt-6.1-sol-2026-10-16",
+            " OpenAI/GPT-6.1-Sol[1m] ",
+            "openai/gpt-6.1-sol-2026-10-16[1m]",
+        ] {
+            assert!(openai_model_supports_ultrafast(model), "{model}");
+            assert_eq!(
+                speed_tier_ladder(Some("OpenAI"), Some(model)),
+                vec!["off", "priority", "ultrafast"],
+                "{model}"
+            );
+        }
+        for model in ["gpt-6.1", "gpt-6.1-solstice", "gpt-6.1-sol2"] {
+            assert!(!openai_model_supports_ultrafast(model), "{model}");
+        }
+        assert!(speed_tier_ladder(Some("openrouter"), Some("openai/gpt-6.1-sol")).is_empty());
     }
 
     #[test]

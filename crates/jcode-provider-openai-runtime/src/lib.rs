@@ -1363,7 +1363,12 @@ impl OpenAIProvider {
             request["reasoning"] = openai_stream_runtime::reasoning_payload(effort);
         }
 
-        if let Some(service_tier) = service_tier {
+        // A saved override or a previous model's tier must not leak Ultrafast
+        // onto an unsupported model, including after a model switch.
+        if let Some(service_tier) = service_tier
+            && (service_tier != "ultrafast"
+                || jcode_provider_core::service_tier::openai_model_supports_ultrafast(model_id))
+        {
             request["service_tier"] = serde_json::json!(service_tier);
         }
 

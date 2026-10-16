@@ -1257,7 +1257,7 @@ pub struct ProviderConfig {
     pub anthropic_cache_ttl_1h: bool,
     /// OpenAI transport mode (auto|websocket|https)
     pub openai_transport: Option<String>,
-    /// OpenAI service tier override (priority|flex)
+    /// OpenAI service tier override (priority|ultrafast|flex|off). Ultrafast is opt-in.
     pub openai_service_tier: Option<String>,
     /// OpenAI native compaction mode: "auto", "explicit", or "off".
     pub openai_native_compaction_mode: String,
