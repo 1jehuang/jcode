@@ -121,3 +121,63 @@ fn test_remote_model_picker_preview_ctrl_o_sets_default() {
         );
     });
 }
+
+#[test]
+fn test_model_picker_chords_do_not_pollute_filter() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.remote_available_entries = vec!["gpt-5.5".to_string()];
+        app.remote_model_options = vec![crate::provider::ModelRoute {
+            model: "gpt-5.5".to_string(),
+            provider: "OpenAI".to_string(),
+            api_method: "openai".to_string(),
+            available: true,
+            detail: String::new(),
+            cheapness: None,
+            usage: None,
+        }];
+
+        app.open_model_picker();
+        assert!(
+            app.inline_interactive_state.is_some(),
+            "model picker should be open"
+        );
+
+        // Ctrl+S inside the picker must not leak a stray 's' into the filter:
+        // it collides with the global input-stash chord, so it is a dead key
+        // here (never opens the swarm sub-picker, never types).
+        app.handle_key(KeyCode::Char('s'), KeyModifiers::CONTROL)
+            .unwrap();
+        let picker = app
+            .inline_interactive_state
+            .as_ref()
+            .expect("picker must stay open after Ctrl+S");
+        assert!(picker.filter.is_empty(), "Ctrl+S must not type into the filter");
+        assert!(
+            !picker.entries.iter().any(|e| matches!(
+                e.action,
+                crate::tui::PickerAction::AgentModelChoice { .. }
+            )),
+            "Ctrl+S must not open the swarm sub-picker"
+        );
+
+        // Alt+S still opens the swarm sub-picker from the preview.
+        app.handle_key(KeyCode::Char('s'), KeyModifiers::ALT)
+            .unwrap();
+        let picker = app
+            .inline_interactive_state
+            .as_ref()
+            .expect("picker must stay open after Alt+S");
+        assert!(
+            picker.entries.iter().any(|e| matches!(
+                e.action,
+                crate::tui::PickerAction::AgentModelChoice {
+                    target: crate::tui::AgentModelTarget::Swarm,
+                    ..
+                }
+            )),
+            "Alt+S must open the swarm sub-picker"
+        );
+    });
+}

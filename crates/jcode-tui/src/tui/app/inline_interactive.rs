@@ -3984,6 +3984,12 @@ impl App {
                 }
             }
             KeyCode::Char(c) => {
+                // Ctrl+letter chords never type: Ctrl+S is the global
+                // input-stash chord, and letting unhandled ctrl chords fall
+                // through here leaked their letter into the filter.
+                if modifiers.contains(KeyModifiers::CONTROL) {
+                    return Ok(());
+                }
                 if let Some(ref mut picker) = self.inline_interactive_state
                     // Spaces separate independently matched search terms. The
                     // token matcher already permits those terms to appear in
