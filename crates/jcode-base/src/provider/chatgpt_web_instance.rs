@@ -69,8 +69,18 @@ pub fn profile_dir() -> Result<PathBuf> {
 /// Chrome or Chromium for the private instance.
 /// `JCODE_CHATGPT_WEB_CHROME` overrides discovery.
 pub fn find_chrome() -> Option<PathBuf> {
+    let configured = std::env::var_os("JCODE_CHATGPT_WEB_CHROME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            crate::config::config()
+                .provider
+                .chatgpt_web_browser
+                .as_ref()
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from)
+        });
     find_chrome_in(
-        std::env::var_os("JCODE_CHATGPT_WEB_CHROME").map(PathBuf::from),
+        configured,
         std::env::var_os("PATH"),
         APP_CANDIDATES,
         dirs::home_dir(),
@@ -187,8 +197,17 @@ pub fn chrome_args(profile: &Path, headless: bool) -> Vec<String> {
         "--password-store=basic".to_string(),
     ];
     if headless {
-        args.push("--headless=new".to_string());
-        args.push("--window-size=1280,900".to_string());
+        // ChatGPT's Cloudflare check blocks the --headless=new fingerprint even
+        // with a valid session, so turns never load. Run a real window parked
+        // far off-screen instead: it passes the check and stays off the desktop.
+        // Override with JCODE_CHATGPT_WEB_HEADLESS=1 to force true headless.
+        if std::env::var("JCODE_CHATGPT_WEB_HEADLESS").as_deref() == Ok("1") {
+            args.push("--headless=new".to_string());
+            args.push("--window-size=1280,900".to_string());
+        } else {
+            args.push("--window-position=-32000,-32000".to_string());
+            args.push("--window-size=1280,900".to_string());
+        }
     }
     args.push("about:blank".to_string());
     args
@@ -1012,36 +1031,43 @@ pub async fn open_signed_in_page(
     loop {
         let instance = headless().await?;
         let page = instance.open_page(CHATGPT_WEB_URL).await?;
-        match wait_for_access(&instance, &page, PAGE_ACCESS_TIMEOUT).await {
-            PageAccess::SignedIn => return Ok((instance, page)),
-            PageAccess::SignedOut => {
-                let _ = instance.close_page(&page).await;
-                drop(instance);
-                if !imported {
-                    imported = true;
-                    match sign_in_from_main_browser().await {
-                        Ok(true) => continue,
-                        Ok(false) => {}
-                        Err(error) => crate::logging::info(&format!(
-                            "Could not copy the ChatGPT session from the main browser: {error:#}"
-                        )),
-                    }
-                }
-                anyhow::ensure!(
-                    sign_in == SignIn::Interactive && !shown_window,
-                    "ChatGPT is signed out. Sign in to chatgpt.com in your browser (with the jcode browser bridge connected), or run `jcode browser chatgpt-login`"
-                );
-                shown_window = true;
-                sign_in_interactively().await?;
-            }
-            PageAccess::Loading => {
-                let _ = instance.close_page(&page).await;
-                anyhow::bail!(
-                    "ChatGPT did not finish loading in jcode's private browser within {} seconds",
-                    PAGE_ACCESS_TIMEOUT.as_secs()
-                );
+        // A cold profile stuck on a Cloudflare "Just a moment" challenge never
+        // reaches a composer or a login button, so it classifies as Loading.
+        // Recover it the same as SignedOut: import the main-browser session,
+        // then (last resort) open the visible window, which a human and a real
+        // window clear the challenge in. Only Loading with no recovery left is
+        // the hard timeout.
+        let access = wait_for_access(&instance, &page, PAGE_ACCESS_TIMEOUT).await;
+        if access == PageAccess::SignedIn {
+            return Ok((instance, page));
+        }
+        let _ = instance.close_page(&page).await;
+        drop(instance);
+        if !imported {
+            imported = true;
+            match sign_in_from_main_browser().await {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(error) => crate::logging::info(&format!(
+                    "Could not copy the ChatGPT session from the main browser: {error:#}"
+                )),
             }
         }
+        if sign_in == SignIn::Interactive && !shown_window {
+            shown_window = true;
+            sign_in_interactively().await?;
+            continue;
+        }
+        anyhow::bail!(
+            "{}",
+            match access {
+                PageAccess::Loading => format!(
+                    "ChatGPT did not finish loading in jcode's private browser within {} seconds (it may be showing a Cloudflare check). Run `jcode browser chatgpt-login` to sign in in a visible window.",
+                    PAGE_ACCESS_TIMEOUT.as_secs()
+                ),
+                _ => "ChatGPT is signed out. Sign in to chatgpt.com in your browser (with the jcode browser bridge connected), or run `jcode browser chatgpt-login`".to_string(),
+            }
+        );
     }
 }
 
@@ -1084,7 +1110,10 @@ mod tests {
     #[test]
     fn headless_args_never_open_a_window_or_a_port() {
         let args = chrome_args(Path::new("/p"), true);
-        assert!(args.contains(&"--headless=new".to_string()));
+        // The background instance runs a real window parked off-screen (the
+        // --headless=new fingerprint fails ChatGPT's Cloudflare check), so it
+        // never shows on the desktop and never opens a debugging port.
+        assert!(args.contains(&"--window-position=-32000,-32000".to_string()));
         assert!(args.contains(&"--user-data-dir=/p".to_string()));
         assert!(args.contains(&"--remote-debugging-pipe".to_string()));
         assert!(
@@ -1094,6 +1123,11 @@ mod tests {
         );
         let visible = chrome_args(Path::new("/p"), false);
         assert!(!visible.iter().any(|arg| arg.starts_with("--headless")));
+        assert!(
+            !visible
+                .iter()
+                .any(|arg| arg.starts_with("--window-position"))
+        );
     }
 
     #[test]

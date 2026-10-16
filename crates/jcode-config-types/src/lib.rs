@@ -1319,6 +1319,11 @@ pub struct ProviderConfig {
     pub copilot_premium: Option<String>,
     /// Enterprise host for Copilot OAuth, GitHub REST, and inference endpoints.
     pub copilot_enterprise_url: Option<String>,
+    /// Browser executable jcode runs ChatGPT `[web]` models in. Defaults to the
+    /// installed Google Chrome or Chromium. Set it to the browser your ChatGPT
+    /// account is signed into (for example Brave) so the session and its cookies
+    /// match. `JCODE_CHATGPT_WEB_CHROME` overrides this.
+    pub chatgpt_web_browser: Option<String>,
     /// Pin the `gemini` provider to Code Assist OAuth even when a Gemini
     /// Developer API key (`gemini.env` / `GEMINI_API_KEY`) is present. Without
     /// this an API key silently wins and every turn bills per token on the
@@ -1368,6 +1373,7 @@ impl Default for ProviderConfig {
             account_failover_return_home: true,
             copilot_premium: None,
             copilot_enterprise_url: None,
+            chatgpt_web_browser: None,
             gemini_force_oauth: false,
             gemini_project: None,
             model_picker_providers: None,
