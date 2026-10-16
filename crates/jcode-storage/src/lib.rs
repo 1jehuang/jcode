@@ -164,9 +164,137 @@ pub fn jcode_dir() -> Result<PathBuf> {
     if let Ok(path) = std::env::var("JCODE_HOME") {
         return Ok(PathBuf::from(path));
     }
+    if let Some(path) = test_harness_home()? {
+        return Ok(path.to_path_buf());
+    }
 
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("No home directory"))?;
     Ok(home.join(".jcode"))
+}
+
+/// Per-process stand-in for `JCODE_HOME` inside Rust test binaries.
+///
+/// Test binaries always run from `<target-dir>/<profile>/deps/`, where no
+/// installed or self-dev jcode ever runs. A test that forgets to set `JCODE_HOME` would
+/// otherwise read and write the developer's real `~/.jcode` (session files,
+/// active-pid markers, config, model-picker usage). Suite-by-suite guards kept
+/// missing cases, so unsandboxed tests fall back here instead. Tests that set
+/// `JCODE_HOME` explicitly, including to the real home, are unaffected.
+fn test_harness_home() -> Result<Option<&'static Path>> {
+    static HOME: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    if let Some(cached) = HOME.get() {
+        return Ok(cached.as_deref());
+    }
+    // Test threads reach this concurrently on first use. Serialize creation,
+    // cleanup registration, and caching: two racing calls could otherwise
+    // create two homes, and the one that lost `HOME` was never removed.
+    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _serialized = HOME_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(cached) = HOME.get() {
+        return Ok(cached.as_deref());
+    }
+    // Resolve before caching, so a test binary that cannot create a private home
+    // reports that instead of quietly using the real `~/.jcode`. A failed
+    // resolve caches nothing, so the next call retries it.
+    let resolved = resolve_test_harness_home()?;
+    Ok(HOME.get_or_init(|| resolved).as_deref())
+}
+
+/// Resolve the sandbox once, before `test_harness_home` caches it.
+fn resolve_test_harness_home() -> Result<Option<PathBuf>> {
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        // Without the executable path there is no way to tell a test binary from
+        // a real one, and guessing could sandbox a real session.
+        Err(_) => return Ok(None),
+    };
+    if !is_test_harness_exe(&exe) {
+        return Ok(None);
+    }
+    let home = create_private_test_home()?;
+    register_test_home_cleanup(&home);
+    Ok(Some(home))
+}
+
+/// Create a fresh, private test home that only this process can use.
+///
+/// `create_dir` (not `create_dir_all`) refuses any pre-existing entry,
+/// including a symlink planted by another local user in a shared temp dir,
+/// and the random suffix keeps a reused PID from inheriting an earlier run's
+/// sessions. The directory is `0o700` on Unix. Callers own its cleanup:
+/// `test_harness_home` registers the process-wide home for removal at exit.
+///
+/// A home that cannot be created is reported as an error rather than a panic:
+/// this module is production-classified by the guardrail's panic-prone budget
+/// even though the shim only ever activates inside test binaries.
+fn create_private_test_home() -> Result<PathBuf> {
+    let temp = std::env::temp_dir();
+    for _ in 0..16 {
+        let path = temp.join(format!(
+            "jcode-test-home-{}-{:016x}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        match builder.create(&path) {
+            Ok(()) => return Ok(path),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            // Falling back to the real `~/.jcode` is exactly what this guards
+            // against, so a test binary that cannot sandbox itself stops here.
+            Err(error) => {
+                return Err(anyhow::anyhow!(
+                    "cannot create private test home {}: {error}",
+                    path.display()
+                ));
+            }
+        }
+    }
+    Err(anyhow::anyhow!(
+        "cannot create a unique private test home in {}",
+        temp.display()
+    ))
+}
+
+/// The process-wide test home removed at exit. Only `test_harness_home`
+/// registers, so a throwaway home can never take the single slot.
+static TEST_HOME_CLEANUP: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+fn register_test_home_cleanup(path: &Path) {
+    extern "C" fn remove_test_home() {
+        if let Some(path) = TEST_HOME_CLEANUP.get()
+            && let Err(error) = std::fs::remove_dir_all(path)
+        {
+            // `atexit` runs after the suite, so nothing can act on this
+            // failure; naming it keeps a leaked test home traceable.
+            eprintln!(
+                "warning: could not remove test home {}: {error}",
+                path.display()
+            );
+        }
+    }
+    if TEST_HOME_CLEANUP.set(path.to_path_buf()).is_ok() {
+        // SAFETY: `remove_test_home` is a plain `extern "C"` fn with no
+        // arguments that only touches an initialised static. `atexit` is the
+        // C runtime's, available on Unix and on the Windows CRT alike.
+        unsafe {
+            libc::atexit(remove_test_home);
+        }
+    }
+}
+
+fn is_test_harness_exe(exe: &Path) -> bool {
+    // Match on the parent directory, not a `/target/` component, so a custom
+    // CARGO_TARGET_DIR is covered too.
+    exe.parent()
+        .and_then(Path::file_name)
+        .is_some_and(|dir| dir == "deps")
 }
 
 /// Whether `JCODE_HOME` redirects this process away from the user's real
@@ -774,6 +902,93 @@ mod windows_hardening_tests {
 
         assert!(!state.enqueue(&file, false, now));
         assert!(state.pending_files.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod test_harness_home_tests {
+    use super::*;
+
+    fn harness_home() -> &'static Path {
+        test_harness_home()
+            .expect("resolving the test home cannot fail here")
+            .expect("cargo test binary is a test harness")
+    }
+
+    #[test]
+    fn only_cargo_test_binaries_count_as_test_harnesses() {
+        assert!(is_test_harness_exe(Path::new(
+            "/repo/target/debug/deps/jcode_storage-0123abcd"
+        )));
+        assert!(is_test_harness_exe(Path::new(
+            "/scratch/custom-target/debug/deps/jcode_storage-0123abcd"
+        )));
+        #[cfg(windows)]
+        assert!(is_test_harness_exe(Path::new(
+            r"C:\repo\target\debug\deps\jcode_storage-0123abcd.exe"
+        )));
+        assert!(!is_test_harness_exe(Path::new(
+            "/repo/target/selfdev/jcode"
+        )));
+        assert!(!is_test_harness_exe(Path::new(
+            "/home/u/.jcode/builds/versions/0.88.0/jcode"
+        )));
+    }
+
+    #[test]
+    fn this_test_binary_never_resolves_to_the_real_jcode_home() {
+        let sandbox = harness_home();
+        assert!(sandbox.starts_with(std::env::temp_dir()));
+        assert!(sandbox.is_dir());
+        if let Some(home) = dirs::home_dir() {
+            assert_ne!(sandbox, home.join(".jcode"));
+        }
+    }
+
+    #[test]
+    fn concurrent_first_calls_agree_on_the_registered_home() {
+        // Test threads race the first call. A home created by a loser of that
+        // race was neither cached nor removed, so every caller must observe the
+        // one home that exit cleanup owns.
+        let homes: Vec<PathBuf> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| scope.spawn(|| harness_home().to_path_buf()))
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("caller thread"))
+                .collect()
+        });
+        let shared = harness_home();
+        assert!(homes.iter().all(|home| home.as_path() == shared));
+        assert_eq!(
+            TEST_HOME_CLEANUP.get().map(PathBuf::as_path),
+            Some(shared),
+            "the cached home must be the one exit cleanup removes"
+        );
+    }
+
+    #[test]
+    fn private_test_homes_are_unique_and_never_follow_existing_entries() {
+        let a = create_private_test_home().expect("first private test home");
+        let b = create_private_test_home().expect("second private test home");
+        assert_ne!(a, b, "a reused PID must not share an earlier home");
+        let shared = harness_home();
+        assert_eq!(
+            TEST_HOME_CLEANUP.get().map(PathBuf::as_path),
+            Some(shared),
+            "exit cleanup must target the process-wide home, not a throwaway one"
+        );
+        let meta = std::fs::symlink_metadata(&a).unwrap();
+        assert!(meta.is_dir() && !meta.file_type().is_symlink());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            assert_eq!(meta.permissions().mode() & 0o777, 0o700);
+            assert_eq!(meta.uid(), unsafe { libc::geteuid() });
+        }
+        let _ = std::fs::remove_dir_all(&a);
+        let _ = std::fs::remove_dir_all(&b);
     }
 }
 
