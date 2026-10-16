@@ -31,6 +31,9 @@ impl SessionPicker {
         if self.visible_sessions.is_empty() {
             return;
         }
+        // Reaching session navigation at all is explicit user intent, even at
+        // the bottom boundary where the selection cannot move further.
+        self.user_selection_intent = true;
         let current = self.list_state.selected().unwrap_or(0);
         if let Some(next) = self.next_selectable(current) {
             self.list_state.select(Some(next));
@@ -56,6 +59,9 @@ impl SessionPicker {
             }
             return;
         }
+        // Reaching session navigation at all is explicit user intent, even at
+        // the top boundary where the selection cannot move further.
+        self.user_selection_intent = true;
         let current = self.list_state.selected().unwrap_or(0);
         if let Some(prev) = self.prev_selectable(current) {
             self.list_state.select(Some(prev));
@@ -247,6 +253,31 @@ impl SessionPicker {
             }
             _ => {}
         }
+    }
+
+    /// How many sessions carry an explicit multi-select mark.
+    pub(super) fn selection_count(&self) -> usize {
+        self.selected_session_ids.len()
+    }
+
+    /// Mark or unmark the highlighted session. Marking is an explicit user
+    /// action even when the toggle removes the only mark, so it latches the
+    /// selection intent that blocks the automatic project-scope default.
+    pub(super) fn toggle_selected_session(&mut self) {
+        let Some(session_id) = self.selected_session().map(|session| session.id.clone()) else {
+            return;
+        };
+
+        self.user_selection_intent = true;
+        if !self.selected_session_ids.insert(session_id.clone()) {
+            self.selected_session_ids.remove(&session_id);
+        }
+    }
+
+    /// Drop every multi-select mark. Marks are per-interaction state; clearing
+    /// them (like starting a new search) is not itself a selection choice.
+    pub fn clear_selected_sessions(&mut self) {
+        self.selected_session_ids.clear();
     }
 
     /// Apply a single line of preview scroll in `direction` (-1 up, +1 down) and
