@@ -1163,13 +1163,11 @@ fn test_real_draw_click_on_body_anchored_image_label_cycles_level() {
         for col in 0..area.width {
             line.push_str(buf[(col, row)].symbol());
         }
-        // The transcript also shows the tool-call row ("read shot.png"); the
-        // image label row is the one that carries the show/hide badge keys.
+        // The image label row is the one carrying the show/hide badge keys.
         if !line.contains("shot.png") || !line.contains("[I]") {
             continue;
         }
-        // Click the first cell of the label text (the hit-region is the whole
-        // label line, so any cell on the row works).
+        // Hit-region is the whole label line; any cell on the row works.
         for col in 0..area.width {
             if buf[(col, row)].symbol() == "s" {
                 badge = Some((col, row));
@@ -1185,10 +1183,10 @@ fn test_real_draw_click_on_body_anchored_image_label_cycles_level() {
         "image should start at Fit before any click"
     );
 
-    // REAL click on the rendered label cell. A terminal delivers a *pair* of
-    // events for one physical click: `Down` then `Up`. We must replay both, just
-    // like the live event loop, or we silently skip the copy-selection state the
-    // `Down` arms (which is exactly what the user's click goes through).
+    assert!(crate::tui::ui::inline_image_ui::materialize_visible(image_id));
+
+    // REAL click: a terminal delivers Down then Up; replay both or the armed
+    // copy-selection state is silently skipped.
     app.handle_mouse_event(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
         column: badge_col,

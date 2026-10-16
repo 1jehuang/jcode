@@ -467,6 +467,7 @@ fn copying_only_the_animated_rows_matches_cloning_the_whole_frame() {
     use ratatui::layout::Rect;
 
     let _lock = viewport_snapshot_test_lock();
+    pin_full_tier();
     clear_flicker_frame_history_for_tests();
 
     for (width, height) in [(160u16, 48u16), (100, 40), (80, 24)] {

@@ -1,5 +1,3 @@
-use super::*;
-
 /// The /model picker's agent chords must stay advertised in the help overlay:
 /// Alt+S (swarm) and Alt+M (memory) replaced the Ctrl+S swarm shortcut that
 /// collided with the global input-stash chord.

@@ -688,6 +688,8 @@ async fn tool_descriptions_stay_under_token_cap() {
     // no other way to learn which node types and props the host renders.
     // codemode documents its sandbox API; compile_remote a credit/consent notice.
     // macos_computer_use is macOS-gated and keeps its live-machine safety policy.
+    // bash keeps the repository-search guidance (fixes #1804); the three pinned
+    // phrases alone exceed the cap, so shortening cannot satisfy it.
     const EXEMPT: &[&str] = &[
         "integration_tools",
         "swarm",
@@ -698,6 +700,7 @@ async fn tool_descriptions_stay_under_token_cap() {
         "codemode",
         "compile_remote",
         "macos_computer_use",
+        "bash",
     ];
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);

@@ -1838,7 +1838,10 @@ async fn sdk_socket_workflow(response_only: bool) {
     let mut other_session =
         crate::session::Session::create_with_id("sdk_other_session".into(), None, None);
     other_session.working_dir = Some(home._home.path().to_string_lossy().into_owned());
-    other_session.save().unwrap();
+    // The session is empty, so plain save() skips the snapshot (untouched-session
+    // gate) and the observer's later disconnect would take the 30s reconnect
+    // grace path instead of finishing inside the test's 5s exit budget.
+    other_session.save_prepared().unwrap();
     let other_registry = Registry::new(provider_template.clone()).await;
     sessions.write().await.insert(
         "sdk_other_session".into(),

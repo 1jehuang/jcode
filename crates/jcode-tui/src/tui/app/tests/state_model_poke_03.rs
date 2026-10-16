@@ -1098,6 +1098,7 @@ fn test_tui_openai_compatible_empty_catalog_does_not_switch_to_profile_default()
     while bus_rx.try_recv().is_ok() {}
 
     let _guard = rt.enter();
+    let expected_session = app.session.id.clone();
     app.start_openai_compatible_post_login_activation(
         "cerebras".to_string(),
         "Cerebras".to_string(),
@@ -1113,7 +1114,8 @@ fn test_tui_openai_compatible_empty_catalog_does_not_switch_to_profile_default()
                     panic!("empty local catalog must not publish final login failure: {login:?}")
                 }
                 Ok(Ok(crate::bus::BusEvent::UiActivity(activity)))
-                    if activity.message.contains("Model Discovery Still Updating") =>
+                    if activity.session_id.as_deref() == Some(expected_session.as_str())
+                        && activity.message.contains("Model Discovery Still Updating") =>
                 {
                     break activity;
                 }
@@ -1138,32 +1140,39 @@ fn test_tui_openai_compatible_empty_catalog_does_not_switch_to_profile_default()
 
 #[test]
 fn test_tui_openai_compatible_local_refresh_failure_is_pending_not_final_failure() {
-    ensure_test_jcode_home_if_unset();
-    clear_persisted_test_ui_state();
-    crate::tui::ui::clear_test_render_state_for_tests();
+    // Same ambient-profile hazard as the other post-login activation tests:
+    // the activation path reads config and profile env while the async
+    // refresh runs, and a sibling test flipping that state mid-flight used
+    // to leak into this one through the process-global bus. Pin a private
+    // home under the env lock.
+    with_temp_jcode_home(|| {
+        ensure_test_jcode_home_if_unset();
+        clear_persisted_test_ui_state();
+        crate::tui::ui::clear_test_render_state_for_tests();
 
-    let refreshes = StdArc::new(AtomicUsize::new(0));
-    let set_model_attempts = StdArc::new(AtomicUsize::new(0));
-    let provider: Arc<dyn Provider> = Arc::new(FailingPostLoginCatalogProvider {
-        refreshes: StdArc::clone(&refreshes),
-        set_model_attempts: StdArc::clone(&set_model_attempts),
-    });
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
-    let mut app = App::new_for_test_harness(provider, registry);
-    app.queue_mode = false;
-    app.diff_mode = crate::config::DiffDisplayMode::Inline;
+        let refreshes = StdArc::new(AtomicUsize::new(0));
+        let set_model_attempts = StdArc::new(AtomicUsize::new(0));
+        let provider: Arc<dyn Provider> = Arc::new(FailingPostLoginCatalogProvider {
+            refreshes: StdArc::clone(&refreshes),
+            set_model_attempts: StdArc::clone(&set_model_attempts),
+        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
+        let mut app = App::new_for_test_harness(provider, registry);
+        app.queue_mode = false;
+        app.diff_mode = crate::config::DiffDisplayMode::Inline;
 
-    let mut bus_rx = crate::bus::Bus::global().subscribe();
-    while bus_rx.try_recv().is_ok() {}
+        let mut bus_rx = crate::bus::Bus::global().subscribe();
+        while bus_rx.try_recv().is_ok() {}
 
-    let _guard = rt.enter();
-    app.start_openai_compatible_post_login_activation(
-        "cerebras".to_string(),
-        "Cerebras".to_string(),
-    );
+        let _guard = rt.enter();
+        let expected_session = app.session.id.clone();
+        app.start_openai_compatible_post_login_activation(
+            "cerebras".to_string(),
+            "Cerebras".to_string(),
+        );
 
-    let activity = rt.block_on(async {
+        let activity = rt.block_on(async {
         loop {
             match tokio::time::timeout(Duration::from_secs(2), bus_rx.recv()).await {
                 Ok(Ok(crate::bus::BusEvent::ProviderModelActivated { .. })) => {
@@ -1175,7 +1184,8 @@ fn test_tui_openai_compatible_local_refresh_failure_is_pending_not_final_failure
                     )
                 }
                 Ok(Ok(crate::bus::BusEvent::UiActivity(activity)))
-                    if activity.message.contains("Model Discovery Still Updating") =>
+                    if activity.session_id.as_deref() == Some(expected_session.as_str())
+                        && activity.message.contains("Model Discovery Still Updating") =>
                 {
                     break activity;
                 }
@@ -1185,64 +1195,70 @@ fn test_tui_openai_compatible_local_refresh_failure_is_pending_not_final_failure
         }
     });
 
-    assert_eq!(refreshes.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        set_model_attempts.load(Ordering::SeqCst),
-        0,
-        "local refresh failure must not try to switch models from an unavailable catalog"
-    );
-    assert!(activity.message.contains("Saved credentials are active"));
-    assert!(
-        activity
-            .message
-            .contains("server auth-change catalog refresh")
-    );
-    assert!(activity.message.contains("fixture refresh failed"));
-    assert!(!activity.message.contains("Login: failed"));
-    assert!(!activity.message.contains("Unable to sign in"));
-    assert!(!activity.message.contains("did not switch models"));
+        assert_eq!(refreshes.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            set_model_attempts.load(Ordering::SeqCst),
+            0,
+            "local refresh failure must not try to switch models from an unavailable catalog"
+        );
+        assert!(activity.message.contains("Saved credentials are active"));
+        assert!(
+            activity
+                .message
+                .contains("server auth-change catalog refresh")
+        );
+        assert!(activity.message.contains("fixture refresh failed"));
+        assert!(!activity.message.contains("Login: failed"));
+        assert!(!activity.message.contains("Unable to sign in"));
+        assert!(!activity.message.contains("did not switch models"));
+    })
 }
 
 #[test]
 fn test_model_picker_opens_simplified_state_before_async_routes_complete() {
-    ensure_test_jcode_home_if_unset();
-    clear_persisted_test_ui_state();
-    crate::tui::ui::clear_test_render_state_for_tests();
+    // Same ambient-profile hazard as the other counting-provider picker
+    // tests; hold the env lock so the async rebuild is never dropped for a
+    // mid-load signature change.
+    with_temp_jcode_home(|| {
+        ensure_test_jcode_home_if_unset();
+        clear_persisted_test_ui_state();
+        crate::tui::ui::clear_test_render_state_for_tests();
 
-    let calls = StdArc::new(AtomicUsize::new(0));
-    let provider: Arc<dyn Provider> = Arc::new(CountingModelRoutesProvider {
-        calls: StdArc::clone(&calls),
-        route_count: 2,
-        delay: Duration::from_millis(75),
+        let calls = StdArc::new(AtomicUsize::new(0));
+        let provider: Arc<dyn Provider> = Arc::new(CountingModelRoutesProvider {
+            calls: StdArc::clone(&calls),
+            route_count: 2,
+            delay: Duration::from_millis(75),
+        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
+        let mut app = App::new_for_test_harness(provider, registry);
+        app.queue_mode = false;
+        app.diff_mode = crate::config::DiffDisplayMode::Inline;
+
+        app.open_model_picker();
+
+        let picker = app
+            .inline_interactive_state
+            .as_ref()
+            .expect("loading picker should open immediately");
+        assert_eq!(picker.entries.len(), 1);
+        assert_eq!(picker.entries[0].name, "counting-a");
+        assert_eq!(picker.entries[0].options[0].detail, "simplified catalog");
+        assert!(app.pending_model_picker_load.is_some());
+        assert_eq!(
+            app.status_notice(),
+            Some("Updating model routes…".to_string())
+        );
+
+        wait_for_model_picker_load(&mut app);
+        let picker = app
+            .inline_interactive_state
+            .as_ref()
+            .expect("hydrated picker should still be open");
+        assert!(picker.entries.len() >= 2);
+        assert_eq!(app.status_notice(), Some("Model list updated".to_string()));
     });
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
-    let mut app = App::new_for_test_harness(provider, registry);
-    app.queue_mode = false;
-    app.diff_mode = crate::config::DiffDisplayMode::Inline;
-
-    app.open_model_picker();
-
-    let picker = app
-        .inline_interactive_state
-        .as_ref()
-        .expect("loading picker should open immediately");
-    assert_eq!(picker.entries.len(), 1);
-    assert_eq!(picker.entries[0].name, "counting-a");
-    assert_eq!(picker.entries[0].options[0].detail, "simplified catalog");
-    assert!(app.pending_model_picker_load.is_some());
-    assert_eq!(
-        app.status_notice(),
-        Some("Updating model routes…".to_string())
-    );
-
-    wait_for_model_picker_load(&mut app);
-    let picker = app
-        .inline_interactive_state
-        .as_ref()
-        .expect("hydrated picker should still be open");
-    assert!(picker.entries.len() >= 2);
-    assert_eq!(app.status_notice(), Some("Model list updated".to_string()));
 }
 
 #[test]
