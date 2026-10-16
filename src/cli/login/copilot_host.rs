@@ -34,7 +34,7 @@ pub(super) fn configure_login_host(
             let prompt = if is_enterprise {
                 format!("GitHub Enterprise hostname [{}]: ", endpoints.host)
             } else {
-                "GitHub Enterprise hostname (for example hiqfi.ghe.com): ".to_string()
+                "GitHub Enterprise hostname (for example example.ghe.com): ".to_string()
             };
             let host = read_line_trimmed(&prompt)?;
             let host = if host.is_empty() && is_enterprise {

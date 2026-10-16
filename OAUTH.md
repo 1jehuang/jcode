@@ -459,13 +459,13 @@ This local custom build supports GitHub Enterprise through
 
 ```toml
 [provider]
-copilot_enterprise_url = "hiqfi.ghe.com"
+copilot_enterprise_url = "example.ghe.com"
 ```
 
 Alternatively, configure the hostname through native login:
 
 ```bash
-jcode login --provider copilot --enterprise-url hiqfi.ghe.com --no-browser
+jcode login --provider copilot --enterprise-url example.ghe.com --no-browser
 ```
 
 `--github-host` is an alias for `--enterprise-url`. Interactive CLI login offers
@@ -479,12 +479,12 @@ refresh, model discovery, and inference. For this tenant the native paths are:
 
 | Purpose | Endpoint |
 | --- | --- |
-| Device authorization | `https://hiqfi.ghe.com/login/device/code` |
-| OAuth polling | `https://hiqfi.ghe.com/login/oauth/access_token` |
-| Copilot token exchange | `https://hiqfi.ghe.com/api/v3/copilot_internal/v2/token` |
-| Model catalog | `https://copilot-api.hiqfi.ghe.com/models` |
-| Responses inference | `https://copilot-api.hiqfi.ghe.com/responses` |
-| Chat inference | `https://copilot-api.hiqfi.ghe.com/chat/completions` |
+| Device authorization | `https://example.ghe.com/login/device/code` |
+| OAuth polling | `https://example.ghe.com/login/oauth/access_token` |
+| Copilot token exchange | `https://example.ghe.com/api/v3/copilot_internal/v2/token` |
+| Model catalog | `https://copilot-api.example.ghe.com/models` |
+| Responses inference | `https://copilot-api.example.ghe.com/responses` |
+| Chat inference | `https://copilot-api.example.ghe.com/chat/completions` |
 
 The value must be a bare DNS hostname or an HTTPS URL without a path or port.
 Login and OAuth polling use that host, GitHub REST and token exchange use

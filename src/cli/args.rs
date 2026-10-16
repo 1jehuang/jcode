@@ -232,7 +232,7 @@ pub(crate) enum Command {
         /// Make this login the default account for new windows.
         #[arg(long = "default", id = "make_default")]
         make_default: bool,
-        /// GitHub hostname for Copilot login (for example hiqfi.ghe.com); github.com selects public GitHub.
+        /// GitHub hostname for Copilot login (for example example.ghe.com); github.com selects public GitHub.
         #[arg(long, visible_alias = "github-host", value_name = "HOSTNAME")]
         enterprise_url: Option<String>,
 

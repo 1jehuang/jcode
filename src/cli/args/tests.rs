@@ -59,12 +59,12 @@ fn should_parse_native_enterprise_copilot_login() {
         "--provider",
         "copilot",
         "--enterprise-url",
-        "hiqfi.ghe.com",
+        "example.ghe.com",
         "--no-browser",
     ])
     .unwrap();
     assert!(
-        matches!(args.command, Some(Command::Login { enterprise_url: Some(host), no_browser: true, .. }) if host == "hiqfi.ghe.com")
+        matches!(args.command, Some(Command::Login { enterprise_url: Some(host), no_browser: true, .. }) if host == "example.ghe.com")
     );
 }
 
@@ -76,11 +76,11 @@ fn should_parse_github_host_alias_for_native_login() {
         "--provider",
         "copilot",
         "--github-host",
-        "hiqfi.ghe.com",
+        "example.ghe.com",
     ])
     .unwrap();
     assert!(
-        matches!(args.command, Some(Command::Login { enterprise_url: Some(host), .. }) if host == "hiqfi.ghe.com")
+        matches!(args.command, Some(Command::Login { enterprise_url: Some(host), .. }) if host == "example.ghe.com")
     );
 }
 

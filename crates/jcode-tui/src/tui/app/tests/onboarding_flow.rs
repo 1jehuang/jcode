@@ -5,7 +5,7 @@ use super::onboarding_flow::{ExternalCli, OnboardingFlow, OnboardingPhase};
 #[test]
 fn should_select_native_copilot_login_for_configured_enterprise() {
     let provider =
-        super::onboarding_flow::onboarding_login_provider_for_host(Some("hiqfi.ghe.com"));
+        super::onboarding_flow::onboarding_login_provider_for_host(Some("example.ghe.com"));
     assert_eq!(
         provider.target,
         crate::provider_catalog::LoginProviderTarget::Copilot

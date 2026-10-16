@@ -467,7 +467,7 @@ cross_provider_failover = "countdown"
 # Set to "zero" if you have premium Copilot and want free requests
 # copilot_premium = "zero"
 # Enterprise hostname for Copilot login, token exchange, models, and inference.
-# copilot_enterprise_url = "hiqfi.ghe.com"
+# copilot_enterprise_url = "example.ghe.com"
 # Only list these providers in the /model picker (issue #460). Entries match
 # provider labels ("openai", "anthropic", "copilot", "openrouter", ...), route
 # api methods ("claude-oauth", "openai-compatible:myprofile"), or bare
