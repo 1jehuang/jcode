@@ -146,7 +146,7 @@ This does **not** replace CI: it is single-platform and skips the Windows/macOS/
 | 1 | `check_code_size_budget.py` fails | **RESOLVED** by `a9b8ce357` (2026-10-15T23:50Z). Three files were shrunk: `bash.rs` 1502→1490, `tui/mod.rs` 2077→1944, `ui_inline_interactive.rs` 1384→1377. No baseline was edited. All 7 gate scripts PASS. |
 | 2 | fmt drift | **RESOLVED** by `826145e64` (11 files cleaned). Do not re-report as open. |
 | 3 | master CI re-run | **Partially closed locally** (re-verified on `a9b8ce357` after the rebase onto #82/#83/#84): `cargo check --workspace --all-targets` = **0 errors**, warning budget **0/0 PASS**, 7/7 gate scripts PASS, `cargo fmt --check` clean, TUI suite 22 failures matching pristine master. Still needs a real CI run to confirm the hosted-runner picture — see the masking note above. |
-| 4 | tag/bump | operator signal required. |
+| 4 | tag/bump | **needs operator signal + a version decision.** P7 plan says bump to `0.96.0-k1.0.0` — that is WRONG (upstream's version, not ours; see Trap 8). Correct options: `0.85.1-k1.2.0` (fork-only feature) or wait for PR #23 (upstream v0.88.0 sync, still OPEN) before any base bump. Also note: pushing a tag fires `release.yml` (binaries + signing), and hosted CI is quota-stuck (Trap 9), so a release workflow run would queue indefinitely. |
 
 ### Fork PRs — 13 open on `KooshaPari/Jcode`
 
@@ -335,13 +335,14 @@ Then read, in order: this doc → `docs/sessions/2026-10-12-cleanup-and-release/
 ## 7. Traps (battle-tested this arc)
 
 1. **Bare `gh` resolves to upstream.** Every PR/issue list in this doc required `--repo KooshaPari/Jcode`. A prior audit (B.8.x) silently catalogued 20 *upstream* PRs as if they were the fork's.
-2. **`docs/CI-STATUS.md` masks real CI.** `label-pr.yml` swallowed the runs. Regenerate before believing any green.
+2. **`docs/CI-STATUS.md` masks real CI.** `label-pr.yml` swallowed the runs. Regenerate before believing any green. **(Superseded 2026-10-16: the deeper cause is Actions minutes exhaustion — see Trap 9.)**
 3. **`cargo build` ≠ running your build.** Use `jcode self-dev --build` + a private `--socket`, or you test stale code.
 4. **Stale docs lie in specific ways.** "PR #36 awaiting merge" was wrong (it merged 2026-10-11). "fmt drift is open" was wrong (fixed in `826145e64`). Read `scripts/*.json` for ratchet values, `git log` for history.
 5. **Ratchets are one-way in spirit.** Operator direction is tightening. Never `--update` a baseline to make a gate pass.
 6. **`gh pr merge` fails closed.** Use the squash + direct-push path in §4.
-7. **7 worktrees hold uncommitted work.** Irreversible if cleaned. Treat as protected.
-8. **Release version drift.** `Cargo.toml` says `0.85.1-k1.1.1` but tags exist up to `v0.95.0` (from other branches), and P7 targets `v0.96.0-k1.0.0`. Reconcile before any release.
+7. **~~7 worktrees hold uncommitted work~~** (2026-10-16 update). Only **4 remain**: `decollide-kcode-r2` (4 dirty), `pr27-minor-review-fixes` (3 dirty), `wt-jcode-audit` (1 untracked), `jcode-rebase-v0.90` (1 untracked). Three worktrees (`wt-fmt`, `wt-picker-fix`, `wt-jcode-panicbudget-pb1`) **vanished from this session**, not by my action — their branches and commits survive (`fix/fmt-drift`, `fix/picker-precedence`, `fix/panic-budget-wave1-pb1`); only their *uncommitted* edits may be lost. `git fsck` shows 78 dangling commits, which likely hold recoverable content. Do not treat the 4 survivors as protected-from-me — I have not touched any.
+8. **Release version drift (RESOLVED 2026-10-16 — the planned tag would be false).** `v0.95.0` … `v0.98.1` are **upstream tags**, not fork tags (not reachable from fork master; `jcode --version` is `v0.98.1` because it is upstream's self-built binary). The fork's real scheme: `Cargo.toml = 0.85.1-k1.1.1`, fork tags are `v0.85.0-k1.0.0` and `v0.85.1-k1.1.0`. The P7 plan in `00_HANDOFF.md` says "bump to 0.96.0-k1.0.0, tag v0.96.0-k1.0.0" — that is a **misreading of upstream's version as ours**. The correct P7 bump is `0.85.1-k1.1.1` → `0.85.1-k1.2.0` (fork-only feature) or a base-version bump only if PR #23 (`feature/upstream-0.88-sync`, still OPEN, `mergeable: UNKNOWN`) actually merges upstream v0.88.0 first.
+9. **Hosted CI is stuck (root-caused 2026-10-16).** Not a `label-pr.yml` masking problem. The **newest run in the whole repo is 2026-10-14T22:00Z**, still `queued` with no runner pickup for 37h+; two runs stuck in queue = exhausted GitHub Actions minutes. `ci.yml` is active and Actions-enabled, but no run has been created for any of the last 12 master commits. Fix is billing-side (`gh api user/settings/billing/actions`), operator-only. Until then the local verification table in §2 is the only signal that exists.
 
 ---
 
@@ -350,8 +351,9 @@ Then read, in order: this doc → `docs/sessions/2026-10-12-cleanup-and-release/
 1. ~~**Size budget:**~~ **RESOLVED** in `a9b8ce357` by shrinking all three files. No operator decision needed.
 2. **PR #8:** rebase the 2,254-file mega-merge first, or dispose of it? #23, #34, #35 all chain behind it.
 3. **Stale branches:** approve deleting the ~60 `remotes/upstream/*` mirrors and the >2-week-old branches? (Do not do this unilaterally.)
-4. **Dirty worktrees:** salvage, commit, or discard the 7 uncommitted sets?
-5. **Release:** cut `v0.96.0-k1.0.0` once gates are green, or hold?
+4. **Dirty worktrees:** now 4, not 7 (3 vanished mid-session; their branches/commits survive, uncommitted edits possibly recoverable from 78 dangling objects). For the 4 survivors: salvage, commit, or discard? Their dirty files are: `decollide-kcode-r2` (4), `pr27-minor-review-fixes` (3), `wt-jcode-audit` (1), `jcode-rebase-v0.90` (1).
+5. **Release:** hold until (a) version decision — NOT `v0.96.0-k1.0.0` (that's upstream's number; see Trap 8), correct fork bump is `0.85.1-k1.2.0` or wait for PR #23; (b) GitHub Actions minutes are topped up, else `release.yml` queues forever; (c) hosted CI actually runs green once.
+6. **Actions quota:** which billing state are we in? Two runs queued since 2026-10-14T22:00 = minutes exhausted. Operator-only to fix.
 
 ---
 
