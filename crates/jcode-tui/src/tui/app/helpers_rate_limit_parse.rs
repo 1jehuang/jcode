@@ -23,6 +23,10 @@ pub(crate) fn parse_rate_limit_error(error: &str) -> Option<Duration> {
     if crate::provider::parse_failover_prompt_message(error).is_some() {
         return None;
     }
+    if let Some(duration) = parse_quota_window_reset(error, chrono::Utc::now()) {
+        return Some(duration);
+    }
+
     let error_lower = error.to_lowercase();
 
     if !error_lower.contains("rate limit")
@@ -121,11 +125,163 @@ pub(crate) fn parse_rate_limit_error(error: &str) -> Option<Duration> {
     None
 }
 
+/// Slack added past the provider's reset instant so clock skew does not
+/// resend a moment early and hit the same exhausted window.
+const QUOTA_WINDOW_RESET_SLACK: Duration = Duration::from_secs(15);
+
+/// Parse a usage-window reset carried as an absolute timestamp in the error
+/// body, e.g. Openference:
+/// `402 Payment Required {"error":"Request limit exceeded (1500 per 5 hours)...",
+///  "code":"window_quota_exceeded","resets_at":"2026-09-24T09:00:00.000Z"}`.
+///
+/// These windows reset hours later, so the caller holds the turn and resends
+/// it once the window reopens instead of failing it. Balance or credit errors
+/// without a reset instant are not matched and still fail.
+pub(crate) fn parse_quota_window_reset(
+    error: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<Duration> {
+    let lower = error.to_lowercase();
+    let is_limit = [
+        "quota",
+        "limit exceeded",
+        "rate limit",
+        "rate_limit",
+        "limit reached",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker));
+    if !is_limit {
+        return None;
+    }
+
+    let raw = reset_instant_field(error)?;
+    let reset_at = match chrono::DateTime::parse_from_rfc3339(raw) {
+        Ok(at) => at.with_timezone(&chrono::Utc),
+        Err(_) => return None,
+    };
+    let until_reset = match (reset_at - now).to_std() {
+        Ok(wait) => wait,
+        // Reset instant already passed: resend promptly.
+        Err(_) => Duration::ZERO,
+    };
+    let max_wait = Duration::from_secs(MAX_TURN_HOLD_SECS);
+    (until_reset <= max_wait).then(|| (until_reset + QUOTA_WINDOW_RESET_SLACK).min(max_wait))
+}
+
+/// Value of a JSON `"resets_at"`-style string field inside an error body.
+fn reset_instant_field(error: &str) -> Option<&str> {
+    [
+        "\"resets_at\"",
+        "\"reset_at\"",
+        "\"resetsAt\"",
+        "\"resetAt\"",
+    ]
+    .iter()
+    .find_map(|key| {
+        let after_key = &error[error.find(key)? + key.len()..];
+        let value = after_key.trim_start().strip_prefix(':')?.trim_start();
+        let value = value.strip_prefix('"')?;
+        Some(&value[..value.find('"')?])
+    })
+}
+
 #[cfg(test)]
 #[cfg(test)]
 mod rate_limit_parse_tests {
-    use super::parse_rate_limit_error;
+    use super::{MAX_TURN_HOLD_SECS, parse_quota_window_reset, parse_rate_limit_error};
     use std::time::Duration;
+
+    const OPENFERENCE_WINDOW_ERROR: &str = "OpenAI-compatible chat request failed\n  endpoint: https://api.openference.com/v1/chat/completions\n  model: GLM-5.3\n  auth: JCODE_PROVIDER_OPENCODE_OPENFERENCE_API_KEY\n  status: 402 Payment Required\n  response: {\"error\":\"Request limit exceeded (1500 per 5 hours). Top up your balance to continue.\",\"type\":\"insufficient_quota\",\"code\":\"window_quota_exceeded\",\"resets_at\":\"2026-09-24T09:00:00.000Z\"}\nHint: check network connectivity";
+
+    fn at(ts: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(ts)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    }
+
+    #[test]
+    fn openference_window_quota_waits_until_resets_at() {
+        let wait = parse_quota_window_reset(OPENFERENCE_WINDOW_ERROR, at("2026-09-24T07:30:00Z"));
+        assert_eq!(wait, Some(Duration::from_secs(90 * 60 + 15)));
+    }
+
+    #[test]
+    fn elapsed_resets_at_retries_promptly() {
+        let wait = parse_quota_window_reset(OPENFERENCE_WINDOW_ERROR, at("2026-09-24T09:10:00Z"));
+        assert_eq!(wait, Some(Duration::from_secs(15)));
+    }
+
+    #[test]
+    fn resets_at_beyond_a_day_is_not_held() {
+        let wait = parse_quota_window_reset(OPENFERENCE_WINDOW_ERROR, at("2026-09-22T09:00:00Z"));
+        assert_eq!(wait, None);
+    }
+
+    #[test]
+    fn quota_reset_within_day_caps_clock_skew_allowance() {
+        let reset = at("2026-09-24T09:00:00Z");
+        for seconds in [MAX_TURN_HOLD_SECS - 14, MAX_TURN_HOLD_SECS] {
+            let now = reset - chrono::Duration::seconds(seconds as i64);
+            assert_eq!(
+                parse_quota_window_reset(OPENFERENCE_WINDOW_ERROR, now),
+                Some(Duration::from_secs(MAX_TURN_HOLD_SECS)),
+                "reset in {seconds} seconds must be held"
+            );
+        }
+        let now = reset - chrono::Duration::seconds(MAX_TURN_HOLD_SECS as i64 + 1);
+        assert_eq!(
+            parse_quota_window_reset(OPENFERENCE_WINDOW_ERROR, now),
+            None
+        );
+    }
+
+    #[test]
+    fn balance_error_without_reset_still_fails() {
+        let err = r#"status: 402 Payment Required response: {"error":"Insufficient balance","type":"insufficient_quota"}"#;
+        assert_eq!(
+            parse_quota_window_reset(err, at("2026-09-24T07:30:00Z")),
+            None
+        );
+        assert_eq!(parse_rate_limit_error(err), None);
+    }
+
+    #[test]
+    fn unrelated_resets_at_field_is_ignored() {
+        let err =
+            r#"status: 500 response: {"error":"internal","resets_at":"2026-09-24T09:00:00Z"}"#;
+        assert_eq!(
+            parse_quota_window_reset(err, at("2026-09-24T07:30:00Z")),
+            None
+        );
+    }
+
+    #[test]
+    fn openference_error_is_scheduled_by_the_rate_limit_parser() {
+        assert!(parse_rate_limit_error(OPENFERENCE_WINDOW_ERROR).is_some());
+    }
+
+    #[test]
+    fn reset_field_variants_and_malformed_values() {
+        let now = at("2026-09-24T08:00:00Z");
+        let hour = Some(Duration::from_secs(3600 + 15));
+        for body in [
+            r#"quota exceeded {"resets_at" : "2026-09-24T09:00:00Z"}"#,
+            r#"quota exceeded {"resetsAt":"2026-09-24T11:00:00+02:00"}"#,
+            r#"limit exceeded {"reset_at":"2026-09-24T09:00:00.000Z"}"#,
+        ] {
+            assert_eq!(parse_quota_window_reset(body, now), hour, "{body}");
+        }
+        for body in [
+            r#"quota exceeded {"resets_at":"tomorrow"}"#,
+            r#"quota exceeded {"resets_at":1790240400}"#,
+            r#"quota exceeded {"resets_at":"2026-09-24T09:00:00Z"#,
+            r#"quota exceeded {"resets_at"}"#,
+            "quota exceeded resets_at",
+        ] {
+            assert_eq!(parse_quota_window_reset(body, now), None, "{body}");
+        }
+    }
 
     #[test]
     fn account_pool_failover_prompt_never_schedules_same_account_retry() {

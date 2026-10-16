@@ -259,10 +259,27 @@ impl App {
     /// Rate-limit notice line, with the weekly-gated subscribe nudge appended
     /// when the gate allows (user is blocked on tokens right now).
     pub(super) fn rate_limit_notice_with_nudge(&mut self, reset_secs: u64) -> String {
-        let mut line = format!(
-            "⏳ Rate limit hit. Will auto-retry in {} seconds...",
-            reset_secs
-        );
+        let mut line = if reset_secs < 120 {
+            format!(
+                "⏳ Rate limit hit. Will auto-retry in {} seconds...",
+                reset_secs
+            )
+        } else {
+            // Provider-controlled value: only show a wall-clock time when it
+            // fits Chrono's range, instead of a wrapping cast that can panic.
+            let resume_at = match i64::try_from(reset_secs) {
+                Ok(secs) => chrono::TimeDelta::try_seconds(secs)
+                    .and_then(|delta| chrono::Local::now().checked_add_signed(delta))
+                    .map_or_else(String::new, |at| format!(" (at {})", at.format("%H:%M"))),
+                Err(_) => String::new(),
+            };
+            format!(
+                "⏳ Usage limit hit. Holding this turn and auto-resuming in {}h {:02}m{}...",
+                reset_secs / 3600,
+                (reset_secs % 3600) / 60,
+                resume_at
+            )
+        };
         if self.claim_subscribe_nudge(SubscribeNudgeTrigger::RateLimited) {
             line.push_str(&format!("\n{}", RATE_LIMIT_NUDGE_LINE));
         }

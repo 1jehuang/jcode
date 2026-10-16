@@ -232,15 +232,14 @@ impl App {
     pub(super) fn save_input_for_reload(&self, session_id: &str) {
         let resume_prompt = self.rate_limit_pending_message.as_ref().filter(|pending| {
             !pending.auto_retry
+                && self.rate_limit_reset.is_none()
                 && !pending.is_system
                 && (!pending.content.trim().is_empty() || !pending.images.is_empty())
         });
-        // A queued follow-up that was dequeued and is currently in flight lives
-        // only in `rate_limit_pending_message` (is_system). Without a scheduled
-        // retry reset, that shape has no dispatch path after a restore (the
-        // tick resend requires `rate_limit_reset`), so persist it back into
-        // the queued/hidden lists instead; the restored queue re-sends it once
-        // the turn is proven idle (issue #391).
+        // An in-flight queued follow-up lives only in rate_limit_pending_message
+        // (is_system). Without a reset, tick cannot dispatch it after restore.
+        // Persist it back into queued/hidden lists so it is sent once the turn
+        // is proven idle (issue #391).
         let inflight_continuation = self.rate_limit_pending_message.as_ref().filter(|pending| {
             pending.is_system
                 && self.rate_limit_reset.is_none()
