@@ -79,6 +79,8 @@ pub struct PreparedMessages {
     pub wrapped_copy_offsets: Arc<Vec<usize>>,
     pub raw_plain_lines: Arc<Vec<String>>,
     pub wrapped_line_map: Arc<Vec<WrappedLineMap>>,
+    /// Sorted `raw_plain_lines` indices of submitted prompt text (never frame art).
+    pub literal_raw_lines: Vec<usize>,
     pub wrapped_user_indices: Vec<usize>,
     /// Wrapped line indices where a user prompt line starts.
     pub wrapped_user_prompt_starts: Vec<usize>,
@@ -309,6 +311,11 @@ impl PreparedChatFrame {
             .raw_plain_lines
             .get(local)
             .map(String::as_str)
+    }
+
+    pub fn raw_line_is_literal(&self, raw_line: usize) -> bool {
+        self.raw_section(raw_line)
+            .is_some_and(|(s, local)| s.prepared.literal_raw_lines.binary_search(&local).is_ok())
     }
 
     pub fn wrapped_line_map(&self, abs_line: usize) -> Option<WrappedLineMap> {

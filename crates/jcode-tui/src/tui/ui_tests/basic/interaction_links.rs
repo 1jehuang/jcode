@@ -94,6 +94,7 @@ fn test_active_file_diff_context_resolves_visible_edit() {
         wrapped_copy_offsets: Arc::new(vec![0; 20]),
         raw_plain_lines: Arc::new(Vec::new()),
         wrapped_line_map: Arc::new(Vec::new()),
+        literal_raw_lines: Vec::new(),
         wrapped_user_indices: Vec::new(),
         wrapped_user_prompt_starts: Vec::new(),
         wrapped_user_prompt_ends: Vec::new(),
