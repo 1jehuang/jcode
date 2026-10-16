@@ -522,7 +522,15 @@ return (async () => {
   function streamState(key) {
     const net = globalThis.__jcodeChatGptWebStream;
     const turn = net?.turns.filter(t => t.key === key).at(-1);
-    if (!turn) return { started: false, sendError: net?.sendError?.key === key ? net.sendError.message : null, pending: net?.pending?.key === key };
+    if (!turn) {
+      // No response yet. `pending` still set means the page never sent the
+      // turn POST (the click did not reach it); cleared means the POST is in
+      // flight and ChatGPT has not answered yet.
+      const alert = all('[role="alert"], [data-testid*="error" i]').filter(visible).map(e => (e.innerText || '').trim()).filter(Boolean).join(' | ').slice(0, 300);
+      const send = one(submitSelector);
+      return { started: false, sendError: net?.sendError?.key === key ? net.sendError.message : null, pending: net?.pending?.key === key,
+        alert: alert || null, sendEnabled: !!send && !send.disabled, title: String(document.title || '').slice(0, 80) };
+    }
     const assistant = turn.order.map(id => turn.messages[id]).filter(m => m.role === 'assistant');
     const texts = assistant.filter(m => m.recipient === 'all' && m.type === 'text' && m.text.trim()).map(m => m.text);
     const last = assistant.at(-1);
@@ -597,6 +605,19 @@ return (async () => {
     await until(() => temporary() && !!one(editorSelector), 'loading the temporary composer');
     requireTemporary(true);
     return { ready: true, temporary: true };
+  }
+  if (request.op === 'click_send') {
+    // Re-click Send for a turn whose first click never reached the page. Only
+    // while the hook still holds this turn's prompt: once the page sends, the
+    // hook clears `pending`, so a second click can never send a duplicate or
+    // the bare placeholder.
+    const net = globalThis.__jcodeChatGptWebStream;
+    if (typeof request.armedKey !== 'string' || net?.pending?.key !== request.armedKey || globalThis.fetch !== net.wrapper) return { clicked: false, reason: 'not armed' };
+    if (net.turns.some(t => t.key === request.armedKey)) return { clicked: false, reason: 'already sent' };
+    const send = one(submitSelector);
+    if (!send || send.disabled) return { clicked: false, reason: 'send unavailable' };
+    setTimeout(() => send.click(), 0);
+    return { clicked: true };
   }
   if (request.op === 'submit') {
     if (typeof request.cancelKey !== 'string' || !request.cancelKey.startsWith('jcode-')) throw Error('ChatGPT submission lacks its owned cancellation key');
