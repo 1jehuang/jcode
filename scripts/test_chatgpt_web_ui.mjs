@@ -397,6 +397,23 @@ test('a dropped stream is reported as interrupted, not as a server rejection',as
   assert.equal(state.done,true); assert.equal(state.complete,false);
   assert.match(state.interrupted,/aborted/);
 });
+test('a dropped stream before the page navigates still finds its conversation',async()=>{
+  // Observed live: the stream dropped before the tab reached /c/<id>, so the
+  // transcript had no id and jcode waited out the whole response timeout.
+  const f=fixture(); const placeholder='jcode turn jcode-x2'; const id='6ad1cdfc-aadc-83ed-ab06-8d7c4c11d49d';
+  const partial='data: '+JSON.stringify({type:'resume_conversation_token',conversation_id:id})+'\n\n';
+  const bytes=new TextEncoder().encode(partial);
+  const api=backend(conversation([said('user','P'),said('assistant','Recovered.',{end_turn:true})]));
+  // The id arrives first; the connection drops a moment later.
+  const globals={ fetch: async (url,init) => /f\/conversation$/.test(url) ? new Response(new ReadableStream({ start(c){ c.enqueue(bytes); setTimeout(()=>c.error(new TypeError('network error')),5); } }), { status: 200 }) : api.fetch(url,init) };
+  await run({op:'arm_send',key:'jcode-x2',text:'P',placeholder},f,{globals});
+  await (await globals.fetch('https://chatgpt.com/backend-api/f/conversation',{method:'POST',body:sendBody(placeholder)})).text().catch(()=>{}); await new Promise(r=>setTimeout(r,20));
+  assert.match((await run({op:'stream',key:'jcode-x2'},f,{globals})).interrupted,/network error/);
+  assert.equal((await run({op:'transcript'},f,{globals})).available,false,'no id without the turn key');
+  const t=await run({op:'transcript',key:'jcode-x2'},f,{globals});
+  assert.equal(t.available,true); assert.deepEqual(t.texts,['Recovered.']); assert.equal(t.complete,true);
+  assert.equal(api.calls.at(-1).url,`/backend-api/conversation/${id}`);
+});
 test('click_send re-clicks only while this turn is armed and unsent',async()=>{
   const f=fixture(); const placeholder='jcode turn jcode-c1'; f.editor.text=placeholder;
   const globals={ fetch: async () => sseResponse(streamFixture) };

@@ -11,6 +11,34 @@
 use super::{TOOL_CALL_END, TOOL_CALL_START};
 use serde_json::{Value, json};
 
+/// ChatGPT built-ins that execute in OpenAI's remote sandbox. Their view of
+/// files, disks, processes and the environment is not the user's computer.
+/// Web search results are real, so browsing is not treated as a sandbox.
+pub(super) fn sandbox_tools(builtin: &[String]) -> Vec<String> {
+    builtin
+        .iter()
+        .filter(|tool| tool.starts_with("container.") || tool.starts_with("python"))
+        .cloned()
+        .collect()
+}
+
+/// Correction appended to the prompt when the model answered from ChatGPT's
+/// sandbox instead of requesting jcode tools.
+pub(super) fn with_sandbox_correction(prompt: &str, sandbox: &[String]) -> String {
+    format!(
+        "{prompt}\n# Correction\n\nA previous attempt at this exact turn used ChatGPT's own sandbox tool(s): {}. That sandbox is OpenAI's remote machine, not the user's computer, so its results about files, disks, processes or the environment were wrong and were discarded. Do not use ChatGPT's built-in tools at all. Request the Jcode tools you need with {TOOL_CALL_START} envelopes instead.\n",
+        sandbox.join(", ")
+    )
+}
+
+/// Visible note when the model kept answering from its sandbox.
+pub(super) fn sandbox_warning(sandbox: &[String]) -> String {
+    format!(
+        "> Note: ChatGPT answered using its own remote sandbox ({}), not this computer, even after a correction. Treat any statements about local files, disks or processes below as unverified.",
+        sandbox.join(", ")
+    )
+}
+
 /// One `container.exec` call observed in a ChatGPT turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SandboxCall {
@@ -93,6 +121,26 @@ pub(super) fn redirected_response(call: &SandboxCall) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_remote_execution_builtins_count_as_sandbox() {
+        let used = vec![
+            "container.exec".to_string(),
+            "web.run".to_string(),
+            "python".to_string(),
+        ];
+        assert_eq!(sandbox_tools(&used), vec!["container.exec", "python"]);
+        assert!(sandbox_tools(&["web.run".to_string()]).is_empty());
+    }
+
+    #[test]
+    fn sandbox_correction_keeps_the_prompt_and_names_the_tools() {
+        let corrected = with_sandbox_correction("PROMPT", &["container.exec".to_string()]);
+        assert!(corrected.starts_with("PROMPT"));
+        assert!(corrected.contains("container.exec"));
+        assert!(corrected.contains(TOOL_CALL_START));
+        assert!(sandbox_warning(&["container.exec".to_string()]).contains("unverified"));
+    }
 
     #[test]
     fn only_shell_scripts_are_taken_and_kept_verbatim() {

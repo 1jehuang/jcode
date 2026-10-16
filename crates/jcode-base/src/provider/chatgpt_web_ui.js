@@ -304,8 +304,11 @@ return (async () => {
   // render wrapped markup such as <escape>...</escape> as an empty message.
   // Read the owned conversation's raw assistant text from the same-origin
   // backend instead. The session token never leaves the page.
-  async function transcript() {
-    const id = location.pathname.match(/^\/c\/([0-9a-f-]{36})$/i)?.[1];
+  async function transcript(key) {
+    // The stream names its conversation. A dropped stream can leave the tab
+    // without /c/<id> in its URL, so fall back to the id the stream gave.
+    const streamed = globalThis.__jcodeChatGptWebStream?.turns.filter(t => t.key === key).at(-1)?.conversationId;
+    const id = location.pathname.match(/^\/c\/([0-9a-f-]{36})$/i)?.[1] || (/^[0-9a-f-]{36}$/i.test(streamed || '') ? streamed : null);
     if (!id) return { available: false, reason: 'the owned tab has no conversation id yet' };
     // jcode reads the unmasked transcript; the page sees the placeholder.
     const fetch = globalThis.__jcodeChatGptWebStream?.original || globalThis.fetch;
@@ -486,6 +489,7 @@ return (async () => {
     turn.events++;
     // The server reports a failed turn as {message:null, error:"..."}.
     if (typeof event.error === 'string' && event.error && !event.type) { turn.error = event.error; return; }
+    if (typeof event.conversation_id === 'string' && !turn.conversationId) turn.conversationId = event.conversation_id;
     if (event.type) {
       if (event.type === 'message_stream_complete') turn.done = true;
       if (event.error) turn.error = String(event.error);
@@ -595,7 +599,7 @@ return (async () => {
     return { cancelled: true, quiescent: true };
   }
   if (request.op === 'response') return responseState();
-  if (request.op === 'transcript') return await transcript();
+  if (request.op === 'transcript') return await transcript(request.key);
   if (request.op === 'arm_stream') return armStream(request.key);
   if (request.op === 'arm_send') return armSend(request.key, request.text, request.placeholder, request.route);
   if (request.op === 'catalog') return await catalog();
