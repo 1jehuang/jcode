@@ -100,6 +100,43 @@ session store or user session was deleted.
 This verifies the real OpenAI session-control path only. API-key and OAuth
 wire payload serialization and request-model gating are covered by regression
 tests, but no live paid API completion or OAuth entitlement request was made.
-Ultrafast badge/hotkey ladders have model-gate regression coverage, not an
-interactive screenshot acceptance check here. The documented API price and
-Codex plan restrictions still apply.
+Ultrafast badge/hotkey ladders have model-gate regression coverage. The documented
+API price and Codex plan restrictions still apply.
+
+## Keyboard follow-up and deployment boundary
+
+The running shared installation was still `v0.98.5-dev (cb2895ab0)`, whereas
+this acceptance executable was `v0.98.15-dev (2e980f7e6)`. Other shared sessions
+were active. No shared daemon reload, executable promotion, or installation was
+performed, so the user's running keyboard behavior has not been changed.
+
+Hosted run `20261016-143849396-302645` passed all four speed tests after expanding
+the real local and remote input-handler regressions to cover both Astra and
+`gpt-6.1-sol`. They exercise upward/downward tier cycling, endpoint clamping,
+and remote tier requests. These tests use a test provider and are regression
+evidence, not proof of live Sol availability.
+
+A private real terminal attempt used an isolated home and socket. Setting that
+private home's setup-hints launch count to six bypassed onboarding without
+sending a prompt. Arrow-only input reached Ultrafast, Fast, and off with zero
+tokens, but the displayed model remained Astra because startup model selection
+was overridden. This is Astra keyboard evidence only. A subsequent private
+model-selection attempt rejected `gpt-6.1-sol` as unsupported by that OAuth
+account's current catalog, including after credential reload. No terminal input
+was sent in that attempt. Therefore real Sol keyboard acceptance is blocked by
+account/catalog availability, despite the earlier successful native control
+acceptance above. The observations are time- and account-state-specific and do
+not establish universal model availability.
+
+An earlier exploratory terminal attempt incorrectly interacted with onboarding
+and unintentionally started an Astra architecture-review generation. The owned
+client and daemon were terminated. That attempt is not counted as successful
+acceptance or as a no-generation run. All subsequent attempts avoided Enter and
+slash-command input. No shared daemon or user session was restarted.
+
+Whole-result checking also exposed two catalog fixtures using a generic account
+scope instead of the constructed provider's credential scope. Commit
+`c3bfebb96` isolates their homes and seeds the exact provider scope. Three
+consecutive hosted full runtime-suite runs then each passed 170 tests with
+three ignored. No live upstream Sol completion, entitlement, latency, or billing
+claim is made.
