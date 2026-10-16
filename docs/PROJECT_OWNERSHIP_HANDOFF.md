@@ -200,9 +200,9 @@ Highest-value, newest first:
 | `fix/fmt-size-conflict` | #82 | `cargo fmt` on 2 files; Format gate was red |
 | `fix/loc-ratchet` | #83 | condensed 2 doc comments; code-size gate now green |
 
-All were **squash**-merged, so `git merge-base --is-ancestor <branch> master` is the wrong test — the original SHAs are not ancestors. Verify by content instead, e.g. `git show master:scripts/panic_budget.json`.
+#66-#71, #74, #77, #78, #80, and #82-#85 were squash-merged to `master`. `#72`, `#79`, and `#81` were squash-merged into `revert/pr-33-merge`, not `master`. `git merge-base --is-ancestor` is the wrong test either way. Verify by content, e.g. `git show master:scripts/panic_budget.json`. Do not merge `revert/pr-33-merge`: it is behind master and fails swallowed-error, test-size, code-size, and `cargo fmt`.
 
-Upstream `master` currently passes **all nine** CI gates (module-files, dependency-boundaries, wildcard re-export, panic 62/20, swallowed-error, test-size, code-size, warning-budget 0, `cargo fmt --check`).
+Local scripts on `master` last passed the nine ratchet/fmt gates. That is not hosted CI. Hosted Actions are not creating runs (Trap 9).
 
 Clearly stale (>2 weeks, safe to propose deletion but **never delete without operator say-so**): `codex/acp-native-remote` (2026-10-01), `chore/enable-dependabot` (2026-09-19), `fix/api-attach-preserve-cwd` (2026-09-05), `fix/fix-responses-api` (2026-09-11), `security/*`, `verify/panic-*`, `tmp-conflict-check`, `rescue/*`, `p25c/port-*`.
 
@@ -335,14 +335,14 @@ Then read, in order: this doc → `docs/sessions/2026-10-12-cleanup-and-release/
 ## 7. Traps (battle-tested this arc)
 
 1. **Bare `gh` resolves to upstream.** Every PR/issue list in this doc required `--repo KooshaPari/Jcode`. A prior audit (B.8.x) silently catalogued 20 *upstream* PRs as if they were the fork's.
-2. **`docs/CI-STATUS.md` masks real CI.** `label-pr.yml` swallowed the runs. Regenerate before believing any green. **(Superseded 2026-10-16: the deeper cause is Actions minutes exhaustion — see Trap 9.)**
+2. **`docs/CI-STATUS.md` masks real CI.** `label-pr.yml` swallowed the runs. Regenerate before believing any green. **(Superseded 2026-10-16: hosted Actions are refusing new runs for this repo. See Trap 9. It is not an account minutes outage.)**
 3. **`cargo build` ≠ running your build.** Use `jcode self-dev --build` + a private `--socket`, or you test stale code.
 4. **Stale docs lie in specific ways.** "PR #36 awaiting merge" was wrong (it merged 2026-10-11). "fmt drift is open" was wrong (fixed in `826145e64`). Read `scripts/*.json` for ratchet values, `git log` for history.
 5. **Ratchets are one-way in spirit.** Operator direction is tightening. Never `--update` a baseline to make a gate pass.
-6. **`gh pr merge` fails closed.** Use the squash + direct-push path in §4.
+6. **`gh pr merge` does not always fail closed.** §4 is the path: if the hook defers, answer the phinbox request, then `gh pr merge --squash`. #85 merged that way at 2026-10-16T01:06:32Z (`30483c7f7`) with no direct-push fallback. A blanket "fails closed" line is stale.
 7. **~~7 worktrees hold uncommitted work~~** (2026-10-16 update). Only **4 remain**: `decollide-kcode-r2` (4 dirty), `pr27-minor-review-fixes` (3 dirty), `wt-jcode-audit` (1 untracked), `jcode-rebase-v0.90` (1 untracked). Three worktrees (`wt-fmt`, `wt-picker-fix`, `wt-jcode-panicbudget-pb1`) **vanished from this session**, not by my action — their branches and commits survive (`fix/fmt-drift`, `fix/picker-precedence`, `fix/panic-budget-wave1-pb1`); only their *uncommitted* edits may be lost. `git fsck` shows 78 dangling commits, which likely hold recoverable content. Do not treat the 4 survivors as protected-from-me — I have not touched any.
 8. **Release version drift (RESOLVED 2026-10-16 — the planned tag would be false).** `v0.95.0` … `v0.98.1` are **upstream tags**, not fork tags (not reachable from fork master; `jcode --version` is `v0.98.1` because it is upstream's self-built binary). The fork's real scheme: `Cargo.toml = 0.85.1-k1.1.1`, fork tags are `v0.85.0-k1.0.0` and `v0.85.1-k1.1.0`. The P7 plan in `00_HANDOFF.md` says "bump to 0.96.0-k1.0.0, tag v0.96.0-k1.0.0" — that is a **misreading of upstream's version as ours**. The correct P7 bump is `0.85.1-k1.1.1` → `0.85.1-k1.2.0` (fork-only feature) or a base-version bump only if PR #23 (`feature/upstream-0.88-sync`, still OPEN, `mergeable: UNKNOWN`) actually merges upstream v0.88.0 first.
-9. **Hosted CI is stuck (root-caused 2026-10-16).** Not a `label-pr.yml` masking problem. The **newest run in the whole repo is 2026-10-14T22:00Z**, still `queued` with no runner pickup for 37h+; two runs stuck in queue = exhausted GitHub Actions minutes. `ci.yml` is active and Actions-enabled, but no run has been created for any of the last 12 master commits. Fix is billing-side (`gh api user/settings/billing/actions`), operator-only. Until then the local verification table in §2 is the only signal that exists.
+9. **Hosted Actions are not dispatching (measured 2026-10-16, not a minutes outage).** The repo is public (`KCode`, default branch `master`). `GET /actions/permissions` returns `enabled: true` and every workflow is `active`. `POST /actions/workflows/ci.yml/dispatches` still returns HTTP 422: `Actions has been disabled for this repository.` Merge `30483c7f7` (#85, unused-deps machete fix, on master) has zero Actions runs. The newest Actions run remains 2026-10-14T22:00:58Z on `fix/ci-unused-deps`, status `queued`, jobs array empty. Third-party check suites are created; the `github-actions` app is absent. Minutes are not the cause: private repo `KooshaPari/PhenoRegistry` completed a run at 2026-10-16T00:42:58Z. Re-enable is operator-only (repo Settings, Actions). Do not toggle it from an agent. Until a new run exists, local gate scripts are the only CI signal.
 
 ---
 
@@ -352,8 +352,8 @@ Then read, in order: this doc → `docs/sessions/2026-10-12-cleanup-and-release/
 2. **PR #8:** rebase the 2,254-file mega-merge first, or dispose of it? #23, #34, #35 all chain behind it.
 3. **Stale branches:** approve deleting the ~60 `remotes/upstream/*` mirrors and the >2-week-old branches? (Do not do this unilaterally.)
 4. **Dirty worktrees:** now 4, not 7 (3 vanished mid-session; their branches/commits survive, uncommitted edits possibly recoverable from 78 dangling objects). For the 4 survivors: salvage, commit, or discard? Their dirty files are: `decollide-kcode-r2` (4), `pr27-minor-review-fixes` (3), `wt-jcode-audit` (1), `jcode-rebase-v0.90` (1).
-5. **Release:** hold until (a) version decision — NOT `v0.96.0-k1.0.0` (that's upstream's number; see Trap 8), correct fork bump is `0.85.1-k1.2.0` or wait for PR #23; (b) GitHub Actions minutes are topped up, else `release.yml` queues forever; (c) hosted CI actually runs green once.
-6. **Actions quota:** which billing state are we in? Two runs queued since 2026-10-14T22:00 = minutes exhausted. Operator-only to fix.
+5. **Release:** hold until (a) version decision — NOT `v0.96.0-k1.0.0` (that's upstream's number; see Trap 8), correct fork bump is `0.85.1-k1.2.0` or wait for PR #23; (b) this repo's Actions dispatch works again (Trap 9), else `release.yml` never starts; (c) hosted CI actually runs green once.
+6. **Actions dispatch:** operator must re-enable Actions for this repo. Measured state is HTTP 422 `Actions has been disabled for this repository` while `actions/permissions` still says `enabled: true`. Not an account minutes outage. Agent must not flip the setting.
 
 ---
 
