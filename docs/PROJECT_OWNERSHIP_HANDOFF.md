@@ -24,14 +24,14 @@
 
 ---
 
-## 1. State snapshot (verified 2026-10-16T02:43Z)
+## 1. State snapshot (verified 2026-10-16T03:34Z)
 
 | Item | Value |
 |---|---|
 | Repo | `/Users/kooshapari/CodeProjects/Phenotype/repos/jcode` |
 | Branch | `master` |
-| Verified parent | `2e39f501b` (#86). This file's own commit is the next master commit. Confirm with `git rev-parse --short origin/master`. |
-| Sync | 0 ahead / 0 behind `origin/master` |
+| Verified tip | `7444e113e` (#90). Confirm with `git rev-parse --short origin/master` before acting. This file's own commit, once merged, is the next SHA. |
+| Sync | local `master` was fast-forwarded to `7444e113e` (0 ahead / 0 behind before this doc commit) |
 | origin | `https://github.com/KooshaPari/Jcode.git` |
 | upstream | `https://github.com/1jehuang/jcode` |
 | Cargo version | `0.85.1-k1.1.1` (fork scheme: `BASEVERSION-k<major>.<minor>.<patch>`) |
@@ -41,18 +41,19 @@
 **Last commits on master:**
 
 ```
+7444e113e  fix(telemetry): clear the three clippy warnings in jcode-telemetry-core (#90)
+c6e594914  docs(handoff): name 2e39f501b as the parent, not the new HEAD (#89)
+988546f05  docs(handoff): correct the snapshot that still named a9b8ce357 (#88)
 2e39f501b  docs(handoff): record the real Actions stall and where #72/#79/#81 landed (#86)
 30483c7f7  fix(ci): drop three unused dependencies that fail cargo-machete (#85)
 7752b0fe6  docs(handoff): root-cause hosted CI stall, resolve version drift, update worktree count
-13a8aa9a5  docs(handoff): correct the TUI suite numbers; they were measured pre-rebase
-5c40fe9ca  docs(handoff): record full-workspace verification on a9b8ce357
-39f7999b0  docs(handoff): record the LOC ratchet fix and refresh master state
 ```
 
 **Historical corrections to prior notes (verify before trusting older docs):**
 
 - PR **#36** (`revert: refactor(decollision) rename jcode to kcode`) **MERGED 2026-10-11**. Older notes saying "awaiting operator merge" are stale.
 - Panic budget on `master` is **62** in `scripts/panic_budget.json`. PR #72 ("145 to 61") merged into `revert/pr-33-merge` on 2026-10-15T06:41Z, not into `master`. Read the file. Do not treat #72 as landed on master.
+- `cargo +stable clippy -p jcode-telemetry-core -- -D warnings` failed on `c6e594914` (three lints) and passes on `7444e113e` (#90). That crate's 62 lib tests passed with the fix. Do not reopen #90. Workspace `clippy --all-targets --all-features` was not re-run on this turn.
 
 ---
 
@@ -145,18 +146,18 @@ This does **not** replace CI: it is single-platform and skips the Windows/macOS/
 |---|---|---|
 | 1 | `check_code_size_budget.py` fails | **RESOLVED** by `a9b8ce357` (2026-10-15T23:50Z). Three files were shrunk: `bash.rs` 1502→1490, `tui/mod.rs` 2077→1944, `ui_inline_interactive.rs` 1384→1377. No baseline was edited. All 7 gate scripts PASS. |
 | 2 | fmt drift | **RESOLVED** by `826145e64` (11 files cleaned). Do not re-report as open. |
-| 3 | master CI re-run | **Blocked.** `POST /actions/workflows/ci.yml/dispatches` returned HTTP 422 `Actions has been disabled for this repository` at 2026-10-16T02:43Z. Newest Actions run is still 2026-10-14T22:00:58Z and queued. Local nine-gate results predate #86. This snapshot correction did not re-run them. |
+| 3 | master CI re-run | **Blocked.** Rechecked 2026-10-16T03:34Z: `POST /actions/workflows/ci.yml/dispatches` still returns HTTP 422 `Actions has been disabled for this repository`. Newest Actions run is still 2026-10-14T22:00:58Z on `fix/ci-unused-deps` (queued, empty jobs). |
 | 4 | tag/bump | **Needs an operator signal.** Do not tag `v0.96.0-k1.0.0` (Trap 8). A tag fires `release.yml`, and that workflow cannot start while dispatch returns 422 (Trap 9). |
 
-### Fork PRs: 12 open on `KooshaPari/Jcode` (2026-10-16T02:43Z)
+### Fork PRs: 12 open on `KooshaPari/Jcode` (2026-10-16T03:34Z)
 
 Non-draft, base `master`:
 
 | PR | Branch | Note |
 |---|---|---|
 | #8 | `feature/herdr-plugin-manifest` | CONFLICTING against master. Not UNKNOWN. |
-| #23 | `feature/upstream-0.88-sync` | base is `master`. It does not chain behind #8. mergeable UNKNOWN. |
-| #25 | `codex/poke-context` | base `master`. mergeable UNKNOWN. |
+| #23 | `feature/upstream-0.88-sync` | base is `master`. CONFLICTING. It does not chain behind #8. |
+| #25 | `codex/poke-context` | base `master`. MERGEABLE. Left with its owner. |
 
 Open, but base is `feature/herdr-plugin-manifest` (the #8 branch), not master:
 
@@ -351,8 +352,8 @@ Then read, in order: this doc → `docs/sessions/2026-10-12-cleanup-and-release/
 5. **Ratchets are one-way in spirit.** Operator direction is tightening. Never `--update` a baseline to make a gate pass.
 6. **`gh pr merge` does not always fail closed.** §4 is the path: if the hook defers, answer the phinbox request, then `gh pr merge --squash`. #85 merged that way at 2026-10-16T01:06:32Z (`30483c7f7`) with no direct-push fallback. A blanket "fails closed" line is stale.
 7. **~~7 worktrees hold uncommitted work~~** (2026-10-16 update). Only **4 remain**: `decollide-kcode-r2` (4 dirty), `pr27-minor-review-fixes` (3 dirty), `wt-jcode-audit` (1 untracked), `jcode-rebase-v0.90` (1 untracked). Three worktrees (`wt-fmt`, `wt-picker-fix`, `wt-jcode-panicbudget-pb1`) **vanished from this session**, not by my action — their branches and commits survive (`fix/fmt-drift`, `fix/picker-precedence`, `fix/panic-budget-wave1-pb1`); only their *uncommitted* edits may be lost. `git fsck` shows 78 dangling commits, which likely hold recoverable content. Do not treat the 4 survivors as protected-from-me — I have not touched any.
-8. **Release version drift (RESOLVED 2026-10-16 — the planned tag would be false).** `v0.95.0` … `v0.98.1` are **upstream tags**, not fork tags (not reachable from fork master; `jcode --version` is `v0.98.1` because it is upstream's self-built binary). The fork's real scheme: `Cargo.toml = 0.85.1-k1.1.1`, fork tags are `v0.85.0-k1.0.0` and `v0.85.1-k1.1.0`. The P7 plan in `00_HANDOFF.md` says "bump to 0.96.0-k1.0.0, tag v0.96.0-k1.0.0" — that is a **misreading of upstream's version as ours**. The correct P7 bump is `0.85.1-k1.1.1` → `0.85.1-k1.2.0` (fork-only feature) or a base-version bump only if PR #23 (`feature/upstream-0.88-sync`, still OPEN, `mergeable: UNKNOWN`) actually merges upstream v0.88.0 first.
-9. **Hosted Actions are not dispatching (measured 2026-10-16, not a minutes outage).** The repo is public (`KCode`, default branch `master`). `GET /actions/permissions` returns `enabled: true` and every workflow is `active`. `POST /actions/workflows/ci.yml/dispatches` still returns HTTP 422: `Actions has been disabled for this repository.` Merge `30483c7f7` (#85, unused-deps machete fix, on master) has zero Actions runs. The newest Actions run remains 2026-10-14T22:00:58Z on `fix/ci-unused-deps`, status `queued`, jobs array empty. Third-party check suites are created; the `github-actions` app is absent. Minutes are not the cause: private repo `KooshaPari/PhenoRegistry` completed a run at 2026-10-16T00:42:58Z. Re-enable is operator-only (repo Settings, Actions). Do not toggle it from an agent. Until a new run exists, local gate scripts are the only CI signal.
+8. **Release version drift (RESOLVED 2026-10-16 — the planned tag would be false).** `v0.95.0` … `v0.98.1` are **upstream tags**, not fork tags (not reachable from fork master; `jcode --version` is `v0.98.1` because it is upstream's self-built binary). The fork's real scheme: `Cargo.toml = 0.85.1-k1.1.1`, fork tags are `v0.85.0-k1.0.0` and `v0.85.1-k1.1.0`. The P7 plan in `00_HANDOFF.md` says "bump to 0.96.0-k1.0.0, tag v0.96.0-k1.0.0" — that is a **misreading of upstream's version as ours**. The correct P7 bump is `0.85.1-k1.1.1` → `0.85.1-k1.2.0` (fork-only feature) or a base-version bump only if PR #23 (`feature/upstream-0.88-sync`, still OPEN, CONFLICTING against master as of 2026-10-16T03:34Z) actually merges upstream v0.88.0 first.
+9. **Hosted Actions are not dispatching (measured 2026-10-16, rechecked 03:34Z, not a minutes outage).** The repo is public (`KCode`, default branch `master`). `GET /actions/permissions` returns `enabled: true` and every workflow is `active`. `POST /actions/workflows/ci.yml/dispatches` still returns HTTP 422: `Actions has been disabled for this repository.` The 03:34Z recheck returned the same body. #90 (`7444e113e`) also has zero Actions runs. Merge `30483c7f7` (#85, unused-deps machete fix, on master) has zero Actions runs. The newest Actions run remains 2026-10-14T22:00:58Z on `fix/ci-unused-deps`, status `queued`, jobs array empty. Third-party check suites are created; the `github-actions` app is absent. Minutes are not the cause: private repo `KooshaPari/PhenoRegistry` completed a run at 2026-10-16T00:42:58Z. Re-enable is operator-only (repo Settings, Actions). Do not toggle it from an agent. Until a new run exists, local gate scripts are the only CI signal.
 
 ---
 
