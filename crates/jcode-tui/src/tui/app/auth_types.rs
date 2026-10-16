@@ -2,6 +2,8 @@
 pub(crate) enum PendingLogin {
     /// SSH flow state and sensitive input are held separately, never in local auth.
     Remote,
+    /// Choose Jcode's OAuth flow or Claude Code's CLI-managed sign-in.
+    ClaudeMethodChoice,
     /// Waiting for user to paste Claude OAuth code for a specific stored account
     ClaudeAccount {
         verifier: String,
@@ -68,6 +70,7 @@ impl PendingLogin {
     pub(crate) fn telemetry_context(&self) -> Option<(String, String)> {
         match self {
             Self::Remote => None,
+            Self::ClaudeMethodChoice => None,
             Self::ClaudeAccount { .. } => Some(("claude".to_string(), "oauth".to_string())),
             Self::OpenAiAccount { .. } => Some(("openai".to_string(), "oauth".to_string())),
             Self::Gemini { .. } => Some(("gemini".to_string(), "oauth".to_string())),

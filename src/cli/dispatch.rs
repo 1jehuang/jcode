@@ -319,6 +319,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             provider: login_provider,
             account,
             no_browser,
+            claude_code,
             print_auth_url,
             callback_url,
             auth_code,
@@ -334,6 +335,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
         }) => {
             let mut options = login::LoginOptions {
                 no_browser,
+                claude_code,
                 print_auth_url,
                 callback_url,
                 auth_code,
