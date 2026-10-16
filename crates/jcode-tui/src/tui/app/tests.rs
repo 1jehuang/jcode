@@ -14,6 +14,7 @@ include!("tests/remote_startup_input_01/part_01.rs");
 include!("tests/remote_startup_input_01/part_02.rs");
 include!("tests/remote_startup_input_02/part_01.rs");
 include!("tests/remote_startup_input_02/part_02.rs");
+include!("tests/remote_startup_input_02/part_03.rs");
 include!("tests/remote_startup_input_03/part_01.rs");
 include!("tests/remote_startup_input_03/part_02.rs");
 include!("tests/remote_startup_input_04.rs");

@@ -3406,6 +3406,19 @@ impl App {
             });
             return Ok(());
         }
+        // `/model` picker and its preview: Alt+S / Alt+M open the swarm /
+        // memory model sub-pickers so users can choose which model spawned
+        // swarm agents or memory extraction use, without leaving the /model
+        // flow. Ctrl+S keeps its global input-stash meaning.
+        if let Some(target) = agent_model_chord_target(code, modifiers)
+            && self
+                .inline_interactive_state
+                .as_ref()
+                .is_some_and(picker_is_runtime_model_picker)
+        {
+            self.open_agent_model_picker(target);
+            return Ok(());
+        }
         match code {
             KeyCode::Esc => {
                 if let Some(ref mut picker) = self.inline_interactive_state
@@ -3624,19 +3637,6 @@ impl App {
                 && key_char_eq_ignore_ascii_case(code, 'n') =>
             {
                 self.toggle_selected_model_favorite();
-            }
-            code if agent_model_chord_target(code, modifiers).is_some()
-                && self
-                    .inline_interactive_state
-                    .as_ref()
-                    .map(picker_is_runtime_model_picker)
-                    .unwrap_or(false) =>
-            {
-                // Alt+S / Alt+M open the swarm / memory model sub-pickers so
-                // users can choose which model spawned swarm agents or memory
-                // extraction use, without leaving the /model flow.
-                let target = agent_model_chord_target(code, modifiers).expect("guarded above");
-                self.open_agent_model_picker(target);
             }
             KeyCode::Enter => {
                 let Some(ref mut picker) = self.inline_interactive_state else {
