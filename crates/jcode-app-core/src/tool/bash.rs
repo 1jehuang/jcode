@@ -1068,10 +1068,7 @@ impl BashTool {
 
                             let mut request_counter = 0u32;
                             loop {
-                                #[cfg(target_os = "linux")]
-                                let state = stdin_detect::linux::check_process_tree(child_pid);
-                                #[cfg(not(target_os = "linux"))]
-                                let state = stdin_detect::is_waiting_for_stdin(child_pid);
+                                let state = stdin_detect::check_process_tree(child_pid);
 
                                 if state == StdinState::Reading {
                                     request_counter += 1;
