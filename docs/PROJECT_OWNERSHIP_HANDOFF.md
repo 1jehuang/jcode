@@ -24,13 +24,13 @@
 
 ---
 
-## 1. State snapshot (verified 2026-10-15T21:50Z)
+## 1. State snapshot (verified 2026-10-16T02:43Z)
 
 | Item | Value |
 |---|---|
 | Repo | `/Users/kooshapari/CodeProjects/Phenotype/repos/jcode` |
 | Branch | `master` |
-| HEAD | `a9b8ce357` — *refactor(size): satisfy the code-size LOC ratchet by shrinking, not loosening* |
+| HEAD | `2e39f501b` — *docs(handoff): record the real Actions stall and where #72/#79/#81 landed (#86)* |
 | Sync | 0 ahead / 0 behind `origin/master` |
 | origin | `https://github.com/KooshaPari/Jcode.git` |
 | upstream | `https://github.com/1jehuang/jcode` |
@@ -38,21 +38,21 @@
 | Workspace | 92 crates, ~8,326 test annotations, 80 `#[ignore]`, 0 `#[should_panic]` |
 | Toolchain | no `rust-toolchain.toml`; CI pins `dtolnay/rust-toolchain@stable`; edition 2024 |
 
-**Last 3 commits on master:**
+**Last commits on master:**
 
 ```
-a9b8ce357  refactor(size): satisfy the code-size LOC ratchet by shrinking, not loosening
-d23be0cd0  docs(handoff): correct stale branch, worktree, and merge-path claims (#84)
-3bc65e65c  docs: tighten two oversized doc comments to satisfy the LOC ratchet (#83)
-95aea518c  style: apply cargo fmt to two files the panic refactor left unformatted (#82)
-778b4fd7a  docs(handoff): project-ownership handoff for fresh context to take over KooshaPari/Jcode
-aef4b0150  docs(audit): B.8.88 — post-handoff fmt cleanup + addendum
+2e39f501b  docs(handoff): record the real Actions stall and where #72/#79/#81 landed (#86)
+30483c7f7  fix(ci): drop three unused dependencies that fail cargo-machete (#85)
+7752b0fe6  docs(handoff): root-cause hosted CI stall, resolve version drift, update worktree count
+13a8aa9a5  docs(handoff): correct the TUI suite numbers; they were measured pre-rebase
+5c40fe9ca  docs(handoff): record full-workspace verification on a9b8ce357
+39f7999b0  docs(handoff): record the LOC ratchet fix and refresh master state
 ```
 
 **Historical corrections to prior notes (verify before trusting older docs):**
 
 - PR **#36** (`revert: refactor(decollision) rename jcode to kcode`) **MERGED 2026-10-11**. Older notes saying "awaiting operator merge" are stale.
-- Panic budget is now **62** in `scripts/panic_budget.json`; PR #72 ("145 → 61") merged 2026-10-15T06:41Z. The count and the baseline were both moving — read the file, don't trust a number from a doc.
+- Panic budget on `master` is **62** in `scripts/panic_budget.json`. PR #72 ("145 to 61") merged into `revert/pr-33-merge` on 2026-10-15T06:41Z, not into `master`. Read the file. Do not treat #72 as landed on master.
 
 ---
 
@@ -118,9 +118,9 @@ Plain `cargo test` — there is **no `cargo nextest`**. CI wraps calls in `pytho
 | `update-star-history.yml` | weekly cron | star chart |
 | `discord-release.yml` | release published | announcement |
 
-**Known-bad CI signal:** `docs/CI-STATUS.md` (last regenerated 2026-10-12) records that `label-pr.yml` consumed all ~30 recent master runs, **masking real CI**. `ci.yml`, `windows-smoke`, `ios-testflight`, `freebsd-smoke` had not run in that window. **Treat hosted CI health as UNVERIFIED** until you trigger and read a run yourself. Do not report "CI is green" from a stale doc.
+**Known-bad CI signal:** `docs/CI-STATUS.md` (last regenerated 2026-10-12) blamed `label-pr.yml` for masking runs. That explanation is superseded. Trap 9 is the live measurement: dispatch returns HTTP 422 and no Actions run has been created since 2026-10-14. Do not report "CI is green" from a stale doc.
 
-**Local verification that IS trustworthy** (macOS arm64, at `a9b8ce357`):
+**Local verification recorded at `a9b8ce357`** (macOS arm64). Current HEAD is `2e39f501b`. Do not treat this table as a fresh run:
 
 | Check | Result |
 |---|---|
@@ -145,28 +145,38 @@ This does **not** replace CI: it is single-platform and skips the Windows/macOS/
 |---|---|---|
 | 1 | `check_code_size_budget.py` fails | **RESOLVED** by `a9b8ce357` (2026-10-15T23:50Z). Three files were shrunk: `bash.rs` 1502→1490, `tui/mod.rs` 2077→1944, `ui_inline_interactive.rs` 1384→1377. No baseline was edited. All 7 gate scripts PASS. |
 | 2 | fmt drift | **RESOLVED** by `826145e64` (11 files cleaned). Do not re-report as open. |
-| 3 | master CI re-run | **Partially closed locally** (re-verified on `a9b8ce357` after the rebase onto #82/#83/#84): `cargo check --workspace --all-targets` = **0 errors**, warning budget **0/0 PASS**, 7/7 gate scripts PASS, `cargo fmt --check` clean, TUI suite 22 failures matching pristine master. Still needs a real CI run to confirm the hosted-runner picture — see the masking note above. |
-| 4 | tag/bump | **needs operator signal + a version decision.** P7 plan says bump to `0.96.0-k1.0.0` — that is WRONG (upstream's version, not ours; see Trap 8). Correct options: `0.85.1-k1.2.0` (fork-only feature) or wait for PR #23 (upstream v0.88.0 sync, still OPEN) before any base bump. Also note: pushing a tag fires `release.yml` (binaries + signing), and hosted CI is quota-stuck (Trap 9), so a release workflow run would queue indefinitely. |
+| 3 | master CI re-run | **Blocked.** `POST /actions/workflows/ci.yml/dispatches` returned HTTP 422 `Actions has been disabled for this repository` at 2026-10-16T02:43Z. Newest Actions run is still 2026-10-14T22:00:58Z and queued. Local nine-gate results predate #86. This snapshot correction did not re-run them. |
+| 4 | tag/bump | **Needs an operator signal.** Do not tag `v0.96.0-k1.0.0` (Trap 8). A tag fires `release.yml`, and that workflow cannot start while dispatch returns 422 (Trap 9). |
 
-### Fork PRs — 13 open on `KooshaPari/Jcode`
+### Fork PRs: 12 open on `KooshaPari/Jcode` (2026-10-16T02:43Z)
 
-Non-draft:
+Non-draft, base `master`:
 
 | PR | Branch | Note |
 |---|---|---|
-| #8 | `feature/herdr-plugin-manifest` | mega-merge (+225k/−211k, 2254 files). `mergeable: UNKNOWN` — needs a rebase check. Chained-PR root. |
-| #23 | `feature/upstream-0.88-sync` | merge upstream v0.88.0. Conflicting. |
-| #25 | `codex/poke-context` | `/poke` context recovery. |
-| #34 | `feature/decollide-kcode-r2` | decollision Phase 2. **base is `feature/herdr-plugin-manifest`, not master** — stacked on #8, so #8 must land first. Currently MERGEABLE/CLEAN. |
-| #35 | `fix/kcode-small-terminal-resume` | tiny-terminal resume. Conflicting. |
+| #8 | `feature/herdr-plugin-manifest` | CONFLICTING against master. Not UNKNOWN. |
+| #23 | `feature/upstream-0.88-sync` | base is `master`. It does not chain behind #8. mergeable UNKNOWN. |
+| #25 | `codex/poke-context` | base `master`. mergeable UNKNOWN. |
 
-Draft: #10, #12, #14, #16, #18, #20, #22, #58.
+Open, but base is `feature/herdr-plugin-manifest` (the #8 branch), not master:
 
-### Open issues on the fork — 22
+| PR | Branch | Note |
+|---|---|---|
+| #35 | `fix/kcode-small-terminal-resume` | non-draft. mergeable UNKNOWN. |
+| #10 | `codex/acp-native-remote` | draft. mergeable UNKNOWN. |
+
+#34 (`feature/decollide-kcode-r2`) is **MERGED** 2026-10-16T01:04:41Z into `feature/herdr-plugin-manifest` at `adb5669e6`. That commit is not an ancestor of `origin/master`.
+
+Draft, base `master`: #12, #14, #16, #18, #20, #22.
+
+Draft, other base: #58 base `consolidation/v1-2026-10-12`, MERGEABLE.
+
+### Open issues on the fork: 23
 
 Highest-value, newest first:
 
-- **#65** CI fix: unused deps + herdr `report_state` reactor guard (2026-10-14)
+- **#87** git commit identity ignores repo/user git config and stamps `jcode@<host>.local` (2026-10-16). Recorded here. Not fixed in this snapshot correction.
+- **#65** CI fix: unused deps + herdr `report_state` reactor guard (2026-10-14). The unused-deps half is on master via #85. The reactor-guard half is not part of #85.
 - **#63** `build-meta`: channel segment dropped from build-time/runtime version env vars
 - **#43** tighter Phase 2 rebase: per-commit `cargo check` (the *replacement* for #33's 2260-commit rebase — read before attempting any decollision merge)
 - **#39** decompose 4 ratcheted budget baselines (panic +135%, 3 code-size files) — the ratchets no longer bite as guardrails
@@ -179,9 +189,9 @@ Highest-value, newest first:
 
 ### Branches and worktrees — read before you touch anything
 
-~80 branches on disk, of which ~60 are `remotes/upstream/*` tracking mirrors from the `f086f27f` rebase (never merged). Still in flight: `fix/ci-unused-deps`, `fix/build-meta-channel-preserve`, `chore/xirp-custom-harness-discovery-20261014`.
+~80 branches on disk, of which ~60 are `remotes/upstream/*` tracking mirrors from the `f086f27f` rebase (never merged). `fix/ci-unused-deps` is an older branch and is not the #85 machete fix. #85 is `30483c7f7` on master. Still not on master: `fix/build-meta-channel-preserve`, `chore/xirp-custom-harness-discovery-20261014`.
 
-**Already merged — do not re-apply.** The panic-refactor, ratchet, and picker lanes all landed on 2026-10-15. These branches exist locally and on the remote but their content is in `master`; they are listed only so nobody mistakes them for work in progress:
+**Map, not a landing proof.** #66-#71, #74, #77, #78, #80, and #82-#85 are on `master`. #72, #79, and #81 are not. Do not re-apply the master set. Do not merge the other three as-is:
 
 | Branch | PR | What it did |
 |---|---|---|
@@ -206,7 +216,7 @@ Local scripts on `master` last passed the nine ratchet/fmt gates. That is not ho
 
 Clearly stale (>2 weeks, safe to propose deletion but **never delete without operator say-so**): `codex/acp-native-remote` (2026-10-01), `chore/enable-dependabot` (2026-09-19), `fix/api-attach-preserve-cwd` (2026-09-05), `fix/fix-responses-api` (2026-09-11), `security/*`, `verify/panic-*`, `tmp-conflict-check`, `rescue/*`, `p25c/port-*`.
 
-**26 worktrees. 5 have uncommitted work:**
+**26 worktrees. 4 have uncommitted work (rechecked 2026-10-16T02:43Z):**
 
 | Worktree | Branch | Uncommitted |
 |---|---|---|
@@ -321,11 +331,11 @@ All agent work artifacts go in `docs/sessions/<YYYY-MM-DD-name>/`. Never create 
 
 ```bash
 cd ~/CodeProjects/Phenotype/repos/jcode
-git fetch origin && git status -sb          # expect: master...origin/master, clean, a9b8ce357
-git worktree list                            # 29 worktrees, 7 dirty — see §3
+git fetch origin && git status -sb          # expect: master...origin/master, clean, 2e39f501b
+git worktree list                            # 26 worktrees, 4 dirty. See section 3.
 gh pr list --repo KooshaPari/Jcode --state open
 gh issue list --repo KooshaPari/Jcode --state open
-python3 scripts/check_code_size_budget.py    # PASS as of a9b8ce357 (was the last known-failing gate)
+python3 scripts/check_code_size_budget.py    # last known PASS predates this doc edit. Re-run before trusting it.
 ```
 
 Then read, in order: this doc → `docs/sessions/2026-10-12-cleanup-and-release/00_HANDOFF.md` → `docs/CI-STATUS.md`.
@@ -349,7 +359,7 @@ Then read, in order: this doc → `docs/sessions/2026-10-12-cleanup-and-release/
 ## 8. Open questions for the operator
 
 1. ~~**Size budget:**~~ **RESOLVED** in `a9b8ce357` by shrinking all three files. No operator decision needed.
-2. **PR #8:** rebase the 2,254-file mega-merge first, or dispose of it? #23, #34, #35 all chain behind it.
+2. **PR #8:** CONFLICTING against master. #34 already merged into that branch, not into master. #35 and draft #10 still use that branch as their base. #23 bases on master directly.
 3. **Stale branches:** approve deleting the ~60 `remotes/upstream/*` mirrors and the >2-week-old branches? (Do not do this unilaterally.)
 4. **Dirty worktrees:** now 4, not 7 (3 vanished mid-session; their branches/commits survive, uncommitted edits possibly recoverable from 78 dangling objects). For the 4 survivors: salvage, commit, or discard? Their dirty files are: `decollide-kcode-r2` (4), `pr27-minor-review-fixes` (3), `wt-jcode-audit` (1), `jcode-rebase-v0.90` (1).
 5. **Release:** hold until (a) version decision — NOT `v0.96.0-k1.0.0` (that's upstream's number; see Trap 8), correct fork bump is `0.85.1-k1.2.0` or wait for PR #23; (b) this repo's Actions dispatch works again (Trap 9), else `release.yml` never starts; (c) hosted CI actually runs green once.
@@ -357,4 +367,4 @@ Then read, in order: this doc → `docs/sessions/2026-10-12-cleanup-and-release/
 
 ---
 
-*Recon sources: `01-build-test-ci-release.md`, `02-open-work-inventory.md` (this session); all `gh` and ratchet-baseline facts re-verified directly against `KooshaPari/Jcode` at 2026-10-15T21:50Z after catching upstream/fork contamination in the subagent output.*
+*Recon sources: `01-build-test-ci-release.md`, `02-open-work-inventory.md`. The 2026-10-15T21:50Z pass caught upstream/fork contamination. Section 1 was rechecked at 2026-10-16T02:43Z against `origin/master` `2e39f501b`.*
