@@ -181,3 +181,93 @@ fn test_model_picker_chords_do_not_pollute_filter() {
         );
     });
 }
+
+#[test]
+fn test_remote_model_picker_alt_chords_open_sub_pickers() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+        app.is_remote = true;
+        app.remote_available_entries = vec!["gpt-5.5".to_string()];
+        app.remote_model_options = vec![crate::provider::ModelRoute {
+            model: "gpt-5.5".to_string(),
+            provider: "OpenAI".to_string(),
+            api_method: "openai".to_string(),
+            available: true,
+            detail: String::new(),
+            cheapness: None,
+            usage: None,
+        }];
+
+        for c in "/model".chars() {
+            rt.block_on(app.handle_remote_key(
+                KeyCode::Char(c),
+                KeyModifiers::empty(),
+                &mut remote,
+            ))
+            .unwrap();
+        }
+        assert!(
+            app.inline_interactive_state
+                .as_ref()
+                .is_some_and(|p| p.preview),
+            "typed /model should open the picker preview"
+        );
+
+        // The remote event loop must route the preview chords to the picker,
+        // not drop them into the global ctrl/alt handling.
+        rt.block_on(app.handle_remote_key(
+            KeyCode::Char('s'),
+            KeyModifiers::ALT,
+            &mut remote,
+        ))
+        .expect("Alt+S should be handled in the remote path");
+        let picker = app
+            .inline_interactive_state
+            .as_ref()
+            .expect("swarm sub-picker should be open after Alt+S");
+        assert!(picker.entries.iter().any(|e| matches!(
+            e.action,
+            crate::tui::PickerAction::AgentModelChoice {
+                target: crate::tui::AgentModelTarget::Swarm,
+                ..
+            }
+        )));
+
+        // Back out, reopen the /model preview, then Alt+M for memory.
+        rt.block_on(app.handle_remote_key(
+            KeyCode::Esc,
+            KeyModifiers::empty(),
+            &mut remote,
+        ))
+        .unwrap();
+        for c in "/model".chars() {
+            rt.block_on(app.handle_remote_key(
+                KeyCode::Char(c),
+                KeyModifiers::empty(),
+                &mut remote,
+            ))
+            .unwrap();
+        }
+        rt.block_on(app.handle_remote_key(
+            KeyCode::Char('m'),
+            KeyModifiers::ALT,
+            &mut remote,
+        ))
+        .expect("Alt+M should be handled in the remote path");
+        let picker = app
+            .inline_interactive_state
+            .as_ref()
+            .expect("memory sub-picker should be open after Alt+M");
+        assert!(picker.entries.iter().any(|e| matches!(
+            e.action,
+            crate::tui::PickerAction::AgentModelChoice {
+                target: crate::tui::AgentModelTarget::Memory,
+                ..
+            }
+        )));
+    });
+}

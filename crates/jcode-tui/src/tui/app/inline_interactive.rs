@@ -2346,8 +2346,6 @@ impl App {
         // preview no longer steals Ctrl+B / Ctrl+F / Alt+F, which are the tmux
         // prefix and readline word-navigation keys users rely on while editing
         // the `/model` command line. Cycling favorites stays on Shift+Tab.
-        // Agent sub-pickers live on Alt+S / Alt+M (see
-        // `agent_model_chord_target`) because Ctrl+S is the input-stash chord.
         let is_default =
             modifiers.contains(KeyModifiers::CONTROL) && key_char_eq_ignore_ascii_case(code, 'o');
         let is_favorite =
