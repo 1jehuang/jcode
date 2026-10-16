@@ -39,6 +39,8 @@ fn sample_picker() -> crate::tui::InlineInteractiveState {
         column: 0,
         filter: String::new(),
         preview: false,
+        scoped_route_restore: Vec::new(),
+        effort_step: None,
         entries: vec![crate::tui::PickerEntry {
             name: "gpt-5.4".to_string(),
             options: vec![crate::tui::PickerOption {
@@ -79,9 +81,10 @@ fn model_suggestions_align_provider_and_method_columns() {
     picker.filtered.push(1);
     for preview in [false, true] {
         picker.preview = preview;
-        let lines = model_suggestion_lines(&picker, 3);
+        let lines = model_suggestion_lines(&picker, 4);
         let texts: Vec<String> = lines
             .iter()
+            .skip(usize::from(!preview))
             .take(2)
             .map(|line| {
                 line.spans
@@ -184,6 +187,8 @@ fn sample_account_picker(mixed_providers: bool) -> crate::tui::InlineInteractive
         column: 0,
         filter: String::new(),
         preview: false,
+        scoped_route_restore: Vec::new(),
+        effort_step: None,
         entries: models,
     }
 }
@@ -196,6 +201,8 @@ fn sample_agent_target_picker() -> crate::tui::InlineInteractiveState {
         column: 0,
         filter: String::new(),
         preview: false,
+        scoped_route_restore: Vec::new(),
+        effort_step: None,
         entries: vec![crate::tui::PickerEntry {
             name: "Swarm / subagent".to_string(),
             options: vec![crate::tui::PickerOption {
@@ -485,9 +492,8 @@ fn picker_entry_display_name_prettifies_known_model_families() {
     entry.name = "claude-opus-4-8".to_string();
     assert_eq!(picker_entry_display_name(entry), "Claude Opus 4.8");
 
-    entry.name = "gpt-5.5 (high)".to_string();
-    entry.effort = Some("high".to_string());
-    assert_eq!(picker_entry_display_name(entry), "GPT-5.5 (high)");
+    entry.name = "gpt-5.5".to_string();
+    assert_eq!(picker_entry_display_name(entry), "GPT-5.5");
 }
 
 #[test]

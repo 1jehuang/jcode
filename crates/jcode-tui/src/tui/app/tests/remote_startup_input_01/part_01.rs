@@ -716,13 +716,14 @@ fn test_model_picker_includes_copilot_models_in_remote_mode() {
 
         let model_names: Vec<&str> = picker.entries.iter().map(|m| m.name.as_str()).collect();
 
-        // Effort metadata (a process-global catalog) may expand a model into
-        // "name (effort)" rows, so match the bare name or an effort-suffixed row.
-        let has_model = |model: &str| {
+        // One row per model and route: reasoning levels are picked in a
+        // second step, never listed as "name (effort)" rows.
+        let has_model = |model: &str| model_names.contains(&model);
+        assert!(
+            !model_names.iter().any(|name| name.ends_with(')')),
+            "no effort-suffixed rows, got: {:?}",
             model_names
-                .iter()
-                .any(|name| *name == model || name.starts_with(&format!("{model} (")))
-        };
+        );
         assert!(
             has_model("claude-opus-4.6"),
             "picker should contain copilot model claude-opus-4.6, got: {:?}",

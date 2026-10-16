@@ -45,8 +45,8 @@ fn ssh_model_picker_uses_wire_catalog_without_local_cache() {
 use super::{
     REMOTE_MODEL_CATALOG_CACHE_MAX_AGE_SECS, REMOTE_MODEL_CATALOG_CACHE_VERSION,
     REMOTE_MODEL_CATALOG_MAX_DETAIL_BYTES, RemoteModelCatalogCache,
-    filter_routes_by_provider_allowlist, key_char_eq_ignore_ascii_case,
-    model_picker_effort_matches_default, model_picker_route_is_current,
+    filter_routes_by_provider_allowlist, fold_model_picker_usage_efforts,
+    key_char_eq_ignore_ascii_case, model_effort_step_preselection, model_picker_route_is_current,
     model_picker_route_is_default, model_picker_route_is_recommended,
     next_model_favorite_after_current, picker_is_runtime_model_picker,
     remote_model_catalog_cache_is_fresh, remote_model_catalog_cache_origin,
@@ -88,6 +88,127 @@ fn picker_option_with_method(provider: &str, api_method: &str) -> PickerOption {
 
 fn picker_option(provider: &str) -> PickerOption {
     picker_option_with_method(provider, "test")
+}
+
+#[test]
+fn named_compatible_route_opens_reasoning_level_step_when_enabled() {
+    let mut config = crate::config::Config::default();
+    config.providers.insert(
+        "custom".into(),
+        crate::config::NamedProviderConfig {
+            supports_reasoning_effort: Some(true),
+            ..Default::default()
+        },
+    );
+    let route = picker_option_with_method("custom", "openai-compatible:custom");
+    assert_eq!(
+        super::model_route_effort_levels_with_config("kimi-k3", &route, &config),
+        vec!["none", "low", "medium", "high", "max"]
+    );
+}
+
+struct LevelRejectingProvider;
+
+#[async_trait::async_trait]
+impl crate::provider::Provider for LevelRejectingProvider {
+    async fn complete(
+        &self,
+        _messages: &[crate::message::Message],
+        _tools: &[crate::message::ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> anyhow::Result<crate::provider::EventStream> {
+        unimplemented!("LevelRejectingProvider")
+    }
+    fn name(&self) -> &str {
+        "custom"
+    }
+    fn set_model(&self, _model: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn set_reasoning_effort(&self, effort: &str) -> anyhow::Result<()> {
+        if effort == "high" {
+            Ok(())
+        } else {
+            anyhow::bail!("Reasoning effort '{effort}' is not supported")
+        }
+    }
+    fn fork(&self) -> std::sync::Arc<dyn crate::provider::Provider> {
+        std::sync::Arc::new(LevelRejectingProvider)
+    }
+}
+
+#[test]
+fn rejected_reasoning_level_is_reported_instead_of_claimed() {
+    use crate::tui::TuiState;
+    let mut app = crate::tui::app::tests::create_test_app();
+    app.provider = std::sync::Arc::new(LevelRejectingProvider);
+    let mut entry = picker_entry("deepseek-v4", "custom", 0);
+    entry.options = vec![picker_option_with_method(
+        "custom",
+        "openai-compatible:custom",
+    )];
+    app.apply_model_picker_choice(entry.clone(), Some("xhigh".to_string()));
+    let last = app.display_messages.last().expect("error message");
+    assert!(
+        last.content.contains("`xhigh` was not applied"),
+        "{}",
+        last.content
+    );
+    assert!(
+        app.status_notice()
+            .is_some_and(|notice| notice.contains("level unchanged"))
+    );
+    app.apply_model_picker_choice(entry, Some("high".to_string()));
+    assert!(
+        app.status_notice()
+            .is_some_and(|notice| !notice.contains("level unchanged"))
+    );
+}
+
+#[test]
+fn named_profile_default_level_is_persisted_per_model() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", dir.path());
+    crate::config::Config::invalidate_cache();
+    std::fs::write(dir.path().join("config.toml"), "[providers.custom]\ntype = \"openai-compatible\"\nbase_url = \"https://example.test/v1\"\n").unwrap();
+    let config = crate::config::Config::load();
+    assert!(matches!(
+        super::persist_default_reasoning_effort(&config, Some("custom"), "kimi-k3", "high"),
+        Some(Ok(()))
+    ));
+    assert!(
+        super::persist_default_reasoning_effort(&config, Some("copilot"), "gpt-5", "high")
+            .is_none()
+    );
+    assert!(super::persist_default_reasoning_effort(&config, None, "m", "high").is_none());
+    crate::config::Config::invalidate_cache();
+    let saved = crate::config::Config::load();
+    assert_eq!(
+        super::named_profile_model_reasoning_effort(&saved, "custom", "kimi-k3").as_deref(),
+        Some("high")
+    );
+    match prev_home {
+        Some(home) => crate::env::set_var("JCODE_HOME", home),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+    crate::config::Config::invalidate_cache();
+}
+
+#[test]
+fn named_compatible_route_skips_level_step_when_disabled() {
+    let mut config = crate::config::Config::default();
+    config.providers.insert(
+        "custom".into(),
+        crate::config::NamedProviderConfig {
+            supports_reasoning_effort: Some(false),
+            ..Default::default()
+        },
+    );
+    let route = picker_option_with_method("custom", "openai-compatible:custom");
+    assert!(super::model_route_effort_levels_with_config("kimi-k3", &route, &config).is_empty());
 }
 
 #[test]
@@ -149,6 +270,8 @@ fn runtime_model_picker_scope_excludes_agent_model_picker() {
         column: 0,
         filter: String::new(),
         preview: false,
+        scoped_route_restore: Vec::new(),
+        effort_step: None,
     };
     let mut agent_entry = picker_entry("Swarm / subagent", "gpt-5 default", 0);
     agent_entry.action = PickerAction::AgentTarget(AgentModelTarget::Swarm);
@@ -160,6 +283,8 @@ fn runtime_model_picker_scope_excludes_agent_model_picker() {
         column: 0,
         filter: String::new(),
         preview: false,
+        scoped_route_restore: Vec::new(),
+        effort_step: None,
     };
 
     assert!(picker_is_runtime_model_picker(&runtime));
@@ -169,30 +294,20 @@ fn runtime_model_picker_scope_excludes_agent_model_picker() {
 #[test]
 fn favorite_cycle_reaches_every_favorite_across_fresh_picker_sorts() {
     let favorite_specs = [
-        ("claude-opus-5", "high", 2550),
-        ("claude-opus-4-8", "high", 950),
-        ("claude-opus-4-8", "medium", 0),
-        ("claude-opus-4-8", "low", 0),
+        ("claude-opus-5", "Anthropic", 2550),
+        ("claude-opus-4-8", "Anthropic", 950),
+        ("claude-opus-4-8", "Bedrock", 0),
+        ("claude-opus-4-8", "Copilot", 0),
     ];
-    let mut current_name = "claude-opus-5 (high)".to_string();
+    let mut current = ("claude-opus-5".to_string(), "Anthropic".to_string());
     let mut visited = Vec::new();
-
     for _ in 0..favorite_specs.len() {
-        // Rebuild and re-sort the picker exactly as each hotkey press does:
-        // the newly current model moves to row zero, while the other
-        // favorites retain their usage-based ranking.
         let mut entries: Vec<_> = favorite_specs
             .iter()
-            .map(|(model, effort, usage_score)| {
-                let effort_label = if *effort == "medium" { "med" } else { effort };
-                let mut entry = picker_entry(
-                    &format!("{model} ({effort_label})"),
-                    "Anthropic",
-                    *usage_score,
-                );
-                entry.effort = Some((*effort).to_string());
+            .map(|(model, provider, usage_score)| {
+                let mut entry = picker_entry(model, provider, *usage_score);
                 entry.is_favorite = true;
-                entry.is_current = entry.name == current_name;
+                entry.is_current = (model.to_string(), provider.to_string()) == current;
                 entry
             })
             .collect();
@@ -211,21 +326,25 @@ fn favorite_cycle_reaches_every_favorite_across_fresh_picker_sorts() {
             column: 0,
             filter: String::new(),
             preview: false,
+            scoped_route_restore: Vec::new(),
+            effort_step: None,
         };
-
         let next = next_model_favorite_after_current(&picker)
             .expect("a favorited model should be selectable");
-        current_name = picker.entries[picker.filtered[next]].name.clone();
-        visited.push(current_name.clone());
+        let entry = &picker.entries[picker.filtered[next]];
+        current = (
+            entry.name.clone(),
+            entry.active_option().unwrap().provider.clone(),
+        );
+        visited.push(format!("{} via {}", current.0, current.1));
     }
-
     assert_eq!(
         visited,
         [
-            "claude-opus-4-8 (high)",
-            "claude-opus-4-8 (low)",
-            "claude-opus-4-8 (med)",
-            "claude-opus-5 (high)",
+            "claude-opus-4-8 via Anthropic",
+            "claude-opus-4-8 via Bedrock",
+            "claude-opus-4-8 via Copilot",
+            "claude-opus-5 via Anthropic"
         ]
     );
 }
@@ -243,6 +362,8 @@ fn model_picker_fuzzy_filter_prefers_previously_selected_route() {
         column: 0,
         filter: "opus".to_string(),
         preview: false,
+        scoped_route_restore: Vec::new(),
+        effort_step: None,
     };
 
     App::apply_inline_interactive_filter(&mut picker);
@@ -263,6 +384,8 @@ fn model_picker_fuzzy_filter_tolerates_common_typos() {
         column: 0,
         filter: "codxe".to_string(),
         preview: false,
+        scoped_route_restore: Vec::new(),
+        effort_step: None,
     };
 
     App::apply_inline_interactive_filter(&mut picker);
@@ -283,6 +406,8 @@ fn model_picker_exact_name_outranks_longer_frequently_used_prefix() {
         column: 0,
         filter: "gpt-5".to_string(),
         preview: false,
+        scoped_route_restore: Vec::new(),
+        effort_step: None,
     };
 
     App::apply_inline_interactive_filter(&mut picker);
@@ -416,54 +541,47 @@ fn model_picker_default_route_marks_anthropic_api_config_provider() {
 }
 
 #[test]
-fn model_picker_effort_default_matches_only_stored_variant() {
-    // Anthropic: stored effort selects exactly one variant.
-    assert!(model_picker_effort_matches_default(
-        Some("claude-oauth"),
-        Some("high"),
-        Some("high"),
-        None,
-    ));
-    assert!(!model_picker_effort_matches_default(
-        Some("claude-oauth"),
-        Some("low"),
-        Some("high"),
-        None,
-    ));
-    // OpenAI uses its own stored effort.
-    assert!(model_picker_effort_matches_default(
-        Some("openai-oauth"),
-        Some("medium"),
-        None,
-        Some("medium"),
-    ));
-    assert!(!model_picker_effort_matches_default(
-        Some("openai-api"),
-        Some("high"),
-        None,
-        Some("medium"),
-    ));
-    // No stored effort: every variant keeps the legacy default marker.
-    assert!(model_picker_effort_matches_default(
-        Some("claude-oauth"),
-        Some("xhigh"),
-        None,
-        None,
-    ));
-    // Entries without an effort always match.
-    assert!(model_picker_effort_matches_default(
-        Some("claude-oauth"),
-        None,
-        Some("high"),
-        None,
-    ));
-    // Unknown provider families ignore stored efforts.
-    assert!(model_picker_effort_matches_default(
-        Some("openrouter"),
-        Some("high"),
-        Some("low"),
-        Some("low"),
-    ));
+fn model_effort_step_preselects_current_then_saved_then_high() {
+    let levels = ["none", "low", "medium", "high", "xhigh", "max"];
+    assert_eq!(
+        model_effort_step_preselection(&levels, Some("low"), Some("max")),
+        1
+    );
+    assert_eq!(
+        model_effort_step_preselection(&levels, None, Some("max")),
+        5
+    );
+    assert_eq!(model_effort_step_preselection(&levels, None, None), 3);
+    assert_eq!(
+        model_effort_step_preselection(&levels, Some("minimal"), Some("MAX")),
+        5
+    );
+    assert_eq!(model_effort_step_preselection(&["low"], None, None), 0);
+}
+
+#[test]
+fn model_picker_usage_folds_effort_keyed_history_into_model_rows() {
+    let route = picker_option_with_method("OpenAI", "openai-oauth");
+    let key = |effort: &str| format!("gpt-5.5\u{1f}OpenAI\u{1f}openai-oauth\u{1f}{effort}");
+    let mut store = super::ModelPickerUsageStore::default();
+    for (effort, count, secs) in [("high", 3, 10), ("low", 2, 30), ("", 1, 20)] {
+        store.selections.insert(
+            key(effort),
+            super::ModelPickerUsageEntry {
+                count,
+                last_selected_unix_secs: secs,
+            },
+        );
+    }
+    fold_model_picker_usage_efforts(&mut store);
+    assert_eq!(store.selections.len(), 1);
+    let entry = &store.selections[&super::model_picker_usage_key("gpt-5.5", &route)];
+    assert_eq!(entry.count, 6, "every level's picks count for the model");
+    assert_eq!(entry.last_selected_unix_secs, 30);
+    assert_eq!(
+        super::model_picker_usage_score(&store, "gpt-5.5", &route),
+        650
+    );
 }
 
 #[test]

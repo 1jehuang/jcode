@@ -40,8 +40,8 @@ pub(super) fn route_supports_reasoning_effort(api_method: &str) -> bool {
         | Method::OpenAIOAuth
         | Method::OpenAIApiKey
         | Method::OpenRouter => true,
-        // Named OpenAI-compatible profiles expose effort through `/effort`.
-        // Expanding them here creates one duplicate picker row per effort.
+        // Named profiles are checked against their configured capabilities in
+        // model_route_effort_levels, which opens a second-step level picker.
         Method::OpenAiCompatible { .. } => false,
         Method::JcodeSubscription
         | Method::GrokBuild
