@@ -468,6 +468,9 @@ cross_provider_failover = "countdown"
 # copilot_premium = "zero"
 # Enterprise hostname for Copilot login, token exchange, models, and inference.
 # copilot_enterprise_url = "example.ghe.com"
+# Browser for ChatGPT [web] models. Defaults to Google Chrome/Chromium.
+# Set it to the browser your ChatGPT account is signed into (e.g. Brave).
+# chatgpt_web_browser = "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"
 # Only list these providers in the /model picker (issue #460). Entries match
 # provider labels ("openai", "anthropic", "copilot", "openrouter", ...), route
 # api methods ("claude-oauth", "openai-compatible:myprofile"), or bare
