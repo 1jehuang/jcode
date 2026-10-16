@@ -775,6 +775,44 @@ fn test_maybe_show_catchup_after_history_adds_brief_page_and_marks_seen() {
 }
 
 #[test]
+fn test_catchup_brief_reveals_side_panel_the_user_hid() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.side_panel = test_side_panel_snapshot("plan", "Plan");
+        // The user dismissed the panel before opening Catch Up.
+        app.dismiss_side_panel();
+        assert!(app.side_panel.focused_page_id.is_none());
+
+        let mut target = Session::create(None, Some("hidden catchup".to_string()));
+        target.add_message(
+            crate::message::Role::User,
+            vec![crate::message::ContentBlock::Text {
+                text: "Check the release notes.".to_string(),
+                cache_control: None,
+            }],
+        );
+        target.mark_closed();
+        target.save().expect("save catchup session");
+        let target_id = target.id.clone();
+
+        app.begin_in_flight_catchup_resume(PendingCatchupResume {
+            target_session_id: target_id.clone(),
+            source_session_id: Some(app.session.id.clone()),
+            queue_position: None,
+            show_brief: true,
+        });
+        app.maybe_show_catchup_after_history(&target_id);
+
+        assert_eq!(
+            app.side_panel.focused_page_id.as_deref(),
+            Some("catchup"),
+            "an explicit Catch Up must show its brief"
+        );
+        assert!(!app.side_panel_user_hidden);
+    });
+}
+
+#[test]
 fn test_help_topic_shows_observe_command_details() {
     let mut app = create_test_app();
     app.input = "/help observe".to_string();
@@ -1471,6 +1509,42 @@ fn test_goals_show_command_focuses_goal_page() {
     } else {
         crate::env::remove_var("JCODE_HOME");
     }
+}
+
+#[test]
+fn test_initiatives_commands_reopen_a_closed_side_panel() {
+    with_temp_jcode_home(|| {
+        let project = tempfile::tempdir().expect("project dir");
+        let goal = crate::goal::create_goal(
+            crate::goal::GoalCreateInput {
+                title: "Ship mobile MVP".to_string(),
+                scope: crate::goal::GoalScope::Project,
+                ..crate::goal::GoalCreateInput::default()
+            },
+            Some(project.path()),
+        )
+        .expect("create goal");
+
+        let mut app = create_test_app();
+        app.session.working_dir = Some(project.path().display().to_string());
+        app.side_panel = test_side_panel_snapshot("plan", "Plan");
+        for command in [
+            "/initiatives".to_string(),
+            "/initiatives resume".to_string(),
+            format!("/initiatives show {}", goal.id),
+        ] {
+            // The user closed the panel, then asks for initiatives.
+            app.dismiss_side_panel();
+            assert!(!app.diff_pane_visible());
+            app.input = command.clone();
+            app.submit_input();
+            assert!(
+                app.diff_pane_visible() && app.side_panel.focused_page().is_some(),
+                "{command} must show the side panel the user closed"
+            );
+            assert!(!app.side_panel_user_hidden, "{command}");
+        }
+    });
 }
 
 #[test]
