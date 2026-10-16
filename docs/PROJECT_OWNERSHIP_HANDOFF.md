@@ -30,7 +30,7 @@
 |---|---|
 | Repo | `/Users/kooshapari/CodeProjects/Phenotype/repos/jcode` |
 | Branch | `master` |
-| HEAD | `2e39f501b` — *docs(handoff): record the real Actions stall and where #72/#79/#81 landed (#86)* |
+| Verified parent | `2e39f501b` (#86). This file's own commit is the next master commit. Confirm with `git rev-parse --short origin/master`. |
 | Sync | 0 ahead / 0 behind `origin/master` |
 | origin | `https://github.com/KooshaPari/Jcode.git` |
 | upstream | `https://github.com/1jehuang/jcode` |
@@ -120,7 +120,7 @@ Plain `cargo test` — there is **no `cargo nextest`**. CI wraps calls in `pytho
 
 **Known-bad CI signal:** `docs/CI-STATUS.md` (last regenerated 2026-10-12) blamed `label-pr.yml` for masking runs. That explanation is superseded. Trap 9 is the live measurement: dispatch returns HTTP 422 and no Actions run has been created since 2026-10-14. Do not report "CI is green" from a stale doc.
 
-**Local verification recorded at `a9b8ce357`** (macOS arm64). Current HEAD is `2e39f501b`. Do not treat this table as a fresh run:
+**Local verification recorded at `a9b8ce357`** (macOS arm64). The snapshot parent is `2e39f501b`. Do not treat this table as a fresh run:
 
 | Check | Result |
 |---|---|
@@ -331,7 +331,7 @@ All agent work artifacts go in `docs/sessions/<YYYY-MM-DD-name>/`. Never create 
 
 ```bash
 cd ~/CodeProjects/Phenotype/repos/jcode
-git fetch origin && git status -sb          # expect: master...origin/master, clean, 2e39f501b
+git fetch origin && git status -sb          # expect: master...origin/master, clean. Parent of this doc is 2e39f501b.
 git worktree list                            # 26 worktrees, 4 dirty. See section 3.
 gh pr list --repo KooshaPari/Jcode --state open
 gh issue list --repo KooshaPari/Jcode --state open
