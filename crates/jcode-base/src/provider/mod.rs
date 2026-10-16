@@ -11,6 +11,7 @@ pub use catalog_memo::bump_catalog_generation;
 use catalog_memo::{RoutesMemoEntry, catalog_generation, next_catalog_scope};
 pub mod catalog_scheduler;
 pub mod copilot;
+mod credit_failover;
 pub mod cursor;
 mod dispatch;
 pub mod external;
@@ -655,26 +656,21 @@ impl MultiProvider {
                 continue;
             }
 
-            let attempt = match mode {
-                CompletionMode::Unified { system } => {
-                    self.complete_on_provider(candidate, messages, tools, system, resume_session_id)
-                        .await
-                }
-                CompletionMode::Split {
-                    system_static,
-                    system_dynamic,
-                } => {
-                    self.complete_split_on_provider(
-                        candidate,
-                        messages,
-                        tools,
-                        system_static,
-                        system_dynamic,
-                        resume_session_id,
-                    )
-                    .await
-                }
-            };
+            let attempt = self
+                .complete_candidate_with_credit_failover(
+                    candidate,
+                    active,
+                    messages,
+                    tools,
+                    mode,
+                    resume_session_id,
+                )
+                .await;
+            if let Err(err) = &attempt
+                && parse_failover_prompt_message(&err.to_string()).is_some()
+            {
+                return attempt;
+            }
             let attempt = self.await_account_stream_start(candidate, attempt).await;
 
             match attempt {

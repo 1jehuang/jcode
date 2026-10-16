@@ -304,10 +304,17 @@ impl App {
         self.pending_automatic_failover_route = None;
         self.clear_pending_fallback_offer();
         let reason = Self::compact_provider_failure(&prompt.reason);
-        let manual_message = format!(
-            "{} unavailable: {}\nUse /model to switch to {} and resend.",
-            prompt.from_label, reason, prompt.to_label,
-        );
+        let manual_message = if prompt.target_route.is_none() && prompt.to_provider.contains(':') {
+            format!(
+                "{} unavailable: {}\nUse /model {} to switch and resend. Metered profiles require a manual switch.",
+                prompt.from_label, reason, prompt.to_provider,
+            )
+        } else {
+            format!(
+                "{} unavailable: {}\nUse /model to switch to {} and resend.",
+                prompt.from_label, reason, prompt.to_label,
+            )
+        };
 
         match crate::config::Config::load()
             .provider

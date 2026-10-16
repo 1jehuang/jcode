@@ -54,7 +54,66 @@ fn incomplete_turn_stop(stop_reason: Option<&str>) -> Option<ServerEvent> {
     }
 }
 
+/// What served the request when it started, to notice a route or login change.
+struct RouteAtRequestStart {
+    model: String,
+    provider: String,
+    credential: Option<jcode_provider_core::ResolvedCredential>,
+    oauth_email: Option<crate::protocol::ProviderOAuthEmail>,
+}
+
 impl Agent {
+    /// Detect a provider route change made during the request (a transparent
+    /// model fallback such as Anthropic's retired `claude-fable-5` ->
+    /// `claude-opus-4-8`, or a switch to another OpenAI-compatible profile
+    /// serving the same model) and resync the session and clients with a
+    /// `ModelChanged`, so the header, picker, and context budget reflect the
+    /// route the provider will use next. Runs on success and on every stream
+    /// error exit, because a failed turn still leaves the provider on the new
+    /// route.
+    fn sync_route_change_after_stream(
+        &mut self,
+        event_tx: &mpsc::UnboundedSender<ServerEvent>,
+        start: &RouteAtRequestStart,
+    ) {
+        let model_after_stream = self.provider.model();
+        let provider_after_stream = self.provider.display_name();
+        let route_changed =
+            model_after_stream != start.model || provider_after_stream != start.provider;
+        if route_changed {
+            logging::warn(&format!(
+                "Provider switched route mid-request: '{}' ({}) -> '{}' ({}) (resyncing session/UI)",
+                start.model, start.provider, model_after_stream, provider_after_stream
+            ));
+            self.session.model = Some(self.provider_model());
+            self.provider_runtime_state.apply(
+                crate::provider::ProviderStateEvent::RuntimeModelObserved {
+                    model: model_after_stream.clone(),
+                },
+            );
+            self.persist_session_best_effort("model fallback");
+        }
+        // Refresh authoritative credential identity after every upstream
+        // request, including auto credential resolution and OAuth failover.
+        let oauth_email_after_stream = crate::server::provider_oauth_email(self.provider.as_ref());
+        let credential_after_stream = self.provider.active_resolved_credential();
+        if route_changed
+            || credential_after_stream != start.credential
+            || oauth_email_after_stream != start.oauth_email
+        {
+            let _ = event_tx.send(ServerEvent::ModelChanged {
+                id: 0,
+                model: model_after_stream,
+                provider_name: Some(provider_after_stream),
+                context_window: Some(self.provider.context_window() as u64),
+                error: None,
+                resolved_credential: credential_after_stream,
+                provider_oauth_email: oauth_email_after_stream,
+                reasoning_effort: self.provider.reasoning_effort(),
+            });
+        }
+    }
+
     pub(super) async fn run_turn_streaming_mpsc(
         &mut self,
         event_tx: mpsc::UnboundedSender<ServerEvent>,
@@ -238,9 +297,14 @@ impl Agent {
             // model. Compare against this after the stream so we can emit a
             // `ModelChanged` and resync the UI/context-limit.
             let model_at_request_start = provider.model().to_string();
-            let credential_at_request_start = provider.active_resolved_credential();
-            let oauth_email_at_request_start =
-                crate::server::provider_oauth_email(provider.as_ref());
+            // OpenAI-compatible profiles can serve the same model id, so the
+            // model alone does not reveal a profile switch.
+            let route_at_request_start = RouteAtRequestStart {
+                model: model_at_request_start.clone(),
+                provider: provider.display_name(),
+                credential: provider.active_resolved_credential(),
+                oauth_email: crate::server::provider_oauth_email(provider.as_ref()),
+            };
             let resume_session_id = self.provider_session_id.clone();
             self.last_status_detail = None;
             let kv_request = kv_cache_request_event(
@@ -311,6 +375,7 @@ impl Agent {
                                         });
                                         continue;
                                     }
+                                    self.sync_route_change_after_stream(&event_tx, &route_at_request_start);
                                     return Err(e);
                                 }
                             }
@@ -513,6 +578,11 @@ impl Agent {
                             api_start,
                             vec![("mode", "mpsc".to_string()), ("error", err_str)],
                         );
+                        // A model fallback may have moved the provider before
+                        // this stream failed. Tell clients and persist it, or
+                        // they keep showing the old route while the next turn
+                        // goes to the new one.
+                        self.sync_route_change_after_stream(&event_tx, &route_at_request_start);
                         return Err(e);
                     }
                 };
@@ -1126,6 +1196,7 @@ impl Agent {
                                 ),
                             ],
                         );
+                        self.sync_route_change_after_stream(&event_tx, &route_at_request_start);
                         return Err(StreamError::new(message, retry_after_secs).into());
                     }
                 }
@@ -1241,40 +1312,7 @@ impl Agent {
             // requested model with a stale context-limit. Resync the session and
             // notify clients with a `ModelChanged` so the header, picker, and
             // context budget all reflect the model that actually served.
-            let model_after_stream = self.provider.model();
-            if model_after_stream != model_at_request_start {
-                logging::warn(&format!(
-                    "Provider switched model mid-request: '{}' -> '{}' (resyncing session/UI)",
-                    model_at_request_start, model_after_stream
-                ));
-                self.session.model = Some(self.provider_model());
-                self.provider_runtime_state.apply(
-                    crate::provider::ProviderStateEvent::RuntimeModelObserved {
-                        model: model_after_stream.clone(),
-                    },
-                );
-                self.persist_session_best_effort("model fallback");
-            }
-            // Refresh authoritative credential identity after every upstream
-            // request, including auto credential resolution and OAuth failover.
-            let oauth_email_after_stream =
-                crate::server::provider_oauth_email(self.provider.as_ref());
-            let credential_after_stream = self.provider.active_resolved_credential();
-            if model_after_stream != model_at_request_start
-                || credential_after_stream != credential_at_request_start
-                || oauth_email_after_stream != oauth_email_at_request_start
-            {
-                let _ = event_tx.send(ServerEvent::ModelChanged {
-                    id: 0,
-                    model: model_after_stream,
-                    provider_name: Some(self.provider.display_name()),
-                    context_window: Some(self.provider.context_window() as u64),
-                    error: None,
-                    resolved_credential: credential_after_stream,
-                    provider_oauth_email: oauth_email_after_stream,
-                    reasoning_effort: self.provider.reasoning_effort(),
-                });
-            }
+            self.sync_route_change_after_stream(&event_tx, &route_at_request_start);
 
             let had_tool_calls_before = !tool_calls.is_empty();
             let text_tool_recovery =

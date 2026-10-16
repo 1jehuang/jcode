@@ -1,7 +1,7 @@
 {
-  "total": 3714,
+  "total": 3715,
   "totals_by_pattern": {
-    "dot_ok": 1429,
+    "dot_ok": 1430,
     "let_underscore": 1355,
     "unwrap_or_default": 930
   },
@@ -1010,6 +1010,11 @@
       "dot_ok": 0,
       "let_underscore": 0,
       "unwrap_or_default": 2
+    },
+    "crates/jcode-base/src/provider/credit_failover.rs": {
+      "dot_ok": 1,
+      "let_underscore": 0,
+      "unwrap_or_default": 0
     },
     "crates/jcode-base/src/provider/image_clamp.rs": {
       "dot_ok": 4,
