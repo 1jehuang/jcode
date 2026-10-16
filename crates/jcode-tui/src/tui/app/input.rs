@@ -2,6 +2,8 @@
 
 #[path = "input/shell_commands.rs"]
 mod shell_commands;
+use super::input_images::attach_image;
+pub(super) use super::input_images::take_prepared_input;
 use shell_commands::*;
 
 use super::{
@@ -94,8 +96,14 @@ pub(super) fn extract_input_shell_command(input: &str) -> Option<&str> {
 
 pub(super) struct PreparedInput {
     pub raw_input: String,
+    // Expanded transport text excludes only explicitly owned image markers.
     pub expanded: String,
     pub images: Vec<(String, String)>,
+    pub image_markers: super::input_images::InputImageMarkers,
+    // Normal preparation saves expanded raw text for command classification.
+    // Legacy synthetic drafts fall back to raw_input, never transport text.
+    pub routing_input: Option<String>,
+    pub pasted_contents: Vec<String>,
 }
 
 // Roughly 500k English words at ~6 bytes/word including spaces. This is still
@@ -544,7 +552,11 @@ pub(super) fn handle_text_paste(app: &mut App, text: String) {
         insert_input_text(app, &text);
         return;
     }
-    if expand_matching_paste(app, &text) {
+    // Pasting over a selection replaces it (in `insert_input_text` below).
+    // Re-pasting identical text normally expands its earlier placeholder, but
+    // that edits text elsewhere in the draft and would leave the selection
+    // live, so a selection always takes the plain placeholder path.
+    if app.input_selection().is_none() && expand_matching_paste(app, &text) {
         return;
     }
 
@@ -581,10 +593,9 @@ fn expand_matching_paste(app: &mut App, text: &str) -> bool {
 
     app.follow_chat_bottom_for_typing();
     app.remember_input_undo_state();
-    app.input.replace_range(
-        placeholder_start..placeholder_start + placeholder.len(),
-        text,
-    );
+    app.remove_input_range(placeholder_start, placeholder_start + placeholder.len());
+    app.input.insert_str(placeholder_start, text);
+    app.input_images_inserted(placeholder_start, text.len(), None);
     app.cursor_pos = placeholder_start + text.len();
     app.pasted_contents.remove(content_index);
     app.reset_tab_completion();
@@ -917,13 +928,21 @@ fn insert_input_text_with_undo(app: &mut App, text: &str, typed: bool) {
     // Shift+Enter, rather than relying on individual key dispatchers to remember
     // to reconcile the transcript viewport.
     app.follow_chat_bottom_for_typing();
+    app.ensure_input_image_markers();
+
+    // Typing or pasting over a composer selection replaces it. Record a single
+    // undo step for the whole replacement so one Ctrl+Z restores the original.
+    let replaced_selection = app.replace_input_selection_for_insert();
 
     let at_end = app.cursor_pos == app.input.len();
 
     // A habitual space typed after an auto-inserted picker separator would
     // only add noise. Swallow it so command + space + filter still produces
     // a single separator.
-    if text == " " && at_end && matches!(app.input.trim_start(), "/login " | "/model " | "/models ")
+    if !replaced_selection
+        && text == " "
+        && at_end
+        && matches!(app.input.trim_start(), "/login " | "/model " | "/models ")
     {
         app.input_typing_undo = None;
         return;
@@ -934,7 +953,7 @@ fn insert_input_text_with_undo(app: &mut App, text: &str, typed: bool) {
         && app.input_typing_undo.is_some_and(|(last, end)| {
             end == app.cursor_pos && last.elapsed() < Duration::from_secs(1)
         });
-    if !same_burst {
+    if !replaced_selection && !same_burst {
         app.remember_input_undo_state();
     }
 
@@ -949,8 +968,10 @@ fn insert_input_text_with_undo(app: &mut App, text: &str, typed: bool) {
         app.cursor_pos = app.input.len();
     }
 
-    app.input.insert_str(app.cursor_pos, text);
+    let at = app.cursor_pos;
+    app.input.insert_str(at, text);
     app.cursor_pos += text.len();
+    app.input_images_inserted(at, text.len(), None);
     scrub_osc_color_replies(app);
 
     // Typing the final command character immediately arms picker filtering.
@@ -1167,8 +1188,7 @@ pub(super) fn handle_prompt_history_navigation(
                     .last()
                     .map(|prompt| {
                         app.remember_input_undo_state();
-                        app.history_draft =
-                            Some((app.input.clone(), app.cursor_pos.min(app.input.len())));
+                        app.history_draft = Some(app.take_input_draft());
                         app.input = prompt.clone();
                         app.cursor_pos = app.input.len();
                         app.reset_tab_completion();
@@ -1182,9 +1202,8 @@ pub(super) fn handle_prompt_history_navigation(
             KeyCode::Up => Some(current_index.saturating_sub(1)),
             KeyCode::Down if current_index + 1 < history.len() => Some(current_index + 1),
             KeyCode::Down => {
-                if let Some((draft, cursor_pos)) = app.history_draft.take() {
-                    app.input = draft;
-                    app.cursor_pos = cursor_pos;
+                if let Some(draft) = app.history_draft.take() {
+                    app.restore_input_draft(draft);
                 } else {
                     app.input.clear();
                     app.cursor_pos = 0;
@@ -1271,6 +1290,8 @@ pub(super) fn clear_input_for_escape(app: &mut App) {
         app.remember_input_undo_state();
     }
     app.input.clear();
+    app.pending_images.clear();
+    app.input_image_markers = Default::default();
     app.cursor_pos = 0;
     app.reset_tab_completion();
     app.sync_model_picker_preview_from_input();
@@ -1321,6 +1342,7 @@ pub(super) struct ComposerDraft {
     input: String,
     cursor_pos: usize,
     pending_images: Vec<(String, String)>,
+    image_markers: super::input_images::InputImageMarkers,
     pasted_contents: Vec<String>,
 }
 
@@ -1332,6 +1354,7 @@ pub(super) fn swap_in_queued_command(app: &mut App, command: String) -> Composer
         input: std::mem::replace(&mut app.input, command),
         cursor_pos: app.cursor_pos,
         pending_images: std::mem::take(&mut app.pending_images),
+        image_markers: std::mem::take(&mut app.input_image_markers),
         pasted_contents: std::mem::take(&mut app.pasted_contents),
     };
     app.cursor_pos = app.input.len();
@@ -1349,16 +1372,19 @@ pub(super) fn restore_composer_draft(app: &mut App, draft: ComposerDraft) {
         app.input = draft.input;
         app.cursor_pos = draft.cursor_pos.min(app.input.len());
         app.pending_images = draft.pending_images;
+        app.input_image_markers = draft.image_markers;
+        app.ensure_input_image_markers();
         app.pasted_contents = draft.pasted_contents;
         app.sync_model_picker_preview_from_input();
     } else {
         let expanded = expand_paste_placeholders_with(&draft.pasted_contents, &draft.input);
         app.record_prompt_history(&expanded);
         app.pending_images.extend(draft.pending_images);
+        app.ensure_input_image_markers();
     }
 }
 
-fn expand_paste_placeholders_with(pasted_contents: &[String], input: &str) -> String {
+pub(super) fn expand_paste_placeholders_with(pasted_contents: &[String], input: &str) -> String {
     let mut result = input.to_string();
     for content in pasted_contents.iter().rev() {
         let placeholder = paste_placeholder(content);
@@ -1415,6 +1441,7 @@ pub(super) fn retrieve_pending_message_for_edit(app: &mut App) -> bool {
     if !parts.is_empty() {
         app.input = parts.join("\n\n");
         app.cursor_pos = app.input.len();
+        app.ensure_input_image_markers();
         let count = parts.len();
         app.set_status_notice(format!(
             "Retrieved {} pending message{} for editing",
@@ -2009,12 +2036,15 @@ fn route_prompt_to_new_session_local(app: &mut App) -> bool {
     let prepared = take_prepared_input(app);
     let restored_raw = prepared.raw_input.clone();
     let restored_images = prepared.images.clone();
+    let restored_markers = prepared.image_markers.clone();
     match commands::launch_prompt_in_new_session_local(app, prepared.expanded, prepared.images) {
         Ok(_) => true,
         Err(error) => {
             app.input = restored_raw;
             app.cursor_pos = app.input.len();
             app.pending_images = restored_images;
+            app.input_image_markers = restored_markers;
+            app.ensure_input_image_markers();
             app.set_status_notice("Prompt launch failed");
             app.push_display_message(DisplayMessage::error(format!(
                 "Failed to launch prompt in a new session: {}",
@@ -2136,8 +2166,7 @@ pub(super) fn delete_input_to_start(app: &mut App) {
     if app.cursor_pos > 0 {
         app.remember_input_undo_state();
     }
-    app.input.drain(..app.cursor_pos);
-    app.cursor_pos = 0;
+    app.remove_input_range(0, app.cursor_pos);
     app.sync_model_picker_preview_from_input();
 }
 
@@ -2145,7 +2174,7 @@ pub(super) fn delete_input_to_end(app: &mut App) {
     if app.cursor_pos < app.input.len() {
         app.remember_input_undo_state();
     }
-    app.input.truncate(app.cursor_pos);
+    app.remove_input_range(app.cursor_pos, app.input.len());
     app.sync_model_picker_preview_from_input();
 }
 
@@ -2212,7 +2241,7 @@ pub(super) fn try_ctrl_d_forward_delete(app: &mut App) -> bool {
     }
     let next = crate::tui::core::next_char_boundary(&app.input, app.cursor_pos);
     app.remember_input_undo_state();
-    app.input.drain(app.cursor_pos..next);
+    app.remove_input_range(app.cursor_pos, next);
     app.reset_tab_completion();
     app.sync_model_picker_preview_from_input();
     true
@@ -2223,8 +2252,7 @@ pub(super) fn delete_input_word_back(app: &mut App) {
     if start < app.cursor_pos {
         app.remember_input_undo_state();
     }
-    app.input.drain(start..app.cursor_pos);
-    app.cursor_pos = start;
+    app.remove_input_range(start, app.cursor_pos);
     app.sync_model_picker_preview_from_input();
 }
 
@@ -2244,7 +2272,7 @@ pub(super) fn handle_alt_key(app: &mut App, code: KeyCode) -> bool {
             if app.cursor_pos < end {
                 app.remember_input_undo_state();
             }
-            app.input.drain(app.cursor_pos..end);
+            app.remove_input_range(app.cursor_pos, end);
             app.sync_model_picker_preview_from_input();
             true
         }
@@ -2871,8 +2899,7 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
             if app.cursor_pos > 0 {
                 let prev = crate::tui::core::prev_char_boundary(&app.input, app.cursor_pos);
                 app.remember_input_undo_state();
-                app.input.drain(prev..app.cursor_pos);
-                app.cursor_pos = prev;
+                app.remove_input_range(prev, app.cursor_pos);
                 app.reset_tab_completion();
                 app.sync_model_picker_preview_from_input();
             }
@@ -2882,7 +2909,7 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
             if app.cursor_pos < app.input.len() {
                 let next = crate::tui::core::next_char_boundary(&app.input, app.cursor_pos);
                 app.remember_input_undo_state();
-                app.input.drain(app.cursor_pos..next);
+                app.remove_input_range(app.cursor_pos, next);
                 app.reset_tab_completion();
                 app.sync_model_picker_preview_from_input();
             }
@@ -2955,6 +2982,7 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
                     // Queued follow-ups are text-only, so carry staged images
                     // back to the composer instead of dropping them silently.
                     app.pending_images.append(&mut app.interleave_images);
+                    app.ensure_input_image_markers();
                 }
                 app.interleave_images.clear();
                 followups.append(&mut app.queued_messages);
@@ -2994,22 +3022,6 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
     }
 }
 
-pub(super) fn take_prepared_input(app: &mut App) -> PreparedInput {
-    promote_dropped_images(app);
-    let raw_input = std::mem::take(&mut app.input);
-    app.record_prompt_history(&raw_input);
-    let expanded = expand_paste_placeholders(app, &raw_input);
-    app.pasted_contents.clear();
-    let images = std::mem::take(&mut app.pending_images);
-    app.cursor_pos = 0;
-    app.clear_input_undo_history();
-    PreparedInput {
-        raw_input,
-        expanded,
-        images,
-    }
-}
-
 pub(super) fn stage_local_interleave(
     app: &mut App,
     content: String,
@@ -3018,17 +3030,6 @@ pub(super) fn stage_local_interleave(
     app.interleave_message = Some(content);
     app.interleave_images = images;
     app.set_status_notice("⏭ Sending now (interleave)");
-}
-
-fn attach_image(app: &mut App, media_type: String, base64_data: String) {
-    let size_kb = base64_data.len() / 1024;
-    app.pending_images.push((media_type.clone(), base64_data));
-    let placeholder = format!("[image {}]", app.pending_images.len());
-    app.remember_input_undo_state();
-    app.input.insert_str(app.cursor_pos, &placeholder);
-    app.cursor_pos += placeholder.len();
-    app.sync_model_picker_preview_from_input();
-    app.set_status_notice(format!("Pasted {} ({} KB)", media_type, size_kb));
 }
 
 fn paste_placeholder(content: &str) -> String {
@@ -3142,6 +3143,12 @@ impl App {
         }
 
         if self.handle_onboarding_continue_prompt_key(code) {
+            return Ok(());
+        }
+
+        // Composer text selection (copy/cut/delete/extend) takes priority over
+        // the whole-line Ctrl+X, the Ctrl+C clear/quit, and plain arrow moves.
+        if super::input_selection::handle_input_selection_key(self, code, modifiers) {
             return Ok(());
         }
 
@@ -3865,6 +3872,11 @@ impl App {
 
     /// Submit input - just sets up message and flags, processing happens in next loop iteration
     pub(super) fn submit_input(&mut self) {
+        let routing_input = expand_paste_placeholders_with(&self.pasted_contents, &self.input);
+        self.submit_input_with_routing(routing_input);
+    }
+
+    pub(super) fn submit_input_with_routing(&mut self, mut routing_input: String) {
         // Connected SSH input is dispatched through the wire client, never the
         // local submit fallback (which reads skills and persists prompts).
         if crate::tui::is_ssh_remote() {
@@ -3880,16 +3892,20 @@ impl App {
             }
             return;
         }
-        promote_dropped_images(self);
+        if promote_dropped_images(self) {
+            routing_input = expand_paste_placeholders_with(&self.pasted_contents, &self.input);
+        }
         if self.activate_picker_from_preview() {
             return;
         }
 
+        self.ensure_input_image_markers();
+        let transport_text = self.input_without_owned_image_markers();
         let raw_input = std::mem::take(&mut self.input);
         // Persist to cross-session prompt history (no-op for slash/shell
         // commands, secret-intercept inputs, and oversized pastes).
         self.record_prompt_history(&raw_input);
-        let mut input = self.expand_paste_placeholders(&raw_input);
+        let mut input = self.expand_paste_placeholders(&transport_text);
         if let Some(notice) = input_exceeds_submit_limit(&input) {
             self.input = raw_input;
             self.cursor_pos = self.input.len();
@@ -3923,7 +3939,7 @@ impl App {
             return;
         }
 
-        let trimmed = input.trim();
+        let trimmed = routing_input.trim();
         let handled = super::commands_dispatch::dispatch_local_command(self, trimmed);
         if handled {
             let embedded = super::commands_dispatch::contains_registered_slash_command(trimmed);
@@ -3933,7 +3949,7 @@ impl App {
             return;
         }
 
-        if let Some(command) = extract_input_shell_command(&input) {
+        if let Some(command) = extract_input_shell_command(&routing_input) {
             self.push_display_message(DisplayMessage::user(raw_input));
 
             if command.is_empty() {
@@ -3967,15 +3983,18 @@ impl App {
         // File drops remain ordinary input. Registry-aware resolution supports
         // multi-word skill names without weakening that guard.
         let initial_snapshot = self.current_skills_snapshot();
-        let skill_invocation = parse_dropped_paths(&input)
+        let skill_invocation = parse_dropped_paths(&routing_input)
             .is_none()
-            .then(|| initial_snapshot.resolve_invocation(&input))
+            .then(|| initial_snapshot.resolve_invocation(&routing_input))
             .flatten();
 
         // Check for skill invocation.
         if let Some(invocation) = skill_invocation {
             let skill_name = invocation.name.to_string();
-            let trailing_prompt = invocation.prompt.map(str::to_string);
+            let trailing_prompt = initial_snapshot
+                .resolve_invocation(&input)
+                .and_then(|invocation| invocation.prompt)
+                .map(str::to_string);
             let mut skill = initial_snapshot.get(&skill_name).cloned();
 
             // Remote/minimal TUI clients may start with an empty skill snapshot, and
@@ -3998,10 +4017,10 @@ impl App {
                     title: None,
                     tool_data: None,
                 });
-                if let Some(prompt) = trailing_prompt {
-                    input = prompt;
-                } else {
-                    return;
+                match trailing_prompt {
+                    Some(prompt) => input = prompt,
+                    None if self.pending_images.is_empty() => return,
+                    None => input.clear(),
                 }
             } else {
                 // Distinguish an endorsed-but-not-installed skill from a
@@ -4036,10 +4055,8 @@ impl App {
         // Leaving the preview should happen as soon as the user acts on it.
         self.onboarding_preview_mode = false;
 
-        // Add the expanded user message to the transcript. The composer remains compact
-        // while editing, but sent turns should show the actual pasted content.
-        // Remember the typed prompt so we can restore it to the input box if this
-        // turn fails (e.g. "token refresh needed"), instead of dropping it.
+        // Keep the raw draft for failure recovery. Transport expands pastes
+        // and excludes only explicitly owned attachment marker text.
         self.last_submitted_input = Some(raw_input.clone());
 
         // See `stage_turn_for_remote_tick_loop`: a remote client must never

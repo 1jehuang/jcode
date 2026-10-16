@@ -167,6 +167,7 @@ impl App {
                 self.pending_images.push(image);
             }
         }
+        self.ensure_input_image_markers();
     }
 
     pub(super) fn cancel_pending_provider_failover(&mut self, notice: impl Into<String>) {

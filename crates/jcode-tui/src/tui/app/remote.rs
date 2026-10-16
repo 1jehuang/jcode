@@ -54,9 +54,9 @@ use workspace::{handle_workspace_command, handle_workspace_navigation_key};
 pub(super) use input_dispatch::{
     apply_remote_transcript_event, apply_transcript_event, begin_remote_send,
     begin_remote_split_launch, finish_remote_split_launch, history_matches_pending_startup_prompt,
-    route_prepared_input_to_new_remote_session, stage_turn_for_remote_tick_loop,
-    submit_prepared_remote_input, submit_remote_slash_input, submit_remote_voice_transcript,
-    submit_voice_transcript,
+    restore_prepared_remote_input, route_prepared_input_to_new_remote_session,
+    stage_turn_for_remote_tick_loop, submit_prepared_remote_input, submit_remote_slash_input,
+    submit_remote_voice_transcript, submit_voice_transcript,
 };
 pub(super) use key_handling::{
     handle_remote_char_input, handle_remote_key, handle_remote_key_event, send_interleave_now,
@@ -2064,6 +2064,10 @@ fn handle_disconnected_key_internal(
         return Ok(());
     }
 
+    if super::input_selection::handle_input_selection_key(app, code, modifiers) {
+        return Ok(());
+    }
+
     if handle_ctrl_kill_to_end(app, code, modifiers) {
         return Ok(());
     }
@@ -2173,8 +2177,7 @@ fn handle_disconnected_key_internal(
             if app.cursor_pos > 0 {
                 let prev = super::super::core::prev_char_boundary(&app.input, app.cursor_pos);
                 app.remember_input_undo_state();
-                app.input.drain(prev..app.cursor_pos);
-                app.cursor_pos = prev;
+                app.remove_input_range(prev, app.cursor_pos);
                 app.reset_tab_completion();
                 app.sync_model_picker_preview_from_input();
             }
@@ -2183,7 +2186,7 @@ fn handle_disconnected_key_internal(
             if app.cursor_pos < app.input.len() {
                 let next = super::super::core::next_char_boundary(&app.input, app.cursor_pos);
                 app.remember_input_undo_state();
-                app.input.drain(app.cursor_pos..next);
+                app.remove_input_range(app.cursor_pos, next);
                 app.reset_tab_completion();
                 app.sync_model_picker_preview_from_input();
             }
