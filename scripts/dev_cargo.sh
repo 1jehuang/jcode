@@ -80,6 +80,9 @@ start_rust_action_log() {
 
 record_rust_action_log() {
   local exit_code="$1"
+  # An EXIT trap also runs after a failed Cargo command. Disable errexit
+  # inside this best-effort logger without changing the original exit status.
+  set +e
   [[ -n "$rust_action_log_started_ns" && -n "$rust_action_log_path" ]] || return 0
   trap - EXIT
 
