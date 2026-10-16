@@ -143,26 +143,42 @@ fn test_disconnected_key_handler_runs_effort_locally() {
 
 #[test]
 fn test_disconnected_key_handler_runs_model_picker_locally() {
-    let mut app = create_test_app();
-    configure_test_remote_models(&mut app);
-    // OpenAI models are effort-expanded into one entry per reasoning effort,
-    // and the "current" entry only matches when the session's effort matches.
-    app.remote_reasoning_effort = Some("high".to_string());
-    app.input = "/model".to_string();
-    app.cursor_pos = app.input.len();
+    // The current-model preselection reads the config/auth state, so a
+    // concurrent test's JCODE_HOME or ambient profile env window can swap the
+    // verdict (claude-opus-4.6 instead of the gpt-5.3-codex route). Isolate
+    // under the env lock with a temp home like the other picker tests.
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        configure_test_remote_models(&mut app);
+        // configure_test_remote_models leaves remote_model_options empty, so
+        // the picker hydrates the on-disk catalog cache. A lockless test's
+        // env-guard drop can repoint JCODE_HOME at the shared home mid-window,
+        // and the shared home may hold a catalog cache persisted by another
+        // remote-mode test (ghost models like Copilot claude-opus-4.6), which
+        // would replace the configured routes and break the preselection
+        // assert. Seed the placeholder routes explicitly (identical to what
+        // the picker builds from remote_available_entries) so hydration
+        // short-circuits and the test only ever sees its own configuration.
+        app.remote_model_options = app.build_remote_model_routes_fallback();
+        // OpenAI models are effort-expanded into one entry per reasoning effort,
+        // and the "current" entry only matches when the session's effort matches.
+        app.remote_reasoning_effort = Some("high".to_string());
+        app.input = "/model".to_string();
+        app.cursor_pos = app.input.len();
 
-    remote::handle_disconnected_key(&mut app, KeyCode::Enter, KeyModifiers::empty()).unwrap();
+        remote::handle_disconnected_key(&mut app, KeyCode::Enter, KeyModifiers::empty()).unwrap();
 
-    assert!(app.input.is_empty());
-    assert!(app.queued_messages().is_empty());
-    let picker = app
-        .inline_interactive_state
-        .as_ref()
-        .expect("model picker should open");
-    assert!(!picker.entries.is_empty());
-    let selected = &picker.entries[picker.selected];
-    assert_eq!(selected.name, "gpt-5.3-codex (high)");
-    assert!(selected.is_current, "current model should be preselected");
+        assert!(app.input.is_empty());
+        assert!(app.queued_messages().is_empty());
+        let picker = app
+            .inline_interactive_state
+            .as_ref()
+            .expect("model picker should open");
+        assert!(!picker.entries.is_empty());
+        let selected = &picker.entries[picker.selected];
+        assert_eq!(selected.name, "gpt-5.3-codex (high)");
+        assert!(selected.is_current, "current model should be preselected");
+    });
 }
 
 #[test]
