@@ -376,24 +376,31 @@ fn test_model_command_provider_suggestions_rank_matching_provider_prefix() {
 
 #[test]
 fn test_model_command_provider_suggestions_normalize_bare_openai_model_to_openrouter_catalog_id() {
-    let (app, _set_model_calls) = create_openrouter_spec_capture_test_app();
+    // Route catalog reads the ambient named-profile env like the picker
+    // does; keep the window free of it.
+    with_temp_jcode_home(|| {
+        let (app, _set_model_calls) = create_openrouter_spec_capture_test_app();
 
-    let suggestions = app.get_suggestions_for("/model gpt-5.4@op");
-    assert_eq!(
-        suggestions.first().map(|(cmd, _)| cmd.as_str()),
-        Some("/model openai/gpt-5.4@OpenAI")
-    );
+        let suggestions = app.get_suggestions_for("/model gpt-5.4@op");
+        assert_eq!(
+            suggestions.first().map(|(cmd, _)| cmd.as_str()),
+            Some("/model openai/gpt-5.4@OpenAI")
+        );
+    });
 }
 
 #[test]
 fn test_model_command_provider_suggestions_include_auto_for_normalized_bare_openai_model() {
-    let (app, _set_model_calls) = create_openrouter_spec_capture_test_app();
+    // Same ambient-profile hazard as the normalize test above.
+    with_temp_jcode_home(|| {
+        let (app, _set_model_calls) = create_openrouter_spec_capture_test_app();
 
-    let suggestions = app.get_suggestions_for("/model gpt-5.4@");
-    let commands: Vec<&str> = suggestions.iter().map(|(cmd, _)| cmd.as_str()).collect();
+        let suggestions = app.get_suggestions_for("/model gpt-5.4@");
+        let commands: Vec<&str> = suggestions.iter().map(|(cmd, _)| cmd.as_str()).collect();
 
-    assert!(commands.contains(&"/model openai/gpt-5.4@auto"));
-    assert!(commands.contains(&"/model openai/gpt-5.4@OpenAI"));
+        assert!(commands.contains(&"/model openai/gpt-5.4@auto"));
+        assert!(commands.contains(&"/model openai/gpt-5.4@OpenAI"));
+    });
 }
 
 #[test]
