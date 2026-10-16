@@ -383,6 +383,20 @@ test('a placeholder is only sent while the network hook is armed, and the click 
   assert.equal(result.deferred,true); assert.equal(f.submits(),0,'click waits for the next task');
   timers.forEach(cb=>cb()); assert.equal(f.submits(),1);
 });
+test('a dropped stream is reported as interrupted, not as a server rejection',async()=>{
+  // "BodyStreamBuffer was aborted": the connection or the page's copy dropped
+  // mid-answer. ChatGPT keeps generating, so jcode must read the transcript.
+  const f=fixture(); const placeholder='jcode turn jcode-x1';
+  const partial='event: delta\ndata: '+JSON.stringify({v:{message:{id:'a',author:{role:'assistant'},content:{content_type:'text',parts:['1 2 3']},status:'in_progress',recipient:'all',end_turn:null,metadata:{}}}})+'\n\n';
+  const bytes=new TextEncoder().encode(partial);
+  const globals={ fetch: async () => new Response(new ReadableStream({ start(c){ c.enqueue(bytes); c.error(new DOMException('BodyStreamBuffer was aborted','AbortError')); } }), { status: 200 }) };
+  await run({op:'arm_send',key:'jcode-x1',text:'P',placeholder},f,{globals});
+  await (await globals.fetch('https://chatgpt.com/backend-api/f/conversation',{method:'POST',body:sendBody(placeholder)})).text().catch(()=>{}); await settle();
+  const state=await run({op:'stream',key:'jcode-x1'},f,{globals});
+  assert.equal(state.error,null,'a dropped connection is not a rejection');
+  assert.equal(state.done,true); assert.equal(state.complete,false);
+  assert.match(state.interrupted,/aborted/);
+});
 test('stream reports HTTP rejections such as unusual-activity blocks',async()=>{
   const f=fixture();
   const globals={ fetch: async () => sseResponse('{"detail":"Unusual activity has been detected"}',{status:403}) };

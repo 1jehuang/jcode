@@ -64,7 +64,7 @@
     "crates/jcode-provider-doctor/src/provider_e2e.rs": 2728,
     "crates/jcode-provider-gemini-runtime/src/lib.rs": 1267,
     "crates/jcode-provider-metadata/src/catalog.rs": 1359,
-    "crates/jcode-provider-openai-runtime/src/chatgpt_web.rs": 1879,
+    "crates/jcode-provider-openai-runtime/src/chatgpt_web.rs": 1887,
     "crates/jcode-provider-openai-runtime/src/lib.rs": 1587,
     "crates/jcode-provider-openai-runtime/src/openai_provider_impl.rs": 1429,
     "crates/jcode-provider-openai-runtime/src/openai_stream_runtime.rs": 2055,
