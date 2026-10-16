@@ -103,16 +103,10 @@ pub(super) fn save_agent_model_override(
     cfg.save()
 }
 
+/// The model id of a model row. Rows no longer carry an effort suffix (the
+/// level is picked in a second step), so the name is the id.
 pub(super) fn model_entry_base_name(entry: &PickerEntry) -> String {
-    if entry.effort.is_some() {
-        entry
-            .name
-            .rsplit_once(" (")
-            .map(|(base, _)| base.to_string())
-            .unwrap_or_else(|| entry.name.clone())
-    } else {
-        entry.name.clone()
-    }
+    entry.name.clone()
 }
 
 pub(super) fn openrouter_route_model_id(model: &str) -> String {
@@ -315,8 +309,8 @@ mod tests {
         ] {
             for label in ["work", "personal", "research"] {
                 let option = route(provider, &format!("{base}@{label}"));
+                // Model rows carry no effort suffix; the level is a second step.
                 let mut entry = entry(model, option.clone());
-                entry.name = format!("{model} (high)");
                 entry.effort = Some("high".into());
                 let expected = format!("{base}@{label}:{model}");
                 assert_eq!(picker_route_model_spec(&entry, &option), expected);

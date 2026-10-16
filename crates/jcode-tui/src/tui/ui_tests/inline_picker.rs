@@ -59,6 +59,8 @@ fn model_picker_state() -> TestState {
             column: 0,
             filter: String::new(),
             preview: false,
+            scoped_route_restore: Vec::new(),
+            effort_step: None,
             entries: vec![model_picker_entry()],
         }),
         ..Default::default()
@@ -240,13 +242,69 @@ fn model_suggestions_show_focused_filter_and_route_focus() {
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.contains("Filter: gpt"), "{text}");
+    assert!(text.contains("Search: gpt"), "{text}");
+    assert!(text.contains("Provider: all providers"), "{text}");
     assert!(text.contains("↑↓ route"), "{text}");
     assert!(
-        lines[0]
+        lines[1]
             .spans
             .iter()
             .any(|span| span.content.contains("openai")
                 && span.style.add_modifier.contains(Modifier::UNDERLINED))
+    );
+}
+
+#[test]
+fn model_effort_step_names_the_model_and_lists_levels() {
+    let state = model_picker_state();
+    let parent = state.inline_interactive_state.clone().unwrap();
+    let level = |effort: &str, name: &str| crate::tui::PickerEntry {
+        name: name.to_string(),
+        options: Vec::new(),
+        is_current: effort == "low",
+        recommended: effort == "high",
+        effort: Some(effort.to_string()),
+        ..model_picker_entry()
+    };
+    let step = crate::tui::InlineInteractiveState {
+        kind: crate::tui::PickerKind::Model,
+        entries: vec![
+            level("low", "low"),
+            level("medium", "med"),
+            level("high", "high"),
+        ],
+        filtered: vec![0, 1, 2],
+        selected: 2,
+        column: 0,
+        filter: String::new(),
+        preview: false,
+        scoped_route_restore: Vec::new(),
+        effort_step: Some(Box::new(crate::tui::ModelEffortStep {
+            model: model_picker_entry(),
+            parent,
+            save_default: false,
+        })),
+    };
+
+    let lines = crate::tui::ui::inline_interactive_ui::model_suggestion_lines(&step, 10);
+    let text: Vec<String> = lines.iter().map(ToString::to_string).collect();
+
+    assert!(
+        text[0].contains("Reasoning for GPT-5.4") && text[0].contains("via openai"),
+        "{text:?}"
+    );
+    assert!(
+        text[1].contains("low") && text[1].contains("current"),
+        "{text:?}"
+    );
+    assert!(text[2].contains("med"), "{text:?}");
+    assert!(
+        text[3].contains("▸ high") && text[3].contains("★"),
+        "{text:?}"
+    );
+    assert!(text[4].contains("Esc back to models"), "{text:?}");
+    assert!(
+        !text.iter().any(|line| line.contains("Search:")),
+        "the level step has no search box: {text:?}"
     );
 }

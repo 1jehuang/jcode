@@ -217,7 +217,10 @@ impl App {
             .inline_interactive_state
             .as_ref()
             .map(|picker| {
-                picker.kind == PickerKind::Login && picker.filter.is_empty() && picker.selected == 0
+                (picker.kind == PickerKind::Login
+                    && picker.filter.is_empty()
+                    && picker.selected == 0)
+                    || super::picker_enter_should_focus_model_browser(picker)
             })
             .unwrap_or(false)
         {
