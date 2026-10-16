@@ -183,6 +183,56 @@ fn test_model_picker_chords_do_not_pollute_filter() {
 }
 
 #[test]
+fn test_model_picker_preview_keeps_ctrl_s_as_input_stash() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.remote_available_entries = vec!["gpt-5.5".to_string()];
+        app.remote_model_options = vec![crate::provider::ModelRoute {
+            model: "gpt-5.5".to_string(),
+            provider: "OpenAI".to_string(),
+            api_method: "openai".to_string(),
+            available: true,
+            detail: String::new(),
+            cheapness: None,
+            usage: None,
+        }];
+
+        // Type `/model` so the preview is open with a draft behind it.
+        for c in "/model".chars() {
+            app.handle_key(KeyCode::Char(c), KeyModifiers::empty()).unwrap();
+        }
+        let picker = app
+            .inline_interactive_state
+            .as_ref()
+            .expect("typing /model should open the picker preview");
+        assert!(picker.preview);
+
+        // Ctrl+S must keep its global meaning while the preview is open:
+        // stash the draft, never open a sub-picker, never type into the
+        // filter. This is the muscle-memory collision the rebind fixed.
+        app.handle_key(KeyCode::Char('s'), KeyModifiers::CONTROL).unwrap();
+        let picker = app
+            .inline_interactive_state
+            .as_ref()
+            .expect("preview must stay open after Ctrl+S");
+        assert!(picker.filter.is_empty(), "Ctrl+S must not type into the filter");
+        assert!(
+            !picker.entries.iter().any(|e| matches!(
+                e.action,
+                crate::tui::PickerAction::AgentModelChoice { .. }
+            )),
+            "Ctrl+S must not open an agent sub-picker"
+        );
+        assert!(
+            app.stashed_input.is_some(),
+            "Ctrl+S with the preview open must stash the draft"
+        );
+        assert_eq!(app.input(), "");
+    });
+}
+
+#[test]
 fn test_remote_model_picker_alt_chords_open_sub_pickers() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();

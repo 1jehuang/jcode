@@ -303,6 +303,21 @@ mod tests {
     }
 
     #[test]
+    fn agent_model_chord_targets_macos_option_chars() {
+        // macOS terminals often deliver Option+S / Option+M as the inserted
+        // character (ß / µ) with no ALT modifier; the fallback must still
+        // resolve the chord.
+        assert_eq!(
+            agent_model_chord_target(KeyCode::Char('ß'), KeyModifiers::empty()),
+            Some(AgentModelTarget::Swarm)
+        );
+        assert_eq!(
+            agent_model_chord_target(KeyCode::Char('µ'), KeyModifiers::empty()),
+            Some(AgentModelTarget::Memory)
+        );
+    }
+
+    #[test]
     fn agent_model_chord_ignores_ctrl_and_plain_keys() {
         // Ctrl+S must stay the input-stash chord, not the swarm picker.
         assert_eq!(
