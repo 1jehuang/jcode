@@ -3579,6 +3579,7 @@ dependencies = [
  "jcode-core",
  "jcode-selfdev-types",
  "jcode-storage",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",

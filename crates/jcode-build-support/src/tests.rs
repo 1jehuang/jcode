@@ -22,6 +22,28 @@ fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
     result
 }
 
+#[test]
+fn daily_prune_retries_after_manifest_is_repaired() {
+    with_temp_jcode_home(|| {
+        let previous = std::env::var_os(version_gc::KEEP_VERSIONS_ENV);
+        jcode_core::env::set_var(version_gc::KEEP_VERSIONS_ENV, "1");
+        let dir = builds_dir().unwrap();
+        let versions = dir.join("versions");
+        std::fs::create_dir_all(&versions).unwrap();
+        let manifest = manifest_path().unwrap();
+        std::fs::write(&manifest, b"invalid manifest").unwrap();
+        version_gc::prune_old_versions();
+        assert!(!dir.join("versions-prune.stamp").exists());
+        std::fs::write(&manifest, b"{}").unwrap();
+        version_gc::prune_old_versions();
+        assert!(dir.join("versions-prune.stamp").exists());
+        match previous {
+            Some(value) => jcode_core::env::set_var(version_gc::KEEP_VERSIONS_ENV, value),
+            None => jcode_core::env::remove_var(version_gc::KEEP_VERSIONS_ENV),
+        }
+    });
+}
+
 fn create_git_repo_fixture() -> tempfile::TempDir {
     let temp = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir_all(temp.path().join(".git")).expect("create .git dir");
