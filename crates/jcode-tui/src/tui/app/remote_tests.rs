@@ -1268,3 +1268,85 @@ fn history_restore_renders_swarm_deliveries_as_one_row() {
 }
 
 include!("remote_tests/recall_cancellation.rs");
+
+#[test]
+fn ask_user_tool_done_drops_the_matching_dead_chooser() {
+    let mut app = create_test_app();
+    let mut decision = crate::tui::app::PendingDecision {
+        request_id: "decision-call-42".to_string(),
+        question: "Deploy now?".to_string(),
+        options: vec![("Yes".to_string(), None), ("No".to_string(), None)],
+        selected: 0,
+        answer_draft: String::new(),
+    };
+    decision.selected = 0;
+    app.pending_decision = Some(decision);
+
+    // Server-side timeout auto-picked option 1 and the ask_user tool call
+    // completed without any client answer; ToolDone must retire the card.
+    let mut remote = crate::tui::backend::ReplayRemoteState::default();
+    super::server_event_handlers::handle_tool_done(
+        &mut app,
+        &mut remote,
+        "call-42".to_string(),
+        "ask_user".to_string(),
+        "Decision: ...\nNo answer within the configured timeout; auto-picked option 1.\n"
+            .to_string(),
+        None,
+    );
+
+    assert!(
+        app.pending_decision.is_none(),
+        "ToolDone for the ask_user call must drop its dead chooser"
+    );
+}
+
+#[test]
+fn unrelated_tool_done_keeps_the_pending_chooser() {
+    let mut app = create_test_app();
+    app.pending_decision = Some(crate::tui::app::PendingDecision {
+        request_id: "decision-call-7".to_string(),
+        question: "Deploy now?".to_string(),
+        options: vec![("Yes".to_string(), None), ("No".to_string(), None)],
+        selected: 0,
+        answer_draft: String::new(),
+    });
+
+    let mut remote = crate::tui::backend::ReplayRemoteState::default();
+    super::server_event_handlers::handle_tool_done(
+        &mut app,
+        &mut remote,
+        "other-call".to_string(),
+        "bash".to_string(),
+        "done".to_string(),
+        None,
+    );
+
+    assert!(app.pending_decision.is_some());
+}
+
+#[test]
+fn ask_user_tool_done_for_a_different_call_keeps_the_chooser() {
+    let mut app = create_test_app();
+    app.pending_decision = Some(crate::tui::app::PendingDecision {
+        request_id: "decision-call-7".to_string(),
+        question: "Deploy now?".to_string(),
+        options: vec![("Yes".to_string(), None), ("No".to_string(), None)],
+        selected: 0,
+        answer_draft: String::new(),
+    });
+
+    // Two ask_user calls in one turn (batch/subagent): the ToolDone for
+    // the first must not retire the second's chooser.
+    let mut remote = crate::tui::backend::ReplayRemoteState::default();
+    super::server_event_handlers::handle_tool_done(
+        &mut app,
+        &mut remote,
+        "call-99".to_string(),
+        "ask_user".to_string(),
+        "Decision: ...\nUser chose option 1: ok\n".to_string(),
+        None,
+    );
+
+    assert!(app.pending_decision.is_some());
+}

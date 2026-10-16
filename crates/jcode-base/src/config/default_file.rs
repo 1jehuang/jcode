@@ -315,6 +315,16 @@ persist_memory_injections = false
 # (avoidable) reason: system prompt, tool set, or message prefix changed. These
 # should essentially never happen and indicate a prefix-cache bug.
 kv_cache_miss_notices = true
+# ask_user decision chooser: when the agent needs a decision it blocks the turn
+# and shows an inline chooser instead of guessing. Set false to disable: ask_user
+# then never blocks and the agent asks in plain text.
+# Env override: JCODE_DECISIONS
+decisions = true
+# How long ask_user waits for the user before auto-picking the first option,
+# in seconds. 0 (default) waits forever until the user answers, the client
+# disconnects, or the turn is shut down.
+# Env override: JCODE_DECISION_TIMEOUT_SECS
+decision_timeout_secs = 0
 # Update channel: "stable" (releases only) or "main" (latest commits on push)
 # Set to "main" for bleeding edge updates every time code is pushed
 update_channel = "stable"
@@ -838,6 +848,14 @@ mod tests {
             config.display.reasoning_display(),
             ReasoningDisplayMode::Full,
             "the shipped user config must keep the full reasoning trace visible"
+        );
+        assert!(
+            config.features.decisions,
+            "the template must ship the decision chooser enabled"
+        );
+        assert_eq!(
+            config.features.decision_timeout_secs, 0,
+            "the template must ship the default no-timeout decision chooser"
         );
     }
 

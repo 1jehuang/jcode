@@ -486,3 +486,40 @@ fn remote_protocol_frame_limit_rejects_oversize_and_overflow() {
     ));
     assert!(remote_protocol_frame_exceeds_limit(usize::MAX, 1));
 }
+
+#[tokio::test]
+async fn decision_response_done_is_filtered_as_control_ack() {
+    let mut remote = RemoteConnection::dummy();
+    let peer = remote.take_dummy_peer().unwrap();
+    let (reader, mut writer) = peer.into_split();
+    let mut reader = BufReader::new(reader);
+
+    remote
+        .send_decision_response(
+            "decision-call-1",
+            crate::protocol::DecisionChoice::Option { index: 1 },
+        )
+        .await
+        .unwrap();
+    let mut request = String::new();
+    reader.read_line(&mut request).await.unwrap();
+    let id = match serde_json::from_str::<Request>(&request).unwrap() {
+        Request::DecisionResponse { id, .. } => id,
+        other => panic!("expected decision response, got {other:?}"),
+    };
+
+    writer
+        .write_all(
+            format!(
+                "{{\"type\":\"done\",\"id\":{id}}}\n{{\"type\":\"text_delta\",\"text\":\"Still waiting\"}}\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        remote.next_event().await,
+        RemoteRead::Event(ServerEvent::TextDelta { text }) if text == "Still waiting"
+    ));
+}

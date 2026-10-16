@@ -99,6 +99,39 @@ pub struct StdinInputRequest {
     pub response_tx: tokio::sync::oneshot::Sender<String>,
 }
 
+/// A request for the user to pick among options at a decision point,
+/// raised by the `ask_user` tool. The turn blocks until the user answers.
+pub struct DecisionInputRequest {
+    pub request_id: String,
+    /// Tool call that is blocked on the user's answer
+    pub tool_call_id: String,
+    /// What is being decided, phrased for the user
+    pub question: String,
+    /// 2-5 offered options
+    pub options: Vec<DecisionInputOption>,
+    pub response_tx: tokio::sync::oneshot::Sender<DecisionInputResponse>,
+}
+
+/// One offered choice.
+#[derive(Debug, Clone)]
+pub struct DecisionInputOption {
+    /// Short label shown in the chooser
+    pub label: String,
+    /// Optional one-line explanation of what this option implies
+    pub detail: Option<String>,
+}
+
+/// The user's answer, or that the chooser was dismissed.
+#[derive(Debug, Clone)]
+pub enum DecisionInputResponse {
+    /// The user picked the 1-based option at this index
+    Option(u32),
+    /// The user typed a free-form answer instead
+    Text(String),
+    /// The user dismissed the chooser without answering
+    Dismissed,
+}
+
 #[derive(Clone)]
 pub struct ToolContext {
     pub session_id: String,
@@ -106,6 +139,7 @@ pub struct ToolContext {
     pub tool_call_id: String,
     pub working_dir: Option<PathBuf>,
     pub stdin_request_tx: Option<tokio::sync::mpsc::UnboundedSender<StdinInputRequest>>,
+    pub decision_request_tx: Option<tokio::sync::mpsc::UnboundedSender<DecisionInputRequest>>,
     pub graceful_shutdown_signal: Option<InterruptSignal>,
     pub execution_mode: ToolExecutionMode,
 }
@@ -133,6 +167,7 @@ impl ToolContext {
             ),
             working_dir: self.working_dir.clone(),
             stdin_request_tx: self.stdin_request_tx.clone(),
+            decision_request_tx: self.decision_request_tx.clone(),
             graceful_shutdown_signal: self.graceful_shutdown_signal.clone(),
             execution_mode: self.execution_mode,
         }
@@ -192,6 +227,7 @@ mod tests {
             tool_call_id: "first-batch".into(),
             working_dir: None,
             stdin_request_tx: None,
+            decision_request_tx: None,
             graceful_shutdown_signal: None,
             execution_mode: ToolExecutionMode::AgentTurn,
         };

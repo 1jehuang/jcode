@@ -1,9 +1,9 @@
 {
-  "total": 3714,
+  "total": 3726,
   "totals_by_pattern": {
-    "dot_ok": 1429,
-    "let_underscore": 1355,
-    "unwrap_or_default": 930
+    "dot_ok": 1432,
+    "let_underscore": 1362,
+    "unwrap_or_default": 932
   },
   "tracked_files": {
     "crates/jcode-app-core/src/agent.rs": {
@@ -153,7 +153,7 @@
     },
     "crates/jcode-app-core/src/server/client_actions.rs": {
       "dot_ok": 2,
-      "let_underscore": 48,
+      "let_underscore": 50,
       "unwrap_or_default": 1
     },
     "crates/jcode-app-core/src/server/client_comm_channels.rs": {
@@ -178,7 +178,7 @@
     },
     "crates/jcode-app-core/src/server/client_lifecycle.rs": {
       "dot_ok": 0,
-      "let_underscore": 51,
+      "let_underscore": 53,
       "unwrap_or_default": 1
     },
     "crates/jcode-app-core/src/server/client_lifecycle_logging.rs": {
@@ -799,7 +799,7 @@
     "crates/jcode-base/src/config/config_file.rs": {
       "dot_ok": 4,
       "let_underscore": 4,
-      "unwrap_or_default": 3
+      "unwrap_or_default": 4
     },
     "crates/jcode-base/src/config/env_overrides.rs": {
       "dot_ok": 1,
@@ -2037,9 +2037,9 @@
       "unwrap_or_default": 0
     },
     "crates/jcode-tui/src/tui/app/commands.rs": {
-      "dot_ok": 4,
+      "dot_ok": 7,
       "let_underscore": 14,
-      "unwrap_or_default": 20
+      "unwrap_or_default": 21
     },
     "crates/jcode-tui/src/tui/app/commands_cloud.rs": {
       "dot_ok": 0,
@@ -2109,6 +2109,11 @@
     "crates/jcode-tui/src/tui/app/debug_script.rs": {
       "dot_ok": 1,
       "let_underscore": 4,
+      "unwrap_or_default": 0
+    },
+    "crates/jcode-tui/src/tui/app/decision_osc9.rs": {
+      "dot_ok": 0,
+      "let_underscore": 2,
       "unwrap_or_default": 0
     },
     "crates/jcode-tui/src/tui/app/dictation.rs": {
@@ -2203,7 +2208,7 @@
     },
     "crates/jcode-tui/src/tui/app/remote/key_handling.rs": {
       "dot_ok": 0,
-      "let_underscore": 17,
+      "let_underscore": 18,
       "unwrap_or_default": 10
     },
     "crates/jcode-tui/src/tui/app/remote/reconnect.rs": {

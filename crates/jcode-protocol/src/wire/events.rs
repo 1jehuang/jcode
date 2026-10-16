@@ -921,4 +921,42 @@ pub enum ServerEvent {
         /// Tool call ID this is associated with
         tool_call_id: String,
     },
+
+    /// The agent hit a decision point and offers the user options
+    /// (raised by the `ask_user` tool). The client renders a chooser;
+    /// free-form input is always valid alongside the listed options.
+    #[serde(rename = "decision_request")]
+    DecisionRequest {
+        /// Unique request ID for matching the response
+        request_id: String,
+        /// What is being decided, phrased for the user
+        question: String,
+        /// 2-5 offered options
+        options: Vec<DecisionOption>,
+        /// Tool call ID this is associated with
+        tool_call_id: String,
+    },
+}
+
+/// One offered choice in a decision request.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DecisionOption {
+    /// Short label shown in the chooser
+    pub label: String,
+    /// Optional one-line explanation of what this option implies
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// The user's answer to a decision request: either a 1-based index into
+/// the offered options, or free-form text.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DecisionChoice {
+    /// The user picked a listed option
+    Option { index: u32 },
+    /// The user typed a free-form answer instead
+    Text { text: String },
+    /// The user dismissed the chooser without answering
+    Dismissed,
 }

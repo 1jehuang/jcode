@@ -388,6 +388,16 @@ impl Config {
                 self.features.kv_cache_miss_notices = parsed;
             }
         }
+        if let Ok(v) = std::env::var("JCODE_DECISIONS") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.features.decisions = parsed;
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_DECISION_TIMEOUT_SECS")
+            && let Ok(parsed) = v.trim().parse::<u64>()
+        {
+            self.features.decision_timeout_secs = parsed;
+        }
         if let Ok(v) = std::env::var("JCODE_UPDATE_CHANNEL")
             && let Some(channel) = UpdateChannel::parse(&v)
         {

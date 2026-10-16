@@ -1098,9 +1098,22 @@ pub trait TuiState {
     }
     /// General inline UI state shown above input.
     fn inline_ui_state(&self) -> Option<InlineUiStateRef<'_>> {
-        self.inline_interactive_state()
-            .map(InlineUiStateRef::Interactive)
+        // A blocking ask_user decision outranks every other inline view: while
+        // the chooser is open, the input box is locked and the chooser owns
+        // the keyboard. If a picker (e.g. the /model preview) was showing when
+        // the question arrived, rendering it here would hide the chooser the
+        // keys are actually going to.
+        self.pending_decision()
+            .map(InlineUiStateRef::Decision)
+            .or_else(|| {
+                self.inline_interactive_state()
+                    .map(InlineUiStateRef::Interactive)
+            })
             .or_else(|| self.inline_view_state().map(InlineUiStateRef::View))
+    }
+    /// Blocking decision request from the agent's ask_user tool, if active.
+    fn pending_decision(&self) -> Option<&crate::tui::app::PendingDecision> {
+        None
     }
     /// Changelog overlay scroll offset (None = not showing)
     // ---- Overlay ----
@@ -1624,6 +1637,8 @@ impl InlineViewState {
 pub enum InlineUiStateRef<'a> {
     View(&'a InlineViewState),
     Interactive(&'a InlineInteractiveState),
+    /// Blocking decision chooser from the agent's ask_user tool
+    Decision(&'a crate::tui::app::PendingDecision),
 }
 
 impl PickerKind {
