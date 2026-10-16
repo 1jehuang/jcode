@@ -1,0 +1,761 @@
+use super::*;
+use crate::bus::{BackgroundTaskProgressKind, BackgroundTaskProgressSource};
+use anyhow::anyhow;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::mpsc::Receiver;
+use std::task::Poll;
+use tempfile::tempdir;
+use tokio::time::Duration;
+
+const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+struct StatusWriteTestHook {
+    staged: std::sync::mpsc::SyncSender<PathBuf>,
+    resume: std::sync::mpsc::Receiver<()>,
+}
+
+struct StatusWriteTestControl {
+    staged: Receiver<PathBuf>,
+    resume: std::sync::mpsc::SyncSender<()>,
+}
+
+fn status_write_test_hooks()
+-> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, StatusWriteTestHook>> {
+    static HOOKS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, StatusWriteTestHook>>,
+    > = std::sync::OnceLock::new();
+    HOOKS.get_or_init(Default::default)
+}
+
+fn install_status_write_test_hook(path: PathBuf) -> StatusWriteTestControl {
+    let (staged_tx, staged_rx) = std::sync::mpsc::sync_channel(1);
+    let (resume_tx, resume_rx) = std::sync::mpsc::sync_channel(1);
+    let prior = status_write_test_hooks()
+        .lock()
+        .expect("status write test hooks mutex poisoned")
+        .insert(
+            path,
+            StatusWriteTestHook {
+                staged: staged_tx,
+                resume: resume_rx,
+            },
+        );
+    assert!(prior.is_none(), "status write test hook already installed");
+    StatusWriteTestControl {
+        staged: staged_rx,
+        resume: resume_tx,
+    }
+}
+
+pub(in crate::background) fn before_status_file_rename(
+    path: &std::path::Path,
+    staged_path: PathBuf,
+) {
+    let hook = status_write_test_hooks()
+        .lock()
+        .expect("status write test hooks mutex poisoned")
+        .remove(path);
+    if let Some(hook) = hook {
+        hook.staged
+            .send(staged_path)
+            .expect("status write test observer dropped");
+        hook.resume
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("status write test resume timed out");
+    }
+}
+
+fn running_status_fixture(task_id: &str, session_id: &str) -> TaskStatusFile {
+    TaskStatusFile {
+        task_id: task_id.to_string(),
+        tool_name: "swarm".to_string(),
+        display_name: None,
+        session_id: session_id.to_string(),
+        status: BackgroundTaskStatus::Running,
+        exit_code: None,
+        error: None,
+        started_at: Utc::now().to_rfc3339(),
+        completed_at: None,
+        duration_secs: None,
+        pid: None,
+        owner_pid: None,
+        owner_instance: None,
+        detached: false,
+        notify: false,
+        wake: false,
+        progress: None,
+        event_history: Vec::new(),
+        stall_wake_seconds: None,
+    }
+}
+
+async fn recv_staged(receiver: Receiver<PathBuf>) -> Result<PathBuf> {
+    tokio::task::spawn_blocking(move || receiver.recv_timeout(HANDSHAKE_TIMEOUT))
+        .await
+        .map_err(|error| anyhow!("staged status observer panicked: {error}"))?
+        .map_err(|error| anyhow!("status write did not reach the pre-rename hook: {error}"))
+}
+
+async fn poll_once<F: Future>(mut future: Pin<&mut F>) -> Poll<F::Output> {
+    std::future::poll_fn(|context| Poll::Ready(future.as_mut().poll(context))).await
+}
+
+fn published_status_documents(dir: &std::path::Path) -> Result<usize> {
+    let mut published = 0;
+    for entry in std::fs::read_dir(dir)? {
+        if entry?.path().to_string_lossy().ends_with(".status.json") {
+            published += 1;
+        }
+    }
+    Ok(published)
+}
+
+fn sole_status_document(dir: &std::path::Path) -> Result<PathBuf> {
+    let mut found = None;
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.to_string_lossy().ends_with(".status.json") {
+            assert!(found.is_none(), "expected exactly one status document");
+            found = Some(path);
+        }
+    }
+    found.ok_or_else(|| anyhow!("no status document was published"))
+}
+
+async fn wait_for_terminal_status(path: &std::path::Path) -> Result<TaskStatusFile> {
+    for _ in 0..500 {
+        if let Ok(content) = tokio::fs::read_to_string(path).await
+            && let Ok(status) = serde_json::from_str::<TaskStatusFile>(&content)
+            && status.status != BackgroundTaskStatus::Running
+        {
+            return Ok(status);
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    anyhow::bail!("status document stayed Running")
+}
+
+fn progress(percent: f32) -> BackgroundTaskProgress {
+    BackgroundTaskProgress {
+        kind: BackgroundTaskProgressKind::Determinate,
+        percent: Some(percent),
+        message: Some(format!("{percent}%")),
+        current: None,
+        total: None,
+        unit: None,
+        eta_seconds: None,
+        updated_at: Utc::now().to_rfc3339(),
+        source: BackgroundTaskProgressSource::Reported,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn staged_atomic_publication_exposes_only_complete_old_then_new_json() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = Arc::new(BackgroundTaskManager::with_output_dir(
+        tmp.path().to_path_buf(),
+    ));
+    let path = manager.status_path_for("staged-atomic");
+    let old_status = running_status_fixture("staged-atomic", "old-session");
+    let mut new_status = old_status.clone();
+    new_status.session_id = "new-session".to_string();
+    manager.write_status_file(&path, &old_status).await;
+
+    let StatusWriteTestControl { staged, resume } = install_status_write_test_hook(path.clone());
+    let writer = tokio::spawn({
+        let manager = Arc::clone(&manager);
+        let path = path.clone();
+        let new_status = new_status.clone();
+        async move { manager.write_status_file(&path, &new_status).await }
+    });
+
+    let staged_path = recv_staged(staged).await?;
+    let visible: TaskStatusFile = serde_json::from_str(&tokio::fs::read_to_string(&path).await?)?;
+    let staged: TaskStatusFile =
+        serde_json::from_str(&tokio::fs::read_to_string(staged_path).await?)?;
+    assert_eq!(visible.session_id, "old-session");
+    assert_eq!(staged.session_id, "new-session");
+
+    resume.send(()).expect("resume staged publication");
+    writer.await?;
+    let visible: TaskStatusFile = serde_json::from_str(&tokio::fs::read_to_string(path).await?)?;
+    assert_eq!(visible.session_id, "new-session");
+    Ok(())
+}
+
+/// Status files are rewritten on every progress and completion update while
+/// `bg status`, `bg wait`, and other jcode processes read them. A truncating
+/// write is observable as an empty file, and a reader that hits that window
+/// reports the task as missing instead of returning its status. The hook holds
+/// the write open after its new contents are staged, so the reader runs inside
+/// the write deterministically rather than by scheduling luck.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn status_reads_during_an_in_flight_write_see_the_previous_status() -> Result<()> {
+    let tmp = tempdir()?;
+    let reader = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+    let writer = Arc::new(BackgroundTaskManager::with_output_dir(
+        tmp.path().to_path_buf(),
+    ));
+    let path = reader.status_path_for("atomic-status");
+    let old_status = running_status_fixture("atomic-status", "session-before");
+    let mut new_status = old_status.clone();
+    new_status.session_id = "session-after".to_string();
+    writer.write_status_file(&path, &old_status).await;
+
+    let StatusWriteTestControl { staged, resume } = install_status_write_test_hook(path.clone());
+    let update = tokio::spawn({
+        let writer = Arc::clone(&writer);
+        let path = path.clone();
+        async move { writer.write_status_file(&path, &new_status).await }
+    });
+    recv_staged(staged).await?;
+
+    let during = reader.status("atomic-status").await;
+    resume.send(()).expect("resume status publication");
+    update.await?;
+    let during = during.ok_or_else(|| anyhow!("an in-flight status write hid the task"))?;
+    assert_eq!(during.session_id, "session-before");
+    let after = reader
+        .status("atomic-status")
+        .await
+        .ok_or_else(|| anyhow!("published status missing"))?;
+    assert_eq!(after.session_id, "session-after");
+    Ok(())
+}
+
+#[tokio::test]
+async fn terminal_publication_does_not_block_a_single_worker_runtime() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+    let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+    let info = manager
+        .spawn_with_notify(
+            "bash",
+            None,
+            "single-worker-publication",
+            false,
+            false,
+            move |_output_path| async move {
+                finish_rx.await?;
+                Ok(TaskResult::completed(Some(0)))
+            },
+        )
+        .await;
+    let StatusWriteTestControl { staged, resume } =
+        install_status_write_test_hook(info.status_file.clone());
+    let heartbeat_start = Arc::new(tokio::sync::Notify::new());
+    let (heartbeat_tx, heartbeat_rx) = std::sync::mpsc::sync_channel(1);
+    tokio::spawn({
+        let heartbeat_start = Arc::clone(&heartbeat_start);
+        async move {
+            heartbeat_start.notified().await;
+            heartbeat_tx.send(()).expect("heartbeat observer dropped");
+        }
+    });
+    let observer = tokio::task::spawn_blocking(move || {
+        staged
+            .recv_timeout(HANDSHAKE_TIMEOUT)
+            .expect("terminal publication never staged");
+        heartbeat_start.notify_one();
+        let heartbeat = heartbeat_rx
+            .recv_timeout(std::time::Duration::from_millis(500))
+            .is_ok();
+        resume.send(()).expect("resume terminal publication");
+        heartbeat
+    });
+
+    finish_tx.send(()).expect("finish background task");
+    assert!(
+        observer.await?,
+        "Tokio heartbeat was starved by synchronous status publication"
+    );
+    let status = manager
+        .wait(&info.task_id, Duration::from_secs(2), false)
+        .await
+        .ok_or_else(|| anyhow!("completed task status missing"))?;
+    assert_eq!(status.task.status, BackgroundTaskStatus::Completed);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelled_progress_update_keeps_publication_serialized_until_rename_finishes() -> Result<()>
+{
+    let tmp = tempdir()?;
+    let manager = Arc::new(BackgroundTaskManager::with_output_dir(
+        tmp.path().to_path_buf(),
+    ));
+    let (_finish_tx, finish_rx) = tokio::sync::oneshot::channel::<()>();
+    let info = manager
+        .spawn_with_notify(
+            "bash",
+            None,
+            "cancelled-progress-publication",
+            false,
+            false,
+            move |_output_path| async move {
+                finish_rx.await?;
+                Ok(TaskResult::completed(Some(0)))
+            },
+        )
+        .await;
+
+    let first = install_status_write_test_hook(info.status_file.clone());
+    let update = tokio::spawn({
+        let manager = Arc::clone(&manager);
+        let task_id = info.task_id.clone();
+        async move { manager.update_progress(&task_id, progress(50.0)).await }
+    });
+    let first_staged = recv_staged(first.staged).await?;
+    let staged: TaskStatusFile =
+        serde_json::from_str(&tokio::fs::read_to_string(first_staged).await?)?;
+    assert_eq!(staged.progress.and_then(|value| value.percent), Some(50.0));
+    update.abort();
+    assert!(
+        update
+            .await
+            .expect_err("progress update should be cancelled")
+            .is_cancelled()
+    );
+    if manager.status_updates.try_lock().is_ok() {
+        first.resume.send(()).expect("resume progress publication");
+        return Err(anyhow!(
+            "cancelled progress caller released serialization before its blocking rename finished"
+        ));
+    }
+
+    let cancel_manager = Arc::clone(&manager);
+    let cancel_task_id = info.task_id.clone();
+    let mut cancel = Box::pin(async move { cancel_manager.cancel(&cancel_task_id).await });
+    assert!(
+        poll_once(cancel.as_mut()).await.is_pending(),
+        "cancellation must wait for the staged progress publication"
+    );
+
+    first.resume.send(()).expect("resume progress publication");
+    assert!(cancel.await?);
+    let status = manager
+        .status(&info.task_id)
+        .await
+        .ok_or_else(|| anyhow!("cancelled task status missing"))?;
+    assert_eq!(status.status, BackgroundTaskStatus::Failed);
+    assert_eq!(status.error.as_deref(), Some("Cancelled by user"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn live_task_cancellation_survives_missing_or_corrupt_status_file() -> Result<()> {
+    for corrupt_contents in [None, Some("{not-json")] {
+        let tmp = tempdir()?;
+        let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+        let (_finish_tx, finish_rx) = tokio::sync::oneshot::channel::<()>();
+        let info = manager
+            .spawn_with_notify(
+                "bash",
+                None,
+                "cancel-without-status",
+                false,
+                false,
+                move |_output_path| async move {
+                    finish_rx.await?;
+                    Ok(TaskResult::completed(Some(0)))
+                },
+            )
+            .await;
+
+        if let Some(contents) = corrupt_contents {
+            tokio::fs::write(&info.status_file, contents).await?;
+        } else {
+            tokio::fs::remove_file(&info.status_file).await?;
+        }
+
+        assert!(manager.cancel(&info.task_id).await?);
+        assert!(!manager.is_live_task(&info.task_id));
+        let status = manager
+            .status(&info.task_id)
+            .await
+            .ok_or_else(|| anyhow!("cancel should recreate terminal status"))?;
+        assert_eq!(status.status, BackgroundTaskStatus::Failed);
+        assert_eq!(status.error.as_deref(), Some("Cancelled by user"));
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelled_cancel_caller_still_publishes_terminal_status() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = Arc::new(BackgroundTaskManager::with_output_dir(
+        tmp.path().to_path_buf(),
+    ));
+    let (_finish_tx, finish_rx) = tokio::sync::oneshot::channel::<()>();
+    let info = manager
+        .spawn_with_notify(
+            "bash",
+            None,
+            "cancelled-cancel-caller",
+            false,
+            false,
+            move |_output_path| async move {
+                finish_rx.await?;
+                Ok(TaskResult::completed(Some(0)))
+            },
+        )
+        .await;
+    let publication = install_status_write_test_hook(info.status_file.clone());
+    let cancel = tokio::spawn({
+        let manager = Arc::clone(&manager);
+        let task_id = info.task_id.clone();
+        async move { manager.cancel(&task_id).await }
+    });
+
+    let staged_path = recv_staged(publication.staged).await?;
+    let staged: TaskStatusFile =
+        serde_json::from_str(&tokio::fs::read_to_string(staged_path).await?)?;
+    assert_eq!(staged.status, BackgroundTaskStatus::Failed);
+    cancel.abort();
+    assert!(
+        cancel
+            .await
+            .expect_err("cancel caller should abort")
+            .is_cancelled()
+    );
+    publication
+        .resume
+        .send(())
+        .expect("resume cancellation publication");
+    drop(manager.status_updates.clone().lock_owned().await);
+
+    assert!(!manager.is_live_task(&info.task_id));
+    let status = manager
+        .status(&info.task_id)
+        .await
+        .ok_or_else(|| anyhow!("terminal cancellation status missing"))?;
+    assert_eq!(status.status, BackgroundTaskStatus::Failed);
+    assert_eq!(status.error.as_deref(), Some("Cancelled by user"));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn completion_in_publication_cannot_be_overwritten_by_cancellation() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = Arc::new(BackgroundTaskManager::with_output_dir(
+        tmp.path().to_path_buf(),
+    ));
+    let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+    let info = manager
+        .spawn_with_notify(
+            "bash",
+            None,
+            "completion-cancel-race",
+            false,
+            false,
+            move |_output_path| async move {
+                finish_rx.await?;
+                Ok(TaskResult::completed(Some(0)))
+            },
+        )
+        .await;
+    let publication = install_status_write_test_hook(info.status_file.clone());
+    finish_tx.send(()).expect("finish background task");
+    let staged_path = recv_staged(publication.staged).await?;
+    let staged: TaskStatusFile =
+        serde_json::from_str(&tokio::fs::read_to_string(staged_path).await?)?;
+    assert_eq!(staged.status, BackgroundTaskStatus::Completed);
+
+    let cancel_manager = Arc::clone(&manager);
+    let cancel_task_id = info.task_id.clone();
+    let mut cancel = Box::pin(async move { cancel_manager.cancel(&cancel_task_id).await });
+    assert!(
+        poll_once(cancel.as_mut()).await.is_pending(),
+        "cancellation must wait while completion owns publication"
+    );
+    publication
+        .resume
+        .send(())
+        .expect("resume completion publication");
+    let cancelled = cancel.await?;
+    assert!(
+        !cancelled,
+        "terminal completion must win before cancellation"
+    );
+
+    let status = manager
+        .status(&info.task_id)
+        .await
+        .ok_or_else(|| anyhow!("completed task status missing"))?;
+    assert_eq!(status.status, BackgroundTaskStatus::Completed);
+    assert_eq!(status.error, None);
+    Ok(())
+}
+
+/// The initial publication writes a freshly generated task id that no other
+/// writer can reach yet, and its caller is an agent turn that a reload can abort
+/// at any await, so it must not park behind the manager-wide status gate: that
+/// gate serializes the read-modify-write cycles of *other* tasks, which can take
+/// as long as their filesystem work. A held gate therefore cannot delay or drop
+/// the `Running` document.
+#[tokio::test(flavor = "current_thread")]
+async fn initial_publication_ignores_a_held_status_gate() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = Arc::new(BackgroundTaskManager::with_output_dir(
+        tmp.path().to_path_buf(),
+    ));
+    let path = manager.status_path_for("initial-publication");
+    let status = running_status_fixture("initial-publication", "session-initial");
+    let gate = manager.status_updates.clone().lock_owned().await;
+
+    status_file::publish_initial_status(&path, &status);
+
+    let visible: TaskStatusFile = serde_json::from_str(&tokio::fs::read_to_string(&path).await?)?;
+    assert_eq!(visible.status, BackgroundTaskStatus::Running);
+    assert_eq!(visible.session_id, "session-initial");
+    drop(gate);
+    Ok(())
+}
+
+/// The same ordering holds at the call site the abort actually interrupts:
+/// adopting a running tool publishes the task's `Running` document before the
+/// caller yields for the first time, so no abort can separate the visible
+/// document from the wrapper that owns the task handle.
+#[tokio::test(flavor = "current_thread")]
+async fn adopting_a_running_tool_publishes_its_status_document_before_yielding() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = Arc::new(BackgroundTaskManager::with_output_dir(
+        tmp.path().to_path_buf(),
+    ));
+    let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+    let handle = tokio::spawn(async move {
+        finish_rx.await?;
+        Ok(jcode_tool_types::ToolOutput::new("complete output\n"))
+    });
+
+    let mut adoption = Box::pin(manager.adopt_with_options(
+        "bash",
+        None,
+        "session-adopt-publication",
+        false,
+        false,
+        handle,
+    ));
+    let first_poll = poll_once(adoption.as_mut()).await;
+    assert_eq!(
+        published_status_documents(tmp.path())?,
+        1,
+        "the adopted task's `Running` document must be published before the caller's first yield"
+    );
+
+    // An uncontended adopt completes in that same poll, publication and
+    // registration included; only a contended live map can park it.
+    let info = match first_poll {
+        Poll::Ready(info) => info,
+        Poll::Pending => adoption.await,
+    };
+    let status = manager
+        .status(&info.task_id)
+        .await
+        .ok_or_else(|| anyhow!("adopted task status missing"))?;
+    assert_eq!(status.status, BackgroundTaskStatus::Running);
+
+    finish_tx.send(()).expect("finish adopted tool");
+    let finished = manager
+        .wait(&info.task_id, Duration::from_secs(5), false)
+        .await
+        .expect("adopted task should exist");
+    assert_eq!(finished.task.status, BackgroundTaskStatus::Completed);
+    Ok(())
+}
+
+/// `spawn_with_notify` is the other call site an abort interrupts, and it has
+/// the same requirement: the task's `Running` document must be visible before
+/// the caller yields, or a reload can publish a document whose work never
+/// started.
+#[tokio::test(flavor = "current_thread")]
+async fn spawning_background_work_publishes_its_status_document_before_yielding() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = Arc::new(BackgroundTaskManager::with_output_dir(
+        tmp.path().to_path_buf(),
+    ));
+    let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+    let mut spawning = Box::pin(manager.spawn_with_notify(
+        "bash",
+        None,
+        "session-spawn-publication",
+        false,
+        false,
+        move |_output_path| async move {
+            finish_rx.await?;
+            Ok(TaskResult::completed(Some(0)))
+        },
+    ));
+    let first_poll = poll_once(spawning.as_mut()).await;
+    assert_eq!(
+        published_status_documents(tmp.path())?,
+        1,
+        "the spawned task's `Running` document must be published before the caller's first yield"
+    );
+
+    let info = match first_poll {
+        Poll::Ready(info) => info,
+        Poll::Pending => spawning.await,
+    };
+    let status = manager
+        .status(&info.task_id)
+        .await
+        .ok_or_else(|| anyhow!("spawned task status missing"))?;
+    assert_eq!(status.status, BackgroundTaskStatus::Running);
+
+    finish_tx.send(()).expect("finish spawned task");
+    let finished = manager
+        .wait(&info.task_id, Duration::from_secs(5), false)
+        .await
+        .expect("spawned task should exist");
+    assert_eq!(finished.task.status, BackgroundTaskStatus::Completed);
+    Ok(())
+}
+
+/// A detached child outlives the server, so its `Running` document is the only
+/// record that the child exists. Registration publishes it without waiting for
+/// the manager-wide gate and without yielding, even while another task holds
+/// that gate.
+#[tokio::test(flavor = "current_thread")]
+async fn registering_a_detached_task_publishes_its_status_document_before_yielding() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = Arc::new(BackgroundTaskManager::with_output_dir(
+        tmp.path().to_path_buf(),
+    ));
+    let info = manager.reserve_task_info();
+    let started_at = Utc::now().to_rfc3339();
+    let gate = manager.status_updates.clone().lock_owned().await;
+    let mut registration = Box::pin(manager.register_detached_task(
+        &info,
+        "bash",
+        None,
+        "session-detached-publication",
+        std::process::id(),
+        &started_at,
+        false,
+        false,
+    ));
+    assert!(
+        matches!(poll_once(registration.as_mut()).await, Poll::Ready(())),
+        "detached registration yielded, which reopens the abort window"
+    );
+
+    let visible: TaskStatusFile =
+        serde_json::from_str(&tokio::fs::read_to_string(&info.status_file).await?)?;
+    assert_eq!(visible.status, BackgroundTaskStatus::Running);
+    assert!(
+        visible.detached,
+        "a detached task must be recorded as detached"
+    );
+    assert_eq!(visible.pid, Some(std::process::id()));
+    drop(gate);
+    Ok(())
+}
+
+/// The abort the P1 measured lands after the document is visible: the caller
+/// parks on the live-map insert, the first await after publication and after the
+/// wrapper that owns the supplied handle exists. Dropping the caller there must
+/// not stop that wrapper, so the adopted work's output and completion still land
+/// even though the aborted caller never returned a task id.
+///
+/// The held status gate stands for another task's slow write, the wait the
+/// initial publication must not join: an awaited publication would park the
+/// caller *before* the wrapper exists, which is the lost-work case this asserts
+/// against.
+#[tokio::test(flavor = "current_thread")]
+async fn aborting_the_adopting_caller_still_records_the_adopted_work() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = Arc::new(BackgroundTaskManager::with_output_dir(
+        tmp.path().to_path_buf(),
+    ));
+    let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+    let handle = tokio::spawn(async move {
+        finish_rx.await?;
+        Ok(jcode_tool_types::ToolOutput::new(
+            "adopted output survives\n",
+        ))
+    });
+
+    // Both held guards park the caller exactly at the abort point: publication
+    // is already done and the wrapper that owns `handle` already exists.
+    let gate = manager.status_updates.clone().lock_owned().await;
+    let live_map = manager.tasks.clone().write_owned().await;
+    let mut adoption = Box::pin(manager.adopt_with_options(
+        "bash",
+        None,
+        "session-aborted-adopt",
+        false,
+        false,
+        handle,
+    ));
+    assert!(
+        matches!(poll_once(adoption.as_mut()).await, Poll::Pending),
+        "the abort must land after publication, not before"
+    );
+    // The document is visible while the gate is still held.
+    let status_path = sole_status_document(tmp.path())?;
+
+    // The caller stops here; its work must not.
+    drop(adoption);
+    drop(live_map);
+    drop(gate);
+    finish_tx.send(()).expect("finish adopted work");
+
+    let status = wait_for_terminal_status(&status_path).await?;
+    assert_eq!(status.status, BackgroundTaskStatus::Completed);
+    assert_eq!(status.exit_code, Some(0));
+    let output_path = tmp.path().join(format!("{}.output", status.task_id));
+    assert_eq!(
+        tokio::fs::read_to_string(&output_path).await?,
+        "adopted output survives\n"
+    );
+    Ok(())
+}
+
+/// The same abort point for spawned work: the wrapper that runs the closure
+/// exists before the caller's first await, so an abort cannot leave a `Running`
+/// document whose work never started.
+#[tokio::test(flavor = "current_thread")]
+async fn aborting_the_spawning_caller_still_runs_the_spawned_work() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = Arc::new(BackgroundTaskManager::with_output_dir(
+        tmp.path().to_path_buf(),
+    ));
+    let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+
+    let gate = manager.status_updates.clone().lock_owned().await;
+    let live_map = manager.tasks.clone().write_owned().await;
+    let mut spawning = Box::pin(manager.spawn_with_notify(
+        "bash",
+        None,
+        "session-aborted-spawn",
+        false,
+        false,
+        move |output_path| async move {
+            tokio::fs::write(&output_path, "spawned work survives\n").await?;
+            finish_rx.await?;
+            Ok(TaskResult::completed(Some(0)))
+        },
+    ));
+    assert!(
+        matches!(poll_once(spawning.as_mut()).await, Poll::Pending),
+        "the abort must land after publication, not before"
+    );
+    let status_path = sole_status_document(tmp.path())?;
+
+    drop(spawning);
+    drop(live_map);
+    drop(gate);
+    finish_tx.send(()).expect("finish spawned work");
+
+    let status = wait_for_terminal_status(&status_path).await?;
+    assert_eq!(status.status, BackgroundTaskStatus::Completed);
+    let output_path = tmp.path().join(format!("{}.output", status.task_id));
+    assert_eq!(
+        tokio::fs::read_to_string(&output_path).await?,
+        "spawned work survives\n"
+    );
+    Ok(())
+}
