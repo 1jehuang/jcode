@@ -3001,8 +3001,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
             .saturating_sub(u16::from(chat_scrollbar_visible));
         let width = width.saturating_sub(left_aligned_content_inset(width, app.centered_mode()));
         viewport::pinned_todo_band_lines(app, width, available_height.saturating_sub(fixed_height))
-            .0
-            .len()
+            .height() as usize
     };
     let content_height = prepared
         .total_wrapped_lines()
