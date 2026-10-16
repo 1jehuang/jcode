@@ -939,16 +939,18 @@ fn test_openai_account_usage_details_are_discoverable_and_keep_switching() {
         // New accounts receive canonical labels from the store, not the requested label.
         let labels: Vec<String> = ["openai-otter", "openai-fox"]
             .into_iter()
-            .map(|label| crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
-                label: label.to_string(),
-                access_token: "acc".into(),
-                refresh_token: "ref".into(),
-                id_token: None,
-                account_id: Some(format!("acct_{label}")),
-                expires_at: None,
-                email: None,
+            .map(|label| {
+                crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
+                    label: label.to_string(),
+                    access_token: "acc".into(),
+                    refresh_token: "ref".into(),
+                    id_token: None,
+                    account_id: Some(format!("acct_{label}")),
+                    expires_at: None,
+                    email: None,
+                })
+                .unwrap()
             })
-            .unwrap())
             .collect();
         crate::provider_activity::record_openai_oauth_usage(
             &labels[0],
@@ -960,7 +962,10 @@ fn test_openai_account_usage_details_are_discoverable_and_keep_switching() {
         );
         let mut app = create_test_app();
         let settings = app.render_openai_accounts_markdown();
-        assert!(settings.contains("12,345 in · 678 out · 123 cached"), "recorded account usage: {settings}");
+        assert!(
+            settings.contains("12,345 in · 678 out · 123 cached"),
+            "recorded account usage: {settings}"
+        );
         assert!(settings.contains("No recorded usage"));
         assert!(settings.contains("local midnight"));
         assert!(settings.contains("not your subscription bill"));

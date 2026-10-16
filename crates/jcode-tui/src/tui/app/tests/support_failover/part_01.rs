@@ -441,11 +441,43 @@ impl Drop for EnvRestoreGuard {
     }
 }
 
-fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
+/// Restores the whole process environment on drop. Login tests run the real
+/// auth activation, which rewrites provider selectors, profile variables and
+/// API keys no fixed key list anticipates; leaking them flips later tests.
+struct EnvSnapshotGuard(Vec<(std::ffi::OsString, std::ffi::OsString)>);
+
+impl EnvSnapshotGuard {
+    fn capture() -> Self {
+        Self(std::env::vars_os().collect())
+    }
+}
+
+impl Drop for EnvSnapshotGuard {
+    fn drop(&mut self) {
+        let saved: std::collections::HashMap<_, _> = self.0.drain(..).collect();
+        for (key, _) in std::env::vars_os() {
+            if !saved.contains_key(&key) {
+                crate::env::remove_var(&key);
+            }
+        }
+        for (key, value) in saved {
+            if std::env::var_os(&key).as_ref() != Some(&value) {
+                crate::env::set_var(&key, &value);
+            }
+        }
+    }
+}
+
+/// Run `f` holding the env lock, in a fresh `JCODE_HOME`, and restore the
+/// whole environment afterwards. Use it for any test that persists state under
+/// the home, reads config-derived state twice, or drives a login/activation.
+pub(super) fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
     let _guard = crate::storage::lock_test_env();
+    let _context_cache = crate::provider::models::ContextLimitCacheGuardForTests::new();
     let temp = tempfile::tempdir().expect("tempdir");
-    let _env_guard = EnvRestoreGuard::capture(["JCODE_HOME"]);
+    let env_guard = EnvSnapshotGuard::capture();
     crate::env::set_var("JCODE_HOME", temp.path());
+    crate::env::remove_var("JCODE_NAMED_PROVIDER_PROFILE");
     // Preserve inherited telemetry opt-out env. In this crate telemetry-core is
     // a dependency, so cfg(test) does not stub its HTTP delivery path; inherited
     // opt-out must keep blocking delivery for tests that exercise onboarding.
@@ -459,6 +491,8 @@ fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
 
     let result = f();
 
+    // Restore env before flushing caches so nothing is re-cached from it.
+    drop(env_guard);
     crate::auth::claude::set_active_account_override(None);
     crate::auth::codex::set_active_account_override(None);
     crate::auth::AuthStatus::invalidate_cache();

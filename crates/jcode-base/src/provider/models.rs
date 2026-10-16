@@ -524,15 +524,11 @@ pub fn cached_openai_reasoning_efforts_for_scope(
     (!efforts.is_empty()).then_some(efforts)
 }
 
-/// Test-only: clear the process-global in-memory model catalogs. The catalog
-/// services are statics shared by every test in the process; a test that
-/// hydrates a scope (directly or via `persist_*` + `cached_*`) otherwise leaks
-/// fixture models into later tests' `known_*_model_ids()` validation.
 #[cfg(any(test, feature = "test-support"))]
-pub fn reset_model_catalog_services_for_tests() {
-    OPENAI_MODEL_CATALOG_SERVICE.reset_for_tests();
-    ANTHROPIC_MODEL_CATALOG_SERVICE.reset_for_tests();
-}
+#[path = "model_test_support.rs"]
+mod test_support;
+#[cfg(any(test, feature = "test-support"))]
+pub use test_support::{ContextLimitCacheGuardForTests, reset_model_catalog_services_for_tests};
 
 pub fn persist_openai_model_catalog(catalog: &OpenAIModelCatalog) {
     persist_openai_model_catalog_for_scope(&current_openai_account_scope(), catalog);

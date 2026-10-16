@@ -48,7 +48,10 @@ fn test_plain_enter_still_runs_slash_command_immediately_while_processing() {
         .unwrap();
 
     assert!(app.queued_commands.is_empty());
-    assert!(app.help_scroll.is_some(), "plain Enter runs the command now");
+    assert!(
+        app.help_scroll.is_some(),
+        "plain Enter runs the command now"
+    );
 }
 
 #[test]
@@ -97,14 +100,16 @@ fn test_ctrl_up_recalls_queued_command_for_editing() {
 
 #[test]
 fn test_reload_round_trip_preserves_queued_commands() {
-    let mut app = create_test_app();
-    let session_id = format!("test-queued-commands-reload-{}", std::process::id());
-    app.queued_commands.push("/compact".to_string());
-    app.save_input_for_reload(&session_id);
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let session_id = format!("test-queued-commands-reload-{}", std::process::id());
+        app.queued_commands.push("/compact".to_string());
+        app.save_input_for_reload(&session_id);
 
-    let restored = App::new_for_remote(Some(session_id));
-    assert_eq!(restored.queued_commands, vec!["/compact"]);
-    assert!(!restored.is_processing);
+        let restored = App::new_for_remote(Some(session_id));
+        assert_eq!(restored.queued_commands, vec!["/compact"]);
+        assert!(!restored.is_processing);
+    });
 }
 
 #[test]
@@ -180,7 +185,10 @@ fn test_remote_tick_arms_dispatch_for_idle_queued_command() {
 
     app.queued_commands.push("/help".to_string());
     rt.block_on(remote::handle_tick(&mut app, &mut remote));
-    assert!(app.pending_queued_dispatch, "an idle client must not strand it");
+    assert!(
+        app.pending_queued_dispatch,
+        "an idle client must not strand it"
+    );
 }
 
 #[test]
@@ -213,5 +221,9 @@ fn test_remote_queued_commands_run_before_queued_prompts() {
 
     assert!(app.queued_commands.is_empty());
     assert!(app.help_scroll.is_some());
-    assert_eq!(app.queued_messages(), &["then do this"], "prompt waits its turn");
+    assert_eq!(
+        app.queued_messages(),
+        &["then do this"],
+        "prompt waits its turn"
+    );
 }

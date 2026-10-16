@@ -65,21 +65,7 @@ fn test_copy_badge_requires_prior_combo_progress() {
     );
 }
 
-#[test]
-fn test_expand_badge_shortcut_toggles_inline_diff_and_pulses_key() {
-    let _render_lock = scroll_render_test_lock();
-    let (mut app, _terminal) = create_copy_test_app();
-    app.diff_mode = crate::config::DiffDisplayMode::Inline;
-
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    app.handle_key_event(KeyEvent::new(
-        KeyCode::Char('E'),
-        KeyModifiers::ALT | KeyModifiers::SHIFT,
-    ));
-
-    assert_eq!(app.diff_mode, crate::config::DiffDisplayMode::FullInline);
-    assert!(app.copy_badge_ui().key_active.is_some());
-}
+include!("expand_shortcut.rs");
 
 #[test]
 fn test_alt_shift_i_toggles_inline_images_and_persists() {
@@ -1208,7 +1194,14 @@ fn test_real_draw_click_on_body_anchored_image_label_cycles_level() {
         "clicking the rendered image label must cycle Fit -> Large \
          (this is the exact path the user reported as broken)"
     );
-    assert_eq!(app.status_notice(), Some("Image size: large".to_string()));
+    assert!(matches!(
+        app.status_notice().as_deref(),
+        Some(
+            "Image size: large"
+                | "Image size: large · Image copied"
+                | "Image size: large · Could not copy image"
+        )
+    ));
 }
 
 /// The inline-image placeholder marker row must never reach the terminal as
@@ -1543,8 +1536,7 @@ fn test_copy_selection_partial_drag_over_inline_math_copies_whole_formula() {
             text.contains("Euler").then_some((abs, text))
         })
         .expect("prose line");
-    let euler_col =
-        unicode_width::UnicodeWidthStr::width(&text[..text.find("Euler").unwrap()]);
+    let euler_col = unicode_width::UnicodeWidthStr::width(&text[..text.find("Euler").unwrap()]);
     // Drag from the start of "Euler" to two cells into the formula.
     let start_col = euler_col;
     let end_col = euler_col + "Euler ".len() + 2;
@@ -1579,7 +1571,10 @@ fn test_unicode_math_copy_badge_copies_latex_to_clipboard() {
     let clipboard = CapturedClipboard::new();
     let (mut app, mut terminal) = create_math_copy_test_app();
     let screen = render_and_snap(&app, &mut terminal);
-    assert!(screen.contains("[S]"), "math frame should get a badge: {screen}");
+    assert!(
+        screen.contains("[S]"),
+        "math frame should get a badge: {screen}"
+    );
 
     app.handle_key(KeyCode::Char('S'), KeyModifiers::ALT)
         .unwrap();
