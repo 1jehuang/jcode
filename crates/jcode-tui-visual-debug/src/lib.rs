@@ -107,6 +107,9 @@ pub struct MarginsCapture {
     pub left_widths: Vec<u16>,
     pub right_widths: Vec<u16>,
     pub centered: bool,
+    /// Rows at the top of the messages area reserved for the pinned top band
+    /// (todos, prompt preview). Widgets never sit above this row.
+    pub content_start_row: usize,
 }
 
 /// Info widget placement capture
