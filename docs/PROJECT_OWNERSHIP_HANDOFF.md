@@ -129,9 +129,11 @@ Plain `cargo test` — there is **no `cargo nextest`**. CI wraps calls in `pytho
 | 7 python gate scripts | all PASS |
 | `cargo fmt --all -- --check` | clean |
 | `cargo test -p jcode-app-core --lib tool::bash` | 38/38 |
-| `cargo test -p jcode-tui --lib` | 2296 passed / 21 failed — **pre-existing** (a pristine-tree run fails 22; no newly failing test) |
+| `cargo test -p jcode-tui --lib` | 2295 passed / 22 failed — **pre-existing**. A pristine-tree run also fails 22; re-running the suite on the shipped `a9b8ce357` tree gives the same 22. See the note below. |
 
 This does **not** replace CI: it is single-platform and skips the Windows/macOS/iOS/FreeBSD jobs plus `cargo audit`. The 18 residual warnings are all dead-code notices in the `jcode-telemetry-core` test target only, so the production warning budget reads 0.
+
+**TUI failure set is unstable between runs.** Comparing failure lists across runs of the same suite produces ±1 churn even with no code change. `test_login_completed_spawns_auth_refresh_when_runtime_is_available` is a wall-clock assertion (`took 145.665875ms`) that fails under full-suite load and **passes 3/3 in isolation**. Do not attribute a single ±1 delta to a change without re-running in isolation — see `docs/TUI_TEST_FLAKINESS.md`.
 
 ---
 
@@ -143,7 +145,7 @@ This does **not** replace CI: it is single-platform and skips the Windows/macOS/
 |---|---|---|
 | 1 | `check_code_size_budget.py` fails | **RESOLVED** by `a9b8ce357` (2026-10-15T23:50Z). Three files were shrunk: `bash.rs` 1502→1490, `tui/mod.rs` 2077→1944, `ui_inline_interactive.rs` 1384→1377. No baseline was edited. All 7 gate scripts PASS. |
 | 2 | fmt drift | **RESOLVED** by `826145e64` (11 files cleaned). Do not re-report as open. |
-| 3 | master CI re-run | **Partially closed locally.** Full-workspace `cargo check --workspace --all-targets` on `a9b8ce357`: **0 errors**, warning budget **0/0 PASS**, 7/7 gate scripts PASS, `cargo fmt --check` clean. Remaining 18 warnings are dead-code notices confined to the `jcode-telemetry-core` **test** target (pre-existing, not touched by this change). Still needs a real CI run to confirm the hosted-runner picture — see the masking note above. |
+| 3 | master CI re-run | **Partially closed locally** (re-verified on `a9b8ce357` after the rebase onto #82/#83/#84): `cargo check --workspace --all-targets` = **0 errors**, warning budget **0/0 PASS**, 7/7 gate scripts PASS, `cargo fmt --check` clean, TUI suite 22 failures matching pristine master. Still needs a real CI run to confirm the hosted-runner picture — see the masking note above. |
 | 4 | tag/bump | operator signal required. |
 
 ### Fork PRs — 13 open on `KooshaPari/Jcode`
