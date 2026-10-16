@@ -371,7 +371,7 @@ bing_market = "en-US"
 # title_pointer = "/title"
 # url_pointer = "/url"
 # snippet_pointer = "/snippet"
-||||||| parent of 74ae627fb (feat(tui): @file mention picker with frecency ranking, closes #570)
+
 [file_mention]
 # @file mention picker tuning. All values are optional; zero or missing
 # fields fall back to the built-in defaults shown here.
