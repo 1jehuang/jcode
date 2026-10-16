@@ -212,6 +212,29 @@ fn strip_quoted(text: &str) -> String {
     }
     kept
 }
+/// Whether a final answer is only a promise to act ("I'll check the machine
+/// directly.") with no tool call and no result. Observed live from GPT-5.6
+/// Sol: the turn ended there, so the user got no answer. Only a short,
+/// single-sentence answer that starts with a first-person intention counts.
+pub(super) fn only_announces_action(text: &str) -> bool {
+    let normalized = text.trim().to_lowercase().replace('\u{2019}', "'");
+    let starts = [
+        "i'll ",
+        "i will ",
+        "let me ",
+        "i'm going to ",
+        "i am going to ",
+    ];
+    let sentences = normalized
+        .split(['.', '!', '?', '\n'])
+        .filter(|sentence| !sentence.trim().is_empty())
+        .count();
+    normalized.len() <= 160
+        && sentences == 1
+        && !normalized.ends_with('?')
+        && starts.iter().any(|start| normalized.starts_with(start))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,6 +296,28 @@ mod tests {
             "The changes are not committed, so they cannot have been pushed.",
         ] {
             assert!(!claims_no_tool_access(text), "false positive: {text}");
+        }
+    }
+
+    #[test]
+    fn a_bare_promise_to_act_is_detected_but_real_answers_are_not() {
+        // Observed live from GPT-5.6 Sol, the whole final answer.
+        for text in [
+            "I’ll check the machine directly.",
+            "I’ll check the machine’s memory directly.",
+            "Let me look at the disk usage.",
+            "I'm going to run the tests now.",
+        ] {
+            assert!(only_announces_action(text), "missed: {text}");
+        }
+        for text in [
+            "I’ll check the machine directly. It has 8 logical CPUs.",
+            "The hostname is `HIQ-1`.",
+            "I'll need the file path to continue?",
+            "I will not push without CI.\n\nThe branch is ready for review.",
+            "SWEEP_OK",
+        ] {
+            assert!(!only_announces_action(text), "false positive: {text}");
         }
     }
 }
