@@ -20,6 +20,8 @@ use sandbox::{SandboxCall, sandbox_tools, sandbox_warning, with_sandbox_correcti
 
 const TOOL_CALL_START: &str = "<jcode_tool_call>";
 const TOOL_CALL_END: &str = "</jcode_tool_call>";
+/// Error text for a turn request that failed before ChatGPT received it.
+const NOT_SENT: &str = "ChatGPT web could not send the request (ChatGPT never received it)";
 const POLL_INTERVAL: Duration = Duration::from_millis(750);
 const NETWORK_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const PREVIEW_INTERVAL: Duration = Duration::from_millis(1000);
@@ -103,6 +105,7 @@ impl ChatGptWebState {
             let mut prompt = prompt;
             let mut corrected = false;
             let mut refusal_corrected = false;
+            let mut resent = false;
             // With `bash` on offer, a ChatGPT sandbox shell call is run on
             // this computer instead, so the turn can stop at that call.
             let redirect = advertised_tools.iter().any(|tool| tool == "bash");
@@ -112,6 +115,11 @@ impl ChatGptWebState {
                     .await
                 {
                     Ok(answer) => answer,
+                    Err(err) if !resent && format!("{err:#}").contains(NOT_SENT) => {
+                        resent = true;
+                        jcode_base::logging::warn(&format!("{err:#}; resending the turn"));
+                        continue;
+                    }
                     Err(err) => {
                         let _ = tx.send(Err(err)).await;
                         return;
@@ -767,6 +775,11 @@ async fn poll_network_stream(
             .context("Failed to read the owned ChatGPT web stream")?;
         if let Some(error) = state.get("sendError").and_then(Value::as_str) {
             anyhow::bail!("ChatGPT web send was refused before reaching the network: {error}");
+        }
+        // The browser's request failed before any response, so ChatGPT never
+        // received this turn. Fail now; the caller resends it once.
+        if let Some(error) = state.get("fetchError").and_then(Value::as_str) {
+            anyhow::bail!("{NOT_SENT}: {error}");
         }
         if state.get("started").and_then(Value::as_bool) == Some(true) {
             if !verified {
