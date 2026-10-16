@@ -22,6 +22,11 @@ const NETWORK_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const PREVIEW_INTERVAL: Duration = Duration::from_millis(1000);
 /// Pro turns finish in the background; their transcript is polled this often.
 const BACKGROUND_POLL_INTERVAL: Duration = Duration::from_secs(3);
+/// A turn POST normally starts streaming within a few seconds. A sent request
+/// gets this long before jcode gives up; ChatGPT can queue busy accounts.
+const START_TIMEOUT: Duration = Duration::from_secs(120);
+/// If the page has not even sent the turn POST by then, Send is clicked once more.
+const UNSENT_RETRY_AFTER: Duration = Duration::from_secs(10);
 
 /// One-line live preview of a streaming web answer: its size and the tail
 /// of the latest text, whitespace collapsed.
@@ -699,6 +704,7 @@ async fn poll_network_stream(
     let deadline = started + Duration::from_secs(timeout_secs);
     let (expected_length, expected_hash) = utf16_fingerprint(prompt);
     let mut verified = false;
+    let mut resent = false;
     let mut streaming_emitted = false;
     let mut last_status_second = 0u64;
     let mut last_preview_chars = 0usize;
@@ -863,8 +869,39 @@ async fn poll_network_stream(
                     selected.label
                 );
             }
-        } else if started.elapsed() > Duration::from_secs(45) {
-            anyhow::bail!("ChatGPT web did not start a response stream within 45 seconds");
+        } else {
+            // No response yet. Either the page never sent the turn POST (the
+            // deferred Send click did not take), or ChatGPT accepted it and is
+            // slow to answer (queueing, large prompt, heavy load).
+            let unsent = state.get("pending").and_then(Value::as_bool) == Some(true);
+            let waited = started.elapsed();
+            if unsent && !resent && waited > UNSENT_RETRY_AFTER {
+                // Nothing reached ChatGPT, so clicking Send again cannot
+                // duplicate the turn. The hook is still armed for this key.
+                resent = true;
+                let outcome = browser
+                    .ui(json!({"op":"click_send", "armedKey": stream_key}))
+                    .await;
+                jcode_base::logging::warn(&format!(
+                    "ChatGPT web Send did not reach the page; clicked Send again: {outcome:?}"
+                ));
+            } else if waited > START_TIMEOUT {
+                let cause = if unsent {
+                    "the page never sent the request"
+                } else {
+                    "the request was sent but ChatGPT did not answer"
+                };
+                match state.get("alert").and_then(Value::as_str) {
+                    Some(alert) => anyhow::bail!(
+                        "ChatGPT web did not start a response stream within {} seconds ({cause}; page says: {alert})",
+                        START_TIMEOUT.as_secs()
+                    ),
+                    None => anyhow::bail!(
+                        "ChatGPT web did not start a response stream within {} seconds ({cause})",
+                        START_TIMEOUT.as_secs()
+                    ),
+                }
+            }
         }
         let elapsed = started.elapsed().as_secs();
         if elapsed >= last_status_second + 10 {

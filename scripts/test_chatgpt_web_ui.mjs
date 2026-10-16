@@ -397,6 +397,23 @@ test('a dropped stream is reported as interrupted, not as a server rejection',as
   assert.equal(state.done,true); assert.equal(state.complete,false);
   assert.match(state.interrupted,/aborted/);
 });
+test('click_send re-clicks only while this turn is armed and unsent',async()=>{
+  const f=fixture(); const placeholder='jcode turn jcode-c1'; f.editor.text=placeholder;
+  const globals={ fetch: async () => sseResponse(streamFixture) };
+  assert.equal((await run({op:'click_send',armedKey:'jcode-c1'},f,{globals})).clicked,false,'never clicks when the hook is not armed');
+  await run({op:'arm_send',key:'jcode-c1',text:'REAL',placeholder},f,{globals});
+  const timers=[]; const source=readFileSync(path,'utf8');
+  const clickOnce=()=>new Function('request','document','location','KeyboardEvent','setTimeout','globalThis','Date','getSelection','DataTransfer','ClipboardEvent','TextDecoder','Response',source)(
+    {op:'click_send',armedKey:'jcode-c1'},f.document,{hostname:'chatgpt.com',pathname:'/'},class{constructor(t,o){this.type=t;Object.assign(this,o);}},
+    (cb,ms)=>{ if(ms===0){timers.push(cb);return 0;} cb(); return 0; },globals,{now:()=>0},()=>({}),class{},class{},TextDecoder,Response);
+  assert.equal((await clickOnce()).clicked,true); timers.splice(0).forEach(cb=>cb());
+  assert.equal(f.submits(),1);
+  // Once the page sends, the hook clears `pending`: no second click.
+  await (await globals.fetch('https://chatgpt.com/backend-api/f/conversation',{method:'POST',body:sendBody(placeholder)})).text(); await settle();
+  assert.equal((await clickOnce()).clicked,false); timers.splice(0).forEach(cb=>cb());
+  assert.equal(f.submits(),1,'a sent turn is never sent again');
+  assert.equal((await run({op:'click_send',armedKey:'jcode-other'},f,{globals})).clicked,false,'another turn key never clicks');
+});
 test('stream reports HTTP rejections such as unusual-activity blocks',async()=>{
   const f=fixture();
   const globals={ fetch: async () => sseResponse('{"detail":"Unusual activity has been detected"}',{status:403}) };
