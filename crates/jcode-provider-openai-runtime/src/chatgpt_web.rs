@@ -816,6 +816,14 @@ async fn poll_network_stream(
                     .and_then(Value::as_str)
                     .map(str::to_string);
                 let mut last_reason = String::from("the stream ended before the answer finished");
+                if let Some(interrupted) = state.get("interrupted").and_then(Value::as_str) {
+                    // The connection dropped ("BodyStreamBuffer was aborted"),
+                    // but ChatGPT keeps generating server-side.
+                    jcode_base::logging::warn(&format!(
+                        "ChatGPT web stream was interrupted ({interrupted}); reading the answer from the conversation"
+                    ));
+                    last_reason = format!("the stream was interrupted: {interrupted}");
+                }
                 while Instant::now() < deadline {
                     if tx.is_closed() {
                         anyhow::bail!("ChatGPT web response consumer was closed");

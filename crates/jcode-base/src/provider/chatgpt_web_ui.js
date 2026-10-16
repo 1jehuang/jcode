@@ -392,7 +392,12 @@ return (async () => {
           }
           turn.done = true;
           if (turn.status !== 200 && !turn.error) turn.error = `HTTP ${turn.status}: ${turn.buffer.slice(0, 300)}`;
-        })().catch(error => { if (!turn.done && !turn.error) turn.error = String(error?.message || error); });
+        })().catch(error => {
+          // The page's copy or the connection dropped (navigation, network
+          // change, page abort). ChatGPT keeps generating server-side, so
+          // this is not a rejection: the transcript holds the answer.
+          if (!turn.done && !turn.error) { turn.interrupted = String(error?.message || error); turn.done = true; }
+        });
         const pageBody = mask ? theirs.pipeThrough(maskStream(mask)) : theirs;
         return new Response(pageBody, { status: response.status, statusText: response.statusText, headers: response.headers });
       };
@@ -521,7 +526,7 @@ return (async () => {
     const assistant = turn.order.map(id => turn.messages[id]).filter(m => m.role === 'assistant');
     const texts = assistant.filter(m => m.recipient === 'all' && m.type === 'text' && m.text.trim()).map(m => m.text);
     const last = assistant.at(-1);
-    return { started: true, status: turn.status, done: turn.done, error: turn.error, events: turn.events, texts, substituted: turn.substituted,
+    return { started: true, status: turn.status, done: turn.done, error: turn.error, interrupted: turn.interrupted || null, events: turn.events, texts, substituted: turn.substituted,
       served: turn.served || null, servedEffort: turn.servedEffort || null,
       complete: turn.done && !!last && last.endTurn === true && last.status === 'finished_successfully',
       builtin: [...new Set(assistant.map(m => m.recipient).filter(r => r && r !== 'all'))],
