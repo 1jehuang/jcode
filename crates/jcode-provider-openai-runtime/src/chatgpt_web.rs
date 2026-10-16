@@ -14,6 +14,9 @@ use jcode_base::provider::chatgpt_web_instance as web_instance;
 #[path = "chatgpt_web/refusal.rs"]
 mod refusal;
 use refusal::claims_no_tool_access;
+#[path = "chatgpt_web/sandbox.rs"]
+mod sandbox;
+use sandbox::SandboxCall;
 
 const TOOL_CALL_START: &str = "<jcode_tool_call>";
 const TOOL_CALL_END: &str = "</jcode_tool_call>";
@@ -100,14 +103,43 @@ impl ChatGptWebState {
             let mut prompt = prompt;
             let mut corrected = false;
             let mut refusal_corrected = false;
+            // With `bash` on offer, a ChatGPT sandbox shell call is run on
+            // this computer instead, so the turn can stop at that call.
+            let redirect = advertised_tools.iter().any(|tool| tool == "bash");
             loop {
-                let answer = match self.run_turn(&prompt, &model, effort.as_deref(), &tx).await {
+                let mut answer = match self
+                    .run_turn(&prompt, &model, effort.as_deref(), redirect, &tx)
+                    .await
+                {
                     Ok(answer) => answer,
                     Err(err) => {
                         let _ = tx.send(Err(err)).await;
                         return;
                     }
                 };
+                // The redirected answer requests a jcode tool, so the sandbox
+                // and refusal checks below let it through unchanged.
+                if let Some(redirected) = answer
+                    .sandbox_call
+                    .as_ref()
+                    .filter(|_| redirect)
+                    .and_then(sandbox::redirected_response)
+                {
+                    jcode_base::logging::warn(
+                        "ChatGPT web used its own sandbox shell; running that command on this computer instead",
+                    );
+                    let detail = format!(
+                        "{model} tried ChatGPT's remote sandbox. Running the command on this computer instead"
+                    );
+                    if tx
+                        .send(Ok(StreamEvent::StatusDetail { detail }))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    answer.text = redirected;
+                }
                 let sandbox = sandbox_tools(&answer.builtin);
                 // An answer that requests jcode tools is acted on locally, so
                 // only a final answer computed in the sandbox is suspect.
@@ -170,6 +202,7 @@ impl ChatGptWebState {
         prompt: &str,
         model: &str,
         effort: Option<&str>,
+        redirect_sandbox: bool,
         tx: &mpsc::Sender<Result<StreamEvent>>,
     ) -> Result<WebAnswer> {
         if !super::is_chatgpt_web_model(model) {
@@ -241,7 +274,7 @@ impl ChatGptWebState {
                     response = &mut submission => { response.context("Failed to submit the temporary ChatGPT prompt")?; }
                 }
                 send_phase(tx, jcode_message_types::ConnectionPhase::WaitingForResponse).await?;
-                let answer = poll_network_stream(&browser, &selected, None, &stream_key, prompt, tx).await?;
+                let answer = poll_network_stream(&browser, &selected, None, &stream_key, prompt, redirect_sandbox, tx).await?;
                 verify_served(&answer, &slug, thinking.as_deref())?;
                 jcode_base::logging::info(&format!(
                     "ChatGPT web turn served model={} thinking_effort={} (requested route {} effort {})",
@@ -297,7 +330,7 @@ impl ChatGptWebState {
             }
             send_phase(tx, jcode_message_types::ConnectionPhase::WaitingForResponse).await?;
             if network {
-                poll_network_stream(&browser, &selected, Some(effective_effort), &stream_key, prompt, tx).await
+                poll_network_stream(&browser, &selected, Some(effective_effort), &stream_key, prompt, redirect_sandbox, tx).await
             } else {
                 poll_for_response(&browser, &selected, effective_effort, tx).await
             }
@@ -567,8 +600,12 @@ async fn poll_for_response(
             // The rendered message is lossy (Markdown, hidden wrapper tags,
             // dropped backslashes). The raw transcript is the source of truth.
             let since = *terminal_since.get_or_insert_with(Instant::now);
-            let (text, builtin) = match read_transcript(browser).await? {
-                Transcript::Final { text, builtin } => (text, builtin),
+            let (text, builtin, sandbox_call) = match read_transcript(browser).await? {
+                Transcript::Final {
+                    text,
+                    builtin,
+                    sandbox_call,
+                } => (text, builtin, sandbox_call),
                 Transcript::Pending if since.elapsed() < TRANSCRIPT_GRACE => {
                     tokio::time::sleep(POLL_INTERVAL).await;
                     continue;
@@ -577,7 +614,7 @@ async fn poll_for_response(
                     jcode_base::logging::warn(
                         "ChatGPT web transcript was not usable, falling back to the rendered answer",
                     );
-                    (text, Vec::new())
+                    (text, Vec::new(), None)
                 }
                 Transcript::Unavailable(reason) => anyhow::bail!(
                     "ChatGPT completed the turn without an assistant response (transcript unavailable: {reason})"
@@ -608,6 +645,7 @@ async fn poll_for_response(
             return Ok(WebAnswer {
                 text,
                 builtin,
+                sandbox_call,
                 served: None,
                 served_effort: None,
             });
@@ -693,6 +731,7 @@ async fn poll_network_stream(
     effort: Option<&str>,
     stream_key: &str,
     prompt: &str,
+    redirect_sandbox: bool,
     tx: &mpsc::Sender<Result<StreamEvent>>,
 ) -> Result<WebAnswer> {
     let timeout_secs = std::env::var("JCODE_CHATGPT_WEB_TIMEOUT_SECS")
@@ -744,6 +783,32 @@ async fn poll_network_stream(
             }
             if let Some(error) = state.get("error").and_then(Value::as_str) {
                 anyhow::bail!("ChatGPT web rejected the request: {error}");
+            }
+            let served = state
+                .get("served")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let served_effort = state
+                .get("servedEffort")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            // Its own sandbox call will be run locally, so the rest of this
+            // answer would build on the wrong machine. Stop here.
+            if let Some(call) = SandboxCall::from_state(&state)
+                .filter(|call| redirect_sandbox && sandbox::sandbox_command(&call.code).is_some())
+            {
+                if let Err(error) = browser.ui(json!({"op":"stop"})).await {
+                    jcode_base::logging::warn(&format!(
+                        "ChatGPT web could not stop the sandboxed answer: {error:#}"
+                    ));
+                }
+                return Ok(WebAnswer {
+                    text: String::new(),
+                    builtin: vec!["container.exec".to_string()],
+                    sandbox_call: Some(call),
+                    served,
+                    served_effort,
+                });
             }
             let texts: Vec<&str> = state
                 .get("texts")
@@ -797,17 +862,10 @@ async fn poll_network_stream(
                     browser.ui(json!({"op":"verify", "label":selected.label, "effort":effort, "requireTemporary":false})).await
                         .context("The requested ChatGPT model or thinking effort changed during the response")?;
                 }
-                let served = state
-                    .get("served")
-                    .and_then(Value::as_str)
-                    .map(str::to_string);
-                let served_effort = state
-                    .get("servedEffort")
-                    .and_then(Value::as_str)
-                    .map(str::to_string);
                 return Ok(WebAnswer {
                     text,
                     builtin,
+                    sandbox_call: SandboxCall::from_state(&state),
                     served,
                     served_effort,
                 });
@@ -817,14 +875,6 @@ async fn poll_network_stream(
                 // models run as a background job: the stream closes early
                 // and the answer lands in the conversation later. Aborted
                 // turns end up here too; the transcript decides which.
-                let served = state
-                    .get("served")
-                    .and_then(Value::as_str)
-                    .map(str::to_string);
-                let served_effort = state
-                    .get("servedEffort")
-                    .and_then(Value::as_str)
-                    .map(str::to_string);
                 let mut last_reason = String::from("the stream ended before the answer finished");
                 if let Some(interrupted) = state.get("interrupted").and_then(Value::as_str) {
                     // The connection dropped ("BodyStreamBuffer was aborted"),
@@ -839,10 +889,15 @@ async fn poll_network_stream(
                         anyhow::bail!("ChatGPT web response consumer was closed");
                     }
                     match read_transcript(browser).await? {
-                        Transcript::Final { text, builtin } => {
+                        Transcript::Final {
+                            text,
+                            builtin,
+                            sandbox_call,
+                        } => {
                             return Ok(WebAnswer {
                                 text,
                                 builtin,
+                                sandbox_call,
                                 served,
                                 served_effort,
                             });
@@ -917,9 +972,14 @@ async fn poll_network_stream(
 }
 
 enum Transcript {
-    /// The raw visible answer of the finished turn, plus the ChatGPT
-    /// built-in tools (message recipients) the model used for it.
-    Final { text: String, builtin: Vec<String> },
+    /// The raw visible answer of the finished turn, the ChatGPT built-in
+    /// tools (message recipients) the model used for it, and its first
+    /// sandbox shell call, if any.
+    Final {
+        text: String,
+        builtin: Vec<String>,
+        sandbox_call: Option<SandboxCall>,
+    },
     /// The backend has not recorded the end of the turn yet.
     Pending,
     /// The transcript cannot be read at all.
@@ -932,6 +992,8 @@ struct WebAnswer {
     text: String,
     /// ChatGPT built-in tools used for this answer. Empty when unknown.
     builtin: Vec<String>,
+    /// The first `container.exec` call, which jcode can run locally instead.
+    sandbox_call: Option<SandboxCall>,
     /// Model slug and thinking level the server reports it used, when known.
     served: Option<String>,
     served_effort: Option<String>,
@@ -1012,7 +1074,10 @@ async fn read_transcript(browser: &Tab<'_>) -> Result<Transcript> {
                 .collect()
         })
         .unwrap_or_default();
-    if text.is_empty() {
+    let sandbox_call = SandboxCall::from_state(&state);
+    // A turn that only ran a sandbox call has no text, but jcode can still
+    // run that call locally.
+    if text.is_empty() && sandbox_call.is_none() {
         anyhow::bail!(
             "ChatGPT completed the turn without an assistant response{}",
             if builtin.is_empty() {
@@ -1022,7 +1087,11 @@ async fn read_transcript(browser: &Tab<'_>) -> Result<Transcript> {
             }
         );
     }
-    Ok(Transcript::Final { text, builtin })
+    Ok(Transcript::Final {
+        text,
+        builtin,
+        sandbox_call,
+    })
 }
 
 /// The visible answer of one turn. ChatGPT may split it into a progress note

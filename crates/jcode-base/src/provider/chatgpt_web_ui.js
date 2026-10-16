@@ -292,6 +292,14 @@ return (async () => {
   function isStopButton(e) {
     return /^stop( (generating|streaming|response))?$/i.test((e.getAttribute('aria-label') || '').trim()) || e.getAttribute('data-testid') === 'stop-button';
   }
+  // ChatGPT's built-in shell, which runs on OpenAI's remote machine. jcode
+  // runs the same command locally instead (see chatgpt_web/sandbox.rs).
+  function isSandboxExec(m) { return m?.role === 'assistant' && m.recipient === 'container.exec' && m.type === 'code'; }
+  // Visible text written before index `end`, then the sandbox call itself.
+  function sandboxCallOf(messages, end, code) {
+    const before = messages.slice(0, end).filter(m => m.role === 'assistant' && m.recipient === 'all' && m.type === 'text' && m.text.trim()).map(m => m.text);
+    return { tool: messages[end].recipient, code, before };
+  }
   // The rendered DOM is lossy: markdown hides backslashes, and ChatGPT can
   // render wrapped markup such as <escape>...</escape> as an empty message.
   // Read the owned conversation's raw assistant text from the same-origin
@@ -314,7 +322,10 @@ return (async () => {
     const texts = assistant.filter(m => (m.recipient ?? 'all') === 'all' && m.content?.content_type === 'text')
       .map(m => (m.content.parts || []).filter(part => typeof part === 'string').join('')).filter(text => text.trim());
     const last = turn.at(-1);
+    const flat = turn.map(m => ({ role: m.author?.role, recipient: m.recipient ?? 'all', type: m.content?.content_type, text: (m.content?.parts || []).filter(part => typeof part === 'string').join('') }));
+    const callIndex = flat.findIndex(isSandboxExec);
     return { available: true, temporary: data.is_temporary_chat === true, texts,
+      sandboxCall: callIndex < 0 ? null : sandboxCallOf(flat, callIndex, String(turn[callIndex].content.text ?? '')),
       complete: last?.author?.role === 'assistant' && last.end_turn === true && last.status === 'finished_successfully',
       builtin: [...new Set(assistant.map(m => m.recipient).filter(r => r && r !== 'all'))] };
   }
@@ -487,7 +498,8 @@ return (async () => {
         if (!m?.id) return;
         if (!turn.messages[m.id]) turn.order.push(m.id);
         turn.messages[m.id] = { role: m.author?.role, recipient: m.recipient ?? 'all', channel: m.channel ?? null, type: m.content?.content_type,
-          text: (m.content?.parts || []).filter(p => typeof p === 'string').join(''), status: m.status, endTurn: m.end_turn };
+          text: (m.content?.parts || []).filter(p => typeof p === 'string').join(''), status: m.status, endTurn: m.end_turn,
+          code: m.content?.content_type === 'code' ? String(m.content.text ?? '') : null };
         // The server reports which model and thinking level actually ran.
         const meta = m.metadata || {};
         if (m.author?.role !== 'user') {
@@ -505,6 +517,8 @@ return (async () => {
       if (/^\/message\/content\/parts\/0$/.test(path)) {
         entry.text = op === 'replace' ? String(value ?? '') : entry.text + String(value ?? '');
         if (entry.role === 'assistant' && entry.text && !turn.firstToken) turn.firstToken = Date.now();
+      } else if (path === '/message/content/text' && entry.code != null) {
+        entry.code = op === 'replace' ? String(value ?? '') : entry.code + String(value ?? '');
       } else if (path === '/message/status' && op === 'replace') entry.status = value;
       else if (path === '/message/end_turn' && op === 'replace') entry.endTurn = value;
     };
@@ -534,7 +548,13 @@ return (async () => {
     const assistant = turn.order.map(id => turn.messages[id]).filter(m => m.role === 'assistant');
     const texts = assistant.filter(m => m.recipient === 'all' && m.type === 'text' && m.text.trim()).map(m => m.text);
     const last = assistant.at(-1);
-    return { started: true, status: turn.status, done: turn.done, error: turn.error, interrupted: turn.interrupted || null, events: turn.events, texts, substituted: turn.substituted,
+    // A sandbox call is final once its message is complete or the sandbox's
+    // output (any later message) has arrived.
+    const ordered = turn.order.map(id => turn.messages[id]);
+    const callIndex = ordered.findIndex(isSandboxExec);
+    const call = ordered[callIndex];
+    const sandboxCall = call && (call.status === 'finished_successfully' || callIndex < ordered.length - 1) ? sandboxCallOf(ordered, callIndex, call.code ?? '') : null;
+    return { started: true, status: turn.status, sandboxCall, done: turn.done, error: turn.error, interrupted: turn.interrupted || null, events: turn.events, texts, substituted: turn.substituted,
       served: turn.served || null, servedEffort: turn.servedEffort || null,
       complete: turn.done && !!last && last.endTurn === true && last.status === 'finished_successfully',
       builtin: [...new Set(assistant.map(m => m.recipient).filter(r => r && r !== 'all'))],
