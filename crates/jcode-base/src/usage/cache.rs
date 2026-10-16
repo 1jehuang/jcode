@@ -177,6 +177,9 @@ pub(super) fn store_openai_usage_for_generation(
     }
 }
 
+const ANTHROPIC_FIVE_HOUR_SECONDS: u64 = 5 * 60 * 60;
+const ANTHROPIC_SEVEN_DAY_SECONDS: u64 = 7 * 24 * 60 * 60;
+
 pub(super) fn anthropic_usage_error(err_msg: String) -> UsageData {
     UsageData {
         fetched_at: Some(Instant::now()),
@@ -202,17 +205,20 @@ pub(super) fn provider_report_from_usage_data(
         name: "5-hour window".to_string(),
         usage_percent: data.five_hour * 100.0,
         resets_at: data.five_hour_resets_at.clone(),
+        window_seconds: Some(ANTHROPIC_FIVE_HOUR_SECONDS),
     });
     limits.push(UsageLimit {
         name: "7-day window".to_string(),
         usage_percent: data.seven_day * 100.0,
         resets_at: data.seven_day_resets_at.clone(),
+        window_seconds: Some(ANTHROPIC_SEVEN_DAY_SECONDS),
     });
     if let Some(opus) = data.seven_day_opus {
         limits.push(UsageLimit {
             name: "7-day Opus window".to_string(),
             usage_percent: opus * 100.0,
             resets_at: data.seven_day_resets_at.clone(),
+            window_seconds: Some(ANTHROPIC_SEVEN_DAY_SECONDS),
         });
     }
     for window in &data.model_scoped {
@@ -220,6 +226,7 @@ pub(super) fn provider_report_from_usage_data(
             name: format!("7-day {} window", window.model_name),
             usage_percent: window.utilization * 100.0,
             resets_at: window.resets_at.clone(),
+            window_seconds: Some(ANTHROPIC_SEVEN_DAY_SECONDS),
         });
     }
 
@@ -337,6 +344,7 @@ pub(super) fn provider_report_from_openai_usage_data(
             name: window.name.clone(),
             usage_percent: window.usage_ratio * 100.0,
             resets_at: window.resets_at.clone(),
+            window_seconds: window.window_seconds,
         });
     }
     if let Some(window) = &data.seven_day {
@@ -344,6 +352,7 @@ pub(super) fn provider_report_from_openai_usage_data(
             name: window.name.clone(),
             usage_percent: window.usage_ratio * 100.0,
             resets_at: window.resets_at.clone(),
+            window_seconds: window.window_seconds,
         });
     }
     if let Some(window) = &data.spark {
@@ -351,6 +360,7 @@ pub(super) fn provider_report_from_openai_usage_data(
             name: window.name.clone(),
             usage_percent: window.usage_ratio * 100.0,
             resets_at: window.resets_at.clone(),
+            window_seconds: window.window_seconds,
         });
     }
 
