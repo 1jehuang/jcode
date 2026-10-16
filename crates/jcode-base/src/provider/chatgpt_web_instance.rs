@@ -1338,6 +1338,7 @@ mod tests {
         browser.await.unwrap();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     #[ignore = "launches the real private Chrome headless against chatgpt.com in an isolated JCODE_HOME; never signs in or sends a prompt"]
     async fn chatgpt_web_instance_live_headless_launch_reports_signed_out_profile() {
@@ -1368,6 +1369,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn waiting_process_requests_handoff_and_clears_the_request() {
         let temp = tempfile::tempdir().unwrap();
