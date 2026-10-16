@@ -332,14 +332,10 @@ fn configure_agent_model_picker_entries(
     // restores preview=true, which made the next typed character land in the
     // composer and the preview sync close the picker instead of filtering it.
     picker.preview = false;
-    if target == AgentModelTarget::Memory {
-        picker.entries.retain(|entry| {
-            matches!(
-                crate::provider::provider_for_model(&model_entry_base_name(entry)),
-                Some("openai" | "claude")
-            )
-        });
-    }
+    // No provider filter for Memory anymore: the sidecar's Provider backend
+    // routes extraction through the live agent provider, so every model in
+    // the catalog works. The old openai/claude-only filter hid routed custom
+    // models (e.g. `together_ai/...`) and made the memory picker look broken.
 
     for entry in &mut picker.entries {
         let matches_saved = configured.as_deref().map(|saved| {

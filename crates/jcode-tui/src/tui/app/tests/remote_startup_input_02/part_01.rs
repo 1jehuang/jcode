@@ -859,7 +859,7 @@ fn test_handle_key_cursor_movement() {
 }
 
 #[test]
-fn test_model_picker_ctrl_s_opens_swarm_model_picker() {
+fn test_model_picker_alt_s_opens_swarm_model_picker() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         app.is_remote = true;
@@ -882,16 +882,17 @@ fn test_model_picker_ctrl_s_opens_swarm_model_picker() {
             "model picker should be open"
         );
 
-        // Ctrl+S should open the swarm model sub-picker
-        app.handle_key(KeyCode::Char('s'), KeyModifiers::CONTROL)
+        // Alt+S should open the swarm model sub-picker (Ctrl+S stays the
+        // global input-stash chord)
+        app.handle_key(KeyCode::Char('s'), KeyModifiers::ALT)
             .unwrap();
 
         let picker = app
             .inline_interactive_state
             .as_ref()
-            .expect("picker should still be open after Ctrl+S");
+            .expect("picker should still be open after Alt+S");
 
-        // After Ctrl+S, entries should be tagged as AgentModelChoice for Swarm target
+        // After Alt+S, entries should be tagged as AgentModelChoice for Swarm target
         assert!(
             picker.entries.iter().any(|e| matches!(
                 e.action,
@@ -900,7 +901,7 @@ fn test_model_picker_ctrl_s_opens_swarm_model_picker() {
                     ..
                 }
             )),
-            "Ctrl+S should open swarm model picker with AgentModelChoice entries"
+            "Alt+S should open swarm model picker with AgentModelChoice entries"
         );
     });
 }
@@ -912,7 +913,7 @@ fn test_swarm_picker_from_model_preview_stays_searchable() {
         app.is_remote = true;
         // >64 names-only entries and no hydrated routes: the typed /model
         // preview opens on lightweight routes without caching them, so the
-        // Ctrl+S rebuild cannot be served from a fresh picker cache. That
+        // Alt+S rebuild cannot be served from a fresh picker cache. That
         // rebuild path is the one that restores preview=true from the /model
         // preview picker, which used to leave the swarm sub-picker glued to
         // the composer: the next typed character landed in the composer and
@@ -932,13 +933,13 @@ fn test_swarm_picker_from_model_preview_stays_searchable() {
             .expect("model picker preview should be open");
         assert!(picker.preview);
 
-        // Ctrl+S opens the swarm sub-picker from the preview.
-        app.handle_key(KeyCode::Char('s'), KeyModifiers::CONTROL)
+        // Alt+S opens the swarm sub-picker from the preview.
+        app.handle_key(KeyCode::Char('s'), KeyModifiers::ALT)
             .unwrap();
         let picker = app
             .inline_interactive_state
             .as_ref()
-            .expect("swarm picker should be open after Ctrl+S");
+            .expect("swarm picker should be open after Alt+S");
         assert!(
             picker.entries.iter().any(|e| matches!(
                 e.action,
@@ -947,7 +948,7 @@ fn test_swarm_picker_from_model_preview_stays_searchable() {
                     ..
                 }
             )),
-            "Ctrl+S from preview should open swarm model picker"
+            "Alt+S from preview should open swarm model picker"
         );
         assert!(
             !picker.preview,
@@ -972,6 +973,77 @@ fn test_swarm_picker_from_model_preview_stays_searchable() {
             app.input(),
             "",
             "search characters must not land in the composer"
+        );
+    });
+}
+
+#[test]
+fn test_model_picker_alt_m_opens_memory_model_picker_with_routed_models() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.is_remote = true;
+        // A routed custom-provider model (slash form) plus a plain OpenAI one:
+        // the memory sub-picker used to filter entries down to openai/claude
+        // only, hiding the routed model and making the picker look broken.
+        // The sidecar's Provider backend routes extraction through any live
+        // provider, so both models must be selectable.
+        app.remote_available_entries = vec![
+            "gpt-5.5".to_string(),
+            "together_ai/revolut-ltd/glm-5-3-responses".to_string(),
+        ];
+        app.remote_model_options = vec![
+            crate::provider::ModelRoute {
+                model: "gpt-5.5".to_string(),
+                provider: "OpenAI".to_string(),
+                api_method: "openai".to_string(),
+                available: true,
+                detail: String::new(),
+                cheapness: None,
+                usage: None,
+            },
+            crate::provider::ModelRoute {
+                model: "together_ai/revolut-ltd/glm-5-3-responses".to_string(),
+                provider: "Together AI".to_string(),
+                api_method: "openai".to_string(),
+                available: true,
+                detail: String::new(),
+                cheapness: None,
+                usage: None,
+            },
+        ];
+
+        app.open_model_picker();
+        assert!(
+            app.inline_interactive_state.is_some(),
+            "model picker should be open"
+        );
+
+        app.handle_key(KeyCode::Char('m'), KeyModifiers::ALT)
+            .unwrap();
+
+        let picker = app
+            .inline_interactive_state
+            .as_ref()
+            .expect("memory picker should be open after Alt+M");
+        assert!(
+            picker.entries.iter().any(|e| matches!(
+                e.action,
+                crate::tui::PickerAction::AgentModelChoice {
+                    target: crate::tui::AgentModelTarget::Memory,
+                    ..
+                }
+            )),
+            "Alt+M should open the memory model picker"
+        );
+        assert!(
+            picker.entries.iter().any(|e| {
+                e.name.contains("together_ai/revolut-ltd/glm-5-3-responses")
+            }),
+            "routed custom-provider models must appear in the memory picker"
+        );
+        assert!(
+            picker.entries.iter().any(|e| e.name.contains("gpt-5.5")),
+            "plain OpenAI models must still appear in the memory picker"
         );
     });
 }
@@ -1015,12 +1087,12 @@ fn test_agent_model_picker_late_catalog_refresh_keeps_agent_entries() {
             "large remote catalog should leave a pending background refresh"
         );
 
-        // Ctrl+S opens the swarm sub-picker. If the refresh completes within
+        // Alt+S opens the swarm sub-picker. If the refresh completes within
         // the two-second wait window the open path retags inline; if it is
         // still in flight the pending load carries the agent target so the
         // poll completion path retags instead. Simulate the in-flight case:
         // tag the still-pending load, then let the refresh land.
-        app.handle_key(KeyCode::Char('s'), KeyModifiers::CONTROL)
+        app.handle_key(KeyCode::Char('s'), KeyModifiers::ALT)
             .unwrap();
         if let Some(pending) = app.pending_model_picker_load.as_mut() {
             pending.agent_target = Some(crate::tui::AgentModelTarget::Swarm);
@@ -1072,7 +1144,7 @@ fn test_agent_model_picker_late_refresh_keeps_inherit_override_search_and_select
             .set_agent_model_override("swarm", Some("claude-legacy-model".to_string()))
             .unwrap();
 
-        app.handle_key(KeyCode::Char('s'), KeyModifiers::CONTROL)
+        app.handle_key(KeyCode::Char('s'), KeyModifiers::ALT)
             .unwrap();
         if let Some(pending) = app.pending_model_picker_load.as_mut() {
             pending.agent_target = Some(crate::tui::AgentModelTarget::Swarm);
@@ -1153,7 +1225,7 @@ fn test_agent_model_picker_late_refresh_keeps_inherit_override_search_and_select
 }
 
 #[test]
-fn test_model_picker_ctrl_s_does_not_fire_when_not_in_model_picker() {
+fn test_model_picker_agent_chords_do_not_fire_when_not_in_model_picker() {
     let mut app = create_test_app();
     app.is_remote = true;
     app.remote_available_entries = vec!["gpt-5.5".to_string()];
@@ -1167,17 +1239,50 @@ fn test_model_picker_ctrl_s_does_not_fire_when_not_in_model_picker() {
         usage: None,
     }];
 
-    // Don't open the model picker — Ctrl+S should be a no-op
+    // Don't open the model picker. Alt+S / Alt+M should be no-ops, and
+    // Ctrl+S must not open anything either: it stays the input-stash chord.
     assert!(app.inline_interactive_state.is_none());
 
+    app.handle_key(KeyCode::Char('s'), KeyModifiers::ALT)
+        .unwrap();
+    app.handle_key(KeyCode::Char('m'), KeyModifiers::ALT)
+        .unwrap();
     app.handle_key(KeyCode::Char('s'), KeyModifiers::CONTROL)
         .unwrap();
 
     // Still no picker should be open
     assert!(
         app.inline_interactive_state.is_none(),
-        "Ctrl+S should not open anything when no picker is active"
+        "agent chords should not open anything when no picker is active"
     );
+}
+
+#[test]
+fn test_ctrl_s_with_no_picker_stashes_input() {
+    let mut app = create_test_app();
+    app.set_input_for_test("draft message");
+    assert!(app.inline_interactive_state.is_none());
+
+    // With no picker open, Ctrl+S is the input-stash chord: it must stash the
+    // draft and never open a picker or sub-picker.
+    app.handle_key(KeyCode::Char('s'), KeyModifiers::CONTROL)
+        .unwrap();
+
+    assert!(
+        app.inline_interactive_state.is_none(),
+        "Ctrl+S with no picker must not open the swarm sub-picker"
+    );
+    assert_eq!(app.input(), "");
+    assert!(
+        app.stashed_input.is_some(),
+        "Ctrl+S with no picker must stash the draft"
+    );
+
+    // A second press restores the draft.
+    app.handle_key(KeyCode::Char('s'), KeyModifiers::CONTROL)
+        .unwrap();
+    assert_eq!(app.input(), "draft message");
+    assert!(app.inline_interactive_state.is_none());
 }
 
 #[test]

@@ -17,10 +17,10 @@ mod preview;
 #[path = "inline_interactive/preview_request.rs"]
 mod preview_request;
 use helpers::{
-    agent_model_default_summary, agent_model_target_label, agent_model_target_slug,
-    catchup_candidates, catchup_queue_position, model_entry_base_name, model_entry_saved_spec,
-    openrouter_route_model_id, picker_route_model_spec, picker_route_selection,
-    save_agent_model_override,
+    agent_model_chord_target, agent_model_default_summary, agent_model_target_label,
+    agent_model_target_slug, catchup_candidates, catchup_queue_position, model_entry_base_name,
+    model_entry_saved_spec, openrouter_route_model_id, picker_route_model_spec,
+    picker_route_selection, save_agent_model_override,
 };
 
 pub(super) fn subagent_picker_model_spec(entry: &PickerEntry) -> String {
@@ -2346,19 +2346,18 @@ impl App {
         // preview no longer steals Ctrl+B / Ctrl+F / Alt+F, which are the tmux
         // prefix and readline word-navigation keys users rely on while editing
         // the `/model` command line. Cycling favorites stays on Shift+Tab.
+        // Agent sub-pickers live on Alt+S / Alt+M (see
+        // `agent_model_chord_target`) because Ctrl+S is the input-stash chord.
         let is_default =
             modifiers.contains(KeyModifiers::CONTROL) && key_char_eq_ignore_ascii_case(code, 'o');
         let is_favorite =
             modifiers.contains(KeyModifiers::CONTROL) && key_char_eq_ignore_ascii_case(code, 'n');
-        let is_swarm =
-            modifiers.contains(KeyModifiers::CONTROL) && key_char_eq_ignore_ascii_case(code, 's');
         if is_default || is_favorite {
             self.handle_inline_interactive_key(code, modifiers)?;
             return Ok(true);
         }
-        if is_swarm {
-            // Open the swarm model sub-picker from the /model preview.
-            self.open_agent_model_picker(crate::tui::AgentModelTarget::Swarm);
+        if let Some(target) = agent_model_chord_target(code, modifiers) {
+            self.open_agent_model_picker(target);
             return Ok(true);
         }
         Ok(false)
@@ -3626,21 +3625,18 @@ impl App {
             {
                 self.toggle_selected_model_favorite();
             }
-            code if modifiers.contains(KeyModifiers::CONTROL)
-                && key_char_eq_ignore_ascii_case(code, 's') =>
-            {
-                // Ctrl+S inside the /model picker opens the swarm model
-                // sub-picker so users can choose which model spawned swarm
-                // agents use, without leaving the /model flow. If no swarm
-                // model override is saved, agents inherit the current model.
-                if self
+            code if agent_model_chord_target(code, modifiers).is_some()
+                && self
                     .inline_interactive_state
                     .as_ref()
                     .map(picker_is_runtime_model_picker)
-                    .unwrap_or(false)
-                {
-                    self.open_agent_model_picker(crate::tui::AgentModelTarget::Swarm);
-                }
+                    .unwrap_or(false) =>
+            {
+                // Alt+S / Alt+M open the swarm / memory model sub-pickers so
+                // users can choose which model spawned swarm agents or memory
+                // extraction use, without leaving the /model flow.
+                let target = agent_model_chord_target(code, modifiers).expect("guarded above");
+                self.open_agent_model_picker(target);
             }
             KeyCode::Enter => {
                 let Some(ref mut picker) = self.inline_interactive_state else {
