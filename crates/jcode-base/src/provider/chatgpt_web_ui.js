@@ -384,7 +384,15 @@ return (async () => {
             throw error;
           }
         }
-        const response = await net.original.call(this ?? globalThis, input, init);
+        let response;
+        try {
+          response = await net.original.call(this ?? globalThis, input, init);
+        } catch (error) {
+          // The turn POST failed before any response ("Failed to fetch"):
+          // ChatGPT never got it, so jcode can retry instead of waiting.
+          if (substituted) net.fetchError = { key: substituted.key, message: String(error?.message || error) };
+          throw error;
+        }
         if (isConversationRead && net.mask && response.ok) return maskedResponse(response, await response.text(), net.mask);
         if (!isTurn || !response.body || !net.key) return response;
         const turn = { key: net.key, status: response.status, substituted, buffer: '', events: 0, messages: {}, order: [], lastPath: null, current: null, done: false, error: null, started: Date.now(), firstToken: null };
@@ -546,7 +554,7 @@ return (async () => {
       // flight and ChatGPT has not answered yet.
       const alert = all('[role="alert"], [data-testid*="error" i]').filter(visible).map(e => (e.innerText || '').trim()).filter(Boolean).join(' | ').slice(0, 300);
       const send = one(submitSelector);
-      return { started: false, sendError: net?.sendError?.key === key ? net.sendError.message : null, pending: net?.pending?.key === key,
+      return { started: false, sendError: net?.sendError?.key === key ? net.sendError.message : null, fetchError: net?.fetchError?.key === key ? net.fetchError.message : null, pending: net?.pending?.key === key,
         alert: alert || null, sendEnabled: !!send && !send.disabled, title: String(document.title || '').slice(0, 80) };
     }
     const assistant = turn.order.map(id => turn.messages[id]).filter(m => m.role === 'assistant');
