@@ -383,7 +383,8 @@ fn test_remote_cached_oauth_only_claude_route_gains_api_key_route_in_picker() {
     // the picker must add the claude-api route instead of trusting the stale
     // single-route cache forever.
     with_temp_jcode_home(|| {
-        let _api_key_guard = AnthropicApiKeyGuard(std::env::var("ANTHROPIC_API_KEY").ok());
+        let _api_key_guard =
+            AnthropicApiKeyGuard(std::env::var("ANTHROPIC_API_KEY").ok());
         crate::env::set_var("ANTHROPIC_API_KEY", "sk-ant-test-key");
         crate::auth::AuthStatus::invalidate_cache();
 
@@ -410,17 +411,18 @@ fn test_remote_cached_oauth_only_claude_route_gains_api_key_route_in_picker() {
             .entries
             .iter()
             .filter(|entry| {
-                entry.name == "claude-fable-5" || entry.name.starts_with("claude-fable-5 (")
+                entry.name == "claude-fable-5"
+                    || entry.name.starts_with("claude-fable-5 (")
             })
             .collect::<Vec<_>>();
         assert!(!fable_entries.is_empty(), "fable should be in the picker");
         assert!(
-            fable_entries.iter().any(|entry| entry
-                .options
-                .iter()
-                .any(|option| option.api_method == "claude-api" && option.available)),
+            fable_entries.iter().any(|entry| entry.options.iter().any(
+                |option| option.api_method == "claude-api" && option.available
+            )),
             "stale oauth-only cached route should be augmented with claude-api, got {:?}",
             fable_entries
+
         );
     });
 }
@@ -461,7 +463,9 @@ fn test_remote_jcode_subscription_catalog_is_not_augmented_with_local_auth_route
 
         let expected = crate::subscription_catalog::curated_models()
             .iter()
-            .filter(|model| crate::subscription_catalog::JcodeTier::Plus.allows(model.min_tier))
+            .filter(|model| {
+                crate::subscription_catalog::JcodeTier::Plus.allows(model.min_tier)
+            })
             .map(|model| model.id)
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(app.remote_model_options.len(), expected.len());
@@ -490,104 +494,104 @@ fn test_remote_mixed_catalog_keeps_jcode_subscription_separate_from_other_provid
     // empty home, which is what the sibling subscription-catalog test already
     // does for exactly this reason.
     with_temp_jcode_home(|| {
-        crate::auth::AuthStatus::invalidate_cache();
-        clear_persisted_test_ui_state();
-        crate::tui::ui::clear_test_render_state_for_tests();
+    crate::auth::AuthStatus::invalidate_cache();
+    clear_persisted_test_ui_state();
+    crate::tui::ui::clear_test_render_state_for_tests();
 
-        let mut app = create_test_app();
-        app.is_remote = true;
-        app.remote_provider_name = Some("Claude".to_string());
-        app.remote_available_entries = vec![
-            "claude-fable-5".to_string(),
-            "claude-opus-4-8".to_string(),
-            "gpt-5.5".to_string(),
-            "gpt-5.6-sol".to_string(),
-            "deepseek/deepseek-v4-pro".to_string(),
-        ];
-        app.remote_model_options = vec![
-            crate::provider::ModelRoute {
-                model: "claude-fable-5".to_string(),
-                provider: "Anthropic".to_string(),
-                api_method: "claude-oauth".to_string(),
-                available: true,
-                detail: String::new(),
-                usage: None,
-                cheapness: None,
-            },
-            crate::provider::ModelRoute {
-                model: "claude-opus-4-8".to_string(),
-                provider: crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME.to_string(),
-                api_method: crate::subscription_catalog::JCODE_ROUTE_API_METHOD.to_string(),
-                available: true,
-                detail: "managed subscription route".to_string(),
-                usage: None,
-                cheapness: None,
-            },
-            crate::provider::ModelRoute {
-                model: "gpt-5.5".to_string(),
-                provider: crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME.to_string(),
-                api_method: crate::subscription_catalog::JCODE_ROUTE_API_METHOD.to_string(),
-                available: true,
-                detail: "managed subscription route".to_string(),
-                usage: None,
-                cheapness: None,
-            },
-            crate::provider::ModelRoute {
-                model: "gpt-5.6-sol".to_string(),
-                provider: crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME.to_string(),
-                api_method: crate::subscription_catalog::JCODE_ROUTE_API_METHOD.to_string(),
-                available: true,
-                detail: "managed subscription route".to_string(),
-                usage: None,
-                cheapness: None,
-            },
-            crate::provider::ModelRoute {
-                model: "deepseek/deepseek-v4-pro".to_string(),
-                provider: "auto".to_string(),
-                api_method: "openrouter".to_string(),
-                available: true,
-                detail: String::new(),
-                usage: None,
-                cheapness: None,
-            },
-        ];
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.remote_provider_name = Some("Claude".to_string());
+    app.remote_available_entries = vec![
+        "claude-fable-5".to_string(),
+        "claude-opus-4-8".to_string(),
+        "gpt-5.5".to_string(),
+        "gpt-5.6-sol".to_string(),
+        "deepseek/deepseek-v4-pro".to_string(),
+    ];
+    app.remote_model_options = vec![
+        crate::provider::ModelRoute {
+            model: "claude-fable-5".to_string(),
+            provider: "Anthropic".to_string(),
+            api_method: "claude-oauth".to_string(),
+            available: true,
+            detail: String::new(),
+            usage: None,
+            cheapness: None,
+        },
+        crate::provider::ModelRoute {
+            model: "claude-opus-4-8".to_string(),
+            provider: crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME.to_string(),
+            api_method: crate::subscription_catalog::JCODE_ROUTE_API_METHOD.to_string(),
+            available: true,
+            detail: "managed subscription route".to_string(),
+            usage: None,
+            cheapness: None,
+        },
+        crate::provider::ModelRoute {
+            model: "gpt-5.5".to_string(),
+            provider: crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME.to_string(),
+            api_method: crate::subscription_catalog::JCODE_ROUTE_API_METHOD.to_string(),
+            available: true,
+            detail: "managed subscription route".to_string(),
+            usage: None,
+            cheapness: None,
+        },
+        crate::provider::ModelRoute {
+            model: "gpt-5.6-sol".to_string(),
+            provider: crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME.to_string(),
+            api_method: crate::subscription_catalog::JCODE_ROUTE_API_METHOD.to_string(),
+            available: true,
+            detail: "managed subscription route".to_string(),
+            usage: None,
+            cheapness: None,
+        },
+        crate::provider::ModelRoute {
+            model: "deepseek/deepseek-v4-pro".to_string(),
+            provider: "auto".to_string(),
+            api_method: "openrouter".to_string(),
+            available: true,
+            detail: String::new(),
+            usage: None,
+            cheapness: None,
+        },
+    ];
 
-        app.open_model_picker();
+    app.open_model_picker();
 
-        assert_eq!(app.remote_model_options.len(), 5);
-        let jcode_routes = app
-            .remote_model_options
+    assert_eq!(app.remote_model_options.len(), 5);
+    let jcode_routes = app
+        .remote_model_options
+        .iter()
+        .filter(|route| {
+            route.provider == crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
+                && route.api_method == crate::subscription_catalog::JCODE_ROUTE_API_METHOD
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(jcode_routes.len(), 3);
+    assert_eq!(
+        jcode_routes
             .iter()
-            .filter(|route| {
-                route.provider == crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
-                    && route.api_method == crate::subscription_catalog::JCODE_ROUTE_API_METHOD
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(jcode_routes.len(), 3);
-        assert_eq!(
-            jcode_routes
-                .iter()
-                .map(|route| route.model.as_str())
-                .collect::<std::collections::BTreeSet<_>>(),
-            std::collections::BTreeSet::from(["claude-opus-4-8", "gpt-5.5", "gpt-5.6-sol",])
-        );
-        assert!(app.remote_model_options.iter().any(|route| {
-            route.model == "claude-fable-5"
-                && route.provider == "Anthropic"
-                && route.api_method == "claude-oauth"
-        }));
-        assert!(app.remote_model_options.iter().any(|route| {
-            route.model == "deepseek/deepseek-v4-pro"
-                && route.provider == "auto"
-                && route.api_method == "openrouter"
-        }));
-        assert!(app.remote_model_options.iter().all(|route| {
-            route.provider != crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
-                || matches!(
-                    route.model.as_str(),
-                    "claude-opus-4-8" | "gpt-5.5" | "gpt-5.6-sol"
-                )
-        }));
+            .map(|route| route.model.as_str())
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from(["claude-opus-4-8", "gpt-5.5", "gpt-5.6-sol",])
+    );
+    assert!(app.remote_model_options.iter().any(|route| {
+        route.model == "claude-fable-5"
+            && route.provider == "Anthropic"
+            && route.api_method == "claude-oauth"
+    }));
+    assert!(app.remote_model_options.iter().any(|route| {
+        route.model == "deepseek/deepseek-v4-pro"
+            && route.provider == "auto"
+            && route.api_method == "openrouter"
+    }));
+    assert!(app.remote_model_options.iter().all(|route| {
+        route.provider != crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
+            || matches!(
+                route.model.as_str(),
+                "claude-opus-4-8" | "gpt-5.5" | "gpt-5.6-sol"
+            )
+    }));
     });
 }
 
@@ -674,7 +678,9 @@ fn test_remote_hydrated_catalog_adds_entitled_jcode_subscription_routes() {
             .collect::<Vec<_>>();
         let expected = crate::subscription_catalog::curated_models()
             .iter()
-            .filter(|model| crate::subscription_catalog::JcodeTier::Plus.allows(model.min_tier))
+            .filter(|model| {
+                crate::subscription_catalog::JcodeTier::Plus.allows(model.min_tier)
+            })
             .map(|model| model.id)
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(jcode_routes.len(), expected.len());
@@ -697,9 +703,10 @@ fn test_remote_hydrated_catalog_adds_entitled_jcode_subscription_routes() {
         }));
         assert!(app.remote_model_options.iter().all(|route| {
             route.provider != crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
-                || crate::subscription_catalog::find_curated_model(&route.model).is_some_and(
-                    |model| crate::subscription_catalog::JcodeTier::Plus.allows(model.min_tier),
-                )
+                || crate::subscription_catalog::find_curated_model(&route.model)
+                    .is_some_and(|model| {
+                        crate::subscription_catalog::JcodeTier::Plus.allows(model.min_tier)
+                    })
         }));
     });
 }
@@ -970,8 +977,7 @@ fn test_handle_key_super_left_right_move_to_edges() {
         app.handle_key(KeyCode::Left, KeyModifiers::SUPER).unwrap();
         assert_eq!(app.cursor_pos(), before);
 
-        app.handle_key(KeyCode::Home, KeyModifiers::empty())
-            .unwrap();
+        app.handle_key(KeyCode::Home, KeyModifiers::empty()).unwrap();
         assert_eq!(app.cursor_pos(), 0);
 
         app.handle_key(KeyCode::End, KeyModifiers::empty()).unwrap();
@@ -1058,8 +1064,7 @@ fn test_typing_undo_preserves_space_and_cursor_edit_boundaries() {
     app.handle_key(KeyCode::Char('z'), KeyModifiers::SUPER)
         .unwrap();
     assert_eq!(app.input(), "가나");
-    app.handle_key(KeyCode::Left, KeyModifiers::empty())
-        .unwrap();
+    app.handle_key(KeyCode::Left, KeyModifiers::empty()).unwrap();
     app.handle_key(KeyCode::Char('다'), KeyModifiers::empty())
         .unwrap();
     app.handle_key(KeyCode::Char('z'), KeyModifiers::SUPER)
@@ -1091,14 +1096,11 @@ fn test_typing_undo_does_not_merge_paste_or_later_burst() {
 fn test_picker_swallowed_space_starts_new_typing_undo_step() {
     let mut app = create_test_app();
     for c in "/model".chars() {
-        app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
-            .unwrap();
+        app.handle_key(KeyCode::Char(c), KeyModifiers::empty()).unwrap();
     }
     assert_eq!(app.input(), "/model ");
-    app.handle_key(KeyCode::Char(' '), KeyModifiers::empty())
-        .unwrap();
-    app.handle_key(KeyCode::Char('g'), KeyModifiers::empty())
-        .unwrap();
+    app.handle_key(KeyCode::Char(' '), KeyModifiers::empty()).unwrap();
+    app.handle_key(KeyCode::Char('g'), KeyModifiers::empty()).unwrap();
     assert_eq!(app.input(), "/model g");
     app.undo_input_change();
     assert_eq!(app.input(), "/model ");
@@ -1241,9 +1243,7 @@ fn test_submit_input_commits_pending_streaming_assistant_text_before_user_messag
             id: "tool_read".to_string(),
             name: "read".to_string(),
             input: serde_json::json!({"file_path": "src/main.rs"}),
-            intent: None,
-            thought_signature: None,
-        },
+            intent: None, thought_signature: None, },
     ));
     app.bump_display_messages_version();
     app.streaming.streaming_text = "Here is the final paragraph".to_string();
@@ -1962,10 +1962,7 @@ fn test_interleave_submission_preserves_pending_images() {
 
     assert!(input::handle_enter(&mut app));
 
-    assert_eq!(
-        app.interleave_message.as_deref(),
-        Some("[image 1] describe this")
-    );
+    assert_eq!(app.interleave_message.as_deref(), Some("[image 1] describe this"));
     assert_eq!(app.interleave_images, images);
     assert!(app.pending_images.is_empty());
 }
@@ -2047,10 +2044,7 @@ fn test_model_picker_effort_variant_selection_stages_effort_in_remote_mode() {
     app.handle_key(KeyCode::Enter, KeyModifiers::empty())
         .unwrap();
 
-    assert!(
-        app.inline_interactive_state.is_none(),
-        "picker should close"
-    );
+    assert!(app.inline_interactive_state.is_none(), "picker should close");
     assert!(
         app.pending_route_selection.is_some(),
         "model switch should be staged for the remote dispatcher"
@@ -2144,10 +2138,7 @@ fn test_model_picker_plain_selection_stages_no_effort_in_remote_mode() {
     app.handle_key(KeyCode::Enter, KeyModifiers::empty())
         .unwrap();
 
-    assert!(
-        app.inline_interactive_state.is_none(),
-        "picker should close"
-    );
+    assert!(app.inline_interactive_state.is_none(), "picker should close");
     assert!(
         app.pending_reasoning_effort.is_none(),
         "plain rows must not override the server's effort"
@@ -2220,7 +2211,10 @@ fn test_model_switch_notice_omits_placeholder_route_details() {
             .map(|(text, _)| text.clone())
             .expect("a model switch notice should be set");
         assert!(!notice.contains("remote-catalog"), "got {notice}");
-        assert!(!notice.contains("refreshing route details"), "got {notice}");
+        assert!(
+            !notice.contains("refreshing route details"),
+            "got {notice}"
+        );
         assert!(notice.starts_with("Model → "), "got {notice}");
         assert!(!notice.contains(" via "), "got {notice}");
     });
@@ -2294,10 +2288,7 @@ fn test_catalog_update_rebuilds_open_model_picker_with_real_routes() {
             .as_ref()
             .expect("picker should still be open after the catalog update");
         assert!(
-            picker
-                .entries
-                .iter()
-                .any(|entry| entry.name.starts_with(model)),
+            picker.entries.iter().any(|entry| entry.name.starts_with(model)),
             "rebuilt picker should still list the model"
         );
         assert!(
