@@ -43,6 +43,28 @@ rust_action_log_path=""
 rust_action_log_execution="local"
 cargo_gate_wait_ms=0
 
+# Some BSD date versions print a literal N for %N. Try an optional subsecond
+# clock before falling back to clearly identified whole-second precision.
+now_ns() {
+  local value
+  value=$(date +%s%N)
+  case "$value" in
+    ''|*[!0-9]*) ;;
+    *) printf '%s\n' "$value"; return ;;
+  esac
+  # Python is already optional for the action log. Missing interpreters,
+  # unsupported versions and failed probes must never prevent Cargo running.
+  if command -v python3 >/dev/null 2>&1 \
+    && value=$(python3 -c 'import time; print(time.time_ns())' 2>/dev/null); then
+    case "$value" in
+      ''|*[!0-9]*) ;;
+      *) printf '%s\n' "$value"; return ;;
+    esac
+  fi
+  log "subsecond clock unavailable; elapsed timing has 1s precision"
+  printf '%s000000000\n' "$(date +%s)"
+}
+
 start_rust_action_log() {
   case "${JCODE_RUST_ACTION_LOG:-1}" in
     0|false|no|off) return ;;
@@ -51,8 +73,8 @@ start_rust_action_log() {
   local state_root="${JCODE_HOME:-${HOME:+$HOME/.jcode}}"
   [[ -n "$state_root" ]] || state_root="$repo_root/target/jcode-state"
   rust_action_log_path="${JCODE_RUST_ACTION_LOG_PATH:-$state_root/logs/rust-actions.jsonl}"
-  rust_action_log_started_ns=$(date +%s%N)
-  rust_action_log_started_at=$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)
+  rust_action_log_started_ns=$(now_ns)
+  rust_action_log_started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   trap 'record_rust_action_log "$?"' EXIT
 }
 
@@ -62,7 +84,7 @@ record_rust_action_log() {
   trap - EXIT
 
   local finished_ns duration_ms profile action
-  finished_ns=$(date +%s%N)
+  finished_ns=$(now_ns)
   duration_ms=$(( (finished_ns - rust_action_log_started_ns) / 1000000 ))
   profile=$(selected_profile "${cargo_argv[@]}")
   action="${cargo_argv[0]:-unknown}"
@@ -211,11 +233,14 @@ build_is_incremental() {
 }
 
 maybe_enable_sccache() {
+  # Explicit wrappers, including empty disable overrides, belong to the caller.
+  if [[ ${RUSTC_WRAPPER+x} || ${CARGO_BUILD_RUSTC_WRAPPER+x} ]]; then
+    sccache_status="external:${RUSTC_WRAPPER-${CARGO_BUILD_RUSTC_WRAPPER-}}"
+    return
+  fi
+
   case "${SCCACHE_DISABLE:-}" in
     1|true|yes|on)
-      if [[ -n "${RUSTC_WRAPPER:-}" && "${RUSTC_WRAPPER}" == *sccache* ]]; then
-        unset RUSTC_WRAPPER
-      fi
       sccache_status="disabled-by-env"
       log "sccache disabled by SCCACHE_DISABLE"
       return
@@ -236,20 +261,6 @@ maybe_enable_sccache() {
       ;;
     *) force_sccache="auto" ;;
   esac
-
-  if [[ -n "${RUSTC_WRAPPER:-}" ]]; then
-    if [[ "${RUSTC_WRAPPER}" == *sccache* ]] \
-      && [[ "$force_sccache" != "1" ]] \
-      && build_is_incremental "$@"; then
-      unset RUSTC_WRAPPER
-      sccache_status="removed-inherited-incremental"
-      log "removed inherited sccache wrapper for incremental build (it cannot cache incremental units)"
-      return
-    fi
-    sccache_status="external:${RUSTC_WRAPPER}"
-    log "keeping existing RUSTC_WRAPPER=${RUSTC_WRAPPER}"
-    return
-  fi
 
   if [[ "$force_sccache" != "1" ]] && build_is_incremental "$@"; then
     sccache_status="skipped-incremental"
@@ -639,8 +650,8 @@ configure_parallel_frontend() {
       ;;
   esac
 
-  if [[ -n "${RUSTC_WRAPPER:-}" ]]; then
-    parallel_frontend_status="skipped-external-rustc-wrapper:${RUSTC_WRAPPER}"
+  if [[ ${RUSTC_WRAPPER+x} || ${CARGO_BUILD_RUSTC_WRAPPER+x} ]]; then
+    parallel_frontend_status="skipped-external-rustc-wrapper:${RUSTC_WRAPPER-${CARGO_BUILD_RUSTC_WRAPPER-}}"
     return 0
   fi
 
@@ -1027,18 +1038,20 @@ acquire_cargo_gate() {
   gate_dir="${JCODE_CARGO_GATE_DIR:-${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}}"
   mkdir -p "$gate_dir"
   gate_path="${JCODE_CARGO_GATE_PATH:-$gate_dir/jcode-cargo-build.lock}"
-  exec {cargo_gate_fd}>"$gate_path"
-  if ! flock -n "$cargo_gate_fd"; then
+  # Reserve FD 9 for this invocation. Dynamic {var} allocation needs Bash 4.1,
+  # but macOS ships Bash 3.2. Keep the FD open until Cargo finishes.
+  exec 9>"$gate_path"
+  if ! flock -n 9; then
     log "waiting for the host-wide Cargo gate ($gate_path)"
-    wait_started_ns=$(date +%s%N)
+    wait_started_ns=$(now_ns)
     waited_seconds=0
     # Avoid one silent, unbounded flock call. Periodic notes make it clear that
     # the process is alive and blocked behind another compiler rather than hung.
-    while ! flock -w 30 "$cargo_gate_fd"; do
+    while ! flock -w 30 9; do
       waited_seconds=$((waited_seconds + 30))
       log "still waiting for the host-wide Cargo gate (${waited_seconds}s elapsed)"
     done
-    wait_finished_ns=$(date +%s%N)
+    wait_finished_ns=$(now_ns)
     cargo_gate_wait_ms=$(( (wait_finished_ns - wait_started_ns) / 1000000 ))
   fi
   export JCODE_CARGO_GATE_HELD=1
