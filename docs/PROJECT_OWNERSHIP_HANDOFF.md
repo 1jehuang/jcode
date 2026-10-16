@@ -118,7 +118,20 @@ Plain `cargo test` — there is **no `cargo nextest`**. CI wraps calls in `pytho
 | `update-star-history.yml` | weekly cron | star chart |
 | `discord-release.yml` | release published | announcement |
 
-**Known-bad CI signal:** `docs/CI-STATUS.md` (last regenerated 2026-10-12) records that `label-pr.yml` consumed all ~30 recent master runs, **masking real CI**. `ci.yml`, `windows-smoke`, `ios-testflight`, `freebsd-smoke` had not run in that window. **Treat master CI health as UNVERIFIED** until you trigger and read a run yourself. Do not report "CI is green" from a stale doc.
+**Known-bad CI signal:** `docs/CI-STATUS.md` (last regenerated 2026-10-12) records that `label-pr.yml` consumed all ~30 recent master runs, **masking real CI**. `ci.yml`, `windows-smoke`, `ios-testflight`, `freebsd-smoke` had not run in that window. **Treat hosted CI health as UNVERIFIED** until you trigger and read a run yourself. Do not report "CI is green" from a stale doc.
+
+**Local verification that IS trustworthy** (macOS arm64, at `a9b8ce357`):
+
+| Check | Result |
+|---|---|
+| `cargo check --workspace --all-targets` | 0 errors |
+| `check_warning_budget.sh` | 0 warnings, baseline 0 — PASS |
+| 7 python gate scripts | all PASS |
+| `cargo fmt --all -- --check` | clean |
+| `cargo test -p jcode-app-core --lib tool::bash` | 38/38 |
+| `cargo test -p jcode-tui --lib` | 2296 passed / 21 failed — **pre-existing** (a pristine-tree run fails 22; no newly failing test) |
+
+This does **not** replace CI: it is single-platform and skips the Windows/macOS/iOS/FreeBSD jobs plus `cargo audit`. The 18 residual warnings are all dead-code notices in the `jcode-telemetry-core` test target only, so the production warning budget reads 0.
 
 ---
 
@@ -130,7 +143,7 @@ Plain `cargo test` — there is **no `cargo nextest`**. CI wraps calls in `pytho
 |---|---|---|
 | 1 | `check_code_size_budget.py` fails | **RESOLVED** by `a9b8ce357` (2026-10-15T23:50Z). Three files were shrunk: `bash.rs` 1502→1490, `tui/mod.rs` 2077→1944, `ui_inline_interactive.rs` 1384→1377. No baseline was edited. All 7 gate scripts PASS. |
 | 2 | fmt drift | **RESOLVED** by `826145e64` (11 files cleaned). Do not re-report as open. |
-| 3 | master CI re-run | needs a fresh trigger on `a9b8ce357`; see masking note above. |
+| 3 | master CI re-run | **Partially closed locally.** Full-workspace `cargo check --workspace --all-targets` on `a9b8ce357`: **0 errors**, warning budget **0/0 PASS**, 7/7 gate scripts PASS, `cargo fmt --check` clean. Remaining 18 warnings are dead-code notices confined to the `jcode-telemetry-core` **test** target (pre-existing, not touched by this change). Still needs a real CI run to confirm the hosted-runner picture — see the masking note above. |
 | 4 | tag/bump | operator signal required. |
 
 ### Fork PRs — 13 open on `KooshaPari/Jcode`
