@@ -414,6 +414,39 @@ test('click_send re-clicks only while this turn is armed and unsent',async()=>{
   assert.equal(f.submits(),1,'a sent turn is never sent again');
   assert.equal((await run({op:'click_send',armedKey:'jcode-other'},f,{globals})).clicked,false,'another turn key never clicks');
 });
+test('stream reports the first sandbox shell call with the text written before it',async()=>{
+  // Observed live: ChatGPT runs `container.exec` in its own remote machine.
+  // jcode runs the same script locally, so it needs the exact call text.
+  const f=fixture(); const placeholder='jcode turn jcode-s1';
+  const msg=(id,role,content,extra={})=>({v:{message:{id,author:{role,name:extra.name??null},content,status:extra.status??'finished_successfully',recipient:extra.recipient??'all',end_turn:extra.end_turn??null,metadata:{}}}});
+  const events=[msg('n','assistant',{content_type:'text',parts:['Checking the disk.']}),
+    msg('c','assistant',{content_type:'code',language:'unknown',text:'bash -lc df -h'},{recipient:'container.exec',status:'in_progress'})];
+  const body=events.map(e=>'data: '+JSON.stringify(e)+'\n\n').join('');
+  const more=['data: '+JSON.stringify({p:'/message/content/text',o:'append',v:' | head -5'})+'\n\n',
+    'data: '+JSON.stringify(msg('o','tool',{content_type:'execution_output',text:'remote fs'},{name:'container.exec'}))+'\n\n'];
+  let push; const globals={ fetch: async () => new Response(new ReadableStream({ start(c){ push=c; c.enqueue(new TextEncoder().encode(body)); } }), { status: 200 }) };
+  await run({op:'arm_send',key:'jcode-s1',text:'P',placeholder},f,{globals});
+  const reading=(await globals.fetch('https://chatgpt.com/backend-api/f/conversation',{method:'POST',body:sendBody(placeholder)})).text(); await settle();
+  assert.equal((await run({op:'stream',key:'jcode-s1'},f,{globals})).sandboxCall,null,'an unfinished call is not acted on');
+  push.enqueue(new TextEncoder().encode(more[0])); await settle();
+  assert.equal((await run({op:'stream',key:'jcode-s1'},f,{globals})).sandboxCall,null);
+  push.enqueue(new TextEncoder().encode(more[1])); await settle();
+  const state=await run({op:'stream',key:'jcode-s1'},f,{globals});
+  assert.deepEqual(state.sandboxCall,{tool:'container.exec',code:'bash -lc df -h | head -5',before:['Checking the disk.']});
+  push.close(); await reading;
+});
+test('transcript reports the sandbox shell call, and python runs are not shell calls',async()=>{
+  const f=fixture();
+  const data=conversation([said('user','prompt'),said('assistant','Looking.'),
+    { author:{role:'assistant'}, recipient:'python', status:'finished_successfully', content:{content_type:'code',text:'print(1)'} },
+    { author:{role:'assistant'}, recipient:'container.exec', status:'finished_successfully', content:{content_type:'code',text:'sh -c ls'} },
+    { author:{role:'tool',name:'container.exec'}, recipient:'all', status:'finished_successfully', content:{content_type:'execution_output',text:'x'} },
+    said('assistant','Done.',{end_turn:true})]);
+  const result=await run({op:'transcript'},f,{pathname:'/c/6ad08967-29f4-83eb-8b81-c5ccaa17b323',globals:{fetch:backend(data).fetch}});
+  assert.deepEqual(result.sandboxCall,{tool:'container.exec',code:'sh -c ls',before:['Looking.']});
+  const plain=conversation([said('user','prompt'),{ author:{role:'assistant'}, recipient:'python', status:'finished_successfully', content:{content_type:'code',text:'print(1)'} },said('assistant','1',{end_turn:true})]);
+  assert.equal((await run({op:'transcript'},f,{pathname:'/c/6ad08967-29f4-83eb-8b81-c5ccaa17b323',globals:{fetch:backend(plain).fetch}})).sandboxCall,null);
+});
 test('stream reports HTTP rejections such as unusual-activity blocks',async()=>{
   const f=fixture();
   const globals={ fetch: async () => sseResponse('{"detail":"Unusual activity has been detected"}',{status:403}) };
