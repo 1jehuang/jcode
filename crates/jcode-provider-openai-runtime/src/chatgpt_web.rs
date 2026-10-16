@@ -16,7 +16,7 @@ mod refusal;
 use refusal::claims_no_tool_access;
 #[path = "chatgpt_web/sandbox.rs"]
 mod sandbox;
-use sandbox::SandboxCall;
+use sandbox::{SandboxCall, sandbox_tools, sandbox_warning, with_sandbox_correction};
 
 const TOOL_CALL_START: &str = "<jcode_tool_call>";
 const TOOL_CALL_END: &str = "</jcode_tool_call>";
@@ -600,7 +600,7 @@ async fn poll_for_response(
             // The rendered message is lossy (Markdown, hidden wrapper tags,
             // dropped backslashes). The raw transcript is the source of truth.
             let since = *terminal_since.get_or_insert_with(Instant::now);
-            let (text, builtin, sandbox_call) = match read_transcript(browser).await? {
+            let (text, builtin, sandbox_call) = match read_transcript(browser, None).await? {
                 Transcript::Final {
                     text,
                     builtin,
@@ -668,6 +668,9 @@ async fn poll_for_response(
 /// How long a finished-looking page may wait for the backend transcript to
 /// record the final answer before falling back to the rendered text.
 const TRANSCRIPT_GRACE: Duration = Duration::from_secs(20);
+
+/// How long a turn whose stream dropped may take to appear in the conversation.
+const INTERRUPTED_RECOVERY: Duration = Duration::from_secs(180);
 
 /// The network path is on by default. `JCODE_CHATGPT_WEB_NETWORK=0` forces
 /// the composer-only path.
@@ -884,11 +887,20 @@ async fn poll_network_stream(
                     ));
                     last_reason = format!("the stream was interrupted: {interrupted}");
                 }
-                while Instant::now() < deadline {
+                // An interrupted turn usually lands in the conversation within
+                // seconds. If ChatGPT never records it, fail with the reason
+                // instead of waiting out the whole response timeout.
+                let interrupted = state.get("interrupted").and_then(Value::as_str).is_some();
+                let recovery_deadline = if interrupted {
+                    deadline.min(Instant::now() + INTERRUPTED_RECOVERY)
+                } else {
+                    deadline
+                };
+                while Instant::now() < recovery_deadline {
                     if tx.is_closed() {
                         anyhow::bail!("ChatGPT web response consumer was closed");
                     }
-                    match read_transcript(browser).await? {
+                    match read_transcript(browser, Some(stream_key)).await? {
                         Transcript::Final {
                             text,
                             builtin,
@@ -918,6 +930,13 @@ async fn poll_network_stream(
                             .await;
                     }
                     tokio::time::sleep(BACKGROUND_POLL_INTERVAL).await;
+                }
+                if interrupted {
+                    anyhow::bail!(
+                        "{} web stream dropped and ChatGPT did not record the answer within {} seconds ({last_reason})",
+                        selected.label,
+                        INTERRUPTED_RECOVERY.as_secs()
+                    );
                 }
                 anyhow::bail!(
                     "{} web response timed out after {timeout_secs} seconds while ChatGPT finished it in the background ({last_reason})",
@@ -999,26 +1018,6 @@ struct WebAnswer {
     served_effort: Option<String>,
 }
 
-/// ChatGPT built-ins that execute in OpenAI's remote sandbox. Their view of
-/// files, disks, processes and the environment is not the user's computer.
-/// Web search results are real, so browsing is not treated as a sandbox.
-fn sandbox_tools(builtin: &[String]) -> Vec<String> {
-    builtin
-        .iter()
-        .filter(|tool| tool.starts_with("container.") || tool.starts_with("python"))
-        .cloned()
-        .collect()
-}
-
-/// Correction appended to the prompt when the model answered from ChatGPT's
-/// sandbox instead of requesting jcode tools.
-fn with_sandbox_correction(prompt: &str, sandbox: &[String]) -> String {
-    format!(
-        "{prompt}\n# Correction\n\nA previous attempt at this exact turn used ChatGPT's own sandbox tool(s): {}. That sandbox is OpenAI's remote machine, not the user's computer, so its results about files, disks, processes or the environment were wrong and were discarded. Do not use ChatGPT's built-in tools at all. Request the Jcode tools you need with <jcode_tool_call> envelopes instead.\n",
-        sandbox.join(", ")
-    )
-}
-
 /// Correction appended to the prompt when the model answered that it cannot
 /// use Jcode's tools instead of calling them.
 fn with_tool_access_correction(prompt: &str) -> String {
@@ -1027,17 +1026,13 @@ fn with_tool_access_correction(prompt: &str) -> String {
     )
 }
 
-/// Visible note when the model kept answering from its sandbox.
-fn sandbox_warning(sandbox: &[String]) -> String {
-    format!(
-        "> Note: ChatGPT answered using its own remote sandbox ({}), not this computer, even after a correction. Treat any statements about local files, disks or processes below as unverified.",
-        sandbox.join(", ")
-    )
-}
-
-/// Reads the owned conversation's raw assistant text.
-async fn read_transcript(browser: &Tab<'_>) -> Result<Transcript> {
-    let state = match browser.ui(json!({"op":"transcript"})).await {
+/// Reads the owned conversation's raw assistant text. `stream_key` names the
+/// network-path turn, whose stream carries the conversation id.
+async fn read_transcript(browser: &Tab<'_>, stream_key: Option<&str>) -> Result<Transcript> {
+    let state = match browser
+        .ui(json!({"op":"transcript", "key": stream_key}))
+        .await
+    {
         Ok(state) => state,
         Err(error) => return Ok(Transcript::Unavailable(format!("{error:#}"))),
     };
@@ -1478,26 +1473,6 @@ mod tests {
         let mut parsed = parse_response(response).unwrap();
         assert_eq!(parsed.calls.len(), 1, "expected exactly one call");
         parsed.calls.remove(0)
-    }
-
-    #[test]
-    fn only_remote_execution_builtins_count_as_sandbox() {
-        let used = vec![
-            "container.exec".to_string(),
-            "web.run".to_string(),
-            "python".to_string(),
-        ];
-        assert_eq!(sandbox_tools(&used), vec!["container.exec", "python"]);
-        assert!(sandbox_tools(&["web.run".to_string()]).is_empty());
-    }
-
-    #[test]
-    fn sandbox_correction_keeps_the_prompt_and_names_the_tools() {
-        let corrected = with_sandbox_correction("PROMPT", &["container.exec".to_string()]);
-        assert!(corrected.starts_with("PROMPT"));
-        assert!(corrected.contains("container.exec"));
-        assert!(corrected.contains(TOOL_CALL_START));
-        assert!(sandbox_warning(&["container.exec".to_string()]).contains("unverified"));
     }
 
     #[test]
