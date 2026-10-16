@@ -1,4 +1,4 @@
-# PROJECT OWNERSHIP HANDOFF — KooshaPari/Jcode
+# PROJECT OWNERSHIP HANDOFF — KooshaPari/KCode (formerly KooshaPari/Jcode)
 
 **Written:** 2026-10-15T21:55Z by orchestrator
 **Audience:** a fresh agent context resuming FULL project ownership (not just the cleanup lane)
@@ -20,7 +20,7 @@
 - Source: `~/AGENTS.md:4217-4225`. Memory `mem_1792099237411_16193025759751338582`.
 - Publishing to `KooshaPari/*` (including this repo) is fine and expected.
 
-**Corollary that keeps biting:** bare `gh` commands resolve against **upstream**, not the fork, because `gh` does not infer the repo from a mixed remote set. Always pass `--repo KooshaPari/Jcode`. This has already corrupted one audit (see §7).
+**Corollary that keeps biting:** bare `gh` commands resolve against **upstream**, not the fork, because `gh` does not infer the repo from a mixed remote set. Always pass `--repo KooshaPari/KCode` (the repo was renamed from `Jcode`; the old path redirects). This has already corrupted one audit (see §7).
 
 ---
 
@@ -32,7 +32,7 @@
 | Branch | `master` |
 | Verified tip | `dc984718b` (this doc, on top of code tip `7444e113e` #90). Confirm with `git rev-parse --short origin/master` before acting. This file's own next commit becomes the tip. |
 | Sync | local `master` matched `origin/master` at `dc984718b` (0 ahead / 0 behind before this doc commit) |
-| origin | `https://github.com/KooshaPari/Jcode.git` |
+| origin | `https://github.com/KooshaPari/KCode.git` (renamed from `Jcode` 2026-10-16) |
 | upstream | `https://github.com/1jehuang/jcode` |
 | Cargo version | `0.85.1-k1.1.1` (fork scheme: `BASEVERSION-k<major>.<minor>.<patch>`) |
 | Workspace | 92 crates, ~8,326 test annotations, 80 `#[ignore]`, 0 `#[should_panic]` |
@@ -146,10 +146,10 @@ This does **not** replace CI: it is single-platform and skips the Windows/macOS/
 |---|---|---|
 | 1 | `check_code_size_budget.py` fails | **RESOLVED** by `a9b8ce357` (2026-10-15T23:50Z). Three files were shrunk: `bash.rs` 1502→1490, `tui/mod.rs` 2077→1944, `ui_inline_interactive.rs` 1384→1377. No baseline was edited. All 7 gate scripts PASS. |
 | 2 | fmt drift | **RESOLVED** by `826145e64` (11 files cleaned). Do not re-report as open. |
-| 3 | master CI re-run | **Blocked.** Rechecked 2026-10-16T04:37Z: `POST /actions/workflows/ci.yml/dispatches` still returns HTTP 422 `Actions has been disabled for this repository`. Newest Actions run is still 2026-10-14T22:00:58Z on `fix/ci-unused-deps` (queued). The probe used a nonexistent ref and created no run. |
+| 3 | master CI re-run | **Blocked — root cause identified.** GitHub's fork-scale limit has disabled workflows on this fork; the Actions banner says "Workflows are not currently being run on this fork due to the scale of GitHub Actions usage. A repository maintainer can choose to re-enable these." API cannot clear it (`enabled:true`, all workflows `active`, yet dispatch → HTTP 422). Requires a signed-in maintainer click. See Trap 9 for the full list of attempts already made. |
 | 4 | tag/bump | **Needs an operator signal.** Do not tag `v0.96.0-k1.0.0` (Trap 8). A tag fires `release.yml`, and that workflow cannot start while dispatch returns 422 (Trap 9). |
 
-### Fork PRs: 12 open on `KooshaPari/Jcode` (2026-10-16T03:34Z)
+### Fork PRs: 12 open on `KooshaPari/KCode` (2026-10-16T03:34Z)
 
 Non-draft, base `master`:
 
@@ -334,8 +334,8 @@ All agent work artifacts go in `docs/sessions/<YYYY-MM-DD-name>/`. Never create 
 cd ~/CodeProjects/Phenotype/repos/jcode
 git fetch origin && git status -sb          # expect: master...origin/master, clean. Code tip under this doc is 7444e113e.
 git worktree list                            # 27 worktrees, 4 dirty. See section 3.
-gh pr list --repo KooshaPari/Jcode --state open
-gh issue list --repo KooshaPari/Jcode --state open
+gh pr list --repo KooshaPari/KCode --state open
+gh issue list --repo KooshaPari/KCode --state open
 python3 scripts/check_code_size_budget.py    # last known PASS predates this doc edit. Re-run before trusting it.
 ```
 
@@ -345,7 +345,7 @@ Then read, in order: this doc → `docs/sessions/2026-10-12-cleanup-and-release/
 
 ## 7. Traps (battle-tested this arc)
 
-1. **Bare `gh` resolves to upstream.** Every PR/issue list in this doc required `--repo KooshaPari/Jcode`. A prior audit (B.8.x) silently catalogued 20 *upstream* PRs as if they were the fork's.
+1. **Bare `gh` resolves to upstream.** Every PR/issue list in this doc required an explicit `--repo`. A prior audit (B.8.x) silently catalogued 20 *upstream* PRs as if they were the fork's. **Also note (2026-10-16): the fork has been RENAMED — `KooshaPari/Jcode` is now `KooshaPari/KCode`** (same repo id `1365855438`; the old path 301-redirects). Prefer `--repo KooshaPari/KCode`. The local checkout's `origin` already points at `KCode.git` and pushes fine.
 2. **`docs/CI-STATUS.md` masks real CI.** `label-pr.yml` swallowed the runs. Regenerate before believing any green. **(Superseded 2026-10-16: hosted Actions are refusing new runs for this repo. See Trap 9. It is not an account minutes outage.)**
 3. **`cargo build` ≠ running your build.** Use `jcode self-dev --build` + a private `--socket`, or you test stale code.
 4. **Stale docs lie in specific ways.** "PR #36 awaiting merge" was wrong (it merged 2026-10-11). "fmt drift is open" was wrong (fixed in `826145e64`). Read `scripts/*.json` for ratchet values, `git log` for history.
@@ -353,7 +353,16 @@ Then read, in order: this doc → `docs/sessions/2026-10-12-cleanup-and-release/
 6. **`gh pr merge` does not always fail closed.** §4 is the path: if the hook defers, answer the phinbox request, then `gh pr merge --squash`. #85 merged that way at 2026-10-16T01:06:32Z (`30483c7f7`) with no direct-push fallback. A blanket "fails closed" line is stale.
 7. **Removed worktrees are not a recovery job (corrected 2026-10-16T04:33Z).** `wt-fmt`, `wt-picker-fix`, and `wt-jcode-panicbudget-pb1` are still absent. Their committed work is already on master: `fix/fmt-drift` (`60ef2d2a3`) is contained in HEAD, #66 merged as `d2cf911ef`, and #68 merged as `e1b1fe91a`. Section 3 (PR #84) classifies the picker worktree diff as a stale rebase artifact already correct on master. An earlier `git fsck` count of 78 dangling commits was never matched to those trees, so it is not a salvage set. The 4 dirty survivors were not touched and their counts are unchanged: `decollide-kcode-r2` (4), `pr27-minor-review-fixes` (3), `wt-jcode-audit` (1), `jcode-rebase-v0.90` (1). Worktree count is still 27, and `wt-accept-c6e594914` is still clean.
 8. **Release version drift (RESOLVED 2026-10-16 — the planned tag would be false).** `v0.95.0` … `v0.98.1` are **upstream tags**, not fork tags (not reachable from fork master; `jcode --version` is `v0.98.1` because it is upstream's self-built binary). The fork's real scheme: `Cargo.toml = 0.85.1-k1.1.1`, fork tags are `v0.85.0-k1.0.0` and `v0.85.1-k1.1.0`. The P7 plan in `00_HANDOFF.md` says "bump to 0.96.0-k1.0.0, tag v0.96.0-k1.0.0" — that is a **misreading of upstream's version as ours**. The correct P7 bump is `0.85.1-k1.1.1` → `0.85.1-k1.2.0` (fork-only feature) or a base-version bump only if PR #23 (`feature/upstream-0.88-sync`, still OPEN, CONFLICTING against master as of 2026-10-16T04:33Z) actually merges upstream v0.88.0 first.
-9. **Hosted Actions are not dispatching (measured 2026-10-16, rechecked 04:37Z, not a minutes outage).** The repo is public (`KCode`, default branch `master`). `GET /actions/permissions` returns `enabled: true` and every workflow is `active`. `POST /actions/workflows/ci.yml/dispatches` still returns HTTP 422: `Actions has been disabled for this repository.` The 03:34Z recheck returned the same body. #90 (`7444e113e`) also has zero Actions runs. Merge `30483c7f7` (#85, unused-deps machete fix, on master) has zero Actions runs. The newest Actions run remains 2026-10-14T22:00:58Z on `fix/ci-unused-deps`, status `queued`, jobs array empty. Third-party check suites are created; the `github-actions` app is absent. Minutes are not the cause: private repo `KooshaPari/PhenoRegistry` completed a run at 2026-10-16T03:32:06Z, and again at 04:25:57Z (failure), and `AgilePlus` completed success at 02:43:42Z. A 03:40Z dispatch probe still returned HTTP 422 and the newest Jcode run was still the 2026-10-14 queue. A 04:37Z probe POSTed `ci.yml` dispatches with a nonexistent ref, so a re-enabled repo could not start a run. It still returned HTTP 422 `Actions has been disabled for this repository`. Permissions were still `enabled: true`. The newest run stayed the 2026-10-14 queue, so the probe created nothing. Worktrees stayed 27, with the same dirty counts 4, 3, 1, and 1. `wt-accept-c6e594914` was still clean (0). Re-enable is operator-only (repo Settings, Actions). Do not toggle it from an agent. Until a new run exists, local gate scripts are the only CI signal.
+9. **Hosted Actions are disabled — ROOT CAUSE FOUND (2026-10-16T22:31Z): it is GitHub's fork-scale limit, not a repo setting and not exhausted minutes.** The repo Actions page states verbatim: *"Workflows are not currently being run on this fork due to the scale of GitHub Actions usage. A repository maintainer can choose to re-enable these."* This explains the whole signature: `GET /actions/permissions` returns `enabled: true`, every workflow is `state: active`, `PUT .../actions/permissions -F enabled=true` returns success and the flag genuinely toggles false→true — yet `POST .../dispatches` still returns HTTP 422 `Actions has been disabled for this repository`. **The REST API cannot clear this gate.** It requires a signed-in repository maintainer to click the re-enable control on the Actions tab.
+
+    Attempts already made and their results (do not repeat them):
+    - `PUT /actions/permissions -f enabled=true` → HTTP 422 (string, not boolean; `-f` is wrong, use `-F`).
+    - `PUT /actions/permissions -F enabled=true` → success, no effect.
+    - disable→enable toggle → flag verifiably flipped false→true, dispatch still 422.
+    - `gh workflow run ci.yml` → HTTP 422.
+    - Browser route → the only reachable GitHub session is **logged out** (`div.logged-out`, "Sign in" link), so no maintainer control is even rendered.
+
+    **Operator action required:** sign in to GitHub, open `https://github.com/KooshaPari/KCode/actions`, and click the re-enable control in the banner. Not an account minutes outage (`PhenoRegistry`/`AgilePlus`/`ShareCLI` all completed runs after the 2026-10-14T22:00:58Z queue entry). Until then the local gate scripts are the only CI signal. Do **not** toggle repo settings from an agent.
 
 ---
 
@@ -364,7 +373,7 @@ Then read, in order: this doc → `docs/sessions/2026-10-12-cleanup-and-release/
 3. **Stale branches:** approve deleting the ~60 `remotes/upstream/*` mirrors and the >2-week-old branches? (Do not do this unilaterally.)
 4. **Dirty worktrees:** the 3 removed trees are not a salvage item (Trap 7 and section 3). For the 4 survivors, still operator-only: salvage, commit, or discard. Counts rechecked 2026-10-16T04:33Z and unchanged: `decollide-kcode-r2` (4), `pr27-minor-review-fixes` (3), `wt-jcode-audit` (1), `jcode-rebase-v0.90` (1).
 5. **Release:** hold until (a) version decision — NOT `v0.96.0-k1.0.0` (that's upstream's number; see Trap 8), correct fork bump is `0.85.1-k1.2.0` or wait for PR #23; (b) this repo's Actions dispatch works again (Trap 9), else `release.yml` never starts; (c) hosted CI actually runs green once.
-6. **Actions dispatch:** operator must re-enable Actions for this repo. Measured state is HTTP 422 `Actions has been disabled for this repository` while `actions/permissions` still says `enabled: true`. Not an account minutes outage. Agent must not flip the setting.
+6. **Actions dispatch:** operator must re-enable Actions for this repo — root cause is GitHub's fork-scale limit (see Trap 9), which no API call can clear. Measured state is HTTP 422 `Actions has been disabled for this repository` while `actions/permissions` still says `enabled: true`. Not an account minutes outage. Agent must not flip the setting.
 
 ---
 
