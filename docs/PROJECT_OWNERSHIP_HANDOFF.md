@@ -24,14 +24,14 @@
 
 ---
 
-## 1. State snapshot (verified 2026-10-16T03:34Z)
+## 1. State snapshot (verified 2026-10-16T03:40Z)
 
 | Item | Value |
 |---|---|
 | Repo | `/Users/kooshapari/CodeProjects/Phenotype/repos/jcode` |
 | Branch | `master` |
-| Verified tip | `7444e113e` (#90). Confirm with `git rev-parse --short origin/master` before acting. This file's own commit, once merged, is the next SHA. |
-| Sync | local `master` was fast-forwarded to `7444e113e` (0 ahead / 0 behind before this doc commit) |
+| Verified tip | `dc984718b` (this doc, on top of code tip `7444e113e` #90). Confirm with `git rev-parse --short origin/master` before acting. This file's own next commit becomes the tip. |
+| Sync | local `master` matched `origin/master` at `dc984718b` (0 ahead / 0 behind before this doc commit) |
 | origin | `https://github.com/KooshaPari/Jcode.git` |
 | upstream | `https://github.com/1jehuang/jcode` |
 | Cargo version | `0.85.1-k1.1.1` (fork scheme: `BASEVERSION-k<major>.<minor>.<patch>`) |
@@ -217,7 +217,7 @@ Local scripts on `master` last passed the nine ratchet/fmt gates. That is not ho
 
 Clearly stale (>2 weeks, safe to propose deletion but **never delete without operator say-so**): `codex/acp-native-remote` (2026-10-01), `chore/enable-dependabot` (2026-09-19), `fix/api-attach-preserve-cwd` (2026-09-05), `fix/fix-responses-api` (2026-09-11), `security/*`, `verify/panic-*`, `tmp-conflict-check`, `rescue/*`, `p25c/port-*`.
 
-**26 worktrees. 4 have uncommitted work (rechecked 2026-10-16T02:43Z):**
+**27 worktrees. 4 have uncommitted work (rechecked 2026-10-16T03:40Z).** The extra tree since the 02:43Z count is clean: `~/wt-accept-c6e594914` on `fix/telemetry-clippy-warnings`.
 
 | Worktree | Branch | Uncommitted |
 |---|---|---|
@@ -332,8 +332,8 @@ All agent work artifacts go in `docs/sessions/<YYYY-MM-DD-name>/`. Never create 
 
 ```bash
 cd ~/CodeProjects/Phenotype/repos/jcode
-git fetch origin && git status -sb          # expect: master...origin/master, clean. Parent of this doc is 2e39f501b.
-git worktree list                            # 26 worktrees, 4 dirty. See section 3.
+git fetch origin && git status -sb          # expect: master...origin/master, clean. Code tip under this doc is 7444e113e.
+git worktree list                            # 27 worktrees, 4 dirty. See section 3.
 gh pr list --repo KooshaPari/Jcode --state open
 gh issue list --repo KooshaPari/Jcode --state open
 python3 scripts/check_code_size_budget.py    # last known PASS predates this doc edit. Re-run before trusting it.
@@ -353,7 +353,7 @@ Then read, in order: this doc → `docs/sessions/2026-10-12-cleanup-and-release/
 6. **`gh pr merge` does not always fail closed.** §4 is the path: if the hook defers, answer the phinbox request, then `gh pr merge --squash`. #85 merged that way at 2026-10-16T01:06:32Z (`30483c7f7`) with no direct-push fallback. A blanket "fails closed" line is stale.
 7. **~~7 worktrees hold uncommitted work~~** (2026-10-16 update). Only **4 remain**: `decollide-kcode-r2` (4 dirty), `pr27-minor-review-fixes` (3 dirty), `wt-jcode-audit` (1 untracked), `jcode-rebase-v0.90` (1 untracked). Three worktrees (`wt-fmt`, `wt-picker-fix`, `wt-jcode-panicbudget-pb1`) **vanished from this session**, not by my action — their branches and commits survive (`fix/fmt-drift`, `fix/picker-precedence`, `fix/panic-budget-wave1-pb1`); only their *uncommitted* edits may be lost. `git fsck` shows 78 dangling commits, which likely hold recoverable content. Do not treat the 4 survivors as protected-from-me — I have not touched any.
 8. **Release version drift (RESOLVED 2026-10-16 — the planned tag would be false).** `v0.95.0` … `v0.98.1` are **upstream tags**, not fork tags (not reachable from fork master; `jcode --version` is `v0.98.1` because it is upstream's self-built binary). The fork's real scheme: `Cargo.toml = 0.85.1-k1.1.1`, fork tags are `v0.85.0-k1.0.0` and `v0.85.1-k1.1.0`. The P7 plan in `00_HANDOFF.md` says "bump to 0.96.0-k1.0.0, tag v0.96.0-k1.0.0" — that is a **misreading of upstream's version as ours**. The correct P7 bump is `0.85.1-k1.1.1` → `0.85.1-k1.2.0` (fork-only feature) or a base-version bump only if PR #23 (`feature/upstream-0.88-sync`, still OPEN, CONFLICTING against master as of 2026-10-16T03:34Z) actually merges upstream v0.88.0 first.
-9. **Hosted Actions are not dispatching (measured 2026-10-16, rechecked 03:34Z, not a minutes outage).** The repo is public (`KCode`, default branch `master`). `GET /actions/permissions` returns `enabled: true` and every workflow is `active`. `POST /actions/workflows/ci.yml/dispatches` still returns HTTP 422: `Actions has been disabled for this repository.` The 03:34Z recheck returned the same body. #90 (`7444e113e`) also has zero Actions runs. Merge `30483c7f7` (#85, unused-deps machete fix, on master) has zero Actions runs. The newest Actions run remains 2026-10-14T22:00:58Z on `fix/ci-unused-deps`, status `queued`, jobs array empty. Third-party check suites are created; the `github-actions` app is absent. Minutes are not the cause: private repo `KooshaPari/PhenoRegistry` completed a run at 2026-10-16T00:42:58Z. Re-enable is operator-only (repo Settings, Actions). Do not toggle it from an agent. Until a new run exists, local gate scripts are the only CI signal.
+9. **Hosted Actions are not dispatching (measured 2026-10-16, rechecked 03:34Z, not a minutes outage).** The repo is public (`KCode`, default branch `master`). `GET /actions/permissions` returns `enabled: true` and every workflow is `active`. `POST /actions/workflows/ci.yml/dispatches` still returns HTTP 422: `Actions has been disabled for this repository.` The 03:34Z recheck returned the same body. #90 (`7444e113e`) also has zero Actions runs. Merge `30483c7f7` (#85, unused-deps machete fix, on master) has zero Actions runs. The newest Actions run remains 2026-10-14T22:00:58Z on `fix/ci-unused-deps`, status `queued`, jobs array empty. Third-party check suites are created; the `github-actions` app is absent. Minutes are not the cause: private repo `KooshaPari/PhenoRegistry` completed a run at 2026-10-16T03:32:06Z, and `AgilePlus` completed success at 02:43:42Z. A 03:40Z dispatch probe still returned HTTP 422 and the newest Jcode run was still the 2026-10-14 queue. Re-enable is operator-only (repo Settings, Actions). Do not toggle it from an agent. Until a new run exists, local gate scripts are the only CI signal.
 
 ---
 
