@@ -3231,7 +3231,6 @@ dependencies = [
  "jcode-cache-vectors",
  "jcode-command-risk",
  "jcode-core",
- "jcode-herdr",
  "jcode-import-core",
  "jcode-message-types",
  "jcode-micro-compact",
@@ -3514,7 +3513,6 @@ name = "jcode-herdr"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "serde",
  "serde_json",
  "tempfile",
  "tokio",
@@ -4079,7 +4077,6 @@ name = "jcode-session-memory"
 version = "0.1.0"
 dependencies = [
  "serde",
- "serde_json",
 ]
 
 [[package]]
