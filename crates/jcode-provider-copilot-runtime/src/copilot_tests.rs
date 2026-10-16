@@ -188,11 +188,11 @@ fn should_keep_public_responses_endpoint_unchanged() {
 fn should_route_enterprise_chat_to_captured_endpoint() {
     let mut provider = make_test_provider(Vec::new());
     provider.endpoints =
-        copilot_auth::CopilotEndpoints::from_enterprise_url(Some("hiqfi.ghe.com")).unwrap();
+        copilot_auth::CopilotEndpoints::from_enterprise_url(Some("example.ghe.com")).unwrap();
 
     assert_eq!(
         provider.inference_url(false),
-        "https://copilot-api.hiqfi.ghe.com/chat/completions"
+        "https://copilot-api.example.ghe.com/chat/completions"
     );
 }
 
@@ -200,11 +200,11 @@ fn should_route_enterprise_chat_to_captured_endpoint() {
 fn should_route_enterprise_responses_to_captured_endpoint() {
     let mut provider = make_test_provider(Vec::new());
     provider.endpoints =
-        copilot_auth::CopilotEndpoints::from_enterprise_url(Some("hiqfi.ghe.com")).unwrap();
+        copilot_auth::CopilotEndpoints::from_enterprise_url(Some("example.ghe.com")).unwrap();
 
     assert_eq!(
         provider.inference_url(true),
-        "https://copilot-api.hiqfi.ghe.com/responses"
+        "https://copilot-api.example.ghe.com/responses"
     );
 }
 
@@ -222,11 +222,11 @@ fn should_keep_public_catalog_cache_filename_unchanged() {
 fn should_namespace_enterprise_catalog_cache_by_host() {
     let mut provider = make_test_provider(Vec::new());
     provider.endpoints =
-        copilot_auth::CopilotEndpoints::from_enterprise_url(Some("hiqfi.ghe.com")).unwrap();
+        copilot_auth::CopilotEndpoints::from_enterprise_url(Some("example.ghe.com")).unwrap();
 
     assert_eq!(
         provider.persisted_catalog_filename(),
-        "copilot_models_cache.hiqfi.ghe.com.json"
+        "copilot_models_cache.example.ghe.com.json"
     );
 }
 
@@ -249,10 +249,10 @@ fn should_isolate_catalog_caches_between_enterprise_hosts() {
 fn should_share_catalog_cache_for_normalized_enterprise_host() {
     let mut first = make_test_provider(Vec::new());
     first.endpoints =
-        copilot_auth::CopilotEndpoints::from_enterprise_url(Some("hiqfi.ghe.com")).unwrap();
+        copilot_auth::CopilotEndpoints::from_enterprise_url(Some("example.ghe.com")).unwrap();
     let mut second = make_test_provider(Vec::new());
     second.endpoints =
-        copilot_auth::CopilotEndpoints::from_enterprise_url(Some("https://HIQFI.GHE.COM/"))
+        copilot_auth::CopilotEndpoints::from_enterprise_url(Some("https://EXAMPLE.GHE.COM/"))
             .unwrap();
 
     assert_eq!(
@@ -265,7 +265,7 @@ fn should_share_catalog_cache_for_normalized_enterprise_host() {
 fn should_preserve_selected_enterprise_model_in_live_catalog() {
     let mut provider = make_test_provider(Vec::new());
     provider.endpoints =
-        copilot_auth::CopilotEndpoints::from_enterprise_url(Some("hiqfi.ghe.com")).unwrap();
+        copilot_auth::CopilotEndpoints::from_enterprise_url(Some("example.ghe.com")).unwrap();
     provider.set_model("gpt-6.1-sol").unwrap();
     let models: Vec<copilot_auth::CopilotModelInfo> = serde_json::from_value(json!([
         {"id": "claude-sonnet-5.5", "model_picker_enabled": true},
@@ -280,7 +280,7 @@ fn should_preserve_selected_enterprise_model_in_live_catalog() {
 fn should_choose_available_enterprise_picker_model_when_legacy_default_is_missing() {
     let mut provider = make_test_provider(Vec::new());
     provider.endpoints =
-        copilot_auth::CopilotEndpoints::from_enterprise_url(Some("hiqfi.ghe.com")).unwrap();
+        copilot_auth::CopilotEndpoints::from_enterprise_url(Some("example.ghe.com")).unwrap();
     let models: Vec<copilot_auth::CopilotModelInfo> = serde_json::from_value(json!([
         {"id": "hidden-model"},
         {"id": "claude-sonnet-5.5", "model_picker_enabled": true}
@@ -297,7 +297,7 @@ fn should_choose_available_enterprise_picker_model_when_legacy_default_is_missin
 fn should_choose_available_enterprise_model_when_no_picker_models_exist() {
     let mut provider = make_test_provider(Vec::new());
     provider.endpoints =
-        copilot_auth::CopilotEndpoints::from_enterprise_url(Some("hiqfi.ghe.com")).unwrap();
+        copilot_auth::CopilotEndpoints::from_enterprise_url(Some("example.ghe.com")).unwrap();
     let models: Vec<copilot_auth::CopilotModelInfo> =
         serde_json::from_value(json!([{"id": "gpt-6.1-sol"}])).unwrap();
 
@@ -362,7 +362,7 @@ fn should_refresh_expired_bearer_at_captured_enterprise_endpoint() {
     });
     let mut provider = make_test_provider(Vec::new());
     provider.endpoints =
-        copilot_auth::CopilotEndpoints::from_enterprise_url(Some("hiqfi.ghe.com")).unwrap();
+        copilot_auth::CopilotEndpoints::from_enterprise_url(Some("example.ghe.com")).unwrap();
     provider.endpoints.token_url = format!("http://{address}/api/v3/copilot_internal/v2/token");
     provider.client = reqwest::Client::builder()
         .no_proxy()

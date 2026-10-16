@@ -3,7 +3,7 @@ use anyhow::{Result, anyhow};
 
 use tempfile::TempDir;
 
-const TEST_ENTERPRISE_HOST: &str = "hiqfi.ghe.com";
+const TEST_ENTERPRISE_HOST: &str = "example.ghe.com";
 
 #[test]
 fn should_preserve_response_only_model_endpoints_from_the_live_catalog() -> Result<()> {
@@ -53,11 +53,11 @@ fn should_route_all_enterprise_endpoints_to_the_configured_tenant() -> Result<()
         endpoints,
         CopilotEndpoints {
             host: TEST_ENTERPRISE_HOST.to_string(),
-            device_code_url: "https://hiqfi.ghe.com/login/device/code".to_string(),
-            access_token_url: "https://hiqfi.ghe.com/login/oauth/access_token".to_string(),
-            token_url: "https://hiqfi.ghe.com/api/v3/copilot_internal/v2/token".to_string(),
-            github_api_base: "https://hiqfi.ghe.com/api/v3".to_string(),
-            api_base: "https://copilot-api.hiqfi.ghe.com".to_string(),
+            device_code_url: "https://example.ghe.com/login/device/code".to_string(),
+            access_token_url: "https://example.ghe.com/login/oauth/access_token".to_string(),
+            token_url: "https://example.ghe.com/api/v3/copilot_internal/v2/token".to_string(),
+            github_api_base: "https://example.ghe.com/api/v3".to_string(),
+            api_base: "https://copilot-api.example.ghe.com".to_string(),
         }
     );
     Ok(())
@@ -65,7 +65,7 @@ fn should_route_all_enterprise_endpoints_to_the_configured_tenant() -> Result<()
 
 #[test]
 fn should_normalize_https_enterprise_configuration() -> Result<()> {
-    let endpoints = CopilotEndpoints::from_enterprise_url(Some("https://HIQFI.ghe.com/"))?;
+    let endpoints = CopilotEndpoints::from_enterprise_url(Some("https://EXAMPLE.ghe.com/"))?;
 
     assert_eq!(endpoints.host, TEST_ENTERPRISE_HOST);
     Ok(())
@@ -73,22 +73,22 @@ fn should_normalize_https_enterprise_configuration() -> Result<()> {
 
 #[test]
 fn should_reject_an_enterprise_url_with_a_path() {
-    assert!(CopilotEndpoints::from_enterprise_url(Some("hiqfi.ghe.com/api/v3")).is_err());
+    assert!(CopilotEndpoints::from_enterprise_url(Some("example.ghe.com/api/v3")).is_err());
 }
 
 #[test]
 fn should_reject_an_insecure_enterprise_url() {
-    assert!(CopilotEndpoints::from_enterprise_url(Some("http://hiqfi.ghe.com")).is_err());
+    assert!(CopilotEndpoints::from_enterprise_url(Some("http://example.ghe.com")).is_err());
 }
 
 #[test]
 fn should_reject_enterprise_url_credentials() {
-    assert!(CopilotEndpoints::from_enterprise_url(Some("user@hiqfi.ghe.com")).is_err());
+    assert!(CopilotEndpoints::from_enterprise_url(Some("user@example.ghe.com")).is_err());
 }
 
 #[test]
 fn should_reject_enterprise_url_whitespace() {
-    assert!(CopilotEndpoints::from_enterprise_url(Some("hiqfi.ghe.com\n")).is_err());
+    assert!(CopilotEndpoints::from_enterprise_url(Some("example.ghe.com\n")).is_err());
 }
 
 #[test]
@@ -101,7 +101,7 @@ fn should_select_only_the_configured_enterprise_host_token() -> Result<()> {
     let config = serde_json::from_value(serde_json::json!({
         "github.com": {"oauth_token": "gho_public"},
         "other.ghe.com": {"oauth_token": "gho_other"},
-        "hiqfi.ghe.com": {"oauth_token": "gho_enterprise"}
+        "example.ghe.com": {"oauth_token": "gho_enterprise"}
     }))?;
 
     assert_eq!(
@@ -114,7 +114,7 @@ fn should_select_only_the_configured_enterprise_host_token() -> Result<()> {
 #[test]
 fn should_accept_enterprise_apps_json_client_id_suffix() -> Result<()> {
     let config = serde_json::from_value(serde_json::json!({
-        "https://hiqfi.ghe.com:Iv1.b507a08c87ecfe98": {"oauth_token": "gho_enterprise"}
+        "https://example.ghe.com:Iv1.b507a08c87ecfe98": {"oauth_token": "gho_enterprise"}
     }))?;
 
     assert_eq!(
@@ -139,7 +139,7 @@ fn should_extract_the_matching_enterprise_cli_account() {
     let value = serde_json::json!({
         "logged_in_users": [
             {"github_host": "https://github.com", "token": "gho_public"},
-            {"github_host": "https://hiqfi.ghe.com", "token": "gho_enterprise"}
+            {"github_host": "https://example.ghe.com", "token": "gho_enterprise"}
         ]
     });
 
@@ -181,7 +181,7 @@ fn should_save_enterprise_credentials_under_the_tenant_host() -> Result<()> {
     assert_eq!(
         saved,
         serde_json::json!({
-            "hiqfi.ghe.com": {"oauth_token": "gho_enterprise", "user": "testuser"}
+            "example.ghe.com": {"oauth_token": "gho_enterprise", "user": "testuser"}
         })
     );
     invalidate_github_token_cache();

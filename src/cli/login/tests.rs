@@ -282,8 +282,8 @@ fn unusable_claude_code_file_falls_back_to_native_snapshot() {
 #[test]
 fn should_normalize_enterprise_login_hostname() {
     assert_eq!(
-        copilot_host::normalize_login_host(" https://HIQFI.GHE.COM/ ").unwrap(),
-        Some("hiqfi.ghe.com".into())
+        copilot_host::normalize_login_host(" https://EXAMPLE.GHE.COM/ ").unwrap(),
+        Some("example.ghe.com".into())
     );
 }
 
@@ -311,7 +311,7 @@ fn should_persist_native_enterprise_login_without_changing_default_model() {
     copilot_host::configure_login_host(
         provider,
         &LoginOptions {
-            copilot_enterprise_url: Some("hiqfi.ghe.com".into()),
+            copilot_enterprise_url: Some("example.ghe.com".into()),
             ..LoginOptions::default()
         },
     )
@@ -324,7 +324,7 @@ fn should_persist_native_enterprise_login_without_changing_default_model() {
             config.provider.copilot_enterprise_url.as_deref(),
             config.provider.default_model.as_deref()
         ),
-        (Some("hiqfi.ghe.com"), Some("gpt-6.1-sol"))
+        (Some("example.ghe.com"), Some("gpt-6.1-sol"))
     );
 }
 
