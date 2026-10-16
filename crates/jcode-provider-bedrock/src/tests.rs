@@ -68,6 +68,8 @@ fn detects_env_credentials_requires_region_and_credential_hint() {
     let _guard = lock_test_env();
     let temp = tempfile::tempdir().unwrap();
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
+    // dirs ignores XDG_CONFIG_HOME on macOS; JCODE_HOME covers the real config dir.
+    let _jcode_home = EnvVarGuard::set("JCODE_HOME", temp.path().as_os_str());
     let _removed = [
         "JCODE_BEDROCK_ENABLE",
         API_KEY_ENV,
@@ -101,6 +103,8 @@ fn detects_bedrock_login_env_file_credentials() {
     let _guard = lock_test_env();
     let temp = tempfile::tempdir().unwrap();
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
+    // dirs ignores XDG_CONFIG_HOME on macOS; JCODE_HOME covers the real config dir.
+    let _jcode_home = EnvVarGuard::set("JCODE_HOME", temp.path().as_os_str());
     for key in [
         "JCODE_BEDROCK_ENABLE",
         API_KEY_ENV,
@@ -140,6 +144,8 @@ fn configured_profile_from_bedrock_env_overrides_stale_bearer_token() {
     let _guard = lock_test_env();
     let temp = tempfile::tempdir().unwrap();
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
+    // dirs ignores XDG_CONFIG_HOME on macOS; JCODE_HOME covers the real config dir.
+    let _jcode_home = EnvVarGuard::set("JCODE_HOME", temp.path().as_os_str());
     let _removed = [
         "JCODE_BEDROCK_ENABLE",
         API_KEY_ENV,
@@ -195,6 +201,8 @@ fn maps_profile_required_foundation_model_to_inference_profile() {
     let _guard = lock_test_env();
     let temp = tempfile::tempdir().unwrap();
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
+    // dirs ignores XDG_CONFIG_HOME on macOS; JCODE_HOME covers the real config dir.
+    let _jcode_home = EnvVarGuard::set("JCODE_HOME", temp.path().as_os_str());
     let p = BedrockProvider::new();
     p.profile_required_models
         .write()
@@ -215,6 +223,8 @@ fn maps_foundation_model_from_stale_cached_profile_list() {
     let _guard = lock_test_env();
     let temp = tempfile::tempdir().unwrap();
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
+    // dirs ignores XDG_CONFIG_HOME on macOS; JCODE_HOME covers the real config dir.
+    let _jcode_home = EnvVarGuard::set("JCODE_HOME", temp.path().as_os_str());
     let p = BedrockProvider::new();
     *p.fetched_inference_profiles.write().unwrap() = vec![
         "global.amazon.nova-2-lite-v1:0".to_string(),
@@ -231,6 +241,8 @@ fn hides_profile_required_foundation_model_when_profile_route_exists() {
     let _guard = lock_test_env();
     let temp = tempfile::tempdir().unwrap();
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
+    // dirs ignores XDG_CONFIG_HOME on macOS; JCODE_HOME covers the real config dir.
+    let _jcode_home = EnvVarGuard::set("JCODE_HOME", temp.path().as_os_str());
     let p = BedrockProvider::new();
     *p.fetched_models.write().unwrap() = vec!["amazon.nova-2-lite-v1:0".to_string()];
     *p.fetched_inference_profiles.write().unwrap() = vec!["us.amazon.nova-2-lite-v1:0".to_string()];
@@ -262,6 +274,8 @@ fn hides_foundation_model_when_profile_route_exists() {
     let _guard = lock_test_env();
     let temp = tempfile::tempdir().unwrap();
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
+    // dirs ignores XDG_CONFIG_HOME on macOS; JCODE_HOME covers the real config dir.
+    let _jcode_home = EnvVarGuard::set("JCODE_HOME", temp.path().as_os_str());
     let p = BedrockProvider::new();
     *p.fetched_models.write().unwrap() = vec!["amazon.nova-2-lite-v1:0".to_string()];
     *p.fetched_inference_profiles.write().unwrap() = vec!["us.amazon.nova-2-lite-v1:0".to_string()];
@@ -289,6 +303,8 @@ fn profile_required_foundation_model_without_profile_route_is_disabled() {
     let _guard = lock_test_env();
     let temp = tempfile::tempdir().unwrap();
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
+    // dirs ignores XDG_CONFIG_HOME on macOS; JCODE_HOME covers the real config dir.
+    let _jcode_home = EnvVarGuard::set("JCODE_HOME", temp.path().as_os_str());
     let p = BedrockProvider::new();
     *p.fetched_models.write().unwrap() = vec!["amazon.nova-2-lite-v1:0".to_string()];
     p.profile_required_models
@@ -333,6 +349,8 @@ fn ignores_persisted_bedrock_catalog_from_different_region() {
     let _guard = lock_test_env();
     let temp = tempfile::tempdir().unwrap();
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
+    // dirs ignores XDG_CONFIG_HOME on macOS; JCODE_HOME covers the real config dir.
+    let _jcode_home = EnvVarGuard::set("JCODE_HOME", temp.path().as_os_str());
     {
         let _region = EnvVarGuard::set(REGION_ENV, "us-east-1");
         BedrockProvider::persist_catalog(
@@ -448,6 +466,8 @@ fn legacy_model_route_is_unavailable_with_reason() {
     let _guard = lock_test_env();
     let temp = tempfile::tempdir().unwrap();
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
+    // dirs ignores XDG_CONFIG_HOME on macOS; JCODE_HOME covers the real config dir.
+    let _jcode_home = EnvVarGuard::set("JCODE_HOME", temp.path().as_os_str());
     let p = BedrockProvider::new();
     *p.fetched_models.write().unwrap() = vec!["anthropic.claude-3-haiku-20240307-v1:0".to_string()];
     p.legacy_models
