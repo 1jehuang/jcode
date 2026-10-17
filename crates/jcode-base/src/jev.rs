@@ -187,8 +187,9 @@ impl JevClient {
 
     fn for_purpose(purpose: JevPurpose) -> Result<Self> {
         let (provider, api_key, endpoint, me_endpoint) = Self::resolve(purpose)?;
+        let bypass_proxy = should_bypass_proxy(provider, &endpoint);
         let build = || {
-            client_builder()
+            client_builder_for(bypass_proxy)
                 .build()
                 .map_err(|_| anyhow!("Could not initialize the Jev decision client"))
         };
@@ -426,11 +427,33 @@ fn retry_after(response: &Response) -> Option<Duration> {
     (delay <= MAX_RETRY_AFTER).then_some(delay)
 }
 
+#[cfg(test)]
 fn client_builder() -> reqwest::ClientBuilder {
-    Client::builder()
+    client_builder_for(false)
+}
+
+fn client_builder_for(bypass_proxy: bool) -> reqwest::ClientBuilder {
+    let builder = Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(25))
-        .redirect(reqwest::redirect::Policy::none())
+        .redirect(reqwest::redirect::Policy::none());
+    if bypass_proxy {
+        builder.no_proxy()
+    } else {
+        builder
+    }
+}
+
+/// Local/private HTTP endpoints (loopback, LAN, Tailscale) must connect directly
+/// rather than routing plaintext request bodies and bearer tokens through an
+/// ambient `HTTP_PROXY` / `ALL_PROXY`.
+fn should_bypass_proxy(provider: JevProvider, endpoint: &str) -> bool {
+    endpoint.starts_with("http://")
+        || (provider == JevProvider::Laya
+            && Url::parse(endpoint)
+                .ok()
+                .and_then(|url| url.host_str().map(is_trusted_local_or_private_host))
+                .unwrap_or(true))
 }
 
 fn resolve_voice_with(
@@ -508,28 +531,30 @@ fn configured_laya_base() -> String {
     LAYA_DEFAULT_BASE.to_owned()
 }
 
+fn is_trusted_local_or_private_host(host: &str) -> bool {
+    let lower = host.to_ascii_lowercase();
+    lower == "localhost"
+        || lower.ends_with(".ts.net")
+        || lower.ends_with(".local")
+        || host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| match ip {
+                std::net::IpAddr::V4(v4) => {
+                    v4.is_loopback()
+                        || v4.is_private()
+                        || (v4.octets()[0] == 100 && (64..=127).contains(&v4.octets()[1]))
+                }
+                std::net::IpAddr::V6(v6) => {
+                    v6.is_loopback() || (v6.segments()[0] & 0xfe00) == 0xfc00
+                }
+            })
+}
+
 fn trusted_laya_base(base: &str) -> Result<String> {
     let url = Url::parse(base.trim()).map_err(|_| anyhow!("Invalid Laya base URL"))?;
-    let trusted_http_host = url.host_str().is_some_and(|host| {
-        let lower = host.to_ascii_lowercase();
-        lower == "localhost"
-            || lower.ends_with(".ts.net")
-            || lower.ends_with(".local")
-            || host
-                .trim_start_matches('[')
-                .trim_end_matches(']')
-                .parse::<std::net::IpAddr>()
-                .is_ok_and(|ip| match ip {
-                    std::net::IpAddr::V4(v4) => {
-                        v4.is_loopback()
-                            || v4.is_private()
-                            || (v4.octets()[0] == 100 && (64..=127).contains(&v4.octets()[1]))
-                    }
-                    std::net::IpAddr::V6(v6) => {
-                        v6.is_loopback() || (v6.segments()[0] & 0xfe00) == 0xfc00
-                    }
-                })
-    });
+    let trusted_http_host = url.host_str().is_some_and(is_trusted_local_or_private_host);
     ensure!(
         url.host_str().is_some()
             && (url.scheme() == "https" || (url.scheme() == "http" && trusted_http_host))
@@ -2133,5 +2158,81 @@ mod tests {
             assert_eq!(requests.len(), 1);
             assert!(requests[0].starts_with("GET /v1/me "));
         }
+    }
+
+    #[tokio::test]
+    async fn laya_local_and_private_requests_bypass_http_proxy_including_voice_hedges() {
+        let _guard = crate::storage::lock_test_env();
+        let proxy_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        proxy_listener.set_nonblocking(true).unwrap();
+        let proxy_url = format!("http://{}", proxy_listener.local_addr().unwrap());
+
+        let (base, seen) =
+            concurrent_mock(vec![(Duration::from_secs(3), 200), (Duration::ZERO, 200)]);
+
+        let prev_http_proxy = std::env::var_os("HTTP_PROXY");
+        let prev_all_proxy = std::env::var_os("ALL_PROXY");
+        let prev_no_proxy = std::env::var_os("NO_PROXY");
+        let prev_voice_provider = std::env::var_os(VOICE_PROVIDER_ENV);
+        let prev_laya_base = std::env::var_os(LAYA_BASE_URL_ENV);
+        let prev_laya_key = std::env::var_os("LAYA_API_KEY");
+
+        crate::env::set_var("HTTP_PROXY", &proxy_url);
+        crate::env::set_var("ALL_PROXY", &proxy_url);
+        crate::env::remove_var("NO_PROXY");
+        crate::env::set_var(VOICE_PROVIDER_ENV, "laya");
+        crate::env::set_var(LAYA_BASE_URL_ENV, &base);
+        crate::env::set_var("LAYA_API_KEY", "laya-private-key");
+
+        assert!(should_bypass_proxy(
+            JevProvider::Laya,
+            "http://127.0.0.1:8080/v1/systemone"
+        ));
+        assert!(should_bypass_proxy(
+            JevProvider::Laya,
+            "http://100.87.178.69:8000/v1/systemone"
+        ));
+        assert!(!should_bypass_proxy(
+            JevProvider::TypeSafe,
+            "https://api.typesafe.ai/v1/systemone"
+        ));
+
+        let client = JevClient::for_voice().unwrap();
+        let value = client
+            .evaluate(json!({"transcript": "private-voice-state"}), questions())
+            .await;
+
+        match prev_http_proxy {
+            Some(v) => crate::env::set_var("HTTP_PROXY", v),
+            None => crate::env::remove_var("HTTP_PROXY"),
+        }
+        match prev_all_proxy {
+            Some(v) => crate::env::set_var("ALL_PROXY", v),
+            None => crate::env::remove_var("ALL_PROXY"),
+        }
+        match prev_no_proxy {
+            Some(v) => crate::env::set_var("NO_PROXY", v),
+            None => crate::env::remove_var("NO_PROXY"),
+        }
+        match prev_voice_provider {
+            Some(v) => crate::env::set_var(VOICE_PROVIDER_ENV, v),
+            None => crate::env::remove_var(VOICE_PROVIDER_ENV),
+        }
+        match prev_laya_base {
+            Some(v) => crate::env::set_var(LAYA_BASE_URL_ENV, v),
+            None => crate::env::remove_var(LAYA_BASE_URL_ENV),
+        }
+        match prev_laya_key {
+            Some(v) => crate::env::set_var("LAYA_API_KEY", v),
+            None => crate::env::remove_var("LAYA_API_KEY"),
+        }
+
+        let value = value.unwrap();
+        assert!(validate_answers(&value, &questions()).is_ok());
+        assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(
+            proxy_listener.accept().is_err(),
+            "capture proxy must never receive local Laya primary or hedge requests"
+        );
     }
 }
