@@ -80,7 +80,7 @@ def debug_cmd(sock_path: str, cmd: str, session_id: str | None = None, timeout: 
 
 
 def run_jcode(sessions: int, turns: int, cwd: str, model: str, memory: bool) -> dict:
-    jcode = shutil.which("jcode") or str(Path.home() / ".local/bin/jcode")
+    jcode = os.environ.get("JCODE_BENCH_BIN") or shutil.which("jcode") or str(Path.home() / ".local/bin/jcode")
     temp_root = tempfile.mkdtemp(prefix="jcode-headless-bench-")
     home = Path(temp_root) / "home"
     run = Path(temp_root) / "run"
@@ -157,6 +157,14 @@ def run_jcode(sessions: int, turns: int, cwd: str, model: str, memory: bool) -> 
             log(f"jcode sessions={sessions} turn {t + 1} pss={samples[-1][1]} MB")
         version = subprocess.run([jcode, "--version"], capture_output=True, text=True).stdout.strip()
         checks = {"embeddings": embeddings_status}
+        dump_dir = os.environ.get("JCODE_BENCH_MEMORY_DUMP")
+        if dump_dir:
+            try:
+                Path(dump_dir).mkdir(parents=True, exist_ok=True)
+                (Path(dump_dir) / f"server-memory-{sessions}.json").write_text(
+                    debug_cmd(dbg_sock, "server:memory", timeout=60))
+            except Exception as exc:  # noqa: BLE001
+                checks["memory_dump_error"] = str(exc)[:200]
         try:
             hist = json.loads(debug_cmd(dbg_sock, "history", ids[0], timeout=30))
             checks["history_messages"] = len(hist) if isinstance(hist, list) else None
