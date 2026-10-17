@@ -1221,6 +1221,14 @@ impl Agent {
                     cache_read_input: usage_cache_read,
                     cache_creation_input: usage_cache_creation,
                 });
+                // Native compaction is applied and announced below, after
+                // usage. Attribute this response's cache refresh now using
+                // evidence from the completed stream, not the later event or
+                // a heuristic based on a smaller prompt. RetryRollback clears
+                // this item, so discarded attempts cannot explain a real miss.
+                if openai_native_compaction.is_some() {
+                    self.kv_cache_monitor.note_provider_compaction();
+                }
                 if let Some(miss) = self.finish_kv_cache_monitor_request(
                     usage_input.unwrap_or(0),
                     usage_cache_read,

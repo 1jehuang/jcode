@@ -1,5 +1,7 @@
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 
+#[cfg(test)]
+mod cache_monitor_tests;
 mod compaction;
 mod conversation_reset;
 mod environment;
@@ -189,12 +191,21 @@ impl Agent {
         cache_read: Option<u64>,
         cache_creation: Option<u64>,
     ) -> Option<ServerEvent> {
-        let effective = self.effective_context_tokens_from_usage(input, cache_read, cache_creation);
-        let miss = self
-            .kv_cache_monitor
-            .finish_request(effective, cache_read)?;
-        logging::warn(&format!(
-            "KV_CACHE_MISS session={} reason={} harness_caused={} missed={} expected={} read={} documented={:?}",
+        let reusable = crate::compaction::reusable_cache_tokens_from_usage(
+            self.provider.name(),
+            input,
+            cache_read,
+            cache_creation,
+        );
+        let miss = self.kv_cache_monitor.finish_request(reusable, cache_read)?;
+        let expected_refresh = miss.reason == crate::kv_cache_monitor::MissReason::Compaction;
+        let label = if expected_refresh {
+            "KV_CACHE_REFRESH"
+        } else {
+            "KV_CACHE_MISS"
+        };
+        let diagnostic = format!(
+            "{label} session={} reason={} harness_caused={} missed={} expected={} read={} documented={:?}",
             self.session.id,
             miss.reason.id(),
             miss.reason.harness_caused(),
@@ -202,7 +213,12 @@ impl Agent {
             miss.expected_tokens,
             miss.read_tokens,
             miss.documented_cause,
-        ));
+        );
+        if expected_refresh {
+            logging::info(&diagnostic);
+        } else {
+            logging::warn(&diagnostic);
+        }
         Some(ServerEvent::KvCacheMiss {
             reason: miss.reason.id().to_string(),
             harness_caused: miss.reason.harness_caused(),
