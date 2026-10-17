@@ -2,13 +2,13 @@
 
 ## 1. Configuration & Environment Hot-Reload (`jcode-config-types`, `jcode-base`)
 
-- [x] 1.1 Add `SuggestedRepliesConfig` (`enabled`, `use_open_gf`, `max_secondary_suggestions`, `confidence_threshold`, `enable_full_auto_explorer`, `six_lens_auto_review`) with lenient deserializers and `1..=5` / `0.0..=1.0` clamping in `crates/jcode-config-types/src/lib.rs` and `serde_lenient.rs`.
-- [x] 1.2 Mount `pub suggested_replies: SuggestedRepliesConfig` on `Config` in `crates/jcode-base/src/config.rs`, wire env overrides in `crates/jcode-base/src/config/env_overrides.rs`, register all new env vars in `CONFIG_ENV_KEYS`, and update `default_file.rs` + `display_summary.rs`.
+- [x] 1.1 Add `SuggestedRepliesConfig` (`enabled`, `jev_provider`, `use_open_gf`, `max_secondary_suggestions`, `confidence_threshold`, `enable_full_auto_explorer`, `six_lens_auto_review`) with lenient deserializers and `1..=5` / `0.0..=1.0` clamping in `crates/jcode-config-types/src/lib.rs` and `serde_lenient.rs`.
+- [x] 1.2 Mount `pub suggested_replies: SuggestedRepliesConfig` on `Config` in `crates/jcode-base/src/config.rs`, wire env overrides (`JCODE_SUGGESTIONS_JEV_PROVIDER`, `JCODE_LAYA_BASE_URL`, `LAYA_BASE_URL`, `LAYA_API_KEY`, etc.) in `crates/jcode-base/src/config/env_overrides.rs`, register all new env vars in `CONFIG_ENV_KEYS`, and update `default_file.rs` + `display_summary.rs`.
 
-## 2. OpenJev SystemOne Transport & Two-Stage Cascade (`jcode-base`)
+## 2. OpenJev / Laya SystemOne Transport & Two-Stage Cascade (`jcode-base`)
 
-- [x] 2.1 Add `JevProvider::OpenJev` (`https://api.openjev.sh/v1/systemone`, `model: "openjev"`, `OPENJEV_API_KEY` / `openjev.env`), `JevPurpose::Suggestions`, `JevClient::for_suggestions()`, and `choice`/`noul` validation in `crates/jcode-base/src/jev.rs` while preserving strict account isolation on HTTP 402.
-- [x] 2.2 Implement `crates/jcode-base/src/suggested_replies.rs` (and export in `crates/jcode-base/src/lib.rs`) with `SuggestedRepliesResponse` (`{ defaultAction, secondarySuggestions, branch }`), `ScoredSuggestion`, Iteration 1 (Jev-native macro-branching vs OpenGF `Sidecar` candidate synthesis), Iteration 2 (OpenJev `noul` logit scoring + deterministic fallback), and `distribute_suggestions`.
+- [x] 2.1 Add `JevProvider::OpenJev` (`https://api.openjev.sh/v1/systemone`, `model: "openjev"`, `OPENJEV_API_KEY` / `openjev.env`), `JevProvider::Laya` (local `http://127.0.0.1:8080/v1/systemone`, `model: "laya-latest"`, optional `LAYA_API_KEY` / `JCODE_LAYA_BASE_URL` / `laya.env`), `JevPurpose::Suggestions`, `JevClient::for_suggestions()`, and `choice`/`noul` validation in `crates/jcode-base/src/jev.rs` while preserving strict account isolation on HTTP 402.
+- [x] 2.2 Implement `crates/jcode-base/src/suggested_replies.rs` (and export in `crates/jcode-base/src/lib.rs`) with `SuggestedRepliesResponse` (`{ defaultAction, secondarySuggestions, branch }`), `ScoredSuggestion`, Iteration 1 (Jev-native macro-branching vs OpenGF `Sidecar` candidate synthesis), Iteration 2 (SystemOne `noul` logit scoring + deterministic fallback), and `distribute_suggestions`.
 
 ## 3. TUI Rendering, Keybindings, Mouse & Full-Auto Explorer (`jcode-tui`)
 
@@ -23,4 +23,5 @@
 
 ## 5. Unit & Integration Tests
 
-- [x] 5.1 Add unit tests for `distribute_suggestions` (threshold promotion, `1..=5` clamping, NaN filtering, JSON camelCase schema `{ defaultAction, secondarySuggestions, branch }`), `SuggestedRepliesConfig` lenient parsing + `CONFIG_ENV_KEYS`, `JevProvider::OpenJev` SystemOne requests, and TUI `[Tab]` / `[Ctrl+Enter]` / Explorer timer behavior.
+- [x] 5.1 Add unit tests for `distribute_suggestions` (threshold promotion, `1..=5` clamping, NaN filtering, JSON camelCase schema `{ defaultAction, secondarySuggestions, branch }`), `SuggestedRepliesConfig` lenient parsing + `CONFIG_ENV_KEYS`, `JevProvider::OpenJev` and `JevProvider::Laya` SystemOne requests, and TUI `[Tab]` / `[Ctrl+Enter]` / Explorer timer behavior.
+- [x] 5.2 Configure and verify local `Laya` SystemOne inference (`http://127.0.0.1:8080/v1/systemone` with `english` & `multilingual` checkpoints on `mps`, `LAYA_JEV_STRICT=1`) end-to-end with `jcode` (`suggested_replies.jev_provider = "laya"` and `agents.memory_jev_provider = "laya"`).

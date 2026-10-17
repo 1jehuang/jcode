@@ -63,12 +63,10 @@ This design incorporates all findings and conditions from the 6-subagent Go/No-G
 - **Lenient Deserialization**: Use custom lenient deserializers in `crates/jcode-config-types/src/serde_lenient.rs` so invalid types or out-of-range numbers in `~/.jcode/config.toml` never break `Config::load_from_file_strict()` during daemon reload handoffs. Clamp `max_secondary_suggestions` to `1..=5` (default `5`) and `confidence_threshold` to `0.0..=1.0` (default `0.55`).
 - **Env Fingerprint**: Register `JCODE_SUGGESTED_REPLIES_ENABLED`, `JCODE_USE_OPEN_GF`, `JCODE_MAX_SECONDARY_SUGGESTIONS`, `JCODE_CONFIDENCE_THRESHOLD`, `JCODE_ENABLE_FULL_AUTO_EXPLORER`, `JCODE_SIX_LENS_AUTO_REVIEW`, and `OPENJEV_API_KEY` in `CONFIG_ENV_KEYS` (`crates/jcode-base/src/config.rs:29-210`) so `config_env_fingerprint_tracks_every_apply_env_override_var` passes.
 
-### 2. OpenJev SystemOne Protocol & Account Isolation (`peacock` conditions)
-- **Provider Addition**: Add `JevProvider::OpenJev` in `crates/jcode-base/src/jev.rs` with:
-  - `name()` -> `"openjev"`
-  - `credentials()` -> `("OPENJEV_API_KEY", "openjev.env")`
-  - `model()` -> `"openjev"`
-  - `endpoint()` -> `"https://api.openjev.sh/v1/systemone"`
+### 2. OpenJev & Local Laya SystemOne Protocol & Account Isolation (`peacock` conditions)
+- **Provider Addition**: Add `JevProvider::OpenJev` and `JevProvider::Laya` in `crates/jcode-base/src/jev.rs` with:
+  - `OpenJev`: `name()` -> `"openjev"`, `credentials()` -> `("OPENJEV_API_KEY", "openjev.env")`, `model()` -> `"openjev"`, `endpoint()` -> `"https://api.openjev.sh/v1/systemone"`
+  - `Laya`: `name()` -> `"laya"`, `credentials()` -> `("LAYA_API_KEY", "laya.env")` (optional on loopback), `model()` -> `"laya-latest"`, `endpoint()` -> `JCODE_LAYA_BASE_URL` / `LAYA_BASE_URL` (default `"http://127.0.0.1:8080/v1/systemone"`)
 - **Question Validation**: Extend `request_body_for` and `validate_answers` in `jev.rs` so `JevPurpose::Suggestions` allows both `choice` and `noul` questions on direct SystemOne endpoints (`OpenJev`, `TypeSafe`), and validates `choice` answers (`answer["choice"]` in criteria keys, finite `confidence` / `probabilities` in `0.0..=1.0`). When routed through `JevProvider::Jcode` (which only accepts `noul` outside Browser), Iteration 1 automatically encodes macro-branch candidates as a single batched `noul` request.
 - **Strict Account Isolation**: If `OPENJEV_API_KEY` is present and returns HTTP `402` (or `401`/`403`), `JevClient` fails fast and never falls back to another paid BYOK account (`TYPESAFE_API_KEY` / `OPENROUTER_API_KEY`). The `suggested_replies` engine catches the error and falls back to its built-in deterministic context scorer.
 
