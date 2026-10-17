@@ -732,6 +732,14 @@ bind_addr = "0.0.0.0"
 # interrupted. Type in the terminal to wake. Set to 0 to disable hibernation.
 # Environment override: JCODE_HIBERNATION_IDLE_SECS
 hibernation_idle_secs = 1800
+# What an idle terminal client releases when it hibernates:
+#   "caches"     - render caches only. Instant, lossless wake. (default)
+#   "transcript" - also drop the transcript and reload it from the server on
+#                  wake. Loses local-only notices and the exact scroll spot.
+#   "exit"       - exit the client, leaving a tiny waiter that resumes the
+#                  session on the next key press. Largest savings, ~1s wake.
+# Environment override: JCODE_HIBERNATION_MODE
+hibernation_mode = "caches"
 
 [power]
 # Prevent automatic system sleep while any jcode session is actively working.
@@ -857,6 +865,11 @@ mod tests {
         let encoded = toml::to_string(&disabled).unwrap();
         let restored: Config = toml::from_str(&encoded).unwrap();
         assert_eq!(restored.session.hibernation_idle_secs, 0);
+        let exit: Config = toml::from_str("[session]\nhibernation_mode = \"exit\"\n").unwrap();
+        assert_eq!(
+            exit.session.hibernation_mode,
+            jcode_config_types::HibernationMode::Exit
+        );
     }
 
     /// Colors are only discoverable if the template mentions them, since most

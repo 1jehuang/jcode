@@ -812,6 +812,11 @@ impl Config {
                 self.session.hibernation_idle_secs = seconds;
             }
         }
+        if let Ok(v) = std::env::var("JCODE_HIBERNATION_MODE") {
+            if let Some(mode) = jcode_config_types::HibernationMode::parse(&v) {
+                self.session.hibernation_mode = mode;
+            }
+        }
 
         // Power management
         if let Ok(v) = std::env::var("JCODE_PREVENT_SLEEP_WHILE_STREAMING") {

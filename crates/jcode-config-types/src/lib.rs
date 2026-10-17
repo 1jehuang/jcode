@@ -4,7 +4,7 @@ mod display;
 mod menubar;
 mod power;
 mod session;
-pub use session::SessionConfig;
+pub use session::{HibernationMode, SessionConfig};
 pub use {display::DisplayConfig, menubar::MenubarConfig, power::PowerConfig};
 pub mod keybindings;
 mod serde_lenient;

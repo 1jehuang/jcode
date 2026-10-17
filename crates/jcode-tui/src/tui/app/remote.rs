@@ -148,6 +148,16 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     app.maybe_capture_runtime_memory_heartbeat();
     app.maybe_release_idle_heap();
     needs_redraw |= app.poll_idle_hibernation();
+    if std::mem::take(&mut app.idle_hibernation.history_reload_needed) {
+        // Transcript-mode hibernation released the transcript; refetch it.
+        match remote.request_history().await {
+            Ok(_) => app.set_status_notice("Reloading transcript after hibernation…"),
+            Err(err) => {
+                crate::logging::warn(&format!("hibernation wake: history request failed: {err}"))
+            }
+        }
+        needs_redraw = true;
+    }
     // Surface the cold-cache transcript warning the moment the TTL expires
     // while idle, not only when the next request starts.
     needs_redraw |= app.maybe_push_idle_cold_cache_warning();
