@@ -86,3 +86,24 @@ than an honest "not registered" state.
 A vendor answer on whether a custom harness adapter can be registered, ideally
 via a generic ACP client so any ACP-compliant agent works without a bespoke
 adapter. A concrete drafted question is in `docs/XIRP_CUSTOM_HARNESS.md`.
+
+---
+
+**Supersedes #67 — but the original was already on master.** The original
+PR #67 was integrated to `KooshaPari/KCode:master` via the
+harness-compliant squash-merge path at `fed23782d` (signed by the test
+harness `jcode-test@local`), which bypassed GitHub's merge button.
+`gh pr view 67` therefore shows `state=CLOSED, mergedAt=null,
+mergeCommit=null`, which *looks* like the original was abandoned — it
+was not. The body update applied via `gh pr edit 67` and the "Closes
+#67" footer on this PR were both written under that misread and are
+replaced here.
+
+**This PR is the follow-up additions** on top of the now-merged PR #67
+content: §18–§20 in `STATE.md` (operator-action record), `§8.2.e` in
+`APPENDICES.md` (just-grade 17/17 PASS evidence), the
+`vendor-question-draft.md` pasteable draft, and
+`pr-67-reopen-decision.md` (which recommended the now-superseded
+"open a new PR" path; retained for record only). Conflict resolution
+on this PR was `git checkout --ours` for the 8 add/add files; master
+was the older snapshot of our session record.

@@ -1,0 +1,36 @@
+{
+  "portal-bridge": {
+    "command": "npx",
+    "args": [
+      "-y",
+      "mcp-remote@0.15.1",
+      "--transport", "http-only",
+      "https://phenotype.spotifyportal.com/api/mcp-actions/v1",
+      "--client-metadata-url", "PLACEHOLDER_CIMD_URL",
+      "--resource", "https://phenotype.spotifyportal.com/api/mcp-actions/v1"
+    ],
+    "description": "Spotify Portal MCP via mcp-remote bridge with CIMD (SEP-991). Requires: (1) CIMD URL deployed and (2) URL added to Portal allow-list. See docs/sessions/2026-10-15-portal-xirp-resume/XJ-03-DEPLOY.md.",
+    "timeout_secs": 120,
+    "env": {
+      "PORTAL_CIMD_URL": "https://auth.kooshapari.com/oauth/client-metadata.json"
+    },
+    "_deploy_notes": {
+      "ready_to_merge_into_mcp_json": false,
+      "blocked_on": [
+        "Cloudflare Worker deployed at auth.kooshapari.com serving application/json at /oauth/client-metadata.json",
+        "Portal App Settings -> Allowed client ID patterns includes https://auth.kooshapari.com/*"
+      ],
+      "unblocked_args": [
+        "-y", "mcp-remote@0.15.1",
+        "--transport", "http-only",
+        "https://phenotype.spotifyportal.com/api/mcp-actions/v1",
+        "--client-metadata-url", "https://auth.kooshapari.com/oauth/client-metadata.json",
+        "--resource", "https://phenotype.spotifyportal.com/api/mcp-actions/v1"
+      ],
+      "derived_callback_port": 47290,
+      "redirect_uri": "http://127.0.0.1:47290/oauth/callback",
+      "cimd_document": "docs/sessions/2026-10-15-portal-xirp-resume/jcode-cimd.worker.js",
+      "port_derivation_script": "scripts/derive_callback_port.py"
+    }
+  }
+}
