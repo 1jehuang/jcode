@@ -52,6 +52,42 @@ fn test_service_tier_auto_reports_do_not_flood_or_consume_confirmation() {
 }
 
 #[test]
+fn test_service_tier_reports_are_quiet_without_explicit_change() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut app = create_test_app();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.remote_service_tier = Some("ultrafast".into());
+    let before = app.display_messages().len();
+    for tier in ["default", "ultrafast", "default"] {
+        // A new turn can clear the previously reported tier.
+        app.remote_reported_service_tier = None;
+        app.handle_server_event(
+            crate::protocol::ServerEvent::ServiceTierReported {
+                requested: Some("ultrafast".into()),
+                tier: tier.into(),
+            },
+            &mut remote,
+        );
+        assert_eq!(app.display_messages().len(), before);
+        assert_eq!(app.remote_reported_service_tier.as_ref().unwrap().1, tier);
+    }
+    // An explicit request must be confirmed even if the report is unchanged.
+    app.remote_service_tier_confirmation_pending = true;
+    for _ in 0..2 {
+        app.handle_server_event(
+            crate::protocol::ServerEvent::ServiceTierReported {
+                requested: Some("ultrafast".into()),
+                tier: "default".into(),
+            },
+            &mut remote,
+        );
+    }
+    assert_eq!(app.display_messages().len(), before + 1);
+    assert!(!app.remote_service_tier_confirmation_pending);
+}
+
+#[test]
 fn test_service_tier_duplicate_acknowledgements_do_not_flood_transcript() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();

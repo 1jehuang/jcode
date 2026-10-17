@@ -400,6 +400,7 @@ fn test_service_tier_reported_deduplicates_and_does_not_confirm_old_request() {
     let _guard = rt.enter();
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
     app.remote_service_tier = Some("ultrafast".to_string());
+    app.remote_service_tier_confirmation_pending = true;
     let before = app.display_messages().len();
     app.handle_server_event(
         crate::protocol::ServerEvent::ServiceTierReported {
@@ -434,13 +435,10 @@ fn test_service_tier_reported_deduplicates_and_does_not_confirm_old_request() {
         },
         &mut remote,
     );
-    assert_eq!(app.display_messages().len(), before + 2);
-    assert!(
-        app.display_messages()
-            .last()
-            .unwrap()
-            .content
-            .contains("Provider confirmed service tier: ultrafast")
+    assert_eq!(app.display_messages().len(), before + 1);
+    assert_eq!(
+        app.remote_reported_service_tier,
+        Some((Some("ultrafast".into()), "ultrafast".into()))
     );
 }
 

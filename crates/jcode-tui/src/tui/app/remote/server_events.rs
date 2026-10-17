@@ -936,10 +936,10 @@ pub(in crate::tui::app) fn handle_server_event(
                 return false;
             }
             let report = (requested.clone(), tier.clone());
-            if app.remote_reported_service_tier.as_ref() == Some(&report) {
+            let pending = std::mem::take(&mut app.remote_service_tier_confirmation_pending);
+            if app.remote_reported_service_tier.as_ref() == Some(&report) && !pending {
                 return false;
             }
-            let had_report = app.remote_reported_service_tier.is_some();
             app.remote_reported_service_tier = Some(report);
             let requested_label = requested.as_deref().unwrap_or("default");
             let matches = requested_label == tier
@@ -947,12 +947,9 @@ pub(in crate::tui::app) fn handle_server_event(
                     && matches!(tier.as_str(), "priority" | "fast"))
                 || (matches!(requested_label, "off" | "auto" | "default")
                     && matches!(tier.as_str(), "default" | "standard"));
-            let pending = std::mem::take(&mut app.remote_service_tier_confirmation_pending);
-            if pending
-                || app_mod::service_tier_is_fast(requested.as_deref())
-                || !matches
-                || had_report
-            {
+            // Keep the badge current on every report, but only interrupt the
+            // transcript when confirming an explicit speed change.
+            if pending {
                 let message = if matches {
                     format!("Provider confirmed service tier: {tier}.")
                 } else {
