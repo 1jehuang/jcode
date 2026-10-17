@@ -7,9 +7,14 @@ fn reset_hint_expires_without_rearming_on_poll() {
     let app = create_test_app();
     assert!(app.reset_hint_visible("work:2"));
     *app.reset_hint_seen.borrow_mut() =
+        Some(("work:2".into(), Instant::now() - Duration::from_secs(14)));
+    assert!(app.reset_hint_visible("work:2"));
+    println!("RESET TIMER: visible at 14s");
+    *app.reset_hint_seen.borrow_mut() =
         Some(("work:2".into(), Instant::now() - Duration::from_secs(15)));
     assert!(!app.reset_hint_visible("work:2"));
     assert!(!app.reset_hint_visible("work:2"));
+    println!("RESET TIMER: hidden at 15s and stays hidden on subsequent poll");
     assert!(app.reset_hint_visible("work:3"));
     assert!(app.reset_hint_visible("personal:3"));
 }

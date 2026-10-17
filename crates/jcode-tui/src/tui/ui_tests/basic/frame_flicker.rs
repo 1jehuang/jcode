@@ -1094,6 +1094,68 @@ fn test_reset_expiry_notification_stays_on_one_row() {
 }
 
 #[test]
+fn test_reset_notice_relative_expiry_render_and_removal() {
+    let _lock = viewport_snapshot_test_lock();
+    let expiry = chrono::Utc::now() + chrono::Duration::hours(74) + chrono::Duration::seconds(30);
+    let usage = crate::usage::OpenAIUsageData {
+        openai_reset_credits: Some(crate::usage::OpenAiResetCredits {
+            available_count: 2,
+            available_expirations: vec![Some(expiry.to_rfc3339())],
+            account_label: None,
+            ordinary_usage_allowed: Some(false),
+        }),
+        fetched_at: Some(std::time::Instant::now()),
+        ..Default::default()
+    };
+    let hint = input_ui::openai_reset_status_hint(
+        crate::tui::info_widget::AuthMethod::OpenAIOAuth,
+        &usage,
+        None,
+    )
+    .unwrap();
+    assert_eq!(hint, "2 resets available · expires in 3d 2h · /reset");
+    let mut state = TestState {
+        openai_reset_hint: Some(Box::leak(hint.into_boxed_str())),
+        ..Default::default()
+    };
+    let mut terminal = Terminal::new(TestBackend::new(80, 3)).unwrap();
+    terminal
+        .draw(|frame| {
+            input_ui::draw_notification(frame, &state, Rect::new(0, 1, 80, 1));
+        })
+        .unwrap();
+    let rows: Vec<String> = (0..3)
+        .map(|y| {
+            (0..80)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect()
+        })
+        .collect();
+    assert_eq!(
+        rows[1].trim(),
+        "2 resets available · expires in 3d 2h · /reset"
+    );
+    assert!(rows[0].trim().is_empty() && rows[2].trim().is_empty());
+    println!("VISIBLE: {} [exactly one occupied row]", rows[1].trim());
+    state.openai_reset_hint = None;
+    assert_eq!(input_ui::notification_height(&state, 80), 0);
+    terminal
+        .draw(|frame| {
+            input_ui::draw_notification(frame, &state, Rect::new(0, 1, 80, 1));
+        })
+        .unwrap();
+    assert!(
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .all(|cell| cell.symbol() == " ")
+    );
+    println!("HIDDEN: notification height 0, no stale text left in rendered buffer");
+}
+
+#[test]
 fn test_reset_expiry_notification_full_frame_uses_one_row() {
     let _lock = viewport_snapshot_test_lock();
     let hint = "2 resets available · expires 2099-05-01 00:00 UTC, expires 2099-06-01 00:00 UTC · /reset usage limits openai";
