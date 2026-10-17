@@ -1,6 +1,62 @@
 use super::*;
+use crate::tui::app::suggested_replies::{SuggestedRepliesView, SuggestedReplyFocus};
+use ratatui::style::Modifier;
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
+#[cfg(not(test))]
+use std::sync::{Mutex, OnceLock};
 use unicode_width::UnicodeWidthStr;
+
+#[derive(Clone, Debug)]
+struct SuggestedReplyHitRegion {
+    rect: Rect,
+    target: SuggestedReplyFocus,
+}
+
+#[cfg(not(test))]
+static SUGGESTED_REPLY_HIT_REGIONS: OnceLock<Mutex<Vec<SuggestedReplyHitRegion>>> = OnceLock::new();
+
+#[cfg(test)]
+thread_local! {
+    static TEST_SUGGESTED_REPLY_HIT_REGIONS: std::cell::RefCell<Vec<SuggestedReplyHitRegion>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn set_suggested_reply_hit_regions(regions: Vec<SuggestedReplyHitRegion>) {
+    #[cfg(test)]
+    {
+        TEST_SUGGESTED_REPLY_HIT_REGIONS.with(|slot| *slot.borrow_mut() = regions);
+        return;
+    }
+    #[cfg(not(test))]
+    {
+        let mutex = SUGGESTED_REPLY_HIT_REGIONS.get_or_init(|| Mutex::new(Vec::new()));
+        let mut guard = mutex.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = regions;
+    }
+}
+
+pub(crate) fn clear_suggested_reply_hit_regions() {
+    set_suggested_reply_hit_regions(Vec::new());
+}
+
+pub(crate) fn suggested_reply_target_at(column: u16, row: u16) -> Option<SuggestedReplyFocus> {
+    #[cfg(test)]
+    let regions = TEST_SUGGESTED_REPLY_HIT_REGIONS.with(|slot| slot.borrow().clone());
+    #[cfg(not(test))]
+    let regions = SUGGESTED_REPLY_HIT_REGIONS
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+
+    regions.into_iter().find_map(|item| {
+        (column >= item.rect.x
+            && column < item.rect.x.saturating_add(item.rect.width)
+            && row >= item.rect.y
+            && row < item.rect.y.saturating_add(item.rect.height))
+        .then_some(item.target)
+    })
+}
 
 fn inline_view_display_width(text: &str) -> usize {
     UnicodeWidthStr::width(text)
@@ -22,7 +78,19 @@ pub(super) fn inline_ui_height(app: &dyn TuiState) -> u16 {
             let rows_needed = visible_rows + 1 + 2; // header + rounded border
             rows_needed.min(10)
         }
-        None => 0,
+        None => {
+            if let Some(view) = app.suggested_replies_view() {
+                let has_default = view.response.default_action.is_some();
+                let has_secondary = !view.response.secondary_suggestions.is_empty();
+                match (has_default, has_secondary) {
+                    (true, true) => 2,
+                    (true, false) | (false, true) => 1,
+                    (false, false) => 0,
+                }
+            } else {
+                0
+            }
+        }
     }
 }
 
@@ -31,11 +99,175 @@ pub(super) fn draw_inline_ui(frame: &mut Frame, app: &dyn TuiState, area: Rect) 
         Some(crate::tui::InlineUiStateRef::Interactive(picker))
             if picker.kind != crate::tui::PickerKind::Model =>
         {
+            clear_suggested_reply_hit_regions();
             super::inline_interactive_ui::draw_inline_interactive(frame, app, area)
         }
-        Some(crate::tui::InlineUiStateRef::View(view)) => draw_inline_view(frame, app, view, area),
-        _ => {}
+        Some(crate::tui::InlineUiStateRef::View(view)) => {
+            clear_suggested_reply_hit_regions();
+            draw_inline_view(frame, app, view, area)
+        }
+        None => {
+            if let Some(view) = app.suggested_replies_view() {
+                draw_suggested_replies_panel(frame, &view, area);
+            } else {
+                clear_suggested_reply_hit_regions();
+            }
+        }
+        _ => {
+            clear_suggested_reply_hit_regions();
+        }
     }
+}
+
+fn pill_caps() -> (&'static str, &'static str) {
+    if cfg!(test) {
+        return ("\u{25D6}", "\u{25D7}");
+    }
+    if let Ok(tp) = std::env::var("TERM_PROGRAM") {
+        let tp = tp.to_ascii_lowercase();
+        if tp == "ghostty" || tp == "apple_terminal" || tp == "vscode" {
+            return ("\u{2590}", "\u{258C}");
+        }
+    }
+    if std::env::var("GHOSTTY_RESOURCES_DIR").is_ok() || std::env::var("GHOSTTY_BIN_DIR").is_ok() {
+        return ("\u{2590}", "\u{258C}");
+    }
+    ("\u{25D6}", "\u{25D7}")
+}
+
+fn draw_suggested_replies_panel(frame: &mut Frame, view: &SuggestedRepliesView, area: Rect) {
+    if area.width < 12 || area.height == 0 {
+        clear_suggested_reply_hit_regions();
+        return;
+    }
+
+    let (left_cap, right_cap) = pill_caps();
+    let mut hit_regions = Vec::new();
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut current_row = area.y;
+
+    if let Some(default_action) = view.response.default_action.as_ref() {
+        let is_focused = matches!(view.focus, Some(SuggestedReplyFocus::DefaultAction));
+        let bg = if is_focused {
+            rgb(44, 66, 98)
+        } else {
+            rgb(30, 38, 54)
+        };
+        let fg = if is_focused {
+            rgb(245, 250, 255)
+        } else {
+            rgb(205, 218, 238)
+        };
+        let key_fg = rgb(255, 213, 128);
+        let conf_pct = view
+            .response
+            .top_confidence()
+            .map(|c| (c * 100.0).round() as u32)
+            .unwrap_or(75);
+        let explorer_tag = view
+            .explorer_remaining_ms
+            .map(|ms| format!(" · auto {}ms [Esc]", ms))
+            .unwrap_or_default();
+
+        let prefix = " ★ [Tab] ▸ ".to_string();
+        let suffix = format!(" ({}% · {}{}) ", conf_pct, view.response.branch, explorer_tag);
+        let budget = (area.width as usize)
+            .saturating_sub(UnicodeWidthStr::width(prefix.as_str()) + UnicodeWidthStr::width(suffix.as_str()) + 2)
+            .max(8);
+        let label = crate::util::truncate_str(default_action, budget).to_string();
+
+        let mut body_style = Style::default().fg(fg).bg(bg);
+        if is_focused {
+            body_style = body_style.add_modifier(Modifier::BOLD);
+        }
+        let spans = vec![
+            Span::styled(left_cap, Style::default().fg(bg)),
+            Span::styled(prefix.clone(), Style::default().fg(key_fg).bg(bg).bold()),
+            Span::styled(label.clone(), body_style),
+            Span::styled(suffix.clone(), Style::default().fg(dim_color()).bg(bg)),
+            Span::styled(right_cap, Style::default().fg(bg)),
+        ];
+        let total_w = (UnicodeWidthStr::width(prefix.as_str())
+            + UnicodeWidthStr::width(label.as_str())
+            + UnicodeWidthStr::width(suffix.as_str())
+            + 2)
+            .min(area.width as usize) as u16;
+        hit_regions.push(SuggestedReplyHitRegion {
+            rect: Rect {
+                x: area.x,
+                y: current_row,
+                width: total_w,
+                height: 1,
+            },
+            target: SuggestedReplyFocus::DefaultAction,
+        });
+        lines.push(Line::from(spans));
+        current_row = current_row.saturating_add(1);
+    }
+
+    if current_row < area.y.saturating_add(area.height)
+        && !view.response.secondary_suggestions.is_empty()
+    {
+        let mut row_spans: Vec<Span<'static>> = Vec::new();
+        let mut cursor_x = area.x;
+        let max_x = area.x.saturating_add(area.width);
+
+        for (idx, text) in view
+            .response
+            .secondary_suggestions
+            .iter()
+            .take(5)
+            .enumerate()
+        {
+            if idx > 0 {
+                if cursor_x.saturating_add(1) >= max_x {
+                    break;
+                }
+                row_spans.push(Span::raw(" "));
+                cursor_x = cursor_x.saturating_add(1);
+            }
+            let remaining = max_x.saturating_sub(cursor_x) as usize;
+            if remaining < 8 {
+                break;
+            }
+            let max_pill_chars = remaining.saturating_sub(6).clamp(4, 32);
+            let short = crate::util::truncate_str(text, max_pill_chars);
+            let pill_label = format!("{}. {}", idx + 1, short);
+            let pill_width = (UnicodeWidthStr::width(pill_label.as_str()) + 4) as u16;
+            if cursor_x.saturating_add(pill_width) > max_x {
+                break;
+            }
+            let is_focused = matches!(view.focus, Some(SuggestedReplyFocus::Secondary(i)) if i == idx);
+            let (fill, text_fg) = if is_focused {
+                (rgb(96, 152, 224), rgb(18, 22, 30))
+            } else {
+                (rgb(48, 52, 62), rgb(182, 188, 198))
+            };
+            let cap_style = Style::default().fg(fill);
+            let mut pill_style = Style::default().fg(text_fg).bg(fill);
+            if is_focused {
+                pill_style = pill_style.add_modifier(Modifier::BOLD);
+            }
+            row_spans.push(Span::styled(left_cap, cap_style));
+            row_spans.push(Span::styled(format!(" {pill_label} "), pill_style));
+            row_spans.push(Span::styled(right_cap, cap_style));
+
+            hit_regions.push(SuggestedReplyHitRegion {
+                rect: Rect {
+                    x: cursor_x,
+                    y: current_row,
+                    width: pill_width,
+                    height: 1,
+                },
+                target: SuggestedReplyFocus::Secondary(idx),
+            });
+            cursor_x = cursor_x.saturating_add(pill_width);
+        }
+        lines.push(Line::from(row_spans));
+    }
+
+    set_suggested_reply_hit_regions(hit_regions);
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 fn draw_inline_view(

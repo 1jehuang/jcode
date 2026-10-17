@@ -639,6 +639,40 @@ impl Config {
             };
         }
 
+        // Suggested Replies with Default Action Focus
+        if let Ok(v) = std::env::var("JCODE_SUGGESTED_REPLIES_ENABLED") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.suggested_replies.enabled = parsed;
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_USE_OPEN_GF") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.suggested_replies.use_open_gf = parsed;
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_MAX_SECONDARY_SUGGESTIONS") {
+            if let Ok(parsed) = v.trim().parse::<i64>() {
+                self.suggested_replies.max_secondary_suggestions = parsed.clamp(1, 5) as usize;
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_CONFIDENCE_THRESHOLD") {
+            if let Ok(parsed) = v.trim().parse::<f32>()
+                && parsed.is_finite()
+            {
+                self.suggested_replies.confidence_threshold = parsed.clamp(0.0, 1.0);
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_ENABLE_FULL_AUTO_EXPLORER") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.suggested_replies.enable_full_auto_explorer = parsed;
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_SIX_LENS_AUTO_REVIEW") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.suggested_replies.six_lens_auto_review = parsed;
+            }
+        }
+
         // Ambient
         if let Ok(v) = std::env::var("JCODE_AMBIENT_ENABLED") {
             if let Some(parsed) = parse_env_bool(&v) {

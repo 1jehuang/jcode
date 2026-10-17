@@ -1586,6 +1586,15 @@ impl App {
         }
 
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && let Some(target) =
+                crate::tui::ui::suggested_reply_target_from_screen(mouse.column, mouse.row)
+            && let Some(prompt) = self.take_suggested_reply_target(target)
+        {
+            self.submit_suggested_reply_prompt(prompt);
+            finish_mouse_event!(false, "suggested_reply_click");
+        }
+
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             && crate::tui::ui::viewport::pinned_todo_more_area().is_some_and(|area| {
                 super::super::layout_utils::point_in_rect(mouse.column, mouse.row, area)
             })

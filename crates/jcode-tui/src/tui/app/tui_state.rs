@@ -2050,6 +2050,16 @@ impl crate::tui::TuiState for App {
         App::suggestion_prompts(self)
     }
 
+    fn suggested_replies_view(
+        &self,
+    ) -> Option<crate::tui::app::suggested_replies::SuggestedRepliesView> {
+        self.build_suggested_replies_view()
+    }
+
+    fn explorer_countdown_active(&self) -> bool {
+        self.suggested_replies.explorer_deadline.is_some()
+    }
+
     fn cache_ttl_status(&self) -> Option<crate::tui::CacheTtlInfo> {
         let baseline = self.kv_cache.kv_cache_baseline.as_ref()?;
         if baseline.session_id != self.kv_cache_session_id()

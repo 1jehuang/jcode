@@ -12,6 +12,7 @@ use std::time::Duration;
 const PROVIDER_ENV: &str = "JCODE_MEMORY_JEV_PROVIDER";
 const BROWSER_PROVIDER_ENV: &str = "JCODE_BROWSER_JEV_PROVIDER";
 const VOICE_PROVIDER_ENV: &str = "JCODE_VOICE_JEV_PROVIDER";
+const SUGGESTIONS_PROVIDER_ENV: &str = "JCODE_SUGGESTIONS_JEV_PROVIDER";
 const MAX_REQUEST_BYTES: usize = 80 * 1024;
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 const MAX_ME_BYTES: usize = 16 * 1024;
@@ -42,6 +43,7 @@ enum JevPurpose {
     Memory,
     Browser,
     Voice,
+    Suggestions,
 }
 
 impl JevPurpose {
@@ -50,6 +52,7 @@ impl JevPurpose {
             Self::Memory => "memory",
             Self::Browser => "browser",
             Self::Voice => "voice",
+            Self::Suggestions => "suggestions",
         }
     }
 
@@ -57,8 +60,8 @@ impl JevPurpose {
         match self {
             Self::Memory => "memory_jev",
             Self::Browser => "browser_jev",
-            // Voice uses the gateway's existing typed noul contract.
-            Self::Voice => "memory_jev",
+            // Voice and Suggestions use the gateway's existing typed noul contract.
+            Self::Voice | Self::Suggestions => "memory_jev",
         }
     }
 
@@ -71,13 +74,13 @@ impl JevPurpose {
             Self::Memory => PROVIDER_ENV,
             Self::Browser => BROWSER_PROVIDER_ENV,
             Self::Voice => VOICE_PROVIDER_ENV,
+            Self::Suggestions => SUGGESTIONS_PROVIDER_ENV,
         };
         match env(key) {
             Ok(value) => Ok(value),
             Err(std::env::VarError::NotPresent) => Ok(match self {
                 Self::Memory => memory_default(),
-                Self::Browser => "auto".into(),
-                Self::Voice => "auto".into(),
+                Self::Browser | Self::Voice | Self::Suggestions => "auto".into(),
             }),
             Err(_) => bail!("{key} must contain a valid provider name"),
         }
@@ -88,6 +91,7 @@ impl JevPurpose {
 enum JevProvider {
     OpenRouter,
     TypeSafe,
+    OpenJev,
     Aimlapi,
     Jcode,
 }
@@ -97,6 +101,7 @@ impl JevProvider {
         match self {
             Self::OpenRouter => "openrouter",
             Self::TypeSafe => "typesafe",
+            Self::OpenJev => "openjev",
             Self::Aimlapi => "aimlapi",
             Self::Jcode => "jcode",
         }
@@ -106,6 +111,7 @@ impl JevProvider {
         match self {
             Self::OpenRouter => ("OPENROUTER_API_KEY", "openrouter.env"),
             Self::TypeSafe => ("TYPESAFE_API_KEY", "typesafe.env"),
+            Self::OpenJev => ("OPENJEV_API_KEY", "openjev.env"),
             Self::Aimlapi => ("AIMLAPI_API_KEY", "aimlapi.env"),
             Self::Jcode => (
                 crate::subscription_catalog::JCODE_API_KEY_ENV,
@@ -116,7 +122,7 @@ impl JevProvider {
 
     fn max_questions(self) -> usize {
         match self {
-            Self::TypeSafe => TYPESAFE_MAX_QUESTIONS,
+            Self::TypeSafe | Self::OpenJev => TYPESAFE_MAX_QUESTIONS,
             _ => MAX_QUESTIONS,
         }
     }
@@ -125,6 +131,7 @@ impl JevProvider {
         match self {
             Self::OpenRouter | Self::Jcode => "typesafe/jev-1.13",
             Self::TypeSafe => "jev-latest",
+            Self::OpenJev => "openjev",
             Self::Aimlapi => "typesafe/jev",
         }
     }
@@ -133,6 +140,7 @@ impl JevProvider {
         Ok(match self {
             Self::OpenRouter => "https://openrouter.ai/api/alpha/decisions".into(),
             Self::TypeSafe => "https://api.typesafe.ai/v1/systemone".into(),
+            Self::OpenJev => "https://api.openjev.sh/v1/systemone".into(),
             Self::Aimlapi => "https://api.aimlapi.com/v1/decisions".into(),
             Self::Jcode => format!("{}/decisions", trusted_gateway_base(gateway_base)?),
         })
@@ -160,6 +168,10 @@ impl JevClient {
         Self::resolve(JevPurpose::Memory).is_ok()
     }
 
+    pub fn suggestions_available() -> bool {
+        Self::resolve(JevPurpose::Suggestions).is_ok()
+    }
+
     pub fn new() -> Result<Self> {
         Self::for_purpose(JevPurpose::Memory)
     }
@@ -176,6 +188,20 @@ impl JevClient {
     /// explicitly select typesafe or jcode. Evaluation never changes accounts.
     pub fn for_voice() -> Result<Self> {
         Self::for_purpose(JevPurpose::Voice)
+    }
+
+    /// Suggestions routing prefers explicit OpenJev SystemOne (`OPENJEV_API_KEY`),
+    /// then Jcode / TypeSafe / OpenRouter / AIMLAPI when `auto` is selected.
+    /// Evaluation never changes accounts after an auth/billing failure.
+    pub fn for_suggestions() -> Result<Self> {
+        Self::for_purpose(JevPurpose::Suggestions)
+    }
+
+    /// True when the active route supports direct SystemOne `choice` questions
+    /// (`OpenJev`, `TypeSafe`, `OpenRouter`, `Aimlapi`). `Jcode` subscription
+    /// decisions only accept `noul` outside of Browser mode.
+    pub fn supports_choice_questions(&self) -> bool {
+        self.provider != JevProvider::Jcode || self.purpose == JevPurpose::Browser
     }
 
     fn for_purpose(purpose: JevPurpose) -> Result<Self> {
@@ -215,10 +241,10 @@ impl JevClient {
         let load = |env: &str, file: &str| {
             crate::provider_catalog::load_env_value_from_env_or_config(env, file)
         };
-        let (provider, api_key) = if purpose == JevPurpose::Voice {
-            resolve_voice_with(&selector, load)?
-        } else {
-            resolve_with(&selector, load)?
+        let (provider, api_key) = match purpose {
+            JevPurpose::Voice => resolve_voice_with(&selector, load)?,
+            JevPurpose::Suggestions => resolve_suggestions_with(&selector, load)?,
+            _ => resolve_with(&selector, load)?,
         };
         let base = if provider == JevProvider::Jcode {
             crate::subscription_api::configured_api_base()
@@ -379,6 +405,7 @@ impl JevClient {
                     JevPurpose::Memory => "Jcode Memory",
                     JevPurpose::Browser => "Jcode Browser",
                     JevPurpose::Voice => "Jcode Voice",
+                    JevPurpose::Suggestions => "Jcode Suggestions",
                 },
             );
         }
@@ -439,6 +466,24 @@ fn resolve_voice_with(
     }
 }
 
+fn resolve_suggestions_with(
+    selector: &str,
+    load: impl FnMut(&str, &str) -> Option<String>,
+) -> Result<(JevProvider, String)> {
+    let providers: &[JevProvider] = match selector.trim().to_ascii_lowercase().as_str() {
+        "auto" => &[
+            JevProvider::OpenJev,
+            JevProvider::Jcode,
+            JevProvider::TypeSafe,
+            JevProvider::OpenRouter,
+            JevProvider::Aimlapi,
+        ],
+        "openjev" => &[JevProvider::OpenJev],
+        _ => return resolve_with(selector, load),
+    };
+    resolve_providers(providers, load)
+}
+
 fn resolve_with(
     selector: &str,
     load: impl FnMut(&str, &str) -> Option<String>,
@@ -456,9 +501,10 @@ fn resolve_with(
         ],
         "openrouter" => &[JevProvider::OpenRouter],
         "typesafe" => &[JevProvider::TypeSafe],
+        "openjev" => &[JevProvider::OpenJev],
         "aimlapi" => &[JevProvider::Aimlapi],
         "jcode" | "subscription" | "jcode-subscription" => &[JevProvider::Jcode],
-        _ => bail!("Invalid Jev provider. Choose auto, openrouter, typesafe, aimlapi, or jcode"),
+        _ => bail!("Invalid Jev provider. Choose auto, openjev, openrouter, typesafe, aimlapi, or jcode"),
     };
     resolve_providers(providers, load)
 }
@@ -725,6 +771,36 @@ fn validate_answers(value: &Value, questions: &Map<String, Value>) -> Result<()>
                     .is_some_and(|v| v.is_finite() && (0.0..=1.0).contains(&v)),
                 "Jev returned an invalid noul probability"
             );
+        } else if question["type"] == "choice" {
+            let criteria = question["criteria"]
+                .as_object()
+                .ok_or_else(|| anyhow!("Jev choice question is missing criteria"))?;
+            let choice = answer["choice"]
+                .as_str()
+                .ok_or_else(|| anyhow!("Jev choice answer omitted selected choice"))?;
+            ensure!(
+                criteria.contains_key(choice),
+                "Jev choice answer selected an unknown option"
+            );
+            if let Some(conf) = answer.get("confidence").and_then(Value::as_f64) {
+                ensure!(
+                    conf.is_finite() && (0.0..=1.0).contains(&conf),
+                    "Jev returned an invalid choice confidence"
+                );
+            }
+            if let Some(probs) = answer.get("probabilities").and_then(Value::as_object) {
+                for (opt, prob) in probs {
+                    ensure!(
+                        criteria.contains_key(opt),
+                        "Jev returned probability for an unknown choice option"
+                    );
+                    ensure!(
+                        prob.as_f64()
+                            .is_some_and(|v| v.is_finite() && (0.0..=1.0).contains(&v)),
+                        "Jev returned an invalid choice probability"
+                    );
+                }
+            }
         }
     }
     Ok(())
@@ -948,6 +1024,14 @@ mod tests {
                 "typesafe.env",
                 "https://api.typesafe.ai/v1/systemone",
                 "jev-latest",
+            ),
+            (
+                "openjev",
+                JevProvider::OpenJev,
+                "OPENJEV_API_KEY",
+                "openjev.env",
+                "https://api.openjev.sh/v1/systemone",
+                "openjev",
             ),
             (
                 "aimlapi",

@@ -854,6 +854,16 @@ pub trait TuiState {
     /// Suggestion prompts for new users (shown in initial empty state).
     /// Returns (label, prompt_text) pairs. Empty if user is experienced or not authenticated.
     fn suggestion_prompts(&self) -> Vec<(String, String)>;
+    /// Two-stage cascading Suggested Replies with Default Action Focus view.
+    fn suggested_replies_view(
+        &self,
+    ) -> Option<crate::tui::app::suggested_replies::SuggestedRepliesView> {
+        None
+    }
+    /// Whether the 500ms Full-Auto Explorer countdown is currently active.
+    fn explorer_countdown_active(&self) -> bool {
+        false
+    }
     /// Cache TTL status - shows whether the prompt cache is warm/cold based on idle time
     fn cache_ttl_status(&self) -> Option<CacheTtlInfo>;
     /// Read-only reset guidance for the active OpenAI OAuth account.

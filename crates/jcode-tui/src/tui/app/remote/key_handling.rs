@@ -887,6 +887,13 @@ async fn handle_remote_key_internal(
             return Ok(());
         }
 
+        if app.input.is_empty()
+            && let Some(prompt) = app.take_focused_or_default_suggested_reply(true)
+        {
+            app.input = prompt;
+            app.cursor_pos = app.input.len();
+        }
+
         if !app.input.is_empty() {
             let prepared = input::take_prepared_input(app);
 
@@ -993,11 +1000,24 @@ async fn handle_remote_key_internal(
             app.cursor_pos = app.input.len();
         }
         KeyCode::Tab => {
-            app.autocomplete();
+            if !app.autocomplete()
+                && let Some(Some(prompt)) = app.handle_suggested_replies_tab()
+            {
+                app.input = prompt;
+                app.cursor_pos = app.input.len();
+                let prepared = input::take_prepared_input(app);
+                submit_prepared_remote_input(app, remote, prepared).await?;
+            }
         }
         KeyCode::Enter => {
             if app.activate_picker_from_preview() {
                 return Ok(());
+            }
+            if app.input.is_empty()
+                && let Some(prompt) = app.take_focused_or_default_suggested_reply(false)
+            {
+                app.input = prompt;
+                app.cursor_pos = app.input.len();
             }
             if !app.input.is_empty() {
                 let prepared = input::take_prepared_input(app);
@@ -1614,7 +1634,13 @@ async fn handle_remote_key_internal(
                     return Ok(());
                 }
 
-                if trimmed == "/review" {
+                if trimmed == "/review"
+                    || matches!(
+                        trimmed,
+                        "/review 6" | "/review 6lenses" | "/review lenses" | "/autoreview 6"
+                    )
+                {
+                    let is_six_lens = trimmed != "/review";
                     let (model_override, provider_key_override) =
                         app_mod::commands::preferred_one_shot_review_override()
                             .map(|(model, provider_key)| (Some(model), Some(provider_key)))
@@ -1623,19 +1649,35 @@ async fn handle_remote_key_internal(
                             });
                     let parent_session_id =
                         app_mod::commands::current_feedback_target_session_id(app);
+                    let (label, startup_msg) = if is_six_lens {
+                        app.record_six_lens_review_findings(
+                            "Verify 6-lens review findings across Correctness, Architecture, Security, TUI/UX, Perf/Async, and Tests".to_string(),
+                        );
+                        (
+                            "6-Lens Review",
+                            app_mod::commands::build_six_lens_review_startup_message(
+                                &parent_session_id,
+                            ),
+                        )
+                    } else {
+                        (
+                            "Review",
+                            app_mod::commands::build_review_startup_message(&parent_session_id),
+                        )
+                    };
                     app_mod::commands::queue_review_spawn_remote(
                         app,
-                        "Review",
+                        label,
                         parent_session_id.clone(),
-                        app_mod::commands::build_review_startup_message(&parent_session_id),
+                        startup_msg,
                         model_override,
                         provider_key_override,
                     );
                     if app.is_processing {
-                        app.set_status_notice("Review queued");
+                        app.set_status_notice(format!("{label} queued"));
                     } else {
                         app.pending_split_request = false;
-                        begin_remote_split_launch(app, "Review");
+                        begin_remote_split_launch(app, label);
                         if let Err(error) = remote.split().await {
                             finish_remote_split_launch(app);
                             app.pending_split_startup_message = None;

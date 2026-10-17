@@ -98,6 +98,7 @@ pub mod storage;
 pub mod subscription_api;
 pub mod subscription_catalog;
 pub mod subscription_notice;
+pub mod suggested_replies;
 pub mod telegram;
 pub mod telemetry {
     pub use jcode_telemetry_core::*;

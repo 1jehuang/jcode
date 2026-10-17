@@ -1005,6 +1005,7 @@ fn insert_input_text_with_undo(app: &mut App, text: &str, typed: bool) {
     // Keeping this at the shared insertion boundary also covers paste and
     // Shift+Enter, rather than relying on individual key dispatchers to remember
     // to reconcile the transcript viewport.
+    app.cancel_suggested_replies_interaction(false);
     app.follow_chat_bottom_for_typing();
 
     let at_end = app.cursor_pos == app.input.len();
@@ -1355,6 +1356,10 @@ fn shifted_printable_fallback(c: char, modifiers: KeyModifiers) -> char {
 }
 
 pub(super) fn clear_input_for_escape(app: &mut App) {
+    let had_explorer_timer = app.suggested_replies.explorer_deadline.is_some();
+    if app.cancel_suggested_replies_interaction(true) && had_explorer_timer {
+        app.set_status_notice("Full-auto Explorer cancelled");
+    }
     let had_input = !app.input.is_empty();
     if had_input {
         app.remember_input_undo_state();
@@ -1964,6 +1969,9 @@ pub(super) fn handle_alternate_enter(app: &mut App) {
     }
 
     if app.input.is_empty() {
+        if let Some(prompt) = app.take_focused_or_default_suggested_reply(true) {
+            app.submit_suggested_reply_prompt(prompt);
+        }
         return;
     }
 
@@ -2771,6 +2779,12 @@ pub(super) fn handle_enter(app: &mut App) -> bool {
     if app.activate_picker_from_preview() {
         return true;
     }
+    if app.input.is_empty()
+        && let Some(prompt) = app.take_focused_or_default_suggested_reply(false)
+    {
+        app.submit_suggested_reply_prompt(prompt);
+        return true;
+    }
     if !app.input.is_empty() {
         if route_prompt_to_new_session_local(app) {
             return true;
@@ -2836,7 +2850,11 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
             true
         }
         KeyCode::Tab => {
-            app.autocomplete();
+            if !app.autocomplete()
+                && let Some(Some(prompt)) = app.handle_suggested_replies_tab()
+            {
+                app.submit_suggested_reply_prompt(prompt);
+            }
             true
         }
         KeyCode::Up | KeyCode::PageUp => {

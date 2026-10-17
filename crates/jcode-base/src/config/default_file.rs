@@ -678,6 +678,20 @@ port = 7643
 # Bind address (0.0.0.0 for LAN/Tailscale reachability)
 bind_addr = "0.0.0.0"
 
+[suggested_replies]
+# Enable two-stage cascading Suggested Replies with Default Action Focus (default: true)
+enabled = true
+# Switch between Jev-native fixed macro/micro pool (false) and OpenGF Sidecar generation (true)
+use_open_gf = false
+# Maximum number of secondary suggestion badges displayed (1..=5, default: 5)
+max_secondary_suggestions = 5
+# Confidence threshold (0.0..=1.0, default: 0.55) to promote the top action to Default Action
+confidence_threshold = 0.55
+# Full-auto Explorer mode (default: false): auto-submits Default Action after 500ms delay
+enable_full_auto_explorer = false
+# Automatic 6-lens subagent self-review at turn completion (default: false)
+six_lens_auto_review = false
+
 [power]
 # Prevent automatic system sleep while any jcode session is actively working.
 # Linux also blocks lid-switch suspend. On Windows and macOS see block_lid_close.

@@ -1236,6 +1236,7 @@ pub(in crate::tui::app) fn handle_server_event(
                     app.clear_visible_turn_started();
                     if app.queued_messages.is_empty() {
                         app.maybe_notify_turn_complete(turn_duration_secs);
+                        app.maybe_trigger_suggested_replies_at_turn_end();
                     }
                 }
             } else if app.is_processing {

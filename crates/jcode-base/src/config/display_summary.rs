@@ -113,6 +113,14 @@ impl Config {
 - Enabled: {}
 - Bind address: {}:{}
 
+**Suggested Replies:**
+- Enabled: {}
+- OpenGF mode (`use_open_gf`): {}
+- Max secondary suggestions: {}
+- Confidence threshold: {:.2}
+- Full-auto Explorer: {}
+- 6-Lens Auto-Review: {}
+
 **Ambient:**
 - Enabled: {}
 - Provider: {}
@@ -313,6 +321,12 @@ impl Config {
             self.gateway.enabled,
             self.gateway.bind_addr,
             self.gateway.port,
+            self.suggested_replies.enabled,
+            self.suggested_replies.use_open_gf,
+            self.suggested_replies.clamped_max_secondary(),
+            self.suggested_replies.clamped_confidence_threshold(),
+            self.suggested_replies.enable_full_auto_explorer,
+            self.suggested_replies.six_lens_auto_review,
             self.ambient.enabled,
             self.ambient.provider.as_deref().unwrap_or("(auto)"),
             self.ambient
