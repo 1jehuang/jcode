@@ -3,6 +3,18 @@
 //! UUID-named `.jsonl` files with mtime after the last consolidation.
 
 use std::path::Path;
+
+#[cfg(test)]
+use std::cell::Cell;
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only override for `SessionGate::is_satisfied`. When any test
+    /// calls `force_satisfied_for_tests`, this flag is set on the calling
+    /// thread and `is_satisfied` returns `true` for the rest of the test.
+    /// It is automatically dropped when the test thread exits.
+    static SESSION_GATE_TEST_OVERRIDE: Cell<bool> = const { Cell::new(false) };
+}
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
@@ -89,7 +101,30 @@ impl SessionGate {
         state.sessions_since >= self.threshold
     }
     pub fn is_satisfied(&self) -> bool {
+        #[cfg(test)]
+        {
+            if SESSION_GATE_TEST_OVERRIDE.with(Cell::get) {
+                return true;
+            }
+        }
         false
+    }
+
+    /// Test-only escape hatch: force `is_satisfied` to return `true`.
+    ///
+    /// In production this method is compiled out and `is_satisfied` is
+    /// always `false` (the session gate logic itself is a stub pending the
+    /// Memory Graph Phase A design). The parking contract test in
+    /// `lib::tests` needs to drive the "all gates open" branch of
+    /// `DreamCoordinator::run`, which would otherwise be unreachable.
+    #[cfg(test)]
+    pub fn force_satisfied_for_tests(&mut self) {
+        // No state to mutate: `is_satisfied` reads the test-only flag
+        // below, which we set here.
+        // (We keep the field layout minimal by using a thread-local
+        // override rather than a struct field; see the test override
+        // at the bottom of this module.)
+        SESSION_GATE_TEST_OVERRIDE.with(|cell| cell.set(true));
     }
     pub fn record_session(&self, mut state: SessionGateState) -> SessionGateState {
         state.sessions_since = state.sessions_since.saturating_add(1);
