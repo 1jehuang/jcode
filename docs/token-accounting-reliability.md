@@ -7,7 +7,11 @@ session. An agent turn can make many responses. Compaction and sidecar requests
 also consume tokens and must be reported separately. Do not add `usage_report`
 rollups to `session_end` totals: they describe overlapping traffic.
 
-`daily_model_usage` is the response-level source for new clients. The legacy
+`daily_model_usage_v2` is the canonical response-level source for new clients.
+`daily_model_usage` preserves older clients' provider-native counter semantics.
+The v2 wire contract uses disjoint input/output/cache-read/cache-write buckets
+and an immutable `occurred_at`. Never apply a second cache subtraction to v2.
+The legacy
 `token-value` dashboards estimate historical usage from session-end snapshots.
 Those snapshots cannot reliably attribute a session that switched models, and
 missing session ends cannot be reconstructed from those snapshots alone. Do not
@@ -36,6 +40,10 @@ present either source as a complete provider invoice or as cash expenditure.
 
 1. Apply required database migrations before deploying the server. Test against
    an isolated database first. Do not prune raw history as part of this rollout.
+   Migration `0031_usage_report_receipts.sql` requires migrations `0027` and
+   earlier. Deploy the worker with its `FIREHOSE_USAGE` binding before releasing
+   the client. A new client must not treat an old server's generic HTTP success
+   as confirmation of durable, idempotent accounting.
 2. Verify schema readiness, migration order and configured usage backup binding.
 3. Exercise the actual ingestion handler with a fixed report identity:
    submit twice, then verify one counter increment and identical accounting day.
@@ -52,6 +60,22 @@ present either source as a complete provider invoice or as cash expenditure.
    updates. Check database growth and pending-client backlog, not just HTTP 200s.
 
 ## Limits and incident recovery
+
+Automatic replay accepts timestamped usage up to seven days old. Receipt keys
+are retained for eight days, with scheduled cleanup bounded to one million
+expired keys per run. Older reports must remain on the client for investigation,
+not be silently erased or retimestamped to bypass deduplication. The aggregate
+usage tables are not deleted when these receipt keys expire. Legacy reports
+without an occurrence timestamp cannot provide the same cross-expiry guarantee.
+
+The receipt schema stores a binary SHA-256 key and epoch timestamp without a
+duplicate rowid index. A synthetic SQLite measurement of 100,000 actual
+receipt/trigger inserts added 10,899,456 bytes, about 109 bytes per report.
+At an illustrative 500,000 reports/day, eight days require about 436 MB. This
+is a storage estimate, not a measured fleet ingestion rate. The earlier draft
+used about 241 bytes/report and would have needed about 11 GB at that rate over
+91 days, so it was not accepted. Monitor actual ingress and cron pruning:
+one million expirations/day or a stalled cron can still outgrow the budget.
 
 These protections apply to usage that the provider actually reports and the
 client observes. They cannot recover a billed request for which no usage was
