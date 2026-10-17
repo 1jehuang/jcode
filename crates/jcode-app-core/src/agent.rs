@@ -427,10 +427,14 @@ impl Agent {
         allowed_tools: Option<HashSet<String>>,
         disabled_tools: HashSet<String>,
     ) -> Self {
+        let t = Instant::now();
         let skills = SkillRegistry::shared_snapshot();
+        let skills_ms = t.elapsed().as_millis();
         let tool_config = &crate::config::config().tools;
         let working_dir = session.working_dir.as_deref().map(std::path::Path::new);
+        let t = Instant::now();
         let agents_md_snapshot = crate::prompt::load_agents_md_files_from_dir(working_dir);
+        let agents_md_ms = t.elapsed().as_millis();
         let initial_provider_model = provider.model();
         let tool_policy_registration = crate::tool::register_session_tool_policy(
             &session.id,
@@ -480,7 +484,12 @@ impl Agent {
             transcript_telemetry_sent: false,
             concurrency_session: None,
         };
+        let t = Instant::now();
         agent.refresh_prompt_skills_snapshot();
+        logging::info(&format!(
+            "[TIMING] agent build_base: skills={skills_ms}ms, agents_md={agents_md_ms}ms, prompt_skills={}ms",
+            t.elapsed().as_millis()
+        ));
         agent
     }
 
@@ -553,11 +562,18 @@ impl Agent {
         track_concurrency: bool,
     ) -> Self {
         let start = Instant::now();
+        let mut marks: Vec<(&'static str, u128)> = Vec::with_capacity(10);
+        let mut lap = Instant::now();
+        let mut mark = |name: &'static str, lap: &mut Instant| {
+            marks.push((name, lap.elapsed().as_millis()));
+            *lap = Instant::now();
+        };
         let tool_selection = crate::config::config().tools.selection();
         let mut session = Session::create(parent_id, None);
         if let Some(working_dir) = working_dir {
             session.working_dir = Some(working_dir.to_string());
         }
+        mark("session", &mut lap);
         let mut agent = Self::build_base(
             provider,
             registry,
@@ -565,17 +581,30 @@ impl Agent {
             tool_selection.allowed_tools,
             tool_selection.disabled_tools,
         );
+        mark("build_base", &mut lap);
         agent.session.mark_active();
+        mark("mark_active", &mut lap);
         agent.session.model = Some(agent.provider_model());
         agent.session.provider_key = agent.provider_key_for_new_session();
         agent.reconcile_explicit_provider_pin_route();
+        mark("provider", &mut lap);
         agent.session.ensure_initial_session_context_message();
+        mark("context_msg", &mut lap);
         agent.seed_compaction_from_session();
+        mark("compaction", &mut lap);
         agent.log_env_snapshot("create");
+        mark("env_snapshot", &mut lap);
         agent.fire_session_lifecycle_hook("session_start", "create");
         if track_concurrency {
             agent.activate_concurrency_tracking();
         }
+        mark("hooks_concurrency", &mut lap);
+        let breakdown = marks
+            .iter()
+            .map(|(name, ms)| format!("{name}={ms}ms"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        logging::info(&format!("[TIMING] agent_new breakdown: {breakdown}"));
         let setup_ms = start.elapsed().as_millis();
         let telemetry_start = Instant::now();
         crate::telemetry::begin_session_with_parent(
