@@ -1,0 +1,39 @@
+#[test]
+fn test_service_tier_duplicate_acknowledgements_do_not_flood_transcript() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let event = |id, tier: Option<&str>, error: Option<&str>| {
+        serde_json::from_value(serde_json::json!({
+            "type": "service_tier_changed", "id": id,
+            "service_tier": tier, "error": error
+        }))
+        .unwrap()
+    };
+    for processing in [false, true] {
+        let mut app = create_test_app();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        app.is_processing = processing;
+        let before = app.display_messages().len();
+        for id in 1..=10 {
+            app.handle_server_event(event(id, Some("priority"), None), &mut remote);
+        }
+        assert_eq!(app.display_messages().len(), before + 1);
+        assert_eq!(app.remote_service_tier.as_deref(), Some("priority"));
+        assert!(app.status_notice().is_some());
+        // Actual transitions still get notices, including returning to Fast.
+        app.handle_server_event(event(11, None, None), &mut remote);
+        app.handle_server_event(event(12, Some("priority"), None), &mut remote);
+        assert_eq!(app.display_messages().len(), before + 3);
+        // Failures remain visible and do not change the configured tier.
+        app.handle_server_event(event(13, None, Some("rejected")), &mut remote);
+        assert_eq!(app.display_messages().len(), before + 4);
+        assert_eq!(app.remote_service_tier.as_deref(), Some("priority"));
+        assert!(
+            app.display_messages()
+                .last()
+                .unwrap()
+                .content
+                .contains("rejected")
+        );
+    }
+}
