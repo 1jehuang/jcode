@@ -331,9 +331,21 @@ impl App {
                     deadline: Instant::now() + Duration::from_secs(3),
                     remote_resend,
                 });
+                // One line for the cause, one line for the switch. Nothing else.
+                // Callers that already printed the provider error skip the cause.
+                if !self
+                    .display_messages
+                    .last()
+                    .is_some_and(|message| message.role == "error")
+                {
+                    self.push_display_message(DisplayMessage::error(format!(
+                        "{}: {}",
+                        prompt.from_label, reason
+                    )));
+                }
                 self.push_display_message(DisplayMessage::system(format!(
-                    "{} unavailable: {}\nSwitching to {} and retrying in 3s. Esc to cancel.",
-                    prompt.from_label, reason, prompt.to_label,
+                    "↪ Switching to {} in 3s. Esc to cancel.",
+                    prompt.to_label,
                 )));
                 self.set_status_notice(format!(
                     "Provider auto-switch → {} in 3s (Esc to cancel)",
@@ -634,8 +646,8 @@ impl App {
         // a second time.
         let key_label = crate::tui::keybind::fallback_switch_key_label();
         self.push_display_message(DisplayMessage::system(format!(
-            "↪ {} failed. Fallback available: press {} to switch to {} and resend.",
-            from_label, key_label, target_label,
+            "↪ Press {} to switch to {} and resend.",
+            key_label, target_label,
         )));
         self.set_status_notice(format!("Press {} to switch to {}", key_label, route.model));
         self.pending_fallback_offer = Some(super::PendingFallbackOffer {

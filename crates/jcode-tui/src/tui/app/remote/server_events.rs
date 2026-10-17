@@ -1385,6 +1385,27 @@ pub(in crate::tui::app) fn handle_server_event(
             }
             remote.clear_pending();
             remote.reset_call_output_tokens_seen();
+            // Account quota exhaustion (e.g. OpenAI `usage_limit_reached`):
+            // the error line above is the whole explanation. Offer the next
+            // pool account as one line and skip retry/poke chatter, since
+            // resending to the spent account can never succeed.
+            if !is_failover_prompt
+                && jcode_provider_core::classify_failover_error_message(&message)
+                    .should_mark_provider_unavailable()
+                && !crate::tui::app::commands::is_auto_poke_connectivity_error(&message)
+                && app.offer_fallback_after_error_with_payload(
+                    &message,
+                    failed_fallback_payload.clone(),
+                )
+            {
+                app.clear_pending_remote_retry();
+                crate::tui::app::commands::disable_auto_poke(app);
+                app.overnight_auto_poke = None;
+                if app.pending_provider_failover.is_none() {
+                    app.restore_failed_input_to_box();
+                }
+                return false;
+            }
             if crate::provider::parse_failover_prompt_message(&message).is_some() {
                 // The server already exhausted the same-provider account pool.
                 // Decode the control payload instead of printing its JSON, and
