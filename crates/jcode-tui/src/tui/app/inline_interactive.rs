@@ -1325,6 +1325,20 @@ impl App {
                     preserve_input,
                     true,
                 );
+                // `remote_model_options` was just replaced by the deduped,
+                // extended route list, which changes the routes markers in the
+                // signature. Re-sign the cache so the next `/model` open hits
+                // it instead of rebuilding ~10k entries every time.
+                let fresh_signature = self.model_picker_cache_signature(
+                    &current_model,
+                    config_default_model,
+                    config_default_provider,
+                    current_effort,
+                    &available_efforts,
+                );
+                if let Some(cache) = self.model_picker_cache.as_mut() {
+                    cache.signature = fresh_signature;
+                }
                 return;
             }
             // Names-only remote catalog: synthesize properly classified
