@@ -50,17 +50,32 @@ pub fn strip_date_suffix(model: &str) -> &str {
 }
 
 /// Rewrite a dotted Claude version (`claude-opus-5.5`) to the dashed form
-/// Anthropic's own catalog uses (`claude-opus-5-5`). Ids that are not
-/// `claude-*` are returned unchanged, so dotted ids from other providers
-/// (`gpt-5.5`, `qwen3.6`) are never rewritten. The `[1m]` suffix and case are
-/// preserved.
+/// Anthropic's own catalog uses (`claude-opus-5-5`).
+///
+/// Only a `.` between two ASCII digits is rewritten, so other punctuation in
+/// custom ids is left alone. Ids that are not `claude-*` are returned trimmed
+/// but otherwise unchanged, so dotted ids from other providers (`gpt-5.5`,
+/// `qwen3.6`) are never rewritten. The `[1m]` suffix and case are preserved.
 pub fn claude_dashed_version(model: &str) -> String {
     let trimmed = model.trim();
-    if trimmed.len() >= 7 && trimmed[..7].eq_ignore_ascii_case("claude-") {
-        trimmed.replace('.', "-")
-    } else {
-        trimmed.to_string()
+    // `get` returns None on a non-char boundary instead of panicking.
+    let is_claude = trimmed
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("claude-"));
+    if !is_claude {
+        return trimmed.to_string();
     }
+    let bytes = trimmed.as_bytes();
+    trimmed
+        .char_indices()
+        .map(|(i, c)| {
+            let between_digits = c == '.'
+                && i > 0
+                && bytes[i - 1].is_ascii_digit()
+                && bytes.get(i + 1).is_some_and(u8::is_ascii_digit);
+            if between_digits { '-' } else { c }
+        })
+        .collect()
 }
 
 /// Final path segment of a slash-qualified id
@@ -129,6 +144,17 @@ mod tests {
         assert_eq!(claude_dashed_version("claude-opus-5-5"), "claude-opus-5-5");
         assert_eq!(claude_dashed_version("gpt-5.5"), "gpt-5.5");
         assert_eq!(claude_dashed_version("qwen3.6-27b"), "qwen3.6-27b");
+        // Only dots between digits are version separators.
+        assert_eq!(claude_dashed_version("claude-x.y-5.5"), "claude-x.y-5-5");
+        assert_eq!(claude_dashed_version("claude-opus-5."), "claude-opus-5.");
+    }
+
+    #[test]
+    fn claude_dashed_version_handles_non_ascii_without_panicking() {
+        // Byte 7 falls inside a multi-byte character in each of these.
+        assert_eq!(claude_dashed_version("éééé"), "éééé");
+        assert_eq!(claude_dashed_version("abcdefé"), "abcdefé");
+        assert_eq!(claude_dashed_version("claude-é-5.5"), "claude-é-5-5");
     }
 
     #[test]

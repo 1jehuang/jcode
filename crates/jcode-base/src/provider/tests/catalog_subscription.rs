@@ -700,6 +700,26 @@ fn test_anthropic_oauth_gate_accepts_dotted_claude_ids() {
 }
 
 #[test]
+fn test_anthropic_oauth_gate_checks_eligibility_on_the_normalized_id() {
+    with_clean_provider_test_env(|| {
+        configure_catalog_pro_account();
+        populate_anthropic_models_for_scope(
+            &anthropic_catalog_scope_for_route(true),
+            vec!["claude-sonnet-4-6[1m]".into()],
+        );
+        let canonical = anthropic_oauth_route_availability("claude-sonnet-4-6[1m]");
+        // Whitespace and dotted spellings must get the same answer, including
+        // the extra-usage gate, as the canonical id.
+        for model in ["claude-sonnet-4.6[1m] ", " claude-sonnet-4-6[1m]"] {
+            assert_eq!(anthropic_oauth_route_availability(model), canonical, "{model:?}");
+        }
+        if !crate::usage::has_extra_usage() {
+            assert_eq!(canonical, (false, "requires extra usage".into()));
+        }
+    });
+}
+
+#[test]
 fn test_anthropic_pro_api_catalog_cannot_override_oauth_absence() {
     with_clean_provider_test_env(|| {
         configure_catalog_pro_account();
