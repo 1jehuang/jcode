@@ -536,7 +536,7 @@ async fn persistent_ws_does_not_reuse_response_cancelled_before_completion() {
         .expect("connect websocket client");
     let persistent_ws = Arc::new(Mutex::new(Some(PersistentWsState {
         ws_stream: client_ws,
-        identity: openai_websocket_prewarm::prewarm_identity(&prewarm_test_credentials()),
+        identity: openai_websocket_prewarm::prewarm_identity(&prewarm_test_credentials(), None, None),
         cache_key: None,
         last_response_id: "resp_previous".to_string(),
         connected_at: Instant::now(),

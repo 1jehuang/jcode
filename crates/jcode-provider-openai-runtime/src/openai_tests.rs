@@ -77,7 +77,7 @@ pub(super) async fn test_persistent_ws_state() -> (PersistentWsState, tokio::tas
     (
         PersistentWsState {
             ws_stream: client_ws,
-            identity: openai_websocket_prewarm::prewarm_identity(&prewarm_test_credentials()),
+            identity: openai_websocket_prewarm::prewarm_identity(&prewarm_test_credentials(), None, None),
             cache_key: None,
             last_response_id: "resp_test".to_string(),
             connected_at: Instant::now(),
@@ -135,7 +135,7 @@ async fn test_persistent_ws_state_with_ping_notify() -> (
     (
         PersistentWsState {
             ws_stream: client_ws,
-            identity: openai_websocket_prewarm::prewarm_identity(&prewarm_test_credentials()),
+            identity: openai_websocket_prewarm::prewarm_identity(&prewarm_test_credentials(), None, None),
             cache_key: None,
             last_response_id: "resp_test".to_string(),
             connected_at: Instant::now(),

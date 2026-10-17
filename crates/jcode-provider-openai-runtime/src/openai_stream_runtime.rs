@@ -178,10 +178,17 @@ fn response_http_request(
     is_chatgpt_mode: bool,
     account_id: Option<&str>,
     cache_key: Option<&str>,
+    model: Option<&str>,
+    service_tier: Option<&str>,
 ) -> reqwest::RequestBuilder {
     let mut builder = client
         .post(url)
         .header("Authorization", format!("Bearer {access_token}"));
+    if let Some((name, value)) =
+        openai_websocket_prewarm::routing_header(is_chatgpt_mode, model, service_tier)
+    {
+        builder = builder.header(name, value);
+    }
     if is_chatgpt_mode {
         builder = builder.header("originator", ORIGINATOR);
         if let Some(key) = cache_key {
@@ -191,7 +198,33 @@ fn response_http_request(
             builder = builder.header("chatgpt-account-id", account_id);
         }
     }
+    if let Some(built) = builder.try_clone().and_then(|builder| builder.build().ok()) {
+        log_openai_stream_lifecycle(
+            jcode_base::logging::LogLevel::Info,
+            "https_request_routing_headers",
+            routing_header_log_fields(built.headers()),
+        );
+    }
     builder
+}
+
+fn routing_header_log_fields(headers: &reqwest::header::HeaderMap) -> Vec<(&'static str, String)> {
+    [
+        ("service_tier_header", "OpenAI-Service-Tier"),
+        ("codex_routing_hint", "x-codex-routing-hint"),
+    ]
+    .into_iter()
+    .map(|(field, header)| {
+        (
+            field,
+            headers
+                .get(header)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("none")
+                .to_owned(),
+        )
+    })
+    .collect()
 }
 
 /// Stream the response from OpenAI API
@@ -254,6 +287,8 @@ pub(super) async fn stream_response(
         is_chatgpt_mode,
         account_id.as_deref(),
         request.get("prompt_cache_key").and_then(Value::as_str),
+        request.get("model").and_then(Value::as_str),
+        request.get("service_tier").and_then(Value::as_str),
     );
 
     emit_connection_phase(&tx, ConnectionPhase::SendingRequest).await;
@@ -649,7 +684,13 @@ async fn continue_persistent_ws_locked(
         }
     };
 
-    if state.identity != openai_websocket_prewarm::prewarm_identity(&*credentials.read().await) {
+    if state.identity
+        != openai_websocket_prewarm::prewarm_identity(
+            &*credentials.read().await,
+            request.get("model").and_then(Value::as_str),
+            request.get("service_tier").and_then(Value::as_str),
+        )
+    {
         *guard = None;
         log_openai_stream_lifecycle(
             jcode_base::logging::LogLevel::Info,
@@ -1046,7 +1087,13 @@ async fn continue_persistent_ws_locked(
     // change in another fork. Revalidate at the send boundary and keep the
     // read guard until the frame is flushed, not throughout generation.
     let send_credentials = credentials.read().await;
-    if state.identity != openai_websocket_prewarm::prewarm_identity(&send_credentials) {
+    if state.identity
+        != openai_websocket_prewarm::prewarm_identity(
+            &send_credentials,
+            request.get("model").and_then(Value::as_str),
+            request.get("service_tier").and_then(Value::as_str),
+        )
+    {
         *guard = None;
         return PersistentWsResult::NotAvailable;
     }
@@ -1447,9 +1494,20 @@ async fn stream_response_websocket_authenticated(
         &creds,
         &access_token,
         request.get("prompt_cache_key").and_then(Value::as_str),
+        request.get("model").and_then(Value::as_str),
+        request.get("service_tier").and_then(Value::as_str),
     )
     .map_err(OpenAIStreamFailure::Other)?;
-    let mut identity = openai_websocket_prewarm::prewarm_identity(&creds);
+    let mut identity = openai_websocket_prewarm::prewarm_identity(
+        &creds,
+        request.get("model").and_then(Value::as_str),
+        request.get("service_tier").and_then(Value::as_str),
+    );
+    log_openai_stream_lifecycle(
+        jcode_base::logging::LogLevel::Info,
+        "fresh_ws_request_routing_headers",
+        routing_header_log_fields(ws_request.headers()),
+    );
     identity.0 = access_token;
     drop(creds);
 

@@ -15,6 +15,8 @@ pub(super) fn websocket_request(
     credentials: &CodexCredentials,
     access_token: &str,
     cache_key: Option<&str>,
+    model: Option<&str>,
+    service_tier: Option<&str>,
 ) -> Result<Request<()>> {
     let mut request = OpenAIProvider::responses_ws_url(credentials).into_client_request()?;
     let headers = request.headers_mut();
@@ -24,6 +26,13 @@ pub(super) fn websocket_request(
     );
     headers.insert("Content-Type", HeaderValue::from_static("application/json"));
     headers.insert("OpenAI-Beta", HeaderValue::from_static(WEBSOCKET_V2_BETA));
+    if let Some((name, value)) = routing_header(
+        OpenAIProvider::is_chatgpt_mode(credentials),
+        model,
+        service_tier,
+    ) {
+        headers.insert(name, HeaderValue::from_str(&value)?);
+    }
     if OpenAIProvider::is_chatgpt_mode(credentials) {
         headers.insert("originator", HeaderValue::from_static(ORIGINATOR));
         if let Some(cache_key) = cache_key {
@@ -64,11 +73,48 @@ struct PrewarmJob {
     task: tokio::task::JoinHandle<()>,
 }
 
-pub(super) fn prewarm_identity(credentials: &CodexCredentials) -> (String, Option<String>, String) {
+/// Only public API Ultrafast has a service-tier header. Other tiers omit it.
+pub(super) fn service_tier_header(service_tier: Option<&str>) -> Option<&'static str> {
+    (service_tier == Some("ultrafast")).then_some("ultrafast")
+}
+
+/// Codex OAuth routes by model and tier, while the public API only accepts
+/// the Ultrafast opt-in header. Values come from the serialized request.
+/// OAuth contract: openai/codex ce0323f2f2d3b25e82806cd555237da3db4e1897,
+/// codex-rs/core/src/client.rs, build_routing_hint_header.
+pub(super) fn routing_header(
+    chatgpt: bool,
+    model: Option<&str>,
+    service_tier: Option<&str>,
+) -> Option<(&'static str, String)> {
+    if chatgpt {
+        let model = model?;
+        let value = match service_tier {
+            Some(tier) => format!("model={model};tier={tier}"),
+            None => format!("model={model}"),
+        };
+        HeaderValue::from_str(&value).ok()?;
+        Some(("x-codex-routing-hint", value))
+    } else {
+        service_tier_header(service_tier).map(|tier| ("OpenAI-Service-Tier", tier.to_owned()))
+    }
+}
+
+pub(super) fn prewarm_identity(
+    credentials: &CodexCredentials,
+    model: Option<&str>,
+    service_tier: Option<&str>,
+) -> (String, Option<String>, String, Option<String>) {
     (
         credentials.access_token.clone(),
         credentials.account_id.clone(),
         OpenAIProvider::responses_ws_url(credentials),
+        routing_header(
+            OpenAIProvider::is_chatgpt_mode(credentials),
+            model,
+            service_tier,
+        )
+        .map(|(_, value)| value),
     )
 }
 
@@ -132,8 +178,14 @@ impl PrewarmSlot {
                     &creds,
                     &creds.access_token,
                     payload.get("prompt_cache_key").and_then(Value::as_str),
+                    payload.get("model").and_then(Value::as_str),
+                    payload.get("service_tier").and_then(Value::as_str),
                 )?;
-                let identity = prewarm_identity(&creds);
+                let identity = prewarm_identity(
+                    &creds,
+                    payload.get("model").and_then(Value::as_str),
+                    payload.get("service_tier").and_then(Value::as_str),
+                );
                 drop(creds);
                 let (socket, _) = connect_async(handshake).await?;
                 warm_socket(socket, &payload, identity).await
@@ -194,7 +246,14 @@ impl PrewarmSlot {
         let state = compatible
             .then(|| job.ready.try_recv().ok())
             .flatten()
-            .filter(|state| state.identity == prewarm_identity(credentials));
+            .filter(|state| {
+                state.identity
+                    == prewarm_identity(
+                        credentials,
+                        request.get("model").and_then(Value::as_str),
+                        request.get("service_tier").and_then(Value::as_str),
+                    )
+            });
         log_openai_stream_lifecycle(
             jcode_base::logging::LogLevel::Info,
             if state.is_some() {
@@ -215,7 +274,7 @@ impl PrewarmSlot {
 async fn warm_socket(
     mut socket: WebSocketStream<MaybeTlsStream<TcpStream>>,
     request: &Value,
-    identity: (String, Option<String>, String),
+    identity: (String, Option<String>, String, Option<String>),
 ) -> Result<PersistentWsState> {
     let connected_at = Instant::now();
     socket
@@ -282,6 +341,77 @@ async fn warm_socket(
 mod tests {
     use super::*;
 
+    #[test]
+    fn oauth_routing_header_identity_tracks_model_and_every_tier() {
+        for id_token_only in [false, true] {
+            let mut creds = credentials();
+            if id_token_only {
+                creds.id_token = Some("id-token".into());
+            } else {
+                creds.refresh_token = "refresh-token".into();
+            }
+            let original = prewarm_identity(&creds, Some("gpt-6.1-sol"), None);
+            for tier in ["priority", "ultrafast"] {
+                assert_ne!(
+                    original,
+                    prewarm_identity(&creds, Some("gpt-6.1-sol"), Some(tier))
+                );
+            }
+            assert_ne!(
+                prewarm_identity(&creds, Some("gpt-6.1-sol"), Some("priority")),
+                prewarm_identity(&creds, Some("gpt-6.1-sol"), Some("ultrafast"))
+            );
+            assert_ne!(
+                original,
+                prewarm_identity(&creds, Some("other-model"), None)
+            );
+        }
+    }
+
+    #[test]
+    fn oauth_routing_header_omits_invalid_values_like_upstream() {
+        for (model, tier) in [
+            (Some("model\r\ninjected: true"), None),
+            (Some("model"), Some("ultrafast\r\ninjected: true")),
+            (None, Some("ultrafast")),
+        ] {
+            assert!(routing_header(true, model, tier).is_none());
+        }
+    }
+
+    #[test]
+    fn handshake_identity_tracks_header_mode_not_nonultrafast_tier() {
+        let creds = credentials();
+        let standard = prewarm_identity(&creds, None, None);
+        for tier in ["default", "auto", "priority", "fast", "flex"] {
+            assert_eq!(standard, prewarm_identity(&creds, None, Some(tier)));
+        }
+        assert_ne!(standard, prewarm_identity(&creds, None, Some("ultrafast")));
+    }
+
+    #[tokio::test]
+    async fn ready_prewarm_requires_matching_handshake_header_mode() {
+        for tier in [None, Some("ultrafast")] {
+            let (mut state, server) = crate::tests::test_persistent_ws_state().await;
+            state.identity = prewarm_identity(&credentials(), Some("gpt-6-astra"), tier);
+            let request = serde_json::json!({"model":"gpt-6-astra", "service_tier":"ultrafast"});
+            let slot = PrewarmSlot::default();
+            let (sender, ready) = oneshot::channel();
+            assert!(sender.send(state).is_ok());
+            *slot.0.lock().unwrap() = Some(PrewarmJob {
+                request: prewarm_request(&request),
+                started_at: Instant::now(),
+                ready,
+                task: tokio::spawn(std::future::pending()),
+            });
+            assert_eq!(
+                slot.take_ready(&request, &credentials()).is_some(),
+                tier == Some("ultrafast")
+            );
+            server.abort();
+        }
+    }
+
     fn credentials() -> CodexCredentials {
         CodexCredentials {
             access_token: "test-access".into(),
@@ -295,7 +425,8 @@ mod tests {
     #[test]
     fn v2_handshake_preserves_api_key_and_oauth_authentication() {
         let mut creds = credentials();
-        let api = websocket_request(&creds, "test-access", Some("test-session")).unwrap();
+        let api =
+            websocket_request(&creds, "test-access", Some("test-session"), None, None).unwrap();
         assert_eq!(api.headers()["OpenAI-Beta"], WEBSOCKET_V2_BETA);
         assert_eq!(api.headers()["Authorization"], "Bearer test-access");
         assert!(!api.headers().contains_key("originator"));
@@ -303,7 +434,8 @@ mod tests {
         assert!(!api.headers().contains_key("session-id"));
         creds.refresh_token = "test-refresh".into();
         creds.account_id = Some("test-account".into());
-        let oauth = websocket_request(&creds, "test-access", Some("test-session")).unwrap();
+        let oauth =
+            websocket_request(&creds, "test-access", Some("test-session"), None, None).unwrap();
         assert_eq!(oauth.headers()["OpenAI-Beta"], WEBSOCKET_V2_BETA);
         assert_eq!(oauth.headers()["Authorization"], "Bearer test-access");
         assert_eq!(oauth.headers()["originator"], ORIGINATOR);
@@ -359,7 +491,7 @@ mod tests {
     #[tokio::test]
     async fn expired_ready_warmup_is_closed_instead_of_adopted() {
         let (mut state, server) = crate::tests::test_persistent_ws_state().await;
-        state.identity = prewarm_identity(&credentials());
+        state.identity = prewarm_identity(&credentials(), None, None);
         let request = serde_json::json!({"model":"gpt-5.6-sol", "input":[]});
         let slot = PrewarmSlot::default();
         let (sender, ready) = oneshot::channel();

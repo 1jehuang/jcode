@@ -1,5 +1,64 @@
 // Stable cache routing must survive transport fallback and provider forks.
 
+#[tokio::test]
+async fn service_tier_header_changes_invalidate_persistent_socket() {
+    for (before, after) in [
+        (None, Some("ultrafast")),
+        (Some("ultrafast"), None),
+        (Some("ultrafast"), Some("priority")),
+    ] {
+        let (mut state, server) = test_persistent_ws_state().await;
+        let creds = prewarm_test_credentials();
+        state.identity =
+            openai_websocket_prewarm::prewarm_identity(&creds, Some("gpt-6-astra"), before);
+        let persistent = Arc::new(Mutex::new(Some(state)));
+        let (tx, _rx) = mpsc::channel(10);
+        let request = serde_json::json!({"model":"gpt-6-astra", "service_tier":after});
+        let result = try_persistent_ws_continuation(
+            &persistent,
+            &Arc::new(RwLock::new(creds)),
+            &request,
+            &[],
+            0,
+            &tx,
+        )
+        .await;
+        assert!(matches!(result, PersistentWsResult::NotAvailable));
+        assert!(persistent.lock().await.is_none());
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn oauth_routing_header_changes_invalidate_persistent_socket() {
+    for (model, before, after) in [
+        ("gpt-6.1-sol", None, Some("priority")),
+        ("gpt-6.1-sol", Some("priority"), Some("ultrafast")),
+        ("other-model", None, None),
+    ] {
+        let (mut state, server) = test_persistent_ws_state().await;
+        let mut creds = prewarm_test_credentials();
+        creds.refresh_token = "refresh".into();
+        state.identity =
+            openai_websocket_prewarm::prewarm_identity(&creds, Some("gpt-6.1-sol"), before);
+        let persistent = Arc::new(Mutex::new(Some(state)));
+        let (tx, _rx) = mpsc::channel(10);
+        let request = serde_json::json!({"model":model, "service_tier":after});
+        let result = try_persistent_ws_continuation(
+            &persistent,
+            &Arc::new(RwLock::new(creds)),
+            &request,
+            &[],
+            0,
+            &tx,
+        )
+        .await;
+        assert!(matches!(result, PersistentWsResult::NotAvailable));
+        assert!(persistent.lock().await.is_none());
+        server.abort();
+    }
+}
+
 #[test]
 fn cache_affinity_is_session_scoped_and_preserved_by_forks() {
     let _lock = jcode_base::storage::lock_test_env();
@@ -36,6 +95,8 @@ fn cache_affinity_explicit_override_controls_oauth_header_and_body() {
         &credentials,
         &credentials.access_token,
         request["prompt_cache_key"].as_str(),
+        request.get("model").and_then(Value::as_str),
+        request.get("service_tier").and_then(Value::as_str),
     )
     .unwrap();
     assert_eq!(handshake.headers()["session-id"], "explicit-key");

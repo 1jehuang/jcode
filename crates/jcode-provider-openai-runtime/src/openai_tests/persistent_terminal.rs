@@ -72,7 +72,7 @@ async fn persistent_terminal_public_case(
     provider.set_transport("websocket").unwrap();
     *provider.persistent_ws.lock().await = Some(PersistentWsState {
         ws_stream,
-        identity: openai_websocket_prewarm::prewarm_identity(&prewarm_test_credentials()),
+        identity: openai_websocket_prewarm::prewarm_identity(&prewarm_test_credentials(), None, None),
         cache_key: Some(provider.cache_routing_key()),
         last_response_id: "resp_stale".into(),
         connected_at: Instant::now(),
@@ -185,7 +185,7 @@ async fn persistent_terminal_failure_invalidates_before_mutex_handoff() {
     let credentials = Arc::new(RwLock::new(prewarm_test_credentials()));
     let persistent_ws = Arc::new(Mutex::new(Some(PersistentWsState {
         ws_stream,
-        identity: openai_websocket_prewarm::prewarm_identity(&prewarm_test_credentials()),
+        identity: openai_websocket_prewarm::prewarm_identity(&prewarm_test_credentials(), None, None),
         cache_key: None,
         last_response_id: "resp_stale".into(),
         connected_at: Instant::now(),

@@ -31,7 +31,7 @@ async fn persistent_cancellation_keepalive_abort_invalidates_before_handoff() {
     let connected_at = Instant::now();
     let persistent = Arc::new(Mutex::new(Some(PersistentWsState {
         ws_stream,
-        identity: openai_websocket_prewarm::prewarm_identity(&prewarm_test_credentials()),
+        identity: openai_websocket_prewarm::prewarm_identity(&prewarm_test_credentials(), None, None),
         cache_key: None,
         last_response_id: "resp_previous".into(),
         connected_at,
@@ -125,7 +125,7 @@ async fn persistent_cancellation_public_drop_releases_chain_and_reconnects() {
         vec!["gpt-5.6-sol".to_string()]);
     *provider.persistent_ws.lock().await = Some(PersistentWsState {
         ws_stream,
-        identity: openai_websocket_prewarm::prewarm_identity(&prewarm_test_credentials()),
+        identity: openai_websocket_prewarm::prewarm_identity(&prewarm_test_credentials(), None, None),
         cache_key: Some(provider.cache_routing_key()),
         last_response_id: "resp_previous".into(),
         connected_at: Instant::now(),
@@ -183,7 +183,7 @@ async fn persistent_cancellation_aborted_future_invalidates_before_handoff() {
         serde_json::json!({"role":"user","content":"next"})];
     let persistent = Arc::new(Mutex::new(Some(PersistentWsState {
         ws_stream,
-        identity: openai_websocket_prewarm::prewarm_identity(&prewarm_test_credentials()),
+        identity: openai_websocket_prewarm::prewarm_identity(&prewarm_test_credentials(), None, None),
         cache_key: None,
         last_response_id: "resp_previous".into(),
         connected_at: Instant::now(),

@@ -304,7 +304,7 @@ struct PersistentWsState {
     ws_stream: WebSocketStream<MaybeTlsStream<TcpStream>>,
     /// Actual handshake identity. Never logged. Forks can update shared
     /// credentials without directly clearing this provider's private socket.
-    identity: (String, Option<String>, String),
+    identity: (String, Option<String>, String, Option<String>),
     /// Cache affinity used by the handshake. A session rebind must reconnect.
     cache_key: Option<String>,
     last_response_id: String,
