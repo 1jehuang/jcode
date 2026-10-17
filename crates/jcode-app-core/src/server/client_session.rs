@@ -1681,8 +1681,15 @@ pub(super) async fn handle_resume_session(
         }
     }
 
+    let pre_lock_ms = resume_start.elapsed().as_millis();
     let (result, is_canary) = {
         let mut agent_guard = agent.lock().await;
+        crate::logging::info(&format!(
+            "[TIMING] resume pre-restore: session={}, pre_lock={}ms, locked_at={}ms",
+            session_id,
+            pre_lock_ms,
+            resume_start.elapsed().as_millis()
+        ));
         let result = super::run_blocking_io(|| {
             agent_guard.restore_session_with_working_dir(&session_id, working_dir_override)
         });
@@ -1706,6 +1713,7 @@ pub(super) async fn handle_resume_session(
         registry.register_selfdev_tools().await;
     }
 
+    let restored_ms = resume_start.elapsed().as_millis();
     match result {
         Ok(_prev_status) => {
             let old_session_id = client_session_id.clone();
@@ -1848,6 +1856,7 @@ pub(super) async fn handle_resume_session(
                 )
             };
 
+            let pre_history_ms = resume_start.elapsed().as_millis();
             handle_get_history(
                 id,
                 &session_id,
@@ -1864,6 +1873,7 @@ pub(super) async fn handle_resume_session(
                 supports_pdf_panels,
             )
             .await?;
+            let history_sent_ms = resume_start.elapsed().as_millis();
             let _ = client_event_tx.send(ServerEvent::Done { id });
             // Re-send the swarm plan AFTER the History payload: the client
             // clears its plan snapshot on session change, so without this the
@@ -1922,6 +1932,9 @@ pub(super) async fn handle_resume_session(
                     ("target_session_id", session_id.clone()),
                     ("client_connection_id", client_connection_id.to_string()),
                     ("was_interrupted", was_interrupted.to_string()),
+                    ("restored_ms", restored_ms.to_string()),
+                    ("pre_history_ms", pre_history_ms.to_string()),
+                    ("history_sent_ms", history_sent_ms.to_string()),
                     ("elapsed_ms", resume_start.elapsed().as_millis().to_string()),
                 ],
             );

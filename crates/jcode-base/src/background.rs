@@ -1621,39 +1621,64 @@ impl BackgroundTaskManager {
         &self,
         session_id: &str,
     ) -> Vec<TaskStatusFile> {
+        // The task directory accumulates thousands of status files and every
+        // History bootstrap asks this question, so a reconnect storm re-read
+        // and re-parsed all of them per client (~40ms each). Cache the parsed
+        // (session, status, detached, pid) tuple per file, keyed by mtime and
+        // size, and only re-read files that changed.
+        type Key = (std::time::SystemTime, u64);
+        static INDEX: std::sync::LazyLock<
+            std::sync::Mutex<HashMap<PathBuf, (Key, Option<TaskStatusFile>)>>,
+        > = std::sync::LazyLock::new(Default::default);
+
         let mut matches = Vec::new();
         let Ok(entries) = std::fs::read_dir(&self.output_dir) else {
             return matches;
         };
-
+        let mut index = INDEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut seen = std::collections::HashSet::new();
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
                 continue;
             }
-
-            let Ok(content) = std::fs::read_to_string(&path) else {
-                continue;
+            let Ok(meta) = entry.metadata() else { continue };
+            let key: Key = (meta.modified().unwrap_or(std::time::UNIX_EPOCH), meta.len());
+            seen.insert(path.clone());
+            let cached = index
+                .get(&path)
+                .filter(|(k, _)| *k == key)
+                .map(|(_, s)| s.clone());
+            let parsed = match cached {
+                Some(parsed) => parsed,
+                None => {
+                    let parsed = std::fs::read_to_string(&path)
+                        .ok()
+                        .and_then(|content| serde_json::from_str::<TaskStatusFile>(&content).ok())
+                        // Only running detached tasks can ever match; cache
+                        // everything else as a cheap negative.
+                        .filter(|status| {
+                            status.status == BackgroundTaskStatus::Running && status.detached
+                        });
+                    index.insert(path.clone(), (key, parsed.clone()));
+                    parsed
+                }
             };
-            let Ok(status) = serde_json::from_str::<TaskStatusFile>(&content) else {
-                continue;
-            };
-
-            if status.session_id != session_id
-                || status.status != BackgroundTaskStatus::Running
-                || !status.detached
-            {
+            let Some(status) = parsed else { continue };
+            if status.session_id != session_id {
                 continue;
             }
-
             let Some(pid) = status.pid else {
                 continue;
             };
-
             if crate::platform::is_process_running(pid) {
                 matches.push(status);
             }
         }
+        index.retain(|path, _| seen.contains(path));
+        drop(index);
 
         matches.sort_by(|a, b| a.task_id.cmp(&b.task_id));
         matches
