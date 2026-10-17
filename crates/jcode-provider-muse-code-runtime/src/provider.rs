@@ -266,20 +266,27 @@ fn is_turn_end(inbound: &MspInbound) -> bool {
     matches!(inbound, MspInbound::Notification { method, .. } if method == "turn/completed")
 }
 
+/// Why jcode declines a Muse user-input prompt.
+const USER_INPUT_DECLINE_REASON: &str =
+    "jcode has no prompt surface wired for Muse Code yet, so no user is available to answer";
+
 /// Answer MSP's server-initiated requests.
 ///
-/// `approval/request` is a **must-answer** request. The response is a
-/// presentation receipt only; the actual decision travels separately as
-/// `approval/decide`. An unanswered request tells the host that this connection
-/// could not present the prompt, so the approval stays pending and the turn
-/// stalls until it times out.
+/// Both `approval/request` and `userInput/request` are **must-answer** requests.
+/// The response is a presentation receipt only; the decision travels separately
+/// (`approval/decide`, `userInput/answer` or `userInput/cancel`). An unanswered
+/// request tells the host this connection could not present the prompt, so it
+/// stays pending and the turn stalls.
 ///
-/// jcode has no approval surface wired for Muse yet, so this acknowledges
-/// presentation and then **denies**. Denying is the fail-safe choice: nothing
-/// executes that a user did not approve. It does mean Muse cannot run commands
-/// its own permission profile does not already cover, which is a real
-/// limitation rather than an oversight. Bridging these decisions into jcode's
-/// approval UI is the follow-up.
+/// jcode has no approval or prompt surface wired for Muse yet, so this
+/// acknowledges presentation and then **declines**, which is the fail-safe
+/// direction in both cases: nothing executes that a user did not approve, and
+/// no answer is fabricated on the user's behalf. The model sees an explicit
+/// denial or cancellation rather than a hang.
+///
+/// The honest cost is that Muse cannot run commands outside its own permission
+/// profile, and cannot ask a clarifying question, while this stands. Bridging
+/// these into jcode's approval and input UI is the follow-up.
 fn spawn_server_request_responder(
     transport: Arc<MspTransport>,
     mut events: broadcast::Receiver<MspInbound>,
@@ -306,6 +313,15 @@ fn spawn_server_request_responder(
                             )
                             .await;
                     }
+                    // A clarifying question has the same failure mode: left
+                    // unanswered it stalls the turn. Declining is honest (no
+                    // answer is invented) and the model sees a cancelled
+                    // result, so it can proceed or report rather than hang.
+                    if method == "userInput/request"
+                        && let Some(cancel) = user_input_cancel_request(&params)
+                    {
+                        let _ = transport.request("userInput/cancel", cancel).await;
+                    }
                 }
                 Ok(_) => {}
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
@@ -313,6 +329,22 @@ fn spawn_server_request_responder(
             }
         }
     });
+}
+
+/// Build the `userInput/cancel` request for a Muse clarifying prompt.
+///
+/// Returns `None` when the payload lacks the identifiers the host requires, in
+/// which case the prompt is left alone rather than cancelled with missing
+/// fields.
+fn user_input_cancel_request(params: &Value) -> Option<Value> {
+    let session_id = params.get("sessionId")?.as_str()?;
+    let user_input_id = params.get("userInputId")?.as_str()?;
+    Some(json!({
+        "sessionId": session_id,
+        "commandId": new_command_id(),
+        "userInputId": user_input_id,
+        "reason": USER_INPUT_DECLINE_REASON,
+    }))
 }
 
 /// Choose the deny option from an `approval/request` payload.
@@ -802,6 +834,32 @@ mod tests {
             })
             .is_none()
         );
+    }
+
+    #[test]
+    fn user_input_prompts_are_declined_with_both_required_ids() {
+        let params = json!({
+            "sessionId": "s-1",
+            "userInputId": "u-1",
+            "toolName": "ask",
+            "questions": [{"questionId": "q"}],
+        });
+        let cancel = user_input_cancel_request(&params).expect("should build a cancel request");
+        assert_eq!(cancel["sessionId"], json!("s-1"));
+        assert_eq!(cancel["userInputId"], json!("u-1"));
+        // The idempotency handle is mandatory on every MSP mutation.
+        let command_id = cancel["commandId"].as_str().expect("commandId present");
+        assert_eq!(
+            uuid::Uuid::parse_str(command_id).unwrap().get_version_num(),
+            7
+        );
+        // The reason tells the model why, so a decline is not a silent failure.
+        assert!(cancel["reason"].as_str().unwrap().contains("jcode"));
+
+        // Missing identifiers must not produce a malformed mutation.
+        assert!(user_input_cancel_request(&json!({"sessionId": "s"})).is_none());
+        assert!(user_input_cancel_request(&json!({"userInputId": "u"})).is_none());
+        assert!(user_input_cancel_request(&json!({})).is_none());
     }
 
     #[test]
