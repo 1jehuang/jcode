@@ -122,136 +122,139 @@ fn inventory_lines(
 ) -> Vec<Line<'static>> {
     use crate::auth::{ActiveCredential, resolve_dual_credential_auth};
     use jcode_provider_core::ActiveProvider;
-    let mut lines = Vec::new();
+    let mut entries = Vec::new();
     let runtime = std::env::var("JCODE_RUNTIME_PROVIDER").ok();
     let current_provider = jcode_provider_core::parse_provider_hint(provider_name);
-    for (name, id, provider, state) in [
-        (
-            "anthropic",
-            "claude",
-            ActiveProvider::Claude,
-            auth.anthropic.state,
-        ),
-        ("openai", "openai", ActiveProvider::OpenAI, auth.openai),
-    ] {
-        let accounts: Vec<_> = inventory
-            .logins
-            .iter()
-            .filter(|a| a.provider == id)
-            .collect();
+    // Preserve the stored login order for defaulted members. Explicit pool
+    // positions below take precedence across providers, including API keys.
+    for account in &inventory.logins {
+        let (name, provider, oauth_state, usage_provider) = if account.provider == "claude" {
+            (
+                "anthropic",
+                ActiveProvider::Claude,
+                auth.anthropic.oauth_state,
+                crate::usage::MultiAccountProviderKind::Anthropic,
+            )
+        } else {
+            (
+                "openai",
+                ActiveProvider::OpenAI,
+                auth.openai_oauth_state,
+                crate::usage::MultiAccountProviderKind::OpenAI,
+            )
+        };
         let resolved = resolve_dual_credential_auth(provider, auth, runtime.as_deref());
-        if accounts.is_empty() && state == AuthState::NotConfigured {
-            continue;
-        }
-        lines.push(Line::styled(name, Style::default().fg(dim_color())));
         let credential = active.get(provider).or(resolved.map(|r| r.active));
         let bound = (current_provider == Some(provider))
             .then_some(selected_label)
             .flatten();
-        let oauth_state = if provider == ActiveProvider::Claude {
-            auth.anthropic.oauth_state
-        } else {
-            auth.openai_oauth_state
-        };
-        let mut accounts = accounts;
-        accounts.sort_by_key(|a| !bound.map_or(a.active, |label| a.label == label));
-        for account in &accounts {
-            let selected = bound.map_or(account.active, |label| account.label == label);
-            let pooled = inventory
-                .pool
-                .is_member(&account_key(id, Some(&account.label)), true);
-            let expired = inventory
-                .expired
-                .iter()
-                .any(|(p, label)| *p == id && label == &account.label)
-                || (selected && bound.is_none() && oauth_state == AuthState::Expired);
-            let status = if selected && credential == Some(ActiveCredential::OAuth) {
+        let selected = bound.map_or(account.active, |label| account.label == label);
+        let expired = inventory
+            .expired
+            .iter()
+            .any(|(p, label)| *p == account.provider && label == &account.label)
+            || (selected && bound.is_none() && oauth_state == AuthState::Expired);
+        let is_current = current_provider == Some(provider)
+            && selected
+            && credential == Some(ActiveCredential::OAuth);
+        let usage = crate::usage::cached_account_usage_snapshot(usage_provider, &account.label);
+        let quota = usage.as_ref().and_then(remaining_bar).unwrap_or_default();
+        entries.push((
+            account_key(account.provider, Some(&account.label)),
+            true,
+            detail(
                 if expired {
-                    "active · expired"
-                } else {
-                    "active"
-                }
-            } else if expired {
-                "saved · expired"
-            } else if pooled {
-                "standby"
-            } else {
-                "saved · manual"
-            };
-            let usage_provider = if provider == ActiveProvider::Claude {
-                crate::usage::MultiAccountProviderKind::Anthropic
-            } else {
-                crate::usage::MultiAccountProviderKind::OpenAI
-            };
-            let usage = crate::usage::cached_account_usage_snapshot(usage_provider, &account.label);
-            let quota = usage.as_ref().and_then(remaining_bar).unwrap_or_default();
-            lines.push(detail(
-                if selected && credential == Some(ActiveCredential::OAuth) {
+                    "×"
+                } else if is_current {
                     "●"
                 } else {
                     "○"
                 },
                 format!(
-                    "{} · {status}{quota}",
+                    "{name:<12} {}{quota}",
                     masked_identity(account.email.as_deref())
                 ),
-                selected
-                    && !expired
-                    && credential == Some(ActiveCredential::OAuth)
-                    && (bound.is_some() || oauth_state == AuthState::Available),
+                is_current && !expired,
+            ),
+        ));
+    }
+    for (name, key, provider) in [
+        ("anthropic", "anthropic-api", ActiveProvider::Claude),
+        ("openai", "openai-api", ActiveProvider::OpenAI),
+    ] {
+        if let Some(resolved) = resolve_dual_credential_auth(provider, auth, runtime.as_deref())
+            && resolved.has_api_key
+        {
+            let credential = active.get(provider).unwrap_or(resolved.active);
+            let is_current =
+                current_provider == Some(provider) && credential == ActiveCredential::ApiKey;
+            entries.push((
+                key.into(),
+                false,
+                detail(
+                    if is_current { "●" } else { "○" },
+                    format!("{name:<12} API key"),
+                    is_current,
+                ),
             ));
         }
-        if let Some(resolved) = resolved {
-            if resolved.has_oauth && accounts.is_empty() {
-                lines.push(detail("◐", "OAuth · identity unavailable".into(), false));
-            }
-            if resolved.has_api_key {
-                let key = if provider == ActiveProvider::Claude {
-                    "anthropic-api"
-                } else {
-                    "openai-api"
-                };
-                let status = if credential == Some(ActiveCredential::ApiKey) {
-                    "active"
-                } else if inventory.pool.is_member(key, false) {
-                    "fallback · auto-switch enabled"
-                } else {
-                    "available · manual fallback"
-                };
-                lines.push(detail("●", format!("API key · {status}"), true));
-            }
-        }
     }
-    for (name, state) in [
-        ("jcode", auth.jcode),
-        ("azure", auth.azure),
-        ("bedrock", auth.bedrock),
-        ("grok build", auth.grok_build),
-        ("OpenAI-compatible profiles", auth.openai_compatible_any),
-        ("openrouter · API key", auth.openrouter),
-        ("cursor", auth.cursor),
-        ("copilot", auth.copilot),
-        ("gemini", auth.gemini),
-        ("antigravity", auth.antigravity),
+    for (name, key, state, api_key) in [
+        ("jcode", "jcode", auth.jcode, false),
+        ("azure", "azure", auth.azure, true),
+        ("bedrock", "bedrock", auth.bedrock, true),
+        ("grok build", "grok-build", auth.grok_build, true),
+        (
+            "OpenAI-compatible profiles",
+            "openai-compatible",
+            auth.openai_compatible_any,
+            true,
+        ),
+        ("openrouter", "openrouter", auth.openrouter, true),
+        ("cursor", "cursor", auth.cursor, false),
+        ("copilot", "copilot", auth.copilot, false),
+        ("gemini", "gemini", auth.gemini, false),
+        ("antigravity", "antigravity", auth.antigravity, false),
     ] {
         if state != AuthState::NotConfigured {
-            lines.push(detail(
-                auth_dot_char(state),
-                format!(
-                    "{name} · {}",
-                    if state == AuthState::Available {
-                        "ready"
-                    } else {
-                        "expired"
-                    }
-                ),
-                state == AuthState::Available,
+            let is_current = current_provider.is_some()
+                && current_provider == jcode_provider_core::parse_provider_hint(key);
+            let dot = if state == AuthState::Expired {
+                "×"
+            } else if is_current {
+                "●"
+            } else {
+                "○"
+            };
+            let label = if api_key {
+                format!("{name:<12} API key")
+            } else {
+                name.into()
+            };
+            entries.push((
+                key.into(),
+                crate::auth::account_pool::default_member(key, api_key),
+                detail(dot, label, is_current && state == AuthState::Available),
             ));
         }
     }
+    let keys: Vec<_> = entries
+        .iter()
+        .map(|(key, default, _)| (key.clone(), *default))
+        .collect();
+    let (ordered, _) = inventory.pool.partition(&keys);
+    let mut lines: Vec<_> = ordered
+        .into_iter()
+        .filter_map(|key| {
+            entries
+                .iter()
+                .find(|(candidate, _, _)| candidate == key)
+                .map(|(_, _, line)| line.clone())
+        })
+        .collect();
     if lines.is_empty() {
         lines.push(Line::styled(
-            "No cached accounts · /login to add credential",
+            "No auto-routing accounts · /login to add credential",
             Style::default().fg(dim_color()),
         ));
     }
@@ -268,7 +271,11 @@ fn remaining_bar(usage: &crate::usage::AccountUsageSnapshot) -> Option<String> {
     }
     let remaining = 1.0 - used;
     let filled = (remaining * 4.0).round() as usize;
-    let label = usage.primary_label.as_deref().unwrap_or("5h");
+    let label = match usage.primary_label.as_deref().unwrap_or("5h") {
+        "5-hour" | "5-hour window" => "5h",
+        "7-day" | "7-day window" => "7d",
+        label => label,
+    };
     Some(format!(
         " · {label} [{}{}] {:.0}% left",
         "█".repeat(filled),
@@ -310,202 +317,150 @@ mod tests {
             .join("\n")
     }
 
-    #[test]
-    fn router_inventory_masks_and_honors_bound_account_and_manual_keys() {
-        let auth = AuthStatus {
+    fn auth() -> AuthStatus {
+        AuthStatus {
             anthropic: ProviderAuth {
                 state: AuthState::Available,
                 has_oauth: true,
                 oauth_state: AuthState::Available,
                 has_api_key: true,
             },
-            openrouter: AuthState::Available,
-            ..Default::default()
-        };
-        let inventory = Inventory {
-            logins: vec![
-                OAuthLogin {
-                    provider: "claude",
-                    label: "one".into(),
-                    email: Some("alice@example.com".into()),
-                    active: true,
-                },
-                OAuthLogin {
-                    provider: "claude",
-                    label: "two".into(),
-                    email: Some("bob@example.com".into()),
-                    active: false,
-                },
-            ],
-            ..Default::default()
-        };
-        let active = ActiveCredentialOverrides {
-            anthropic: Some(ActiveCredential::OAuth),
-            openai: None,
-        };
-        let rendered = text(inventory_lines(
-            &auth,
-            active,
-            &inventory,
-            "anthropic",
-            Some("two"),
-        ));
-        assert!(
-            rendered.contains("b***b@example.com · active"),
-            "{rendered}"
-        );
-        assert!(rendered.contains("a***e@example.com · standby"));
-        assert!(rendered.contains("API key · available · manual fallback"));
-        assert!(rendered.contains("openrouter · API key · ready"));
-        assert!(!rendered.contains("alice"));
-        assert!(!rendered.contains('%'));
-    }
-
-    #[test]
-    fn router_inventory_respects_exclusions_and_key_pool_membership() {
-        let auth = AuthStatus {
             openai: AuthState::Available,
             openai_has_oauth: true,
             openai_oauth_state: AuthState::Available,
             openai_has_api_key: true,
+            openrouter: AuthState::Available,
             ..Default::default()
-        };
-        let inventory = Inventory {
-            logins: vec![OAuthLogin {
-                provider: "openai",
-                label: "one".into(),
-                email: None,
-                active: false,
-            }],
-            pool: AccountPool {
-                members: vec!["openai-api".into()],
-                excluded: vec!["openai:one".into()],
-            },
-            ..Default::default()
-        };
-        let active = ActiveCredentialOverrides {
-            anthropic: None,
-            openai: Some(ActiveCredential::OAuth),
-        };
-        let rendered = text(inventory_lines(&auth, active, &inventory, "claude", None));
-        assert!(rendered.contains("saved account · saved · manual"));
-        assert!(rendered.contains("API key · fallback · auto-switch enabled"));
-        assert!(!rendered.contains("standby"));
+        }
+    }
+
+    fn login(provider: &'static str, label: &str, email: &str) -> OAuthLogin {
+        OAuthLogin {
+            provider,
+            label: label.into(),
+            email: Some(email.into()),
+            active: true,
+        }
     }
 
     #[test]
-    fn router_inventory_expiry_is_account_scoped_and_keys_can_be_active() {
-        let auth = AuthStatus {
-            openai: AuthState::Available,
-            openai_has_oauth: true,
-            openai_oauth_state: AuthState::Expired,
-            openai_has_api_key: true,
-            ..Default::default()
-        };
+    fn router_inventory_follows_global_pool_order_without_promoting_active() {
         let inventory = Inventory {
             logins: vec![
-                OAuthLogin {
-                    provider: "openai",
-                    label: "old".into(),
-                    email: Some("old@example.com".into()),
-                    active: true,
-                },
-                OAuthLogin {
-                    provider: "openai",
-                    label: "bound".into(),
-                    email: Some("new@example.com".into()),
-                    active: false,
-                },
+                login("claude", "a", "alice@example.com"),
+                login("openai", "a", "anna@example.com"),
+                login("openai", "b", "bob@example.com"),
+            ],
+            pool: AccountPool {
+                members: vec![
+                    "openai:b".into(),
+                    "claude:a".into(),
+                    "openai-api".into(),
+                    "openai:a".into(),
+                ],
+                excluded: vec![],
+            },
+            ..Default::default()
+        };
+        let lines = inventory_lines(
+            &auth(),
+            ActiveCredentialOverrides {
+                openai: Some(ActiveCredential::OAuth),
+                anthropic: Some(ActiveCredential::OAuth),
+            },
+            &inventory,
+            "openai",
+            Some("a"),
+        );
+        let rendered = text(lines.clone());
+        assert_eq!(lines.len(), 4, "{rendered}");
+        assert!(text(vec![lines[0].clone()]).contains("b***b@example.com"));
+        assert!(text(vec![lines[1].clone()]).contains("a***e@example.com"));
+        assert!(text(vec![lines[2].clone()]).contains("API key"));
+        assert!(text(vec![lines[3].clone()]).contains("a***a@example.com"));
+        assert_eq!(lines[3].spans[1].content, "●");
+        assert_eq!(lines[0].spans[1].content, "○");
+        assert_eq!(rendered.matches('●').count(), 1);
+        for word in [
+            "active",
+            "standby",
+            "fallback",
+            "manual",
+            "alice@example.com",
+            "bob@example.com",
+            "anthropic-api",
+        ] {
+            assert!(!rendered.contains(word), "{rendered}");
+        }
+    }
+
+    #[test]
+    fn router_inventory_hides_excluded_and_manual_credentials_even_if_active() {
+        let inventory = Inventory {
+            logins: vec![
+                login("openai", "excluded", "secret@example.com"),
+                login("claude", "a", "alice@example.com"),
+            ],
+            pool: AccountPool {
+                members: vec!["openrouter".into()],
+                excluded: vec!["openai:excluded".into()],
+            },
+            ..Default::default()
+        };
+        let rendered = text(inventory_lines(
+            &auth(),
+            ActiveCredentialOverrides {
+                openai: Some(ActiveCredential::ApiKey),
+                anthropic: None,
+            },
+            &inventory,
+            "openai",
+            Some("excluded"),
+        ));
+        assert!(rendered.contains("openrouter"));
+        assert!(rendered.contains("API key"));
+        assert!(rendered.contains("a***e@example.com"));
+        assert!(!rendered.contains("openai"));
+        assert!(!rendered.contains("s***t@example.com"));
+        assert_eq!(rendered.matches("API key").count(), 1);
+    }
+
+    #[test]
+    fn router_inventory_default_subscriptions_and_expiry_are_account_scoped() {
+        let mut status = auth();
+        status.openai_oauth_state = AuthState::Expired;
+        let inventory = Inventory {
+            logins: vec![
+                login("openai", "old", "old@example.com"),
+                login("openai", "bound", "new@example.com"),
             ],
             expired: vec![("openai", "old".into())],
             ..Default::default()
         };
-        let active = ActiveCredentialOverrides {
-            anthropic: None,
-            openai: Some(ActiveCredential::OAuth),
-        };
-        let rendered = text(inventory_lines(
-            &auth,
-            active,
+        let lines = inventory_lines(
+            &status,
+            ActiveCredentialOverrides {
+                openai: Some(ActiveCredential::OAuth),
+                anthropic: None,
+            },
             &inventory,
             "openai",
             Some("bound"),
-        ));
-        assert!(rendered.contains("n***w@example.com · active"));
-        assert!(!rendered.contains("n***w@example.com · active · expired"));
-        assert!(rendered.contains("o***d@example.com · saved · expired"));
-        let active = ActiveCredentialOverrides {
-            anthropic: None,
-            openai: Some(ActiveCredential::ApiKey),
-        };
-        let rendered = text(inventory_lines(
-            &auth,
-            active,
-            &inventory,
-            "openai",
-            Some("bound"),
-        ));
-        assert!(rendered.contains("API key · active"));
-        assert!(!rendered.contains("n***w@example.com · active"));
-    }
-
-    #[test]
-    fn router_inventory_preserves_other_configured_providers() {
-        let auth = AuthStatus {
-            jcode: AuthState::Available,
-            azure: AuthState::Available,
-            bedrock: AuthState::Available,
-            grok_build: AuthState::Available,
-            openai_compatible_any: AuthState::Available,
-            ..Default::default()
-        };
-        let rendered = text(inventory_lines(
-            &auth,
-            ActiveCredentialOverrides::default(),
-            &Inventory::default(),
-            "",
-            None,
-        ));
-        for provider in [
-            "jcode",
-            "azure",
-            "bedrock",
-            "grok build",
-            "OpenAI-compatible profiles",
-        ] {
-            assert!(rendered.contains(provider), "{rendered}");
-        }
-        assert!(!rendered.contains("No cached accounts"));
-    }
-
-    #[test]
-    fn router_inventory_remaining_bar_rejects_unknown_and_invalid_usage() {
-        let mut usage = crate::usage::AccountUsageSnapshot {
-            label: "one".into(),
-            email: None,
-            exhausted: false,
-            primary_label: Some("5h".into()),
-            five_hour_ratio: Some(0.25),
-            secondary_label: None,
-            seven_day_ratio: None,
-            resets_at: None,
-            error: None,
-        };
-        assert_eq!(
-            remaining_bar(&usage).as_deref(),
-            Some(" · 5h [███░] 75% left")
         );
-        for ratio in [None, Some(f32::NAN), Some(1.1), Some(-0.1)] {
-            usage.five_hour_ratio = ratio;
-            assert!(remaining_bar(&usage).is_none());
-        }
-        usage.five_hour_ratio = Some(0.0);
-        usage.error = Some("unavailable".into());
-        assert!(remaining_bar(&usage).is_none());
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].spans[1].content, "×");
+        assert_eq!(lines[0].spans[1].style.fg, Some(dim_color()));
+        assert_eq!(lines[1].spans[1].content, "●");
+        assert_eq!(
+            lines[1].spans[1].style.fg,
+            Some(auth_dot_color(AuthState::Available))
+        );
+        assert!(!text(lines).contains("API key"));
     }
 
     #[test]
-    fn router_inventory_handles_unknown_identity_and_empty_auth() {
+    fn router_inventory_empty_and_unknown_identities_remain_private() {
+        assert_eq!(masked_identity(None), "saved account");
         assert_eq!(
             masked_identity(Some("secret-not-an-email")),
             "saved account"
@@ -519,67 +474,33 @@ mod tests {
             "",
             None,
         ));
+        assert!(rendered.contains("No auto-routing accounts"));
         assert!(rendered.contains("/login"));
-        assert!(!rendered.contains("ready"));
     }
 
     #[test]
-    fn router_inventory_expired_oauth_never_borrows_key_readiness() {
-        let auth = AuthStatus {
-            openai: AuthState::Available,
-            openai_has_oauth: true,
-            openai_oauth_state: AuthState::Expired,
-            openai_has_api_key: true,
-            ..Default::default()
+    fn router_inventory_remaining_bar_rejects_unknown_and_invalid_usage() {
+        let mut usage = crate::usage::AccountUsageSnapshot {
+            label: "one".into(),
+            email: None,
+            exhausted: false,
+            primary_label: Some("5h".into()),
+            five_hour_ratio: Some(0.48),
+            secondary_label: None,
+            seven_day_ratio: None,
+            resets_at: None,
+            error: None,
         };
-        let inventory = Inventory {
-            logins: vec![OAuthLogin {
-                provider: "openai",
-                label: "one".into(),
-                email: Some("alice@example.com".into()),
-                active: true,
-            }],
-            expired: vec![("openai", "one".into())],
-            ..Default::default()
-        };
-        let active = ActiveCredentialOverrides {
-            anthropic: None,
-            openai: Some(ActiveCredential::ApiKey),
-        };
-        let lines = inventory_lines(&auth, active, &inventory, "openai", Some("one"));
-        let rendered = text(lines.clone());
-        assert!(rendered.contains("saved · expired"), "{rendered}");
-        assert!(rendered.contains("API key · active"));
-        assert!(!rendered.contains("standby"));
-        assert_eq!(lines[1].spans[1].style.fg, Some(dim_color()));
-    }
-
-    #[test]
-    fn router_inventory_keeps_other_configured_providers() {
-        let auth = AuthStatus {
-            jcode: AuthState::Available,
-            azure: AuthState::Available,
-            bedrock: AuthState::Available,
-            grok_build: AuthState::Available,
-            openai_compatible_any: AuthState::Available,
-            ..Default::default()
-        };
-        let rendered = text(inventory_lines(
-            &auth,
-            ActiveCredentialOverrides::default(),
-            &Inventory::default(),
-            "",
-            None,
-        ));
-        for name in [
-            "jcode",
-            "azure",
-            "bedrock",
-            "grok build",
-            "OpenAI-compatible profiles",
-        ] {
-            assert!(rendered.contains(name), "{rendered}");
+        assert_eq!(
+            remaining_bar(&usage).as_deref(),
+            Some(" · 5h [██░░] 52% left")
+        );
+        for ratio in [None, Some(f32::NAN), Some(-0.1), Some(1.1)] {
+            usage.five_hour_ratio = ratio;
+            assert!(remaining_bar(&usage).is_none());
         }
-        assert!(!rendered.contains("No cached accounts"));
+        usage.five_hour_ratio = Some(0.0);
+        usage.error = Some("unavailable".into());
+        assert!(remaining_bar(&usage).is_none());
     }
 }

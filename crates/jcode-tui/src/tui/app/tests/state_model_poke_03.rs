@@ -48,10 +48,6 @@ fn test_open_work_rearms_auto_poke_after_completion_gate_breaker() {
 
 include!("model_picker_startup_tests.rs");
 
-
-
-
-
 #[test]
 fn test_remote_model_command_opens_picker_without_catalog_request() {
     let mut app = create_test_app();
@@ -2177,12 +2173,23 @@ fn test_login_preview_enter_after_navigation_starts_selected_login() {
         app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
             .unwrap();
     }
-    // Explicit navigation makes the selection deliberate, so Enter activates.
-    // Navigate to the Anthropic API key row (an offline api-key prompt flow).
-    app.handle_key(KeyCode::Down, KeyModifiers::empty())
-        .unwrap();
-    app.handle_key(KeyCode::Down, KeyModifiers::empty())
-        .unwrap();
+    // Navigate deliberately to the offline API-key flow by semantic action,
+    // rather than assuming a fixed number of saved-account/add-account rows.
+    let picker = app.inline_interactive_state.as_ref().unwrap();
+    let target = picker
+        .filtered
+        .iter()
+        .position(|&index| {
+            picker.entries[index].options.iter().any(|option| {
+                matches!(&option.action, crate::tui::PickerAction::Login(provider)
+                if provider.id == "anthropic-api")
+            })
+        })
+        .expect("Anthropic API key login should be listed");
+    for _ in 0..target {
+        app.handle_key(KeyCode::Down, KeyModifiers::empty())
+            .unwrap();
+    }
     app.handle_key(KeyCode::Enter, KeyModifiers::empty())
         .unwrap();
 
