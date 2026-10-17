@@ -59,7 +59,7 @@ enum SessionListUpdate {
     Fresh(Result<GroupedSessionList>),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PickerResult {
     Selected(Vec<ResumeTarget>),
     SelectedInCurrentTerminal(Vec<ResumeTarget>),
@@ -80,7 +80,7 @@ enum OnboardingAction {
     ReviewRecentProject,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OverlayAction {
     Continue,
     Close,
@@ -543,6 +543,15 @@ impl SessionPicker {
         self.same_project_cache.borrow_mut().clear();
     }
 
+    /// Enter search mode with an initial query, e.g. from `/sessions <query>`.
+    /// Applies the filter immediately so the picker opens pre-filtered, with
+    /// the search bar active so typing continues refining the same query.
+    pub fn start_search(&mut self, query: impl Into<String>) {
+        self.search_query = query.into();
+        self.search_active = true;
+        self.rebuild_items();
+    }
+
     /// Whether the given session belongs to the project the picker was opened
     /// from: the same directory, a subdirectory of it, or another worktree of
     /// the same git repository.
@@ -785,6 +794,18 @@ impl SessionPicker {
             .iter()
             .filter_map(|session_ref| self.session_by_ref(*session_ref))
             .count()
+    }
+
+    /// Current search query (empty string when no search is active).
+    #[cfg(test)]
+    pub fn search_query(&self) -> &str {
+        &self.search_query
+    }
+
+    /// Whether the search bar is active (the picker is in search input mode).
+    #[cfg(test)]
+    pub fn search_is_active(&self) -> bool {
+        self.search_active
     }
 
     /// Resume target for the most recently active visible session, used by the
@@ -1202,6 +1223,18 @@ impl SessionPicker {
             return Ok(action);
         }
         if self.loading_message.is_some() {
+            // While the session list loads, an active search must still accept
+            // editing keys: the picker renders the search bar with a cursor
+            // when `/sessions <query>` opened it, and swallowing letters there
+            // (typing `q` closed the picker instead) made the visible input
+            // look broken. Selection stays blocked until results arrive: Enter
+            // is ignored and only Esc / q / Ctrl+C close, as before.
+            if self.search_active {
+                if matches!(code, KeyCode::Enter) {
+                    return Ok(OverlayAction::Continue);
+                }
+                return self.handle_search_key(code, modifiers);
+            }
             return match code {
                 KeyCode::Esc | KeyCode::Char('q') => Ok(OverlayAction::Close),
                 KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
