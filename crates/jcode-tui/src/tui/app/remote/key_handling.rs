@@ -920,6 +920,10 @@ async fn handle_remote_key_internal(
         return Ok(());
     }
 
+    if app.handle_suggested_replies_arrow_key(code, modifiers) {
+        return Ok(());
+    }
+
     if input::handle_multiline_input_navigation(app, code, modifiers)
         || input::handle_prompt_history_navigation(app, code, modifiers)
     {

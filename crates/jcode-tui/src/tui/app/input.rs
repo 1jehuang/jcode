@@ -1067,6 +1067,17 @@ pub(super) fn handle_text_input(app: &mut App, text: &str) -> bool {
         return false;
     }
 
+    if app.input.is_empty() && !app.is_processing && app.suggested_replies_visible() {
+        let mut chars = text.chars();
+        if let (Some(c), None) = (chars.next(), chars.next())
+            && let Some(prompt) = app.take_suggested_reply_by_digit(c)
+        {
+            app.follow_chat_bottom_for_typing();
+            app.submit_suggested_reply_prompt(prompt);
+            return true;
+        }
+    }
+
     let onboarding_suggestions = matches!(
         app.onboarding_phase(),
         Some(crate::tui::app::onboarding_flow::OnboardingPhase::Suggestions)
@@ -3196,6 +3207,10 @@ impl App {
                 }
                 _ => {}
             }
+        }
+
+        if self.handle_suggested_replies_arrow_key(code, modifiers) {
+            return Ok(());
         }
 
         if handle_multiline_input_navigation(self, code, modifiers)

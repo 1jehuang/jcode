@@ -270,63 +270,111 @@ impl App {
         (needs_redraw, None)
     }
 
-    /// Handle `[Tab]` when `self.autocomplete()` returned `false` and input is empty.
-    /// Returns `Some(Some(prompt))` when `[Tab]` activates a focused Default Action,
-    /// `Some(None)` when `[Tab]` moved focus inside the Suggested Replies panel,
-    /// or `None` when Suggested Replies are not visible.
-    pub fn handle_suggested_replies_tab(&mut self) -> Option<Option<String>> {
+    /// Ordered list of selectable focus targets in the current Suggested Replies panel.
+    fn ordered_suggested_reply_targets(&self) -> Vec<SuggestedReplyFocus> {
+        let Some(response) = self.suggested_replies.current.as_ref() else {
+            return Vec::new();
+        };
+        let mut targets = Vec::new();
+        if response.default_action.is_some() {
+            targets.push(SuggestedReplyFocus::DefaultAction);
+        }
+        for idx in 0..response.secondary_suggestions.len().min(5) {
+            targets.push(SuggestedReplyFocus::Secondary(idx));
+        }
+        targets
+    }
+
+    /// Move focus forward (`delta = 1`) or backward (`delta = -1`) across
+    /// `DefaultAction` and `Secondary(0..N)`.
+    pub fn step_suggested_replies_focus(&mut self, delta: isize) -> bool {
+        if !self.suggested_replies_visible() {
+            return false;
+        }
+        let targets = self.ordered_suggested_reply_targets();
+        if targets.is_empty() {
+            return false;
+        }
+        self.suggested_replies.explorer_deadline = None;
+        let next_pos = match self
+            .suggested_replies
+            .focus
+            .and_then(|cur| targets.iter().position(|t| *t == cur))
+        {
+            Some(pos) => (pos as isize + delta).rem_euclid(targets.len() as isize) as usize,
+            None => {
+                if delta >= 0 {
+                    0
+                } else {
+                    targets.len() - 1
+                }
+            }
+        };
+        let next_focus = targets[next_pos];
+        self.suggested_replies.focus = Some(next_focus);
+        match next_focus {
+            SuggestedReplyFocus::DefaultAction => {
+                self.set_status_notice(
+                    "Default Action selected (Enter to send · ↑/↓/Tab to choose · 1-5 quick pick)",
+                );
+            }
+            SuggestedReplyFocus::Secondary(idx) => {
+                self.set_status_notice(format!(
+                    "Suggestion #{} selected (Enter to send · ↑/↓/Tab to choose)",
+                    idx + 1
+                ));
+            }
+        }
+        true
+    }
+
+    /// Handle `Up` / `Down` arrow keys when Suggested Replies are visible on an empty input.
+    /// - `Down` always steps down through the vertical suggestion list (focusing the first item if unfocused).
+    /// - `Up` steps up when focus is already inside the suggestion panel (leaving plain `Up` for prompt history when unfocused).
+    pub fn handle_suggested_replies_arrow_key(
+        &mut self,
+        code: crossterm::event::KeyCode,
+        modifiers: crossterm::event::KeyModifiers,
+    ) -> bool {
+        if !modifiers.is_empty() || !self.suggested_replies_visible() {
+            return false;
+        }
+        match code {
+            crossterm::event::KeyCode::Down => self.step_suggested_replies_focus(1),
+            crossterm::event::KeyCode::Up if self.suggested_replies.focus.is_some() => {
+                self.step_suggested_replies_focus(-1)
+            }
+            _ => false,
+        }
+    }
+
+    /// Handle pressing digit `'1'..='5'` (or `'0'` for Default Action) on an empty input
+    /// when Suggested Replies are visible. Returns `Some(prompt)` to submit immediately.
+    pub fn take_suggested_reply_by_digit(&mut self, ch: char) -> Option<String> {
         if !self.suggested_replies_visible() {
             return None;
         }
-        // Any manual key cancels the auto-explorer countdown.
-        self.suggested_replies.explorer_deadline = None;
-        let response = self.suggested_replies.current.as_ref()?;
+        let target = match ch {
+            '0' => SuggestedReplyFocus::DefaultAction,
+            '1'..='5' => SuggestedReplyFocus::Secondary((ch as usize) - ('1' as usize)),
+            _ => return None,
+        };
+        self.take_suggested_reply_target(target)
+    }
 
-        if let Some(default_action) = response.default_action.clone() {
-            match self.suggested_replies.focus {
-                None => {
-                    self.suggested_replies.focus = Some(SuggestedReplyFocus::DefaultAction);
-                    self.set_status_notice("Default Action focused (Tab/Enter to run)");
-                    Some(None)
-                }
-                Some(SuggestedReplyFocus::DefaultAction) => {
-                    // Already focused on Default Action -> activate and submit!
-                    self.suggested_replies.current = None;
-                    self.suggested_replies.focus = None;
-                    self.set_status_notice("Default Action activated");
-                    Some(Some(default_action))
-                }
-                Some(SuggestedReplyFocus::Secondary(idx)) => {
-                    let len = response.secondary_suggestions.len();
-                    if idx + 1 < len {
-                        self.suggested_replies.focus =
-                            Some(SuggestedReplyFocus::Secondary(idx + 1));
-                    } else {
-                        self.suggested_replies.focus = Some(SuggestedReplyFocus::DefaultAction);
-                    }
-                    Some(None)
-                }
-            }
-        } else if !response.secondary_suggestions.is_empty() {
-            let len = response.secondary_suggestions.len();
-            let next_idx = match self.suggested_replies.focus {
-                Some(SuggestedReplyFocus::Secondary(idx)) => (idx + 1) % len,
-                _ => 0,
-            };
-            self.suggested_replies.focus = Some(SuggestedReplyFocus::Secondary(next_idx));
-            self.set_status_notice(format!(
-                "Suggestion {}/{} focused (Enter to run)",
-                next_idx + 1,
-                len
-            ));
+    /// Handle `[Tab]` when `self.autocomplete()` returned `false` and input is empty.
+    /// Cycles focus across `DefaultAction` and `Secondary(0..N)` so the user can pick any
+    /// vertical suggestion with `[Tab]` and press `[Enter]` to send it.
+    pub fn handle_suggested_replies_tab(&mut self) -> Option<Option<String>> {
+        if self.step_suggested_replies_focus(1) {
             Some(None)
         } else {
             None
         }
     }
 
-    /// Return the currently focused suggestion (or `default_action` when `Ctrl+Enter` is pressed)
-    /// and consume the Suggested Replies panel so the caller can submit it.
+    /// Return the currently focused suggestion (or `default_action` when `allow_unfocused_default`
+    /// is true) and consume the Suggested Replies panel so the caller can submit it.
     pub fn take_focused_or_default_suggested_reply(
         &mut self,
         allow_unfocused_default: bool,
@@ -340,7 +388,10 @@ impl App {
             Some(SuggestedReplyFocus::Secondary(idx)) => {
                 response.secondary_suggestions.get(idx).cloned()
             }
-            None if allow_unfocused_default => response.default_action.clone(),
+            None if allow_unfocused_default => response
+                .default_action
+                .clone()
+                .or_else(|| response.secondary_suggestions.first().cloned()),
             None => None,
         }?;
         self.suggested_replies.current = None;
@@ -438,7 +489,7 @@ mod tests {
         assert!(app.suggested_replies_visible());
         assert_eq!(app.suggested_replies.focus, None);
 
-        // First Tab focuses DefaultAction without submitting yet.
+        // First Tab focuses DefaultAction.
         let tab1 = app.handle_suggested_replies_tab();
         assert_eq!(tab1, Some(None));
         assert_eq!(
@@ -446,9 +497,35 @@ mod tests {
             Some(SuggestedReplyFocus::DefaultAction)
         );
 
-        // Second Tab activates and returns the DefaultAction prompt.
+        // Second Tab steps focus to Secondary(0), and Up arrow returns to DefaultAction.
         let tab2 = app.handle_suggested_replies_tab();
-        assert_eq!(tab2, Some(Some("Run unit tests".to_string())));
+        assert_eq!(tab2, Some(None));
+        assert_eq!(
+            app.suggested_replies.focus,
+            Some(SuggestedReplyFocus::Secondary(0))
+        );
+        assert!(app.handle_suggested_replies_arrow_key(
+            crossterm::event::KeyCode::Up,
+            crossterm::event::KeyModifiers::NONE
+        ));
+        assert_eq!(
+            app.suggested_replies.focus,
+            Some(SuggestedReplyFocus::DefaultAction)
+        );
+
+        // Enter (take_focused_or_default_suggested_reply(false)) submits the focused item.
+        assert_eq!(
+            app.take_focused_or_default_suggested_reply(false),
+            Some("Run unit tests".to_string())
+        );
+        assert!(!app.suggested_replies_visible());
+
+        // Re-apply and test 1..5 digit quick selection.
+        app.apply_suggested_replies_response(resp.clone());
+        assert_eq!(
+            app.take_suggested_reply_by_digit('1'),
+            Some("Inspect git diff".to_string())
+        );
         assert!(!app.suggested_replies_visible());
 
         // Re-apply and test Ctrl+Enter (unfocused immediate DefaultAction activation).

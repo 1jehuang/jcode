@@ -165,7 +165,11 @@ fn draw_suggested_replies_panel(frame: &mut Frame, view: &SuggestedRepliesView, 
             .map(|ms| format!(" · auto {}ms [Esc]", ms))
             .unwrap_or_default();
 
-        let prefix = " ★ [Tab] ▸ ".to_string();
+        let prefix = if is_focused {
+            " ★ [Enter ↵ · Tab/↓] ▸ ".to_string()
+        } else {
+            " ★ [Tab / ↓] ▸ ".to_string()
+        };
         let suffix = format!(" ({}% · {}{}) ", conf_pct, view.response.branch, explorer_tag);
         let budget = (area.width as usize)
             .saturating_sub(UnicodeWidthStr::width(prefix.as_str()) + UnicodeWidthStr::width(suffix.as_str()) + 2)
