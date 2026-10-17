@@ -601,31 +601,25 @@ impl App {
                 .provider
                 .cross_provider_failover
                 == crate::config::CrossProviderFailoverMode::Countdown;
+        // One shared ranking for both the automatic and manual paths: pool
+        // order, then newest generation, then affinity.
+        let ranked = jcode_provider_core::rank_fallback_routes(
+            &routes,
+            &current_model,
+            &current_provider,
+            &current_api_method,
+            options,
+            &pool.members,
+        );
         if automatic {
             // Never let an excluded preferred route hide an approved later one.
-            // The pool's explicit account order wins over catalog/model ranking.
-            let mut approved: Vec<_> = routes
-                .iter()
-                .filter(|route| {
-                    let selection = crate::provider::RouteSelection::from_model_route(route);
-                    let identity = Self::fallback_pool_identity(&route.api_method);
-                    route.available
-                        && crate::provider::MultiProvider::is_failover_route_pool_approved(
-                            &selection.routed_model_spec(),
-                        )
-                        && identity != source_identity
-                })
-                .collect();
-            // Within one account, always prefer the newest-generation model.
-            approved.sort_by_key(|route| {
-                (
-                    Self::fallback_pool_identity(&route.api_method)
-                        .and_then(|(key, _)| pool.members.iter().position(|member| member == &key))
-                        .unwrap_or(usize::MAX),
-                    jcode_provider_core::model_generation_rank(&route.model),
-                )
+            let approved = ranked.iter().map(|index| &routes[*index]).find(|route| {
+                let selection = crate::provider::RouteSelection::from_model_route(route);
+                crate::provider::MultiProvider::is_failover_route_pool_approved(
+                    &selection.routed_model_spec(),
+                ) && Self::fallback_pool_identity(&route.api_method) != source_identity
             });
-            if let Some(route) = approved.first() {
+            if let Some(route) = approved {
                 let target_route =
                     crate::provider::RouteSelection::from_model_route(route).routed_model_spec();
                 self.handle_provider_failover_prompt_with_payload(
@@ -644,14 +638,9 @@ impl App {
                 return true;
             }
         }
-        // No approved automatic target: preserve unrestricted manual choice.
-        let Some(index) = crate::provider::pick_next_fallback_route_with_options(
-            &routes,
-            &current_model,
-            &current_provider,
-            &current_api_method,
-            options,
-        ) else {
+        // No approved automatic target: preserve unrestricted manual choice,
+        // still ordered by the shared ranking.
+        let Some(&index) = ranked.first() else {
             return false;
         };
         let route = routes[index].clone();

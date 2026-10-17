@@ -254,13 +254,16 @@ fn test_generic_auto_fallback_skips_excluded_preferred_and_checks_source_pool() 
         pool.save().unwrap();
         assert!(app.offer_fallback_after_error_with_payload("401 invalid API key", payload));
         assert!(app.pending_provider_failover.is_none());
+        // Unified router: pooled accounts outrank excluded ones even for
+        // the manual offer; the excluded route stays reachable only when no
+        // pooled alternative exists.
         assert_eq!(
             app.pending_fallback_offer
                 .as_ref()
                 .unwrap()
                 .selection
                 .api_method,
-            "claude-oauth@claude-otter"
+            "openai-oauth@openai-fox"
         );
     });
 }

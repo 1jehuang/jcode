@@ -238,12 +238,26 @@ impl MultiProvider {
                 {
                     return Some(*preserved);
                 }
+                // Shared router rule: an explicitly configured default is the
+                // user's own choice and wins; otherwise newest generation.
                 if let Some(configured) = configured_model.as_deref()
                     && let Some(preferred) = group
                         .iter()
                         .find(|candidate| candidate_matches_configured_model(candidate, configured))
                 {
                     return Some(*preferred);
+                }
+                if let Some(best) = group
+                    .iter()
+                    .filter(|candidate| {
+                        jcode_provider_core::model_generation_rank(candidate_model(candidate))
+                            != usize::MAX
+                    })
+                    .min_by_key(|candidate| {
+                        jcode_provider_core::model_generation_rank(candidate_model(candidate))
+                    })
+                {
+                    return Some(*best);
                 }
                 let models: Vec<&str> = group
                     .iter()
