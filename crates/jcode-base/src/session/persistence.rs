@@ -324,6 +324,7 @@ impl Session {
             );
         }
         self.guard_snapshot_shrink(snapshot_path, journal_path);
+        self.trim_env_snapshots();
         storage::write_json_fast(snapshot_path, self)?;
         if journal_path.exists() {
             let _ = std::fs::remove_file(journal_path);

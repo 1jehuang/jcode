@@ -1208,6 +1208,12 @@ impl Agent {
             .collect()
     }
 
+    /// Borrow the in-memory session so history assembly need not re-read the
+    /// (possibly tens of MB) persisted snapshot.
+    pub(crate) fn session_for_history(&self) -> &crate::session::Session {
+        &self.session
+    }
+
     pub fn get_history_and_rendered_images(
         &self,
     ) -> (Vec<HistoryMessage>, Vec<crate::session::RenderedImage>) {

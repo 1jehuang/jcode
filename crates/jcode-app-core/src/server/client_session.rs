@@ -1683,8 +1683,9 @@ pub(super) async fn handle_resume_session(
 
     let (result, is_canary) = {
         let mut agent_guard = agent.lock().await;
-        let result =
-            agent_guard.restore_session_with_working_dir(&session_id, working_dir_override);
+        let result = super::run_blocking_io(|| {
+            agent_guard.restore_session_with_working_dir(&session_id, working_dir_override)
+        });
         if *client_selfdev {
             agent_guard.set_canary("self-dev");
         }

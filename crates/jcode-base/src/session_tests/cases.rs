@@ -2957,3 +2957,76 @@ fn first_visible_user_prompt_becomes_the_generated_title() {
     session.rename_title(Some("Custom".into()));
     assert_eq!(session.display_title(), Some("Custom"));
 }
+
+/// Resuming a long session records an env snapshot. Past the retention cap
+/// that used to force a full rewrite of a tens-of-MB snapshot on every
+/// resume. It must append to the journal instead, and trim only when a
+/// checkpoint rewrites the snapshot anyway.
+#[test]
+fn env_snapshot_past_cap_appends_instead_of_rewriting_snapshot() -> Result<()> {
+    let _env_lock = lock_env();
+    let temp_home = tempfile::Builder::new()
+        .prefix("jcode-env-snapshot-append-test-")
+        .tempdir()
+        .map_err(|e| anyhow!(e))?;
+    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+
+    let session_id = "session_env_snapshot_append";
+    let mut session = Session::create_with_id(session_id.to_string(), None, None);
+    session.append_stored_message(StoredMessage {
+        id: "msg_env_1".to_string(),
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: "hello".to_string(),
+            cache_control: None,
+        }],
+        display_role: None,
+        timestamp: Some(Utc::now()),
+        tool_duration_ms: None,
+        token_usage: None,
+    });
+    let snapshot = |reason: &str| EnvSnapshot {
+        captured_at: Utc::now(),
+        reason: reason.to_string(),
+        session_id: session_id.to_string(),
+        working_dir: None,
+        provider: "openai".to_string(),
+        model: "gpt-5.4".to_string(),
+        jcode_version: "test".to_string(),
+        jcode_git_hash: None,
+        jcode_git_dirty: None,
+        os: "linux".to_string(),
+        arch: "x86_64".to_string(),
+        pid: 1,
+        is_selfdev: false,
+        is_debug: false,
+        is_canary: false,
+        testing_build: None,
+        working_git: None,
+    };
+    for i in 0..MAX_ENV_SNAPSHOTS {
+        session.record_env_snapshot(snapshot(&format!("fill{i}")));
+    }
+    session.save()?;
+
+    let snapshot_path = storage_paths::session_path(session_id)?;
+    let journal_path = session_journal_path_from_snapshot(&snapshot_path);
+    let snapshot_bytes = std::fs::read(&snapshot_path)?;
+
+    session.record_env_snapshot(snapshot("resume"));
+    session.save()?;
+
+    assert_eq!(
+        std::fs::read(&snapshot_path)?,
+        snapshot_bytes,
+        "recording one env snapshot past the cap must not rewrite the snapshot"
+    );
+    assert!(journal_path.exists(), "the new env snapshot is journaled");
+
+    let loaded = Session::load(session_id)?;
+    assert_eq!(
+        loaded.env_snapshots.last().map(|s| s.reason.as_str()),
+        Some("resume")
+    );
+    Ok(())
+}

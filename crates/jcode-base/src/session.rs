@@ -956,13 +956,19 @@ impl Session {
         self.memory_profile_cache.env_snapshots_count += 1;
         self.memory_profile_cache.env_snapshots_json_bytes += estimate_json_bytes(&snapshot);
         self.env_snapshots.push(snapshot);
+        // Trimming here would force a full snapshot rewrite (seconds on large
+        // transcripts) on every resume. Append instead and trim only when a
+        // checkpoint rewrites the snapshot anyway (see `trim_env_snapshots`).
+        self.mark_env_snapshots_append_dirty();
+    }
+
+    /// Drop all but the newest `MAX_ENV_SNAPSHOTS`. Only call right before a
+    /// full snapshot write, because it shrinks an append-tracked vector.
+    pub(crate) fn trim_env_snapshots(&mut self) {
         if self.env_snapshots.len() > MAX_ENV_SNAPSHOTS {
             let excess = self.env_snapshots.len() - MAX_ENV_SNAPSHOTS;
             self.env_snapshots.drain(0..excess);
             self.mark_memory_profile_dirty();
-            self.mark_env_snapshots_full_dirty();
-        } else {
-            self.mark_env_snapshots_append_dirty();
         }
     }
 
