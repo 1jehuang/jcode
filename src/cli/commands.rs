@@ -2123,6 +2123,8 @@ struct NdjsonRunState {
     connection_type: Option<String>,
     connection_phase: Option<String>,
     status_detail: Option<String>,
+    requested_service_tier: Option<String>,
+    served_service_tier: Option<String>,
     usage: crate::agent::TokenUsage,
 }
 
@@ -3271,6 +3273,8 @@ async fn run_single_message_command_ndjson(
                     "connection_type": state.connection_type,
                     "connection_phase": state.connection_phase,
                     "status_detail": state.status_detail,
+                    "requested_service_tier": state.requested_service_tier,
+                    "served_service_tier": state.served_service_tier,
                 }),
             )?;
             Ok(())
@@ -3369,6 +3373,18 @@ fn emit_ndjson_event(
                     "output": output,
                     "cache_read_input": cache_read_input,
                     "cache_creation_input": cache_creation_input,
+                }),
+            )
+        }
+        ServerEvent::ServiceTierReported { requested, tier } => {
+            state.requested_service_tier = requested.clone();
+            state.served_service_tier = Some(tier.clone());
+            write_json_line(
+                stdout,
+                &serde_json::json!({
+                    "type": "service_tier",
+                    "requested": requested,
+                    "tier": tier,
                 }),
             )
         }

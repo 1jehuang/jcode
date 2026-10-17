@@ -12,6 +12,43 @@ use tokio::sync::mpsc as tokio_mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 #[test]
+fn ndjson_preserves_provider_reported_service_tier_without_inferring_it() {
+    let mut state = NdjsonRunState::default();
+    assert_eq!(state.served_service_tier, None);
+    let mut output = Vec::new();
+    for (requested, served) in [
+        (Some("ultrafast"), "default"),
+        (Some("priority"), "priority"),
+        (None, "default"),
+    ] {
+        emit_ndjson_event(
+            &mut output,
+            &mut state,
+            crate::protocol::ServerEvent::ServiceTierReported {
+                requested: requested.map(str::to_owned),
+                tier: served.to_owned(),
+            },
+        )
+        .expect("emit tier metadata");
+        assert_eq!(state.requested_service_tier.as_deref(), requested);
+        assert_eq!(state.served_service_tier.as_deref(), Some(served));
+    }
+    let events: Vec<serde_json::Value> = String::from_utf8(output)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(events.len(), 3);
+    assert_eq!(
+        events[0],
+        serde_json::json!({
+            "type": "service_tier", "requested": "ultrafast", "tier": "default"
+        })
+    );
+    assert!(events[2]["requested"].is_null());
+}
+
+#[test]
 fn server_reload_report_preserves_json_fields_and_exit_status_contract() {
     let cases = [
         (false, false, false, false),
