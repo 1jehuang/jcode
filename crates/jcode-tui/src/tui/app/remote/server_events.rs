@@ -529,6 +529,7 @@ pub(in crate::tui::app) fn handle_server_event(
             | ServerEvent::Ack { .. }
             | ServerEvent::SwarmStatus { .. }
             | ServerEvent::SidePanelState { .. }
+            | ServerEvent::AccountUsage { .. }
             | ServerEvent::ModelUsageUpdated { .. }
             | ServerEvent::AvailableModelsUpdated { .. }
             | ServerEvent::MemoryActivity { .. }
@@ -2644,6 +2645,13 @@ pub(in crate::tui::app) fn handle_server_event(
                 }
             }
             false
+        }
+        ServerEvent::AccountUsage {
+            anthropic, openai, ..
+        } => {
+            crate::usage::set_remote_account_usage(anthropic, openai);
+            crate::tui::ui::prepare::invalidate_header_prep_cache();
+            true
         }
         ServerEvent::ModelUsageUpdated { route } => {
             for cached in &mut app.remote_model_options {

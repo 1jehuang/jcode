@@ -100,6 +100,11 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     });
     let mut needs_redraw = crate::tui::periodic_redraw_required(app);
     needs_redraw |= app.poll_pending_startup_transcript();
+    if remote.has_loaded_history()
+        && let Err(error) = remote.poll_account_usage().await
+    {
+        crate::logging::warn(&format!("Failed to request daemon account usage: {error}"));
+    }
     if app.model_catalog_after_history && remote.has_loaded_history() {
         app.model_catalog_after_history = false;
         if let Err(error) = remote.request_model_catalog().await {
