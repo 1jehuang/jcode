@@ -398,7 +398,10 @@ deletion. Lifecycle detail rows follow their existing parent retention.
 
 `npm run model-usage` reads the authoritative contract-v2 per-response
 `daily_model_usage_v2` rollup (migration 0031) for clients that emit
-`usage_report` with `usage_contract_version: 2`. Its monthly rows
+`usage_report` with `usage_contract_version: 2`. New clients POST to `/v2/usage`,
+which accepts only that event and contract version and rejects invalid bodies
+before storage. Older servers return 404 so clients can retain reports for retry.
+The existing `/v1/event` endpoint remains compatible with legacy reports. Its monthly rows
 keep `agent`, `compaction`, and `sidecar` sources separate. These are distinct
 response categories, not alternative copies of session totals. Input is already
 normalized to **uncached, disjoint tokens** before ingestion, so total tokens are

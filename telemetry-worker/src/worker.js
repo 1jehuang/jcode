@@ -527,7 +527,8 @@ export default {
       return ingestTranscript(request, env, cors);
     }
 
-    if (url.pathname !== "/v1/event") {
+    const isUsageV2 = url.pathname === "/v2/usage";
+    if (url.pathname !== "/v1/event" && !isUsageV2) {
       return jsonResponse({ error: "Not found" }, 404, cors);
     }
 
@@ -536,6 +537,15 @@ export default {
       body = await request.json();
     } catch {
       return jsonResponse({ error: "Invalid JSON" }, 400, cors);
+    }
+
+    if (body === null || typeof body !== "object" || Array.isArray(body)) {
+      return jsonResponse({ error: "Invalid event body" }, 400, cors);
+    }
+    // Reject incompatible clients before normalization or any storage side effects.
+    // This dedicated route lets v2 clients safely retry against older servers (404).
+    if (isUsageV2 && (body.event !== "usage_report" || body.usage_contract_version !== 2)) {
+      return jsonResponse({ error: "Expected usage_report with usage_contract_version 2" }, 400, cors);
     }
 
     // Web beacon events are normalized before the generic required-field
