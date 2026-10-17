@@ -165,16 +165,26 @@ clean.
 **Flagged for human review (NOT a §22 match, but adjacent):**
 
 - **PR #25** "feat(tui): add /poke context recovery launcher" has
-  "Closes #26" in its user description. **Issue/PR #26 does not
-  exist on `KooshaPari/KCode`** (`gh pr view 26` → "Could not
-  resolve"). `git log origin/master --grep="harness-compliant
-  squash-merge"` returns only the 3 already-retargeted PRs.
-  Conclusion: the "Closes #26" footer is misleading (references a
-  non-existent PR) but is **not** the §22 harness-squash-merge
-  pattern. This is a different class of problem; the subagent
-  flagged it per the stop condition and did NOT edit. **Operator
-  decision needed:** is #26 a pre-fork upstream PR, a planned
-  issue, or just a typo? Should the footer be removed/replaced?
+  "Closes #26" in its user description. **RETRACTED 2026-10-17T22:34Z**:
+  #26 is an issue, not a PR. `gh pr view 26` correctly fails with
+  "Could not resolve to a PullRequest" because GitHub keeps issue and
+  PR in separate namespaces (issue #26 and PR #26 share the same
+  number sequence but are different objects). The original audit
+  interpreted that error as "#26 does not exist" — that is the wrong
+  conclusion. `gh issue view 26` returns a live issue: "Add /poke
+  context recovery sessions" (state: OPEN, author: KooshaPari,
+  createdAt: 2026-10-02T19:10:12Z). PR #25's `closingIssuesReferences`
+  also points to issue #26. The link is real. **No operator action
+  needed.** Full retraction in
+  `pr-25-pr-26-investigation.md`.
+
+**Method note (added 2026-10-17T22:34Z):** when checking whether a
+referenced number exists, **use both** `gh issue view <N> --repo X`
+(or REST `/repos/X/issues/<N>`) **and** `gh pr view <N> --repo X`.
+`gh pr view` alone is insufficient and will produce false-positive
+"orphan" findings for any `Closes #N` reference where #N is an issue.
+The original audit ran only `gh pr view` and reached a wrong
+conclusion; the retraction fixes that.
 
 **§22 closed-loop conclusion (2026-10-17T07:06Z):** the §22
 finding is closed. Of all 200 PRs on `KooshaPari/KCode` and the
