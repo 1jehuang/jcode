@@ -38,6 +38,18 @@ fn agent_failover_fixture(models: &[&str]) -> MultiProvider {
 }
 
 fn agent_failover_target(provider: &MultiProvider, tokens: usize, reason: &str) -> Option<String> {
+    // Changing the configured default bumps the config generation, which is
+    // part of the memo key. Re-key the fixture catalog so the test keeps
+    // measuring its own routes instead of the real built-in catalog.
+    let routes = provider
+        .routes_memo
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|entry| entry.routes.clone());
+    if let Some(routes) = routes {
+        agent_failover_catalog(provider, routes);
+    }
     provider
         .cross_provider_pool_prompt(
             ActiveProvider::Claude,
@@ -217,18 +229,18 @@ fn agent_failover_unranked_models_have_no_catalog_or_context_tiebreak_fallback()
         let rt = enter_test_runtime();
         let _guard = rt.enter();
         for models in [
-            ["gpt-9.9-nova", "gpt-9.9-mira"],
-            ["gpt-9.9-mira", "gpt-9.9-nova"],
+            ["gpt-6.1-terra", "gpt-6.1-luna"],
+            ["gpt-6.1-luna", "gpt-6.1-terra"],
         ] {
             let provider = agent_failover_fixture(&models);
             assert_eq!(
                 agent_failover_target(&provider, 128, "401 unauthorized"),
                 None
             );
-            agent_failover_set_default_model("openai-api:gpt-9.9-nova").unwrap();
+            agent_failover_set_default_model("openai-api:gpt-6.1-terra").unwrap();
             assert_eq!(
                 agent_failover_target(&provider, 128, "401 unauthorized"),
-                Some("openai-api:gpt-9.9-nova".into()),
+                Some("openai-api:gpt-6.1-terra".into()),
                 "an explicitly configured eligible new GPT variant is supported"
             );
             agent_failover_set_default_model("").unwrap();
