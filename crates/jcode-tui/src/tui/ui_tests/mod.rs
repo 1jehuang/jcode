@@ -527,6 +527,8 @@ mod palette_topology;
 mod prepared_messages_tests;
 #[path = "rendering.rs"]
 mod rendering;
+#[path = "scrollbar_overlay.rs"]
+mod scrollbar_overlay;
 #[path = "swarm_buffer.rs"]
 mod swarm_buffer;
 #[path = "tools.rs"]
