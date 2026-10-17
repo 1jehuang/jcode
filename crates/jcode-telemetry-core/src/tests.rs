@@ -765,11 +765,13 @@ fn usage_report_is_attributed_to_caller_session_not_global_slot() {
     assert_eq!(report["provider"], "OpenAI");
     assert_eq!(report["model"], "gpt-6-astra");
     assert_eq!(report["source"], "agent");
-    assert_eq!(report["input_tokens"], 1_000);
+    assert_eq!(report["input_tokens"], 200);
     assert_eq!(report["output_tokens"], 200);
     assert_eq!(report["cache_read_input_tokens"], 800);
     assert_eq!(report["cache_creation_input_tokens"], 0);
-    assert_eq!(report["total_tokens"], 2_000);
+    assert_eq!(report["total_tokens"], 1_200);
+    assert_eq!(report["usage_contract_version"], 2);
+    assert!(chrono::DateTime::parse_from_rfc3339(report["occurred_at"].as_str().unwrap()).is_ok());
     assert_eq!(report["responses"], 1);
     assert!(report.get("build_channel").is_some());
     assert!(report.get("is_ci").is_some());
@@ -841,6 +843,45 @@ fn usage_report_falls_back_to_global_session_and_skips_zero_usage() {
     if let Ok(mut session) = SESSION_STATE.lock() {
         *session = None;
     }
+}
+
+#[test]
+fn provider_usage_normalizes_cache_subsets_by_transport_not_model() {
+    let usage = ProviderUsage {
+        input_tokens: 100,
+        output_tokens: 20,
+        cache_read_input_tokens: Some(60),
+        cache_creation_input_tokens: Some(10),
+    };
+    for provider in [
+        "openai",
+        "OpenAI",
+        "openrouter",
+        "gemini",
+        "antigravity",
+        "copilot",
+    ] {
+        let normalized = usage.normalized(provider);
+        assert_eq!(normalized.input_tokens, 30, "{provider}");
+        assert_eq!(normalized.output_tokens, 20);
+        assert_eq!(normalized.cache_read_input_tokens, Some(60));
+        assert_eq!(normalized.cache_creation_input_tokens, Some(10));
+    }
+    for provider in ["anthropic", "claude", "bedrock", "unknown"] {
+        assert_eq!(usage.normalized(provider), usage, "{provider}");
+    }
+    let cache_only = ProviderUsage {
+        cache_read_input_tokens: Some(100),
+        cache_creation_input_tokens: Some(20),
+        ..ProviderUsage::default()
+    };
+    assert_eq!(cache_only.normalized("openai").input_tokens, 0);
+    assert!(!cache_only.normalized("openai").is_zero());
+    let missing_details = ProviderUsage {
+        input_tokens: 100,
+        ..ProviderUsage::default()
+    };
+    assert_eq!(missing_details.normalized("openai"), missing_details);
 }
 
 #[test]

@@ -12,6 +12,7 @@ mod lifecycle;
 pub use concurrency::{ConcurrencySession, begin_concurrency_session};
 pub mod onboarding_trace;
 mod state_support;
+mod usage_outbox;
 use chrono::{DateTime, NaiveDate, Utc};
 use jcode_usage_types::{
     AuthEvent, DiscoveryEvent, ErrorCounts, FeedbackEvent, InstallEvent, OnboardingStepEvent,
@@ -520,6 +521,10 @@ pub fn set_usage_telemetry_enabled(enabled: bool) -> bool {
         return false;
     };
     if enabled {
+        #[cfg(not(test))]
+        if path.exists() || opt_out_forced_by_env() {
+            usage_outbox::clear_pending();
+        }
         match std::fs::remove_file(&path) {
             Ok(()) => true,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => true,
@@ -541,6 +546,8 @@ pub fn set_usage_telemetry_enabled(enabled: bool) -> bool {
         match std::fs::write(&path, b"1") {
             Ok(()) => {
                 logging::debug("usage telemetry opted out via marker");
+                #[cfg(not(test))]
+                usage_outbox::clear_pending();
                 true
             }
             Err(err) => {
@@ -1217,12 +1224,17 @@ pub fn record_command_family(command: &str) {
 
 #[cfg(not(test))]
 fn post_payload(payload: serde_json::Value, timeout: Duration) -> bool {
-    if TELEMETRY_PERMANENTLY_REJECTED.load(Ordering::Relaxed) {
+    if payload["event"] == "usage_report" && !is_enabled() {
+        return false;
+    }
+    // Spend delivery must survive an unrelated activity event tripping the
+    // legacy circuit breaker. Older workers can reject newer activity schemas.
+    let breaker_exempt = payload_is_breaker_exempt(&payload);
+    if TELEMETRY_PERMANENTLY_REJECTED.load(Ordering::Relaxed) && !breaker_exempt {
         return false;
     }
     // Newer event types can reach an older worker that rejects them as unknown.
     // That must only drop the one payload, never disable all telemetry.
-    let breaker_exempt = payload_is_breaker_exempt(&payload);
     let client = TELEMETRY_HTTP_CLIENT.get_or_init(|| {
         reqwest::blocking::Client::builder()
             .user_agent(jcode_provider_core::JCODE_USER_AGENT)
@@ -1235,7 +1247,13 @@ fn post_payload(payload: serde_json::Value, timeout: Duration) -> bool {
         .json(&payload)
         .send()
     {
-        Ok(response) if response.status().is_success() => true,
+        Ok(response) if response.status().is_success() => {
+            if payload["event"] == "usage_report" {
+                usage_outbox::acknowledged(response, &payload)
+            } else {
+                true
+            }
+        }
         Ok(response) => {
             let status = response.status();
             if telemetry_status_is_permanent(status.as_u16()) && !breaker_exempt {
@@ -1264,7 +1282,9 @@ fn post_payload_with_retry(payload: serde_json::Value, timeout: Duration) -> boo
         return true;
     }
     for delay in RETRY_DELAYS {
-        if TELEMETRY_PERMANENTLY_REJECTED.load(Ordering::Relaxed) {
+        if TELEMETRY_PERMANENTLY_REJECTED.load(Ordering::Relaxed)
+            && !payload_is_breaker_exempt(&payload)
+        {
             return false;
         }
         std::thread::sleep(delay);
@@ -1325,10 +1345,24 @@ static TELEMETRY_IN_FLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::
 /// exit right after recording an event.
 pub fn flush_pending(timeout: std::time::Duration) {
     let deadline = std::time::Instant::now() + timeout;
-    while TELEMETRY_IN_FLIGHT.load(std::sync::atomic::Ordering::Acquire) > 0
+    #[cfg(not(test))]
+    usage_outbox::wake();
+    while (TELEMETRY_IN_FLIGHT.load(std::sync::atomic::Ordering::Acquire) > 0
+        || durable_usage_pending())
         && std::time::Instant::now() < deadline
     {
         std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+fn durable_usage_pending() -> bool {
+    #[cfg(not(test))]
+    {
+        usage_outbox::has_pending()
+    }
+    #[cfg(test)]
+    {
+        false
     }
 }
 
@@ -1404,6 +1438,12 @@ fn send_payload(mut payload: serde_json::Value, mode: DeliveryMode) -> bool {
 #[cfg(not(test))]
 fn send_payload(mut payload: serde_json::Value, mode: DeliveryMode) -> bool {
     concurrency::mark_legacy_concurrency_unavailable(&mut payload);
+    // Usage events bypass the volatile activity queue. A process exit, queue
+    // overflow, or retry exhaustion must not discard the authoritative spend.
+    if payload["event"] == "usage_report" {
+        return usage_outbox::enqueue(payload);
+    }
+    usage_outbox::wake();
     match mode {
         DeliveryMode::Background => {
             if TELEMETRY_PERMANENTLY_REJECTED.load(Ordering::Relaxed) {
@@ -1932,6 +1972,8 @@ fn begin_session_with_mode(
     resumed_session: bool,
 ) {
     if !is_enabled() {
+        #[cfg(not(test))]
+        usage_outbox::clear_pending();
         return;
     }
     logging::info(&format!(
@@ -2287,6 +2329,27 @@ pub struct ProviderUsage {
 }
 
 impl ProviderUsage {
+    /// Convert provider-native counters to non-overlapping spend buckets.
+    /// OpenAI-compatible and Gemini inputs contain their cache subsets, while
+    /// Anthropic and Bedrock report uncached input separately. Key on transport,
+    /// not model name: OpenRouter can serve Anthropic with inclusive counters.
+    fn normalized(self, provider: &str) -> Self {
+        if matches!(
+            provider.trim().to_ascii_lowercase().as_str(),
+            "openai" | "openrouter" | "gemini" | "antigravity" | "copilot"
+        ) {
+            Self {
+                input_tokens: self
+                    .input_tokens
+                    .saturating_sub(self.cache_read_input_tokens.unwrap_or(0))
+                    .saturating_sub(self.cache_creation_input_tokens.unwrap_or(0)),
+                ..self
+            }
+        } else {
+            self
+        }
+    }
+
     fn is_zero(&self) -> bool {
         self.input_tokens == 0
             && self.output_tokens == 0
@@ -2302,7 +2365,8 @@ impl ProviderUsage {
 /// depend on the session ending cleanly and does not read the process-global
 /// telemetry session, so concurrent agents in one server process (swarm
 /// workers, background tasks, desktop panels) are each attributed correctly.
-/// Delivery is background and best-effort; token counts only, no content.
+/// Delivery persists before returning and retries in the background. A server
+/// acknowledgement is required to remove the event. Token counts only, no content.
 pub fn record_provider_usage(
     session_id: Option<&str>,
     provider: &str,
@@ -2326,10 +2390,13 @@ pub fn record_provider_usage(
                 .and_then(|guard| guard.as_ref().map(|state| state.session_id.clone()))
         })
         .unwrap_or_default();
+    let usage = usage.normalized(provider);
     let cache_read = usage.cache_read_input_tokens.unwrap_or(0);
     let cache_creation = usage.cache_creation_input_tokens.unwrap_or(0);
     let (schema_version, build_channel, git_checkout, ci, from_cargo) = telemetry_envelope();
     let event = UsageReportEvent {
+        usage_contract_version: 2,
+        occurred_at: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         event_id: new_event_id(),
         id,
         session_id,
