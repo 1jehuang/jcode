@@ -615,7 +615,6 @@ fn trusted_laya_base(base: &str) -> Result<String> {
     let trusted_http_host = url.host_str().is_some_and(|host| {
         let lower = host.to_ascii_lowercase();
         lower == "localhost"
-            || lower == "dragon"
             || lower.ends_with(".ts.net")
             || lower.ends_with(".local")
             || host
