@@ -215,6 +215,31 @@ fn test_process_that_reads_then_exits() {
     assert!(status.success(), "head should exit successfully");
 }
 
+// ── is_stdin_interactive / is_stdin_terminal / is_stdin_pipe tests ──
+
+#[test]
+fn test_is_stdin_interactive_and_terminal_agree() {
+    // is_stdin_interactive and is_stdin_terminal must always return the same
+    // value — they are semantic aliases.
+    assert_eq!(is_stdin_interactive(), is_stdin_terminal());
+}
+
+#[test]
+fn test_is_stdin_pipe_is_negation_of_interactive() {
+    // pipe = !interactive
+    assert_eq!(is_stdin_pipe(), !is_stdin_interactive());
+}
+
+#[test]
+fn test_is_stdin_interactive_consistency_with_is_terminal_trait() {
+    // Our helper should agree with the raw IsTerminal trait call.
+    use std::io::IsTerminal;
+    assert_eq!(
+        is_stdin_interactive(),
+        std::io::stdin().is_terminal()
+    );
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn test_process_with_closed_stdin_not_reading() {
