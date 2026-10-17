@@ -543,6 +543,8 @@ pub struct GeminiUsageMetadata {
     #[serde(default)]
     pub prompt_token_count: Option<u64>,
     #[serde(default)]
+    pub tool_use_prompt_token_count: Option<u64>,
+    #[serde(default)]
     pub candidates_token_count: Option<u64>,
     #[serde(default)]
     pub thoughts_token_count: Option<u64>,
@@ -551,6 +553,14 @@ pub struct GeminiUsageMetadata {
 }
 
 impl GeminiUsageMetadata {
+    /// Tool-use prompts are input tokens, separate from the ordinary prompt.
+    pub fn input_token_count(&self) -> Option<u64> {
+        match (self.prompt_token_count, self.tool_use_prompt_token_count) {
+            (Some(prompt), Some(tool_use)) => Some(prompt.saturating_add(tool_use)),
+            (prompt, tool_use) => prompt.or(tool_use),
+        }
+    }
+
     /// Billable output includes candidates and thinking tokens.
     /// Do not infer output from totalTokenCount, which includes tool-use prompts.
     pub fn output_token_count(&self) -> Option<u64> {
@@ -713,6 +723,41 @@ pub fn choose_onboard_tier(res: &LoadCodeAssistResponse) -> GeminiUserTier {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn response_usage_counts_tool_use_prompts_without_inventing_input() {
+        for (metadata, expected) in [
+            (json!({}), None),
+            (json!({"totalTokenCount": 99}), None),
+            (
+                json!({"promptTokenCount": null, "toolUsePromptTokenCount": null}),
+                None,
+            ),
+            (json!({"promptTokenCount": 0}), Some(0)),
+            (json!({"toolUsePromptTokenCount": 0}), Some(0)),
+            (json!({"promptTokenCount": 10}), Some(10)),
+            (json!({"toolUsePromptTokenCount": 90}), Some(90)),
+            (
+                json!({"promptTokenCount": 10, "toolUsePromptTokenCount": 90, "cachedContentTokenCount": 4}),
+                Some(100),
+            ),
+            (
+                json!({"promptTokenCount": u64::MAX, "toolUsePromptTokenCount": 1}),
+                Some(u64::MAX),
+            ),
+        ] {
+            let response: VertexGenerateContentResponse = serde_json::from_value(json!({
+                "usageMetadata": metadata
+            }))
+            .unwrap();
+            let usage = response.usage_metadata.unwrap();
+            assert_eq!(usage.input_token_count(), expected, "{metadata}");
+            assert_eq!(
+                usage.cached_content_token_count,
+                metadata["cachedContentTokenCount"].as_u64()
+            );
+        }
+    }
 
     #[test]
     fn response_usage_counts_thinking_without_inventing_output() {
