@@ -1,0 +1,70 @@
+name: Windows Transport Tests
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+    paths:
+      - 'crates/jcode-transport/**'
+      - '.github/workflows/windows-transport.yml'
+  pull_request:
+    paths:
+      - 'crates/jcode-transport/**'
+      - '.github/workflows/windows-transport.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-transport-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  transport:
+    name: Native transport (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2025
+            arch: amd64
+            target: x86_64-pc-windows-msvc
+          - os: windows-11-arm
+            arch: arm64
+            target: aarch64-pc-windows-msvc
+    env:
+      CARGO_BUILD_RUSTC_WRAPPER: ''
+      JUSTRUST_TOOLCHAIN: system
+      JUSTRUST_SLOTS: '0'
+      JUSTRUST_NO_TELEMETRY: '1'
+      # Native Windows execution is required for named-pipe tests. As in the
+      # companion workflow, disable alpha.17's Windows measurement allocation.
+      JUSTRUST_DISABLE: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.arch }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-transport-${{ matrix.target }}
+      - name: Install pinned justrust
+        shell: bash
+        # The installer uses the x64 Windows package, which also runs under
+        # emulation on ARM64. Cargo/rustc still target the native architecture.
+        run: bash scripts/install_justrust_ci.sh
+      - name: Check transport
+        shell: pwsh
+        run: |
+          justrust check --local --locked -p jcode-transport --target ${{ matrix.target }}
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Test native named pipes
+        shell: pwsh
+        run: |
+          justrust test --local --locked -p jcode-transport --target ${{ matrix.target }} -- --nocapture
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
