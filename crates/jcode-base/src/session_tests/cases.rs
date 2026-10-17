@@ -3030,3 +3030,55 @@ fn env_snapshot_past_cap_appends_instead_of_rewriting_snapshot() -> Result<()> {
     );
     Ok(())
 }
+
+/// Resuming a large session changes metadata (status, pid). That used to
+/// rewrite the whole multi-MB snapshot on every resume. It must journal the
+/// change instead, and both full and startup-stub loads must see it.
+#[test]
+fn metadata_change_on_large_session_is_journaled_not_rewritten() -> Result<()> {
+    let _env_lock = lock_env();
+    let temp_home = tempfile::Builder::new()
+        .prefix("jcode-meta-journal-test-")
+        .tempdir()
+        .map_err(|e| anyhow!(e))?;
+    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+
+    let session_id = "session_meta_journal_large";
+    let mut session = Session::create_with_id(session_id.to_string(), None, None);
+    let big = "x".repeat(64 * 1024);
+    for i in 0..24 {
+        session.append_stored_message(StoredMessage {
+            id: format!("msg_{i}"),
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: big.clone(),
+                cache_control: None,
+            }],
+            display_role: None,
+            timestamp: Some(Utc::now()),
+            tool_duration_ms: None,
+            token_usage: None,
+        });
+    }
+    session.save()?;
+    let snapshot_path = storage_paths::session_path(session_id)?;
+    let before = std::fs::read(&snapshot_path)?;
+    assert!(before.len() as u64 >= 1024 * 1024, "fixture must be large");
+
+    session.custom_title = Some("renamed".to_string());
+    session.status = SessionStatus::Closed;
+    session.save()?;
+
+    assert_eq!(
+        std::fs::read(&snapshot_path)?,
+        before,
+        "a metadata change must not rewrite a large snapshot"
+    );
+    let full = Session::load(session_id)?;
+    assert_eq!(full.custom_title.as_deref(), Some("renamed"));
+    assert!(matches!(full.status, SessionStatus::Closed));
+    let stub = Session::load_startup_stub(session_id)?;
+    assert_eq!(stub.custom_title.as_deref(), Some("renamed"));
+    assert!(matches!(stub.status, SessionStatus::Closed));
+    Ok(())
+}

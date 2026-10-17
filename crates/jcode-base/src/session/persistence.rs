@@ -179,6 +179,36 @@ fn salvage_glued_journal_entries(line: &str, mut apply: impl FnMut(SessionJourna
 /// line preserves the rest of the transcript; per-entry `meta` snapshots make
 /// later entries self-sufficient for metadata, and appended messages after a
 /// gap are far better than losing the whole tail.
+/// Snapshot files at or above this size journal metadata-only changes
+/// instead of rewriting the whole transcript.
+const METADATA_SNAPSHOT_MAX_BYTES: u64 = 1024 * 1024;
+
+/// Apply the metadata from the newest journal entry without deserializing
+/// any appended messages.
+fn apply_latest_journal_meta(session: &mut Session, journal_path: &Path) {
+    #[derive(serde::Deserialize)]
+    struct MetaOnly {
+        meta: super::journal::SessionJournalMeta,
+    }
+    let Ok(file) = std::fs::File::open(journal_path) else {
+        return;
+    };
+    let mut latest = None;
+    for line in BufReader::new(file).lines() {
+        let Ok(line) = line else { break };
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(entry) = serde_json::from_str::<MetaOnly>(trimmed) {
+            latest = Some(entry.meta);
+        }
+    }
+    if let Some(meta) = latest {
+        session.apply_journal_meta(meta);
+    }
+}
+
 fn replay_journal_lines(
     journal_path: &Path,
     mut apply: impl FnMut(SessionJournalEntry),
@@ -480,6 +510,10 @@ impl Session {
         let bytes = std::fs::read(&path)?;
         let stub: SessionStartupStub = serde_json::from_slice(&bytes)?;
         let mut session = Self::session_from_startup_stub(stub);
+        // Metadata changes on large sessions are journaled instead of forcing
+        // a full snapshot rewrite, so the journal holds the latest metadata.
+        apply_latest_journal_meta(&mut session, &session_journal_path_from_snapshot(&path));
+        session.reset_persist_state(true);
         session.refresh_agent_model_overrides()?;
         Ok(session)
     }
@@ -615,11 +649,16 @@ impl Session {
         let snapshot_bytes_before = file_len_or_zero(&path);
         let journal_bytes_before = file_len_or_zero(&journal_path);
         let current_meta = self.journal_meta();
-        let metadata_needs_snapshot = self
-            .persist_state
-            .last_meta
-            .as_ref()
-            .is_some_and(|prev| metadata_requires_snapshot(prev, &current_meta));
+        // Every journal entry carries the full metadata and replay (and the
+        // startup stub) applies it, so a metadata change only needs a snapshot
+        // to keep small files self-contained. For large transcripts the full
+        // rewrite cost ~0.6s per resume of a 40MB session, so journal it.
+        let metadata_needs_snapshot = snapshot_bytes_before < METADATA_SNAPSHOT_MAX_BYTES
+            && self
+                .persist_state
+                .last_meta
+                .as_ref()
+                .is_some_and(|prev| metadata_requires_snapshot(prev, &current_meta));
         let vectors_need_snapshot = !self.persist_state.snapshot_exists
             || self.persist_state.messages_mode == PersistVectorMode::Full
             || self.persist_state.env_snapshots_mode == PersistVectorMode::Full
