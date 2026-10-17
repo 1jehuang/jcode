@@ -599,6 +599,47 @@ fn test_new_for_remote_restores_display_history_without_retaining_session_transc
 }
 
 #[test]
+fn test_remote_startup_restores_swarm_delivery_as_compact_card() {
+    with_temp_jcode_home(|| {
+        let session_id = "session_remote_restore_swarm_delivery";
+        let mut session =
+            crate::session::Session::create_with_id(session_id.to_string(), None, None);
+        let body = "Detailed implementation report. ".repeat(40);
+        session.append_stored_message(crate::session::StoredMessage {
+            id: "msg_restored_dm".to_string(),
+            role: crate::message::Role::User,
+            content: vec![crate::message::ContentBlock::Text {
+                text: format!("DM from hatchling: {body}"),
+                cache_control: None,
+            }],
+            display_role: Some(crate::session::StoredDisplayRole::System),
+            timestamp: None,
+            tool_duration_ms: None,
+            token_usage: None,
+        });
+        session.save_prepared().expect("save persisted DM");
+
+        let _env_guard = EnvRestoreGuard::capture(["JCODE_RELOAD_FAST_START"]);
+        crate::env::remove_var("JCODE_RELOAD_FAST_START");
+        let loaded = crate::session::Session::load_for_remote_startup(session_id)
+            .expect("load persisted DM");
+        assert_eq!(loaded.messages.len(), 1);
+        assert_eq!(crate::session::render_messages(&loaded).len(), 1);
+        let app = App::new_for_remote_with_options(Some(session_id.to_string()), false);
+        let message = app.display_messages().first().expect("restored DM");
+        assert_eq!(message.role, "swarm");
+        assert_eq!(message.title.as_deref(), Some("DM from hatchling"));
+        assert_eq!(
+            crate::tui::app::remote_notifications::swarm_display_full_body(&message.content),
+            body.trim()
+        );
+        let lines =
+            crate::tui::ui::render_swarm_message(message, 100, crate::config::DiffDisplayMode::Off);
+        assert_eq!(lines.len(), 1, "restored DM must stay collapsed");
+    });
+}
+
+#[test]
 fn test_restore_session_restores_local_judge_processing_state() {
     with_temp_jcode_home(|| {
         let session_id = "session_local_judge_child";

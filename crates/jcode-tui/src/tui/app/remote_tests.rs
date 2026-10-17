@@ -1299,6 +1299,35 @@ fn injected_swarm_dm_without_card_renders_one_collapsed_row() {
 }
 
 #[test]
+fn restored_display_snapshot_normalizes_only_raw_swarm_deliveries() {
+    use crate::tui::DisplayMessage;
+    let mut app = create_test_app();
+    let body = "Detailed implementation report. ".repeat(40);
+    let encoded = jcode_tui_messages::encode_collapsible_swarm_content("report", &body);
+    let expanded = jcode_tui_messages::toggle_collapsible_swarm_content(&encoded).unwrap();
+    app.replace_display_messages(vec![
+        DisplayMessage::system(format!("DM from hatchling: {body}")),
+        DisplayMessage::user(format!("#parser from owl: {body}")),
+        DisplayMessage::assistant(format!("DM from fox: {body}")),
+        DisplayMessage::swarm("DM from sheep", expanded.clone()),
+    ]);
+    let messages = app.display_messages();
+    for message in &messages[..2] {
+        assert_eq!(message.role, "swarm");
+        assert_eq!(
+            crate::tui::ui::render_swarm_message(
+                message,
+                100,
+                crate::config::DiffDisplayMode::Off,
+            ).len(),
+            1,
+        );
+    }
+    assert_eq!(messages[2].role, "assistant");
+    assert_eq!(messages[3].content, expanded);
+}
+
+#[test]
 fn history_restore_renders_swarm_deliveries_as_one_row() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
