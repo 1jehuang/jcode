@@ -2519,6 +2519,37 @@ pub(crate) fn debug_chat_image_regions_json() -> String {
     .unwrap_or_else(|_| "{}".to_string())
 }
 
+/// Conservatively detect overflow without rendering Markdown. This lets a cold
+/// reload skip preparing a wide transcript that would immediately be discarded
+/// to reserve the scrollbar column. Only count rows the body must emit.
+fn transcript_definitely_overflows(messages: &[DisplayMessage], available_rows: usize) -> bool {
+    let mut rows = 0usize;
+    for message in messages {
+        let role = message.effective_role();
+        // Tool results can be hidden (notably pinned todos). These three roles
+        // do not add the usual inter-message separator either.
+        if rows > 0 && !matches!(role, "tool" | "meta" | "swarm") {
+            rows = rows.saturating_add(1);
+        }
+        rows = rows.saturating_add(match role {
+            // Voice/transcription normalization can remove source lines, but
+            // even an empty user prompt still emits its numbered first row.
+            "user" | "meta" | "error" => 1,
+            "spacer" => message
+                .content
+                .trim()
+                .parse::<usize>()
+                .unwrap_or(0)
+                .saturating_sub(1),
+            _ => 0,
+        });
+        if rows > available_rows {
+            return true;
+        }
+    }
+    false
+}
+
 pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
     record_idle_animation_area(None);
     if let Some(frozen) = app.hibernation_frame()
@@ -3022,9 +3053,14 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         let prepared_wide = prepare_at(wide_prepare_width);
         initial_content_height = prepared_wide.total_wrapped_lines().max(1) as u16;
         (prepared_wide, false)
-    } else if last_chat_scrollbar_visible() {
-        // Scrollbar was visible last frame: prepare the narrow (reserved-column)
-        // layout first. If it still overflows we keep it without touching wide.
+    } else if last_chat_scrollbar_visible()
+        || transcript_definitely_overflows(
+            app.display_messages(),
+            available_height.saturating_sub(stable_fixed_height) as usize,
+        )
+    {
+        // Prior visibility or the source-row lower bound suggests starting
+        // narrow. Still check the actual layout before keeping the scrollbar.
         let prepared_narrow = prepare_at(narrow_prepare_width);
         initial_content_height = prepared_narrow.total_wrapped_lines().max(1) as u16;
         if overflows(&prepared_narrow) {
