@@ -258,6 +258,12 @@ fn model_capabilities_refresh_forwards_only_active_present_openai() {
             "gpt-5.4".to_string()
         }
 
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(Self(std::sync::atomic::AtomicBool::new(
+                self.model_capabilities_need_refresh(),
+            )))
+        }
+
         fn model_capabilities_need_refresh(&self) -> bool {
             self.0.load(std::sync::atomic::Ordering::SeqCst)
         }
