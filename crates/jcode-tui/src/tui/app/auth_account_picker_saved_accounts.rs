@@ -1,7 +1,7 @@
 use super::*;
 
-/// The login picker re-authenticates saved credentials under their existing label.
-/// Account switching remains available through the separate `/account` picker.
+/// The login picker offers explicit additions alongside reauthentication of saved
+/// credentials. Both use the same account actions as the `/account` picker.
 pub(super) fn saved_login_picker_entries(
     current_provider: &str,
     selected_label: Option<&str>,
@@ -60,7 +60,41 @@ pub(super) fn saved_login_picker_entries(
             active.as_deref() == Some(account.label.as_str()),
         ));
     }
+    entries.extend(new_login_account_entries());
     entries
+}
+
+/// Allocate no labels while rendering. The existing account-add action allocates
+/// an unused label at selection time and aborts on allocation errors.
+fn new_login_account_entries() -> Vec<crate::tui::PickerEntry> {
+    use crate::tui::{AccountPickerAction, PickerAction, PickerEntry, PickerOption};
+    [("claude", "Claude"), ("openai", "OpenAI")]
+        .into_iter()
+        .map(|(provider_id, provider_name)| PickerEntry {
+            name: format!("{provider_name} · Add another account"),
+            options: vec![PickerOption {
+                provider: provider_id.to_string(),
+                api_method: "new account".to_string(),
+                available: true,
+                detail: "Sign in with a new account label without replacing saved credentials"
+                    .to_string(),
+                estimated_reference_cost_micros: None,
+            }],
+            action: PickerAction::Account(AccountPickerAction::Add {
+                provider_id: provider_id.to_string(),
+            }),
+            selected_option: 0,
+            is_current: false,
+            is_default: false,
+            is_favorite: false,
+            recommended: false,
+            recommendation_rank: usize::MAX,
+            usage_score: 0,
+            old: false,
+            created_date: None,
+            effort: None,
+        })
+        .collect()
 }
 
 fn selected_login_label(
@@ -500,6 +534,33 @@ fn format_account_table(headers: &[&str; 5], rows: &[[String; 5]]) -> Vec<String
 #[cfg(test)]
 mod account_display_tests {
     use super::*;
+
+    #[test]
+    fn login_additions_use_safe_account_add_actions_for_both_oauth_providers() {
+        let entries = new_login_account_entries();
+        assert_eq!(entries.len(), 2);
+        for (entry, provider) in entries.iter().zip(["claude", "openai"]) {
+            assert!(entry.name.contains("Add another account"));
+            assert_eq!(entry.options.len(), 1);
+            assert!(entry.options[0].available);
+            assert_eq!(entry.options[0].api_method, "new account");
+            assert!(!entry.is_current);
+            assert!(!entry.is_default);
+            assert!(matches!(&entry.action,
+                crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Add { provider_id })
+                if provider_id == provider));
+        }
+    }
+
+    #[test]
+    fn login_picker_includes_additions_independently_of_saved_account_state() {
+        let entries = saved_login_picker_entries("OpenAI", Some("existing-account"));
+        for provider in ["claude", "openai"] {
+            assert_eq!(entries.iter().filter(|entry| matches!(&entry.action,
+                crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Add { provider_id })
+                if provider_id == provider)).count(), 1);
+        }
+    }
 
     #[test]
     fn saved_login_choices_preserve_all_named_reauthentication_targets() {
