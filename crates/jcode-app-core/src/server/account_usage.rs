@@ -86,7 +86,7 @@ fn wire_snapshot(value: crate::usage::AccountUsageSnapshot) -> AccountUsageSnaps
             || lower.contains("rate limit")
             || lower.contains("too many requests")
         {
-            "Usage temporarily rate limited (429)".to_string()
+            "Couldn't fetch usage (429: lookup throttled)".to_string()
         } else if lower.contains("401") || lower.contains("unauthorized") {
             "Usage authentication failed (401)".to_string()
         } else {
@@ -138,7 +138,7 @@ mod tests {
         for (raw, safe) in [
             (
                 "HTTP 429 secret diagnostic",
-                "Usage temporarily rate limited (429)",
+                "Couldn't fetch usage (429: lookup throttled)",
             ),
             (
                 "HTTP 401 secret diagnostic",

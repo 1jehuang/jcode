@@ -264,9 +264,9 @@ fn usage_status_label(usage: Option<&crate::usage::AccountUsageSnapshot>) -> &'s
     match usage {
         None => "limits pending",
         Some(usage) => match usage.error.as_deref() {
-            Some(error) if error.contains("429") => "limits rate limited",
-            Some(error) if error.contains("401") => "limits need login",
-            Some(_) => "limits unavailable",
+            Some(error) if error.contains("429") => "usage fetch failed (429)",
+            Some(error) if error.contains("401") => "usage fetch needs login",
+            Some(_) => "usage fetch failed",
             None => "limits not reported",
         },
     }
@@ -725,10 +725,17 @@ mod tests {
         for (error, expected) in [
             (
                 "Usage temporarily rate limited (429)",
-                "limits rate limited",
+                "usage fetch failed (429)",
             ),
-            ("Usage authentication failed (401)", "limits need login"),
-            ("secret transport diagnostic", "limits unavailable"),
+            (
+                "Couldn't fetch usage (429: lookup throttled)",
+                "usage fetch failed (429)",
+            ),
+            (
+                "Usage authentication failed (401)",
+                "usage fetch needs login",
+            ),
+            ("secret transport diagnostic", "usage fetch failed"),
         ] {
             usage.error = Some(error.into());
             assert_eq!(usage_status_label(Some(&usage)), expected);
