@@ -2126,6 +2126,22 @@ async fn run_stream_with_retries(
                     return;
                 }
 
+                // Replayed web search payloads are bound to the account that
+                // produced them. After a fork or account switch Anthropic
+                // rejects them, so resend with plain-text summaries instead of
+                // bricking the session.
+                if !saw_output
+                    && jcode_provider_anthropic::is_invalid_native_replay_error(&error_str)
+                    && jcode_provider_anthropic::downgrade_native_replay(&mut request.messages)
+                {
+                    jcode_base::logging::warn(&format!(
+                        "Anthropic rejected replayed server tool blocks; retrying with text summaries: {}",
+                        e
+                    ));
+                    last_error = Some(e);
+                    continue;
+                }
+
                 // Check if this is a transient/retryable error
                 if is_retryable_error(&error_str) && attempt + 1 < MAX_RETRIES {
                     if saw_output {
