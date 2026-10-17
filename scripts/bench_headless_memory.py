@@ -268,6 +268,20 @@ def resolve_bin(name: str, override: str | None) -> str:
 
 
 def provision_openai_homes(root: Path, account: str | None) -> dict[str, dict[str, str]]:
+    homes = {
+        "codex": {"CODEX_HOME": str(root / "codex")},
+        "opencode": {"XDG_DATA_HOME": str(root / "opencode"),
+                     "XDG_CONFIG_HOME": str(root / "opencode-config"),
+                     "XDG_STATE_HOME": str(root / "opencode-state")},
+        "pi": {"PI_CODING_AGENT_DIR": str(root / "pi")},
+    }
+    if os.environ.get("OPENAI_API_KEY"):
+        # API-key mode: every tool reads OPENAI_API_KEY from the environment.
+        (root / "codex").mkdir(parents=True, exist_ok=True)
+        key_auth = root / "codex" / "auth.json"
+        key_auth.write_text(json.dumps({"auth_mode": "apikey", "OPENAI_API_KEY": os.environ["OPENAI_API_KEY"]}))
+        key_auth.chmod(0o600)
+        return homes
     data = json.loads((Path.home() / ".jcode" / "openai-auth.json").read_text())
     label = account or data.get("active_openai_account")
     acct = next(a for a in data["openai_accounts"] if a["label"] == label)
@@ -399,7 +413,8 @@ class PiSession(JsonLineProc):
     """`pi --mode rpc`: one process per session."""
 
     def __init__(self, pi: str, cwd: str, env: dict[str, str], model: str):
-        argv = [pi, "--mode", "rpc", "--no-session", "--provider", "openai-codex"]
+        provider = "openai" if os.environ.get("OPENAI_API_KEY") else "openai-codex"
+        argv = [pi, "--mode", "rpc", "--no-session", "--provider", provider]
         if model:
             argv += ["--model", model]
         super().__init__(argv, cwd, env)
