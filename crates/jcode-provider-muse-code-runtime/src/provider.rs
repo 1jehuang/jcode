@@ -365,8 +365,46 @@ fn map_inbound(inbound: &MspInbound) -> Option<StreamEvent> {
                 .filter(|d| !d.is_empty())
                 .map(|delta| StreamEvent::TextDelta(delta.to_string()))
         }
+        // Muse runs its own tools, so its tool activity never reaches jcode as a
+        // tool call and cannot become transcript content: emitting
+        // `ToolUseStart` for tools jcode will not execute would leave unbalanced
+        // tool blocks in the transcript.
+        //
+        // A silent turn is still a bad turn, though. MSP gives every tool-ish
+        // item a `displayLabel` in three plain-text forms keyed off the item's
+        // status, so surface that on jcode's **status line** instead.
+        // `StatusDetail` is transport detail for the status bar rather than
+        // transcript content, which makes it the right surface for activity
+        // jcode does not own.
+        "item/started" | "item/updated" | "item/completed" => tool_status_detail(params),
         _ => None,
     }
+}
+
+/// Render a Muse tool item as a status-line detail.
+///
+/// Gated on the presence of `displayLabel` rather than an enumerated set of item
+/// kinds: the schema documents that field as `toolCall.displayLabel`, and
+/// message and reasoning items do not carry it, so keying on it stays correct if
+/// Muse adds kinds later.
+fn tool_status_detail(params: &Value) -> Option<StreamEvent> {
+    let item = params.get("item")?;
+    let label = item.get("displayLabel")?;
+
+    // The item's status picks which of the three forms applies. Anything that is
+    // not a clear success uses `neutral`, which never implies success.
+    let text = match item.get("status").and_then(Value::as_str) {
+        Some("inProgress") => label.get("active"),
+        Some("completed") => label.get("done"),
+        _ => label.get("neutral"),
+    }
+    .and_then(Value::as_str)
+    .map(str::trim)
+    .filter(|text| !text.is_empty())?;
+
+    Some(StreamEvent::StatusDetail {
+        detail: format!("muse: {text}"),
+    })
 }
 
 fn normalize_model(model: &str) -> Option<String> {
@@ -647,6 +685,122 @@ mod tests {
         assert_eq!(
             deny_choice_id(&json!({"availableChoices": [{"decision": "denied"}]})),
             None
+        );
+    }
+
+    #[test]
+    fn muse_tool_activity_lands_on_the_status_line_not_the_transcript() {
+        // A running tool call shows its `active` form.
+        let running = json!({
+            "sessionId": "s",
+            "item": {
+                "kind": "toolCall",
+                "status": "inProgress",
+                "displayLabel": {
+                    "active": "Running the test suite",
+                    "done": "Ran the test suite",
+                    "neutral": "Test suite",
+                }
+            }
+        });
+        match map_inbound(&MspInbound::Notification {
+            method: "item/started".into(),
+            params: running,
+        }) {
+            Some(StreamEvent::StatusDetail { detail }) => {
+                assert_eq!(detail, "muse: Running the test suite");
+            }
+            other => panic!("expected a status detail, got {other:?}"),
+        }
+
+        // A finished call shows its `done` form.
+        let done = json!({
+            "item": {
+                "kind": "toolCall",
+                "status": "completed",
+                "displayLabel": {"active": "a", "done": "Ran the test suite", "neutral": "n"}
+            }
+        });
+        match map_inbound(&MspInbound::Notification {
+            method: "item/completed".into(),
+            params: done,
+        }) {
+            Some(StreamEvent::StatusDetail { detail }) => {
+                assert_eq!(detail, "muse: Ran the test suite");
+            }
+            other => panic!("expected a status detail, got {other:?}"),
+        }
+
+        // A rejected call must never read as success: `neutral` is used.
+        let rejected = json!({
+            "item": {
+                "kind": "toolCall",
+                "status": "rejected",
+                "displayLabel": {"active": "a", "done": "d", "neutral": "Command rejected"}
+            }
+        });
+        match map_inbound(&MspInbound::Notification {
+            method: "item/completed".into(),
+            params: rejected,
+        }) {
+            Some(StreamEvent::StatusDetail { detail }) => {
+                assert_eq!(detail, "muse: Command rejected");
+            }
+            other => panic!("expected a status detail, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn non_tool_items_do_not_produce_status_details() {
+        // Assistant text arrives as a delta, never as a status line entry.
+        let assistant = json!({
+            "item": {"kind": "agentMessage", "status": "inProgress", "text": "hi"}
+        });
+        assert!(
+            map_inbound(&MspInbound::Notification {
+                method: "item/started".into(),
+                params: assistant,
+            })
+            .is_none()
+        );
+
+        // A user message likewise.
+        let user = json!({"item": {"kind": "userMessage", "status": "completed"}});
+        assert!(
+            map_inbound(&MspInbound::Notification {
+                method: "item/completed".into(),
+                params: user,
+            })
+            .is_none()
+        );
+
+        // Blank labels must not produce empty status noise.
+        let blank = json!({
+            "item": {"displayLabel": {"active": "  ", "done": "", "neutral": ""},
+                    "status": "inProgress"}
+        });
+        assert!(
+            map_inbound(&MspInbound::Notification {
+                method: "item/started".into(),
+                params: blank,
+            })
+            .is_none()
+        );
+
+        // Malformed payloads must not panic or fabricate a status.
+        assert!(
+            map_inbound(&MspInbound::Notification {
+                method: "item/started".into(),
+                params: json!({}),
+            })
+            .is_none()
+        );
+        assert!(
+            map_inbound(&MspInbound::Notification {
+                method: "item/started".into(),
+                params: json!({"item": {"displayLabel": "nope"}}),
+            })
+            .is_none()
         );
     }
 
