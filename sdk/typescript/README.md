@@ -112,6 +112,30 @@ console.log("tokens:", turn.usage);
 client.close();
 ```
 
+### Headless hosts and applets
+
+The `applet` tool creates UI documents, but a successful tool call does not
+confirm that a client rendered them. A custom chat UI, terminal integration,
+or chat bridge must render `applet_state` snapshots itself to display applets.
+If your host does not implement an applet renderer, disable the tool when
+starting the instance so the agent can use text or Markdown instead:
+
+```ts
+const client = await JcodeClient.launch({
+  workingDir: process.cwd(),
+  env: { JCODE_DISABLED_TOOLS: "applet" },
+});
+```
+
+`JCODE_DISABLED_TOOLS` is a comma-separated list that replaces the configured
+disabled-tool list. Include any other tools you already disable in that value.
+For `connect()`, configure the daemon that serves the sessions before starting
+it, not just the SDK client process. The environment of a running daemon is
+not changed by starting another client.
+
+This is a host-side workaround, not automatic renderer-capability detection.
+See [issue #1858](https://github.com/1jehuang/jcode/issues/1858).
+
 ### Full system prompt override
 
 ```ts
