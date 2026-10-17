@@ -315,6 +315,9 @@ pub(super) async fn handle_lightweight_control_request(
     match request {
         // Scheduled delivery opens a one-shot connection and names the target
         // session explicitly. Reuse its live agent, not a new subscribed agent.
+        Request::AccountUsage { id } => {
+            super::account_usage::request(id, client_event_tx.clone());
+        }
         Request::InvalidateOpenAiUsage { id, account_label } => {
             super::provider_control::handle_invalidate_openai_usage(
                 id,

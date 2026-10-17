@@ -17,8 +17,12 @@ pub async fn fetch_oauth_account_usage(
                 } else {
                     let now = chrono::Utc::now().timestamp_millis();
                     let token = if account.expires < now + 300_000 && !account.refresh.is_empty() {
-                        auth::oauth::refresh_claude_tokens_for_account(&account.refresh, &account.label)
-                            .await.map(|tokens| tokens.access_token)
+                        auth::oauth::refresh_claude_tokens_for_account(
+                            &account.refresh,
+                            &account.label,
+                        )
+                        .await
+                        .map(|tokens| tokens.access_token)
                     } else if account.expires < now {
                         Err(anyhow::anyhow!("OAuth token expired"))
                     } else {
@@ -32,11 +36,22 @@ pub async fn fetch_oauth_account_usage(
                         Err(error) => Err(error),
                     }
                 };
-                let data = usage.unwrap_or_else(|error| UsageData {
-                    fetched_at: Some(Instant::now()), last_error: Some(error.to_string()),
-                    ..Default::default()
+                let data = usage.unwrap_or_else(|error| {
+                    let data = UsageData {
+                        fetched_at: Some(Instant::now()),
+                        last_error: Some(error.to_string()),
+                        ..Default::default()
+                    };
+                    // Refresh and expired-token failures happen before the HTTP
+                    // fetcher's cache. Give them the same per-account retry floor.
+                    store_anthropic_usage(cache_key, data.clone());
+                    data
                 });
-                result.push(anthropic_snapshot_from_usage(account.label, account.email, &data));
+                result.push(anthropic_snapshot_from_usage(
+                    account.label,
+                    account.email,
+                    &data,
+                ));
             }
             result
         }
@@ -58,9 +73,12 @@ pub async fn fetch_oauth_account_usage(
                         expires_at: account.expires_at,
                     },
                     Some(&account.label),
-                ).await;
+                )
+                .await;
                 result.push(openai_snapshot_from_usage(
-                    account.label, account.email, &openai_usage_data_from_provider_report(&report),
+                    account.label,
+                    account.email,
+                    &openai_usage_data_from_provider_report(&report),
                 ));
             }
             result

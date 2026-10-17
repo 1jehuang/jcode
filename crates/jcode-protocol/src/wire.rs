@@ -467,6 +467,10 @@ pub enum Request {
         prefer_strongest: bool,
     },
 
+    /// Fetch daemon-owned OAuth account usage without acquiring the agent lock.
+    #[serde(rename = "account_usage")]
+    AccountUsage { id: u64 },
+
     /// Switch active Anthropic account label on the server session.
     /// This keeps account overrides and provider credential caches in sync.
     #[serde(rename = "switch_anthropic_account")]
@@ -845,4 +849,4 @@ pub enum Request {
 }
 
 mod events;
-pub use events::ServerEvent;
+pub use events::{AccountUsageSnapshot, ServerEvent};

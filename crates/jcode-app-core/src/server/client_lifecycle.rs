@@ -2136,6 +2136,10 @@ pub(super) async fn handle_client(
                 handle_switch_openai_account(id, label, &agent, &client_event_tx).await;
             }
 
+            Request::AccountUsage { id } => {
+                super::account_usage::request(id, client_event_tx.clone());
+            }
+
             Request::InvalidateOpenAiUsage { id, account_label } => {
                 handle_invalidate_openai_usage(id, account_label, &client_event_tx).await;
             }

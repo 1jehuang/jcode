@@ -38,6 +38,19 @@ pub fn cached_account_usage_snapshot(
     provider: super::MultiAccountProviderKind,
     label: &str,
 ) -> Option<AccountUsageSnapshot> {
+    cached_account_usage_status_snapshot(provider, label).filter(|usage| usage.error.is_none())
+}
+
+/// Read fresh account-scoped usage, including failed probes for status indicators.
+/// A failed probe must not be interpreted as zero usage or an exhausted quota.
+/// Like the quota-only accessor, this never probes or blocks the render thread.
+pub fn cached_account_usage_status_snapshot(
+    provider: super::MultiAccountProviderKind,
+    label: &str,
+) -> Option<AccountUsageSnapshot> {
+    if let Some(remote) = super::remote_accounts::cached(provider, label) {
+        return remote;
+    }
     let label = label.trim();
     if label.is_empty() {
         return None;
@@ -47,7 +60,7 @@ pub fn cached_account_usage_snapshot(
         super::MultiAccountProviderKind::Anthropic => {
             let map = ANTHROPIC_USAGE_CACHE.get()?.try_lock().ok()?;
             let data = map.get(&key)?;
-            if data.is_stale() || data.last_error.is_some() {
+            if data.is_stale() {
                 return None;
             }
             Some(anthropic_snapshot_from_usage(label.into(), None, data))
@@ -55,7 +68,7 @@ pub fn cached_account_usage_snapshot(
         super::MultiAccountProviderKind::OpenAI => {
             let map = OPENAI_ACCOUNT_USAGE_CACHE.get()?.try_lock().ok()?;
             let data = map.get(&key)?;
-            if data.is_stale() || data.last_error.is_some() {
+            if data.is_stale() {
                 return None;
             }
             Some(openai_snapshot_from_usage(label.into(), None, data))
@@ -83,10 +96,13 @@ mod account_snapshot_tests {
         assert_eq!(snapshot.five_hour_ratio, Some(0.42));
         assert_eq!(snapshot.label, label);
         assert!(cached_account_usage_snapshot(provider, "router-other-account").is_none());
+        assert!(cached_account_usage_status_snapshot(provider, "router-other-account").is_none());
+        assert!(cached_account_usage_status_snapshot(provider, " ").is_none());
         assert!(cached_account_usage_snapshot(MultiAccountProviderKind::OpenAI, label).is_none());
         {
             let _guard = anthropic_usage_cache().lock().unwrap();
             assert!(cached_account_usage_snapshot(provider, label).is_none());
+            assert!(cached_account_usage_status_snapshot(provider, label).is_none());
         }
         store_anthropic_usage(
             key.clone(),
@@ -100,6 +116,7 @@ mod account_snapshot_tests {
             },
         );
         assert!(cached_account_usage_snapshot(provider, label).is_none());
+        assert!(cached_account_usage_status_snapshot(provider, label).is_none());
         store_anthropic_usage(
             key.clone(),
             UsageData {
@@ -108,6 +125,13 @@ mod account_snapshot_tests {
             },
         );
         assert!(cached_account_usage_snapshot(provider, label).is_none());
+        assert_eq!(
+            cached_account_usage_status_snapshot(provider, label)
+                .unwrap()
+                .error
+                .as_deref(),
+            Some("unavailable")
+        );
         anthropic_usage_cache().lock().unwrap().remove(&key);
     }
 }

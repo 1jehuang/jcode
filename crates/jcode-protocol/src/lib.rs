@@ -209,7 +209,7 @@ impl AuthChanged {
 pub type ReloadRecoverySnapshot = jcode_selfdev_types::ReloadRecoveryDirective;
 
 mod wire;
-pub use wire::{Request, ServerEvent};
+pub use wire::{AccountUsageSnapshot, Request, ServerEvent};
 pub use wire::{SessionToolConfig, SessionToolDefinition};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -643,6 +643,7 @@ impl Request {
             Request::NotifyAuthChanged { id, .. } => *id,
             Request::SwitchAnthropicAccount { id, .. } => *id,
             Request::SwitchOpenAiAccount { id, .. } => *id,
+            Request::AccountUsage { id } => *id,
             Request::InvalidateOpenAiUsage { id, .. } => *id,
             Request::InvalidateAnthropicUsage { id, .. } => *id,
             Request::StdinResponse { id, .. } => *id,
@@ -687,6 +688,7 @@ impl Request {
                 | Request::UpgradeRuntime { .. }
                 // Usage invalidation only touches process-wide caches, so a
                 // one-shot client can send it without subscribing to a session.
+                | Request::AccountUsage { .. }
                 | Request::InvalidateOpenAiUsage { .. }
                 | Request::InvalidateAnthropicUsage { .. }
                 | Request::NotifySession { .. }

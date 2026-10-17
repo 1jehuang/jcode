@@ -2,6 +2,64 @@
 
 use super::*;
 
+/// Credential-free usage attributed to an OAuth account on the daemon host.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AccountUsageSnapshot {
+    pub label: String,
+    pub email: Option<String>,
+    pub exhausted: bool,
+    pub primary_label: Option<String>,
+    pub five_hour_ratio: Option<f32>,
+    pub secondary_label: Option<String>,
+    pub seven_day_ratio: Option<f32>,
+    pub resets_at: Option<String>,
+    pub error: Option<String>,
+}
+
+#[cfg(test)]
+mod account_usage_tests {
+    use super::*;
+
+    #[test]
+    fn account_usage_roundtrips_as_lightweight_control() {
+        let request = Request::AccountUsage { id: 71 };
+        assert!(request.is_lightweight_control_request());
+        assert_eq!(request.id(), 71);
+        let decoded: Request =
+            serde_json::from_str(&serde_json::to_string(&request).unwrap()).unwrap();
+        assert!(matches!(decoded, Request::AccountUsage { id: 71 }));
+        let snapshot = AccountUsageSnapshot {
+            label: "remote-account".into(),
+            email: None,
+            exhausted: false,
+            primary_label: Some("5h".into()),
+            five_hour_ratio: Some(0.35),
+            secondary_label: None,
+            seven_day_ratio: None,
+            resets_at: None,
+            error: None,
+        };
+        let event = ServerEvent::AccountUsage {
+            id: 71,
+            anthropic: vec![snapshot.clone()],
+            openai: Vec::new(),
+        };
+        let decoded: ServerEvent =
+            serde_json::from_str(&serde_json::to_string(&event).unwrap()).unwrap();
+        let ServerEvent::AccountUsage {
+            id,
+            anthropic,
+            openai,
+        } = decoded
+        else {
+            panic!("wrong response")
+        };
+        assert_eq!(id, 71);
+        assert_eq!(anthropic, vec![snapshot]);
+        assert!(openai.is_empty());
+    }
+}
+
 /// Server event sent to client
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -10,6 +68,12 @@ use super::*;
     reason = "wire protocol prioritizes straightforward serde payloads over boxing every larger event variant"
 )]
 pub enum ServerEvent {
+    #[serde(rename = "account_usage")]
+    AccountUsage {
+        id: u64,
+        anthropic: Vec<AccountUsageSnapshot>,
+        openai: Vec<AccountUsageSnapshot>,
+    },
     #[serde(rename = "runtime_command_result")]
     RuntimeCommandResult {
         id: u64,
