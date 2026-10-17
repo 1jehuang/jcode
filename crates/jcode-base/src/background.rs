@@ -1622,63 +1622,69 @@ impl BackgroundTaskManager {
         session_id: &str,
     ) -> Vec<TaskStatusFile> {
         // The task directory accumulates thousands of status files and every
-        // History bootstrap asks this question, so a reconnect storm re-read
-        // and re-parsed all of them per client (~40ms each). Cache the parsed
-        // (session, status, detached, pid) tuple per file, keyed by mtime and
-        // size, and only re-read files that changed.
-        type Key = (std::time::SystemTime, u64);
-        static INDEX: std::sync::LazyLock<
-            std::sync::Mutex<HashMap<PathBuf, (Key, Option<TaskStatusFile>)>>,
-        > = std::sync::LazyLock::new(Default::default);
+        // History bootstrap asks this question, so a reconnect storm re-read,
+        // re-parsed, and re-stat'ed all of them per client. Keep one index of
+        // running detached tasks, rebuilt only when the directory changes
+        // (its mtime moves when a status file is created, renamed, or removed;
+        // status files are replaced atomically) or after a short TTL.
+        struct Index {
+            dir_mtime: Option<std::time::SystemTime>,
+            built_at: Instant,
+            running: Vec<TaskStatusFile>,
+        }
+        static INDEX: std::sync::LazyLock<std::sync::Mutex<Option<Index>>> =
+            std::sync::LazyLock::new(Default::default);
+        const TTL: std::time::Duration = std::time::Duration::from_secs(2);
 
-        let mut matches = Vec::new();
-        let Ok(entries) = std::fs::read_dir(&self.output_dir) else {
-            return matches;
-        };
-        let mut index = INDEX
+        let dir_mtime = std::fs::metadata(&self.output_dir)
+            .and_then(|meta| meta.modified())
+            .ok();
+        let mut guard = INDEX
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut seen = std::collections::HashSet::new();
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-                continue;
-            }
-            let Ok(meta) = entry.metadata() else { continue };
-            let key: Key = (meta.modified().unwrap_or(std::time::UNIX_EPOCH), meta.len());
-            seen.insert(path.clone());
-            let cached = index
-                .get(&path)
-                .filter(|(k, _)| *k == key)
-                .map(|(_, s)| s.clone());
-            let parsed = match cached {
-                Some(parsed) => parsed,
-                None => {
-                    let parsed = std::fs::read_to_string(&path)
+        let fresh = guard.as_ref().is_some_and(|index| {
+            index.dir_mtime.is_some()
+                && index.dir_mtime == dir_mtime
+                && index.built_at.elapsed() < TTL
+        });
+        if !fresh {
+            let mut running = Vec::new();
+            if let Ok(entries) = std::fs::read_dir(&self.output_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                        continue;
+                    }
+                    let Some(status) = std::fs::read_to_string(&path)
                         .ok()
                         .and_then(|content| serde_json::from_str::<TaskStatusFile>(&content).ok())
-                        // Only running detached tasks can ever match; cache
-                        // everything else as a cheap negative.
-                        .filter(|status| {
-                            status.status == BackgroundTaskStatus::Running && status.detached
-                        });
-                    index.insert(path.clone(), (key, parsed.clone()));
-                    parsed
+                    else {
+                        continue;
+                    };
+                    if status.status == BackgroundTaskStatus::Running && status.detached {
+                        running.push(status);
+                    }
                 }
-            };
-            let Some(status) = parsed else { continue };
-            if status.session_id != session_id {
-                continue;
             }
-            let Some(pid) = status.pid else {
-                continue;
-            };
-            if crate::platform::is_process_running(pid) {
-                matches.push(status);
-            }
+            *guard = Some(Index {
+                dir_mtime,
+                built_at: Instant::now(),
+                running,
+            });
         }
-        index.retain(|path, _| seen.contains(path));
-        drop(index);
+        let mut matches: Vec<TaskStatusFile> = guard
+            .as_ref()
+            .map(|index| {
+                index
+                    .running
+                    .iter()
+                    .filter(|status| status.session_id == session_id)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        drop(guard);
+        matches.retain(|status| status.pid.is_some_and(crate::platform::is_process_running));
 
         matches.sort_by(|a, b| a.task_id.cmp(&b.task_id));
         matches
