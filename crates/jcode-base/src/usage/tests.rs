@@ -902,6 +902,70 @@ fn jcode_me(memory_used: u64, upgrade: bool) -> crate::subscription_api::Subscri
 }
 
 #[test]
+fn jcode_usage_shows_monthly_inference_spending_and_remaining() {
+    let mut me = jcode_me(100, true);
+    me.usage.used_usd = 12.5;
+    me.usage.budget_usd = 50.0;
+    me.usage.resets_at = Some("2026-11-01T00:00:00Z".into());
+    let report = jcode_usage_report(&me);
+    assert_eq!(report.limits.len(), 3);
+    let inference = &report.limits[0];
+    assert_eq!(inference.name, "Inference spending limit (monthly)");
+    assert_eq!(inference.usage_percent, 25.0);
+    assert_eq!(inference.resets_at, me.usage.resets_at);
+    assert!(
+        report
+            .extra_info
+            .contains(&("Inference spending limit remaining".into(), "$37.50".into()))
+    );
+    assert!(
+        report
+            .extra_info
+            .contains(&("Inference spending".into(), "$12.50 / $50.00".into()))
+    );
+    assert_eq!(report.limits[1].name, "Memory recall (daily)");
+    assert!(!report.hard_limit_reached);
+    assert!(report.extra_info.iter().all(|(key, _)| key != "Upgrade"));
+}
+
+#[test]
+fn jcode_usage_monthly_limit_exhaustion_clamps_remaining() {
+    for used in [50.0, 60.0] {
+        let mut me = jcode_me(100, false);
+        me.usage.used_usd = used;
+        me.usage.budget_usd = 50.0;
+        let report = jcode_usage_report(&me);
+        assert!(report.hard_limit_reached);
+        assert_eq!(report.limits[0].usage_percent, (used * 2.0) as f32);
+        assert!(
+            report
+                .extra_info
+                .contains(&("Inference spending limit remaining".into(), "$0.00".into()))
+        );
+    }
+}
+
+#[test]
+fn jcode_usage_unknown_monthly_budget_is_not_exhausted() {
+    for budget in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        let mut me = jcode_me(100, false);
+        me.usage.used_usd = 10.0;
+        me.usage.budget_usd = budget;
+        let report = jcode_usage_report(&me);
+        assert_eq!(report.limits.len(), 2);
+        assert!(!report.hard_limit_reached);
+        assert!(
+            report
+                .extra_info
+                .iter()
+                .all(|(key, _)| key != "Inference spending limit remaining")
+        );
+        me.jev_usage.as_mut().unwrap().memory.used = 1000;
+        assert!(jcode_usage_report(&me).hard_limit_reached);
+    }
+}
+
+#[test]
 fn jcode_usage_shows_daily_allowances_without_upsell_when_low() {
     let report = jcode_usage_report(&jcode_me(100, true));
     assert_eq!(report.provider_name, "Jcode subscription");

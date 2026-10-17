@@ -859,7 +859,7 @@ pub(super) async fn fetch_copilot_usage_report() -> Option<ProviderUsage> {
     })
 }
 
-/// Jcode subscription: included daily feature allowances plus an upgrade hint
+/// Jcode subscription: monthly inference spending and included daily feature allowances, plus an upgrade hint
 /// when an allowance is running low, so users see the limit before a feature
 /// stops working rather than after.
 pub(super) async fn fetch_jcode_usage_report() -> Option<ProviderUsage> {
@@ -885,6 +885,26 @@ pub(crate) fn jcode_usage_report(me: &crate::subscription_api::SubscriptionMe) -
             .unwrap_or_else(|| me.tier.clone()),
     )];
     let mut hard_limit_reached = false;
+    let usage = &me.usage;
+    if usage.budget_usd.is_finite() && usage.budget_usd > 0.0 {
+        limits.push(UsageLimit {
+            name: "Inference spending limit (monthly)".to_string(),
+            usage_percent: usage_percent_from_used_limit(usage.used_usd, usage.budget_usd),
+            resets_at: usage.resets_at.clone(),
+        });
+        if usage.used_usd.is_finite() {
+            let used = usage.used_usd.max(0.0);
+            hard_limit_reached = used >= usage.budget_usd;
+            extra_info.push((
+                "Inference spending limit remaining".to_string(),
+                format!("${:.2}", (usage.budget_usd - used).max(0.0)),
+            ));
+            extra_info.push((
+                "Inference spending".to_string(),
+                format!("${:.2} / ${:.2}", used, usage.budget_usd),
+            ));
+        }
+    }
     if let Some(jev) = &me.jev_usage {
         let mut worst = 0.0f32;
         for (label, feature) in [

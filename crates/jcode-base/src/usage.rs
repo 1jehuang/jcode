@@ -467,6 +467,12 @@ fn enqueue_activity_sweeper_task(tasks: &mut tokio::task::JoinSet<Option<Provide
     for (source_key, entry) in leftover {
         tasks.spawn(async move {
             let mut extra_info = Vec::new();
+            if source_key == "jcode" {
+                extra_info.push((
+                    "Inference balance".to_string(),
+                    "Unavailable: no Jcode account credential configured. Use /login jcode to load your remaining allowance.".to_string(),
+                ));
+            }
             if let Some(spend) = entry.spend {
                 extra_info.push((
                     "Local spend (this machine)".to_string(),
