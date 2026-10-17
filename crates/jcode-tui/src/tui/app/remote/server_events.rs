@@ -919,6 +919,52 @@ pub(in crate::tui::app) fn handle_server_event(
             app.status_detail = Some(detail);
             eager_stream_redraw
         }
+        ServerEvent::ServiceTierReported { requested, tier } => {
+            // `auto` is an unresolved routing policy, not the tier ultimately
+            // used for a response. It can precede a resolved `default` report
+            // on every request. Do not turn that into a mismatch, replace a
+            // resolved report, or consume an explicit confirmation request.
+            if tier == "auto" {
+                return false;
+            }
+            // An older in-flight response must not confirm a newly requested tier.
+            if app_mod::service_tier_display_label(requested.as_deref().unwrap_or("default"))
+                != app_mod::service_tier_display_label(
+                    app.remote_service_tier.as_deref().unwrap_or("default"),
+                )
+            {
+                return false;
+            }
+            let report = (requested.clone(), tier.clone());
+            if app.remote_reported_service_tier.as_ref() == Some(&report) {
+                return false;
+            }
+            let had_report = app.remote_reported_service_tier.is_some();
+            app.remote_reported_service_tier = Some(report);
+            let requested_label = requested.as_deref().unwrap_or("default");
+            let matches = requested_label == tier
+                || (matches!(requested_label, "priority" | "fast")
+                    && matches!(tier.as_str(), "priority" | "fast"))
+                || (matches!(requested_label, "off" | "auto" | "default")
+                    && matches!(tier.as_str(), "default" | "standard"));
+            let pending = std::mem::take(&mut app.remote_service_tier_confirmation_pending);
+            if pending
+                || app_mod::service_tier_is_fast(requested.as_deref())
+                || !matches
+                || had_report
+            {
+                let message = if matches {
+                    format!("Provider confirmed service tier: {tier}.")
+                } else {
+                    format!(
+                        "Requested {requested_label}, but provider reports {tier}. Requested speed is not confirmed."
+                    )
+                };
+                app.push_display_message(DisplayMessage::system(message.clone()));
+                app.set_status_notice(message);
+            }
+            true
+        }
         ServerEvent::TextDone => false,
         ServerEvent::MessageEnd { .. } => {
             app.pause_streaming_tps(true);
@@ -2528,9 +2574,15 @@ pub(in crate::tui::app) fn handle_server_event(
         ServerEvent::ServiceTierChanged {
             service_tier,
             error,
+            pending,
             ..
         } => {
-            if let Some(err) = error {
+            if pending {
+                app.push_display_message(DisplayMessage::system(
+                    "Speed change requested. Waiting for session configuration access.",
+                ));
+                app.set_status_notice("Speed: change requested (waiting)");
+            } else if let Some(err) = error {
                 app.push_display_message(DisplayMessage::error(format!(
                     "Failed to set fast mode: {}",
                     err
@@ -2538,6 +2590,10 @@ pub(in crate::tui::app) fn handle_server_event(
             } else {
                 let tier_changed = app.remote_service_tier != service_tier;
                 app.remote_service_tier = service_tier.clone();
+                if tier_changed {
+                    app.remote_reported_service_tier = None;
+                    app.remote_service_tier_confirmation_pending = true;
+                }
                 let enabled = app_mod::service_tier_is_fast(service_tier.as_deref());
                 let label = service_tier
                     .as_deref()
@@ -2556,7 +2612,7 @@ pub(in crate::tui::app) fn handle_server_event(
                     applies_next_request,
                 ));
             }
-            false
+            true
         }
         ServerEvent::TransportChanged {
             transport, error, ..

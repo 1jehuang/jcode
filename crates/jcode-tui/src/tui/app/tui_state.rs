@@ -1663,7 +1663,38 @@ impl crate::tui::TuiState for App {
             context_limit: Some(self.context_limit as usize),
             model,
             reasoning_effort,
-            service_tier,
+            service_tier: if !self.is_remote {
+                service_tier
+            } else {
+                service_tier
+                    .or_else(|| {
+                        (self.remote_service_tier_confirmation_pending
+                            || self.remote_reported_service_tier.as_ref().is_some_and(
+                                |(sent, tier)| {
+                                    sent.is_none()
+                                        && super::service_tier_display_label(tier) != "Standard"
+                                },
+                            ))
+                        .then(|| "default".to_string())
+                    })
+                    .map(|requested| {
+                        let label = super::service_tier_display_label(&requested);
+                        match self.remote_reported_service_tier.as_ref() {
+                            Some((sent, applied))
+                                if super::service_tier_display_label(
+                                    sent.as_deref().unwrap_or("default"),
+                                ) == label =>
+                            {
+                                if super::service_tier_display_label(applied) == label {
+                                    requested
+                                } else {
+                                    format!("{label} requested, {applied} applied")
+                                }
+                            }
+                            _ => format!("{label} requested (unconfirmed)"),
+                        }
+                    })
+            },
             native_compaction_mode,
             native_compaction_threshold_tokens,
             session_count,

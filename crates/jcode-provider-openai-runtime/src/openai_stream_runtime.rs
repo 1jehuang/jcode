@@ -4,6 +4,41 @@ use super::openai_stream_diagnostics::{
 };
 use super::*;
 
+// Bind metadata to the immutable request, not the provider's concurrently mutable
+// preference. Both primary parser events and its pending queue pass here.
+fn bind_requested_service_tier(event: &mut StreamEvent, request_tier: &Option<String>) {
+    if let StreamEvent::ServiceTier { requested, .. } = event {
+        *requested = request_tier.clone();
+    }
+}
+
+#[test]
+fn service_tier_metadata_uses_serialized_request_not_later_preference() {
+    let request = serde_json::json!({"service_tier": "priority"});
+    let requested = request
+        .get("service_tier")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let mut event = StreamEvent::ServiceTier {
+        tier: "default".into(),
+        requested: None,
+    };
+    bind_requested_service_tier(&mut event, &requested);
+    assert!(
+        matches!(event, StreamEvent::ServiceTier { requested: Some(ref tier), .. } if tier == "priority")
+    );
+    // An omitted request field must stay omitted, even if a preference has
+    // changed to Ultrafast while the network request was in flight.
+    bind_requested_service_tier(&mut event, &None);
+    assert!(matches!(
+        event,
+        StreamEvent::ServiceTier {
+            requested: None,
+            ..
+        }
+    ));
+}
+
 #[path = "openai_usage_recording.rs"]
 mod openai_usage_recording;
 use openai_usage_recording::OAuthUsageRecorder;
@@ -145,6 +180,10 @@ pub(super) async fn stream_response(
     tx: mpsc::Sender<Result<StreamEvent>>,
 ) -> Result<(), OpenAIStreamFailure> {
     use jcode_message_types::ConnectionPhase;
+    let requested_tier = request
+        .get("service_tier")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     let request_model = openai_request_model(&request);
     let stream_started_at = Instant::now();
     log_openai_stream_lifecycle(
@@ -394,7 +433,8 @@ pub(super) async fn stream_response(
             }
         };
         match result {
-            Ok(event) => {
+            Ok(mut event) => {
+                bind_requested_service_tier(&mut event, &requested_tier);
                 progress.record_event(&event);
                 if matches!(event, StreamEvent::MessageEnd { .. }) {
                     saw_message_end = true;
@@ -746,6 +786,10 @@ async fn continue_persistent_ws_locked(
         return PersistentWsResult::NotAvailable;
     }
 
+    let requested_tier = request
+        .get("service_tier")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     let incremental_stats = summarize_ws_input(&incremental_items);
     let previous_response_id = state.last_response_id.clone();
     let request_prompt_cache_key_hash = request
@@ -1108,7 +1152,7 @@ async fn continue_persistent_ws_locked(
                     }
                 }
 
-                if let Some(event) = parse_openai_response_event(
+                if let Some(mut event) = parse_openai_response_event(
                     &text,
                     &mut saw_text_delta,
                     &mut saw_thinking_delta,
@@ -1116,6 +1160,7 @@ async fn continue_persistent_ws_locked(
                     &mut completed_tool_items,
                     &mut pending,
                 ) {
+                    bind_requested_service_tier(&mut event, &requested_tier);
                     if is_stream_activity_event(&event) {
                         made_api_activity = true;
                     }
@@ -1145,7 +1190,8 @@ async fn continue_persistent_ws_locked(
                         break;
                     }
                 }
-                while let Some(event) = pending.pop_front() {
+                while let Some(mut event) = pending.pop_front() {
+                    bind_requested_service_tier(&mut event, &requested_tier);
                     if let StreamEvent::Error { ref message, .. } = event {
                         let lower = message.to_lowercase();
                         if is_retryable_error(&lower)
@@ -1321,6 +1367,10 @@ async fn stream_response_websocket_authenticated(
     access_token: String,
 ) -> Result<(), OpenAIStreamFailure> {
     use jcode_message_types::ConnectionPhase;
+    let requested_tier = request
+        .get("service_tier")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     let request_model = request
         .get("model")
         .and_then(|m| m.as_str())
@@ -1588,7 +1638,7 @@ async fn stream_response_websocket_authenticated(
                     } else {
                         is_websocket_first_activity_payload(&text)
                     };
-                    if let Some(event) = parse_openai_response_event(
+                    if let Some(mut event) = parse_openai_response_event(
                         &text,
                         &mut saw_text_delta,
                         &mut saw_thinking_delta,
@@ -1596,6 +1646,7 @@ async fn stream_response_websocket_authenticated(
                         &mut completed_tool_items,
                         &mut pending,
                     ) {
+                        bind_requested_service_tier(&mut event, &requested_tier);
                         if is_stream_activity_event(&event) {
                             made_api_activity = true;
                         }
@@ -1639,7 +1690,8 @@ async fn stream_response_websocket_authenticated(
                             return Ok(());
                         }
                     }
-                    while let Some(event) = pending.pop_front() {
+                    while let Some(mut event) = pending.pop_front() {
+                        bind_requested_service_tier(&mut event, &requested_tier);
                         if is_stream_activity_event(&event) {
                             made_api_activity = true;
                         }

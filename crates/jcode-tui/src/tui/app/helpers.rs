@@ -624,11 +624,14 @@ pub(super) fn fast_mode_success_message(
     let status = if enabled { "on" } else { "off" };
     if applies_next_request {
         format!(
-            "✓ Fast mode {} ({})\nApplies to the next request/turn. The current in-flight request keeps its existing tier.",
+            "✓ Fast mode configured {} ({})\nRequested for the next provider request, including later in this turn. The current in-flight request is unchanged. Provider acceptance is not yet confirmed.",
             status, label
         )
     } else {
-        format!("✓ Fast mode {} ({})", status, label)
+        format!(
+            "✓ Fast mode configured {} ({})\nRequested for the next provider request. Provider acceptance is not yet confirmed.",
+            status, label
+        )
     }
 }
 

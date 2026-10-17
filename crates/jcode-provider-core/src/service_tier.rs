@@ -6,7 +6,7 @@
 //!
 //! Canonical tier values:
 //! - `off`: Standard processing (no service tier override)
-//! - `priority`: Fast mode (OpenAI accepts `priority` or `fast` on the wire)
+//! - `priority`: Fast mode (normalize the `fast` UI alias before sending upstream)
 //! - `ultrafast`: OpenAI Ultrafast, only for models that support it
 
 /// Standard processing.

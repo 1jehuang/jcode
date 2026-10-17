@@ -1,6 +1,57 @@
 use super::*;
 
 #[test]
+fn service_tier_metadata_is_provider_reported_and_precedes_completion() {
+    for kind in ["response.created", "response.completed"] {
+        for tier in ["default", "priority", "ultrafast"] {
+            let frame = serde_json::json!({"type":kind,"response":{"service_tier":tier}});
+            let mut pending = VecDeque::new();
+            let event = parse_openai_response_event(
+                &frame.to_string(),
+                &mut false,
+                &mut false,
+                &mut HashMap::new(),
+                &mut HashSet::new(),
+                &mut pending,
+            );
+            assert!(
+                matches!(event, Some(StreamEvent::ServiceTier { tier: actual, requested: None }) if actual == tier)
+            );
+            if kind == "response.completed" {
+                assert!(matches!(
+                    pending.pop_front(),
+                    Some(StreamEvent::MessageEnd { .. })
+                ));
+            }
+            assert!(pending.is_empty());
+        }
+    }
+}
+
+#[test]
+fn service_tier_metadata_does_not_infer_missing_or_invalid_tiers() {
+    for response in [
+        serde_json::json!({}),
+        serde_json::json!({"service_tier":null}),
+        serde_json::json!({"service_tier":3}),
+        serde_json::json!({"service_tier":" "}),
+    ] {
+        let frame = serde_json::json!({"type":"response.created","response":response});
+        assert!(
+            parse_openai_response_event(
+                &frame.to_string(),
+                &mut false,
+                &mut false,
+                &mut HashMap::new(),
+                &mut HashSet::new(),
+                &mut VecDeque::new(),
+            )
+            .is_none()
+        );
+    }
+}
+
+#[test]
 fn usage_preserves_inclusive_input_and_optional_cache_details() {
     for (usage, expected_read, expected_write) in [
         (

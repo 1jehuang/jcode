@@ -1,4 +1,57 @@
 #[test]
+fn test_service_tier_auto_reports_do_not_flood_or_consume_confirmation() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut app = create_test_app();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    let before = app.display_messages().len();
+    for _ in 0..10 {
+        for tier in ["auto", "default"] {
+            app.handle_server_event(
+                crate::protocol::ServerEvent::ServiceTierReported {
+                    requested: None,
+                    tier: tier.to_string(),
+                },
+                &mut remote,
+            );
+        }
+    }
+    assert_eq!(app.display_messages().len(), before);
+    assert_eq!(
+        app.remote_reported_service_tier,
+        Some((None, "default".to_string()))
+    );
+    app.remote_service_tier = Some("priority".to_string());
+    app.remote_reported_service_tier = None;
+    app.remote_service_tier_confirmation_pending = true;
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ServiceTierReported {
+            requested: Some("priority".to_string()),
+            tier: "auto".to_string(),
+        },
+        &mut remote,
+    );
+    assert!(app.remote_service_tier_confirmation_pending);
+    assert!(app.remote_reported_service_tier.is_none());
+    assert_eq!(app.display_messages().len(), before);
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ServiceTierReported {
+            requested: Some("priority".to_string()),
+            tier: "default".to_string(),
+        },
+        &mut remote,
+    );
+    assert_eq!(app.display_messages().len(), before + 1);
+    assert!(
+        app.display_messages()
+            .last()
+            .unwrap()
+            .content
+            .contains("Requested priority")
+    );
+}
+
+#[test]
 fn test_service_tier_duplicate_acknowledgements_do_not_flood_transcript() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();

@@ -90,9 +90,23 @@ async fn apply_remote_speed_direction(
         ));
         return Ok(());
     }
-    app.set_status_notice(app_mod::speed_tier_notice(next, index, ladder.len(), None));
-    remote.set_service_tier(next).await?;
+    request_remote_service_tier(app, remote, next).await?;
     Ok(())
+}
+
+async fn request_remote_service_tier(
+    app: &mut App,
+    remote: &mut RemoteConnection,
+    tier: &str,
+) -> Result<()> {
+    // A transient notice acknowledges input without claiming configuration or
+    // provider acceptance. The server acknowledgement replaces it, so fast
+    // round trips do not add a second transcript message.
+    app.set_status_notice(format!(
+        "Speed: {} requested (waiting for server)",
+        app_mod::service_tier_display_label(tier)
+    ));
+    remote.set_service_tier(tier).await
 }
 
 async fn apply_remote_effort_direction(
@@ -1403,11 +1417,11 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
             match mode.as_str() {
                 "on" => {
                     app_mod::auth::save_openai_fast_setting_local(app, true);
-                    remote.set_service_tier("priority").await?;
+                    request_remote_service_tier(app, remote, "priority").await?;
                 }
                 "off" => {
                     app_mod::auth::save_openai_fast_setting_local(app, false);
-                    remote.set_service_tier("off").await?;
+                    request_remote_service_tier(app, remote, "off").await?;
                 }
                 "status" => {
                     let default_tier = crate::config::Config::load().provider.openai_service_tier;
@@ -1485,7 +1499,7 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
                     return Ok(());
                 }
             };
-            remote.set_service_tier(service_tier).await?;
+            request_remote_service_tier(app, remote, service_tier).await?;
             return Ok(());
         }
 

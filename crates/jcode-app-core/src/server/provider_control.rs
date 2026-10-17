@@ -920,6 +920,7 @@ pub(super) async fn handle_set_service_tier(
     id: u64,
     service_tier: String,
     agent: &Arc<Mutex<Agent>>,
+    provider: Option<Arc<dyn Provider>>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
     let apply = move |provider: Arc<dyn Provider>,
@@ -928,6 +929,7 @@ pub(super) async fn handle_set_service_tier(
             Ok(()) => {
                 let _ = client_event_tx.send(ServerEvent::ServiceTierChanged {
                     id,
+                    pending: false,
                     service_tier: provider.service_tier(),
                     error: None,
                 });
@@ -935,6 +937,7 @@ pub(super) async fn handle_set_service_tier(
             Err(e) => {
                 let _ = client_event_tx.send(ServerEvent::ServiceTierChanged {
                     id,
+                    pending: false,
                     service_tier: None,
                     error: Some(e.to_string()),
                 });
@@ -942,9 +945,19 @@ pub(super) async fn handle_set_service_tier(
         }
     };
 
-    if let Ok(agent_guard) = agent.try_lock() {
+    if let Some(provider) = provider {
+        // Configures the next provider request, even while the turn owns Agent.
+        // The provider cannot rewrite a request already accepted upstream.
+        apply(provider, client_event_tx);
+    } else if let Ok(agent_guard) = agent.try_lock() {
         apply(agent_guard.provider_handle(), client_event_tx);
     } else {
+        let _ = client_event_tx.send(ServerEvent::ServiceTierChanged {
+            id,
+            pending: true,
+            service_tier: None,
+            error: None,
+        });
         spawn_deferred_provider_operation(
             "set_service_tier",
             id,

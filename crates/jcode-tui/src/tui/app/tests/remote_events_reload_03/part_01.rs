@@ -7,15 +7,17 @@ fn test_handle_server_event_service_tier_changed_mentions_next_request_when_stre
 
     app.is_processing = true;
 
-    app.handle_server_event(
+    let redraw = app.handle_server_event(
         crate::protocol::ServerEvent::ServiceTierChanged {
             id: 7,
+            pending: false,
             service_tier: Some("priority".to_string()),
             error: None,
         },
         &mut remote,
     );
 
+    assert!(redraw, "tier configuration acknowledgement must redraw immediately");
     assert_eq!(app.remote_service_tier, Some("priority".to_string()));
     assert_eq!(
         app.status_notice(),
@@ -25,7 +27,73 @@ fn test_handle_server_event_service_tier_changed_mentions_next_request_when_stre
     let last = app.display_messages().last().expect("missing response");
     assert_eq!(
         last.content,
-        "✓ Fast mode on (Fast)\nApplies to the next request/turn. The current in-flight request keeps its existing tier."
+        "✓ Fast mode configured on (Fast)\nRequested for the next provider request, including later in this turn. The current in-flight request is unchanged. Provider acceptance is not yet confirmed."
+    );
+}
+
+#[test]
+fn test_service_tier_pending_keeps_configured_tier_until_confirmation() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.remote_service_tier = Some("priority".to_string());
+    let before = app.display_messages().len();
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ServiceTierChanged {
+            id: 8,
+            pending: true,
+            service_tier: None,
+            error: None,
+        },
+        &mut remote,
+    );
+    assert_eq!(app.remote_service_tier.as_deref(), Some("priority"));
+    assert_eq!(app.display_messages().len(), before + 1);
+    assert_eq!(
+        app.status_notice().as_deref(),
+        Some("Speed: change requested (waiting)")
+    );
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ServiceTierChanged {
+            id: 8,
+            pending: false,
+            service_tier: Some("ultrafast".to_string()),
+            error: None,
+        },
+        &mut remote,
+    );
+    assert_eq!(app.remote_service_tier.as_deref(), Some("ultrafast"));
+    assert_eq!(app.display_messages().len(), before + 2);
+    assert!(
+        app.display_messages()
+            .last()
+            .unwrap()
+            .content
+            .contains("configured on (Ultrafast)")
+    );
+}
+
+#[test]
+fn test_service_tier_old_protocol_response_is_single_configuration_confirmation() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    let event = serde_json::from_value(serde_json::json!({
+        "type": "service_tier_changed", "id": 9, "service_tier": "ultrafast"
+    }))
+    .expect("old server tier event must deserialize");
+    let before = app.display_messages().len();
+    app.handle_server_event(event, &mut remote);
+    assert_eq!(app.display_messages().len(), before + 1);
+    assert_eq!(app.remote_service_tier.as_deref(), Some("ultrafast"));
+    assert!(
+        app.display_messages()
+            .last()
+            .unwrap()
+            .content
+            .contains("Provider acceptance is not yet confirmed")
     );
 }
 

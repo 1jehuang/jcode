@@ -64,6 +64,61 @@ Jcode should continue normalizing the Fast UI label to `priority` on the wire.
 
 All nine requests in the reverse-order run completed successfully.
 
+## Incremental continuation follow-up
+
+A third connection used a fresh prefix, then sent each later request with
+`previous_response_id` from the immediately preceding response and only a new
+short user input (`Reply with only OK.`). This mirrors Jcode's incremental
+WebSocket conversation shape rather than resending the full prompt.
+
+| Request | Requested tier | Total input tokens | Cached input tokens |
+| --- | --- | ---: | ---: |
+| 1 | default | 12,045 | 0 |
+| 2 | default | 12,061 | 11,904 |
+| 3 | priority (Fast) | 12,077 | 0 |
+| 4 | priority (Fast) | 12,093 | 11,904 |
+| 5 | ultrafast | 12,109 | 0 |
+| 6 | ultrafast | 12,125 | 11,904 |
+| 7 | default | 12,141 | 11,904 |
+
+The same first-use cold-cache pattern occurred across the incremental chain.
+Every response again reported `service_tier: default`, so the same actual-tier
+confirmation limitation applies.
+
+## Application-level switching acceptance
+
+The updated Jcode binary was run on an isolated daemon socket with real OpenAI
+OAuth requests, independently of the shared daemon. A turn executed a harmless
+`bash` call containing `sleep 8`. While that tool was running and the agent's
+turn remained active, two consecutive protocol requests configured Fast and
+Ultrafast:
+
+| Request | Time to configuration acknowledgement | Deferred acknowledgement |
+| --- | ---: | --- |
+| Fast (`priority`) | 0.98 ms | No |
+| Ultrafast | 1.01 ms | No |
+
+These are single local-socket observations, not a latency distribution or a
+promise of sub-millisecond performance on remote machines. The current response
+retained its original requested tier, and the next provider request **within the
+same turn** carried `ultrafast`. This verifies that configuration no longer waits
+for the whole turn to finish, without claiming mutation of an in-flight response.
+
+A real PTY TUI connected to that isolated daemon also passed:
+
+- Changing to Standard and then Ultrafast produced one configuration message
+  each, explicitly stating that provider acceptance was not yet confirmed.
+- The persistent Runtime widget displayed the requested/unconfirmed tier.
+- A short live model reply produced one warning that Ultrafast was requested
+  but the provider reported `default`. There was no false Ultrafast success
+  notification and no warning for the provisional `auto` metadata.
+- A server-driven visual frame captured the warning and reported no anomalies.
+
+The frozen tested binary had SHA-256
+`8ba4457be7fa51f9be58b57503b2c94f09d4fdd19ca1a743c202e46eb42f9933`.
+A subsequent small TUI refinement adds a transient requested/waiting status
+before a server acknowledgement, without adding another transcript message.
+
 ## Interpretation and limitations
 
 - In both runs, the first request on each previously unused requested tier was
