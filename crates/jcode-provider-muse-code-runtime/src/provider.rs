@@ -37,9 +37,9 @@ use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use jcode_message_types::{ContentBlock, Message, Role, StreamEvent, ToolDefinition};
 use jcode_provider_core::{EventStream, ModelRoute, Provider};
-use serde_json::json;
+use serde_json::{Value, json};
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, broadcast};
 
 use crate::msp::{MspInbound, MspTransport, MuseHostConfig, new_command_id};
 use crate::{MSP_CLIENT_NAME, MSP_CLIENT_VERSION};
@@ -66,7 +66,7 @@ pub const DEFAULT_MODEL: &str = "muse-wonder-1.0";
 
 /// A live host plus the session this provider is driving.
 struct HostState {
-    transport: MspTransport,
+    transport: Arc<MspTransport>,
     session_id: String,
     /// Kept alive so a future revision can surface tool activity; the stream
     /// currently drains it.
@@ -169,10 +169,17 @@ impl MuseCodeProvider {
             .to_string();
 
         let state = Arc::new(HostState {
-            transport,
+            transport: Arc::new(transport),
             session_id,
             _models: models,
         });
+
+        // Muse owns the agent loop, so it raises its own approvals. MSP defines
+        // `approval/request` as a **must-answer** server request, and a request
+        // left unanswered stalls the turn until it times out. Answering is
+        // therefore a protocol obligation rather than an optional feature.
+        spawn_server_request_responder(Arc::clone(&state.transport), state.transport.subscribe());
+
         *guard = Some(Arc::clone(&state));
         Ok(state)
     }
@@ -259,12 +266,88 @@ fn is_turn_end(inbound: &MspInbound) -> bool {
     matches!(inbound, MspInbound::Notification { method, .. } if method == "turn/completed")
 }
 
+/// Answer MSP's server-initiated requests.
+///
+/// `approval/request` is a **must-answer** request. The response is a
+/// presentation receipt only; the actual decision travels separately as
+/// `approval/decide`. An unanswered request tells the host that this connection
+/// could not present the prompt, so the approval stays pending and the turn
+/// stalls until it times out.
+///
+/// jcode has no approval surface wired for Muse yet, so this acknowledges
+/// presentation and then **denies**. Denying is the fail-safe choice: nothing
+/// executes that a user did not approve. It does mean Muse cannot run commands
+/// its own permission profile does not already cover, which is a real
+/// limitation rather than an oversight. Bridging these decisions into jcode's
+/// approval UI is the follow-up.
+fn spawn_server_request_responder(
+    transport: Arc<MspTransport>,
+    mut events: broadcast::Receiver<MspInbound>,
+) {
+    tokio::spawn(async move {
+        loop {
+            match events.recv().await {
+                Ok(MspInbound::Request { id, method, params }) => {
+                    // Acknowledge presentation first, so the host is never left
+                    // waiting on a receipt that will not arrive.
+                    let _ = transport.respond(id, json!({})).await;
+                    if method == "approval/request"
+                        && let Some(choice_id) = deny_choice_id(&params)
+                    {
+                        let _ = transport
+                            .request(
+                                "approval/decide",
+                                json!({
+                                    "sessionId": params.get("sessionId"),
+                                    "commandId": new_command_id(),
+                                    "approvalId": params.get("approvalId"),
+                                    "choiceId": choice_id,
+                                }),
+                            )
+                            .await;
+                    }
+                }
+                Ok(_) => {}
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+}
+
+/// Choose the deny option from an `approval/request` payload.
+///
+/// Preference order: a `denied` decision scoped to a single use, then any
+/// `denied` variant, then `abort`. Returns `None` when the host offered no
+/// deniable choice, in which case the request is deliberately left pending
+/// rather than guessing at a choice id the host never advertised.
+fn deny_choice_id(params: &Value) -> Option<String> {
+    let choices = params.get("availableChoices")?.as_array()?;
+    let find = |decision: &str, scope: Option<&str>| {
+        choices.iter().find_map(|choice| {
+            if choice.get("decision")?.as_str()? != decision {
+                return None;
+            }
+            if let Some(scope) = scope
+                && choice.get("scope").and_then(Value::as_str) != Some(scope)
+            {
+                return None;
+            }
+            choice.get("choiceId")?.as_str().map(str::to_string)
+        })
+    };
+    find("denied", Some("once"))
+        .or_else(|| find("denied", None))
+        .or_else(|| find("abort", None))
+}
+
 /// Map a single MSP notification onto a jcode stream event, if it carries text.
 fn map_inbound(inbound: &MspInbound) -> Option<StreamEvent> {
     let MspInbound::Notification { method, params } = inbound else {
-        // Server-initiated requests (notably `approval/request`) are not yet
-        // bridged to jcode's approval UI. Muse's own policy still applies, and
-        // the host will time the request out rather than proceed silently.
+        // Server-initiated requests are handled by
+        // `spawn_server_request_responder`, which answers them whether or not a
+        // stream is active. They carry no assistant text, so nothing is emitted
+        // here.
         return None;
     };
     match method.as_str() {
@@ -515,6 +598,56 @@ mod tests {
             params: json!({"approvalId": "a"}),
         };
         assert!(map_inbound(&approval).is_none());
+    }
+
+    #[test]
+    fn deny_choice_prefers_single_use_denial() {
+        let params = json!({
+            "availableChoices": [
+                {"choiceId": "a", "decision": "approved", "scope": "once"},
+                {"choiceId": "b", "decision": "denied", "scope": "session"},
+                {"choiceId": "c", "decision": "denied", "scope": "once"},
+            ]
+        });
+        assert_eq!(deny_choice_id(&params).as_deref(), Some("c"));
+    }
+
+    #[test]
+    fn deny_choice_falls_back_and_refuses_to_guess() {
+        // No single-use denial: take any denial rather than an approval.
+        let any_denied = json!({
+            "availableChoices": [
+                {"choiceId": "a", "decision": "approved", "scope": "once"},
+                {"choiceId": "b", "decision": "denied", "scope": "session"},
+            ]
+        });
+        assert_eq!(deny_choice_id(&any_denied).as_deref(), Some("b"));
+
+        // Nothing deniable: `abort` is the next fail-safe. Never an approval.
+        let abort = json!({
+            "availableChoices": [
+                {"choiceId": "a", "decision": "approved", "scope": "once"},
+                {"choiceId": "z", "decision": "abort", "scope": "once"},
+            ]
+        });
+        assert_eq!(deny_choice_id(&abort).as_deref(), Some("z"));
+
+        // Only approvals offered: decline to choose rather than approve.
+        let only_approved = json!({
+            "availableChoices": [
+                {"choiceId": "a", "decision": "approved", "scope": "once"},
+                {"choiceId": "b", "decision": "approvedPolicyAmendment", "scope": "localPersistent"},
+            ]
+        });
+        assert_eq!(deny_choice_id(&only_approved), None);
+
+        // Malformed payloads must not panic.
+        assert_eq!(deny_choice_id(&json!({})), None);
+        assert_eq!(deny_choice_id(&json!({"availableChoices": "nope"})), None);
+        assert_eq!(
+            deny_choice_id(&json!({"availableChoices": [{"decision": "denied"}]})),
+            None
+        );
     }
 
     #[test]
