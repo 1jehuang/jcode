@@ -993,17 +993,6 @@ impl OpenRouterProvider {
         Ok(Box::pin(ReceiverStream::new(rx)))
     }
 
-    /// Stable capability-record scope for this runtime instance.
-    ///
-    /// Image-input rejections are recorded per concrete endpoint, not per
-    /// provider slot: named profiles are distinguished by profile id *and*
-    /// api base (a profile's `base_url` can be edited while another session
-    /// still holds the old endpoint), and endpoint-only runtimes (explicit
-    /// `OPENROUTER_BASE_URL`, autodetected Ollama/LM Studio) by their api base
-    /// alone. Profile id and api base are both stable for the instance lifetime
-    /// and both are known at construction, so record and lookup paths derive
-    /// the identical key. Falls back to the bare slot key when neither is
-    /// present.
     /// Normalize an api base for the capability scope key: scheme and host
     /// are case-insensitive URL parts and get lowercased, while the path is
     /// case-sensitive (RFC 3986) and keeps its exact spelling so distinct
@@ -1024,6 +1013,17 @@ impl OpenRouterProvider {
         format!("{prefix}{}{tail}", authority.to_ascii_lowercase())
     }
 
+    /// Stable capability-record scope for this runtime instance.
+    ///
+    /// Image-input rejections are recorded per concrete endpoint, not per
+    /// provider slot: named profiles are distinguished by profile id *and*
+    /// api base (a profile's `base_url` can be edited while another session
+    /// still holds the old endpoint), and endpoint-only runtimes (explicit
+    /// `OPENROUTER_BASE_URL`, autodetected Ollama/LM Studio) by their api base
+    /// alone. Profile id and api base are both stable for the instance lifetime
+    /// and both are known at construction, so record and lookup paths derive
+    /// the identical key. Falls back to the bare slot key when neither is
+    /// present.
     pub(crate) fn capability_scope_key(&self) -> String {
         let profile_part = self
             .profile_id

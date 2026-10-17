@@ -209,8 +209,10 @@ pub fn clear_image_input_overrides_for_provider(provider_key: &str) {
     }
 }
 
-/// True when a serialized chat-completions request body contains `image_url`
-/// content parts (the OpenAI wire shape for user-supplied images).
+/// True when a serialized request body carries image content parts: the
+/// chat-completions wire shape (`messages[].content[].type == "image_url"`)
+/// or the Responses wire shape (`input[].content[].type == "input_image"`,
+/// used by the Azure Responses route and the opencode-go Responses route).
 pub fn request_contains_image_url_parts(request: &serde_json::Value) -> bool {
     request
         .get("messages")
@@ -229,40 +231,87 @@ pub fn request_contains_image_url_parts(request: &serde_json::Value) -> bool {
             })
         })
         .unwrap_or(false)
+        || request
+            .get("input")
+            .and_then(|i| i.as_array())
+            .map(|items| {
+                items.iter().any(|item| {
+                    item.get("content")
+                        .and_then(|c| c.as_array())
+                        .map(|parts| {
+                            parts.iter().any(|part| {
+                                part.get("type").and_then(|t| t.as_str()) == Some("input_image")
+                            })
+                        })
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false)
 }
 
-/// Replace every `image_url` content part in a serialized chat-completions
-/// request body with a text marker describing the omitted image. Returns a
-/// new request value; the input is untouched. Non-array message content
-/// (plain strings) carries no images, so it is preserved as-is.
+/// Replace every image content part in a serialized request body with a text
+/// marker describing the omitted image. Handles both wire shapes:
+/// chat-completions `messages[].content[].type == "image_url"` (nested
+/// `image_url.url` data URL) and Responses `input[].content[].type ==
+/// "input_image"` (plain-string `image_url` data URL). Returns a new request
+/// value; the input is untouched. Non-array message content (plain strings)
+/// carries no images, so it is preserved as-is.
 pub fn filter_image_url_parts_from_request(request: &serde_json::Value) -> serde_json::Value {
     let mut filtered = request.clone();
-    let Some(messages) = filtered.get_mut("messages").and_then(|m| m.as_array_mut()) else {
-        return filtered;
-    };
-    for message in messages.iter_mut() {
-        let Some(parts) = message.get_mut("content").and_then(|c| c.as_array_mut()) else {
-            continue;
-        };
-        for part in parts.iter_mut() {
-            if part.get("type").and_then(|t| t.as_str()) != Some("image_url") {
+    // Chat-completions shape.
+    if let Some(messages) = filtered.get_mut("messages").and_then(|m| m.as_array_mut()) {
+        for message in messages.iter_mut() {
+            let Some(parts) = message.get_mut("content").and_then(|c| c.as_array_mut()) else {
                 continue;
+            };
+            for part in parts.iter_mut() {
+                if part.get("type").and_then(|t| t.as_str()) != Some("image_url") {
+                    continue;
+                }
+                // Keep the media type in the marker so the model still knows what
+                // kind of image was omitted; the pixel data itself is dropped.
+                let media_type = part
+                    .get("image_url")
+                    .and_then(|iu| iu.get("url"))
+                    .and_then(|u| u.as_str())
+                    .and_then(|url| url.strip_prefix("data:"))
+                    .and_then(|rest| rest.split(';').next())
+                    .unwrap_or("unknown");
+                *part = serde_json::json!({
+                    "type": "text",
+                    "text": format!(
+                        "[Image omitted: this model does not support image input; media_type={media_type}]"
+                    )
+                });
             }
-            // Keep the media type in the marker so the model still knows what
-            // kind of image was omitted; the pixel data itself is dropped.
-            let media_type = part
-                .get("image_url")
-                .and_then(|iu| iu.get("url"))
-                .and_then(|u| u.as_str())
-                .and_then(|url| url.strip_prefix("data:"))
-                .and_then(|rest| rest.split(';').next())
-                .unwrap_or("unknown");
-            *part = serde_json::json!({
-                "type": "text",
-                "text": format!(
-                    "[Image omitted: this model does not support image input; media_type={media_type}]"
-                )
-            });
+        }
+    }
+    // Responses shape (Azure Responses route, opencode-go Responses route):
+    // `input[].content[].type == "input_image"` with a plain-string
+    // `image_url` data URL. The replacement keeps the Responses content-part
+    // vocabulary (`input_text`) so the endpoint accepts the rewritten item.
+    if let Some(items) = filtered.get_mut("input").and_then(|i| i.as_array_mut()) {
+        for item in items.iter_mut() {
+            let Some(parts) = item.get_mut("content").and_then(|c| c.as_array_mut()) else {
+                continue;
+            };
+            for part in parts.iter_mut() {
+                if part.get("type").and_then(|t| t.as_str()) != Some("input_image") {
+                    continue;
+                }
+                let media_type = part
+                    .get("image_url")
+                    .and_then(|u| u.as_str())
+                    .and_then(|url| url.strip_prefix("data:"))
+                    .and_then(|rest| rest.split(';').next())
+                    .unwrap_or("unknown");
+                *part = serde_json::json!({
+                    "type": "input_text",
+                    "text": format!(
+                        "[Image omitted: this model does not support image input; media_type={media_type}]"
+                    )
+                });
+            }
         }
     }
     filtered
@@ -466,6 +515,57 @@ mod tests {
             "messages": [
                 {"role": "user", "content": [{"type": "text", "text": "hello"}]},
                 {"role": "user", "content": "plain string"}
+            ]
+        });
+        assert!(!request_contains_image_url_parts(&request));
+        let filtered = filter_image_url_parts_from_request(&request);
+        assert_eq!(filtered, request);
+    }
+
+    #[test]
+    fn responses_input_image_detection_and_filtering() {
+        // Azure Responses / opencode-go Responses wire shape: images are
+        // `input[].content[].type == "input_image"` with a plain-string
+        // `image_url` data URL, not the chat-completions `image_url` object.
+        let request = json!({
+            "model": "text-only-test-model",
+            "input": [
+                {"type": "message", "role": "user", "content": [
+                    {"type": "input_text", "text": "look at this"},
+                    {"type": "input_image", "image_url": "data:image/jpeg;base64,Zm9v"}
+                ]},
+                {"type": "function_call_output", "call_id": "c1", "output": "plain output"}
+            ],
+            "stream": true
+        });
+        assert!(request_contains_image_url_parts(&request));
+
+        let filtered = filter_image_url_parts_from_request(&request);
+        assert!(!request_contains_image_url_parts(&filtered));
+        // The rewritten part keeps the Responses vocabulary.
+        let parts = filtered["input"][0]["content"].as_array().unwrap();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["type"], "input_text");
+        assert_eq!(parts[0]["text"], "look at this");
+        assert_eq!(parts[1]["type"], "input_text");
+        let marker = parts[1]["text"].as_str().unwrap();
+        assert!(marker.contains("[Image omitted:"));
+        assert!(marker.contains("media_type=image/jpeg"));
+        // Non-message items untouched.
+        assert_eq!(filtered["input"][1]["type"], "function_call_output");
+        assert_eq!(filtered["input"][1]["output"], "plain output");
+        // Original request not mutated.
+        assert!(request_contains_image_url_parts(&request));
+    }
+
+    #[test]
+    fn responses_request_without_images_is_untouched() {
+        let request = json!({
+            "model": "text-only-test-model",
+            "input": [
+                {"type": "message", "role": "user", "content": [
+                    {"type": "input_text", "text": "hello"}
+                ]}
             ]
         });
         assert!(!request_contains_image_url_parts(&request));
