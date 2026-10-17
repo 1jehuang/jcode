@@ -681,6 +681,8 @@ bind_addr = "0.0.0.0"
 [suggested_replies]
 # Enable two-stage cascading Suggested Replies with Default Action Focus (default: true)
 enabled = true
+# Jev SystemOne provider for Suggested Replies: "auto", "laya", "openjev", "typesafe", "openrouter", "aimlapi", or "jcode"
+jev_provider = "auto"
 # Switch between Jev-native fixed macro/micro pool (false) and OpenGF Sidecar generation (true)
 use_open_gf = false
 # Maximum number of secondary suggestion badges displayed (1..=5, default: 5)

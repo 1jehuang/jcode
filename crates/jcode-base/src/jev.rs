@@ -13,6 +13,8 @@ const PROVIDER_ENV: &str = "JCODE_MEMORY_JEV_PROVIDER";
 const BROWSER_PROVIDER_ENV: &str = "JCODE_BROWSER_JEV_PROVIDER";
 const VOICE_PROVIDER_ENV: &str = "JCODE_VOICE_JEV_PROVIDER";
 const SUGGESTIONS_PROVIDER_ENV: &str = "JCODE_SUGGESTIONS_JEV_PROVIDER";
+const LAYA_BASE_URL_ENV: &str = "JCODE_LAYA_BASE_URL";
+const LAYA_DEFAULT_BASE: &str = "http://127.0.0.1:8080";
 const MAX_REQUEST_BYTES: usize = 80 * 1024;
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 const MAX_ME_BYTES: usize = 16 * 1024;
@@ -92,6 +94,7 @@ enum JevProvider {
     OpenRouter,
     TypeSafe,
     OpenJev,
+    Laya,
     Aimlapi,
     Jcode,
 }
@@ -102,6 +105,7 @@ impl JevProvider {
             Self::OpenRouter => "openrouter",
             Self::TypeSafe => "typesafe",
             Self::OpenJev => "openjev",
+            Self::Laya => "laya",
             Self::Aimlapi => "aimlapi",
             Self::Jcode => "jcode",
         }
@@ -112,6 +116,7 @@ impl JevProvider {
             Self::OpenRouter => ("OPENROUTER_API_KEY", "openrouter.env"),
             Self::TypeSafe => ("TYPESAFE_API_KEY", "typesafe.env"),
             Self::OpenJev => ("OPENJEV_API_KEY", "openjev.env"),
+            Self::Laya => ("LAYA_API_KEY", "laya.env"),
             Self::Aimlapi => ("AIMLAPI_API_KEY", "aimlapi.env"),
             Self::Jcode => (
                 crate::subscription_catalog::JCODE_API_KEY_ENV,
@@ -122,7 +127,7 @@ impl JevProvider {
 
     fn max_questions(self) -> usize {
         match self {
-            Self::TypeSafe | Self::OpenJev => TYPESAFE_MAX_QUESTIONS,
+            Self::TypeSafe | Self::OpenJev | Self::Laya => TYPESAFE_MAX_QUESTIONS,
             _ => MAX_QUESTIONS,
         }
     }
@@ -132,6 +137,7 @@ impl JevProvider {
             Self::OpenRouter | Self::Jcode => "typesafe/jev-1.13",
             Self::TypeSafe => "jev-latest",
             Self::OpenJev => "openjev",
+            Self::Laya => "laya-latest",
             Self::Aimlapi => "typesafe/jev",
         }
     }
@@ -141,6 +147,7 @@ impl JevProvider {
             Self::OpenRouter => "https://openrouter.ai/api/alpha/decisions".into(),
             Self::TypeSafe => "https://api.typesafe.ai/v1/systemone".into(),
             Self::OpenJev => "https://api.openjev.sh/v1/systemone".into(),
+            Self::Laya => laya_endpoint(gateway_base)?,
             Self::Aimlapi => "https://api.aimlapi.com/v1/decisions".into(),
             Self::Jcode => format!("{}/decisions", trusted_gateway_base(gateway_base)?),
         })
@@ -232,10 +239,19 @@ impl JevClient {
     }
 
     fn resolve(purpose: JevPurpose) -> Result<(JevProvider, String, String, Option<String>)> {
-        let selector = purpose.selector_with(
-            |key| std::env::var(key),
-            || crate::config::config().agents.memory_jev_provider.clone(),
-        )?;
+        let selector = match purpose {
+            JevPurpose::Suggestions => match std::env::var(SUGGESTIONS_PROVIDER_ENV) {
+                Ok(value) => value,
+                Err(std::env::VarError::NotPresent) => {
+                    crate::config::config().suggested_replies.jev_provider.clone()
+                }
+                Err(_) => bail!("{SUGGESTIONS_PROVIDER_ENV} must contain a valid provider name"),
+            },
+            _ => purpose.selector_with(
+                |key| std::env::var(key),
+                || crate::config::config().agents.memory_jev_provider.clone(),
+            )?,
+        };
         // Unlike the API-key helper, this does not consult registered
         // cross-provider fallback resolvers or the shared compatible slot.
         let load = |env: &str, file: &str| {
@@ -246,10 +262,10 @@ impl JevClient {
             JevPurpose::Suggestions => resolve_suggestions_with(&selector, load)?,
             _ => resolve_with(&selector, load)?,
         };
-        let base = if provider == JevProvider::Jcode {
-            crate::subscription_api::configured_api_base()
-        } else {
-            String::new()
+        let base = match provider {
+            JevProvider::Jcode => crate::subscription_api::configured_api_base(),
+            JevProvider::Laya => configured_laya_base(),
+            _ => String::new(),
         };
         let endpoint = provider.endpoint(&base)?;
         let me_endpoint = if provider == JevProvider::Jcode {
@@ -390,9 +406,11 @@ impl JevClient {
     async fn send_once(&self, client: &Client, endpoint: &str, body: Vec<u8>) -> Result<Response> {
         let mut request = client
             .post(endpoint)
-            .bearer_auth(&self.api_key)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body);
+        if !self.api_key.is_empty() {
+            request = request.bearer_auth(&self.api_key);
+        }
         if self.provider == JevProvider::Jcode && self.purpose == JevPurpose::Browser {
             // The gateway budgets browser handoffs separately so background
             // memory recall cannot exhaust interactive browsing.
@@ -457,18 +475,18 @@ fn resolve_voice_with(
 ) -> Result<(JevProvider, String)> {
     match selector.trim().to_ascii_lowercase().as_str() {
         "auto" => resolve_providers(&[JevProvider::Jcode, JevProvider::TypeSafe], load),
-        "typesafe" | "jcode" | "subscription" | "jcode-subscription" => {
+        "typesafe" | "laya" | "jcode" | "subscription" | "jcode-subscription" => {
             resolve_with(selector, load)
         }
         _ => bail!(
-            "Invalid voice Jev provider. Choose auto, typesafe, or jcode; voice never uses OpenRouter or AIMLAPI"
+            "Invalid voice Jev provider. Choose auto, typesafe, laya, or jcode; voice never uses OpenRouter or AIMLAPI"
         ),
     }
 }
 
 fn resolve_suggestions_with(
     selector: &str,
-    load: impl FnMut(&str, &str) -> Option<String>,
+    mut load: impl FnMut(&str, &str) -> Option<String>,
 ) -> Result<(JevProvider, String)> {
     let providers: &[JevProvider] = match selector.trim().to_ascii_lowercase().as_str() {
         "auto" => &[
@@ -479,6 +497,7 @@ fn resolve_suggestions_with(
             JevProvider::Aimlapi,
         ],
         "openjev" => &[JevProvider::OpenJev],
+        "laya" => return resolve_laya_with(&mut load),
         _ => return resolve_with(selector, load),
     };
     resolve_providers(providers, load)
@@ -486,7 +505,7 @@ fn resolve_suggestions_with(
 
 fn resolve_with(
     selector: &str,
-    load: impl FnMut(&str, &str) -> Option<String>,
+    mut load: impl FnMut(&str, &str) -> Option<String>,
 ) -> Result<(JevProvider, String)> {
     let providers: &[JevProvider] = match selector.trim().to_ascii_lowercase().as_str() {
         "auto" => &[
@@ -502,11 +521,63 @@ fn resolve_with(
         "openrouter" => &[JevProvider::OpenRouter],
         "typesafe" => &[JevProvider::TypeSafe],
         "openjev" => &[JevProvider::OpenJev],
+        "laya" => return resolve_laya_with(&mut load),
         "aimlapi" => &[JevProvider::Aimlapi],
         "jcode" | "subscription" | "jcode-subscription" => &[JevProvider::Jcode],
-        _ => bail!("Invalid Jev provider. Choose auto, openjev, openrouter, typesafe, aimlapi, or jcode"),
+        _ => bail!("Invalid Jev provider. Choose auto, laya, openjev, openrouter, typesafe, aimlapi, or jcode"),
     };
     resolve_providers(providers, load)
+}
+
+fn resolve_laya_with(
+    load: &mut impl FnMut(&str, &str) -> Option<String>,
+) -> Result<(JevProvider, String)> {
+    let (env, file) = JevProvider::Laya.credentials();
+    if let Some(key) = load(env, file) {
+        let key = jcode_provider_env::sanitize_secret_value(&key);
+        if !key.is_empty() {
+            ensure!(
+                reqwest::header::HeaderValue::from_str(&format!("Bearer {key}")).is_ok(),
+                "The selected Jev provider credential is not a valid HTTP bearer value"
+            );
+            return Ok((JevProvider::Laya, key.to_owned()));
+        }
+    }
+    Ok((JevProvider::Laya, String::new()))
+}
+
+fn configured_laya_base() -> String {
+    if let Some(base) =
+        crate::provider_catalog::load_env_value_from_env_or_config(LAYA_BASE_URL_ENV, "laya.env")
+            .or_else(|| {
+                crate::provider_catalog::load_env_value_from_env_or_config(
+                    "LAYA_BASE_URL",
+                    "laya.env",
+                )
+            })
+    {
+        let trimmed = jcode_provider_env::sanitize_secret_value(&base);
+        if !trimmed.is_empty() {
+            return trimmed.to_owned();
+        }
+    }
+    LAYA_DEFAULT_BASE.to_owned()
+}
+
+fn laya_endpoint(base: &str) -> Result<String> {
+    let effective = if base.trim().is_empty() {
+        LAYA_DEFAULT_BASE
+    } else {
+        base.trim()
+    };
+    let root = trusted_gateway_base(effective)?;
+    if let Some(stripped) = root.strip_suffix("/v1/systemone") {
+        Ok(format!("{stripped}/v1/systemone"))
+    } else if let Some(stripped) = root.strip_suffix("/v1") {
+        Ok(format!("{stripped}/v1/systemone"))
+    } else {
+        Ok(format!("{root}/v1/systemone"))
+    }
 }
 
 fn resolve_providers(
@@ -1034,6 +1105,14 @@ mod tests {
                 "openjev",
             ),
             (
+                "laya",
+                JevProvider::Laya,
+                "LAYA_API_KEY",
+                "laya.env",
+                "http://127.0.0.1:8080/v1/systemone",
+                "laya-latest",
+            ),
+            (
                 "aimlapi",
                 JevProvider::Aimlapi,
                 "AIMLAPI_API_KEY",
@@ -1058,11 +1137,29 @@ mod tests {
             assert_eq!(provider, expected);
             assert_eq!(secret, format!("test-{selector}"));
             assert_eq!(
-                provider.endpoint("https://api.jcode.sh/v1/").unwrap(),
+                provider.endpoint(if provider == JevProvider::Laya {
+                    ""
+                } else {
+                    "https://api.jcode.sh/v1/"
+                }).unwrap(),
                 endpoint
             );
             assert_eq!(provider.model(), model);
         }
+        // Laya works without an API key on loopback and normalizes custom base URLs.
+        let (provider, secret) = resolve_with("laya", |_, _| None).unwrap();
+        assert_eq!(provider, JevProvider::Laya);
+        assert!(secret.is_empty());
+        assert_eq!(
+            JevProvider::Laya.endpoint("http://127.0.0.1:8000").unwrap(),
+            "http://127.0.0.1:8000/v1/systemone"
+        );
+        assert_eq!(
+            JevProvider::Laya
+                .endpoint("http://localhost:8080/v1")
+                .unwrap(),
+            "http://localhost:8080/v1/systemone"
+        );
     }
 
     #[test]

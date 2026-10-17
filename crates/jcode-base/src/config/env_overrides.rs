@@ -645,6 +645,12 @@ impl Config {
                 self.suggested_replies.enabled = parsed;
             }
         }
+        if let Ok(v) = std::env::var("JCODE_SUGGESTIONS_JEV_PROVIDER") {
+            let trimmed = v.trim();
+            if !trimmed.is_empty() {
+                self.suggested_replies.jev_provider = trimmed.to_ascii_lowercase();
+            }
+        }
         if let Ok(v) = std::env::var("JCODE_USE_OPEN_GF") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.suggested_replies.use_open_gf = parsed;

@@ -1005,6 +1005,15 @@ pub struct SuggestedRepliesConfig {
         deserialize_with = "crate::serde_lenient::lenient_bool_true"
     )]
     pub enabled: bool,
+    /// Jev SystemOne provider for Suggested Replies (`auto`, `laya`, `openjev`,
+    /// `typesafe`, `openrouter`, `aimlapi`, or `jcode`). Env override:
+    /// `JCODE_SUGGESTIONS_JEV_PROVIDER`.
+    #[serde(
+        default = "default_suggestions_jev_provider",
+        alias = "jevProvider",
+        alias = "provider"
+    )]
+    pub jev_provider: String,
     /// Switch between Jev-native fixed macro/micro pool (`false`, default) and
     /// generative OpenGF (`Sidecar`) candidate synthesis (`true`).
     #[serde(
@@ -1052,6 +1061,10 @@ fn default_suggested_replies_enabled() -> bool {
     true
 }
 
+fn default_suggestions_jev_provider() -> String {
+    "auto".to_string()
+}
+
 fn default_max_secondary_suggestions() -> usize {
     5
 }
@@ -1064,6 +1077,7 @@ impl Default for SuggestedRepliesConfig {
     fn default() -> Self {
         Self {
             enabled: default_suggested_replies_enabled(),
+            jev_provider: default_suggestions_jev_provider(),
             use_open_gf: false,
             max_secondary_suggestions: default_max_secondary_suggestions(),
             confidence_threshold: default_suggested_replies_confidence_threshold(),
