@@ -36,8 +36,8 @@ pub use failover::{
     parse_failover_prompt_message,
 };
 pub use fallback_pick::{
-    FallbackPickOptions, error_looks_like_credential_failure, pick_next_fallback_route,
-    pick_next_fallback_route_with_options,
+    FallbackPickOptions, error_looks_like_credential_failure, model_generation_rank,
+    pick_next_fallback_route, pick_next_fallback_route_with_options,
 };
 pub use fingerprint::{log_provider_canonical_input, stable_hash_json, stable_hash_str};
 pub use models::{

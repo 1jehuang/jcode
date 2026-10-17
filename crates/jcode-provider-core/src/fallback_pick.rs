@@ -24,6 +24,23 @@ fn api_method_is_oauth(api_method: &ModelRouteApiMethod) -> bool {
     )
 }
 
+/// Rank a model by generation/quality using the curated best-first catalogs.
+/// Lower is better. Unknown models sort after every curated model so the
+/// newest known flagship always wins a tie between otherwise equal routes.
+pub fn model_generation_rank(model: &str) -> usize {
+    let normalized =
+        crate::model_id::strip_date_suffix(&crate::model_id::canonical(model)).to_ascii_lowercase();
+    let position = |catalog: &[&str]| {
+        catalog.iter().position(|candidate| {
+            crate::model_id::strip_date_suffix(&crate::model_id::canonical(candidate))
+                .eq_ignore_ascii_case(&normalized)
+        })
+    };
+    position(crate::ALL_CLAUDE_MODELS)
+        .or_else(|| position(crate::ALL_OPENAI_MODELS))
+        .unwrap_or(usize::MAX)
+}
+
 fn models_match(a: &str, b: &str) -> bool {
     a.trim().eq_ignore_ascii_case(b.trim())
 }
@@ -157,10 +174,15 @@ pub fn pick_next_fallback_route_with_options(
                 &route.api_method,
             )));
 
-            Some((tier, prefers_oauth, index))
+            Some((
+                tier,
+                model_generation_rank(&route.model),
+                prefers_oauth,
+                index,
+            ))
         })
         .min()
-        .map(|(_, _, index)| index)
+        .map(|(_, _, _, index)| index)
 }
 
 #[cfg(test)]
@@ -364,5 +386,33 @@ mod tests {
         assert!(!error_looks_like_credential_failure(
             "500 internal server error"
         ));
+    }
+}
+
+#[cfg(test)]
+mod generation_tests {
+    use super::*;
+
+    fn route(model: &str, provider: &str, api_method: &str) -> ModelRoute {
+        ModelRoute {
+            model: model.to_string(),
+            provider: provider.to_string(),
+            api_method: api_method.to_string(),
+            available: true,
+            detail: String::new(),
+            usage: None,
+            cheapness: None,
+        }
+    }
+
+    #[test]
+    fn prefers_latest_generation_over_catalog_order() {
+        let routes = vec![
+            route("claude-fable-5", "Anthropic", "claude-oauth"),
+            route("claude-opus-5-5", "Anthropic", "claude-oauth"),
+        ];
+        let pick = pick_next_fallback_route(&routes, "gpt-6-astra", "OpenAI", "openai-oauth")
+            .expect("fallback");
+        assert_eq!(routes[pick].model, "claude-opus-5-5");
     }
 }

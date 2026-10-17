@@ -566,13 +566,33 @@ impl App {
         }
         let pool = crate::auth::account_pool::AccountPool::load();
         let source_identity = Self::fallback_pool_identity(&current_api_method);
-        let source_is_pooled = source_identity.as_ref().is_some_and(|(key, api_key)| {
-            !pool.excluded.contains(key)
-                && pool.is_member(
-                    key,
-                    crate::auth::account_pool::default_member(key, *api_key),
-                )
-        });
+        let source_is_pooled = match source_identity.as_ref() {
+            Some((key, api_key)) => {
+                !pool.excluded.contains(key)
+                    && pool.is_member(
+                        key,
+                        crate::auth::account_pool::default_member(key, *api_key),
+                    )
+            }
+            // An unlabeled OAuth source (e.g. a remote session that does not
+            // know the account label) is still a subscription login, which is
+            // pooled by default. Treat it as pooled unless every account of
+            // that provider was excluded, so failover is automatic instead of
+            // falling back to a manual Ctrl+Y offer.
+            None => {
+                let prefix = match current_api_method.as_str() {
+                    "claude-oauth" => Some("claude:"),
+                    "openai-oauth" => Some("openai:"),
+                    _ => None,
+                };
+                prefix.is_some_and(|prefix| {
+                    let excluded_all = !pool.excluded.is_empty()
+                        && pool.excluded.iter().any(|key| key.starts_with(prefix))
+                        && !pool.members.iter().any(|key| key.starts_with(prefix));
+                    !excluded_all
+                })
+            }
+        };
         let automatic = crate::provider::parse_failover_prompt_message(error).is_none()
             && (options.credential_failure || failover_decision.should_failover())
             && source_is_pooled
@@ -596,10 +616,14 @@ impl App {
                         && identity != source_identity
                 })
                 .collect();
+            // Within one account, always prefer the newest-generation model.
             approved.sort_by_key(|route| {
-                Self::fallback_pool_identity(&route.api_method)
-                    .and_then(|(key, _)| pool.members.iter().position(|member| member == &key))
-                    .unwrap_or(usize::MAX)
+                (
+                    Self::fallback_pool_identity(&route.api_method)
+                        .and_then(|(key, _)| pool.members.iter().position(|member| member == &key))
+                        .unwrap_or(usize::MAX),
+                    jcode_provider_core::model_generation_rank(&route.model),
+                )
             });
             if let Some(route) = approved.first() {
                 let target_route =
