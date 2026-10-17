@@ -230,11 +230,17 @@ pub(super) fn resolve_selfdev_reload_repo_dir(
     resolve_selfdev_reload_repo_dir_from(build::get_repo_dir(), working_dir)
 }
 
+/// The session's own checkout wins, matching how `selfdev build` resolves it.
+/// `primary` is derived from where the *running binary* was compiled, which
+/// can be a different worktree. Preferring it made `build-reload` build in the
+/// session repo and then publish another worktree's stale binary.
 pub(super) fn resolve_selfdev_reload_repo_dir_from(
     primary: Option<std::path::PathBuf>,
     working_dir: Option<&std::path::Path>,
 ) -> Option<std::path::PathBuf> {
-    primary.or_else(|| working_dir.and_then(build::find_repo_in_ancestors))
+    working_dir
+        .and_then(build::find_repo_in_ancestors)
+        .or(primary)
 }
 
 impl SelfDevTool {
