@@ -406,6 +406,8 @@ pub struct UsageInfo {
     pub output_tps: Option<f32>,
     /// Whether data was successfully fetched / available to show
     pub available: bool,
+    /// A request was rejected for a usage limit, even without a fresh snapshot.
+    pub limit_reached: bool,
 }
 
 /// Session-level KV cache telemetry for providers that report cache usage.
@@ -789,7 +791,7 @@ impl InfoWidgetData {
                 if self
                     .usage_info
                     .as_ref()
-                    .map(|u| u.available)
+                    .map(|u| u.available || u.limit_reached)
                     .unwrap_or(false)
                 {
                     sections += 1;
@@ -832,7 +834,7 @@ impl InfoWidgetData {
             WidgetKind::UsageLimits => self
                 .usage_info
                 .as_ref()
-                .map(|u| u.available)
+                .map(|u| u.available || u.limit_reached)
                 .unwrap_or(false),
             WidgetKind::KvCache => self.cache_hit_info.is_some(),
             WidgetKind::ModelInfo => runtime_has_data(self),
@@ -2119,7 +2121,7 @@ fn render_sections(
 
     // Usage info (subscription limits)
     if let Some(info) = &data.usage_info
-        && info.available
+        && (info.available || info.limit_reached)
     {
         lines.extend(render_usage_compact(
             info,

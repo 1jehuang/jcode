@@ -517,6 +517,64 @@ fn swarm_plan_todos_render_safely_at_extreme_sizes() {
 }
 
 #[test]
+fn openai_limit_reached_overrides_nonexhausted_usage_windows() {
+    let usage = UsageInfo {
+        provider: UsageProvider::OpenAI,
+        primary_limit_label: Some("5-hour".to_string()),
+        five_hour: 0.18,
+        secondary_limit_label: Some("Weekly".to_string()),
+        seven_day: 0.03,
+        available: true,
+        limit_reached: true,
+        ..Default::default()
+    };
+    assert_usage_limit_warning(usage);
+}
+
+#[test]
+fn openai_limit_reached_without_snapshot_or_windows_is_visible() {
+    let usage = UsageInfo {
+        provider: UsageProvider::OpenAI,
+        limit_reached: true,
+        ..Default::default()
+    };
+    assert!(!usage.available);
+    assert_usage_limit_warning(usage);
+}
+
+#[test]
+fn usage_limit_reached_defaults_to_false() {
+    assert!(!UsageInfo::default().limit_reached);
+}
+
+fn assert_usage_limit_warning(usage: UsageInfo) {
+    let data = InfoWidgetData {
+        usage_info: Some(usage.clone()),
+        ..Default::default()
+    };
+    assert!(data.has_data_for(WidgetKind::UsageLimits));
+    for display_used in [false, true] {
+        let data = InfoWidgetData {
+            usage_display_used: display_used,
+            ..data.clone()
+        };
+        let expanded = render_usage_widget(&data, Rect::new(0, 0, 40, 4));
+        let compact = render_usage_compact(&usage, 40, display_used);
+        let overview = super::render_sections(&data, Rect::new(0, 0, 40, 10), None);
+        for text in [
+            lines_text(&expanded.all_lines()),
+            lines_text(&compact),
+            lines_text(&overview),
+        ] {
+            assert!(text.contains("Usage limit reached"), "{text}");
+            assert!(!text.contains('%'), "{text}");
+            assert!(!text.contains('▰') && !text.contains('▱'), "{text}");
+            assert!(!text.contains("Usage unavailable"), "{text}");
+        }
+    }
+}
+
+#[test]
 fn cost_based_usage_widgets_show_price_and_tokens() {
     let usage = UsageInfo {
         provider: UsageProvider::CostBased,
