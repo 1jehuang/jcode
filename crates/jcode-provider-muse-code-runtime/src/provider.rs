@@ -178,7 +178,10 @@ impl MuseCodeProvider {
         // `approval/request` as a **must-answer** server request, and a request
         // left unanswered stalls the turn until it times out. Answering is
         // therefore a protocol obligation rather than an optional feature.
-        spawn_server_request_responder(Arc::clone(&state.transport), state.transport.subscribe());
+        spawn_server_request_responder(
+            Arc::downgrade(&state.transport),
+            state.transport.subscribe(),
+        );
 
         *guard = Some(Arc::clone(&state));
         Ok(state)
@@ -191,13 +194,14 @@ impl MuseCodeProvider {
         // and the first notification.
         let events = state.transport.subscribe();
 
+        let command_id = new_command_id();
         state
             .transport
             .request(
                 "turn/start",
                 json!({
                     "sessionId": state.session_id,
-                    "commandId": new_command_id(),
+                    "commandId": command_id,
                     "input": [{ "type": "text", "text": prompt }],
                     "displayText": prompt,
                 }),
@@ -205,7 +209,16 @@ impl MuseCodeProvider {
             .await
             .context("MSP turn/start failed")?;
 
-        Ok(muse_event_stream(events))
+        // `turnId` is the commandId we minted, so the guard knows exactly which
+        // turn to cancel if jcode stops reading.
+        Ok(muse_event_stream(
+            events,
+            TurnCancelGuard {
+                transport: Arc::downgrade(&state.transport),
+                session_id: state.session_id.clone(),
+                turn_id: command_id,
+            },
+        ))
     }
 }
 
@@ -232,33 +245,110 @@ fn latest_user_text(messages: &[Message]) -> Option<String> {
         .filter(|text| !text.trim().is_empty())
 }
 
-/// Convert the MSP event feed into jcode's stream.
-fn muse_event_stream(events: tokio::sync::broadcast::Receiver<MspInbound>) -> EventStream {
-    let stream = futures::stream::unfold((events, false), |(mut events, done)| async move {
-        if done {
-            return None;
+/// Cancels the Muse turn when jcode stops reading the reply.
+///
+/// jcode aborts a reply by dropping the stream. Dropping a broadcast receiver
+/// cancels nothing on the host side, so without this Muse would keep making
+/// model calls and running tools after the user pressed stop, and the only
+/// evidence would be side effects in the workspace.
+struct TurnCancelGuard {
+    transport: std::sync::Weak<MspTransport>,
+    session_id: String,
+    turn_id: String,
+}
+
+impl TurnCancelGuard {
+    /// Mark the turn finished, so dropping the stream does not cancel it.
+    fn disarm(&mut self) {
+        self.turn_id.clear();
+    }
+}
+
+impl Drop for TurnCancelGuard {
+    fn drop(&mut self) {
+        if self.turn_id.is_empty() {
+            return;
         }
-        loop {
-            match events.recv().await {
-                Ok(inbound) => {
-                    if let Some(event) = map_inbound(&inbound) {
-                        return Some((Ok(event), (events, false)));
+        let Some(transport) = self.transport.upgrade() else {
+            return;
+        };
+        let session_id = std::mem::take(&mut self.session_id);
+        let turn_id = std::mem::take(&mut self.turn_id);
+        // `Drop` cannot await, so hand the cancellation to the runtime.
+        tokio::spawn(async move {
+            let _ = transport
+                .request(
+                    "turn/cancel",
+                    json!({
+                        "sessionId": session_id,
+                        "commandId": new_command_id(),
+                        "turnId": turn_id,
+                    }),
+                )
+                .await;
+        });
+    }
+}
+
+/// Convert the MSP event feed into jcode's stream.
+fn muse_event_stream(
+    events: tokio::sync::broadcast::Receiver<MspInbound>,
+    guard: TurnCancelGuard,
+) -> EventStream {
+    let stream = futures::stream::unfold(
+        (events, false, guard),
+        |(mut events, done, mut guard)| async move {
+            if done {
+                return None;
+            }
+            loop {
+                match events.recv().await {
+                    Ok(inbound) => {
+                        // The host exiting arrives as an explicit `Closed` message,
+                        // not as `RecvError::Closed`: the transport still holds a
+                        // sender, so the channel stays open and a bare `recv()` would
+                        // block forever. Without this arm a Muse crash left the turn
+                        // waiting indefinitely.
+                        if matches!(inbound, MspInbound::Closed) {
+                            return Some((
+                                Err(anyhow::anyhow!(
+                                    "the muse host exited before the turn completed"
+                                )),
+                                (events, true, guard),
+                            ));
+                        }
+                        if let Some(event) = map_inbound(&inbound) {
+                            return Some((Ok(event), (events, false, guard)));
+                        }
+                        if is_turn_end(&inbound) {
+                            // The turn reached its own end, so the guard must not
+                            // cancel it on drop.
+                            guard.disarm();
+                            return Some((Ok(StreamEvent::TextDone), (events, true, guard)));
+                        }
                     }
-                    if is_turn_end(&inbound) {
-                        // Emit the terminal marker, then stop.
-                        return Some((Ok(StreamEvent::TextDone), (events, true)));
+                    // Skipping dropped events would present a truncated reply as a
+                    // complete one, which is worse than failing: the caller would
+                    // believe the turn succeeded. The channel buffers 256 messages
+                    // and a burst can overrun it.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                        return Some((
+                            Err(anyhow::anyhow!(
+                                "muse emitted more events than jcode could consume ({missed} dropped), so the reply is incomplete"
+                            )),
+                            (events, true, guard),
+                        ));
                     }
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                    return Some((
-                        Err(anyhow::anyhow!("muse host closed the connection mid-turn")),
-                        (events, true),
-                    ));
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        return Some((
+                            Err(anyhow::anyhow!("muse host closed the connection mid-turn")),
+                            (events, true, guard),
+                        ));
+                    }
                 }
             }
-        }
-    });
+        },
+    );
     Box::pin(stream)
 }
 
@@ -288,13 +378,22 @@ const USER_INPUT_DECLINE_REASON: &str =
 /// profile, and cannot ask a clarifying question, while this stands. Bridging
 /// these into jcode's approval and input UI is the follow-up.
 fn spawn_server_request_responder(
-    transport: Arc<MspTransport>,
+    transport: std::sync::Weak<MspTransport>,
     mut events: broadcast::Receiver<MspInbound>,
 ) {
     tokio::spawn(async move {
         loop {
             match events.recv().await {
                 Ok(MspInbound::Request { id, method, params }) => {
+                    // Weak, not Arc: a strong reference here would be a cycle.
+                    // The task would hold the transport, the transport holds the
+                    // broadcast sender for this very channel, so the receiver
+                    // would never see `Closed`, the task would never exit, and
+                    // the child process would outlive the provider. In a
+                    // long-lived daemon that accumulates Muse processes.
+                    let Some(transport) = transport.upgrade() else {
+                        break;
+                    };
                     // Acknowledge presentation first, so the host is never left
                     // waiting on a receipt that will not arrive.
                     let _ = transport.respond(id, json!({})).await;
@@ -489,7 +588,37 @@ impl Provider for MuseCodeProvider {
             bail!("Muse Code model cannot be empty");
         };
         if let Ok(mut guard) = self.model.try_lock() {
-            *guard = model;
+            *guard = model.clone();
+        }
+
+        // A live Muse session keeps its own model selection, so changing only
+        // the local name would leave jcode displaying one model while Muse
+        // answered with another. `set_model` is synchronous, so the update is
+        // handed to the runtime instead of awaited; a failure is logged rather
+        // than silently dropped.
+        let live = self.host.try_lock().ok().and_then(|guard| {
+            guard
+                .as_ref()
+                .map(|state| (Arc::clone(&state.transport), state.session_id.clone()))
+        });
+        if let Some((transport, session_id)) = live {
+            tokio::spawn(async move {
+                if let Err(error) = transport
+                    .request(
+                        "session/setModel",
+                        json!({
+                            "sessionId": session_id,
+                            "commandId": new_command_id(),
+                            "model": { "modelId": model },
+                        }),
+                    )
+                    .await
+                {
+                    jcode_logging::warn(&format!(
+                        "muse-code: session/setModel failed, the live session is still on its previous model: {error:#}"
+                    ));
+                }
+            });
         }
         Ok(())
     }

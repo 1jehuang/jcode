@@ -18,6 +18,7 @@ uuid = { version = "1", features = ["v4", "v7"] }
 
 # default-features = false: see jcode-provider-openrouter-runtime/Cargo.toml.
 jcode-base = { path = "../jcode-base", default-features = false }
+jcode-logging = { path = "../jcode-logging" }
 jcode-message-types = { path = "../jcode-message-types" }
 jcode-provider-core = { path = "../jcode-provider-core" }
 

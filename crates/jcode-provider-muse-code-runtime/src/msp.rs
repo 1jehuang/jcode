@@ -183,9 +183,9 @@ impl MspTransport {
             .args(&config.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            // Keep stderr piped rather than inherited so a host that writes
-            // diagnostics cannot corrupt the protocol stream on stdout or leak
-            // into jcode's own terminal rendering.
+            // Piped so a chatty host cannot corrupt the protocol stream on
+            // stdout or leak into jcode's own terminal; drained by the task
+            // below so filling the pipe buffer cannot block the child.
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         if let Some(cwd) = &config.cwd {
@@ -201,6 +201,22 @@ impl MspTransport {
             .stdout
             .take()
             .context("muse serve produced no stdout")?;
+
+        // Drain stderr. Piping it without reading is a deadlock, not merely a
+        // missed diagnostic: once the OS pipe buffer fills, the child blocks
+        // writing and stops answering MSP requests altogether, so the turn
+        // hangs with no visible cause. Forwarding it to jcode's log also means
+        // a Muse crash leaves a trace instead of vanishing.
+        if let Some(stderr) = child.stderr.take() {
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    if !line.trim().is_empty() {
+                        jcode_logging::warn(&format!("muse host stderr: {line}"));
+                    }
+                }
+            });
+        }
 
         let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         let pending: PendingRequests = Arc::new(Mutex::new(HashMap::new()));
