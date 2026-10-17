@@ -163,14 +163,12 @@ fn inventory_lines(
         });
         let mut row = detail(
             if expired {
-                "×"
-            } else if is_current {
-                "●"
+                AuthState::Expired
             } else {
-                "○"
+                AuthState::Available
             },
             format!("{name:<9} {}", masked_identity(account.email.as_deref())),
-            is_current && !expired,
+            is_current,
         );
         if let Some(quota) = quota {
             row.spans
@@ -197,7 +195,7 @@ fn inventory_lines(
                 key.into(),
                 false,
                 detail(
-                    if is_current { "●" } else { "○" },
+                    AuthState::Available,
                     format!("{name:<9} API key"),
                     is_current,
                 ),
@@ -224,13 +222,6 @@ fn inventory_lines(
         if state != AuthState::NotConfigured {
             let is_current = current_provider.is_some()
                 && current_provider == jcode_provider_core::parse_provider_hint(key);
-            let dot = if state == AuthState::Expired {
-                "×"
-            } else if is_current {
-                "●"
-            } else {
-                "○"
-            };
             let label = if api_key {
                 format!("{name:<9} API key")
             } else {
@@ -239,7 +230,7 @@ fn inventory_lines(
             entries.push((
                 key.into(),
                 crate::auth::account_pool::default_member(key, api_key),
-                detail(dot, label, is_current && state == AuthState::Available),
+                detail(state, label, is_current),
             ));
         }
     }
@@ -298,16 +289,15 @@ fn remaining_bar(
     Some(bar)
 }
 
-fn detail(dot: &str, label: String, ready: bool) -> Line<'static> {
+fn detail(state: AuthState, label: String, selected: bool) -> Line<'static> {
     Line::from(vec![
-        Span::raw("  "),
         Span::styled(
-            dot.to_owned(),
-            Style::default().fg(if ready {
-                auth_dot_color(AuthState::Available)
-            } else {
-                dim_color()
-            }),
+            if selected { "> " } else { "  " },
+            Style::default().fg(auth_dot_color(AuthState::Available)),
+        ),
+        Span::styled(
+            auth_dot_char(state),
+            Style::default().fg(auth_dot_color(state)),
         ),
         Span::styled(format!(" {label}"), Style::default().fg(dim_color())),
     ])
@@ -393,8 +383,16 @@ mod tests {
         assert!(text(vec![lines[2].clone()]).contains("API key"));
         assert!(text(vec![lines[3].clone()]).contains("a***a@example.com"));
         assert_eq!(lines[3].spans[1].content, "●");
-        assert_eq!(lines[0].spans[1].content, "○");
-        assert_eq!(rendered.matches('●').count(), 1);
+        assert_eq!(lines[0].spans[1].content, "●");
+        assert_eq!(rendered.matches('●').count(), 4);
+        assert_eq!(lines[3].spans[0].content, "> ");
+        assert_eq!(rendered.matches('>').count(), 1);
+        for line in &lines {
+            assert_eq!(
+                line.spans[1].style.fg,
+                Some(auth_dot_color(AuthState::Available))
+            );
+        }
         for word in [
             "active",
             "standby",
@@ -462,14 +460,36 @@ mod tests {
             Some("bound"),
         );
         assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0].spans[1].content, "×");
-        assert_eq!(lines[0].spans[1].style.fg, Some(dim_color()));
+        assert_eq!(lines[0].spans[1].content, "◐");
+        assert_eq!(
+            lines[0].spans[1].style.fg,
+            Some(auth_dot_color(AuthState::Expired))
+        );
+        assert_eq!(lines[0].spans[0].content, "  ");
+        assert_eq!(lines[1].spans[0].content, "> ");
         assert_eq!(lines[1].spans[1].content, "●");
         assert_eq!(
             lines[1].spans[1].style.fg,
             Some(auth_dot_color(AuthState::Available))
         );
         assert!(!text(lines).contains("API key"));
+    }
+
+    #[test]
+    fn router_inventory_selection_is_independent_of_status() {
+        for state in [
+            AuthState::Available,
+            AuthState::Expired,
+            AuthState::NotConfigured,
+        ] {
+            for selected in [false, true] {
+                let row = detail(state, "credential".into(), selected);
+                assert_eq!(row.spans[0].content, if selected { "> " } else { "  " });
+                assert_eq!(row.spans[1].content, auth_dot_char(state));
+                assert_eq!(row.spans[1].style.fg, Some(auth_dot_color(state)));
+                assert_eq!(row.width(), 14);
+            }
+        }
     }
 
     #[test]
