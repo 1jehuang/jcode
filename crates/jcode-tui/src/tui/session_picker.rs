@@ -681,6 +681,7 @@ impl SessionPicker {
         // data swap + item rebuild.
         let selected_id = self.selected_session().map(|session| session.id.clone());
         let preview_scroll = self.scroll_offset;
+        let preview_auto_scroll = self.auto_scroll_preview;
         let list_offset = self.list_state.offset();
 
         let hidden_test_count: usize = server_groups
@@ -744,14 +745,18 @@ impl SessionPicker {
 
         // Restore the user's scroll position only when their selection survived
         // the refresh so the view feels stable; otherwise fall back to the
-        // rebuild's defaults.
+        // rebuild's defaults. `auto_scroll_preview` rides along: while the
+        // transcript is still loading the flag is deliberately still armed
+        // (the draw loop only consumes it on real content), so forcing it
+        // off here left the populated preview stuck at the top instead of
+        // snapping to the bottom once the load finished.
         let still_selected = selected_id
             .as_deref()
             .and_then(|id| self.selected_session().map(|s| s.id == id))
             .unwrap_or(false);
         if still_selected {
             self.scroll_offset = preview_scroll;
-            self.auto_scroll_preview = false;
+            self.auto_scroll_preview = preview_auto_scroll;
             *self.list_state.offset_mut() = list_offset;
         }
     }

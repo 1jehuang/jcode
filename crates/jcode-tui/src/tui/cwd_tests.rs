@@ -948,3 +948,49 @@ fn test_presence_rebuild_keeps_preview_scroll_position() {
     assert_eq!(gone.scroll_offset, 0);
     assert!(gone.auto_scroll_preview);
 }
+
+#[test]
+fn test_presence_rebuild_keeps_auto_scroll_armed_while_preview_loads() {
+    // While the selected session's transcript is still loading on the
+    // background thread, `auto_scroll_preview` stays armed by design: the
+    // draw loop only consumes it on real content. A presence-driven rebuild
+    // in that window used to force the flag off, so the populated preview
+    // stayed stuck at the top and the sticky prompt header never appeared.
+    let reading = make_session("loading", "loading", false, SessionStatus::Active);
+    let stopped_old = make_session("stopped_old", "stopped-old", false, SessionStatus::Closed);
+
+    let mut picker = SessionPicker::new(vec![stopped_old, reading]);
+    picker.set_live_presence_for_test(vec![live_presence("loading", true)]);
+    picker.list_state.select(
+        Some(
+            picker
+                .find_item_index_for_session_id("loading")
+                .expect("loading row present"),
+        ),
+    );
+    picker.auto_scroll_preview = true;
+    let (tx, rx) = std::sync::mpsc::channel::<Option<Vec<PreviewMessage>>>();
+    picker.pending_preview_load = Some(PendingSessionPreviewLoad {
+        session_id: "loading".to_string(),
+        receiver: rx,
+    });
+
+    // Another session goes live: the presence poll changes, the rebuild
+    // runs, but `loading` stays selected, so the armed auto-scroll flag
+    // must survive the rebuild instead of being disarmed mid-load.
+    picker.set_live_presence_for_test(vec![
+        live_presence("loading", true),
+        live_presence("stopped_old", false),
+    ]);
+    picker.live_presence_refreshed_at = None;
+    assert!(picker.maybe_refresh_live_presence());
+    assert_eq!(
+        picker.selected_session().map(|s| s.id.as_str()),
+        Some("loading")
+    );
+    assert!(
+        picker.auto_scroll_preview,
+        "auto-scroll must stay armed through a presence rebuild while the preview loads"
+    );
+    let _ = tx; // keep the channel alive so the load stays "in flight"
+}

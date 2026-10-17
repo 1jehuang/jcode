@@ -52,9 +52,12 @@ impl SessionPicker {
             // also preserve the user's reading position. Without this, a
             // background session starting or finishing would snap the preview
             // back to the bottom (auto-scroll) mid-read. Mirrors the save and
-            // restore in `reseed_grouped`.
+            // restore in `reseed_grouped`, including the auto-scroll flag:
+            // disarming it while the transcript is still loading left the
+            // preview stuck at the top once the content landed.
             let selected_id = self.selected_session().map(|session| session.id.clone());
             let preview_scroll = self.scroll_offset;
+            let preview_auto_scroll = self.auto_scroll_preview;
             let list_offset = self.list_state.offset();
             self.rebuild_items();
             let still_selected = selected_id
@@ -62,7 +65,7 @@ impl SessionPicker {
                 .is_some_and(|id| self.selected_session().is_some_and(|s| s.id == id));
             if still_selected {
                 self.scroll_offset = preview_scroll;
-                self.auto_scroll_preview = false;
+                self.auto_scroll_preview = preview_auto_scroll;
                 *self.list_state.offset_mut() = list_offset;
             }
         }
