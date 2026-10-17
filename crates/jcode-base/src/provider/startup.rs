@@ -410,7 +410,7 @@ impl MultiProvider {
         static FRESH_ROUTE_MEMO: Mutex<Option<FreshRouteMemo>> = Mutex::new(None);
         static FRESH_ROUTE_BUILD_LOCK: Mutex<()> = Mutex::new(());
         let key = (
-            self.routes_memo_key(),
+            self.routes_memo_key_unscoped(),
             pricing::auth_pricing_generation(),
             catalog_generation(),
             crate::auth::account_pool::AccountPool::load(),
