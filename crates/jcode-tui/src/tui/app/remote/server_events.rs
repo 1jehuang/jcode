@@ -558,6 +558,9 @@ pub(in crate::tui::app) fn handle_server_event(
 
     match event {
         ServerEvent::TextDelta { text } => {
+            if !text.is_empty() {
+                app.usage_reset.openai_quota_rejected = false;
+            }
             if let Some(thought_line) = App::extract_thought_line(&text) {
                 let ops = app.stream_buffer.flush();
                 app.apply_stream_ops(ops);
@@ -638,6 +641,7 @@ pub(in crate::tui::app) fn handle_server_event(
             eager_stream_redraw
         }
         ServerEvent::ToolStart { id, name } => {
+            app.usage_reset.openai_quota_rejected = false;
             // Tool-call JSON is provider-generated output and is included in output-token
             // usage. Keep the TPS timer running until the server reports ToolExec; actual
             // tool execution time is excluded after that point.
@@ -1770,6 +1774,9 @@ pub(in crate::tui::app) fn handle_server_event(
             crate::set_current_session(&session_id);
             app.note_client_focus(true);
             let session_changed = prev_session_id.as_deref() != Some(session_id.as_str());
+            if session_changed {
+                app.usage_reset.openai_quota_rejected = false;
+            }
             // The initial Subscribe snapshot predates an early startup Message
             // sent on the same ordered connection. Adopting its session id must
             // not make that in-flight request idle or discard its retry payload.
@@ -2486,6 +2493,15 @@ pub(in crate::tui::app) fn handle_server_event(
                 ));
                 app.set_status_notice("Model switch failed");
             } else {
+                if app.remote_provider_model.as_deref() != Some(model.as_str())
+                    || app.remote_provider_oauth_email != provider_oauth_email
+                    || app.remote_resolved_credential != resolved_credential
+                    || provider_name
+                        .as_ref()
+                        .is_some_and(|name| app.remote_provider_name.as_ref() != Some(name))
+                {
+                    app.usage_reset.openai_quota_rejected = false;
+                }
                 app.remote_provider_oauth_email = provider_oauth_email;
                 // The server also re-sends ModelChanged on resume so the client
                 // learns the server-resolved context window. That is not a

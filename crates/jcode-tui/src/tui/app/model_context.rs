@@ -39,6 +39,7 @@ impl App {
     /// explicit provider prefix like `openrouter:`); for provider-level
     /// switches without a model request, pass the active model name.
     pub(super) fn finalize_model_switch(&mut self, model_request: &str) -> String {
+        self.usage_reset.openai_quota_rejected = false;
         self.provider_session_id = None;
         self.session.provider_session_id = None;
         self.upstream_provider = None;

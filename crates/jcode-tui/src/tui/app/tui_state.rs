@@ -393,6 +393,19 @@ impl App {
         }
     }
 
+    pub(super) fn openai_widget_account_email(&self) -> Option<String> {
+        if crate::tui::is_ssh_remote() {
+            return None;
+        }
+        if self.is_remote {
+            self.remote_provider_oauth_email
+                .as_ref()
+                .map(|email| email.as_str().to_string())
+        } else {
+            self.provider.active_oauth_account_email()
+        }
+    }
+
     fn widget_usage_info(
         &self,
         route: WidgetRouteInfo,
@@ -437,6 +450,7 @@ impl App {
             cache_read_tokens: self.streaming.streaming_cache_read_tokens,
             cache_write_tokens: self.streaming.streaming_cache_creation_tokens,
             output_tps,
+            limit_reached: false,
             available: true,
         };
 
@@ -457,6 +471,7 @@ impl App {
                 cache_read_tokens: None,
                 cache_write_tokens: None,
                 output_tps,
+                limit_reached: false,
                 available: display_input_tokens > 0 || display_output_tokens > 0,
             }),
             WidgetProviderKind::Anthropic => {
@@ -485,6 +500,7 @@ impl App {
                     cache_read_tokens: None,
                     cache_write_tokens: None,
                     output_tps,
+                    limit_reached: false,
                     available: usage.last_error.is_none(),
                 })
             }
@@ -497,7 +513,12 @@ impl App {
                     _ => return None,
                 }
 
-                let openai_usage = crate::usage::get_openai_usage_sync();
+                // The selected route is session-bound, unlike the global
+                // active account. Never borrow another login's quota headroom.
+                let openai_usage = self
+                    .openai_widget_account_email()
+                    .map(|email| crate::usage::get_openai_usage_for_email_sync(&email))
+                    .unwrap_or_default();
                 Some(crate::tui::info_widget::UsageInfo {
                     provider: crate::tui::info_widget::UsageProvider::OpenAI,
                     primary_limit_label: openai_usage
@@ -537,7 +558,9 @@ impl App {
                     cache_read_tokens: None,
                     cache_write_tokens: None,
                     output_tps,
-                    available: openai_usage.has_limits(),
+                    limit_reached: openai_usage.hard_limit_reached
+                        || self.usage_reset.openai_quota_rejected,
+                    available: openai_usage.has_limits() && openai_usage.last_error.is_none(),
                 })
             }
             WidgetProviderKind::Gemini => None,
@@ -1802,6 +1825,20 @@ impl crate::tui::TuiState for App {
         // the widget's auth line can never disagree.
         let route = self.widget_route_info(None);
         self.dual_credential_active(route, provider)
+    }
+
+    fn startup_oauth_account_label(&self) -> Option<String> {
+        if crate::tui::is_ssh_remote() {
+            return None;
+        }
+        if !self.is_remote {
+            return self.provider.oauth_account_label();
+        }
+        self.session
+            .route_api_method
+            .as_deref()
+            .and_then(jcode_provider_core::oauth_account_label)
+            .map(str::to_owned)
     }
 
     fn diagram_mode(&self) -> crate::config::DiagramDisplayMode {

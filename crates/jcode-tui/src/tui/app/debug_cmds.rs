@@ -275,6 +275,14 @@ impl App {
                 "OK: mouse {kind} at {col},{row} (status: {:?})",
                 self.status_notice.as_ref().map(|(text, _)| text.as_str())
             )
+        } else if cmd == "quota-limit-fixture" {
+            self.is_remote = true;
+            self.remote_provider_name = Some("OpenAI".into());
+            self.remote_provider_model = Some("gpt-5.4".into());
+            self.remote_resolved_credential = Some(jcode_provider_core::ResolvedCredential::Oauth);
+            self.remote_provider_oauth_email = None;
+            self.refresh_openai_usage_after_quota_error("usage_limit_reached");
+            serde_json::json!({"ok": true, "fixture": "quota-limit"}).to_string()
         } else if cmd.starts_with("image-click-target:") {
             // Probe the inline-image expand badge hit-test at screen coords.
             let raw = cmd.strip_prefix("image-click-target:").unwrap_or("");
