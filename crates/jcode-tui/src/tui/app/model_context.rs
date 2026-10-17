@@ -181,11 +181,30 @@ impl App {
         if let Some(payload) = pending.remote_resend {
             self.restore_failover_payload(payload);
         }
+        self.remove_failover_countdown_message(&pending.prompt.to_label);
         self.push_display_message(DisplayMessage::system(format!(
             "Auto-switch canceled. Kept {} active. Use /model to switch manually.",
             pending.prompt.from_label,
         )));
         self.set_status_notice(notice);
+    }
+
+    fn failover_countdown_message(to_label: &str) -> String {
+        format!("↪ Switching to {to_label} in 3s. Esc to cancel.")
+    }
+
+    /// The countdown line is only meaningful while the countdown runs. Once the
+    /// switch happens (or is canceled), drop it so the transcript keeps just the
+    /// outcome rather than how long we waited.
+    fn remove_failover_countdown_message(&mut self, to_label: &str) {
+        let countdown = Self::failover_countdown_message(to_label);
+        if let Some(idx) = self
+            .display_messages
+            .iter()
+            .rposition(|message| message.role == "system" && message.content == countdown)
+        {
+            self.remove_display_message(idx);
+        }
     }
 
     pub(super) fn maybe_progress_provider_failover_countdown(&mut self) -> bool {
@@ -219,6 +238,7 @@ impl App {
         }
 
         self.pending_provider_failover = None;
+        self.remove_failover_countdown_message(&pending.prompt.to_label);
         if self.is_remote {
             let selection = pending.prompt.target_route.as_deref().and_then(|target| {
                 self.fallback_candidate_routes()
@@ -343,10 +363,9 @@ impl App {
                         prompt.from_label, reason
                     )));
                 }
-                self.push_display_message(DisplayMessage::system(format!(
-                    "↪ Switching to {} in 3s. Esc to cancel.",
-                    prompt.to_label,
-                )));
+                self.push_display_message(DisplayMessage::system(
+                    Self::failover_countdown_message(&prompt.to_label),
+                ));
                 self.set_status_notice(format!(
                     "Provider auto-switch → {} in 3s (Esc to cancel)",
                     prompt.to_label
