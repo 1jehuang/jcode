@@ -392,7 +392,7 @@ impl Agent {
                 jcode_message_types::provider_native::ProviderNativeItems::default();
             let mut provider_native_tracker =
                 jcode_message_types::provider_native::ProviderNativeTracker::default();
-            let mut openai_native_compaction: Option<(String, usize, Option<u64>)> = None;
+            let mut openai_native_compaction: Option<(String, usize, Option<u64>, String)> = None;
             let mut tool_id_to_name: std::collections::HashMap<String, String> =
                 std::collections::HashMap::new();
 
@@ -1000,15 +1000,16 @@ impl Agent {
                         }
                     }
                     StreamEvent::Compaction {
+                        trigger,
                         pre_tokens,
                         openai_encrypted_content,
-                        ..
                     } => {
                         if let Some(encrypted_content) = openai_encrypted_content {
                             openai_native_compaction.get_or_insert((
                                 encrypted_content,
                                 self.session.messages.len(),
                                 pre_tokens,
+                                trigger,
                             ));
                         }
                     }
@@ -1344,7 +1345,7 @@ impl Agent {
                 None
             };
 
-            if let Some((encrypted_content, compacted_count, native_pre_tokens)) =
+            if let Some((encrypted_content, compacted_count, native_pre_tokens, native_trigger)) =
                 openai_native_compaction.take()
             {
                 self.apply_openai_native_compaction(encrypted_content, compacted_count)?;
@@ -1359,7 +1360,7 @@ impl Agent {
                 // here. The response's own input usage is not the pre-compaction
                 // context size, so omit the value rather than mislabel it (#1178).
                 let _ = event_tx.send(ServerEvent::Compaction {
-                    trigger: "openai_native".to_string(),
+                    trigger: native_trigger,
                     pre_tokens: native_pre_tokens,
                     post_tokens: None,
                     tokens_saved: None,

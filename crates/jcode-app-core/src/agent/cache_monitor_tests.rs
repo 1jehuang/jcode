@@ -133,7 +133,25 @@ async fn native_compaction_cache_refresh_is_classified_before_compaction_is_anno
                     }
                     refresh_seen = true;
                 }
-                ServerEvent::Compaction { .. } => {
+                ServerEvent::Compaction {
+                    trigger,
+                    pre_tokens,
+                    post_tokens,
+                    tokens_saved,
+                    summary_chars,
+                    ..
+                } => {
+                    assert_eq!(trigger, "openai_native_auto");
+                    assert_eq!(
+                        pre_tokens, None,
+                        "response input is not a pre-compaction count"
+                    );
+                    assert_eq!(
+                        post_tokens, None,
+                        "opaque payload length is not a token count"
+                    );
+                    assert_eq!(tokens_saved, None);
+                    assert_eq!(summary_chars, None);
                     assert!(
                         refresh_seen,
                         "usage classification precedes compaction application"

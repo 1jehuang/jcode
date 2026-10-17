@@ -120,7 +120,8 @@ pub struct KvCacheMiss {
     pub expected_tokens: u64,
     /// Tokens the provider reported as read from cache.
     pub read_tokens: u64,
-    /// Estimated tokens that had to be resent.
+    /// Estimated shortfall against the previous reusable prefix. A compaction
+    /// changes that prefix, so this is not measured resent or avoidable input.
     pub missed_tokens: u64,
     /// Documented intentional invalidation that explains a harness-caused miss.
     pub documented_cause: Option<String>,
@@ -129,6 +130,13 @@ pub struct KvCacheMiss {
 impl KvCacheMiss {
     /// One-line summary suitable for any client to display.
     pub fn message(&self) -> String {
+        if self.reason == MissReason::Compaction {
+            return format!(
+                "KV cache refresh [provider_auto_compaction]: provider compacted the context; rebuilding cache is expected (previous reusable prefix ~{} tokens, cache read {}).",
+                compact_tokens(self.expected_tokens),
+                self.read_tokens
+            );
+        }
         let tokens = compact_tokens(self.missed_tokens);
         match (&self.documented_cause, self.reason.harness_caused()) {
             (Some(cause), _) => format!(
@@ -436,6 +444,12 @@ mod tests {
                 .starts_with("KV cache refresh [provider_auto_compaction]")
         );
         assert!(!miss.message().contains("likely a harness bug"));
+        assert!(miss.message().contains("rebuilding cache is expected"));
+        assert!(
+            miss.message()
+                .contains("previous reusable prefix ~216K tokens")
+        );
+        assert!(!miss.message().contains("tokens resent"));
 
         // Evidence belongs to this response only. A subsequent unexplained
         // zero read must still be reported, even after a compacted response.
