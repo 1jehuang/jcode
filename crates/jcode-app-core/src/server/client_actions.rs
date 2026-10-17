@@ -243,7 +243,7 @@ pub(super) fn handle_input_shell(
     let agent = Arc::clone(agent);
     let tx = client_event_tx.clone();
 
-    tokio::spawn(async move {
+    crate::runtime_activity::spawn(async move {
         let cwd = {
             let agent_guard = agent.lock().await;
             agent_guard.working_dir().map(|dir| dir.to_string())
@@ -288,6 +288,40 @@ pub(super) fn handle_input_shell(
     });
 }
 
+/// Routing for future workers is metadata, so it can be updated during a turn.
+pub(super) async fn set_session_agent_model(
+    agent: &Arc<Mutex<Agent>>,
+    session_id: &str,
+    target: &str,
+    model: Option<String>,
+) -> anyhow::Result<crate::session::AgentModelOverrides> {
+    if let Ok(mut guard) = agent.try_lock() {
+        guard.set_agent_model_override(target, model)?;
+        Ok(guard.session_for_split().agent_model_overrides.clone())
+    } else {
+        let mut session = Session::load_startup_stub(session_id)?;
+        session.set_agent_model_override(target, model)?;
+        Ok(session.agent_model_overrides)
+    }
+}
+
+/// Save a worker-model default in the server's own configuration, so remote
+/// clients change the default that server-side workers actually use.
+pub(super) async fn set_global_agent_model(
+    agent: &Arc<Mutex<Agent>>,
+    session_id: &str,
+    target: &str,
+    model: Option<String>,
+) -> anyhow::Result<crate::session::AgentModelOverrides> {
+    crate::config::Config::set_agent_model_default(target, model.as_deref())?;
+    // Report the session's current overrides so the client view stays exact.
+    if let Ok(guard) = agent.try_lock() {
+        Ok(guard.session_for_split().agent_model_overrides.clone())
+    } else {
+        Ok(Session::load_startup_stub(session_id)?.agent_model_overrides)
+    }
+}
+
 pub(super) async fn handle_set_subagent_model(
     id: u64,
     model: Option<String>,
@@ -321,7 +355,7 @@ pub(super) fn handle_run_subagent(
     let agent = Arc::clone(agent);
     let tx = client_event_tx.clone();
 
-    tokio::spawn(async move {
+    crate::runtime_activity::spawn(async move {
         let description = derive_subagent_description(&prompt);
         let tool_call_id = crate::id::new_id("call");
         let tool_name = "subagent".to_string();
@@ -387,9 +421,10 @@ pub(super) fn handle_run_subagent(
 
         let started = Instant::now();
         let tool_name_for_exec = tool_name.clone();
-        let result = match tokio::spawn(async move {
+        let result = match crate::runtime_activity::spawn(async move {
             registry.execute(&tool_name_for_exec, tool_input, ctx).await
         })
+        .expect("subagent task inherits its admitted parent activity")
         .await
         {
             Ok(result) => result,
@@ -1193,7 +1228,7 @@ pub(super) fn handle_compact(
 ) {
     let agent = Arc::clone(agent);
     let tx = client_event_tx.clone();
-    tokio::spawn(async move {
+    crate::runtime_activity::spawn(async move {
         let mut agent_guard = agent.lock().await;
         let session_id = agent_guard.session_id().to_string();
         let (message, success) = agent_guard.request_manual_compaction();

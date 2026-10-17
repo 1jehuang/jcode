@@ -35,9 +35,9 @@ pub use jcode_compaction_core::{
     TOKEN_HISTORY_WINDOW, build_compaction_prompt, build_emergency_summary_text,
     compacted_summary_text_block, content_char_count, effective_context_tokens_from_usage,
     emergency_strip_large_images, emergency_truncate_large_payloads, estimate_compaction_tokens,
-    is_request_payload_too_large_error, mean_embedding, message_char_count, safe_compaction_cutoff,
-    semantic_cache_key, semantic_goal_text, semantic_message_text, strip_large_images_in_contents,
-    summary_payload_char_count,
+    is_image_rejection_error, is_request_payload_too_large_error, mean_embedding,
+    message_char_count, safe_compaction_cutoff, semantic_cache_key, semantic_goal_text,
+    semantic_message_text, strip_large_images_in_contents, summary_payload_char_count,
 };
 
 const HARD_THRESHOLD_PENDING_WAIT_MS: u64 = 15_000;
@@ -519,11 +519,7 @@ impl CompactionManager {
         }
 
         // 5. Cooldown: too soon after the last compaction.
-        if self.turns_since_last_compact < cfg.min_turns_between_compactions {
-            return true;
-        }
-
-        false
+        self.turns_since_last_compact < cfg.min_turns_between_compactions
     }
 
     // ── Proactive mode trigger ──────────────────────────────────────────────
@@ -925,7 +921,7 @@ impl CompactionManager {
         self.pending_trigger = Some(mode_label.clone());
 
         // Spawn background task that notifies via Bus when done
-        self.pending_task = Some(tokio::spawn(async move {
+        self.pending_task = crate::runtime_activity::spawn(async move {
             let start = std::time::Instant::now();
             let result =
                 generate_compaction_artifact(provider, messages_to_summarize, existing_summary)
@@ -943,7 +939,7 @@ impl CompactionManager {
                 result.summarized_messages = msg_count;
                 result
             })
-        }));
+        });
     }
 
     /// Ensure context fits before an API call.
@@ -1139,7 +1135,7 @@ impl CompactionManager {
         self.pending_cutoff = cutoff;
         self.pending_trigger = Some("manual".to_string());
 
-        self.pending_task = Some(tokio::spawn(async move {
+        self.pending_task = crate::runtime_activity::spawn(async move {
             let start = std::time::Instant::now();
             let result =
                 generate_compaction_artifact(provider, messages_to_summarize, existing_summary)
@@ -1156,7 +1152,7 @@ impl CompactionManager {
                 result.summarized_messages = msg_count;
                 result
             })
-        }));
+        });
 
         Ok(())
     }
@@ -1757,12 +1753,19 @@ async fn generate_compaction_artifact(
     let prompt = build_compaction_prompt(&messages, existing_summary.as_ref(), max_prompt_chars);
 
     // Generate summary using simple completion
-    let summary = provider
-        .complete_simple(
+    let (summary, usage) = provider
+        .complete_simple_with_usage(
             &prompt,
             "You are a helpful assistant that summarizes conversations.",
         )
         .await?;
+    crate::telemetry::record_simple_completion_usage(
+        None,
+        provider.name(),
+        &provider.model(),
+        crate::telemetry::UsageSource::Compaction,
+        usage,
+    );
 
     Ok(CompactionResult {
         summary_text: summary,

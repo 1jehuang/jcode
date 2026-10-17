@@ -912,6 +912,7 @@ async fn comm_broadcast_reaches_only_senders_spawned_subtree() {
 /// swarm. Without `to_session` the DM lands on that swarm's coordinator; with
 /// it, on the named agent. Without `to_swarm`, DMs stay swarm-local.
 #[tokio::test]
+#[allow(clippy::await_holding_lock)] // serializes tests sharing the global swarm label registry
 async fn comm_message_cross_swarm_dm_by_label() {
     let _labels_guard = crate::server::swarm_labels::SWARM_LABELS_TEST_LOCK
         .lock()
@@ -966,7 +967,10 @@ async fn comm_message_cross_swarm_dm_by_label() {
             HashSet::from(["beta-coord".to_string(), "beta-worker".to_string()]),
         ),
     ])));
-    let live: HashSet<String> = ["swarm-a", "swarm-b"].iter().map(|s| s.to_string()).collect();
+    let live: HashSet<String> = ["swarm-a", "swarm-b"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     crate::server::swarm_labels::set_swarm_label("swarm-b", "Backend", &live).unwrap();
 
     let sessions = Arc::new(RwLock::new(HashMap::new()));
@@ -1034,7 +1038,11 @@ async fn comm_message_cross_swarm_dm_by_label() {
     assert!(beta_worker_rx.try_recv().is_err());
 
     // Label + friendly name: delivered to that agent.
-    send!(3, Some("beta-worker".to_string()), Some("swarm-b".to_string()));
+    send!(
+        3,
+        Some("beta-worker".to_string()),
+        Some("swarm-b".to_string())
+    );
     assert!(matches!(
         client_event_rx.recv().await,
         Some(ServerEvent::Done { id: 3 })

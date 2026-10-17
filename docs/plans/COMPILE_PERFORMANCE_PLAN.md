@@ -940,10 +940,19 @@ selfdev profile):
 - base-edit full-chain rebuild end-to-end: **~16s -> ~10s**
 - Diminishing returns past 4 threads on an 8-core box.
 
-Shipped in `scripts/dev_cargo.sh` (`configure_parallel_frontend`): auto-enabled
-for the `selfdev` profile when a nightly toolchain is installed, isolated to
-`target/selfdev` so it cannot thrash rust-analyzer's `target/debug` cache.
-Controls: `JCODE_PARALLEL_FRONTEND`, `JCODE_FRONTEND_THREADS`, `JCODE_DEV_TOOLCHAIN`.
+Shipped in `scripts/dev_cargo.sh` (`configure_parallel_frontend`): enabled for
+the unoptimized `dev`, `selfdev`, and `test` profiles through Cargo's
+`RUSTC_WRAPPER` (`scripts/rustc-parallel-frontend`). Only local crates (sources
+outside `CARGO_HOME`) get `-Zthreads`. Unlike `RUSTC_WORKSPACE_WRAPPER`, a
+`RUSTC_WRAPPER` is not hashed into crate metadata or fingerprints, so wrapped
+and raw `cargo` builds share artifacts. The wrapper sets `RUSTC_BOOTSTRAP=1`
+for those invocations only, so the stable toolchain is enough. Optimized
+compiles pass through untouched. Jcode Desktop applies the same wrapper
+repo-wide through `build.rustc-wrapper` in its `.cargo/config.toml`.
+Re-measured on a 16-thread Core Ultra X9 388H with `-Zthreads=8` (full
+re-check of one crate): `jcode-base` 29.3s -> 8.8s, `jcode-app-core`
+25.7s -> 8.9s, at ~0.1-0.2 GiB extra RSS.
+Controls: `JCODE_PARALLEL_FRONTEND=0` (off), `JCODE_FRONTEND_THREADS`.
 
 ### WIN 2 — prefer mold over lld for the bin link
 

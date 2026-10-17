@@ -154,6 +154,19 @@ fn swarm_spawn_mode_defaults_to_inline() {
 }
 
 #[test]
+fn swarm_stall_watchdog_defaults_and_parses() {
+    let defaults = Config::default().agents;
+    assert_eq!(defaults.swarm_stall_after_secs, 600);
+    assert!(!defaults.swarm_stall_nudge);
+
+    let cfg: Config =
+        toml::from_str("[agents]\nswarm_stall_after_secs = 0\nswarm_stall_nudge = true\n")
+            .expect("stall watchdog settings should parse");
+    assert_eq!(cfg.agents.swarm_stall_after_secs, 0);
+    assert!(cfg.agents.swarm_stall_nudge);
+}
+
+#[test]
 fn swarm_max_concurrent_agents_defaults_to_safe_live_worker_budget() {
     // Keep enough parallelism for deep fan-out without allowing recursive ad hoc
     // spawns to grow until the 1000-member hard cap exhausts machine memory.
@@ -1580,8 +1593,8 @@ fn config_reload_generation_increments_on_cache_invalidation() {
 #[test]
 fn swarm_root_effort_config_defaults_and_independent_modes() {
     let defaults = Config::default();
-    assert_eq!(defaults.agents.root_effort_for_swarm(false), "max");
-    assert_eq!(defaults.agents.root_effort_for_swarm(true), "max");
+    assert_eq!(defaults.agents.root_effort_for_swarm(false), "low");
+    assert_eq!(defaults.agents.root_effort_for_swarm(true), "low");
     let cfg: Config = toml::from_str(
         "[agents]\nswarm_root_effort = 'low'\nswarm_deep_root_effort = ' High '\nswarm_effort = 'medium'\n",
     ).unwrap();
@@ -1601,12 +1614,12 @@ fn swarm_root_effort_config_defaults_and_independent_modes() {
         let cfg: Config =
             toml::from_str(&format!("[agents]\nswarm_root_effort = '{level}'")).unwrap();
         assert_eq!(cfg.agents.root_effort_for_swarm(false), level);
-        assert_eq!(cfg.agents.root_effort_for_swarm(true), "max");
+        assert_eq!(cfg.agents.root_effort_for_swarm(true), "low");
     }
     for invalid in ["", "swarm", "swarm-deep", "turbo"] {
         let cfg: Config = toml::from_str(&format!("[agents]\nswarm_root_effort = '{invalid}'\nswarm_deep_root_effort = '{invalid}'\nswarm_effort = 'low'")).unwrap();
-        assert_eq!(cfg.agents.root_effort_for_swarm(false), "max");
-        assert_eq!(cfg.agents.root_effort_for_swarm(true), "max");
+        assert_eq!(cfg.agents.root_effort_for_swarm(false), "low");
+        assert_eq!(cfg.agents.root_effort_for_swarm(true), "low");
         assert_eq!(cfg.agents.swarm_effort.as_deref(), Some("low"));
     }
 }
@@ -1737,4 +1750,3 @@ fn removed_overscroll_status_key_still_loads_config() {
     assert!(config.display.centered);
     assert_eq!(config.display.usage_display, "used");
 }
-

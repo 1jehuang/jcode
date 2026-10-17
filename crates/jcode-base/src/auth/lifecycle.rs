@@ -254,6 +254,104 @@ pub fn provider_model_to_select_after_auth_with_configured_default(
     provider_model_to_select_after_auth(activation, selected_model, routes)
 }
 
+/// Pick the strongest model among `models` for `provider_id`, using the same
+/// flagship-first order and new-release auto-promotion as post-login
+/// selection. Unlike [`provider_model_to_select_after_auth`] this does not
+/// filter by route identity, so clients that already scoped the candidates to
+/// one provider (Desktop's provider switcher, Copilot tier detection) can rank
+/// them directly. Returns `None` when the provider has no curated order or no
+/// candidate is recognized, so callers keep their own fallback.
+pub fn preferred_model_for_provider(provider_id: &str, models: &[&str]) -> Option<String> {
+    if let Some(ranked) = ranked_flagship_for_provider(provider_id, models) {
+        return Some(ranked);
+    }
+    let provider_id = normalized_auth_provider_id(Some(provider_id))
+        .map(str::to_string)
+        .unwrap_or_else(|| provider_id.trim().to_ascii_lowercase());
+    crate::provider_catalog::newest_released_model_for_openai_compatible_profile(&provider_id)
+        .filter(|newest| models.contains(&newest.as_str()))
+}
+
+/// Curated-order part of [`preferred_model_for_provider`]: new-release
+/// promotion, then flagship rank. `None` for providers without a curated
+/// order or when nothing in `models` is recognized. Never consults catalogs,
+/// so catalog code can call it without recursing.
+pub fn ranked_flagship_for_provider(provider_id: &str, models: &[&str]) -> Option<String> {
+    let provider_id = normalized_auth_provider_id(Some(provider_id))
+        .map(str::to_string)
+        .unwrap_or_else(|| provider_id.trim().to_ascii_lowercase());
+    let activation = AuthActivationResult {
+        provider_id: Some(provider_id.clone()),
+        ..Default::default()
+    };
+    let routes: Vec<ModelRoute> = models
+        .iter()
+        .map(|model| ModelRoute {
+            model: (*model).to_string(),
+            provider: String::new(),
+            api_method: provider_id.clone(),
+            available: true,
+            detail: String::new(),
+            usage: None,
+            cheapness: None,
+        })
+        .collect();
+    let route_refs: Vec<&ModelRoute> = routes.iter().collect();
+    if let Some(newer) = newest_frontier_release(&activation, &route_refs) {
+        return Some(newer);
+    }
+    let orders = provider_preferred_model_orders(&activation);
+    if !orders.is_empty() {
+        return routes
+            .iter()
+            .filter(|route| preferred_model_rank(orders, &route.model) != usize::MAX)
+            .min_by_key(|route| preferred_model_rank(orders, &route.model))
+            .map(|route| route.model.clone());
+    }
+    None
+}
+
+/// The model a fresh session starts on for one provider login, before any
+/// live catalog is fetched. `None` for providers Jcode cannot run (or that
+/// need a catalog to name a model, such as OpenRouter).
+pub fn default_model_for_provider(provider_id: &str) -> Option<&'static str> {
+    match provider_id.trim().to_ascii_lowercase().as_str() {
+        "claude" | "claude-api" | "anthropic" | "anthropic-api" => {
+            Some(jcode_provider_core::DEFAULT_CLAUDE_MODEL)
+        }
+        "openai" | "openai-api" | "codex" => Some(jcode_provider_core::DEFAULT_OPENAI_MODEL),
+        "copilot" => Some(crate::provider::copilot::DEFAULT_MODEL),
+        "gemini" => Some(crate::provider::gemini::DEFAULT_MODEL),
+        "antigravity" => Some(crate::provider::antigravity::DEFAULT_FALLBACK_MODEL),
+        "cursor" => Some(crate::provider::cursor::DEFAULT_MODEL),
+        _ => None,
+    }
+}
+
+/// Predict the provider and model a first session will use once onboarding
+/// finishes with these logins (already connected plus selected imports).
+/// Mirrors the strongest-route choice the runtime applies after an import
+/// ([`globally_preferred_default_route`]), so UIs can show the real identity
+/// instead of asking the user to choose. Ties keep the caller's order.
+/// Returns `(provider_id, model)`.
+pub fn onboarding_default_selection(provider_ids: &[&str]) -> Option<(String, String)> {
+    let routes: Vec<ModelRoute> = provider_ids
+        .iter()
+        .filter_map(|id| {
+            default_model_for_provider(id).map(|model| ModelRoute {
+                model: model.to_string(),
+                provider: id.trim().to_string(),
+                api_method: String::new(),
+                available: true,
+                detail: String::new(),
+                usage: None,
+                cheapness: None,
+            })
+        })
+        .collect();
+    globally_preferred_default_route(&routes).map(|route| (route.provider, route.model))
+}
+
 /// Pick the strongest available route across every authenticated provider.
 ///
 /// This is intentionally separate from [`provider_model_to_select_after_auth`],
@@ -291,15 +389,15 @@ fn globally_preferred_model_rank(model: &str) -> (u8, usize) {
     if normalized == claude_default {
         return (2, 0);
     }
-    if let Some(position) = crate::provider::ALL_CLAUDE_MODELS
+    if let Some(position) = normalized_preference_order(crate::provider::ALL_CLAUDE_MODELS)
         .iter()
-        .position(|candidate| normalize_model_for_preference(candidate) == normalized)
+        .position(|candidate| *candidate == normalized)
     {
         return (3, position);
     }
-    if let Some(position) = crate::provider::ALL_OPENAI_MODELS
+    if let Some(position) = normalized_preference_order(crate::provider::ALL_OPENAI_MODELS)
         .iter()
-        .position(|candidate| normalize_model_for_preference(candidate) == normalized)
+        .position(|candidate| *candidate == normalized)
     {
         return (4, position);
     }
@@ -341,6 +439,11 @@ const ALL_GEMINI_MODELS: &[&str] = &[
     "gemini-1.5-flash",
 ];
 
+/// Curated flagship-first order for Grok (Grok Build subscription). Newer
+/// bare `grok-N.M` releases auto-promote via [`frontier_families`]; `code`/
+/// `fast` variants never do.
+const ALL_GROK_MODELS: &[&str] = &["grok-4.7", "grok-4.6", "grok-4.5", "grok-code-fast-1"];
+
 /// Flagship-first preference tiers used only to break ties when falling back to
 /// an arbitrary matching route after a login. Each inner slice is one curated
 /// family ordered best-first; earlier families outrank later ones. Returns an
@@ -360,10 +463,13 @@ fn provider_preferred_model_orders(
     match activation.provider_id.as_deref() {
         Some("claude") | Some("claude-api") => &[crate::provider::ALL_CLAUDE_MODELS],
         Some("openai") | Some("openai-api") => &[crate::provider::ALL_OPENAI_MODELS],
-        Some("copilot") | Some("cursor") => &[
+        // OpenRouter also proxies both families (`anthropic/claude-opus-5.5`,
+        // `openai/gpt-6-astra`); the vendor prefix is stripped before ranking.
+        Some("copilot") | Some("cursor") | Some("openrouter") => &[
             crate::provider::ALL_CLAUDE_MODELS,
             crate::provider::ALL_OPENAI_MODELS,
         ],
+        Some("grok-build") => &[ALL_GROK_MODELS],
         Some("bedrock") => &[ALL_BEDROCK_MODELS],
         // Azure hosts the OpenAI family.
         Some("azure-openai") => &[crate::provider::ALL_OPENAI_MODELS],
@@ -377,18 +483,46 @@ fn provider_preferred_model_orders(
 /// preference tiers. Lower is more preferred: an earlier family tier always
 /// outranks a later one, and within a tier the curated position decides.
 /// Unknown models sort last so they only win when nothing curated matches.
-fn preferred_model_rank(orders: &[&[&str]], model: &str) -> usize {
+fn preferred_model_rank(orders: &[&'static [&'static str]], model: &str) -> usize {
     const TIER_STRIDE: usize = 10_000;
     let normalized = normalize_model_for_preference(model);
     for (tier, order) in orders.iter().enumerate() {
-        if let Some(position) = order
+        if let Some(position) = normalized_preference_order(order)
             .iter()
-            .position(|candidate| normalize_model_for_preference(candidate) == normalized)
+            .position(|candidate| *candidate == normalized)
         {
             return tier * TIER_STRIDE + position;
         }
     }
     usize::MAX
+}
+
+/// `order` with every id passed through [`normalize_model_for_preference`],
+/// memoized per curated list. Ranking a catalog compares every catalog model
+/// against every curated id; re-normalizing the curated side each time made a
+/// single OpenRouter catalog ranking cost ~80ms (it runs on every new session).
+/// Curated orders are `&'static` constants, so the slice address identifies
+/// them.
+fn normalized_preference_order(order: &'static [&'static str]) -> std::sync::Arc<Vec<String>> {
+    type OrderCache =
+        std::sync::Mutex<std::collections::HashMap<(usize, usize), std::sync::Arc<Vec<String>>>>;
+    static CACHE: std::sync::LazyLock<OrderCache> = std::sync::LazyLock::new(Default::default);
+    let key = (order.as_ptr() as usize, order.len());
+    if let Ok(cache) = CACHE.lock()
+        && let Some(hit) = cache.get(&key)
+    {
+        return hit.clone();
+    }
+    let normalized = std::sync::Arc::new(
+        order
+            .iter()
+            .map(|candidate| normalize_model_for_preference(candidate))
+            .collect::<Vec<_>>(),
+    );
+    if let Ok(mut cache) = CACHE.lock() {
+        cache.insert(key, normalized.clone());
+    }
+    normalized
 }
 
 /// Normalize a model id for flagship-preference comparison: lowercase, drop a
@@ -437,6 +571,14 @@ fn normalize_model_for_preference(model: &str) -> String {
     id = strip_bedrock_region_prefix(&id);
     if let Some(rest) = id.strip_prefix("anthropic.") {
         id = rest.to_string();
+    }
+
+    // Copilot and OpenRouter spell Claude releases with dots
+    // (`claude-opus-4.6`) while the curated catalog uses hyphens
+    // (`claude-opus-4-6`). Without this, dotted ids never match the curated
+    // order and Copilot/Desktop fall back to arbitrary catalog order.
+    if id.starts_with("claude-") {
+        id = id.replace('.', "-");
     }
 
     id
@@ -521,11 +663,16 @@ fn frontier_families(activation: &AuthActivationResult) -> &'static [FrontierFam
         prefix: "gemini",
         flagship_token: Some("pro"),
     };
+    const GROK: FrontierFamily = FrontierFamily {
+        prefix: "grok",
+        flagship_token: None,
+    };
     match activation.provider_id.as_deref() {
         Some("claude") | Some("claude-api") => &[CLAUDE, FABLE],
         Some("openai") | Some("openai-api") | Some("azure-openai") => &[GPT],
         // Copilot/Cursor proxy both families under canonical ids.
-        Some("copilot") | Some("cursor") => &[CLAUDE, FABLE, GPT],
+        Some("copilot") | Some("cursor") | Some("openrouter") => &[CLAUDE, FABLE, GPT],
+        Some("grok-build") => &[GROK],
         // Bedrock hosts Claude under `anthropic.claude-opus-...` (prefix stripped
         // by normalize), so the Claude family applies.
         Some("bedrock") => &[CLAUDE],
@@ -937,250 +1084,9 @@ pub fn provider_display_label(provider_id: Option<&str>) -> Option<String> {
         .or_else(|| Some(provider.to_string()))
 }
 
-pub fn activate_auth_change(request: &AuthActivationRequest) -> AuthActivationResult {
-    let provider_id = request.provider_id();
-    sync_process_env_from_saved_credentials(request, provider_id.as_deref());
-    // The notification handler may have probed auth while the newly saved
-    // credential was not yet reflected in the process environment. Discard
-    // that snapshot after activation so catalog rebuilding sees the new auth.
-    super::AuthStatus::invalidate_cache();
-    let provider_label = provider_display_label(provider_id.as_deref());
-    let activated_model = apply_auth_provider_runtime(provider_id.as_deref());
-    AuthActivationResult {
-        provider_id,
-        provider_label,
-        activated_model,
-        expected_runtime: request
-            .expected_runtime()
-            .map(|runtime| runtime.as_str().to_string()),
-        expected_catalog_namespace: request
-            .expected_catalog_namespace()
-            .map(|namespace| namespace.as_str().to_string()),
-    }
-}
-
-/// Env keys and env-file names that persist API-key credentials for a
-/// normalized auth provider id. Empty for OAuth/CLI providers whose
-/// credentials live in token stores, not env vars.
-fn api_key_env_bindings_for_provider(provider_id: &str) -> Vec<(String, String)> {
-    match provider_id {
-        "claude-api" => vec![("ANTHROPIC_API_KEY".to_string(), "anthropic.env".to_string())],
-        "openai-api" => vec![("OPENAI_API_KEY".to_string(), "openai.env".to_string())],
-        "openrouter" => vec![(
-            "OPENROUTER_API_KEY".to_string(),
-            "openrouter.env".to_string(),
-        )],
-        "jcode" => vec![
-            (
-                crate::subscription_catalog::JCODE_API_KEY_ENV.to_string(),
-                crate::subscription_catalog::JCODE_ENV_FILE.to_string(),
-            ),
-            (
-                crate::subscription_catalog::JCODE_API_BASE_ENV.to_string(),
-                crate::subscription_catalog::JCODE_ENV_FILE.to_string(),
-            ),
-        ],
-        "bedrock" => vec![
-            (
-                crate::provider::bedrock::API_KEY_ENV.to_string(),
-                crate::provider::bedrock::ENV_FILE.to_string(),
-            ),
-            (
-                crate::provider::bedrock::REGION_ENV.to_string(),
-                crate::provider::bedrock::ENV_FILE.to_string(),
-            ),
-        ],
-        "cursor" => vec![("CURSOR_API_KEY".to_string(), "cursor.env".to_string())],
-        "gemini" => super::gemini::GEMINI_API_KEY_ENV_VARS
-            .iter()
-            .map(|env_key| {
-                (
-                    env_key.to_string(),
-                    super::gemini::GEMINI_API_KEY_ENV_FILE.to_string(),
-                )
-            })
-            .collect(),
-        "azure-openai" => vec![
-            (
-                super::azure::API_KEY_ENV.to_string(),
-                super::azure::ENV_FILE.to_string(),
-            ),
-            (
-                super::azure::ENDPOINT_ENV.to_string(),
-                super::azure::ENV_FILE.to_string(),
-            ),
-            (
-                super::azure::MODEL_ENV.to_string(),
-                super::azure::ENV_FILE.to_string(),
-            ),
-        ],
-        other => crate::provider_catalog::openai_compatible_profile_by_id(other)
-            .map(|profile| {
-                let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
-                vec![(resolved.api_key_env, resolved.env_file)]
-            })
-            .unwrap_or_default(),
-    }
-}
-
-/// Make freshly saved credentials win over stale env vars inherited by this
-/// process (issue #453).
-///
-/// `/login` persists API keys to the per-provider env file under the jcode
-/// config dir, but credential resolution
-/// ([`crate::provider_catalog::load_api_key_from_env_or_config`]) prefers the
-/// process env var. A long-lived server that inherited a stale
-/// `ANTHROPIC_API_KEY` (or similar) would therefore keep 401-ing forever even
-/// though the login succeeded and the file holds a valid key. On an explicit
-/// auth change, overwrite this process's env var with the env-file value when
-/// the two diverge, so the just-saved credential is actually used.
-fn sync_process_env_from_saved_credentials(
-    request: &AuthActivationRequest,
-    provider_id: Option<&str>,
-) {
-    let Some(provider_id) = provider_id else {
-        return;
-    };
-    // Only do this for auth changes that plausibly wrote an env file. OAuth
-    // logins do not touch API-key env files, and process-env-preseeded auth
-    // means the env var itself is the intended source of truth.
-    let explicit_env_file_login = match request.auth.as_ref() {
-        Some(auth) => {
-            matches!(
-                auth.credential_source,
-                Some(crate::protocol::AuthCredentialSource::ApiKeyFile) | None
-            ) && !matches!(
-                auth.auth_method,
-                Some(crate::protocol::AuthMethod::ProcessEnvPreseeded)
-                    | Some(crate::protocol::AuthMethod::OAuthBrowser)
-                    | Some(crate::protocol::AuthMethod::DeviceCode)
-            )
-        }
-        // Legacy hint-only notifications carry no source metadata; syncing is
-        // still the safe default because it only runs when the file has a
-        // value that differs from the env var.
-        None => true,
-    };
-    if !explicit_env_file_login {
-        return;
-    }
-
-    for (env_key, env_file) in api_key_env_bindings_for_provider(provider_id) {
-        let Some(file_value) =
-            crate::provider_catalog::load_env_value_from_config_file(&env_key, &env_file)
-        else {
-            continue;
-        };
-        let env_value = std::env::var(&env_key).ok();
-        if env_value.as_deref() == Some(file_value.as_str()) {
-            continue;
-        }
-        let had_stale_env = env_value.is_some();
-        crate::env::set_var(&env_key, &file_value);
-        crate::logging::auth_event(
-            "auth_changed_env_synced_from_file",
-            provider_id,
-            &[
-                ("env_key", env_key.as_str()),
-                ("env_file", env_file.as_str()),
-                (
-                    "replaced",
-                    if had_stale_env {
-                        "stale_process_env"
-                    } else {
-                        "unset_process_env"
-                    },
-                ),
-            ],
-        );
-    }
-}
-
-fn apply_auth_provider_runtime(provider_id: Option<&str>) -> Option<String> {
-    match normalized_auth_provider_id(provider_id) {
-        Some("azure-openai") => match crate::provider::activation::apply_azure_openai_runtime() {
-            Ok(model) => model,
-            Err(error) => {
-                let message = error.to_string();
-                crate::logging::auth_event(
-                    "auth_changed_runtime_activation_failed",
-                    "azure-openai",
-                    &[("reason", message.as_str())],
-                );
-                None
-            }
-        },
-        Some(profile_id)
-            if direct_provider_activation(profile_id).is_none()
-                && crate::provider_catalog::openai_compatible_profile_by_id(profile_id)
-                    .is_some() =>
-        {
-            let Some(profile) =
-                crate::provider_catalog::openai_compatible_profile_by_id(profile_id)
-            else {
-                crate::logging::auth_event(
-                    "auth_changed_runtime_activation_failed",
-                    profile_id,
-                    &[(
-                        "reason",
-                        "openai-compatible profile disappeared during activation",
-                    )],
-                );
-                return None;
-            };
-            crate::provider_catalog::force_apply_openai_compatible_profile_env(Some(profile));
-            let default_model =
-                crate::provider_catalog::resolve_openai_compatible_profile(profile).default_model;
-            if let Err(error) =
-                crate::provider::activation::apply_openai_compatible_runtime(default_model.clone())
-            {
-                let message = error.to_string();
-                crate::logging::auth_event(
-                    "auth_changed_runtime_activation_failed",
-                    profile_id,
-                    &[("reason", message.as_str())],
-                );
-                None
-            } else {
-                default_model
-            }
-        }
-        Some(provider_id) => {
-            if let Some(activation) = direct_provider_activation(provider_id)
-                && let Err(error) = activation.apply_env()
-            {
-                let message = error.to_string();
-                crate::logging::auth_event(
-                    "auth_changed_runtime_activation_failed",
-                    provider_id,
-                    &[("reason", message.as_str())],
-                );
-            }
-            None
-        }
-        _ => None,
-    }
-}
-
-fn direct_provider_activation(provider_id: &str) -> Option<ProviderActivation> {
-    let (runtime_id, active) = match normalized_login_provider_id(provider_id)? {
-        "claude" => (RuntimeProviderId::Claude, ActiveProvider::Claude),
-        "claude-api" => (RuntimeProviderId::ClaudeApiKey, ActiveProvider::Claude),
-        "openai" => (RuntimeProviderId::OpenAi, ActiveProvider::OpenAI),
-        "openai-api" => (RuntimeProviderId::OpenAiApiKey, ActiveProvider::OpenAI),
-        "openrouter" => (RuntimeProviderId::OpenRouter, ActiveProvider::OpenRouter),
-        "jcode" => (RuntimeProviderId::Jcode, ActiveProvider::OpenRouter),
-        "bedrock" => (RuntimeProviderId::Bedrock, ActiveProvider::Bedrock),
-        "cursor" => (RuntimeProviderId::Cursor, ActiveProvider::Cursor),
-        "copilot" => (RuntimeProviderId::Copilot, ActiveProvider::Copilot),
-        "gemini" => (RuntimeProviderId::Gemini, ActiveProvider::Gemini),
-        "antigravity" => (RuntimeProviderId::Antigravity, ActiveProvider::Antigravity),
-        "grok-build" => (RuntimeProviderId::GrokBuild, ActiveProvider::OpenRouter),
-        _ => return None,
-    };
-    Some(ProviderActivation::initial(runtime_id, active))
-}
-
+#[path = "lifecycle_activation.rs"]
+mod activation;
+pub use activation::*;
 pub fn model_switch_request_for_provider_id(
     provider_id: Option<&str>,
     _provider_name: &str,
@@ -1257,6 +1163,33 @@ mod tests {
             usage: None,
             cheapness: None,
         }
+    }
+
+    #[test]
+    fn onboarding_default_selection_follows_global_preference() {
+        assert_eq!(onboarding_default_selection(&[]), None);
+        assert_eq!(onboarding_default_selection(&["openrouter"]), None);
+        assert_eq!(
+            onboarding_default_selection(&["gemini", "claude", "openai"]),
+            Some((
+                "openai".to_string(),
+                jcode_provider_core::DEFAULT_OPENAI_MODEL.to_string()
+            ))
+        );
+        assert_eq!(
+            onboarding_default_selection(&["gemini", "claude-api"]),
+            Some((
+                "claude-api".to_string(),
+                jcode_provider_core::DEFAULT_CLAUDE_MODEL.to_string()
+            ))
+        );
+        assert_eq!(
+            onboarding_default_selection(&["cursor", "gemini"]),
+            Some((
+                "cursor".to_string(),
+                crate::provider::cursor::DEFAULT_MODEL.to_string()
+            ))
+        );
     }
 
     #[test]
@@ -1499,6 +1432,36 @@ mod tests {
                 "grok-build:grok-4.6"
             );
         }
+    }
+
+    #[test]
+    fn login_does_not_override_configured_default_provider_for_new_sessions() {
+        let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().expect("sandbox");
+        std::fs::write(
+            sandbox.root().join("config.toml"),
+            "[provider]\ndefault_model = \"claude-oauth:claude-opus-5-5\"\ndefault_provider = \"claude-oauth\"\n",
+        )
+        .expect("write config");
+        crate::config::invalidate_config_cache();
+        crate::env::set_var("JCODE_RUNTIME_PROVIDER", "claude");
+        crate::env::set_var("JCODE_ACTIVE_PROVIDER", "claude");
+        crate::env::remove_var("JCODE_INITIAL_PROVIDER_EXPLICIT");
+
+        let activation = activate_auth_change(&AuthActivationRequest::new(
+            None,
+            Some(AuthChanged::new("openai")),
+        ));
+
+        assert_eq!(activation.provider_id.as_deref(), Some("openai"));
+        assert_eq!(
+            std::env::var("JCODE_ACTIVE_PROVIDER").as_deref(),
+            Ok("claude"),
+            "logging into OpenAI must not retarget the daemon-wide initial provider"
+        );
+        assert!(std::env::var("JCODE_INITIAL_PROVIDER_EXPLICIT").is_err());
+
+        std::fs::remove_file(sandbox.root().join("config.toml")).ok();
+        crate::config::invalidate_config_cache();
     }
 
     #[test]
@@ -2182,6 +2145,7 @@ mod tests {
                     context_length: None,
                     pricing: Default::default(),
                     created: Some(1_700_000_000),
+                    ..Default::default()
                 },
                 jcode_provider_openrouter::ModelInfo {
                     id: "qwen-3-235b-a22b-instruct-2507".to_string(),
@@ -2189,6 +2153,7 @@ mod tests {
                     context_length: None,
                     pricing: Default::default(),
                     created: Some(1_800_000_000),
+                    ..Default::default()
                 },
             ],
             Some("https://api.cerebras.ai/v1"),
@@ -2506,6 +2471,8 @@ mod tests {
         "openai-api",
         "copilot",
         "cursor",
+        "openrouter",
+        "grok-build",
         "bedrock",
         "azure-openai",
         "gemini",
@@ -2655,6 +2622,27 @@ mod tests {
                 &["gemini-2.5-flash", "gemini-2.5-pro", "gemini-3-pro-preview"],
                 "gemini-3-pro-preview",
             ),
+            (
+                // OpenRouter lists Sonnet 4 (its old hardcoded default) first;
+                // vendor-prefixed dotted Claude ids must still rank.
+                "openrouter",
+                "openrouter",
+                "auto",
+                &[
+                    "anthropic/claude-sonnet-4",
+                    "anthropic/claude-haiku-4.5",
+                    "anthropic/claude-opus-4.8",
+                ],
+                "anthropic/claude-opus-4.8",
+            ),
+            (
+                // Grok Build: the code-specialized model must not win.
+                "grok-build",
+                "grok-build-acp",
+                "Grok Build",
+                &["grok-code-fast-1", "grok-4.5", "grok-4.6"],
+                "grok-4.6",
+            ),
         ];
 
         // Guard: the hand-written cases must cover every ranked provider, or the
@@ -2684,6 +2672,115 @@ mod tests {
                 models[0]
             );
         }
+    }
+
+    /// Copilot and Cursor proxy both families; the cross-family tie-break must prefer the
+    /// Claude flagship over the OpenAI flagship to mirror jcode's default model.
+    #[test]
+    fn preferred_model_for_provider_picks_newest_flagship_for_every_provider() {
+        // Each case is a realistic id style for that provider, listed oldest /
+        // cheapest first so plain catalog order would pick the wrong model.
+        let cases: &[(&str, &[&str], &str)] = &[
+            (
+                "copilot",
+                &[
+                    "claude-haiku-4.5",
+                    "claude-opus-4.6",
+                    "claude-opus-4.6-fast",
+                    "claude-opus-5.5",
+                ],
+                "claude-opus-5.5",
+            ),
+            (
+                "claude",
+                &[
+                    "claude-haiku-4-5-20251001",
+                    "claude-opus-4-6",
+                    "claude-opus-5-5",
+                ],
+                "claude-opus-5-5",
+            ),
+            (
+                "anthropic-api",
+                &["claude-haiku-4-5", "claude-opus-4-8", "claude-opus-5-5"],
+                "claude-opus-5-5",
+            ),
+            (
+                "openai",
+                &["gpt-5.4-mini", "gpt-5.5", "gpt-6-astra"],
+                "gpt-6-astra",
+            ),
+            (
+                "openrouter",
+                &[
+                    "anthropic/claude-sonnet-4",
+                    "anthropic/claude-opus-4.6",
+                    "anthropic/claude-opus-5.5",
+                    "openai/gpt-5.5",
+                ],
+                "anthropic/claude-opus-5.5",
+            ),
+            (
+                "bedrock",
+                &[
+                    "anthropic.claude-3-5-sonnet-20241022-v2:0",
+                    "us.anthropic.claude-opus-4-6-v1",
+                    "anthropic.claude-opus-5-20260101-v1:0",
+                ],
+                "anthropic.claude-opus-5-20260101-v1:0",
+            ),
+            (
+                "grok-build",
+                &["grok-code-fast-1", "grok-4.5", "grok-4.6", "grok-4.7"],
+                "grok-4.7",
+            ),
+            (
+                "gemini",
+                &[
+                    "gemini-2.5-flash",
+                    "gemini-2.5-pro",
+                    "gemini-3.1-pro-preview",
+                ],
+                "gemini-3.1-pro-preview",
+            ),
+        ];
+        for (provider, models, expected) in cases {
+            assert_eq!(
+                preferred_model_for_provider(provider, models).as_deref(),
+                Some(*expected),
+                "{provider} should default to its newest flagship"
+            );
+        }
+    }
+
+    #[test]
+    fn preferred_model_for_provider_auto_promotes_unlisted_releases() {
+        assert_eq!(
+            preferred_model_for_provider(
+                "openrouter",
+                &["anthropic/claude-opus-5.5", "anthropic/claude-opus-6"]
+            )
+            .as_deref(),
+            Some("anthropic/claude-opus-6")
+        );
+        assert_eq!(
+            preferred_model_for_provider("grok-build", &["grok-4.7", "grok-5"]).as_deref(),
+            Some("grok-5")
+        );
+        assert_eq!(
+            preferred_model_for_provider("grok-build", &["grok-4.7", "grok-code-fast-9"])
+                .as_deref(),
+            Some("grok-4.7"),
+            "specialized variants must not self-promote"
+        );
+    }
+
+    #[test]
+    fn preferred_model_for_provider_unknown_provider_defers_to_caller() {
+        assert_eq!(
+            preferred_model_for_provider("some-local-llm", &["a", "b"]),
+            None
+        );
     }
 
     /// Copilot proxies both families; the cross-family tie-break must prefer the
@@ -2761,6 +2858,25 @@ mod tests {
             preferred_frontier_auth_provider(&openai_api_and_oauth),
             Some("openai"),
             "OAuth is preferred over an API key within one provider family"
+        );
+    }
+}
+
+#[cfg(test)]
+mod real_catalog_tests {
+    /// Snapshot of the real OpenRouter `/models` catalog (466 ids, Oct 2026).
+    /// Includes the hazards a synthetic list misses: `:batch` variants,
+    /// `~anthropic/claude-opus-latest` aliases, and newer non-Claude releases
+    /// (`mistralai/mistral-large-4-0`) that recency alone would pick.
+    const OPENROUTER_IDS: &str = include_str!("openrouter_catalog_snapshot.json");
+
+    #[test]
+    fn real_openrouter_catalog_ranks_to_claude_opus_flagship() {
+        let ids: Vec<String> = serde_json::from_str(OPENROUTER_IDS).expect("snapshot");
+        let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        assert_eq!(
+            super::ranked_flagship_for_provider("openrouter", &refs).as_deref(),
+            Some("anthropic/claude-opus-5.5")
         );
     }
 }

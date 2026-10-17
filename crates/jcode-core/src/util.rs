@@ -30,6 +30,11 @@ pub fn estimate_tokens(s: &str) -> usize {
 
 /// Format a number with ASCII thousands separators.
 pub fn format_number(n: usize) -> String {
+    format_number_u64(n as u64)
+}
+
+/// Format a full-width usage counter without truncating it on 32-bit targets.
+pub fn format_number_u64(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (idx, ch) in digits.chars().enumerate() {
@@ -366,6 +371,7 @@ mod tests {
         assert_eq!(format_number(12), "12");
         assert_eq!(format_number(1_234), "1,234");
         assert_eq!(format_number(12_345_678), "12,345,678");
+        assert_eq!(format_number_u64(u64::MAX), "18,446,744,073,709,551,615");
     }
 
     #[test]

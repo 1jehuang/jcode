@@ -1,7 +1,7 @@
 pub use jcode_provider_env::{
     load_api_key_from_env_or_config, load_env_value_from_config_file,
     load_env_value_from_env_or_config, register_api_key_fallback_resolver,
-    save_env_value_to_env_file,
+    save_env_value_to_env_file, save_named_api_key,
 };
 pub use jcode_provider_metadata::*;
 use std::collections::{HashMap, HashSet};
@@ -34,6 +34,27 @@ pub fn resolve_openai_compatible_profile_with_api_key_hint(
     profile: OpenAiCompatibleProfile,
     api_key_hint: Option<&str>,
 ) -> ResolvedOpenAiCompatibleProfile {
+    let mut resolved = resolve_openai_compatible_profile_endpoint(profile, api_key_hint);
+    if profile.id != OPENAI_COMPAT_PROFILE.id
+        && let Some(newest_model) =
+            newest_released_model_for_resolved_openai_compatible_profile(profile.id, &resolved)
+    {
+        resolved.default_model = Some(newest_model);
+    }
+    resolved
+}
+
+/// Resolve a profile's endpoint and credential bindings (api base, key env,
+/// env file, `requires_api_key`) without picking a default model.
+///
+/// Choosing the default model reads the profile's cached model catalog from
+/// disk and ranks it, which costs milliseconds per profile. Credential checks
+/// (auth status, which runs on the TUI's first frame across every profile)
+/// never look at the model, so they use this cheaper path.
+fn resolve_openai_compatible_profile_endpoint(
+    profile: OpenAiCompatibleProfile,
+    api_key_hint: Option<&str>,
+) -> ResolvedOpenAiCompatibleProfile {
     let mut resolved = ResolvedOpenAiCompatibleProfile {
         id: profile.id.to_string(),
         display_name: profile.display_name.to_string(),
@@ -58,11 +79,6 @@ pub fn resolve_openai_compatible_profile_with_api_key_hint(
     apply_profile_key_based_endpoint_overrides(profile, &mut resolved, api_key_hint);
 
     if profile.id != OPENAI_COMPAT_PROFILE.id {
-        if let Some(newest_model) =
-            newest_released_model_for_resolved_openai_compatible_profile(profile.id, &resolved)
-        {
-            resolved.default_model = Some(newest_model);
-        }
         return resolved;
     }
 
@@ -134,6 +150,22 @@ fn newest_released_model_for_resolved_openai_compatible_profile(
         == normalize_api_base(&resolved.api_base);
     if !source_matches {
         return None;
+    }
+
+    // Proxies with a curated flagship order (OpenRouter carries Claude/GPT
+    // under vendor prefixes) rank by quality first. Plain recency picks
+    // whatever shipped last; live, that put OpenRouter on
+    // `mistralai/mistral-large-4-0` over `anthropic/claude-opus-5.5`.
+    let chat_ids: Vec<&str> = cache
+        .models
+        .iter()
+        .map(|model| model.id.trim())
+        .filter(|id| !id.is_empty() && crate::provider::is_listable_model_name(id))
+        .collect();
+    if let Some(flagship) =
+        crate::auth::lifecycle::ranked_flagship_for_provider(profile_id, &chat_ids)
+    {
+        return Some(flagship);
     }
 
     cache
@@ -1157,7 +1189,7 @@ pub fn openai_compatible_profile_is_configured(profile: OpenAiCompatibleProfile)
         return configured;
     }
 
-    let resolved = resolve_openai_compatible_profile(profile);
+    let resolved = resolve_openai_compatible_profile_endpoint(profile, None);
     if load_api_key_from_env_or_config(&resolved.api_key_env, &resolved.env_file).is_some() {
         return true;
     }
@@ -1280,3 +1312,7 @@ fn dedup_sources(sources: Vec<(String, String)>) -> Vec<(String, String)> {
 #[cfg(test)]
 #[path = "provider_catalog_tests.rs"]
 mod provider_catalog_tests;
+
+#[cfg(test)]
+#[path = "provider_catalog_tsubasa_tests.rs"]
+mod provider_catalog_tsubasa_tests;

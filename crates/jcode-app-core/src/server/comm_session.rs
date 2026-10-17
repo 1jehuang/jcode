@@ -366,6 +366,24 @@ fn selection_for_concrete_model(
     }
 }
 
+async fn session_swarm_model(
+    req_session_id: &str,
+    sessions: &SessionAgents,
+    global: Option<String>,
+) -> Option<String> {
+    let agent = sessions.read().await.get(req_session_id).cloned();
+    if let Some(agent) = agent
+        && let Ok(guard) = agent.try_lock()
+    {
+        return guard
+            .session_for_split()
+            .effective_agent_model("swarm", global);
+    }
+    Session::load_startup_stub(req_session_id)
+        .map(|session| session.effective_agent_model("swarm", global.clone()))
+        .unwrap_or(global)
+}
+
 fn resolve_swarm_spawn_selection(
     requested_model: Option<String>,
     configured_swarm_model: Option<String>,
@@ -570,6 +588,22 @@ pub(super) fn resolve_swarm_spawn_effort(
     clean(requested_effort).or_else(|| clean(configured_swarm_effort))
 }
 
+/// Spawn mode for one swarm spawn. An explicit per-call mode wins, except
+/// `auto`: a model passing `auto` expresses no preference, so the user's
+/// configured `agents.swarm_spawn_mode` (inline by default) decides. Without
+/// this, `auto` tried a visible window first and, from terminals jcode cannot
+/// target (VS Code, Cursor), opened a separate terminal app instead of the
+/// inline gallery the user configured. Configuring `auto` still works.
+pub(super) fn resolve_swarm_spawn_mode(
+    requested: Option<SwarmSpawnMode>,
+    configured: SwarmSpawnMode,
+) -> SwarmSpawnMode {
+    match requested {
+        Some(SwarmSpawnMode::Auto) | None => configured,
+        Some(mode) => mode,
+    }
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "server-side swarm spawning needs session, swarm state, provider, and event sinks together"
@@ -607,8 +641,9 @@ pub(super) async fn spawn_swarm_agent(
     let client_terminal_env =
         client_terminal_env_for_session(req_session_id, client_connections).await;
     let agents_config = &crate::config::config().agents;
-    let configured_swarm_model = agents_config.swarm_model.clone();
-    let resolved_spawn_mode = spawn_mode.unwrap_or(agents_config.swarm_spawn_mode);
+    let configured_swarm_model =
+        session_swarm_model(req_session_id, sessions, agents_config.swarm_model.clone()).await;
+    let resolved_spawn_mode = resolve_swarm_spawn_mode(spawn_mode, agents_config.swarm_spawn_mode);
     let selection = resolve_swarm_spawn_selection(
         requested_model.clone(),
         configured_swarm_model.clone(),
@@ -789,7 +824,7 @@ pub(super) async fn spawn_swarm_agent(
             let event_history2 = Arc::clone(event_history);
             let event_counter2 = Arc::clone(event_counter);
             let swarm_event_tx2 = swarm_event_tx.clone();
-            tokio::spawn(async move {
+            crate::runtime_activity::spawn(async move {
                 update_member_status(
                     &sid_clone,
                     "running",
@@ -998,7 +1033,12 @@ pub(super) async fn handle_comm_list_models(
     send_event(ServerEvent::CommListModelsResponse {
         id,
         current_model: coordinator.model,
-        configured_swarm_model: crate::config::config().agents.swarm_model.clone(),
+        configured_swarm_model: session_swarm_model(
+            req_session_id,
+            sessions,
+            crate::config::Config::load().agents.swarm_model,
+        )
+        .await,
         model_routes,
     });
 }

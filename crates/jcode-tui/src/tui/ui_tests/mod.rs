@@ -143,7 +143,6 @@ struct TestState {
     side_pane_images: Vec<crate::session::RenderedImage>,
     pin_images: bool,
     inline_images_visible: bool,
-    chat_overscroll_active: bool,
     cache_ttl_status: Option<crate::tui::CacheTtlInfo>,
     openai_reset_hint: Option<&'static str>,
     status_notice: Option<String>,
@@ -152,10 +151,14 @@ struct TestState {
     transcript_swarm_members: Option<Vec<crate::protocol::SwarmMemberStatus>>,
     swarm_panel_selected: usize,
     swarm_panel_focused: bool,
+    pinned_todos_payload: Option<String>,
     swarm_panel_full_page: bool,
 }
 
 impl crate::tui::TuiState for TestState {
+    fn pinned_todos_payload(&self) -> Option<&str> {
+        self.pinned_todos_payload.as_deref()
+    }
     fn display_messages(&self) -> &[DisplayMessage] {
         &self.display_messages
     }
@@ -267,14 +270,6 @@ impl crate::tui::TuiState for TestState {
     }
     fn time_since_activity(&self) -> Option<Duration> {
         self.time_since_activity
-    }
-    fn chat_overscroll_active(&self) -> bool {
-        self.chat_overscroll_active
-    }
-    fn chat_overscroll_remaining(&self) -> Option<f32> {
-        // TestState models the elastic reveal: while active, a countdown is
-        // depleting (a config-pinned line would report None here instead).
-        self.chat_overscroll_active.then_some(1.0)
     }
     fn total_session_tokens(&self) -> Option<(u64, u64)> {
         None
@@ -514,6 +509,9 @@ fn reset_prompt_viewport_state_for_test() {
         *state.borrow_mut() = PromptViewportState::default();
     });
 }
+
+#[path = "pinned_todo_regressions.rs"]
+mod pinned_todo_regressions;
 
 #[path = "basic.rs"]
 mod basic;

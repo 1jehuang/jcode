@@ -71,6 +71,9 @@ impl TestEnvGuard {
         let temp_home = tempfile::Builder::new()
             .prefix("jcode-e2e-home-")
             .tempdir()?;
+        // No telemetry: a concurrency lease finishing at runtime shutdown otherwise recreates
+        // telemetry_concurrency_v2/ after the TempDir is removed, leaking one dir per test.
+        std::fs::write(temp_home.path().join("no_telemetry"), b"")?;
         let prev_home = std::env::var_os("JCODE_HOME");
         let prev_runtime_dir = std::env::var_os("JCODE_RUNTIME_DIR");
         let prev_test_session = std::env::var_os("JCODE_TEST_SESSION");
@@ -363,6 +366,7 @@ impl WsTestClient {
         self.send_request(Request::Subscribe {
             system_prompt: None,
             supports_pdf_panels: false,
+            supports_user_response: false,
             crash_on_disconnect: false,
             continue_on_disconnect: false,
             id,
@@ -1407,24 +1411,5 @@ pub(crate) async fn wait_for_selfdev_client_reload_cycle(
     )
 }
 
-pub(crate) fn latest_log_excerpt(home_dir: &std::path::Path) -> Option<String> {
-    let logs_dir = home_dir.join("logs");
-    let mut entries = std::fs::read_dir(logs_dir)
-        .ok()?
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.path())
-        .collect::<Vec<_>>();
-    entries.sort();
-    let latest = entries.pop()?;
-    let content = std::fs::read_to_string(latest).ok()?;
-    let tail = content
-        .lines()
-        .rev()
-        .take(120)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<Vec<_>>()
-        .join("\n");
-    Some(tail)
-}
+mod logs;
+pub(crate) use logs::latest_log_excerpt;

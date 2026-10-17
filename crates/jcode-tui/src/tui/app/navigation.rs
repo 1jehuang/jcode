@@ -2,6 +2,9 @@ use super::*;
 use crate::tui::ui::input_ui;
 use ratatui::layout::Rect;
 
+#[path = "panel_controls.rs"]
+mod panel_controls;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct MouseScrollTraceState {
     chat_offset: usize,
@@ -78,19 +81,6 @@ impl App {
     /// Maximum accumulated scroll momentum. Slightly above the original so a fast
     /// flick still glides a touch, without long runaway momentum.
     const MOUSE_SCROLL_MAX_QUEUE: i16 = 30;
-    /// How long the overscroll status line stays revealed after the last
-    /// downward overscroll tick before it rebounds away. Long enough that the
-    /// depleting countdown indicator is perceivable and the line reads as a
-    /// temporary, pull-to-reveal panel.
-    const OVERSCROLL_DWELL: std::time::Duration = std::time::Duration::from_millis(1500);
-    /// Maximum pause between downward scroll ticks for them to count as the
-    /// same continuous gesture. Overscroll only reveals when a gesture *began*
-    /// at the bottom of the transcript, so momentum from a scroll that merely
-    /// carries the view into the bottom does not pop the elastic line. Wheel
-    /// momentum drains a few lines per redraw tick, so this must comfortably
-    /// exceed the idle redraw cadence to avoid splitting one physical flick.
-    pub(super) const OVERSCROLL_GESTURE_GAP: std::time::Duration =
-        std::time::Duration::from_millis(500);
 
     fn log_mouse_scroll_trace(
         &self,
@@ -225,6 +215,52 @@ impl App {
         true
     }
 
+    /// Ctrl+wheel (also how terminals report a trackpad pinch) over an inline
+    /// image steps its size one level without wrapping. Returns `false` when
+    /// the pointer is not over an image so the wheel scrolls the chat instead.
+    pub(super) fn try_zoom_inline_image_at(
+        &mut self,
+        column: u16,
+        row: u16,
+        direction: i8,
+    ) -> bool {
+        use crate::tui::ui::inline_image_ui::ImageExpandLevel;
+        let centered = self.centered;
+        let Some(image_id) =
+            super::super::ui::inline_image_body_target_from_screen(column, row, centered)
+                .or_else(|| super::super::ui::inline_image_expand_target_from_screen(column, row))
+        else {
+            return false;
+        };
+        let current = self
+            .expanded_images
+            .get(&image_id)
+            .copied()
+            .unwrap_or_default();
+        let next =
+            ImageExpandLevel::from_index(crate::tui::mermaid::step_distinct_mermaid_inline_level(
+                image_id,
+                current as u8,
+                direction,
+            ));
+        if next == current {
+            return true;
+        }
+        if matches!(next, ImageExpandLevel::Fit) {
+            self.expanded_images.remove(&image_id);
+        } else {
+            self.expanded_images.insert(image_id, next);
+        }
+        self.expanded_images_version = self.expanded_images_version.wrapping_add(1);
+        crate::tui::mermaid::set_mermaid_inline_expand_level(image_id, next as u8);
+        self.set_status_notice(match next {
+            ImageExpandLevel::Fit => "Image size: fit",
+            ImageExpandLevel::Large => "Image size: large",
+            ImageExpandLevel::Full => "Image size: full",
+        });
+        true
+    }
+
     /// If a left-click landed on a swarm notification's `▸ expand` /
     /// `▾ collapse` badge, toggle that notification between its tldr line and
     /// its full body. Returns `false` when the click was elsewhere.
@@ -245,7 +281,8 @@ impl App {
         if message.role != "swarm" {
             return false;
         }
-        let Some(toggled) = jcode_tui_messages::toggle_collapsible_swarm_content(&message.content)
+        let normalized = jcode_tui_messages::collapse_long_swarm_content(&message.content);
+        let Some(toggled) = jcode_tui_messages::toggle_collapsible_swarm_content(&normalized)
         else {
             return false;
         };
@@ -652,14 +689,14 @@ impl App {
         crate::tui::clear_side_panel_render_caches();
     }
 
-    fn side_pane_has_visual_images(&self) -> bool {
+    pub(super) fn side_pane_has_visual_images(&self) -> bool {
         if self.side_panel_user_hidden {
             return false;
         }
         self.side_pane_has_visual_images_ignoring_user_hidden()
     }
 
-    fn side_pane_has_visual_images_ignoring_user_hidden(&self) -> bool {
+    pub(super) fn side_pane_has_visual_images_ignoring_user_hidden(&self) -> bool {
         // Images now render inline in the transcript flow, not in the side
         // panel, so they no longer drive the side-panel visibility heuristics.
         false
@@ -938,6 +975,7 @@ impl App {
                 });
                 true
             }
+            MouseScrollTarget::CommitLogOverlay => self.scroll_commit_log_overlay(direction),
             MouseScrollTarget::ModelStatusOverlay => {
                 let Some(current) = self.model_status_scroll else {
                     return false;
@@ -1100,75 +1138,6 @@ impl App {
         };
         self.set_status_notice(status);
         next
-    }
-
-    pub(super) fn toggle_side_panel(&mut self) {
-        if self.side_panel_user_hidden {
-            self.side_panel_user_hidden = false;
-            self.side_panel_explicit_hidden = false;
-            self.pinned_images_auto_hide_deadline = None;
-            if self.side_panel.pages.is_empty() {
-                if self.side_pane_has_visual_images_ignoring_user_hidden() {
-                    self.sync_diagram_fit_context();
-                    self.set_status_notice("Image side panel: ON");
-                } else {
-                    self.toggle_diagram_pane();
-                }
-                return;
-            }
-        }
-
-        if self.side_pane_has_visual_images() {
-            self.side_panel_user_hidden = true;
-            self.side_panel_explicit_hidden = true;
-            self.pinned_images_auto_hide_deadline = None;
-            self.set_diff_pane_focus(false);
-            self.sync_diagram_fit_context();
-            self.set_status_notice("Image side panel: OFF");
-            return;
-        }
-
-        if self.side_panel.pages.is_empty() {
-            self.toggle_diagram_pane();
-            return;
-        }
-
-        if self.side_panel.focused_page().is_some() {
-            self.last_side_panel_focus_id = self.side_panel.focused_page_id.clone();
-            self.side_panel.focused_page_id = None;
-            self.side_panel_user_hidden = true;
-            self.side_panel_explicit_hidden = true;
-            if !self.diff_pane_visible() {
-                self.set_diff_pane_focus(false);
-            }
-            self.sync_diagram_fit_context();
-            self.set_status_notice("Side panel: OFF");
-            return;
-        }
-
-        let restore_id = self
-            .last_side_panel_focus_id
-            .as_deref()
-            .filter(|id| self.side_panel.pages.iter().any(|page| page.id == *id))
-            .map(str::to_owned)
-            .or_else(|| self.side_panel.pages.first().map(|page| page.id.clone()));
-
-        let Some(restore_id) = restore_id else {
-            self.toggle_diagram_pane();
-            return;
-        };
-
-        self.side_panel.focused_page_id = Some(restore_id.clone());
-        self.last_side_panel_focus_id = Some(restore_id);
-        self.side_panel_user_hidden = false;
-        self.side_panel_explicit_hidden = false;
-        self.sync_diagram_fit_context();
-        let status = self
-            .side_panel
-            .focused_page()
-            .map(|page| format!("Side panel: {}", page.title))
-            .unwrap_or_else(|| "Side panel: ON".to_string());
-        self.set_status_notice(status);
     }
 
     pub(super) fn adjust_diagram_zoom(&mut self, delta: i8) {
@@ -1380,6 +1349,20 @@ impl App {
             finish_mouse_event!(false, "panel_image_preview");
         }
 
+        if self.commit_log_overlay.is_some() {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    self.enqueue_mouse_scroll(MouseScrollTarget::CommitLogOverlay, -1);
+                    finish_mouse_event!(true, "commit_log_overlay_scroll_up");
+                }
+                MouseEventKind::ScrollDown => {
+                    self.enqueue_mouse_scroll(MouseScrollTarget::CommitLogOverlay, 1);
+                    finish_mouse_event!(true, "commit_log_overlay_scroll_down");
+                }
+                _ => finish_mouse_event!(false, "commit_log_overlay_non_scroll"),
+            }
+        }
+
         if self.changelog_scroll.is_some() {
             match mouse.kind {
                 MouseEventKind::ScrollUp => {
@@ -1479,6 +1462,19 @@ impl App {
         let mut terminal_width: u16 = 0;
         let mut terminal_height: u16 = 0;
         if let Some(layout) = layout {
+            if self.side_panel.focused_page().is_some()
+                && !crate::tui::TuiState::swarm_panel_full_page(self)
+                && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+                && layout
+                    .diff_pane_area
+                    .and_then(super::super::ui::side_panel_dismiss_area)
+                    .is_some_and(|area| {
+                        super::super::layout_utils::point_in_rect(mouse.column, mouse.row, area)
+                    })
+            {
+                self.dismiss_side_panel();
+                finish_mouse_event!(false, "side_panel_dismiss");
+            }
             current_messages_area = Some(layout.messages_area);
             current_diagram_area = layout.diagram_area;
             input_area = layout.input_area;
@@ -1740,6 +1736,17 @@ impl App {
             finish_mouse_event!(false, "open_link");
         }
 
+        if mouse.modifiers.contains(KeyModifiers::CONTROL)
+            && let Some(direction) = match mouse.kind {
+                MouseEventKind::ScrollUp => Some(1),
+                MouseEventKind::ScrollDown => Some(-1),
+                _ => None,
+            }
+            && self.try_zoom_inline_image_at(mouse.column, mouse.row, direction)
+        {
+            finish_mouse_event!(false, "inline_image_zoom");
+        }
+
         match mouse.kind {
             MouseEventKind::ScrollUp => {
                 self.enqueue_mouse_scroll(MouseScrollTarget::Chat, -1);
@@ -1763,7 +1770,6 @@ impl App {
     pub(super) fn scroll_up(&mut self, amount: usize) -> bool {
         // A user scroll supersedes a pending resize anchor.
         self.pending_resize_anchor = None;
-        // Scrolling up cancels any pending overscroll rebound line immediately
         // Leaving the collapsed terminal-clear screen: drop the trailing Ctrl+L
         // spacer so scrolling up reveals the transcript immediately instead of
         // first having to travel back through a viewport of blank rows.
@@ -1772,11 +1778,6 @@ impl App {
             self.bump_display_messages_version();
             self.request_full_repaint();
         }
-        // and ends the current downward gesture, so a subsequent scroll down
-        // starts a fresh gesture evaluated from wherever the view is then.
-        self.chat_overscroll_last = None;
-        self.chat_scroll_down_last = None;
-        self.chat_scroll_gesture_from_bottom = false;
         // While older compacted history is still settling on screen, the renderer
         // is anchored to a distance-from-bottom rather than `scroll_offset`. Keep
         // scrolling continuous by moving the anchor itself instead of a stale
@@ -1848,27 +1849,11 @@ impl App {
     pub(super) fn scroll_down(&mut self, amount: usize) -> bool {
         // A user scroll supersedes a pending resize anchor.
         self.pending_resize_anchor = None;
-        // Segment downward motion into gestures: a pause longer than
-        // `OVERSCROLL_GESTURE_GAP` starts a new gesture. Record whether this
-        // gesture began while already pinned to the bottom; only such gestures
-        // may reveal the elastic overscroll line below.
-        let now = Instant::now();
-        let new_gesture = self
-            .chat_scroll_down_last
-            .map(|last| now.saturating_duration_since(last) > Self::OVERSCROLL_GESTURE_GAP)
-            .unwrap_or(true);
-        self.chat_scroll_down_last = Some(now);
-        if new_gesture {
-            self.chat_scroll_gesture_from_bottom = self.chat_pinned_to_bottom();
-        }
         // Mirror `scroll_up`: while an older-history prepend is still settling,
         // the renderer is anchored to distance-from-bottom, so move the anchor
         // toward the bottom instead of a stale `scroll_offset`.
         if let Some(mut anchor) = self.pending_history_anchor {
             if anchor.lines_from_bottom == 0 {
-                if self.chat_scroll_gesture_from_bottom {
-                    self.register_chat_overscroll();
-                }
                 return false;
             }
             anchor.lines_from_bottom = anchor.lines_from_bottom.saturating_sub(amount);
@@ -1878,13 +1863,7 @@ impl App {
             return true;
         }
         if !self.auto_scroll_paused {
-            // Already pinned to the bottom: a further downward scroll is an
-            // "overscroll". Only reveal the elastic status line when the whole
-            // gesture started here at the bottom; momentum left over from a
-            // scroll that just arrived at the bottom is swallowed silently.
-            if self.chat_scroll_gesture_from_bottom {
-                self.register_chat_overscroll();
-            }
+            // Already pinned to the bottom: nothing further to scroll.
             return false;
         }
         let before = self.scroll_offset;
@@ -1920,16 +1899,6 @@ impl App {
         changed
     }
 
-    /// Whether the chat viewport is currently pinned to (following) the
-    /// bottom of the transcript.
-    fn chat_pinned_to_bottom(&self) -> bool {
-        if let Some(anchor) = self.pending_history_anchor {
-            anchor.lines_from_bottom == 0
-        } else {
-            !self.auto_scroll_paused
-        }
-    }
-
     pub(super) fn follow_chat_bottom(&mut self) {
         self.pending_history_anchor = None;
         // Resuming the tail drops any reading position captured for a resize.
@@ -1937,45 +1906,6 @@ impl App {
         self.scroll_offset = 0;
         self.auto_scroll_paused = false;
         super::super::ui::request_tail_follow_snap();
-    }
-
-    /// Record an overscroll tick (downward scroll while already pinned to the
-    /// bottom). Reveals the elastic status line below the input and (re)starts
-    /// the dwell window after which it rebounds away.
-    pub(super) fn register_chat_overscroll(&mut self) {
-        self.chat_overscroll_last = Some(Instant::now());
-    }
-
-    /// Whether the overscroll status line is currently revealed.
-    pub(super) fn chat_overscroll_active(&self) -> bool {
-        self.chat_overscroll_last
-            .map(|t| t.elapsed() < Self::OVERSCROLL_DWELL)
-            .unwrap_or(false)
-    }
-
-    /// Seconds remaining in the overscroll dwell window before the line
-    /// rebounds away. Returns `None` when the overscroll line is not currently
-    /// shown. Drives the visible `(overscroll x.x)` countdown so users can see
-    /// the line is temporary.
-    pub(super) fn chat_overscroll_remaining(&self) -> Option<f32> {
-        let last = self.chat_overscroll_last?;
-        let elapsed = last.elapsed();
-        if elapsed >= Self::OVERSCROLL_DWELL {
-            return None;
-        }
-        Some(Self::OVERSCROLL_DWELL.saturating_sub(elapsed).as_secs_f32())
-    }
-
-    /// Drive the overscroll dwell timer. Returns `true` when the revealed state
-    /// changed (so the caller can request a redraw). Called every tick.
-    pub(super) fn update_chat_overscroll(&mut self) -> bool {
-        if let Some(t) = self.chat_overscroll_last
-            && t.elapsed() >= Self::OVERSCROLL_DWELL
-        {
-            self.chat_overscroll_last = None;
-            return true;
-        }
-        false
     }
 
     pub(super) fn debug_scroll_up(&mut self, amount: usize) {

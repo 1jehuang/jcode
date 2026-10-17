@@ -556,6 +556,59 @@ pub fn render_messages_and_images_with_compacted_history(
                         pending_prompt_image_indices.push(images.len() - 1);
                     }
                 }
+                ContentBlock::ProviderNative { provider, item } => {
+                    use jcode_message_types::provider_native::provider_native_display;
+                    let Some(display) = provider_native_display(provider, item) else {
+                        continue;
+                    };
+                    let Some(output) = display.output else {
+                        // Call start: remember the input for the result row.
+                        let input = display.input.unwrap_or(serde_json::Value::Null);
+                        tool_map.insert(
+                            display.id.clone(),
+                            ToolCall {
+                                intent: ToolCall::intent_from_input(&input),
+                                id: display.id,
+                                name: display.name,
+                                input,
+                                thought_signature: None,
+                            },
+                        );
+                        continue;
+                    };
+                    // Flush text streamed before the search so order matches live.
+                    let combined = format!("{}{}", reasoning, text);
+                    if !combined.is_empty() {
+                        text.clear();
+                        reasoning.clear();
+                        rendered.push(RenderedMessage {
+                            response_stats: None,
+                            role: role.to_string(),
+                            content: combined,
+                            tool_calls: std::mem::take(&mut tool_calls),
+                            tool_data: None,
+                            stored_index: Some(stored_index),
+                        });
+                    }
+                    let tool_data = tool_map.get(&display.id).cloned().unwrap_or_else(|| {
+                        let input = display.input.clone().unwrap_or(serde_json::Value::Null);
+                        ToolCall {
+                            intent: ToolCall::intent_from_input(&input),
+                            id: display.id.clone(),
+                            name: display.name.clone(),
+                            input,
+                            thought_signature: None,
+                        }
+                    });
+                    rendered.push(RenderedMessage {
+                        response_stats: None,
+                        role: "tool".to_string(),
+                        content: output,
+                        tool_calls: Vec::new(),
+                        tool_data: Some(tool_data),
+                        stored_index: Some(stored_index),
+                    });
+                }
                 ContentBlock::OpenAICompaction { .. } | ContentBlock::ToolReference { .. } => {}
             }
         }

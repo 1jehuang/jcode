@@ -1,3 +1,7 @@
+#[path = "app/cache_fingerprints.rs"]
+mod cache_fingerprints;
+use cache_fingerprints::*;
+
 use super::DisplayMessageRoleExt;
 use super::keybind::{
     CenteredToggleKeys, ModelSwitchKeys, OptionalBinding, ScrollKeys, WorkspaceNavigationKeys,
@@ -55,7 +59,11 @@ mod auth_account_picker_saved_accounts;
 mod auth_remote;
 mod catchup;
 mod commands;
+mod commit_log;
+pub(crate) use commit_log::CommitLogOverlay;
+mod commands_cloud;
 mod commands_colors;
+mod commands_desktop;
 mod commands_dispatch;
 mod commands_improve;
 mod commands_overnight;
@@ -79,6 +87,7 @@ mod local;
 mod misc_ui;
 mod model_context;
 mod navigation;
+pub(crate) mod oauth_telemetry;
 mod observe;
 pub(crate) mod onboarding_flow;
 mod onboarding_flow_control;
@@ -88,6 +97,7 @@ mod onboarding_sim;
 mod productivity;
 mod prompt_history;
 mod remote;
+mod remote_header_hint;
 mod remote_notifications;
 mod replay;
 pub(crate) mod run_shell;
@@ -97,6 +107,7 @@ mod slash_command_parser;
 mod split_view;
 mod state_ui;
 mod state_ui_input_helpers;
+mod update_rehearsal;
 mod update_sim;
 mod usage_reset;
 mod voice_input;
@@ -340,6 +351,7 @@ struct PreparedTransferSession {
 struct PendingProviderFailover {
     prompt: crate::provider::ProviderFailoverPrompt,
     deadline: Instant,
+    remote_resend: Option<FallbackResendPayload>,
 }
 
 /// An interactive "switch to the next best model/method and resend" offer shown
@@ -430,6 +442,8 @@ pub(super) enum PendingReloadReconnectStatus {
 }
 
 const MEMORY_INJECTION_SUPPRESSION_SECS: u64 = 90;
+/// How long a transient status notice stays on screen.
+const STATUS_NOTICE_TTL: Duration = Duration::from_secs(3);
 
 /// Current processing status
 #[derive(Clone, Default, Debug)]
@@ -561,10 +575,25 @@ pub struct RunResult {
     pub update_session: Option<String>,
     /// Session ID to restart (exec into current binary, no build)
     pub restart_session: Option<String>,
+    /// After `/cloud` or `/local`: exec into the session at its new location.
+    pub cloud_handoff: Option<CloudHandoff>,
     /// Exit code to use (for canary wrapper communication)
     pub exit_code: Option<i32>,
     /// The session ID that was active (for resume hints on exit)
     pub session_id: Option<String>,
+}
+
+/// Where to reattach after a machine move.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CloudHandoff {
+    /// Attach to the session on a cloud host over SSH.
+    Remote {
+        session_id: String,
+        host: String,
+        working_dir: Option<String>,
+    },
+    /// Resume the (returned) session locally.
+    Local { session_id: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -608,6 +637,7 @@ pub(super) enum MouseScrollTarget {
     HelpOverlay,
     ChangelogOverlay,
     ModelStatusOverlay,
+    CommitLogOverlay,
     /// The right-hand preview pane of the /resume session picker overlay.
     SessionPickerPreview,
 }
@@ -872,6 +902,8 @@ pub struct App {
     mcp_manager: Arc<RwLock<McpManager>>,
     messages: Vec<Message>,
     session: Session,
+    agent_models_global_scope: bool,
+    pending_agent_model_request_id: Option<u64>,
     display_messages: Vec<DisplayMessage>,
     display_messages_version: u64,
     display_user_message_count: usize,
@@ -910,6 +942,9 @@ pub struct App {
     should_quit: bool,
     // Message queueing
     queued_messages: Vec<String>,
+    /// Slash (`/...`) and shell (`!...`) commands queued with Ctrl+Enter while
+    /// a turn was running. They run as real commands once the turn ends.
+    queued_commands: Vec<String>,
     hidden_queued_system_messages: Vec<String>,
     current_turn_system_reminder: Option<String>,
     // Upstream provider (e.g., which provider OpenRouter routed to)
@@ -954,6 +989,10 @@ pub struct App {
     // while the client was idle. Drives the starvation watchdog that recovers a
     // stranded auto-poke continuation instead of spinning forever.
     queued_followup_starved_since: Option<Instant>,
+    // Esc redirected the turn to a pending follow-up prompt. Remote servers
+    // send Done before Interrupted, so the follow-up waits for Interrupted
+    // (or this deadline) or the late Interrupted would clobber the new turn.
+    remote_interrupt_ack_deadline: Option<Instant>,
     // Reload reconnect is waiting for server history before deciding whether to continue.
     pending_reload_reconnect_status: Option<PendingReloadReconnectStatus>,
     // Current status
@@ -1107,6 +1146,8 @@ pub struct App {
     pending_background_client_reload: Option<(String, crate::bus::ClientMaintenanceAction)>,
     // Restart: if set, exec into current binary with this session ID (no build)
     restart_requested: Option<String>,
+    // `/cloud` or `/local` finished: reattach at the new location on quit.
+    cloud_handoff_requested: Option<CloudHandoff>,
     // Pasted content storage (displayed as placeholders, expanded on submit)
     pasted_contents: Vec<String>,
     // Pending pasted images (media_type, base64_data) attached to next message
@@ -1122,11 +1163,9 @@ pub struct App {
     startup_submit_deferred_reason: Option<&'static str>,
     /// One-shot/session-local preview of the first-run onboarding empty state.
     onboarding_preview_mode: bool,
-    /// Active onboarding simulator: `Some(index)` is the current simulated
-    /// screen (driven by `onboarding_sim.rs`); `None` when not simulating. The
-    /// simulator seeds synthetic phases so a developer can step through every
-    /// first-run screen via Alt+5 reset or Cmd+5 toggle without touching real auth state.
-    onboarding_sim: Option<usize>,
+    /// Whether an onboarding rehearsal is running (see `onboarding_sim.rs`):
+    /// the real first-run flow, started as if this install were new.
+    onboarding_sim: bool,
     /// Active time-based, non-destructive update experience preview.
     update_sim: Option<update_sim::UpdateSimulator>,
     /// Active guided first-run onboarding flow (model select -> continue ->
@@ -1212,10 +1251,18 @@ pub struct App {
     /// subscription vs cost-based usage display for remote sessions without
     /// re-deriving it from the provider name.
     remote_resolved_credential: Option<jcode_provider_core::ResolvedCredential>,
+    remote_provider_oauth_email: Option<crate::protocol::ProviderOAuthEmail>,
+    oauth_notice_displayed_at: Option<Instant>,
+    /// Remote model/provider/context/effort/credential were seeded from the
+    /// last launch's `remote_header_hint` and have not yet been confirmed by
+    /// the server. Cleared (and re-derived) when History arrives.
+    remote_session_facts_provisional: bool,
     remote_startup_phase: Option<RemoteStartupPhase>,
     remote_startup_phase_started: Option<Instant>,
     remote_reasoning_effort: Option<String>,
     remote_service_tier: Option<String>,
+    remote_reported_service_tier: Option<(Option<String>, String)>,
+    remote_service_tier_confirmation_pending: bool,
     remote_transport: Option<String>,
     remote_compaction_mode: Option<crate::config::CompactionMode>,
     remote_available_entries: Vec<String>,
@@ -1333,7 +1380,7 @@ pub struct App {
     swarm_panel_focused: bool,
     // Whether the focused swarm panel owns the main transcript viewport.
     swarm_panel_full_page: bool,
-    // Diff display mode (toggle with Alt+G)
+    // Diff display mode (cycle with /diff)
     diff_mode: crate::config::DiffDisplayMode,
     // Center all content (from config)
     pub(crate) centered: bool,
@@ -1413,6 +1460,8 @@ pub struct App {
     last_client_focus_session_id: Option<String>,
     // Most recently focused side panel page, used to restore visibility when toggled off.
     last_side_panel_focus_id: Option<String>,
+    // Side panel takes over the whole transcript column (Alt+M cycle: split -> fullscreen -> hidden).
+    side_panel_fullscreen: bool,
     // User explicitly hid the side panel with the side-panel toggle key. While set, incoming snapshots may update
     // pages but must not reopen the panel by restoring focused_page_id.
     side_panel_user_hidden: bool,
@@ -1459,6 +1508,8 @@ pub struct App {
     // Pending model switch from picker (for remote mode async processing)
     pending_model_switch: Option<String>,
     pending_route_selection: Option<crate::provider::RouteSelection>,
+    pending_automatic_failover_route: Option<crate::provider::RouteSelection>,
+    pending_automatic_failover_request_id: Option<u64>,
     // Reasoning-effort variant chosen together with a model in the picker
     // (e.g. "gpt-5.5 (high)"), staged for remote mode alongside the model
     // switch. Without forwarding this to the server, it keeps its configured
@@ -1487,6 +1538,7 @@ pub struct App {
     model_switch_keys: ModelSwitchKeys,
     // Keybindings for effort switching
     effort_switch_keys: super::keybind::EffortSwitchKeys,
+    speed_switch_keys: super::keybind::SpeedSwitchKeys,
     // Keybindings for scrolling
     scroll_keys: ScrollKeys,
     // Keybinding for centered-mode toggle
@@ -1529,6 +1581,7 @@ pub struct App {
     stashed_input: Option<(String, usize)>,
     // Undo history for in-progress input editing (Ctrl+Z)
     input_undo_stack: Vec<(String, usize)>,
+    input_typing_undo: Option<(Instant, usize)>,
     // Draft replaced by an explicit jump into prompt history (Ctrl+Up),
     // restored when Down walks back past the newest entry
     history_draft: Option<(String, usize)>,
@@ -1667,11 +1720,6 @@ pub struct App {
     mouse_scroll_target: Option<MouseScrollTarget>,
     /// Remaining queued mouse-wheel lines. Positive = down, negative = up.
     mouse_scroll_queue: i16,
-    /// When the user overscrolls past the bottom of the transcript, an extra
-    /// status line is revealed below the input. This records the last time an
-    /// overscroll tick was received; the line dwells for a fixed window after
-    /// the last tick, then rebounds away. `None` means the line is hidden.
-    chat_overscroll_last: Option<Instant>,
     /// Absolute paths edited by the agent's edit-style tool calls, derived
     /// from `display_messages` and cached by `display_messages_version`.
     agent_edited_cache: std::cell::RefCell<
@@ -1680,20 +1728,13 @@ pub struct App {
             std::sync::Arc<std::collections::HashSet<std::path::PathBuf>>,
         )>,
     >,
-    /// Timestamp of the most recent downward chat scroll intent. Segments
-    /// wheel/key motion into "gestures": a pause longer than
-    /// `OVERSCROLL_GESTURE_GAP` starts a new gesture.
-    chat_scroll_down_last: Option<Instant>,
-    /// Whether the current downward scroll gesture began while the transcript
-    /// was already pinned to the bottom. Only such gestures reveal the elastic
-    /// overscroll line, so momentum from a scroll that merely carries the view
-    /// into the bottom does not trigger it.
-    chat_scroll_gesture_from_bottom: bool,
     /// Scroll offset for changelog overlay (None = not visible)
     changelog_scroll: Option<usize>,
     help_scroll: Option<usize>,
     model_status_scroll: Option<usize>,
     model_status_content: String,
+    /// Commit log overlay (None = not visible)
+    commit_log_overlay: Option<commit_log::CommitLogOverlay>,
     /// Session picker overlay (None = not visible)
     session_picker_overlay: Option<RefCell<super::session_picker::SessionPicker>>,
     session_picker_mode: SessionPickerMode,
@@ -2645,46 +2686,12 @@ impl App {
     }
 }
 
-fn stable_hash_str(value: &str) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    value.hash(&mut hasher);
-    hasher.finish()
-}
-
-fn stable_hash_json<T: serde::Serialize + ?Sized>(value: &T) -> u64 {
-    let encoded = serde_json::to_string(value).unwrap_or_default();
-    stable_hash_str(&encoded)
-}
-
-fn stable_json_len<T: serde::Serialize + ?Sized>(value: &T) -> usize {
-    serde_json::to_string(value)
-        .map(|encoded| encoded.len())
-        .unwrap_or_default()
-}
-
 // The cache-relevant projection lives in `jcode-message-types` (re-exported
 // through `crate::message`) so this local path and the server event path in
 // `jcode-app-core::agent::kv_cache_request_event` hash messages identically.
 // If the two projections drift, remote sessions report false
 // `harness:_prefix_changed` KV-cache misses.
 use crate::message::{cache_relevant_message_value, cache_relevant_messages};
-
-fn message_hashes(messages: &[Message]) -> Vec<u64> {
-    messages
-        .iter()
-        .map(|message| stable_hash_json(&cache_relevant_message_value(message)))
-        .collect()
-}
-
-fn ratio_pct(numerator: u64, denominator: u64) -> u8 {
-    if denominator == 0 {
-        0
-    } else {
-        ((numerator as f32 / denominator as f32) * 100.0)
-            .round()
-            .clamp(0.0, 100.0) as u8
-    }
-}
 
 #[cfg(test)]
 mod tests;

@@ -1,90 +1,11 @@
+#[path = "tui_lifecycle_reload_input.rs"]
+mod reload_input;
+
 use super::state_ui::RestoredReloadInput;
 use super::*;
 use crate::tui::{backend, keybind};
 
 impl App {
-    pub(super) fn apply_restored_reload_input(&mut self, restored: RestoredReloadInput) {
-        self.input = restored.input;
-        self.cursor_pos = restored.cursor;
-        self.pending_images = restored.pending_images;
-        self.submit_input_on_startup = restored.submit_on_restore
-            && (!self.input.is_empty() || !self.pending_images.is_empty());
-        crate::logging::info(&format!(
-            "Startup input restored: submit_on_restore={} input_chars={} pending_images={} queued_messages={} hidden_system={} => submit_input_on_startup={}",
-            restored.submit_on_restore,
-            self.input.chars().count(),
-            self.pending_images.len(),
-            restored.queued_messages.len(),
-            restored.hidden_queued_system_messages.len(),
-            self.submit_input_on_startup,
-        ));
-        self.hidden_queued_system_messages = restored.hidden_queued_system_messages;
-        if let Some(status_notice) = restored.startup_status_notice {
-            self.set_status_notice(status_notice);
-        } else if self.submit_input_on_startup {
-            self.set_status_notice("Startup prompt queued");
-        }
-        if let Some((title, message)) = restored.startup_display_message {
-            self.push_display_message(DisplayMessage::system(message).with_title(title));
-        }
-        self.interleave_message = None;
-        self.interleave_images.clear();
-        self.rate_limit_pending_message = restored.rate_limit_pending_message;
-        self.rate_limit_reset = restored.rate_limit_reset;
-        self.observe_page_markdown = restored.observe_page_markdown;
-        self.observe_page_updated_at_ms = restored.observe_page_updated_at_ms;
-        self.set_observe_mode_enabled(restored.observe_mode_enabled, restored.observe_mode_enabled);
-        self.set_split_view_enabled(restored.split_view_enabled, restored.split_view_enabled);
-        self.set_todos_view_enabled(restored.todos_view_enabled, restored.todos_view_enabled);
-        self.todo_confidence_spike_challenged = restored.todo_confidence_spike_challenged;
-        self.last_todo_ownership_fingerprint = restored.last_todo_ownership_fingerprint;
-        self.final_response_todo_fingerprint = restored.final_response_todo_fingerprint;
-        self.todo_final_response_requested = self.final_response_todo_fingerprint.is_some();
-
-        let mut queued_messages = restored.queued_messages;
-        let mut recovered_followups = Vec::new();
-        if let Some(interleave_message) = restored.interleave_message
-            && !interleave_message.trim().is_empty()
-        {
-            recovered_followups.push(interleave_message);
-        }
-        let recovered_interrupts = restored
-            .pending_soft_interrupt_resend
-            .unwrap_or(restored.pending_soft_interrupts);
-        if !recovered_interrupts.is_empty() {
-            crate::logging::info(&format!(
-                "Recovered {} pending soft interrupt(s) after reload; re-queueing them as normal follow-ups",
-                recovered_interrupts.len()
-            ));
-            recovered_followups.extend(recovered_interrupts);
-        }
-        if !recovered_followups.is_empty() {
-            let mut recovered_queue = recovered_followups;
-            recovered_queue.append(&mut queued_messages);
-            queued_messages = recovered_queue;
-            self.set_status_notice("Recovered pending prompts after reload");
-        }
-
-        self.queued_messages = queued_messages;
-        if self.has_queued_followups() {
-            if self.is_remote {
-                // Do not synthesize a processing turn for restored remote follow-ups.
-                // After a reload, the server may still be running the previous turn;
-                // the queue must remain a wait-until-turn-end queue until the history
-                // bootstrap/Done event proves the remote turn is idle. The remote
-                // post-connect/history/tick paths will dispatch once it is safe.
-                self.set_status_notice("Restored queued follow-up after reload");
-            } else {
-                self.is_processing = true;
-                self.status = ProcessingStatus::Sending;
-                if self.processing_started.is_none() {
-                    self.processing_started = Some(Instant::now());
-                }
-                self.pending_turn = true;
-            }
-        }
-    }
-
     /// Re-parse keybinding snapshots when the config cache has reloaded.
     ///
     /// The parsed bindings are cached on `App` for cheap per-keystroke lookup,
@@ -106,6 +27,7 @@ impl App {
         self.keybindings_config_generation = generation;
         self.model_switch_keys = keybind::load_model_switch_keys();
         self.effort_switch_keys = keybind::load_effort_switch_keys();
+        self.speed_switch_keys = keybind::load_speed_switch_keys();
         self.centered_toggle_keys = keybind::load_centered_toggle_key();
         self.toggle_keys = keybind::load_toggle_keys();
         self.workspace_navigation_keys = keybind::load_workspace_navigation_keys();
@@ -144,12 +66,16 @@ impl App {
     /// Hold the in-flight remote turn until the network recovers, then resume it.
     ///
     /// Connectivity failures (DNS, connection reset, no route, transient TLS,
-    /// timeouts) are always transient: the request never reached the provider,
-    /// so resending after the network comes back is both safe and correct. When
-    /// `force` is set we wait regardless of the pending message's `auto_retry`
-    /// flag and promote it to auto-retry so the tick-based resume re-sends it.
-    /// This prevents a transient disconnect from being misclassified as a
-    /// permanent, non-retryable failure that stops auto-poke.
+    /// timeouts) usually recover: the request never reached the provider, so
+    /// resending is safe. When `force` is set (a real provider attempt just
+    /// failed) we wait regardless of the pending message's `auto_retry` flag
+    /// and promote it to auto-retry so the tick-based resume re-sends it.
+    ///
+    /// A provider-specific failure (for example DNS for one host) can persist
+    /// while the generic connectivity probe succeeds, so each forced wait
+    /// consumes one attempt from the per-turn retry budget and returns `false`
+    /// once it is spent. Offline probe re-waits (`force == false`) do not
+    /// consume attempts because no request was sent.
     pub(super) fn schedule_pending_remote_network_wait_with_force(
         &mut self,
         reason: &str,
@@ -158,6 +84,12 @@ impl App {
         let Some(pending) = self.rate_limit_pending_message.as_mut() else {
             return false;
         };
+        if force {
+            if pending.retry_attempts >= Self::AUTO_RETRY_MAX_ATTEMPTS {
+                return false;
+            }
+            pending.retry_attempts = pending.retry_attempts.saturating_add(1);
+        }
         if !pending.auto_retry {
             if force {
                 pending.auto_retry = true;
@@ -167,7 +99,8 @@ impl App {
         }
 
         let plan = crate::network_retry::wait_plan();
-        let retry_at = Instant::now() + Duration::from_secs(5);
+        let retry_at =
+            Instant::now() + Duration::from_secs(5 * u64::from(pending.retry_attempts.max(1)));
         pending.retry_at = Some(retry_at);
         self.rate_limit_reset = Some(retry_at);
         self.status = ProcessingStatus::WaitingForNetwork {
@@ -288,6 +221,20 @@ impl App {
         self.rate_limit_reset = None;
     }
 
+    /// Stop automatically resuming a held turn whose retry budget is spent.
+    ///
+    /// Drops the held resend, disarms auto-poke (which would otherwise start
+    /// the same loop again at turn end), puts the user's prompt back in the
+    /// input box, and explains why the turn paused.
+    pub(super) fn pause_exhausted_auto_resume(&mut self, message: String, notice: &str) {
+        self.clear_pending_remote_retry();
+        super::commands::disable_auto_poke(self);
+        self.overnight_auto_poke = None;
+        self.restore_failed_input_to_box();
+        self.push_display_message(DisplayMessage::system(format!("🛑 {message}")));
+        self.set_status_notice(notice);
+    }
+
     /// Track a failed turn for the credential-failure circuit breaker.
     ///
     /// Returns `true` when the error classifies as a credential/auth failure
@@ -356,7 +303,12 @@ impl App {
         mut session: Session,
     ) -> Self {
         let skills = Arc::new(SkillRegistry::default());
-        let mcp_manager = Arc::new(RwLock::new(McpManager::new()));
+        // Remote and replay clients never connect MCP servers locally (the
+        // server owns them), so skip parsing ~/.claude.json and friends on the
+        // first-frame path.
+        let mcp_manager = Arc::new(RwLock::new(McpManager::with_config(
+            crate::mcp::McpConfig::default(),
+        )));
         if session.model.is_none() {
             session.model = Some(provider.model());
         }
@@ -408,6 +360,8 @@ impl App {
             mcp_manager,
             messages: Vec::new(),
             session,
+            agent_models_global_scope: false,
+            pending_agent_model_request_id: None,
             display_messages: Vec::new(),
             display_messages_version: 0,
             display_user_message_count: 0,
@@ -430,6 +384,7 @@ impl App {
             power_inhibitor: crate::power_inhibit::PowerInhibitor::new(),
             should_quit: false,
             queued_messages: Vec::new(),
+            queued_commands: Vec::new(),
             hidden_queued_system_messages: Vec::new(),
             current_turn_system_reminder: None,
             upstream_provider: None,
@@ -448,6 +403,7 @@ impl App {
             deferred_stream_done_id: None,
             remote_resume_activity: None,
             queued_followup_starved_since: None,
+            remote_interrupt_ack_deadline: None,
             pending_reload_reconnect_status: None,
             status: ProcessingStatus::default(),
             subagent_status: None,
@@ -502,13 +458,14 @@ impl App {
             background_client_action: None,
             pending_background_client_reload: None,
             restart_requested: None,
+            cloud_handoff_requested: None,
             pasted_contents: Vec::new(),
             pending_images: Vec::new(),
             route_next_prompt_to_new_session: false,
             submit_input_on_startup: false,
             startup_submit_deferred_reason: None,
             onboarding_preview_mode: false,
-            onboarding_sim: None,
+            onboarding_sim: false,
             update_sim: None,
             onboarding_flow: None,
             onboarding_auto_model_selection_active: Arc::new(AtomicBool::new(false)),
@@ -534,10 +491,15 @@ impl App {
             remote_provider_model: None,
             remote_model_catalog_generation: 0,
             remote_resolved_credential: None,
+            remote_provider_oauth_email: None,
+            oauth_notice_displayed_at: None,
+            remote_session_facts_provisional: false,
             remote_startup_phase: None,
             remote_startup_phase_started: None,
             remote_reasoning_effort: None,
             remote_service_tier: None,
+            remote_reported_service_tier: None,
+            remote_service_tier_confirmation_pending: false,
             remote_transport: None,
             remote_compaction_mode: None,
             remote_available_entries: Vec::new(),
@@ -641,6 +603,7 @@ impl App {
             last_client_focus_session_id: None,
             last_side_panel_focus_id: None,
             side_panel_user_hidden: false,
+            side_panel_fullscreen: false,
             side_panel_explicit_hidden: false,
             pin_images: display.pin_images,
             inline_images_visible: super::ui_prefs::inline_images_visible(),
@@ -660,6 +623,8 @@ impl App {
             model_picker_load_request_id: 0,
             pending_model_switch: None,
             pending_route_selection: None,
+            pending_automatic_failover_route: None,
+            pending_automatic_failover_request_id: None,
             pending_reasoning_effort: None,
             remote_model_switch_in_flight: false,
             pending_prompt_after_model_switch: None,
@@ -668,6 +633,7 @@ impl App {
             pending_account_picker_action: None,
             model_switch_keys: keybind::load_model_switch_keys(),
             effort_switch_keys: keybind::load_effort_switch_keys(),
+            speed_switch_keys: keybind::load_speed_switch_keys(),
             centered_toggle_keys: keybind::load_centered_toggle_key(),
             toggle_keys: keybind::load_toggle_keys(),
             workspace_navigation_keys: keybind::load_workspace_navigation_keys(),
@@ -688,6 +654,7 @@ impl App {
             typing_scroll_lock: false,
             stashed_input: None,
             input_undo_stack: Vec::new(),
+            input_typing_undo: None,
             history_draft: None,
             status_notice: None,
             learn_hint: None,
@@ -750,14 +717,12 @@ impl App {
             last_mouse_scroll: None,
             mouse_scroll_target: None,
             mouse_scroll_queue: 0,
-            chat_overscroll_last: None,
             agent_edited_cache: std::cell::RefCell::new(None),
-            chat_scroll_down_last: None,
-            chat_scroll_gesture_from_bottom: false,
             changelog_scroll: None,
             help_scroll: None,
             model_status_scroll: None,
             model_status_content: String::new(),
+            commit_log_overlay: None,
             session_picker_overlay: None,
             session_picker_mode: SessionPickerMode::Resume,
             pending_session_picker_load: None,
@@ -868,6 +833,8 @@ impl App {
             mcp_manager,
             messages: Vec::new(),
             session,
+            agent_models_global_scope: false,
+            pending_agent_model_request_id: None,
             display_messages: Vec::new(),
             display_messages_version: 0,
             display_user_message_count: 0,
@@ -890,6 +857,7 @@ impl App {
             power_inhibitor: crate::power_inhibit::PowerInhibitor::new(),
             should_quit: false,
             queued_messages: Vec::new(),
+            queued_commands: Vec::new(),
             hidden_queued_system_messages: Vec::new(),
             current_turn_system_reminder: None,
             upstream_provider: None,
@@ -908,6 +876,7 @@ impl App {
             deferred_stream_done_id: None,
             remote_resume_activity: None,
             queued_followup_starved_since: None,
+            remote_interrupt_ack_deadline: None,
             pending_reload_reconnect_status: None,
             status: ProcessingStatus::default(),
             subagent_status: None,
@@ -962,13 +931,14 @@ impl App {
             background_client_action: None,
             pending_background_client_reload: None,
             restart_requested: None,
+            cloud_handoff_requested: None,
             pasted_contents: Vec::new(),
             pending_images: Vec::new(),
             route_next_prompt_to_new_session: false,
             submit_input_on_startup: false,
             startup_submit_deferred_reason: None,
             onboarding_preview_mode: false,
-            onboarding_sim: None,
+            onboarding_sim: false,
             update_sim: None,
             onboarding_flow: None,
             onboarding_auto_model_selection_active: Arc::new(AtomicBool::new(false)),
@@ -994,10 +964,15 @@ impl App {
             remote_provider_model: None,
             remote_model_catalog_generation: 0,
             remote_resolved_credential: None,
+            remote_provider_oauth_email: None,
+            oauth_notice_displayed_at: None,
+            remote_session_facts_provisional: false,
             remote_startup_phase: None,
             remote_startup_phase_started: None,
             remote_reasoning_effort: None,
             remote_service_tier: None,
+            remote_reported_service_tier: None,
+            remote_service_tier_confirmation_pending: false,
             remote_transport: None,
             remote_compaction_mode: None,
             remote_available_entries: Vec::new(),
@@ -1101,6 +1076,7 @@ impl App {
             last_client_focus_session_id: None,
             last_side_panel_focus_id: None,
             side_panel_user_hidden: false,
+            side_panel_fullscreen: false,
             side_panel_explicit_hidden: false,
             pin_images: display.pin_images,
             inline_images_visible: super::ui_prefs::inline_images_visible(),
@@ -1120,6 +1096,8 @@ impl App {
             model_picker_load_request_id: 0,
             pending_model_switch: None,
             pending_route_selection: None,
+            pending_automatic_failover_route: None,
+            pending_automatic_failover_request_id: None,
             pending_reasoning_effort: None,
             remote_model_switch_in_flight: false,
             pending_prompt_after_model_switch: None,
@@ -1128,6 +1106,7 @@ impl App {
             pending_account_picker_action: None,
             model_switch_keys: keybind::load_model_switch_keys(),
             effort_switch_keys: keybind::load_effort_switch_keys(),
+            speed_switch_keys: keybind::load_speed_switch_keys(),
             centered_toggle_keys: keybind::load_centered_toggle_key(),
             toggle_keys: keybind::load_toggle_keys(),
             workspace_navigation_keys: keybind::load_workspace_navigation_keys(),
@@ -1148,6 +1127,7 @@ impl App {
             typing_scroll_lock: false,
             stashed_input: None,
             input_undo_stack: Vec::new(),
+            input_typing_undo: None,
             history_draft: None,
             status_notice: None,
             learn_hint: None,
@@ -1210,14 +1190,12 @@ impl App {
             last_mouse_scroll: None,
             mouse_scroll_target: None,
             mouse_scroll_queue: 0,
-            chat_overscroll_last: None,
             agent_edited_cache: std::cell::RefCell::new(None),
-            chat_scroll_down_last: None,
-            chat_scroll_gesture_from_bottom: false,
             changelog_scroll: None,
             help_scroll: None,
             model_status_scroll: None,
             model_status_content: String::new(),
+            commit_log_overlay: None,
             session_picker_overlay: None,
             session_picker_mode: SessionPickerMode::Resume,
             pending_session_picker_load: None,
@@ -1324,7 +1302,7 @@ impl App {
             .autojudge_enabled
             .unwrap_or(crate::config::config().autojudge.enabled);
         if let Some(model) = self.session.model.clone() {
-            self.update_context_limit_for_model(&model);
+            self.update_context_limit_for_model(&model, None);
         }
         self.follow_chat_bottom();
         crate::logging::info(&format!(
@@ -1348,6 +1326,10 @@ impl App {
     }
 
     pub fn new_for_remote_with_options(resume_session: Option<String>, fresh_spawn: bool) -> Self {
+        // Kick the background git probe first so its ~20ms of subprocess work
+        // overlaps with the rest of client setup. `run_remote` gives it a short
+        // bounded wait before the first paint.
+        let _ = super::helpers::gather_git_info();
         let provider: Arc<dyn Provider> =
             Arc::new(InertRuntimeProvider::new(AppRuntimeMode::RemoteClient));
         let registry = Registry::empty();
@@ -1370,6 +1352,15 @@ impl App {
             app.session.working_dir = None;
             app.resume_session_id = resume_session;
             app.set_status_notice(format!("SSH: {host} (remote server)"));
+            // `/cloud` hands a mid-task session over and asks the new runtime
+            // to keep going without the user retyping anything. One-shot.
+            if let Ok(message) = std::env::var("JCODE_CLOUD_CONTINUE_MESSAGE") {
+                crate::env::remove_var("JCODE_CLOUD_CONTINUE_MESSAGE");
+                if !message.trim().is_empty() {
+                    app.hidden_queued_system_messages.push(message);
+                    app.set_status_notice(format!("Continuing on {host}"));
+                }
+            }
             return app;
         }
 
@@ -1407,6 +1398,9 @@ impl App {
         }
 
         app.resume_session_id = resume_session;
+        // After `resume_session_id`: the hint needs to know whether this is a
+        // new session (configured effort applies) or a resumed one.
+        app.apply_remote_header_hint();
         app
     }
 

@@ -18,6 +18,7 @@ jcode-selfdev-types = { path = "../jcode-selfdev-types" }
 jcode-storage = { path = "../jcode-storage" }
 jcode-usage-types = { path = "../jcode-usage-types" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "blocking", "charset", "http2", "system-proxy", "rustls-tls", "rustls-tls-native-roots"] }
+sha2 = "0.10"
 serde_json = "1"
 walkdir = "2"
 tokio = { version = "1", features = ["rt"] }

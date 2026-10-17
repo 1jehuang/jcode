@@ -2030,7 +2030,7 @@ impl Tool for CommunicateTool {
                 },
                 "tldr": {
                     "type": "string",
-                    "description": "Optional one-line summary under ~120 chars. Recommended for message/report bodies longer than 240 chars. When omitted, a compact preview is derived automatically without blocking delivery."
+                    "description": "Optional one-line summary (under ~120 chars); recommended for bodies over 240 chars, else auto-derived."
                 },
                 "status": {
                     "type": "string",
@@ -2050,7 +2050,7 @@ impl Tool for CommunicateTool {
                 },
                 "to_swarm": {
                     "type": "string",
-                    "description": "Cross-swarm DM: target swarm label or id (see list_swarms). With to_session, DMs that agent in that swarm; without, DMs its coordinator."
+                    "description": "Cross-swarm DM: swarm label or id (see list_swarms). With to_session, that agent; else its coordinator."
                 },
                 "channel": {
                     "type": "string",
@@ -2069,7 +2069,7 @@ impl Tool for CommunicateTool {
                 "label": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "Required for spawn. Short label shown on the agent's chip (e.g. 'api reviewer'). For set_swarm_label, your swarm's new unique label."
+                    "description": "Required for spawn: agent chip label (e.g. 'api reviewer'). For set_swarm_label: the new unique label."
                 },
                 "working_dir": {
                     "type": "string",
@@ -2103,7 +2103,7 @@ impl Tool for CommunicateTool {
                 "spawn_mode": {
                     "type": "string",
                     "enum": ["visible", "headless", "inline", "auto"],
-                    "description": "Spawn UI mode: visible terminal, headless, inline gallery, or auto. Defaults to inline."
+                    "description": "Omit to use the user's configured mode. Set only when the user asks for one."
                 },
                 "model": {
                     "type": "string",
@@ -2874,10 +2874,10 @@ impl Tool for CommunicateTool {
                     Ok(ServerEvent::CommSpawnResponse { new_session_id, .. })
                         if !new_session_id.is_empty() =>
                     {
-                        Ok(ToolOutput::new(format!(
-                            "Spawned new agent: {}",
-                            new_session_id
-                        )))
+                        Ok(
+                            ToolOutput::new(format!("Spawned new agent: {}", new_session_id))
+                                .with_metadata(serde_json::json!({"session_id": new_session_id})),
+                        )
                     }
                     Ok(response) => {
                         ensure_success(&response)?;

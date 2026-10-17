@@ -183,3 +183,59 @@ fn tool_reference_without_available_definition_keeps_plain_result() {
         serde_json::to_value(&format_messages(&reference_conversation(), false)[2]).unwrap();
     assert_eq!(legacy, last);
 }
+
+#[test]
+fn parallel_tool_references_keep_tool_results_contiguous() {
+    // Two parallel mcp_search calls stored as separate user messages. Each
+    // result's text moves to a sibling text block; after same-role merging the
+    // tool_results must still lead the user message, or Anthropic reports the
+    // second tool_use as missing its tool_result (400).
+    let search = |id: &str| ContentBlock::ToolUse {
+        id: id.into(),
+        name: "mcp_search".into(),
+        input: json!({"query": "x"}),
+        thought_signature: None,
+    };
+    let result = |id: &str| {
+        msg(
+            Role::User,
+            vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: id.into(),
+                    content: format!("results for {id}"),
+                    is_error: None,
+                },
+                ContentBlock::ToolReference {
+                    tool_use_id: id.into(),
+                    tool_name: "mcp__weather__forecast".into(),
+                },
+            ],
+        )
+    };
+    let conversation = vec![
+        msg(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "go".into(),
+                cache_control: None,
+            }],
+        ),
+        msg(Role::Assistant, vec![search("toolu_a"), search("toolu_b")]),
+        result("toolu_a"),
+        result("toolu_b"),
+    ];
+    let tools = format_tools(
+        &[def("mcp_search"), def("mcp__weather__forecast").deferred()],
+        false,
+        false,
+    );
+    let api = format_messages_with_tools(&conversation, false, &tools);
+    assert_eq!(api.len(), 3);
+    let types: Vec<String> = serde_json::to_value(&api[2]).unwrap()["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["type"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(types, ["tool_result", "tool_result", "text", "text"]);
+}

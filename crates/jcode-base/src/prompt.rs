@@ -94,7 +94,7 @@ pub fn load_swarm_prompt(working_dir: Option<&Path>) -> String {
 }
 
 /// Reasoning-effort sentinel that enables swarm orchestration. Providers
-/// translate this to the configured root effort (maximum by default) when
+/// translate this to the configured root effort (low by default) when
 /// building API requests, while the UI/session keep the literal `swarm` marker
 /// so the agent knows to
 /// inject [`SWARM_EFFORT_DIRECTIVE`].
@@ -240,6 +240,7 @@ impl SplitSystemPrompt {
 }
 
 /// Skill info for system prompt
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillInfo {
     pub name: String,
     pub description: String,

@@ -411,11 +411,44 @@ fn clear_persisted_test_ui_state() {
     crate::auth::AuthStatus::invalidate_cache();
 }
 
+struct EnvRestoreGuard(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+impl EnvRestoreGuard {
+    fn capture(keys: impl IntoIterator<Item = &'static str>) -> Self {
+        Self(
+            keys.into_iter()
+                .map(|key| (key, std::env::var_os(key)))
+                .collect(),
+        )
+    }
+
+    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+        let guard = Self::capture([key]);
+        crate::env::set_var(key, value);
+        guard
+    }
+}
+
+impl Drop for EnvRestoreGuard {
+    fn drop(&mut self) {
+        for (key, value) in self.0.drain(..) {
+            if let Some(value) = value {
+                crate::env::set_var(key, value);
+            } else {
+                crate::env::remove_var(key);
+            }
+        }
+    }
+}
+
 fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
-    let prev_home = std::env::var_os("JCODE_HOME");
+    let _env_guard = EnvRestoreGuard::capture(["JCODE_HOME"]);
     crate::env::set_var("JCODE_HOME", temp.path());
+    // Preserve inherited telemetry opt-out env. In this crate telemetry-core is
+    // a dependency, so cfg(test) does not stub its HTTP delivery path; inherited
+    // opt-out must keep blocking delivery for tests that exercise onboarding.
     crate::auth::claude::set_active_account_override(None);
     crate::auth::codex::set_active_account_override(None);
     crate::auth::AuthStatus::invalidate_cache();
@@ -430,11 +463,6 @@ fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
     crate::auth::codex::set_active_account_override(None);
     crate::auth::AuthStatus::invalidate_cache();
     crate::tui::app::helpers::clear_ambient_info_cache_for_tests();
-    if let Some(prev_home) = prev_home {
-        crate::env::set_var("JCODE_HOME", prev_home);
-    } else {
-        crate::env::remove_var("JCODE_HOME");
-    }
     // Drop any config loaded from the temp home so it cannot leak into the next
     // test, which is process-global state shared across this suite.
     crate::config::invalidate_config_cache();
@@ -452,10 +480,8 @@ fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
 /// silently following a config default they do not control.
 fn with_reasoning_current_home<T>(f: impl FnOnce() -> T) -> T {
     with_temp_jcode_home(|| {
-        crate::config::Config::set_reasoning_display(
-            crate::config::ReasoningDisplayMode::Current,
-        )
-        .expect("pin reasoning display to current for the test config");
+        crate::config::Config::set_reasoning_display(crate::config::ReasoningDisplayMode::Current)
+            .expect("pin reasoning display to current for the test config");
         crate::config::invalidate_config_cache();
         f()
     })
@@ -513,6 +539,7 @@ fn test_handle_turn_error_failover_prompt_manual_mode_shows_system_notice() {
             from_label: "Anthropic".to_string(),
             to_provider: "openai".to_string(),
             to_label: "OpenAI".to_string(),
+            target_route: Some("openai-oauth@openai-fox:gpt-5.4".to_string()),
             reason: "OAuth usage exhausted".to_string(),
             estimated_input_chars: 48_000,
             estimated_input_tokens: 12_000,
@@ -522,12 +549,13 @@ fn test_handle_turn_error_failover_prompt_manual_mode_shows_system_notice() {
 
         let last = app.display_messages.last().expect("display message");
         assert_eq!(last.role, "system");
-        assert!(last.content.contains("did not resend your prompt"));
-        assert!(last.content.contains("/model"));
         assert!(
             last.content
-                .contains("cross_provider_failover = \"manual\"")
+                .contains("Anthropic unavailable: OAuth usage exhausted")
         );
+        assert!(last.content.contains("/model"));
+        assert!(!last.content.contains("cross_provider_failover"));
+        assert!(last.content.lines().count() <= 2);
         assert!(app.pending_provider_failover.is_none());
     });
 }
@@ -542,6 +570,7 @@ fn test_handle_turn_error_failover_prompt_countdown_can_switch_and_retry() {
             from_label: "Anthropic".to_string(),
             to_provider: "openai".to_string(),
             to_label: "OpenAI".to_string(),
+            target_route: Some("openai-oauth@openai-fox:gpt-5.4".to_string()),
             reason: "OAuth usage exhausted".to_string(),
             estimated_input_chars: 32_000,
             estimated_input_tokens: 8_000,
@@ -549,6 +578,22 @@ fn test_handle_turn_error_failover_prompt_countdown_can_switch_and_retry() {
 
         app.handle_turn_error(failover_error_message(&prompt));
         assert!(app.pending_provider_failover.is_some());
+        assert_eq!(active_provider.lock().unwrap().as_str(), "claude");
+        assert!(!app.pending_turn);
+        let pending = app.pending_provider_failover.as_ref().unwrap();
+        let remaining = pending.deadline.saturating_duration_since(Instant::now());
+        assert!(remaining <= Duration::from_secs(3));
+        assert!(remaining > Duration::from_secs(2));
+        app.maybe_progress_provider_failover_countdown();
+        assert_eq!(active_provider.lock().unwrap().as_str(), "claude");
+        assert!(!app.pending_turn);
+        assert!(
+            app.display_messages
+                .last()
+                .unwrap()
+                .content
+                .contains("Esc to cancel")
+        );
 
         if let Some(pending) = app.pending_provider_failover.as_mut() {
             pending.deadline = Instant::now() - Duration::from_secs(1);
@@ -558,12 +603,10 @@ fn test_handle_turn_error_failover_prompt_countdown_can_switch_and_retry() {
         assert!(app.pending_provider_failover.is_none());
         assert!(app.pending_turn);
         assert_eq!(active_provider.lock().unwrap().as_str(), "openai");
-        assert_eq!(app.session.model.as_deref(), Some("gpt-test"));
+        assert_eq!(app.session.model.as_deref(), Some("gpt-5.4"));
         let last = app.display_messages.last().expect("display message");
-        assert!(
-            last.content
-                .contains("cross_provider_failover = \"manual\"")
-        );
+        assert!(!last.content.contains("cross_provider_failover"));
+        assert!(last.content.lines().count() <= 2);
     });
 }
 

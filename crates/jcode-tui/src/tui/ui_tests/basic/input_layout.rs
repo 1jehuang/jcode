@@ -1,5 +1,10 @@
 #[test]
 fn first_prompt_preserves_welcome_header_spacing() {
+    // Hold the env lock (before the render lock, matching the env-then-render
+    // order) so a sibling test's JCODE_IDLE_ANIMATION override cannot turn the
+    // idle donut on for the welcome frame only.
+    let _env = crate::storage::lock_test_env();
+    crate::config::invalidate_config_cache();
     let _lock = viewport_snapshot_test_lock();
     for (width, height) in [(80, 40), (100, 60), (60, 80)] {
         for centered in [false, true] {
@@ -30,7 +35,7 @@ fn first_prompt_preserves_welcome_header_spacing() {
                     .lines()
                     .position(|line| line.contains("/model to switch")),
                 Some(header_y),
-                "submitting must not jump the transcript to the top: {submitted}"
+                "submitting must not jump the transcript to the top ({width}x{height} centered={centered}):\nWELCOME:\n{welcome}\nSUBMITTED:\n{submitted}"
             );
             let prompt_y = submitted
                 .lines()
