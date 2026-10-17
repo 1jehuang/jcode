@@ -894,20 +894,31 @@ subagent produced 4 deliverables:
    mismatch is flagged for vendor confirmation before the real
    deploy.
 
-**Real deploy status (2026-10-17T07:14Z):** blocked on three
-sequential conditions:
+**Real deploy status (2026-10-17T11:54Z):** all three conditions
+unblocked. Re-verified against the live CIMD and the live Spotify
+Portal admin UI (`https://phenotype.spotifyportal.com/admin/app-settings`
+→ General → External access, 2026-10-17T19:50Z):
 
 | # | Condition | Owner | Status |
 |---|-----------|-------|--------|
-| 1 | Cloudflare Worker at `auth.kooshapari.com/oauth/client-metadata.json` returning HTTP 200 + `application/json` | **OPERATOR** | §E2 says this was previously deployed but the operator has not yet confirmed the current state; check before proceeding |
-| 2 | Spotify Portal allow-list append `https://auth.kooshapari.com/*` (without removing existing patterns) | **OPERATOR + SPOTIFY** | Spotifiable in admin UI; needs operator access + Spotify action |
-| 3 | `redirect_uri` path match confirmation (`/oauth/callback` vs `/callback`) | **OPERATOR + VENDOR** | Send as part of the §19 vendor question; defer if no internal contact |
+| 1 | Cloudflare Worker at `auth.kooshapari.com/oauth/client-metadata.json` returning HTTP 200 + `application/json` | **AGENT** | **PASS** — `curl` returns valid SEP-991 CIMD (356 B), `redirect_uris=[http://127.0.0.1:47290/oauth/callback]` |
+| 2 | Spotify Portal allow-list append `https://auth.kooshapari.com/*` (without removing existing patterns) | **NO ACTION NEEDED** | The CIMD's `redirect_uris` is a loopback URL (`http://127.0.0.1:47290/oauth/callback`), which Spotify Portal allows by default ("HTTP loopback redirects on localhost, 127.0.0.1, and [::1], using any port and path"). The CIMD's `client_id` `https://auth.kooshapari.com/oauth/client-metadata.json` is **already in the Allowed client ID patterns** (alongside `claude.ai`, `chatgpt.com`, `backstage.spotify.com`, `xirp.spotify.com`). Saving any custom redirect-URI list would replace the loopback default and break mcp-remote — a regression, not a fix. |
+| 3 | `redirect_uri` path match confirmation (`/oauth/callback` vs `/callback`) | **RESOLVED** | CIMD body declares `redirect_uris=[http://127.0.0.1:47290/oauth/callback]`; mcp-remote 0.15.1 derives the same path. No vendor question needed for the path itself. |
 
-Once all three are unblocked, the operator can:
+**Operator-deployable now** (no remaining blockers):
 - Edit `scripts/portal-mcp-bridge.json` to replace `PLACEHOLDER_CIMD_URL`
+  with `https://auth.kooshapari.com/oauth/client-metadata.json`
 - Merge the JSON into `~/.jcode/mcp.json` under `servers.portal-bridge`
 - Restart jcode; the `portal-bridge` server should appear and
-  open a browser for OAuth consent
+  open a browser for OAuth consent (callback lands on
+  `http://127.0.0.1:47290/oauth/callback`, which mcp-remote is
+  already listening on)
+
+**§19 vendor question (revised scope):** the only remaining
+vendor-side uncertainty is whether the Spotify Portal admin team
+has any *future* plans to tighten the loopback allow-list (e.g.
+require an explicit entry per client). That is a heads-up question,
+not a deploy blocker. The current default behavior unblocks XJ-03.
 
 **Why this matters:** the XJ-03 bridge is the only way to get
 OAuth 2.1 + CIMD support on the Jcode Portal MCP. The native `http`
