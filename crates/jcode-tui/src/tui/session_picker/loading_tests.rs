@@ -1492,6 +1492,296 @@ fn session_matches_picker_query_requires_all_tokens_order_independent() {
     assert!(session_matches_picker_query(loaded, "   "));
 }
 
+#[test]
+fn parse_search_query_splits_free_text_from_qualifiers() {
+    let parsed = parse_search_query("deploy model:GPT-5 provider:anthropic saved:no");
+    assert_eq!(parsed.free_tokens, vec!["deploy".to_string()]);
+    assert_eq!(parsed.model.as_deref(), Some("gpt-5"));
+    assert_eq!(parsed.provider.as_deref(), Some("anthropic"));
+    assert_eq!(parsed.saved, Some(false));
+    assert!(parsed.source.is_none());
+    assert!(parsed.dir.is_none());
+    assert!(parsed.after.is_none());
+    assert!(parsed.before.is_none());
+
+    // Unknown keys stay free text, so `foo:bar` keeps behaving like a plain
+    // word instead of silently filtering nothing.
+    let parsed = parse_search_query("foo:bar");
+    assert_eq!(parsed.free_tokens, vec!["foo:bar".to_string()]);
+    assert!(parsed.model.is_none());
+
+    // Half-typed bool values degrade to free text rather than erroring.
+    let parsed = parse_search_query("saved:ye");
+    assert_eq!(parsed.free_tokens, vec!["saved:ye".to_string()]);
+    assert!(parsed.saved.is_none());
+
+    // `source:claude-code` normalizes like session_search does.
+    let parsed = parse_search_query("source:claude-code");
+    assert_eq!(parsed.source.as_deref(), Some("claude"));
+
+    // An unknown colon token with an empty value (`http:` while typing a
+    // URL) is not a qualifier: it stays free text instead of being dropped,
+    // so cached and fresh searches agree (the cache guard already treats
+    // unknown keys as free text via `is_qualifier_token`).
+    let parsed = parse_search_query("http:");
+    assert_eq!(parsed.free_tokens, vec!["http:".to_string()]);
+    assert!(parsed.model.is_none());
+    assert!(parsed.source.is_none());
+    assert!(query_is_pure_free_text("http:"));
+    assert!(query_is_pure_free_text("foo http:"));
+
+    // `source:all` clears an earlier source constraint in the same query
+    // (last-value-wins like every other repeated qualifier).
+    let parsed = parse_search_query("source:codex source:all");
+    assert!(parsed.source.is_none());
+    let parsed = parse_search_query("source:all");
+    assert!(parsed.source.is_none());
+}
+
+#[test]
+fn parse_search_query_parses_time_qualifiers() {
+    // Absolute date.
+    let parsed = parse_search_query("after:2026-10-01");
+    assert_eq!(
+        parsed.after.map(|dt| dt.to_rfc3339()),
+        Some("2026-10-01T00:00:00+00:00".to_string())
+    );
+
+    // RFC3339 timestamp.
+    let parsed = parse_search_query("before:2026-10-12T10:30:00Z");
+    assert_eq!(
+        parsed.before.map(|dt| dt.to_rfc3339()),
+        Some("2026-10-12T10:30:00+00:00".to_string())
+    );
+
+    // Relative offset resolves to roughly now minus the window.
+    let parsed = parse_search_query("after:2h");
+    let after = parsed.after.expect("relative after parsed");
+    let two_hours_ago = chrono::Utc::now() - chrono::Duration::hours(2);
+    let drift = (after - two_hours_ago).num_seconds().abs();
+    assert!(drift < 5, "relative window drifted {drift}s");
+
+    // An unparseable time value imposes no constraint: the list stays
+    // unfiltered while the user is still typing a date, and `query_is_pure_free_text`
+    // still treats the token as a qualifier so the cache never narrows on it.
+    let parsed = parse_search_query("after:banana");
+    assert!(parsed.after.is_none());
+    assert!(parsed.is_empty());
+
+    // Multibyte input must not panic: the relative-unit split strips a
+    // trailing ASCII letter instead of slicing raw bytes, so `é` and CJK
+    // values are rejected as unparseable rather than crashing the picker.
+    let parsed = parse_search_query("after:é");
+    assert!(parsed.after.is_none());
+    let parsed = parse_search_query("before:日本語");
+    assert!(parsed.before.is_none());
+    let parsed = parse_search_query("after:30米");
+    assert!(parsed.after.is_none());
+
+    // Huge offsets that would leave chrono's supported date range impose no
+    // constraint instead of panicking on the subtraction.
+    let parsed = parse_search_query("after:100000000d");
+    assert!(parsed.after.is_none());
+    let parsed = parse_search_query("before:99999999999w");
+    assert!(parsed.before.is_none());
+
+    // `query_is_pure_free_text` mirrors the parser: only known keys count.
+    assert!(query_is_pure_free_text("deploy foo:bar"));
+    assert!(!query_is_pure_free_text("deploy after:2h"));
+    assert!(!query_is_pure_free_text("source:codex"));
+    assert!(query_is_pure_free_text(""));
+}
+
+#[test]
+fn session_matches_picker_query_applies_structured_qualifiers() {
+    let _env_lock = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+
+    let mut session = Session::create_with_id(
+        "session_qualifier_match".to_string(),
+        Some("/tmp/qualifier-match".to_string()),
+        Some("Qualifier Match".to_string()),
+    );
+    session.append_stored_message(crate::session::StoredMessage {
+        id: "msg1".to_string(),
+        role: crate::message::Role::User,
+        content: vec![crate::message::ContentBlock::Text {
+            text: "ship the production deploy".to_string(),
+            cache_control: None,
+        }],
+        display_role: None,
+        timestamp: None,
+        tool_duration_ms: None,
+        token_usage: None,
+    });
+    session.save().expect("save session");
+
+    let sessions = load_sessions().expect("load sessions");
+    let loaded = sessions
+        .iter()
+        .find(|candidate| candidate.id == "session_qualifier_match")
+        .expect("session present");
+    let loaded = SessionInfo {
+        model: Some("gpt-5.5-luna".to_string()),
+        provider_key: Some("openai-api".to_string()),
+        saved: true,
+        is_debug: false,
+        is_canary: true,
+        last_active_at: Some(chrono::Utc::now() - chrono::Duration::hours(1)),
+        working_dir: Some("/tmp/qualifier-match".to_string()),
+        source: SessionSource::Jcode,
+        ..loaded.clone()
+    };
+
+    // Qualifier + free text combine with logical AND.
+    assert!(session_matches_picker_query(
+        &loaded,
+        "deploy model:luna saved:yes canary:true"
+    ));
+    assert!(!session_matches_picker_query(&loaded, "model:opus"));
+    assert!(!session_matches_picker_query(&loaded, "provider:anthropic"));
+    assert!(!session_matches_picker_query(&loaded, "dir:/home"));
+    assert!(!session_matches_picker_query(&loaded, "saved:no"));
+    assert!(!session_matches_picker_query(&loaded, "debug:yes"));
+    // Time window: session was active an hour ago, so after:2h (active in the
+    // last two hours) includes it; before:2h (inactive for two hours) and
+    // after:30m (active in the last half hour) exclude it.
+    assert!(session_matches_picker_query(&loaded, "after:2h"));
+    assert!(session_matches_picker_query(&loaded, "before:30m"));
+    assert!(!session_matches_picker_query(&loaded, "before:2h"));
+    assert!(!session_matches_picker_query(&loaded, "after:30m"));
+    assert!(session_matches_picker_query(&loaded, "source:jcode"));
+    assert!(!session_matches_picker_query(&loaded, "source:codex"));
+    // Free text still matches the index; a qualifier applies as a filter, not
+    // free text: `model:opus` blocks the match even though `deploy` matches,
+    // and a bare `model:` (value not typed yet) is no constraint.
+    assert!(session_matches_picker_query(&loaded, "deploy"));
+    assert!(session_matches_picker_query(&loaded, "model: deploy"));
+    assert!(!session_matches_picker_query(&loaded, "model:opus deploy"));
+}
+
+#[test]
+fn session_matches_picker_query_time_window_falls_back_to_last_message_time() {
+    let _env_lock = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+
+    let mut session = Session::create_with_id(
+        "session_time_fallback".to_string(),
+        Some("/tmp/time-fallback".to_string()),
+        Some("Time Fallback".to_string()),
+    );
+    session.append_stored_message(crate::session::StoredMessage {
+        id: "msg1".to_string(),
+        role: crate::message::Role::User,
+        content: vec![crate::message::ContentBlock::Text {
+            text: "old but not ancient".to_string(),
+            cache_control: None,
+        }],
+        display_role: None,
+        timestamp: None,
+        tool_duration_ms: None,
+        token_usage: None,
+    });
+    session.save().expect("save session");
+
+    let sessions = load_sessions().expect("load sessions");
+    let found = sessions
+        .iter()
+        .find(|candidate| candidate.id == "session_time_fallback")
+        .expect("session present");
+    // Force the dead-session shape: a stored session that never registered
+    // live presence keeps `last_active_at: None`, and the window must fall
+    // back to `last_message_time`. Pin it to exactly one hour ago so all four
+    // window boundaries are deterministic.
+    let one_hour_ago = chrono::Utc::now() - chrono::Duration::hours(1);
+    let loaded = SessionInfo {
+        last_active_at: None,
+        last_message_time: one_hour_ago,
+        ..found.clone()
+    };
+
+    assert!(loaded.last_active_at.is_none());
+    assert!(session_matches_picker_query(&loaded, "after:2h"));
+    assert!(session_matches_picker_query(&loaded, "before:30m"));
+    assert!(!session_matches_picker_query(&loaded, "after:30m"));
+    assert!(!session_matches_picker_query(&loaded, "before:2h"));
+}
+
+#[test]
+fn session_matches_picker_query_combined_time_window_ands_both_bounds() {
+    let _env_lock = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+
+    let mut session = Session::create_with_id(
+        "session_combined_window".to_string(),
+        Some("/tmp/combined-window".to_string()),
+        Some("Combined Window".to_string()),
+    );
+    session.append_stored_message(crate::session::StoredMessage {
+        id: "msg1".to_string(),
+        role: crate::message::Role::User,
+        content: vec![crate::message::ContentBlock::Text {
+            text: "window bounds".to_string(),
+            cache_control: None,
+        }],
+        display_role: None,
+        timestamp: None,
+        tool_duration_ms: None,
+        token_usage: None,
+    });
+    session.save().expect("save session");
+
+    let sessions = load_sessions().expect("load sessions");
+    let found = sessions
+        .iter()
+        .find(|candidate| candidate.id == "session_combined_window")
+        .expect("session present");
+    // Pin the session's activity one hour ago so both window bounds are
+    // deterministic, then assert that `after:` and `before:` in one query
+    // AND: the session survives only when it falls inside both bounds.
+    let one_hour_ago = chrono::Utc::now() - chrono::Duration::hours(1);
+    let loaded = SessionInfo {
+        last_active_at: None,
+        last_message_time: one_hour_ago,
+        ..found.clone()
+    };
+
+    let window = |after: chrono::DateTime<chrono::Utc>, before: chrono::DateTime<chrono::Utc>| {
+        let fmt = |dt: chrono::DateTime<chrono::Utc>| {
+            chrono::DateTime::from_timestamp(dt.timestamp(), 0)
+                .unwrap()
+                .to_rfc3339()
+        };
+        format!("after:{} before:{}", fmt(after), fmt(before))
+    };
+    let now = chrono::Utc::now();
+
+    // Window contains the session.
+    assert!(session_matches_picker_query(
+        &loaded,
+        &window(one_hour_ago, now + chrono::Duration::minutes(5)),
+    ));
+    // Lower bound excludes it: window starts after the session's activity.
+    assert!(!session_matches_picker_query(
+        &loaded,
+        &window(
+            one_hour_ago + chrono::Duration::minutes(10),
+            now + chrono::Duration::minutes(5),
+        ),
+    ));
+    // Upper bound excludes it: window ends before the session's activity.
+    assert!(!session_matches_picker_query(
+        &loaded,
+        &window(
+            now - chrono::Duration::hours(3),
+            one_hour_ago - chrono::Duration::minutes(10),
+        ),
+    ));
+}
+
 /// Regression tests for issue #674: the picker must be able to list only
 /// jcode's own sessions, and toggling that must not be masked by either cache.
 mod external_session_opt_out {
