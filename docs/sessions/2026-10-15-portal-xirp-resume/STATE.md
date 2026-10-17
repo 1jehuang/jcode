@@ -984,6 +984,44 @@ needs the vendor allow-list. The 4 deliverables shipped today
 are the missing pieces between "decided to use mcp-remote" (§E)
 and "real bridge live".
 
+## 24.1 XJ-03 LIVE verification — bridge PASSES, live CIMD does NOT resolve (2026-10-17T22:46Z)
+
+Live verification of the XJ-03 bridge against the production CIMD
+and the live Spotify Portal MCP endpoint. Full report:
+`XJ-03-VERIFY.md` (this session dir). Additive script:
+`scripts/test-portal-bridge-live.sh` (does not touch the master
+stub test or `portal-mcp-bridge.json`).
+
+**Result: PARTIAL.**
+
+- **Bridge mechanism: PASS.** `mcp-remote@0.15.1` (npm `latest`)
+  discovered the protected-resource metadata
+  (`authorizationServers: ["https://phenotype.spotifyportal.com/api/auth"]`),
+  fetched AS metadata (`client_id_metadata_document_supported: true`),
+  derived loopback callback port **47290**, started the callback
+  server, and emitted a valid authorize URL (redirect_uri
+  `http://localhost:47290/oauth/callback`). Additive script exit **0**.
+- **BLOCKER — the live CIMD is NOT publicly resolvable.** `auth.kooshapari.com`
+  is **NXDOMAIN** from the Cloudflare authoritative nameservers, from
+  `1.1.1.1`, and from `8.8.8.8`; `https://kooshapari.com/oauth/client-metadata.json`
+  returns 404. This **contradicts §24 condition 1** ("curl returns valid
+  SEP-991 CIMD (356 B)"). The bridge does not fetch the CIMD (the client_id
+  *is* the CIMD URL; the AS dereferences it), so this did not stop the bridge —
+  it will fail the AS client-validation during real authorization.
+- **DEFECT — arg order in `scripts/portal-mcp-bridge.json`.** mcp-remote 0.15.1
+  needs the server URL as the **first positional arg**; the shipped config puts
+  `--transport http-only` first, which makes mcp-remote parse `--transport` as
+  the URL (`TypeError: Invalid URL ... input: '--transport'`). Merging verbatim
+  fails immediately. Correct order: URL, then `--transport`, then
+  `--client-metadata-url`, then `--resource`.
+- **Minor — redirect_uri host.** CIMD declares `127.0.0.1`, mcp-remote emits
+  `localhost`. Both loopback; only matters if the AS ever exact-matches.
+
+**Operator next step:** re-deploy / re-check the `auth.kooshapari.com` DNS
+record (currently absent) and the Cloudflare Worker, fix the arg order, then
+re-run `scripts/test-portal-bridge-live.sh`. Human consent in the browser is
+the only remaining step after the CIMD resolves.
+
 ## 25. Squash-merge to master (2026-10-17T07:48Z)
 
 Operator signal "go" at 2026-10-17T07:39Z triggered the squash-merge
