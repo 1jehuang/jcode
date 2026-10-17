@@ -1,7 +1,7 @@
 use super::response_recovery::{MalformedToolCallInfo, TextToolRecovery};
 use super::*;
 
-use super::streaming::{find_wrap_marker_incremental, record_partial_stream_usage};
+use super::streaming::{StreamUsageRecorder, find_wrap_marker_incremental};
 
 fn reload_interrupted_tool_result(tc: &ToolCall, elapsed_secs: f64) -> (String, bool) {
     if tc.name == "selfdev" {
@@ -367,6 +367,7 @@ impl Agent {
             let mut usage_output: Option<u64> = None;
             let mut usage_cache_read: Option<u64> = None;
             let mut usage_cache_creation: Option<u64> = None;
+            let mut usage_recorder = StreamUsageRecorder::new(&self.session.id);
             let mut saw_message_end = false;
             let mut stop_reason: Option<String> = None;
             let mut sdk_tool_results: std::collections::HashMap<String, (String, bool)> =
@@ -448,17 +449,7 @@ impl Agent {
                     Ok(event) => event,
                     Err(e) => {
                         self.record_failed_account_route(&e.to_string());
-                        record_partial_stream_usage(
-                            &self.session.id,
-                            provider.name(),
-                            &model_at_request_start,
-                            [
-                                usage_input,
-                                usage_output,
-                                usage_cache_read,
-                                usage_cache_creation,
-                            ],
-                        );
+                        usage_recorder.finish();
                         let err_str = e.to_string();
                         if self.try_auto_compact_after_context_limit(&err_str) {
                             log_agent_provider_stream_lifecycle(
@@ -867,6 +858,16 @@ impl Agent {
                         if cache_creation_input_tokens.is_some() {
                             usage_cache_creation = cache_creation_input_tokens;
                         }
+                        usage_recorder.observe(
+                            provider.name(),
+                            &provider.model(),
+                            [
+                                usage_input,
+                                usage_output,
+                                usage_cache_read,
+                                usage_cache_creation,
+                            ],
+                        );
                         if let Some(input) = usage_input {
                             self.update_compaction_usage_from_stream(
                                 input,
@@ -1056,17 +1057,7 @@ impl Agent {
                         message,
                         retry_after_secs,
                     } => {
-                        record_partial_stream_usage(
-                            &self.session.id,
-                            provider.name(),
-                            &model_at_request_start,
-                            [
-                                usage_input,
-                                usage_output,
-                                usage_cache_read,
-                                usage_cache_creation,
-                            ],
-                        );
+                        usage_recorder.finish();
                         if self.try_auto_compact_after_context_limit(&message) {
                             log_agent_provider_stream_lifecycle(
                                 logging::LogLevel::Warn,
@@ -1135,6 +1126,7 @@ impl Agent {
                 }
             }
 
+            usage_recorder.finish();
             if retry_after_compaction {
                 log_agent_provider_stream_lifecycle(
                     logging::LogLevel::Info,
@@ -1184,18 +1176,6 @@ impl Agent {
                     usage_output.unwrap_or(0),
                     usage_cache_read,
                     usage_cache_creation,
-                );
-                crate::telemetry::record_provider_usage(
-                    Some(&self.session.id),
-                    provider.name(),
-                    &model_at_request_start,
-                    crate::telemetry::UsageSource::Agent,
-                    crate::telemetry::ProviderUsage {
-                        input_tokens: usage_input.unwrap_or(0),
-                        output_tokens: usage_output.unwrap_or(0),
-                        cache_read_input_tokens: usage_cache_read,
-                        cache_creation_input_tokens: usage_cache_creation,
-                    },
                 );
 
                 let input = usage_input.unwrap_or(0);

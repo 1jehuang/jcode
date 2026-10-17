@@ -1,4 +1,5 @@
 use super::response_recovery::MalformedToolCallInfo;
+use super::streaming::StreamUsageRecorder;
 use super::*;
 use crate::{terminal_eprintln as eprintln, terminal_print as print, terminal_println as println};
 
@@ -274,6 +275,7 @@ impl Agent {
             let mut usage_output: Option<u64> = None;
             let mut usage_cache_read: Option<u64> = None;
             let mut usage_cache_creation: Option<u64> = None;
+            let mut usage_recorder = StreamUsageRecorder::new(&self.session.id);
             let mut saw_message_end = false;
             let mut stop_reason: Option<String> = None;
             let mut _thinking_start: Option<Instant> = None;
@@ -299,6 +301,7 @@ impl Agent {
                     Err(e) => {
                         let err_str = e.to_string();
                         self.record_failed_account_route(&err_str);
+                        usage_recorder.finish();
                         if self.try_auto_compact_after_context_limit(&err_str) {
                             log_agent_provider_stream_lifecycle(
                                 logging::LogLevel::Warn,
@@ -566,6 +569,16 @@ impl Agent {
                         if cache_creation_input_tokens.is_some() {
                             usage_cache_creation = cache_creation_input_tokens;
                         }
+                        usage_recorder.observe(
+                            self.provider.name(),
+                            &self.provider.model(),
+                            [
+                                usage_input,
+                                usage_output,
+                                usage_cache_read,
+                                usage_cache_creation,
+                            ],
+                        );
                         if let Some(input) = usage_input {
                             self.update_compaction_usage_from_stream(
                                 input,
@@ -765,6 +778,7 @@ impl Agent {
                         if trace {
                             eprintln!("[trace] stream_error {}", message);
                         }
+                        usage_recorder.finish();
                         if self.try_auto_compact_after_context_limit(&message) {
                             log_agent_provider_stream_lifecycle(
                                 logging::LogLevel::Warn,
@@ -814,6 +828,7 @@ impl Agent {
                 }
             }
 
+            usage_recorder.finish();
             if retry_after_compaction {
                 log_agent_provider_stream_lifecycle(
                     logging::LogLevel::Info,
@@ -859,18 +874,6 @@ impl Agent {
                     usage_output.unwrap_or(0),
                     usage_cache_read,
                     usage_cache_creation,
-                );
-                crate::telemetry::record_provider_usage(
-                    Some(&self.session.id),
-                    self.provider.name(),
-                    &self.provider.model(),
-                    crate::telemetry::UsageSource::Agent,
-                    crate::telemetry::ProviderUsage {
-                        input_tokens: usage_input.unwrap_or(0),
-                        output_tokens: usage_output.unwrap_or(0),
-                        cache_read_input_tokens: usage_cache_read,
-                        cache_creation_input_tokens: usage_cache_creation,
-                    },
                 );
             }
 
