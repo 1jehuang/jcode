@@ -1,0 +1,887 @@
+jcode
+================
+Name               Project  Compat  Latest            Kind         Platform
+----               -------  ------  ------            ----         --------
+anyhow             1.0.100  ---     1.0.104           Normal       ---
+async-trait        0.1.89   ---     0.1.92            Normal       ---
+chrono             0.4.42   ---     0.4.45            Normal       ---
+clap               4.6.1    ---     4.6.7             Normal       ---
+criterion          0.5.1    ---     0.8.2             Development  ---
+dirs               5.0.1    ---     7.0.0             Normal       ---
+futures            0.3.31   ---     0.3.34            Normal       ---
+global-hotkey      0.7.0    ---     0.9.0             Normal       cfg(target_os = "macos")
+libc               0.2.180  ---     0.2.191           Normal       ---
+objc2              0.6.4    ---     0.6.5             Normal       cfg(target_os = "macos")
+open               5.3.3    ---     5.4.4             Normal       ---
+ratatui            0.30.0   ---     0.30.2            Normal       ---
+reqwest            0.12.28  ---     0.13.5            Normal       ---
+rustls             0.23.45  ---     0.23.46           Normal       ---
+serde              1.0.228  ---     1.0.229           Normal       ---
+serde_json         1.0.149  ---     1.0.154           Normal       ---
+sha2               0.10.9   ---     0.11.1            Normal       ---
+tempfile           3.24.0   ---     3.27.0            Normal       ---
+tikv-jemallocator  0.6.1    ---     0.7.0             Normal       ---
+tokio              1.49.0   ---     1.53.3            Normal       ---
+tokio-stream       0.1.18   ---     0.1.19            Normal       ---
+tokio-tungstenite  0.24.0   ---     0.30.0            Normal       ---
+toml               0.8.2    ---     1.1.8+spec-1.1.0  Normal       ---
+windows-sys        0.59.0   ---     0.61.2            Normal       cfg(windows)
+
+jcode-config-types
+================
+Name        Project  Compat  Latest   Kind    Platform
+----        -------  ------  ------   ----    --------
+serde       1.0.228  ---     1.0.229  Normal  ---
+serde_json  1.0.149  ---     1.0.154  Normal  ---
+
+jcode-herdr
+================
+Name        Project  Compat  Latest            Kind         Platform
+----        -------  ------  ------            ----         --------
+anyhow      1.0.100  ---     1.0.104           Normal       ---
+serde_json  1.0.149  ---     1.0.154           Normal       ---
+tempfile    3.24.0   ---     3.27.0            Development  ---
+tokio       1.49.0   ---     1.53.3            Normal       ---
+toml        0.8.2    ---     1.1.8+spec-1.1.0  Development  ---
+
+jcode-provider-anthropic-runtime
+================
+Name          Project  Compat  Latest   Kind         Platform
+----          -------  ------  ------   ----         --------
+anyhow        1.0.100  ---     1.0.104  Normal       ---
+async-trait   0.1.89   ---     0.1.92   Normal       ---
+chrono        0.4.42   ---     0.4.45   Normal       ---
+futures       0.3.31   ---     0.3.34   Normal       ---
+reqwest       0.12.28  ---     0.13.5   Normal       ---
+serde         1.0.228  ---     1.0.229  Normal       ---
+serde_json    1.0.149  ---     1.0.154  Normal       ---
+tempfile      3.24.0   ---     3.27.0   Development  ---
+tokio         1.49.0   ---     1.53.3   Normal       ---
+tokio-stream  0.1.18   ---     0.1.19   Normal       ---
+uuid          1.21.0   ---     1.28.0   Normal       ---
+
+jcode-base
+================
+Name               Project                                                  Compat  Latest                                                   Kind    Platform
+----               -------                                                  ------  ------                                                   ----    --------
+anyhow             1.0.100                                                  ---     1.0.104                                                  Normal  ---
+async-trait        0.1.89                                                   ---     0.1.92                                                   Normal  ---
+base64             0.22.1                                                   ---     0.23.1                                                   Normal  ---
+chrono             0.4.42                                                   ---     0.4.45                                                   Normal  ---
+dirs               5.0.1                                                    ---     7.0.0                                                    Normal  ---
+futures            0.3.31                                                   ---     0.3.34                                                   Normal  ---
+global-hotkey      0.7.0                                                    ---     0.9.0                                                    Normal  cfg(target_os = "macos")
+image              0.25.9                                                   ---     0.25.10                                                  Normal  ---
+libc               0.2.180                                                  ---     0.2.191                                                  Normal  ---
+open               5.3.3                                                    ---     5.4.4                                                    Normal  ---
+rand               0.9.3                                                    ---     0.10.3                                                   Normal  ---
+regex              1.12.2                                                   ---     1.13.1                                                   Normal  ---
+reqwest            0.12.28                                                  ---     0.13.5                                                   Normal  ---
+rusqlite           0.32.1                                                   ---     0.40.2                                                   Normal  ---
+serde              1.0.228                                                  ---     1.0.229                                                  Normal  ---
+serde_json         1.0.149                                                  ---     1.0.154                                                  Normal  ---
+sha2               0.10.9                                                   ---     0.11.1                                                   Normal  ---
+tempfile           3.24.0                                                   ---     3.27.0                                                   Normal  ---
+tikv-jemalloc-ctl  0.6.1                                                    ---     0.7.0                                                    Normal  ---
+tikv-jemalloc-sys  0.6.1+5.3.0-1-ge13ca993e8ccb9ba9847cc330696e02839f328f7  ---     0.7.1+5.3.1-0-g81034ce1f1373e37dc865038e1bc8eeecf559ce8  Normal  ---
+tokio              1.49.0                                                   ---     1.53.3                                                   Normal  ---
+tokio-tungstenite  0.24.0                                                   ---     0.30.0                                                   Normal  ---
+toml               0.8.2                                                    ---     1.1.8+spec-1.1.0                                         Normal  ---
+uuid               1.21.0                                                   ---     1.28.0                                                   Normal  ---
+windows-sys        0.59.0                                                   ---     0.61.2                                                   Normal  cfg(windows)
+
+jcode-agent-runtime
+================
+Name       Project  Compat  Latest  Kind    Platform
+----       -------  ------  ------  ----    --------
+thiserror  1.0.69   ---     2.0.21  Normal  ---
+tokio      1.49.0   ---     1.53.3  Normal  ---
+
+jcode-auth-types
+================
+Name   Project  Compat  Latest   Kind    Platform
+----   -------  ------  ------   ----    --------
+serde  1.0.228  ---     1.0.229  Normal  ---
+
+jcode-azure-auth
+================
+Name        Project  Compat  Latest   Kind    Platform
+----        -------  ------  ------   ----    --------
+anyhow      1.0.100  ---     1.0.104  Normal  ---
+azure_core  1.0.0    ---     1.1.0    Normal  ---
+
+jcode-background-types
+================
+Name   Project  Compat  Latest   Kind    Platform
+----   -------  ------  ------   ----    --------
+serde  1.0.228  ---     1.0.229  Normal  ---
+
+jcode-batch-types
+================
+Name   Project  Compat  Latest   Kind    Platform
+----   -------  ------  ------   ----    --------
+serde  1.0.228  ---     1.0.229  Normal  ---
+
+jcode-message-types
+================
+Name        Project  Compat  Latest   Kind    Platform
+----        -------  ------  ------   ----    --------
+chrono      0.4.42   ---     0.4.45   Normal  ---
+serde       1.0.228  ---     1.0.229  Normal  ---
+serde_json  1.0.149  ---     1.0.154  Normal  ---
+
+jcode-compaction-core
+================
+Name        Project  Compat  Latest   Kind    Platform
+----        -------  ------  ------   ----    --------
+serde_json  1.0.149  ---     1.0.154  Normal  ---
+
+jcode-core
+================
+Name                  Project  Compat  Latest   Kind    Platform
+----                  -------  ------  ------   ----    --------
+chrono                0.4.42   ---     0.4.45   Normal  ---
+libc                  0.2.180  ---     0.2.191  Normal  ---
+rand                  0.9.3    ---     0.10.3   Normal  ---
+unicode-segmentation  1.12.0   ---     1.13.3   Normal  ---
+windows-sys           0.59.0   ---     0.61.2   Normal  cfg(windows)
+
+jcode-embedding
+================
+Name        Project  Compat  Latest   Kind    Platform
+----        -------  ------  ------   ----    --------
+anyhow      1.0.100  ---     1.0.104  Normal  ---
+reqwest     0.12.28  ---     0.13.5   Normal  ---
+tokenizers  0.21.4   ---     0.23.2   Normal  ---
+tract-hir   0.23.4   ---     0.23.9   Normal  ---
+tract-onnx  0.23.4   ---     0.23.9   Normal  ---
+
+jcode-gateway-types
+================
+Name   Project  Compat  Latest   Kind    Platform
+----   -------  ------  ------   ----    --------
+serde  1.0.228  ---     1.0.229  Normal  ---
+
+jcode-import-core
+================
+Name        Project  Compat  Latest   Kind         Platform
+----        -------  ------  ------   ----         --------
+chrono      0.4.42   ---     0.4.45   Normal       ---
+serde       1.0.228  ---     1.0.229  Normal       ---
+serde_json  1.0.149  ---     1.0.154  Normal       ---
+sha2        0.10.9   ---     0.11.1   Normal       ---
+tempfile    3.24.0   ---     3.27.0   Development  ---
+
+jcode-logging
+================
+Name        Project  Compat  Latest   Kind    Platform
+----        -------  ------  ------   ----    --------
+chrono      0.4.42   ---     0.4.45   Normal  ---
+serde_json  1.0.149  ---     1.0.154  Normal  ---
+tokio       1.49.0   ---     1.53.3   Normal  ---
+
+jcode-storage
+================
+Name        Project  Compat  Latest   Kind         Platform
+----        -------  ------  ------   ----         --------
+anyhow      1.0.100  ---     1.0.104  Normal       ---
+dirs        5.0.1    ---     7.0.0    Normal       ---
+libc        0.2.180  ---     0.2.191  Normal       ---
+rand        0.9.3    ---     0.10.3   Normal       ---
+serde       1.0.228  ---     1.0.229  Normal       ---
+serde_json  1.0.149  ---     1.0.154  Normal       ---
+tempfile    3.24.0   ---     3.27.0   Development  ---
+
+jcode-memory-types
+================
+Name        Project  Compat  Latest   Kind    Platform
+----        -------  ------  ------   ----    --------
+chrono      0.4.42   ---     0.4.45   Normal  ---
+rand        0.9.3    ---     0.10.3   Normal  ---
+serde       1.0.228  ---     1.0.229  Normal  ---
+serde_json  1.0.149  ---     1.0.154  Normal  ---
+
+jcode-permission-bubble
+================
+Name        Project  Compat  Latest   Kind    Platform
+----        -------  ------  ------   ----    --------
+serde       1.0.228  ---     1.0.229  Normal  ---
+serde_json  1.0.149  ---     1.0.154  Normal  ---
+
+jcode-plan
+================
+Name        Project  Compat  Latest   Kind    Platform
+----        -------  ------  ------   ----    --------
+serde       1.0.228  ---     1.0.229  Normal  ---
+serde_json  1.0.149  ---     1.0.154  Normal  ---
+
+jcode-protocol
+================
+Name        Project  Compat  Latest   Kind         Platform
+----        -------  ------  ------   ----         --------
+anyhow      1.0.100  ---     1.0.104  Development  ---
+rand        0.9.3    ---     0.10.3   Development  ---
+serde       1.0.228  ---     1.0.229  Normal       ---
+serde_json  1.0.149  ---     1.0.154  Normal       ---
+
+jcode-provider-core
+================
+Name         Project  Compat  Latest   Kind    Platform
+----         -------  ------  ------   ----    --------
+anyhow       1.0.100  ---     1.0.104  Normal  ---
+async-trait  0.1.89   ---     0.1.92   Normal  ---
+futures      0.3.31   ---     0.3.34   Normal  ---
+rand         0.9.3    ---     0.10.3   Normal  ---
+reqwest      0.12.28  ---     0.13.5   Normal  ---
+serde        1.0.228  ---     1.0.229  Normal  ---
+serde_json   1.0.149  ---     1.0.154  Normal  ---
+sha2         0.10.9   ---     0.11.1   Normal  ---
+tokio        1.49.0   ---     1.53.3   Normal  ---
+
+jcode-schema-dialect
+================
+Name        Project  Compat  Latest   Kind         Platform
+----        -------  ------  ------   ----         --------
+dirs        5.0.1    ---     7.0.0    Normal       ---
+serde       1.0.228  ---     1.0.229  Normal       ---
+serde_json  1.0.149  ---     1.0.154  Normal       ---
+tempfile    3.24.0   ---     3.27.0   Development  ---
+
+jcode-usage-types
+================
+Name        Project  Compat  Latest   Kind    Platform
+----        -------  ------  ------   ----    --------
+serde       1.0.228  ---     1.0.229  Normal  ---
+serde_json  1.0.149  ---     1.0.154  Normal  ---
+
+jcode-selfdev-types
+================
+Name    Project  Compat  Latest   Kind    Platform
+----    -------  ------  ------   ----    --------
+anyhow  1.0.100  ---     1.0.104  Normal  ---
+chrono  0.4.42   ---     0.4.45   Normal  ---
+serde   1.0.228  ---     1.0.229  Normal  ---
+
+jcode-session-types
+================
+Name    Project  Compat  Latest   Kind    Platform
+----    -------  ------  ------   ----    --------
+chrono  0.4.42   ---     0.4.45   Normal  ---
+memchr  2.7.6    ---     2.8.3    Normal  ---
+serde   1.0.228  ---     1.0.229  Normal  ---
+
+jcode-side-panel-types
+================
+Name   Project  Compat  Latest   Kind    Platform
+----   -------  ------  ------   ----    --------
+serde  1.0.228  ---     1.0.229  Normal  ---
+
+jcode-provider-antigravity
+================
+Name        Project  Compat  Latest   Kind    Platform
+----        -------  ------  ------   ----    --------
+chrono      0.4.42   ---     0.4.45   Normal  ---
+serde       1.0.228  ---     1.0.229  Normal  ---
+serde_json  1.0.149  ---     1.0.154  Normal  ---
+
+jcode-provider-gemini
+================
+Name        Project  Compat  Latest   Kind    Platform
+----        -------  ------  ------   ----    --------
+anyhow      1.0.100  ---     1.0.104  Normal  ---
+serde       1.0.228  ---     1.0.229  Normal  ---
+serde_json  1.0.149  ---     1.0.154  Normal  ---
+
+jcode-provider-bedrock
+================
+Name                    Project  Compat  Latest   Kind         Platform
+----                    -------  ------  ------   ----         --------
+anyhow                  1.0.100  ---     1.0.104  Normal       ---
+async-trait             0.1.89   ---     0.1.92   Normal       ---
+aws-config              1.9.0    ---     1.12.0   Normal       ---
+aws-sdk-bedrock         1.148.0  ---     1.161.0  Normal       ---
+aws-sdk-bedrockruntime  1.136.0  ---     1.148.0  Normal       ---
+aws-sdk-sts             1.108.0  ---     1.119.0  Normal       ---
+aws-smithy-types        1.6.1    ---     1.8.1    Normal       ---
+aws-types               1.4.0    ---     1.6.0    Normal       ---
+base64                  0.22.1   ---     0.23.1   Normal       ---
+chrono                  0.4.42   ---     0.4.45   Normal       ---
+futures                 0.3.31   ---     0.3.34   Normal       ---
+serde                   1.0.228  ---     1.0.229  Normal       ---
+serde_json              1.0.149  ---     1.0.154  Normal       ---
+tempfile                3.24.0   ---     3.27.0   Development  ---
+tokio                   1.49.0   ---     1.53.3   Normal       ---
+tokio-stream            0.1.18   ---     0.1.19   Normal       ---
+
+jcode-provider-env
+================
+Name      Project  Compat  Latest   Kind         Platform
+----      -------  ------  ------   ----         --------
+anyhow    1.0.100  ---     1.0.104  Normal       ---
+tempfile  3.24.0   ---     3.27.0   Development  ---
+
+jcode-provider-copilot
+================
+Name        Project  Compat  Latest   Kind    Platform
+----        -------  ------  ------   ----    --------
+serde       1.0.228  ---     1.0.229  Normal  ---
+serde_json  1.0.149  ---     1.0.154  Normal  ---
+
+jcode-provider-openai
+================
+Name        Project  Compat  Latest   Kind    Platform
+----        -------  ------  ------   ----    --------
+anyhow      1.0.100  ---     1.0.104  Normal  ---
+base64      0.22.1   ---     0.23.1   Normal  ---
+bytes       1.11.1   ---     1.12.1   Normal  ---
+futures     0.3.31   ---     0.3.34   Normal  ---
+reqwest     0.12.28  ---     0.13.5   Normal  ---
+serde       1.0.228  ---     1.0.229  Normal  ---
+serde_json  1.0.149  ---     1.0.154  Normal  ---
+tokio       1.49.0   ---     1.53.3   Normal  ---
+
+jcode-provider-openrouter
+================
+Name        Project  Compat  Latest   Kind    Platform
+----        -------  ------  ------   ----    --------
+anyhow      1.0.100  ---     1.0.104  Normal  ---
+bytes       1.11.1   ---     1.12.1   Normal  ---
+dirs        5.0.1    ---     7.0.0    Normal  ---
+futures     0.3.31   ---     0.3.34   Normal  ---
+reqwest     0.12.28  ---     0.13.5   Normal  ---
+serde       1.0.228  ---     1.0.229  Normal  ---
+serde_json  1.0.149  ---     1.0.154  Normal  ---
+
+jcode-render-core
+================
+Name            Project  Compat  Latest   Kind    Platform
+----            -------  ------  ------   ----    --------
+pulldown-cmark  0.12.2   ---     0.13.4   Normal  ---
+serde           1.0.228  ---     1.0.229  Normal  ---
+
+jcode-task-types
+================
+Name        Project  Compat  Latest   Kind    Platform
+----        -------  ------  ------   ----    --------
+chrono      0.4.42   ---     0.4.45   Normal  ---
+serde       1.0.228  ---     1.0.229  Normal  ---
+serde_json  1.0.149  ---     1.0.154  Normal  ---
+
+jcode-telemetry-core
+================
+Name        Project  Compat  Latest   Kind         Platform
+----        -------  ------  ------   ----         --------
+chrono      0.4.42   ---     0.4.45   Normal       ---
+reqwest     0.12.28  ---     0.13.5   Normal       ---
+serde_json  1.0.149  ---     1.0.154  Normal       ---
+tempfile    3.24.0   ---     3.27.0   Development  ---
+tokio       1.49.0   ---     1.53.3   Normal       ---
+uuid        1.21.0   ---     1.28.0   Normal       ---
+
+jcode-terminal-image
+================
+Name    Project  Compat  Latest  Kind    Platform
+----    -------  ------  ------  ----    --------
+base64  0.22.1   ---     0.23.1  Normal  ---
+
+jcode-terminal-launch
+================
+Name    Project  Compat  Latest   Kind    Platform
+----    -------  ------  ------   ----    --------
+anyhow  1.0.100  ---     1.0.104  Normal  ---
+dirs    5.0.1    ---     7.0.0    Normal  ---
+
+jcode-tool-core
+================
+Name         Project  Compat  Latest   Kind    Platform
+----         -------  ------  ------   ----    --------
+anyhow       1.0.100  ---     1.0.104  Normal  ---
+async-trait  0.1.89   ---     0.1.92   Normal  ---
+serde_json   1.0.149  ---     1.0.154  Normal  ---
+tokio        1.49.0   ---     1.53.3   Normal  ---
+
+jcode-tool-types
+================
+Name        Project  Compat  Latest   Kind    Platform
+----        -------  ------  ------   ----    --------
+serde_json  1.0.149  ---     1.0.154  Normal  ---
+
+jcode-transport
+================
+Name         Project  Compat  Latest  Kind    Platform
+----         -------  ------  ------  ----    --------
+sha2         0.10.9   ---     0.11.1  Normal  cfg(windows)
+tokio        1.49.0   ---     1.53.3  Normal  ---
+windows-sys  0.59.0   ---     0.61.2  Normal  cfg(windows)
+
+jcode-provider-openrouter-runtime
+================
+Name          Project  Compat  Latest            Kind         Platform
+----          -------  ------  ------            ----         --------
+anyhow        1.0.100  ---     1.0.104           Normal       ---
+async-trait   0.1.89   ---     0.1.92            Normal       ---
+bytes         1.11.1   ---     1.12.1            Normal       ---
+futures       0.3.31   ---     0.3.34            Normal       ---
+reqwest       0.12.28  ---     0.13.5            Normal       ---
+serde         1.0.228  ---     1.0.229           Normal       ---
+serde_json    1.0.149  ---     1.0.154           Normal       ---
+tempfile      3.24.0   ---     3.27.0            Development  ---
+tokio         1.49.0   ---     1.53.3            Normal       ---
+tokio-stream  0.1.18   ---     0.1.19            Normal       ---
+toml          0.8.2    ---     1.1.8+spec-1.1.0  Development  ---
+uuid          1.21.0   ---     1.28.0            Normal       ---
+
+jcode-provider-anthropic
+================
+Name        Project  Compat  Latest   Kind    Platform
+----        -------  ------  ------   ----    --------
+serde       1.0.228  ---     1.0.229  Normal  ---
+serde_json  1.0.149  ---     1.0.154  Normal  ---
+
+jcode-provider-antigravity-runtime
+================
+Name          Project  Compat  Latest   Kind         Platform
+----          -------  ------  ------   ----         --------
+anyhow        1.0.100  ---     1.0.104  Normal       ---
+async-trait   0.1.89   ---     0.1.92   Normal       ---
+chrono        0.4.42   ---     0.4.45   Normal       ---
+reqwest       0.12.28  ---     0.13.5   Normal       ---
+serde_json    1.0.149  ---     1.0.154  Normal       ---
+tempfile      3.24.0   ---     3.27.0   Development  ---
+tokio         1.49.0   ---     1.53.3   Normal       ---
+tokio-stream  0.1.18   ---     0.1.19   Normal       ---
+uuid          1.21.0   ---     1.28.0   Normal       ---
+
+jcode-provider-claude-cli-runtime
+================
+Name          Project  Compat  Latest   Kind    Platform
+----          -------  ------  ------   ----    --------
+anyhow        1.0.100  ---     1.0.104  Normal  ---
+async-trait   0.1.89   ---     0.1.92   Normal  ---
+chrono        0.4.42   ---     0.4.45   Normal  ---
+serde         1.0.228  ---     1.0.229  Normal  ---
+serde_json    1.0.149  ---     1.0.154  Normal  ---
+tokio         1.49.0   ---     1.53.3   Normal  ---
+tokio-stream  0.1.18   ---     0.1.19   Normal  ---
+
+jcode-provider-copilot-runtime
+================
+Name          Project  Compat  Latest   Kind         Platform
+----          -------  ------  ------   ----         --------
+anyhow        1.0.100  ---     1.0.104  Normal       ---
+async-trait   0.1.89   ---     0.1.92   Normal       ---
+chrono        0.4.42   ---     0.4.45   Normal       ---
+dirs          5.0.1    ---     7.0.0    Normal       ---
+futures       0.3.31   ---     0.3.34   Normal       ---
+reqwest       0.12.28  ---     0.13.5   Normal       ---
+serde_json    1.0.149  ---     1.0.154  Normal       ---
+tempfile      3.24.0   ---     3.27.0   Development  ---
+tokio         1.49.0   ---     1.53.3   Normal       ---
+tokio-stream  0.1.18   ---     0.1.19   Normal       ---
+uuid          1.21.0   ---     1.28.0   Normal       ---
+
+jcode-provider-cursor-runtime
+================
+Name          Project  Compat  Latest   Kind         Platform
+----          -------  ------  ------   ----         --------
+anyhow        1.0.100  ---     1.0.104  Normal       ---
+async-trait   0.1.89   ---     0.1.92   Normal       ---
+bytes         1.11.1   ---     1.12.1   Normal       ---
+chrono        0.4.42   ---     0.4.45   Normal       ---
+flate2        1.1.8    ---     1.1.10   Normal       ---
+h2            0.4.19   ---     0.4.20   Normal       ---
+http          1.4.0    ---     1.5.0    Normal       ---
+reqwest       0.12.28  ---     0.13.5   Normal       ---
+serde         1.0.228  ---     1.0.229  Normal       ---
+serde_json    1.0.149  ---     1.0.154  Normal       ---
+tempfile      3.24.0   ---     3.27.0   Development  ---
+tokio         1.49.0   ---     1.53.3   Normal       ---
+tokio-rustls  0.26.4   ---     0.26.6   Normal       ---
+tokio-stream  0.1.18   ---     0.1.19   Normal       ---
+uuid          1.21.0   ---     1.28.0   Normal       ---
+webpki-roots  1.0.6    ---     1.0.9    Normal       ---
+
+jcode-provider-doctor
+================
+Name        Project  Compat  Latest   Kind    Platform
+----        -------  ------  ------   ----    --------
+anyhow      1.0.100  ---     1.0.104  Normal  ---
+futures     0.3.31   ---     0.3.34   Normal  ---
+reqwest     0.12.28  ---     0.13.5   Normal  ---
+serde       1.0.228  ---     1.0.229  Normal  ---
+serde_json  1.0.149  ---     1.0.154  Normal  ---
+tokio       1.49.0   ---     1.53.3   Normal  ---
+
+jcode-provider-gemini-runtime
+================
+Name          Project  Compat  Latest   Kind         Platform
+----          -------  ------  ------   ----         --------
+anyhow        1.0.100  ---     1.0.104  Normal       ---
+async-trait   0.1.89   ---     0.1.92   Normal       ---
+chrono        0.4.42   ---     0.4.45   Normal       ---
+reqwest       0.12.28  ---     0.13.5   Normal       ---
+serde         1.0.228  ---     1.0.229  Normal       ---
+serde_json    1.0.149  ---     1.0.154  Normal       ---
+tempfile      3.24.0   ---     3.27.0   Development  ---
+tokio         1.49.0   ---     1.53.3   Normal       ---
+tokio-stream  0.1.18   ---     0.1.19   Normal       ---
+uuid          1.21.0   ---     1.28.0   Normal       ---
+
+jcode-provider-openai-runtime
+================
+Name               Project  Compat  Latest   Kind         Platform
+----               -------  ------  ------   ----         --------
+anyhow             1.0.100  ---     1.0.104  Normal       ---
+async-trait        0.1.89   ---     0.1.92   Normal       ---
+chrono             0.4.42   ---     0.4.45   Normal       ---
+dirs               5.0.1    ---     7.0.0    Normal       ---
+futures            0.3.31   ---     0.3.34   Normal       ---
+reqwest            0.12.28  ---     0.13.5   Normal       ---
+rustls             0.23.45  ---     0.23.46  Development  ---
+serde_json         1.0.149  ---     1.0.154  Normal       ---
+tempfile           3.24.0   ---     3.27.0   Development  ---
+tokio              1.49.0   ---     1.53.3   Normal       ---
+tokio-stream       0.1.18   ---     0.1.19   Normal       ---
+tokio-tungstenite  0.24.0   ---     0.30.0   Normal       ---
+
+jcode-provider-forgecode-runtime
+================
+Name          Project  Compat  Latest   Kind    Platform
+----          -------  ------  ------   ----    --------
+anyhow        1.0.100  ---     1.0.104  Normal  ---
+async-trait   0.1.89   ---     0.1.92   Normal  ---
+serde         1.0.228  ---     1.0.229  Normal  ---
+serde_json    1.0.149  ---     1.0.154  Normal  ---
+tokio         1.49.0   ---     1.53.3   Normal  ---
+tokio-stream  0.1.18   ---     0.1.19   Normal  ---
+
+jcode-provider-grok-build-runtime
+================
+Name                   Project  Compat  Latest   Kind         Platform
+----                   -------  ------  ------   ----         --------
+agent-client-protocol  0.10.4   ---     3.4.0    Normal       ---
+anyhow                 1.0.100  ---     1.0.104  Normal       ---
+async-trait            0.1.89   ---     0.1.92   Normal       ---
+futures                0.3.31   ---     0.3.34   Normal       ---
+serde_json             1.0.149  ---     1.0.154  Normal       ---
+tempfile               3.24.0   ---     3.27.0   Development  ---
+tokio                  1.49.0   ---     1.53.3   Normal       ---
+tokio-stream           0.1.18   ---     0.1.19   Normal       ---
+tokio-util             0.7.18   ---     0.7.20   Normal       ---
+
+jcode-tui
+================
+Name           Project  Compat  Latest   Kind    Platform
+----           -------  ------  ------   ----    --------
+anyhow         1.0.100  ---     1.0.104  Normal  ---
+arboard        3.6.1    ---     3.7.0    Normal  ---
+async-trait    0.1.89   ---     0.1.92   Normal  ---
+base64         0.22.1   ---     0.23.1   Normal  ---
+chrono         0.4.42   ---     0.4.45   Normal  ---
+dirs           5.0.1    ---     7.0.0    Normal  ---
+futures        0.3.31   ---     0.3.34   Normal  ---
+global-hotkey  0.7.0    ---     0.9.0    Normal  cfg(target_os = "macos")
+image          0.25.9   ---     0.25.10  Normal  ---
+libc           0.2.180  ---     0.2.191  Normal  ---
+open           5.3.3    ---     5.4.4    Normal  ---
+rand           0.9.3    ---     0.10.3   Normal  ---
+ratatui        0.30.0   ---     0.30.2   Normal  ---
+regex          1.12.2   ---     1.13.1   Normal  ---
+serde          1.0.228  ---     1.0.229  Normal  ---
+serde_json     1.0.149  ---     1.0.154  Normal  ---
+sha2           0.10.9   ---     0.11.1   Normal  ---
+similar        2.7.0    ---     3.2.0    Normal  ---
+tempfile       3.24.0   ---     3.27.0   Normal  ---
+tokio          1.49.0   ---     1.53.3   Normal  ---
+
+jcode-app-core
+================
+Name           Project  Compat  Latest   Kind    Platform
+----           -------  ------  ------   ----    --------
+anyhow         1.0.100  ---     1.0.104  Normal  ---
+async-trait    0.1.89   ---     0.1.92   Normal  ---
+base64         0.22.1   ---     0.23.1   Normal  ---
+chrono         0.4.42   ---     0.4.45   Normal  ---
+core-graphics  0.23.2   ---     0.25.0   Normal  cfg(target_os = "macos")
+dirs           5.0.1    ---     7.0.0    Normal  ---
+flate2         1.1.8    ---     1.1.10   Normal  ---
+futures        0.3.31   ---     0.3.34   Normal  ---
+glob           0.3.3    ---     0.3.4    Normal  ---
+global-hotkey  0.7.0    ---     0.9.0    Normal  cfg(target_os = "macos")
+libc           0.2.180  ---     0.2.191  Normal  ---
+open           5.3.3    ---     5.4.4    Normal  ---
+rand           0.9.3    ---     0.10.3   Normal  ---
+ratatui        0.30.0   ---     0.30.2   Normal  ---
+regex          1.12.2   ---     1.13.1   Normal  ---
+reqwest        0.12.28  ---     0.13.5   Normal  ---
+serde          1.0.228  ---     1.0.229  Normal  ---
+serde_json     1.0.149  ---     1.0.154  Normal  ---
+sha2           0.10.9   ---     0.11.1   Normal  ---
+similar        2.7.0    ---     3.2.0    Normal  ---
+tar            0.4.45   ---     0.4.46   Normal  ---
+tempfile       3.24.0   ---     3.27.0   Normal  ---
+tokio          1.49.0   ---     1.53.3   Normal  ---
+tokio-stream   0.1.18   ---     0.1.19   Normal  ---
+tokio-util     0.7.18   ---     0.7.20   Normal  ---
+uuid           1.21.0   ---     1.28.0   Normal  ---
+windows-sys    0.59.0   ---     0.61.2   Normal  cfg(windows)
+
+jcode-ambient-types
+================
+Name    Project  Compat  Latest   Kind    Platform
+----    -------  ------  ------   ----    --------
+chrono  0.4.42   ---     0.4.45   Normal  ---
+serde   1.0.228  ---     1.0.229  Normal  ---
+
+jcode-auto-dream
+================
+Name        Project  Compat  Latest   Kind         Platform
+----        -------  ------  ------   ----         --------
+anyhow      1.0.100  ---     1.0.104  Normal       ---
+chrono      0.4.42   ---     0.4.45   Normal       ---
+filetime    0.2.27   ---     0.2.29   Development  ---
+serde       1.0.228  ---     1.0.229  Normal       ---
+serde_json  1.0.149  ---     1.0.154  Normal       ---
+tempfile    3.24.0   ---     3.27.0   Development  ---
+tokio       1.49.0   ---     1.53.3   Normal       ---
+
+jcode-build-support
+================
+Name        Project  Compat  Latest   Kind    Platform
+----        -------  ------  ------   ----    --------
+anyhow      1.0.100  ---     1.0.104  Normal  ---
+chrono      0.4.42   ---     0.4.45   Normal  ---
+serde       1.0.228  ---     1.0.229  Normal  ---
+serde_json  1.0.149  ---     1.0.154  Normal  ---
+tempfile    3.24.0   ---     3.27.0   Normal  ---
+
+jcode-cache-vectors
+================
+Name        Project  Compat  Latest   Kind    Platform
+----        -------  ------  ------   ----    --------
+serde       1.0.228  ---     1.0.229  Normal  ---
+serde_json  1.0.149  ---     1.0.154  Normal  ---
+
+jcode-command-risk
+================
+Name      Project  Compat  Latest  Kind         Platform
+----      -------  ------  ------  ----         --------
+regex     1.12.2   ---     1.13.1  Normal       ---
+tempfile  3.24.0   ---     3.27.0  Development  ---
+
+jcode-micro-compact
+================
+Name        Project  Compat  Latest   Kind    Platform
+----        -------  ------  ------   ----    --------
+serde       1.0.228  ---     1.0.229  Normal  ---
+serde_json  1.0.149  ---     1.0.154  Normal  ---
+
+jcode-notify-email
+================
+Name            Project  Compat  Latest   Kind    Platform
+----            -------  ------  ------   ----    --------
+anyhow          1.0.100  ---     1.0.104  Normal  ---
+chrono          0.4.42   ---     0.4.45   Normal  ---
+lettre          0.11.22  ---     0.11.23  Normal  ---
+mail-parser     0.9.4    ---     0.11.9   Normal  ---
+pulldown-cmark  0.12.2   ---     0.13.4   Normal  ---
+
+jcode-overnight-core
+================
+Name        Project  Compat  Latest   Kind    Platform
+----        -------  ------  ------   ----    --------
+chrono      0.4.42   ---     0.4.45   Normal  ---
+serde       1.0.228  ---     1.0.229  Normal  ---
+serde_json  1.0.149  ---     1.0.154  Normal  ---
+
+jcode-pdf
+================
+Name         Project  Compat  Latest   Kind    Platform
+----         -------  ------  ------   ----    --------
+anyhow       1.0.100  ---     1.0.104  Normal  ---
+pdf-extract  0.12.0   ---     0.12.1   Normal  ---
+
+jcode-session-memory
+================
+Name   Project  Compat  Latest   Kind    Platform
+----   -------  ------  ------   ----    --------
+serde  1.0.228  ---     1.0.229  Normal  ---
+
+jcode-setup-hints
+================
+Name           Project  Compat  Latest            Kind         Platform
+----           -------  ------  ------            ----         --------
+anyhow         1.0.100  ---     1.0.104           Normal       ---
+dirs           5.0.1    ---     7.0.0             Normal       ---
+global-hotkey  0.7.0    ---     0.9.0             Normal       cfg(target_os = "macos")
+serde          1.0.228  ---     1.0.229           Normal       ---
+serde_json     1.0.149  ---     1.0.154           Normal       ---
+tempfile       3.24.0   ---     3.27.0            Development  ---
+toml           0.8.2    ---     1.1.8+spec-1.1.0  Normal       ---
+windows-sys    0.59.0   ---     0.61.2            Normal       cfg(windows)
+
+jcode-swarm-core
+================
+Name   Project  Compat  Latest   Kind    Platform
+----   -------  ------  ------   ----    --------
+serde  1.0.228  ---     1.0.229  Normal  ---
+
+jcode-tool-search
+================
+Name   Project  Compat  Latest   Kind    Platform
+----   -------  ------  ------   ----    --------
+serde  1.0.228  ---     1.0.229  Normal  ---
+
+jcode-update-core
+================
+Name    Project  Compat  Latest   Kind    Platform
+----    -------  ------  ------   ----    --------
+anyhow  1.0.100  ---     1.0.104  Normal  ---
+serde   1.0.228  ---     1.0.229  Normal  ---
+sha2    0.10.9   ---     0.11.1   Normal  ---
+
+jcode-productivity-core
+================
+Name        Project  Compat  Latest   Kind         Platform
+----        -------  ------  ------   ----         --------
+anyhow      1.0.100  ---     1.0.104  Normal       ---
+chrono      0.4.42   ---     0.4.45   Normal       ---
+rayon       1.11.0   ---     1.12.0   Normal       ---
+resvg       0.46.0   ---     0.48.1   Normal       ---
+serde       1.0.228  ---     1.0.229  Normal       ---
+serde_json  1.0.149  ---     1.0.154  Normal       ---
+tempfile    3.24.0   ---     3.27.0   Development  ---
+usvg        0.46.0   ---     0.48.1   Normal       ---
+
+jcode-tui-account-picker
+================
+Name        Project  Compat  Latest   Kind    Platform
+----        -------  ------  ------   ----    --------
+anyhow      1.0.100  ---     1.0.104  Normal  ---
+ratatui     0.30.0   ---     0.30.2   Normal  ---
+serde       1.0.228  ---     1.0.229  Normal  ---
+serde_json  1.0.149  ---     1.0.154  Normal  ---
+
+jcode-tui-core
+================
+Name   Project  Compat  Latest   Kind    Platform
+----   -------  ------  ------   ----    --------
+serde  1.0.228  ---     1.0.229  Normal  ---
+
+jcode-tui-markdown
+================
+Name            Project  Compat  Latest   Kind    Platform
+----            -------  ------  ------   ----    --------
+dirs            5.0.1    ---     7.0.0    Normal  ---
+image           0.25.9   ---     0.25.10  Normal  ---
+pulldown-cmark  0.12.2   ---     0.13.4   Normal  ---
+ratatui         0.30.0   ---     0.30.2   Normal  ---
+serde           1.0.228  ---     1.0.229  Normal  ---
+serde_json      1.0.149  ---     1.0.154  Normal  ---
+tempfile        3.24.0   ---     3.27.0   Normal  ---
+
+jcode-tui-mermaid
+================
+Name           Project  Compat  Latest   Kind    Platform
+----           -------  ------  ------   ----    --------
+anyhow         1.0.100  ---     1.0.104  Normal  ---
+base64         0.22.1   ---     0.23.1   Normal  ---
+dirs           5.0.1    ---     7.0.0    Normal  ---
+image          0.25.9   ---     0.25.10  Normal  ---
+ratatui        0.30.0   ---     0.30.2   Normal  ---
+ratatui-image  10.0.6   ---     11.1.0   Normal  ---
+resvg          0.46.0   ---     0.48.1   Normal  ---
+serde          1.0.228  ---     1.0.229  Normal  ---
+serde_json     1.0.149  ---     1.0.154  Normal  ---
+usvg           0.46.0   ---     0.48.1   Normal  ---
+
+jcode-tui-workspace
+================
+Name     Project  Compat  Latest  Kind    Platform
+----     -------  ------  ------  ----    --------
+ratatui  0.30.0   ---     0.30.2  Normal  ---
+
+jcode-tui-messages
+================
+Name        Project  Compat  Latest   Kind    Platform
+----        -------  ------  ------   ----    --------
+ratatui     0.30.0   ---     0.30.2   Normal  ---
+serde_json  1.0.149  ---     1.0.154  Normal  ---
+
+jcode-tui-permissions
+================
+Name        Project  Compat  Latest   Kind    Platform
+----        -------  ------  ------   ----    --------
+anyhow      1.0.100  ---     1.0.104  Normal  ---
+chrono      0.4.42   ---     0.4.45   Normal  ---
+ratatui     0.30.0   ---     0.30.2   Normal  ---
+serde_json  1.0.149  ---     1.0.154  Normal  ---
+
+jcode-tui-style
+================
+Name     Project  Compat  Latest  Kind    Platform
+----     -------  ------  ------  ----    --------
+ratatui  0.30.0   ---     0.30.2  Normal  ---
+
+jcode-tui-render
+================
+Name     Project  Compat  Latest  Kind    Platform
+----     -------  ------  ------  ----    --------
+chrono   0.4.42   ---     0.4.45  Normal  ---
+ratatui  0.30.0   ---     0.30.2  Normal  ---
+
+jcode-tui-session-picker
+================
+Name    Project  Compat  Latest   Kind    Platform
+----    -------  ------  ------   ----    --------
+chrono  0.4.42   ---     0.4.45   Normal  ---
+serde   1.0.228  ---     1.0.229  Normal  ---
+
+jcode-tui-usage-overlay
+================
+Name        Project  Compat  Latest   Kind    Platform
+----        -------  ------  ------   ----    --------
+anyhow      1.0.100  ---     1.0.104  Normal  ---
+chrono      0.4.42   ---     0.4.45   Normal  ---
+ratatui     0.30.0   ---     0.30.2   Normal  ---
+serde       1.0.228  ---     1.0.229  Normal  ---
+serde_json  1.0.149  ---     1.0.154  Normal  ---
+
+jcode-tui-visual-debug
+================
+Name        Project  Compat  Latest   Kind    Platform
+----        -------  ------  ------   ----    --------
+dirs        5.0.1    ---     7.0.0    Normal  ---
+ratatui     0.30.0   ---     0.30.2   Normal  ---
+regex       1.12.2   ---     1.13.1   Normal  ---
+serde       1.0.228  ---     1.0.229  Normal  ---
+serde_json  1.0.149  ---     1.0.154  Normal  ---
+
+jcode-harness-api
+================
+Name        Project  Compat  Latest   Kind    Platform
+----        -------  ------  ------   ----    --------
+serde       1.0.228  ---     1.0.229  Normal  ---
+serde_json  1.0.149  ---     1.0.154  Normal  ---
+
+jcode-harness-api-server
+================
+Name        Project  Compat  Latest   Kind    Platform
+----        -------  ------  ------   ----    --------
+anyhow      1.0.100  ---     1.0.104  Normal  ---
+libc        0.2.180  ---     0.2.191  Normal  cfg(unix)
+rusqlite    0.32.1   ---     0.40.2   Normal  ---
+serde       1.0.228  ---     1.0.229  Normal  ---
+serde_json  1.0.149  ---     1.0.154  Normal  ---
+tokio       1.49.0   ---     1.53.3   Normal  ---
+
+jcode-sdk
+================
+Name        Project  Compat  Latest   Kind    Platform
+----        -------  ------  ------   ----    --------
+jsonschema  0.49.3   ---     0.59.0   Normal  ---
+libc        0.2.180  ---     0.2.191  Normal  ---
+serde       1.0.228  ---     1.0.229  Normal  ---
+serde_json  1.0.149  ---     1.0.154  Normal  ---
+tempfile    3.24.0   ---     3.27.0   Normal  ---
+uuid        1.21.0   ---     1.28.0   Normal  ---
