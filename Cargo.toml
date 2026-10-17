@@ -344,6 +344,22 @@ opt-level = 3
 [profile.test.package."jcode-fuzzy"]
 opt-level = 3
 
+# Session snapshots can be tens of MB, and every reload re-parses them on the
+# resume path. Unoptimized, serde_json's tokenizer made a 40MB parse take
+# 0.7-1.7s in selfdev builds. It is a stable dependency, so optimizing it costs
+# one compile and never recompiles during iterative work.
+[profile.dev.package.serde_json]
+opt-level = 3
+
+[profile.selfdev.package.serde_json]
+opt-level = 3
+
+[profile.dev.package.serde]
+opt-level = 3
+
+[profile.selfdev.package.serde]
+opt-level = 3
+
 [profile.release.package."jcode-fuzzy"]
 opt-level = 3
 

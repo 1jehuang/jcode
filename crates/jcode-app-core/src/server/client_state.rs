@@ -717,7 +717,7 @@ async fn send_history_from_persisted_session(
 /// real frame (session name, transcript, model facts), while the catalog only
 /// feeds the model picker, and the client already requests the full catalog
 /// right after History. So History never waits long for it.
-const HISTORY_MODEL_CATALOG_BUDGET: Duration = Duration::from_millis(30);
+const HISTORY_MODEL_CATALOG_BUDGET: Duration = Duration::from_millis(5);
 
 /// Model names for the History payload, bounded by
 /// [`HISTORY_MODEL_CATALOG_BUDGET`]. On timeout the build keeps running in the
