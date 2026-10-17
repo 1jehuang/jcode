@@ -25,6 +25,22 @@ fn usage_card_fits_content_on_wide_terminals() {
 }
 
 #[test]
+fn usage_card_compacts_padded_labels_in_narrow_terminals() {
+    let msg = DisplayMessage::system(
+        "  7-day window              : ████████░░░░░░  59% · resets in 5d 4h",
+    );
+    let lines = render_usage_message(&msg, 36, crate::config::DiffDisplayMode::Off);
+    let rows: Vec<_> = lines.iter().map(extract_line_text).collect();
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("7-day window:") && row.contains("59%")),
+        "{rows:#?}"
+    );
+    assert!(rows.iter().any(|row| row.contains("resets in 5d 4h")));
+    assert!(lines.iter().all(|line| line.width() <= 36));
+}
+
+#[test]
 fn usage_card_never_overflows_even_tiny_terminals() {
     let mut msg = DisplayMessage::system(
         "# Usage updated\n+ 工作账户 e\u{301} - available\n  Weekly: █████░░░░░ 50% · resets in 2h 5m\n  Session resets: 1 available\n\n! Claude - error\n  error: unavailable",

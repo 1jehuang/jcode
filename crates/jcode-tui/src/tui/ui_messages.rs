@@ -701,7 +701,14 @@ fn usage_report_lines(raw: &str, width: usize) -> Vec<Line<'static>> {
         && let Some(percent) = raw[start..end].split_whitespace().last()
         && let Ok(value) = percent.trim_end_matches('%').parse::<f32>()
     {
-        let label = &raw[..start];
+        // The report pads labels to align all providers. Drop that padding
+        // when reflowing a narrow card so short names do not wrap needlessly.
+        let raw_label = &raw[..start];
+        let compact_label = raw_label
+            .trim_end()
+            .strip_suffix(':')
+            .map(|label| format!("{}: ", label.trim_end()));
+        let label = compact_label.as_deref().unwrap_or(raw_label);
         let original_bar_width = raw[start..]
             .chars()
             .take_while(|ch| matches!(ch, '█' | '░'))
