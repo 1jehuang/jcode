@@ -14,6 +14,20 @@ fn restore_env_var(key: &str, previous: Option<OsString>) {
     }
 }
 
+#[test]
+fn hibernation_environment_override_accepts_seconds_and_zero_but_not_invalid_values() {
+    let _lock = crate::storage::lock_test_env();
+    let key = "JCODE_HIBERNATION_IDLE_SECS";
+    let previous = std::env::var_os(key);
+    for (value, expected) in [("60", 60), (" 0 ", 0), ("-1", 1800), ("invalid", 1800)] {
+        crate::env::set_var(key, value);
+        let mut config = Config::default();
+        config.apply_env_overrides();
+        assert_eq!(config.session.hibernation_idle_secs, expected, "{value}");
+    }
+    restore_env_var(key, previous);
+}
+
 struct GeminiConfigEnv {
     _home: tempfile::TempDir,
     previous: Vec<(&'static str, Option<OsString>)>,

@@ -727,6 +727,12 @@ port = 7643
 # Bind address (0.0.0.0 for LAN/Tailscale reachability)
 bind_addr = "0.0.0.0"
 
+[session]
+# Release reloadable session memory after 30 minutes idle. Active work is never
+# interrupted. Type in the terminal to wake. Set to 0 to disable hibernation.
+# Environment override: JCODE_HIBERNATION_IDLE_SECS
+hibernation_idle_secs = 1800
+
 [power]
 # Prevent automatic system sleep while any jcode session is actively working.
 # Linux also blocks lid-switch suspend. On Windows and macOS see block_lid_close.
@@ -830,6 +836,7 @@ mod tests {
             toml::from_str::<Config>(&template).expect("the shipped config template must parse");
         assert_eq!(config.tools.mcp_tools, McpToolsMode::Auto);
         assert_eq!(config.tools.mcp_tools_token_threshold, 8_000);
+        assert_eq!(config.session.hibernation_idle_secs, 1800);
         assert!(
             config.display.show_thinking,
             "the shipped user config must request model reasoning"
@@ -839,6 +846,17 @@ mod tests {
             ReasoningDisplayMode::Full,
             "the shipped user config must keep the full reasoning trace visible"
         );
+    }
+
+    #[test]
+    fn session_hibernation_config_defaults_and_roundtrips() {
+        let legacy: Config = toml::from_str("").unwrap();
+        assert_eq!(legacy.session.hibernation_idle_secs, 1800);
+        let disabled: Config = toml::from_str("[session]\nhibernation_idle_secs = 0\n").unwrap();
+        assert_eq!(disabled.session.hibernation_idle_secs, 0);
+        let encoded = toml::to_string(&disabled).unwrap();
+        let restored: Config = toml::from_str(&encoded).unwrap();
+        assert_eq!(restored.session.hibernation_idle_secs, 0);
     }
 
     /// Colors are only discoverable if the template mentions them, since most

@@ -11,8 +11,8 @@ pub use jcode_config_types::{
     LaunchHotkeyEntry, LaunchHotkeysConfig, MarkdownSpacingMode, MenubarConfig, NamedProviderAuth,
     NamedProviderConfig, NamedProviderModelConfig, NamedProviderType, NativeScrollbarConfig,
     NotificationsConfig, PowerConfig, ProviderConfig, ReasoningDisplayMode, SafetyConfig,
-    SessionPickerResumeAction, SponsorsConfig, SwarmSpawnMode, SwarmStripLayout, TerminalConfig,
-    UpdateChannel, WebSearchConfig, WebSearchEngine,
+    SessionConfig, SessionPickerResumeAction, SponsorsConfig, SwarmSpawnMode, SwarmStripLayout,
+    TerminalConfig, UpdateChannel, WebSearchConfig, WebSearchEngine,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -71,6 +71,7 @@ snippet_pointer = "/summary"
 }
 
 const CONFIG_ENV_KEYS: &[&str] = &[
+    "JCODE_HIBERNATION_IDLE_SECS",
     "HOME",
     "JCODE_COMMIT_LOG_KEY",
     "JCODE_RESUME_PROJECT_SCOPE",
@@ -537,6 +538,9 @@ pub fn on_config_reloaded(listener: fn()) {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct Config {
+    /// Idle session memory hibernation policy.
+    pub session: SessionConfig,
+
     /// Daemon behavior for autonomous wake requests.
     pub server: ServerConfig,
 
