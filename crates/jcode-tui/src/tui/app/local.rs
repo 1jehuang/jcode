@@ -90,6 +90,7 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
     needs_redraw |= app.flush_pending_resize_redraw();
     app.maybe_capture_runtime_memory_heartbeat();
     app.maybe_release_idle_heap();
+    needs_redraw |= app.poll_idle_hibernation();
     // Surface the cold-cache transcript warning the moment the TTL expires
     // while idle, not only when the next request starts.
     needs_redraw |= app.maybe_push_idle_cold_cache_warning();

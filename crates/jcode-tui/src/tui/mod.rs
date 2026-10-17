@@ -694,6 +694,14 @@ pub(crate) fn hash_rendered_image_signature_fields(
 /// selection, onboarding, misc). See `docs/TUISTATE_TRAIT_DECOMPOSITION.md` for
 /// the incremental plan to split these into composable sub-traits.
 pub trait TuiState {
+    /// Bounded last frame while derived caches are released. Source transcripts
+    /// remain resident, but the renderer must not re-materialize them at idle.
+    fn hibernation_frame(&self) -> Option<&ratatui::buffer::Buffer> {
+        None
+    }
+    fn hibernation_notice(&self) -> Option<&str> {
+        None
+    }
     // ---- Transcript ----
     fn display_messages(&self) -> &[DisplayMessage];
     fn display_user_message_count(&self) -> usize;

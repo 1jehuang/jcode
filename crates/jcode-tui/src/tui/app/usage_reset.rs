@@ -156,6 +156,10 @@ impl<P> Default for ResetState<P> {
 }
 
 impl<P> ResetState<P> {
+    pub(super) fn is_running(&self) -> bool {
+        self.receiver.is_some() || self.quota_refresh.is_some()
+    }
+
     fn finish(&mut self, reply: Reply<P>) -> String {
         self.receiver = None;
         self.redeeming = false;

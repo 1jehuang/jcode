@@ -694,6 +694,7 @@ impl App {
             client_focused: true,
             runtime_memory_log,
             idle_heap_release: Default::default(),
+            idle_hibernation: Default::default(),
             client_binary_mtime: std::env::current_exe()
                 .ok()
                 .and_then(|p| std::fs::metadata(&p).ok())
@@ -1167,6 +1168,7 @@ impl App {
             client_focused: true,
             runtime_memory_log,
             idle_heap_release: Default::default(),
+            idle_hibernation: Default::default(),
             client_binary_mtime: std::env::current_exe()
                 .ok()
                 .and_then(|p| std::fs::metadata(&p).ok())
