@@ -1691,7 +1691,7 @@ pub(super) async fn handle_resume_session(
             resume_start.elapsed().as_millis()
         ));
         let result = super::run_blocking_io(|| {
-            agent_guard.restore_session_with_working_dir(&session_id, working_dir_override)
+            agent_guard.restore_session_deferring_save(&session_id, working_dir_override)
         });
         if *client_selfdev {
             agent_guard.set_canary("self-dev");
@@ -1714,6 +1714,15 @@ pub(super) async fn handle_resume_session(
     }
 
     let restored_ms = resume_start.elapsed().as_millis();
+    // Persist the restore (status, env snapshot) off the History critical
+    // path, but never skip it: it runs once History is sent or on any error.
+    let persist_restored = || async {
+        let mut agent_guard = agent.lock().await;
+        super::run_blocking_io(|| agent_guard.persist_restored_session());
+    };
+    if result.is_err() {
+        persist_restored().await;
+    }
     match result {
         Ok(_prev_status) => {
             let old_session_id = client_session_id.clone();
@@ -1857,7 +1866,7 @@ pub(super) async fn handle_resume_session(
             };
 
             let pre_history_ms = resume_start.elapsed().as_millis();
-            handle_get_history(
+            let history_result = handle_get_history(
                 id,
                 &session_id,
                 false,
@@ -1872,7 +1881,9 @@ pub(super) async fn handle_resume_session(
                 Some(was_interrupted),
                 supports_pdf_panels,
             )
-            .await?;
+            .await;
+            persist_restored().await;
+            history_result?;
             let history_sent_ms = resume_start.elapsed().as_millis();
             let _ = client_event_tx.send(ServerEvent::Done { id });
             // Re-send the swarm plan AFTER the History payload: the client

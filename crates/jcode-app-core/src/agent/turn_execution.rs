@@ -1135,6 +1135,43 @@ impl Agent {
         session_id: &str,
         working_dir: Option<&str>,
     ) -> Result<SessionStatus> {
+        self.restore_session_inner(session_id, working_dir, true)
+    }
+
+    /// Restore without persisting. The caller must call
+    /// [`Self::persist_restored_session`] once it is off the latency-critical
+    /// path: for sessions with multi-MB compaction state that save is a full
+    /// snapshot rewrite (0.4-1.6s), and it used to delay the History reply.
+    pub(crate) fn restore_session_deferring_save(
+        &mut self,
+        session_id: &str,
+        working_dir: Option<&str>,
+    ) -> Result<SessionStatus> {
+        self.restore_session_inner(session_id, working_dir, false)
+    }
+
+    /// Persist state recorded by [`Self::restore_session_deferring_save`].
+    pub(crate) fn persist_restored_session(&mut self) {
+        let start = Instant::now();
+        if let Err(err) = self.session.save() {
+            logging::error(&format!(
+                "Failed to persist resumed session state for {}: {}",
+                self.session.id, err
+            ));
+        }
+        logging::info(&format!(
+            "[TIMING] restore_session deferred save: session={}, save={}ms",
+            self.session.id,
+            start.elapsed().as_millis()
+        ));
+    }
+
+    fn restore_session_inner(
+        &mut self,
+        session_id: &str,
+        working_dir: Option<&str>,
+        persist: bool,
+    ) -> Result<SessionStatus> {
         let restore_start = Instant::now();
         let restore_cpu_start = crate::server::thread_cpu_ms();
         let load_start = Instant::now();
@@ -1201,7 +1238,7 @@ impl Agent {
         self.fire_session_lifecycle_hook("session_start", "resume");
 
         let save_start = Instant::now();
-        if let Err(err) = self.session.save() {
+        if persist && let Err(err) = self.session.save() {
             logging::error(&format!(
                 "Failed to persist resumed session state for {}: {}",
                 session_id, err
