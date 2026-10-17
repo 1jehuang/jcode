@@ -1027,7 +1027,8 @@ fn extract_input_token_detail(usage: &Value, field: &str) -> Option<u64> {
         .find_map(|key| usage.get(key)?.get(field)?.as_u64())
 }
 
-fn extract_usage_from_response(response: &Value) -> Option<StreamEvent> {
+/// Extract provider counters without converting inclusive OpenAI input totals.
+pub fn extract_usage_from_response(response: &Value) -> Option<StreamEvent> {
     let usage = response.get("usage")?;
     let input_tokens = usage.get("input_tokens").and_then(|v| v.as_u64());
     let output_tokens = usage.get("output_tokens").and_then(|v| v.as_u64());

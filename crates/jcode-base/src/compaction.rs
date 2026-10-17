@@ -1732,6 +1732,15 @@ async fn generate_compaction_artifact(
         )
         .await
     {
+        if let Some(usage) = native.usage {
+            crate::telemetry::record_simple_completion_usage(
+                None,
+                provider.name(),
+                &provider.model(),
+                crate::telemetry::UsageSource::Compaction,
+                usage,
+            );
+        }
         if let Some(encrypted_content) = native.openai_encrypted_content.as_ref()
             && !openai_encrypted_content_is_sendable(encrypted_content)
         {
@@ -1739,7 +1748,7 @@ async fn generate_compaction_artifact(
                 "[compaction] OpenAI native compaction returned oversized encrypted_content ({} chars); falling back to text summary",
                 encrypted_content.len(),
             ));
-        } else {
+        } else if native.openai_encrypted_content.is_some() || native.summary_text.is_some() {
             return Ok(CompactionResult {
                 summary_text: native.summary_text.unwrap_or_default(),
                 openai_encrypted_content: native.openai_encrypted_content,

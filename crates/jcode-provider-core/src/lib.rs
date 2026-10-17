@@ -811,6 +811,8 @@ pub fn fresh_transport_client() -> reqwest::Client {
 pub struct NativeCompactionResult {
     pub summary_text: Option<String>,
     pub openai_encrypted_content: Option<String>,
+    /// Provider counters for this separately billed compaction request.
+    pub usage: Option<SimpleCompletionUsage>,
 }
 
 /// A single route to access a model: model + provider + API method
