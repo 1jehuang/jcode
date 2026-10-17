@@ -709,8 +709,19 @@ impl Session {
             )
         } else {
             let entry_build_start = Instant::now();
+            let mut entry_meta = current_meta.clone();
+            if entry_meta.compaction.is_some()
+                && self
+                    .persist_state
+                    .last_meta
+                    .as_ref()
+                    .is_some_and(|prev| prev.compaction == entry_meta.compaction)
+            {
+                entry_meta.compaction = None;
+                entry_meta.compaction_unchanged = true;
+            }
             let entry = SessionJournalEntry {
-                meta: current_meta.clone(),
+                meta: entry_meta,
                 append_messages: self.messages[self.persist_state.messages_len..].to_vec(),
                 append_env_snapshots: self.env_snapshots[self.persist_state.env_snapshots_len..]
                     .to_vec(),

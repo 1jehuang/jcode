@@ -541,6 +541,7 @@ impl Session {
             system_prompt: self.system_prompt.clone(),
             updated_at: self.updated_at,
             compaction: self.compaction.clone(),
+            compaction_unchanged: false,
             provider_session_id: self.provider_session_id.clone(),
             model_usage_turn_id: self.model_usage_turn_id.clone(),
             provider_key: self.provider_key.clone(),
@@ -745,7 +746,9 @@ impl Session {
         self.custom_title = meta.custom_title;
         self.system_prompt = meta.system_prompt;
         self.updated_at = meta.updated_at;
-        self.compaction = meta.compaction;
+        if !meta.compaction_unchanged {
+            self.compaction = meta.compaction;
+        }
         self.provider_session_id = meta.provider_session_id;
         self.model_usage_turn_id = meta.model_usage_turn_id;
         self.provider_key = meta.provider_key;

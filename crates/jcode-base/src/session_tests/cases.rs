@@ -3082,3 +3082,186 @@ fn metadata_change_on_large_session_is_journaled_not_rewritten() -> Result<()> {
     assert!(matches!(stub.status, SessionStatus::Closed));
     Ok(())
 }
+
+fn big_compaction(tag: &str) -> crate::session::StoredCompactionState {
+    crate::session::StoredCompactionState {
+        summary_text: String::new(),
+        openai_encrypted_content: Some(format!("{tag}{}", "e".repeat(300 * 1024))),
+        covers_up_to_turn: 3,
+        original_turn_count: 3,
+        compacted_count: 3,
+    }
+}
+
+/// Multi-MB compaction state must not be repeated in every journal entry
+/// (that overflowed the journal cap on each save and forced full rewrites),
+/// yet every load path must still see the current compaction.
+#[test]
+fn journal_entries_elide_unchanged_compaction_but_loads_keep_it() -> Result<()> {
+    let _env_lock = lock_env();
+    let temp_home = tempfile::Builder::new()
+        .prefix("jcode-compaction-elide-")
+        .tempdir()
+        .map_err(|e| anyhow!(e))?;
+    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+
+    let session_id = "session_compaction_elide";
+    let mut session = Session::create_with_id(session_id.to_string(), None, None);
+    let msg = |i: usize| StoredMessage {
+        id: format!("m{i}"),
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: format!("hello {i}"),
+            cache_control: None,
+        }],
+        display_role: None,
+        timestamp: Some(Utc::now()),
+        tool_duration_ms: None,
+        token_usage: None,
+    };
+    session.append_stored_message(msg(0));
+    session.compaction = Some(big_compaction("A"));
+    session.save()?; // first save: snapshot carries compaction
+
+    let snapshot_path = storage_paths::session_path(session_id)?;
+    let journal_path = session_journal_path_from_snapshot(&snapshot_path);
+    for i in 1..6 {
+        session.append_stored_message(msg(i));
+        session.save()?;
+    }
+    let journal_len = std::fs::metadata(&journal_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
+    assert!(
+        journal_len > 0 && journal_len < 64 * 1024,
+        "unchanged compaction must be elided from journal entries (journal {journal_len} bytes)"
+    );
+
+    let full = Session::load(session_id)?;
+    assert_eq!(full.messages.len(), 6);
+    assert_eq!(full.compaction, Some(big_compaction("A")));
+    let stub = Session::load_startup_stub(session_id)?;
+    assert_eq!(stub.compaction, Some(big_compaction("A")));
+    let remote = Session::load_for_remote_startup(session_id)?;
+    assert_eq!(remote.compaction, Some(big_compaction("A")));
+
+    // A changed compaction is written and wins on reload.
+    session.compaction = Some(big_compaction("B"));
+    session.append_stored_message(msg(6));
+    session.save()?;
+    session.append_stored_message(msg(7));
+    session.save()?;
+    let reloaded = Session::load(session_id)?;
+    assert_eq!(reloaded.compaction, Some(big_compaction("B")));
+    assert_eq!(reloaded.messages.len(), 8);
+
+    // Clearing compaction is persisted too (not mistaken for "unchanged").
+    let mut cleared = reloaded;
+    cleared.compaction = None;
+    cleared.append_stored_message(msg(8));
+    cleared.save()?;
+    assert_eq!(Session::load(session_id)?.compaction, None);
+    Ok(())
+}
+
+/// Journals written before the elision flag existed carry the full
+/// compaction in every entry and must still load unchanged.
+#[test]
+fn legacy_journal_entries_with_inline_compaction_still_load() -> Result<()> {
+    let _env_lock = lock_env();
+    let temp_home = tempfile::Builder::new()
+        .prefix("jcode-compaction-legacy-")
+        .tempdir()
+        .map_err(|e| anyhow!(e))?;
+    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+    let session_id = "session_compaction_legacy";
+    let mut session = Session::create_with_id(session_id.to_string(), None, None);
+    session.append_stored_message(StoredMessage {
+        id: "m0".into(),
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: "hi".into(),
+            cache_control: None,
+        }],
+        display_role: None,
+        timestamp: Some(Utc::now()),
+        tool_duration_ms: None,
+        token_usage: None,
+    });
+    session.save()?;
+    let snapshot_path = storage_paths::session_path(session_id)?;
+    let journal_path = session_journal_path_from_snapshot(&snapshot_path);
+    // Hand-write a legacy-format entry (no compaction_unchanged field).
+    let mut meta = serde_json::to_value(session.journal_meta())?;
+    meta["compaction"] = serde_json::to_value(big_compaction("L"))?;
+    meta.as_object_mut().unwrap().remove("compaction_unchanged");
+    // Replay ignores entries not newer than the snapshot.
+    meta["updated_at"] = serde_json::to_value(Utc::now() + chrono::Duration::seconds(5))?;
+    let line = serde_json::json!({ "meta": meta });
+    std::fs::write(&journal_path, format!("{line}\n"))?;
+    assert_eq!(
+        Session::load(session_id)?.compaction,
+        Some(big_compaction("L"))
+    );
+    assert_eq!(
+        Session::load_startup_stub(session_id)?.compaction,
+        Some(big_compaction("L"))
+    );
+    Ok(())
+}
+
+/// Fixture writer for the old-binary compatibility check. Writes a session
+/// with large compaction followed by journal entries that elide it. Runs only
+/// when JCODE_COMPAT_FIXTURE_HOME is set.
+#[test]
+#[ignore]
+fn write_compaction_elision_compat_fixture() -> Result<()> {
+    let Some(home) = std::env::var_os("JCODE_COMPAT_FIXTURE_HOME") else {
+        return Ok(());
+    };
+    let _env_lock = lock_env();
+    let _home = EnvVarGuard::set("JCODE_HOME", &home);
+    let mut session = Session::create_with_id("session_compat_fixture_1".to_string(), None, None);
+    for i in 0..4 {
+        session.append_stored_message(StoredMessage {
+            id: format!("m{i}"),
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: format!("compat {i}"),
+                cache_control: None,
+            }],
+            display_role: None,
+            timestamp: Some(Utc::now()),
+            tool_duration_ms: None,
+            token_usage: None,
+        });
+        if i == 0 {
+            session.compaction = Some(big_compaction("C"));
+        }
+        session.save()?;
+    }
+    Ok(())
+}
+
+/// Reader half of the compatibility check: after an older binary has loaded
+/// and re-saved the fixture, every message must still be present.
+#[test]
+#[ignore]
+fn read_compaction_elision_compat_fixture() -> Result<()> {
+    let Some(home) = std::env::var_os("JCODE_COMPAT_FIXTURE_HOME") else {
+        return Ok(());
+    };
+    let _env_lock = lock_env();
+    let _home = EnvVarGuard::set("JCODE_HOME", &home);
+    let session = Session::load("session_compat_fixture_1")?;
+    let ids: Vec<_> = session.messages.iter().map(|m| m.id.clone()).collect();
+    for i in 0..4 {
+        assert!(ids.contains(&format!("m{i}")), "message m{i} lost: {ids:?}");
+    }
+    println!(
+        "COMPAT messages={} compaction_present={}",
+        session.messages.len(),
+        session.compaction.is_some()
+    );
+    Ok(())
+}
