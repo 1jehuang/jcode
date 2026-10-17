@@ -24,4 +24,4 @@
 ## 5. Unit & Integration Tests
 
 - [x] 5.1 Add unit tests for `distribute_suggestions` (threshold promotion, `1..=5` clamping, NaN filtering, JSON camelCase schema `{ defaultAction, secondarySuggestions, branch }`), `SuggestedRepliesConfig` lenient parsing + `CONFIG_ENV_KEYS`, `JevProvider::OpenJev` and `JevProvider::Laya` SystemOne requests, and TUI `[Tab]` / `[Ctrl+Enter]` / Explorer timer behavior.
-- [x] 5.2 Configure and verify local `Laya` SystemOne inference (`http://127.0.0.1:8080/v1/systemone` with `english` & `multilingual` checkpoints on `mps`, `LAYA_JEV_STRICT=1`) end-to-end with `jcode` (`suggested_replies.jev_provider = "laya"` and `agents.memory_jev_provider = "laya"`).
+- [x] 5.2 Configure and verify local `Laya` SystemOne inference (`http://127.0.0.1:8080/v1/systemone` with `english` & `multilingual` checkpoints on `mps`, `LAYA_JEV_STRICT=1`) and Tailscale/LAN `Laya` endpoint support (`http://100.87.178.69:8000/v1/systemone` on `dragon`) end-to-end with `jcode` (`suggested_replies.jev_provider = "laya"` and `agents.memory_jev_provider = "laya"`).
