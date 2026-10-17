@@ -167,10 +167,15 @@ fn inventory_lines(
             format!("{name:<9} {}", masked_identity(account.email.as_deref())),
             is_current,
         );
+        row.spans
+            .push(Span::styled(" · ", Style::default().fg(dim_color())));
         if let Some(quota) = quota {
-            row.spans
-                .push(Span::styled(" · ", Style::default().fg(dim_color())));
             row.spans.extend(quota.spans);
+        } else {
+            row.spans.push(Span::styled(
+                usage_status_label(usage.as_ref()),
+                Style::default().fg(dim_color()),
+            ));
         }
         entries.push((
             account_key(account.provider, Some(&account.label)),
@@ -254,6 +259,19 @@ fn inventory_lines(
     lines
 }
 
+/// Explain missing bars without exposing raw endpoint errors or implying zero usage.
+fn usage_status_label(usage: Option<&crate::usage::AccountUsageSnapshot>) -> &'static str {
+    match usage {
+        None => "limits pending",
+        Some(usage) => match usage.error.as_deref() {
+            Some(error) if error.contains("429") => "limits rate limited",
+            Some(error) if error.contains("401") => "limits need login",
+            Some(_) => "limits unavailable",
+            None => "limits not reported",
+        },
+    }
+}
+
 fn remaining_bar(
     usage: &crate::usage::AccountUsageSnapshot,
     display_used: bool,
@@ -261,11 +279,17 @@ fn remaining_bar(
     if usage.error.is_some() {
         return None;
     }
-    let used = usage.five_hour_ratio?;
+    let (used, window) = match usage.five_hour_ratio {
+        Some(used) => (used, usage.primary_label.as_deref().unwrap_or("5h")),
+        None => (
+            usage.seven_day_ratio?,
+            usage.secondary_label.as_deref().unwrap_or("7d"),
+        ),
+    };
     if !used.is_finite() || !(0.0..=1.0).contains(&used) {
         return None;
     }
-    let label = match usage.primary_label.as_deref().unwrap_or("5h") {
+    let label = match window {
         "5-hour" | "5-hour window" => "5h",
         "7-day" | "7-day window" => "7d",
         label => label,
@@ -317,10 +341,11 @@ fn oauth_credential_status(
     if let Some(error) = usage.error.as_deref() {
         // Only an explicit HTTP authentication rejection is conclusive. A
         // timeout, 403 quota-scope denial, or 429 usage-endpoint throttle is not.
-        let unauthorized = ["Usage API error (401", "API error (401", "HTTP 401"]
-            .iter()
-            .filter_map(|prefix| error.strip_prefix(prefix))
-            .any(|suffix| suffix.starts_with([' ', ')', ':']) || suffix.is_empty());
+        let unauthorized = error == "Usage authentication failed (401)"
+            || ["Usage API error (401", "API error (401", "HTTP 401"]
+                .iter()
+                .filter_map(|prefix| error.strip_prefix(prefix))
+                .any(|suffix| suffix.starts_with([' ', ')', ':']) || suffix.is_empty());
         return if unauthorized {
             CredentialStatus::Blocked
         } else {
@@ -680,6 +705,67 @@ mod tests {
         ));
         assert!(rendered.contains("No auto-routing accounts"));
         assert!(rendered.contains("/login"));
+    }
+
+    #[test]
+    fn router_inventory_missing_usage_has_explicit_safe_status() {
+        assert_eq!(usage_status_label(None), "limits pending");
+        let mut usage = crate::usage::AccountUsageSnapshot {
+            label: "test".into(),
+            email: None,
+            exhausted: false,
+            primary_label: None,
+            five_hour_ratio: None,
+            secondary_label: None,
+            seven_day_ratio: None,
+            resets_at: None,
+            error: None,
+        };
+        assert_eq!(usage_status_label(Some(&usage)), "limits not reported");
+        for (error, expected) in [
+            (
+                "Usage temporarily rate limited (429)",
+                "limits rate limited",
+            ),
+            ("Usage authentication failed (401)", "limits need login"),
+            ("secret transport diagnostic", "limits unavailable"),
+        ] {
+            usage.error = Some(error.into());
+            assert_eq!(usage_status_label(Some(&usage)), expected);
+            assert!(remaining_bar(&usage, false).is_none());
+        }
+        usage.error = Some("Usage authentication failed (401)".into());
+        assert_eq!(
+            oauth_credential_status(false, Some(&usage)),
+            CredentialStatus::Blocked
+        );
+    }
+
+    #[test]
+    fn router_inventory_weekly_only_usage_shows_reported_window() {
+        let mut usage = crate::usage::AccountUsageSnapshot {
+            label: "weekly-only".into(),
+            email: None,
+            exhausted: false,
+            primary_label: None,
+            five_hour_ratio: None,
+            secondary_label: Some("7-day window".into()),
+            seven_day_ratio: Some(0.0),
+            resets_at: None,
+            error: None,
+        };
+        let bar = remaining_bar(&usage, false).unwrap();
+        assert_eq!(bar.spans[0].content, "7d ");
+        assert!(text(vec![bar]).contains("100% left"));
+        usage.seven_day_ratio = Some(1.0);
+        assert!(text(vec![remaining_bar(&usage, false).unwrap()]).contains("0% left"));
+        for ratio in [None, Some(f32::NAN), Some(-0.1), Some(1.1)] {
+            usage.seven_day_ratio = ratio;
+            assert!(remaining_bar(&usage, false).is_none());
+        }
+        usage.seven_day_ratio = Some(0.0);
+        usage.error = Some("Usage unavailable".into());
+        assert!(remaining_bar(&usage, false).is_none());
     }
 
     #[test]

@@ -58,6 +58,55 @@ struct WidgetRouteInfo {
     is_remote: bool,
 }
 
+fn remote_openai_widget_usage_for_route(
+    route_api_method: Option<&str>,
+    quota_rejected: bool,
+    output_tps: Option<f32>,
+    lookup: impl FnOnce(&str) -> Option<crate::usage::AccountUsageSnapshot>,
+) -> crate::tui::info_widget::UsageInfo {
+    let snapshot = route_api_method
+        .and_then(jcode_provider_core::oauth_account_label)
+        .and_then(lookup);
+    remote_openai_widget_usage(snapshot.as_ref(), quota_rejected, output_tps)
+}
+
+fn remote_openai_widget_usage(
+    snapshot: Option<&crate::usage::AccountUsageSnapshot>,
+    quota_rejected: bool,
+    output_tps: Option<f32>,
+) -> crate::tui::info_widget::UsageInfo {
+    use crate::tui::info_widget::{UsageInfo, UsageProvider};
+    let Some(snapshot) = snapshot else {
+        return UsageInfo {
+            provider: UsageProvider::OpenAI,
+            limit_reached: quota_rejected,
+            ..Default::default()
+        };
+    };
+    UsageInfo {
+        provider: UsageProvider::OpenAI,
+        primary_limit_label: snapshot.five_hour_ratio.and(snapshot.primary_label.clone()),
+        five_hour: snapshot.five_hour_ratio.unwrap_or_default(),
+        // The wire snapshot has one reset timestamp, belonging to the primary
+        // window (or secondary when primary is absent), not both windows.
+        five_hour_resets_at: snapshot.five_hour_ratio.and(snapshot.resets_at.clone()),
+        secondary_limit_label: snapshot
+            .seven_day_ratio
+            .and(snapshot.secondary_label.clone()),
+        seven_day: snapshot.seven_day_ratio.unwrap_or_default(),
+        seven_day_resets_at: snapshot
+            .five_hour_ratio
+            .is_none()
+            .then(|| snapshot.resets_at.clone())
+            .flatten(),
+        output_tps,
+        limit_reached: quota_rejected,
+        available: snapshot.error.is_none()
+            && (snapshot.five_hour_ratio.is_some() || snapshot.seven_day_ratio.is_some()),
+        ..Default::default()
+    }
+}
+
 impl App {
     fn sanitize_remote_model_hint(model: Option<String>) -> Option<String> {
         model
@@ -511,6 +560,23 @@ impl App {
                     }
                     crate::tui::info_widget::AuthMethod::OpenAIOAuth => {}
                     _ => return None,
+                }
+
+                if route.is_remote {
+                    // The header reads the daemon's account cache by route label.
+                    // An email lookup here would instead probe this machine's
+                    // credentials and can show a different account's windows.
+                    return Some(remote_openai_widget_usage_for_route(
+                        self.session.route_api_method.as_deref(),
+                        self.usage_reset.openai_quota_rejected,
+                        output_tps,
+                        |label| {
+                            crate::usage::cached_account_usage_status_snapshot(
+                                crate::usage::MultiAccountProviderKind::OpenAI,
+                                label,
+                            )
+                        },
+                    ));
                 }
 
                 // The selected route is session-bound, unlike the global
@@ -2434,6 +2500,75 @@ pub(crate) fn filter_inline_swarm_subtree(
         .filter(|m| descendants.contains(m.session_id.as_str()))
         .cloned()
         .collect()
+}
+
+#[cfg(test)]
+mod sidebar_usage_tests {
+    use super::{remote_openai_widget_usage, remote_openai_widget_usage_for_route};
+    use crate::usage::AccountUsageSnapshot;
+
+    fn snapshot() -> AccountUsageSnapshot {
+        AccountUsageSnapshot {
+            label: "solosystems".into(),
+            email: None,
+            exhausted: false,
+            primary_label: Some("5-hour".into()),
+            five_hour_ratio: Some(1.0),
+            secondary_label: Some("7-day".into()),
+            seven_day_ratio: Some(0.0),
+            resets_at: Some("2099-01-01T00:00:00Z".into()),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn remote_sidebar_usage_uses_bound_label_not_global_account() {
+        let info = remote_openai_widget_usage_for_route(
+            Some("openai-oauth@solosystems"),
+            false,
+            None,
+            |label| {
+                assert_eq!(label, "solosystems");
+                Some(snapshot())
+            },
+        );
+        assert!(info.available);
+        assert_eq!(info.primary_limit_label.as_deref(), Some("5-hour"));
+        assert_eq!(info.five_hour, 1.0);
+        assert_eq!(info.seven_day, 0.0);
+        assert!(info.five_hour_resets_at.is_some());
+        assert!(info.seven_day_resets_at.is_none());
+    }
+
+    #[test]
+    fn remote_sidebar_usage_without_bound_account_never_looks_up_global_usage() {
+        for route in [None, Some("openai-oauth"), Some("openai-api-key")] {
+            let info = remote_openai_widget_usage_for_route(route, false, None, |_| {
+                panic!("unbound route must not look up another account")
+            });
+            assert!(!info.available);
+            assert!(info.primary_limit_label.is_none());
+            assert!(info.secondary_limit_label.is_none());
+        }
+    }
+
+    #[test]
+    fn remote_sidebar_usage_preserves_weekly_only_and_unavailable_snapshots() {
+        let mut usage = snapshot();
+        usage.five_hour_ratio = None;
+        usage.primary_label = None;
+        let info = remote_openai_widget_usage(Some(&usage), false, None);
+        assert!(info.available);
+        assert!(info.primary_limit_label.is_none());
+        assert_eq!(info.secondary_limit_label.as_deref(), Some("7-day"));
+        assert_eq!(info.seven_day, 0.0);
+        assert_eq!(info.seven_day_resets_at, usage.resets_at);
+        usage.error = Some("HTTP 429".into());
+        assert!(!remote_openai_widget_usage(Some(&usage), false, None).available);
+        let missing = remote_openai_widget_usage(None, true, None);
+        assert!(!missing.available);
+        assert!(missing.limit_reached);
+    }
 }
 
 #[cfg(test)]
