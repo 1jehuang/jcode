@@ -709,21 +709,41 @@ For the built-in OpenAI login flow, jcode opens a local callback on
 <img width="2877" height="1762" alt="Screenshot from 2026-04-02 14-28-51" src="https://github.com/user-attachments/assets/530684c0-9d12-4363-aa0e-1b39a0d4e1be" />
 The above image is the first page of provider logins
 
-### Supported provider
+### Provider surface
 
-- **Native / first-party style providers:** `claude`, `openai`, `copilot`, `gemini`, `azure`, `alibaba-coding-plan`
-- **Aggregator / compatibility providers:** `openrouter`, `orcarouter`, `yolo-auto`, `openai-compatible`
-- **Additional provider integrations:** `opencode`, `opencode-go`, `zai` / `kimi`, `302ai`, `baseten`, `cortecs`, `deepseek`, `firmware`, `huggingface`, `moonshotai`, `nebius`, `scaleway`, `stackit`, `groq`, `mistral`, `perplexity`, `togetherai`, `deepinfra`, `fireworks`, `novita`, `minimax`, `xai`, `lmstudio`, `ollama`, `chutes`, `cerebras`, `cursor`, `antigravity`, `google`
+jcode's provider surface is **two-tier**:
 
-Jcode also supports easy multi-account switching. Ran out of tokens on your first ChatGPT Pro subscription? /account and quickly switch to your second. 
+**11 first-class provider adapter crates** under `crates/jcode-provider-*/` — each implements provider-specific streaming, OAuth refresh, and tool/usage handling:
+
+- `claude` (subscription OAuth) and `anthropic-api` (API key) — `jcode-provider-anthropic` + `jcode-provider-anthropic-runtime`
+- `openai` (OAuth, ChatGPT/Codex) and `openai-api` (API key) — `jcode-provider-openai` + `jcode-provider-openai-runtime`
+- `gemini` (OAuth + API key) — `jcode-provider-gemini` + `jcode-provider-gemini-runtime`
+- `copilot` (GitHub device flow + standard OAuth) — `jcode-provider-copilot` + `jcode-provider-copilot-runtime`
+- `openrouter` (live catalog merge) — `jcode-provider-openrouter` + `jcode-provider-openrouter-runtime`
+- `bedrock` (AWS sigv4) — `jcode-provider-bedrock`
+- `antigravity` (drives the Antigravity CLI binary) — `jcode-provider-antigravity` + `jcode-provider-antigravity-runtime`
+- `claude-cli` (reuses Claude Code's CLI as a backend) — `jcode-provider-claude-cli-runtime`
+- `cursor` (drives Cursor's local daemon) — `jcode-provider-cursor-runtime`
+- `grok-build` (drives the Grok CLI binary) — `jcode-provider-grok-build-runtime`
+- `forgecode` (drives the Forge CLI binary) — `jcode-provider-forgecode-runtime`
+
+**An `openai-compatible` profile harness** — any service that speaks OpenAI's `/v1/chat/completions` API works through one shared runtime. Built-in named profiles fill in the base URL and key environment variable for you:
+
+- Aggregators and hosted providers: `orcarouter`, `opencode` (OpenCode Zen), `opencode-go`, `zai` / `kimi`, `302ai`, `baseten`, `cortecs`, `deepseek`, `firmware`, `huggingface`, `moonshotai`, `nebius`, `scaleway`, `stackit`, `groq`, `mistral`, `perplexity`, `togetherai`, `deepinfra`, `fireworks`, `novita`, `minimax`, `xai`, `alibaba-coding-plan`
+- Local and self-hosted runtimes: `lmstudio`, `ollama`, `chutes`, `cerebras`, plus a generic `openai-compatible` profile for any custom endpoint
+- `azure` — handled by the separate `jcode-azure-auth` credential crate (auth only), pairing with the openai-compatible runtime for the API calls
+
+`jcode login --provider <profile-id>` wires the named profiles; you still pick the model with `/model` (or `--model`). Run `jcode login` with no provider to see the interactive list. **Note:** `openrouter` is listed above in both tiers on purpose — it has a dedicated adapter for live catalog merge and falls back to the openai-compatible path when the merged catalog is empty.
+
+Jcode also supports easy multi-account switching. Ran out of tokens on your first ChatGPT Pro subscription? /account and quickly switch to your second.
 
 ---
 
 ## Customizability / Self-Dev
 
-Jcode is inventing a new form of customizability. One that doesn't limit you to what a plugin or extension can do. Tell your jcode agent to enter self dev mode, and it will start modifying its own source code. Jcode is optimized to iterate on itself. There is significant infrastructure around self development, which allows it to edit, build, and test its own source code, then reload its own binary and continue work in your (potentially many) sessions, fully automatically.
+Jcode is inventing a new form of customizability. One that doesn't limit you to what a plugin or extension can do. Tell your jcode agent to enter self dev mode, and it will start modifying its own source code. Jcode is optimized to iterate on itself. There is significant infrastructure around self developement, which allows it to edit, build, and test its own source code, then reload its own binary and continue work in your (potentially many) sessions, fully automatically. 
 
-It is recommended that you use a frontier model for this. The jcode codebase is not a simple one, and weaker models can make subtle, breaking changes. GPT 5.5 or the latest available frontier model works well.
+It is reccomended that you use a frontier model for this. The jcode codebase is not a simple one, and weaker models can make subtle, breaking changes. GPT 5.5 or the latest available frontier model works well.
 
 <!-- Add self-dev demo thumbnail/video and fuller writeup here. -->
 
@@ -737,7 +757,7 @@ Anthropic's Claude cache goes cold after 5 minutes. If you initiate Claude after
 
 jcode comes with instructions on how to set up Firefox Agent Bridge. Ask you agent to set it up, and then you will have browser automation in jcode as well. 
 
-Agent grep is a grep tool I made for the jcode agent. It adds file structure information (ie the list of functions, their displacement, etc) to the grep return, so that the agent can infer more of what the file doesn without actually reading the file. It also implements a harness-level integration that adaptively truncates returns based on what the agent has already seen. This saves on context a lot.
+Agent grep is a grep tool I made for the jcode agent. It adds file strucuture information (ie the list of functions, their displacement, etc) to the grep return, so that the agent can infer more of what the file doesn without actually reading the file. It also implements a harness-level integration that adaptively truncates returns based on what the agent has already seen. This saves on context a lot. 
 
 Inputs are by default interleaved with the working agent. It sends the input as soon as it safely can without breaking the KV cache. Submit with shift enter instead, and it will send a queue send, and wait for the agent to fully finish its turn before sending.
 
