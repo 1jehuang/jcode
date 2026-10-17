@@ -70,7 +70,7 @@ impl JevPurpose {
     fn selector_with(
         self,
         env: impl FnOnce(&str) -> Result<String, std::env::VarError>,
-        memory_default: impl FnOnce() -> String,
+        default_provider: impl FnOnce() -> String,
     ) -> Result<String> {
         let key = match self {
             Self::Memory => PROVIDER_ENV,
@@ -78,12 +78,28 @@ impl JevPurpose {
             Self::Voice => VOICE_PROVIDER_ENV,
             Self::Suggestions => SUGGESTIONS_PROVIDER_ENV,
         };
+        let fallback = || match self {
+            Self::Memory => default_provider(),
+            Self::Suggestions => {
+                let d = default_provider();
+                let trimmed = d.trim();
+                if trimmed.is_empty() {
+                    "auto".into()
+                } else {
+                    trimmed.to_owned()
+                }
+            }
+            Self::Browser | Self::Voice => "auto".into(),
+        };
         match env(key) {
-            Ok(value) => Ok(value),
-            Err(std::env::VarError::NotPresent) => Ok(match self {
-                Self::Memory => memory_default(),
-                Self::Browser | Self::Voice | Self::Suggestions => "auto".into(),
-            }),
+            Ok(value) => {
+                if self == Self::Suggestions && value.trim().is_empty() {
+                    Ok(fallback())
+                } else {
+                    Ok(value)
+                }
+            }
+            Err(std::env::VarError::NotPresent) => Ok(fallback()),
             Err(_) => bail!("{key} must contain a valid provider name"),
         }
     }
@@ -271,26 +287,10 @@ impl JevClient {
     fn resolve_with_suggestions_default(
         config_default: &str,
     ) -> Result<(JevProvider, String, String, Option<String>)> {
-        let fallback = || {
-            let trimmed = config_default.trim();
-            if trimmed.is_empty() {
-                "auto".to_string()
-            } else {
-                trimmed.to_string()
-            }
-        };
-        let selector = match std::env::var(SUGGESTIONS_PROVIDER_ENV) {
-            Ok(value) => {
-                let trimmed = value.trim();
-                if trimmed.is_empty() {
-                    fallback()
-                } else {
-                    trimmed.to_string()
-                }
-            }
-            Err(std::env::VarError::NotPresent) => fallback(),
-            Err(_) => bail!("{SUGGESTIONS_PROVIDER_ENV} must contain a valid provider name"),
-        };
+        let selector = JevPurpose::Suggestions.selector_with(
+            |key| std::env::var(key),
+            || config_default.to_owned(),
+        )?;
         Self::resolve_for_selector(JevPurpose::Suggestions, &selector)
     }
 
@@ -1095,7 +1095,7 @@ mod tests {
                 .unwrap(),
             "aimlapi"
         );
-        for purpose in [JevPurpose::Memory, JevPurpose::Browser] {
+        for purpose in [JevPurpose::Memory, JevPurpose::Browser, JevPurpose::Suggestions] {
             assert!(
                 purpose
                     .selector_with(
@@ -1105,6 +1105,27 @@ mod tests {
                     .is_err()
             );
         }
+        assert_eq!(
+            JevPurpose::Suggestions
+                .selector_with(
+                    |key| {
+                        assert_eq!(key, SUGGESTIONS_PROVIDER_ENV);
+                        Ok("   ".into())
+                    },
+                    || "laya".into(),
+                )
+                .unwrap(),
+            "laya"
+        );
+        assert_eq!(
+            JevPurpose::Suggestions
+                .selector_with(
+                    |_| Err(std::env::VarError::NotPresent),
+                    || "  ".into(),
+                )
+                .unwrap(),
+            "auto"
+        );
     }
 
     #[test]
