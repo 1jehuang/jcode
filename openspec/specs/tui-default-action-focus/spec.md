@@ -1,14 +1,15 @@
 # tui-default-action-focus Specification
 
 ## Purpose
-TBD - created by archiving change suggested-replies-default-action-focus. Update Purpose after archive.
+Define the TUI rendering, vertical layout, keyboard/mouse navigation (`[Tab]`, `↑`/`↓`, `1`–`5`, `[Enter]`, `[Ctrl+Enter]`, `[Esc]`), and cancelable 500ms Full-Auto Explorer countdown for Suggested Replies and the prominent `Default Action` control in `chunks[5]`.
+
 ## Requirements
 ### Requirement: Inline TUI Suggested Replies Panel & Keybindings
-The TUI SHALL render the Suggested Replies panel in `chunks[5]` (`ui_inline.rs`) when the session is idle and the composer input is empty, displaying a prominent `Default Action` control above rounded secondary suggestion capsules (`1..=5`).
+The TUI SHALL render the Suggested Replies panel in `chunks[5]` (`ui_inline.rs`) when the session is idle and the composer input is empty, displaying a prominent `Default Action` control above a vertical stack of rounded secondary suggestion capsules (`1..=5`, one row per item).
 
-#### Scenario: Tab, Enter, Ctrl+Enter, and mouse activation
+#### Scenario: Vertical layout and Tab, Arrow, Number, Enter, Ctrl+Enter, and mouse activation
 - **WHEN** Suggested Replies are visible on an empty composer input
-- **THEN** pressing `[Tab]` focuses/activates the `Default Action`, pressing `[Ctrl+Enter]` (or `[Enter]` while focused) submits the `Default Action`, and clicking any secondary capsule badge (`1..=5`) inserts and submits that suggestion in both local and remote TUI modes.
+- **THEN** secondary suggestions (`1..=5`) are stacked vertically one per row below `Default Action`, pressing `[Tab]` or `↑`/`↓` cycles focus across `Default Action` and secondary suggestions `1..=5`, pressing `[Enter]` submits the currently focused item, pressing `[Ctrl+Enter]` (or `0` when `Default Action` is present) immediately submits `Default Action`, pressing keys `1`–`5` immediately selects and submits the corresponding secondary suggestion, and clicking any capsule submits it in both local and remote TUI modes.
 
 ### Requirement: Cancelable 500ms Full-Auto Explorer Mode
 When `enable_full_auto_explorer` is enabled and a `Default Action` is present (`confidence >= confidence_threshold`) with no queued follow-ups or active review splits, the TUI SHALL start a 500ms visual countdown timer (`REDRAW_IDLE`) and automatically submit the `Default Action` when the timer expires.

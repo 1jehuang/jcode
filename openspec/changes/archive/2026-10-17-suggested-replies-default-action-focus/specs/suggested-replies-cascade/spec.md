@@ -3,7 +3,7 @@
 ## ADDED Requirements
 
 ### Requirement: Suggested Replies Configuration & Lenient Hot-Reload
-The system SHALL provide a `[suggested_replies]` configuration section (`SuggestedRepliesConfig`) with `use_open_gf` (bool, default `false`), `max_secondary_suggestions` (usize, default `5`, clamped `1..=5`), `confidence_threshold` (f32, default `0.55`, clamped `0.0..=1.0`), `enable_full_auto_explorer` (bool, default `false`), and `six_lens_auto_review` (bool, default `false`).
+The system SHALL provide a `[suggested_replies]` configuration section (`SuggestedRepliesConfig`) with `enabled` (bool, default `true`), `jev_provider` (string, default `"auto"`, supporting `"auto"`, `"laya"`, `"openjev"`, `"typesafe"`, `"openrouter"`, `"aimlapi"`, and `"jcode"`), `use_open_gf` (bool, default `false`), `max_secondary_suggestions` (usize, default `5`, clamped `1..=5`), `confidence_threshold` (f32, default `0.55`, clamped `0.0..=1.0`), `enable_full_auto_explorer` (bool, default `false`), and `six_lens_auto_review` (bool, default `false`).
 
 #### Scenario: Lenient config parsing and environment fingerprint tracking
 - **WHEN** `config.toml` or `JCODE_*` environment variables specify `[suggested_replies]` values (including out-of-range integers or floats)

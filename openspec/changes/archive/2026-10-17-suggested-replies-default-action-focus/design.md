@@ -48,8 +48,9 @@ This design incorporates all findings and conditions from the 6-subagent Go/No-G
 ┌────────────────────────────────────────────────────────────────────────────┐
 │               TUI RENDER & INTERACTION (`chunks[5]` in `ui.rs`)            │
 │ • Rendered via `ui_inline.rs` when `inline_ui_state().is_none()`           │
-│ • `[Tab]` focuses/activates `Default Action` when `app.input.is_empty()`   │
-│ • `[Ctrl+Enter]` / `[Enter]` (when focused) submits `Default Action`       │
+│ • Secondary suggestions `1..=5` stacked vertically (one row per capsule)   │
+│ • `[Tab]` & `↑`/`↓` cycle focus across `Default Action` and `1..=5`        │
+│ • `[Enter]` submits focused item; `1`–`5` (`0`) & `[Ctrl+Enter]` submit    │
 │ • Mouse click on `Default Action` or capsules `1..=5` submits immediately  │
 │ • `enable_full_auto_explorer`: 500ms timer (`REDRAW_IDLE`), canceled by Esc│
 └────────────────────────────────────────────────────────────────────────────┘
@@ -84,15 +85,17 @@ This design incorporates all findings and conditions from the 6-subagent Go/No-G
   - `app.inline_ui_state().is_none()`
   - `app.prompt_history_search().is_none()`
   - `app.command_suggestions().is_empty()`
-- **Capsule Badges**: Use terminal-safe rounded caps (`◖`/`◗` with `▐`/`▌` fallback) matching `ui_onboarding.rs`.
+- **Vertical Capsule Stack**: Render the `Default Action` row at the top and stack secondary suggestion capsules (`1..=5`) vertically below it (one capsule per row), using terminal-safe rounded caps (`◖`/`◗` with `▐`/`▌` fallback) matching `ui_onboarding.rs`.
 
 ### 5. Keyboard & Mouse Parity (`sheep` conditions)
-- **`KeyCode::Tab`**: In both `input.rs:2838` (local) and `remote/key_handling.rs:995` (remote), after `if !app.autocomplete()`, if `app.suggested_replies_visible()`:
-  - First `[Tab]` focuses the `Default Action` (or if already focused, activates and submits it; if no `Default Action` exists, cycles focus across secondary suggestions).
-- **`[Enter]` & `[Ctrl+Enter]`**:
-  - When `Default Action` (or a suggestion pill) is focused and `app.input.is_empty()`, plain `Enter` copies the suggestion into `app.input` and submits it through the normal local/remote send pipeline.
-  - `Ctrl+Enter` (`is_alternate_enter`) when `app.input.is_empty()` immediately activates and submits the `Default Action` even without a prior `[Tab]`.
-- **Mouse Click Hit-Testing**: Record screen `Rect`s for the `Default Action` banner and each secondary badge `1..=5` during `draw_inline_ui`. In `navigation.rs` (`handle_mouse_event`), check hit-testing on `MouseEventKind::Down(MouseButton::Left)` before starting chat/input copy selection.
+- **`KeyCode::Tab` & `↑`/`↓` Arrows**: In both `input.rs` (local) and `remote/key_handling.rs` (remote), when `app.suggested_replies_visible()`:
+  - `[Tab]` cycles focus forward across `Default Action` -> `1` -> `2` -> ... -> `N` -> `Default Action` (and immediately submits if there is only a single item and it is already focused).
+  - `Down` focuses the first item or advances focus to the next suggestion; `Up` moves focus to the previous suggestion across `Default Action` and `1..=5` when suggestion focus is active.
+- **`[Enter]`, `[Ctrl+Enter]`, and Number Keys `1`–`5` (`0`)**:
+  - When `Default Action` or any secondary suggestion (`1..=5`) is focused and `app.input.is_empty()`, plain `Enter` copies that focused suggestion into `app.input` and submits it through the normal local/remote send pipeline.
+  - Pressing `1`–`5` on an empty input immediately focuses and submits the corresponding secondary suggestion (`1..=5`); pressing `0` immediately submits `Default Action` when present.
+  - `Ctrl+Enter` (`is_alternate_enter`) when `app.input.is_empty()` immediately activates and submits the `Default Action` even without prior focus.
+- **Mouse Click Hit-Testing**: Record screen `Rect`s for the `Default Action` banner and each vertical secondary badge `1..=5` during `draw_inline_ui`. In `navigation.rs` (`handle_mouse_event`), check hit-testing on `MouseEventKind::Down(MouseButton::Left)` before starting chat/input copy selection.
 
 ### 6. Full-Auto Explorer & 6-Lens Self-Review Lifecycle (`sloth` conditions)
 - **Turn-End Trigger**: In `local::finish_turn` and `remote/server_events.rs` (`ServerEvent::Done`), trigger Suggested Replies generation only when `!followup_scheduled` / `!auto_poked` and `queued_messages.is_empty()`.

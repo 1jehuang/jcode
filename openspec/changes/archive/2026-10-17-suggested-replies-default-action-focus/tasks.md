@@ -13,8 +13,8 @@
 ## 3. TUI Rendering, Keybindings, Mouse & Full-Auto Explorer (`jcode-tui`)
 
 - [x] 3.1 Add Suggested Replies state, focus tracking, background receiver channel, and 500ms `enable_full_auto_explorer` countdown to `App` and `TuiState` (`crates/jcode-tui/src/tui/app.rs`, `crates/jcode-tui/src/tui/mod.rs`, `crates/jcode-tui/src/tui/app/suggested_replies.rs`).
-- [x] 3.2 Render the prominent `Default Action` control and rounded secondary suggestion badges (`1..=5`) in `chunks[5]` via `crates/jcode-tui/src/tui/ui_inline.rs` with screen `Rect` hit-target recording.
-- [x] 3.3 Wire `[Tab]`, `[Enter]`, `[Ctrl+Enter]`, `[Esc]` cancellation, and mouse click hit-testing in `crates/jcode-tui/src/tui/app/input.rs`, `crates/jcode-tui/src/tui/app/remote/key_handling.rs`, `crates/jcode-tui/src/tui/app/navigation.rs`, and `crates/jcode-tui/src/tui/redraw_schedule.rs`.
+- [x] 3.2 Render the prominent `Default Action` control and vertical stack of rounded secondary suggestion badges (`1..=5`, one row per item) in `chunks[5]` via `crates/jcode-tui/src/tui/ui_inline.rs` with screen `Rect` hit-target recording.
+- [x] 3.3 Wire `[Tab]`, `↑`/`↓` arrows, `1`–`5` (`0`) number shortcuts, `[Enter]`, `[Ctrl+Enter]`, `[Esc]` cancellation, and mouse click hit-testing in `crates/jcode-tui/src/tui/app/input.rs`, `crates/jcode-tui/src/tui/app/remote/key_handling.rs`, `crates/jcode-tui/src/tui/app/navigation.rs`, and `crates/jcode-tui/src/tui/redraw_schedule.rs`.
 - [x] 3.4 Trigger non-blocking Suggested Replies cascade at turn end in `crates/jcode-tui/src/tui/app/local.rs` (`finish_turn`) and `crates/jcode-tui/src/tui/app/remote/server_events.rs` (`ServerEvent::Done`).
 
 ## 4. 6-Lens Subagent Auto-Self-Review (`jcode-tui`)
