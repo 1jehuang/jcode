@@ -838,17 +838,21 @@ async fn continue_persistent_ws_locked(
     // rs_...". The full input still needs reasoning items for fresh requests,
     // but deltas must only contain genuinely new client-side input/tool
     // callbacks.
-    let (incremental_items, skipped_reasoning_items) = if state.message_count == 0 {
+    let (incremental_items, skipped_output_items) = if state.message_count == 0 {
         // A generate:false warmup has no model output in its context. Preserve
         // all history (including encrypted reasoning) for its first generation.
         (input.to_vec(), 0)
     } else {
-        persistent_ws_incremental_items(input, state.last_input_item_count)
+        persistent_ws_incremental_items(
+            input,
+            state.last_input_item_count,
+            &state.last_response_output,
+        )
     };
-    if skipped_reasoning_items > 0 {
+    if skipped_output_items > 0 {
         jcode_base::logging::info(&format!(
-            "Skipped {} reasoning item(s) in persistent WS continuation delta to avoid duplicate rs_* replay",
-            skipped_reasoning_items
+            "Skipped {} prior response output item(s) in persistent WS continuation delta",
+            skipped_output_items
         ));
     }
     if incremental_items.is_empty() {
@@ -1126,6 +1130,7 @@ async fn continue_persistent_ws_locked(
     let mut consumer_dropped = false;
     let mut pending: VecDeque<StreamEvent> = VecDeque::new();
     let mut new_response_id: Option<String> = None;
+    let mut response_output = Vec::new();
     let stream_started = Instant::now();
     let mut last_api_activity_at = stream_started;
     let mut saw_api_activity = false;
@@ -1210,6 +1215,8 @@ async fn continue_persistent_ws_locked(
                 } else {
                     is_websocket_first_activity_payload(&text)
                 };
+
+                observe_ws_response_output(&text, &mut response_output);
 
                 // Extract response_id from response.created event
                 if new_response_id.is_none()
@@ -1371,6 +1378,7 @@ async fn continue_persistent_ws_locked(
         state.last_response_id = resp_id;
         state.last_input_item_count = input_item_count;
         state.last_input_item_hashes = input_item_hashes;
+        state.last_response_output = response_output;
         state.message_count += 1;
         state.last_activity_at = Instant::now();
         state.last_response_completed_at = Instant::now();
@@ -1635,6 +1643,7 @@ async fn stream_response_websocket_authenticated(
     let mut last_api_activity_at = ws_started_at;
     let mut pending: VecDeque<StreamEvent> = VecDeque::new();
     let mut response_id: Option<String> = None;
+    let mut response_output = Vec::new();
     let connected_at = Instant::now();
     let mut logged_first_server_event = false;
     let ws_completion_timeout_secs = effective_ws_completion_timeout_secs(&request_event);
@@ -1712,6 +1721,8 @@ async fn stream_response_websocket_authenticated(
                             WEBSOCKET_FALLBACK_NOTICE
                         )));
                     }
+
+                    observe_ws_response_output(&text, &mut response_output);
 
                     // Extract response_id from response.created event
                     if response_id.is_none()
@@ -1911,6 +1922,7 @@ async fn stream_response_websocket_authenticated(
             message_count: 1,
             last_input_item_count: input_item_count,
             last_input_item_hashes: input_item_hashes,
+            last_response_output: response_output,
         });
         drop(guard);
         spawn_persistent_ws_keepalive(

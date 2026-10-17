@@ -322,6 +322,7 @@ async fn warm_socket(
                             // continuation must send ALL input, including reasoning.
                             message_count: 0,
                             last_input_item_count: 0,
+                            last_response_output: Vec::new(),
                             last_input_item_hashes: Vec::new(),
                         });
                     }

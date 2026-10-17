@@ -194,7 +194,7 @@ fn test_websocket_continuation_delta_skips_reasoning_items() {
         }),
     ];
 
-    let (delta, skipped_reasoning) = persistent_ws_incremental_items(&input, 2);
+    let (delta, skipped_reasoning) = persistent_ws_incremental_items(&input, 2, &[]);
 
     assert_eq!(skipped_reasoning, 1);
     assert_eq!(delta.len(), 2);
@@ -206,6 +206,77 @@ fn test_websocket_continuation_delta_skips_reasoning_items() {
     );
     assert_eq!(delta[0]["type"], "function_call_output");
     assert_eq!(delta[1]["type"], "message");
+}
+
+#[test]
+fn websocket_delta_removes_only_matched_previous_response_output() {
+    let output = vec![
+        serde_json::json!({"type":"message", "id":"msg_1", "status":"completed", "role":"assistant", "phase":"commentary", "content":[{"type":"output_text", "text":"Working", "annotations":[]}]}),
+        serde_json::json!({"type":"function_call", "id":"fc_1", "status":"completed", "call_id":"call_1", "name":"read", "arguments":"{ \"path\": \"file\" }"}),
+    ];
+    let replay_text = serde_json::json!({"type":"message", "role":"assistant", "content":[{"type":"output_text", "text":"Working"}]});
+    let replay_call = serde_json::json!({"type":"function_call", "call_id":"call_1", "name":"read", "arguments":"{\"path\":\"file\"}"});
+    let callback =
+        serde_json::json!({"type":"function_call_output", "call_id":"call_1", "output":"done"});
+    let injected = serde_json::json!({"type":"message", "role":"assistant", "content":[{"type":"output_text", "text":"Client-injected history"}]});
+    let injected_call = serde_json::json!({"type":"function_call", "call_id":"client_call", "name":"read", "arguments":"{}"});
+    let user = serde_json::json!({"type":"message", "role":"user", "content":[{"type":"input_text", "text":"next"}]});
+    let input = vec![
+        user.clone(),
+        replay_text.clone(),
+        replay_call,
+        callback.clone(),
+        injected.clone(),
+        injected_call.clone(),
+        replay_text.clone(),
+        user.clone(),
+    ];
+    let (delta, skipped) = persistent_ws_incremental_items(&input, 1, &output);
+    assert_eq!(skipped, 2);
+    assert_eq!(
+        delta,
+        vec![callback, injected, injected_call, replay_text, user]
+    );
+    assert_eq!(input.len(), 8, "full canonical history must not be mutated");
+    let (without_output, skipped) = persistent_ws_incremental_items(&input, 1, &[]);
+    assert_eq!(without_output, input[1..]);
+    assert_eq!(skipped, 0);
+}
+
+#[test]
+fn websocket_delta_preserves_unmatched_nontext_assistant_content() {
+    let previous = serde_json::json!({"type":"message", "role":"assistant", "content":[{"type":"refusal", "refusal":"previous"}]});
+    let injected = serde_json::json!({"type":"message", "role":"assistant", "content":[{"type":"refusal", "refusal":"different"}]});
+    let (delta, skipped) = persistent_ws_incremental_items(&[injected.clone()], 0, &[previous]);
+    assert_eq!(delta, vec![injected]);
+    assert_eq!(skipped, 0);
+}
+
+#[test]
+fn websocket_output_bookkeeping_uses_completed_output_without_duplicates() {
+    let item = serde_json::json!({"type":"function_call", "call_id":"call_1", "name":"read", "arguments":"{}"});
+    let mut output = Vec::new();
+    observe_ws_response_output(
+        &serde_json::json!({"type":"response.output_item.done", "item":item}).to_string(),
+        &mut output,
+    );
+    assert_eq!(output, vec![item.clone()]);
+    observe_ws_response_output(
+        r#"{"type":"response.completed","response":{}}"#,
+        &mut output,
+    );
+    assert_eq!(output, vec![item.clone()]);
+    observe_ws_response_output(
+        &serde_json::json!({"type":"response.completed", "response":{"output":[item.clone()]}})
+            .to_string(),
+        &mut output,
+    );
+    assert_eq!(output, vec![item]);
+    observe_ws_response_output(
+        r#"{"type":"response.completed","response":{"output":[]}}"#,
+        &mut output,
+    );
+    assert!(output.is_empty());
 }
 
 #[test]

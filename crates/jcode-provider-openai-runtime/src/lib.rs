@@ -322,6 +322,8 @@ struct PersistentWsState {
     /// rewrite earlier items (for example, when tool outputs are reordered).
     /// A count alone is not a safe continuation cursor in that case.
     last_input_item_hashes: Vec<u64>,
+    /// Actual output of the previous response, used to remove only server-owned replay.
+    last_response_output: Vec<Value>,
 }
 
 #[derive(Debug, PartialEq, Eq)]

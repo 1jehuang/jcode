@@ -39,6 +39,7 @@ async fn persistent_cancellation_keepalive_abort_invalidates_before_handoff() {
         last_response_completed_at: connected_at,
         message_count: 1,
         last_input_item_count: 0,
+        last_response_output: Vec::new(),
         last_input_item_hashes: vec![],
     })));
     let keepalive = spawn_persistent_ws_keepalive_with_interval(
@@ -133,6 +134,7 @@ async fn persistent_cancellation_public_drop_releases_chain_and_reconnects() {
         last_response_completed_at: Instant::now(),
         message_count: 1,
         last_input_item_count: 1,
+        last_response_output: Vec::new(),
         last_input_item_hashes: persistent_ws_input_item_hashes(&input[..1]),
     });
     let mut stream = provider.complete(&messages, &[], "fixture", None).await.unwrap();
@@ -191,6 +193,7 @@ async fn persistent_cancellation_aborted_future_invalidates_before_handoff() {
         last_response_completed_at: Instant::now(),
         message_count: 1,
         last_input_item_count: 1,
+        last_response_output: Vec::new(),
         last_input_item_hashes: persistent_ws_input_item_hashes(&input[..1]),
     })));
     let (tx, _rx) = mpsc::channel(10);
