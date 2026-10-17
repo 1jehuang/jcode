@@ -65,6 +65,60 @@ fn test_usage_card_reset_balances() {
 }
 
 #[test]
+fn test_usage_card_responsive_terminal_layout() {
+    let mut app = create_test_app();
+    app.handle_usage_report(vec![crate::usage::ProviderUsage {
+        provider_name: "OpenAI (personal)".into(),
+        limits: vec![crate::usage::UsageLimit {
+            name: "5-hour window".into(),
+            usage_percent: 42.0,
+            resets_at: None,
+        }],
+        openai_reset_credits: Some(crate::usage::OpenAiResetCredits {
+            available_count: 3,
+            available_expirations: vec![],
+            account_label: Some("personal".into()),
+            ordinary_usage_allowed: Some(true),
+        }),
+        ..Default::default()
+    }]);
+    let mut card_widths = Vec::new();
+    for width in [40, 60, 100, 180] {
+        let backend = ratatui::backend::TestBackend::new(width, 60);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| crate::tui::ui::draw(frame, &app))
+            .unwrap();
+        let text = buffer_to_text(&terminal);
+        let normalized: String = text
+            .chars()
+            .filter(|ch| !ch.is_whitespace() && *ch != '│')
+            .collect();
+        assert!(
+            normalized.contains("Bankedresets:3available"),
+            "{width} cols:\n{text}"
+        );
+        assert!(text.contains("OpenAI (personal)"), "{width} cols:\n{text}");
+        assert!(text.contains("42%"), "{width} cols:\n{text}");
+        let border = text
+            .lines()
+            .find(|line| line.contains('╭') && line.contains("Usage"))
+            .unwrap_or_else(|| panic!("missing usage border at {width}:\n{text}"));
+        let start = border.find('╭').unwrap();
+        let end = border.find('╮').unwrap();
+        let card_width =
+            unicode_width::UnicodeWidthStr::width(&border[start..end + '╮'.len_utf8()]);
+        assert!(card_width <= usize::from(width));
+        card_widths.push(card_width);
+    }
+    assert_eq!(
+        card_widths[2], card_widths[3],
+        "wide terminals should fit the content, not expand the card"
+    );
+    assert!(card_widths[0] < card_widths[2]);
+}
+
+#[test]
 fn test_usage_card_renders_when_loading() {
     let mut app = create_test_app();
     app.open_usage_inline_loading();
