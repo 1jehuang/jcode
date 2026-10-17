@@ -393,8 +393,9 @@ impl App {
                 Err(oneshot::error::TryRecvError::Empty)
             )
         {
+            // Only the cached snapshot is refreshed. Never pop an unrequested
+            // usage card into the transcript after a quota error.
             self.usage_reset.quota_refresh = None;
-            self.usage_reset.refresh_usage = true;
         }
         // A report already in flight may have read pre-reset state. Queue a fresh
         // report after it completes instead of silently dropping the refresh.

@@ -842,7 +842,7 @@ fn test_turn_error_offers_same_model_oauth_fallback() {
         let offer_msg = app
             .display_messages
             .iter()
-            .find(|m| m.content.contains("Fallback available"))
+            .find(|m| m.content.contains("to switch to"))
             .expect("offer message should be shown");
         assert!(offer_msg.content.contains("oauth") || offer_msg.content.contains("OAuth"));
     });
