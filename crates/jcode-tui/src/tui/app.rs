@@ -2144,6 +2144,12 @@ impl App {
     }
 
     pub(super) fn record_completed_stream_cache_usage(&mut self) -> bool {
+        // A request boundary intentionally retains the last context counters
+        // until fresh usage arrives. Cancellation before that first report
+        // must not bill or compare those previous-request counters again.
+        if self.streaming.streaming_usage_call_reset_pending {
+            return false;
+        }
         let has_cache_telemetry = self.streaming.streaming_cache_read_tokens.is_some()
             || self.streaming.streaming_cache_creation_tokens.is_some();
         if self.kv_cache.current_api_usage_recorded {

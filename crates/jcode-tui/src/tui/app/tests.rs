@@ -373,7 +373,7 @@ fn harness_caused_kv_cache_miss_pushes_in_chat_alarm() {
     app.streaming.streaming_cache_read_tokens = Some(0);
     app.streaming.streaming_cache_creation_tokens = Some(50_000);
     app.kv_cache.current_api_usage_recorded = false;
-    app.record_completed_stream_cache_usage();
+    record_reported_test_cache_usage(&mut app);
 
     let alarm = app
         .display_messages()
@@ -427,7 +427,7 @@ fn documented_invalidation_downgrades_kv_cache_alarm_to_attribution() {
     app.streaming.streaming_cache_read_tokens = Some(0);
     app.streaming.streaming_cache_creation_tokens = Some(50_000);
     app.kv_cache.current_api_usage_recorded = false;
-    app.record_completed_stream_cache_usage();
+    record_reported_test_cache_usage(&mut app);
 
     let notice = app
         .display_messages()
@@ -459,7 +459,7 @@ fn kv_cache_baseline_stores_reusable_prompt_tokens() {
     app.streaming.streaming_cache_read_tokens = Some(90_000);
     app.streaming.streaming_cache_creation_tokens = Some(5_000);
     app.kv_cache.current_api_usage_recorded = false;
-    app.record_completed_stream_cache_usage();
+    record_reported_test_cache_usage(&mut app);
 
     let baseline = app
         .kv_cache
@@ -504,7 +504,7 @@ fn legitimate_model_switch_miss_pushes_informational_notice() {
     app.streaming.streaming_cache_read_tokens = Some(0);
     app.streaming.streaming_cache_creation_tokens = Some(50_000);
     app.kv_cache.current_api_usage_recorded = false;
-    app.record_completed_stream_cache_usage();
+    record_reported_test_cache_usage(&mut app);
 
     let notice = app
         .display_messages()
@@ -567,9 +567,9 @@ fn kv_cache_notice_explicit_loss_matrix() {
         app.kv_cache.pending_kv_cache_request = Some(request);
         app.streaming.streaming_input_tokens = 110_000; // includes a normal new tail
         app.streaming.streaming_cache_read_tokens = read;
-        assert!(app.record_completed_stream_cache_usage());
+        assert!(record_reported_test_cache_usage(&mut app));
         assert!(
-            !app.record_completed_stream_cache_usage(),
+            !record_reported_test_cache_usage(&mut app),
             "same call must deduplicate"
         );
         let notices: Vec<_> = app
@@ -598,8 +598,8 @@ fn kv_cache_first_fill_without_baseline_is_not_a_miss() {
         let mut app = create_test_app();
         app.streaming.streaming_input_tokens = 10_000;
         app.streaming.streaming_cache_read_tokens = read;
-        assert!(app.record_completed_stream_cache_usage());
-        assert!(!app.record_completed_stream_cache_usage());
+        assert!(record_reported_test_cache_usage(&mut app));
+        assert!(!record_reported_test_cache_usage(&mut app));
         let count = app
             .display_messages()
             .iter()
@@ -755,7 +755,7 @@ fn compaction_invalidates_kv_cache_baseline_and_stale_completion_cannot_restore_
     app.streaming.streaming_cache_read_tokens = Some(80_000);
     app.streaming.streaming_cache_creation_tokens = Some(0);
     app.kv_cache.current_api_usage_recorded = false;
-    app.record_completed_stream_cache_usage();
+    record_reported_test_cache_usage(&mut app);
     assert!(
         app.kv_cache_baseline_for_current_session().is_none(),
         "a pre-compaction request completion must remain stale"
@@ -782,7 +782,7 @@ fn compaction_invalidates_kv_cache_baseline_and_stale_completion_cannot_restore_
     app.streaming.streaming_cache_read_tokens = Some(20_224);
     app.streaming.streaming_cache_creation_tokens = Some(0);
     app.kv_cache.current_api_usage_recorded = false;
-    app.record_completed_stream_cache_usage();
+    record_reported_test_cache_usage(&mut app);
 
     assert!(app.kv_cache.kv_cache_miss_samples.is_empty());
     assert!(
