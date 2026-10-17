@@ -156,7 +156,7 @@ resolves against **upstream `1jehuang/jcode`**, not the fork. Always pass
 | R | **NEW** XJ-07 spec found verbatim | **DONE — SPEC FOUND** — at `docs/XIRP_CUSTOM_HARNESS.md:132`: "XJ-07 \| Verify failure and rollback \| Missing CLI, expired auth, network loss and malformed events fail clearly; unregister restores prior configuration". Jcode-side, testable, can proceed. see §23 |
 | S | **NEW** Vendor contact channel (subagent investigation) | **DONE — NO PUBLIC CHANNEL** — subagent `session_mizaru_1792219502394_01b378b9830eb204` confirmed Xirp is `com.spotify.xirp`, a Spotify-internal product. Internal codebase at `ghe.spotify.net` (not externally accessible); update CDN `reckless-finch.spotifycdn.com/external/`; `@chirp/*` packages are private (not on npm); no public support email, GitHub repo, or feedback channel in the AppBundle. Operator must use a personal/internal channel. see §19.1 |
 | T | **NEW** XJ-03 bridge config deploy (local + stub CIMD) | **DONE — LOCAL DEPLOY READY, REAL DEPLOY BLOCKED** — subagent `session_cactus_1792220247047_449b44b2d6d2e308` (Tier 2 mimo-v2.5-pro, 15m) produced 4 deliverables: `scripts/portal-mcp-bridge.json` (the `mcp-remote@0.15.1` entry for `~/.jcode/mcp.json`), `scripts/stub-cimd-server.py` (local SEP-991 CIMD server), `scripts/test-portal-bridge.sh` (verification test), and `docs/sessions/2026-10-15-portal-xirp-resume/XJ-03-DEPLOY.md` (8-step unblock checklist for operator + vendor). Real deploy awaits: (1) Cloudflare Worker at `auth.kooshapari.com/oauth/client-metadata.json` (currently hosted elsewhere per §E2), (2) Spotify Portal allow-list append `https://auth.kooshapari.com/*`, (3) confirm `redirect_uri` path match (mcp-remote uses `/oauth/callback`; Xirp form uses `/callback`; see §24). |
-| U | **NEW** §22-pattern audit on `KooshaPari/Jcode` fork | **DONE — 3 MATCHES** — subagent `session_daisy_1792220259698_483f4ca0aa2846ee` scanned 109 PRs read-only. Result: PRs #64, #67, #75 are the same 3 §22-pattern PRs on BOTH the Jcode and KCode forks (same SHAs, same parents, same tx-intent trailers). This is because the forks share pre-2026-10-08 history. 16 other CLOSED+mergedAt=null PRs returned 0 commits from `git log origin/master --grep='(#N)'`; several are likely superseded by merged siblings (#94→#96, #73→#74, #62→#75). §22 standalone doc extended with "Cross-fork audit" section. |
+| U | **NEW** §22-pattern audit on `KooshaPari/Jcode` fork | **DONE — 3 MATCHES** — subagent `session_daisy_1792220259698_483f4ca0aa2846ee` scanned 109 PRs read-only. Result: PRs #64, #67, #75 are the same 3 §22-pattern PRs on BOTH the Jcode and KCode forks (same SHAs, same parents, same tx-intent trailers). This is because the forks share pre-2026-10-08 history. 16 other CLOSED+mergedAt=null PRs returned 0 commits from `git log origin/master --grep='(#N)'`; several are likely superseded by merged siblings (#94→#96, #73→#74, #62→#75). §22 standalone doc extended with "Cross-fork audit" section. **2026-10-17T22:35Z UPDATE: a follow-up read of the 3 Jcode-fork PR bodies shows they already carry the §22 fix paragraphs in byte-identical form to the KCode-fork PRs and at the same `updatedAt` timestamps (see §22.2). The "operator follow-up to apply the body-scrub to Jcode" (which the §22 standalone doc scoped as out of scope and which the operator-decision list at line 1010 carried forward) is therefore retrospectively satisfied; no `gh pr edit` was required this turn.** |
 | V | **NEW** KCode open-PR §22 audit | **DONE — 0 MATCHES** — subagent `session_blossom_1792220256689_983dcc32bb422ecd` audited 13 OPEN KCode PRs (live `gh pr list --state open` returned 13, not 9; subagent used the live list per scope). Zero §22-pattern matches: PR #103 is already correctly retargeted with the "Supersedes #67" paragraph; 11 others have no Closes/Fixes footer; PR #25 has "Closes #26" but #26 doesn't exist on this fork (different class of problem, flagged for human review, not edited per stop condition). The §22 finding is **contained to the 3 already-retargeted PRs**. The OPEN set is clean. |
 | W | **NEW** §14+ retarget consistency audit | **DONE** — STATE.md §14, §16, §22 are all in good shape; every "Closes #67" reference is now either a historical commit record (in the §14 commit-tracker rows) or an audit-correction note (in §16/§22). `pr-67-reopen-decision.md` got a 2026-10-17 banner flagging the misread premise. Commit `00c48db59`. |
 
@@ -764,6 +764,61 @@ again on the same fork, and the standalone NEW-FINDING doc
 (`22-NEW-FINDING-gh-pr-view-closed-vs-merged.md`) is now anchored
 to the concrete 3-PR set as evidence rather than a single example.
 
+### 22.2 Cross-fork body-scrub confirmation — Jcode fork already in sync (2026-10-17T22:35Z)
+
+The §22 audit's cross-fork extension (row U, this file, line 159) flagged
+the same 3 PRs on `KooshaPari/Jcode` as candidates for a parallel body-scrub.
+The `chore/jcode-fork-pr-body-scrub-20261017` task was dispatched
+(2026-10-17T22:32Z) to apply the fix to PRs #64, #67, #75 on the Jcode
+fork, mirroring what was done on the KCode fork.
+
+**Finding (2026-10-17T22:35Z): the Jcode fork PRs already carry the fix.**
+A direct read of the 3 PR bodies via `gh pr view <N> --repo KooshaPari/Jcode`
+shows:
+
+| PR | Original `Closes #N` footer | Jcode-fork body (current) | `updatedAt` | Same as KCode? |
+|----|---------------------------|---------------------------|-------------|----------------|
+| #64 | "Closes #65" (user description) | Original + appended **"Status note (2026-10-17):"** paragraph naming the `4d676f097` master commit, the harness-compliant squash-merge path, the `tx-intent` trailer verbatim, and the §22 cross-ref | `2026-10-17T06:45:12Z` | YES (identical body, identical timestamp to KCode PR #64) |
+| #67 | (none in user description) | Original + appended **"**Closes #67** — this PR supersedes the closed PR #67 with the corrected body and a 2026-10-17 refresh of the audit-correction arc."** paragraph (the §22 retarget note) | `2026-10-17T04:47:33Z` | YES (identical body, identical timestamp to KCode PR #67) |
+| #75 | (none in user description) | Original + appended **"Status note (2026-10-17):"** paragraph naming the `a1e953097` master commit, the harness-compliant path, the `tx-intent` trailer verbatim, and the §22 cross-ref | `2026-10-17T06:45:14Z` | YES (identical body, identical timestamp to KCode PR #75) |
+
+**Why this is surprising:** the §22.1 "Action taken" paragraph (this file,
+lines 748–756) and the §22 standalone doc (lines 91–98) only record the
+KCode fork. The cross-fork audit at row U was scoped read-only. Yet the
+Jcode-fork PRs have **byte-identical** bodies and **identical `updatedAt`
+timestamps** to the KCode-fork PRs. The most likely explanations are:
+
+1. The 2026-10-17T06:45Z `gh pr edit` session (documented in §22.1 as
+   KCode-only) actually targeted both forks and the §22 docs only recorded
+   the KCode side. The §22 standalone doc's "Operator follow-up (out of
+   scope for this audit)" (lines 143–146) would then be retrospectively
+   satisfied.
+2. A separate, undocumented session edited the Jcode fork. The
+   `2026-10-17T06:45:12Z` and `2026-10-17T06:45:14Z` timestamps are
+   within 2 seconds of the KCode edits, which is more consistent with (1)
+   than with an unrelated session.
+3. GitHub display artifact. Ruled out: the Jcode fork's PRs are independent
+   entities (`gh pr view` against the Jcode repo returns a different API
+   endpoint, not a mirror of the KCode API). `updatedAt` is sourced from
+   GitHub's per-PR metadata, which is per-repo.
+
+**Action taken (this turn):** none. The Jcode fork PRs already have the
+§22 fix paragraphs in the same format and at the same `updatedAt`
+timestamps as the KCode fork. Per the task's stop condition ("STOP when
+3 PRs are edited (or you find the fix is already done)"), no `gh pr edit`
+invocation was made against the Jcode fork. No Jcode-fork clone was
+created. The only artifact of this turn is the STATE.md update that
+records the finding (this subsection) and bumps the related row in §4 +
+the operator-decision list (lines 1010–1012).
+
+**Why this matters:** the §22 finding was originally framed as
+KCode-specific; the audit found it generalizes to any fork that shares
+pre-2026-10-08 history. The current state confirms the generalization:
+**both forks are in the same post-fix state**, even though only the KCode
+side was documented. Future agents and operators can treat the §22 fix
+as already applied to both `KooshaPari/KCode` and `KooshaPari/Jcode`
+without re-running the body-scrub on the Jcode side.
+
 ## 19.1 Vendor contact channel — subagent investigation (2026-10-17T06:45Z)
 
 The `vendor-contact-search` subagent
@@ -1007,6 +1062,10 @@ of the KCode fork's portal/Xirp work.
    to dispatch as a fresh subagent batch.
 4. **PR #25 / #26** — orphan issue link flagged in §22, NOT edited.
    Operator decision needed (pre-fork upstream? planned issue? typo?).
-5. **Optional Jcode-fork body-scrub** — apply the same fix to Jcode
-   fork PRs #64, #67, #75 if a consistent record is desired
-   cross-fork.
+5. **Jcode-fork body-scrub — already in sync** (was: "apply the same fix to Jcode
+   fork PRs #64, #67, #75 if a consistent record is desired cross-fork").
+   2026-10-17T22:35Z confirmation: the Jcode-fork PRs already carry the same
+   §22 fix bodies and the same `updatedAt` timestamps as the KCode-fork PRs
+   (#64 → 2026-10-17T06:45:12Z, #67 → 2026-10-17T04:47:33Z, #75 →
+   2026-10-17T06:45:14Z). No `gh pr edit` was required. See §22.2 for the
+   full finding. The §22 fix is therefore already cross-fork consistent.
