@@ -256,6 +256,7 @@ struct PendingKvCacheRequest {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KvCacheMissReason {
+    Compaction,
     ProviderSwitch,
     ModelSwitch,
     UpstreamSwitch,
@@ -271,6 +272,7 @@ enum KvCacheMissReason {
 impl KvCacheMissReason {
     fn label(self) -> &'static str {
         match self {
+            Self::Compaction => "compaction refresh",
             Self::ProviderSwitch => "provider switch",
             Self::ModelSwitch => "model switch",
             Self::UpstreamSwitch => "upstream switch",
@@ -2155,17 +2157,21 @@ impl App {
         }
 
         let optimal_input_tokens = self.token_accounting.cache_next_optimal_input_tokens;
-        // Stash the *effective* prompt size for this request so the next request's
-        // cache-read can be compared against everything that just became cacheable.
-        // For split-accounting providers (Anthropic) bare `input` is only the
-        // uncached remainder, so the reusable prefix is input + read + creation.
+        // Context size includes the uncached tail, but the next cache-read
+        // expectation must stop at the boundary actually read or written.
         let effective_prompt_tokens = crate::tui::info_widget::effective_prompt_tokens(
             &self.kv_cache_provider_name(),
             self.streaming.streaming_input_tokens,
             self.streaming.streaming_cache_read_tokens.unwrap_or(0),
             self.streaming.streaming_cache_creation_tokens.unwrap_or(0),
         );
-        self.token_accounting.cache_next_optimal_input_tokens = Some(effective_prompt_tokens);
+        let reusable_tokens = crate::compaction::reusable_cache_tokens_from_usage(
+            &self.kv_cache_provider_name(),
+            self.streaming.streaming_input_tokens,
+            self.streaming.streaming_cache_read_tokens,
+            self.streaming.streaming_cache_creation_tokens,
+        );
+        self.token_accounting.cache_next_optimal_input_tokens = Some(reusable_tokens);
 
         let request = self
             .kv_cache
@@ -2228,7 +2234,7 @@ impl App {
         self.kv_cache.kv_cache_baseline = Some(KvCacheBaseline {
             session_id: baseline_session_id,
             cache_generation: request.cache_generation,
-            input_tokens: effective_prompt_tokens,
+            input_tokens: reusable_tokens,
             completed_at: Instant::now(),
             cache_ttl_secs: request.cache_ttl_secs,
             provider: request.provider,
@@ -2521,6 +2527,9 @@ impl App {
             return;
         }
         let detail = match reason {
+            KvCacheMissReason::Compaction => {
+                "context was compacted; rebuilding the cache is expected"
+            }
             KvCacheMissReason::HarnessSystemChanged => "system prompt changed mid-session",
             KvCacheMissReason::HarnessToolsChanged => "tool set changed mid-session",
             KvCacheMissReason::HarnessPrefixChanged => "an earlier message was modified",

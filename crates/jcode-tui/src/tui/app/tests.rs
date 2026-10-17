@@ -446,12 +446,10 @@ fn documented_invalidation_downgrades_kv_cache_alarm_to_attribution() {
 }
 
 #[test]
-fn kv_cache_baseline_stores_effective_prompt_tokens() {
+fn kv_cache_baseline_stores_reusable_prompt_tokens() {
     // For split-accounting providers (Anthropic), the reported `input` is only
     // the uncached remainder of the request. The baseline drives the cold-cache
-    // warning's "~N input tokens will be resent" figure, so it must store the
-    // whole effective prompt (input + cache read + cache creation), not the
-    // bare input.
+    // warning and miss comparison, so only the read/written boundary is reusable.
     let mut app = create_test_app();
     crate::provider::anthropic::set_cache_ttl_1h(true);
 
@@ -469,8 +467,8 @@ fn kv_cache_baseline_stores_effective_prompt_tokens() {
         .as_ref()
         .expect("completed stream should record a baseline");
     assert_eq!(
-        baseline.input_tokens, 95_700,
-        "baseline must capture input + read + creation, not bare input"
+        baseline.input_tokens, 95_000,
+        "baseline must capture read + creation, excluding the uncached tail"
     );
 }
 
