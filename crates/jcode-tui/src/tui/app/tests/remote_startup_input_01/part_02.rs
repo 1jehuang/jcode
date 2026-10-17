@@ -398,6 +398,19 @@ fn test_remote_catalog_activity_notification_upserts_compact_row() {
 
 #[test]
 fn test_model_picker_copilot_models_have_copilot_route() {
+    // An ambient named provider profile (a session started with a corporate
+    // OpenAI-compatible gateway) makes the picker include the built-in
+    // openai-compatible static catalogs, so firmware claims grok-code-fast-1
+    // and the expected copilot route never appears. The test asserts pure
+    // copilot routing, so clear the profile lock for its duration.
+    let _env_guard = EnvRestoreGuard::capture([
+        "JCODE_NAMED_PROVIDER_PROFILE",
+        "JCODE_PROVIDER_PROFILE_ACTIVE",
+        "JCODE_PROVIDER_PROFILE_NAME",
+    ]);
+    crate::env::remove_var("JCODE_NAMED_PROVIDER_PROFILE");
+    crate::env::remove_var("JCODE_PROVIDER_PROFILE_ACTIVE");
+    crate::env::remove_var("JCODE_PROVIDER_PROFILE_NAME");
     let mut app = create_test_app();
     configure_test_remote_models_with_copilot(&mut app);
 

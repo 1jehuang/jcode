@@ -1,5 +1,17 @@
 #[test]
 fn test_model_picker_copilot_selection_prefixes_model() {
+    // Same ambient-profile hazard as
+    // test_model_picker_copilot_models_have_copilot_route: the firmware
+    // static catalog claims grok-code-fast-1 under an active named profile,
+    // so selection would produce a firmware: prefix instead of copilot:.
+    let _env_guard = EnvRestoreGuard::capture([
+        "JCODE_NAMED_PROVIDER_PROFILE",
+        "JCODE_PROVIDER_PROFILE_ACTIVE",
+        "JCODE_PROVIDER_PROFILE_NAME",
+    ]);
+    crate::env::remove_var("JCODE_NAMED_PROVIDER_PROFILE");
+    crate::env::remove_var("JCODE_PROVIDER_PROFILE_ACTIVE");
+    crate::env::remove_var("JCODE_PROVIDER_PROFILE_NAME");
     let mut app = create_test_app();
     configure_test_remote_models_with_copilot(&mut app);
 
