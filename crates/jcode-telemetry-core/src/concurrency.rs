@@ -329,6 +329,10 @@ pub struct ConcurrencySession {
     session_id: String,
     incarnation: String,
     child: bool,
+    /// Lease registration runs on a background thread: it takes a global file
+    /// lock and scans every live lease, which serialized dozens of resumes
+    /// behind each other when all clients reconnected after a reload.
+    pending: Option<std::sync::Mutex<std::sync::mpsc::Receiver<Option<(Lease, Option<Counts>)>>>>,
     lease: Option<Lease>,
     at_start: Counts,
     active: bool,
@@ -344,6 +348,7 @@ pub fn begin_concurrency_session(
         session_id: session_id.to_owned(),
         incarnation: uuid::Uuid::new_v4().to_string(),
         child: parent_session_id.is_some(),
+        pending: None,
         lease: None,
         at_start: Counts::default(),
         active: is_enabled(),
@@ -351,27 +356,88 @@ pub fn begin_concurrency_session(
     if !guard.active {
         return guard;
     }
-    let result = storage::jcode_dir().and_then(|dir| {
-        Lease::begin(
-            dir.join("telemetry_concurrency_v2"),
-            &guard.incarnation,
-            guard.child,
-        )
-        .map_err(Into::into)
+    let incarnation = guard.incarnation.clone();
+    let session_id = guard.session_id.clone();
+    let child = guard.child;
+    let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+    let job: RegistrationJob = Box::new(move || {
+        let registered = storage::jcode_dir()
+            .and_then(|dir| {
+                Lease::begin(dir.join("telemetry_concurrency_v2"), &incarnation, child)
+                    .map_err(Into::into)
+            })
+            .ok();
+        let at_start = registered
+            .as_ref()
+            .and_then(|(_, counts)| *counts)
+            .unwrap_or_default();
+        let start = ConcurrencySession {
+            session_id,
+            incarnation,
+            child,
+            pending: None,
+            lease: None,
+            at_start,
+            active: false,
+        };
+        start.emit_unchecked(
+            "start",
+            (at_start.total > 0).then_some(at_start),
+            DeliveryMode::Background,
+        );
+        let _ = reply_tx.send(registered);
     });
-    if let Ok((lease, counts)) = result {
-        guard.lease = Some(lease);
-        guard.at_start = counts.unwrap_or_default();
+    match registration_worker().and_then(|worker| worker.lock().ok()?.send(job).ok()) {
+        Some(()) => guard.pending = Some(std::sync::Mutex::new(reply_rx)),
+        None => guard.emit("start", None, DeliveryMode::Background),
     }
-    guard.emit(
-        "start",
-        (guard.at_start.total > 0).then_some(guard.at_start),
-        DeliveryMode::Background,
-    );
     guard
 }
 
+type RegistrationJob = Box<dyn FnOnce() + Send>;
+
+/// One FIFO worker keeps registrations ordered (so counts and `start` events
+/// match the order sessions began) while keeping the global registry lock and
+/// lease scan off the caller. Resumes no longer serialize behind each other.
+fn registration_worker()
+-> Option<&'static std::sync::Mutex<std::sync::mpsc::Sender<RegistrationJob>>> {
+    static WORKER: std::sync::OnceLock<
+        Option<std::sync::Mutex<std::sync::mpsc::Sender<RegistrationJob>>>,
+    > = std::sync::OnceLock::new();
+    WORKER
+        .get_or_init(|| {
+            let (tx, rx) = std::sync::mpsc::channel::<RegistrationJob>();
+            std::thread::Builder::new()
+                .name("jcode-concurrency-lease".to_string())
+                .spawn(move || {
+                    while let Ok(job) = rx.recv() {
+                        job();
+                    }
+                })
+                .ok()?;
+            Some(std::sync::Mutex::new(tx))
+        })
+        .as_ref()
+}
+
 impl ConcurrencySession {
+    /// Block until this session's lease registration has completed.
+    pub fn wait_registered(&mut self) {
+        self.resolve_pending();
+    }
+
+    fn resolve_pending(&mut self) {
+        if let Some(reply) = self.pending.take()
+            && let Ok(Some((lease, counts))) = reply
+                .into_inner()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .recv()
+        {
+            self.lease = Some(lease);
+            self.at_start = counts.unwrap_or_default();
+        }
+    }
+
     pub fn session_id(&self) -> &str {
         &self.session_id
     }
@@ -392,6 +458,7 @@ impl ConcurrencySession {
             return;
         }
         self.active = false;
+        self.resolve_pending();
         let peak = self
             .lease
             .take()
@@ -409,6 +476,13 @@ impl ConcurrencySession {
         if !is_enabled() {
             return;
         }
+        self.emit_unchecked(phase, peak, mode);
+    }
+
+    /// Emit without re-checking opt-out. The deferred `start` event uses this:
+    /// telemetry was enabled when the session began, and an opt-out that lands
+    /// while registration is still running must not drop it.
+    fn emit_unchecked(&self, phase: &str, peak: Option<Counts>, mode: DeliveryMode) {
         let Some(id) = get_or_create_id() else { return };
         let (schema_version, build_channel, git_checkout, ci, from_cargo) = telemetry_envelope();
         let mut payload = serde_json::json!({

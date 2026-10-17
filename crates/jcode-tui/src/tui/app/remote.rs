@@ -100,6 +100,14 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     });
     let mut needs_redraw = crate::tui::periodic_redraw_required(app);
     needs_redraw |= app.poll_pending_startup_transcript();
+    if app.model_catalog_after_history && remote.has_loaded_history() {
+        app.model_catalog_after_history = false;
+        if let Err(error) = remote.request_model_catalog().await {
+            crate::logging::warn(&format!(
+                "Failed to hydrate model routes after History: {error}"
+            ));
+        }
+    }
     needs_redraw |= app.retire_expired_status_notice();
     needs_redraw |= app.poll_usage_reset();
     if let Some((provider, account)) = app.usage_reset.invalidate_account.take() {

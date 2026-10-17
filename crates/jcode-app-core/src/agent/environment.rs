@@ -28,6 +28,42 @@ pub(super) fn cached_git_state_for_dir(
     state
 }
 
+/// Git state for an env snapshot without waiting on `git` subprocesses.
+/// A cold directory returns `None` now and is filled in the background, so
+/// the next snapshot for it is complete. Resume and create are on the
+/// first-frame path, and a reload resumes every session at once.
+fn git_state_for_snapshot(dir: &Path) -> Option<GitState> {
+    static IN_FLIGHT: std::sync::LazyLock<
+        std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>,
+    > = std::sync::LazyLock::new(Default::default);
+    let key = dir.to_path_buf();
+    if let Ok(cache) = WORKING_GIT_STATE_CACHE.lock()
+        && let Some(state) = cache.get(&key)
+    {
+        return state.clone();
+    }
+    let first = IN_FLIGHT
+        .lock()
+        .map(|mut set| set.insert(key.clone()))
+        .unwrap_or(false);
+    if first {
+        let spawned = std::thread::Builder::new()
+            .name("jcode-git-state".to_string())
+            .spawn(move || {
+                let _ = cached_git_state_for_dir(&key, super::utils::git_state_for_dir);
+                if let Ok(mut set) = IN_FLIGHT.lock() {
+                    set.remove(&key);
+                }
+            });
+        if spawned.is_err()
+            && let Ok(mut set) = IN_FLIGHT.lock()
+        {
+            set.remove(dir);
+        }
+    }
+    None
+}
+
 impl Agent {
     /// Set logging context for this agent's session/provider
     pub(super) fn set_log_context(&self) {
@@ -69,15 +105,30 @@ impl Agent {
         detail: EnvSnapshotDetail,
     ) -> EnvSnapshot {
         let (jcode_git_hash, jcode_git_dirty) = match detail {
-            EnvSnapshotDetail::Full => JCODE_REPO_SOURCE_STATE.clone(),
+            // Never block on the git subprocesses behind this LazyLock: warm
+            // it in the background and report unknown until it is ready.
+            EnvSnapshotDetail::Full => match std::sync::LazyLock::get(&JCODE_REPO_SOURCE_STATE) {
+                Some(state) => state.clone(),
+                None => {
+                    static WARMING: std::sync::Once = std::sync::Once::new();
+                    WARMING.call_once(|| {
+                        let _ = std::thread::Builder::new()
+                            .name("jcode-repo-state".to_string())
+                            .spawn(|| {
+                                std::sync::LazyLock::force(&JCODE_REPO_SOURCE_STATE);
+                            });
+                    });
+                    (None, None)
+                }
+            },
             EnvSnapshotDetail::Minimal => (None, None),
         };
 
         let working_dir = self.session.working_dir.clone();
         let working_git = match detail {
-            EnvSnapshotDetail::Full => working_dir.as_deref().and_then(|dir| {
-                cached_git_state_for_dir(Path::new(dir), super::utils::git_state_for_dir)
-            }),
+            EnvSnapshotDetail::Full => working_dir
+                .as_deref()
+                .and_then(|dir| git_state_for_snapshot(Path::new(dir))),
             EnvSnapshotDetail::Minimal => None,
         };
 

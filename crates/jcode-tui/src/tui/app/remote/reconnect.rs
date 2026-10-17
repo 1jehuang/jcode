@@ -756,10 +756,18 @@ pub(in crate::tui::app) async fn handle_post_connect<B: ratatui::backend::Backen
     // this follow-up the public picker exposes generic `remote-catalog` rows.
     // Request ordering keeps the authoritative History snapshot ahead of this
     // expanded catalog response on a newly connected transport.
-    if let Err(error) = remote.request_model_catalog().await {
-        crate::logging::warn(&format!(
-            "Failed to hydrate model routes during remote bootstrap: {error}"
-        ));
+    //
+    // The catalog is ~1MB. Requesting it alongside the bootstrap made every
+    // reconnecting client compete with every other client's History during a
+    // reload storm. Wait for History first; the tick sends it once loaded.
+    if remote.has_loaded_history() {
+        if let Err(error) = remote.request_model_catalog().await {
+            crate::logging::warn(&format!(
+                "Failed to hydrate model routes during remote bootstrap: {error}"
+            ));
+        }
+    } else {
+        app.model_catalog_after_history = true;
     }
 
     // Dispatch restored work once the server history is in place. This must

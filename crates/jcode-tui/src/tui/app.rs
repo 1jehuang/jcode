@@ -1289,6 +1289,8 @@ pub struct App {
     remote_is_canary: Option<bool>,
     // Remote server version (from server)
     remote_server_version: Option<String>,
+    /// Send GetModelCatalog once bootstrap History has arrived.
+    model_catalog_after_history: bool,
     // Whether the remote server has a newer binary available
     remote_server_has_update: Option<bool>,
     // Auto-reload server when stale (set on first connect if server_has_update)

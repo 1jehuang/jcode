@@ -908,7 +908,8 @@ async fn send_history_with_guard(
         (all, count)
     };
 
-    let history_event = ServerEvent::History {
+    let build_start = Instant::now();
+    let history_event = super::run_blocking_io(|| ServerEvent::History {
         id,
         session_id: session_id.to_string(),
         messages,
@@ -947,7 +948,8 @@ async fn send_history_with_guard(
         activity,
         side_panel,
         applets: crate::applets::snapshot_for_session(session_id).unwrap_or_default(),
-    };
+    });
+    let build_ms = build_start.elapsed().as_millis();
     let encode_start = Instant::now();
     let json = encode_event(&history_event);
     // Free the structured event as soon as the wire bytes exist so only ~1x
@@ -967,9 +969,10 @@ async fn send_history_with_guard(
     let write_ms = write_start.elapsed().as_millis();
 
     crate::logging::info(&format!(
-        "[TIMING] send_history write: session={}, bytes={}, encode={}ms, writer_lock={}ms, write={}ms, total={}ms",
+        "[TIMING] send_history write: session={}, bytes={}, build={}ms, encode={}ms, writer_lock={}ms, write={}ms, total={}ms",
         session_id,
         json_len,
+        build_ms,
         encode_ms,
         writer_lock_ms,
         write_ms,

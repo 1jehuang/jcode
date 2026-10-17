@@ -1513,6 +1513,9 @@ fn concurrency_guard_paths_never_use_untrusted_session_ids() {
     let escape = home.join("escaped");
     let mut first = begin_concurrency_session("../../escaped", None);
     let mut second = begin_concurrency_session(escape.to_str().unwrap(), Some(".."));
+    // Registration is asynchronous; inspect the directory once it has run.
+    first.wait_registered();
+    second.wait_registered();
     assert!(!escape.exists());
     for entry in std::fs::read_dir(home.join("telemetry_concurrency_v2")).unwrap() {
         let path = entry.unwrap().path();
