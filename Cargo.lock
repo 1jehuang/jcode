@@ -4089,6 +4089,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "jcode-provider-muse-code-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "jcode-provider-openai"
 version = "0.1.0"
 dependencies = [
