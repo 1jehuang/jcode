@@ -5,6 +5,8 @@ mod subscription_status;
 mod auth_account_commands;
 #[path = "auth_account_picker.rs"]
 mod auth_account_picker;
+#[path = "auth_progress.rs"]
+mod auth_progress;
 #[path = "auth_types.rs"]
 mod auth_types;
 pub(crate) use self::auth_account_commands::{
@@ -1155,29 +1157,13 @@ impl App {
             Some(callback_available),
         );
 
-        self.push_display_message(DisplayMessage::system(format!(
-            "OpenAI OAuth Login (account: {})\n\n\
-             Opening browser for authentication...\n\n\
-             If the browser didn't open, visit:\n{}\n\n\
-             Note: Wait a few seconds for the page to fully load before clicking Continue. \
-             OpenAI's verification system may briefly disable the button.\n\n\
-             {}{}{}\
-             Or paste the full callback URL or query string here to finish from another device. Type /cancel to abort.{}",
+        self.show_openai_login_progress(
             label,
-            auth_url,
-            if preflight.is_empty() {
-                String::new()
-            } else {
-                format!("{}\n", preflight)
-            },
-            callback_line,
-            if preflight.is_empty() {
-                String::new()
-            } else {
-                "Manual-safe fallback is already active here.\n".to_string()
-            },
-            qr_section
-        )));
+            &auth_url,
+            browser_opened,
+            callback_available,
+            &format!("{preflight}\n{callback_line}\nIf Continue is disabled, wait for the page to finish loading.\nPaste the full callback URL or query string to finish from another device.{qr_section}"),
+        );
         self.set_status_notice(format!("Login [{}]: waiting...", label));
         self.begin_pending_login(PendingLogin::OpenAiAccount {
             verifier,
@@ -1937,10 +1923,19 @@ impl App {
     pub(super) fn handle_login_input(&mut self, pending: PendingLogin, input: String) {
         let trimmed = input.trim();
         if trimmed == "/cancel" {
+            if matches!(&pending, PendingLogin::Exchanging { .. }) {
+                self.set_status_notice("Login exchange is running. Wait for completion.");
+                self.pending_login = Some(pending);
+                return;
+            }
             if let Some((provider, method)) = pending.telemetry_context() {
                 crate::telemetry::record_auth_cancelled(&provider, &method);
             }
-            self.push_display_message(DisplayMessage::system("Login cancelled.".to_string()));
+            let replaced = matches!(&pending, PendingLogin::OpenAiAccount { .. })
+                && self.finish_openai_login_progress("OpenAI login cancelled.".to_string());
+            if !replaced {
+                self.push_display_message(DisplayMessage::system("Login cancelled.".to_string()));
+            }
             return;
         }
 
@@ -1975,6 +1970,10 @@ impl App {
         }
 
         match pending {
+            PendingLogin::Exchanging { provider } => {
+                self.set_status_notice("Login only: exchanging credentials, input not sent to AI");
+                self.pending_login = Some(PendingLogin::Exchanging { provider });
+            }
             PendingLogin::Remote => {
                 // SSH input must never fall through to laptop credential handlers.
                 self.append_ssh_login_input(&input);
@@ -1984,6 +1983,9 @@ impl App {
                 label,
                 redirect_uri,
             } => {
+                self.pending_login = Some(PendingLogin::Exchanging {
+                    provider: "claude".to_string(),
+                });
                 self.set_status_notice(format!("Login [{}]: exchanging...", label));
                 let input_owned = input.clone();
                 let label_clone = label.clone();
@@ -2023,6 +2025,9 @@ impl App {
                 expected_state,
                 redirect_uri,
             } => {
+                self.pending_login = Some(PendingLogin::Exchanging {
+                    provider: "openai".to_string(),
+                });
                 self.set_status_notice(format!("Login [{}]: exchanging...", label));
                 let input_owned = input.clone();
                 let label_clone = label.clone();
@@ -2052,16 +2057,16 @@ impl App {
                         }
                     }
                 });
-                self.push_display_message(DisplayMessage::system(format!(
-                    "Exchanging OpenAI callback for account {}...",
-                    label
-                )));
+                self.update_openai_login_exchange(&label);
             }
             PendingLogin::Gemini {
                 verifier,
                 expected_state,
                 redirect_uri,
             } => {
+                self.pending_login = Some(PendingLogin::Exchanging {
+                    provider: "gemini".to_string(),
+                });
                 self.set_status_notice("Login: exchanging...");
                 let input_owned = input.clone();
                 tokio::spawn(async move {
@@ -2103,6 +2108,9 @@ impl App {
                 expected_state,
                 redirect_uri,
             } => {
+                self.pending_login = Some(PendingLogin::Exchanging {
+                    provider: "antigravity".to_string(),
+                });
                 self.set_status_notice("Login: exchanging...");
                 let input_owned = input.clone();
                 tokio::spawn(async move {
@@ -3172,6 +3180,19 @@ impl App {
             }
             return;
         }
+        // A callback may complete while the user is still typing a URL/code.
+        // Never leave that authentication input armed as the next AI prompt.
+        if self
+            .pending_login
+            .as_ref()
+            .and_then(PendingLogin::telemetry_context)
+            .is_some_and(|(provider, _)| provider == login.provider)
+        {
+            self.input.clear();
+            self.cursor_pos = 0;
+            self.pasted_contents.clear();
+            self.clear_input_undo_history();
+        }
         crate::auth::AuthStatus::invalidate_cache();
         crate::logging::event_info(
             "login_completed",
@@ -3194,6 +3215,8 @@ impl App {
             }
         }
         if login.success {
+            let replaced_login_card = login.provider == "openai"
+                && self.finish_openai_login_progress("✓ OpenAI login complete.".to_string());
             self.recent_authenticated_provider = Some((login.provider.clone(), Instant::now()));
             // A fresh login is exactly what the credential-failure breaker is
             // waiting for: give automatic retries a fresh budget.
@@ -3202,7 +3225,7 @@ impl App {
             self.invalidate_model_picker_cache();
             let suppress_first_run_login_noise =
                 self.onboarding_flow_active() && !matches!(login.provider.as_str(), "copilot_code");
-            if !suppress_first_run_login_noise {
+            if !suppress_first_run_login_noise && !replaced_login_card {
                 self.push_display_message(DisplayMessage::system(login.message));
             }
             self.set_status_notice(format!("Login: {} ready", login.provider));
@@ -3246,15 +3269,26 @@ impl App {
             // During onboarding we route the failure to the recovery screen
             // (which explains next steps) instead of dumping a raw error message
             // and a status notice the user can miss.
+            let replaced_login_card = login.provider == "openai"
+                && self.finish_openai_login_progress(format!(
+                    "OpenAI login failed: {message}\nRetry /login openai."
+                ));
             if self.onboarding_flow_active() {
                 self.onboarding_handle_login_failed(Some(message));
             } else {
-                self.push_display_message(DisplayMessage::error(message));
+                if !replaced_login_card {
+                    self.push_display_message(DisplayMessage::error(message));
+                }
                 self.set_status_notice(format!("Login: {} failed", login.provider));
                 self.onboarding_handle_login_failed(None);
             }
         }
-        if self.pending_login.is_some() {
+        if self
+            .pending_login
+            .as_ref()
+            .and_then(PendingLogin::telemetry_context)
+            .is_some_and(|(provider, _)| provider == login.provider)
+        {
             self.pending_login = None;
         }
     }

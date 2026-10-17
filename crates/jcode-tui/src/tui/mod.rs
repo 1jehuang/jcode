@@ -745,6 +745,10 @@ pub trait TuiState {
     }
 
     // ---- Input ----
+    /// Authentication input is never an AI prompt, including async exchanges.
+    fn login_input_hint(&self) -> Option<&'static str> {
+        None
+    }
     fn input(&self) -> &str;
     fn cursor_pos(&self) -> usize;
     fn is_processing(&self) -> bool;

@@ -1,5 +1,46 @@
 use super::*;
 
+#[test]
+fn oauth_login_progress_renderer_keeps_short_link_and_hides_full_details() {
+    let url =
+        "https://example.invalid/authorize?state=private-state&code_challenge=private-challenge";
+    let summary = format!(
+        "✓ Sign-in link ready\n◌ Waiting for browser approval\n[Open OpenAI sign-in]({url})\nPaste callback URL here · /cancel"
+    );
+    let mut msg = DisplayMessage::system(jcode_tui_messages::encode_collapsible_swarm_content(
+        "Sign-in details",
+        &format!(
+            "{summary}\n\n<!-- oauth-details -->\n\nFull sign-in URL:\n{url}\n\nManual fallback details"
+        ),
+    ));
+    msg.title = Some("OpenAI login".to_string());
+    for width in [40, 80, 120] {
+        let lines = render_system_message(&msg, width, crate::config::DiffDisplayMode::Off);
+        let text = lines
+            .iter()
+            .map(extract_line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Sign-in link ready"));
+        assert!(text.contains("Waiting for browser approval"));
+        assert!(text.contains("Open OpenAI sign-in"));
+        assert!(text.contains(SWARM_EXPAND_BADGE));
+        assert!(!text.contains("private-state"));
+        assert!(!text.contains("Manual fallback details"));
+        assert!(lines.iter().all(|line| line.width() <= width as usize));
+    }
+    msg.content = jcode_tui_messages::toggle_collapsible_swarm_content(&msg.content).unwrap();
+    let lines = render_system_message(&msg, 120, crate::config::DiffDisplayMode::Off);
+    let text = lines
+        .iter()
+        .map(extract_line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("private-state"));
+    assert!(text.contains("Manual fallback details"));
+    assert!(text.contains(SWARM_COLLAPSE_BADGE));
+}
+
 fn extract_line_text(line: &Line<'_>) -> String {
     line.spans
         .iter()

@@ -492,6 +492,54 @@ pub(crate) fn render_system_message(
     width: u16,
     _diff_mode: crate::config::DiffDisplayMode,
 ) -> Vec<Line<'static>> {
+    if msg.title.as_deref() == Some("OpenAI login")
+        && let Some(parsed) = jcode_tui_messages::parse_collapsible_swarm_content(&msg.content)
+    {
+        let (summary, details) = parsed
+            .body
+            .split_once("\n\n<!-- oauth-details -->\n\n")
+            .unwrap_or((parsed.body, ""));
+        let mut lines = vec![Line::from(Span::styled(
+            "OpenAI login",
+            Style::default().fg(system_message_color()).bold(),
+        ))];
+        // Generic markdown links append the full destination visibly. Keep this
+        // label short, and resolve its click from the owning message instead.
+        for line in summary.lines() {
+            if line.starts_with("[Open OpenAI sign-in](") {
+                lines.push(Line::from(Span::styled(
+                    "Open OpenAI sign-in",
+                    Style::default().fg(super::accent_color()).underlined(),
+                )));
+            } else {
+                lines.push(Line::from(Span::styled(
+                    line.to_string(),
+                    Style::default().fg(system_message_color()),
+                )));
+            }
+        }
+        lines.push(Line::from(vec![
+            Span::styled(
+                "Full URL / details  ",
+                Style::default().fg(system_message_color()),
+            ),
+            Span::styled(
+                if parsed.expanded {
+                    SWARM_COLLAPSE_BADGE
+                } else {
+                    SWARM_EXPAND_BADGE
+                },
+                Style::default().fg(system_message_color()).bold(),
+            ),
+        ]));
+        if parsed.expanded {
+            lines.extend(markdown::render_markdown_with_width(
+                details,
+                Some(width.max(1) as usize),
+            ));
+        }
+        return markdown::wrap_lines(lines, width.max(1) as usize);
+    }
     if let Some(lines) = render_scheduled_session_message(msg, width) {
         return lines;
     }

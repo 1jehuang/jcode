@@ -674,6 +674,20 @@ impl crate::tui::TuiState for App {
         self.background_task_rows_ref()
     }
 
+    fn login_input_hint(&self) -> Option<&'static str> {
+        match self.pending_login.as_ref()? {
+            PendingLogin::Exchanging { .. } => {
+                Some("Login only: exchanging credentials · not sent to AI · please wait")
+            }
+            PendingLogin::OpenAiAccount { .. }
+            | PendingLogin::Gemini { .. }
+            | PendingLogin::Antigravity { .. } => {
+                Some("Login only: paste callback URL · not sent to AI · /cancel")
+            }
+            _ => Some("Login only: authentication input · not sent to AI · /cancel"),
+        }
+    }
+
     fn input(&self) -> &str {
         &self.input
     }

@@ -288,6 +288,9 @@ pub(crate) fn dim_command_color(color: Option<Color>) -> Color {
 }
 
 pub(super) fn input_hint_line_height(app: &dyn TuiState) -> u16 {
+    if app.login_input_hint().is_some() {
+        return 1;
+    }
     // Command suggestions render as an overlay (see
     // `draw_command_suggestions_overlay`) and intentionally reserve no layout
     // height: opening the palette must not move the transcript or footer.
@@ -309,6 +312,9 @@ pub(super) fn send_mode_reserved_width(app: &dyn TuiState) -> usize {
 }
 
 pub(super) fn input_prompt(app: &dyn TuiState) -> (&'static str, Color) {
+    if app.login_input_hint().is_some() {
+        return (" login> ", accent_color());
+    }
     let mode = composer_mode(app.input(), app.is_remote_mode());
     if mode.is_shell() {
         ("$ ", shell_mode_color())
@@ -2396,7 +2402,14 @@ pub(super) fn draw_input(
     let mut lines: Vec<Line> = Vec::new();
     let mut hint_shown = false;
     let mut hint_line: Option<String> = None;
-    if has_suggestions {
+    if let Some(hint) = app.login_input_hint() {
+        hint_shown = true;
+        hint_line = Some(hint.to_string());
+        lines.push(Line::from(Span::styled(
+            hint,
+            Style::default().fg(accent_color()),
+        )));
+    } else if has_suggestions {
         // Overlay pass owns the palette rows; no inline hint line competes
         // with it.
     } else if let Some(shell_hint) = shell_mode_hint(mode) {
