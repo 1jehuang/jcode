@@ -1,3 +1,77 @@
+#[test]
+fn cache_accounting_claude_reuses_written_boundary_not_uncached_tail() {
+    let mut app = create_test_app();
+    let first = vec![Message::user("first")];
+    app.begin_kv_cache_request(&first, &[], "system", "");
+    app.streaming.streaming_input_tokens = 2_482;
+    app.streaming.streaming_cache_read_tokens = Some(615_629);
+    app.streaming.streaming_cache_creation_tokens = Some(1_375);
+    assert!(app.record_completed_stream_cache_usage());
+    assert_eq!(app.token_accounting.last_cache_prompt_tokens, Some(619_486));
+    assert_eq!(app.token_accounting.cache_next_optimal_input_tokens, Some(617_004));
+    assert_eq!(app.kv_cache.kv_cache_baseline.as_ref().unwrap().input_tokens, 617_004);
+
+    let mut second = first;
+    second.push(Message::user("next"));
+    app.begin_kv_cache_request(&second, &[], "system", "");
+    app.kv_cache.current_api_usage_recorded = false;
+    app.streaming.streaming_input_tokens = 283;
+    app.streaming.streaming_cache_read_tokens = Some(617_004);
+    app.streaming.streaming_cache_creation_tokens = Some(3_248);
+    assert!(app.record_completed_stream_cache_usage());
+    assert!(app.kv_cache.kv_cache_miss_samples.is_empty());
+    assert_eq!(app.token_accounting.last_cache_optimal_input_tokens, Some(617_004));
+
+    second.push(Message::user("third"));
+    app.begin_kv_cache_request(&second, &[], "system", "");
+    app.kv_cache.current_api_usage_recorded = false;
+    app.streaming.streaming_cache_read_tokens = Some(620_252 - 1_782);
+    app.streaming.streaming_cache_creation_tokens = Some(2_000);
+    assert!(app.record_completed_stream_cache_usage());
+    assert_eq!(app.kv_cache.kv_cache_miss_samples.len(), 1);
+    assert_eq!(app.kv_cache.kv_cache_miss_samples[0].missed_tokens, 1_782);
+    assert_eq!(app.kv_cache.kv_cache_miss_samples[0].reason, KvCacheMissReason::LowRead);
+}
+
+#[test]
+fn cache_accounting_remote_late_claude_usage_keeps_reusable_boundary() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.runtime_mode = AppRuntimeMode::RemoteClient;
+    app.remote_provider_name = Some("Claude".to_string());
+    app.remote_provider_model = Some("claude-opus-5-5".to_string());
+    for write in [1_000, 1_375] {
+        app.handle_server_event(crate::protocol::ServerEvent::TokenUsage {
+            input: 2_482, output: 100,
+            cache_read_input: Some(615_629), cache_creation_input: Some(write),
+        }, &mut remote);
+    }
+    assert_eq!(app.kv_cache.kv_cache_baseline.as_ref().unwrap().input_tokens, 617_004);
+    assert_eq!(app.token_accounting.cache_next_optimal_input_tokens, Some(617_004));
+    assert_eq!(app.last_turn_input_tokens, Some(619_486));
+    // A late correction after compaction must not resurrect an old expectation.
+    app.handle_compaction_event(crate::compaction::CompactionEvent {
+        trigger: "semantic".to_string(),
+        pre_tokens: Some(619_486),
+        post_tokens: Some(20_000),
+        tokens_saved: None,
+        duration_ms: None,
+        messages_dropped: None,
+        messages_compacted: Some(10),
+        summary_chars: Some(100),
+        active_messages: Some(3),
+    });
+    app.handle_server_event(crate::protocol::ServerEvent::TokenUsage {
+        input: 2_482, output: 101,
+        cache_read_input: Some(615_629), cache_creation_input: Some(1_375),
+    }, &mut remote);
+    assert!(app.kv_cache.kv_cache_baseline.is_none());
+    assert!(app.token_accounting.cache_next_optimal_input_tokens.is_none());
+}
+
 fn cache_accounting_openai_app() -> App {
     let mut app = create_test_app();
     app.is_remote = true;
