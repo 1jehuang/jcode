@@ -1,5 +1,13 @@
 use super::*;
 
+/// Shared fresh-session route choice; see `select_fresh_session_pool_route`.
+#[derive(Clone)]
+struct FreshRouteMemo {
+    key: (String, u64, u64, crate::auth::account_pool::AccountPool),
+    at: std::time::Instant,
+    spec: Option<String>,
+}
+
 impl MultiProvider {
     pub(super) fn spawn_post_auth_model_refresh(
         &self,
@@ -392,7 +400,60 @@ impl MultiProvider {
         if self.initial_provider.is_some() {
             return;
         }
-        let pool = crate::auth::account_pool::AccountPool::load();
+        // A reconnect burst forks one provider per client. Each choice reads every
+        // saved credential and pool approval across the whole route catalog, so 40
+        // parallel forks took seconds. Identical forks pick the same route, so share
+        // one recent decision. The key covers the inputs that matter (pre-selection
+        // provider state, auth and catalog generations). A short TTL bounds how stale
+        // quota and cooldown state can get.
+        const FRESH_ROUTE_MEMO_TTL: std::time::Duration = std::time::Duration::from_secs(3);
+        static FRESH_ROUTE_MEMO: Mutex<Option<FreshRouteMemo>> = Mutex::new(None);
+        static FRESH_ROUTE_BUILD_LOCK: Mutex<()> = Mutex::new(());
+        let key = (
+            self.routes_memo_key(),
+            pricing::auth_pricing_generation(),
+            catalog_generation(),
+            crate::auth::account_pool::AccountPool::load(),
+        );
+        let cached = || {
+            FRESH_ROUTE_MEMO
+                .lock()
+                .ok()
+                .and_then(|memo| memo.clone())
+                .filter(|memo| memo.key == key && memo.at.elapsed() < FRESH_ROUTE_MEMO_TTL)
+        };
+        let apply = |memo: FreshRouteMemo| match memo.spec {
+            None => true,
+            Some(spec) => self.set_model(&spec).is_ok(),
+        };
+        if let Some(memo) = cached()
+            && apply(memo)
+        {
+            return;
+        }
+        let _guard = FRESH_ROUTE_BUILD_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(memo) = cached()
+            && apply(memo)
+        {
+            return;
+        }
+        let spec = self.compute_fresh_session_pool_route(key.3.clone());
+        if let Ok(mut memo) = FRESH_ROUTE_MEMO.lock() {
+            *memo = Some(FreshRouteMemo {
+                key,
+                at: std::time::Instant::now(),
+                spec,
+            });
+        }
+    }
+
+    /// Bind the first ready pool route and return its spec (None if nothing bound).
+    fn compute_fresh_session_pool_route(
+        &self,
+        pool: crate::auth::account_pool::AccountPool,
+    ) -> Option<String> {
         let routes: Vec<_> = self
             .model_routes()
             .into_iter()
@@ -481,11 +542,12 @@ impl MultiProvider {
                 });
                 for (_, _, spec, _) in candidates {
                     if self.set_model(spec).is_ok() {
-                        return;
+                        return Some(spec.clone());
                     }
                 }
             }
         }
+        None
     }
 
     pub(super) fn spawn_openai_catalog_refresh_if_needed(&self) {
