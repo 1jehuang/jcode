@@ -718,10 +718,14 @@ pub(super) async fn handle_client(
         tokio::spawn(async move {
             while let Some(req) = decision_req_rx.recv().await {
                 let request_id = req.request_id.clone();
-                decision_responses
-                    .lock()
-                    .await
-                    .insert(request_id.clone(), req.response_tx);
+                {
+                    let mut responses = decision_responses.lock().await;
+                    // Prune entries whose ask_user wait already ended (timeout
+                    // auto-pick or cancelled turn dropped the receiver) so the
+                    // map cannot accumulate dead senders across turns.
+                    responses.retain(|_, tx| !tx.is_closed());
+                    responses.insert(request_id.clone(), req.response_tx);
+                }
                 let _ = client_event_tx.send(ServerEvent::DecisionRequest {
                     request_id,
                     question: req.question,
@@ -789,6 +793,14 @@ pub(super) async fn handle_client(
                     processing_message_id = None;
                     processing_task = None;
                     client_is_processing = false;
+                    // The turn ended: any ask_user still holding a map entry
+                    // resolved on its own (timeout auto-pick) or was dropped
+                    // mid-cancel. Drop dead senders now instead of waiting for
+                    // the next ask_user to prune them.
+                    decision_responses
+                        .lock()
+                        .await
+                        .retain(|_, tx| !tx.is_closed());
                     {
                         let mut connections = client_connections.write().await;
                         if let Some(info) = connections.get_mut(&client_connection_id) {

@@ -3196,6 +3196,19 @@ pub(in crate::tui::app) fn handle_server_event(
             options,
             tool_call_id: _,
         } => {
+            if !app.is_processing {
+                // The turn that raised this question already ended on this
+                // client (cancel, timeout auto-pick, or fatal error). The
+                // event only arrives now because decision forwarding runs
+                // through its own task, which can lag the turn-end event.
+                // The server-side reply channel is gone with the turn, so
+                // showing the chooser would lock the input box on a question
+                // whose answer goes nowhere.
+                crate::logging::warn(&format!(
+                    "Ignoring stale DecisionRequest {request_id}: the turn already stopped"
+                ));
+                return true;
+            }
             let options: Vec<(String, Option<String>)> = options
                 .into_iter()
                 .map(|opt| (opt.label, opt.detail))

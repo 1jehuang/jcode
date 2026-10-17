@@ -1314,7 +1314,6 @@ fn queue_for_reconnect_expands_and_consumes_file_chips() {
         app.input.is_empty(),
         "composer input must be consumed by the queue path"
     );
-||||||| parent of a033020ea (feat(decisions): ask_user tool with inline TUI chooser and selected-option display)
 }
 
 #[test]
@@ -1397,4 +1396,51 @@ fn ask_user_tool_done_for_a_different_call_keeps_the_chooser() {
     );
 
     assert!(app.pending_decision.is_some());
+}
+
+fn decision_request_event() -> ServerEvent {
+    ServerEvent::DecisionRequest {
+        request_id: "decision-call-1".to_string(),
+        question: "Deploy now?".to_string(),
+        options: vec![
+            crate::protocol::DecisionOption {
+                label: "Yes".to_string(),
+                detail: None,
+            },
+            crate::protocol::DecisionOption {
+                label: "No".to_string(),
+                detail: None,
+            },
+        ],
+        tool_call_id: "call-1".to_string(),
+    }
+}
+
+#[test]
+fn decision_request_opens_the_chooser_while_the_turn_runs() {
+    let mut app = create_test_app();
+    app.is_processing = true;
+    let mut remote = crate::tui::backend::ReplayRemoteState::default();
+
+    handle_server_event(&mut app, decision_request_event(), &mut remote);
+
+    assert!(
+        app.pending_decision.is_some(),
+        "a live turn's DecisionRequest must open the chooser"
+    );
+}
+
+#[test]
+fn decision_request_after_the_turn_stopped_is_ignored() {
+    let mut app = create_test_app();
+    app.is_processing = false;
+    let mut remote = crate::tui::backend::ReplayRemoteState::default();
+
+    handle_server_event(&mut app, decision_request_event(), &mut remote);
+
+    assert!(
+        app.pending_decision.is_none(),
+        "a stale DecisionRequest must not open the chooser once the turn stopped"
+    );
+    assert!(!app.display_messages().iter().any(|m| m.content.contains("Deploy now?")));
 }
