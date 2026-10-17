@@ -909,7 +909,34 @@ async fn send_history_with_guard(
     };
 
     let build_start = Instant::now();
-    let history_event = super::run_blocking_io(|| ServerEvent::History {
+    let (agent_model_overrides, server_has_update, reload_recovery, applets, build_parts) =
+        super::run_blocking_io(|| {
+            let t = Instant::now();
+            let overrides = crate::session::Session::read_agent_model_overrides(session_id);
+            let overrides_ms = t.elapsed().as_millis();
+            let t = Instant::now();
+            let has_update = server_has_newer_binary();
+            let update_ms = t.elapsed().as_millis();
+            let t = Instant::now();
+            let recovery =
+                history_reload_recovery_snapshot_with(session_id, was_interrupted, || {
+                    inferred_interrupted.unwrap_or(false)
+                });
+            let recovery_ms = t.elapsed().as_millis();
+            let t = Instant::now();
+            let applets = crate::applets::snapshot_for_session(session_id).unwrap_or_default();
+            let applets_ms = t.elapsed().as_millis();
+            (
+                overrides,
+                has_update,
+                recovery,
+                applets,
+                format!(
+                    "overrides={overrides_ms}ms, update_check={update_ms}ms, recovery={recovery_ms}ms, applets={applets_ms}ms"
+                ),
+            )
+        });
+    let history_event = ServerEvent::History {
         id,
         session_id: session_id.to_string(),
         messages,
@@ -917,7 +944,7 @@ async fn send_history_with_guard(
         provider_name: Some(provider_name),
         provider_model: Some(provider_model),
         subagent_model,
-        agent_model_overrides: crate::session::Session::read_agent_model_overrides(session_id),
+        agent_model_overrides,
         autoreview_enabled,
         autojudge_enabled,
         available_models,
@@ -932,11 +959,9 @@ async fn send_history_with_guard(
         server_version: Some(jcode_build_meta::version().to_string()),
         server_name: Some(server_name.to_string()),
         server_icon: Some(server_icon.to_string()),
-        server_has_update: Some(server_has_newer_binary()),
+        server_has_update: Some(server_has_update),
         was_interrupted,
-        reload_recovery: history_reload_recovery_snapshot_with(session_id, was_interrupted, || {
-            inferred_interrupted.unwrap_or(false)
-        }),
+        reload_recovery,
         connection_type,
         status_detail,
         upstream_provider,
@@ -947,8 +972,8 @@ async fn send_history_with_guard(
         compaction_mode,
         activity,
         side_panel,
-        applets: crate::applets::snapshot_for_session(session_id).unwrap_or_default(),
-    });
+        applets,
+    };
     let build_ms = build_start.elapsed().as_millis();
     let encode_start = Instant::now();
     let json = encode_event(&history_event);
@@ -969,10 +994,11 @@ async fn send_history_with_guard(
     let write_ms = write_start.elapsed().as_millis();
 
     crate::logging::info(&format!(
-        "[TIMING] send_history write: session={}, bytes={}, build={}ms, encode={}ms, writer_lock={}ms, write={}ms, total={}ms",
+        "[TIMING] send_history write: session={}, bytes={}, build={}ms ({}), encode={}ms, writer_lock={}ms, write={}ms, total={}ms",
         session_id,
         json_len,
         build_ms,
+        build_parts,
         encode_ms,
         writer_lock_ms,
         write_ms,
