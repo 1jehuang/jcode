@@ -917,3 +917,85 @@ path. The local test proves the bridge works; the real deploy
 needs the vendor allow-list. The 4 deliverables shipped today
 are the missing pieces between "decided to use mcp-remote" (§E)
 and "real bridge live".
+
+## 25. Squash-merge to master (2026-10-17T07:48Z)
+
+Operator signal "go" at 2026-10-17T07:39Z triggered the squash-merge
+of `chore/xirp-custom-harness-discovery-20261014` to `master` using
+the canonical harness-compliant path (per AGENTS.md, the
+`gh pr merge` deferral forces the local squash-merge flow on
+single-owner repos):
+
+```
+git -c merge.ff=true merge --squash chore/xirp-custom-harness-discovery-20261014
+git commit -m "..."   # ledger trailers + subagent callout
+git push origin master
+```
+
+**SHA-equivalence confirmed:** PR 103's 16 files = squash commit
+`79f91d7e5`'s 16 files (byte-equal file set; diff is empty).
+
+**PR 103 closed** at 2026-10-17T07:48:49Z with a comment citing the
+superseding SHA. State = CLOSED, mergedAt = null (correct: this was
+a local squash, not a GitHub merge button).
+
+**Also carried in the push:** the pre-existing local commit
+`7fdbe2f6c fix(update): resolve #104 three blockers (PR #113)`,
+which had been sitting on local master ahead of origin (it was a
+fast-forward). Pushed in the same `git push` because the squash
+was committed on top of it.
+
+**Branch preserved:** `chore/xirp-custom-harness-discovery-20261014`
+remains at `ceba3e297` in immutable history, with all 64 atomic
+commits. Future agents can `git diff ceba3e297 79f91d7e5` to
+reconstruct the squash if needed (the diff is empty — the squash
+commit's tree is identical to the branch's tip).
+
+**Pre-merge cleanup performed (one-off, NOT expected on a clean
+repo):** the main repo at
+`/Users/kooshapari/CodeProjects/Phenotype/repos/jcode` had a leftover
+unmerged-state from a prior abandoned merge of
+`origin/fix/pr94-three-blockers` into master, with conflict markers
+in `crates/jcode-app-core/src/update.rs` and `update_product.rs`.
+This was not the work of this session; it predated the squash-merge
+attempt. Cleared via:
+
+```
+git restore --staged crates/jcode-app-core/src/update_product.rs
+git checkout HEAD -- crates/jcode-app-core/src/update.rs crates/jcode-app-core/src/update_product.rs
+```
+
+The conflict-side files had been the upstream PR #113's content
+(already picked up cleanly in commit `7fdbe2f6c`); the `--ours`
+resolution was safe. No information loss — the `fix/pr94-three-blockers`
+branch is preserved at `9f4906c21` in immutable history.
+
+**Master state post-merge:**
+
+| Commit | Description |
+|--------|-------------|
+| `79f91d7e5` | docs(portal): record XJ-* discovery + audit-correction arc (squash-merge) |
+| `7fdbe2f6c` | fix(update): resolve #104 three blockers (PR #113) |
+| `6cf71ed4e` | fix(kcode): isolate updates and storage; restore configured models (#98) [origin/master before push] |
+
+**Why this matters:** all 5 subagent findings, the §22 closed-loop
+audit, the XJ-07 spec, the XJ-03 bridge deliverables, the §19.1
+vendor-channel investigation, and the pr-67-reopen-decision
+narrative are now on `master` as a single atomic commit. The work
+is no longer a feature-branch proposal — it is the canonical state
+of the KCode fork's portal/Xirp work.
+
+**Next operator decisions (in priority order):**
+
+1. **XJ-03 real deploy** — 3 conditions in §24 table. Block 1
+   (CIMD Worker health) is operator-checkable.
+2. **Vendor contact** — send the draft in
+   `vendor-question-draft.md` via personal/internal Spotify channel
+   (no public contact exists).
+3. **XJ-07 implementation** — bounded, Jcode-side, testable. Ready
+   to dispatch as a fresh subagent batch.
+4. **PR #25 / #26** — orphan issue link flagged in §22, NOT edited.
+   Operator decision needed (pre-fork upstream? planned issue? typo?).
+5. **Optional Jcode-fork body-scrub** — apply the same fix to Jcode
+   fork PRs #64, #67, #75 if a consistent record is desired
+   cross-fork.
