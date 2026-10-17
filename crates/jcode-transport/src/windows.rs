@@ -67,30 +67,14 @@ impl Listener {
     }
 
     pub async fn accept(&mut self) -> io::Result<(Stream, PipeAddr)> {
-        loop {
-            match self.current_server.connect().await {
-                Ok(()) => {
-                    let connected = std::mem::replace(
-                        &mut self.current_server,
-                        ServerOptions::new().create(&self.pipe_name)?,
-                    );
-                    return Ok((Stream::Server(connected), PipeAddr));
-                }
-                Err(error)
-                    if error.raw_os_error()
-                        == Some(windows_sys::Win32::Foundation::ERROR_NO_DATA as i32) =>
-                {
-                    // A readiness probe can open and close this instance before
-                    // accept is polled. Windows then reports ERROR_NO_DATA (232),
-                    // not a new connection. Retire that instance and keep serving:
-                    // propagating the error would terminate the daemon/bridge.
-                    // Create the replacement before dropping the old handle so
-                    // the pipe name remains owned throughout the transition.
-                    self.current_server = ServerOptions::new().create(&self.pipe_name)?;
-                }
-                Err(error) => return Err(error),
-            }
-        }
+        self.current_server.connect().await?;
+
+        let connected = std::mem::replace(
+            &mut self.current_server,
+            ServerOptions::new().create(&self.pipe_name)?,
+        );
+
+        Ok((Stream::Server(connected), PipeAddr))
     }
 }
 
@@ -560,14 +544,20 @@ mod tests {
                 is_socket_path(&path),
                 "probe must open the waiting instance"
             );
-            // Prove this is the reported failure, rather than merely hoping to
-            // win a scheduling race. ConnectNamedPipe is sticky until reset.
-            let error = listener.current_server.connect().await.unwrap_err();
-            assert_eq!(
-                error.raw_os_error(),
-                Some(windows_sys::Win32::Foundation::ERROR_NO_DATA as i32),
-                "closed pre-accept probe must reproduce Windows error 232"
+            // Mio treats ERROR_NO_DATA during ConnectNamedPipe as an accepted
+            // but already closed stream. Consume that probe just as the server
+            // does, then prove a real client can still exchange data.
+            let (mut probe, _) = listener.accept().await.expect("accept closed probe");
+            let mut byte = [0];
+            let read =
+                tokio::time::timeout(std::time::Duration::from_secs(5), probe.read(&mut byte))
+                    .await
+                    .expect("closed probe read must not hang");
+            assert!(
+                matches!(read, Ok(0)) || read.is_err_and(|e| e.kind() == io::ErrorKind::BrokenPipe),
+                "closed readiness probe should report EOF or broken pipe"
             );
+            drop(probe);
 
             let exchange = async {
                 let server = async {
