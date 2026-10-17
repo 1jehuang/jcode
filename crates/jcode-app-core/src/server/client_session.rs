@@ -1515,7 +1515,7 @@ pub(super) async fn handle_resume_session(
             server_icon,
             None,
             supports_pdf_panels,
-            None,
+            history_base,
         )
         .await?;
         let _ = client_event_tx.send(ServerEvent::Done { id });
@@ -1884,7 +1884,7 @@ pub(super) async fn handle_resume_session(
                 server_icon,
                 Some(was_interrupted),
                 supports_pdf_panels,
-                None,
+                history_base,
             )
             .await;
             persist_restored().await;
