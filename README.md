@@ -15,8 +15,7 @@
 
 <p>
   <strong>High-performance coding agents.</strong><br>
-  Run dozens of agents in parallel without melting your machine.<br>
-  More agents, less RAM, no lag.
+  Run dozens of agents in parallel without melting your machine. More agents, less RAM, no lag.
 </p>
 
 [![Last Commit](https://badgen.net/github/last-commit/1jehuang/jcode/master?icon=github)](https://github.com/1jehuang/jcode/commits/master)
