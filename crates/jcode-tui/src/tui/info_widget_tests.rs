@@ -548,6 +548,7 @@ fn usage_limit_reached_defaults_to_false() {
 }
 
 fn assert_usage_limit_warning(usage: UsageInfo) {
+    assert_eq!(usage.max_usage_pct(), 100);
     let data = InfoWidgetData {
         usage_info: Some(usage.clone()),
         ..Default::default()

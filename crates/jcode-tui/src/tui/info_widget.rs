@@ -504,8 +504,11 @@ impl CacheHitInfo {
 }
 
 impl UsageInfo {
-    /// Return the highest usage percentage across all limit windows (0-100).
+    /// Return the highest usage percentage, treating a rejected request as exhausted.
     pub fn max_usage_pct(&self) -> u8 {
+        if self.limit_reached {
+            return 100;
+        }
         let five_hr = (self.five_hour * 100.0).round().clamp(0.0, 100.0) as u8;
         let seven_day = (self.seven_day * 100.0).round().clamp(0.0, 100.0) as u8;
         let spark = self
