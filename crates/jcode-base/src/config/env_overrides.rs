@@ -807,6 +807,12 @@ impl Config {
             }
         }
 
+        if let Ok(v) = std::env::var("JCODE_HIBERNATION_IDLE_SECS") {
+            if let Ok(seconds) = v.trim().parse::<u64>() {
+                self.session.hibernation_idle_secs = seconds;
+            }
+        }
+
         // Power management
         if let Ok(v) = std::env::var("JCODE_PREVENT_SLEEP_WHILE_STREAMING") {
             if let Some(parsed) = parse_env_bool(&v) {
