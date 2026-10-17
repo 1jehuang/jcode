@@ -85,7 +85,7 @@ Swarm workers run headless, so this is the number that matters when you fan out 
 
 </div>
 
-Each session completes 5 real model turns with tool calls, then total PSS of every process is measured. Reproduce with `python3 scripts/bench_headless_memory.py`.
+Each session completes 5 real model turns with tool calls, then total PSS of every process is measured. Reproduce with `python3 scripts/bench_headless_memory.py --tools jcode claude codex opencode pi`.
 
 ### Time to first input
 
