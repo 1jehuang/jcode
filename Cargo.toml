@@ -1,6 +1,6 @@
 [package]
-name = "jcode"
-version = "0.85.1-k1.1.1"
+name = "kcode"
+version = "0.93.0-k0.1.0"
 description = "Possibly the greatest coding agent ever built — blazing-fast TUI, multi-model, swarm coordination, 30+ tools"
 edition = "2024"
 autobins = false
@@ -47,6 +47,7 @@ members = [
     "crates/jcode-setup-hints",
     "crates/jcode-storage",
     "crates/jcode-side-panel-types",
+    "crates/jcode-applet-types",
     "crates/jcode-azure-auth",
     "crates/jcode-notify-email",
     "crates/jcode-provider-metadata",
@@ -64,7 +65,6 @@ members = [
     "crates/jcode-provider-cursor-runtime",
     "crates/jcode-provider-antigravity-runtime",
     "crates/jcode-provider-copilot-runtime",
-    "crates/jcode-provider-claude-cli-runtime",
     "crates/jcode-provider-openrouter-runtime",
     "crates/jcode-provider-anthropic-runtime",
     "crates/jcode-provider-openai-runtime",
@@ -79,6 +79,7 @@ members = [
     "crates/jcode-tui-mermaid",
     "crates/jcode-task-types",
     "crates/jcode-transport",
+    "crates/jcode-codemode",
     "crates/jcode-tool-core",
     "crates/jcode-tool-search",
     "crates/jcode-tool-types",
@@ -108,7 +109,7 @@ name = "jcode"
 path = "src/lib.rs"
 
 [[bin]]
-name = "jcode"
+name = "kcode"
 path = "src/main.rs"
 
 [[bin]]
@@ -116,7 +117,7 @@ name = "test_api"
 path = "src/bin/test_api.rs"
 
 [[bin]]
-name = "jcode-harness"
+name = "kcode-harness"
 path = "src/bin/harness.rs"
 
 [[bin]]
@@ -209,7 +210,6 @@ jcode-provider-gemini-runtime = { path = "crates/jcode-provider-gemini-runtime" 
 jcode-provider-cursor-runtime = { path = "crates/jcode-provider-cursor-runtime" }
 jcode-provider-antigravity-runtime = { path = "crates/jcode-provider-antigravity-runtime" }
 jcode-provider-copilot-runtime = { path = "crates/jcode-provider-copilot-runtime" }
-jcode-provider-claude-cli-runtime = { path = "crates/jcode-provider-claude-cli-runtime" }
 jcode-provider-openrouter-runtime = { path = "crates/jcode-provider-openrouter-runtime" }
 jcode-provider-anthropic-runtime = { path = "crates/jcode-provider-anthropic-runtime" }
 jcode-provider-openai-runtime = { path = "crates/jcode-provider-openai-runtime" }
@@ -222,11 +222,9 @@ jcode-selfdev-types = { path = "crates/jcode-selfdev-types" }
 tempfile = "3"
 
 [features]
-# Include local ONNX/tokenizer embeddings in default builds so memory recall,
-# semantic retrieval, and embedding-backed features work out of the box.
-# Use `JCODE_DEV_FEATURE_PROFILE=minimal` for compile-speed probes that need
-# to skip optional default feature stacks.
-default = ["pdf", "embeddings", "bedrock"]
+# Memory recall uses Jev Decisions and needs no local inference stack.
+# Keep embeddings opt-in for historical benchmarks/debugging only.
+default = ["pdf", "bedrock"]
 dev-bins = ["jcode-tui/dev-bins"]
 jemalloc = [
     "dep:tikv-jemallocator",

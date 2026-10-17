@@ -12,7 +12,7 @@ use std::time::SystemTime;
 
 /// Get the jcode repository directory
 pub fn get_repo_dir() -> Option<PathBuf> {
-    if let Ok(path) = std::env::var("JCODE_REPO_DIR") {
+    if let Ok(path) = std::env::var("KCODE_REPO_DIR") {
         let path = PathBuf::from(path);
         if is_jcode_repo(&path) {
             return Some(path);
@@ -62,12 +62,12 @@ pub fn find_repo_in_ancestors(start: &Path) -> Option<PathBuf> {
 }
 
 pub fn binary_stem() -> &'static str {
-    "jcode"
+    "kcode"
 }
 
 pub fn binary_name() -> &'static str {
     if cfg!(windows) {
-        "jcode.exe"
+        "kcode.exe"
     } else {
         binary_stem()
     }
@@ -184,8 +184,8 @@ fn selfdev_build_command_for_target_on_platform(
         explicit => explicit,
     };
     let specs = match target {
-        SelfDevBuildTarget::Tui => vec![("jcode", "jcode")],
-        SelfDevBuildTarget::All | SelfDevBuildTarget::Auto => vec![("jcode", "jcode")],
+        SelfDevBuildTarget::Tui => vec![("kcode", "kcode")],
+        SelfDevBuildTarget::All | SelfDevBuildTarget::Auto => vec![("kcode", "kcode")],
     };
     let wrapper = repo_dir.join("scripts").join("dev_cargo.sh");
     // `bash` on Windows may resolve to WSL, which cannot use the native Rust
@@ -361,25 +361,27 @@ fn non_empty_env_path(name: &str) -> Option<PathBuf> {
 /// Directory for the single launcher path users execute from PATH.
 ///
 /// Defaults to `~/.local/bin` on Unix, `%LOCALAPPDATA%\jcode\bin` on Windows.
-/// Overridable with `JCODE_INSTALL_DIR`.
+/// Overridable with `KCODE_INSTALL_DIR`.
 pub fn launcher_dir() -> Result<PathBuf> {
-    if let Some(custom) = non_empty_env_path("JCODE_INSTALL_DIR") {
+    if let Some(custom) = non_empty_env_path("KCODE_INSTALL_DIR") {
+        storage::product_paths::require_kcode_path(&custom)?;
         return Ok(custom);
     }
 
-    if let Some(sandbox_home) = non_empty_env_path("JCODE_HOME") {
+    if let Some(sandbox_home) = non_empty_env_path("KCODE_HOME") {
+        storage::product_paths::require_kcode_path(&sandbox_home)?;
         return Ok(sandbox_home.join("bin"));
     }
 
     #[cfg(windows)]
     {
         if let Ok(local) = std::env::var("LOCALAPPDATA") {
-            return Ok(PathBuf::from(local).join("jcode").join("bin"));
+            return Ok(PathBuf::from(local).join("kcode").join("bin"));
         }
         Ok(home_dir()?
             .join("AppData")
             .join("Local")
-            .join("jcode")
+            .join("kcode")
             .join("bin"))
     }
     #[cfg(not(windows))]
@@ -390,7 +392,9 @@ pub fn launcher_dir() -> Result<PathBuf> {
 
 /// Path to the launcher binary (`~/.local/bin/jcode` by default).
 pub fn launcher_binary_path() -> Result<PathBuf> {
-    Ok(launcher_dir()?.join(binary_name()))
+    let path = launcher_dir()?.join(binary_name());
+    storage::product_paths::require_kcode_path(&path)?;
+    Ok(path)
 }
 
 fn update_launcher_symlink(target: &Path) -> Result<PathBuf> {
@@ -597,7 +601,7 @@ pub fn preferred_reload_candidate(is_selfdev_session: bool) -> Option<(PathBuf, 
 
 /// Check if a directory is the jcode repository
 pub fn is_jcode_repo(dir: &Path) -> bool {
-    // Check for Cargo.toml with name = "jcode"
+    // Check for Cargo.toml with name = "kcode"
     let cargo_toml = dir.join("Cargo.toml");
     if !cargo_toml.exists() {
         return false;
@@ -610,7 +614,7 @@ pub fn is_jcode_repo(dir: &Path) -> bool {
 
     // Read Cargo.toml and check package name
     if let Ok(content) = std::fs::read_to_string(&cargo_toml)
-        && content.contains("name = \"jcode\"")
+        && content.contains("name = \"kcode\"")
     {
         return true;
     }
@@ -632,7 +636,7 @@ mod tests {
         }
         std::fs::write(
             temp.path().join("Cargo.toml"),
-            "[package]\nname = \"jcode\"\nversion = \"0.1.0\"\n",
+            "[package]\nname = \"kcode\"\nversion = \"0.1.0\"\n",
         )
         .expect("Cargo.toml");
         temp
@@ -656,8 +660,8 @@ mod tests {
     fn every_build_target_builds_its_own_package() {
         let repo = repo_fixture(false);
         let cases = [
-            (SelfDevBuildTarget::Tui, vec!["-p jcode "]),
-            (SelfDevBuildTarget::All, vec!["-p jcode "]),
+            (SelfDevBuildTarget::Tui, vec!["-p kcode "]),
+            (SelfDevBuildTarget::All, vec!["-p kcode "]),
         ];
         for (target, expected) in cases {
             let command = selfdev_build_command_for_target(repo.path(), target);
@@ -693,9 +697,9 @@ mod tests {
                 "--profile",
                 "selfdev",
                 "-p",
-                "jcode",
+                "kcode",
                 "--bin",
-                "jcode"
+                "kcode"
             ]
         );
         assert!(
@@ -743,9 +747,9 @@ mod tests {
                 "--profile",
                 "selfdev",
                 "-p",
-                "jcode",
+                "kcode",
                 "--bin",
-                "jcode",
+                "kcode",
             ]
         );
     }
@@ -795,7 +799,7 @@ mod tests {
                 "target name `{name}` parsed wrong"
             );
         }
-        for removed in ["desktop", "desktop2", "jcode-desktop2"] {
+        for removed in ["desktop", "desktop2", "kcode-desktop2"] {
             assert!(
                 SelfDevBuildTarget::parse(Some(removed)).is_err(),
                 "removed target `{removed}` must not remain available"
@@ -813,8 +817,8 @@ mod tests {
     /// Build a release-style install dir: `jcode` wrapper script + payload.
     fn release_install_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
         let temp = tempfile::TempDir::new().expect("temp install");
-        let wrapper = temp.path().join("jcode");
-        let payload = temp.path().join("jcode-linux-x86_64.bin");
+        let wrapper = temp.path().join("kcode");
+        let payload = temp.path().join("kcode-linux-x86_64.bin");
         std::fs::write(
             &wrapper,
             "#!/usr/bin/env sh\nexec ./jcode-linux-x86_64.bin \"$@\"\n",
@@ -839,7 +843,7 @@ mod tests {
         let (temp, wrapper, payload) = release_install_fixture();
         let channel_dir = temp.path().join("channel");
         std::fs::create_dir_all(&channel_dir).expect("channel dir");
-        let link = channel_dir.join("jcode");
+        let link = channel_dir.join("kcode");
         #[cfg(unix)]
         std::os::unix::fs::symlink(&wrapper, &link).expect("symlink");
         #[cfg(not(unix))]
@@ -855,9 +859,9 @@ mod tests {
         // A normal (non-wrapper) binary resolves to itself even with a sibling
         // `.bin` file present: it is too large / not a script.
         let temp = tempfile::TempDir::new().expect("temp install");
-        let binary = temp.path().join("jcode");
+        let binary = temp.path().join("kcode");
         std::fs::write(&binary, vec![0x7fu8; 8192]).expect("binary");
-        std::fs::write(temp.path().join("jcode-linux-x86_64.bin"), [0u8; 8]).expect("bin");
+        std::fs::write(temp.path().join("kcode-linux-x86_64.bin"), [0u8; 8]).expect("bin");
         assert_eq!(
             resolve_binary_payload(&binary),
             std::fs::canonicalize(&binary).expect("canonical binary")
@@ -867,7 +871,7 @@ mod tests {
     #[test]
     fn resolve_binary_payload_keeps_small_script_without_payload() {
         let temp = tempfile::TempDir::new().expect("temp install");
-        let script = temp.path().join("jcode");
+        let script = temp.path().join("kcode");
         std::fs::write(&script, "#!/usr/bin/env sh\nexec true\n").expect("script");
         assert_eq!(
             resolve_binary_payload(&script),
@@ -878,7 +882,7 @@ mod tests {
     #[test]
     fn resolve_binary_payload_refuses_ambiguous_payloads() {
         let (temp, wrapper, _payload) = release_install_fixture();
-        std::fs::write(temp.path().join("jcode-macos-aarch64.bin"), [0u8; 8]).expect("second bin");
+        std::fs::write(temp.path().join("kcode-macos-aarch64.bin"), [0u8; 8]).expect("second bin");
         assert_eq!(
             resolve_binary_payload(&wrapper),
             std::fs::canonicalize(&wrapper).expect("canonical wrapper")

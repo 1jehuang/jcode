@@ -80,6 +80,53 @@ fn detect_multiplexer_from_env() -> Multiplexer {
     )
 }
 
+/// Adjust a detected protocol for multiplexer limitations.
+///
+/// ratatui-image renders Kitty graphics exclusively through Unicode
+/// placeholders (`U=1` virtual placements). Zellij implements the Kitty
+/// graphics protocol but rejects `U=1` with `ENOTSUPPORTED`, so the image
+/// never appears and the reserved area renders blank. `KITTY_WINDOW_ID` leaks
+/// into Zellij panes from an outer kitty, and the stdio probe succeeds because
+/// Zellij answers Kitty queries, so both detection paths would pick Kitty.
+/// Fall back to halfblocks (Mermaid then shows its source) unless the user
+/// opts in with `KCODE_ZELLIJ_KITTY_IMAGES=1`, for Zellij builds that add
+/// placeholder support.
+pub(super) fn adjust_protocol_for_multiplexer(
+    protocol: ProtocolType,
+    multiplexer: Multiplexer,
+    zellij_kitty_opt_in: bool,
+) -> ProtocolType {
+    if protocol == ProtocolType::Kitty && multiplexer == Multiplexer::Zellij && !zellij_kitty_opt_in
+    {
+        ProtocolType::Halfblocks
+    } else {
+        protocol
+    }
+}
+
+fn zellij_kitty_images_opt_in() -> bool {
+    std::env::var("KCODE_ZELLIJ_KITTY_IMAGES")
+        .ok()
+        .as_deref()
+        .and_then(parse_env_bool)
+        .unwrap_or(false)
+}
+
+fn apply_multiplexer_protocol_limits(picker: &mut Picker, multiplexer: Multiplexer) {
+    let current = picker.protocol_type();
+    let adjusted =
+        adjust_protocol_for_multiplexer(current, multiplexer, zellij_kitty_images_opt_in());
+    if adjusted != current {
+        crate::log_info(&format!(
+            "Image protocol {:?} unusable inside {} (no Kitty unicode placeholder support); using {:?}. Set KCODE_ZELLIJ_KITTY_IMAGES=1 to override",
+            current,
+            multiplexer.label(),
+            adjusted
+        ));
+        picker.set_protocol_type(adjusted);
+    }
+}
+
 fn tmux_reports_native_sixel(sixel_support: &str, client_termfeatures: &str) -> bool {
     sixel_support.trim() == "1"
         && client_termfeatures
@@ -143,7 +190,7 @@ fn parse_env_bool(raw: &str) -> Option<bool> {
 
 /// Decide how to initialize the picker.
 ///
-/// * `probe_override` is the parsed value of `JCODE_MERMAID_PICKER_PROBE`
+/// * `probe_override` is the parsed value of `KCODE_MERMAID_PICKER_PROBE`
 ///   (`Some(true)`/`Some(false)` when set explicitly, `None` otherwise) and
 ///   always wins so users can force either behavior.
 /// * When the override is absent, startup stays on the environment-based fast
@@ -151,7 +198,7 @@ fn parse_env_bool(raw: &str) -> Option<bool> {
 ///   does not answer, which made an optional image capability dominate the TUI
 ///   critical path. Users behind multiplexers that hide the outer terminal can
 ///   still opt into the authoritative probe with
-///   `JCODE_MERMAID_PICKER_PROBE=1`.
+///   `KCODE_MERMAID_PICKER_PROBE=1`.
 pub(super) fn decide_picker_init_mode(
     probe_override: Option<bool>,
     _env_protocol: Option<ProtocolType>,
@@ -164,7 +211,7 @@ pub(super) fn decide_picker_init_mode(
     }
 }
 
-/// Parse only the explicit `JCODE_MERMAID_PICKER_PROBE` override into a mode,
+/// Parse only the explicit `KCODE_MERMAID_PICKER_PROBE` override into a mode,
 /// ignoring env/multiplexer detection. `Some(true)` probes; unset or any other
 /// value keeps the historical fast default. Used for the force-on/off path and
 /// as a focused unit-test seam.
@@ -211,11 +258,21 @@ pub(super) fn infer_protocol_from_env(
         // Real iTerm2 renders jcode's inline images incorrectly (corrupted
         // scrollback / broken layout), so treat it as having no usable image
         // protocol and fall back to Mermaid source text. Set
-        // JCODE_ITERM2_IMAGES=1 to opt back in.
+        // KCODE_ITERM2_IMAGES=1 to opt back in.
         if iterm2_images_opt_in() {
             return Some(ProtocolType::Iterm2);
         }
         return None;
+    }
+
+    // foot has built-in sixel support (since 1.2.0, no libsixel) and sets
+    // TERM=foot with no TERM_PROGRAM, so TERM is the signal. foot only
+    // advertises DA1 attribute 4 when sixel is enabled at runtime
+    // ([tweak].sixel=no) and compile time, so a disabled-sixel foot is still
+    // mis-detected here; KCODE_MERMAID_PICKER_PROBE=1 probes the real DA1 and
+    // overrides the protocol with the truthful answer.
+    if term.starts_with("foot") || term_program.contains("foot") {
+        return Some(ProtocolType::Sixel);
     }
 
     if term.contains("sixel") {
@@ -248,7 +305,7 @@ pub(super) fn real_iterm2_without_opt_in() -> bool {
 
 /// Whether the user explicitly opted iTerm2 image output back in.
 pub(super) fn iterm2_images_opt_in() -> bool {
-    std::env::var("JCODE_ITERM2_IMAGES")
+    std::env::var("KCODE_ITERM2_IMAGES")
         .ok()
         .as_deref()
         .and_then(parse_env_bool)
@@ -349,7 +406,7 @@ fn probe_picker() -> Picker {
 pub(crate) fn prewarm_svg_font_db_async() {
     SVG_FONT_DB_PREWARM_STARTED.get_or_init(|| {
         let _ = std::thread::Builder::new()
-            .name("jcode-mermaid-fontdb-prewarm".to_string())
+            .name("kcode-mermaid-fontdb-prewarm".to_string())
             .spawn(|| {
                 let _ = &*SVG_FONT_DB;
             });
@@ -358,7 +415,7 @@ pub(crate) fn prewarm_svg_font_db_async() {
 
 /// Initialize the global picker.
 /// By default jcode uses environment-based detection and never blocks startup
-/// on terminal capability responses. Set JCODE_MERMAID_PICKER_PROBE=1 to run an
+/// on terminal capability responses. Set KCODE_MERMAID_PICKER_PROBE=1 to run an
 /// authoritative stdio probe when a multiplexer masks the outer terminal, or
 /// =0 to explicitly retain the fast path. Cache eviction runs once before image
 /// rendering can begin so it cannot delete a file between materialization and
@@ -372,7 +429,7 @@ pub fn init_picker() {
             std::env::var("KITTY_WINDOW_ID").ok().as_deref(),
         );
         let multiplexer = detect_multiplexer_from_env();
-        let probe_override = std::env::var("JCODE_MERMAID_PICKER_PROBE")
+        let probe_override = std::env::var("KCODE_MERMAID_PICKER_PROBE")
             .ok()
             .as_deref()
             .and_then(parse_env_bool);
@@ -384,10 +441,12 @@ pub fn init_picker() {
             env_protocol,
             probe_override
         ));
-        match mode {
-            PickerInitMode::Fast => Some(fast_picker()),
-            PickerInitMode::Probe => Some(probe_picker()),
-        }
+        let mut picker = match mode {
+            PickerInitMode::Fast => fast_picker(),
+            PickerInitMode::Probe => probe_picker(),
+        };
+        apply_multiplexer_protocol_limits(&mut picker, multiplexer);
+        Some(picker)
     });
     // Note: the SVG font-DB prewarm is intentionally NOT triggered here.
     // init_picker() runs on every TUI startup, and the font load is only
@@ -683,7 +742,7 @@ mod tests {
         use image::{ImageBuffer, Rgba};
 
         let dir = std::env::temp_dir().join(format!(
-            "jcode-external-image-{}-{:?}",
+            "kcode-external-image-{}-{:?}",
             std::process::id(),
             std::thread::current().id()
         ));
@@ -728,7 +787,7 @@ mod tests {
     #[test]
     fn rediscovery_fails_when_the_external_image_file_is_gone() {
         let path = std::env::temp_dir().join(format!(
-            "jcode-missing-external-image-{}-{:?}.png",
+            "kcode-missing-external-image-{}-{:?}.png",
             std::process::id(),
             std::thread::current().id()
         ));
@@ -773,6 +832,15 @@ mod tests {
             infer_protocol_from_env(Some("xterm-sixel"), None, None, None),
             Some(ProtocolType::Sixel)
         );
+        assert_eq!(
+            infer_protocol_from_env(Some("foot"), Some("foot"), None, None),
+            Some(ProtocolType::Sixel)
+        );
+        // foot sets TERM=foot but no TERM_PROGRAM.
+        assert_eq!(
+            infer_protocol_from_env(Some("foot"), None, None, None),
+            Some(ProtocolType::Sixel)
+        );
     }
 
     #[test]
@@ -785,10 +853,6 @@ mod tests {
                 Some("stale-kitty-window")
             ),
             Some(ProtocolType::Iterm2)
-        );
-        assert_eq!(
-            infer_protocol_from_env(Some("foot"), Some("foot"), None, None),
-            None
         );
         assert_eq!(
             infer_protocol_from_env(Some("xterm-256color"), Some("konsole"), None, None),
@@ -875,6 +939,31 @@ mod tests {
         assert!(!tmux_reports_native_sixel("0", "sixel"));
         assert!(!tmux_reports_native_sixel("1", "256,clipboard,mouse"));
         assert!(!tmux_reports_native_sixel("1", "sixel-overwrite"));
+    }
+
+    #[test]
+    fn zellij_downgrades_kitty_placeholders_unless_opted_in() {
+        // Zellij rejects U=1 virtual placements, the only Kitty mode
+        // ratatui-image uses, so Kitty would render blank there.
+        assert_eq!(
+            adjust_protocol_for_multiplexer(ProtocolType::Kitty, Multiplexer::Zellij, false),
+            ProtocolType::Halfblocks
+        );
+        assert_eq!(
+            adjust_protocol_for_multiplexer(ProtocolType::Kitty, Multiplexer::Zellij, true),
+            ProtocolType::Kitty
+        );
+        // Zellij's Sixel passthrough and other multiplexers are untouched.
+        assert_eq!(
+            adjust_protocol_for_multiplexer(ProtocolType::Sixel, Multiplexer::Zellij, false),
+            ProtocolType::Sixel
+        );
+        for mux in [Multiplexer::None, Multiplexer::Tmux, Multiplexer::Herdr] {
+            assert_eq!(
+                adjust_protocol_for_multiplexer(ProtocolType::Kitty, mux, false),
+                ProtocolType::Kitty
+            );
+        }
     }
 
     #[test]

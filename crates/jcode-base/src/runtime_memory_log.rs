@@ -504,7 +504,7 @@ impl RuntimeMemoryLogController {
 }
 
 pub fn server_logging_enabled() -> bool {
-    match std::env::var("JCODE_RUNTIME_MEMORY_LOG") {
+    match std::env::var("KCODE_RUNTIME_MEMORY_LOG") {
         Ok(value) => !matches!(
             value.trim().to_ascii_lowercase().as_str(),
             "0" | "false" | "no" | "off"
@@ -514,28 +514,28 @@ pub fn server_logging_enabled() -> bool {
 }
 
 pub fn server_logging_config() -> RuntimeMemoryLogConfig {
-    let legacy_interval_secs = env_u64("JCODE_RUNTIME_MEMORY_LOG_INTERVAL_SECS");
-    let process_interval_secs = env_u64("JCODE_RUNTIME_MEMORY_LOG_PROCESS_INTERVAL_SECS")
+    let legacy_interval_secs = env_u64("KCODE_RUNTIME_MEMORY_LOG_INTERVAL_SECS");
+    let process_interval_secs = env_u64("KCODE_RUNTIME_MEMORY_LOG_PROCESS_INTERVAL_SECS")
         .or(legacy_interval_secs)
         .filter(|value| *value >= MIN_PROCESS_INTERVAL_SECS)
         .unwrap_or(DEFAULT_PROCESS_INTERVAL_SECS);
-    let attribution_interval_secs = env_u64("JCODE_RUNTIME_MEMORY_LOG_ATTRIBUTION_INTERVAL_SECS")
+    let attribution_interval_secs = env_u64("KCODE_RUNTIME_MEMORY_LOG_ATTRIBUTION_INTERVAL_SECS")
         .or_else(|| legacy_interval_secs.map(|value| value.saturating_mul(3)))
         .filter(|value| *value >= MIN_ATTRIBUTION_INTERVAL_SECS)
         .unwrap_or(DEFAULT_ATTRIBUTION_INTERVAL_SECS);
     let attribution_min_spacing_secs =
-        env_u64("JCODE_RUNTIME_MEMORY_LOG_ATTRIBUTION_MIN_SPACING_SECS")
+        env_u64("KCODE_RUNTIME_MEMORY_LOG_ATTRIBUTION_MIN_SPACING_SECS")
             .filter(|value| *value >= MIN_ATTRIBUTION_MIN_SPACING_SECS)
             .unwrap_or(DEFAULT_ATTRIBUTION_MIN_SPACING_SECS);
     let event_process_min_spacing_secs =
-        env_u64("JCODE_RUNTIME_MEMORY_LOG_EVENT_PROCESS_MIN_SPACING_SECS")
+        env_u64("KCODE_RUNTIME_MEMORY_LOG_EVENT_PROCESS_MIN_SPACING_SECS")
             .filter(|value| *value >= MIN_EVENT_PROCESS_MIN_SPACING_SECS)
             .unwrap_or(DEFAULT_EVENT_PROCESS_MIN_SPACING_SECS);
-    let pss_delta_threshold_bytes = env_u64("JCODE_RUNTIME_MEMORY_LOG_PSS_DELTA_THRESHOLD_MB")
+    let pss_delta_threshold_bytes = env_u64("KCODE_RUNTIME_MEMORY_LOG_PSS_DELTA_THRESHOLD_MB")
         .unwrap_or(DEFAULT_PSS_DELTA_THRESHOLD_MB)
         .saturating_mul(1024 * 1024);
     let attribution_json_delta_threshold_bytes =
-        env_u64("JCODE_RUNTIME_MEMORY_LOG_ATTRIBUTION_JSON_DELTA_THRESHOLD_MB")
+        env_u64("KCODE_RUNTIME_MEMORY_LOG_ATTRIBUTION_JSON_DELTA_THRESHOLD_MB")
             .unwrap_or(DEFAULT_ATTRIBUTION_JSON_DELTA_THRESHOLD_MB)
             .saturating_mul(1024 * 1024);
 
@@ -550,7 +550,7 @@ pub fn server_logging_config() -> RuntimeMemoryLogConfig {
 }
 
 pub fn client_logging_enabled() -> bool {
-    match std::env::var("JCODE_CLIENT_RUNTIME_MEMORY_LOG") {
+    match std::env::var("KCODE_CLIENT_RUNTIME_MEMORY_LOG") {
         Ok(value) => !matches!(
             value.trim().to_ascii_lowercase().as_str(),
             "0" | "false" | "no" | "off"
@@ -560,27 +560,27 @@ pub fn client_logging_enabled() -> bool {
 }
 
 pub fn client_logging_config() -> RuntimeMemoryLogConfig {
-    let process_interval_secs = env_u64("JCODE_CLIENT_RUNTIME_MEMORY_LOG_PROCESS_INTERVAL_SECS")
+    let process_interval_secs = env_u64("KCODE_CLIENT_RUNTIME_MEMORY_LOG_PROCESS_INTERVAL_SECS")
         .filter(|value| *value >= MIN_PROCESS_INTERVAL_SECS)
         .unwrap_or(DEFAULT_CLIENT_PROCESS_INTERVAL_SECS);
     let attribution_interval_secs =
-        env_u64("JCODE_CLIENT_RUNTIME_MEMORY_LOG_ATTRIBUTION_INTERVAL_SECS")
+        env_u64("KCODE_CLIENT_RUNTIME_MEMORY_LOG_ATTRIBUTION_INTERVAL_SECS")
             .filter(|value| *value >= MIN_ATTRIBUTION_INTERVAL_SECS)
             .unwrap_or(DEFAULT_CLIENT_ATTRIBUTION_INTERVAL_SECS);
     let attribution_min_spacing_secs =
-        env_u64("JCODE_CLIENT_RUNTIME_MEMORY_LOG_ATTRIBUTION_MIN_SPACING_SECS")
+        env_u64("KCODE_CLIENT_RUNTIME_MEMORY_LOG_ATTRIBUTION_MIN_SPACING_SECS")
             .filter(|value| *value >= MIN_ATTRIBUTION_MIN_SPACING_SECS)
             .unwrap_or(DEFAULT_CLIENT_ATTRIBUTION_MIN_SPACING_SECS);
     let event_process_min_spacing_secs =
-        env_u64("JCODE_CLIENT_RUNTIME_MEMORY_LOG_EVENT_PROCESS_MIN_SPACING_SECS")
+        env_u64("KCODE_CLIENT_RUNTIME_MEMORY_LOG_EVENT_PROCESS_MIN_SPACING_SECS")
             .filter(|value| *value >= MIN_EVENT_PROCESS_MIN_SPACING_SECS)
             .unwrap_or(DEFAULT_CLIENT_EVENT_PROCESS_MIN_SPACING_SECS);
     let pss_delta_threshold_bytes =
-        env_u64("JCODE_CLIENT_RUNTIME_MEMORY_LOG_PSS_DELTA_THRESHOLD_MB")
+        env_u64("KCODE_CLIENT_RUNTIME_MEMORY_LOG_PSS_DELTA_THRESHOLD_MB")
             .unwrap_or(DEFAULT_CLIENT_PSS_DELTA_THRESHOLD_MB)
             .saturating_mul(1024 * 1024);
     let attribution_json_delta_threshold_bytes =
-        env_u64("JCODE_CLIENT_RUNTIME_MEMORY_LOG_ATTRIBUTION_JSON_DELTA_THRESHOLD_MB")
+        env_u64("KCODE_CLIENT_RUNTIME_MEMORY_LOG_ATTRIBUTION_JSON_DELTA_THRESHOLD_MB")
             .unwrap_or(DEFAULT_CLIENT_ATTRIBUTION_JSON_DELTA_THRESHOLD_MB)
             .saturating_mul(1024 * 1024);
 

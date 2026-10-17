@@ -1,19 +1,20 @@
+#![cfg_attr(test, allow(clippy::await_holding_lock))]
 use super::*;
 
 /// Point the process at a temp jcode home and return it with a restore guard.
 fn temp_jcode_home() -> (tempfile::TempDir, Option<std::ffi::OsString>) {
     let dir = tempfile::TempDir::new().expect("tempdir");
-    let prev = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", dir.path());
+    let prev = std::env::var_os("KCODE_HOME");
+    crate::env::set_var("KCODE_HOME", dir.path());
     crate::config::Config::invalidate_cache();
     (dir, prev)
 }
 
 fn restore_jcode_home(prev: Option<std::ffi::OsString>) {
     if let Some(prev) = prev {
-        crate::env::set_var("JCODE_HOME", prev);
+        crate::env::set_var("KCODE_HOME", prev);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
     }
     crate::config::Config::invalidate_cache();
 }

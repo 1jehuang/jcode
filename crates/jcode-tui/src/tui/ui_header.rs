@@ -36,6 +36,26 @@ pub(crate) fn set_unseen_changelog_entries_override_for_tests(entries: Option<Ve
     *guard = entries;
 }
 
+/// Keep an override in place only while its owning render test is in scope.
+/// Callers must hold the shared render-state test lock before creating this guard.
+#[cfg(test)]
+pub(crate) struct ChangelogEntriesOverrideGuard;
+
+#[cfg(test)]
+pub(crate) fn scoped_unseen_changelog_entries_override_for_tests(
+    entries: Vec<String>,
+) -> ChangelogEntriesOverrideGuard {
+    set_unseen_changelog_entries_override_for_tests(Some(entries));
+    ChangelogEntriesOverrideGuard
+}
+
+#[cfg(test)]
+impl Drop for ChangelogEntriesOverrideGuard {
+    fn drop(&mut self) {
+        set_unseen_changelog_entries_override_for_tests(None);
+    }
+}
+
 pub(crate) fn capitalize(s: &str) -> String {
     let mut chars = s.chars();
     match chars.next() {
@@ -339,7 +359,7 @@ fn auth_full_specs(
         active: ActiveCredentialOverrides,
     ) -> Option<&'static str> {
         use crate::auth::{ActiveCredential, resolve_dual_credential_auth};
-        let runtime_provider = std::env::var("JCODE_RUNTIME_PROVIDER").ok();
+        let runtime_provider = std::env::var("KCODE_RUNTIME_PROVIDER").ok();
         let resolved = resolve_dual_credential_auth(provider, auth, runtime_provider.as_deref())?;
         // Prefer the app's authoritative answer over the env heuristic.
         let active = active.get(provider).unwrap_or(resolved.active);
@@ -426,7 +446,7 @@ fn header_provider_auth_tag(
     auth: &AuthStatus,
     active: ActiveCredentialOverrides,
 ) -> &'static str {
-    let runtime_provider = std::env::var("JCODE_RUNTIME_PROVIDER").ok();
+    let runtime_provider = std::env::var("KCODE_RUNTIME_PROVIDER").ok();
 
     // Anthropic and OpenAI share one credential-resolution source of truth so
     // the header tag never drifts from the info widget / model-switch line. We
@@ -737,6 +757,17 @@ fn build_persistent_header_with_auth(
             }
         }
         lines.push(Line::from(spans).alignment(align));
+    } else if is_remote && server_name.is_some() && app.remote_startup_phase_active() {
+        // The session name arrives with the server's History event. Hold the
+        // row now so the header does not grow by a line (and shove the whole
+        // layout down) when it lands a few dozen milliseconds later.
+        lines.push(
+            Line::from(Span::styled(
+                "client: connecting…".to_string(),
+                Style::default().fg(dim_color()),
+            ))
+            .alignment(align),
+        );
     } else if server_name.is_none() {
         lines.push(
             Line::from(Span::styled(
@@ -1015,6 +1046,26 @@ mod tests {
     use std::sync::Arc;
     use std::sync::OnceLock;
 
+    #[test]
+    fn changelog_override_is_cleared_after_a_render_test_panics() {
+        let _lock = crate::tui::ui::render_state_test_lock();
+        let panic = std::panic::catch_unwind(|| {
+            let _fixture = scoped_unseen_changelog_entries_override_for_tests(vec![
+                "temporary changelog entry".to_owned(),
+            ]);
+            assert_eq!(unseen_changelog_entries(), ["temporary changelog entry"]);
+            panic!("injected render failure");
+        });
+        assert!(panic.is_err());
+        assert!(
+            unseen_changelog_entries_override()
+                .lock()
+                .unwrap()
+                .is_none(),
+            "a failed render test must not leak its changelog fixture"
+        );
+    }
+
     struct MockProvider;
 
     #[async_trait]
@@ -1043,16 +1094,16 @@ mod tests {
     fn ensure_test_jcode_home_if_unset() {
         static TEST_HOME: OnceLock<std::path::PathBuf> = OnceLock::new();
 
-        if std::env::var_os("JCODE_HOME").is_some() {
+        if std::env::var_os("KCODE_HOME").is_some() {
             return;
         }
 
         let path = TEST_HOME.get_or_init(|| {
-            let path = std::env::temp_dir().join(format!("jcode-test-home-{}", std::process::id()));
+            let path = std::env::temp_dir().join(format!("kcode-test-home-{}", std::process::id()));
             let _ = std::fs::create_dir_all(&path);
             path
         });
-        crate::env::set_var("JCODE_HOME", path);
+        crate::env::set_var("KCODE_HOME", path);
     }
 
     fn create_test_app() -> crate::tui::app::App {
@@ -1425,8 +1476,8 @@ mod tests {
     #[test]
     fn header_provider_auth_tag_reports_active_credential_for_openai() {
         let _guard = crate::storage::lock_test_env();
-        let prev = std::env::var_os("JCODE_RUNTIME_PROVIDER");
-        crate::env::remove_var("JCODE_RUNTIME_PROVIDER");
+        let prev = std::env::var_os("KCODE_RUNTIME_PROVIDER");
+        crate::env::remove_var("KCODE_RUNTIME_PROVIDER");
         let auth = AuthStatus {
             openai: AuthState::Available,
             openai_has_oauth: true,
@@ -1441,17 +1492,17 @@ mod tests {
             "oauth"
         );
         if let Some(value) = prev {
-            crate::env::set_var("JCODE_RUNTIME_PROVIDER", value);
+            crate::env::set_var("KCODE_RUNTIME_PROVIDER", value);
         }
     }
 
     #[test]
     fn header_provider_auth_tag_prefers_app_resolved_credential_over_env() {
         let _guard = crate::storage::lock_test_env();
-        let prev = std::env::var_os("JCODE_RUNTIME_PROVIDER");
-        // The TUI client usually does not inherit JCODE_RUNTIME_PROVIDER, so the
+        let prev = std::env::var_os("KCODE_RUNTIME_PROVIDER");
+        // The TUI client usually does not inherit KCODE_RUNTIME_PROVIDER, so the
         // env heuristic would answer "oauth" here; the app's resolution must win.
-        crate::env::remove_var("JCODE_RUNTIME_PROVIDER");
+        crate::env::remove_var("KCODE_RUNTIME_PROVIDER");
         let both = AuthStatus {
             anthropic: ProviderAuth {
                 // `state` must be set alongside the credential booleans:
@@ -1483,14 +1534,14 @@ mod tests {
         );
 
         if let Some(value) = prev {
-            crate::env::set_var("JCODE_RUNTIME_PROVIDER", value);
+            crate::env::set_var("KCODE_RUNTIME_PROVIDER", value);
         }
     }
 
     #[test]
     fn header_provider_auth_tag_honors_runtime_selection_and_oauth_first() {
         let _guard = crate::storage::lock_test_env();
-        let prev = std::env::var_os("JCODE_RUNTIME_PROVIDER");
+        let prev = std::env::var_os("KCODE_RUNTIME_PROVIDER");
 
         let both = AuthStatus {
             anthropic: ProviderAuth {
@@ -1502,21 +1553,21 @@ mod tests {
         };
 
         // Explicit API-key selection wins even when OAuth is available.
-        crate::env::set_var("JCODE_RUNTIME_PROVIDER", "claude-api");
+        crate::env::set_var("KCODE_RUNTIME_PROVIDER", "claude-api");
         assert_eq!(
             header_provider_auth_tag("anthropic", &both, ActiveCredentialOverrides::default()),
             "api-key"
         );
 
         // Explicit OAuth selection.
-        crate::env::set_var("JCODE_RUNTIME_PROVIDER", "claude");
+        crate::env::set_var("KCODE_RUNTIME_PROVIDER", "claude");
         assert_eq!(
             header_provider_auth_tag("anthropic", &both, ActiveCredentialOverrides::default()),
             "oauth"
         );
 
         // Auto (unset) prefers OAuth when both credentials are present.
-        crate::env::remove_var("JCODE_RUNTIME_PROVIDER");
+        crate::env::remove_var("KCODE_RUNTIME_PROVIDER");
         assert_eq!(
             header_provider_auth_tag("anthropic", &both, ActiveCredentialOverrides::default()),
             "oauth"
@@ -1527,12 +1578,12 @@ mod tests {
             header_provider_auth_tag("claude", &both, ActiveCredentialOverrides::default()),
             "oauth"
         );
-        crate::env::set_var("JCODE_RUNTIME_PROVIDER", "claude-api");
+        crate::env::set_var("KCODE_RUNTIME_PROVIDER", "claude-api");
         assert_eq!(
             header_provider_auth_tag("claude", &both, ActiveCredentialOverrides::default()),
             "api-key"
         );
-        crate::env::remove_var("JCODE_RUNTIME_PROVIDER");
+        crate::env::remove_var("KCODE_RUNTIME_PROVIDER");
 
         // Auto falls back to the API key when no OAuth credential exists.
         let api_only = AuthStatus {
@@ -1549,19 +1600,19 @@ mod tests {
         );
 
         if let Some(value) = prev {
-            crate::env::set_var("JCODE_RUNTIME_PROVIDER", value);
+            crate::env::set_var("KCODE_RUNTIME_PROVIDER", value);
         } else {
-            crate::env::remove_var("JCODE_RUNTIME_PROVIDER");
+            crate::env::remove_var("KCODE_RUNTIME_PROVIDER");
         }
     }
 
     #[test]
     fn build_persistent_header_prefers_configured_model_during_remote_connect() {
         let _guard = crate::storage::lock_test_env();
-        let prev_model = std::env::var_os("JCODE_MODEL");
-        let prev_provider = std::env::var_os("JCODE_PROVIDER");
-        crate::env::set_var("JCODE_MODEL", "gpt-5.4");
-        crate::env::set_var("JCODE_PROVIDER", "openai");
+        let prev_model = std::env::var_os("KCODE_MODEL");
+        let prev_provider = std::env::var_os("KCODE_PROVIDER");
+        crate::env::set_var("KCODE_MODEL", "gpt-5.4");
+        crate::env::set_var("KCODE_PROVIDER", "openai");
 
         let app = crate::tui::app::App::new_for_remote(None);
         let lines = build_persistent_header(&app, 80);
@@ -1575,31 +1626,31 @@ mod tests {
         assert!(!rendered.contains("connecting to server…"));
 
         if let Some(prev_model) = prev_model {
-            crate::env::set_var("JCODE_MODEL", prev_model);
+            crate::env::set_var("KCODE_MODEL", prev_model);
         } else {
-            crate::env::remove_var("JCODE_MODEL");
+            crate::env::remove_var("KCODE_MODEL");
         }
         if let Some(prev_provider) = prev_provider {
-            crate::env::set_var("JCODE_PROVIDER", prev_provider);
+            crate::env::set_var("KCODE_PROVIDER", prev_provider);
         } else {
-            crate::env::remove_var("JCODE_PROVIDER");
+            crate::env::remove_var("KCODE_PROVIDER");
         }
     }
 
     #[test]
     fn build_header_lines_omits_placeholder_provider_label_when_unknown() {
         // Reads model/provider env-derived state: without the env lock, the
-        // sibling test that sets JCODE_MODEL=gpt-5.4 mid-flight leaks into this
+        // sibling test that sets KCODE_MODEL=gpt-5.4 mid-flight leaks into this
         // render and the "loading session…" placeholder never appears. The
         // startup-phase label is also only rendered when no model hint is
-        // known, so neutralize JCODE_MODEL/JCODE_PROVIDER for the duration
+        // known, so neutralize KCODE_MODEL/KCODE_PROVIDER for the duration
         // ("unknown" also suppresses the shared test home's config
         // default_model fallback, which another test may have persisted).
         let _guard = crate::storage::lock_test_env();
-        let prev_model = std::env::var_os("JCODE_MODEL");
-        let prev_provider = std::env::var_os("JCODE_PROVIDER");
-        crate::env::set_var("JCODE_MODEL", "unknown");
-        crate::env::remove_var("JCODE_PROVIDER");
+        let prev_model = std::env::var_os("KCODE_MODEL");
+        let prev_provider = std::env::var_os("KCODE_PROVIDER");
+        crate::env::set_var("KCODE_MODEL", "unknown");
+        crate::env::remove_var("KCODE_PROVIDER");
 
         let mut app = crate::tui::app::App::new_for_remote(None);
         app.set_remote_startup_phase(crate::tui::app::RemoteStartupPhase::LoadingSession);
@@ -1614,14 +1665,14 @@ mod tests {
             .collect::<String>();
 
         if let Some(prev_model) = prev_model {
-            crate::env::set_var("JCODE_MODEL", prev_model);
+            crate::env::set_var("KCODE_MODEL", prev_model);
         } else {
-            crate::env::remove_var("JCODE_MODEL");
+            crate::env::remove_var("KCODE_MODEL");
         }
         if let Some(prev_provider) = prev_provider {
-            crate::env::set_var("JCODE_PROVIDER", prev_provider);
+            crate::env::set_var("KCODE_PROVIDER", prev_provider);
         } else {
-            crate::env::remove_var("JCODE_PROVIDER");
+            crate::env::remove_var("KCODE_PROVIDER");
         }
 
         assert!(rendered.contains("loading session…"), "{rendered}");
@@ -1631,8 +1682,8 @@ mod tests {
 
     #[test]
     fn build_header_lines_hides_secondary_placeholder_during_brief_connecting_phase() {
-        // Same env sensitivity as the placeholder test above: JCODE_MODEL /
-        // JCODE_PROVIDER mutations from sibling tests change what renders.
+        // Same env sensitivity as the placeholder test above: KCODE_MODEL /
+        // KCODE_PROVIDER mutations from sibling tests change what renders.
         let _guard = crate::storage::lock_test_env();
         let app = crate::tui::app::App::new_for_remote(None);
 
@@ -1696,7 +1747,7 @@ mod tests {
     #[test]
     fn auth_status_line_marks_active_credential_when_both_configured() {
         let _guard = crate::storage::lock_test_env();
-        let prev = std::env::var_os("JCODE_RUNTIME_PROVIDER");
+        let prev = std::env::var_os("KCODE_RUNTIME_PROVIDER");
         let auth = AuthStatus {
             anthropic: ProviderAuth {
                 state: AuthState::Available,
@@ -1709,8 +1760,8 @@ mod tests {
 
         let rendered_with = |runtime: Option<&str>| {
             match runtime {
-                Some(value) => crate::env::set_var("JCODE_RUNTIME_PROVIDER", value),
-                None => crate::env::remove_var("JCODE_RUNTIME_PROVIDER"),
+                Some(value) => crate::env::set_var("KCODE_RUNTIME_PROVIDER", value),
+                None => crate::env::remove_var("KCODE_RUNTIME_PROVIDER"),
             }
             build_auth_status_lines(&auth, ActiveCredentialOverrides::default())
                 .iter()
@@ -1735,8 +1786,8 @@ mod tests {
         );
 
         match prev {
-            Some(value) => crate::env::set_var("JCODE_RUNTIME_PROVIDER", value),
-            None => crate::env::remove_var("JCODE_RUNTIME_PROVIDER"),
+            Some(value) => crate::env::set_var("KCODE_RUNTIME_PROVIDER", value),
+            None => crate::env::remove_var("KCODE_RUNTIME_PROVIDER"),
         }
     }
 

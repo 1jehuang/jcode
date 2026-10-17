@@ -17,11 +17,11 @@ IN_CONTAINER_BINARY = "/usr/local/bin/jcode"
 IN_CONTAINER_LIB_DIR = f"{IN_CONTAINER_RUNTIME}/lib"
 IN_CONTAINER_CA_BUNDLE = f"{IN_CONTAINER_HOME}/ca-certificates.crt"
 DEFAULT_BINARY_PATH = "/tmp/jcode-compat-dist/jcode-linux-x86_64.bin"
-DEFAULT_CLAUDE_AUTH_PATH = "~/.jcode/auth.json"
-DEFAULT_OPENROUTER_ENV_PATH = "~/.config/jcode/openrouter.env"
-DEFAULT_ANTHROPIC_ENV_PATH = "~/.config/jcode/anthropic.env"
+DEFAULT_CLAUDE_AUTH_PATH = "~/.kcode/auth.json"
+DEFAULT_OPENROUTER_ENV_PATH = "~/.config/kcode/openrouter.env"
+DEFAULT_ANTHROPIC_ENV_PATH = "~/.config/kcode/anthropic.env"
 CA_BUNDLE_CANDIDATES = (
-    os.environ.get("JCODE_HARBOR_CA_BUNDLE"),
+    os.environ.get("KCODE_HARBOR_CA_BUNDLE"),
     "/etc/ca-certificates/extracted/tls-ca-bundle.pem",
     "/etc/ssl/certs/ca-certificates.crt",
 )
@@ -80,19 +80,19 @@ def _load_key_from_env_file(env_path: str, env_var: str, *direct_env: str) -> st
 
 def _load_anthropic_key() -> str | None:
     return _load_key_from_env_file(
-        os.environ.get("JCODE_HARBOR_ANTHROPIC_ENV", DEFAULT_ANTHROPIC_ENV_PATH),
+        os.environ.get("KCODE_HARBOR_ANTHROPIC_ENV", DEFAULT_ANTHROPIC_ENV_PATH),
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_API_KEY",
-        "JCODE_HARBOR_ANTHROPIC_KEY",
+        "KCODE_HARBOR_ANTHROPIC_KEY",
     )
 
 
 def _load_openrouter_key() -> str | None:
     # Priority: explicit env, then the jcode openrouter.env file (raw key per line).
-    direct = os.environ.get("OPENROUTER_API_KEY") or os.environ.get("JCODE_HARBOR_OPENROUTER_KEY")
+    direct = os.environ.get("OPENROUTER_API_KEY") or os.environ.get("KCODE_HARBOR_OPENROUTER_KEY")
     if direct and direct.strip():
         return direct.strip()
-    path = Path(os.environ.get("JCODE_HARBOR_OPENROUTER_ENV", DEFAULT_OPENROUTER_ENV_PATH)).expanduser()
+    path = Path(os.environ.get("KCODE_HARBOR_OPENROUTER_ENV", DEFAULT_OPENROUTER_ENV_PATH)).expanduser()
     if path.exists() and path.is_file():
         for line in path.read_text().splitlines():
             line = line.strip()
@@ -109,12 +109,12 @@ def _load_openrouter_key() -> str | None:
     return None
 
 
-JCODE_BINARY = _resolve_existing_file(
-    env_name="JCODE_HARBOR_BINARY",
+KCODE_BINARY = _resolve_existing_file(
+    env_name="KCODE_HARBOR_BINARY",
     default_path=DEFAULT_BINARY_PATH,
 )
 CA_BUNDLE = _resolve_existing_file(
-    env_name="JCODE_HARBOR_CA_BUNDLE",
+    env_name="KCODE_HARBOR_CA_BUNDLE",
     candidates=CA_BUNDLE_CANDIDATES,
 )
 OPENSSL_RUNTIME_LIBS = tuple(
@@ -122,8 +122,8 @@ OPENSSL_RUNTIME_LIBS = tuple(
     for lib in (
         _resolve_optional_existing_file(
             candidates=(
-                os.environ.get("JCODE_HARBOR_LIBSSL"),
-                *_sibling_runtime_lib_candidates(JCODE_BINARY, "libssl"),
+                os.environ.get("KCODE_HARBOR_LIBSSL"),
+                *_sibling_runtime_lib_candidates(KCODE_BINARY, "libssl"),
                 "/usr/lib/libssl.so.3",
                 "/usr/lib/x86_64-linux-gnu/libssl.so.3",
                 "/lib/x86_64-linux-gnu/libssl.so.3",
@@ -131,8 +131,8 @@ OPENSSL_RUNTIME_LIBS = tuple(
         ),
         _resolve_optional_existing_file(
             candidates=(
-                os.environ.get("JCODE_HARBOR_LIBCRYPTO"),
-                *_sibling_runtime_lib_candidates(JCODE_BINARY, "libcrypto"),
+                os.environ.get("KCODE_HARBOR_LIBCRYPTO"),
+                *_sibling_runtime_lib_candidates(KCODE_BINARY, "libcrypto"),
                 "/usr/lib/libcrypto.so.3",
                 "/usr/lib/x86_64-linux-gnu/libcrypto.so.3",
                 "/lib/x86_64-linux-gnu/libcrypto.so.3",
@@ -144,7 +144,7 @@ OPENSSL_RUNTIME_LIBS = tuple(
 
 
 def _benchmark_instruction_preamble() -> str:
-    return os.environ.get("JCODE_HARBOR_EXTRA_PREAMBLE", "")
+    return os.environ.get("KCODE_HARBOR_EXTRA_PREAMBLE", "")
 
 
 def _load_final_payload(output_dir: Path) -> dict[str, Any] | None:
@@ -190,7 +190,7 @@ class JcodeClaudeHarborAgent(BaseAgent):
     Default route is the native Anthropic API (provider=anthropic-api,
     model=claude-opus-4-8) using ANTHROPIC_API_KEY. OpenRouter
     (provider=openrouter, model=anthropic/claude-opus-4.8) and native Claude
-    OAuth (provider=claude via ~/.jcode/auth.json) are also supported.
+    OAuth (provider=claude via ~/.kcode/auth.json) are also supported.
     """
 
     def __init__(self, logs_dir: Path, model_name: str | None = None, *args, **kwargs):
@@ -205,7 +205,7 @@ class JcodeClaudeHarborAgent(BaseAgent):
         self._claude_auth: Path | None = None
         if self._provider_arg == "claude":
             self._claude_auth = _resolve_existing_file(
-                env_name="JCODE_HARBOR_CLAUDE_AUTH",
+                env_name="KCODE_HARBOR_CLAUDE_AUTH",
                 default_path=DEFAULT_CLAUDE_AUTH_PATH,
             )
 
@@ -233,7 +233,7 @@ class JcodeClaudeHarborAgent(BaseAgent):
             ),
             timeout_sec=30,
         )
-        await environment.upload_file(JCODE_BINARY, IN_CONTAINER_BINARY)
+        await environment.upload_file(KCODE_BINARY, IN_CONTAINER_BINARY)
         await environment.exec(f"chmod +x {IN_CONTAINER_BINARY}", timeout_sec=30)
         for lib in OPENSSL_RUNTIME_LIBS:
             await environment.upload_file(lib, f"{IN_CONTAINER_LIB_DIR}/{lib.name}")
@@ -245,9 +245,9 @@ class JcodeClaudeHarborAgent(BaseAgent):
             f"{IN_CONTAINER_BINARY} --quiet --no-update --no-selfdev version --json",
             env={
                 "HOME": IN_CONTAINER_HOME,
-                "JCODE_HOME": IN_CONTAINER_HOME,
-                "JCODE_RUNTIME_DIR": IN_CONTAINER_RUNTIME,
-                "JCODE_NO_TELEMETRY": "1",
+                "KCODE_HOME": IN_CONTAINER_HOME,
+                "KCODE_RUNTIME_DIR": IN_CONTAINER_RUNTIME,
+                "KCODE_NO_TELEMETRY": "1",
                 "LD_LIBRARY_PATH": IN_CONTAINER_LIB_DIR,
             },
             timeout_sec=60,
@@ -265,12 +265,12 @@ class JcodeClaudeHarborAgent(BaseAgent):
 
         env = {
             "HOME": IN_CONTAINER_HOME,
-            "JCODE_HOME": IN_CONTAINER_HOME,
-            "JCODE_RUNTIME_DIR": IN_CONTAINER_RUNTIME,
-            "JCODE_NO_TELEMETRY": "1",
-            "JCODE_PROVIDER": self._provider_arg,
-            "JCODE_MODEL": self._jcode_model,
-            "JCODE_ANTHROPIC_REASONING_EFFORT": os.environ.get("JCODE_ANTHROPIC_REASONING_EFFORT", "high"),
+            "KCODE_HOME": IN_CONTAINER_HOME,
+            "KCODE_RUNTIME_DIR": IN_CONTAINER_RUNTIME,
+            "KCODE_NO_TELEMETRY": "1",
+            "KCODE_PROVIDER": self._provider_arg,
+            "KCODE_MODEL": self._jcode_model,
+            "KCODE_ANTHROPIC_REASONING_EFFORT": os.environ.get("KCODE_ANTHROPIC_REASONING_EFFORT", "high"),
             "SSL_CERT_FILE": IN_CONTAINER_CA_BUNDLE,
             "OPENSSL_CERT_FILE": IN_CONTAINER_CA_BUNDLE,
             "LD_LIBRARY_PATH": IN_CONTAINER_LIB_DIR,
@@ -283,13 +283,13 @@ class JcodeClaudeHarborAgent(BaseAgent):
         result = await environment.exec(
             command=(
                 'set -e; '
-                'workdir="${JCODE_TASK_WORKDIR:-}"; '
+                'workdir="${KCODE_TASK_WORKDIR:-}"; '
                 'if [ -z "$workdir" ]; then '
                 '  if [ -d /app ]; then workdir=/app; else workdir="$(pwd)"; fi; '
                 'fi; '
                 f'instruction="$(cat {IN_CONTAINER_INPUT}/instruction.txt)"; '
                 f'{IN_CONTAINER_BINARY} --quiet --no-update --no-selfdev '
-                '--provider "$JCODE_PROVIDER" --model "$JCODE_MODEL" '
+                '--provider "$KCODE_PROVIDER" --model "$KCODE_MODEL" '
                 '-C "$workdir" run --ndjson "$instruction" '
                 f'> {IN_CONTAINER_OUTPUT}/events.ndjson 2> {IN_CONTAINER_OUTPUT}/stderr.txt'
             ),
@@ -309,7 +309,7 @@ class JcodeClaudeHarborAgent(BaseAgent):
             "return_code": result.return_code,
             "provider": self._provider_arg,
             "model": self._jcode_model,
-            "jcode_binary": str(JCODE_BINARY),
+            "jcode_binary": str(KCODE_BINARY),
         }
 
         output_dir = self.logs_dir / "jcode-output"

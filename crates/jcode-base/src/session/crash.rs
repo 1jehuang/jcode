@@ -300,7 +300,7 @@ impl SessionHeader {
 
 /// Find recent crashed sessions for showing resume hints.
 ///
-/// Uses a fast O(n) scan of `~/.jcode/active_pids/` (typically 0-5 files)
+/// Uses a fast O(n) scan of `~/.kcode/active_pids/` (typically 0-5 files)
 /// instead of scanning the full sessions directory (tens of thousands).
 /// Each file in active_pids/ contains a PID; if that PID is dead, the
 /// session crashed. We then load only those specific session files.
@@ -349,10 +349,25 @@ fn find_crashed_via_pid_files() -> Option<Vec<(String, String)>> {
 
         match Session::load(&session_id) {
             Ok(mut session) => {
-                session.mark_crashed(Some(format!(
-                    "Process {} exited unexpectedly (no shutdown signal captured)",
-                    pid
-                )));
+                // Idle-vs-interrupted disposition (upstream #988, extended to
+                // the PID detector): losing the process is only a crash when
+                // it interrupts unfinished work. A leftover streaming marker
+                // proves the session was mid-turn when its owner died
+                // (`StreamingGuard` clears the marker on every exit path —
+                // normal return, `?`, interrupt, panic — so only a killed
+                // process leaves one behind). No marker = idle = ordinary
+                // close, same as the disconnect path's idle rule. This stops
+                // daemon restarts stamping every owned idle session Crashed.
+                // Fail toward crash when the marker dir is unreadable: crash
+                // recovery is fail-noisy, never fail-silent.
+                if had_streaming_marker(&session_id) {
+                    session.mark_crashed(Some(format!(
+                        "Process {} exited unexpectedly (no shutdown signal captured)",
+                        pid
+                    )));
+                } else {
+                    session.mark_closed();
+                }
                 let _ = session.save();
                 let ts = session.last_active_at.unwrap_or(session.updated_at);
                 if ts <= cutoff {
@@ -376,6 +391,22 @@ fn find_crashed_via_pid_files() -> Option<Vec<(String, String)>> {
             .map(|(id, name, _)| (id, name))
             .collect(),
     )
+}
+
+/// True when a streaming marker file exists for this session — i.e. the
+/// session was mid-turn when its owner died. Any content counts (even a
+/// stale marker naming the dead owner): `StreamingGuard` removes the file
+/// on every orderly exit, so presence alone proves interruption. Missing
+/// marker dir or I/O error returns true (fail toward crash recovery, never
+/// silently close a session that may hold interrupted work).
+fn had_streaming_marker(session_id: &str) -> bool {
+    let Some(dir) = storage::streaming_pids_dir() else {
+        return true;
+    };
+    match std::fs::read_dir(&dir) {
+        Ok(_) => dir.join(session_id).exists(),
+        Err(_) => true,
+    }
 }
 
 /// Legacy fallback: scan the full sessions directory.
@@ -501,7 +532,7 @@ pub(super) fn is_pid_running(pid: u32) -> bool {
 // ---------------------------------------------------------------------------
 // Active PID tracking
 // ---------------------------------------------------------------------------
-// Lightweight files in ~/.jcode/active_pids/<session_id> containing the PID.
+// Lightweight files in ~/.kcode/active_pids/<session_id> containing the PID.
 // Written on mark_active(), removed on mark_closed()/mark_crashed().
 // On startup we only need to scan this tiny directory (usually 0-5 files)
 // instead of the entire sessions/ directory (tens of thousands of files).
@@ -534,7 +565,7 @@ fn session_matches_resume_title(session: &Session, normalized_query: &str) -> bo
 /// resolved by re-importing from the external tool's own storage. Once the user
 /// removed or reinstalled that tool, the re-import failed and resume hard-exited
 /// with "No session found matching 'ses_...'" even though the imported snapshot
-/// was still sitting in `~/.jcode/sessions` (issue #336).
+/// was still sitting in `~/.kcode/sessions` (issue #336).
 ///
 /// Pi sessions are intentionally excluded: their imported id is a hash of the
 /// session *path*, not the provider id, so there is no bare-id mapping.
@@ -582,6 +613,14 @@ pub fn find_session_by_name_or_id(name_or_id: &str) -> Result<String> {
     // user has removed/reinstalled that tool (issue #336).
     if let Some(imported_id) = resolve_imported_snapshot_id(name_or_id) {
         return Ok(imported_id);
+    }
+
+    // A full generated id (`session_<name>_<millis>_<hex>`) can never match a
+    // short name or title, so the scan below (which parses every session file
+    // on disk) is pure overhead. With thousands of sessions that scan took
+    // ~15s and stalled reload handoffs for ids that only exist server-side.
+    if crate::id::is_generated_session_id(name_or_id) {
+        anyhow::bail!("No session found matching '{}'", name_or_id);
     }
 
     // Otherwise, search for a session with matching short name or title.
@@ -657,10 +696,52 @@ mod batch_crash_tests {
     }
 
     #[test]
+    fn idle_dead_pid_without_streaming_marker_is_not_a_crash() {
+        // Upstream #988 extended to the PID detector: a dead owner PID with
+        // no leftover streaming marker means the session was idle — ordinary
+        // close, not crash. Daemon restarts must not stamp idle sessions.
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        crate::env::set_var("KCODE_HOME", temp.path());
+
+        let dir = storage::streaming_pids_dir().expect("streaming dir");
+        std::fs::create_dir_all(&dir).expect("marker dir");
+        assert!(
+            !had_streaming_marker("session_idle_1"),
+            "no marker file means idle"
+        );
+
+        crate::env::remove_var("KCODE_HOME");
+    }
+
+    #[test]
+    fn leftover_streaming_marker_means_interrupted() {
+        // A marker file left behind (StreamingGuard clears it on every
+        // orderly exit) proves the owner died mid-turn — genuine crash.
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        crate::env::set_var("KCODE_HOME", temp.path());
+
+        let dir = storage::streaming_pids_dir().expect("streaming dir");
+        std::fs::create_dir_all(&dir).expect("marker dir");
+        std::fs::write(dir.join("session_midturn_1"), "999999").expect("marker");
+        assert!(
+            had_streaming_marker("session_midturn_1"),
+            "leftover marker means interrupted"
+        );
+        assert!(
+            !had_streaming_marker("session_other_1"),
+            "other sessions unaffected"
+        );
+
+        crate::env::remove_var("KCODE_HOME");
+    }
+
+    #[test]
     fn find_session_by_name_or_id_matches_custom_title() {
         let _guard = crate::storage::lock_test_env();
         let temp = tempfile::tempdir().expect("tempdir");
-        crate::env::set_var("JCODE_HOME", temp.path());
+        crate::env::set_var("KCODE_HOME", temp.path());
 
         let session_id = "session_renamecli_1770000000000";
         let mut session = Session::create_with_id(
@@ -681,14 +762,14 @@ mod batch_crash_tests {
             session_id
         );
 
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
     }
 
     #[test]
     fn find_session_by_name_or_id_accepts_imported_session_ids() -> anyhow::Result<()> {
         let _guard = crate::storage::lock_test_env();
         let temp = tempfile::tempdir()?;
-        crate::env::set_var("JCODE_HOME", temp.path());
+        crate::env::set_var("KCODE_HOME", temp.path());
 
         let imported_id = "imported_codex_test_resume";
         let mut session =
@@ -699,7 +780,7 @@ mod batch_crash_tests {
         let resolved = find_session_by_name_or_id(imported_id)?;
         assert_eq!(resolved, imported_id);
 
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
         Ok(())
     }
 
@@ -712,7 +793,7 @@ mod batch_crash_tests {
     -> anyhow::Result<()> {
         let _guard = crate::storage::lock_test_env();
         let temp = tempfile::tempdir()?;
-        crate::env::set_var("JCODE_HOME", temp.path());
+        crate::env::set_var("KCODE_HOME", temp.path());
 
         let provider_id = "ses_2c72f8f4cffee6Qh7GId7D81Se";
         let imported_id = crate::import::imported_opencode_session_id(provider_id);
@@ -726,12 +807,12 @@ mod batch_crash_tests {
         session.provider_key = Some("opencode".to_string());
         session.save()?;
 
-        // No external OpenCode store exists under JCODE_HOME/external, so the only
+        // No external OpenCode store exists under KCODE_HOME/external, so the only
         // way to resolve the bare id is via the local imported snapshot.
         let resolved = find_session_by_name_or_id(provider_id)?;
         assert_eq!(resolved, imported_id);
 
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
         Ok(())
     }
 
@@ -741,13 +822,13 @@ mod batch_crash_tests {
     fn find_session_by_name_or_id_bare_id_without_snapshot_still_errors() -> anyhow::Result<()> {
         let _guard = crate::storage::lock_test_env();
         let temp = tempfile::tempdir()?;
-        crate::env::set_var("JCODE_HOME", temp.path());
+        crate::env::set_var("KCODE_HOME", temp.path());
         std::fs::create_dir_all(temp.path().join("sessions"))?;
 
         let err = find_session_by_name_or_id("ses_does_not_exist_anywhere");
         assert!(err.is_err(), "expected unknown bare id to error");
 
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
         Ok(())
     }
 }

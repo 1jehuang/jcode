@@ -3,7 +3,7 @@
 /// Preexec hook (via DEBUG trap).
 pub const BASH_PREEXEC: &str = r#"__jcode_preexec() {
     printf '\033]133;B\007'
-    __JCODE_CMD_START=$(date +%s%N)
+    __KCODE_CMD_START=$(date +%s%N)
 }
 "#;
 
@@ -21,7 +21,7 @@ pub const BASH_INIT: &str = r#"# jcode shell integration for bash
 
 __jcode_preexec() {
     printf '\033]133;B\007'
-    __JCODE_CMD_START=$(date +%s%N)
+    __KCODE_CMD_START=$(date +%s%N)
 }
 
 __jcode_precmd() {

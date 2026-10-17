@@ -764,6 +764,8 @@ impl AcpRuntime {
         let subscribe_id = 1;
         session
             .send(&Request::Subscribe {
+                system_prompt: None,
+                supports_pdf_panels: false,
                 crash_on_disconnect: false,
                 continue_on_disconnect: false,
                 id: subscribe_id,
@@ -817,6 +819,8 @@ impl AcpRuntime {
         let resume_id = 1;
         session
             .send(&Request::Subscribe {
+                system_prompt: None,
+                supports_pdf_panels: false,
                 crash_on_disconnect: false,
                 continue_on_disconnect: false,
                 id: resume_id,
@@ -1419,6 +1423,7 @@ async fn wait_for_model_changed(session: &DaemonSession, request_id: u64) -> Res
                 model,
                 provider_name,
                 error,
+                ..
             } if id == request_id => {
                 if let Some(error) = error {
                     anyhow::bail!(error);
@@ -1490,7 +1495,7 @@ impl EventMapper {
                     "status": "pending",
                 })]
             }
-            ServerEvent::ToolInput { delta } => {
+            ServerEvent::ToolInput { delta, .. } => {
                 let Some(tool_id) = self.current_tool_id.clone() else {
                     return Vec::new();
                 };
@@ -1840,7 +1845,7 @@ fn tool_title(name: &str) -> String {
         "bash" => "Running shell command".to_string(),
         "read" => "Reading file".to_string(),
         "write" => "Writing file".to_string(),
-        "edit" | "multiedit" | "patch" | "apply_patch" => "Editing files".to_string(),
+        "edit" | "multiedit" | "patch" | "apply_patch" | "replace" => "Editing files".to_string(),
         "agentgrep" | "grep" | "glob" | "ls" => "Searching workspace".to_string(),
         "webfetch" | "websearch" => "Fetching web content".to_string(),
         other => other.replace('_', " "),
@@ -1850,7 +1855,7 @@ fn tool_title(name: &str) -> String {
 pub(crate) fn tool_kind(name: &str) -> &'static str {
     match name {
         "read" => "read",
-        "write" | "edit" | "multiedit" | "patch" | "apply_patch" => "edit",
+        "write" | "edit" | "multiedit" | "patch" | "apply_patch" | "replace" => "edit",
         "bash" | "bg" | "selfdev" => "execute",
         "agentgrep" | "grep" | "glob" | "ls" | "session_search" | "conversation_search" => "search",
         "webfetch" | "websearch" | "codesearch" => "fetch",
@@ -1864,10 +1869,10 @@ pub(crate) async fn run_acp_command(
     provider_profile: Option<String>,
     explicit_tool_profile: bool,
 ) -> Result<()> {
-    crate::env::set_var("JCODE_NON_INTERACTIVE", "1");
+    crate::env::set_var("KCODE_NON_INTERACTIVE", "1");
     let acp_config = crate::config::config().acp.clone();
     if !explicit_tool_profile {
-        crate::env::set_var("JCODE_TOOL_PROFILE", acp_config.tool_profile.trim());
+        crate::env::set_var("KCODE_TOOL_PROFILE", acp_config.tool_profile.trim());
         crate::config::invalidate_config_cache();
     }
     let profile = AcpProfile::parse(&acp_config.profile);
@@ -1990,6 +1995,7 @@ mod tests {
         assert_eq!(start[0]["kind"], "execute");
 
         let input = mapper.map_event(ServerEvent::ToolInput {
+            id: None,
             delta: "{\"command\":\"true\"}".to_string(),
         });
         assert_eq!(input[0]["rawInput"]["command"], "true");

@@ -38,7 +38,7 @@ use Disposition::{ClientInternal, Covered, Gap};
 ///
 /// Sorted by name so additions produce clean diffs.
 const LEDGER: &[(&str, Disposition)] = &[
-    ("BackgroundTool", ClientInternal),
+    ("BackgroundTool", Covered),
     ("Cancel", Covered),
     ("CancelSoftInterrupts", Covered),
     ("Clear", Covered),
@@ -68,6 +68,7 @@ const LEDGER: &[(&str, Disposition)] = &[
     ("SetReasoningEffort", Covered),
     ("SetRoute", ClientInternal),
     ("SetServiceTier", ClientInternal),
+    ("SetSessionSaved", Covered),
     ("SetSubagentModel", ClientInternal),
     ("SetTransport", ClientInternal),
     ("SoftInterrupt", Covered),
@@ -76,6 +77,7 @@ const LEDGER: &[(&str, Disposition)] = &[
     ("Subscribe", Covered),
     ("SwitchAnthropicAccount", ClientInternal),
     ("SwitchOpenAiAccount", ClientInternal),
+    ("InvalidateOpenAiUsage", Covered),
     ("Transcript", ClientInternal),
     ("Transfer", ClientInternal),
     ("TriggerMemoryExtraction", ClientInternal),
@@ -204,8 +206,8 @@ fn capability_report() {
 /// The SDK mirrors jcode's external credential locations by hand, so a new one
 /// added in Rust must also be inherited by launched instances.
 ///
-/// `JCODE_HOME` redirects every `user_home_path` lookup into
-/// `$JCODE_HOME/external/`, which is what makes an instance private. The cost
+/// `KCODE_HOME` redirects every `user_home_path` lookup into
+/// `$KCODE_HOME/external/`, which is what makes an instance private. The cost
 /// is that an instance only sees another CLI's credentials if the SDK links
 /// that directory in. Miss one and inheritance silently half-works: the
 /// instance starts fine and fails on the first turn with an auth error, which
@@ -253,7 +255,7 @@ fn sdk_covers(sdk: &str, path: &str) -> bool {
 /// Home-relative paths jcode reads other tools' credentials from.
 ///
 /// Read out of the source so the list cannot drift: `user_home_path` is the
-/// single funnel for "a file in the user's home that JCODE_HOME sandboxes".
+/// single funnel for "a file in the user's home that KCODE_HOME sandboxes".
 fn external_credential_paths() -> Vec<String> {
     const CREDENTIAL_HINTS: [&str; 5] = ["auth", "credential", "oauth", "hosts.json", "apps.json"];
     let mut found = Vec::new();

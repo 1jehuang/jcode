@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 #[test]
 fn session_creation_does_not_wait_for_unreachable_telemetry() {
-    const CHILD: &str = "JCODE_TEST_SESSION_LATENCY_CHILD";
+    const CHILD: &str = "KCODE_TEST_SESSION_LATENCY_CHILD";
     if std::env::var_os(CHILD).is_some() {
         jcode_telemetry_core::begin_session("test-provider", "test-model");
         jcode_telemetry_core::record_turn();
@@ -39,8 +39,8 @@ fn session_creation_does_not_wait_for_unreachable_telemetry() {
             "--nocapture",
         ])
         .env(CHILD, "1")
-        .env("JCODE_HOME", home.path())
-        .env_remove("JCODE_NO_TELEMETRY")
+        .env("KCODE_HOME", home.path())
+        .env_remove("KCODE_NO_TELEMETRY")
         .env_remove("DO_NOT_TRACK")
         .env("HTTPS_PROXY", &proxy)
         .env("https_proxy", &proxy)

@@ -12,8 +12,8 @@ fn write_auth_file(path: &std::path::Path, value: serde_json::Value) {
 fn novita_api_key_import_requires_trust() {
     let _guard = crate::storage::lock_test_env();
     let dir = TempDir::new().unwrap();
-    let prev = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", dir.path());
+    let prev = std::env::var_os("KCODE_HOME");
+    crate::env::set_var("KCODE_HOME", dir.path());
 
     let path = ExternalAuthSource::OpenCode.path().unwrap();
     write_auth_file(
@@ -28,9 +28,9 @@ fn novita_api_key_import_requires_trust() {
     );
 
     if let Some(prev) = prev {
-        crate::env::set_var("JCODE_HOME", prev);
+        crate::env::set_var("KCODE_HOME", prev);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
     }
 }
 
@@ -38,8 +38,8 @@ fn novita_api_key_import_requires_trust() {
 fn opencode_api_key_imports_from_trusted_file() {
     let _guard = crate::storage::lock_test_env();
     let dir = TempDir::new().unwrap();
-    let prev = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", dir.path());
+    let prev = std::env::var_os("KCODE_HOME");
+    crate::env::set_var("KCODE_HOME", dir.path());
 
     let path = ExternalAuthSource::OpenCode.path().unwrap();
     write_auth_file(
@@ -57,9 +57,9 @@ fn opencode_api_key_imports_from_trusted_file() {
     );
 
     if let Some(prev) = prev {
-        crate::env::set_var("JCODE_HOME", prev);
+        crate::env::set_var("KCODE_HOME", prev);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
     }
 }
 
@@ -67,9 +67,9 @@ fn opencode_api_key_imports_from_trusted_file() {
 fn pi_api_key_env_reference_uses_named_env_var() {
     let _guard = crate::storage::lock_test_env();
     let dir = TempDir::new().unwrap();
-    let prev_home = std::env::var_os("JCODE_HOME");
+    let prev_home = std::env::var_os("KCODE_HOME");
     let prev_key = std::env::var_os("PI_OPENAI_KEY");
-    crate::env::set_var("JCODE_HOME", dir.path());
+    crate::env::set_var("KCODE_HOME", dir.path());
     crate::env::set_var("PI_OPENAI_KEY", "sk-from-env-ref");
 
     let path = ExternalAuthSource::Pi.path().unwrap();
@@ -87,9 +87,9 @@ fn pi_api_key_env_reference_uses_named_env_var() {
     );
 
     if let Some(prev_home) = prev_home {
-        crate::env::set_var("JCODE_HOME", prev_home);
+        crate::env::set_var("KCODE_HOME", prev_home);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
     }
     if let Some(prev_key) = prev_key {
         crate::env::set_var("PI_OPENAI_KEY", prev_key);
@@ -102,8 +102,8 @@ fn pi_api_key_env_reference_uses_named_env_var() {
 fn pi_shell_command_api_keys_are_not_executed() {
     let _guard = crate::storage::lock_test_env();
     let dir = TempDir::new().unwrap();
-    let prev = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", dir.path());
+    let prev = std::env::var_os("KCODE_HOME");
+    crate::env::set_var("KCODE_HOME", dir.path());
 
     let path = ExternalAuthSource::Pi.path().unwrap();
     write_auth_file(
@@ -117,9 +117,9 @@ fn pi_shell_command_api_keys_are_not_executed() {
     assert!(load_api_key_for_env("OPENAI_API_KEY").is_none());
 
     if let Some(prev) = prev {
-        crate::env::set_var("JCODE_HOME", prev);
+        crate::env::set_var("KCODE_HOME", prev);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
     }
 }
 
@@ -127,8 +127,8 @@ fn pi_shell_command_api_keys_are_not_executed() {
 fn load_copilot_oauth_token_from_pi_auth() {
     let _guard = crate::storage::lock_test_env();
     let dir = TempDir::new().unwrap();
-    let prev = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", dir.path());
+    let prev = std::env::var_os("KCODE_HOME");
+    crate::env::set_var("KCODE_HOME", dir.path());
 
     let path = ExternalAuthSource::Pi.path().unwrap();
     write_auth_file(
@@ -147,9 +147,9 @@ fn load_copilot_oauth_token_from_pi_auth() {
     assert_eq!(load_copilot_oauth_token().as_deref(), Some("ghu_pi_token"));
 
     if let Some(prev) = prev {
-        crate::env::set_var("JCODE_HOME", prev);
+        crate::env::set_var("KCODE_HOME", prev);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
     }
 }
 
@@ -157,8 +157,8 @@ fn load_copilot_oauth_token_from_pi_auth() {
 fn unconsented_source_detects_supported_api_key_files() {
     let _guard = crate::storage::lock_test_env();
     let dir = TempDir::new().unwrap();
-    let prev = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", dir.path());
+    let prev = std::env::var_os("KCODE_HOME");
+    crate::env::set_var("KCODE_HOME", dir.path());
 
     let path = ExternalAuthSource::OpenCode.path().unwrap();
     write_auth_file(
@@ -174,9 +174,9 @@ fn unconsented_source_detects_supported_api_key_files() {
     );
 
     if let Some(prev) = prev {
-        crate::env::set_var("JCODE_HOME", prev);
+        crate::env::set_var("KCODE_HOME", prev);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
     }
 }
 
@@ -184,8 +184,8 @@ fn unconsented_source_detects_supported_api_key_files() {
 fn source_provider_labels_reports_supported_oauth_and_api_key_imports() {
     let _guard = crate::storage::lock_test_env();
     let dir = TempDir::new().unwrap();
-    let prev = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", dir.path());
+    let prev = std::env::var_os("KCODE_HOME");
+    crate::env::set_var("KCODE_HOME", dir.path());
 
     let path = ExternalAuthSource::OpenCode.path().unwrap();
     write_auth_file(
@@ -213,9 +213,9 @@ fn source_provider_labels_reports_supported_oauth_and_api_key_imports() {
     assert!(labels.contains(&"OpenRouter/API-key providers"));
 
     if let Some(prev) = prev {
-        crate::env::set_var("JCODE_HOME", prev);
+        crate::env::set_var("KCODE_HOME", prev);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
     }
 }
 
@@ -223,8 +223,8 @@ fn source_provider_labels_reports_supported_oauth_and_api_key_imports() {
 fn openclaw_api_key_imports_from_trusted_file() {
     let _guard = crate::storage::lock_test_env();
     let dir = TempDir::new().unwrap();
-    let prev = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", dir.path());
+    let prev = std::env::var_os("KCODE_HOME");
+    crate::env::set_var("KCODE_HOME", dir.path());
 
     let path = ExternalAuthSource::OpenClaw.path().unwrap();
     write_auth_file(
@@ -242,9 +242,9 @@ fn openclaw_api_key_imports_from_trusted_file() {
     );
 
     if let Some(prev) = prev {
-        crate::env::set_var("JCODE_HOME", prev);
+        crate::env::set_var("KCODE_HOME", prev);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
     }
 }
 
@@ -252,8 +252,8 @@ fn openclaw_api_key_imports_from_trusted_file() {
 fn openclaw_oauth_tokens_import_like_pi() {
     let _guard = crate::storage::lock_test_env();
     let dir = TempDir::new().unwrap();
-    let prev = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", dir.path());
+    let prev = std::env::var_os("KCODE_HOME");
+    crate::env::set_var("KCODE_HOME", dir.path());
 
     let path = ExternalAuthSource::OpenClaw.path().unwrap();
     write_auth_file(
@@ -275,9 +275,9 @@ fn openclaw_oauth_tokens_import_like_pi() {
     assert_eq!(tokens.refresh_token, "claude-refresh");
 
     if let Some(prev) = prev {
-        crate::env::set_var("JCODE_HOME", prev);
+        crate::env::set_var("KCODE_HOME", prev);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
     }
 }
 
@@ -285,8 +285,8 @@ fn openclaw_oauth_tokens_import_like_pi() {
 fn hermes_api_key_imports_from_credential_pool() {
     let _guard = crate::storage::lock_test_env();
     let dir = TempDir::new().unwrap();
-    let prev = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", dir.path());
+    let prev = std::env::var_os("KCODE_HOME");
+    crate::env::set_var("KCODE_HOME", dir.path());
 
     let path = ExternalAuthSource::Hermes.path().unwrap();
     write_auth_file(
@@ -317,9 +317,9 @@ fn hermes_api_key_imports_from_credential_pool() {
     );
 
     if let Some(prev) = prev {
-        crate::env::set_var("JCODE_HOME", prev);
+        crate::env::set_var("KCODE_HOME", prev);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
     }
 }
 
@@ -327,8 +327,8 @@ fn hermes_api_key_imports_from_credential_pool() {
 fn hermes_oauth_tokens_import_from_credential_pool() {
     let _guard = crate::storage::lock_test_env();
     let dir = TempDir::new().unwrap();
-    let prev = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", dir.path());
+    let prev = std::env::var_os("KCODE_HOME");
+    crate::env::set_var("KCODE_HOME", dir.path());
 
     let path = ExternalAuthSource::Hermes.path().unwrap();
     write_auth_file(
@@ -359,9 +359,9 @@ fn hermes_oauth_tokens_import_from_credential_pool() {
     assert_eq!(tokens.refresh_token, "codex-refresh");
 
     if let Some(prev) = prev {
-        crate::env::set_var("JCODE_HOME", prev);
+        crate::env::set_var("KCODE_HOME", prev);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
     }
 }
 
@@ -369,8 +369,8 @@ fn hermes_oauth_tokens_import_from_credential_pool() {
 fn hermes_oauth_tokens_parse_rfc3339_expiry() {
     let _guard = crate::storage::lock_test_env();
     let dir = TempDir::new().unwrap();
-    let prev = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", dir.path());
+    let prev = std::env::var_os("KCODE_HOME");
+    crate::env::set_var("KCODE_HOME", dir.path());
 
     let future = chrono::Utc::now() + chrono::Duration::minutes(5);
     let path = ExternalAuthSource::Hermes.path().unwrap();
@@ -397,9 +397,9 @@ fn hermes_oauth_tokens_parse_rfc3339_expiry() {
     assert!(tokens.expires_at > chrono::Utc::now().timestamp_millis());
 
     if let Some(prev) = prev {
-        crate::env::set_var("JCODE_HOME", prev);
+        crate::env::set_var("KCODE_HOME", prev);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
     }
 }
 
@@ -407,8 +407,8 @@ fn hermes_oauth_tokens_parse_rfc3339_expiry() {
 fn openclaw_auth_profiles_store_resolves_and_flattens() {
     let _guard = crate::storage::lock_test_env();
     let dir = TempDir::new().unwrap();
-    let prev = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", dir.path());
+    let prev = std::env::var_os("KCODE_HOME");
+    crate::env::set_var("KCODE_HOME", dir.path());
 
     // No legacy ~/.openclaw/agent/auth.json: the current per-agent
     // auth-profiles.json store must be discovered instead.
@@ -454,9 +454,9 @@ fn openclaw_auth_profiles_store_resolves_and_flattens() {
     );
 
     if let Some(prev) = prev {
-        crate::env::set_var("JCODE_HOME", prev);
+        crate::env::set_var("KCODE_HOME", prev);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
     }
 }
 
@@ -464,8 +464,8 @@ fn openclaw_auth_profiles_store_resolves_and_flattens() {
 fn openclaw_legacy_flat_auth_json_still_wins_when_present() {
     let _guard = crate::storage::lock_test_env();
     let dir = TempDir::new().unwrap();
-    let prev = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", dir.path());
+    let prev = std::env::var_os("KCODE_HOME");
+    crate::env::set_var("KCODE_HOME", dir.path());
 
     // Both layouts exist: the original pi-fork path must take precedence so
     // previously-recorded trust decisions stay bound to the same file.
@@ -486,8 +486,8 @@ fn openclaw_legacy_flat_auth_json_still_wins_when_present() {
     assert_eq!(ExternalAuthSource::OpenClaw.path().unwrap(), legacy_path);
 
     if let Some(prev) = prev {
-        crate::env::set_var("JCODE_HOME", prev);
+        crate::env::set_var("KCODE_HOME", prev);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
     }
 }

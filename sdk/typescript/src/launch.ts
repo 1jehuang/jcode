@@ -8,7 +8,7 @@
  * state, and no way to disturb the user's live work by accident.
  *
  * `launch()` gives it one. It starts a private daemon and bridge under a
- * dedicated `JCODE_HOME` and runtime directory, and shuts them down on
+ * dedicated `KCODE_HOME` and runtime directory, and shuts them down on
  * `close()`.
  */
 
@@ -17,7 +17,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { HarnessError } from "./errors.js";
-import { bundledJcodeBinary, platformBinaryPackage } from "./binary.js";
+import { platformBinaryPackage, resolveKcodeBinary } from "./binary.js";
+import { assertKcodePath } from "./product.js";
 
 /**
  * Files inherited from the user's jcode home when logins are inherited.
@@ -54,10 +55,10 @@ const SHARED_FILES = new Set(CREDENTIAL_FILES.filter((name) => name !== "config.
  * Where jcode looks for *other* tools' credentials, relative to `$HOME`.
  *
  * jcode can log in by reusing an existing CLI's OAuth store, so a large share
- * of real users have no usable `~/.jcode/auth.json` at all: the working
+ * of real users have no usable `~/.kcode/auth.json` at all: the working
  * credentials live in files under `~/.claude/` or
  * `~/.config/github-copilot/`. Under
- * `JCODE_HOME` these lookups are sandboxed to `$JCODE_HOME/external/`, so an
+ * `KCODE_HOME` these lookups are sandboxed to `$KCODE_HOME/external/`, so an
  * instance that inherits only `auth.json` silently has no credentials and
  * fails on the first turn. Linking the recognized credential files makes
  * inheritance mean what it says without exposing either directory wholesale.
@@ -66,14 +67,14 @@ const SHARED_FILES = new Set(CREDENTIAL_FILES.filter((name) => name !== "config.
  * jcode's own config directory, relative to the platform config root.
  *
  * `app_config_dir()` is where provider env files live (`anthropic.env`,
- * `n.env` for the jcode subscription), and `JCODE_HOME` redirects it to
- * `$JCODE_HOME/config/jcode`. It is easy to miss because it is not under
+ * `n.env` for the jcode subscription), and `KCODE_HOME` redirects it to
+ * `$KCODE_HOME/config/kcode`. It is easy to miss because it is not under
  * `~/.jcode` at all, and missing it is not a subtle failure: on a machine
  * whose working credential is a jcode subscription, `auth.json` holds only a
  * stale OAuth token, so the instance inherits exactly the credential that does
  * not work and none of the ones that do.
  */
-const APP_CONFIG_DIRNAME = "jcode";
+const APP_CONFIG_DIRNAME = "kcode";
 
 const EXTERNAL_CREDENTIAL_FILES = [
   ".claude/.credentials.json",
@@ -130,6 +131,7 @@ function ensureInstanceDirectory(root: string, relative: string): string {
 
 /** Replace an instance-relative path with a link to one credential file. */
 function linkCredentialFile(source: string, root: string, relative: string): boolean {
+  assertKcodePath(source);
   let sourceStats;
   try {
     sourceStats = fs.statSync(source);
@@ -177,12 +179,12 @@ export interface LaunchOptions {
   /**
    * Default model for spawned swarm workers, unless overridden per spawn.
    * Use `inherit` to default to the coordinator's model and auth route. This setting takes
-   * precedence over `env.JCODE_SWARM_MODEL`.
+   * precedence over `env.KCODE_SWARM_MODEL`.
    */
   swarmModel?: string;
   /**
    * Who executes autonomous wake requests. This operator-level setting takes
-   * precedence over `env.JCODE_WAKE_MODE`.
+   * precedence over `env.KCODE_WAKE_MODE`.
    */
   wakeMode?: WakeMode;
   /** Milliseconds to wait for the socket to appear. Defaults to 30000. */
@@ -203,7 +205,7 @@ export interface LaunchOptions {
 export interface LaunchedInstance {
   /** API socket path to connect to. */
   socketPath: string;
-  /** The instance's `JCODE_HOME`. */
+  /** The instance's `KCODE_HOME`. */
   jcodeHome: string;
   /** The bridge process. */
   process: ChildProcess;
@@ -213,11 +215,14 @@ export interface LaunchedInstance {
 
 /** Resolve the user's real jcode home, ignoring any instance override. */
 export function userJcodeHome(): string {
-  return process.env.JCODE_HOME ?? path.join(os.homedir(), ".jcode");
+  return assertKcodePath(process.env.KCODE_HOME ?? path.join(os.homedir(), ".kcode"));
 }
 
 /** The user's jcode config directory, mirroring `storage::app_config_dir`. */
 export function userAppConfigDir(): string {
+  if (process.env.KCODE_HOME) {
+    return path.join(assertKcodePath(process.env.KCODE_HOME), "config", APP_CONFIG_DIRNAME);
+  }
   if (process.platform === "darwin") {
     return path.join(os.homedir(), "Library", "Application Support", APP_CONFIG_DIRNAME);
   }
@@ -240,6 +245,9 @@ export function userAppConfigDir(): string {
  * nothing" from "inherited something".
  */
 export function inheritCredentials(fromHome: string, toHome: string): string[] {
+  assertKcodePath(fromHome);
+  assertKcodePath(toHome);
+  assertKcodePath(userAppConfigDir());
   fs.mkdirSync(toHome, { recursive: true, mode: 0o700 });
   const toStats = fs.lstatSync(toHome);
   if (toStats.isSymbolicLink() || !toStats.isDirectory()) {
@@ -276,7 +284,7 @@ export function inheritCredentials(fromHome: string, toHome: string): string[] {
   }
 
   // jcode's provider env files live in its platform config directory, which
-  // `JCODE_HOME` moves to `$JCODE_HOME/config/jcode`. Link only the env files:
+  // `KCODE_HOME` moves to `$KCODE_HOME/config/kcode`. Link only the env files:
   // caches and usage data are not credentials and must stay instance-private.
   // Most importantly, never link the directory itself. A buggy recursive
   // cleanup can descend through a directory link and delete the user's files;
@@ -295,7 +303,7 @@ export function inheritCredentials(fromHome: string, toHome: string): string[] {
   }
 
   // Other CLIs' credential stores, which jcode reads directly and which
-  // `JCODE_HOME` redirects to `$JCODE_HOME/external/`. Share only the exact
+  // `KCODE_HOME` redirects to `$KCODE_HOME/external/`. Share only the exact
   // credential files. Linking whole directories would also expose transcripts,
   // configuration, and anything those tools add in the future.
   for (const relative of EXTERNAL_CREDENTIAL_FILES) {
@@ -336,7 +344,7 @@ export function inheritCredentials(fromHome: string, toHome: string): string[] {
  *
  * Synchronous on purpose: the only caller is a process "exit" handler, which
  * cannot await, so shelling out to the CLI is not available. jcode records
- * every server in `$JCODE_HOME/servers.json` keyed by socket path, and an
+ * every server in `$KCODE_HOME/servers.json` keyed by socket path, and an
  * instance's registry lists only that instance's daemon, so this can never
  * resolve to the server the user is running themselves.
  */
@@ -353,7 +361,7 @@ function readDaemonPidSync(jcodeHome: string, runtimeDir: string): number | unde
   } catch {
     return undefined;
   }
-  const socket = path.join(runtimeDir, "jcode.sock");
+  const socket = path.join(runtimeDir, "kcode.sock");
   for (const entry of Object.values(registry)) {
     if (entry?.socket === socket && typeof entry.pid === "number" && entry.pid > 1) {
       return entry.pid;
@@ -476,7 +484,7 @@ function removeInstanceHome(home: string): void {
   const tempRoot = path.resolve(os.tmpdir());
   if (
     path.dirname(resolvedHome) !== tempRoot ||
-    !path.basename(resolvedHome).startsWith("jcode-sdk-instance-")
+    !path.basename(resolvedHome).startsWith("kcode-sdk-instance-")
   ) {
     return;
   }
@@ -519,11 +527,12 @@ function removeInstanceHome(home: string): void {
  * connections.
  */
 export async function launchInstance(options: LaunchOptions = {}): Promise<LaunchedInstance> {
-  const binary = options.binary ?? bundledJcodeBinary() ?? "jcode";
+  const binary = resolveKcodeBinary(options.binary ?? options.env?.KCODE_BINARY);
   const ephemeral = options.jcodeHome === undefined;
-  const jcodeHome =
+  const jcodeHome = assertKcodePath(
     options.jcodeHome ??
-    fs.mkdtempSync(path.join(os.tmpdir(), "jcode-sdk-instance-"));
+    fs.mkdtempSync(path.join(assertKcodePath(os.tmpdir()), "kcode-sdk-instance-")),
+  );
   fs.mkdirSync(jcodeHome, { recursive: true, mode: 0o700 });
 
   // The runtime directory holds the sockets. Keeping it inside the instance
@@ -532,7 +541,7 @@ export async function launchInstance(options: LaunchOptions = {}): Promise<Launc
   // and the user's own jcode cannot collide or find each other.
   const runtimeDir = path.join(jcodeHome, "run");
   fs.mkdirSync(runtimeDir, { recursive: true, mode: 0o700 });
-  const socketPath = path.join(runtimeDir, "jcode-api.sock");
+  const socketPath = path.join(runtimeDir, "kcode-api.sock");
 
   // A reused `jcodeHome` still holds the previous run's socket files. The
   // startup loop waits for the API socket to *appear*, so a leftover one makes
@@ -540,7 +549,7 @@ export async function launchInstance(options: LaunchOptions = {}): Promise<Launc
   // the first request fails with ECONNREFUSED. Clearing them is safe: a live
   // instance on this home would mean two daemons sharing one state directory,
   // which is already unsupported.
-  for (const stale of ["jcode-api.sock", "jcode.sock", "jcode-debug.sock", "jcode.sock.hash"]) {
+  for (const stale of ["kcode-api.sock", "kcode.sock", "kcode-debug.sock", "kcode.sock.hash"]) {
     try {
       fs.unlinkSync(path.join(runtimeDir, stale));
     } catch {
@@ -559,15 +568,16 @@ export async function launchInstance(options: LaunchOptions = {}): Promise<Launc
       cwd: options.workingDir ?? process.cwd(),
       env: {
         ...process.env,
-        JCODE_HOME: jcodeHome,
-        JCODE_RUNTIME_DIR: runtimeDir,
-        JCODE_API_SOCKET: socketPath,
-        JCODE_SOCKET: path.join(runtimeDir, "jcode.sock"),
         ...options.env,
+        KCODE_BINARY: binary,
+        KCODE_HOME: jcodeHome,
+        KCODE_RUNTIME_DIR: runtimeDir,
+        KCODE_API_SOCKET: socketPath,
+        KCODE_SOCKET: path.join(runtimeDir, "kcode.sock"),
         ...(options.swarmModel === undefined
           ? {}
-          : { JCODE_SWARM_MODEL: options.swarmModel }),
-        ...(options.wakeMode === undefined ? {} : { JCODE_WAKE_MODE: options.wakeMode }),
+          : { KCODE_SWARM_MODEL: options.swarmModel }),
+        ...(options.wakeMode === undefined ? {} : { KCODE_WAKE_MODE: options.wakeMode }),
       },
       stdio: ["ignore", "ignore", options.inheritStderr ? "inherit" : "pipe"],
       detached: false,

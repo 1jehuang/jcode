@@ -16,7 +16,7 @@ fn user_config_block_shadowing_a_builtin_id_wins_at_activation() {
     register_test_external_runtimes();
     let temp = tempfile::TempDir::new().expect("create temp home");
     let jcode_home = temp.path().join("jcode-home");
-    let _jcode_home = OrEnvVarGuard::set("JCODE_HOME", &jcode_home);
+    let _jcode_home = OrEnvVarGuard::set("KCODE_HOME", &jcode_home);
     let _home = OrEnvVarGuard::set("HOME", temp.path());
     let _appdata = OrEnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
     let _env = isolate_openrouter_autodetect_env_or();
@@ -51,32 +51,31 @@ context_window = 1000000
 
     // The user's base_url must be applied, not the built-in api.openai.com.
     assert_eq!(
-        std::env::var("JCODE_OPENROUTER_API_BASE").ok().as_deref(),
+        std::env::var("KCODE_OPENROUTER_API_BASE").ok().as_deref(),
         Some("https://user-gateway.example.com/v1"),
         "a user config block must override the built-in profile sharing its id"
     );
     assert_eq!(
-        std::env::var("JCODE_OPENROUTER_API_KEY_NAME").ok().as_deref(),
+        std::env::var("KCODE_OPENROUTER_API_KEY_NAME").ok().as_deref(),
         Some("SHADOWED_GATEWAY_API_KEY"),
         "the user's api-key env must be applied, not the built-in default"
     );
     // And the declared model must reach the picker surface rather than
     // being dropped in favour of the built-in static catalog.
     assert_eq!(
-        std::env::var("JCODE_OPENROUTER_MODEL").ok().as_deref(),
+        std::env::var("KCODE_OPENROUTER_MODEL").ok().as_deref(),
         Some("MiniMax-M3.1-Flash-Preview")
     );
     assert!(
-        std::env::var("JCODE_OPENROUTER_STATIC_MODELS")
+        std::env::var("KCODE_OPENROUTER_STATIC_MODELS")
             .ok()
             .as_deref()
             .is_some_and(|models| models.contains("MiniMax-M3.1-Flash-Preview")),
         "the user's declared model must survive activation so the picker can list it"
     );
     assert_eq!(
-        std::env::var("JCODE_PROVIDER_PROFILE_NAME").ok().as_deref(),
+        std::env::var("KCODE_PROVIDER_PROFILE_NAME").ok().as_deref(),
         Some("openai-compatible"),
         "the user profile must be marked active"
     );
 }
-

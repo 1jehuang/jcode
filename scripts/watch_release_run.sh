@@ -12,7 +12,7 @@ SLEEP_S="${3:-30}"
 
 for i in $(seq 1 "$MAX_POLLS"); do
     line="$(gh run view "$RUN_ID" --json status,conclusion -q '"\(.status) \(.conclusion)"' 2>&1)" || line="unknown"
-    printf 'JCODE_PROGRESS {"message":"run %s: %s","current":%d,"total":%d,"unit":"polls"}\n' \
+    printf 'KCODE_PROGRESS {"message":"run %s: %s","current":%d,"total":%d,"unit":"polls"}\n' \
         "$RUN_ID" "$line" "$i" "$MAX_POLLS"
     case "$line" in
         "completed success")

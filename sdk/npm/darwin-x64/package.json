@@ -1,6 +1,6 @@
 {
-  "name": "@1jehuang/jcode-darwin-x64",
-  "version": "1.2.0",
+  "name": "@kooshapari/kcode-darwin-x64",
+  "version": "1.2.0-k0.1.0",
   "description": "Jcode runtime binary for darwin x64",
   "license": "MIT",
   "os": [
@@ -23,5 +23,6 @@
   },
   "publishConfig": {
     "access": "public"
-  }
+  },
+  "private": true
 }

@@ -63,7 +63,7 @@ pub(super) fn should_show(shows: u32, shown_this_session: bool) -> bool {
 
 /// The hint text pointing at the editable swarm prompt/config file.
 pub(super) fn hint_message() -> String {
-    "\u{2699} Swarm routing (models, effort) is configured by a prompt, not a config file. Edit ~/.jcode/swarm-prompt.md (or ./.jcode/swarm-prompt.md) to tune it".to_string()
+    "\u{2699} Swarm routing (models, effort) is configured by a prompt, not a config file. Edit ~/.kcode/swarm-prompt.md (or ./.kcode/swarm-prompt.md) to tune it".to_string()
 }
 
 impl App {
@@ -110,8 +110,8 @@ mod tests {
     fn state_persists_show_count() {
         let _guard = crate::storage::lock_test_env();
         let temp = tempfile::tempdir().expect("tempdir");
-        let prev = std::env::var_os("JCODE_HOME");
-        crate::env::set_var("JCODE_HOME", temp.path());
+        let prev = std::env::var_os("KCODE_HOME");
+        crate::env::set_var("KCODE_HOME", temp.path());
 
         let mut state = load_state();
         assert_eq!(state.shows, 0);
@@ -120,9 +120,9 @@ mod tests {
         assert_eq!(load_state().shows, 2);
 
         if let Some(prev) = prev {
-            crate::env::set_var("JCODE_HOME", prev);
+            crate::env::set_var("KCODE_HOME", prev);
         } else {
-            crate::env::remove_var("JCODE_HOME");
+            crate::env::remove_var("KCODE_HOME");
         }
     }
 }

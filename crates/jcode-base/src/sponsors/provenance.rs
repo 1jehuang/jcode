@@ -227,7 +227,7 @@ mod tests {
     fn enable_sponsors() -> (std::sync::MutexGuard<'static, ()>, tempfile::TempDir) {
         let guard = crate::storage::lock_test_env();
         let temp = tempfile::tempdir().unwrap();
-        crate::env::set_var("JCODE_HOME", temp.path());
+        crate::env::set_var("KCODE_HOME", temp.path());
         std::fs::write(
             temp.path().join("config.toml"),
             "[sponsors]\nenabled = true\n",
@@ -291,7 +291,7 @@ mod tests {
     fn disabled_sponsors_config_disables_everything() {
         let guard = crate::storage::lock_test_env();
         let temp = tempfile::tempdir().unwrap();
-        crate::env::set_var("JCODE_HOME", temp.path());
+        crate::env::set_var("KCODE_HOME", temp.path());
         std::fs::write(
             temp.path().join("config.toml"),
             "[sponsors]\nenabled = false\n",

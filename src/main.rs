@@ -81,7 +81,7 @@ fn configure_system_allocator() {
     const M_ARENA_MAX: i32 = -8;
     const M_MMAP_THRESHOLD: i32 = -3;
 
-    let arena_max = parse_alloc_tuning_env("JCODE_GLIBC_ARENA_MAX", 4);
+    let arena_max = parse_alloc_tuning_env("KCODE_GLIBC_ARENA_MAX", 4);
     let _ = unsafe { mallopt(M_ARENA_MAX, arena_max) };
 
     // Pin the mmap threshold so large transient allocations (history JSON,
@@ -96,7 +96,7 @@ fn configure_system_allocator() {
     // alloc/free cycles (mmap/munmap syscalls + page faults each time) for
     // predictable, immediate memory return. For a long-running interactive
     // agent, lower steady-state RSS wins.
-    let mmap_threshold = parse_alloc_tuning_env("JCODE_GLIBC_MMAP_THRESHOLD", 256 * 1024);
+    let mmap_threshold = parse_alloc_tuning_env("KCODE_GLIBC_MMAP_THRESHOLD", 256 * 1024);
     let _ = unsafe { mallopt(M_MMAP_THRESHOLD, mmap_threshold) };
 }
 
@@ -132,7 +132,7 @@ fn main() -> Result<()> {
     // sized stack instead.
     const WINDOWS_MAIN_STACK_SIZE: usize = 8 * 1024 * 1024;
     match std::thread::Builder::new()
-        .name("jcode-main".to_string())
+        .name("kcode-main".to_string())
         .stack_size(WINDOWS_MAIN_STACK_SIZE)
         .spawn(run_main)?
         .join()

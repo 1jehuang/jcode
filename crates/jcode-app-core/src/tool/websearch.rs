@@ -56,7 +56,7 @@ impl Tool for WebSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search the web."
+        jcode_message_types::provider_native::LOCAL_WEBSEARCH_DESCRIPTION
     }
 
     fn parameters_schema(&self) -> Value {
@@ -76,11 +76,11 @@ impl Tool for WebSearchTool {
                 "engine": {
                     "type": "string",
                     "enum": ["duckduckgo", "bing", "searxng"],
-                    "description": "Engine. Defaults to duckduckgo; bing uses JCODE_BING_API_KEY, searxng uses JCODE_SEARXNG_URL."
+                    "description": "Engine. Defaults to duckduckgo; searxng uses KCODE_SEARXNG_URL."
                 },
                 "bing_market": {
                     "type": "string",
-                    "description": "Optional Bing market, e.g. en-US or zh-CN. Defaults to JCODE_BING_MARKET or en-US."
+                    "description": "Optional Bing market, e.g. en-US or zh-CN. Defaults to KCODE_BING_MARKET or en-US."
                 }
             }
         })
@@ -91,10 +91,10 @@ impl Tool for WebSearchTool {
         let num_results = params.num_results.unwrap_or(8).min(20);
 
         let config = crate::config::config();
-        let mut engines = Vec::new();
-        engines.push(params.engine.unwrap_or(config.websearch.engine));
-        engines.extend(config.websearch.fallback_engines.iter().copied());
-        engines.dedup();
+        let engines = local_engine_order(
+            params.engine.unwrap_or(config.websearch.engine),
+            &config.websearch.fallback_engines,
+        );
 
         let market = params
             .bing_market
@@ -139,10 +139,9 @@ impl Tool for WebSearchTool {
                 "No results found for: {}\n\n\
                  If results are consistently empty on this machine, the default \
                  DuckDuckGo/Bing engines may be blocked here by TLS fingerprinting \
-                 or IP reputation (common on Linux/servers). Workarounds:\n\
+                 or IP reputation (common on Linux/servers). Workaround:\n\
                  - Point at a SearXNG instance: set `websearch.searxng_url` (or \
-                 JCODE_SEARXNG_URL) and use engine \"searxng\".\n\
-                 - Or provide a Bing Search API key via JCODE_BING_API_KEY.",
+                 KCODE_SEARXNG_URL) and use engine \"searxng\".",
                 params.query
             )));
         }
@@ -179,6 +178,9 @@ impl WebSearchTool {
                     .await
             }
             WebSearchEngine::Searxng => self.search_searxng(query, num_results).await,
+            // Provider-native search never reaches the local tool: engine order
+            // filters it out. Kept for exhaustiveness.
+            WebSearchEngine::Native => Ok(Vec::new()),
         }
     }
 
@@ -649,8 +651,47 @@ fn html_decode(s: &str) -> String {
         .to_string()
 }
 
+/// Engines the local tool tries, in order. `native` is provider-side and never
+/// runs locally: when it is preferred (e.g. the active provider has no server
+/// search), the local fallbacks run, defaulting to DuckDuckGo then Bing.
+fn local_engine_order(
+    preferred: WebSearchEngine,
+    fallbacks: &[WebSearchEngine],
+) -> Vec<WebSearchEngine> {
+    let mut engines: Vec<WebSearchEngine> = std::iter::once(preferred)
+        .chain(fallbacks.iter().copied())
+        .filter(|engine| engine.is_local())
+        .collect();
+    if engines.is_empty() {
+        engines = vec![WebSearchEngine::Duckduckgo, WebSearchEngine::Bing];
+    }
+    let mut seen = std::collections::HashSet::new();
+    engines.retain(|engine| seen.insert(*engine));
+    engines
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_engine_falls_back_to_local_engines() {
+        use super::local_engine_order;
+        assert_eq!(
+            local_engine_order(WebSearchEngine::Native, &[WebSearchEngine::Searxng]),
+            vec![WebSearchEngine::Searxng]
+        );
+        assert_eq!(
+            local_engine_order(WebSearchEngine::Native, &[WebSearchEngine::Native]),
+            vec![WebSearchEngine::Duckduckgo, WebSearchEngine::Bing]
+        );
+        assert_eq!(
+            local_engine_order(
+                WebSearchEngine::Bing,
+                &[WebSearchEngine::Duckduckgo, WebSearchEngine::Bing]
+            ),
+            vec![WebSearchEngine::Bing, WebSearchEngine::Duckduckgo]
+        );
+    }
+
     use super::*;
 
     #[test]

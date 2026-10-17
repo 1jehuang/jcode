@@ -25,7 +25,7 @@
 //!
 //! ## Templates
 //!
-//! Custom templates can be loaded from `~/.jcode/session-memory/config/template.md`
+//! Custom templates can be loaded from `~/.kcode/session-memory/config/template.md`
 //! and must use `{{variable}}` syntax for substitution.
 
 pub mod budget;

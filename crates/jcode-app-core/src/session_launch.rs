@@ -30,7 +30,7 @@ fn resume_provider_arg(provider_key: Option<&str>) -> Option<&'static str> {
 }
 
 /// Metadata describing why a session window is being spawned, exported to
-/// spawn hooks and spawned terminals as `JCODE_SPAWN_*` env vars so external
+/// spawn hooks and spawned terminals as `KCODE_SPAWN_*` env vars so external
 /// programs (tmux, kitty remote, herd, window managers) can reroute or place
 /// the window. See `[terminal] spawn_hook` in config.
 #[derive(Debug, Clone, Default)]
@@ -38,7 +38,7 @@ pub struct SessionSpawnContext {
     /// Spawn kind override (e.g. "swarm-agent", "restart"). Defaults to
     /// "resume" or "selfdev" based on the launch helper used.
     pub kind: Option<String>,
-    /// Extra `JCODE_SPAWN_*` env entries (e.g. swarm/coordinator ids).
+    /// Extra `KCODE_SPAWN_*` env entries (e.g. swarm/coordinator ids).
     pub extra_env: Vec<(String, String)>,
     /// Terminal-identifying env vars captured from the client that requested
     /// the spawn (tmux/zellij/kitty/DISPLAY/...). Re-exported to spawn/focus
@@ -111,7 +111,7 @@ pub fn resumed_window_title(session_id: &str) -> String {
 ///
 /// Returns `true` when a hook was configured and its process started (the
 /// built-in wmctrl/xdotool fallback should then be skipped). The hook receives
-/// `JCODE_FOCUS_SESSION_ID` and `JCODE_FOCUS_TITLE` env vars.
+/// `KCODE_FOCUS_SESSION_ID` and `KCODE_FOCUS_TITLE` env vars.
 pub fn focus_session_via_hook(session_id: &str, title: &str) -> bool {
     focus_session_via_hook_with_env(session_id, title, &[])
 }
@@ -119,7 +119,7 @@ pub fn focus_session_via_hook(session_id: &str, title: &str) -> bool {
 /// Like [`focus_session_via_hook`] but also re-exports the requesting client's
 /// terminal env (#405) so focus hooks (e.g. `zellij action go-to-tab-name`)
 /// target the client's terminal session instead of the server's stale env. Each
-/// var is exported natively and under a `JCODE_CLIENT_<NAME>` alias.
+/// var is exported natively and under a `KCODE_CLIENT_<NAME>` alias.
 pub fn focus_session_via_hook_with_env(
     session_id: &str,
     title: &str,
@@ -151,14 +151,14 @@ pub fn focus_session_via_hook_with_env(
 
     let mut cmd = std::process::Command::new(crate::terminal_launch::expand_home(program));
     cmd.args(args)
-        .env("JCODE_FOCUS_SESSION_ID", session_id)
-        .env("JCODE_FOCUS_TITLE", title)
+        .env("KCODE_FOCUS_SESSION_ID", session_id)
+        .env("KCODE_FOCUS_TITLE", title)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     for (key, value) in client_terminal_env {
         cmd.env(key, value);
-        cmd.env(format!("JCODE_CLIENT_{key}"), value);
+        cmd.env(format!("KCODE_CLIENT_{key}"), value);
     }
     match crate::platform::spawn_detached(&mut cmd) {
         Ok(child) => {
@@ -203,11 +203,11 @@ fn focus_title_best_effort(title: &str) {
     cmd.arg("-c")
         .arg(
             "sleep 0.4; \
-             if command -v wmctrl >/dev/null 2>&1; then wmctrl -a \"$JCODE_WINDOW_TITLE\" >/dev/null 2>&1 && exit 0; fi; \
-             if command -v xdotool >/dev/null 2>&1; then xdotool search --name \"$JCODE_WINDOW_TITLE\" windowactivate >/dev/null 2>&1 && exit 0; fi; \
+             if command -v wmctrl >/dev/null 2>&1; then wmctrl -a \"$KCODE_WINDOW_TITLE\" >/dev/null 2>&1 && exit 0; fi; \
+             if command -v xdotool >/dev/null 2>&1; then xdotool search --name \"$KCODE_WINDOW_TITLE\" windowactivate >/dev/null 2>&1 && exit 0; fi; \
              exit 0",
         )
-        .env("JCODE_WINDOW_TITLE", title)
+        .env("KCODE_WINDOW_TITLE", title)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -378,7 +378,7 @@ fn find_wezterm_gui_binary() -> Option<String> {
 
 #[cfg(not(unix))]
 fn resume_terminal_candidates_windows() -> Vec<String> {
-    std::env::var("JCODE_RESUME_TERMINAL")
+    std::env::var("KCODE_RESUME_TERMINAL")
         .ok()
         .map(|value| {
             value

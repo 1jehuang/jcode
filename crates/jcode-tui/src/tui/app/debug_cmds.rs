@@ -189,6 +189,8 @@ impl App {
             // Return current state as JSON for easier parsing
             serde_json::json!({
                 "processing": self.is_processing,
+                "terminal_title": self.terminal_title.borrow().last_sent,
+                "session_edit_lines": self.display_edit_line_counts,
                 "messages": self.messages.len(),
                 "display_messages": self.display_messages.len(),
                 "input": self.input,
@@ -947,11 +949,11 @@ impl App {
             }
         } else if cmd.starts_with("bundle-start:") {
             let name = cmd.strip_prefix("bundle-start:").unwrap_or("test");
-            crate::env::set_var("JCODE_TEST_BUNDLE", name);
+            crate::env::set_var("KCODE_TEST_BUNDLE", name);
             format!("OK: test bundle '{}' started", name)
         } else if cmd == "bundle-save" {
             use crate::tui::test_harness::TestBundle;
-            let name = std::env::var("JCODE_TEST_BUNDLE").unwrap_or_else(|_| "unnamed".to_string());
+            let name = std::env::var("KCODE_TEST_BUNDLE").unwrap_or_else(|_| "unnamed".to_string());
             let bundle = TestBundle::new(&name);
             let path = TestBundle::default_path(&name);
             match bundle.save(&path) {
@@ -1115,7 +1117,7 @@ impl App {
 
             // The actual exec happens in main.rs when run() returns
             // We store the binary path in an env var for the reload handler
-            crate::env::set_var("JCODE_MIGRATE_BINARY", stable_binary);
+            crate::env::set_var("KCODE_MIGRATE_BINARY", stable_binary);
 
             crate::logging::info(&format!("Migrating to stable version {}...", version));
             self.set_status_notice(format!("Migrating to stable {}...", version));

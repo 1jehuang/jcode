@@ -19,7 +19,7 @@ Options:
   --profile <name>          Cargo profile to build (default: selfdev)
   --package <name>          Cargo package to build (default: jcode)
   --bin <name>              Cargo binary to build (default: jcode)
-  --feature-profile <name>  JCODE_DEV_FEATURE_PROFILE for dev_cargo.sh (default: default)
+  --feature-profile <name>  KCODE_DEV_FEATURE_PROFILE for dev_cargo.sh (default: default)
   --json <path>             Write the parsed summary JSON to this path
   --top <n>                 Number of slowest units to print (default: 12)
   -h, --help                Show this help
@@ -131,7 +131,7 @@ print(time.perf_counter_ns())
 PY
 )
 
-  JCODE_DEV_FEATURE_PROFILE="$feature_profile" \
+  KCODE_DEV_FEATURE_PROFILE="$feature_profile" \
     scripts/dev_cargo.sh build --profile "$profile" -p "$package" --bin "$bin" --timings
 
   end_ns=$(python3 - <<'PY'

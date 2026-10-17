@@ -136,7 +136,7 @@ impl ProviderActivation {
     pub fn azure_openai(model: Option<String>) -> Self {
         let activation = Self::initial(RuntimeProviderId::AzureOpenAi, ActiveProvider::OpenRouter);
         if let Some(model) = model.filter(|value| !value.trim().is_empty()) {
-            activation.with_model_hint("JCODE_OPENROUTER_MODEL", model)
+            activation.with_model_hint("KCODE_OPENROUTER_MODEL", model)
         } else {
             activation
         }
@@ -148,7 +148,7 @@ impl ProviderActivation {
             ActiveProvider::OpenRouter,
         );
         if let Some(model) = model.filter(|value| !value.trim().is_empty()) {
-            activation.with_model_hint("JCODE_OPENROUTER_MODEL", model)
+            activation.with_model_hint("KCODE_OPENROUTER_MODEL", model)
         } else {
             activation
         }
@@ -156,28 +156,28 @@ impl ProviderActivation {
 
     pub fn jcode_subscription(model: impl Into<String>) -> Self {
         Self::initial(RuntimeProviderId::Jcode, ActiveProvider::OpenRouter)
-            .with_model_hint("JCODE_OPENROUTER_MODEL", model)
+            .with_model_hint("KCODE_OPENROUTER_MODEL", model)
     }
 
     pub fn apply_env(&self) -> Result<()> {
-        crate::env::set_var("JCODE_RUNTIME_PROVIDER", self.runtime_id.key());
+        crate::env::set_var("KCODE_RUNTIME_PROVIDER", self.runtime_id.key());
         match self.runtime_id {
             RuntimeProviderId::Jcode => {
-                crate::env::set_var("JCODE_OPENROUTER_TRANSPORT_STATE", "jcode-subscription")
+                crate::env::set_var("KCODE_OPENROUTER_TRANSPORT_STATE", "jcode-subscription")
             }
             RuntimeProviderId::OpenRouter => {
-                crate::env::set_var("JCODE_OPENROUTER_TRANSPORT_STATE", "openrouter-api-key")
+                crate::env::set_var("KCODE_OPENROUTER_TRANSPORT_STATE", "openrouter-api-key")
             }
             RuntimeProviderId::AzureOpenAi => {
-                crate::env::set_var("JCODE_OPENROUTER_TRANSPORT_STATE", "direct-api-key")
+                crate::env::set_var("KCODE_OPENROUTER_TRANSPORT_STATE", "direct-api-key")
             }
             RuntimeProviderId::OpenAiCompatible => {
-                if std::env::var_os("JCODE_OPENROUTER_TRANSPORT_STATE").is_none() {
-                    crate::env::set_var("JCODE_OPENROUTER_TRANSPORT_STATE", "direct-api-key");
+                if std::env::var_os("KCODE_OPENROUTER_TRANSPORT_STATE").is_none() {
+                    crate::env::set_var("KCODE_OPENROUTER_TRANSPORT_STATE", "direct-api-key");
                 }
             }
             _ => {
-                crate::env::remove_var("JCODE_OPENROUTER_TRANSPORT_STATE");
+                crate::env::remove_var("KCODE_OPENROUTER_TRANSPORT_STATE");
             }
         }
 
@@ -185,16 +185,16 @@ impl ProviderActivation {
         match self.selection {
             RuntimeSelection::Initial(active_provider) => {
                 active_key_for_log = provider_key(active_provider);
-                crate::env::set_var("JCODE_ACTIVE_PROVIDER", active_key_for_log);
-                crate::env::set_var("JCODE_INITIAL_PROVIDER_EXPLICIT", "1");
+                crate::env::set_var("KCODE_ACTIVE_PROVIDER", active_key_for_log);
+                crate::env::set_var("KCODE_INITIAL_PROVIDER_EXPLICIT", "1");
             }
             RuntimeSelection::Unlocked { active_hint } => {
-                crate::env::remove_var("JCODE_INITIAL_PROVIDER_EXPLICIT");
+                crate::env::remove_var("KCODE_INITIAL_PROVIDER_EXPLICIT");
                 if let Some(active_provider) = active_hint {
                     active_key_for_log = provider_key(active_provider);
-                    crate::env::set_var("JCODE_ACTIVE_PROVIDER", active_key_for_log);
+                    crate::env::set_var("KCODE_ACTIVE_PROVIDER", active_key_for_log);
                 } else {
-                    crate::env::remove_var("JCODE_ACTIVE_PROVIDER");
+                    crate::env::remove_var("KCODE_ACTIVE_PROVIDER");
                 }
             }
             RuntimeSelection::Unchanged => {}
@@ -226,9 +226,9 @@ impl ProviderActivation {
 /// Select the provider used when a new multi-provider runtime starts.
 /// Later model switches remain free to select any configured provider.
 pub fn select_initial_runtime_provider_key(provider_key_raw: &str) {
-    crate::env::set_var("JCODE_RUNTIME_PROVIDER", provider_key_raw);
-    crate::env::set_var("JCODE_ACTIVE_PROVIDER", provider_key_raw);
-    crate::env::set_var("JCODE_INITIAL_PROVIDER_EXPLICIT", "1");
+    crate::env::set_var("KCODE_RUNTIME_PROVIDER", provider_key_raw);
+    crate::env::set_var("KCODE_ACTIVE_PROVIDER", provider_key_raw);
+    crate::env::set_var("KCODE_INITIAL_PROVIDER_EXPLICIT", "1");
     crate::logging::auth_event(
         "runtime_activation_initial_provider",
         provider_key_raw,
@@ -237,8 +237,8 @@ pub fn select_initial_runtime_provider_key(provider_key_raw: &str) {
 }
 
 pub fn clear_initial_runtime_provider() {
-    crate::env::remove_var("JCODE_ACTIVE_PROVIDER");
-    crate::env::remove_var("JCODE_INITIAL_PROVIDER_EXPLICIT");
+    crate::env::remove_var("KCODE_ACTIVE_PROVIDER");
+    crate::env::remove_var("KCODE_INITIAL_PROVIDER_EXPLICIT");
     crate::logging::auth_event(
         "runtime_activation_clear_initial_provider",
         "runtime",
@@ -294,19 +294,19 @@ mod tests {
     fn initial_provider_selection_preserves_raw_runtime_key() {
         let _guard = crate::storage::lock_test_env();
         let _env = EnvGuard::new(&[
-            "JCODE_RUNTIME_PROVIDER",
-            "JCODE_ACTIVE_PROVIDER",
-            "JCODE_INITIAL_PROVIDER_EXPLICIT",
+            "KCODE_RUNTIME_PROVIDER",
+            "KCODE_ACTIVE_PROVIDER",
+            "KCODE_INITIAL_PROVIDER_EXPLICIT",
         ]);
 
         select_initial_runtime_provider_key("custom-provider-key");
 
         assert_eq!(
-            std::env::var("JCODE_RUNTIME_PROVIDER").as_deref(),
+            std::env::var("KCODE_RUNTIME_PROVIDER").as_deref(),
             Ok("custom-provider-key")
         );
         assert_eq!(
-            std::env::var("JCODE_ACTIVE_PROVIDER").as_deref(),
+            std::env::var("KCODE_ACTIVE_PROVIDER").as_deref(),
             Ok("custom-provider-key")
         );
     }
@@ -314,14 +314,14 @@ mod tests {
     #[test]
     fn azure_activation_preserves_identity_while_using_openrouter_slot() {
         // Serialize with every other test that mutates provider env vars
-        // (e.g. anthropic_tests sets JCODE_RUNTIME_PROVIDER=claude); without
+        // (e.g. anthropic_tests sets KCODE_RUNTIME_PROVIDER=claude); without
         // this lock the assertions below race parallel tests.
         let _lock = crate::storage::lock_test_env();
         let _guard = EnvGuard::new(&[
-            "JCODE_RUNTIME_PROVIDER",
-            "JCODE_ACTIVE_PROVIDER",
-            "JCODE_INITIAL_PROVIDER_EXPLICIT",
-            "JCODE_OPENROUTER_MODEL",
+            "KCODE_RUNTIME_PROVIDER",
+            "KCODE_ACTIVE_PROVIDER",
+            "KCODE_INITIAL_PROVIDER_EXPLICIT",
+            "KCODE_OPENROUTER_MODEL",
         ]);
 
         ProviderActivation::azure_openai(Some("gpt-4.1-mini".to_string()))
@@ -329,19 +329,19 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            std::env::var("JCODE_RUNTIME_PROVIDER").as_deref(),
+            std::env::var("KCODE_RUNTIME_PROVIDER").as_deref(),
             Ok("azure-openai")
         );
         assert_eq!(
-            std::env::var("JCODE_ACTIVE_PROVIDER").as_deref(),
+            std::env::var("KCODE_ACTIVE_PROVIDER").as_deref(),
             Ok("openrouter")
         );
         assert_eq!(
-            std::env::var("JCODE_INITIAL_PROVIDER_EXPLICIT").as_deref(),
+            std::env::var("KCODE_INITIAL_PROVIDER_EXPLICIT").as_deref(),
             Ok("1")
         );
         assert_eq!(
-            std::env::var("JCODE_OPENROUTER_MODEL").as_deref(),
+            std::env::var("KCODE_OPENROUTER_MODEL").as_deref(),
             Ok("gpt-4.1-mini")
         );
     }

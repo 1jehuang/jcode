@@ -33,8 +33,8 @@ fn test_handle_server_event_service_tier_changed_mentions_next_request_when_stre
 fn test_reload_handoff_active_when_server_reload_flag_set() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().expect("create temp dir");
-    let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
-    crate::env::set_var("JCODE_RUNTIME_DIR", temp.path());
+    let prev_runtime = std::env::var_os("KCODE_RUNTIME_DIR");
+    crate::env::set_var("KCODE_RUNTIME_DIR", temp.path());
 
     let state = remote::RemoteRunState {
         server_reload_in_progress: true,
@@ -44,9 +44,9 @@ fn test_reload_handoff_active_when_server_reload_flag_set() {
     assert!(remote::reload_handoff_active(&state));
 
     if let Some(prev_runtime) = prev_runtime {
-        crate::env::set_var("JCODE_RUNTIME_DIR", prev_runtime);
+        crate::env::set_var("KCODE_RUNTIME_DIR", prev_runtime);
     } else {
-        crate::env::remove_var("JCODE_RUNTIME_DIR");
+        crate::env::remove_var("KCODE_RUNTIME_DIR");
     }
 }
 
@@ -54,17 +54,17 @@ fn test_reload_handoff_active_when_server_reload_flag_set() {
 fn test_reload_handoff_inactive_without_flag_or_marker() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().expect("create temp dir");
-    let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
-    crate::env::set_var("JCODE_RUNTIME_DIR", temp.path());
+    let prev_runtime = std::env::var_os("KCODE_RUNTIME_DIR");
+    crate::env::set_var("KCODE_RUNTIME_DIR", temp.path());
 
     let state = remote::RemoteRunState::default();
 
     assert!(!remote::reload_handoff_active(&state));
 
     if let Some(prev_runtime) = prev_runtime {
-        crate::env::set_var("JCODE_RUNTIME_DIR", prev_runtime);
+        crate::env::set_var("KCODE_RUNTIME_DIR", prev_runtime);
     } else {
-        crate::env::remove_var("JCODE_RUNTIME_DIR");
+        crate::env::remove_var("KCODE_RUNTIME_DIR");
     }
 }
 
@@ -72,8 +72,8 @@ fn test_reload_handoff_inactive_without_flag_or_marker() {
 fn test_reload_handoff_active_when_reload_marker_present() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().expect("create temp dir");
-    let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
-    crate::env::set_var("JCODE_RUNTIME_DIR", temp.path());
+    let prev_runtime = std::env::var_os("KCODE_RUNTIME_DIR");
+    crate::env::set_var("KCODE_RUNTIME_DIR", temp.path());
 
     crate::server::write_reload_state(
         "reload-marker-test",
@@ -90,9 +90,9 @@ fn test_reload_handoff_active_when_reload_marker_present() {
 
     crate::server::clear_reload_marker();
     if let Some(prev_runtime) = prev_runtime {
-        crate::env::set_var("JCODE_RUNTIME_DIR", prev_runtime);
+        crate::env::set_var("KCODE_RUNTIME_DIR", prev_runtime);
     } else {
-        crate::env::remove_var("JCODE_RUNTIME_DIR");
+        crate::env::remove_var("KCODE_RUNTIME_DIR");
     }
 }
 
@@ -100,8 +100,8 @@ fn test_reload_handoff_active_when_reload_marker_present() {
 fn test_reload_handoff_active_when_socket_ready_marker_present() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().expect("create temp dir");
-    let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
-    crate::env::set_var("JCODE_RUNTIME_DIR", temp.path());
+    let prev_runtime = std::env::var_os("KCODE_RUNTIME_DIR");
+    crate::env::set_var("KCODE_RUNTIME_DIR", temp.path());
 
     crate::server::write_reload_state(
         "reload-marker-test",
@@ -116,9 +116,9 @@ fn test_reload_handoff_active_when_socket_ready_marker_present() {
 
     crate::server::clear_reload_marker();
     if let Some(prev_runtime) = prev_runtime {
-        crate::env::set_var("JCODE_RUNTIME_DIR", prev_runtime);
+        crate::env::set_var("KCODE_RUNTIME_DIR", prev_runtime);
     } else {
-        crate::env::remove_var("JCODE_RUNTIME_DIR");
+        crate::env::remove_var("KCODE_RUNTIME_DIR");
     }
 }
 
@@ -170,6 +170,7 @@ fn test_handle_server_event_history_with_interruption_queues_continuation() {
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
+            applets: Default::default(),
         },
         &mut remote,
     );
@@ -247,6 +248,7 @@ fn test_handle_server_event_history_uses_server_owned_reload_recovery_directive(
         compaction_mode: crate::config::CompactionMode::Reactive,
         activity: None,
         side_panel: crate::side_panel::SidePanelSnapshot::default(),
+        applets: Default::default(),
     };
 
     app.handle_server_event(event.clone(), &mut remote);
@@ -326,6 +328,7 @@ fn test_handle_server_event_history_without_interruption_does_not_queue() {
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
+            applets: Default::default(),
         },
         &mut remote,
     );
@@ -390,6 +393,7 @@ fn test_handle_server_event_history_after_reload_reports_no_continuation_needed(
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
+            applets: Default::default(),
         },
         &mut remote,
     );
@@ -644,12 +648,14 @@ fn test_handle_server_event_history_restores_side_panel_snapshot() {
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
 
     let side_panel = crate::side_panel::SidePanelSnapshot {
+        focus_revision: 0,
         focused_page_id: Some("plan".to_string()),
         pages: vec![crate::side_panel::SidePanelPage {
             id: "plan".to_string(),
             title: "Plan".to_string(),
             file_path: "/tmp/plan.md".to_string(),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
+            pdf_data: None,
             source: crate::side_panel::SidePanelPageSource::Managed,
             content: "# Plan\n```mermaid\nflowchart LR\nA-->B\n```".to_string(),
             updated_at_ms: 1,
@@ -691,6 +697,7 @@ fn test_handle_server_event_history_restores_side_panel_snapshot() {
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
             side_panel: side_panel.clone(),
+            applets: Default::default(),
         },
         &mut remote,
     );
@@ -751,6 +758,7 @@ fn test_handle_server_event_history_restores_active_resume_processing_state() {
                 current_tool_name: Some("batch".to_string()),
             }),
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
+            applets: Default::default(),
         },
         &mut remote,
     );
@@ -770,12 +778,14 @@ fn test_handle_server_event_side_panel_state_updates_snapshot() {
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
 
     app.side_panel = crate::side_panel::SidePanelSnapshot {
+        focus_revision: 0,
         focused_page_id: Some("old".to_string()),
         pages: vec![crate::side_panel::SidePanelPage {
             id: "old".to_string(),
             title: "Old".to_string(),
             file_path: "/tmp/old.md".to_string(),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
+            pdf_data: None,
             source: crate::side_panel::SidePanelPageSource::Managed,
             content: "old".to_string(),
             updated_at_ms: 1,
@@ -786,12 +796,14 @@ fn test_handle_server_event_side_panel_state_updates_snapshot() {
     app.handle_server_event(
         crate::protocol::ServerEvent::SidePanelState {
             snapshot: crate::side_panel::SidePanelSnapshot {
+                focus_revision: 0,
                 focused_page_id: Some("new".to_string()),
                 pages: vec![crate::side_panel::SidePanelPage {
                     id: "new".to_string(),
                     title: "New".to_string(),
                     file_path: "/tmp/new.md".to_string(),
                     format: crate::side_panel::SidePanelPageFormat::Markdown,
+                    pdf_data: None,
                     source: crate::side_panel::SidePanelPageSource::Managed,
                     content: "# New".to_string(),
                     updated_at_ms: 2,
@@ -810,8 +822,8 @@ fn test_handle_server_event_side_panel_state_updates_snapshot() {
 fn test_remote_swarm_status_does_not_clobber_newer_session_history_on_disk() {
     let _guard = crate::storage::lock_test_env();
     let temp_home = tempfile::TempDir::new().expect("create temp home");
-    let prev_home = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", temp_home.path());
+    let prev_home = std::env::var_os("KCODE_HOME");
+    crate::env::set_var("KCODE_HOME", temp_home.path());
 
     let session_id = "session_remote_preserve_history";
     let mut session = crate::session::Session::create_with_id(
@@ -872,8 +884,8 @@ fn test_remote_swarm_status_does_not_clobber_newer_session_history_on_disk() {
     assert_eq!(last_text, "newer server-side message");
 
     if let Some(prev_home) = prev_home {
-        crate::env::set_var("JCODE_HOME", prev_home);
+        crate::env::set_var("KCODE_HOME", prev_home);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
     }
 }

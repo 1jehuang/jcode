@@ -13,6 +13,10 @@ pub enum ColorCapability {
 static CAPABILITY: OnceLock<ColorCapability> = OnceLock::new();
 
 pub fn color_capability() -> ColorCapability {
+    // This crate's unit tests assert exact truecolor output; never depend on the runner's COLORTERM.
+    if cfg!(test) {
+        return ColorCapability::TrueColor;
+    }
     *CAPABILITY.get_or_init(detect_color_capability)
 }
 
@@ -22,9 +26,9 @@ pub fn color_capability() -> ColorCapability {
 /// these to the 256-color palette bounds the distinct-color space the atlas
 /// must cache, keeping markdown/mermaid colors readable. Mirrors the detection
 /// in `jcode_tui_style::color::fragile_glyph_cache_terminal`. Overridable with
-/// `JCODE_GLYPH_SAFE_MODE=on|off`.
+/// `KCODE_GLYPH_SAFE_MODE=on|off`.
 fn fragile_glyph_cache_terminal() -> bool {
-    if let Ok(raw) = std::env::var("JCODE_GLYPH_SAFE_MODE") {
+    if let Ok(raw) = std::env::var("KCODE_GLYPH_SAFE_MODE") {
         match raw.trim().to_ascii_lowercase().as_str() {
             "1" | "true" | "yes" | "on" => return true,
             "0" | "false" | "no" | "off" => return false,
@@ -436,7 +440,7 @@ mod fragile_glyph_tests {
     fn override_off_forces_truecolor() {
         temp_env_scope(
             &[
-                ("JCODE_GLYPH_SAFE_MODE", Some("off")),
+                ("KCODE_GLYPH_SAFE_MODE", Some("off")),
                 ("TERM_PROGRAM", Some("vscode")),
             ],
             || assert!(!fragile_glyph_cache_terminal()),
@@ -445,7 +449,7 @@ mod fragile_glyph_tests {
 
     #[test]
     fn override_on_forces_quantize() {
-        temp_env_scope(&[("JCODE_GLYPH_SAFE_MODE", Some("on"))], || {
+        temp_env_scope(&[("KCODE_GLYPH_SAFE_MODE", Some("on"))], || {
             assert!(fragile_glyph_cache_terminal())
         });
     }
@@ -455,21 +459,21 @@ mod fragile_glyph_tests {
     fn detects_vscode_and_apple_terminal() {
         temp_env_scope(
             &[
-                ("JCODE_GLYPH_SAFE_MODE", None),
+                ("KCODE_GLYPH_SAFE_MODE", None),
                 ("TERM_PROGRAM", Some("vscode")),
             ],
             || assert!(fragile_glyph_cache_terminal()),
         );
         temp_env_scope(
             &[
-                ("JCODE_GLYPH_SAFE_MODE", None),
+                ("KCODE_GLYPH_SAFE_MODE", None),
                 ("TERM_PROGRAM", Some("Apple_Terminal")),
             ],
             || assert!(fragile_glyph_cache_terminal()),
         );
         temp_env_scope(
             &[
-                ("JCODE_GLYPH_SAFE_MODE", None),
+                ("KCODE_GLYPH_SAFE_MODE", None),
                 ("TERM_PROGRAM", Some("ghostty")),
             ],
             || assert!(!fragile_glyph_cache_terminal()),

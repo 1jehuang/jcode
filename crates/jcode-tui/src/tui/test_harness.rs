@@ -466,7 +466,7 @@ impl TestBundle {
     pub fn default_path(name: &str) -> PathBuf {
         dirs::config_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("jcode")
+            .join("kcode")
             .join("test-bundles")
             .join(format!("{}.json", sanitize_filename(name)))
     }

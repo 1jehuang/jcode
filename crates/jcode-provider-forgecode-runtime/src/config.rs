@@ -7,17 +7,17 @@ pub(crate) struct ForgeCodeCliConfig {
 
 impl ForgeCodeCliConfig {
     pub(crate) fn from_env() -> Self {
-        let cli_path = std::env::var("JCODE_FORGECODE_CLI_PATH")
+        let cli_path = std::env::var("KCODE_FORGECODE_CLI_PATH")
             .ok()
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| "forge".to_string());
 
-        let model = std::env::var("JCODE_FORGECODE_CLI_MODEL")
+        let model = std::env::var("KCODE_FORGECODE_CLI_MODEL")
             .ok()
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| super::DEFAULT_MODEL.to_string());
 
-        let permission_mode = std::env::var("JCODE_FORGECODE_CLI_PERMISSION_MODE")
+        let permission_mode = std::env::var("KCODE_FORGECODE_CLI_PERMISSION_MODE")
             .ok()
             .filter(|value| !value.trim().is_empty())
             .or_else(|| Some("bypassPermissions".to_string()));
@@ -36,7 +36,7 @@ mod tests {
     use std::sync::Mutex;
 
     // Tests in this module mutate global process state via
-    // std::env::set_var on JCODE_FORGECODE_CLI_* variables and then
+    // std::env::set_var on KCODE_FORGECODE_CLI_* variables and then
     // read them back via ForgeCodeCliConfig::from_env. Because the env
     // is process-global, parallel test execution (cargo test's default)
     // lets one test's set_var race into another test's from_env read.
@@ -57,9 +57,9 @@ mod tests {
     fn test_from_env_defaults() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
         unsafe {
-            std::env::set_var("JCODE_FORGECODE_CLI_PATH", "");
-            std::env::set_var("JCODE_FORGECODE_CLI_MODEL", "");
-            std::env::set_var("JCODE_FORGECODE_CLI_PERMISSION_MODE", "");
+            std::env::set_var("KCODE_FORGECODE_CLI_PATH", "");
+            std::env::set_var("KCODE_FORGECODE_CLI_MODEL", "");
+            std::env::set_var("KCODE_FORGECODE_CLI_PERMISSION_MODE", "");
         }
         let config = ForgeCodeCliConfig::from_env();
         assert_eq!(config.cli_path, "forge");
@@ -71,9 +71,9 @@ mod tests {
     fn test_from_env_custom_values() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
         unsafe {
-            std::env::set_var("JCODE_FORGECODE_CLI_PATH", "/usr/local/bin/forge");
-            std::env::set_var("JCODE_FORGECODE_CLI_MODEL", "claude-sonnet-4");
-            std::env::set_var("JCODE_FORGECODE_CLI_PERMISSION_MODE", "strict");
+            std::env::set_var("KCODE_FORGECODE_CLI_PATH", "/usr/local/bin/forge");
+            std::env::set_var("KCODE_FORGECODE_CLI_MODEL", "claude-sonnet-4");
+            std::env::set_var("KCODE_FORGECODE_CLI_PERMISSION_MODE", "strict");
         }
         let config = ForgeCodeCliConfig::from_env();
         assert_eq!(config.cli_path, "/usr/local/bin/forge");
@@ -85,9 +85,9 @@ mod tests {
     fn test_from_env_whitespace_uses_default() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
         unsafe {
-            std::env::set_var("JCODE_FORGECODE_CLI_PATH", "  ");
-            std::env::set_var("JCODE_FORGECODE_CLI_MODEL", "  ");
-            std::env::set_var("JCODE_FORGECODE_CLI_PERMISSION_MODE", "  ");
+            std::env::set_var("KCODE_FORGECODE_CLI_PATH", "  ");
+            std::env::set_var("KCODE_FORGECODE_CLI_MODEL", "  ");
+            std::env::set_var("KCODE_FORGECODE_CLI_PERMISSION_MODE", "  ");
         }
         let config = ForgeCodeCliConfig::from_env();
         assert_eq!(config.cli_path, "forge");

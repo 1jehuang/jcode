@@ -40,7 +40,7 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 def jcode_debug_socket():
     """Find the active jcode debug socket path."""
     runtime_dir = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
-    return os.path.join(runtime_dir, "jcode-debug.sock")
+    return os.path.join(runtime_dir, "kcode-debug.sock")
 
 
 def _send_recv(sock_path, request, timeout=TIMEOUT_SECS):
@@ -212,7 +212,7 @@ def test_selfdev_socket_info():
 
 @test("6. Reload context file: write and load roundtrip")
 def test_reload_context_roundtrip():
-    jcode_dir = pathlib.Path.home() / ".jcode"
+    jcode_dir = pathlib.Path.home() / ".kcode"
     ctx_path = jcode_dir / "reload-context.json"
 
     original = ctx_path.read_text() if ctx_path.exists() else None
@@ -241,7 +241,7 @@ def test_reload_context_roundtrip():
 
 @test("7. Reload context: session_id filtering (peek_for_session)")
 def test_reload_context_session_filter():
-    jcode_dir = pathlib.Path.home() / ".jcode"
+    jcode_dir = pathlib.Path.home() / ".kcode"
     ctx_path = jcode_dir / "reload-context.json"
 
     original = ctx_path.read_text() if ctx_path.exists() else None
@@ -270,7 +270,7 @@ def test_reload_context_session_filter():
 
 @test("8. Reload-info file: write and verify format")
 def test_reload_info_file():
-    jcode_dir = pathlib.Path.home() / ".jcode"
+    jcode_dir = pathlib.Path.home() / ".kcode"
     info_path = jcode_dir / "reload-info"
 
     original = info_path.read_text() if info_path.exists() else None
@@ -290,7 +290,7 @@ def test_reload_info_file():
 @test("9. Canary binary path exists (build manifest)")
 def test_canary_binary_path():
     home = pathlib.Path.home()
-    manifest_path = home / ".jcode" / "build-manifest.json"
+    manifest_path = home / ".kcode" / "build-manifest.json"
 
     if not manifest_path.exists():
         if verbose:
@@ -307,7 +307,7 @@ def test_canary_binary_path():
         print(f"     canary_status: {manifest.get('canary_status')}")
 
     if canary_hash:
-        canary_binary = home / ".jcode" / "builds" / "canary" / "jcode"
+        canary_binary = home / ".kcode" / "builds" / "canary" / "jcode"
         exists = canary_binary.exists()
         if verbose:
             print(f"     canary binary at {canary_binary}: exists={exists}")
@@ -435,7 +435,7 @@ def test_stale_reload_info():
     A stale reload-info file (from a crashed reload) would show a false
     'reload succeeded' message on next connect. Check for this condition.
     """
-    jcode_dir = pathlib.Path.home() / ".jcode"
+    jcode_dir = pathlib.Path.home() / ".kcode"
     info_path = jcode_dir / "reload-info"
 
     if not info_path.exists():

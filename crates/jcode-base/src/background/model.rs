@@ -9,7 +9,7 @@ use tokio::task::JoinHandle;
 
 /// Directory for background task output files
 pub(super) fn task_dir() -> PathBuf {
-    std::env::temp_dir().join("jcode-bg-tasks")
+    std::env::temp_dir().join("kcode-bg-tasks")
 }
 
 pub(super) const EXIT_MARKER_PREFIX: &str = "--- Command finished with exit code: ";

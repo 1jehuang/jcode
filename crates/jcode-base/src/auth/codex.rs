@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
 
-const ALLOW_LEGACY_AUTH_ENV: &str = "JCODE_ALLOW_CODEX_LEGACY_AUTH";
+const ALLOW_LEGACY_AUTH_ENV: &str = "KCODE_ALLOW_CODEX_LEGACY_AUTH";
 pub const LEGACY_CODEX_AUTH_SOURCE_ID: &str = "openai_codex_auth_json";
 
 #[derive(Debug, Clone)]

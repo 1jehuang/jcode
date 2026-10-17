@@ -20,7 +20,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     files.sort();
 
-    let mut generated = String::from("pub(crate) static JCODE_DOCS: &[(&str, &str)] = &[\n");
+    let mut generated = String::from("pub(crate) static KCODE_DOCS: &[(&str, &str)] = &[\n");
     for path in files {
         let relative = path.strip_prefix(&repo).map_err(|e| {
             format!(

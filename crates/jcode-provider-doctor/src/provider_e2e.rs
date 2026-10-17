@@ -273,7 +273,7 @@ const FULL_PIPELINE_LABELS: &[(&str, &str)] = &[
     (checkpoints::TOOL_CALL_PARSE, "Tool-call parse"),
     (checkpoints::TOOL_EXECUTION_LOOP, "Tool execution loop"),
     (checkpoints::TOOL_RESULT_FOLLOWUP, "Tool-result followup"),
-    (checkpoints::REAL_JCODE_TOOL_SMOKE, "Real Jcode tool smoke"),
+    (checkpoints::REAL_KCODE_TOOL_SMOKE, "Real Jcode tool smoke"),
     (checkpoints::REASONING_CAPABILITY, "Reasoning capability"),
 ];
 
@@ -387,7 +387,7 @@ const API_DEPENDENT_CHECKPOINTS: &[&str] = &[
     checkpoints::TOOL_CALL_PARSE,
     checkpoints::TOOL_EXECUTION_LOOP,
     checkpoints::TOOL_RESULT_FOLLOWUP,
-    checkpoints::REAL_JCODE_TOOL_SMOKE,
+    checkpoints::REAL_KCODE_TOOL_SMOKE,
     checkpoints::REASONING_CAPABILITY,
 ];
 
@@ -631,7 +631,7 @@ pub async fn run_claude_native_e2e(
     //
     // The `claude` login provider is specifically the OAuth/subscription path,
     // so pin OAuth mode before resolving: otherwise a self-dev session with
-    // `JCODE_RUNTIME_PROVIDER=claude-api` would silently test the API-key path
+    // `KCODE_RUNTIME_PROVIDER=claude-api` would silently test the API-key path
     // and mislabel the credential. Pinning also points any provider instances
     // the probes build afterwards at the same OAuth path.
     let provider_runtime = AnthropicProvider::new();
@@ -913,7 +913,7 @@ async fn run_native_claude_api_checks(
                 checkpoints::TOOL_CALL_PARSE,
                 checkpoints::TOOL_EXECUTION_LOOP,
                 checkpoints::TOOL_RESULT_FOLLOWUP,
-                checkpoints::REAL_JCODE_TOOL_SMOKE,
+                checkpoints::REAL_KCODE_TOOL_SMOKE,
             ] {
                 checks.push(DoctorCheck::passed(
                     checkpoint,
@@ -927,7 +927,7 @@ async fn run_native_claude_api_checks(
                 checkpoints::TOOL_CALL_PARSE,
                 checkpoints::TOOL_EXECUTION_LOOP,
                 checkpoints::TOOL_RESULT_FOLLOWUP,
-                checkpoints::REAL_JCODE_TOOL_SMOKE,
+                checkpoints::REAL_KCODE_TOOL_SMOKE,
             ] {
                 checks.push(DoctorCheck::failed(
                     checkpoint,
@@ -1257,7 +1257,7 @@ async fn run_native_antigravity_api_checks(
                 checkpoints::TOOL_CALL_PARSE,
                 checkpoints::TOOL_EXECUTION_LOOP,
                 checkpoints::TOOL_RESULT_FOLLOWUP,
-                checkpoints::REAL_JCODE_TOOL_SMOKE,
+                checkpoints::REAL_KCODE_TOOL_SMOKE,
             ] {
                 checks.push(DoctorCheck::passed(
                     checkpoint,
@@ -1271,7 +1271,7 @@ async fn run_native_antigravity_api_checks(
                 checkpoints::TOOL_CALL_PARSE,
                 checkpoints::TOOL_EXECUTION_LOOP,
                 checkpoints::TOOL_RESULT_FOLLOWUP,
-                checkpoints::REAL_JCODE_TOOL_SMOKE,
+                checkpoints::REAL_KCODE_TOOL_SMOKE,
             ] {
                 checks.push(DoctorCheck::failed(
                     checkpoint,
@@ -1409,16 +1409,16 @@ impl NativeProviderKind {
                 // route identity is the managed Jcode subscription. Model
                 // switches use a bare model id so they stay on that runtime.
                 contract: WiringContract {
-                    api_method: jcode_base::subscription_catalog::JCODE_ROUTE_API_METHOD
+                    api_method: jcode_base::subscription_catalog::KCODE_ROUTE_API_METHOD
                         .to_string(),
-                    route_provider: jcode_base::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
+                    route_provider: jcode_base::subscription_catalog::KCODE_PROVIDER_DISPLAY_NAME
                         .to_string(),
                     expected_runtime: "jcode",
                     expected_namespace: None,
                     switch_prefix: String::new(),
                 },
-                auth_source: "Jcode subscription API key (JCODE_API_KEY)",
-                auth_env_key: Some("JCODE_API_KEY"),
+                auth_source: "Jcode subscription API key (KCODE_API_KEY)",
+                auth_env_key: Some("KCODE_API_KEY"),
                 login_hint: "jcode login --provider jcode",
             },
             Self::Azure => NativeProviderSpec {
@@ -1481,7 +1481,7 @@ impl NativeProviderKind {
                 // `detect_tier_and_set_default` (run from `prefetch_models`). With
                 // the default grace window the doctor's immediate prefetch returns
                 // early without marking init done, so the live probes would hang.
-                jcode_base::env::set_var("JCODE_COPILOT_PREFETCH_STARTUP_GRACE_MS", "0");
+                jcode_base::env::set_var("KCODE_COPILOT_PREFETCH_STARTUP_GRACE_MS", "0");
                 let runtime = match jcode_provider_copilot_runtime::CopilotApiProvider::new() {
                     Ok(runtime) => runtime,
                     Err(_) => jcode_provider_copilot_runtime::CopilotApiProvider::new_with_token(
@@ -1565,7 +1565,7 @@ impl NativeProviderKind {
             Self::Jcode => {
                 if !jcode_base::subscription_catalog::has_credentials() {
                     anyhow::bail!(
-                        "no Jcode subscription credential found (set JCODE_API_KEY or run \
+                        "no Jcode subscription credential found (set KCODE_API_KEY or run \
                          `jcode login --provider jcode`)"
                     );
                 }
@@ -1909,7 +1909,7 @@ async fn run_generic_native_api_checks(
                 checkpoints::TOOL_CALL_PARSE,
                 checkpoints::TOOL_EXECUTION_LOOP,
                 checkpoints::TOOL_RESULT_FOLLOWUP,
-                checkpoints::REAL_JCODE_TOOL_SMOKE,
+                checkpoints::REAL_KCODE_TOOL_SMOKE,
             ] {
                 checks.push(DoctorCheck::passed(
                     checkpoint,
@@ -1923,7 +1923,7 @@ async fn run_generic_native_api_checks(
                 checkpoints::TOOL_CALL_PARSE,
                 checkpoints::TOOL_EXECUTION_LOOP,
                 checkpoints::TOOL_RESULT_FOLLOWUP,
-                checkpoints::REAL_JCODE_TOOL_SMOKE,
+                checkpoints::REAL_KCODE_TOOL_SMOKE,
             ] {
                 checks.push(DoctorCheck::failed(
                     checkpoint,
@@ -2224,7 +2224,7 @@ async fn run_full_api_checks(
                 checkpoints::TOOL_CALL_PARSE,
                 checkpoints::TOOL_EXECUTION_LOOP,
                 checkpoints::TOOL_RESULT_FOLLOWUP,
-                checkpoints::REAL_JCODE_TOOL_SMOKE,
+                checkpoints::REAL_KCODE_TOOL_SMOKE,
             ] {
                 checks.push(DoctorCheck::passed(
                     checkpoint,
@@ -2238,7 +2238,7 @@ async fn run_full_api_checks(
                 checkpoints::TOOL_CALL_PARSE,
                 checkpoints::TOOL_EXECUTION_LOOP,
                 checkpoints::TOOL_RESULT_FOLLOWUP,
-                checkpoints::REAL_JCODE_TOOL_SMOKE,
+                checkpoints::REAL_KCODE_TOOL_SMOKE,
             ] {
                 checks.push(DoctorCheck::failed(
                     checkpoint,
@@ -2602,11 +2602,11 @@ mod tests {
         let contract = NativeProviderKind::Jcode.spec().contract;
         assert_eq!(
             contract.api_method,
-            jcode_base::subscription_catalog::JCODE_ROUTE_API_METHOD
+            jcode_base::subscription_catalog::KCODE_ROUTE_API_METHOD
         );
         assert_eq!(
             contract.route_provider,
-            jcode_base::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
+            jcode_base::subscription_catalog::KCODE_PROVIDER_DISPLAY_NAME
         );
         assert_eq!(contract.expected_runtime, "jcode");
         assert!(contract.expected_namespace.is_none());

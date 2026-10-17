@@ -290,9 +290,9 @@ fn dispatch(action: &str, input: &ComputerInput) -> Result<ToolOutput> {
     const SCREENSHOT_ACTIONS: &[&str] = &["screenshot", "window_screenshot", "ocr"];
     if SCREENSHOT_ACTIONS.contains(&action) {
         // Check if screenshots are disabled via env var
-        if std::env::var("JCODE_SCREENSHOT_DISABLED").unwrap_or_default() == "1" {
+        if std::env::var("KCODE_SCREENSHOT_DISABLED").unwrap_or_default() == "1" {
             bail!(
-                "Screen capture is disabled (JCODE_SCREENSHOT_DISABLED=1). \
+                "Screen capture is disabled (KCODE_SCREENSHOT_DISABLED=1). \
                  This agent does not have permission to capture screen content. \
                  Use browser tool with 'screenshot' action for browser-only screenshots."
             );

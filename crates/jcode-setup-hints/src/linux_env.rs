@@ -12,7 +12,7 @@
 //!   turn resolved launch hotkeys into the exact bind lines we manage. Instead
 //!   of inlining shell one-liners (a quoting minefield across three different
 //!   config grammars), each bind simply executes a launch script jcode writes
-//!   to `~/.jcode/hotkey/`.
+//!   to `~/.kcode/hotkey/`.
 //! * [`splice_flat_managed_block`] replaces/creates the sentinel-delimited
 //!   managed region at file scope, leaving every other line untouched.
 //!
@@ -21,7 +21,7 @@
 //!
 //! ```text
 //! # >>> jcode launch hotkeys (managed) >>>
-//! bind = SUPER, semicolon, exec, '/home/u/.jcode/hotkey/launch_jcode_0_cmd_semicolon.sh'
+//! bind = SUPER, semicolon, exec, '/home/u/.kcode/hotkey/launch_jcode_0_cmd_semicolon.sh'
 //! # <<< jcode launch hotkeys (managed) <<<
 //! ```
 
@@ -58,7 +58,7 @@ pub(crate) enum LinuxCompositor {
 }
 
 impl LinuxCompositor {
-    #[cfg(target_os = "linux")]
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn name(&self) -> &'static str {
         match self {
             LinuxCompositor::Niri => "niri",
@@ -404,7 +404,7 @@ pub(crate) fn merge_gnome_keybinding_list(current: &str, ours: &[String]) -> Str
         let after = &rest[start + 1..];
         let Some(end) = after.find('\'') else { break };
         let entry = &after[..end];
-        if !entry.contains("jcode-launch-") {
+        if !entry.contains("kcode-launch-") {
             entries.push(entry.to_string());
         }
         rest = &after[end + 1..];
@@ -416,7 +416,7 @@ pub(crate) fn merge_gnome_keybinding_list(current: &str, ours: &[String]) -> Str
 
 /// Stable dconf slot name for jcode's Nth custom keybinding (Cinnamon/MATE).
 pub(crate) fn dconf_slot_name(index: usize) -> String {
-    format!("jcode-launch-{index}")
+    format!("kcode-launch-{index}")
 }
 
 /// One dconf-backed custom keybinding (GNOME/Cinnamon/MATE all share the
@@ -504,7 +504,7 @@ pub(crate) fn kde_shortcut(chord: &KeyChord) -> Option<String> {
 
 /// Stable desktop-file name for jcode's Nth KDE launch shortcut.
 pub(crate) fn kde_desktop_file_name(index: usize) -> String {
-    format!("jcode-launch-{index}.desktop")
+    format!("kcode-launch-{index}.desktop")
 }
 
 /// One KDE launch shortcut: a hidden desktop file plus its
@@ -684,9 +684,8 @@ mod tests {
 
     #[test]
     fn detects_compositors_from_sockets_and_desktop_names() {
-        type EnvPairs = (&'static str, &'static str);
-        type EnvExpectation = (Vec<EnvPairs>, Option<LinuxCompositor>);
-        let cases: Vec<EnvExpectation> = vec![
+        type Case<'a> = (Vec<(&'a str, &'a str)>, Option<LinuxCompositor>);
+        let cases: Vec<Case> = vec![
             (
                 vec![("NIRI_SOCKET", "/run/niri.sock")],
                 Some(LinuxCompositor::Niri),
@@ -828,9 +827,9 @@ mod tests {
         );
         let merged = merge_gnome_keybinding_list(&current, &ours);
         assert!(merged.contains("custom0"));
-        assert!(!merged.contains("jcode-launch-7"));
-        assert_eq!(merged.matches("jcode-launch-0").count(), 1);
-        assert_eq!(merged.matches("jcode-launch-1").count(), 1);
+        assert!(!merged.contains("kcode-launch-7"));
+        assert_eq!(merged.matches("kcode-launch-0").count(), 1);
+        assert_eq!(merged.matches("kcode-launch-1").count(), 1);
         // Idempotent.
         assert_eq!(merge_gnome_keybinding_list(&merged, &ours), merged);
     }
@@ -843,8 +842,8 @@ mod tests {
             bind("cmd+shift+'", "/b.sh", "self-dev", true),
         ]);
         assert_eq!(kbs.len(), 2);
-        assert_eq!(kbs[0].slot, "jcode-launch-0");
-        assert_eq!(kbs[1].slot, "jcode-launch-1");
+        assert_eq!(kbs[0].slot, "kcode-launch-0");
+        assert_eq!(kbs[1].slot, "kcode-launch-1");
         assert_eq!(kbs[0].binding, "<Super>semicolon");
         assert_eq!(kbs[1].binding, "<Super><Shift>apostrophe");
         assert_eq!(kbs[1].name, "jcode: self-dev");
@@ -857,9 +856,9 @@ mod tests {
         let current = "['custom0', 'jcode-launch-0', 'jcode-launch-5']";
         let merged = merge_gnome_keybinding_list(current, &ours);
         assert!(merged.contains("'custom0'"));
-        assert!(!merged.contains("jcode-launch-5"));
-        assert_eq!(merged.matches("jcode-launch-0").count(), 1);
-        assert!(merged.contains("jcode-launch-1"));
+        assert!(!merged.contains("kcode-launch-5"));
+        assert_eq!(merged.matches("kcode-launch-0").count(), 1);
+        assert!(merged.contains("kcode-launch-1"));
         assert_eq!(merge_gnome_keybinding_list(&merged, &ours), merged);
     }
 
@@ -875,7 +874,7 @@ mod tests {
             bind("cmd+shift+'", "/b.sh", "self-dev", true),
         ]);
         assert_eq!(scs.len(), 2);
-        assert_eq!(scs[0].desktop_file_name, "jcode-launch-0.desktop");
+        assert_eq!(scs[0].desktop_file_name, "kcode-launch-0.desktop");
         assert!(scs[0].desktop_file_body.contains("Exec=/a.sh"));
         assert!(scs[0].desktop_file_body.contains("NoDisplay=true"));
         assert_eq!(scs[1].launch_shortcut, "Meta+Shift+'");
@@ -896,7 +895,7 @@ mod tests {
         );
         assert!(updated.contains("_launch=Meta+;"));
         assert!(!updated.contains("Meta+X"));
-        assert!(!updated.contains("jcode-launch-9"));
+        assert!(!updated.contains("kcode-launch-9"));
         // Idempotent.
         assert_eq!(upsert_kde_shortcut_sections(&updated, &scs), updated);
     }
@@ -919,14 +918,14 @@ mod tests {
     fn hyprland_bind_line_maps_cmd_to_super() {
         let line = render_hyprland_bind_line(&bind(
             "cmd+;",
-            "/home/u/.jcode/hotkey/launch_jcode_0_cmd_semicolon.sh",
+            "/home/u/.kcode/hotkey/launch_jcode_0_cmd_semicolon.sh",
             "jcode",
             false,
         ))
         .unwrap();
         assert_eq!(
             line,
-            "bind = SUPER, semicolon, exec, '/home/u/.jcode/hotkey/launch_jcode_0_cmd_semicolon.sh'"
+            "bind = SUPER, semicolon, exec, '/home/u/.kcode/hotkey/launch_jcode_0_cmd_semicolon.sh'"
         );
 
         let shifted = render_hyprland_bind_line(&bind("cmd+shift+'", "/s.sh", "x", true)).unwrap();

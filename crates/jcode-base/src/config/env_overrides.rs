@@ -8,94 +8,109 @@ impl Config {
     )]
     pub(crate) fn apply_env_overrides(&mut self) {
         // Server/operator behavior
-        if let Ok(v) = std::env::var("JCODE_WAKE_MODE")
+        if let Ok(v) = std::env::var("KCODE_WAKE_MODE")
             && let Some(parsed) = WakeMode::parse(&v)
         {
             self.server.wake_mode = parsed;
         }
 
         // Keybindings
-        if let Ok(v) = std::env::var("JCODE_SCROLL_UP_KEY") {
+        if let Ok(v) = std::env::var("KCODE_SCROLL_UP_KEY") {
             self.keybindings.scroll_up = v;
         }
-        if let Ok(v) = std::env::var("JCODE_SCROLL_DOWN_KEY") {
+        if let Ok(v) = std::env::var("KCODE_SCROLL_DOWN_KEY") {
             self.keybindings.scroll_down = v;
         }
-        if let Ok(v) = std::env::var("JCODE_SCROLL_PAGE_UP_KEY") {
+        if let Ok(v) = std::env::var("KCODE_SCROLL_PAGE_UP_KEY") {
             self.keybindings.scroll_page_up = v;
         }
-        if let Ok(v) = std::env::var("JCODE_SCROLL_PAGE_DOWN_KEY") {
+        if let Ok(v) = std::env::var("KCODE_SCROLL_PAGE_DOWN_KEY") {
             self.keybindings.scroll_page_down = v;
         }
-        if let Ok(v) = std::env::var("JCODE_MODEL_SWITCH_KEY") {
+        if let Ok(v) = std::env::var("KCODE_MODEL_SWITCH_KEY") {
             self.keybindings.model_switch_next = v;
         }
-        if let Ok(v) = std::env::var("JCODE_MODEL_SWITCH_PREV_KEY") {
+        if let Ok(v) = std::env::var("KCODE_MODEL_SWITCH_PREV_KEY") {
             self.keybindings.model_switch_prev = v;
         }
-        if let Ok(v) = std::env::var("JCODE_EFFORT_INCREASE_KEY") {
+        if let Ok(v) = std::env::var("KCODE_EFFORT_INCREASE_KEY") {
             self.keybindings.effort_increase = v;
         }
-        if let Ok(v) = std::env::var("JCODE_EFFORT_DECREASE_KEY") {
+        if let Ok(v) = std::env::var("KCODE_EFFORT_DECREASE_KEY") {
             self.keybindings.effort_decrease = v;
         }
-        if let Ok(v) = std::env::var("JCODE_CENTERED_TOGGLE_KEY") {
+        if let Ok(v) = std::env::var("KCODE_SPEED_INCREASE_KEY") {
+            self.keybindings.speed_increase = v;
+        }
+        if let Ok(v) = std::env::var("KCODE_SPEED_DECREASE_KEY") {
+            self.keybindings.speed_decrease = v;
+        }
+        if let Ok(v) = std::env::var("KCODE_CENTERED_TOGGLE_KEY") {
             self.keybindings.centered_toggle = v;
         }
-        if let Ok(v) = std::env::var("JCODE_SCROLL_PROMPT_UP_KEY") {
+        if let Ok(v) = std::env::var("KCODE_SCROLL_PROMPT_UP_KEY") {
             self.keybindings.scroll_prompt_up = v;
         }
-        if let Ok(v) = std::env::var("JCODE_SCROLL_PROMPT_DOWN_KEY") {
+        if let Ok(v) = std::env::var("KCODE_SCROLL_PROMPT_DOWN_KEY") {
             self.keybindings.scroll_prompt_down = v;
         }
-        if let Ok(v) = std::env::var("JCODE_SCROLL_BOOKMARK_KEY") {
+        if let Ok(v) = std::env::var("KCODE_SCROLL_BOOKMARK_KEY") {
             self.keybindings.scroll_bookmark = v;
         }
-        if let Ok(v) = std::env::var("JCODE_SCROLL_UP_FALLBACK_KEY") {
+        if let Ok(v) = std::env::var("KCODE_SCROLL_UP_FALLBACK_KEY") {
             self.keybindings.scroll_up_fallback = v;
         }
-        if let Ok(v) = std::env::var("JCODE_SCROLL_DOWN_FALLBACK_KEY") {
+        if let Ok(v) = std::env::var("KCODE_SCROLL_DOWN_FALLBACK_KEY") {
             self.keybindings.scroll_down_fallback = v;
         }
-        if let Ok(v) = std::env::var("JCODE_WORKSPACE_LEFT_KEY") {
+        if let Ok(v) = std::env::var("KCODE_WORKSPACE_LEFT_KEY") {
             self.keybindings.workspace_left = v;
         }
-        if let Ok(v) = std::env::var("JCODE_WORKSPACE_DOWN_KEY") {
+        if let Ok(v) = std::env::var("KCODE_WORKSPACE_DOWN_KEY") {
             self.keybindings.workspace_down = v;
         }
-        if let Ok(v) = std::env::var("JCODE_WORKSPACE_UP_KEY") {
+        if let Ok(v) = std::env::var("KCODE_WORKSPACE_UP_KEY") {
             self.keybindings.workspace_up = v;
         }
-        if let Ok(v) = std::env::var("JCODE_WORKSPACE_RIGHT_KEY") {
+        if let Ok(v) = std::env::var("KCODE_WORKSPACE_RIGHT_KEY") {
             self.keybindings.workspace_right = v;
         }
-        if let Ok(v) = std::env::var("JCODE_SIDE_PANEL_TOGGLE_KEY") {
+        if let Ok(v) = std::env::var("KCODE_SIDE_PANEL_TOGGLE_KEY") {
             self.keybindings.side_panel_toggle = v;
         }
-        if let Ok(v) = std::env::var("JCODE_COPY_SELECTION_TOGGLE_KEY") {
+        if let Ok(v) = std::env::var("KCODE_COPY_SELECTION_TOGGLE_KEY") {
             self.keybindings.copy_selection_toggle = v;
         }
-        if let Ok(v) = std::env::var("JCODE_DIAGRAM_PANE_TOGGLE_KEY") {
+        if let Ok(v) = std::env::var("KCODE_DIAGRAM_PANE_TOGGLE_KEY") {
             self.keybindings.diagram_pane_toggle = v;
         }
-        if let Ok(v) = std::env::var("JCODE_TYPING_SCROLL_LOCK_TOGGLE_KEY") {
+        if let Ok(v) = std::env::var("KCODE_DIAGRAM_PANE_VISIBILITY_TOGGLE_KEY") {
+            self.keybindings.diagram_pane_visibility_toggle = v;
+        }
+        if let Ok(v) = std::env::var("KCODE_TYPING_SCROLL_LOCK_TOGGLE_KEY") {
             self.keybindings.typing_scroll_lock_toggle = v;
         }
-        if let Ok(v) = std::env::var("JCODE_DIFF_MODE_CYCLE_KEY") {
+        if let Ok(v) = std::env::var("KCODE_DIFF_MODE_CYCLE_KEY") {
             self.keybindings.diff_mode_cycle = v;
         }
-        if let Ok(v) = std::env::var("JCODE_INFO_WIDGET_TOGGLE_KEY") {
+        if let Ok(v) = std::env::var("KCODE_INFO_WIDGET_TOGGLE_KEY") {
             self.keybindings.info_widget_toggle = v;
         }
-        if let Ok(v) = std::env::var("JCODE_NEW_TERMINAL_KEY") {
+        if let Ok(v) = std::env::var("KCODE_NEW_TERMINAL_KEY") {
             self.keybindings.new_terminal = v;
+        }
+        if let Ok(v) = std::env::var("KCODE_VOICE_INPUT_KEY") {
+            self.keybindings.voice_input = v;
+        }
+        if let Ok(v) = std::env::var("KCODE_DICTATION_RECORDER") {
+            self.dictation.recorder = v;
         }
 
         // Dictation
-        if let Ok(v) = std::env::var("JCODE_DICTATION_COMMAND") {
+        if let Ok(v) = std::env::var("KCODE_DICTATION_COMMAND") {
             self.dictation.command = v;
         }
-        if let Ok(v) = std::env::var("JCODE_DICTATION_MODE")
+        if let Ok(v) = std::env::var("KCODE_DICTATION_MODE")
             && let Ok(mode) = toml::from_str::<crate::protocol::TranscriptMode>(&format!(
                 "\"{}\"",
                 v.trim().to_ascii_lowercase()
@@ -103,49 +118,54 @@ impl Config {
         {
             self.dictation.mode = mode;
         }
-        if let Ok(v) = std::env::var("JCODE_DICTATION_KEY") {
+        if let Ok(v) = std::env::var("KCODE_DICTATION_KEY") {
             self.dictation.key = v;
         }
-        if let Ok(v) = std::env::var("JCODE_DICTATION_TIMEOUT_SECS")
+        if let Ok(v) = std::env::var("KCODE_DICTATION_TIMEOUT_SECS")
             && let Ok(parsed) = v.trim().parse::<u64>()
         {
             self.dictation.timeout_secs = parsed;
         }
 
         // Tools
-        if let Ok(v) = std::env::var("JCODE_TOOL_PROFILE") {
+        if let Ok(v) = std::env::var("KCODE_TOOL_PROFILE") {
             self.tools.profile = v;
         }
-        if let Ok(v) = std::env::var("JCODE_TOOLS") {
+        if let Ok(v) = std::env::var("KCODE_TOOLS") {
             self.tools.enabled = parse_env_list(&v);
         }
-        if let Ok(v) = std::env::var("JCODE_DISABLED_TOOLS") {
+        if let Ok(v) = std::env::var("KCODE_DISABLED_TOOLS") {
             self.tools.disabled = parse_env_list(&v);
         }
-        if let Ok(v) = std::env::var("JCODE_DISABLE_BASE_TOOLS")
+        if let Ok(v) = std::env::var("KCODE_DISABLE_BASE_TOOLS")
             && let Some(parsed) = parse_env_bool(&v)
         {
             self.tools.disable_base_tools = parsed;
         }
-        if let Ok(v) = std::env::var("JCODE_MCP_TOOLS")
+        if let Ok(v) = std::env::var("KCODE_MCP_TOOLS")
             && let Some(mode) = crate::config::McpToolsMode::parse(&v)
         {
             self.tools.mcp_tools = mode;
         }
-        if let Ok(v) = std::env::var("JCODE_MCP_TOOLS_TOKEN_THRESHOLD")
+        if let Ok(v) = std::env::var("KCODE_MCP_TOOLS_TOKEN_THRESHOLD")
             && let Ok(parsed) = v.trim().parse::<usize>()
         {
             self.tools.mcp_tools_token_threshold = parsed;
         }
+        if let Ok(v) = std::env::var("KCODE_CODEMODE")
+            && let Some(parsed) = parse_env_bool(&v)
+        {
+            self.tools.codemode = parsed;
+        }
 
         // ACP adapter
-        if let Ok(v) = std::env::var("JCODE_ACP_PROFILE") {
+        if let Ok(v) = std::env::var("KCODE_ACP_PROFILE") {
             let trimmed = v.trim().to_ascii_lowercase();
             if matches!(trimmed.as_str(), "standard" | "extended" | "full") {
                 self.acp.profile = trimmed;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_ACP_TOOL_PROFILE") {
+        if let Ok(v) = std::env::var("KCODE_ACP_TOOL_PROFILE") {
             let trimmed = v.trim();
             if !trimmed.is_empty() {
                 self.acp.tool_profile = trimmed.to_string();
@@ -153,7 +173,7 @@ impl Config {
         }
 
         // Display
-        if let Ok(v) = std::env::var("JCODE_DIFF_MODE") {
+        if let Ok(v) = std::env::var("KCODE_DIFF_MODE") {
             match v.to_lowercase().as_str() {
                 "off" | "none" | "0" | "false" => self.display.diff_mode = DiffDisplayMode::Off,
                 "inline" | "on" | "1" | "true" => self.display.diff_mode = DiffDisplayMode::Inline,
@@ -161,11 +181,10 @@ impl Config {
                 | "inlinefull" | "full" => {
                     self.display.diff_mode = DiffDisplayMode::FullInline;
                 }
-                "pinned" | "pin" => self.display.diff_mode = DiffDisplayMode::Pinned,
                 "file" => self.display.diff_mode = DiffDisplayMode::File,
                 _ => {}
             }
-        } else if let Ok(v) = std::env::var("JCODE_SHOW_DIFFS")
+        } else if let Ok(v) = std::env::var("KCODE_SHOW_DIFFS")
             && let Some(parsed) = parse_env_bool(&v)
         {
             self.display.diff_mode = if parsed {
@@ -174,57 +193,52 @@ impl Config {
                 DiffDisplayMode::Off
             };
         }
-        if let Ok(v) = std::env::var("JCODE_PIN_IMAGES")
+        if let Ok(v) = std::env::var("KCODE_PIN_IMAGES")
             && let Some(parsed) = parse_env_bool(&v)
         {
             self.display.pin_images = parsed;
         }
-        if let Ok(v) = std::env::var("JCODE_PIN_TODOS")
+        if let Ok(v) = std::env::var("KCODE_PIN_TODOS")
             && let Some(parsed) = parse_env_bool(&v)
         {
             self.display.pin_todos = parsed;
         }
-        if let Ok(v) = std::env::var("JCODE_DISPLAY_CENTERED") {
+        if let Ok(v) = std::env::var("KCODE_DISPLAY_CENTERED") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.display.centered = parsed;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_DIFF_LINE_WRAP") {
-            if let Some(parsed) = parse_env_bool(&v) {
-                self.display.diff_line_wrap = parsed;
-            }
-        }
-        if let Ok(v) = std::env::var("JCODE_QUEUE_MODE") {
+        if let Ok(v) = std::env::var("KCODE_QUEUE_MODE") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.display.queue_mode = parsed;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_AUTO_SERVER_RELOAD") {
+        if let Ok(v) = std::env::var("KCODE_AUTO_SERVER_RELOAD") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.display.auto_server_reload = parsed;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_MOUSE_CAPTURE") {
+        if let Ok(v) = std::env::var("KCODE_MOUSE_CAPTURE") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.display.mouse_capture = parsed;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_DEBUG_SOCKET") {
+        if let Ok(v) = std::env::var("KCODE_DEBUG_SOCKET") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.display.debug_socket = parsed;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_NO_EMOJI")
+        if let Ok(v) = std::env::var("KCODE_NO_EMOJI")
             && let Some(parsed) = parse_env_bool(&v)
         {
             self.display.emoji = !parsed;
         }
-        if let Ok(v) = std::env::var("JCODE_SHOW_THINKING") {
+        if let Ok(v) = std::env::var("KCODE_SHOW_THINKING") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.display.show_thinking = parsed;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_REASONING_DISPLAY") {
+        if let Ok(v) = std::env::var("KCODE_REASONING_DISPLAY") {
             if let Some(mode) = crate::config::ReasoningDisplayMode::parse(&v) {
                 self.display.set_reasoning_display(mode);
             }
@@ -233,12 +247,12 @@ impl Config {
         // explicit choice. The desktop uses this so its transcript shows live
         // thinking out of the box without silently overriding config.
         if !self.display.has_explicit_reasoning_display()
-            && let Ok(v) = std::env::var("JCODE_DEFAULT_REASONING_DISPLAY")
+            && let Ok(v) = std::env::var("KCODE_DEFAULT_REASONING_DISPLAY")
             && let Some(mode) = crate::config::ReasoningDisplayMode::parse(&v)
         {
             self.display.set_reasoning_display(mode);
         }
-        if let Ok(v) = std::env::var("JCODE_MARKDOWN_SPACING") {
+        if let Ok(v) = std::env::var("KCODE_MARKDOWN_SPACING") {
             match v.trim().to_lowercase().as_str() {
                 "compact" => self.display.markdown_spacing = MarkdownSpacingMode::Compact,
                 "document" | "doc" => {
@@ -247,133 +261,133 @@ impl Config {
                 _ => {}
             }
         }
-        if let Ok(v) = std::env::var("JCODE_IDLE_ANIMATION") {
+        if let Ok(v) = std::env::var("KCODE_IDLE_ANIMATION") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.display.idle_animation = parsed;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_PROMPT_ENTRY_ANIMATION") {
+        if let Ok(v) = std::env::var("KCODE_PROMPT_ENTRY_ANIMATION") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.display.prompt_entry_animation = parsed;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_DISABLED_ANIMATIONS") {
+        if let Ok(v) = std::env::var("KCODE_DISABLED_ANIMATIONS") {
             self.display.disabled_animations = parse_env_list(&v);
         }
-        if let Ok(v) = std::env::var("JCODE_ACTIVE_SESSIONS_MANAGER") {
+        if let Ok(v) = std::env::var("KCODE_ACTIVE_SESSIONS_MANAGER") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.display.active_sessions_manager = parsed;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_EXTERNAL_SESSIONS") {
+        if let Ok(v) = std::env::var("KCODE_EXTERNAL_SESSIONS") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.display.external_sessions = parsed;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_PERFORMANCE") {
+        if let Ok(v) = std::env::var("KCODE_PERFORMANCE") {
             let trimmed = v.trim().to_lowercase();
             if matches!(trimmed.as_str(), "auto" | "full" | "reduced" | "minimal") {
                 self.display.performance = trimmed;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_ANIMATION_FPS") {
+        if let Ok(v) = std::env::var("KCODE_ANIMATION_FPS") {
             if let Ok(fps) = v.trim().parse::<u32>() {
                 self.display.animation_fps = fps.clamp(1, 120);
             }
         }
-        if let Ok(v) = std::env::var("JCODE_REDRAW_FPS") {
+        if let Ok(v) = std::env::var("KCODE_REDRAW_FPS") {
             if let Ok(fps) = v.trim().parse::<u32>() {
                 self.display.redraw_fps = fps.clamp(1, 120);
             }
         }
-        if let Ok(v) = std::env::var("JCODE_COPY_BADGE_ALT_LABEL") {
+        if let Ok(v) = std::env::var("KCODE_COPY_BADGE_ALT_LABEL") {
             self.display.copy_badge_alt_label = v;
         }
-        if let Ok(v) = std::env::var("JCODE_COMPACT_NOTIFICATIONS") {
+        if let Ok(v) = std::env::var("KCODE_COMPACT_NOTIFICATIONS") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.display.compact_notifications = parsed;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_SHOW_AGENTGREP_OUTPUT") {
+        if let Ok(v) = std::env::var("KCODE_SHOW_AGENTGREP_OUTPUT") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.display.show_agentgrep_output = parsed;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_SHOW_BASH_OUTPUT") {
+        if let Ok(v) = std::env::var("KCODE_SHOW_BASH_OUTPUT") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.display.show_bash_output = parsed;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_TOOL_CALL_DETAILS") {
+        if let Ok(v) = std::env::var("KCODE_TOOL_CALL_DETAILS") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.display.tool_call_details = parsed;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_LATEX_RENDERING")
+        if let Ok(v) = std::env::var("KCODE_LATEX_RENDERING")
             && let Some(mode) = LatexRenderingMode::parse(&v)
         {
             self.display.latex_rendering = mode;
         }
-        if let Ok(v) = std::env::var("JCODE_CHAT_NATIVE_SCROLLBAR") {
+        if let Ok(v) = std::env::var("KCODE_CHAT_NATIVE_SCROLLBAR") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.display.native_scrollbars.chat = parsed;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_SIDE_PANEL_NATIVE_SCROLLBAR") {
+        if let Ok(v) = std::env::var("KCODE_SIDE_PANEL_NATIVE_SCROLLBAR") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.display.native_scrollbars.side_panel = parsed;
             }
         }
 
         // Features
-        if let Ok(v) = std::env::var("JCODE_MEMORY_ENABLED") {
+        if let Ok(v) = std::env::var("KCODE_MEMORY_ENABLED") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.features.memory = parsed;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_SWARM_ENABLED") {
+        if let Ok(v) = std::env::var("KCODE_SWARM_ENABLED") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.features.swarm = parsed;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_ENABLE_MERMAID") {
+        if let Ok(v) = std::env::var("KCODE_ENABLE_MERMAID") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.features.mermaid = parsed;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_CHECK_UPDATES") {
+        if let Ok(v) = std::env::var("KCODE_CHECK_UPDATES") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.features.check_updates = parsed;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_AUTO_POKE") {
+        if let Ok(v) = std::env::var("KCODE_AUTO_POKE") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.features.auto_poke = parsed;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_MESSAGE_TIMESTAMPS") {
+        if let Ok(v) = std::env::var("KCODE_MESSAGE_TIMESTAMPS") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.features.message_timestamps = parsed;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_PERSIST_MEMORY_INJECTIONS") {
+        if let Ok(v) = std::env::var("KCODE_PERSIST_MEMORY_INJECTIONS") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.features.persist_memory_injections = parsed;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_KV_CACHE_MISS_NOTICES") {
+        if let Ok(v) = std::env::var("KCODE_KV_CACHE_MISS_NOTICES") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.features.kv_cache_miss_notices = parsed;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_UPDATE_CHANNEL")
+        if let Ok(v) = std::env::var("KCODE_UPDATE_CHANNEL")
             && let Some(channel) = UpdateChannel::parse(&v)
         {
             self.features.update_channel = channel;
         }
 
         // Agents (spawned helper sessions)
-        if let Ok(v) = std::env::var("JCODE_SWARM_MODEL") {
+        if let Ok(v) = std::env::var("KCODE_SWARM_MODEL") {
             let trimmed = v.trim();
             self.agents.swarm_model = if trimmed.is_empty() {
                 None
@@ -381,7 +395,7 @@ impl Config {
                 Some(trimmed.to_string())
             };
         }
-        if let Ok(v) = std::env::var("JCODE_SWARM_EFFORT") {
+        if let Ok(v) = std::env::var("KCODE_SWARM_EFFORT") {
             let trimmed = v.trim();
             self.agents.swarm_effort = if trimmed.is_empty() {
                 None
@@ -389,22 +403,40 @@ impl Config {
                 Some(trimmed.to_string())
             };
         }
-        if let Ok(v) = std::env::var("JCODE_SWARM_SPAWN_MODE") {
+        for (key, target) in [
+            (
+                "KCODE_SWARM_ROOT_EFFORT",
+                &mut self.agents.swarm_root_effort,
+            ),
+            (
+                "KCODE_SWARM_DEEP_ROOT_EFFORT",
+                &mut self.agents.swarm_deep_root_effort,
+            ),
+        ] {
+            if let Ok(value) = std::env::var(key) {
+                let value = value.trim();
+                *target = (!value.is_empty()).then(|| value.to_string());
+            }
+        }
+        if let Ok(v) = std::env::var("KCODE_SWARM_SPAWN_MODE") {
             if let Some(parsed) = SwarmSpawnMode::parse(&v) {
                 self.agents.swarm_spawn_mode = parsed;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_SWARM_STRIP_LAYOUT") {
+        if let Ok(v) = std::env::var("KCODE_SWARM_STRIP_LAYOUT") {
             if let Some(parsed) = SwarmStripLayout::parse(&v) {
                 self.agents.swarm_strip_layout = parsed;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_SWARM_MAX_CONCURRENT_AGENTS") {
+        if let Ok(v) = std::env::var("KCODE_SWARM_MAX_CONCURRENT_AGENTS") {
             if let Ok(parsed) = v.trim().parse::<usize>() {
                 self.agents.swarm_max_concurrent_agents = parsed;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_MEMORY_MODEL") {
+        if let Ok(v) = std::env::var("KCODE_MEMORY_JEV_PROVIDER") {
+            self.agents.memory_jev_provider = v.trim().to_ascii_lowercase();
+        }
+        if let Ok(v) = std::env::var("KCODE_MEMORY_MODEL") {
             let trimmed = v.trim();
             self.agents.memory_model = if trimmed.is_empty() {
                 None
@@ -412,18 +444,18 @@ impl Config {
                 Some(trimmed.to_string())
             };
         }
-        if let Ok(v) = std::env::var("JCODE_MEMORY_SIDECAR_ENABLED") {
+        if let Ok(v) = std::env::var("KCODE_MEMORY_SIDECAR_ENABLED") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.agents.memory_sidecar_enabled = parsed;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_MEMORY_EMBEDDING_BACKEND") {
+        if let Ok(v) = std::env::var("KCODE_MEMORY_EMBEDDING_BACKEND") {
             let trimmed = v.trim();
             if !trimmed.is_empty() {
                 self.agents.memory_embedding_backend = trimmed.to_string();
             }
         }
-        if let Ok(v) = std::env::var("JCODE_MEMORY_EMBEDDING_MODEL") {
+        if let Ok(v) = std::env::var("KCODE_MEMORY_EMBEDDING_MODEL") {
             let trimmed = v.trim();
             self.agents.memory_embedding_model = if trimmed.is_empty() {
                 None
@@ -431,7 +463,7 @@ impl Config {
                 Some(trimmed.to_string())
             };
         }
-        if let Ok(v) = std::env::var("JCODE_MEMORY_EMBEDDING_BASE_URL") {
+        if let Ok(v) = std::env::var("KCODE_MEMORY_EMBEDDING_BASE_URL") {
             let trimmed = v.trim();
             self.agents.memory_embedding_base_url = if trimmed.is_empty() {
                 None
@@ -439,14 +471,14 @@ impl Config {
                 Some(trimmed.to_string())
             };
         }
-        if let Ok(v) = std::env::var("JCODE_MEMORY_EMBEDDING_DIM") {
+        if let Ok(v) = std::env::var("KCODE_MEMORY_EMBEDDING_DIM") {
             if let Ok(parsed) = v.trim().parse::<usize>() {
                 self.agents.memory_embedding_dim = Some(parsed);
             }
         }
 
         // Terminal spawning
-        if let Ok(v) = std::env::var("JCODE_SPAWN_HOOK") {
+        if let Ok(v) = std::env::var("KCODE_SPAWN_HOOK") {
             let trimmed = v.trim();
             // An explicitly empty env value disables a config-file hook.
             self.terminal.spawn_hook = if trimmed.is_empty() {
@@ -455,7 +487,7 @@ impl Config {
                 Some(trimmed.to_string())
             };
         }
-        if let Ok(v) = std::env::var("JCODE_FOCUS_HOOK") {
+        if let Ok(v) = std::env::var("KCODE_FOCUS_HOOK") {
             let trimmed = v.trim();
             // An explicitly empty env value disables a config-file hook.
             self.terminal.focus_hook = if trimmed.is_empty() {
@@ -486,25 +518,43 @@ impl Config {
                 };
             }
         }
-        hook_env_override(&mut self.hooks.turn_start, "JCODE_HOOK_TURN_START");
-        hook_env_override(&mut self.hooks.turn_end, "JCODE_HOOK_TURN_END");
-        hook_env_override(&mut self.hooks.session_start, "JCODE_HOOK_SESSION_START");
-        hook_env_override(&mut self.hooks.session_end, "JCODE_HOOK_SESSION_END");
-        hook_env_override(&mut self.hooks.pre_tool, "JCODE_HOOK_PRE_TOOL");
-        hook_env_override(&mut self.hooks.post_tool, "JCODE_HOOK_POST_TOOL");
-        if let Ok(v) = std::env::var("JCODE_HOOK_PRE_TOOL_TIMEOUT_MS") {
+        hook_env_override(&mut self.hooks.turn_start, "KCODE_HOOK_TURN_START");
+        hook_env_override(&mut self.hooks.turn_end, "KCODE_HOOK_TURN_END");
+        hook_env_override(&mut self.hooks.session_start, "KCODE_HOOK_SESSION_START");
+        hook_env_override(&mut self.hooks.session_end, "KCODE_HOOK_SESSION_END");
+        hook_env_override(&mut self.hooks.pre_tool, "KCODE_HOOK_PRE_TOOL");
+        hook_env_override(
+            &mut self.hooks.pre_tool_transform,
+            "KCODE_HOOK_PRE_TOOL_TRANSFORM",
+        );
+        if let Ok(v) = std::env::var("KCODE_HOOK_PRE_TOOL_TRANSFORM_TIMEOUT_MS")
+            && let Ok(parsed) = v.trim().parse::<u64>()
+        {
+            self.hooks.pre_tool_transform_timeout_ms = parsed;
+        }
+        hook_env_override(&mut self.hooks.post_tool, "KCODE_HOOK_POST_TOOL");
+        hook_env_override(
+            &mut self.hooks.post_tool_feedback,
+            "KCODE_HOOK_POST_TOOL_FEEDBACK",
+        );
+        if let Ok(v) = std::env::var("KCODE_HOOK_POST_TOOL_FEEDBACK_TIMEOUT_MS")
+            && let Ok(parsed) = v.trim().parse::<u64>()
+        {
+            self.hooks.post_tool_feedback_timeout_ms = parsed;
+        }
+        if let Ok(v) = std::env::var("KCODE_HOOK_PRE_TOOL_TIMEOUT_MS") {
             if let Ok(parsed) = v.trim().parse::<u64>() {
                 self.hooks.pre_tool_timeout_ms = parsed;
             }
         }
 
         // Web search
-        if let Ok(v) = std::env::var("JCODE_WEBSEARCH_ENGINE")
+        if let Ok(v) = std::env::var("KCODE_WEBSEARCH_ENGINE")
             && let Some(engine) = WebSearchEngine::parse(&v)
         {
             self.websearch.engine = engine;
         }
-        if let Ok(v) = std::env::var("JCODE_WEBSEARCH_FALLBACK_ENGINES") {
+        if let Ok(v) = std::env::var("KCODE_WEBSEARCH_FALLBACK_ENGINES") {
             let engines = parse_env_list(&v)
                 .into_iter()
                 .filter_map(|item| WebSearchEngine::parse(&item))
@@ -513,28 +563,44 @@ impl Config {
                 self.websearch.fallback_engines = engines;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_BING_API_KEY")
+        if let Ok(v) = std::env::var("KCODE_BING_API_KEY")
             && !v.trim().is_empty()
         {
             self.websearch.bing_api_key = Some(v);
         }
-        if let Ok(v) = std::env::var("JCODE_BING_API_KEY_ENV")
+        if let Ok(v) = std::env::var("KCODE_BING_API_KEY_ENV")
             && !v.trim().is_empty()
         {
             self.websearch.bing_api_key_env = v;
         }
-        if let Ok(v) = std::env::var("JCODE_BING_MARKET")
+        if let Ok(v) = std::env::var("KCODE_BING_MARKET")
             && !v.trim().is_empty()
         {
             self.websearch.bing_market = v;
         }
-        if let Ok(v) = std::env::var("JCODE_SEARXNG_URL")
+        if let Ok(v) = std::env::var("KCODE_SEARXNG_URL")
             && !v.trim().is_empty()
         {
             self.websearch.searxng_url = Some(v);
         }
+        if let Ok(v) = std::env::var("KCODE_WEBSEARCH_PREFER_NATIVE")
+            && let Some(parsed) = parse_env_bool(&v)
+        {
+            self.websearch.prefer_native = parsed;
+        }
+        if let Ok(v) = std::env::var("KCODE_WEBSEARCH_NATIVE_MAX_USES")
+            && let Ok(parsed) = v.trim().parse::<u32>()
+        {
+            self.websearch.native_max_uses = (parsed > 0).then_some(parsed);
+        }
+        if let Ok(v) = std::env::var("KCODE_WEBSEARCH_NATIVE_ALLOWED_DOMAINS") {
+            self.websearch.native_allowed_domains = parse_env_list(&v);
+        }
+        if let Ok(v) = std::env::var("KCODE_WEBSEARCH_NATIVE_BLOCKED_DOMAINS") {
+            self.websearch.native_blocked_domains = parse_env_list(&v);
+        }
 
-        if let Ok(v) = std::env::var("JCODE_TRUSTED_EXTERNAL_AUTH_SOURCES") {
+        if let Ok(v) = std::env::var("KCODE_TRUSTED_EXTERNAL_AUTH_SOURCES") {
             let mut source_ids = Vec::new();
             let mut source_paths = Vec::new();
             for value in parse_env_list(&v) {
@@ -553,12 +619,12 @@ impl Config {
         }
 
         // Autoreview
-        if let Ok(v) = std::env::var("JCODE_AUTOREVIEW_ENABLED") {
+        if let Ok(v) = std::env::var("KCODE_AUTOREVIEW_ENABLED") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.autoreview.enabled = parsed;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_AUTOREVIEW_MODEL") {
+        if let Ok(v) = std::env::var("KCODE_AUTOREVIEW_MODEL") {
             let trimmed = v.trim();
             self.autoreview.model = if trimmed.is_empty() {
                 None
@@ -568,12 +634,12 @@ impl Config {
         }
 
         // Autojudge
-        if let Ok(v) = std::env::var("JCODE_AUTOJUDGE_ENABLED") {
+        if let Ok(v) = std::env::var("KCODE_AUTOJUDGE_ENABLED") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.autojudge.enabled = parsed;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_AUTOJUDGE_MODEL") {
+        if let Ok(v) = std::env::var("KCODE_AUTOJUDGE_MODEL") {
             let trimmed = v.trim();
             self.autojudge.model = if trimmed.is_empty() {
                 None
@@ -583,138 +649,138 @@ impl Config {
         }
 
         // Ambient
-        if let Ok(v) = std::env::var("JCODE_AMBIENT_ENABLED") {
+        if let Ok(v) = std::env::var("KCODE_AMBIENT_ENABLED") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.ambient.enabled = parsed;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_AMBIENT_PROVIDER") {
+        if let Ok(v) = std::env::var("KCODE_AMBIENT_PROVIDER") {
             self.ambient.provider = Some(v);
         }
-        if let Ok(v) = std::env::var("JCODE_AMBIENT_MODEL") {
+        if let Ok(v) = std::env::var("KCODE_AMBIENT_MODEL") {
             self.ambient.model = Some(v);
         }
-        if let Ok(v) = std::env::var("JCODE_AMBIENT_MIN_INTERVAL") {
+        if let Ok(v) = std::env::var("KCODE_AMBIENT_MIN_INTERVAL") {
             if let Ok(parsed) = v.trim().parse::<u32>() {
                 self.ambient.min_interval_minutes = parsed;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_AMBIENT_MAX_INTERVAL") {
+        if let Ok(v) = std::env::var("KCODE_AMBIENT_MAX_INTERVAL") {
             if let Ok(parsed) = v.trim().parse::<u32>() {
                 self.ambient.max_interval_minutes = parsed;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_AMBIENT_PROACTIVE") {
+        if let Ok(v) = std::env::var("KCODE_AMBIENT_PROACTIVE") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.ambient.proactive_work = parsed;
             }
         }
 
         // Safety / notifications
-        if let Ok(v) = std::env::var("JCODE_NTFY_TOPIC") {
+        if let Ok(v) = std::env::var("KCODE_NTFY_TOPIC") {
             self.safety.ntfy_topic = Some(v);
         }
-        if let Ok(v) = std::env::var("JCODE_NTFY_SERVER") {
+        if let Ok(v) = std::env::var("KCODE_NTFY_SERVER") {
             self.safety.ntfy_server = v;
         }
-        if let Ok(v) = std::env::var("JCODE_SMTP_PASSWORD") {
+        if let Ok(v) = std::env::var("KCODE_SMTP_PASSWORD") {
             self.safety.email_password = Some(v);
         }
-        if let Ok(v) = std::env::var("JCODE_EMAIL_TO") {
+        if let Ok(v) = std::env::var("KCODE_EMAIL_TO") {
             self.safety.email_to = Some(v);
             self.safety.email_enabled = true;
         }
-        if let Ok(v) = std::env::var("JCODE_IMAP_HOST") {
+        if let Ok(v) = std::env::var("KCODE_IMAP_HOST") {
             self.safety.email_imap_host = Some(v);
         }
-        if let Ok(v) = std::env::var("JCODE_EMAIL_REPLY_ENABLED") {
+        if let Ok(v) = std::env::var("KCODE_EMAIL_REPLY_ENABLED") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.safety.email_reply_enabled = parsed;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_TELEGRAM_BOT_TOKEN") {
+        if let Ok(v) = std::env::var("KCODE_TELEGRAM_BOT_TOKEN") {
             self.safety.telegram_bot_token = Some(v);
             self.safety.telegram_enabled = true;
         }
-        if let Ok(v) = std::env::var("JCODE_TELEGRAM_CHAT_ID") {
+        if let Ok(v) = std::env::var("KCODE_TELEGRAM_CHAT_ID") {
             self.safety.telegram_chat_id = Some(v);
         }
-        if let Ok(v) = std::env::var("JCODE_TELEGRAM_REPLY_ENABLED") {
+        if let Ok(v) = std::env::var("KCODE_TELEGRAM_REPLY_ENABLED") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.safety.telegram_reply_enabled = parsed;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_DISCORD_BOT_TOKEN") {
+        if let Ok(v) = std::env::var("KCODE_DISCORD_BOT_TOKEN") {
             self.safety.discord_bot_token = Some(v);
             self.safety.discord_enabled = true;
         }
-        if let Ok(v) = std::env::var("JCODE_DISCORD_CHANNEL_ID") {
+        if let Ok(v) = std::env::var("KCODE_DISCORD_CHANNEL_ID") {
             self.safety.discord_channel_id = Some(v);
         }
-        if let Ok(v) = std::env::var("JCODE_DISCORD_BOT_USER_ID") {
+        if let Ok(v) = std::env::var("KCODE_DISCORD_BOT_USER_ID") {
             self.safety.discord_bot_user_id = Some(v);
         }
-        if let Ok(v) = std::env::var("JCODE_DISCORD_REPLY_ENABLED") {
+        if let Ok(v) = std::env::var("KCODE_DISCORD_REPLY_ENABLED") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.safety.discord_reply_enabled = parsed;
             }
         }
         // Jade cloud relay channel
-        if let Ok(v) = std::env::var("JCODE_JADE_RELAY_API_BASE") {
+        if let Ok(v) = std::env::var("KCODE_JADE_RELAY_API_BASE") {
             self.safety.jade_relay_api_base = Some(v);
         }
-        if let Ok(v) = std::env::var("JCODE_JADE_RELAY_TOKEN") {
+        if let Ok(v) = std::env::var("KCODE_JADE_RELAY_TOKEN") {
             self.safety.jade_relay_token = Some(v);
             self.safety.jade_relay_enabled = true;
         }
-        if let Ok(v) = std::env::var("JCODE_JADE_RELAY_TOKEN_ID") {
+        if let Ok(v) = std::env::var("KCODE_JADE_RELAY_TOKEN_ID") {
             self.safety.jade_relay_token_id = Some(v);
         }
-        if let Ok(v) = std::env::var("JCODE_JADE_RELAY_USER_ID") {
+        if let Ok(v) = std::env::var("KCODE_JADE_RELAY_USER_ID") {
             self.safety.jade_relay_user_id = Some(v);
         }
-        if let Ok(v) = std::env::var("JCODE_JADE_RELAY_SESSION_ID") {
+        if let Ok(v) = std::env::var("KCODE_JADE_RELAY_SESSION_ID") {
             self.safety.jade_relay_session_id = Some(v);
         }
-        if let Ok(v) = std::env::var("JCODE_JADE_RELAY_ENABLED") {
+        if let Ok(v) = std::env::var("KCODE_JADE_RELAY_ENABLED") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.safety.jade_relay_enabled = parsed;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_JADE_RELAY_REPLY_ENABLED") {
+        if let Ok(v) = std::env::var("KCODE_JADE_RELAY_REPLY_ENABLED") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.safety.jade_relay_reply_enabled = parsed;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_JADE_RELAY_LAUNCH_ENABLED") {
+        if let Ok(v) = std::env::var("KCODE_JADE_RELAY_LAUNCH_ENABLED") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.safety.jade_relay_launch_enabled = parsed;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_JADE_RELAY_LAUNCH_WORKING_DIR") {
+        if let Ok(v) = std::env::var("KCODE_JADE_RELAY_LAUNCH_WORKING_DIR") {
             let trimmed = v.trim();
             if !trimmed.is_empty() {
                 self.safety.jade_relay_launch_working_dir = Some(trimmed.to_string());
             }
         }
-        if let Ok(v) = std::env::var("JCODE_AMBIENT_VISIBLE") {
+        if let Ok(v) = std::env::var("KCODE_AMBIENT_VISIBLE") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.ambient.visible = parsed;
             }
         }
 
         // Gateway (iOS/web)
-        if let Ok(v) = std::env::var("JCODE_GATEWAY_ENABLED") {
+        if let Ok(v) = std::env::var("KCODE_GATEWAY_ENABLED") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.gateway.enabled = parsed;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_GATEWAY_PORT") {
+        if let Ok(v) = std::env::var("KCODE_GATEWAY_PORT") {
             if let Ok(parsed) = v.trim().parse::<u16>() {
                 self.gateway.port = parsed;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_GATEWAY_BIND_ADDR") {
+        if let Ok(v) = std::env::var("KCODE_GATEWAY_BIND_ADDR") {
             let trimmed = v.trim();
             if !trimmed.is_empty() {
                 self.gateway.bind_addr = trimmed.to_string();
@@ -722,88 +788,93 @@ impl Config {
         }
 
         // Power management
-        if let Ok(v) = std::env::var("JCODE_PREVENT_SLEEP_WHILE_STREAMING") {
+        if let Ok(v) = std::env::var("KCODE_PREVENT_SLEEP_WHILE_STREAMING") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.power.prevent_sleep_while_streaming = parsed;
             }
         }
+        if let Ok(v) = std::env::var("KCODE_BLOCK_LID_CLOSE") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.power.block_lid_close = parsed;
+            }
+        }
 
         // Provider
-        if let Ok(v) = std::env::var("JCODE_MODEL") {
+        if let Ok(v) = std::env::var("KCODE_MODEL") {
             self.provider.default_model = Some(v);
         }
-        if let Ok(v) = std::env::var("JCODE_PROVIDER") {
+        if let Ok(v) = std::env::var("KCODE_PROVIDER") {
             let trimmed = v.trim().to_lowercase();
             if !trimmed.is_empty() {
                 self.provider.default_provider = Some(trimmed);
             }
         }
-        if let Ok(v) = std::env::var("JCODE_OPENAI_REASONING_EFFORT") {
+        if let Ok(v) = std::env::var("KCODE_OPENAI_REASONING_EFFORT") {
             let trimmed = v.trim().to_string();
             if !trimmed.is_empty() {
                 self.provider.openai_reasoning_effort = Some(trimmed);
             }
         }
-        if let Ok(v) = std::env::var("JCODE_ANTHROPIC_REASONING_EFFORT") {
+        if let Ok(v) = std::env::var("KCODE_ANTHROPIC_REASONING_EFFORT") {
             let trimmed = v.trim().to_string();
             if !trimmed.is_empty() {
                 self.provider.anthropic_reasoning_effort = Some(trimmed);
             }
         }
-        if let Ok(v) = std::env::var("JCODE_OPENAI_TRANSPORT") {
+        if let Ok(v) = std::env::var("KCODE_OPENAI_TRANSPORT") {
             let trimmed = v.trim().to_string();
             if !trimmed.is_empty() {
                 self.provider.openai_transport = Some(trimmed);
             }
         }
-        if let Ok(v) = std::env::var("JCODE_OPENAI_SERVICE_TIER") {
+        if let Ok(v) = std::env::var("KCODE_OPENAI_SERVICE_TIER") {
             let trimmed = v.trim().to_string();
             if !trimmed.is_empty() {
                 self.provider.openai_service_tier = Some(trimmed);
             }
         }
-        if let Ok(v) = std::env::var("JCODE_OPENAI_NATIVE_COMPACTION_MODE") {
+        if let Ok(v) = std::env::var("KCODE_OPENAI_NATIVE_COMPACTION_MODE") {
             let trimmed = v.trim().to_ascii_lowercase();
             if !trimmed.is_empty() {
                 self.provider.openai_native_compaction_mode = trimmed;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_OPENAI_NATIVE_COMPACTION_THRESHOLD_TOKENS") {
+        if let Ok(v) = std::env::var("KCODE_OPENAI_NATIVE_COMPACTION_THRESHOLD_TOKENS") {
             if let Ok(parsed) = v.trim().parse::<usize>() {
                 if parsed > 0 {
                     self.provider.openai_native_compaction_threshold_tokens = parsed;
                 }
             }
         }
-        if let Ok(v) = std::env::var("JCODE_PRESERVE_REASONING_CONTEXT") {
+        if let Ok(v) = std::env::var("KCODE_PRESERVE_REASONING_CONTEXT") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.provider.preserve_reasoning_context = parsed;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_CROSS_PROVIDER_FAILOVER") {
+        if let Ok(v) = std::env::var("KCODE_CROSS_PROVIDER_FAILOVER") {
             if let Some(mode) = CrossProviderFailoverMode::parse(&v) {
                 self.provider.cross_provider_failover = mode;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_SAME_PROVIDER_ACCOUNT_FAILOVER") {
+        if let Ok(v) = std::env::var("KCODE_SAME_PROVIDER_ACCOUNT_FAILOVER") {
             if let Some(enabled) = parse_env_bool(&v) {
                 self.provider.same_provider_account_failover = enabled;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_STREAM_IDLE_TIMEOUT_SECS") {
+        if let Ok(v) = std::env::var("KCODE_STREAM_IDLE_TIMEOUT_SECS") {
             if let Ok(parsed) = v.trim().parse::<u64>() {
                 if parsed > 0 {
                     self.provider.stream_idle_timeout_secs = parsed;
                 }
             }
         }
-        if let Ok(v) = std::env::var("JCODE_MAX_RETRIES")
+        if let Ok(v) = std::env::var("KCODE_MAX_RETRIES")
             && let Ok(parsed) = v.trim().parse::<u32>()
             && parsed > 0
         {
             self.provider.max_retries = parsed;
         }
-        if let Ok(v) = std::env::var("JCODE_RETRY_BACKOFF_CAP_SECS")
+        if let Ok(v) = std::env::var("KCODE_RETRY_BACKOFF_CAP_SECS")
             && let Ok(parsed) = v.trim().parse::<u64>()
             && parsed > 0
         {
@@ -812,7 +883,7 @@ impl Config {
 
         // Copilot premium mode: env var overrides config
         // If set in config but not in env, propagate config -> env
-        if let Ok(v) = std::env::var("JCODE_COPILOT_PREMIUM") {
+        if let Ok(v) = std::env::var("KCODE_COPILOT_PREMIUM") {
             self.provider.copilot_premium = Some(v);
         } else if let Some(ref mode) = self.provider.copilot_premium {
             let env_val = match mode.as_str() {
@@ -821,7 +892,22 @@ impl Config {
                 _ => "",
             };
             if !env_val.is_empty() {
-                crate::env::set_var("JCODE_COPILOT_PREMIUM", env_val);
+                crate::env::set_var("KCODE_COPILOT_PREMIUM", env_val);
+            }
+        }
+
+        // Explicit environment overrides win, but never export config values:
+        // self-written env would mask subsequent config edits/removals.
+        if let Ok(v) = std::env::var("KCODE_GEMINI_FORCE_OAUTH") {
+            self.provider.gemini_force_oauth = parse_env_bool(&v).unwrap_or(false);
+        }
+
+        if let Ok(v) = std::env::var("GOOGLE_CLOUD_PROJECT")
+            .or_else(|_| std::env::var("GOOGLE_CLOUD_PROJECT_ID"))
+        {
+            let v = v.trim();
+            if !v.is_empty() {
+                self.provider.gemini_project = Some(v.to_string());
             }
         }
     }

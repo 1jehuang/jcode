@@ -19,7 +19,7 @@ pub const MAX_STREAM_IDLE_TIMEOUT_MULTIPLIER: u32 = 4;
 /// before treating the connection as dead.
 ///
 /// Resolved from `[provider] stream_idle_timeout_secs` /
-/// `JCODE_STREAM_IDLE_TIMEOUT_SECS` (default 180).
+/// `KCODE_STREAM_IDLE_TIMEOUT_SECS` (default 180).
 pub fn stream_idle_timeout() -> Duration {
     let secs = crate::config::config()
         .provider

@@ -12,16 +12,16 @@ $envNames = @(
     'LOCALAPPDATA',
     'APPDATA',
     'USERPROFILE',
-    'JCODE_HOME',
+    'KCODE_HOME',
     'TEMP',
     'TMP',
     'PATH',
-    'JCODE_INSTALL_PS1_IMPORT_ONLY',
-    'JCODE_UNINSTALL_PS1_IMPORT_ONLY',
-    'JCODE_SKIP_SERVER_RELOAD',
-    'JCODE_INSTALL_SKIP_BINARY_VALIDATION',
-    'JCODE_DISABLE_ENV_BROADCAST',
-    'JCODE_WINDOWS_SETUP_SKIP_EXTERNALS'
+    'KCODE_INSTALL_PS1_IMPORT_ONLY',
+    'KCODE_UNINSTALL_PS1_IMPORT_ONLY',
+    'KCODE_SKIP_SERVER_RELOAD',
+    'KCODE_INSTALL_SKIP_BINARY_VALIDATION',
+    'KCODE_DISABLE_ENV_BROADCAST',
+    'KCODE_WINDOWS_SETUP_SKIP_EXTERNALS'
 )
 $originalEnv = @{}
 foreach ($name in $envNames) {
@@ -102,7 +102,7 @@ function New-IsolatedWindowsProfile([string]$Name) {
     $env:LOCALAPPDATA = $local
     $env:USERPROFILE = $profile
     $env:APPDATA = $appData
-    $env:JCODE_HOME = $jcodeHome
+    $env:KCODE_HOME = $jcodeHome
     $env:TEMP = $temp
     $env:TMP = $temp
 
@@ -118,7 +118,7 @@ function New-IsolatedWindowsProfile([string]$Name) {
         BuildsDir = Join-Path $local 'jcode\builds'
         SetupHintsPath = Join-Path $jcodeHome 'setup_hints.json'
         HotkeyDir = Join-Path $jcodeHome 'hotkey'
-        StartupShortcutPath = Join-Path $appData 'Microsoft\Windows\Start Menu\Programs\Startup\jcode-hotkey.lnk'
+        StartupShortcutPath = Join-Path $appData 'Microsoft\Windows\Start Menu\Programs\Startup\kcode-hotkey.lnk'
     }
 }
 
@@ -146,14 +146,14 @@ $coveredScenarios = [ordered]@{
 New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
 
 try {
-    $env:JCODE_INSTALL_PS1_IMPORT_ONLY = '1'
-    $env:JCODE_SKIP_SERVER_RELOAD = '1'
-    $env:JCODE_INSTALL_SKIP_BINARY_VALIDATION = '1'
+    $env:KCODE_INSTALL_PS1_IMPORT_ONLY = '1'
+    $env:KCODE_SKIP_SERVER_RELOAD = '1'
+    $env:KCODE_INSTALL_SKIP_BINARY_VALIDATION = '1'
     . $installScript -SkipAlacrittySetup -SkipHotkeySetup
 
     Invoke-Case 'release_lookup_avoids_unauthenticated_github_api' {
-        Assert-Equal 'v1.2.3' (Resolve-JcodeReleaseTagFromUri 'https://github.com/1jehuang/jcode/releases/tag/v1.2.3') 'release redirect parser should extract the stable tag'
-        Assert-Equal 'v1.2.3-rc.1' (Resolve-JcodeReleaseTagFromUri 'https://github.com/1jehuang/jcode/releases/tag/v1.2.3-rc.1?source=latest') 'release redirect parser should stop before query parameters'
+        Assert-Equal 'v1.2.3' (Resolve-JcodeReleaseTagFromUri 'https://github.com/KooshaPari/KCode/releases/tag/v1.2.3') 'release redirect parser should extract the stable tag'
+        Assert-Equal 'v1.2.3-rc.1' (Resolve-JcodeReleaseTagFromUri 'https://github.com/KooshaPari/KCode/releases/tag/v1.2.3-rc.1?source=latest') 'release redirect parser should stop before query parameters'
         Assert-Equal $true (Test-JcodeReleaseTag 'v1.2.3') 'stable release tags should validate'
         Assert-Equal $false (Test-JcodeReleaseTag 'latest') 'unversioned release labels should not validate'
         $scriptText = Get-Content -LiteralPath $installScript -Raw
@@ -175,7 +175,7 @@ try {
             if ($Uri -eq 'https://jcode.sh/releases/v1.2.3/download-bases') {
                 return [pscustomobject]@{ Content = "https://mirror.example/releases/v1.2.3`n" }
             }
-            if ($Uri -eq 'https://github.com/1jehuang/jcode/releases/latest') {
+            if ($Uri -eq 'https://github.com/KooshaPari/KCode/releases/latest') {
                 throw 'simulated GitHub block'
             }
             throw "unexpected URI: $Uri"
@@ -184,7 +184,7 @@ try {
             Assert-Equal 'v1.2.3' (Get-LatestJcodeReleaseTag) 'static metadata should cover a blocked GitHub release lookup'
             $bases = @(Get-JcodeReleaseDownloadBases 'v1.2.3')
             Assert-Equal 'https://mirror.example/releases/v1.2.3' $bases[0] 'configured mirror should be preferred'
-            Assert-Equal 'https://github.com/1jehuang/jcode/releases/download/v1.2.3' $bases[1] 'GitHub should remain the final fallback'
+            Assert-Equal 'https://github.com/KooshaPari/KCode/releases/download/v1.2.3' $bases[1] 'GitHub should remain the final fallback'
         } finally {
             Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
         }
@@ -221,9 +221,9 @@ try {
         Assert-Contains $text '0x001A' 'installer should broadcast WM_SETTINGCHANGE'
         Assert-Contains $text '"Environment"' 'installer should broadcast the Environment lParam'
         Assert-Contains $text 'SendMessageTimeout([IntPtr]0xffff' 'installer should broadcast to HWND_BROADCAST'
-        $env:JCODE_DISABLE_ENV_BROADCAST = '1'
+        $env:KCODE_DISABLE_ENV_BROADCAST = '1'
         Assert-Equal $false (Send-JcodeEnvironmentChangedBroadcast) 'broadcast helper should honor the deterministic no-mutate opt-out'
-        $env:JCODE_DISABLE_ENV_BROADCAST = $null
+        $env:KCODE_DISABLE_ENV_BROADCAST = $null
         $script:coveredScenarios.wm_settingchange = $true
     }
 
@@ -274,7 +274,7 @@ try {
         Assert-PathCount $script:mockUserPath $profile.InstallDir 1 'clean install should persist exactly one launcher PATH entry in the mocked user PATH'
         Assert-Equal 1 $script:pathWrites 'clean install should write mocked user PATH once'
         Assert-Equal 1 $script:pathBroadcasts 'clean install should broadcast exactly once for a PATH change'
-        Assert-PathExists $profile.SetupHintsPath 'clean install should write setup hints into isolated JCODE_HOME'
+        Assert-PathExists $profile.SetupHintsPath 'clean install should write setup hints into isolated KCODE_HOME'
         $state = Get-Content -LiteralPath $profile.SetupHintsPath -Raw | ConvertFrom-Json
         Assert-Equal $false $state.hotkey_configured 'SkipHotkeySetup should record hotkey opt-out without configuring the listener'
         Assert-Equal $false $state.alacritty_configured 'SkipAlacrittySetup should avoid deterministic terminal installation side effects'
@@ -320,26 +320,26 @@ try {
     Invoke-Case 'copilot_key_mapping_and_spaces_non_ascii_paths' {
         $profile = New-IsolatedWindowsProfile 'hotkey-spaces-nonascii'
         Set-InstallScriptProfileGlobals $profile
-        $env:JCODE_WINDOWS_SETUP_SKIP_EXTERNALS = '1'
+        $env:KCODE_WINDOWS_SETUP_SKIP_EXTERNALS = '1'
         $jcodeExe = Join-Path $profile.Root '路径 With Spaces\jcode.exe'
         New-Item -ItemType Directory -Path (Split-Path -Parent $jcodeExe) -Force | Out-Null
         Set-Content -Path $jcodeExe -Value 'fake exe' -NoNewline
         New-Item -ItemType Directory -Path $profile.HotkeyDir -Force | Out-Null
-        Set-Content -Path (Join-Path $profile.HotkeyDir 'jcode-hotkey.ps1') -Value 'legacy listener' -Force
+        Set-Content -Path (Join-Path $profile.HotkeyDir 'kcode-hotkey.ps1') -Value 'legacy listener' -Force
 
         $ok = Install-JcodeHotkey -JcodeExePath $jcodeExe
         Assert-Equal $true $ok 'hotkey install should succeed using the deterministic external-command skip hook'
-        $vbsPath = Join-Path $profile.HotkeyDir 'jcode-hotkey-launcher.vbs'
+        $vbsPath = Join-Path $profile.HotkeyDir 'kcode-hotkey-launcher.vbs'
         Assert-PathMissing $vbsPath 'hotkey install should remove the legacy hidden VBScript trampoline'
-        $shortcutScriptPath = Join-Path $profile.HotkeyDir 'jcode-hotkey-shortcut.ps1'
-        Assert-PathExists $shortcutScriptPath 'hotkey install should render the deterministic Startup shortcut script under the isolated JCODE_HOME'
+        $shortcutScriptPath = Join-Path $profile.HotkeyDir 'kcode-hotkey-shortcut.ps1'
+        Assert-PathExists $shortcutScriptPath 'hotkey install should render the deterministic Startup shortcut script under the isolated KCODE_HOME'
         $shortcutScript = Get-Content -LiteralPath $shortcutScriptPath -Raw
         Assert-Contains $shortcutScript 'powershell.exe' 'Startup shortcut should target PowerShell directly'
         Assert-Contains $shortcutScript 'ExecutionPolicy RemoteSigned' 'Startup shortcut should use RemoteSigned execution policy'
         Assert-NotContains $shortcutScript 'ExecutionPolicy Bypass' 'Startup shortcut should not bypass execution policy'
         Assert-Contains $shortcutScript 'setup-hotkey --listen-windows-hotkey' 'Startup shortcut should start the native Windows hotkey listener'
         Assert-Contains $shortcutScript $jcodeExe 'Startup shortcut should preserve spaces and non-ASCII characters in the jcode path'
-        Assert-PathMissing (Join-Path $profile.HotkeyDir 'jcode-hotkey.ps1') 'hotkey upgrade should remove the legacy PowerShell listener'
+        Assert-PathMissing (Join-Path $profile.HotkeyDir 'kcode-hotkey.ps1') 'hotkey upgrade should remove the legacy PowerShell listener'
         $scriptText = Get-Content -LiteralPath $installScript -Raw
         Assert-Contains $scriptText 'Configured Alt+; and the Copilot key' 'installer should document both Windows launch-key mappings'
         $script:coveredScenarios.copilot_key_mapping = $true
@@ -349,7 +349,7 @@ try {
     Invoke-Case 'missing_windows_terminal_is_not_required' {
         $profile = New-IsolatedWindowsProfile 'missing-windows-terminal'
         Set-InstallScriptProfileGlobals $profile
-        $env:JCODE_WINDOWS_SETUP_SKIP_EXTERNALS = '1'
+        $env:KCODE_WINDOWS_SETUP_SKIP_EXTERNALS = '1'
         $env:WT_SESSION = $null
         $env:WindowsTerminal = $null
         $jcodeExe = Join-Path $profile.Root 'No Windows Terminal\jcode.exe'
@@ -375,12 +375,12 @@ try {
         }
         Assert-Equal $true $threw 'launcher install should surface copy failures'
         Assert-Equal 'known-good' (Get-Content -LiteralPath $profile.LauncherPath -Raw) 'failed launcher install should preserve the existing launcher'
-        $tempLaunchers = @(Get-ChildItem -LiteralPath $profile.InstallDir -Filter '.jcode-launcher-*.tmp.exe' -Force -ErrorAction SilentlyContinue)
+        $tempLaunchers = @(Get-ChildItem -LiteralPath $profile.InstallDir -Filter '.kcode-launcher-*.tmp.exe' -Force -ErrorAction SilentlyContinue)
         Assert-Equal 0 $tempLaunchers.Count 'failed launcher install should not leave temporary launcher files behind'
         $script:coveredScenarios.rollback_failure = $true
     }
 
-    $env:JCODE_UNINSTALL_PS1_IMPORT_ONLY = '1'
+    $env:KCODE_UNINSTALL_PS1_IMPORT_ONLY = '1'
     . $uninstallScript
 
     function Get-CimInstance { @() }
@@ -411,7 +411,7 @@ try {
         Assert-Equal $false (Test-JcodeSafePurgePath $profile.UserProfile) 'the user profile must never be accepted as a purge target'
         Assert-Equal $false (Test-JcodeSafePurgePath $profile.Root) 'a parent workspace must never be accepted as a purge target'
         Assert-Equal $true (Test-JcodeManagedExecutablePath -ExecutablePath $profile.LauncherPath -LauncherPath $profile.LauncherPath -BuildsDir $profile.BuildsDir) 'the installed launcher should be recognized as managed'
-        Assert-Equal $true (Test-JcodeManagedExecutablePath -ExecutablePath (Join-Path $profile.InstallDir '.jcode-launcher-old-a1b2c3.exe') -LauncherPath $profile.LauncherPath -BuildsDir $profile.BuildsDir) 'a renamed live-upgrade launcher should be recognized as managed'
+        Assert-Equal $true (Test-JcodeManagedExecutablePath -ExecutablePath (Join-Path $profile.InstallDir '.kcode-launcher-old-a1b2c3.exe') -LauncherPath $profile.LauncherPath -BuildsDir $profile.BuildsDir) 'a renamed live-upgrade launcher should be recognized as managed'
         Assert-Equal $false (Test-JcodeManagedExecutablePath -ExecutablePath (Join-Path $profile.InstallDir 'other-tool.exe') -LauncherPath $profile.LauncherPath -BuildsDir $profile.BuildsDir) 'unrelated executables beside the launcher must not be terminated'
         Assert-Equal $true (Test-JcodeManagedExecutablePath -ExecutablePath (Join-Path $profile.BuildsDir 'stable\jcode.exe') -LauncherPath $profile.LauncherPath -BuildsDir $profile.BuildsDir) 'installed version binaries should be recognized as managed'
         Assert-Equal $false (Test-JcodeManagedExecutablePath -ExecutablePath (Join-Path $profile.Root 'development\jcode.exe') -LauncherPath $profile.LauncherPath -BuildsDir $profile.BuildsDir) 'unrelated development binaries must not be terminated'
@@ -425,11 +425,11 @@ try {
         New-Item -ItemType Directory -Path $profile.HotkeyDir -Force | Out-Null
         New-Item -ItemType Directory -Path (Split-Path -Parent $profile.StartupShortcutPath) -Force | Out-Null
         Set-Content -Path $profile.LauncherPath -Value 'installed launcher' -NoNewline
-        $oldLauncherPath = Join-Path $profile.InstallDir '.jcode-launcher-old-a1b2c3.exe'
+        $oldLauncherPath = Join-Path $profile.InstallDir '.kcode-launcher-old-a1b2c3.exe'
         Set-Content -Path $oldLauncherPath -Value 'previous running launcher' -NoNewline
         Set-Content -Path (Join-Path $profile.BuildsDir 'stable\jcode.exe') -Value 'stable build' -NoNewline
         Set-Content -Path (Join-Path $profile.JcodeHome 'config.toml') -Value 'kept = true' -NoNewline
-        Set-Content -Path (Join-Path $profile.HotkeyDir 'jcode-hotkey.ps1') -Value 'legacy listener' -NoNewline
+        Set-Content -Path (Join-Path $profile.HotkeyDir 'kcode-hotkey.ps1') -Value 'legacy listener' -NoNewline
         Set-Content -Path $profile.StartupShortcutPath -Value 'startup shortcut' -NoNewline
         @{ hotkey_configured = $true; hotkey_dismissed = $false } | ConvertTo-Json | Set-Content -Path $profile.SetupHintsPath -Encoding UTF8
         $installVariant = ($profile.InstallDir.ToUpperInvariant() + '\')
@@ -444,7 +444,7 @@ try {
         Assert-PathMissing $profile.InstallDir 'uninstall should remove the empty launcher directory'
         Assert-PathMissing $profile.BuildsDir 'uninstall should remove installed build binaries'
         Assert-PathMissing $profile.StartupShortcutPath 'uninstall should remove the launch-hotkey Startup shortcut'
-        Assert-PathMissing (Join-Path $profile.HotkeyDir 'jcode-hotkey.ps1') 'uninstall should remove legacy launch-hotkey artifacts'
+        Assert-PathMissing (Join-Path $profile.HotkeyDir 'kcode-hotkey.ps1') 'uninstall should remove legacy launch-hotkey artifacts'
         Assert-PathExists (Join-Path $profile.JcodeHome 'config.toml') 'uninstall without -Purge should keep user data'
         $setupHints = Get-Content -LiteralPath $profile.SetupHintsPath -Raw | ConvertFrom-Json
         Assert-Equal $false $setupHints.hotkey_configured 'uninstall should clear the persisted hotkey-configured state'

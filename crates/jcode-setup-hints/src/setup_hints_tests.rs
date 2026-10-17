@@ -52,8 +52,8 @@ fn default_resolved_hotkeys_match_legacy_three() {
     let resolved = launch_hotkeys::resolve_launch_hotkeys(
         &jcode_config_types::LaunchHotkeysConfig::default(),
         "/usr/local/bin/jcode",
-        "/home/u/.jcode/hotkey/last_dir",
-        "/home/u/.jcode/hotkey/last_repo",
+        "/home/u/.kcode/hotkey/last_dir",
+        "/home/u/.kcode/hotkey/last_repo",
     );
     let chords: Vec<&str> = resolved.iter().map(|r| r.chord.as_str()).collect();
     assert_eq!(chords, vec!["cmd+;", "cmd+'", "cmd+shift+'"]);
@@ -64,11 +64,11 @@ fn default_resolved_hotkeys_match_legacy_three() {
     assert!(!home.contains("self-dev"));
 
     let last_dir = launch_hotkeys::shell_command_for(&resolved[1], "/usr/local/bin/jcode");
-    assert!(last_dir.contains("cat '/home/u/.jcode/hotkey/last_dir'"));
+    assert!(last_dir.contains("cat '/home/u/.kcode/hotkey/last_dir'"));
     assert!(last_dir.contains("cd \"$HOME\""));
 
     let selfdev = launch_hotkeys::shell_command_for(&resolved[2], "/usr/local/bin/jcode");
-    assert!(selfdev.contains("cat '/home/u/.jcode/hotkey/last_repo'"));
+    assert!(selfdev.contains("cat '/home/u/.kcode/hotkey/last_repo'"));
     assert!(selfdev.contains("'/usr/local/bin/jcode' 'self-dev';"));
 }
 
@@ -105,15 +105,15 @@ fn baked_repo_hotkey_cds_into_fixed_dir() {
         entries: vec![jcode_config_types::LaunchHotkeyEntry {
             chord: "cmd+[".to_string(),
             dir: "/Users/jeremy/jcode-github".to_string(),
-            label: "jcode-github".to_string(),
+            label: "kcode-github".to_string(),
             self_dev: false,
         }],
     };
     let resolved = launch_hotkeys::resolve_launch_hotkeys(
         &config,
         "/usr/local/bin/jcode",
-        "/home/u/.jcode/hotkey/last_dir",
-        "/home/u/.jcode/hotkey/last_repo",
+        "/home/u/.kcode/hotkey/last_dir",
+        "/home/u/.kcode/hotkey/last_repo",
     );
     assert_eq!(resolved.len(), 1);
     assert_eq!(resolved[0].chord, "cmd+[");
@@ -147,8 +147,8 @@ fn install_writes_executable_scripts_and_plan() {
     let resolved = launch_hotkeys::resolve_launch_hotkeys(
         &jcode_config_types::LaunchHotkeysConfig::default(),
         "/usr/local/bin/jcode",
-        "/home/u/.jcode/hotkey/last_dir",
-        "/home/u/.jcode/hotkey/last_repo",
+        "/home/u/.kcode/hotkey/last_dir",
+        "/home/u/.kcode/hotkey/last_repo",
     );
     let plan = super::write_hotkey_launch_scripts(
         dir.path(),
@@ -179,9 +179,9 @@ fn install_writes_executable_scripts_and_plan() {
 #[test]
 fn mac_hotkey_launch_agent_plist_uses_valid_xml_quotes() {
     let plist = mac_hotkey_launch_agent_plist(
-        "/Applications/Jcode.app/Contents/MacOS/jcode",
-        "/tmp/jcode-hotkey.out.log",
-        "/tmp/jcode-hotkey.err.log",
+        "/Applications/kcode.app/Contents/MacOS/jcode",
+        "/tmp/kcode-hotkey.out.log",
+        "/tmp/kcode-hotkey.err.log",
         "ghostty",
     );
 
@@ -459,7 +459,7 @@ fn glyph_safe_notice_shows_once_then_debounces() {
     let (title, body) = hint.unwrap().display_message.unwrap();
     assert_eq!(title, "Display");
     assert!(body.contains("quantizes colors"));
-    assert!(body.contains("JCODE_GLYPH_SAFE_MODE=off"));
+    assert!(body.contains("KCODE_GLYPH_SAFE_MODE=off"));
 
     // Subsequent launches: debounced, no repeat.
     let (hint2, changed2) = glyph_safe_notice_for(true, &mut state);

@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 
 RUNTIME_DIR = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
-SOCKET_PATH = os.path.join(RUNTIME_DIR, "jcode-debug.sock")
+SOCKET_PATH = os.path.join(RUNTIME_DIR, "kcode-debug.sock")
 REPO = Path(__file__).resolve().parents[2]
 
 
@@ -96,9 +96,9 @@ def focused_niri_window_id():
 def main():
     if not shutil_which("kitty") or not shutil_which("wtype"):
         raise SystemExit("SKIP: kitty and wtype are required")
-    binary = os.environ.get("JCODE_E2E_BIN", str(REPO / "target" / "selfdev" / "jcode"))
+    binary = os.environ.get("KCODE_E2E_BIN", str(REPO / "target" / "selfdev" / "jcode"))
     kitty_sock = os.environ.get("KITTY_E2E_SOCKET", find_kitty_socket())
-    title = f"JCODE_EXPAND_E2E_{int(time.time())}"
+    title = f"KCODE_EXPAND_E2E_{int(time.time())}"
 
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.connect(SOCKET_PATH)

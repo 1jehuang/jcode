@@ -216,6 +216,7 @@ fn test_handle_server_event_history_clears_connection_type_on_session_change_whe
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
+            applets: Default::default(),
         },
         &mut remote,
     );
@@ -269,6 +270,7 @@ fn test_handle_server_event_history_preserves_connection_type_for_same_session_w
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
+            applets: Default::default(),
         },
         &mut remote,
     );
@@ -322,6 +324,7 @@ fn test_handle_server_event_history_preserves_reasoning_effort_for_same_session_
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
+            applets: Default::default(),
         },
         &mut remote,
     );
@@ -402,6 +405,7 @@ fn test_handle_server_event_history_session_change_clears_streaming_preview_diag
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
+            applets: Default::default(),
         },
         &mut remote,
     );
@@ -505,6 +509,7 @@ fn test_handle_server_event_history_same_session_rewind_reapply_clears_streaming
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
+            applets: Default::default(),
         },
         &mut remote,
     );
@@ -614,6 +619,7 @@ fn test_handle_server_event_history_same_session_midstream_duplicate_is_dropped_
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
+            applets: Default::default(),
         },
         &mut remote,
     );
@@ -696,6 +702,7 @@ fn test_handle_server_event_history_same_session_midstream_duplicate_is_dropped_
                 compaction_mode: crate::config::CompactionMode::Reactive,
                 activity: None,
                 side_panel: crate::side_panel::SidePanelSnapshot::default(),
+                applets: Default::default(),
             },
             &mut remote,
         );
@@ -798,6 +805,7 @@ fn test_handle_server_event_history_same_session_rewind_then_late_done_does_not_
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
+            applets: Default::default(),
         },
         &mut remote,
     );
@@ -887,6 +895,7 @@ fn test_handle_server_event_history_session_change_clears_pending_interleaves() 
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
+            applets: Default::default(),
         },
         &mut remote,
     );
@@ -902,8 +911,8 @@ fn test_handle_server_event_history_session_change_clears_pending_interleaves() 
 fn test_handle_post_connect_marker_without_reload_context_does_not_queue_selfdev_continuation() {
     let _guard = crate::storage::lock_test_env();
     let temp_home = tempfile::TempDir::new().expect("create temp home");
-    let prev_home = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", temp_home.path());
+    let prev_home = std::env::var_os("KCODE_HOME");
+    crate::env::set_var("KCODE_HOME", temp_home.path());
 
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -951,9 +960,9 @@ fn test_handle_post_connect_marker_without_reload_context_does_not_queue_selfdev
     );
 
     if let Some(prev_home) = prev_home {
-        crate::env::set_var("JCODE_HOME", prev_home);
+        crate::env::set_var("KCODE_HOME", prev_home);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
     }
 }
 
@@ -961,8 +970,8 @@ fn test_handle_post_connect_marker_without_reload_context_does_not_queue_selfdev
 fn test_handle_post_connect_defers_reload_followup_to_server_history_payload() {
     let _guard = crate::storage::lock_test_env();
     let temp_home = tempfile::TempDir::new().expect("create temp home");
-    let prev_home = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", temp_home.path());
+    let prev_home = std::env::var_os("KCODE_HOME");
+    crate::env::set_var("KCODE_HOME", temp_home.path());
 
     let session_id = "session_hidden_reload_followup";
     crate::tool::selfdev::ReloadContext {
@@ -1007,9 +1016,9 @@ fn test_handle_post_connect_defers_reload_followup_to_server_history_payload() {
 
     cleanup_reload_context_file(session_id);
     if let Some(prev_home) = prev_home {
-        crate::env::set_var("JCODE_HOME", prev_home);
+        crate::env::set_var("KCODE_HOME", prev_home);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
     }
 }
 
@@ -1017,8 +1026,8 @@ fn test_handle_post_connect_defers_reload_followup_to_server_history_payload() {
 fn test_handle_post_connect_clears_deferred_dispatch_before_reload_followup() {
     let _guard = crate::storage::lock_test_env();
     let temp_home = tempfile::TempDir::new().expect("create temp home");
-    let prev_home = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", temp_home.path());
+    let prev_home = std::env::var_os("KCODE_HOME");
+    crate::env::set_var("KCODE_HOME", temp_home.path());
 
     let session_id = "session_reload_deferred_dispatch";
     crate::tool::selfdev::ReloadContext {
@@ -1072,9 +1081,9 @@ fn test_handle_post_connect_clears_deferred_dispatch_before_reload_followup() {
 
     cleanup_reload_context_file(session_id);
     if let Some(prev_home) = prev_home {
-        crate::env::set_var("JCODE_HOME", prev_home);
+        crate::env::set_var("KCODE_HOME", prev_home);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
     }
 }
 
@@ -1084,8 +1093,8 @@ fn test_handle_post_connect_requests_client_reload_after_server_reload_even_with
 
     let _guard = crate::storage::lock_test_env();
     let temp_home = tempfile::TempDir::new().expect("create temp home");
-    let prev_home = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", temp_home.path());
+    let prev_home = std::env::var_os("KCODE_HOME");
+    crate::env::set_var("KCODE_HOME", temp_home.path());
 
     let mut app = create_test_app();
     app.client_binary_mtime = Some(SystemTime::now() + Duration::from_secs(3600));
@@ -1121,9 +1130,9 @@ fn test_handle_post_connect_requests_client_reload_after_server_reload_even_with
     assert!(app.should_quit);
 
     if let Some(prev_home) = prev_home {
-        crate::env::set_var("JCODE_HOME", prev_home);
+        crate::env::set_var("KCODE_HOME", prev_home);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
     }
 }
 
@@ -1141,8 +1150,8 @@ fn test_handle_post_connect_plain_reconnect_does_not_trigger_client_reload_even_
     // (short alias `tigress` vs full `session_tigress_…`).
     let _guard = crate::storage::lock_test_env();
     let temp_home = tempfile::TempDir::new().expect("create temp home");
-    let prev_home = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", temp_home.path());
+    let prev_home = std::env::var_os("KCODE_HOME");
+    crate::env::set_var("KCODE_HOME", temp_home.path());
 
     let mut app = create_test_app();
     // Simulate a freshly-built launcher payload: mtime in the future means
@@ -1179,9 +1188,9 @@ fn test_handle_post_connect_plain_reconnect_does_not_trigger_client_reload_even_
     assert!(!app.should_quit, "must not quit on a plain reconnect");
 
     if let Some(prev_home) = prev_home {
-        crate::env::set_var("JCODE_HOME", prev_home);
+        crate::env::set_var("KCODE_HOME", prev_home);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
     }
 }
 
@@ -1608,7 +1617,7 @@ fn test_handle_server_event_interrupted_clears_stream_state_and_sets_idle() {
         .push((77, "pending soft interrupt".to_string()));
 
     remote.handle_tool_start("tool_1", "bash");
-    remote.handle_tool_input("{\"command\":\"sleep 10\"}");
+    remote.handle_tool_input(None, "{\"command\":\"sleep 10\"}");
     remote.handle_tool_exec("tool_1", "edit");
 
     app.handle_server_event(crate::protocol::ServerEvent::Interrupted, &mut remote);
@@ -2062,6 +2071,7 @@ fn test_pending_startup_notice_survives_history_bootstrap_for_fresh_session() {
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
+            applets: Default::default(),
         },
         &mut remote,
     );

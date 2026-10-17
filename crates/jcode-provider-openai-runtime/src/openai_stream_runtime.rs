@@ -113,6 +113,7 @@ pub(super) async fn stream_response(
     }
     let mut usage_recorder = OAuthUsageRecorder::capture(&creds, &request);
     let is_chatgpt_mode = !creds.refresh_token.is_empty() || creds.id_token.is_some();
+    let catalog_scope = OpenAIProvider::catalog_scope_for(&creds);
     let url = OpenAIProvider::responses_url(&creds);
     let account_id = creds.account_id.clone();
     drop(creds);
@@ -191,7 +192,11 @@ pub(super) async fn stream_response(
         if let Some(reason) = classify_unavailable_model_error(status, &body)
             && let Some(model_name) = request.get("model").and_then(|m| m.as_str())
         {
-            jcode_base::provider::record_model_unavailable_for_account(model_name, &reason);
+            jcode_base::provider::record_model_unavailable_for_scope(
+                &catalog_scope,
+                model_name,
+                &reason,
+            );
             jcode_base::logging::warn(&format!(
                 "Recorded OpenAI model '{}' as unavailable: {}",
                 model_name, reason
@@ -262,7 +267,7 @@ pub(super) async fn stream_response(
     // connection (or a provider that never emits) would hang forever; with a
     // hardcoded short value, slow reasoning models that think silently for
     // minutes get cancelled prematurely. Resolved from
-    // `[provider] stream_idle_timeout_secs` / `JCODE_STREAM_IDLE_TIMEOUT_SECS`
+    // `[provider] stream_idle_timeout_secs` / `KCODE_STREAM_IDLE_TIMEOUT_SECS`
     // (issue #434).
     use futures::StreamExt;
     loop {
@@ -296,7 +301,9 @@ pub(super) async fn stream_response(
                 if let StreamEvent::Error { message, .. } = &event {
                     if let Some(model_name) = request.get("model").and_then(|m| m.as_str()) {
                         maybe_record_runtime_model_unavailable_from_stream_error(
-                            model_name, message,
+                            &catalog_scope,
+                            model_name,
+                            message,
                         );
                     }
                     if is_retryable_error(&message.to_lowercase()) {
@@ -564,6 +571,30 @@ async fn continue_persistent_ws_locked(
                 ("reason", "input_not_growing".to_string()),
                 ("input_item_count", input_item_count.to_string()),
                 ("last_input_item_count", last_input_item_count.to_string()),
+            ],
+        );
+        *guard = None;
+        return PersistentWsResult::NotAvailable;
+    }
+
+    // Canonicalization can move a new tool output before the old cursor, even
+    // when the input grows. Slicing by count would silently omit that output.
+    // Replay the full normalized history unless the prior input is unchanged.
+    let input_item_hashes = persistent_ws_input_item_hashes(input);
+    if state.last_input_item_hashes.len() != state.last_input_item_count
+        || !input_item_hashes.starts_with(&state.last_input_item_hashes)
+    {
+        log_openai_stream_lifecycle(
+            jcode_base::logging::LogLevel::Info,
+            "persistent_state_reset",
+            vec![
+                ("model", request_model.clone()),
+                ("reason", "input_prefix_changed".to_string()),
+                ("input_item_count", input_item_count.to_string()),
+                (
+                    "last_input_item_count",
+                    state.last_input_item_count.to_string(),
+                ),
             ],
         );
         *guard = None;
@@ -970,6 +1001,7 @@ async fn continue_persistent_ws_locked(
                         let lower = message.to_lowercase();
                         if is_retryable_error(&lower)
                             || lower.contains("previous_response_not_found")
+                            || lower.contains("no tool output found for function call")
                         {
                             return PersistentWsResult::Failed(format!(
                                 "stream error: {}",
@@ -993,6 +1025,7 @@ async fn continue_persistent_ws_locked(
                         let lower = message.to_lowercase();
                         if is_retryable_error(&lower)
                             || lower.contains("previous_response_not_found")
+                            || lower.contains("no tool output found for function call")
                         {
                             return PersistentWsResult::Failed(format!(
                                 "stream error: {}",
@@ -1073,6 +1106,7 @@ async fn continue_persistent_ws_locked(
     if let Some(resp_id) = new_response_id {
         state.last_response_id = resp_id;
         state.last_input_item_count = input_item_count;
+        state.last_input_item_hashes = input_item_hashes;
         state.message_count += 1;
         state.last_activity_at = Instant::now();
         state.last_response_completed_at = Instant::now();
@@ -1160,6 +1194,7 @@ pub(super) async fn stream_response_websocket_persistent(
         )));
     }
     let mut usage_recorder = OAuthUsageRecorder::capture(&creds, &request);
+    let catalog_scope = OpenAIProvider::catalog_scope_for(&creds);
     let ws_request = openai_websocket_prewarm::websocket_request(&creds, &access_token)
         .map_err(OpenAIStreamFailure::Other)?;
     let mut identity = openai_websocket_prewarm::prewarm_identity(&creds);
@@ -1217,6 +1252,13 @@ pub(super) async fn stream_response_websocket_persistent(
         }))
         .await;
 
+    let input_item_hashes = persistent_ws_input_item_hashes(
+        request
+            .get("input")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]),
+    );
     let mut request_event = request;
     if !request_event.is_object() {
         return Err(OpenAIStreamFailure::Other(anyhow::anyhow!(
@@ -1397,7 +1439,9 @@ pub(super) async fn stream_response_websocket_persistent(
                         if let StreamEvent::Error { message, .. } = &event {
                             if let Some(model_name) = request_model.as_deref() {
                                 maybe_record_runtime_model_unavailable_from_stream_error(
-                                    model_name, message,
+                                    &catalog_scope,
+                                    model_name,
+                                    message,
                                 );
                             }
                             if is_retryable_error(&message.to_lowercase()) {
@@ -1406,6 +1450,11 @@ pub(super) async fn stream_response_websocket_persistent(
                                     message
                                 )));
                             }
+                            // A failed response never sends response.completed,
+                            // and the server may keep the socket open (usage
+                            // limits do). Forward once and drop the socket.
+                            let _ = tx.send(Ok(event)).await;
+                            return Ok(());
                         }
                         usage_recorder.observe(&event).await;
                         if tx.send(Ok(event)).await.is_err() {
@@ -1431,7 +1480,9 @@ pub(super) async fn stream_response_websocket_persistent(
                         if let StreamEvent::Error { message, .. } = &event {
                             if let Some(model_name) = request_model.as_deref() {
                                 maybe_record_runtime_model_unavailable_from_stream_error(
-                                    model_name, message,
+                                    &catalog_scope,
+                                    model_name,
+                                    message,
                                 );
                             }
                             if is_retryable_error(&message.to_lowercase()) {
@@ -1440,6 +1491,8 @@ pub(super) async fn stream_response_websocket_persistent(
                                     message
                                 )));
                             }
+                            let _ = tx.send(Ok(event)).await;
+                            return Ok(());
                         }
                         if matches!(event, StreamEvent::MessageEnd { .. }) {
                             saw_response_completed = true;
@@ -1528,6 +1581,7 @@ pub(super) async fn stream_response_websocket_persistent(
             last_response_completed_at: Instant::now(),
             message_count: 1,
             last_input_item_count: input_item_count,
+            last_input_item_hashes: input_item_hashes,
         });
         drop(guard);
         spawn_persistent_ws_keepalive(
@@ -1570,12 +1624,16 @@ fn should_refresh_token(status: StatusCode, body: &str) -> bool {
     false
 }
 
-fn maybe_record_runtime_model_unavailable_from_stream_error(model: &str, message: &str) {
+fn maybe_record_runtime_model_unavailable_from_stream_error(
+    catalog_scope: &str,
+    model: &str,
+    message: &str,
+) {
     let reason = classify_unavailable_model_error(StatusCode::BAD_REQUEST, message)
         .or_else(|| classify_unavailable_model_error(StatusCode::FORBIDDEN, message));
 
     if let Some(reason) = reason {
-        jcode_base::provider::record_model_unavailable_for_account(model, &reason);
+        jcode_base::provider::record_model_unavailable_for_scope(catalog_scope, model, &reason);
         jcode_base::logging::warn(&format!(
             "Recorded OpenAI model '{}' as unavailable from stream error: {}",
             model, reason

@@ -80,8 +80,8 @@ fn file_activity_scope_label_classifies_overlap() {
 #[tokio::test]
 async fn removing_server_session_clears_active_pid_marker() {
     let _guard = crate::storage::lock_test_env();
-    let home = tempfile::tempdir().expect("create temporary JCODE_HOME");
-    let _home_guard = ScopedEnvVar::set("JCODE_HOME", home.path());
+    let home = tempfile::tempdir().expect("create temporary KCODE_HOME");
+    let _home_guard = ScopedEnvVar::set("KCODE_HOME", home.path());
     let session_id = "session_marker_cleanup_test";
     crate::storage::register_active_pid(session_id, std::process::id());
 
@@ -117,8 +117,8 @@ fn configured_server_name_normalizes_operator_labels() {
 #[test]
 fn server_identity_uses_configured_name() {
     let _guard = crate::storage::lock_test_env();
-    let _server_name_guard = ScopedEnvVar::set("JCODE_SERVER_NAME", "env-name");
-    let _server_display_name_guard = ScopedEnvVar::set("JCODE_SERVER_DISPLAY_NAME", "display-name");
+    let _server_name_guard = ScopedEnvVar::set("KCODE_SERVER_NAME", "env-name");
+    let _server_display_name_guard = ScopedEnvVar::set("KCODE_SERVER_DISPLAY_NAME", "display-name");
 
     let server = Server::new_with_name(
         Arc::new(StreamingMockProvider::default()),
@@ -137,8 +137,8 @@ fn server_identity_uses_configured_name() {
 #[test]
 fn server_identity_reads_name_from_env() {
     let _guard = crate::storage::lock_test_env();
-    let _server_name_guard = ScopedEnvVar::set("JCODE_SERVER_NAME", "mount-cloud/john");
-    let _server_display_name_guard = ScopedEnvVar::set("JCODE_SERVER_DISPLAY_NAME", "ignored");
+    let _server_name_guard = ScopedEnvVar::set("KCODE_SERVER_NAME", "mount-cloud/john");
+    let _server_display_name_guard = ScopedEnvVar::set("KCODE_SERVER_DISPLAY_NAME", "ignored");
 
     let server = Server::new_with_name(Arc::new(StreamingMockProvider::default()), None);
 
@@ -148,19 +148,19 @@ fn server_identity_reads_name_from_env() {
 impl Drop for EnvGuard {
     fn drop(&mut self) {
         if let Some(value) = &self.prev_home {
-            crate::env::set_var("JCODE_HOME", value);
+            crate::env::set_var("KCODE_HOME", value);
         } else {
-            crate::env::remove_var("JCODE_HOME");
+            crate::env::remove_var("KCODE_HOME");
         }
         if let Some(value) = &self.prev_runtime_dir {
-            crate::env::set_var("JCODE_RUNTIME_DIR", value);
+            crate::env::set_var("KCODE_RUNTIME_DIR", value);
         } else {
-            crate::env::remove_var("JCODE_RUNTIME_DIR");
+            crate::env::remove_var("KCODE_RUNTIME_DIR");
         }
         if let Some(value) = &self.prev_socket {
-            crate::env::set_var("JCODE_SOCKET", value);
+            crate::env::set_var("KCODE_SOCKET", value);
         } else {
-            crate::env::remove_var("JCODE_SOCKET");
+            crate::env::remove_var("KCODE_SOCKET");
         }
     }
 }
@@ -169,16 +169,10 @@ impl ScopedEnvVar {
     fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
         let prev = std::env::var_os(key);
         crate::env::set_var(key, value);
-        // KCode fork: jcode-core::env::set_var is a thin unsafe wrapper around
-        // std::env::set_var and does NOT invalidate the config cache. The
-        // server-wide wake-mode test relies on a fresh config snapshot
-        // (wake_mode=external) after this call; without the explicit
-        // invalidation, the cached value from a prior test in the same
-        // `cargo test` process wins and the assertion fires. Only invalidate
-        // for keys that drive the config snapshot, to avoid disturbing tests
-        // that expect config to be stable across env-var mutations.
+        // Config is cached with a recheck interval; config-backed env vars
+        // such as KCODE_WAKE_MODE must be observed immediately.
         if is_config_driven_key(key) {
-            jcode_base::config::invalidate_config_cache();
+            crate::config::invalidate_config_cache();
         }
         Self { key, prev }
     }
@@ -188,11 +182,11 @@ impl ScopedEnvVar {
 ///
 /// `CONFIG_ENV_KEYS` is module-private; the test code here only needs the
 /// subset of keys that affect the config snapshot under test (notably
-/// `JCODE_WAKE_MODE`, which gates whether background-task completion starts
+/// `KCODE_WAKE_MODE`, which gates whether background-task completion starts
 /// a new turn or emits a wake request). Adding a key here is safe as long
 /// as the corresponding test asserts the post-mutation config value.
 fn is_config_driven_key(key: &str) -> bool {
-    matches!(key, "JCODE_WAKE_MODE")
+    matches!(key, "KCODE_WAKE_MODE")
 }
 
 impl Drop for ScopedEnvVar {
@@ -202,26 +196,23 @@ impl Drop for ScopedEnvVar {
         } else {
             crate::env::remove_var(self.key);
         }
-        // KCode fork: mirror the set-side invalidation so the next test in the
-        // same process doesn't observe a stale cached value. Only invalidate
-        // for keys that drive the config snapshot.
         if is_config_driven_key(self.key) {
-            jcode_base::config::invalidate_config_cache();
+            crate::config::invalidate_config_cache();
         }
     }
 }
 
 fn configure_test_env(root: &tempfile::TempDir) -> EnvGuard {
-    let prev_home = std::env::var_os("JCODE_HOME");
-    let prev_runtime_dir = std::env::var_os("JCODE_RUNTIME_DIR");
-    let prev_socket = std::env::var_os("JCODE_SOCKET");
+    let prev_home = std::env::var_os("KCODE_HOME");
+    let prev_runtime_dir = std::env::var_os("KCODE_RUNTIME_DIR");
+    let prev_socket = std::env::var_os("KCODE_SOCKET");
     let home_dir = root.path().join("home");
     let runtime_dir = root.path().join("runtime");
     std::fs::create_dir_all(&home_dir).expect("create home dir");
     std::fs::create_dir_all(&runtime_dir).expect("create runtime dir");
-    crate::env::set_var("JCODE_HOME", &home_dir);
-    crate::env::set_var("JCODE_RUNTIME_DIR", &runtime_dir);
-    crate::env::remove_var("JCODE_SOCKET");
+    crate::env::set_var("KCODE_HOME", &home_dir);
+    crate::env::set_var("KCODE_RUNTIME_DIR", &runtime_dir);
+    crate::env::remove_var("KCODE_SOCKET");
     EnvGuard {
         prev_home,
         prev_runtime_dir,
@@ -353,8 +344,8 @@ fn persisted_headless_member(
 async fn background_task_wake_runs_live_session_immediately_when_idle() {
     // KCode fork: take the test-env mutex so this test serializes with
     // `external_background_task_wake_emits_request_without_starting_turn` (and
-    // any other test that mutates `JCODE_WAKE_MODE`). Without the lock, the
-    // external test can set `JCODE_WAKE_MODE=external` while this test is
+    // any other test that mutates `KCODE_WAKE_MODE`). Without the lock, the
+    // external test can set `KCODE_WAKE_MODE=external` while this test is
     // still running on a parallel `--test-threads>1` worker; the cache will
     // hand us `WakeMode::External`, `emit_external_wake` will short-circuit
     // `run_live_turn_if_idle`, and the asserted `TextDelta` never arrives.
@@ -460,7 +451,7 @@ async fn background_task_wake_runs_live_session_immediately_when_idle() {
 #[tokio::test]
 async fn external_background_task_wake_emits_request_without_starting_turn() {
     let _env_lock = crate::storage::lock_test_env();
-    let _wake_mode = ScopedEnvVar::set("JCODE_WAKE_MODE", "external");
+    let _wake_mode = ScopedEnvVar::set("KCODE_WAKE_MODE", "external");
     let provider = Arc::new(StreamingMockProvider::default());
     provider.queue_response(vec![
         StreamEvent::TextDelta("must not run".to_string()),
@@ -866,7 +857,7 @@ async fn background_task_progress_notifies_attached_clients() {
 #[tokio::test]
 #[allow(
     clippy::await_holding_lock,
-    reason = "test intentionally serializes process-wide JCODE_HOME/env state across async recovery assertions"
+    reason = "test intentionally serializes process-wide KCODE_HOME/env state across async recovery assertions"
 )]
 async fn startup_recovery_resumes_interrupted_headless_sessions_after_reload() -> Result<()> {
     let _storage_guard = crate::storage::lock_test_env();
@@ -1001,7 +992,7 @@ async fn startup_recovery_resumes_interrupted_headless_sessions_after_reload() -
 #[tokio::test]
 #[allow(
     clippy::await_holding_lock,
-    reason = "test intentionally serializes process-wide JCODE_HOME/env state across async recovery assertions"
+    reason = "test intentionally serializes process-wide KCODE_HOME/env state across async recovery assertions"
 )]
 async fn startup_recovery_preserves_headed_session_reload_context_for_later_reconnect() -> Result<()>
 {
@@ -1104,7 +1095,7 @@ async fn startup_recovery_preserves_headed_session_reload_context_for_later_reco
 #[tokio::test]
 #[allow(
     clippy::await_holding_lock,
-    reason = "test intentionally serializes process-wide JCODE_HOME/env state across async startup assertions"
+    reason = "test intentionally serializes process-wide KCODE_HOME/env state across async startup assertions"
 )]
 async fn startup_ready_signal_is_not_blocked_by_headless_recovery_delay() -> Result<()> {
     use std::os::unix::io::FromRawFd;
@@ -1113,7 +1104,7 @@ async fn startup_ready_signal_is_not_blocked_by_headless_recovery_delay() -> Res
     let _storage_guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new()?;
     let _env = configure_test_env(&temp);
-    let _delay_guard = ScopedEnvVar::set("JCODE_TEST_HEADLESS_STARTUP_RECOVERY_DELAY_MS", "500");
+    let _delay_guard = ScopedEnvVar::set("KCODE_TEST_HEADLESS_STARTUP_RECOVERY_DELAY_MS", "500");
 
     let mut headless =
         crate::session::Session::create(None, Some("headless-ready-delay".to_string()));
@@ -1141,7 +1132,7 @@ async fn startup_ready_signal_is_not_blocked_by_headless_recovery_delay() -> Res
     assert_eq!(pipe_rc, 0, "pipe() should succeed");
     let read_fd = ready_fds[0];
     let write_fd = ready_fds[1];
-    let _ready_fd_guard = ScopedEnvVar::set("JCODE_READY_FD", write_fd.to_string());
+    let _ready_fd_guard = ScopedEnvVar::set("KCODE_READY_FD", write_fd.to_string());
 
     let main_listener = crate::transport::Listener::bind(&server.socket_path)?;
     let debug_listener = crate::transport::Listener::bind(&server.debug_socket_path)?;

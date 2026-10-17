@@ -25,16 +25,16 @@ fn exercise_stdio(close_daemon_first: bool) {
     let listener = UnixListener::bind(&socket).unwrap();
     listener.set_nonblocking(true).unwrap();
     let mut child = ChildGuard(
-        Command::new(env!("CARGO_BIN_EXE_jcode"))
+        Command::new(env!("CARGO_BIN_EXE_kcode"))
             .current_dir(root.path())
             .env_clear()
             .env("HOME", root.path())
-            .env("JCODE_HOME", &home)
-            .env("JCODE_RUNTIME_DIR", &runtime)
+            .env("KCODE_HOME", &home)
+            .env("KCODE_RUNTIME_DIR", &runtime)
             .env("XDG_RUNTIME_DIR", &runtime)
-            .env("JCODE_NO_TELEMETRY", "1")
-            .env("JCODE_SOCKET", &socket)
-            .env("JCODE_API_SOCKET", runtime.join("unused-api.sock"))
+            .env("KCODE_NO_TELEMETRY", "1")
+            .env("KCODE_SOCKET", &socket)
+            .env("KCODE_API_SOCKET", runtime.join("unused-api.sock"))
             .env("XDG_CONFIG_HOME", root.path().join("config"))
             .env("XDG_CACHE_HOME", root.path().join("cache"))
             .env("PATH", "/usr/bin:/bin")

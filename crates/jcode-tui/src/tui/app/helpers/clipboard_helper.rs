@@ -82,7 +82,7 @@ mod tests {
     #[test]
     fn missing_helper_binary_falls_through() {
         assert!(!copy_via_clipboard_helper(
-            "jcode-nonexistent-clipboard-helper",
+            "kcode-nonexistent-clipboard-helper",
             &[],
             "hello"
         ));

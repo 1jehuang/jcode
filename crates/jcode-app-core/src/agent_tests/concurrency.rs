@@ -12,10 +12,10 @@ struct IsolatedEnv {
 impl IsolatedEnv {
     fn new() -> Self {
         let home = tempfile::tempdir().unwrap();
-        let previous_home = std::env::var_os("JCODE_HOME");
-        let previous_opt_out = std::env::var_os("JCODE_NO_TELEMETRY");
-        crate::env::set_var("JCODE_HOME", home.path());
-        crate::env::set_var("JCODE_NO_TELEMETRY", "1");
+        let previous_home = std::env::var_os("KCODE_HOME");
+        let previous_opt_out = std::env::var_os("KCODE_NO_TELEMETRY");
+        crate::env::set_var("KCODE_HOME", home.path());
+        crate::env::set_var("KCODE_NO_TELEMETRY", "1");
         Self {
             _home: home,
             previous_home,
@@ -27,8 +27,8 @@ impl IsolatedEnv {
 impl Drop for IsolatedEnv {
     fn drop(&mut self) {
         for (key, value) in [
-            ("JCODE_HOME", self.previous_home.take()),
-            ("JCODE_NO_TELEMETRY", self.previous_opt_out.take()),
+            ("KCODE_HOME", self.previous_home.take()),
+            ("KCODE_NO_TELEMETRY", self.previous_opt_out.take()),
         ] {
             if let Some(value) = value {
                 crate::env::set_var(key, value);

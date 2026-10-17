@@ -1,4 +1,4 @@
-//! Disk cache of MCP tool schemas (`~/.jcode/mcp-schema-cache.json`).
+//! Disk cache of MCP tool schemas (`~/.kcode/mcp-schema-cache.json`).
 //!
 //! MCP servers connect on a background task and only expose their tool
 //! schemas after a JSON-RPC `initialize` + `tools/list` round-trip. That means

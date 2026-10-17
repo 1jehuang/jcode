@@ -49,18 +49,18 @@ def cpu_seconds(pid: int) -> float | None:
 def run(binary: str, session: str, fps: int | None, window_s: float,
         rows: int, cols: int) -> dict:
     flick.ROWS, flick.COLS = rows, cols
-    runtime = Path(os.environ.get("JCODE_RUNTIME_DIR")
+    runtime = Path(os.environ.get("KCODE_RUNTIME_DIR")
                    or f"/run/user/{os.getuid()}")
     env = os.environ.copy()
-    env["JCODE_SOCKET"] = env.get("JCODE_SOCKET") or str(runtime / "jcode.sock")
-    env["JCODE_DEBUG_CONTROL"] = "1"
-    env["JCODE_THEME"] = "dark"
+    env["KCODE_SOCKET"] = env.get("KCODE_SOCKET") or str(runtime / "kcode.sock")
+    env["KCODE_DEBUG_CONTROL"] = "1"
+    env["KCODE_THEME"] = "dark"
     if fps is None:
-        env["JCODE_IDLE_ANIMATION"] = "false"
+        env["KCODE_IDLE_ANIMATION"] = "false"
     else:
-        env["JCODE_ANIMATION_FPS"] = str(fps)
+        env["KCODE_ANIMATION_FPS"] = str(fps)
 
-    scratch = Path(os.environ.get("JCODE_SCRATCH_DIR") or tempfile.gettempdir())
+    scratch = Path(os.environ.get("KCODE_SCRATCH_DIR") or tempfile.gettempdir())
     root = Path(tempfile.mkdtemp(prefix="jcode-fps-", dir=str(scratch)))
     cmd_path, resp_path = root / "client_cmd", root / "client_resp"
 
@@ -136,9 +136,9 @@ def main() -> int:
     args = ap.parse_args()
 
     binary = str(Path(args.binary).resolve())
-    runtime = Path(os.environ.get("JCODE_RUNTIME_DIR")
+    runtime = Path(os.environ.get("KCODE_RUNTIME_DIR")
                    or f"/run/user/{os.getuid()}")
-    session = args.session or recent_session(runtime / "jcode-debug.sock",
+    session = args.session or recent_session(runtime / "kcode-debug.sock",
                                              str(REPO_ROOT))
     if not session:
         print("could not resolve a session")

@@ -2,8 +2,8 @@
 fn test_fast_default_on_saves_config_and_updates_session() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
-    let prev_home = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", temp.path());
+    let prev_home = std::env::var_os("KCODE_HOME");
+    crate::env::set_var("KCODE_HOME", temp.path());
 
     let mut app = create_fast_test_app();
     app.input = "/fast default on".to_string();
@@ -21,9 +21,9 @@ fn test_fast_default_on_saves_config_and_updates_session() {
     assert_eq!(last.content, "Saved OpenAI fast mode: on.");
 
     if let Some(prev_home) = prev_home {
-        crate::env::set_var("JCODE_HOME", prev_home);
+        crate::env::set_var("KCODE_HOME", prev_home);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
     }
 }
 
@@ -31,8 +31,8 @@ fn test_fast_default_on_saves_config_and_updates_session() {
 fn test_fast_default_off_persists_explicit_off() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
-    let prev_home = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", temp.path());
+    let prev_home = std::env::var_os("KCODE_HOME");
+    crate::env::set_var("KCODE_HOME", temp.path());
     crate::config::Config::set_openai_service_tier(Some("priority")).expect("save fast default");
 
     let mut app = create_fast_test_app();
@@ -49,9 +49,9 @@ fn test_fast_default_off_persists_explicit_off() {
     assert_eq!(last.content, "Saved OpenAI fast mode: off.");
 
     if let Some(prev_home) = prev_home {
-        crate::env::set_var("JCODE_HOME", prev_home);
+        crate::env::set_var("KCODE_HOME", prev_home);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
     }
 }
 
@@ -59,8 +59,8 @@ fn test_fast_default_off_persists_explicit_off() {
 fn test_fast_status_shows_saved_default() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
-    let prev_home = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", temp.path());
+    let prev_home = std::env::var_os("KCODE_HOME");
+    crate::env::set_var("KCODE_HOME", temp.path());
     crate::config::Config::set_openai_service_tier(Some("priority")).expect("save fast default");
 
     let mut app = create_fast_test_app();
@@ -75,9 +75,9 @@ fn test_fast_status_shows_saved_default() {
     );
 
     if let Some(prev_home) = prev_home {
-        crate::env::set_var("JCODE_HOME", prev_home);
+        crate::env::set_var("KCODE_HOME", prev_home);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
     }
 }
 
@@ -123,7 +123,13 @@ fn test_alignment_status_shows_current_and_saved_defaults() {
         );
         assert!(last.content.contains("Saved default: left-aligned."));
         assert!(last.content.contains("/alignment centered"));
-        assert!(last.content.contains("Alt+C"));
+        // The keycap hint is platform-dependent: the message renders the
+        // platform chord via alt_chord (Option symbol on macOS, Alt elsewhere),
+        // so assert exactly that instead of a hardcoded "Alt+C" that fails on
+        // macOS builds while passing on the upstream Linux CI.
+        assert!(last
+            .content
+            .contains(&jcode_tui_core::keybind::alt_chord("C")));
     });
 }
 
@@ -216,8 +222,8 @@ fn test_mask_email_censors_local_part() {
 fn test_subscription_command_shows_jcode_status_scaffold() {
     let _guard = crate::storage::lock_test_env();
     crate::subscription_catalog::clear_runtime_env();
-    crate::env::remove_var(crate::subscription_catalog::JCODE_API_KEY_ENV);
-    crate::env::remove_var(crate::subscription_catalog::JCODE_API_BASE_ENV);
+    crate::env::remove_var(crate::subscription_catalog::KCODE_API_KEY_ENV);
+    crate::env::remove_var(crate::subscription_catalog::KCODE_API_BASE_ENV);
 
     let mut app = create_test_app();
     app.input = "/subscription".to_string();

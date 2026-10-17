@@ -369,7 +369,7 @@ mod tests {
 
     #[test]
     fn process_writer_child() {
-        let Some(path) = std::env::var_os("JCODE_OAUTH_TEST_LEDGER") else {
+        let Some(path) = std::env::var_os("KCODE_OAUTH_TEST_LEDGER") else {
             return;
         };
         for _ in 0..10 {
@@ -396,7 +396,7 @@ mod tests {
                         "--exact",
                         "provider_activity::oauth_usage::tests::process_writer_child",
                     ])
-                    .env("JCODE_OAUTH_TEST_LEDGER", &path)
+                    .env("KCODE_OAUTH_TEST_LEDGER", &path)
                     .stdout(std::process::Stdio::null())
                     .spawn()
                     .unwrap(),

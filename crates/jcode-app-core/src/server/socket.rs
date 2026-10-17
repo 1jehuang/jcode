@@ -5,10 +5,10 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 pub fn socket_path() -> PathBuf {
-    if let Ok(custom) = std::env::var("JCODE_SOCKET") {
+    if let Ok(custom) = std::env::var("KCODE_SOCKET") {
         return PathBuf::from(custom);
     }
-    crate::storage::runtime_dir().join("jcode.sock")
+    crate::storage::runtime_dir().join("kcode.sock")
 }
 
 /// Debug socket path for testing/introspection
@@ -18,7 +18,7 @@ pub fn debug_socket_path() -> PathBuf {
     let filename = main_path
         .file_name()
         .and_then(|n| n.to_str())
-        .unwrap_or("jcode.sock");
+        .unwrap_or("kcode.sock");
     let debug_filename = filename.replace(".sock", "-debug.sock");
     main_path.with_file_name(debug_filename)
 }
@@ -158,7 +158,7 @@ pub async fn has_live_listener(path: &std::path::Path) -> bool {
 
 #[cfg(unix)]
 pub(super) fn daemon_lock_path() -> PathBuf {
-    crate::storage::runtime_dir().join("jcode-daemon.lock")
+    crate::storage::runtime_dir().join("kcode-daemon.lock")
 }
 
 #[cfg(unix)]
@@ -221,13 +221,13 @@ pub(super) fn mark_close_on_exec<T: std::os::fd::AsRawFd>(io: &T) {
 }
 
 pub fn set_socket_path(path: &str) {
-    crate::env::set_var("JCODE_SOCKET", path);
+    crate::env::set_var("KCODE_SOCKET", path);
 }
 
 /// Spawn a server child process and wait until it signals readiness.
 ///
 /// Creates an anonymous pipe, passes the write-end fd to the child via
-/// `JCODE_READY_FD`, and awaits a single byte on the read end. The server
+/// `KCODE_READY_FD`, and awaits a single byte on the read end. The server
 /// calls `signal_ready_fd()` once its accept loops are spawned, so the future
 /// resolves only after the daemon can start servicing client requests.
 ///
@@ -268,7 +268,7 @@ pub async fn spawn_server_notify(cmd: &mut std::process::Command) -> Result<std:
             Ok(())
         });
     }
-    cmd.env("JCODE_READY_FD", write_fd.to_string());
+    cmd.env("KCODE_READY_FD", write_fd.to_string());
 
     let mut child = cmd.spawn()?;
 
@@ -402,7 +402,7 @@ pub(super) fn format_server_start_error(
 ) -> String {
     if stderr_output.trim().is_empty() {
         format!(
-            "Server exited before signalling ready ({}). Check logs at ~/.jcode/logs/",
+            "Server exited before signalling ready ({}). Check logs at ~/.kcode/logs/",
             status
         )
     } else {
@@ -433,7 +433,7 @@ pub(super) async fn handle_server_start_exit(
     anyhow::bail!(format_server_start_error(status, &stderr_output));
 }
 
-/// Write a single byte to the fd in `JCODE_READY_FD` and close it.
+/// Write a single byte to the fd in `KCODE_READY_FD` and close it.
 /// Called after startup plumbing is ready so the parent process knows the
 /// server can accept and service client requests. The env var is cleared so child
 /// processes (e.g. tool subprocesses) don't inherit a stale fd.
@@ -442,8 +442,8 @@ pub(super) fn signal_ready_fd() {
     {
         use std::os::unix::io::FromRawFd;
 
-        if let Ok(fd_str) = std::env::var("JCODE_READY_FD") {
-            crate::env::remove_var("JCODE_READY_FD");
+        if let Ok(fd_str) = std::env::var("KCODE_READY_FD") {
+            crate::env::remove_var("KCODE_READY_FD");
             if let Ok(fd) = fd_str.parse::<i32>() {
                 let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
                 let _ = std::io::Write::write_all(&mut file, b"R");

@@ -12,6 +12,8 @@ pub(super) struct SessionJournalMeta {
     pub(super) title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) custom_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) system_prompt: Option<String>,
     pub(super) updated_at: DateTime<Utc>,
     pub(super) compaction: Option<StoredCompactionState>,
     pub(super) provider_session_id: Option<String>,
@@ -70,6 +72,10 @@ pub(super) struct SessionPersistState {
     pub(super) memory_injections_mode: PersistVectorMode,
     pub(super) replay_events_mode: PersistVectorMode,
     pub(super) last_meta: Option<SessionJournalMeta>,
+    /// Set on remote-client stubs whose transcript was never loaded or was
+    /// stripped. The server owns that transcript, so a snapshot written from
+    /// the stub would replace it with nothing. Survives `reset_persist_state`.
+    pub(super) transcript_stripped: bool,
 }
 
 pub(super) fn metadata_requires_snapshot(
@@ -79,6 +85,7 @@ pub(super) fn metadata_requires_snapshot(
     prev.parent_id != current.parent_id
         || prev.title != current.title
         || prev.custom_title != current.custom_title
+        || prev.system_prompt != current.system_prompt
         || prev.provider_key != current.provider_key
         || prev.reasoning_effort != current.reasoning_effort
         || prev.subagent_model != current.subagent_model

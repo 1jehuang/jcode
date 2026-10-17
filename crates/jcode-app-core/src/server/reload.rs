@@ -17,7 +17,7 @@ fn prepare_server_exec(cmd: &mut std::process::Command, socket_path: &std::path:
     // The replacement daemon must own the published socket paths. Unlink them
     // before exec so we never inherit a stale on-disk endpoint through reload.
     crate::server::cleanup_socket_pair(socket_path);
-    cmd.env_remove("JCODE_READY_FD");
+    cmd.env_remove("KCODE_READY_FD");
 
     // The shared daemon may have inherited stderr from the client process that
     // originally spawned it. Once that client exits, later reload execs can hit
@@ -101,7 +101,7 @@ pub(super) async fn await_reload_signal(
         );
         super::acknowledge_reload_signal(&signal);
 
-        if std::env::var("JCODE_TEST_SESSION")
+        if std::env::var("KCODE_TEST_SESSION")
             .map(|value| {
                 let trimmed = value.trim();
                 !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
@@ -109,7 +109,7 @@ pub(super) async fn await_reload_signal(
             .unwrap_or(false)
         {
             crate::logging::info(
-                "Server: JCODE_TEST_SESSION set, skipping process exec for reload test",
+                "Server: KCODE_TEST_SESSION set, skipping process exec for reload test",
             );
             continue;
         }
@@ -206,7 +206,7 @@ pub(super) async fn await_reload_signal(
                 if let Ok(auth_status) =
                     serde_json::to_string(&crate::auth::AuthStatus::check_fast())
                 {
-                    cmd.env("JCODE_RELOAD_AUTH_STATUS", auth_status);
+                    cmd.env("KCODE_RELOAD_AUTH_STATUS", auth_status);
                 }
                 prepare_server_exec(&mut cmd, &socket);
                 let err = crate::platform::replace_process(&mut cmd);

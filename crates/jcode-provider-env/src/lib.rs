@@ -231,6 +231,24 @@ pub fn save_env_value_to_env_file(
     Ok(())
 }
 
+/// Persist a named API key to its provider env file, file-only.
+///
+/// Deliberately unlike [`save_env_value_to_env_file`]: no process env write.
+/// Env wins over file in [`load_api_key_from_env_or_config`], so a `set_var`
+/// here would shadow later file edits until restart (issue #1386).
+pub fn save_named_api_key(env_file: &str, key_name: &str, key: &str) -> anyhow::Result<()> {
+    if !is_safe_env_key_name(key_name) {
+        anyhow::bail!("Invalid API key variable name: {}", key_name);
+    }
+    if !is_safe_env_file_name(env_file) {
+        anyhow::bail!("Invalid env file name: {}", env_file);
+    }
+
+    let file_path = jcode_storage::app_config_dir()?.join(env_file);
+    jcode_storage::upsert_env_file_value(&file_path, key_name, Some(key))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,19 +292,19 @@ mod tests {
     #[test]
     fn loads_api_key_from_env_before_config_file() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let _guard = EnvGuard::new(&["JCODE_HOME", "JCODE_PROVIDER_ENV_TEST_KEY"]);
-        jcode_core::env::set_var("JCODE_HOME", temp.path());
+        let _guard = EnvGuard::new(&["KCODE_HOME", "KCODE_PROVIDER_ENV_TEST_KEY"]);
+        jcode_core::env::set_var("KCODE_HOME", temp.path());
 
         save_env_value_to_env_file(
-            "JCODE_PROVIDER_ENV_TEST_KEY",
+            "KCODE_PROVIDER_ENV_TEST_KEY",
             "provider-env-test.env",
             Some("file-key"),
         )
         .expect("save file key");
-        jcode_core::env::set_var("JCODE_PROVIDER_ENV_TEST_KEY", "env-key");
+        jcode_core::env::set_var("KCODE_PROVIDER_ENV_TEST_KEY", "env-key");
 
         assert_eq!(
-            load_api_key_from_env_or_config("JCODE_PROVIDER_ENV_TEST_KEY", "provider-env-test.env")
+            load_api_key_from_env_or_config("KCODE_PROVIDER_ENV_TEST_KEY", "provider-env-test.env")
                 .as_deref(),
             Some("env-key")
         );
@@ -295,20 +313,20 @@ mod tests {
     #[test]
     fn loads_and_removes_values_from_sandboxed_config_file() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let _guard = EnvGuard::new(&["JCODE_HOME", "JCODE_PROVIDER_ENV_TEST_VALUE"]);
-        jcode_core::env::set_var("JCODE_HOME", temp.path());
+        let _guard = EnvGuard::new(&["KCODE_HOME", "KCODE_PROVIDER_ENV_TEST_VALUE"]);
+        jcode_core::env::set_var("KCODE_HOME", temp.path());
 
         save_env_value_to_env_file(
-            "JCODE_PROVIDER_ENV_TEST_VALUE",
+            "KCODE_PROVIDER_ENV_TEST_VALUE",
             "provider-env-test.env",
             Some("file-value"),
         )
         .expect("save file value");
 
-        jcode_core::env::remove_var("JCODE_PROVIDER_ENV_TEST_VALUE");
+        jcode_core::env::remove_var("KCODE_PROVIDER_ENV_TEST_VALUE");
         assert_eq!(
             load_env_value_from_env_or_config(
-                "JCODE_PROVIDER_ENV_TEST_VALUE",
+                "KCODE_PROVIDER_ENV_TEST_VALUE",
                 "provider-env-test.env"
             )
             .as_deref(),
@@ -316,14 +334,14 @@ mod tests {
         );
 
         save_env_value_to_env_file(
-            "JCODE_PROVIDER_ENV_TEST_VALUE",
+            "KCODE_PROVIDER_ENV_TEST_VALUE",
             "provider-env-test.env",
             None,
         )
         .expect("remove file value");
         assert_eq!(
             load_env_value_from_env_or_config(
-                "JCODE_PROVIDER_ENV_TEST_VALUE",
+                "KCODE_PROVIDER_ENV_TEST_VALUE",
                 "provider-env-test.env"
             ),
             None
@@ -333,8 +351,8 @@ mod tests {
     #[test]
     fn accepts_legacy_zai_key_for_zhipu() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let _guard = EnvGuard::new(&["JCODE_HOME", "ZHIPU_API_KEY", "ZAI_API_KEY"]);
-        jcode_core::env::set_var("JCODE_HOME", temp.path());
+        let _guard = EnvGuard::new(&["KCODE_HOME", "ZHIPU_API_KEY", "ZAI_API_KEY"]);
+        jcode_core::env::set_var("KCODE_HOME", temp.path());
 
         save_env_value_to_env_file("ZAI_API_KEY", "zai.env", Some("legacy-zai-key"))
             .expect("save legacy key");
@@ -343,6 +361,54 @@ mod tests {
         assert_eq!(
             load_api_key_from_env_or_config("ZHIPU_API_KEY", "zai.env").as_deref(),
             Some("legacy-zai-key")
+        );
+    }
+
+    #[test]
+    fn save_named_api_key_writes_file_without_poisoning_process_env() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _guard = EnvGuard::new(&["KCODE_HOME", "TEST_NAMED_API_KEY"]);
+        jcode_core::env::set_var("KCODE_HOME", temp.path());
+
+        save_named_api_key("test-named.env", "TEST_NAMED_API_KEY", "sk-live").expect("save key");
+
+        assert_eq!(
+            load_api_key_from_env_or_config("TEST_NAMED_API_KEY", "test-named.env").as_deref(),
+            Some("sk-live"),
+            "the env file must be the source of truth"
+        );
+        assert!(
+            std::env::var_os("TEST_NAMED_API_KEY").is_none(),
+            "saving must not poison the process env"
+        );
+    }
+
+    /// The #1386 scenario end to end: a key pasted in `/login`, then corrected
+    /// by editing the env file, must take effect on the next lookup without a
+    /// restart.
+    #[test]
+    fn corrected_env_file_wins_after_a_saved_key() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _guard = EnvGuard::new(&["KCODE_HOME", "TEST_CORRECTED_API_KEY"]);
+        jcode_core::env::set_var("KCODE_HOME", temp.path());
+
+        save_named_api_key("test-corrected.env", "TEST_CORRECTED_API_KEY", "sk-wrong")
+            .expect("save pasted key");
+        let file_path = jcode_storage::app_config_dir()
+            .expect("config dir")
+            .join("test-corrected.env");
+        jcode_storage::upsert_env_file_value(
+            &file_path,
+            "TEST_CORRECTED_API_KEY",
+            Some("sk-corrected"),
+        )
+        .expect("edit env file");
+
+        assert_eq!(
+            load_api_key_from_env_or_config("TEST_CORRECTED_API_KEY", "test-corrected.env")
+                .as_deref(),
+            Some("sk-corrected"),
+            "an edited env file must not be shadowed by the earlier save"
         );
     }
 
@@ -371,8 +437,8 @@ mod tests {
     #[test]
     fn loads_api_key_with_zero_width_space_from_config_file() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let _guard = EnvGuard::new(&["JCODE_HOME", "JCODE_PROVIDER_FOO_API_KEY"]);
-        jcode_core::env::set_var("JCODE_HOME", temp.path());
+        let _guard = EnvGuard::new(&["KCODE_HOME", "KCODE_PROVIDER_FOO_API_KEY"]);
+        jcode_core::env::set_var("KCODE_HOME", temp.path());
 
         // Write an env file with a U+200B zero-width space prefixed onto the key,
         // mirroring issue #376's reproduction.
@@ -380,12 +446,12 @@ mod tests {
         std::fs::create_dir_all(&config_dir).expect("create config dir");
         std::fs::write(
             config_dir.join("provider-foo.env"),
-            "JCODE_PROVIDER_FOO_API_KEY=\u{200B}sk-mykey123\n",
+            "KCODE_PROVIDER_FOO_API_KEY=\u{200B}sk-mykey123\n",
         )
         .expect("write env file");
 
         assert_eq!(
-            load_api_key_from_env_or_config("JCODE_PROVIDER_FOO_API_KEY", "provider-foo.env")
+            load_api_key_from_env_or_config("KCODE_PROVIDER_FOO_API_KEY", "provider-foo.env")
                 .as_deref(),
             Some("sk-mykey123")
         );
@@ -394,13 +460,13 @@ mod tests {
     #[test]
     fn loads_api_key_with_invisible_chars_from_env_var() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let _guard = EnvGuard::new(&["JCODE_HOME", "JCODE_PROVIDER_BAR_API_KEY"]);
-        jcode_core::env::set_var("JCODE_HOME", temp.path());
+        let _guard = EnvGuard::new(&["KCODE_HOME", "KCODE_PROVIDER_BAR_API_KEY"]);
+        jcode_core::env::set_var("KCODE_HOME", temp.path());
         // NBSP + BOM padding around the env-provided key.
-        jcode_core::env::set_var("JCODE_PROVIDER_BAR_API_KEY", "\u{00A0}sk-env-key\u{FEFF}");
+        jcode_core::env::set_var("KCODE_PROVIDER_BAR_API_KEY", "\u{00A0}sk-env-key\u{FEFF}");
 
         assert_eq!(
-            load_api_key_from_env_or_config("JCODE_PROVIDER_BAR_API_KEY", "provider-bar.env")
+            load_api_key_from_env_or_config("KCODE_PROVIDER_BAR_API_KEY", "provider-bar.env")
                 .as_deref(),
             Some("sk-env-key")
         );

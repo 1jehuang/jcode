@@ -3,7 +3,7 @@
 //! This lives in the API crate on purpose. It used to be duplicated in the
 //! bridge and external clients, where separate copies could disagree: the bridge
 //! resolved `$XDG_RUNTIME_DIR` while the desktop always looked in
-//! `~/.jcode`. The result was a desktop app that could never connect even
+//! `~/.kcode`. The result was a desktop app that could never connect even
 //! with a healthy bridge running. One definition, used by both sides, makes
 //! that class of bug impossible.
 //!
@@ -12,13 +12,40 @@
 
 use std::path::PathBuf;
 
+fn product_path(path: PathBuf) -> Option<PathBuf> {
+    fn owned(path: &std::path::Path) -> bool {
+        path.is_absolute()
+            && !path.components().any(|part| {
+                let name = part.as_os_str().to_string_lossy().to_ascii_lowercase();
+                name == "jcode"
+                    || name.starts_with(".jcode")
+                    || name.starts_with("jcode.")
+                    || name.starts_with("jcode-")
+            })
+    }
+    if !owned(&path) {
+        return None;
+    }
+    if let Some(existing) = path.ancestors().find(|part| part.exists()) {
+        let canonical = existing.canonicalize().ok()?;
+        if !owned(&canonical) {
+            return None;
+        }
+    }
+    Some(path)
+}
+
 /// Runtime directory holding the daemon and API sockets.
 pub fn runtime_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("JCODE_RUNTIME_DIR") {
-        return PathBuf::from(dir);
+    if let Ok(dir) = std::env::var("KCODE_RUNTIME_DIR") {
+        if let Some(path) = product_path(PathBuf::from(dir)) {
+            return path;
+        }
     }
     if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
-        return PathBuf::from(dir);
+        if let Some(path) = product_path(PathBuf::from(dir)) {
+            return path;
+        }
     }
     #[cfg(target_os = "macos")]
     if let Ok(dir) = std::env::var("TMPDIR") {
@@ -28,7 +55,7 @@ pub fn runtime_dir() -> PathBuf {
 }
 
 fn fallback_runtime_dir() -> PathBuf {
-    std::env::temp_dir().join(format!("jcode-{}", runtime_user_discriminator()))
+    std::env::temp_dir().join(format!("kcode-{}", runtime_user_discriminator()))
 }
 
 #[cfg(unix)]
@@ -63,26 +90,45 @@ fn sanitize(raw: String) -> String {
     }
 }
 
-/// Path of the versioned harness API socket. `JCODE_API_SOCKET` overrides it.
+/// Path of the versioned harness API socket. `KCODE_API_SOCKET` overrides it.
 pub fn api_socket_path() -> PathBuf {
-    if let Ok(custom) = std::env::var("JCODE_API_SOCKET") {
-        return PathBuf::from(custom);
+    if let Ok(custom) = std::env::var("KCODE_API_SOCKET") {
+        if let Some(path) = product_path(PathBuf::from(custom)) {
+            return path;
+        }
     }
-    runtime_dir().join("jcode-api.sock")
+    runtime_dir().join("kcode-api.sock")
 }
 
 /// Path of the internal daemon socket the bridge translates onto.
-/// `JCODE_SOCKET` overrides it.
+/// `KCODE_SOCKET` overrides it.
 pub fn legacy_socket_path() -> PathBuf {
-    if let Ok(custom) = std::env::var("JCODE_SOCKET") {
-        return PathBuf::from(custom);
+    if let Ok(custom) = std::env::var("KCODE_SOCKET") {
+        if let Some(path) = product_path(PathBuf::from(custom)) {
+            return path;
+        }
     }
-    runtime_dir().join("jcode.sock")
+    runtime_dir().join("kcode.sock")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overrides_cannot_select_jcode_sockets_or_storage() {
+        let root = std::env::temp_dir();
+        for name in [
+            "jcode.sock",
+            "jcode-api.sock",
+            ".jcode/sessions",
+            "jcode/bin",
+            "jcode-user/run",
+        ] {
+            assert!(product_path(root.join(name)).is_none());
+        }
+        assert!(product_path(root.join("kcode-api.sock")).is_some());
+    }
 
     /// The two sockets must always be siblings. A client that resolves one
     /// directory while the bridge resolves another cannot connect at all,
@@ -91,16 +137,16 @@ mod tests {
     fn the_api_socket_sits_beside_the_daemon_socket() {
         // Guard against env-dependent divergence by comparing parents rather
         // than absolute paths, since either may be overridden in a session.
-        let api = runtime_dir().join("jcode-api.sock");
-        let legacy = runtime_dir().join("jcode.sock");
+        let api = runtime_dir().join("kcode-api.sock");
+        let legacy = runtime_dir().join("kcode.sock");
         assert_eq!(api.parent(), legacy.parent());
     }
 
     #[test]
     fn socket_names_are_stable() {
         assert_eq!(
-            runtime_dir().join("jcode-api.sock").file_name().unwrap(),
-            "jcode-api.sock"
+            runtime_dir().join("kcode-api.sock").file_name().unwrap(),
+            "kcode-api.sock"
         );
     }
 

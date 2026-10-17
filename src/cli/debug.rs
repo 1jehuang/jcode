@@ -21,7 +21,7 @@ pub async fn run_debug_command(
         let filename = main_path
             .file_name()
             .and_then(|n| n.to_str())
-            .unwrap_or("jcode.sock");
+            .unwrap_or("kcode.sock");
         let debug_filename = filename.replace(".sock", "-debug.sock");
         main_path.with_file_name(debug_filename)
     } else {
@@ -32,7 +32,7 @@ pub async fn run_debug_command(
         eprintln!("Debug socket not found at {:?}", debug_socket);
         eprintln!("\nMake sure:");
         eprintln!("  1. A jcode server is running (jcode or jcode serve)");
-        eprintln!("  2. debug_socket is enabled in ~/.jcode/config.toml");
+        eprintln!("  2. debug_socket is enabled in ~/.kcode/config.toml");
         eprintln!("     [display]");
         eprintln!("     debug_socket = true");
         eprintln!("\nOr use 'jcode debug start' to start a server.");
@@ -141,7 +141,7 @@ async fn debug_list_servers() -> Result<()> {
             let filename = socket_path
                 .file_name()
                 .and_then(|n| n.to_str())
-                .unwrap_or("jcode.sock");
+                .unwrap_or("kcode.sock");
             let debug_filename = filename.replace(".sock", "-debug.sock");
             socket_path.with_file_name(debug_filename)
         };
@@ -244,7 +244,7 @@ async fn debug_start_server(arg: &str, socket_path: Option<String>) -> Result<()
         let filename = socket_pathbuf
             .file_name()
             .and_then(|n| n.to_str())
-            .unwrap_or("jcode.sock");
+            .unwrap_or("kcode.sock");
         let debug_filename = filename.replace(".sock", "-debug.sock");
         socket_pathbuf.with_file_name(debug_filename)
     };
@@ -285,7 +285,7 @@ async fn debug_start_server(arg: &str, socket_path: Option<String>) -> Result<()
     if crate::transport::is_socket_path(&debug_socket) {
         eprintln!("✓ Debug socket at {}", debug_socket.display());
     } else {
-        eprintln!("⚠ Debug socket not enabled. Add to ~/.jcode/config.toml:");
+        eprintln!("⚠ Debug socket not enabled. Add to ~/.kcode/config.toml:");
         eprintln!("  [display]");
         eprintln!("  debug_socket = true");
     }

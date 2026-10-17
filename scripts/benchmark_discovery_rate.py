@@ -211,9 +211,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tag", action="append", dest="tags", help="Run only cases carrying this tag. Repeatable.")
     parser.add_argument("--trials", type=int, default=1, help="Independent trials per case (no retry-until-hit).")
     parser.add_argument("--timeout", type=float, default=120.0, help="Seconds allowed per trial.")
-    parser.add_argument("--jcode", default=os.environ.get("JCODE_BIN", "jcode"))
-    parser.add_argument("--model", default=os.environ.get("JCODE_DISCOVERY_BENCHMARK_MODEL", "gpt-5.6-sol"))
-    parser.add_argument("--provider", default=os.environ.get("JCODE_DISCOVERY_BENCHMARK_PROVIDER"))
+    parser.add_argument("--jcode", default=os.environ.get("KCODE_BIN", "jcode"))
+    parser.add_argument("--model", default=os.environ.get("KCODE_DISCOVERY_BENCHMARK_MODEL", "gpt-5.6-sol"))
+    parser.add_argument("--provider", default=os.environ.get("KCODE_DISCOVERY_BENCHMARK_PROVIDER"))
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--min-recall", type=float, default=0.8, help="Required browse rate on `call` cases.")
     parser.add_argument("--min-precision", type=float, default=0.9, help="Required clean rate on `no-call` controls.")
@@ -400,7 +400,7 @@ def run_trial(args: argparse.Namespace, case: RateCase, trial: int, socket_path:
         "# scratch project\n\nA small project used for one benchmark task.\n", encoding="utf-8"
     )
     command = [
-        args.jcode,
+        args.kcode,
         "--socket",
         str(socket_path),
         "--no-selfdev",
@@ -688,15 +688,15 @@ def main() -> int:
         print(f"\n{len(cases)} cases")
         return 0
 
-    executable = executable_identity(args.jcode)
+    executable = executable_identity(args.kcode)
     # Pin the resolved binary path so a symlink update during the run cannot
     # make the recorded identity differ from later trials.
-    args.jcode = executable["path"]
+    args.kcode = executable["path"]
 
     results: list[dict[str, Any]] = []
     with tempfile.TemporaryDirectory(prefix="jcode-discovery-rate-") as temp_dir:
         root = Path(temp_dir)
-        socket_path = root / "jcode.sock"
+        socket_path = root / "kcode.sock"
         server = start_server(args, socket_path)
         try:
             total = len(cases) * args.trials

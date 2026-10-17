@@ -8,7 +8,7 @@ use std::path::Path;
 
 /// The configured external spawn hook, if any.
 ///
-/// Resolution order: `JCODE_SPAWN_HOOK` env (handled by config env overrides;
+/// Resolution order: `KCODE_SPAWN_HOOK` env (handled by config env overrides;
 /// empty value disables) then `[terminal] spawn_hook` in config.toml.
 pub fn configured_spawn_hook() -> Option<String> {
     crate::config::config()
@@ -22,9 +22,9 @@ pub fn configured_spawn_hook() -> Option<String> {
 
 /// Spawn `command` in a new terminal window/pane.
 ///
-/// When a spawn hook is configured (`[terminal] spawn_hook` / `JCODE_SPAWN_HOOK`),
+/// When a spawn hook is configured (`[terminal] spawn_hook` / `KCODE_SPAWN_HOOK`),
 /// the hook takes over the spawn: jcode runs `<hook> <program> <args...>` with
-/// `JCODE_SPAWN_*` metadata env vars so external programs (tmux, kitty remote,
+/// `KCODE_SPAWN_*` metadata env vars so external programs (tmux, kitty remote,
 /// herd, window managers) control where and how the session appears. If the
 /// hook cannot be started, jcode falls back to its built-in terminal detection.
 pub fn spawn_command_in_new_terminal(command: &TerminalCommand, cwd: &Path) -> Result<bool> {
@@ -104,7 +104,7 @@ mod tests {
         std::fs::write(
             &hook_path,
             format!(
-                "#!/bin/sh\nprintf '%s|%s|%s|%s' \"$JCODE_SPAWN_KIND\" \"$JCODE_SPAWN_SESSION_ID\" \"$JCODE_SPAWN_SWARM_ID\" \"$*\" > {}\n",
+                "#!/bin/sh\nprintf '%s|%s|%s|%s' \"$KCODE_SPAWN_KIND\" \"$KCODE_SPAWN_SESSION_ID\" \"$KCODE_SPAWN_SWARM_ID\" \"$*\" > {}\n",
                 sh_escape(&record.to_string_lossy())
             ),
         )
@@ -118,7 +118,7 @@ mod tests {
         )
         .kind("swarm-agent")
         .session_id("ses_hooked")
-        .spawn_env("JCODE_SPAWN_SWARM_ID", "swarm-7");
+        .spawn_env("KCODE_SPAWN_SWARM_ID", "swarm-7");
 
         spawn_via_hook(&hook_path.to_string_lossy(), &command, temp.path())
             .expect("hook should spawn");

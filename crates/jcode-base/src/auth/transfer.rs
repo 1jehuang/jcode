@@ -650,7 +650,7 @@ mod tests {
         for provider in [TransferProvider::OpenAi, TransferProvider::Claude] {
             let local = tempfile::tempdir().unwrap();
             let remote = tempfile::tempdir().unwrap();
-            let home = remote.path().join("jcode");
+            let home = remote.path().join("kcode");
             fs::create_dir(&home).unwrap();
             let original = source(local.path(), provider);
             let path = local.path().join(provider.store_name());
@@ -728,7 +728,7 @@ mod tests {
             fs::create_dir_all(&directory).unwrap();
             fs::write(directory.join(filename), b"external sentinel").unwrap();
         }
-        let home = local.path().join("jcode");
+        let home = local.path().join("kcode");
         for provider in [TransferProvider::OpenAi, TransferProvider::Claude] {
             assert_eq!(available_at(&home, provider), Ok(false));
             assert!(!home.exists());
@@ -1053,7 +1053,7 @@ mod tests {
     #[test]
     fn racing_imports_have_exactly_one_winner_and_no_partial_or_leftover_files() {
         let remote = tempfile::tempdir().unwrap();
-        let home = Arc::new(remote.path().join("jcode"));
+        let home = Arc::new(remote.path().join("kcode"));
         let barrier = Arc::new(Barrier::new(8));
         let threads: Vec<_> = (0..8)
             .map(|index| {

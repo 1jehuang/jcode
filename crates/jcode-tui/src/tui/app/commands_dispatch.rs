@@ -66,9 +66,11 @@ pub(super) fn ssh_unsupported_command(input: &str) -> bool {
             | "/rebuild"
             | "/update"
             | "/update-sim"
+            | "/update-rehearsal"
             | "/onboarding-sim"
             | "/onboarding-preview"
             | "/usage"
+            | "/reset"
             | "/subscription"
             | "/fix"
             | "/support"
@@ -83,6 +85,7 @@ pub(super) fn ssh_unsupported_command(input: &str) -> bool {
             | "/goal"
             | "/dictate"
             | "/dictation"
+            | "/voice"
             | "/debug-fixture"
             | "/debug-visual"
             | "/screenshot"
@@ -109,6 +112,7 @@ pub(super) fn ssh_unsupported_command(input: &str) -> bool {
             | "/split"
             | "/btw"
             | "/transfer"
+            | "/desktop"
             | "/workspace"
             | "/loop"
     )
@@ -144,10 +148,62 @@ pub(super) fn handle_ssh_unsupported_command(app: &mut App, input: &str) -> bool
 
 /// Run `trimmed` against every locally handled slash command.
 ///
+/// Returns whether the input contains a known slash command at a safe token
+/// boundary. This is intentionally registry-aware so paths and URLs remain
+/// ordinary prompt text.
+pub(super) fn contains_registered_slash_command(input: &str) -> bool {
+    let names: Vec<_> = super::registered_command_names().collect();
+    !super::slash_command_parser::find_known_commands(input, &names).is_empty()
+}
+
 /// Returns `true` when a handler claimed the input. Callers own presentation
 /// concerns (clearing the input line, telemetry) because those differ between
 /// the local and remote entry points.
 pub(super) fn dispatch_local_command(app: &mut App, trimmed: &str) -> bool {
+    let names: Vec<_> = super::registered_command_names().collect();
+    let matches = super::slash_command_parser::find_known_commands(trimmed, &names);
+    if matches.first().is_some_and(|command| command.start > 0) || matches.len() > 1 {
+        return dispatch_command_sequence(app, trimmed, &matches);
+    }
+
+    dispatch_single_local_command(app, trimmed)
+}
+
+fn dispatch_command_sequence(
+    app: &mut App,
+    input: &str,
+    matches: &[super::slash_command_parser::SlashCommandMatch],
+) -> bool {
+    let prefix = input[..matches[0].start].trim();
+    let mut handled = false;
+
+    for (index, command) in matches.iter().enumerate() {
+        let end = matches
+            .get(index + 1)
+            .map_or(input.len(), |next| next.start);
+        let args = input[command.name_end..end].trim();
+        let command_text = if index == 0 && !prefix.is_empty() {
+            if args.is_empty() {
+                format!("{} {}", &input[command.start..command.name_end], prefix)
+            } else {
+                format!(
+                    "{} {} {}",
+                    &input[command.start..command.name_end],
+                    prefix,
+                    args
+                )
+            }
+        } else {
+            input[command.start..end].trim().to_string()
+        };
+
+        handled |= dispatch_single_local_command(app, &command_text);
+    }
+
+    handled
+}
+
+fn dispatch_single_local_command(app: &mut App, trimmed: &str) -> bool {
     if handle_ssh_unsupported_command(app, trimmed) {
         return true;
     }
@@ -174,6 +230,7 @@ pub(super) fn dispatch_local_command(app: &mut App, trimmed: &str) -> bool {
         // lives in commands_goal.rs and `/goals` is handled by `handle_goals_command`
         // inside `handle_session_command`.
         || super::commands::handle_session_command(app, trimmed)
+        || super::commands_desktop::handle_desktop_command(app, trimmed)
         || super::commands_goal::handle_goal_command(app, trimmed)
         || super::commands::handle_dictation_command(app, trimmed)
         || super::commands::handle_config_command(app, trimmed)
@@ -183,6 +240,7 @@ pub(super) fn dispatch_local_command(app: &mut App, trimmed: &str) -> bool {
         || super::commands::handle_model_status_command(app, trimmed)
         || super::debug::handle_debug_command(app, trimmed)
         || super::model_context::handle_model_command(app, trimmed)
+        || app.handle_usage_reset_command(trimmed)
         || super::commands::handle_usage_command(app, trimmed)
         || super::productivity::handle_productivity_command(app, trimmed)
         || super::commands::handle_feedback_command(app, trimmed)
@@ -192,13 +250,14 @@ pub(super) fn dispatch_local_command(app: &mut App, trimmed: &str) -> bool {
         || super::state_ui::handle_info_command(app, trimmed)
         || super::auth::handle_auth_command(app, trimmed)
         || super::tui_lifecycle_runtime::handle_dev_command(app, trimmed)
+        || app.handle_update_rehearsal_command(trimmed)
 }
 
 /// Environment-mode tests run in their own process, so parallel local-mode
 /// tests never observe an SSH flag or another test's temporary home.
 #[cfg(test)]
 pub(super) fn ssh_test_runs_in_child(test_name: &str) -> bool {
-    if std::env::var("JCODE_SSH_UI_TEST").as_deref() == Ok(test_name) {
+    if std::env::var("KCODE_SSH_UI_TEST").as_deref() == Ok(test_name) {
         return false;
     }
     let home = tempfile::tempdir().expect("isolated SSH test home");
@@ -206,9 +265,9 @@ pub(super) fn ssh_test_runs_in_child(test_name: &str) -> bool {
         .arg(test_name)
         .arg("--test-threads=1")
         .arg("--nocapture")
-        .env("JCODE_SSH_UI_TEST", test_name)
-        .env("JCODE_SSH_REMOTE", "test-remote")
-        .env("JCODE_HOME", home.path())
+        .env("KCODE_SSH_UI_TEST", test_name)
+        .env("KCODE_SSH_REMOTE", "test-remote")
+        .env("KCODE_HOME", home.path())
         .output()
         .expect("run isolated SSH test");
     assert!(
@@ -306,6 +365,7 @@ mod tests {
             "/split",
             "/btw question",
             "/transfer",
+            "/desktop",
             "/workspace",
             "/workspace split",
             "/todos",
@@ -325,6 +385,7 @@ mod tests {
             "/compact",
             "/plan investigate",
             "/commit",
+            "/merge",
             "/rename title",
             "/fast on",
             "/help",

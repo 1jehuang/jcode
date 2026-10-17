@@ -15,11 +15,11 @@ impl TestHomeGuard {
     fn new() -> Self {
         let lock = lock_env();
         let temp_home = tempfile::Builder::new()
-            .prefix("jcode-server-debug-testers-home-")
+            .prefix("kcode-server-debug-testers-home-")
             .tempdir()
             .expect("create temp home");
-        let prev_home = std::env::var_os("JCODE_HOME");
-        crate::env::set_var("JCODE_HOME", temp_home.path());
+        let prev_home = std::env::var_os("KCODE_HOME");
+        crate::env::set_var("KCODE_HOME", temp_home.path());
         Self {
             _lock: lock,
             prev_home,
@@ -31,9 +31,9 @@ impl TestHomeGuard {
 impl Drop for TestHomeGuard {
     fn drop(&mut self) {
         if let Some(prev_home) = &self.prev_home {
-            crate::env::set_var("JCODE_HOME", prev_home);
+            crate::env::set_var("KCODE_HOME", prev_home);
         } else {
-            crate::env::remove_var("JCODE_HOME");
+            crate::env::remove_var("KCODE_HOME");
         }
     }
 }

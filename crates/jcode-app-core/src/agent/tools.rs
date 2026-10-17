@@ -75,12 +75,34 @@ pub(super) fn tool_output_side_pane_images(
         .collect()
 }
 
+/// Metadata key a tool sets to load deferred tool definitions into context.
+/// Value: array of registry tool names (e.g. `mcp__github__create_issue`).
+pub(crate) const TOOL_REFERENCES_METADATA_KEY: &str = "tool_references";
+
+/// Tool names a tool output asks to load via provider-native tool references.
+pub(crate) fn tool_output_references(output: &ToolOutput) -> Vec<String> {
+    output
+        .metadata
+        .as_ref()
+        .and_then(|meta| meta.get(TOOL_REFERENCES_METADATA_KEY))
+        .and_then(|refs| refs.as_array())
+        .map(|refs| {
+            refs.iter()
+                .filter_map(|name| name.as_str())
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub(super) fn tool_output_to_content_blocks(
     tool_use_id: String,
     output: ToolOutput,
 ) -> Vec<ContentBlock> {
+    let references = tool_output_references(&output);
     let mut blocks = vec![ContentBlock::ToolResult {
-        tool_use_id,
+        tool_use_id: tool_use_id.clone(),
         content: output.output,
         is_error: None,
     }];
@@ -99,6 +121,17 @@ pub(super) fn tool_output_to_content_blocks(
             });
         }
     }
+    // References come last so image folding (which expects an image right
+    // after its tool_result) is unaffected. Providers without native deferred
+    // loading ignore them; the result text still names the tools.
+    blocks.extend(
+        references
+            .into_iter()
+            .map(|tool_name| ContentBlock::ToolReference {
+                tool_use_id: tool_use_id.clone(),
+                tool_name,
+            }),
+    );
     blocks
 }
 
@@ -139,6 +172,22 @@ pub(super) fn print_tool_summary(tool: &ToolCall) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authoritative_diff_text_survives_history_conversion_and_serialization() {
+        let text =
+            "Edited f\n\nFile diff:\n```diff\n--- f\n+++ f\n@@ -39,1 +39,1 @@\n-old\n+new\n```\n";
+        let blocks = tool_output_to_content_blocks(
+            "edit-call".into(),
+            cap_tool_output_for_history("edit", ToolOutput::new(text)),
+        );
+        let serialized = serde_json::to_string(&blocks).unwrap();
+        let restored: Vec<ContentBlock> = serde_json::from_str(&serialized).unwrap();
+        assert!(
+            matches!(&restored[0], ContentBlock::ToolResult { content, tool_use_id, .. }
+            if content == text && tool_use_id == "edit-call")
+        );
+    }
 
     #[test]
     fn cap_tool_output_leaves_small_output_unchanged() {

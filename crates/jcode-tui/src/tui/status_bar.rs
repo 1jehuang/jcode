@@ -34,7 +34,7 @@ impl StatusBarData {
         let session_name = app.session_display_name();
 
         // Read agent mode from env (set by CLI --mode flag).
-        let mode_label = std::env::var("JCODE_AGENT_MODE")
+        let mode_label = std::env::var("KCODE_AGENT_MODE")
             .ok()
             .and_then(|m| jcode_config_types::AgentMode::parse(&m))
             .map(|m| m.label().to_string());

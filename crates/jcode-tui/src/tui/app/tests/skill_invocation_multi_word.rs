@@ -2,7 +2,7 @@
 fn skill_invocation_matches_a_multi_word_skill_name() {
     let mut app = create_test_app();
     let temp = tempfile::tempdir().expect("tempdir");
-    let skill_dir = temp.path().join(".jcode/skills/my-custom-skill");
+    let skill_dir = temp.path().join(".kcode/skills/my-custom-skill");
     std::fs::create_dir_all(&skill_dir).expect("create skill dir");
     std::fs::write(
         skill_dir.join("SKILL.md"),

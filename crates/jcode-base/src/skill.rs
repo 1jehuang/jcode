@@ -19,7 +19,10 @@ pub struct Skill {
     pub allowed_tools: Option<Vec<String>>,
     pub content: String,
     pub path: PathBuf,
-    search_text: String,
+    /// Normalized search text, built on first use. Normalizing every skill
+    /// body eagerly dominated `load_global` (the TUI loads it before its first
+    /// frame), yet only memory-entry conversion ever reads it.
+    search_text: std::sync::OnceLock<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -50,12 +53,20 @@ pub struct SkillRegistry {
 /// defensively but with a bound to avoid walking arbitrarily deep trees.
 const PLUGIN_SCAN_MAX_DEPTH: usize = 5;
 
+/// Outcome of importing one external skills directory.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct SkillCopyStats {
+    copied: usize,
+    skipped: usize,
+    failed: usize,
+}
+
 impl SkillRegistry {
     /// Process-wide shared mutable registry used by both `skill_manage` and
     /// direct slash invocation paths. Keeping a single registry prevents slash
     /// commands from seeing a stale startup-only skill snapshot after reloads.
     ///
-    /// Holds GLOBAL skills only (plugins, `~/.jcode/skills/`,
+    /// Holds GLOBAL skills only (plugins, `~/.kcode/skills/`,
     /// `~/.agents/skills/`). Project-local skills are a per-session overlay
     /// composed at read time from the session's workspace root (issue #457);
     /// they must never enter this shared registry, and the daemon's startup
@@ -98,7 +109,7 @@ impl SkillRegistry {
     }
 
     /// Import skills from Claude Code and Codex CLI on first run.
-    /// Only runs if ~/.jcode/skills/ doesn't exist yet.
+    /// Only runs if ~/.kcode/skills/ doesn't exist yet.
     fn import_from_external() {
         let jcode_skills = match crate::storage::jcode_dir() {
             Ok(dir) => dir.join("skills"),
@@ -116,7 +127,7 @@ impl SkillRegistry {
         if let Ok(claude_skills) = crate::storage::user_home_path(".claude/skills")
             && claude_skills.is_dir()
         {
-            let count = Self::copy_skills_dir(&claude_skills, &jcode_skills);
+            let count = Self::copy_skills_dir(&claude_skills, &jcode_skills).copied;
             if count > 0 {
                 sources.push(format!("{} from Claude Code", count));
                 copied.extend(Self::list_skill_names(&jcode_skills));
@@ -127,7 +138,7 @@ impl SkillRegistry {
         if let Ok(codex_skills) = crate::storage::user_home_path(".codex/skills")
             && codex_skills.is_dir()
         {
-            let count = Self::copy_skills_dir(&codex_skills, &jcode_skills);
+            let count = Self::copy_skills_dir(&codex_skills, &jcode_skills).copied;
             if count > 0 {
                 sources.push(format!("{} from Codex CLI", count));
                 copied.extend(Self::list_skill_names(&jcode_skills));
@@ -147,14 +158,14 @@ impl SkillRegistry {
         }
     }
 
-    /// Copy skill directories from src to dst. Returns count of skills copied.
-    fn copy_skills_dir(src: &Path, dst: &Path) -> usize {
+    /// Copy skill directories from src to dst.
+    fn copy_skills_dir(src: &Path, dst: &Path) -> SkillCopyStats {
+        let mut stats = SkillCopyStats::default();
         let entries = match std::fs::read_dir(src) {
             Ok(e) => e,
-            Err(_) => return 0,
+            Err(_) => return stats,
         };
 
-        let mut count = 0;
         for entry in entries.flatten() {
             let path = entry.path();
             if !path.is_dir() {
@@ -176,13 +187,22 @@ impl SkillRegistry {
             }
 
             let dest = dst.join(&name);
-            if let Err(e) = Self::copy_dir_recursive(&path, &dest) {
-                crate::logging::error(&format!("Failed to copy skill '{}': {}", name, e));
+            // An earlier source (e.g. ~/.claude/skills) may already have imported
+            // this skill, often because ~/.codex/skills links to the same
+            // directory. Copying over it fails on read-only files such as
+            // `.git/objects/**` (issue #1404), and the first copy wins anyway.
+            if dest.exists() {
+                stats.skipped += 1;
                 continue;
             }
-            count += 1;
+            if let Err(e) = Self::copy_dir_recursive(&path, &dest) {
+                crate::logging::error(&format!("Failed to copy skill '{}': {}", name, e));
+                stats.failed += 1;
+                continue;
+            }
+            stats.copied += 1;
         }
-        count
+        stats
     }
 
     /// Recursively copy a directory
@@ -231,7 +251,7 @@ impl SkillRegistry {
     }
 
     /// Load only the shared global skill sources: Claude Code plugin installs,
-    /// `~/.jcode/skills/`, and `~/.agents/skills/`.
+    /// `~/.kcode/skills/`, and `~/.agents/skills/`.
     ///
     /// This is what the process-wide shared registry holds. Project-local
     /// skills are intentionally excluded: they are a per-session overlay
@@ -249,7 +269,7 @@ impl SkillRegistry {
             registry.load_plugin_skills_from_root(&plugins_root);
         }
 
-        // Load from ~/.jcode/skills/ (jcode's own global skills)
+        // Load from ~/.kcode/skills/ (jcode's own global skills)
         if let Ok(jcode_dir) = crate::storage::jcode_dir() {
             let jcode_skills = jcode_dir.join("skills");
             if jcode_skills.exists() {
@@ -268,7 +288,7 @@ impl SkillRegistry {
     }
 
     /// Load only the project-local skill overlay for a workspace root:
-    /// `./.jcode/skills/`, `./.agents/skills/`, and `./.claude/skills/`.
+    /// `./.kcode/skills/`, `./.agents/skills/`, and `./.claude/skills/`.
     ///
     /// Loaded fresh from disk on access so edits are visible without daemon
     /// restarts and two sessions in different repositories never see each
@@ -311,8 +331,8 @@ impl SkillRegistry {
     }
 
     fn load_project_local_dirs(&mut self, working_dir: Option<&Path>) -> Result<()> {
-        // Load from ./.jcode/skills/ (project-local jcode skills)
-        let local_jcode = Self::project_local_dir(working_dir, ".jcode");
+        // Load from ./.kcode/skills/ (project-local jcode skills)
+        let local_jcode = Self::project_local_dir(working_dir, ".kcode");
         if local_jcode.exists() {
             self.load_from_dir(&local_jcode)?;
         }
@@ -513,15 +533,13 @@ impl SkillRegistry {
                 .collect(),
             AllowedTools::Sequence(tools) => tools,
         });
-        let search_text = build_skill_search_text(&name, &description, &body);
-
         Ok(Skill {
             name,
             description,
             allowed_tools,
             content: body,
             path: path.to_path_buf(),
-            search_text,
+            search_text: std::sync::OnceLock::new(),
         })
     }
 
@@ -591,7 +609,7 @@ impl SkillRegistry {
         self.reload_global()
     }
 
-    /// Reload the shared global skill sources (plugins, `~/.jcode/skills/`,
+    /// Reload the shared global skill sources (plugins, `~/.kcode/skills/`,
     /// `~/.agents/skills/`) into this registry.
     ///
     /// Project-local skills are intentionally NOT loaded here: they are a
@@ -617,7 +635,7 @@ impl SkillRegistry {
             count += self.load_plugin_skills_from_root(&plugins_root);
         }
 
-        // Load from ~/.jcode/skills/ (jcode's own global skills)
+        // Load from ~/.kcode/skills/ (jcode's own global skills)
         if let Ok(jcode_dir) = crate::storage::jcode_dir() {
             let jcode_skills = jcode_dir.join("skills");
             if jcode_skills.exists() {
@@ -730,7 +748,7 @@ pub const ENDORSED_SKILLS: &[EndorsedSkill] = &[
         name: "optimization",
         description: "Improve performance, latency, throughput, memory usage, or general efficiency by defining metrics, measuring, attributing bottlenecks, and prioritizing macro-optimizations.",
         category: "jcode",
-        source: "bundled in jcode repo (.jcode/skills/optimization)",
+        source: "bundled in jcode repo (.kcode/skills/optimization)",
         install: None,
     },
     EndorsedSkill {
@@ -935,7 +953,10 @@ impl Skill {
         .with_trust(crate::memory::TrustLevel::Medium)
         .with_timestamps(now, now);
         // Use the precomputed skill search text rather than the tag-derived one.
-        entry.search_text = self.search_text.clone();
+        entry.search_text = self
+            .search_text
+            .get_or_init(|| build_skill_search_text(&self.name, &self.description, &self.content))
+            .clone();
         entry
     }
 }
@@ -945,19 +966,22 @@ fn build_skill_search_text(name: &str, description: &str, content: &str) -> Stri
 }
 
 fn normalize_skill_search_text(text: &str) -> String {
-    text.to_lowercase()
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c.is_whitespace() {
-                c
-            } else {
-                ' '
+    // Single pass: lowercase, map non-alphanumerics to separators, and
+    // collapse whitespace runs. Equivalent to lowercase -> map -> split -> join.
+    let mut out = String::with_capacity(text.len());
+    let mut pending_space = false;
+    for c in text.chars().flat_map(char::to_lowercase) {
+        if c.is_ascii_alphanumeric() {
+            if pending_space && !out.is_empty() {
+                out.push(' ');
             }
-        })
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
+            pending_space = false;
+            out.push(c);
+        } else {
+            pending_space = true;
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -971,7 +995,11 @@ mod tests {
             allowed_tools: None,
             content: content.to_string(),
             path: PathBuf::from(format!("/tmp/{name}/SKILL.md")),
-            search_text: build_skill_search_text(name, description, content),
+            search_text: std::sync::OnceLock::from(build_skill_search_text(
+                name,
+                description,
+                content,
+            )),
         }
     }
 
@@ -991,6 +1019,37 @@ mod tests {
         let path = dir.join("SKILL.md");
         std::fs::write(&path, content).expect("write skill");
         path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_skills_dir_skips_skill_already_imported_from_linked_source() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let claude = temp.path().join("claude-skills");
+        let skill = claude.join("s");
+        std::fs::create_dir_all(skill.join("sub")).expect("create skill");
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: s\ndescription: test skill\n---\nbody\n",
+        )
+        .expect("write skill");
+        let readonly = skill.join("sub").join("obj");
+        std::fs::write(&readonly, "x").expect("write obj");
+        std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o444)).expect("chmod");
+        let codex = temp.path().join("codex-skills");
+        std::os::unix::fs::symlink(&claude, &codex).expect("symlink");
+        let dest = temp.path().join("kcode-skills");
+
+        let first = SkillRegistry::copy_skills_dir(&claude, &dest);
+        assert_eq!((first.copied, first.skipped, first.failed), (1, 0, 0));
+        let second = SkillRegistry::copy_skills_dir(&codex, &dest);
+        assert_eq!((second.copied, second.skipped, second.failed), (0, 1, 0));
+        assert_eq!(
+            std::fs::read_to_string(dest.join("s").join("sub").join("obj")).expect("read obj"),
+            "x"
+        );
     }
 
     #[test]
@@ -1153,7 +1212,7 @@ mod tests {
     #[test]
     fn load_for_working_dir_reads_project_local_jcode_skills() {
         let temp = tempfile::tempdir().expect("tempdir");
-        write_test_skill(temp.path(), ".jcode", "wd-only");
+        write_test_skill(temp.path(), ".kcode", "wd-only");
 
         let registry = SkillRegistry::load_for_working_dir(Some(temp.path())).expect("load skills");
 
@@ -1212,7 +1271,7 @@ mod tests {
     #[test]
     fn project_overlay_is_session_scoped_and_composes_over_globals() {
         let temp = tempfile::tempdir().expect("tempdir");
-        write_test_skill(temp.path(), ".jcode", "session-skill");
+        write_test_skill(temp.path(), ".kcode", "session-skill");
 
         // The overlay resolves against the given workspace root, not the
         // process cwd or a shared registry (issue #457).
@@ -1246,7 +1305,7 @@ mod tests {
         // chdir is process-global; serialize with other env-sensitive tests.
         let _env_guard = crate::storage::lock_test_env();
         let temp = tempfile::tempdir().expect("tempdir");
-        write_test_skill(temp.path(), ".jcode", "session-skill");
+        write_test_skill(temp.path(), ".kcode", "session-skill");
 
         let prev_cwd = std::env::current_dir().expect("cwd");
         // reload_global must not pick up project-local skills even when the
@@ -1353,7 +1412,7 @@ mod tests {
     #[test]
     fn registry_contains_reports_loaded_skills() {
         let temp = tempfile::tempdir().expect("tempdir");
-        write_test_skill(temp.path(), ".jcode", "present-skill");
+        write_test_skill(temp.path(), ".kcode", "present-skill");
 
         let registry = SkillRegistry::load_for_working_dir(Some(temp.path())).expect("load skills");
         assert!(registry.contains("present-skill"));
@@ -1508,14 +1567,14 @@ mod tests {
         write_plugin_skill_with_description(&install, "shared-name", "plugin version");
 
         // Explicit jcode skill with the same name.
-        write_test_skill(temp.path(), ".jcode", "shared-name");
+        write_test_skill(temp.path(), ".kcode", "shared-name");
 
         // Mirror load ordering: plugins first, then explicit skill dirs, so
         // the later (explicit) insert wins in the registry map.
         let mut registry = SkillRegistry::default();
         registry.load_plugin_skills_from_root(&plugins_root);
         registry
-            .load_from_dir(&temp.path().join(".jcode/skills"))
+            .load_from_dir(&temp.path().join(".kcode/skills"))
             .expect("load explicit skills");
 
         let skill = registry.get("shared-name").expect("skill present");

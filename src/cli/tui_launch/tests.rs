@@ -98,9 +98,9 @@ fn spawn_resume_in_new_terminal_uses_handterm_exec_mode() {
         std::env::var("PATH").unwrap_or_default()
     );
     let _path_guard = EnvVarGuard::set_value("PATH", &path);
-    let _term_guard = EnvVarGuard::set_value("JCODE_TERMINAL", "handterm");
+    let _term_guard = EnvVarGuard::set_value("KCODE_TERMINAL", "handterm");
 
-    let exe = temp.path().join("jcode-bin");
+    let exe = temp.path().join("kcode-bin");
     let cwd = temp.path().join("cwd");
     fs::create_dir_all(&cwd).expect("create cwd");
 
@@ -131,9 +131,9 @@ fn resumed_window_title_includes_server_name_when_registry_matches_socket() {
     let _guard = crate::storage::lock_test_env();
     let temp_home = tempfile::tempdir().expect("temp home");
     let temp_runtime = tempfile::tempdir().expect("temp runtime");
-    let socket_path = temp_runtime.path().join("jcode.sock");
-    let _home_guard = EnvVarGuard::set_path("JCODE_HOME", temp_home.path());
-    let _socket_guard = EnvVarGuard::set_path("JCODE_SOCKET", &socket_path);
+    let socket_path = temp_runtime.path().join("kcode.sock");
+    let _home_guard = EnvVarGuard::set_path("KCODE_HOME", temp_home.path());
+    let _socket_guard = EnvVarGuard::set_path("KCODE_SOCKET", &socket_path);
 
     let mut registry = crate::registry::ServerRegistry::default();
     registry.register(crate::registry::ServerInfo {
@@ -141,7 +141,7 @@ fn resumed_window_title_includes_server_name_when_registry_matches_socket() {
         name: "blazing".to_string(),
         icon: "🔥".to_string(),
         socket: socket_path,
-        debug_socket: temp_runtime.path().join("jcode-debug.sock"),
+        debug_socket: temp_runtime.path().join("kcode-debug.sock"),
         git_hash: "abc1234".to_string(),
         version: "v0.1.0".to_string(),
         pid: std::process::id(),
@@ -174,9 +174,9 @@ fn spawn_selfdev_in_new_terminal_uses_handterm_exec_mode() {
         std::env::var("PATH").unwrap_or_default()
     );
     let _path_guard = EnvVarGuard::set_value("PATH", &path);
-    let _term_guard = EnvVarGuard::set_value("JCODE_TERMINAL", "handterm");
+    let _term_guard = EnvVarGuard::set_value("KCODE_TERMINAL", "handterm");
 
-    let exe = temp.path().join("jcode-bin");
+    let exe = temp.path().join("kcode-bin");
     let cwd = temp.path().join("cwd");
     fs::create_dir_all(&cwd).expect("create cwd");
 
@@ -207,8 +207,8 @@ fn spawn_selfdev_in_new_terminal_uses_handterm_exec_mode() {
 async fn suppresses_stale_server_spawning_phase_when_listener_is_already_live() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("temp dir");
-    let socket_path = temp.path().join("jcode.sock");
-    let _socket_guard = EnvVarGuard::set_path("JCODE_SOCKET", &socket_path);
+    let socket_path = temp.path().join("kcode.sock");
+    let _socket_guard = EnvVarGuard::set_path("KCODE_SOCKET", &socket_path);
     let _listener = Listener::bind(&socket_path).expect("bind listener");
 
     assert!(
@@ -222,8 +222,8 @@ async fn suppresses_stale_server_spawning_phase_when_listener_is_already_live() 
 async fn keeps_server_spawning_phase_while_listener_is_not_live() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("temp dir");
-    let socket_path = temp.path().join("jcode.sock");
-    let _socket_guard = EnvVarGuard::set_path("JCODE_SOCKET", &socket_path);
+    let socket_path = temp.path().join("kcode.sock");
+    let _socket_guard = EnvVarGuard::set_path("KCODE_SOCKET", &socket_path);
 
     assert!(
         should_show_server_spawning(true).await,

@@ -18,6 +18,14 @@ crossterm decodes the result, so **on a capable terminal Shift+Enter works with
 no setup**: kitty, Ghostty, WezTerm, Alacritty, foot, iTerm2 3.5+, Warp, and
 VS Code 1.109+.
 
+Inside tmux, jcode also requests xterm `modifyOtherKeys` mode 2
+(`ESC[>4;2m`). With `extended-keys on`, tmux needs this application-side opt-in
+before it forwards modified keys. A Kitty protocol request or a terminal mapping
+that sends CSI-u to tmux is not enough: tmux decodes and re-encodes keys for each
+pane. With `extended-keys-format csi-u`, Shift+Enter then reaches jcode as
+`ESC[13;2u`. Jcode reasserts the request when reapplying terminal modes and resets
+it with `ESC[>4;0m` on cleanup. `extended-keys always` is not required.
+
 Three situations still break, and jcode handles each explicitly:
 
 | Situation | Fix | Where |
@@ -55,6 +63,8 @@ achievable. A fallback is a safety net, not a substitute for the chord working.
 
 ## Tests
 
+- `tui::terminal_mode_tests::*` cover tmux opt-in, reapplication without another
+  Kitty stack push, cleanup, and unchanged keyboard requests outside tmux.
 - `tui::app::tests::shift_enter_csi_u_sequence_decodes_to_enter_plus_shift`
   feeds the exact bytes through a real PTY and asserts crossterm decodes
   Enter+SHIFT. This pins the sequence written into terminal configs to the

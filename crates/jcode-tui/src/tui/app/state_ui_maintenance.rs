@@ -209,7 +209,7 @@ impl App {
                     ),
                 );
             }
-            UpdateStatus::UpToDate => {
+            UpdateStatus::UpToDate | UpdateStatus::Skipped { .. } => {
                 if self.background_client_action == Some(action) {
                     self.background_client_action = None;
                 }
@@ -279,7 +279,7 @@ impl App {
         if let Ok(now) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
             // Survives exec and lets the replacement measure the complete period
             // from the old client's final interactive state to its first frame.
-            crate::env::set_var("JCODE_RELOAD_GAP_STARTED_MS", now.as_millis().to_string());
+            crate::env::set_var("KCODE_RELOAD_GAP_STARTED_MS", now.as_millis().to_string());
         }
         self.reload_requested = Some(session_id);
         self.should_quit = true;
@@ -534,7 +534,7 @@ Do not force-push or discard local commits without confirming they are already u
             .filter(|path| path.is_dir())
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| std::path::PathBuf::from("."));
-        let socket = std::env::var("JCODE_SOCKET").ok();
+        let socket = std::env::var("KCODE_SOCKET").ok();
         super::spawn_in_new_terminal(&exe, session_id, &cwd, socket.as_deref())
     }
 }

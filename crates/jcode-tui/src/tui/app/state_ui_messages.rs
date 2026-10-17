@@ -54,6 +54,15 @@ fn is_background_task_lifecycle_message(content: &str) -> bool {
         || content.starts_with("**Background task stalled**")
 }
 
+/// A tool row for a provider-executed tool (hosted web search), which streams
+/// mid-response as part of the current attempt rather than after it.
+pub(super) fn is_attempt_provider_native_row(message: &DisplayMessage) -> bool {
+    message.role == "tool"
+        && message.tool_data.as_ref().is_some_and(|tool| {
+            crate::message::provider_native::is_provider_native_tool_id(&tool.id)
+        })
+}
+
 fn stored_message_visible_text(message: &crate::session::StoredMessage) -> String {
     let mut parts = Vec::new();
     for block in &message.content {
@@ -77,7 +86,9 @@ fn stored_message_visible_text(message: &crate::session::StoredMessage) -> Strin
             ContentBlock::Image { media_type, .. } => {
                 parts.push(format!("[image:{}]", media_type));
             }
-            ContentBlock::OpenAICompaction { .. } => {}
+            ContentBlock::OpenAICompaction { .. }
+            | ContentBlock::ToolReference { .. }
+            | ContentBlock::ProviderNative { .. } => {}
         }
     }
     parts.join("\n\n")
@@ -109,7 +120,9 @@ impl App {
         // RetryRollback can remove exactly the current attempt's committed
         // output. Any non-assistant message (user/tool/system) is a fence: it
         // proves earlier assistant messages belong to completed work.
-        if message.role == "assistant" {
+        // Provider-native tool rows (hosted web search) are emitted mid-stream
+        // by the same attempt, so they count as attempt output, not a fence.
+        if message.role == "assistant" || is_attempt_provider_native_row(&message) {
             self.attempt_committed_assistant_messages += 1;
         } else {
             self.attempt_committed_assistant_messages = 0;
@@ -196,9 +209,9 @@ impl App {
     }
 
     fn retain_latest_background_tasks(&mut self) {
-        const MAX_PINNED_BACKGROUND_TASKS: usize = 2;
-        if self.background_task_rows.len() > MAX_PINNED_BACKGROUND_TASKS {
-            let stale = self.background_task_rows.len() - MAX_PINNED_BACKGROUND_TASKS;
+        const MAX_TRACKED_BACKGROUND_TASKS: usize = 8;
+        if self.background_task_rows.len() > MAX_TRACKED_BACKGROUND_TASKS {
+            let stale = self.background_task_rows.len() - MAX_TRACKED_BACKGROUND_TASKS;
             self.background_task_rows.drain(..stale);
         }
     }
@@ -300,7 +313,7 @@ impl App {
     }
 
     /// Successful tasks are useful as short-lived confirmation, but should not
-    /// permanently consume the pinned todo band's limited space. Failures stay
+    /// permanently consume the background widget's limited space. Failures stay
     /// until acted on, and running tasks always stay visible.
     pub(super) fn prune_irrelevant_background_tasks(&mut self) -> bool {
         const COMPLETED_TASK_VISIBILITY: std::time::Duration = std::time::Duration::from_secs(12);
@@ -650,6 +663,10 @@ impl App {
         // render map it back to an absolute offset against the larger total.
         let scroll = self.scroll_offset.min(total);
         let lines_from_bottom = total.saturating_sub(scroll).saturating_add(overshoot);
+        // A prepend shifts content ordinals, so a resize anchor captured against
+        // the pre-prepend frame can no longer be trusted to name the same
+        // message. Drop it; this prepend anchor is authoritative.
+        self.pending_resize_anchor = None;
         self.pending_history_anchor = Some(super::HistoryScrollAnchor {
             lines_from_bottom,
             base_total: total,
@@ -671,6 +688,69 @@ impl App {
         let resolved = crate::tui::ui::last_resolved_chat_scroll();
         self.pending_history_anchor = None;
         let changed = self.scroll_offset != resolved || !self.auto_scroll_paused;
+        self.scroll_offset = resolved;
+        self.auto_scroll_paused = true;
+        changed
+    }
+
+    /// Capture the reader's position in content coordinates before a resize
+    /// rewraps the transcript. Only meaningful while parked in history; while
+    /// following the tail the resize snaps to the new bottom instead.
+    pub(super) fn capture_resize_anchor(&mut self) {
+        if !self.auto_scroll_paused {
+            return;
+        }
+        // A prepend anchor may be pending here, and this capture is still the
+        // right one: a content position is width-independent, while the prepend
+        // anchor's row distance is only meaningful at the width it was captured
+        // at. So this anchor takes precedence while it exists, and the prepend
+        // anchor adopts the resolved row afterwards. The prepend anchor still
+        // wins when it is captured *after* this one (see
+        // `capture_history_anchor`), which is what stops a prepended duplicate
+        // from being misnamed.
+        //
+        // ponytail: if the prepended history is still in flight (a remote load)
+        // and contains a message identical to the anchored one, this ordinal can
+        // name the older copy until messages get a stable identity.
+        let Some(frame) = crate::tui::ui::last_chat_frame() else {
+            return;
+        };
+        // The row actually on screen, not the stored index (which may exceed
+        // the scrollable range after an earlier widen).
+        let row = crate::tui::ui::last_resolved_chat_scroll();
+        let Some(target) = jcode_tui_messages::content_pos_at_row(&frame, row) else {
+            return;
+        };
+        let captured_width = crate::tui::ui::last_layout_snapshot()
+            .map(|layout| layout.messages_area.width)
+            .unwrap_or(0);
+        self.pending_resize_anchor = Some(super::PendingResizeAnchor {
+            target,
+            captured_width,
+            captured_scroll: row,
+        });
+    }
+
+    /// Adopt the row the renderer resolved from a pending resize anchor, once a
+    /// frame laid out against the new geometry has rendered. Returns true when
+    /// the scroll position changed.
+    pub(super) fn reconcile_resize_anchor(&mut self) -> bool {
+        let Some(pending) = self.pending_resize_anchor else {
+            return false;
+        };
+        let width = crate::tui::ui::last_layout_snapshot()
+            .map(|layout| layout.messages_area.width)
+            .unwrap_or(0);
+        let resolved = crate::tui::ui::last_resolved_chat_scroll();
+        // Wait until a frame has been laid out against the new geometry: either
+        // the viewport width moved off the captured one, or the resolved row
+        // already differs from the row captured. Both readings are stale until
+        // that frame exists, so resolving early would adopt the old position.
+        if width == pending.captured_width && resolved == pending.captured_scroll {
+            return false;
+        }
+        self.pending_resize_anchor = None;
+        let changed = self.scroll_offset != resolved;
         self.scroll_offset = resolved;
         self.auto_scroll_paused = true;
         changed

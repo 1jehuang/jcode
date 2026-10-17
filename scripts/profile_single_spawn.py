@@ -114,22 +114,22 @@ def profile_single_spawn(binary: str, cwd: str, timeout_s: float) -> dict:
     root = Path(tempfile.mkdtemp(prefix="jcode-single-profile-"))
     home = root / "home"
     runtime_dir = root / "run"
-    socket_path = runtime_dir / "jcode.sock"
-    debug_socket_path = runtime_dir / "jcode-debug.sock"
+    socket_path = runtime_dir / "kcode.sock"
+    debug_socket_path = runtime_dir / "kcode-debug.sock"
     home.mkdir(parents=True, exist_ok=True)
     runtime_dir.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     env.update(
         {
-            "JCODE_HOME": str(home),
-            "JCODE_RUNTIME_DIR": str(runtime_dir),
-            "JCODE_SOCKET": str(socket_path),
-            "JCODE_DEBUG_SOCKET": str(debug_socket_path),
-            "JCODE_SWARM_ENABLED": "0",
-            "JCODE_NO_TELEMETRY": "1",
-            "JCODE_TRACE": "1",
-            "JCODE_TEMP_SERVER": "1",
-            "JCODE_SERVER_OWNER_PID": str(os.getpid()),
+            "KCODE_HOME": str(home),
+            "KCODE_RUNTIME_DIR": str(runtime_dir),
+            "KCODE_SOCKET": str(socket_path),
+            "KCODE_DEBUG_SOCKET": str(debug_socket_path),
+            "KCODE_SWARM_ENABLED": "0",
+            "KCODE_NO_TELEMETRY": "1",
+            "KCODE_TRACE": "1",
+            "KCODE_TEMP_SERVER": "1",
+            "KCODE_SERVER_OWNER_PID": str(os.getpid()),
         }
     )
 

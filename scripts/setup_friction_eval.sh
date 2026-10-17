@@ -16,7 +16,7 @@
 #              complaint, asked of the real rc files the installer wrote.
 #   Section B  idempotency - three installs must leave exactly one PATH line
 #              per rc file (no duplicate exports piling up run after run).
-#   Section C  retention - an upgrade must preserve ~/.jcode config and auth,
+#   Section C  retention - an upgrade must preserve ~/.kcode config and auth,
 #              keep both immutable version binaries (rollback stays possible),
 #              and the launcher must serve the new version.
 #   Section D  Windows parity - static audit that the Git Bash installer path
@@ -89,7 +89,7 @@ case "$url" in
   *telemetry.jcode.sh*) ;;
   *jcode.sh/releases/latest/version) printf 'v%s\n' "${EVAL_VERSION:-1.2.3}" ;;
   *jcode.sh/releases/v*/download-bases)
-    printf 'https://github.com/1jehuang/jcode/releases/download/v%s\n' "${EVAL_VERSION:-1.2.3}"
+    printf 'https://github.com/KooshaPari/KCode/releases/download/v%s\n' "${EVAL_VERSION:-1.2.3}"
     ;;
   *SHA256SUMS)
     # Checksum of the deterministic fake archive written by the tar mock's
@@ -98,7 +98,7 @@ case "$url" in
       "${EVAL_CHECKSUM_ASSET:-jcode-linux-x86_64.tar.gz}"
     ;;
   *github.com*/releases/latest)
-    printf 'https://github.com/1jehuang/jcode/releases/tag/v%s' "${EVAL_VERSION:-1.2.3}"
+    printf 'https://github.com/KooshaPari/KCode/releases/tag/v%s' "${EVAL_VERSION:-1.2.3}"
     ;;
   *github.com*/releases/download/*)
     [ -n "$output" ] || exit 2
@@ -135,9 +135,9 @@ run_install() {
   PATH="$work/bin:/usr/bin:/bin" \
   HOME="$home" \
   XDG_CONFIG_HOME="$home/.config" \
-  JCODE_HOME="$home/.jcode" \
-  JCODE_SKIP_SERVER_RELOAD=1 \
-  JCODE_NO_TELEMETRY=1 \
+  KCODE_HOME="$home/.kcode" \
+  KCODE_SKIP_SERVER_RELOAD=1 \
+  KCODE_NO_TELEMETRY=1 \
   bash "$install_sh" 2>&1
 }
 
@@ -227,9 +227,9 @@ home_c="$work/home-c"
 run_install "$home_c" "1.2.3" >/dev/null 2>&1
 
 # Simulate accumulated user state between installs.
-mkdir -p "$home_c/.jcode"
-printf 'model = "kept"\n' > "$home_c/.jcode/config.toml"
-printf '{"kept":true}\n' > "$home_c/.jcode/auth.json"
+mkdir -p "$home_c/.kcode"
+printf 'model = "kept"\n' > "$home_c/.kcode/config.toml"
+printf '{"kept":true}\n' > "$home_c/.kcode/auth.json"
 
 run_install "$home_c" "1.3.0" >/dev/null 2>&1
 
@@ -237,20 +237,20 @@ ver=$("$home_c/.local/bin/jcode" --version 2>/dev/null || true)
 [ "$ver" = "jcode 1.3.0" ]; check "upgrade switches the launcher to the new version" \
   "jcode 1.3.0" "${ver:-<no output>}" "$?"
 
-[ "$(cat "$home_c/.jcode/config.toml" 2>/dev/null)" = 'model = "kept"' ]
-check "upgrade preserves ~/.jcode/config.toml" \
+[ "$(cat "$home_c/.kcode/config.toml" 2>/dev/null)" = 'model = "kept"' ]
+check "upgrade preserves ~/.kcode/config.toml" \
   "file unchanged" "missing or modified" "$?"
 
-[ "$(cat "$home_c/.jcode/auth.json" 2>/dev/null)" = '{"kept":true}' ]
-check "upgrade preserves ~/.jcode/auth.json" \
+[ "$(cat "$home_c/.kcode/auth.json" 2>/dev/null)" = '{"kept":true}' ]
+check "upgrade preserves ~/.kcode/auth.json" \
   "file unchanged" "missing or modified" "$?"
 
-[ -x "$home_c/.jcode/builds/versions/1.2.3/jcode" ] && [ -x "$home_c/.jcode/builds/versions/1.3.0/jcode" ]
+[ -x "$home_c/.kcode/builds/versions/1.2.3/jcode" ] && [ -x "$home_c/.kcode/builds/versions/1.3.0/jcode" ]
 check "both immutable version binaries kept (rollback possible)" \
   "versions/1.2.3 and versions/1.3.0 both executable" \
-  "$(ls "$home_c/.jcode/builds/versions" 2>/dev/null | tr '\n' ' ')" "$?"
+  "$(ls "$home_c/.kcode/builds/versions" 2>/dev/null | tr '\n' ' ')" "$?"
 
-stable_ver=$(cat "$home_c/.jcode/builds/stable-version" 2>/dev/null || true)
+stable_ver=$(cat "$home_c/.kcode/builds/stable-version" 2>/dev/null || true)
 [ "$stable_ver" = "1.3.0" ]; check "stable channel marker points at the new version" \
   "1.3.0" "${stable_ver:-<missing>}" "$?"
 
@@ -274,12 +274,12 @@ bash "$uninstall_sh" --yes >/dev/null 2>&1
 uninstall_status=$?
 check "uninstall (no --purge) completes" "exit 0" "exit $uninstall_status" "$uninstall_status"
 
-[ ! -e "$home_c/.local/bin/jcode" ] && [ ! -d "$home_c/.jcode/builds" ]
+[ ! -e "$home_c/.local/bin/jcode" ] && [ ! -d "$home_c/.kcode/builds" ]
 check "uninstall removes launcher and build channels" \
   "launcher and builds gone" "still present" "$?"
 
-[ "$(cat "$home_c/.jcode/config.toml" 2>/dev/null)" = 'model = "kept"' ] \
-  && [ "$(cat "$home_c/.jcode/auth.json" 2>/dev/null)" = '{"kept":true}' ]
+[ "$(cat "$home_c/.kcode/config.toml" 2>/dev/null)" = 'model = "kept"' ] \
+  && [ "$(cat "$home_c/.kcode/auth.json" 2>/dev/null)" = '{"kept":true}' ]
 check "uninstall keeps config/auth for a cheap return" \
   "config.toml and auth.json intact" "user data lost" "$?"
 
@@ -308,11 +308,11 @@ check "install.sh dedupes stale Windows PATH entries" \
 # (bash-escaped quotes are not PowerShell-escaped quotes) fails here instead
 # of silently no-oping on end-user machines.
 if command -v pwsh >/dev/null 2>&1; then
-  broadcast_block=$(awk "/<<'JCODE_PS_BROADCAST_EOF'/{inblock=1; next} /^JCODE_PS_BROADCAST_EOF\$/{inblock=0} inblock" "$install_sh")
+  broadcast_block=$(awk "/<<'KCODE_PS_BROADCAST_EOF'/{inblock=1; next} /^KCODE_PS_BROADCAST_EOF\$/{inblock=0} inblock" "$install_sh")
   printf '%s' "$broadcast_block" > "$work/broadcast.ps1"
-  parse_errors=$(JCODE_EVAL_PS_FILE="$work/broadcast.ps1" pwsh -NoProfile -NonInteractive -Command '
+  parse_errors=$(KCODE_EVAL_PS_FILE="$work/broadcast.ps1" pwsh -NoProfile -NonInteractive -Command '
     $errors = $null
-    [System.Management.Automation.Language.Parser]::ParseFile($env:JCODE_EVAL_PS_FILE, [ref]$null, [ref]$errors) | Out-Null
+    [System.Management.Automation.Language.Parser]::ParseFile($env:KCODE_EVAL_PS_FILE, [ref]$null, [ref]$errors) | Out-Null
     $errors.Count
   ' 2>/dev/null | tr -d '[:space:]')
   [ -n "$broadcast_block" ] && [ "$parse_errors" = "0" ]
@@ -337,12 +337,12 @@ cat > "$work/bin/powershell.exe" <<'EOF'
 #!/usr/bin/env bash
 # Minimal mock of the two PowerShell invocations install.sh makes on Windows:
 #   1. read the user PATH   -> print the stored value
-#   2. write the user PATH  -> persist $JCODE_NEW_USER_PATH
+#   2. write the user PATH  -> persist $KCODE_NEW_USER_PATH
 #   3. broadcast            -> record that a broadcast happened
 args="$*"
 case "$args" in
   *GetEnvironmentVariable*) cat "$EVAL_WIN_STATE/user-path" ;;
-  *SetEnvironmentVariable*) printf '%s' "$JCODE_NEW_USER_PATH" > "$EVAL_WIN_STATE/user-path" ;;
+  *SetEnvironmentVariable*) printf '%s' "$KCODE_NEW_USER_PATH" > "$EVAL_WIN_STATE/user-path" ;;
   *SendMessageTimeout*) touch "$EVAL_WIN_STATE/broadcasted" ;;
   *) exit 1 ;;
 esac
@@ -357,9 +357,9 @@ EVAL_WIN_STATE="$win_state" \
 PATH="$work/bin:/usr/bin:/bin" \
 HOME="$home_w" \
 LOCALAPPDATA="$work/localappdata" \
-JCODE_HOME="$home_w/.jcode" \
-JCODE_SKIP_SERVER_RELOAD=1 \
-JCODE_NO_TELEMETRY=1 \
+KCODE_HOME="$home_w/.kcode" \
+KCODE_SKIP_SERVER_RELOAD=1 \
+KCODE_NO_TELEMETRY=1 \
 bash "$install_sh" >/dev/null 2>&1
 win_install_status=$?
 check "Git Bash Windows install completes" "exit 0" "exit $win_install_status" "$win_install_status"

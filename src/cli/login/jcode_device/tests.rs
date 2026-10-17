@@ -138,10 +138,10 @@ async fn cancellation_during_consumed_exchange_finishes_and_returns_the_key() {
 fn approved_key_persistence_is_owner_only_and_clear_is_deterministic() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().expect("temp dir");
-    let previous_home = std::env::var_os("JCODE_HOME");
-    let previous_key = std::env::var_os(crate::subscription_catalog::JCODE_API_KEY_ENV);
-    crate::env::set_var("JCODE_HOME", temp.path());
-    crate::env::remove_var(crate::subscription_catalog::JCODE_API_KEY_ENV);
+    let previous_home = std::env::var_os("KCODE_HOME");
+    let previous_key = std::env::var_os(crate::subscription_catalog::KCODE_API_KEY_ENV);
+    crate::env::set_var("KCODE_HOME", temp.path());
+    crate::env::remove_var(crate::subscription_catalog::KCODE_API_KEY_ENV);
 
     let approved = ApprovedAccountKey {
         api_key: "jck_live_test".to_string(),
@@ -153,7 +153,7 @@ fn approved_key_persistence_is_owner_only_and_clear_is_deterministic() {
     persist_approved_key(&approved).expect("persist");
     let path = crate::subscription_catalog::account_credential_path().expect("path");
     let content = std::fs::read_to_string(&path).expect("read");
-    assert!(content.contains("JCODE_API_KEY=jck_live_test"));
+    assert!(content.contains("KCODE_API_KEY=jck_live_test"));
 
     #[cfg(unix)]
     {
@@ -172,11 +172,11 @@ fn approved_key_persistence_is_owner_only_and_clear_is_deterministic() {
     assert!(!cleared.contains("user@example.com"));
 
     match previous_home {
-        Some(value) => crate::env::set_var("JCODE_HOME", value),
-        None => crate::env::remove_var("JCODE_HOME"),
+        Some(value) => crate::env::set_var("KCODE_HOME", value),
+        None => crate::env::remove_var("KCODE_HOME"),
     }
     match previous_key {
-        Some(value) => crate::env::set_var(crate::subscription_catalog::JCODE_API_KEY_ENV, value),
-        None => crate::env::remove_var(crate::subscription_catalog::JCODE_API_KEY_ENV),
+        Some(value) => crate::env::set_var(crate::subscription_catalog::KCODE_API_KEY_ENV, value),
+        None => crate::env::remove_var(crate::subscription_catalog::KCODE_API_KEY_ENV),
     }
 }

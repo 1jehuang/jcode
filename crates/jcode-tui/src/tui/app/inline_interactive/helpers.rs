@@ -48,7 +48,7 @@ pub(super) fn agent_model_target_label(target: AgentModelTarget) -> &'static str
         AgentModelTarget::Swarm => "Swarm / subagent",
         AgentModelTarget::Review => "Code review",
         AgentModelTarget::Judge => "Judge",
-        AgentModelTarget::Memory => "Memory",
+        AgentModelTarget::Memory => "Memory extraction",
         AgentModelTarget::Ambient => "Ambient",
     }
 }
@@ -124,6 +124,9 @@ pub(super) fn picker_route_model_spec(entry: &PickerEntry, route: &PickerOption)
     let api_method = crate::provider::ModelRouteApiMethod::parse(&route.api_method);
     match api_method {
         crate::provider::ModelRouteApiMethod::Copilot => format!("copilot:{}", bare_name),
+        crate::provider::ModelRouteApiMethod::GrokBuild => {
+            crate::provider::grok_build_model_spec(&bare_name)
+        }
         crate::provider::ModelRouteApiMethod::ClaudeOAuth => {
             format!("claude-oauth:{}", bare_name)
         }
@@ -193,7 +196,7 @@ pub(super) fn model_entry_saved_spec(entry: &PickerEntry) -> String {
 
 pub(super) fn agent_model_inherit_fallback_label(target: AgentModelTarget) -> &'static str {
     match target {
-        AgentModelTarget::Memory => "sidecar auto-select",
+        AgentModelTarget::Memory => "extraction auto-select",
         AgentModelTarget::Swarm
         | AgentModelTarget::Review
         | AgentModelTarget::Judge
@@ -216,7 +219,9 @@ pub(super) fn normalize_agent_model_summary(
     match summary.to_ascii_lowercase().as_str() {
         "unknown" | "(unknown)" | "unknown model" => fallback.to_string(),
         "(provider default)" => "provider default".to_string(),
-        "(sidecar auto-select)" => "sidecar auto-select".to_string(),
+        "sidecar auto-select" | "(sidecar auto-select)" | "(extraction auto-select)" => {
+            "extraction auto-select".to_string()
+        }
         _ => summary,
     }
 }
@@ -245,6 +250,28 @@ pub(super) fn agent_model_default_summary(target: AgentModelTarget, app: &App) -
 mod tests {
     use super::*;
     use crate::tui::{PickerAction, PickerEntry, PickerOption};
+
+    #[test]
+    fn memory_model_picker_describes_extraction_not_recall() {
+        let target = AgentModelTarget::Memory;
+        assert_eq!(agent_model_target_label(target), "Memory extraction");
+        assert_eq!(
+            agent_model_target_config_path(target),
+            "agents.memory_model"
+        );
+        assert_eq!(agent_model_target_slug(target), "memory");
+        for summary in [
+            None,
+            Some(""),
+            Some("unknown"),
+            Some("(sidecar auto-select)"),
+        ] {
+            assert_eq!(
+                normalize_agent_model_summary(target, summary.map(str::to_string)),
+                "extraction auto-select"
+            );
+        }
+    }
 
     fn entry(model: &str, route: PickerOption) -> PickerEntry {
         PickerEntry {
@@ -307,6 +334,16 @@ mod tests {
                 route("Copilot", "copilot"),
                 "copilot:claude-sonnet-4-6",
             ),
+            (
+                "grok-4.6",
+                route("Grok Build", "grok-build-acp"),
+                "grok-build:grok-4.6",
+            ),
+            (
+                "grok-build:grok-4.6",
+                route("Grok Build", "grok-build-acp"),
+                "grok-build:grok-4.6",
+            ),
         ] {
             let entry = entry(model, route.clone());
             assert_eq!(picker_route_model_spec(&entry, &route), expected);
@@ -327,5 +364,18 @@ mod tests {
                 profile_id: Some("nvidia-nim".to_string())
             }
         );
+    }
+
+    #[test]
+    fn model_picker_grok_build_route_selection_is_wire_safe() {
+        let route = route("Grok Build", "grok-build-acp");
+        let entry = entry("grok-build:grok-4.6", route.clone());
+        let selection = picker_route_selection(&entry, &route);
+        assert_eq!(
+            selection.runtime_key,
+            crate::provider::RuntimeKey::GrokBuild
+        );
+        assert_eq!(selection.routed_model_spec(), "grok-build:grok-4.6");
+        serde_json::to_string(&selection).expect("Grok Build route selection must serialize");
     }
 }

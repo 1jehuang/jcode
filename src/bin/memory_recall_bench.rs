@@ -44,7 +44,7 @@ static LLM_OUTPUT_TOK: std::sync::atomic::AtomicUsize = std::sync::atomic::Atomi
 fn bench_root() -> PathBuf {
     std::env::var("MEMORY_BENCH_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| dirs_home().join("jcode-memory-bench"))
+        .unwrap_or_else(|_| dirs_home().join("kcode-memory-bench"))
 }
 
 fn dirs_home() -> PathBuf {
@@ -447,7 +447,7 @@ fn cmd_queries(args: &[String]) -> Result<()> {
     let sessions_dir = opts
         .get("sessions")
         .cloned()
-        .unwrap_or_else(|| format!("{}/.jcode/sessions", dirs_home().display()));
+        .unwrap_or_else(|| format!("{}/.kcode/sessions", dirs_home().display()));
     let max_sessions: usize = opts
         .get("max_sessions")
         .and_then(|s| s.parse().ok())
@@ -1029,13 +1029,13 @@ fn cmd_metrics(args: &[String]) -> Result<()> {
     let queries = read_queries()?;
     let gold = read_gold()?;
 
-    // For `prod_hybrid`: seed a temp JCODE_HOME project graph with the corpus and
+    // For `prod_hybrid`: seed a temp KCODE_HOME project graph with the corpus and
     // exercise the REAL shipped MemoryManager::find_similar_hybrid end-to-end.
     let prod_mgr = if config == "prod_hybrid" {
         let tmp = std::env::temp_dir().join(format!("memrecall-prod-{}", std::process::id()));
         std::fs::create_dir_all(&tmp)?;
         // SAFETY: single-threaded setup before any embedding work.
-        unsafe { std::env::set_var("JCODE_HOME", &tmp) };
+        unsafe { std::env::set_var("KCODE_HOME", &tmp) };
         let project_dir = "/bench/prod-validate";
         let mgr = jcode::memory::MemoryManager::new().with_project_dir(project_dir);
         let graph = load_graph(Path::new(&graph_file))?;
@@ -2191,7 +2191,7 @@ fn cmd_gate(args: &[String]) -> Result<()> {
     let sessions_dir = opts
         .get("sessions")
         .cloned()
-        .unwrap_or_else(|| format!("{}/.jcode/sessions", dirs_home().display()));
+        .unwrap_or_else(|| format!("{}/.kcode/sessions", dirs_home().display()));
     let max_sessions: usize = opts
         .get("max_sessions")
         .and_then(|s| s.parse().ok())

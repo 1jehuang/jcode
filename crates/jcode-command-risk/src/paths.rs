@@ -19,7 +19,7 @@ const PROTECTED_CREDENTIAL_SUBPATHS: &[&str] = &[".ssh", ".gnupg", ".aws", ".kub
 /// exactly, so `~/.config` is protected while `~/.config/app/stale.toml` is not.
 const PROTECTED_HOME_SUBPATHS: &[&str] = &[
     ".config",
-    ".jcode",
+    ".kcode",
     ".claude",
     ".local",
     ".local/share",
@@ -102,7 +102,7 @@ pub fn expand(raw: &str, ctx: &RiskContext) -> PathBuf {
 fn expand_known_prefix(raw: &str, ctx: &RiskContext) -> String {
     for (name, value) in [
         ("HOME", &ctx.home_dir),
-        ("JCODE_SCRATCH_DIR", &ctx.scratch_dir),
+        ("KCODE_SCRATCH_DIR", &ctx.scratch_dir),
     ] {
         let Some(value) = value else { continue };
         for prefix in [format!("${name}"), format!("${{{name}}}")] {

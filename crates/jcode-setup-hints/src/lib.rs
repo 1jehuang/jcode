@@ -6,7 +6,7 @@
 //! - Linux: create a .desktop launcher file.
 //!
 //! Each nudge can be dismissed permanently with "Don't ask again".
-//! State is persisted in `~/.jcode/setup_hints.json`.
+//! State is persisted in `~/.kcode/setup_hints.json`.
 
 // Several launch-hotkey helpers are gated `#[cfg(any(test, target_os = "macos"))]`
 // because the unit tests exercise the macOS launch-hotkey notice logic on every
@@ -49,11 +49,12 @@ use macos_launcher::{install_macos_app_launcher, should_refresh_macos_app_launch
 use macos_terminal::launch_script_for_macos_terminal;
 #[cfg(target_os = "macos")]
 use macos_terminal::load_preferred_macos_terminal;
+#[cfg(test)]
+use macos_terminal::paused_jcode_shell_command;
+#[cfg(target_os = "macos")]
+use macos_terminal::save_preferred_macos_terminal;
 #[cfg(any(test, target_os = "macos"))]
-use macos_terminal::{
-    MacTerminalKind, effective_macos_terminal, escape_applescript_text, escape_shell_single_quotes,
-    launch_command_for_macos_terminal, paused_jcode_shell_command, save_preferred_macos_terminal,
-};
+use macos_terminal::{MacTerminalKind, effective_macos_terminal};
 #[cfg(windows)]
 use windows_setup::{
     create_windows_desktop_shortcut, maybe_show_windows_setup_hints, run_setup_hotkey_windows,
@@ -304,7 +305,7 @@ fn mac_hotkey_plan_file() -> Result<PathBuf> {
     Ok(mac_hotkey_support_dir()?.join("plan.json"))
 }
 
-/// Load the `[launch_hotkeys]` table from `~/.jcode/config.toml`.
+/// Load the `[launch_hotkeys]` table from `~/.kcode/config.toml`.
 ///
 /// Returns the default (empty -> built-in 3 hotkeys) when the file is missing or
 /// the section is absent. Best-effort: a malformed config falls back to default
@@ -319,12 +320,39 @@ fn load_launch_hotkeys_config() -> jcode_config_types::LaunchHotkeysConfig {
         return Default::default();
     };
     let path = dir.join("config.toml");
+    // Startup calls this several times (hotkey notice, resolve, install
+    // checks), each a full TOML parse of config.toml. Memoize on the file's
+    // path, mtime and length so edits are still picked up immediately.
+    type Key = (
+        std::path::PathBuf,
+        Option<std::time::SystemTime>,
+        Option<u64>,
+    );
+    static MEMO: std::sync::Mutex<Option<(Key, jcode_config_types::LaunchHotkeysConfig)>> =
+        std::sync::Mutex::new(None);
+    let metadata = std::fs::metadata(&path).ok();
+    let key: Key = (
+        path.clone(),
+        metadata.as_ref().and_then(|meta| meta.modified().ok()),
+        metadata.as_ref().map(std::fs::Metadata::len),
+    );
+    if !cfg!(test)
+        && let Ok(guard) = MEMO.lock()
+        && let Some((cached_key, config)) = guard.as_ref()
+        && *cached_key == key
+    {
+        return config.clone();
+    }
     let Ok(text) = std::fs::read_to_string(&path) else {
         return Default::default();
     };
-    toml::from_str::<Wrapper>(&text)
+    let config = toml::from_str::<Wrapper>(&text)
         .map(|w| w.launch_hotkeys)
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if let Ok(mut guard) = MEMO.lock() {
+        *guard = Some((key, config.clone()));
+    }
+    config
 }
 
 /// Record the directories the global launch hotkeys should reopen.
@@ -386,7 +414,7 @@ fn mac_hotkey_launch_agent_path() -> Result<PathBuf> {
     Ok(home
         .join("Library")
         .join("LaunchAgents")
-        .join("com.jcode.hotkey.plist"))
+        .join("com.kcode.hotkey.plist"))
 }
 
 #[cfg(any(test, target_os = "macos"))]
@@ -402,7 +430,7 @@ fn mac_hotkey_launch_agent_plist(
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.jcode.hotkey</string>
+    <string>com.kcode.hotkey</string>
     <key>ProgramArguments</key>
     <array>
         <string>{exe}</string>
@@ -421,7 +449,7 @@ fn mac_hotkey_launch_agent_plist(
     <string>{stderr_path}</string>
     <key>EnvironmentVariables</key>
     <dict>
-        <key>JCODE_PREFERRED_TERMINAL</key>
+        <key>KCODE_PREFERRED_TERMINAL</key>
         <string>{terminal}</string>
     </dict>
 </dict>
@@ -1060,7 +1088,7 @@ fn run_macos_hotkey_listener() -> Result<()> {
             let command = TerminalCommand::new(&exe_path, args)
                 .fresh_spawn()
                 .kind("hotkey")
-                .spawn_env("JCODE_SPAWN_LABEL", launch.label.clone());
+                .spawn_env("KCODE_SPAWN_LABEL", launch.label.clone());
             match spawn_command_in_new_terminal_with(&command, &cwd, |cmd| cmd.spawn().map(|_| ()))
             {
                 Ok(true) => {}
@@ -1433,13 +1461,15 @@ fn detect_linux_compositor() -> Option<linux_env::LinuxCompositor> {
 }
 
 /// Path to the niri config file, honoring `$XDG_CONFIG_HOME`.
-#[cfg(target_os = "linux")]
+#[cfg(any(test, target_os = "linux"))]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn niri_config_path() -> Option<PathBuf> {
     Some(xdg_config_home()?.join("niri").join("config.kdl"))
 }
 
 /// `$XDG_CONFIG_HOME`, defaulting to `~/.config`.
-#[cfg(target_os = "linux")]
+#[cfg(any(test, target_os = "linux"))]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn xdg_config_home() -> Option<PathBuf> {
     std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -1519,10 +1549,10 @@ fn linux_hotkeys_installed(comp: linux_env::LinuxCompositor) -> bool {
     match comp {
         LinuxCompositor::Gnome => gnome_keybinding_list().contains("/jcode-launch-"),
         LinuxCompositor::Cinnamon => {
-            dconf_read("/org/cinnamon/desktop/keybindings/custom-list").contains("jcode-launch-")
+            dconf_read("/org/cinnamon/desktop/keybindings/custom-list").contains("kcode-launch-")
         }
         LinuxCompositor::Mate => {
-            dconf_list("/org/mate/desktop/keybindings/").contains("jcode-launch-")
+            dconf_list("/org/mate/desktop/keybindings/").contains("kcode-launch-")
         }
         LinuxCompositor::Xfce => xfce_shortcut_commands_text().contains("/launch_jcode_"),
         LinuxCompositor::Kde => kde_globalshortcutsrc_path()
@@ -1563,7 +1593,8 @@ fn linux_hotkey_setup_action(
 
 /// Pick a terminal emulator to launch jcode in on Linux. Honors `$TERMINAL`,
 /// otherwise probes common emulators on `PATH`, falling back to `kitty`.
-#[cfg(target_os = "linux")]
+#[cfg(any(test, target_os = "linux"))]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn linux_launch_terminal() -> String {
     if let Ok(t) = std::env::var("TERMINAL")
         && !t.trim().is_empty()
@@ -1587,7 +1618,8 @@ fn linux_launch_terminal() -> String {
 }
 
 /// Whether `name` resolves to an executable on `$PATH`.
-#[cfg(target_os = "linux")]
+#[cfg(any(test, target_os = "linux"))]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn binary_on_path(name: &str) -> bool {
     let Some(paths) = std::env::var_os("PATH") else {
         return false;
@@ -1600,7 +1632,8 @@ fn binary_on_path(name: &str) -> bool {
 
 /// Resolve the configured launch hotkeys into concrete Linux hotkeys, with each
 /// directory sentinel expanded to a real path.
-#[cfg(target_os = "linux")]
+#[cfg(any(test, target_os = "linux"))]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn resolve_linux_hotkeys() -> Vec<linux_niri::NiriHotkey> {
     let config = load_launch_hotkeys_config();
     let exe_path = std::env::current_exe()
@@ -1714,7 +1747,7 @@ fn install_niri_launch_hotkeys() -> Result<bool> {
 
 /// Install (or refresh) the launch-hotkey binds for a flat `#`-commented
 /// compositor config (Hyprland/omarchy, sway, i3). Bind lines execute launch
-/// scripts written under `~/.jcode/hotkey/`, so the config never embeds shell
+/// scripts written under `~/.kcode/hotkey/`, so the config never embeds shell
 /// one-liners. Writes a timestamped backup before modifying; no-op when the
 /// managed block already matches. Returns `Ok(true)` if the config changed.
 #[cfg(target_os = "linux")]
@@ -2071,7 +2104,7 @@ fn install_kde_launch_hotkeys() -> Result<bool> {
 }
 
 /// Write one executable launch script per resolved hotkey to
-/// `~/.jcode/hotkey/` and return the chord -> script binds. The scripts `cd`
+/// `~/.kcode/hotkey/` and return the chord -> script binds. The scripts `cd`
 /// into the target (with `$HOME` fallback for stale/dynamic dirs) and exec the
 /// user's terminal running jcode, so compositor bind lines stay trivial.
 #[cfg(target_os = "linux")]
@@ -2130,7 +2163,7 @@ fn backup_compositor_config(config_path: &std::path::Path) {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "config".to_string());
-    let backup = config_path.with_file_name(format!("{file_name}.bak-jcode-hotkeys-{ts}"));
+    let backup = config_path.with_file_name(format!("{file_name}.bak-kcode-hotkeys-{ts}"));
     if let Err(err) = std::fs::copy(config_path, &backup) {
         jcode_logging::warn(&format!(
             "failed to back up compositor config before hotkey install: {err}"
@@ -2347,9 +2380,9 @@ pub(crate) fn keymap_conflict_hint_for(
 /// (macOS VS Code integrated terminal / Apple Terminal). Mirrors the detection
 /// in `jcode-tui-style`'s color module and `jcode-app-core::perf` so the
 /// disclosure fires exactly when the behavior is active. Overridable with
-/// `JCODE_GLYPH_SAFE_MODE=on|off`.
+/// `KCODE_GLYPH_SAFE_MODE=on|off`.
 fn glyph_safe_mode_active() -> bool {
-    if let Ok(raw) = std::env::var("JCODE_GLYPH_SAFE_MODE") {
+    if let Ok(raw) = std::env::var("KCODE_GLYPH_SAFE_MODE") {
         match raw.trim().to_ascii_lowercase().as_str() {
             "1" | "true" | "yes" | "on" => return true,
             "0" | "false" | "no" | "off" => return false,
@@ -2400,7 +2433,7 @@ pub(crate) fn glyph_safe_notice_for(
 its glyph cache under jcode's full-color animations, rendering letters as boxes. \
 jcode automatically quantizes colors to the 256-palette here to keep text readable; \
 the only tradeoff is slightly reduced color fidelity. Animations still run. \
-For full color, use Ghostty, iTerm2, kitty, or WezTerm, or set JCODE_GLYPH_SAFE_MODE=off."
+For full color, use Ghostty, iTerm2, kitty, or WezTerm, or set KCODE_GLYPH_SAFE_MODE=off."
         .to_string();
     (
         Some(StartupHints::with_status_and_display(
@@ -2418,20 +2451,25 @@ pub fn run_setup_launcher() -> Result<()> {
         eprintln!("\x1b[1mjcode setup-launcher\x1b[0m");
         eprintln!();
 
+        let removed = macos_launcher::remove_legacy_macos_bundles();
         match install_macos_app_launcher() {
-            Ok((app_dir, terminal)) => {
+            Ok(broker_dir) => {
                 state.desktop_shortcut_created = true;
                 let _ = state.save();
+                for path in removed.unwrap_or_default() {
+                    eprintln!(
+                        "  \x1b[32m✓\x1b[0m Removed legacy launcher: {}",
+                        path.display()
+                    );
+                }
                 eprintln!(
-                    "  \x1b[32m✓\x1b[0m Installed launcher: {}",
-                    app_dir.display()
-                );
-                eprintln!(
-                    "  \x1b[32m✓\x1b[0m Spotlight/Launchpad/Dock will launch jcode in {}",
-                    terminal.label()
+                    "  \x1b[32m✓\x1b[0m Installed turn-notification helper: {}",
+                    broker_dir.display()
                 );
                 eprintln!();
-                eprintln!("  Tip: pin Jcode.app to your Dock or launch it with Cmd+Space.");
+                eprintln!(
+                    "  Launch Jcode from the Jcode Desktop app, a terminal, or the Cmd+; hotkey."
+                );
                 Ok(())
             }
             Err(e) => {
@@ -2448,7 +2486,7 @@ pub fn run_setup_launcher() -> Result<()> {
         eprintln!();
         match create_windows_desktop_shortcut(&mut state) {
             Ok(()) => {
-                eprintln!("  \x1b[32m✓\x1b[0m Created desktop shortcut: jcode.lnk");
+                eprintln!("  \x1b[32m✓\x1b[0m Created desktop shortcut: kcode.lnk");
                 return Ok(());
             }
             Err(e) => {
@@ -2467,7 +2505,8 @@ pub fn run_setup_launcher() -> Result<()> {
 
 /// Create a desktop shortcut/launcher for jcode.
 ///
-/// - macOS: creates a jcode.app bundle in ~/Applications/
+/// - macOS: installs the hidden notification helper and removes the legacy
+///   CLI launcher bundles. Jcode Desktop is the only macOS app launcher.
 /// - Windows uses [`windows_setup::create_windows_desktop_shortcut`] via
 ///   `jcode setup-launcher` instead (PowerShell/COM is too slow for the
 ///   startup path).
@@ -2475,12 +2514,15 @@ pub fn run_setup_launcher() -> Result<()> {
 fn create_desktop_shortcut(state: &mut SetupHintsState) -> Result<()> {
     #[cfg(any(test, target_os = "macos"))]
     {
-        let (app_dir, _terminal) = install_macos_app_launcher()?;
+        let broker_dir = install_macos_app_launcher()?;
 
         state.desktop_shortcut_created = true;
         let _ = state.save();
 
-        jcode_logging::info(&format!("Created macOS app bundle: {}", app_dir.display()));
+        jcode_logging::info(&format!(
+            "Installed macOS notification helper: {}",
+            broker_dir.display()
+        ));
     }
 
     #[cfg(not(any(test, target_os = "macos")))]

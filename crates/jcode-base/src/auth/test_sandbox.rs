@@ -13,7 +13,7 @@ impl AuthTestSandbox {
     pub fn new() -> anyhow::Result<Self> {
         let lock = crate::storage::lock_test_env();
         let temp = tempfile::Builder::new()
-            .prefix("jcode-auth-lifecycle-")
+            .prefix("kcode-auth-lifecycle-")
             .tempdir()?;
         let saved_env = tracked_env_vars()
             .into_iter()
@@ -27,9 +27,9 @@ impl AuthTestSandbox {
             crate::env::remove_var(key);
         }
 
-        std::fs::create_dir_all(temp.path().join("config").join("jcode"))?;
+        std::fs::create_dir_all(temp.path().join("config").join("kcode"))?;
         std::fs::create_dir_all(temp.path().join("external"))?;
-        crate::env::set_var("JCODE_HOME", temp.path());
+        crate::env::set_var("KCODE_HOME", temp.path());
         crate::provider_catalog::force_apply_openai_compatible_profile_env(None);
         reset_global_auth_state();
 
@@ -45,7 +45,7 @@ impl AuthTestSandbox {
     }
 
     pub fn config_dir(&self) -> PathBuf {
-        self.root().join("config").join("jcode")
+        self.root().join("config").join("kcode")
     }
 
     pub fn external_dir(&self) -> PathBuf {
@@ -101,35 +101,35 @@ fn reset_global_auth_state() {
 
 fn tracked_env_vars() -> Vec<String> {
     let mut keys = [
-        "JCODE_HOME",
+        "KCODE_HOME",
         "XDG_CONFIG_HOME",
-        "JCODE_OPENROUTER_API_BASE",
-        "JCODE_OPENROUTER_API_KEY_NAME",
-        "JCODE_OPENROUTER_ENV_FILE",
-        "JCODE_OPENROUTER_CACHE_NAMESPACE",
-        "JCODE_OPENROUTER_PROVIDER_FEATURES",
-        "JCODE_OPENROUTER_TRANSPORT_STATE",
-        "JCODE_OPENROUTER_ALLOW_NO_AUTH",
-        "JCODE_OPENROUTER_PROVIDER",
-        "JCODE_OPENROUTER_NO_FALLBACK",
-        "JCODE_OPENROUTER_MODEL",
-        "JCODE_OPENROUTER_MODEL_CATALOG",
-        "JCODE_OPENROUTER_STATIC_MODELS",
-        "JCODE_OPENROUTER_AUTH_HEADER",
-        "JCODE_OPENROUTER_AUTH_HEADER_NAME",
-        "JCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
-        "JCODE_OPENAI_COMPAT_API_BASE",
-        "JCODE_OPENAI_COMPAT_API_KEY_NAME",
-        "JCODE_OPENAI_COMPAT_ENV_FILE",
-        "JCODE_OPENAI_COMPAT_SETUP_URL",
-        "JCODE_OPENAI_COMPAT_DEFAULT_MODEL",
-        "JCODE_OPENAI_COMPAT_LOCAL_ENABLED",
-        "JCODE_NAMED_PROVIDER_PROFILE",
-        "JCODE_PROVIDER_PROFILE_ACTIVE",
-        "JCODE_PROVIDER_PROFILE_NAME",
-        "JCODE_RUNTIME_PROVIDER",
-        "JCODE_ACTIVE_PROVIDER",
-        "JCODE_INITIAL_PROVIDER_EXPLICIT",
+        "KCODE_OPENROUTER_API_BASE",
+        "KCODE_OPENROUTER_API_KEY_NAME",
+        "KCODE_OPENROUTER_ENV_FILE",
+        "KCODE_OPENROUTER_CACHE_NAMESPACE",
+        "KCODE_OPENROUTER_PROVIDER_FEATURES",
+        "KCODE_OPENROUTER_TRANSPORT_STATE",
+        "KCODE_OPENROUTER_ALLOW_NO_AUTH",
+        "KCODE_OPENROUTER_PROVIDER",
+        "KCODE_OPENROUTER_NO_FALLBACK",
+        "KCODE_OPENROUTER_MODEL",
+        "KCODE_OPENROUTER_MODEL_CATALOG",
+        "KCODE_OPENROUTER_STATIC_MODELS",
+        "KCODE_OPENROUTER_AUTH_HEADER",
+        "KCODE_OPENROUTER_AUTH_HEADER_NAME",
+        "KCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
+        "KCODE_OPENAI_COMPAT_API_BASE",
+        "KCODE_OPENAI_COMPAT_API_KEY_NAME",
+        "KCODE_OPENAI_COMPAT_ENV_FILE",
+        "KCODE_OPENAI_COMPAT_SETUP_URL",
+        "KCODE_OPENAI_COMPAT_DEFAULT_MODEL",
+        "KCODE_OPENAI_COMPAT_LOCAL_ENABLED",
+        "KCODE_NAMED_PROVIDER_PROFILE",
+        "KCODE_PROVIDER_PROFILE_ACTIVE",
+        "KCODE_PROVIDER_PROFILE_NAME",
+        "KCODE_RUNTIME_PROVIDER",
+        "KCODE_ACTIVE_PROVIDER",
+        "KCODE_INITIAL_PROVIDER_EXPLICIT",
         "OPENAI_API_KEY",
         "OPENROUTER_API_KEY",
         "ANTHROPIC_API_KEY",
@@ -164,7 +164,7 @@ mod tests {
         let sandbox = AuthTestSandbox::new().expect("sandbox");
 
         assert_eq!(
-            std::env::var("JCODE_HOME").ok().as_deref(),
+            std::env::var("KCODE_HOME").ok().as_deref(),
             Some(sandbox.root().to_str().unwrap())
         );
         assert_eq!(

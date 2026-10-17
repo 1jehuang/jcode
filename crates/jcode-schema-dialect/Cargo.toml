@@ -16,7 +16,7 @@ serde_json = "1"
 [features]
 # Exposes the per-thread quirk-store redirect so integration tests (which see
 # the crate as an external dependency) can isolate themselves from the real
-# ~/.jcode store.
+# ~/.kcode store.
 test-support = []
 
 [dev-dependencies]

@@ -19,11 +19,11 @@ impl SpawnedWindowsServer {
             .join("target")
             .join("x86_64-pc-windows-msvc")
             .join("release")
-            .join("jcode.exe");
+            .join("kcode.exe");
         if release_binary.exists() {
             return release_binary;
         }
-        std::path::PathBuf::from(env!("CARGO_BIN_EXE_jcode"))
+        std::path::PathBuf::from(env!("CARGO_BIN_EXE_kcode"))
     }
 
     fn spawn(prefix: &str) -> Result<Self> {
@@ -52,17 +52,17 @@ impl SpawnedWindowsServer {
             .arg("--model")
             .arg("windows-e2e-model")
             .arg("serve")
-            .env_remove("JCODE_TEST_SESSION")
-            .env("JCODE_HOME", &home_dir)
-            .env("JCODE_RUNTIME_DIR", &runtime_dir)
-            .env("JCODE_INSTALL_DIR", &install_dir)
-            .env("JCODE_NO_TELEMETRY", "1")
-            .env("JCODE_OPENAI_COMPAT_API_BASE", "http://127.0.0.1:9/v1")
-            .env("JCODE_OPENAI_COMPAT_DEFAULT_MODEL", "windows-e2e-model")
-            .env("JCODE_OPENAI_COMPAT_LOCAL_ENABLED", "1")
-            .env("JCODE_DEBUG_CONTROL", "1")
-            .env("JCODE_TEMP_SERVER", "1")
-            .env("JCODE_SERVER_OWNER_PID", std::process::id().to_string())
+            .env_remove("KCODE_TEST_SESSION")
+            .env("KCODE_HOME", &home_dir)
+            .env("KCODE_RUNTIME_DIR", &runtime_dir)
+            .env("KCODE_INSTALL_DIR", &install_dir)
+            .env("KCODE_NO_TELEMETRY", "1")
+            .env("KCODE_OPENAI_COMPAT_API_BASE", "http://127.0.0.1:9/v1")
+            .env("KCODE_OPENAI_COMPAT_DEFAULT_MODEL", "windows-e2e-model")
+            .env("KCODE_OPENAI_COMPAT_LOCAL_ENABLED", "1")
+            .env("KCODE_DEBUG_CONTROL", "1")
+            .env("KCODE_TEMP_SERVER", "1")
+            .env("KCODE_SERVER_OWNER_PID", std::process::id().to_string())
             .env("RUST_BACKTRACE", "1")
             .stdin(Stdio::null())
             .stdout(Stdio::from(stdout_file))
@@ -88,17 +88,17 @@ impl SpawnedWindowsServer {
 
     fn apply_env<'a>(&self, command: &'a mut Command) -> &'a mut Command {
         command
-            .env_remove("JCODE_TEST_SESSION")
-            .env("JCODE_HOME", &self.home_dir)
-            .env("JCODE_RUNTIME_DIR", &self.runtime_dir)
-            .env("JCODE_INSTALL_DIR", &self.install_dir)
-            .env("JCODE_NO_TELEMETRY", "1")
-            .env("JCODE_OPENAI_COMPAT_API_BASE", "http://127.0.0.1:9/v1")
-            .env("JCODE_OPENAI_COMPAT_DEFAULT_MODEL", "windows-e2e-model")
-            .env("JCODE_OPENAI_COMPAT_LOCAL_ENABLED", "1")
-            .env("JCODE_DEBUG_CONTROL", "1")
-            .env("JCODE_TEMP_SERVER", "1")
-            .env("JCODE_SERVER_OWNER_PID", std::process::id().to_string())
+            .env_remove("KCODE_TEST_SESSION")
+            .env("KCODE_HOME", &self.home_dir)
+            .env("KCODE_RUNTIME_DIR", &self.runtime_dir)
+            .env("KCODE_INSTALL_DIR", &self.install_dir)
+            .env("KCODE_NO_TELEMETRY", "1")
+            .env("KCODE_OPENAI_COMPAT_API_BASE", "http://127.0.0.1:9/v1")
+            .env("KCODE_OPENAI_COMPAT_DEFAULT_MODEL", "windows-e2e-model")
+            .env("KCODE_OPENAI_COMPAT_LOCAL_ENABLED", "1")
+            .env("KCODE_DEBUG_CONTROL", "1")
+            .env("KCODE_TEMP_SERVER", "1")
+            .env("KCODE_SERVER_OWNER_PID", std::process::id().to_string())
             .env("RUST_BACKTRACE", "1")
     }
 
@@ -169,7 +169,7 @@ impl SpawnedWindowsServer {
             }
         }
 
-        if let Ok(artifact_root) = std::env::var("JCODE_E2E_ARTIFACT_DIR") {
+        if let Ok(artifact_root) = std::env::var("KCODE_E2E_ARTIFACT_DIR") {
             let safe_label: String = label
                 .chars()
                 .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
@@ -256,7 +256,7 @@ async fn windows_binary_server_accepts_clients_and_debug_cli() -> Result<()> {
             info.get("debug_control_enabled")
                 .and_then(|value| value.as_bool())
                 == Some(true),
-            "server should honor JCODE_DEBUG_CONTROL in Windows e2e"
+            "server should honor KCODE_DEBUG_CONTROL in Windows e2e"
         );
 
         let output = server

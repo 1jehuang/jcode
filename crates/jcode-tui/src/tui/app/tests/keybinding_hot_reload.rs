@@ -7,8 +7,8 @@ fn keybinding_edit_applies_to_the_next_key_press() {
 
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
-    let prev_home = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", temp.path());
+    let prev_home = std::env::var_os("KCODE_HOME");
+    crate::env::set_var("KCODE_HOME", temp.path());
     crate::config::Config::invalidate_cache();
 
     let config_path = crate::config::Config::path().expect("config path");
@@ -52,9 +52,9 @@ fn keybinding_edit_applies_to_the_next_key_press() {
     );
 
     if let Some(prev_home) = prev_home {
-        crate::env::set_var("JCODE_HOME", prev_home);
+        crate::env::set_var("KCODE_HOME", prev_home);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
     }
     crate::config::Config::invalidate_cache();
 }

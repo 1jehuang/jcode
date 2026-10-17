@@ -41,10 +41,6 @@ fn test_openai_switching_models_include_dynamic_catalog_entries() {
     let _guard = jcode_base::storage::lock_test_env();
     let dynamic_model = "gpt-5.9-switching-test";
     jcode_base::auth::codex::set_active_account_override(Some("switching-test".to_string()));
-    jcode_base::provider::populate_account_models(vec![
-        "gpt-5.4".to_string(),
-        dynamic_model.to_string(),
-    ]);
 
     let provider = OpenAIProvider::new(CodexCredentials {
         access_token: "test".to_string(),
@@ -53,6 +49,11 @@ fn test_openai_switching_models_include_dynamic_catalog_entries() {
         account_id: None,
         expires_at: None,
     });
+    // The catalog is scoped to the credential the runtime holds.
+    jcode_base::provider::populate_account_models_for_scope(
+        &provider.catalog_scope(),
+        vec!["gpt-5.4".to_string(), dynamic_model.to_string()],
+    );
 
     let models = provider.available_models_for_switching();
     assert!(models.contains(&"gpt-5.4".to_string()));
@@ -66,7 +67,7 @@ fn test_chatgpt_web_model_bypasses_live_api_catalog() {
     let _guard = jcode_base::storage::lock_test_env();
     jcode_base::auth::codex::set_active_account_override(Some("web-model-test".to_string()));
     jcode_base::provider::populate_account_models(vec!["gpt-5.6-sol".to_string()]);
-    let _model = EnvVarGuard::set("JCODE_OPENAI_MODEL", CHATGPT_WEB_MODEL);
+    let _model = EnvVarGuard::set("KCODE_OPENAI_MODEL", CHATGPT_WEB_MODEL);
 
     let provider = OpenAIProvider::new(CodexCredentials {
         access_token: "test".to_string(),
@@ -115,7 +116,7 @@ fn test_chatgpt_browser_only_runtime_rejects_api_models_and_uses_local_compactio
 #[test]
 fn test_chatgpt_web_model_environment_override_is_trimmed() {
     let _guard = jcode_base::storage::lock_test_env();
-    let _model = EnvVarGuard::set("JCODE_OPENAI_MODEL", "  gpt-5.6-pro[web]  ");
+    let _model = EnvVarGuard::set("KCODE_OPENAI_MODEL", "  gpt-5.6-pro[web]  ");
     let provider = OpenAIProvider::new(CodexCredentials {
         access_token: "test".to_string(),
         refresh_token: String::new(),
@@ -253,8 +254,6 @@ async fn test_set_model_clears_persistent_ws_state() {
     jcode_base::auth::codex::set_active_account_override(Some(
         "openai-set-model-clears-ws".to_string(),
     ));
-    jcode_base::provider::populate_account_models(vec!["gpt-5.3-codex".to_string()]);
-
     let provider = OpenAIProvider::new(CodexCredentials {
         access_token: "test".to_string(),
         refresh_token: String::new(),
@@ -262,6 +261,10 @@ async fn test_set_model_clears_persistent_ws_state() {
         account_id: None,
         expires_at: None,
     });
+    jcode_base::provider::populate_account_models_for_scope(
+        &provider.catalog_scope(),
+        vec!["gpt-5.3-codex".to_string()],
+    );
     let (state, server) = test_persistent_ws_state().await;
     *provider.persistent_ws.lock().await = Some(state);
 
@@ -280,7 +283,7 @@ async fn test_set_model_clears_persistent_ws_state() {
 // process-global env access with other tests (see comment below).
 #[allow(clippy::await_holding_lock)]
 async fn test_switching_to_https_clears_persistent_ws_state() {
-    // Serialize with the tests that set JCODE_OPENAI_MODEL via EnvVarGuard:
+    // Serialize with the tests that set KCODE_OPENAI_MODEL via EnvVarGuard:
     // provider construction reads that process-global env var, so an
     // unsynchronized overlap can construct this provider pinned to the
     // browser-only web model and fail the HTTPS transport switch below.
@@ -406,7 +409,7 @@ fn openai_catalog_and_chat_endpoints_agree_on_credential_shape() {
 #[test]
 fn responses_url_honors_api_base_override_in_api_key_mode() {
     let _guard = jcode_base::storage::lock_test_env();
-    let _b = EnvVarGuard::remove("JCODE_OPENAI_API_BASE");
+    let _b = EnvVarGuard::remove("KCODE_OPENAI_API_BASE");
     let _c = EnvVarGuard::remove("OPENAI_BASE_URL");
     let _d = EnvVarGuard::remove("OPENAI_API_BASE");
 
@@ -425,7 +428,7 @@ fn responses_url_honors_api_base_override_in_api_key_mode() {
     );
 
     // Override is applied (and a trailing slash is tolerated).
-    let _override = EnvVarGuard::set("JCODE_OPENAI_API_BASE", "http://127.0.0.1:8317/v1/");
+    let _override = EnvVarGuard::set("KCODE_OPENAI_API_BASE", "http://127.0.0.1:8317/v1/");
     assert_eq!(
         OpenAIProvider::responses_url(&api_key_creds),
         "http://127.0.0.1:8317/v1/responses",
@@ -445,7 +448,7 @@ fn responses_url_honors_api_base_override_in_api_key_mode() {
 #[test]
 fn responses_url_ignores_override_in_chatgpt_mode() {
     let _guard = jcode_base::storage::lock_test_env();
-    let _override = EnvVarGuard::set("JCODE_OPENAI_API_BASE", "http://127.0.0.1:8317/v1");
+    let _override = EnvVarGuard::set("KCODE_OPENAI_API_BASE", "http://127.0.0.1:8317/v1");
 
     let oauth_creds = CodexCredentials {
         access_token: "oauth-access".to_string(),
@@ -464,24 +467,132 @@ fn responses_url_ignores_override_in_chatgpt_mode() {
 #[test]
 fn resolve_api_base_precedence_and_validation() {
     let _guard = jcode_base::storage::lock_test_env();
-    let _a = EnvVarGuard::remove("JCODE_OPENAI_API_BASE");
+    let _a = EnvVarGuard::remove("KCODE_OPENAI_API_BASE");
     let _b = EnvVarGuard::remove("OPENAI_BASE_URL");
     let _c = EnvVarGuard::remove("OPENAI_API_BASE");
 
     // Default.
     assert_eq!(OpenAIProvider::resolve_api_base(), OPENAI_API_BASE);
 
-    // JCODE_OPENAI_API_BASE wins over OPENAI_BASE_URL / OPENAI_API_BASE.
+    // KCODE_OPENAI_API_BASE wins over OPENAI_BASE_URL / OPENAI_API_BASE.
     let _p1 = EnvVarGuard::set("OPENAI_API_BASE", "https://c.example/v1");
     let _p2 = EnvVarGuard::set("OPENAI_BASE_URL", "https://b.example/v1");
-    let _p3 = EnvVarGuard::set("JCODE_OPENAI_API_BASE", "https://a.example/v1");
+    let _p3 = EnvVarGuard::set("KCODE_OPENAI_API_BASE", "https://a.example/v1");
     assert_eq!(OpenAIProvider::resolve_api_base(), "https://a.example/v1");
 
     // A trailing /responses is trimmed so callers don't double it.
-    let _p4 = EnvVarGuard::set("JCODE_OPENAI_API_BASE", "https://a.example/v1/responses");
+    let _p4 = EnvVarGuard::set("KCODE_OPENAI_API_BASE", "https://a.example/v1/responses");
     assert_eq!(OpenAIProvider::resolve_api_base(), "https://a.example/v1");
 
     // Non-URL values are ignored, falling through to the next candidate.
-    let _p5 = EnvVarGuard::set("JCODE_OPENAI_API_BASE", "not-a-url");
+    let _p5 = EnvVarGuard::set("KCODE_OPENAI_API_BASE", "not-a-url");
     assert_eq!(OpenAIProvider::resolve_api_base(), "https://b.example/v1");
+}
+
+#[test]
+fn test_ultrafast_service_tier_round_trips_into_request_payload() {
+    let provider = OpenAIProvider::new(CodexCredentials {
+        access_token: "test".to_string(),
+        refresh_token: String::new(),
+        id_token: None,
+        account_id: None,
+        expires_at: None,
+    });
+    // Write the model directly: set_model validates against the machine's
+    // cached account catalog, which is not what this test is about.
+    *provider.model.try_write().unwrap() = "gpt-6-astra".to_string();
+    assert_eq!(
+        provider.available_service_tiers(),
+        vec!["priority", "ultrafast", "flex"]
+    );
+
+    for alias in ["ultrafast", "ultra", "Ultra-Fast"] {
+        provider.set_service_tier(alias).unwrap();
+        assert_eq!(provider.service_tier().as_deref(), Some("ultrafast"));
+    }
+    let request = provider.response_request_for_model("gpt-6-astra", &[], &[], "sys", true);
+    assert_eq!(request["service_tier"], serde_json::json!("ultrafast"));
+
+    provider.set_service_tier("off").unwrap();
+    assert_eq!(provider.service_tier(), None);
+    let request = provider.response_request_for_model("gpt-6-astra", &[], &[], "sys", true);
+    assert!(request.get("service_tier").is_none());
+
+    *provider.model.try_write().unwrap() = "gpt-5.5".to_string();
+    assert_eq!(provider.available_service_tiers(), vec!["priority", "flex"]);
+}
+
+fn api_key_creds(key: &str) -> CodexCredentials {
+    CodexCredentials {
+        access_token: key.to_string(),
+        refresh_token: String::new(),
+        id_token: None,
+        account_id: None,
+        expires_at: None,
+    }
+}
+
+fn oauth_creds() -> CodexCredentials {
+    CodexCredentials {
+        access_token: "oauth-access".to_string(),
+        refresh_token: "oauth-refresh".to_string(),
+        id_token: None,
+        account_id: Some("acct".to_string()),
+        expires_at: None,
+    }
+}
+
+/// Regression: the ChatGPT/Codex OAuth catalog and the platform API-key
+/// catalog used to share one per-account scope. Whichever refresh landed last
+/// overwrote the other, so selecting `openai-api:<api-only model>` failed with
+/// "Unsupported OpenAI model" right after an OAuth catalog refresh.
+#[test]
+fn oauth_catalog_refresh_does_not_clobber_api_key_catalog() {
+    let _guard = jcode_base::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set_path("KCODE_HOME", temp.path());
+    jcode_base::auth::codex::set_active_account_override(Some("split-scope".to_string()));
+
+    let api = OpenAIProvider::new(api_key_creds("sk-split-scope-test"));
+    let oauth = OpenAIProvider::new(oauth_creds());
+    let api_scope = api.catalog_scope();
+    let oauth_scope = oauth.catalog_scope();
+    assert_ne!(api_scope, oauth_scope);
+    assert!(!api_scope.contains("sk-split-scope-test"), "raw key leaked into scope");
+
+    // API-key refresh lists an API-only model, then an OAuth refresh lands.
+    jcode_base::provider::populate_account_models_for_scope(
+        &api_scope,
+        vec!["gpt-5.5".into(), "gpt-split-api-only".into()],
+    );
+    jcode_base::provider::populate_account_models_for_scope(
+        &oauth_scope,
+        vec!["gpt-5.5".into(), "gpt-split-oauth-only".into()],
+    );
+
+    api.set_model("gpt-split-api-only")
+        .expect("API-key runtime must validate against its own catalog");
+    let err = api.set_model("gpt-split-oauth-only").unwrap_err().to_string();
+    assert!(err.contains("Unsupported OpenAI model"), "{err}");
+
+    oauth
+        .set_model("gpt-split-oauth-only")
+        .expect("OAuth runtime must validate against its own catalog");
+    let err = oauth.set_model("gpt-split-api-only").unwrap_err().to_string();
+    assert!(err.contains("Unsupported OpenAI model"), "{err}");
+
+    // A runtime unavailability marker on one route must not hide the model on
+    // the other route.
+    jcode_base::provider::record_model_unavailable_for_scope(&oauth_scope, "gpt-5.5", "denied");
+    assert!(api.set_model("gpt-5.5").is_ok());
+
+    jcode_base::auth::codex::set_active_account_override(None);
+}
+
+#[test]
+fn openai_api_key_scope_is_per_key() {
+    let a = OpenAIProvider::catalog_scope_for(&api_key_creds("sk-key-a"));
+    let b = OpenAIProvider::catalog_scope_for(&api_key_creds("sk-key-b"));
+    assert_ne!(a, b);
+    assert_eq!(a, OpenAIProvider::catalog_scope_for(&api_key_creds(" sk-key-a ")));
 }

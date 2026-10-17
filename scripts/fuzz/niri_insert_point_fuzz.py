@@ -2,7 +2,7 @@
 
 Run:  python3 scripts/fuzz/niri_insert_point_fuzz.py <seed> <count>
 
-Emits niri-valid configs to ~/.jcode/scratch/fuzz719/valid_inputs.json. Feed
+Emits niri-valid configs to ~/.kcode/scratch/fuzz719/valid_inputs.json. Feed
 that to the committed corpus in
 crates/jcode-setup-hints/src/linux_niri_fuzz_corpus.txt to widen coverage.
 
@@ -26,7 +26,7 @@ OPEN, CLOSE, NL, Q, HASH, BS = chr(123), chr(125), chr(10), chr(34), chr(35), ch
 BC_O, BC_C = '/' + '*', '*' + '/'
 LC = '/' + '/'
 
-WORK = pathlib.Path.home() / '.jcode' / 'scratch' / 'fuzz719'
+WORK = pathlib.Path.home() / '.kcode' / 'scratch' / 'fuzz719'
 WORK.mkdir(parents=True, exist_ok=True)
 
 

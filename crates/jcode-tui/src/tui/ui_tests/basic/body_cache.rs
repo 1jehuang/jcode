@@ -1113,6 +1113,21 @@ fn test_prefix_reuse_truncation_matches_full_build() {
 #[cfg(unix)]
 #[test]
 fn test_prepare_body_with_math_never_blocks_on_a_stalled_tex_toolchain() {
+    // Earlier tests can cache a missing toolchain. Exercise the real probe and
+    // worker in a fresh process, not that process-global cached result.
+    if std::env::var_os("KCODE_STALLED_TEX_TEST_CHILD").is_none() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tui::ui::tests::basic::test_prepare_body_with_math_never_blocks_on_a_stalled_tex_toolchain",
+                "--nocapture",
+            ])
+            .env("KCODE_STALLED_TEX_TEST_CHILD", "1")
+            .status()
+            .unwrap();
+        assert!(status.success(), "isolated stalled TeX regression failed");
+        return;
+    }
     use std::io::Write as _;
     use std::os::unix::fs::PermissionsExt as _;
 
@@ -1124,10 +1139,10 @@ fn test_prepare_body_with_math_never_blocks_on_a_stalled_tex_toolchain() {
     std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
     // SAFETY: read only by the render and worker threads spawned below.
     unsafe {
-        std::env::set_var("JCODE_LATEX_COMMAND", &stub);
-        std::env::set_var("JCODE_DVIPNG_COMMAND", &stub);
-        std::env::set_var("JCODE_PDFLATEX_COMMAND", &stub);
-        std::env::set_var("JCODE_PDFTOCAIRO_COMMAND", &stub);
+        std::env::set_var("KCODE_LATEX_COMMAND", &stub);
+        std::env::set_var("KCODE_DVIPNG_COMMAND", &stub);
+        std::env::set_var("KCODE_PDFLATEX_COMMAND", &stub);
+        std::env::set_var("KCODE_PDFTOCAIRO_COMMAND", &stub);
     }
 
     // Unique formulas so no previously cached artifact short-circuits this.
@@ -1167,9 +1182,9 @@ fn test_prepare_body_with_math_never_blocks_on_a_stalled_tex_toolchain() {
     );
 
     unsafe {
-        std::env::remove_var("JCODE_LATEX_COMMAND");
-        std::env::remove_var("JCODE_DVIPNG_COMMAND");
-        std::env::remove_var("JCODE_PDFLATEX_COMMAND");
-        std::env::remove_var("JCODE_PDFTOCAIRO_COMMAND");
+        std::env::remove_var("KCODE_LATEX_COMMAND");
+        std::env::remove_var("KCODE_DVIPNG_COMMAND");
+        std::env::remove_var("KCODE_PDFLATEX_COMMAND");
+        std::env::remove_var("KCODE_PDFTOCAIRO_COMMAND");
     }
 }

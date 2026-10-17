@@ -4,13 +4,13 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo_root"
 
-bin=${JCODE_AUTH_MATRIX_BIN:-}
-out_dir=${JCODE_AUTH_MATRIX_OUT:-"$repo_root/target/auth-test-reports"}
-prompt=${JCODE_AUTH_MATRIX_PROMPT:-"Reply with exactly AUTH_TEST_OK and nothing else. Do not call tools."}
-providers=${JCODE_AUTH_MATRIX_PROVIDERS:-"claude copilot openrouter deepseek zai alibaba-coding-plan openai-compatible"}
-mode=${JCODE_AUTH_MATRIX_MODE:-configured}
-keep_going=${JCODE_AUTH_MATRIX_KEEP_GOING:-1}
-per_command_timeout=${JCODE_AUTH_MATRIX_TIMEOUT:-90}
+bin=${KCODE_AUTH_MATRIX_BIN:-}
+out_dir=${KCODE_AUTH_MATRIX_OUT:-"$repo_root/target/auth-test-reports"}
+prompt=${KCODE_AUTH_MATRIX_PROMPT:-"Reply with exactly AUTH_TEST_OK and nothing else. Do not call tools."}
+providers=${KCODE_AUTH_MATRIX_PROVIDERS:-"claude copilot openrouter deepseek zai alibaba-coding-plan openai-compatible"}
+mode=${KCODE_AUTH_MATRIX_MODE:-configured}
+keep_going=${KCODE_AUTH_MATRIX_KEEP_GOING:-1}
+per_command_timeout=${KCODE_AUTH_MATRIX_TIMEOUT:-90}
 
 usage() {
   cat <<'EOF'
@@ -34,20 +34,20 @@ Options:
   -h, --help            Show this help
 
 Environment equivalents:
-  JCODE_AUTH_MATRIX_BIN=/path/to/jcode
-  JCODE_AUTH_MATRIX_OUT=target/auth-test-reports
-  JCODE_AUTH_MATRIX_PROVIDERS="claude deepseek zai"
-  JCODE_AUTH_MATRIX_MODE=configured|all
-  JCODE_AUTH_MATRIX_LOGIN=1
-  JCODE_AUTH_MATRIX_NO_SMOKE=1
-  JCODE_AUTH_MATRIX_NO_TOOL_SMOKE=1
-  JCODE_AUTH_MATRIX_KEEP_GOING=0
-  JCODE_AUTH_MATRIX_TIMEOUT=90
+  KCODE_AUTH_MATRIX_BIN=/path/to/jcode
+  KCODE_AUTH_MATRIX_OUT=target/auth-test-reports
+  KCODE_AUTH_MATRIX_PROVIDERS="claude deepseek zai"
+  KCODE_AUTH_MATRIX_MODE=configured|all
+  KCODE_AUTH_MATRIX_LOGIN=1
+  KCODE_AUTH_MATRIX_NO_SMOKE=1
+  KCODE_AUTH_MATRIX_NO_TOOL_SMOKE=1
+  KCODE_AUTH_MATRIX_KEEP_GOING=0
+  KCODE_AUTH_MATRIX_TIMEOUT=90
 
 Examples:
   scripts/auth_regression_matrix.sh --configured --no-smoke
   scripts/auth_regression_matrix.sh --provider deepseek --provider zai
-  JCODE_AUTH_MATRIX_BIN=target/selfdev/jcode scripts/auth_regression_matrix.sh --all
+  KCODE_AUTH_MATRIX_BIN=target/selfdev/jcode scripts/auth_regression_matrix.sh --all
 EOF
 }
 
@@ -116,13 +116,13 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ "${JCODE_AUTH_MATRIX_LOGIN:-0}" == "1" ]]; then
+if [[ "${KCODE_AUTH_MATRIX_LOGIN:-0}" == "1" ]]; then
   extra_args+=(--login)
 fi
-if [[ "${JCODE_AUTH_MATRIX_NO_SMOKE:-0}" == "1" ]]; then
+if [[ "${KCODE_AUTH_MATRIX_NO_SMOKE:-0}" == "1" ]]; then
   extra_args+=(--no-smoke)
 fi
-if [[ "${JCODE_AUTH_MATRIX_NO_TOOL_SMOKE:-0}" == "1" ]]; then
+if [[ "${KCODE_AUTH_MATRIX_NO_TOOL_SMOKE:-0}" == "1" ]]; then
   extra_args+=(--no-tool-smoke)
 fi
 

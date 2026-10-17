@@ -264,7 +264,7 @@ fn fuzz_visible_text_parity() {
 // A tiny xorshift PRNG drives a recursive markdown generator. Each generated
 // document is rendered by both the shared core and the legacy renderer; their
 // flattened visible text must match. Iteration count is controlled by the
-// JCODE_MD_FUZZ_ITERS env var (default 5000) so CI stays fast while local deep
+// KCODE_MD_FUZZ_ITERS env var (default 5000) so CI stays fast while local deep
 // runs can crank it up.
 
 struct Rng(u64);
@@ -443,11 +443,11 @@ fn gen_document(rng: &mut Rng) -> String {
 
 #[test]
 fn fuzz_random_documents_parity() {
-    let iters: u64 = std::env::var("JCODE_MD_FUZZ_ITERS")
+    let iters: u64 = std::env::var("KCODE_MD_FUZZ_ITERS")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(5000);
-    let base_seed: u64 = std::env::var("JCODE_MD_FUZZ_SEED")
+    let base_seed: u64 = std::env::var("KCODE_MD_FUZZ_SEED")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(0x9E3779B97F4A7C15);
@@ -484,11 +484,11 @@ fn fuzz_random_documents_parity() {
 /// whitespace-collapsed content.
 #[test]
 fn fuzz_random_documents_line_structure() {
-    let iters: u64 = std::env::var("JCODE_MD_FUZZ_ITERS")
+    let iters: u64 = std::env::var("KCODE_MD_FUZZ_ITERS")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(5000);
-    let base_seed: u64 = std::env::var("JCODE_MD_FUZZ_SEED")
+    let base_seed: u64 = std::env::var("KCODE_MD_FUZZ_SEED")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(0x1234_5678_9ABC_DEF0);
@@ -523,11 +523,11 @@ fn fuzz_random_documents_line_structure() {
 #[test]
 fn fuzz_random_documents_wrapped_parity() {
     use crate::render_markdown_via_core_wrapped;
-    let iters: u64 = std::env::var("JCODE_MD_FUZZ_ITERS")
+    let iters: u64 = std::env::var("KCODE_MD_FUZZ_ITERS")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(3000);
-    let base_seed: u64 = std::env::var("JCODE_MD_FUZZ_SEED")
+    let base_seed: u64 = std::env::var("KCODE_MD_FUZZ_SEED")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(0xCAFE_F00D_DEAD_BEEF);

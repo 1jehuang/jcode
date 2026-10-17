@@ -3,7 +3,7 @@
 /// Preexec hook (runs before each command).
 pub const ZSH_PREEXEC: &str = r#"__jcode_preexec() {
     printf '\033]133;B\007'
-    __JCODE_CMD_START=$(date +%s%N)
+    __KCODE_CMD_START=$(date +%s%N)
 }
 "#;
 
@@ -29,7 +29,7 @@ pub const ZSH_INIT: &str = r#"# jcode shell integration for zsh
 
 __jcode_preexec() {
     printf '\033]133;B\007'
-    __JCODE_CMD_START=$(date +%s%N)
+    __KCODE_CMD_START=$(date +%s%N)
 }
 
 __jcode_precmd() {

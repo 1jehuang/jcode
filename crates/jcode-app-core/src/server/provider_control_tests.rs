@@ -1,3 +1,4 @@
+#![cfg_attr(test, allow(clippy::await_holding_lock))]
 use super::*;
 use crate::message::{Message, StreamEvent, ToolDefinition};
 use crate::provider::{EventStream, ModelRoute, Provider};
@@ -8,6 +9,34 @@ use std::pin::Pin;
 use std::sync::RwLock as StdRwLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex as StdMutex, MutexGuard as StdMutexGuard};
+
+#[tokio::test]
+async fn invalidate_openai_usage_acknowledges_after_clearing_pinned_daemon_cooldown() {
+    let _guard = crate::storage::lock_test_env();
+    let target = "daemon-reset-target";
+    let other = "daemon-reset-other";
+    crate::auth::codex::set_active_account_override(Some(target.to_string()));
+    crate::provider::record_provider_unavailable_for_account("openai", "target quota exhausted");
+    crate::auth::codex::set_active_account_override(Some(other.to_string()));
+    crate::provider::record_provider_unavailable_for_account("openai", "other quota exhausted");
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    for id in [51, 52] {
+        handle_invalidate_openai_usage(id, Some(target.to_string()), &tx).await;
+        assert!(matches!(rx.try_recv(), Ok(ServerEvent::Done { id: ack }) if ack == id));
+        assert!(rx.try_recv().is_err());
+        assert_eq!(
+            crate::auth::codex::active_account_label().as_deref(),
+            Some(other)
+        );
+        assert!(crate::provider::provider_unavailability_detail_for_account("openai").is_some());
+        crate::auth::codex::set_active_account_override(Some(target.to_string()));
+        assert!(crate::provider::provider_unavailability_detail_for_account("openai").is_none());
+        crate::auth::codex::set_active_account_override(Some(other.to_string()));
+    }
+    crate::provider::clear_openai_provider_unavailability_for_account_label(Some(other));
+    crate::auth::codex::set_active_account_override(None);
+}
 
 async fn recv_final_catalog_notification(rx: &mut mpsc::UnboundedReceiver<ServerEvent>) -> String {
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -244,11 +273,11 @@ struct EnvGuard {
 }
 
 impl EnvGuard {
-    /// Save and clear the given env vars, and redirect `JCODE_HOME` to a fresh
+    /// Save and clear the given env vars, and redirect `KCODE_HOME` to a fresh
     /// empty temp dir for the lifetime of the guard.
     ///
     /// The temp home keeps these tests hermetic: provider activation reads
-    /// on-disk model catalog caches (`~/.jcode/cache/<profile>_models.json`) to
+    /// on-disk model catalog caches (`~/.kcode/cache/<profile>_models.json`) to
     /// pick a profile's newest default model, so without an isolated home the
     /// host's real caches leak in and a stale or non-chat model (e.g. Groq's
     /// `canopylabs/orpheus-*` TTS) can be auto-selected, breaking the test on
@@ -256,8 +285,8 @@ impl EnvGuard {
     fn save(keys: &[&'static str]) -> Self {
         let lock = lock_env();
         let mut all_keys: Vec<&'static str> = keys.to_vec();
-        if !all_keys.contains(&"JCODE_HOME") {
-            all_keys.push("JCODE_HOME");
+        if !all_keys.contains(&"KCODE_HOME") {
+            all_keys.push("KCODE_HOME");
         }
         let saved = all_keys
             .iter()
@@ -266,8 +295,8 @@ impl EnvGuard {
         for key in &all_keys {
             crate::env::remove_var(key);
         }
-        let temp_home = tempfile::tempdir().expect("create temp JCODE_HOME");
-        crate::env::set_var("JCODE_HOME", temp_home.path());
+        let temp_home = tempfile::tempdir().expect("create temp KCODE_HOME");
+        crate::env::set_var("KCODE_HOME", temp_home.path());
         Self {
             saved,
             _temp_home: temp_home,
@@ -551,19 +580,19 @@ async fn notify_auth_changed_with_azure_hint_applies_runtime_model_without_compl
         "AZURE_OPENAI_MODEL",
         "AZURE_OPENAI_API_KEY",
         "AZURE_OPENAI_USE_ENTRA",
-        "JCODE_OPENROUTER_API_BASE",
-        "JCODE_OPENROUTER_API_KEY_NAME",
-        "JCODE_OPENROUTER_ENV_FILE",
-        "JCODE_OPENROUTER_CACHE_NAMESPACE",
-        "JCODE_OPENROUTER_PROVIDER_FEATURES",
-        "JCODE_OPENROUTER_TRANSPORT_STATE",
-        "JCODE_OPENROUTER_MODEL_CATALOG",
-        "JCODE_OPENROUTER_AUTH_HEADER",
-        "JCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
-        "JCODE_OPENROUTER_MODEL",
-        "JCODE_RUNTIME_PROVIDER",
-        "JCODE_ACTIVE_PROVIDER",
-        "JCODE_INITIAL_PROVIDER_EXPLICIT",
+        "KCODE_OPENROUTER_API_BASE",
+        "KCODE_OPENROUTER_API_KEY_NAME",
+        "KCODE_OPENROUTER_ENV_FILE",
+        "KCODE_OPENROUTER_CACHE_NAMESPACE",
+        "KCODE_OPENROUTER_PROVIDER_FEATURES",
+        "KCODE_OPENROUTER_TRANSPORT_STATE",
+        "KCODE_OPENROUTER_MODEL_CATALOG",
+        "KCODE_OPENROUTER_AUTH_HEADER",
+        "KCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
+        "KCODE_OPENROUTER_MODEL",
+        "KCODE_RUNTIME_PROVIDER",
+        "KCODE_ACTIVE_PROVIDER",
+        "KCODE_INITIAL_PROVIDER_EXPLICIT",
     ]);
     crate::env::set_var("AZURE_OPENAI_ENDPOINT", "https://example.openai.azure.com");
     crate::env::set_var("AZURE_OPENAI_MODEL", "azure-deployment");
@@ -631,11 +660,11 @@ async fn notify_auth_changed_with_azure_hint_applies_runtime_model_without_compl
             .any(|model| model == "azure-deployment")
     );
     assert_eq!(
-        std::env::var("JCODE_RUNTIME_PROVIDER").as_deref(),
+        std::env::var("KCODE_RUNTIME_PROVIDER").as_deref(),
         Ok("azure-openai")
     );
     assert_eq!(
-        std::env::var("JCODE_ACTIVE_PROVIDER").as_deref(),
+        std::env::var("KCODE_ACTIVE_PROVIDER").as_deref(),
         Ok("openrouter")
     );
     assert_eq!(
@@ -648,19 +677,19 @@ async fn notify_auth_changed_with_azure_hint_applies_runtime_model_without_compl
 #[test]
 fn cerebras_auth_hint_applies_openai_compatible_runtime_profile() {
     let _guard = EnvGuard::save(&[
-        "JCODE_OPENROUTER_API_BASE",
-        "JCODE_OPENROUTER_API_KEY_NAME",
-        "JCODE_OPENROUTER_ENV_FILE",
-        "JCODE_OPENROUTER_CACHE_NAMESPACE",
-        "JCODE_OPENROUTER_PROVIDER_FEATURES",
-        "JCODE_OPENROUTER_TRANSPORT_STATE",
-        "JCODE_OPENROUTER_MODEL_CATALOG",
-        "JCODE_OPENROUTER_AUTH_HEADER",
-        "JCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
-        "JCODE_OPENROUTER_MODEL",
-        "JCODE_RUNTIME_PROVIDER",
-        "JCODE_ACTIVE_PROVIDER",
-        "JCODE_INITIAL_PROVIDER_EXPLICIT",
+        "KCODE_OPENROUTER_API_BASE",
+        "KCODE_OPENROUTER_API_KEY_NAME",
+        "KCODE_OPENROUTER_ENV_FILE",
+        "KCODE_OPENROUTER_CACHE_NAMESPACE",
+        "KCODE_OPENROUTER_PROVIDER_FEATURES",
+        "KCODE_OPENROUTER_TRANSPORT_STATE",
+        "KCODE_OPENROUTER_MODEL_CATALOG",
+        "KCODE_OPENROUTER_AUTH_HEADER",
+        "KCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
+        "KCODE_OPENROUTER_MODEL",
+        "KCODE_RUNTIME_PROVIDER",
+        "KCODE_ACTIVE_PROVIDER",
+        "KCODE_INITIAL_PROVIDER_EXPLICIT",
     ]);
 
     let request =
@@ -671,27 +700,27 @@ fn cerebras_auth_hint_applies_openai_compatible_runtime_profile() {
     let default_model = activation.activated_model.as_deref();
     assert_eq!(default_model, Some("gpt-oss-120b"));
     assert_eq!(
-        std::env::var("JCODE_RUNTIME_PROVIDER").as_deref(),
+        std::env::var("KCODE_RUNTIME_PROVIDER").as_deref(),
         Ok("openai-compatible")
     );
     assert_eq!(
-        std::env::var("JCODE_ACTIVE_PROVIDER").as_deref(),
+        std::env::var("KCODE_ACTIVE_PROVIDER").as_deref(),
         Ok("openrouter")
     );
     assert_eq!(
-        std::env::var("JCODE_OPENROUTER_API_BASE").as_deref(),
+        std::env::var("KCODE_OPENROUTER_API_BASE").as_deref(),
         Ok("https://api.cerebras.ai/v1")
     );
     assert_eq!(
-        std::env::var("JCODE_OPENROUTER_API_KEY_NAME").as_deref(),
+        std::env::var("KCODE_OPENROUTER_API_KEY_NAME").as_deref(),
         Ok("CEREBRAS_API_KEY")
     );
     assert_eq!(
-        std::env::var("JCODE_OPENROUTER_ENV_FILE").as_deref(),
+        std::env::var("KCODE_OPENROUTER_ENV_FILE").as_deref(),
         Ok("cerebras.env")
     );
     assert_eq!(
-        std::env::var("JCODE_OPENROUTER_CACHE_NAMESPACE").as_deref(),
+        std::env::var("KCODE_OPENROUTER_CACHE_NAMESPACE").as_deref(),
         Ok("cerebras")
     );
     assert_eq!(
@@ -703,19 +732,19 @@ fn cerebras_auth_hint_applies_openai_compatible_runtime_profile() {
 #[tokio::test]
 async fn notify_auth_changed_typed_cerebras_event_controls_user_visible_catalog_identity() {
     let _guard = EnvGuard::save(&[
-        "JCODE_OPENROUTER_API_BASE",
-        "JCODE_OPENROUTER_API_KEY_NAME",
-        "JCODE_OPENROUTER_ENV_FILE",
-        "JCODE_OPENROUTER_CACHE_NAMESPACE",
-        "JCODE_OPENROUTER_PROVIDER_FEATURES",
-        "JCODE_OPENROUTER_TRANSPORT_STATE",
-        "JCODE_OPENROUTER_MODEL_CATALOG",
-        "JCODE_OPENROUTER_AUTH_HEADER",
-        "JCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
-        "JCODE_OPENROUTER_MODEL",
-        "JCODE_RUNTIME_PROVIDER",
-        "JCODE_ACTIVE_PROVIDER",
-        "JCODE_INITIAL_PROVIDER_EXPLICIT",
+        "KCODE_OPENROUTER_API_BASE",
+        "KCODE_OPENROUTER_API_KEY_NAME",
+        "KCODE_OPENROUTER_ENV_FILE",
+        "KCODE_OPENROUTER_CACHE_NAMESPACE",
+        "KCODE_OPENROUTER_PROVIDER_FEATURES",
+        "KCODE_OPENROUTER_TRANSPORT_STATE",
+        "KCODE_OPENROUTER_MODEL_CATALOG",
+        "KCODE_OPENROUTER_AUTH_HEADER",
+        "KCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
+        "KCODE_OPENROUTER_MODEL",
+        "KCODE_RUNTIME_PROVIDER",
+        "KCODE_ACTIVE_PROVIDER",
+        "KCODE_INITIAL_PROVIDER_EXPLICIT",
     ]);
 
     crate::bus::reset_models_updated_publish_state_for_tests();
@@ -776,7 +805,7 @@ async fn notify_auth_changed_typed_cerebras_event_controls_user_visible_catalog_
     );
     assert_eq!(final_message.lines().count(), 2);
     assert_eq!(
-        std::env::var("JCODE_OPENROUTER_CACHE_NAMESPACE").as_deref(),
+        std::env::var("KCODE_OPENROUTER_CACHE_NAMESPACE").as_deref(),
         Ok("cerebras")
     );
 }
@@ -784,19 +813,19 @@ async fn notify_auth_changed_typed_cerebras_event_controls_user_visible_catalog_
 #[tokio::test]
 async fn notify_auth_changed_switches_from_stale_model_to_matching_provider_route() {
     let _guard = EnvGuard::save(&[
-        "JCODE_OPENROUTER_API_BASE",
-        "JCODE_OPENROUTER_API_KEY_NAME",
-        "JCODE_OPENROUTER_ENV_FILE",
-        "JCODE_OPENROUTER_CACHE_NAMESPACE",
-        "JCODE_OPENROUTER_PROVIDER_FEATURES",
-        "JCODE_OPENROUTER_TRANSPORT_STATE",
-        "JCODE_OPENROUTER_MODEL_CATALOG",
-        "JCODE_OPENROUTER_AUTH_HEADER",
-        "JCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
-        "JCODE_OPENROUTER_MODEL",
-        "JCODE_RUNTIME_PROVIDER",
-        "JCODE_ACTIVE_PROVIDER",
-        "JCODE_INITIAL_PROVIDER_EXPLICIT",
+        "KCODE_OPENROUTER_API_BASE",
+        "KCODE_OPENROUTER_API_KEY_NAME",
+        "KCODE_OPENROUTER_ENV_FILE",
+        "KCODE_OPENROUTER_CACHE_NAMESPACE",
+        "KCODE_OPENROUTER_PROVIDER_FEATURES",
+        "KCODE_OPENROUTER_TRANSPORT_STATE",
+        "KCODE_OPENROUTER_MODEL_CATALOG",
+        "KCODE_OPENROUTER_AUTH_HEADER",
+        "KCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
+        "KCODE_OPENROUTER_MODEL",
+        "KCODE_RUNTIME_PROVIDER",
+        "KCODE_ACTIVE_PROVIDER",
+        "KCODE_INITIAL_PROVIDER_EXPLICIT",
     ]);
 
     crate::bus::reset_models_updated_publish_state_for_tests();
@@ -863,9 +892,9 @@ async fn notify_auth_changed_switches_from_stale_model_to_matching_provider_rout
 #[tokio::test]
 async fn onboarding_auth_refresh_prefers_global_gpt_5_6_route_over_fable() {
     let _guard = EnvGuard::save(&[
-        "JCODE_RUNTIME_PROVIDER",
-        "JCODE_ACTIVE_PROVIDER",
-        "JCODE_INITIAL_PROVIDER_EXPLICIT",
+        "KCODE_RUNTIME_PROVIDER",
+        "KCODE_ACTIVE_PROVIDER",
+        "KCODE_INITIAL_PROVIDER_EXPLICIT",
     ]);
     crate::bus::reset_models_updated_publish_state_for_tests();
 
@@ -927,19 +956,19 @@ async fn onboarding_auth_refresh_prefers_global_gpt_5_6_route_over_fable() {
 #[tokio::test]
 async fn notify_auth_changed_does_not_override_manual_model_selected_during_refresh() {
     let _guard = EnvGuard::save(&[
-        "JCODE_OPENROUTER_API_BASE",
-        "JCODE_OPENROUTER_API_KEY_NAME",
-        "JCODE_OPENROUTER_ENV_FILE",
-        "JCODE_OPENROUTER_CACHE_NAMESPACE",
-        "JCODE_OPENROUTER_PROVIDER_FEATURES",
-        "JCODE_OPENROUTER_TRANSPORT_STATE",
-        "JCODE_OPENROUTER_MODEL_CATALOG",
-        "JCODE_OPENROUTER_AUTH_HEADER",
-        "JCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
-        "JCODE_OPENROUTER_MODEL",
-        "JCODE_RUNTIME_PROVIDER",
-        "JCODE_ACTIVE_PROVIDER",
-        "JCODE_INITIAL_PROVIDER_EXPLICIT",
+        "KCODE_OPENROUTER_API_BASE",
+        "KCODE_OPENROUTER_API_KEY_NAME",
+        "KCODE_OPENROUTER_ENV_FILE",
+        "KCODE_OPENROUTER_CACHE_NAMESPACE",
+        "KCODE_OPENROUTER_PROVIDER_FEATURES",
+        "KCODE_OPENROUTER_TRANSPORT_STATE",
+        "KCODE_OPENROUTER_MODEL_CATALOG",
+        "KCODE_OPENROUTER_AUTH_HEADER",
+        "KCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
+        "KCODE_OPENROUTER_MODEL",
+        "KCODE_RUNTIME_PROVIDER",
+        "KCODE_ACTIVE_PROVIDER",
+        "KCODE_INITIAL_PROVIDER_EXPLICIT",
     ]);
 
     crate::bus::reset_models_updated_publish_state_for_tests();
@@ -1054,19 +1083,19 @@ async fn auth_model_first_prompt_e2e_state_space_is_bounded_by_selection_source(
 
     for scenario in scenarios {
         let _guard = EnvGuard::save(&[
-            "JCODE_OPENROUTER_API_BASE",
-            "JCODE_OPENROUTER_API_KEY_NAME",
-            "JCODE_OPENROUTER_ENV_FILE",
-            "JCODE_OPENROUTER_CACHE_NAMESPACE",
-            "JCODE_OPENROUTER_PROVIDER_FEATURES",
-            "JCODE_OPENROUTER_TRANSPORT_STATE",
-            "JCODE_OPENROUTER_MODEL_CATALOG",
-            "JCODE_OPENROUTER_AUTH_HEADER",
-            "JCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
-            "JCODE_OPENROUTER_MODEL",
-            "JCODE_RUNTIME_PROVIDER",
-            "JCODE_ACTIVE_PROVIDER",
-            "JCODE_INITIAL_PROVIDER_EXPLICIT",
+            "KCODE_OPENROUTER_API_BASE",
+            "KCODE_OPENROUTER_API_KEY_NAME",
+            "KCODE_OPENROUTER_ENV_FILE",
+            "KCODE_OPENROUTER_CACHE_NAMESPACE",
+            "KCODE_OPENROUTER_PROVIDER_FEATURES",
+            "KCODE_OPENROUTER_TRANSPORT_STATE",
+            "KCODE_OPENROUTER_MODEL_CATALOG",
+            "KCODE_OPENROUTER_AUTH_HEADER",
+            "KCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
+            "KCODE_OPENROUTER_MODEL",
+            "KCODE_RUNTIME_PROVIDER",
+            "KCODE_ACTIVE_PROVIDER",
+            "KCODE_INITIAL_PROVIDER_EXPLICIT",
         ]);
 
         crate::bus::reset_models_updated_publish_state_for_tests();
@@ -1226,19 +1255,19 @@ async fn auth_model_first_prompt_e2e_state_space_is_bounded_by_selection_source(
 #[tokio::test]
 async fn notify_auth_changed_switches_only_current_session_model() {
     let _guard = EnvGuard::save(&[
-        "JCODE_OPENROUTER_API_BASE",
-        "JCODE_OPENROUTER_API_KEY_NAME",
-        "JCODE_OPENROUTER_ENV_FILE",
-        "JCODE_OPENROUTER_CACHE_NAMESPACE",
-        "JCODE_OPENROUTER_PROVIDER_FEATURES",
-        "JCODE_OPENROUTER_TRANSPORT_STATE",
-        "JCODE_OPENROUTER_MODEL_CATALOG",
-        "JCODE_OPENROUTER_AUTH_HEADER",
-        "JCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
-        "JCODE_OPENROUTER_MODEL",
-        "JCODE_RUNTIME_PROVIDER",
-        "JCODE_ACTIVE_PROVIDER",
-        "JCODE_INITIAL_PROVIDER_EXPLICIT",
+        "KCODE_OPENROUTER_API_BASE",
+        "KCODE_OPENROUTER_API_KEY_NAME",
+        "KCODE_OPENROUTER_ENV_FILE",
+        "KCODE_OPENROUTER_CACHE_NAMESPACE",
+        "KCODE_OPENROUTER_PROVIDER_FEATURES",
+        "KCODE_OPENROUTER_TRANSPORT_STATE",
+        "KCODE_OPENROUTER_MODEL_CATALOG",
+        "KCODE_OPENROUTER_AUTH_HEADER",
+        "KCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
+        "KCODE_OPENROUTER_MODEL",
+        "KCODE_RUNTIME_PROVIDER",
+        "KCODE_ACTIVE_PROVIDER",
+        "KCODE_INITIAL_PROVIDER_EXPLICIT",
     ]);
 
     crate::bus::reset_models_updated_publish_state_for_tests();

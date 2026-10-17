@@ -152,7 +152,7 @@ impl CopilotApiToken {
 /// 5. ~/.config/github-copilot/hosts.json (legacy Copilot CLI)
 /// 6. ~/.config/github-copilot/apps.json (legacy VS Code)
 /// 7. trusted OpenCode/pi auth.json OAuth entries
-/// 8. optional `gh auth token` fallback when JCODE_COPILOT_ALLOW_GH_AUTH_TOKEN=1
+/// 8. optional `gh auth token` fallback when KCODE_COPILOT_ALLOW_GH_AUTH_TOKEN=1
 pub fn load_github_token() -> Result<String> {
     // Env vars first: cheap to read and they must win immediately when the
     // user changes them, so they are never served from (or shadowed by) the
@@ -214,12 +214,12 @@ pub fn load_github_token() -> Result<String> {
     anyhow::bail!(
         "GitHub Copilot token not found. \
          Set COPILOT_GITHUB_TOKEN/GH_TOKEN/GITHUB_TOKEN, run `jcode login --provider copilot`, \
-         or set JCODE_COPILOT_ALLOW_GH_AUTH_TOKEN=1 to explicitly reuse `gh auth token`."
+         or set KCODE_COPILOT_ALLOW_GH_AUTH_TOKEN=1 to explicitly reuse `gh auth token`."
     )
 }
 
 fn allow_gh_cli_fallback() -> bool {
-    std::env::var("JCODE_COPILOT_ALLOW_GH_AUTH_TOKEN")
+    std::env::var("KCODE_COPILOT_ALLOW_GH_AUTH_TOKEN")
         .ok()
         .map(|value| {
             let value = value.trim();
@@ -431,7 +431,7 @@ pub fn trust_external_auth_source(source: ExternalCopilotAuthSource) -> Result<(
 }
 
 fn copilot_cli_dir() -> PathBuf {
-    if let Ok(path) = std::env::var("JCODE_HOME") {
+    if let Ok(path) = std::env::var("KCODE_HOME") {
         return PathBuf::from(path).join("external").join(".copilot");
     }
 
@@ -440,7 +440,7 @@ fn copilot_cli_dir() -> PathBuf {
 }
 
 fn legacy_copilot_config_dir() -> PathBuf {
-    if let Ok(path) = std::env::var("JCODE_HOME") {
+    if let Ok(path) = std::env::var("KCODE_HOME") {
         return PathBuf::from(path)
             .join("external")
             .join(".config")
@@ -888,6 +888,36 @@ pub struct CopilotModelInfo {
 pub struct CopilotModelCapabilities {
     #[serde(default)]
     pub limits: Option<CopilotModelLimits>,
+    #[serde(default)]
+    pub supports: Option<CopilotModelSupports>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CopilotModelSupports {
+    /// Advertised reasoning effort levels, e.g. `["low","medium","high"]`.
+    #[serde(default)]
+    pub reasoning_effort: Option<Value>,
+}
+
+impl CopilotModelInfo {
+    /// Reasoning effort levels advertised in the catalog, lowercased.
+    /// Empty when the model does not advertise any.
+    pub fn reasoning_efforts(&self) -> Vec<String> {
+        let Some(Value::Array(levels)) = self
+            .capabilities
+            .as_ref()
+            .and_then(|c| c.supports.as_ref())
+            .and_then(|s| s.reasoning_effort.as_ref())
+        else {
+            return Vec::new();
+        };
+        levels
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(|v| v.trim().to_ascii_lowercase())
+            .filter(|v| !v.is_empty())
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -933,15 +963,63 @@ pub async fn fetch_available_models(
     Ok(models_resp.data)
 }
 
-/// Determine the best default model based on available models.
-/// - If claude-opus-4.6 is available -> paid tier -> use claude-opus-4.6
-/// - Otherwise -> free/basic tier -> use claude-sonnet-4.6 or claude-sonnet-4
+/// Determine the best default model from the live Copilot catalog.
+///
+/// Uses the same flagship-first ranking and new-release auto-promotion as every
+/// other provider's post-login selection, so the newest Claude/GPT flagship the
+/// account can access wins (e.g. `claude-opus-5.5` over `claude-opus-4.6`) without
+/// a code change per release. Picker-enabled models are preferred when the
+/// catalog marks any, since the rest are often embeddings or internal ids.
+/// Returns the Copilot catalog id (dot-separated), which is what the Copilot API
+/// accepts. Falls back to Sonnet when nothing in the catalog is recognized.
 pub fn choose_default_model(available_models: &[CopilotModelInfo]) -> String {
-    let model_ids: Vec<&str> = available_models.iter().map(|m| m.id.as_str()).collect();
+    let picker_enabled = available_models.iter().any(|m| m.model_picker_enabled);
+    let candidates: Vec<&str> = available_models
+        .iter()
+        .filter(|m| !picker_enabled || m.model_picker_enabled)
+        .map(|m| m.id.as_str())
+        .collect();
 
-    if model_ids.contains(&"claude-opus-4.6") {
-        "claude-opus-4.6".to_string()
-    } else if model_ids.contains(&"claude-sonnet-4.6") {
+    // Copilot ids are dot-separated (`claude-opus-4.6`); the shared ranking is
+    // keyed on canonical hyphenated ids (`claude-opus-4-6`). Rank canonical
+    // forms, then map the winner back to the original Copilot id.
+    let canonical_of = |id: &str| -> String {
+        jcode_provider_core::normalize_copilot_model_name(id)
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                if id.starts_with("claude-") {
+                    id.replace('.', "-")
+                } else {
+                    id.to_string()
+                }
+            })
+    };
+    let routes: Vec<crate::provider::ModelRoute> = candidates
+        .iter()
+        .filter(|id| id.starts_with("claude-") || id.starts_with("gpt-"))
+        .map(|id| crate::provider::ModelRoute {
+            model: canonical_of(id),
+            provider: "Copilot".to_string(),
+            api_method: "copilot".to_string(),
+            available: true,
+            detail: String::new(),
+            usage: None,
+            cheapness: None,
+        })
+        .collect();
+    let activation = crate::auth::lifecycle::AuthActivationResult {
+        provider_id: Some("copilot".to_string()),
+        ..Default::default()
+    };
+    if let Some(best) =
+        crate::auth::lifecycle::provider_model_to_select_after_auth(&activation, None, &routes)
+        && let Some(original) = candidates.iter().find(|id| canonical_of(id) == best)
+    {
+        return (*original).to_string();
+    }
+
+    let model_ids: Vec<&str> = available_models.iter().map(|m| m.id.as_str()).collect();
+    if model_ids.contains(&"claude-sonnet-4.6") {
         "claude-sonnet-4.6".to_string()
     } else {
         "claude-sonnet-4".to_string()

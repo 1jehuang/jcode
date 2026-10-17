@@ -1,7 +1,7 @@
 {
-  "name": "@1jehuang/jcode-sdk",
-  "version": "1.2.0",
-  "description": "TypeScript SDK for the jcode harness API (protocol v1)",
+  "name": "@kooshapari/kcode-sdk",
+  "version": "1.2.0-k0.1.0",
+  "description": "Local TypeScript SDK for the KCode harness API (protocol v1)",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
@@ -42,12 +42,12 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/1jehuang/jcode.git",
+    "url": "git+https://github.com/KooshaPari/KCode.git",
     "directory": "sdk/typescript"
   },
-  "homepage": "https://github.com/1jehuang/jcode/tree/main/sdk/typescript#readme",
+  "homepage": "https://github.com/KooshaPari/KCode/tree/master/sdk/typescript#readme",
   "bugs": {
-    "url": "https://github.com/1jehuang/jcode/issues"
+    "url": "https://github.com/KooshaPari/KCode/issues"
   },
   "author": "Jeremy Huang",
   "sideEffects": false,
@@ -58,12 +58,5 @@
     "ajv": "^8.20.0",
     "fast-uri": "^3.1.8"
   },
-  "optionalDependencies": {
-    "@1jehuang/jcode-darwin-arm64": "1.2.0",
-    "@1jehuang/jcode-darwin-x64": "1.2.0",
-    "@1jehuang/jcode-linux-arm64": "1.2.0",
-    "@1jehuang/jcode-linux-x64": "1.2.0",
-    "@1jehuang/jcode-win32-arm64": "1.2.0",
-    "@1jehuang/jcode-win32-x64": "1.2.0"
-  }
+  "private": true
 }

@@ -94,10 +94,10 @@ def main() -> int:
     env = os.environ.copy()
     # Live server and real home: catalog resolution is the thing under test, so a
     # throwaway home with no providers would skip it entirely.
-    runtime = Path(env.get("JCODE_RUNTIME_DIR") or f"/run/user/{os.getuid()}")
-    env["JCODE_SOCKET"] = env.get("JCODE_SOCKET") or str(runtime / "jcode.sock")
-    env["JCODE_DEBUG_CONTROL"] = "1"
-    debug_sock = runtime / "jcode-debug.sock"
+    runtime = Path(env.get("KCODE_RUNTIME_DIR") or f"/run/user/{os.getuid()}")
+    env["KCODE_SOCKET"] = env.get("KCODE_SOCKET") or str(runtime / "kcode.sock")
+    env["KCODE_DEBUG_CONTROL"] = "1"
+    debug_sock = runtime / "kcode-debug.sock"
     cmd_path, resp_path = run / "cmd", run / "resp"
 
     if not args.json:

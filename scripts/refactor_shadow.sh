@@ -7,23 +7,23 @@ umask 077
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 user_name="${USER:-$(id -un)}"
 runtime_dir="${XDG_RUNTIME_DIR:-/tmp}"
-default_home="${HOME}/.jcode-refactor"
+default_home="${HOME}/.kcode-refactor"
 default_socket="${runtime_dir}/jcode-refactor-${user_name}.sock"
 
-ref_home="${JCODE_REF_HOME:-$default_home}"
-ref_socket="${JCODE_REF_SOCKET:-$default_socket}"
-ref_profile="${JCODE_REF_PROFILE:-debug}"
+ref_home="${KCODE_REF_HOME:-$default_home}"
+ref_socket="${KCODE_REF_SOCKET:-$default_socket}"
+ref_profile="${KCODE_REF_PROFILE:-debug}"
 
 case "$ref_profile" in
   debug) default_bin="$repo_root/target/debug/jcode" ;;
   release) default_bin="$repo_root/target/release/jcode" ;;
   *)
-    printf 'error: unsupported JCODE_REF_PROFILE: %s (expected debug or release)\n' "$ref_profile" >&2
+    printf 'error: unsupported KCODE_REF_PROFILE: %s (expected debug or release)\n' "$ref_profile" >&2
     exit 1
     ;;
 esac
 
-ref_bin="${JCODE_REF_BIN:-$default_bin}"
+ref_bin="${KCODE_REF_BIN:-$default_bin}"
 
 usage() {
   cat <<'USAGE'
@@ -37,14 +37,14 @@ Usage:
 
 What it does:
   - Runs jcode in an isolated refactor environment
-  - Uses separate JCODE_HOME and JCODE_SOCKET
-  - Refuses to run against ~/.jcode to protect live sessions
+  - Uses separate KCODE_HOME and KCODE_SOCKET
+  - Refuses to run against ~/.kcode to protect live sessions
 
 Environment overrides:
-  JCODE_REF_HOME      Isolated home dir (default: ~/.jcode-refactor)
-  JCODE_REF_SOCKET    Isolated socket path
-  JCODE_REF_PROFILE   debug|release (default: debug)
-  JCODE_REF_BIN       Explicit jcode binary path
+  KCODE_REF_HOME      Isolated home dir (default: ~/.kcode-refactor)
+  KCODE_REF_SOCKET    Isolated socket path
+  KCODE_REF_PROFILE   debug|release (default: debug)
+  KCODE_REF_BIN       Explicit jcode binary path
 USAGE
 }
 
@@ -54,14 +54,14 @@ die() {
 }
 
 assert_safe_paths() {
-  [[ -n "$ref_home" ]] || die "JCODE_REF_HOME resolved to empty path"
-  [[ -n "$ref_socket" ]] || die "JCODE_REF_SOCKET resolved to empty path"
-  [[ "$ref_home" = /* ]] || die "JCODE_REF_HOME must be an absolute path: $ref_home"
-  [[ "$ref_socket" = /* ]] || die "JCODE_REF_SOCKET must be an absolute path: $ref_socket"
+  [[ -n "$ref_home" ]] || die "KCODE_REF_HOME resolved to empty path"
+  [[ -n "$ref_socket" ]] || die "KCODE_REF_SOCKET resolved to empty path"
+  [[ "$ref_home" = /* ]] || die "KCODE_REF_HOME must be an absolute path: $ref_home"
+  [[ "$ref_socket" = /* ]] || die "KCODE_REF_SOCKET must be an absolute path: $ref_socket"
 
-  local prod_home="${HOME}/.jcode"
+  local prod_home="${HOME}/.kcode"
   if [[ "$ref_home" == "$prod_home" ]]; then
-    die "refusing to run with production home ($prod_home); set JCODE_REF_HOME to an isolated path"
+    die "refusing to run with production home ($prod_home); set KCODE_REF_HOME to an isolated path"
   fi
 }
 
@@ -102,7 +102,7 @@ remove_stale_socket() {
 }
 
 run_isolated() {
-  JCODE_HOME="$ref_home" JCODE_SOCKET="$ref_socket" "$@"
+  KCODE_HOME="$ref_home" KCODE_SOCKET="$ref_socket" "$@"
 }
 
 normalize_args() {
@@ -114,13 +114,13 @@ normalize_args() {
 
 cmd_env() {
   cat <<EOF_OUT
-JCODE_REF_HOME=$ref_home
-JCODE_REF_SOCKET=$ref_socket
-JCODE_REF_PROFILE=$ref_profile
-JCODE_REF_BIN=$ref_bin
+KCODE_REF_HOME=$ref_home
+KCODE_REF_SOCKET=$ref_socket
+KCODE_REF_PROFILE=$ref_profile
+KCODE_REF_BIN=$ref_bin
 
 # One-off command example:
-JCODE_HOME=$ref_home JCODE_SOCKET=$ref_socket $ref_bin --version
+KCODE_HOME=$ref_home KCODE_SOCKET=$ref_socket $ref_bin --version
 EOF_OUT
 }
 

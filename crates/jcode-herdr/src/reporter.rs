@@ -94,8 +94,8 @@ impl HerdrReporter {
     pub fn new(agent_label: &str) -> Self {
         let env = HerdrEnv::capture();
         let source = format!("jcode:{agent_label}");
-        let idle_debounce_ms = parse_duration_env("HERDR_JCODE_IDLE_DEBOUNCE_MS", 250);
-        let retry_grace_ms = parse_duration_env("HERDR_JCODE_RETRY_GRACE_MS", 2500);
+        let idle_debounce_ms = parse_duration_env("HERDR_KCODE_IDLE_DEBOUNCE_MS", 250);
+        let retry_grace_ms = parse_duration_env("HERDR_KCODE_RETRY_GRACE_MS", 2500);
         Self {
             env,
             agent_label: agent_label.to_string(),

@@ -749,9 +749,9 @@ fn persist_auth_test_live_verification_event(
                 expected.push(crate::live_tests::checkpoints::TOOL_CALL_PARSE);
                 expected.push(crate::live_tests::checkpoints::TOOL_EXECUTION_LOOP);
                 expected.push(crate::live_tests::checkpoints::TOOL_RESULT_FOLLOWUP);
-                expected.push(crate::live_tests::checkpoints::REAL_JCODE_TOOL_SMOKE);
+                expected.push(crate::live_tests::checkpoints::REAL_KCODE_TOOL_SMOKE);
                 let stage = auth_test_step_stage(
-                    crate::live_tests::checkpoints::REAL_JCODE_TOOL_SMOKE,
+                    crate::live_tests::checkpoints::REAL_KCODE_TOOL_SMOKE,
                     step,
                 )
                 .with_evidence("tool_name", serde_json::json!(AUTH_TEST_TOOL_NAME))
@@ -809,7 +809,7 @@ fn persist_auth_test_live_verification_event(
 
 fn auth_test_coverage_provider_identity(report: &AuthTestProviderReport) -> (String, String) {
     if report.provider == "openai-compatible"
-        && let Ok(profile_name) = std::env::var("JCODE_NAMED_PROVIDER_PROFILE")
+        && let Ok(profile_name) = std::env::var("KCODE_NAMED_PROVIDER_PROFILE")
     {
         let profile_name = profile_name.trim();
         if !profile_name.is_empty() {
@@ -856,6 +856,6 @@ fn auth_test_tool_derived_stage(
 ) -> crate::live_tests::LiveVerificationStage {
     auth_test_step_stage(checkpoint, step).with_evidence(
         "derived_from",
-        serde_json::json!(crate::live_tests::checkpoints::REAL_JCODE_TOOL_SMOKE),
+        serde_json::json!(crate::live_tests::checkpoints::REAL_KCODE_TOOL_SMOKE),
     )
 }

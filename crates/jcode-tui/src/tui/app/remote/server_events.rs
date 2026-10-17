@@ -7,7 +7,7 @@ use crate::tui::app::remote::swarm_plan_core::RemoteSwarmPlanSnapshot;
 use crate::tui::app::remote::swarm_status_core::swarm_status_transition_notice;
 
 fn allow_runtime_identity_mismatch() -> bool {
-    std::env::var_os("JCODE_ALLOW_SERVER_VERSION_MISMATCH").is_some()
+    std::env::var_os("KCODE_ALLOW_SERVER_VERSION_MISMATCH").is_some()
 }
 
 /// Parse a jcode version string into an orderable `(major, minor, patch)`, but
@@ -109,7 +109,7 @@ fn should_defer_history_for_runtime_identity_with_allow(
 /// unorderable and short-circuit the comparison).
 fn client_release_version() -> String {
     if (cfg!(test) || cfg!(debug_assertions))
-        && let Some(v) = std::env::var_os("JCODE_TEST_CLIENT_VERSION_OVERRIDE")
+        && let Some(v) = std::env::var_os("KCODE_TEST_CLIENT_VERSION_OVERRIDE")
     {
         return v.to_string_lossy().into_owned();
     }
@@ -544,6 +544,22 @@ pub(in crate::tui::app) fn handle_server_event(
     event: ServerEvent,
     remote: &mut impl RemoteEventState,
 ) -> bool {
+    if let ServerEvent::Done { id } = &event
+        && app.usage_reset.invalidate_requests.remove(id).is_some()
+    {
+        app.usage_reset.refresh_usage = true;
+        return true;
+    }
+
+    if let ServerEvent::Error { id, message, .. } = &event
+        && app.usage_reset.invalidate_requests.remove(id).is_some()
+    {
+        app.push_display_message(DisplayMessage::error(format!(
+            "Reset result is unchanged, but the daemon usage cache could not be refreshed: {message}. Reconnect to refresh daemon state."
+        )));
+        return true;
+    }
+
     let eager_stream_redraw = !crate::perf::tui_policy().enable_decorative_animations;
     if app.is_processing {
         app.last_stream_activity = Some(Instant::now());
@@ -705,8 +721,8 @@ pub(in crate::tui::app) fn handle_server_event(
             });
             eager_stream_redraw
         }
-        ServerEvent::ToolInput { delta } => {
-            remote.handle_tool_input(&delta);
+        ServerEvent::ToolInput { id, delta } => {
+            remote.handle_tool_input(id.as_deref(), &delta);
             false
         }
         ServerEvent::ToolExec { id, name } => {
@@ -714,7 +730,7 @@ pub(in crate::tui::app) fn handle_server_event(
             // snapshots often arrive later. Keep collecting deltas while excluding tool
             // runtime from the elapsed TPS denominator.
             app.pause_streaming_tps(true);
-            let parsed_input = remote.get_current_tool_input();
+            let parsed_input = remote.get_tool_input(&id);
             let tool_call = ToolCall {
                 id: id.clone(),
                 name: name.clone(),
@@ -808,6 +824,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 // local push_turn_footer path: this feeds the cache
                 // countdown/cold indicators as "what gets resent".
                 let effective = crate::tui::info_widget::effective_prompt_tokens(
+                    &app.kv_cache_provider_name(),
                     input,
                     app.streaming.streaming_cache_read_tokens.unwrap_or(0),
                     app.streaming.streaming_cache_creation_tokens.unwrap_or(0),
@@ -843,6 +860,23 @@ pub(in crate::tui::app) fn handle_server_event(
                 let has_cache_telemetry = app.streaming.streaming_cache_read_tokens.is_some()
                     || app.streaming.streaming_cache_creation_tokens.is_some();
                 if has_cache_telemetry {
+                    let prompt = crate::tui::info_widget::effective_prompt_tokens(
+                        &app.kv_cache_provider_name(),
+                        input,
+                        app.streaming.streaming_cache_read_tokens.unwrap_or(0),
+                        app.streaming.streaming_cache_creation_tokens.unwrap_or(0),
+                    );
+                    let previous_prompt = if had_cache_telemetry {
+                        app.token_accounting.last_cache_prompt_tokens.unwrap_or(0)
+                    } else {
+                        0
+                    };
+                    app.token_accounting.total_cache_prompt_tokens = app
+                        .token_accounting
+                        .total_cache_prompt_tokens
+                        .saturating_sub(previous_prompt)
+                        .saturating_add(prompt);
+                    app.token_accounting.last_cache_prompt_tokens = Some(prompt);
                     let reported_delta = if had_cache_telemetry {
                         input.saturating_sub(previous_input)
                     } else {
@@ -870,12 +904,13 @@ pub(in crate::tui::app) fn handle_server_event(
                         );
                     app.token_accounting.last_cache_reported_input_tokens = Some(input);
                     app.token_accounting.last_cache_read_tokens =
-                        Some(app.streaming.streaming_cache_read_tokens.unwrap_or(0));
+                        app.streaming.streaming_cache_read_tokens;
                     app.token_accounting.last_cache_creation_tokens =
-                        Some(app.streaming.streaming_cache_creation_tokens.unwrap_or(0));
+                        app.streaming.streaming_cache_creation_tokens;
                 }
 
                 let effective_prompt_tokens = crate::tui::info_widget::effective_prompt_tokens(
+                    &app.kv_cache_provider_name(),
                     input,
                     app.streaming.streaming_cache_read_tokens.unwrap_or(0),
                     app.streaming.streaming_cache_creation_tokens.unwrap_or(0),
@@ -971,6 +1006,7 @@ pub(in crate::tui::app) fn handle_server_event(
             app.status_detail = Some(detail);
             eager_stream_redraw
         }
+        ServerEvent::TextDone => false,
         ServerEvent::MessageEnd { .. } => {
             app.pause_streaming_tps(true);
             app.stream_message_ended = true;
@@ -1053,6 +1089,13 @@ pub(in crate::tui::app) fn handle_server_event(
                 ));
             }
             app.schedule_queued_dispatch_after_interrupt();
+            // Esc redirect: the follow-up may live only in pending soft
+            // interrupts (not counted by has_queued_followups). Arm dispatch
+            // so recovery sends it as the next turn right away.
+            if app.remote_interrupt_ack_deadline.take().is_some() && app.has_pending_user_followup()
+            {
+                app.pending_queued_dispatch = true;
+            }
             app.push_display_message(DisplayMessage::system("Interrupted"));
             app.is_processing = false;
             app.status = ProcessingStatus::Idle;
@@ -1124,6 +1167,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 }
                 app.deferred_stream_done_id = None;
                 let turn_duration_secs = app.display_turn_duration_secs();
+                app.remember_terminal_title_work();
                 if completes_resumed_turn {
                     crate::logging::info(&format!(
                         "Treating Done id={} as completion for resumed remote activity",
@@ -1215,6 +1259,7 @@ pub(in crate::tui::app) fn handle_server_event(
             retry_after_secs,
             ..
         } => {
+            app.refresh_openai_usage_after_quota_error(&message);
             // The server rejects a Message request with this error while its
             // previous turn is still running. This typically happens when a
             // reload/reconnect raced the turn-end dispatch: the history
@@ -1597,7 +1642,7 @@ pub(in crate::tui::app) fn handle_server_event(
                         "Connected server is an older release; reloading it before attach",
                     );
                     app.push_display_message(DisplayMessage::system(format!(
-                        "ℹ Connected server is running an older release ({}) than this client ({}). Reloading it before applying session state. If reload does not take, run `jcode server stop` and relaunch. Set JCODE_ALLOW_SERVER_VERSION_MISMATCH=1 only for intentional compatibility testing.",
+                        "ℹ Connected server is running an older release ({}) than this client ({}). Reloading it before applying session state. If reload does not take, run `jcode server stop` and relaunch. Set KCODE_ALLOW_SERVER_VERSION_MISMATCH=1 only for intentional compatibility testing.",
                         app.remote_server_version.as_deref().unwrap_or("unknown"),
                         jcode_build_meta::version(),
                     )));
@@ -1606,7 +1651,7 @@ pub(in crate::tui::app) fn handle_server_event(
                         "Server/runtime mismatch detected; reloading server before attach",
                     );
                     app.push_display_message(DisplayMessage::system(
-                        "ℹ Connected server binary differs from the installed client channel. Reloading the server before applying remote session state. Set JCODE_ALLOW_SERVER_VERSION_MISMATCH=1 only for intentional compatibility testing."
+                        "ℹ Connected server binary differs from the installed client channel. Reloading the server before applying remote session state. Set KCODE_ALLOW_SERVER_VERSION_MISMATCH=1 only for intentional compatibility testing."
                             .to_string(),
                     ));
                 }
@@ -1647,10 +1692,12 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.streaming.streaming_cache_creation_tokens = None;
                 app.kv_cache.current_api_usage_recorded = false;
                 app.token_accounting.total_cache_reported_input_tokens = 0;
+                app.token_accounting.total_cache_prompt_tokens = 0;
                 app.token_accounting.total_cache_read_tokens = 0;
                 app.token_accounting.total_cache_creation_tokens = 0;
                 app.token_accounting.total_cache_optimal_input_tokens = 0;
                 app.token_accounting.last_cache_reported_input_tokens = None;
+                app.token_accounting.last_cache_prompt_tokens = None;
                 app.token_accounting.last_cache_read_tokens = None;
                 app.token_accounting.last_cache_creation_tokens = None;
                 app.token_accounting.last_cache_optimal_input_tokens = None;
@@ -1766,6 +1813,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.token_accounting.total_input_tokens = 0;
                 app.token_accounting.total_output_tokens = 0;
                 app.token_accounting.total_cache_reported_input_tokens = 0;
+                app.token_accounting.total_cache_prompt_tokens = 0;
                 app.token_accounting.total_cache_read_tokens = 0;
                 app.token_accounting.total_cache_creation_tokens = 0;
                 app.token_accounting.total_cache_optimal_input_tokens = 0;
@@ -1805,6 +1853,7 @@ pub(in crate::tui::app) fn handle_server_event(
             app.update_terminal_title();
 
             if !mcp_servers.is_empty() {
+                let previous = std::mem::take(&mut app.mcp_server_names);
                 app.mcp_server_names = mcp_servers
                     .iter()
                     .filter_map(|s| {
@@ -1813,6 +1862,9 @@ pub(in crate::tui::app) fn handle_server_event(
                         Some((name.to_string(), count))
                     })
                     .collect();
+                if previous != app.mcp_server_names {
+                    app.persist_remote_header_hint();
+                }
             }
 
             let should_apply_history_payload = session_changed || !remote.has_loaded_history();
@@ -2259,6 +2311,9 @@ pub(in crate::tui::app) fn handle_server_event(
             model,
             provider_name,
             error,
+            resolved_credential,
+            reasoning_effort,
+            context_window,
             ..
         } => {
             app.remote_model_switch_in_flight = false;
@@ -2281,20 +2336,34 @@ pub(in crate::tui::app) fn handle_server_event(
                 ));
                 app.set_status_notice("Model switch failed");
             } else {
-                app.update_context_limit_for_model(&model);
+                // The server also re-sends ModelChanged on resume so the client
+                // learns the server-resolved context window. That is not a
+                // user-visible switch, so only announce an actual model change.
+                let model_actually_changed =
+                    app.remote_provider_model.as_deref() != Some(model.as_str());
+                app.update_context_limit_for_model(&model, context_window);
                 app.remote_provider_model = Some(model.clone());
                 app.clear_remote_startup_phase();
                 if let Some(ref pname) = provider_name {
                     app.remote_provider_name = Some(pname.clone());
                 }
+                // Always replace: a switch to a provider with no OAuth/API
+                // distinction must clear the previous route's credential too.
+                app.remote_resolved_credential = resolved_credential;
+                // Always replace: the server reports the effort the new model
+                // runs with (`None` = cleared), so the chip must not keep the
+                // previous model's level.
+                app.remote_reasoning_effort = reasoning_effort;
                 app.invalidate_model_picker_cache();
-                if !app.auth_catalog_refresh_pending {
+                if model_actually_changed && !app.auth_catalog_refresh_pending {
                     app.push_display_message(DisplayMessage::system(format!(
                         "✓ Switched to model: {}",
                         model
                     )));
                 }
-                app.set_status_notice(format!("Model → {}", model));
+                if model_actually_changed {
+                    app.set_status_notice(format!("Model → {}", model));
+                }
             }
             false
         }
@@ -2398,7 +2467,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 )));
             } else {
                 app.remote_service_tier = service_tier.clone();
-                let enabled = service_tier.as_deref() == Some("priority");
+                let enabled = app_mod::service_tier_is_fast(service_tier.as_deref());
                 let label = service_tier
                     .as_deref()
                     .map(app_mod::service_tier_display_label)
@@ -2408,7 +2477,7 @@ pub(in crate::tui::app) fn handle_server_event(
                     app_mod::fast_mode_success_message(enabled, label, applies_next_request),
                 ));
                 app.set_status_notice(app_mod::fast_mode_status_notice(
-                    enabled,
+                    service_tier.as_deref(),
                     applies_next_request,
                 ));
             }
@@ -2821,7 +2890,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 .filter(|path| path.is_dir())
                 .or_else(|| std::env::current_dir().ok())
                 .unwrap_or_else(|| std::path::PathBuf::from("."));
-            let socket = std::env::var("JCODE_SOCKET").ok();
+            let socket = std::env::var("KCODE_SOCKET").ok();
             match spawn_in_new_terminal(&exe, &new_session_id, &cwd, socket.as_deref()) {
                 Ok(true) => {
                     if let Some(label) = split_label.as_deref() {

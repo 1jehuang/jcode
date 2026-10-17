@@ -20,7 +20,7 @@ impl Config {
     /// parses and documents the options it claims to.
     pub fn default_config_file_contents() -> String {
         let default_content = r##"# jcode configuration file
-# Location: ~/.jcode/config.toml
+# Location: ~/.kcode/config.toml
 #
 # Environment variables override these settings.
 # Run `/config` in jcode to see current settings.
@@ -43,6 +43,11 @@ model_switch_prev = "ctrl+shift+tab"
 # Alt/Option+Left/Right move by word in the input box.
 effort_increase = "@EFFORT_INCREASE@"
 effort_decrease = "@EFFORT_DECREASE@"
+
+# Speed tier switching: Standard -> Fast -> Ultrafast (OpenAI), Fast on/off elsewhere.
+# Ctrl/Cmd+Up/Down still recall prompt history.
+speed_increase = "alt+up"
+speed_decrease = "alt+down"
 
 # Centered mode toggle key
 centered_toggle = "alt+c"
@@ -75,6 +80,7 @@ workspace_right = "alt+l"
 side_panel_toggle = "alt+m"
 copy_selection_toggle = "alt+y"
 diagram_pane_toggle = "alt+t"
+diagram_pane_visibility_toggle = "alt+shift+m"
 typing_scroll_lock_toggle = "alt+s"
 diff_mode_cycle = "alt+g"
 info_widget_toggle = "alt+i"
@@ -100,6 +106,11 @@ swarm_panel_focus = "alt+n"
 # Default: Cmd+B on macOS, Alt+R on Windows/Linux. Set "" to disable.
 # open_resume = "cmd+b"
 
+# Built-in voice input: press to record, press again to send the transcript.
+# Esc cancels. Needs a Nari API key (NARI_API_KEY or ~/.config/kcode/nari.env).
+# Default: Ctrl+Space. Set "" to disable.
+# voice_input = "ctrl+space"
+
 # /resume picker Enter behavior. Options: "current-terminal" or "new-terminal".
 # By default Enter resumes in this terminal; Ctrl+Enter performs the alternate action.
 session_picker_enter = "current-terminal"
@@ -123,8 +134,17 @@ key = "off"
 # Max seconds to wait for the dictation command to finish (0 = no timeout)
 timeout_secs = 90
 
+# Extra names or terms to help built-in voice transcription recognize them.
+# Jcode's own product names are always included.
+# vocabulary = ["Kubernetes", "Alice Zhang"]
+
+# Microphone recorder for built-in voice input (keybindings.voice_input).
+# Empty auto-detects pw-record, parecord, arecord, rec (SoX), or ffmpeg.
+# A custom command must print raw mono 16 kHz signed 16-bit little-endian PCM.
+# recorder = "arecord -q -t raw -f S16_LE -r 16000 -c 1 -"
+
 [display]
-# Diff display mode: "off", "inline" (default), "full-inline", "pinned" (dedicated pane), or "file"
+# Diff display mode: "off", "inline" (default), "full-inline", or "file"
 diff_mode = "inline"
 
 # Center all content by default (default: false)
@@ -136,10 +156,6 @@ pin_images = true
 # Pin the full session todo list to the top of the chat transcript while it
 # scrolls, like the sticky previous-prompt preview (default: false)
 # pin_todos = true
-
-# Wrap long lines in the pinned diff pane (default: true)
-# Set to false for horizontal scrolling instead of wrapping
-diff_line_wrap = true
 
 # Queue mode: wait until assistant is done before sending next message
 queue_mode = false
@@ -154,7 +170,7 @@ mouse_capture = true
 debug_socket = false
 
 # Render emoji in terminal-facing TUI and CLI output (default: true).
-# Set false here or set JCODE_NO_EMOJI=1 for ASCII fallbacks.
+# Set false here or set KCODE_NO_EMOJI=1 for ASCII fallbacks.
 emoji = true
 
 # Usage percentage wording: "left" (default) or "used".
@@ -219,12 +235,6 @@ prompt_entry_animation = true
 # Cursor) in the session picker so they can be resumed or imported
 # (default: true). Set false to list only jcode's own sessions.
 # external_sessions = true
-
-# Overscroll status line (model/provider/context info below the input):
-#   "overscroll" - elastic reveal when scrolling past the bottom (default)
-#   "on"         - always visible
-#   "off"        - never shown
-# overscroll_status = "overscroll"
 
 # Disable specific animation variants by name.
 # Examples: ["donut"] or ["donut", "orbit_rings"]
@@ -296,13 +306,21 @@ kv_cache_miss_notices = true
 update_channel = "stable"
 
 [websearch]
-# Preferred websearch engine: "duckduckgo", "bing", or "searxng".
+# Use the model provider's own server-side search (Anthropic web_search on the
+# first-party API, OpenAI Responses web_search) whenever the active
+# provider/model supports it. Searches then run on the provider's side, so they
+# work on servers where DuckDuckGo/Bing scraping is blocked and need no extra
+# key. Providers without native search use the local engines below.
+# Anthropic API keys are billed about $10 per 1,000 searches.
+prefer_native = true
+# Local websearch engine: "duckduckgo", "bing", "searxng", or "native"
+# ("native" forces prefer_native on and otherwise runs fallback_engines).
 engine = "duckduckgo"
 # Keyless HTML engines to try if the preferred engine fails. Default falls back to Bing HTML.
 fallback_engines = ["bing"]
 # Bring your own Bing Search API key for primary Bing searches. Prefer using an env var.
 # Fallback Bing searches intentionally use keyless HTML search.
-# bing_api_key_env = "JCODE_BING_API_KEY"
+# bing_api_key_env = "KCODE_BING_API_KEY"
 # bing_api_key = ""
 # Bing market/region, for example "en-US" or "zh-CN".
 bing_market = "en-US"
@@ -310,9 +328,19 @@ bing_market = "en-US"
 # DuckDuckGo and Bing block scraped requests via TLS fingerprinting / IP
 # reputation and return an anti-bot page with no results. Pointing at a SearXNG
 # instance (self-hosted or trusted public) with the JSON format enabled avoids
-# this. Configure here or via the JCODE_SEARXNG_URL environment variable, then
+# this. Configure here or via the KCODE_SEARXNG_URL environment variable, then
 # set engine = "searxng" or add it to fallback_engines.
 # searxng_url = "https://searx.example.org"
+# Native search options (prefer_native):
+# Max provider searches per request (Anthropic only). Caps spend. 0 = no cap.
+# native_max_uses = 5
+# Restrict results to these domains (Anthropic and OpenAI), or block domains
+# (Anthropic only). Set one list, not both.
+# native_allowed_domains = ["docs.rs", "developer.mozilla.org"]
+# native_blocked_domains = ["example.com"]
+# Anthropic tool version. "web_search_20260209" and newer are sent with
+# allowed_callers = ["direct"].
+# native_anthropic_tool_version = "web_search_20250305"
 
 [tools]
 # Controls which built-in tools are sent to the model.
@@ -329,12 +357,23 @@ profile = "full"
 # disabled = ["browser", "gmail", "swarm"]
 # Disable all built-in tools unless enabled is set.
 disable_base_tools = false
-# MCP tool exposure: "eager" sends every server tool definition, "deferred"
-# sends only fixed mcp_search/mcp_call tools, and "auto" switches to deferred
-# when the filtered MCP definitions exceed the token threshold below.
-# Env overrides: JCODE_MCP_TOOLS, JCODE_MCP_TOOLS_TOKEN_THRESHOLD.
+# MCP tool exposure. "auto" never changes the cached tool list when MCP
+# servers connect, reconnect, or register late, so the provider prompt cache
+# survives: Claude and OpenAI (gpt-5.4+) load MCP tools natively as deferred
+# definitions; other providers use fixed mcp_search/mcp_call tools and learn
+# new tools' schemas from the transcript. "deferred" behaves like "auto".
+# "eager" sends every server tool definition in the tool list; adding a
+# server mid-session then invalidates the whole prompt cache.
+# Env overrides: KCODE_MCP_TOOLS. mcp_tools_token_threshold is ignored and
+# kept only so existing configs still parse.
 mcp_tools = "auto"
 mcp_tools_token_threshold = 8000
+# Experimental, opt-in Codemode. Adds a `codemode` tool that runs
+# model-written JavaScript in an embedded QuickJS sandbox. Scripts call any
+# other tool (including MCP tools) via `await tools.<name>(args)`, chain and
+# parallelize calls, and keep intermediate results out of the conversation.
+# Env override: KCODE_CODEMODE=1.
+codemode = false
 
 [acp]
 # Agent Client Protocol adapter compatibility profile: standard, extended, or full.
@@ -348,12 +387,12 @@ tool_profile = "acp"
 [provider]
 # Default model (optional, uses provider default if not set)
 # Set via /model picker with Ctrl+B to save as default
-# default_model = "claude-opus-5"
+# default_model = "claude-opus-5-5"
 # Default provider (optional: claude|anthropic-api|openai|openai-api|copilot|openrouter|...)
 # When set, this provider is preferred on startup if available.
-#   claude        = Claude via OAuth/subscription (token in ~/.jcode/auth.json)
+#   claude        = Claude via OAuth/subscription (token in ~/.kcode/auth.json)
 #   anthropic-api = Claude via direct Anthropic API key (ANTHROPIC_API_KEY env
-#                   or ~/.config/jcode/anthropic.env). API-key mode does NOT fall
+#                   or ~/.config/kcode/anthropic.env). API-key mode does NOT fall
 #                   back to OAuth; configure the key first.
 # `claude` and `anthropic-api` are distinct providers with distinct credentials.
 # See docs/AUTH_CREDENTIAL_SOURCES.md for where each credential lives.
@@ -394,13 +433,13 @@ cross_provider_failover = "countdown"
 # silently for minutes before emitting tokens. Default: 180.
 # Applies to every streaming provider path (OpenAI native, Anthropic, Copilot,
 # OpenRouter/OpenAI-compatible). The TUI's client-side stall guard also extends
-# to match this value. Also overridable per-launch via JCODE_STREAM_IDLE_TIMEOUT_SECS.
+# to match this value. Also overridable per-launch via KCODE_STREAM_IDLE_TIMEOUT_SECS.
 # This is the base budget: high reasoning efforts scale it up automatically
 # (high 2x, xhigh 3x, max/swarm 4x) since they think silently for much longer.
 # stream_idle_timeout_secs = 600
 # Maximum attempts for transient 429/5xx/network failures, including the first
 # request. Retries honor Retry-After and use capped exponential backoff.
-# Env overrides: JCODE_MAX_RETRIES, JCODE_RETRY_BACKOFF_CAP_SECS.
+# Env overrides: KCODE_MAX_RETRIES, KCODE_RETRY_BACKOFF_CAP_SECS.
 # max_retries = 8
 # retry_backoff_cap_secs = 30
 
@@ -410,25 +449,33 @@ cross_provider_failover = "countdown"
 # "internal" starts or interrupts turns in the daemon (default).
 # "external" emits typed wake_requested events for an operator to handle and
 # never starts a turn or injects into a running turn.
-# Env override: JCODE_WAKE_MODE
+# Env override: KCODE_WAKE_MODE
 wake_mode = "internal"
 
 [agents]
-# Defaults for spawned helper agents (swarm workers, subagents, sidecars).
+# Swarm root settings and defaults for helper agents (workers, subagents, sidecars).
 # All keys are optional; the values below are the built-in defaults.
 #
 # Default model for spawned swarm/subagent sessions.
 # Leave unset (or "inherit"/"coordinator") so workers inherit the model of the
 # session that spawned them. Set a concrete model to change the worker default.
 # An explicit `model` in the swarm tool overrides this default for new workers.
-# Env override: JCODE_SWARM_MODEL
+# Env override: KCODE_SWARM_MODEL
 # swarm_model = "inherit"
 #
 # Default reasoning effort for spawned swarm workers when the spawn call does
 # not pass an explicit `effort` ("low", "medium", "high", ...). Leave unset so
 # workers inherit the provider-wide reasoning effort.
-# Env override: JCODE_SWARM_EFFORT
+# Env override: KCODE_SWARM_EFFORT
 # swarm_effort = "medium"
+#
+# Root model reasoning while /effort swarm or /effort swarm-deep is selected.
+# These are independent of worker swarm_effort. Supported levels:
+# none|minimal|low|medium|high|xhigh|max. Unset/invalid = max (model maximum).
+# Providers map unsupported levels to their supported range.
+# Env overrides: KCODE_SWARM_ROOT_EFFORT, KCODE_SWARM_DEEP_ROOT_EFFORT
+swarm_root_effort = "max"
+swarm_deep_root_effort = "max"
 #
 # How swarm-created agents are spawned:
 #   "inline"   - in-process (no window), shown as a live gallery viewport in the coordinator (default)
@@ -436,14 +483,14 @@ wake_mode = "internal"
 #   "headless" - create the worker in-process with no terminal window
 #   "auto"     - try visible first, fall back to headless if no window can open
 # The swarm tool's per-call `spawn_mode` overrides this when set.
-# Env override: JCODE_SWARM_SPAWN_MODE
+# Env override: KCODE_SWARM_SPAWN_MODE
 swarm_spawn_mode = "inline"
 #
 # Max live swarm worker agents in one swarm. This RAM-safety budget applies to
 # recursive ad hoc spawning and deep-mode run_plan parallelism. Completed/stopped
 # workers free their slots. 0 disables this guard and leaves only the absolute
 # per-swarm hard cap of 1000. Light mode uses a smaller fixed fan-out.
-# Env override: JCODE_SWARM_MAX_CONCURRENT_AGENTS
+# Env override: KCODE_SWARM_MAX_CONCURRENT_AGENTS
 swarm_max_concurrent_agents = 32
 #
 # Max percentage (1-90) of the chat height the inline swarm gallery band may use.
@@ -455,64 +502,50 @@ swarm_max_concurrent_agents = 32
 #   "vertical"   - one agent per row (session icon + status + task), capped to
 #                  a few rows with a "+N more" overflow marker (default)
 #   "horizontal" - all agents packed as chips on a single row
-# Env override: JCODE_SWARM_STRIP_LAYOUT
+# Env override: KCODE_SWARM_STRIP_LAYOUT
 # swarm_strip_layout = "vertical"
 #
-# Model for the memory sidecar (relevance/extraction). Unset = sidecar auto-select
+# Recall uses Jev typed Decisions directly, without embeddings or a sidecar LLM.
+# Provider values: auto, jcode, openrouter, typesafe, aimlapi.
+# auto prefers Jcode, then OpenRouter, TypeSafe, AI/ML API credentials.
+# Env override: KCODE_MEMORY_JEV_PROVIDER
+# memory_jev_provider = "auto"
+# Minimum relevance probability (0.8..=1.0). Invalid values fail closed.
+# memory_jev_threshold = 0.8
+# BYOK: OPENROUTER_API_KEY, TYPESAFE_API_KEY, or AIMLAPI_API_KEY.
+# Jcode requires an eligible subscription and gateway memory_jev capability.
+# With a Jcode login and an older gateway, explicitly select a BYOK provider.
+# No fallback after entitlement, auth, billing, or network failure; no silent BYOK spend.
+# Memories remain local; the query and candidate memories go to the selected provider.
+# No keys? Local memory list/search/remember/forget still work.
+#
+# Optional text-generating extraction is separate from recall. Disable it to
+# learn only through the main agent's explicit memory writes.
 # (OpenAI defaults to gpt-5.6-luna with reasoning effort "none").
-# Env override: JCODE_MEMORY_MODEL
-# memory_model = "gpt-5.6-luna"
-#
-# Whether the memory sidecar (LLM precision judge) handles relevance/extraction.
-# Default true: the LLM precision-judge path is the only reliably productive
-# memory mode. Set false only to opt into the lower-precision no-LLM hybrid path.
-# When this is true but no LLM backend is reachable (logged out), memory goes
-# dormant instead of degrading to the no-LLM path. Env: JCODE_MEMORY_SIDECAR_ENABLED
+# Env overrides: KCODE_MEMORY_SIDECAR_ENABLED, KCODE_MEMORY_MODEL
 # memory_sidecar_enabled = true
-#
-# Minimum turns between Mode-2 memory reranks (cadence floor). The expensive
-# listwise LLM rerank runs at most once per this many turns; skipped turns fall
-# back to hybrid-ordered surfacing. A topic change always forces a rerank. Set 1
-# to rerank every turn. Default 3.
-# memory_rerank_cadence = 3
-#
-# High-precision consensus rerank: run N independent LLM judges per fired rerank
-# and inject only memories that >= memory_rerank_min_agree of them agree on.
-# Default 2 judges / 2 agreement -> injection precision ~1.0 with ~100% clean
-# (zero memory) on no-memory turns, at 2 LLM calls per fired turn. Set votes=1
-# for the cheaper single-judge path (precision ~0.77).
-# memory_rerank_votes = 2
-# memory_rerank_min_agree = 2
-#
-# Embedding backend for memory dense-retrieval. "local" (default) uses the
-# bundled all-MiniLM-L6-v2 ONNX model (no network); "openai" uses a remote
-# OpenAI / OpenAI-compatible /v1/embeddings endpoint (requires OPENAI_API_KEY;
-# silently falls back to local when no key is found). Vectors from different
-# models live in separate spaces and are never compared, so switching is safe.
-# Env override: JCODE_MEMORY_EMBEDDING_BACKEND
-# memory_embedding_backend = "local"
-# memory_embedding_model = "text-embedding-3-small"
-# memory_embedding_base_url = "https://api.openai.com/v1"
-# memory_embedding_dim = 1536
+# memory_model = "gpt-5.6-luna"
+# Legacy memory_rerank_* and memory_embedding_* settings are accepted for
+# backwards compatibility, but have no effect on Jev recall.
 
 [terminal]
 # Without a hook, clients inside tmux automatically use a right-side pane.
-# Set JCODE_TERMINAL to force a supported terminal emulator instead.
+# Set KCODE_TERMINAL to force a supported terminal emulator instead.
 # External command that takes over headed session spawns (swarm agents,
 # resume-in-new-terminal, self-dev windows, restart restores).
 #
 # When set, jcode runs `<spawn_hook> <jcode-binary> <args...>` instead of
-# opening a terminal emulator itself. The hook receives JCODE_SPAWN_* env vars
+# opening a terminal emulator itself. The hook receives KCODE_SPAWN_* env vars
 # describing the spawn so multiplexers/wrappers can decide where it appears:
-#   JCODE_SPAWN_KIND        - "swarm-agent", "resume", "selfdev", "restart", ...
-#   JCODE_SPAWN_SESSION_ID  - session the window will run
-#   JCODE_SPAWN_TITLE       - suggested window/tab title
-#   JCODE_SPAWN_CWD         - session working directory (also the hook's cwd)
-#   JCODE_SPAWN_PROGRAM     - jcode binary path
-#   JCODE_SPAWN_COMMAND     - full shell-escaped command line
-#   JCODE_SPAWN_SWARM_ID / JCODE_SPAWN_COORDINATOR_SESSION_ID (swarm spawns)
+#   KCODE_SPAWN_KIND        - "swarm-agent", "resume", "selfdev", "restart", ...
+#   KCODE_SPAWN_SESSION_ID  - session the window will run
+#   KCODE_SPAWN_TITLE       - suggested window/tab title
+#   KCODE_SPAWN_CWD         - session working directory (also the hook's cwd)
+#   KCODE_SPAWN_PROGRAM     - jcode binary path
+#   KCODE_SPAWN_COMMAND     - full shell-escaped command line
+#   KCODE_SPAWN_SWARM_ID / KCODE_SPAWN_COORDINATOR_SESSION_ID (swarm spawns)
 # If the hook fails to start, jcode falls back to built-in terminal detection.
-# Env override: JCODE_SPAWN_HOOK (set empty to disable a config hook).
+# Env override: KCODE_SPAWN_HOOK (set empty to disable a config hook).
 #
 # Examples:
 #   spawn_hook = "tmux new-window"                # tmux window per agent
@@ -521,10 +554,10 @@ swarm_max_concurrent_agents = 32
 # spawn_hook = ""
 #
 # External command used to focus/raise an existing session window, replacing
-# the built-in wmctrl/xdotool title search. Receives JCODE_FOCUS_SESSION_ID
-# and JCODE_FOCUS_TITLE env vars. Pair with spawn_hook so the program that
+# the built-in wmctrl/xdotool title search. Receives KCODE_FOCUS_SESSION_ID
+# and KCODE_FOCUS_TITLE env vars. Pair with spawn_hook so the program that
 # placed the window also brings it to the front.
-# Env override: JCODE_FOCUS_HOOK (set empty to disable a config hook).
+# Env override: KCODE_FOCUS_HOOK (set empty to disable a config hook).
 #
 # Example:
 #   focus_hook = "~/bin/jcode-focus-router"
@@ -533,7 +566,7 @@ swarm_max_concurrent_agents = 32
 # macOS only: terminal that the Cmd+; launch hotkey and in-app session spawns
 # open jcode into. One of: ghostty, iterm2, wezterm, warp, alacritty, vscode,
 # terminal (Apple Terminal). Preferred over the legacy
-# ~/.jcode/preferred_terminal.json file. After changing this, re-run
+# ~/.kcode/preferred_terminal.json file. After changing this, re-run
 # `jcode setup-hotkey` so the generated launcher script (Cmd+;) picks it up.
 # preferred = "ghostty"
 
@@ -559,42 +592,47 @@ swarm_max_concurrent_agents = 32
 # turn_complete_sound = "Glass"
 
 [hooks]
+# Synchronous tool-input transformers. Each receives the tool input JSON on
+# stdin and may print replacement JSON on stdout. Failures and empty output
+# retain the original input. Transformers run before pre_tool policy gates.
+# pre_tool_transform = ["~/.kcode/plugins/rtk-transform"]
+# pre_tool_transform_timeout_ms = 500
 # Lifecycle hooks: external commands jcode runs at well-defined points so other
 # programs can observe or gate agent behavior. Commands are parsed shell-style
-# (quotes work) but executed directly, with JCODE_HOOK_* env vars describing
+# (quotes work) but executed directly, with KCODE_HOOK_* env vars describing
 # the event:
-#   JCODE_HOOK_EVENT       - "turn_start", "turn_end", "session_start",
+#   KCODE_HOOK_EVENT       - "turn_start", "turn_end", "session_start",
 #                            "session_end", "pre_tool", "post_tool"
-#   JCODE_HOOK_SESSION_ID  - the session the event belongs to
-#   JCODE_HOOK_CWD         - session working directory (also the hook's cwd)
-#   JCODE_HOOK_PAYLOAD     - JSON mirror of all fields
-# Hook processes get JCODE_HOOKS_DISABLED=1 so nested jcode calls don't recurse.
+#   KCODE_HOOK_SESSION_ID  - the session the event belongs to
+#   KCODE_HOOK_CWD         - session working directory (also the hook's cwd)
+#   KCODE_HOOK_PAYLOAD     - JSON mirror of all fields
+# Hook processes get KCODE_HOOKS_DISABLED=1 so nested jcode calls don't recurse.
 #
 # All hooks except pre_tool are observers: detached, fire-and-forget, failures
-# only logged. Env overrides: JCODE_HOOK_TURN_START, JCODE_HOOK_TURN_END,
-# JCODE_HOOK_SESSION_START, JCODE_HOOK_SESSION_END, JCODE_HOOK_PRE_TOOL,
-# JCODE_HOOK_POST_TOOL (set empty to disable a config hook).
+# only logged. Env overrides: KCODE_HOOK_TURN_START, KCODE_HOOK_TURN_END,
+# KCODE_HOOK_SESSION_START, KCODE_HOOK_SESSION_END, KCODE_HOOK_PRE_TOOL,
+# KCODE_HOOK_POST_TOOL (set empty to disable a config hook).
 #
 # Runs when an agent turn begins, before the model starts generating and before
 # the first pre_tool. Lets integrations detect the agent is working during the
-# think/stream window before any tool call. Extra fields: JCODE_HOOK_MODEL,
-# JCODE_HOOK_SOURCE ("chat"/"resume"/"ambient").
+# think/stream window before any tool call. Extra fields: KCODE_HOOK_MODEL,
+# KCODE_HOOK_SOURCE ("chat"/"resume"/"ambient").
 # turn_start = "~/bin/jcode-turn-start"
 #
-# Runs when an agent turn completes. Extra fields: JCODE_HOOK_STATUS
-# ("ok"/"error"), JCODE_HOOK_DURATION_MS, JCODE_HOOK_MODEL,
-# JCODE_HOOK_LAST_ASSISTANT_TEXT (first 4000 chars), JCODE_HOOK_ERROR.
+# Runs when an agent turn completes. Extra fields: KCODE_HOOK_STATUS
+# ("ok"/"error"), KCODE_HOOK_DURATION_MS, KCODE_HOOK_MODEL,
+# KCODE_HOOK_LAST_ASSISTANT_TEXT (first 4000 chars), KCODE_HOOK_ERROR.
 # turn_end = "~/bin/jcode-turn-notify"
 #
-# Runs when a session becomes active. Extra: JCODE_HOOK_SOURCE
+# Runs when a session becomes active. Extra: KCODE_HOOK_SOURCE
 # ("create"/"attach"/"resume").
 # session_start = ""
 #
-# Runs when a session closes normally. Extra: JCODE_HOOK_SOURCE ("close").
+# Runs when a session closes normally. Extra: KCODE_HOOK_SOURCE ("close").
 # session_end = ""
 #
-# Gate hook before every tool call. Receives JCODE_HOOK_TOOL_NAME and the tool
-# input JSON on stdin (truncated copy in JCODE_HOOK_TOOL_INPUT). Exit 0 allows
+# Gate hook before every tool call. Receives KCODE_HOOK_TOOL_NAME and the tool
+# input JSON on stdin (truncated copy in KCODE_HOOK_TOOL_INPUT). Exit 0 allows
 # the call; exit 2 blocks it and stderr is shown to the model as the error;
 # any other outcome (other exits, timeout, missing binary) fails open.
 # pre_tool = "~/bin/jcode-tool-policy"
@@ -602,10 +640,18 @@ swarm_max_concurrent_agents = 32
 # Max milliseconds to wait for pre_tool before failing open (default: 5000).
 # pre_tool_timeout_ms = 5000
 #
-# Runs after each tool call. Extra fields: JCODE_HOOK_TOOL_NAME,
-# JCODE_HOOK_STATUS, JCODE_HOOK_DURATION_MS, JCODE_HOOK_OUTPUT_BYTES,
-# JCODE_HOOK_ERROR.
+# Runs after each tool call. Extra fields: KCODE_HOOK_TOOL_NAME,
+# KCODE_HOOK_TOOL_CALL_ID, KCODE_HOOK_TOOL_INPUT (tool input JSON, 16 KB cap),
+# KCODE_HOOK_TOUCHED_PATHS (newline-separated absolute paths),
+# KCODE_HOOK_STATUS, KCODE_HOOK_DURATION_MS, KCODE_HOOK_OUTPUT_BYTES,
+# KCODE_HOOK_ERROR.
 # post_tool = ""
+#
+# Synchronous hook after each successful tool call. Same fields as post_tool,
+# full tool input JSON on stdin. Anything it prints to stdout is appended to
+# the tool result the model sees, so linters can report findings inline.
+# post_tool_feedback = "~/bin/jcode-vale"
+# post_tool_feedback_timeout_ms = 10000
 
 [ambient]
 # Ambient mode: background agent that maintains your codebase
@@ -642,17 +688,23 @@ bind_addr = "0.0.0.0"
 
 [power]
 # Prevent automatic system sleep while any jcode session is actively working.
-# Linux also blocks lid-switch suspend. Windows still respects explicit lid-close
-# and power-button actions from your active power plan. The display may sleep.
+# Linux also blocks lid-switch suspend. On Windows and macOS see block_lid_close.
+# The display may sleep.
 # The guard is held only for as long as work is in flight. (default: true)
-# Set JCODE_DISABLE_POWER_INHIBIT=1 to force-disable regardless of this setting.
+# Set KCODE_DISABLE_POWER_INHIBIT=1 to force-disable regardless of this setting.
 prevent_sleep_while_streaming = true
+# Also keep working when the lid closes on macOS and Windows while a session is
+# working. Windows temporarily sets the power plan's lid close action to "Do
+# nothing". macOS runs `sudo -n pmset -a disablesleep 1` and needs a passwordless
+# sudoers rule for /usr/bin/pmset (skipped otherwise). Original settings are
+# saved to ~/.kcode/lid_override.json and restored afterwards, even after a crash.
+block_lid_close = true
 
 [safety]
 # Notification settings for ambient mode events
 
 # ntfy.sh push notifications (free, phone app: https://ntfy.sh)
-# ntfy_topic = "jcode-ambient-your-secret-topic"
+# ntfy_topic = "kcode-ambient-your-secret-topic"
 # ntfy_server = "https://ntfy.sh"
 
 # Desktop notifications via notify-send (default: true)
@@ -664,7 +716,7 @@ desktop_notifications = true
 # email_from = "jcode@example.com"
 # email_smtp_host = "smtp.gmail.com"
 # email_smtp_port = 587
-# Password via env: JCODE_SMTP_PASSWORD (preferred) or config below
+# Password via env: KCODE_SMTP_PASSWORD (preferred) or config below
 # email_password = ""
 
 # IMAP for email replies (reply to ambient emails to send directives)
@@ -674,21 +726,21 @@ desktop_notifications = true
 
 # Telegram notifications via Bot API (free, https://telegram.org)
 # telegram_enabled = false
-# telegram_bot_token = ""  # From @BotFather (prefer JCODE_TELEGRAM_BOT_TOKEN env var)
+# telegram_bot_token = ""  # From @BotFather (prefer KCODE_TELEGRAM_BOT_TOKEN env var)
 # telegram_chat_id = ""    # Your user/chat ID
 # telegram_reply_enabled = false  # Reply to bot messages to send directives
 
 # Discord notifications via Bot API (https://discord.com/developers)
 # discord_enabled = false
-# discord_bot_token = ""     # From Discord Developer Portal (prefer JCODE_DISCORD_BOT_TOKEN env var)
+# discord_bot_token = ""     # From Discord Developer Portal (prefer KCODE_DISCORD_BOT_TOKEN env var)
 # discord_channel_id = ""    # Channel ID to post in
 # discord_bot_user_id = ""   # Bot's user ID (for filtering own messages)
 # discord_reply_enabled = false  # Messages in channel become agent directives
 
 # Jade cloud relay (outbound-only long polling, disabled by default).
 # Prefer environment variables for secrets:
-# JCODE_JADE_RELAY_API_BASE, JCODE_JADE_RELAY_TOKEN, JCODE_JADE_RELAY_TOKEN_ID,
-# JCODE_JADE_RELAY_USER_ID, JCODE_JADE_RELAY_SESSION_ID.
+# KCODE_JADE_RELAY_API_BASE, KCODE_JADE_RELAY_TOKEN, KCODE_JADE_RELAY_TOKEN_ID,
+# KCODE_JADE_RELAY_USER_ID, KCODE_JADE_RELAY_SESSION_ID.
 # jade_relay_enabled = false
 # jade_relay_reply_enabled = false   # Deliver cloud prompts to one configured live session.
 # jade_relay_launch_enabled = false  # Allow cloud device commands to open headed local sessions.

@@ -34,8 +34,8 @@ class ImportCLI(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.home = self.root / 'data'
         self.env = {'PATH': os.environ.get('PATH', '/usr/bin:/bin'), 'HOME': str(self.root),
-                    'JCODE_HOME': str(self.home), 'XDG_CONFIG_HOME': str(self.root / 'config'),
-                    'JCODE_TELEMETRY': 'off', 'HTTPS_PROXY': 'http://127.0.0.1:9',
+                    'KCODE_HOME': str(self.home), 'XDG_CONFIG_HOME': str(self.root / 'config'),
+                    'KCODE_TELEMETRY': 'off', 'HTTPS_PROXY': 'http://127.0.0.1:9',
                     'HTTP_PROXY': 'http://127.0.0.1:9', 'ALL_PROXY': 'http://127.0.0.1:9', 'NO_PROXY': ''}
 
     def command(self, provider='openai'):

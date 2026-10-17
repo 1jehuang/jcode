@@ -18,7 +18,7 @@ import argparse, json, os, pathlib, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from gateway_client import Gateway, health, pair
 
-TOKEN_DIR = pathlib.Path.home() / ".jcode" / "remote-tokens"
+TOKEN_DIR = pathlib.Path.home() / ".kcode" / "remote-tokens"
 
 
 def token_path(host, port):

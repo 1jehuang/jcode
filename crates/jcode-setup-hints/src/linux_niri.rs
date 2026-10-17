@@ -730,7 +730,7 @@ mod tests {
             "output \"eDP-1\" {\n    scale 2\n}\n",
         ];
 
-        let dir = std::env::temp_dir().join(format!("jcode-niri-719-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("kcode-niri-719-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
 
         for (idx, original) in originals.iter().enumerate() {
@@ -825,7 +825,7 @@ mod tests {
         )
         .unwrap();
 
-        let dir = std::env::temp_dir().join(format!("jcode-niri-fuzz-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("kcode-niri-fuzz-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
 
         let mut checked = 0usize;

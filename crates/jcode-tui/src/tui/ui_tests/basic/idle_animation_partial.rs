@@ -43,7 +43,7 @@ struct IdleAnimationEnvGuard {
 impl IdleAnimationEnvGuard {
     fn enable() -> Self {
         let env = crate::storage::lock_test_env();
-        crate::env::set_var("JCODE_IDLE_ANIMATION", "1");
+        crate::env::set_var("KCODE_IDLE_ANIMATION", "1");
         // The config cache throttles env re-checks; flush it so this test
         // observes the override immediately rather than a sibling's state.
         crate::config::invalidate_config_cache();
@@ -53,7 +53,7 @@ impl IdleAnimationEnvGuard {
 
 impl Drop for IdleAnimationEnvGuard {
     fn drop(&mut self) {
-        crate::env::remove_var("JCODE_IDLE_ANIMATION");
+        crate::env::remove_var("KCODE_IDLE_ANIMATION");
         crate::config::invalidate_config_cache();
     }
 }

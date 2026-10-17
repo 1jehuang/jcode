@@ -1316,7 +1316,7 @@ mod tests {
     fn load_cursor_external_session_skips_subagent_transcripts() {
         use std::io::Write;
         let dir = std::env::temp_dir().join(format!(
-            "jcode-cursor-subagent-{}-{}",
+            "kcode-cursor-subagent-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1346,7 +1346,7 @@ mod tests {
     fn load_cursor_external_session_parses_content_blocks() {
         use std::io::Write;
         let dir = std::env::temp_dir().join(format!(
-            "jcode-cursor-loader-{}-{}",
+            "kcode-cursor-loader-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

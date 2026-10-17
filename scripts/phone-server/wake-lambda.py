@@ -10,8 +10,8 @@ from urllib.parse import quote
 
 INSTANCE_ID = os.environ.get("INSTANCE_ID", "i-08214cf66cd3f80c7")
 TOKEN = os.environ.get("WAKE_TOKEN", "REPLACE_WITH_WAKE_TOKEN")
-HOST = os.environ.get("JCODE_GATEWAY_HOST", "100.109.78.41")
-PORT = int(os.environ.get("JCODE_GATEWAY_PORT", "7643"))
+HOST = os.environ.get("KCODE_GATEWAY_HOST", "100.109.78.41")
+PORT = int(os.environ.get("KCODE_GATEWAY_PORT", "7643"))
 REGION = os.environ.get("AWS_REGION", "us-east-1")
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 PAIRING_CODE_RE = re.compile(r"Pairing code:\s+(\d{3})\s+(\d{3})")
@@ -58,7 +58,7 @@ def fetch_pair_code(ssm):
     host = shlex.quote(HOST)
     command = (
         "sudo -iu ec2-user env "
-        f"JCODE_GATEWAY_HOST={host} "
+        f"KCODE_GATEWAY_HOST={host} "
         "/home/ec2-user/.local/bin/jcode pair"
     )
     command_id = ssm.send_command(

@@ -100,7 +100,7 @@ mod tests {
     #[test]
     fn claim_prune_slot_rate_limits_within_interval_and_reclaims_after() {
         let dir = std::env::temp_dir().join(format!(
-            "jcode-bak-claim-test-{}-{}",
+            "kcode-bak-claim-test-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
@@ -138,7 +138,7 @@ mod tests {
     #[test]
     fn prunes_only_old_bak_files() {
         let dir = std::env::temp_dir().join(format!(
-            "jcode-bak-prune-test-{}-{}",
+            "kcode-bak-prune-test-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)

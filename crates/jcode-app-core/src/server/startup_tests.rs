@@ -40,10 +40,10 @@ impl Provider for TestProvider {
 async fn server_run_refuses_to_replace_live_socket() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
-    let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
-    crate::env::set_var("JCODE_RUNTIME_DIR", temp.path());
-    let socket_path = temp.path().join("jcode.sock");
-    let debug_socket_path = temp.path().join("jcode-debug.sock");
+    let prev_runtime = std::env::var_os("KCODE_RUNTIME_DIR");
+    crate::env::set_var("KCODE_RUNTIME_DIR", temp.path());
+    let socket_path = temp.path().join("kcode.sock");
+    let debug_socket_path = temp.path().join("kcode-debug.sock");
     let _listener = Listener::bind(&socket_path).expect("bind existing live socket");
     let provider: Arc<dyn Provider> = Arc::new(TestProvider);
     let server = Server::new_with_paths(provider, socket_path, debug_socket_path);
@@ -60,9 +60,9 @@ async fn server_run_refuses_to_replace_live_socket() {
     );
 
     if let Some(prev_runtime) = prev_runtime {
-        crate::env::set_var("JCODE_RUNTIME_DIR", prev_runtime);
+        crate::env::set_var("KCODE_RUNTIME_DIR", prev_runtime);
     } else {
-        crate::env::remove_var("JCODE_RUNTIME_DIR");
+        crate::env::remove_var("KCODE_RUNTIME_DIR");
     }
 }
 
@@ -83,7 +83,7 @@ async fn is_server_ready_returns_false_immediately_for_missing_socket() {
 async fn wait_for_existing_server_tolerates_delayed_listener() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
-    let socket_path = temp.path().join("jcode.sock");
+    let socket_path = temp.path().join("kcode.sock");
     let bind_path = socket_path.clone();
 
     let bind_task = tokio::spawn(async move {
@@ -114,8 +114,8 @@ fn server_initializes_schedule_runner_even_when_ambient_disabled() {
 async fn debug_accept_loop_responds_to_ping_without_affecting_client_count() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
-    let socket_path = temp.path().join("jcode.sock");
-    let debug_socket_path = temp.path().join("jcode-debug.sock");
+    let socket_path = temp.path().join("kcode.sock");
+    let debug_socket_path = temp.path().join("kcode-debug.sock");
     let provider: Arc<dyn Provider> = Arc::new(TestProvider);
     let server = Server::new_with_paths(provider, socket_path, debug_socket_path.clone());
     let runtime = ServerRuntime::from_server(&server);

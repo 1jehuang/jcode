@@ -13,7 +13,7 @@ static SCREENSHOT_MODE: AtomicBool = AtomicBool::new(false);
 
 /// Get the screenshot signal directory
 fn signal_dir() -> PathBuf {
-    crate::storage::runtime_dir().join("jcode-screenshots")
+    crate::storage::runtime_dir().join("kcode-screenshots")
 }
 
 /// Enable screenshot automation mode

@@ -349,8 +349,8 @@ mod tests {
     fn fast_and_slow_counters_persist_independently() {
         let _guard = crate::storage::lock_test_env();
         let temp = tempfile::tempdir().expect("tempdir");
-        let prev = std::env::var_os("JCODE_HOME");
-        crate::env::set_var("JCODE_HOME", temp.path());
+        let prev = std::env::var_os("KCODE_HOME");
+        crate::env::set_var("KCODE_HOME", temp.path());
 
         record_slow(LearnableAction::Resume);
         record_slow(LearnableAction::Resume);
@@ -362,9 +362,9 @@ mod tests {
         assert_eq!(stat.fast_uses, 1);
 
         if let Some(prev) = prev {
-            crate::env::set_var("JCODE_HOME", prev);
+            crate::env::set_var("KCODE_HOME", prev);
         } else {
-            crate::env::remove_var("JCODE_HOME");
+            crate::env::remove_var("KCODE_HOME");
         }
     }
 }

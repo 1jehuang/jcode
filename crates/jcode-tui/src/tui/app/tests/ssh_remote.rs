@@ -13,13 +13,13 @@ fn with_ssh_remote_test_home(f: impl FnOnce()) {
             }
         }
         let _restore = RestoreEnv(
-            ["JCODE_SSH_REMOTE", "JCODE_SOCKET", "JCODE_SELFDEV"]
+            ["KCODE_SSH_REMOTE", "KCODE_SOCKET", "KCODE_SELFDEV"]
                 .into_iter()
                 .map(|key| (key, std::env::var_os(key)))
                 .collect(),
         );
-        crate::env::set_var("JCODE_SSH_REMOTE", "test-remote");
-        crate::env::remove_var("JCODE_SELFDEV");
+        crate::env::set_var("KCODE_SSH_REMOTE", "test-remote");
+        crate::env::remove_var("KCODE_SELFDEV");
         f();
     });
 }
@@ -193,6 +193,7 @@ fn ssh_remote_history_is_authoritative_even_when_empty_or_server_version_differs
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
+            applets: Default::default(),
         };
         app.handle_server_event(event, &mut remote);
         assert!(remote.has_loaded_history());

@@ -10,12 +10,12 @@ use std::time::Duration;
 #[test]
 #[ignore = "takes ~15s; must run in its own process (separate from the stall probe)"]
 fn idle_process_is_not_reported_as_stalled() {
-    let dir = std::env::temp_dir().join(format!("jcode-wd-idle-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("kcode-wd-idle-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     unsafe {
         std::env::set_var("HOME", &dir);
-        std::env::set_var("JCODE_WATCHDOG_STALL_SECS", "3");
-        std::env::set_var("JCODE_WATCHDOG_HEARTBEAT_SECS", "0");
+        std::env::set_var("KCODE_WATCHDOG_STALL_SECS", "3");
+        std::env::set_var("KCODE_WATCHDOG_HEARTBEAT_SECS", "0");
     }
 
     jcode_logging::init();

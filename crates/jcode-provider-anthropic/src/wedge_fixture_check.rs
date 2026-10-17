@@ -3,7 +3,7 @@ use jcode_message_types::Message;
 
 #[test]
 fn real_wedged_session_becomes_sendable() {
-    let Ok(path) = std::env::var("JCODE_WEDGE_FIXTURE") else {
+    let Ok(path) = std::env::var("KCODE_WEDGE_FIXTURE") else {
         return;
     };
     let raw = std::fs::read_to_string(path).expect("fixture");

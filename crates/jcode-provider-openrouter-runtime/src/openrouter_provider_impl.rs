@@ -138,54 +138,11 @@ impl Provider for OpenRouterProvider {
             request["max_tokens"] = serde_json::json!(max_tokens);
         }
 
-        let mut sent_reasoning_config = false;
-        if let Some(effort) = reasoning_effort.as_deref() {
-            if self.supports_deepseek_reasoning_effort() {
-                // The `swarm` sentinel maps to the strongest real effort.
-                let effort = if jcode_base::prompt::is_swarm_effort(effort) {
-                    "max"
-                } else {
-                    effort
-                };
-                if effort != "none" {
-                    request["reasoning_effort"] = serde_json::json!(effort);
-                    sent_reasoning_config = true;
-                }
-            } else if self.supports_openai_reasoning_effort() {
-                // GPT-family models on direct compat gateways (e.g. OpenCode
-                // Zen serving gpt-5.3-codex-spark) take the standard OpenAI
-                // `reasoning_effort` field with OpenAI's effort vocabulary.
-                let effort = if strict_openai_schema
-                    && (jcode_base::prompt::is_swarm_effort(effort) || effort == "max")
-                {
-                    // Strict OpenAI-schema endpoints such as Mistral document
-                    // xhigh as their strongest accepted value and reject the
-                    // jcode/OpenAI UX alias `max`.
-                    "xhigh"
-                } else if jcode_base::prompt::is_swarm_effort(effort) {
-                    "max"
-                } else {
-                    effort
-                };
-                if effort != "none" {
-                    request["reasoning_effort"] = serde_json::json!(effort);
-                    sent_reasoning_config = true;
-                }
-            } else if Self::profile_supports_unified_reasoning(
-                self.profile_id.as_deref(),
-                self.send_openrouter_headers,
-            ) {
-                let effort = if jcode_base::prompt::is_swarm_effort(effort) {
-                    "xhigh"
-                } else {
-                    effort
-                };
-                request["reasoning"] = serde_json::json!({
-                    "effort": effort,
-                });
-                sent_reasoning_config = true;
-            }
-        }
+        let sent_reasoning_config = reasoning_effort.as_deref().is_some_and(|effort| {
+            let resolved =
+                jcode_base::prompt::swarm_root_reasoning_effort(effort).unwrap_or(effort);
+            self.apply_resolved_reasoning_effort(&mut request, resolved, strict_openai_schema)
+        });
 
         if !api_tools.is_empty() {
             request["tools"] = serde_json::json!(api_tools);
@@ -305,7 +262,7 @@ impl Provider for OpenRouterProvider {
         let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(100);
         let client = self.client.clone();
         let api_base = self.api_base.clone();
-        let auth = self.auth.clone();
+        let auth = (self.auth)()?;
         let send_openrouter_headers = self.send_openrouter_headers;
         let conversation_id = self.conversation_id.clone();
         let request_for_retries = request;
@@ -378,6 +335,14 @@ impl Provider for OpenRouterProvider {
         }
         if Self::profile_rejects_image_input(self.profile_id.as_deref()) {
             return false;
+        }
+
+        // The catalog already states which modalities each model accepts, so
+        // honour that before falling back to a per-provider guess. Without this
+        // a vision-capable model on the native OpenRouter route is clamped to
+        // text even though the provider advertised image input for it.
+        if self.catalog_declares_image_input(&model_id) {
+            return true;
         }
 
         // Direct OpenAI-compatible local providers such as Ollama and LM Studio
@@ -678,7 +643,8 @@ impl Provider for OpenRouterProvider {
             return Ok(());
         }
 
-        let _ = self.fetch_models().await?;
+        let models = self.fetch_models().await?;
+        self.promote_placeholder_default_model(&models);
         if self.supports_provider_features {
             // Also prefetch endpoints for the current model so preferred_provider() works immediately.
             let model = self.model();
@@ -694,6 +660,7 @@ impl Provider for OpenRouterProvider {
         let before_routes = self.model_routes();
 
         let refreshed_models = self.refresh_models().await?;
+        self.promote_placeholder_default_model(&refreshed_models);
 
         if self.supports_provider_features {
             let mut targets = Vec::new();
@@ -753,10 +720,21 @@ impl Provider for OpenRouterProvider {
         // the (large) provider default and over-budgeting the request. See #403.
         let raw_model = self.model();
         let model_id = self.strip_session_profile_prefix(&raw_model).to_string();
+        // A pinned variant suffix is routing syntax, not part of the catalog id.
+        // OpenRouter's `/models` lists `stealth/space-bunny-alpha` while the pinned
+        // runtime model is `stealth/space-bunny-alpha@Stealth`, so comparing only the
+        // pinned form matched nothing and fell through to the 200K default even
+        // though the catalog entry carries context_length 1000000. Try the base id too.
+        let base_model_id = model_id
+            .split_once('@')
+            .map(|(b, _)| b)
+            .filter(|b| !b.is_empty());
         // Try cached model data from OpenRouter API
         let cache = self.models_cache.try_read();
         if let Ok(cache) = cache
-            && let Some(model) = cache.models.iter().find(|m| m.id == model_id)
+            && let Some(model) = std::iter::once(model_id.as_str())
+                .chain(base_model_id)
+                .find_map(|id| cache.models.iter().find(|m| m.id == id))
             && let Some(ctx) = model.context_length
         {
             return ctx as usize;
@@ -766,7 +744,9 @@ impl Provider for OpenRouterProvider {
         // in-memory cache. Use that live catalog context length before falling
         // back to static defaults.
         if let Some(cache_entry) = self.load_usable_model_disk_cache_entry()
-            && let Some(model) = cache_entry.models.iter().find(|m| m.id == model_id)
+            && let Some(model) = std::iter::once(model_id.as_str())
+                .chain(base_model_id)
+                .find_map(|id| cache_entry.models.iter().find(|m| m.id == id))
             && let Some(ctx) = model.context_length
         {
             return ctx as usize;
@@ -859,7 +839,7 @@ impl OpenRouterProvider {
     /// writes should use.
     ///
     /// Every `new_named_openai_compatible()` constructor sets the process-global
-    /// `JCODE_OPENROUTER_CACHE_NAMESPACE` env var, so with several named
+    /// `KCODE_OPENROUTER_CACHE_NAMESPACE` env var, so with several named
     /// profiles in one process the last one constructed wins and all profiles
     /// collide on a single `<last-profile>_models.json`. The background refresh
     /// path already passes an explicit namespace; the foreground paths did not.
@@ -930,4 +910,48 @@ impl OpenRouterProvider {
         // `/models` catalog refreshes (issue #579).
         self.supports_provider_features || self.profile_id.is_none() || self.is_user_named_profile()
     }
+
+    /// Whether the model catalog declares `image` as an accepted input modality
+    /// for this model.
+    ///
+    /// Memory decides whenever it holds an opinion about the model, so a freshly
+    /// fetched catalog is never overruled by a stale copy on disk. Only when
+    /// memory is silent does the persisted catalog answer, and that fallback is
+    /// what makes the first request after startup behave: the in-memory cache is
+    /// initialised empty while the catalog is normally already on disk from the
+    /// previous run, so memory alone would keep clamping images until the first
+    /// refresh completed.
+    ///
+    /// `supports_image_input` is a sync trait method, so the in-memory read uses
+    /// `try_read` rather than awaiting the tokio lock; a busy lock defers to the
+    /// disk copy instead of blocking.
+    pub(crate) fn catalog_declares_image_input(&self, model_id: &str) -> bool {
+        if !self.supports_model_catalog {
+            return false;
+        }
+        if let Ok(cache) = self.models_cache.try_read()
+            && let Some(model) = cache
+                .models
+                .iter()
+                .find(|model| model.id.trim().eq_ignore_ascii_case(model_id))
+        {
+            return declares_image_input(model);
+        }
+        self.load_usable_model_disk_cache_entry()
+            .is_some_and(|entry| {
+                entry
+                    .models
+                    .iter()
+                    .find(|model| model.id.trim().eq_ignore_ascii_case(model_id))
+                    .is_some_and(declares_image_input)
+            })
+    }
+}
+
+/// Whether one catalog entry declares `image` as an accepted input modality.
+fn declares_image_input(model: &jcode_provider_openrouter::ModelInfo) -> bool {
+    model
+        .input
+        .iter()
+        .any(|modality| modality.eq_ignore_ascii_case("image"))
 }

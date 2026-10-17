@@ -31,7 +31,7 @@ pub(crate) use tokio_tungstenite::connect_async;
 pub(crate) use tokio_tungstenite::tungstenite::Message as WsMessage;
 pub(crate) use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
-static JCODE_HOME_LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
+static KCODE_HOME_LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
 
 pub(crate) fn short_runtime_dir(name: String) -> std::path::PathBuf {
     #[cfg(unix)]
@@ -45,7 +45,7 @@ pub(crate) fn short_runtime_dir(name: String) -> std::path::PathBuf {
 }
 
 fn lock_jcode_home() -> std::sync::MutexGuard<'static, ()> {
-    let mutex = JCODE_HOME_LOCK.get_or_init(|| Mutex::new(()));
+    let mutex = KCODE_HOME_LOCK.get_or_init(|| Mutex::new(()));
     // Recover from poisoned state if a previous test panicked
     match mutex.lock() {
         Ok(guard) => guard,
@@ -71,29 +71,32 @@ impl TestEnvGuard {
         let temp_home = tempfile::Builder::new()
             .prefix("jcode-e2e-home-")
             .tempdir()?;
-        let prev_home = std::env::var_os("JCODE_HOME");
-        let prev_runtime_dir = std::env::var_os("JCODE_RUNTIME_DIR");
-        let prev_test_session = std::env::var_os("JCODE_TEST_SESSION");
-        let prev_debug_control = std::env::var_os("JCODE_DEBUG_CONTROL");
-        let prev_runtime_provider = std::env::var_os("JCODE_RUNTIME_PROVIDER");
-        let prev_active_provider = std::env::var_os("JCODE_ACTIVE_PROVIDER");
-        let prev_openrouter_cache_namespace = std::env::var_os("JCODE_OPENROUTER_CACHE_NAMESPACE");
+        // No telemetry: a concurrency lease finishing at runtime shutdown otherwise recreates
+        // telemetry_concurrency_v2/ after the TempDir is removed, leaking one dir per test.
+        std::fs::write(temp_home.path().join("no_telemetry"), b"")?;
+        let prev_home = std::env::var_os("KCODE_HOME");
+        let prev_runtime_dir = std::env::var_os("KCODE_RUNTIME_DIR");
+        let prev_test_session = std::env::var_os("KCODE_TEST_SESSION");
+        let prev_debug_control = std::env::var_os("KCODE_DEBUG_CONTROL");
+        let prev_runtime_provider = std::env::var_os("KCODE_RUNTIME_PROVIDER");
+        let prev_active_provider = std::env::var_os("KCODE_ACTIVE_PROVIDER");
+        let prev_openrouter_cache_namespace = std::env::var_os("KCODE_OPENROUTER_CACHE_NAMESPACE");
         let runtime_dir = temp_home.path().join("runtime");
         std::fs::create_dir_all(&runtime_dir)?;
 
-        jcode::env::set_var("JCODE_HOME", temp_home.path());
-        jcode::env::set_var("JCODE_RUNTIME_DIR", &runtime_dir);
-        jcode::env::set_var("JCODE_TEST_SESSION", "1");
-        jcode::env::set_var("JCODE_DEBUG_CONTROL", "1");
-        jcode::env::remove_var("JCODE_RUNTIME_PROVIDER");
-        jcode::env::remove_var("JCODE_ACTIVE_PROVIDER");
-        jcode::env::remove_var("JCODE_OPENROUTER_CACHE_NAMESPACE");
+        jcode::env::set_var("KCODE_HOME", temp_home.path());
+        jcode::env::set_var("KCODE_RUNTIME_DIR", &runtime_dir);
+        jcode::env::set_var("KCODE_TEST_SESSION", "1");
+        jcode::env::set_var("KCODE_DEBUG_CONTROL", "1");
+        jcode::env::remove_var("KCODE_RUNTIME_PROVIDER");
+        jcode::env::remove_var("KCODE_ACTIVE_PROVIDER");
+        jcode::env::remove_var("KCODE_OPENROUTER_CACHE_NAMESPACE");
         // Disable the memory sidecar/extraction in e2e runs. Its background
         // extraction makes its own provider `complete()` call, which would steal
         // a queued mock response from the scenario under test and make turn
         // outcomes nondeterministic across transports.
-        jcode::env::set_var("JCODE_MEMORY_ENABLED", "0");
-        jcode::env::set_var("JCODE_MEMORY_SIDECAR_ENABLED", "0");
+        jcode::env::set_var("KCODE_MEMORY_ENABLED", "0");
+        jcode::env::set_var("KCODE_MEMORY_SIDECAR_ENABLED", "0");
 
         Ok(Self {
             _lock: lock,
@@ -112,48 +115,48 @@ impl TestEnvGuard {
 impl Drop for TestEnvGuard {
     fn drop(&mut self) {
         if let Some(prev_home) = &self.prev_home {
-            jcode::env::set_var("JCODE_HOME", prev_home);
+            jcode::env::set_var("KCODE_HOME", prev_home);
         } else {
-            jcode::env::remove_var("JCODE_HOME");
+            jcode::env::remove_var("KCODE_HOME");
         }
 
         if let Some(prev_runtime_dir) = &self.prev_runtime_dir {
-            jcode::env::set_var("JCODE_RUNTIME_DIR", prev_runtime_dir);
+            jcode::env::set_var("KCODE_RUNTIME_DIR", prev_runtime_dir);
         } else {
-            jcode::env::remove_var("JCODE_RUNTIME_DIR");
+            jcode::env::remove_var("KCODE_RUNTIME_DIR");
         }
 
         if let Some(prev_test_session) = &self.prev_test_session {
-            jcode::env::set_var("JCODE_TEST_SESSION", prev_test_session);
+            jcode::env::set_var("KCODE_TEST_SESSION", prev_test_session);
         } else {
-            jcode::env::remove_var("JCODE_TEST_SESSION");
+            jcode::env::remove_var("KCODE_TEST_SESSION");
         }
 
         if let Some(prev_debug_control) = &self.prev_debug_control {
-            jcode::env::set_var("JCODE_DEBUG_CONTROL", prev_debug_control);
+            jcode::env::set_var("KCODE_DEBUG_CONTROL", prev_debug_control);
         } else {
-            jcode::env::remove_var("JCODE_DEBUG_CONTROL");
+            jcode::env::remove_var("KCODE_DEBUG_CONTROL");
         }
 
         if let Some(prev_runtime_provider) = &self.prev_runtime_provider {
-            jcode::env::set_var("JCODE_RUNTIME_PROVIDER", prev_runtime_provider);
+            jcode::env::set_var("KCODE_RUNTIME_PROVIDER", prev_runtime_provider);
         } else {
-            jcode::env::remove_var("JCODE_RUNTIME_PROVIDER");
+            jcode::env::remove_var("KCODE_RUNTIME_PROVIDER");
         }
 
         if let Some(prev_active_provider) = &self.prev_active_provider {
-            jcode::env::set_var("JCODE_ACTIVE_PROVIDER", prev_active_provider);
+            jcode::env::set_var("KCODE_ACTIVE_PROVIDER", prev_active_provider);
         } else {
-            jcode::env::remove_var("JCODE_ACTIVE_PROVIDER");
+            jcode::env::remove_var("KCODE_ACTIVE_PROVIDER");
         }
 
         if let Some(prev_openrouter_cache_namespace) = &self.prev_openrouter_cache_namespace {
             jcode::env::set_var(
-                "JCODE_OPENROUTER_CACHE_NAMESPACE",
+                "KCODE_OPENROUTER_CACHE_NAMESPACE",
                 prev_openrouter_cache_namespace,
             );
         } else {
-            jcode::env::remove_var("JCODE_OPENROUTER_CACHE_NAMESPACE");
+            jcode::env::remove_var("KCODE_OPENROUTER_CACHE_NAMESPACE");
         }
     }
 }
@@ -361,6 +364,8 @@ impl WsTestClient {
         self.next_id += 1;
         let working_dir = std::env::current_dir()?.to_string_lossy().into_owned();
         self.send_request(Request::Subscribe {
+            system_prompt: None,
+            supports_pdf_panels: false,
             crash_on_disconnect: false,
             continue_on_disconnect: false,
             id,
@@ -550,8 +555,8 @@ pub(crate) async fn run_unix_transport_scenario() -> Result<TransportScenarioRes
             .as_nanos()
     ));
     std::fs::create_dir_all(&runtime_dir)?;
-    let socket_path = runtime_dir.join("jcode.sock");
-    let debug_socket_path = runtime_dir.join("jcode-debug.sock");
+    let socket_path = runtime_dir.join("kcode.sock");
+    let debug_socket_path = runtime_dir.join("kcode-debug.sock");
 
     let provider = MockProvider::new();
     provider.queue_response(vec![
@@ -610,7 +615,7 @@ pub(crate) async fn run_unix_transport_scenario() -> Result<TransportScenarioRes
                 let state = debug_run_command(debug_socket_path.clone(), "state", None)
                     .await
                     .unwrap_or_else(|e| format!("<state error: {e}>"));
-                let logs = std::env::var_os("JCODE_HOME")
+                let logs = std::env::var_os("KCODE_HOME")
                     .and_then(|home| latest_log_excerpt(std::path::Path::new(&home)));
                 let seen = message_events
                     .iter()
@@ -667,8 +672,8 @@ pub(crate) async fn run_websocket_transport_scenario() -> Result<TransportScenar
             .as_nanos()
     ));
     std::fs::create_dir_all(&runtime_dir)?;
-    let socket_path = runtime_dir.join("jcode.sock");
-    let debug_socket_path = runtime_dir.join("jcode-debug.sock");
+    let socket_path = runtime_dir.join("kcode.sock");
+    let debug_socket_path = runtime_dir.join("kcode-debug.sock");
     let gateway_port = reserve_tcp_port()?;
     let ws_token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     pair_test_device(ws_token)?;

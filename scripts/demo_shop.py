@@ -41,7 +41,7 @@ PRODUCTS = {
 
 
 def state_path() -> Path:
-    configured = os.environ.get("JCODE_DEMO_SHOP_STATE")
+    configured = os.environ.get("KCODE_DEMO_SHOP_STATE")
     if configured:
         return Path(configured).expanduser()
     return Path(f"/tmp/jcode-demo-shop-{os.getuid()}.json")

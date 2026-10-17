@@ -173,7 +173,7 @@ fn kitty_notification_id(session_id: &str) -> String {
         .take(128)
         .collect();
     format!(
-        "jcode-turn-{}",
+        "kcode-turn-{}",
         if safe.is_empty() { "unknown" } else { &safe }
     )
 }

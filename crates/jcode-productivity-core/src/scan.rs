@@ -1,7 +1,7 @@
 //! Transcript scanning with an on-disk incremental cache.
 //!
 //! Scanning is the expensive part: there can be ~100k JSON transcripts totaling
-//! several GB. We keep a sidecar cache (`~/.jcode/cache/productivity/summaries.json`)
+//! several GB. We keep a sidecar cache (`~/.kcode/cache/productivity/summaries.json`)
 //! keyed by `(file_len, mtime_ns)` so a re-run only re-parses changed files.
 //! Parsing of the changed set is parallelized with rayon.
 

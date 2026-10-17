@@ -105,7 +105,7 @@ fn deferred_sender() -> &'static mpsc::Sender<DeferredLatexTask> {
         // A failure to spawn leaves the receiver dropped, so `send` fails and
         // callers fall back to reporting the error rather than blocking.
         let _ = std::thread::Builder::new()
-            .name("jcode-latex-deferred".to_string())
+            .name("kcode-latex-deferred".to_string())
             .spawn(move || deferred_worker(rx));
         tx
     })
@@ -366,19 +366,69 @@ struct Toolchain {
     pdftocairo: PathBuf,
 }
 
+const TOOLCHAIN_MISSING_ERROR: &str =
+    "no TeX toolchain found (need latex + dvipng, or pdflatex + pdftocairo)";
+
+#[cfg(test)]
+thread_local! {
+    static TOOLCHAIN_MISSING_OVERRIDE: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) fn with_toolchain_missing_override<T>(missing: bool, f: impl FnOnce() -> T) -> T {
+    TOOLCHAIN_MISSING_OVERRIDE.with(|cell| {
+        let previous = cell.replace(Some(missing));
+        let result = f();
+        cell.set(previous);
+        result
+    })
+}
+
+fn executable_on_path(command: &Path) -> bool {
+    if command.components().count() > 1 {
+        return command.is_file();
+    }
+    let Some(paths) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&paths).any(|dir| {
+        let candidate = dir.join(command);
+        candidate.is_file() || (cfg!(windows) && candidate.with_extension("exe").is_file())
+    })
+}
+
+/// True when image-mode LaTeX can never succeed because neither the DVI nor
+/// the PDF toolchain is installed. Cached for the process lifetime: this runs
+/// on the draw path and `PATH` probing is not free.
+pub(super) fn toolchain_missing() -> bool {
+    #[cfg(test)]
+    if let Some(missing) = TOOLCHAIN_MISSING_OVERRIDE.with(std::cell::Cell::get) {
+        return missing;
+    }
+    static MISSING: OnceLock<bool> = OnceLock::new();
+    *MISSING.get_or_init(|| {
+        let toolchain = Toolchain::from_environment();
+        let dvi = executable_on_path(&toolchain.latex) && executable_on_path(&toolchain.dvipng);
+        let pdf =
+            executable_on_path(&toolchain.pdflatex) && executable_on_path(&toolchain.pdftocairo);
+        !dvi && !pdf
+    })
+}
+
 impl Toolchain {
     fn from_environment() -> Self {
         Self {
-            latex: std::env::var_os("JCODE_LATEX_COMMAND")
+            latex: std::env::var_os("KCODE_LATEX_COMMAND")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("latex")),
-            dvipng: std::env::var_os("JCODE_DVIPNG_COMMAND")
+            dvipng: std::env::var_os("KCODE_DVIPNG_COMMAND")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("dvipng")),
-            pdflatex: std::env::var_os("JCODE_PDFLATEX_COMMAND")
+            pdflatex: std::env::var_os("KCODE_PDFLATEX_COMMAND")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("pdflatex")),
-            pdftocairo: std::env::var_os("JCODE_PDFTOCAIRO_COMMAND")
+            pdftocairo: std::env::var_os("KCODE_PDFTOCAIRO_COMMAND")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("pdftocairo")),
         }
@@ -409,6 +459,11 @@ pub(super) fn render_latex_image(
     let artifact = match cached_artifact(source, display, dpi) {
         Ok(artifact) => artifact,
         Err(_) => {
+            // Previously cached artifacts stay usable, but never queue work
+            // that cannot succeed without a TeX toolchain.
+            if toolchain_missing() {
+                return LatexImageOutcome::Failed(TOOLCHAIN_MISSING_ERROR.to_string());
+            }
             if enqueue_render(source, display, dpi, failure_key) {
                 return LatexImageOutcome::Pending;
             }
@@ -538,7 +593,7 @@ fn render_artifact_in(
     }
 
     let work = tempfile::Builder::new()
-        .prefix("jcode-latex-")
+        .prefix("kcode-latex-")
         .tempdir()
         .map_err(|e| format!("create LaTeX workspace: {e}"))?;
     let tex_path = work.path().join("formula.tex");
@@ -684,7 +739,7 @@ fn recolor_and_crop(path: &Path, dpi: u16) -> Result<(), String> {
 
 fn cache_dir() -> Result<PathBuf, String> {
     dirs::cache_dir()
-        .map(|path| path.join("jcode").join("latex"))
+        .map(|path| path.join("kcode").join("latex"))
         .ok_or_else(|| "no user cache directory is available".to_string())
 }
 
@@ -706,7 +761,7 @@ fn run_command<const N: usize>(
     args: [&str; N],
     working_dir: &Path,
 ) -> Result<(), String> {
-    let output_path = working_dir.join(".jcode-command-output.log");
+    let output_path = working_dir.join(".kcode-command-output.log");
     let stdout = File::create(&output_path)
         .map_err(|e| format!("create {} diagnostics: {e}", executable.display()))?;
     let stderr = stdout

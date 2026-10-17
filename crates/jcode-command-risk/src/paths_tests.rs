@@ -8,7 +8,7 @@ use super::*;
 
 fn ctx() -> RiskContext {
     RiskContext {
-        scratch_dir: Some(PathBuf::from("/home/u/.jcode/scratch")),
+        scratch_dir: Some(PathBuf::from("/home/u/.kcode/scratch")),
         working_dir: Some(PathBuf::from("/home/u/proj")),
         home_dir: Some(PathBuf::from("/home/u")),
     }
@@ -64,7 +64,7 @@ fn root_and_system_paths_are_catastrophic() {
 #[test]
 fn credential_stores_inside_home_are_catastrophic() {
     let ctx = ctx();
-    for sub in [".ssh", ".gnupg", ".aws", ".config", ".jcode"] {
+    for sub in [".ssh", ".gnupg", ".aws", ".config", ".kcode"] {
         let expanded = expand(&format!("~/{sub}"), &ctx);
         assert!(is_catastrophic_target(&expanded, &ctx), "~/{sub}");
     }
@@ -163,7 +163,7 @@ fn unresolvable_targets_escalate_rather_than_pass() {
 fn missing_home_context_does_not_panic_or_misfire() {
     // On an exotic host HOME may be unset; the system-path tier must still work.
     let ctx = RiskContext {
-        scratch_dir: Some(PathBuf::from("/home/u/.jcode/scratch")),
+        scratch_dir: Some(PathBuf::from("/home/u/.kcode/scratch")),
         working_dir: Some(PathBuf::from("/srv/app")),
         home_dir: None,
     };
@@ -206,7 +206,7 @@ fn ordinary_config_files_remain_editable() {
     let ctx = ctx();
     for path in [
         "/home/u/.config/app/settings.toml",
-        "/home/u/.jcode/sessions/old.json",
+        "/home/u/.kcode/sessions/old.json",
         "/home/u/Documents/notes/draft.md",
     ] {
         assert!(
@@ -215,7 +215,7 @@ fn ordinary_config_files_remain_editable() {
         );
     }
     // ...while the roots themselves stay protected.
-    for path in ["/home/u/.config", "/home/u/.jcode", "/home/u/Documents"] {
+    for path in ["/home/u/.config", "/home/u/.kcode", "/home/u/Documents"] {
         assert!(is_catastrophic_target(Path::new(path), &ctx), "{path}");
     }
 }
@@ -224,10 +224,10 @@ fn ordinary_config_files_remain_editable() {
 fn known_variable_logs_are_bounded_but_unknown_expansions_still_confirm() {
     let ctx = ctx();
     for raw in [
-        "$HOME/.jcode/scratch/tests.log",
+        "$HOME/.kcode/scratch/tests.log",
         "${HOME}/proj/tests.log",
-        "$JCODE_SCRATCH_DIR/tests.log",
-        "${JCODE_SCRATCH_DIR}/backup.patch",
+        "$KCODE_SCRATCH_DIR/tests.log",
+        "${KCODE_SCRATCH_DIR}/backup.patch",
     ] {
         let path = expand(raw, &ctx);
         let finding = classify_target(&path, raw, false, &ctx);
@@ -237,11 +237,11 @@ fn known_variable_logs_are_bounded_but_unknown_expansions_still_confirm() {
         "$HOME_BACKUP/file",
         "$HOME/proj/$UNKNOWN/file*",
         "$HOME/proj/$UNKNOWN/../file*",
-        "$JCODE_SCRATCH_DIR_OTHER/file",
+        "$KCODE_SCRATCH_DIR_OTHER/file",
         "${HOME:-/tmp}/file",
         "$UNKNOWN/../file",
-        "$JCODE_SCRATCH_DIR/$UNKNOWN/../file",
-        "$JCODE_SCRATCH_DIR/$(pwd)/file",
+        "$KCODE_SCRATCH_DIR/$UNKNOWN/../file",
+        "$KCODE_SCRATCH_DIR/$(pwd)/file",
     ] {
         let path = expand(raw, &ctx);
         assert_eq!(
@@ -258,8 +258,8 @@ fn known_variables_do_not_bypass_protected_paths() {
     for raw in [
         "$HOME",
         "${HOME}/.ssh/key",
-        "$JCODE_SCRATCH_DIR/../..",
-        "$JCODE_SCRATCH_DIR/../../../../etc/passwd",
+        "$KCODE_SCRATCH_DIR/../..",
+        "$KCODE_SCRATCH_DIR/../../../../etc/passwd",
     ] {
         let path = expand(raw, &ctx);
         assert_eq!(
@@ -272,7 +272,7 @@ fn known_variables_do_not_bypass_protected_paths() {
         scratch_dir: Some(PathBuf::from("/etc")),
         ..ctx
     };
-    let raw = "$JCODE_SCRATCH_DIR/passwd";
+    let raw = "$KCODE_SCRATCH_DIR/passwd";
     assert_eq!(
         classify_target(&expand(raw, &ctx), raw, false, &ctx)
             .unwrap()

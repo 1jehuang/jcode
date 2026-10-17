@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Verify the *published* @1jehuang/jcode-sdk tarball, not just its source.
+# Verify the *published* @KooshaPari/KCode-sdk tarball, not just its source.
 #
 # `npm run check` compiles src/ and runs tests against it. A consumer never
 # sees src/: they see whatever `files`, `exports`, `main`, and `types` let out
@@ -53,7 +53,7 @@ fi
 
 echo "== ESM import =="
 node --input-type=module -e '
-import { JcodeClient, HarnessError, API_VERSION_MAJOR } from "@1jehuang/jcode-sdk";
+import { JcodeClient, HarnessError, API_VERSION_MAJOR } from "@KooshaPari/KCode-sdk";
 if (typeof JcodeClient !== "function") throw new Error("JcodeClient missing");
 if (typeof HarnessError !== "function") throw new Error("HarnessError missing");
 if (API_VERSION_MAJOR !== 1) throw new Error("unexpected protocol version");
@@ -63,9 +63,9 @@ console.log("esm ok");
 if [ -n "$runtime_tarball" ]; then
   echo "== bundled runtime resolution =="
   node --input-type=module -e '
-  import { bundledJcodeBinary } from "@1jehuang/jcode-sdk";
+  import { bundledJcodeBinary } from "@KooshaPari/KCode-sdk";
   const binary = bundledJcodeBinary();
-  if (!binary || !binary.includes("@1jehuang/jcode-linux-")) {
+  if (!binary || !binary.includes("@KooshaPari/KCode-linux-")) {
     throw new Error(`platform runtime was not resolved: ${binary}`);
   }
   console.log(`runtime ok: ${binary}`);
@@ -74,7 +74,7 @@ fi
 
 echo "== CJS require =="
 node --input-type=commonjs -e '
-const sdk = require("@1jehuang/jcode-sdk");
+const sdk = require("@KooshaPari/KCode-sdk");
 if (typeof sdk.JcodeClient !== "function") throw new Error("JcodeClient missing under require");
 console.log("cjs ok");
 '
@@ -95,7 +95,7 @@ cat > tsconfig.json <<'JSON'
 }
 JSON
 cat > consumer.ts <<'TS'
-import { JcodeClient, HarnessError, type TurnResult, type ApiEvent } from "@1jehuang/jcode-sdk";
+import { JcodeClient, HarnessError, type TurnResult, type ApiEvent } from "@KooshaPari/KCode-sdk";
 
 export async function demo(prompt: string): Promise<TurnResult> {
   const client = await JcodeClient.connect({ clientName: "package-test/1.0" });
@@ -121,7 +121,7 @@ TS
 # and every field came back `unknown`. That compiles fine inside the repo and
 # only bites consumers, so assert it from a consumer.
 cat > narrowing.ts <<'TS'
-import { isKnownEvent, type AnyApiEvent, type ApiEvent } from "@1jehuang/jcode-sdk";
+import { isKnownEvent, type AnyApiEvent, type ApiEvent } from "@KooshaPari/KCode-sdk";
 
 export function summarize(event: ApiEvent): string {
   switch (event.ev) {
@@ -155,7 +155,7 @@ echo "types ok"
 if command -v jcode >/dev/null 2>&1; then
   echo "== launching a private instance as a consumer would =="
   cat > launch-consumer.mjs <<'JS'
-import { JcodeClient } from "@1jehuang/jcode-sdk";
+import { JcodeClient } from "@KooshaPari/KCode-sdk";
 import fs from "node:fs";
 
 // No `binary` option: use the platform npm package, exactly like a consumer.

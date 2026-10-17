@@ -17,9 +17,9 @@ IN_CONTAINER_BINARY = "/usr/local/bin/jcode"
 IN_CONTAINER_LIB_DIR = f"{IN_CONTAINER_RUNTIME}/lib"
 IN_CONTAINER_CA_BUNDLE = f"{IN_CONTAINER_HOME}/ca-certificates.crt"
 DEFAULT_BINARY_PATH = "/tmp/jcode-compat-dist/jcode-linux-x86_64"
-DEFAULT_OPENAI_AUTH_PATH = "~/.jcode/openai-auth.json"
+DEFAULT_OPENAI_AUTH_PATH = "~/.kcode/openai-auth.json"
 CA_BUNDLE_CANDIDATES = (
-    os.environ.get("JCODE_HARBOR_CA_BUNDLE"),
+    os.environ.get("KCODE_HARBOR_CA_BUNDLE"),
     "/etc/ca-certificates/extracted/tls-ca-bundle.pem",
     "/etc/ssl/certs/ca-certificates.crt",
 )
@@ -53,16 +53,16 @@ def _sibling_runtime_lib_candidates(binary: Path, stem: str) -> tuple[str, ...]:
     return tuple(str(path) for path in sorted(binary.parent.glob(f"{stem}.so*")) if path.is_file())
 
 
-JCODE_BINARY = _resolve_existing_file(
-    env_name="JCODE_HARBOR_BINARY",
+KCODE_BINARY = _resolve_existing_file(
+    env_name="KCODE_HARBOR_BINARY",
     default_path=DEFAULT_BINARY_PATH,
 )
 OPENAI_AUTH = _resolve_existing_file(
-    env_name="JCODE_HARBOR_OPENAI_AUTH",
+    env_name="KCODE_HARBOR_OPENAI_AUTH",
     default_path=DEFAULT_OPENAI_AUTH_PATH,
 )
 CA_BUNDLE = _resolve_existing_file(
-    env_name="JCODE_HARBOR_CA_BUNDLE",
+    env_name="KCODE_HARBOR_CA_BUNDLE",
     candidates=CA_BUNDLE_CANDIDATES,
 )
 OPENSSL_RUNTIME_LIBS = tuple(
@@ -70,8 +70,8 @@ OPENSSL_RUNTIME_LIBS = tuple(
     for lib in (
         _resolve_optional_existing_file(
             candidates=(
-                os.environ.get("JCODE_HARBOR_LIBSSL"),
-                *_sibling_runtime_lib_candidates(JCODE_BINARY, "libssl"),
+                os.environ.get("KCODE_HARBOR_LIBSSL"),
+                *_sibling_runtime_lib_candidates(KCODE_BINARY, "libssl"),
                 "/usr/lib/libssl.so.3",
                 "/usr/lib/x86_64-linux-gnu/libssl.so.3",
                 "/lib/x86_64-linux-gnu/libssl.so.3",
@@ -82,8 +82,8 @@ OPENSSL_RUNTIME_LIBS = tuple(
         ),
         _resolve_optional_existing_file(
             candidates=(
-                os.environ.get("JCODE_HARBOR_LIBCRYPTO"),
-                *_sibling_runtime_lib_candidates(JCODE_BINARY, "libcrypto"),
+                os.environ.get("KCODE_HARBOR_LIBCRYPTO"),
+                *_sibling_runtime_lib_candidates(KCODE_BINARY, "libcrypto"),
                 "/usr/lib/libcrypto.so.3",
                 "/usr/lib/x86_64-linux-gnu/libcrypto.so.3",
                 "/lib/x86_64-linux-gnu/libcrypto.so.3",
@@ -118,17 +118,17 @@ def _benchmark_instruction_preamble() -> str:
     # The legacy preamble can still be enabled explicitly for reproducing older
     # runs, but new benchmark runs should rely on jcode's normal system prompt
     # and the official Terminal-Bench task instruction.
-    if os.environ.get("JCODE_HARBOR_LEGACY_PREAMBLE"):
+    if os.environ.get("KCODE_HARBOR_LEGACY_PREAMBLE"):
         return LEGACY_BENCHMARK_INSTRUCTION_PREAMBLE
-    return os.environ.get("JCODE_HARBOR_EXTRA_PREAMBLE", "")
+    return os.environ.get("KCODE_HARBOR_EXTRA_PREAMBLE", "")
 
 
 def _load_task_hint() -> str:
-    if not os.environ.get("JCODE_HARBOR_ENABLE_HINTS"):
+    if not os.environ.get("KCODE_HARBOR_ENABLE_HINTS"):
         return ""
-    task_name = os.environ.get("JCODE_HARBOR_CURRENT_TASK", "").strip()
-    hints_path = os.environ.get("JCODE_HARBOR_TASK_HINTS_FILE", "").strip()
-    extra = os.environ.get("JCODE_HARBOR_EXTRA_PREAMBLE", "").strip()
+    task_name = os.environ.get("KCODE_HARBOR_CURRENT_TASK", "").strip()
+    hints_path = os.environ.get("KCODE_HARBOR_TASK_HINTS_FILE", "").strip()
+    extra = os.environ.get("KCODE_HARBOR_EXTRA_PREAMBLE", "").strip()
     parts: list[str] = []
     if extra:
         parts.append(extra)
@@ -209,7 +209,7 @@ class JcodeHarborAgent(BaseAgent):
             ),
             timeout_sec=30,
         )
-        await environment.upload_file(JCODE_BINARY, IN_CONTAINER_BINARY)
+        await environment.upload_file(KCODE_BINARY, IN_CONTAINER_BINARY)
         await environment.exec(f"chmod +x {IN_CONTAINER_BINARY}", timeout_sec=30)
         for lib in OPENSSL_RUNTIME_LIBS:
             await environment.upload_file(lib, f"{IN_CONTAINER_LIB_DIR}/{lib.name}")
@@ -219,9 +219,9 @@ class JcodeHarborAgent(BaseAgent):
             f"{IN_CONTAINER_BINARY} --quiet --no-update --no-selfdev version --json",
             env={
                 "HOME": IN_CONTAINER_HOME,
-                "JCODE_HOME": IN_CONTAINER_HOME,
-                "JCODE_RUNTIME_DIR": IN_CONTAINER_RUNTIME,
-                "JCODE_NO_TELEMETRY": "1",
+                "KCODE_HOME": IN_CONTAINER_HOME,
+                "KCODE_RUNTIME_DIR": IN_CONTAINER_RUNTIME,
+                "KCODE_NO_TELEMETRY": "1",
                 "LD_LIBRARY_PATH": IN_CONTAINER_LIB_DIR,
             },
             timeout_sec=60,
@@ -239,13 +239,13 @@ class JcodeHarborAgent(BaseAgent):
 
         env = {
             "HOME": IN_CONTAINER_HOME,
-            "JCODE_HOME": IN_CONTAINER_HOME,
-            "JCODE_RUNTIME_DIR": IN_CONTAINER_RUNTIME,
-            "JCODE_NO_TELEMETRY": "1",
-            "JCODE_PROVIDER": self._provider_arg,
-            "JCODE_MODEL": self._jcode_model,
-            "JCODE_OPENAI_REASONING_EFFORT": os.environ.get("JCODE_OPENAI_REASONING_EFFORT", "high"),
-            "JCODE_OPENAI_SERVICE_TIER": os.environ.get("JCODE_OPENAI_SERVICE_TIER", "priority"),
+            "KCODE_HOME": IN_CONTAINER_HOME,
+            "KCODE_RUNTIME_DIR": IN_CONTAINER_RUNTIME,
+            "KCODE_NO_TELEMETRY": "1",
+            "KCODE_PROVIDER": self._provider_arg,
+            "KCODE_MODEL": self._jcode_model,
+            "KCODE_OPENAI_REASONING_EFFORT": os.environ.get("KCODE_OPENAI_REASONING_EFFORT", "high"),
+            "KCODE_OPENAI_SERVICE_TIER": os.environ.get("KCODE_OPENAI_SERVICE_TIER", "priority"),
             "SSL_CERT_FILE": IN_CONTAINER_CA_BUNDLE,
             "OPENSSL_CERT_FILE": IN_CONTAINER_CA_BUNDLE,
             "LD_LIBRARY_PATH": IN_CONTAINER_LIB_DIR,
@@ -254,13 +254,13 @@ class JcodeHarborAgent(BaseAgent):
         result = await environment.exec(
             command=(
                 'set -e; '
-                'workdir="${JCODE_TASK_WORKDIR:-}"; '
+                'workdir="${KCODE_TASK_WORKDIR:-}"; '
                 'if [ -z "$workdir" ]; then '
                 '  if [ -d /app ]; then workdir=/app; else workdir="$(pwd)"; fi; '
                 'fi; '
                 f'instruction="$(cat {IN_CONTAINER_INPUT}/instruction.txt)"; '
                 f'{IN_CONTAINER_BINARY} --quiet --no-update --no-selfdev '
-                '--provider "$JCODE_PROVIDER" --model "$JCODE_MODEL" '
+                '--provider "$KCODE_PROVIDER" --model "$KCODE_MODEL" '
                 '-C "$workdir" run --ndjson "$instruction" '
                 f'> {IN_CONTAINER_OUTPUT}/events.ndjson 2> {IN_CONTAINER_OUTPUT}/stderr.txt'
             ),
@@ -280,7 +280,7 @@ class JcodeHarborAgent(BaseAgent):
             "return_code": result.return_code,
             "provider": self._provider_arg,
             "model": self._jcode_model,
-            "jcode_binary": str(JCODE_BINARY),
+            "jcode_binary": str(KCODE_BINARY),
         }
 
         output_dir = self.logs_dir / "jcode-output"

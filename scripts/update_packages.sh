@@ -8,10 +8,10 @@ VERSION_NUM="${VERSION#v}"
 
 echo "Updating packages for $VERSION..."
 
-LINUX_URL="https://github.com/1jehuang/jcode/releases/download/${VERSION}/jcode-linux-x86_64.tar.gz"
-LINUX_ARM_URL="https://github.com/1jehuang/jcode/releases/download/${VERSION}/jcode-linux-aarch64.tar.gz"
-MACOS_ARM_URL="https://github.com/1jehuang/jcode/releases/download/${VERSION}/jcode-macos-aarch64.tar.gz"
-MACOS_INTEL_URL="https://github.com/1jehuang/jcode/releases/download/${VERSION}/jcode-macos-x86_64.tar.gz"
+LINUX_URL="https://github.com/KooshaPari/KCode/releases/download/${VERSION}/jcode-linux-x86_64.tar.gz"
+LINUX_ARM_URL="https://github.com/KooshaPari/KCode/releases/download/${VERSION}/jcode-linux-aarch64.tar.gz"
+MACOS_ARM_URL="https://github.com/KooshaPari/KCode/releases/download/${VERSION}/jcode-macos-aarch64.tar.gz"
+MACOS_INTEL_URL="https://github.com/KooshaPari/KCode/releases/download/${VERSION}/jcode-macos-x86_64.tar.gz"
 
 tmpdir=$(mktemp -d)
 trap 'rm -rf "$tmpdir"' EXIT
@@ -41,7 +41,7 @@ git clone --depth 1 git@github.com:1jehuang/homebrew-jcode.git "$BREW_DIR" 2>/de
 cat > "$BREW_DIR/Formula/jcode.rb" <<EOF
 class Jcode < Formula
   desc "AI coding agent powered by Claude and ChatGPT"
-  homepage "https://github.com/1jehuang/jcode"
+  homepage "https://github.com/KooshaPari/KCode"
   version "$VERSION_NUM"
   license "MIT"
 
@@ -112,7 +112,7 @@ pkgver=$VERSION_NUM
 pkgrel=1
 pkgdesc="AI coding agent powered by Claude and ChatGPT"
 arch=('x86_64')
-url="https://github.com/1jehuang/jcode"
+url="https://github.com/KooshaPari/KCode"
 license=('MIT')
 provides=('jcode')
 conflicts=('jcode')

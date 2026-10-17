@@ -29,21 +29,21 @@ struct Member {
 /// yet return these fields. This is opt-in: never use local metadata to enrich
 /// a remote daemon's session list.
 ///
-/// Respects `JCODE_RUNTIME_DIR` (isolated `durable-state/swarm`), then
-/// `JCODE_HOME` (or the default `~/.jcode`) under `state/swarm`. Missing or
+/// Respects `KCODE_RUNTIME_DIR` (isolated `durable-state/swarm`), then
+/// `KCODE_HOME` (or the default `~/.kcode`) under `state/swarm`. Missing or
 /// malformed snapshots are harmless. Values already supplied by the API win.
 /// Only swarm ownership is used, never a transcript's ordinary fork parent.
 /// Statuses describe the last persisted snapshot, not a live liveness probe.
 pub fn enrich_sessions_from_local_swarm_state(sessions: &mut [SessionInfo]) {
-    let dir = if let Ok(runtime) = std::env::var("JCODE_RUNTIME_DIR") {
+    let dir = if let Ok(runtime) = std::env::var("KCODE_RUNTIME_DIR") {
         std::path::PathBuf::from(runtime).join("durable-state")
     } else {
-        let home = std::env::var_os("JCODE_HOME")
+        let home = std::env::var_os("KCODE_HOME")
             .map(std::path::PathBuf::from)
             .or_else(|| {
                 std::env::var_os("HOME")
                     .or_else(|| std::env::var_os("USERPROFILE"))
-                    .map(|home| std::path::PathBuf::from(home).join(".jcode"))
+                    .map(|home| std::path::PathBuf::from(home).join(".kcode"))
             });
         let Some(home) = home else { return };
         home.join("state")

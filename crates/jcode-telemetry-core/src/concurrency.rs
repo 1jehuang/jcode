@@ -4,7 +4,7 @@
 //! One guard represents one runtime incarnation, including idle/background
 //! Agents, until explicit finish or drop. Parent presence distinguishes children
 //! (manual splits and automated agents).
-//! Counts cover v2 participants sharing a local JCODE_HOME, not other machines,
+//! Counts cover v2 participants sharing a local KCODE_HOME, not other machines,
 //! old clients, connected viewers, or persisted sessions. No session ID is used
 //! as a filesystem path. OS leases have no clock/mtime/PID-reuse dependency.
 //!

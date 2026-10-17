@@ -39,7 +39,7 @@ pub fn hot_restart(session_id: &str) -> Result<()> {
 
     crate::logging::info(&format!("Restarting with current binary: {:?}", exe));
 
-    crate::env::set_var("JCODE_RESUMING", "1");
+    crate::env::set_var("KCODE_RESUMING", "1");
 
     let mut cmd = ProcessCommand::new(&exe);
     if is_selfdev {
@@ -54,9 +54,9 @@ pub fn hot_restart(session_id: &str) -> Result<()> {
 pub fn hot_reload(session_id: &str) -> Result<()> {
     let cwd = std::env::current_dir()?;
 
-    crate::env::set_var("JCODE_RESUMING", "1");
+    crate::env::set_var("KCODE_RESUMING", "1");
 
-    if let Ok(migrate_binary) = std::env::var("JCODE_MIGRATE_BINARY") {
+    if let Ok(migrate_binary) = std::env::var("KCODE_MIGRATE_BINARY") {
         let binary_path = std::path::PathBuf::from(&migrate_binary);
         if binary_path.exists() {
             crate::logging::info("Migrating to stable binary...");
@@ -64,7 +64,7 @@ pub fn hot_reload(session_id: &str) -> Result<()> {
             cmd.arg("--resume")
                 .arg(session_id)
                 .arg("--no-update")
-                .env_remove("JCODE_MIGRATE_BINARY")
+                .env_remove("KCODE_MIGRATE_BINARY")
                 .current_dir(cwd);
             let err = crate::platform::replace_process(&mut cmd);
             return Err(anyhow::anyhow!("Failed to exec {:?}: {}", binary_path, err));
@@ -116,7 +116,7 @@ pub fn hot_reload(session_id: &str) -> Result<()> {
             // re-execs. Let the replacement client paint and accept input from
             // its startup stub immediately; the authoritative History payload
             // will repopulate the transcript after reconnect.
-            .env("JCODE_RELOAD_FAST_START", "1")
+            .env("KCODE_RELOAD_FAST_START", "1")
             .current_dir(&cwd);
         let err = crate::platform::replace_process(&mut cmd);
 
@@ -168,7 +168,7 @@ pub fn hot_update(session_id: &str) -> Result<()> {
 
                     update::print_centered(&format!("Restarting with session {}...", session_id));
 
-                    crate::env::set_var("JCODE_RESUMING", "1");
+                    crate::env::set_var("KCODE_RESUMING", "1");
 
                     let mut cmd = ProcessCommand::new(&exe);
                     if is_selfdev {
@@ -206,7 +206,7 @@ pub fn hot_update(session_id: &str) -> Result<()> {
         }
     }
 
-    crate::env::set_var("JCODE_RESUMING", "1");
+    crate::env::set_var("KCODE_RESUMING", "1");
     let exe = std::env::current_exe()?;
     let is_selfdev = crate::cli::selfdev::client_selfdev_requested();
     let mut cmd = ProcessCommand::new(&exe);
@@ -249,38 +249,54 @@ fn claim_update_fetch_slot() -> bool {
     std::fs::write(&marker, b"").is_ok()
 }
 
-pub fn check_for_updates() -> Option<bool> {
-    let repo_dir = get_repo_dir()?;
+/// `None` means this local checkout has no tracking branch, not a failed check.
+pub fn check_for_updates() -> Result<Option<bool>> {
+    let repo_dir =
+        get_repo_dir().ok_or_else(|| anyhow::anyhow!("Could not find jcode source repository"))?;
+    check_for_updates_in(&repo_dir, claim_update_fetch_slot)
+}
 
-    if claim_update_fetch_slot() {
-        let fetch = ProcessCommand::new("git")
-            .args(["fetch", "-q"])
-            .current_dir(&repo_dir)
-            .output()
-            .ok()?;
-
-        if !fetch.status.success() {
-            return None;
-        }
+pub(super) fn check_for_updates_in(
+    repo_dir: &std::path::Path,
+    claim_fetch: impl FnOnce() -> bool,
+) -> Result<Option<bool>> {
+    // Unlike @{u}, these commands distinguish a valid local branch without
+    // tracking from an inaccessible repository or a broken upstream ref.
+    let branch = source_update_git(repo_dir, &["rev-parse", "--symbolic-full-name", "HEAD"])?;
+    if branch == "HEAD" {
+        return Ok(None); // Detached source checkouts cannot be auto-updated either.
     }
-    // When the fetch slot was claimed by another recent process, still answer
-    // from the (fresh enough) local refs instead of skipping the check.
+    let upstream = source_update_git(repo_dir, &["for-each-ref", "--format=%(upstream)", &branch])?;
+    if upstream.is_empty() {
+        return Ok(None);
+    }
 
-    let behind = ProcessCommand::new("git")
-        .args(["rev-list", "--count", "HEAD..@{u}"])
-        .current_dir(&repo_dir)
+    // Do not fetch or claim the shared throttle slot for an untracked branch.
+    if claim_fetch() {
+        source_update_git(repo_dir, &["fetch", "-q"])?;
+    }
+    // When another process claimed the slot, use the fresh-enough local refs.
+    let behind = source_update_git(repo_dir, &["rev-list", "--count", "HEAD..@{u}"])?;
+    let count: u64 = behind.parse()?;
+    Ok(Some(count > 0))
+}
+
+fn source_update_git(repo_dir: &std::path::Path, args: &[&str]) -> Result<String> {
+    use anyhow::Context;
+
+    let output = ProcessCommand::new("git")
+        .args(args)
+        .current_dir(repo_dir)
         .output()
-        .ok()?;
-
-    if behind.status.success() {
-        let count: u32 = String::from_utf8_lossy(&behind.stdout)
-            .trim()
-            .parse()
-            .unwrap_or(0);
-        Some(count > 0)
-    } else {
-        None
+        .with_context(|| format!("Could not run git {}", args.join(" ")))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git {}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
     }
+    Ok(String::from_utf8(output.stdout)?.trim().to_string())
 }
 
 /// True when the source checkout has local commits that upstream lacks, so a

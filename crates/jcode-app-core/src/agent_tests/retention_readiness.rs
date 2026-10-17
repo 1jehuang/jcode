@@ -23,9 +23,9 @@ struct RetentionHomeRestore(Option<std::ffi::OsString>);
 impl Drop for RetentionHomeRestore {
     fn drop(&mut self) {
         if let Some(previous) = self.0.take() {
-            crate::env::set_var("JCODE_HOME", previous);
+            crate::env::set_var("KCODE_HOME", previous);
         } else {
-            crate::env::remove_var("JCODE_HOME");
+            crate::env::remove_var("KCODE_HOME");
         }
     }
 }
@@ -278,8 +278,8 @@ fn retention_dimension_scores(e: &RetentionJourneyEvidence) -> RetentionDimensio
 async fn retention_readiness_scorecard() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().expect("retention readiness home");
-    let previous_home = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", temp.path());
+    let previous_home = std::env::var_os("KCODE_HOME");
+    crate::env::set_var("KCODE_HOME", temp.path());
     let _home_restore = RetentionHomeRestore(previous_home);
 
     let provider_fixture = RetentionReadinessProvider::new();

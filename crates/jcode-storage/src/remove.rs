@@ -22,7 +22,7 @@ pub fn remove_state_file(path: &Path) -> std::io::Result<()> {
 
 /// Remove a durable state file without following a directory swapped in after
 /// the caller's path validation. Durable state lives under the configured
-/// runtime root rather than `JCODE_HOME`.
+/// runtime root rather than `KCODE_HOME`.
 pub fn remove_durable_state_file(path: &Path) -> std::io::Result<()> {
     remove_file_beneath(&crate::durable_state_dir(), path)
 }
@@ -103,7 +103,7 @@ mod tests {
     use std::io::Write;
     use std::os::unix::fs::symlink;
 
-    /// Serialize tests that mutate `JCODE_HOME`. Uses the shared lock
+    /// Serialize tests that mutate `KCODE_HOME`. Uses the shared lock
     /// from the crate root so other test modules cannot race on the env.
     fn lock_env() -> std::sync::MutexGuard<'static, ()> {
         crate::lock_env()
@@ -117,9 +117,9 @@ mod tests {
         let mut file = std::fs::File::create(&state_file).expect("create");
         file.write_all(b"{}").expect("write");
 
-        jcode_core::env::set_var("JCODE_HOME", home.path());
+        jcode_core::env::set_var("KCODE_HOME", home.path());
         let result = remove_state_file(&state_file);
-        jcode_core::env::remove_var("JCODE_HOME");
+        jcode_core::env::remove_var("KCODE_HOME");
 
         result.expect("remove_state_file");
         assert!(!state_file.exists(), "state file must be removed");
@@ -137,9 +137,9 @@ mod tests {
         let link = link_dir.path().join("jcode-link");
         symlink(real_home.path(), &link).expect("symlink");
 
-        jcode_core::env::set_var("JCODE_HOME", &link);
+        jcode_core::env::set_var("KCODE_HOME", &link);
         let result = remove_state_file(&link.join("state.json"));
-        jcode_core::env::remove_var("JCODE_HOME");
+        jcode_core::env::remove_var("KCODE_HOME");
 
         result.expect("remove through symlink");
         assert!(
@@ -153,11 +153,11 @@ mod tests {
         let _guard = lock_env();
         let home = tempfile::tempdir().expect("tempdir");
 
-        jcode_core::env::set_var("JCODE_HOME", home.path());
+        jcode_core::env::set_var("KCODE_HOME", home.path());
         let outside = home.path().parent().expect("parent").join("escape.json");
         std::fs::write(&outside, b"{}").expect("seed");
         let err = remove_state_file(&outside);
-        jcode_core::env::remove_var("JCODE_HOME");
+        jcode_core::env::remove_var("KCODE_HOME");
 
         let err = err.expect_err("must refuse outside path");
         assert_eq!(err.kind(), std::io::ErrorKind::Other);
@@ -172,10 +172,10 @@ mod tests {
         let _guard = lock_env();
         let home = tempfile::tempdir().expect("tempdir");
 
-        jcode_core::env::set_var("JCODE_HOME", home.path());
+        jcode_core::env::set_var("KCODE_HOME", home.path());
         let missing = home.path().join("does-not-exist.json");
         let err = remove_state_file(&missing);
-        jcode_core::env::remove_var("JCODE_HOME");
+        jcode_core::env::remove_var("KCODE_HOME");
 
         let err = err.expect_err("missing file errors");
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound);

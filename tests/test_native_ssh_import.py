@@ -3,16 +3,16 @@
 
 Offline: python3 tests/test_native_ssh_import.py --self-test
 Live, only after the coordinator builds/deploys matching binaries:
-  JCODE_NATIVE_SSH_IMPORT=1 \
-  JCODE_NATIVE_SSH_BINARY=/absolute/local/ELF/jcode \
-  JCODE_NATIVE_SSH_IMPORT_REMOTE_EXECUTABLE=/absolute/remote/ELF/jcode \
-  JCODE_NATIVE_SSH_HOST=explicit-verified-alias \
-  JCODE_NATIVE_SSH_CWD=/absolute/remote/workspace \
+  KCODE_NATIVE_SSH_IMPORT=1 \
+  KCODE_NATIVE_SSH_BINARY=/absolute/local/ELF/jcode \
+  KCODE_NATIVE_SSH_IMPORT_REMOTE_EXECUTABLE=/absolute/remote/ELF/jcode \
+  KCODE_NATIVE_SSH_HOST=explicit-verified-alias \
+  KCODE_NATIVE_SSH_CWD=/absolute/remote/workspace \
     python3 tests/test_native_ssh_import.py
 
 No opt-in means no subprocess/network. No Cargo, AWS, installation, personal
 credential copying, OAuth, model turns, or provider validation. Local/remote HOME,
-JCODE_HOME, runtime and config are fresh. Expiry is year 2100 and closed loopback
+KCODE_HOME, runtime and config are fresh. Expiry is year 2100 and closed loopback
 proxies block provider HTTP access (defense in depth, not packet-capture proof).
 System SSH config/keys/agent remain available for the explicitly selected host.
 
@@ -58,8 +58,8 @@ import test_native_ssh_login as login
 PREFIX = native.PREFIX
 require = native.require
 MAX_PAYLOAD = 65536
-TOKEN_PREFIX = "JCODE_SYNTHETIC_IMPORT_"
-TOKEN_RE = re.compile(rb"JCODE_SYNTHETIC_IMPORT_[a-z]+_[0-9a-f]{32}")
+TOKEN_PREFIX = "KCODE_SYNTHETIC_IMPORT_"
+TOKEN_RE = re.compile(rb"KCODE_SYNTHETIC_IMPORT_[a-z]+_[0-9a-f]{32}")
 FILES = {"openai": "openai-auth.json", "claude": "auth.json"}
 EXPIRES = 4102444800000
 CONFIRM = "Import your local {provider} login to {host}?"
@@ -99,12 +99,12 @@ def isolated_env(root):
     root = Path(root)
     return {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": str(root / "home"),
             "USER": "jcode-import-acceptance", "LANG": "C.UTF-8", "TERM": "xterm-256color",
-            "JCODE_HOME": str(root / "jcode"), "JCODE_RUNTIME_DIR": str(root / "runtime"),
+            "KCODE_HOME": str(root / "jcode"), "KCODE_RUNTIME_DIR": str(root / "runtime"),
             "XDG_RUNTIME_DIR": str(root / "runtime"),
             "XDG_CONFIG_HOME": str(root / "home" / ".config"),
             "XDG_CACHE_HOME": str(root / "home" / ".cache"),
-            "JCODE_NO_BROWSER": "1", "NO_BROWSER": "1", "BROWSER": "/bin/false",
-            "JCODE_NO_TELEMETRY": "1", "DO_NOT_TRACK": "1", "JCODE_WAKE_MODE": "external",
+            "KCODE_NO_BROWSER": "1", "NO_BROWSER": "1", "BROWSER": "/bin/false",
+            "KCODE_NO_TELEMETRY": "1", "DO_NOT_TRACK": "1", "KCODE_WAKE_MODE": "external",
             "HTTP_PROXY": "http://127.0.0.1:9", "HTTPS_PROXY": "http://127.0.0.1:9",
             "ALL_PROXY": "http://127.0.0.1:9", "NO_PROXY": "",
             "http_proxy": "http://127.0.0.1:9", "https_proxy": "http://127.0.0.1:9",
@@ -294,7 +294,7 @@ else:
 
 def configured():
     if os.environ.get(PREFIX + "IMPORT") != "1":
-        print("SKIP native SSH import acceptance: set JCODE_NATIVE_SSH_IMPORT=1 explicitly")
+        print("SKIP native SSH import acceptance: set KCODE_NATIVE_SSH_IMPORT=1 explicitly")
         return None
     executable = os.environ.get(PREFIX + "IMPORT_REMOTE_EXECUTABLE", "")
     require(executable.startswith("/") and not any(ord(c) < 32 or ord(c) == 127 for c in executable),
@@ -406,7 +406,7 @@ def run_provider(config, provider, root, env, local_before, expected):
     try:
         baseline = remote_control(config, "inspect")
         assert_snapshot(baseline, provider, baseline, expected, False, 0)
-        sentinel = "JCODE_IMPORT_CONTEXT_" + uuid.uuid4().hex
+        sentinel = "KCODE_IMPORT_CONTEXT_" + uuid.uuid4().hex
         with native.Bridge(config) as bridge:
             header = bridge.handshake()
             history = bridge.subscribe(header["working_dir"], "import-" + uuid.uuid4().hex)
@@ -470,7 +470,7 @@ def run_provider(config, provider, root, env, local_before, expected):
 
 def run_acceptance(config):
     require(sys.platform.startswith("linux"), "Import acceptance requires Linux /proc")
-    with tempfile.TemporaryDirectory(prefix="jcode-ssh-import-", dir=os.environ.get("JCODE_SCRATCH_DIR")) as directory:
+    with tempfile.TemporaryDirectory(prefix="jcode-ssh-import-", dir=os.environ.get("KCODE_SCRATCH_DIR")) as directory:
         root = Path(directory)
         for name in ("home", "jcode", "runtime"):
             (root / name).mkdir(mode=0o700)

@@ -1,7 +1,7 @@
 //! End-to-end Claude Code import integration tests (swarm Worker C / dolphin).
 //!
 //! These drive the real `jcode_base::import` pipeline against synthetic
-//! `.jsonl` fixtures written into a sandboxed `JCODE_HOME`, so they never touch
+//! `.jsonl` fixtures written into a sandboxed `KCODE_HOME`, so they never touch
 //! the developer's real `~/.claude`. They assert the *target* behavior agreed
 //! with the swarm coordinator:
 //!
@@ -14,7 +14,7 @@
 //!     sibling `<id>.jsonl` file (resolve_claude_session_path).
 //!
 //! All tests serialize on `lock_test_env()` because they mutate the process
-//! environment (`JCODE_HOME`).
+//! environment (`KCODE_HOME`).
 
 use jcode_base::import::{
     import_session, import_session_from_file, list_claude_code_sessions,
@@ -26,7 +26,7 @@ use jcode_import_core::imported_claude_code_session_id;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-/// Serializes tests that mutate `JCODE_HOME`. This test binary has its own
+/// Serializes tests that mutate `KCODE_HOME`. This test binary has its own
 /// address space, so a file-local mutex is sufficient (and avoids depending on
 /// the `test-support`-gated `storage::lock_test_env`).
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -55,7 +55,7 @@ impl Drop for EnvVarGuard {
     }
 }
 
-/// Create the sandboxed Claude project dir under `$JCODE_HOME/external/...`.
+/// Create the sandboxed Claude project dir under `$KCODE_HOME/external/...`.
 fn make_project_dir(home: &Path) -> PathBuf {
     let dir = home.join("external/.claude/projects/-Users-demo");
     std::fs::create_dir_all(&dir).unwrap();
@@ -87,7 +87,7 @@ fn import_array_tool_result_with_image_uses_placeholder_not_base64() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempfile::TempDir::new().unwrap();
-    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let _home = EnvVarGuard::set_path("KCODE_HOME", temp.path());
     let project_dir = make_project_dir(temp.path());
 
     let big = "Z".repeat(80_000);
@@ -132,8 +132,8 @@ fn import_array_tool_result_with_image_uses_placeholder_not_base64() {
 }
 
 /// Path to where jcode persists imported sessions under the sandbox.
-/// With `JCODE_HOME` set, `storage::jcode_dir()` returns it directly, and
-/// sessions live at `<JCODE_HOME>/sessions/<id>.json`.
+/// With `KCODE_HOME` set, `storage::jcode_dir()` returns it directly, and
+/// sessions live at `<KCODE_HOME>/sessions/<id>.json`.
 fn jcode_session_file(home: &Path, claude_id: &str) -> PathBuf {
     let id = imported_claude_code_session_id(claude_id);
     home.join(format!("sessions/{id}.json"))
@@ -149,7 +149,7 @@ fn import_tool_result_null_and_missing_content_does_not_drop_lines() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempfile::TempDir::new().unwrap();
-    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let _home = EnvVarGuard::set_path("KCODE_HOME", temp.path());
     let project_dir = make_project_dir(temp.path());
 
     let path = project_dir.join("nullc.jsonl");
@@ -182,7 +182,7 @@ fn import_excludes_sidechain_messages() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempfile::TempDir::new().unwrap();
-    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let _home = EnvVarGuard::set_path("KCODE_HOME", temp.path());
     let project_dir = make_project_dir(temp.path());
 
     let path = project_dir.join("side.jsonl");
@@ -217,7 +217,7 @@ fn import_skips_only_malformed_lines() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempfile::TempDir::new().unwrap();
-    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let _home = EnvVarGuard::set_path("KCODE_HOME", temp.path());
     let project_dir = make_project_dir(temp.path());
 
     let path = project_dir.join("mixed.jsonl");
@@ -252,7 +252,7 @@ fn list_filters_empty_and_meta_only_transcripts() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempfile::TempDir::new().unwrap();
-    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let _home = EnvVarGuard::set_path("KCODE_HOME", temp.path());
     let project_dir = make_project_dir(temp.path());
 
     // Empty file.
@@ -305,7 +305,7 @@ fn index_with_missing_full_path_falls_back_to_sibling_jsonl() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempfile::TempDir::new().unwrap();
-    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let _home = EnvVarGuard::set_path("KCODE_HOME", temp.path());
     let project_dir = make_project_dir(temp.path());
 
     // The actual transcript lives next to the index under <id>.jsonl ...
@@ -360,7 +360,7 @@ fn lazy_lister_handles_array_tool_result_session() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempfile::TempDir::new().unwrap();
-    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let _home = EnvVarGuard::set_path("KCODE_HOME", temp.path());
     let project_dir = make_project_dir(temp.path());
 
     let big = "Y".repeat(40_000);

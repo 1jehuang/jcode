@@ -20,7 +20,7 @@ carries a UNIQUE marker token ("MARK_xxxx"). If a marker shows up in more
 display_messages than it appears in the server's history, that is the bug,
 caught with the exact trigger isolated.
 
-Everything runs in a throwaway JCODE_HOME / runtime dir / socket, so the
+Everything runs in a throwaway KCODE_HOME / runtime dir / socket, so the
 user's real server and sessions are never touched.
 
 The suspected triggers (issue "Possible trigger" + "Notes") are exercised in
@@ -229,7 +229,7 @@ def launch_client(binary: str, env: dict, session_id: str, name: str) -> LiveCli
             binary,
             "--no-update",
             "--no-selfdev",
-            "--socket", env["JCODE_SOCKET"],
+            "--socket", env["KCODE_SOCKET"],
             "--resume", session_id,
         ],
         stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
@@ -436,7 +436,7 @@ def run_self_test(debug_sock: Path, session_id: str, verbose: bool) -> bool:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    default_bin = Path.home() / ".jcode" / "builds" / "current" / "jcode"
+    default_bin = Path.home() / ".kcode" / "builds" / "current" / "jcode"
     ap.add_argument("--binary", default=str(default_bin))
     ap.add_argument("--turns", type=int, default=3, help="tool-call turns to seed")
     ap.add_argument("--keep", action="store_true", help="keep temp home on exit")
@@ -458,24 +458,24 @@ def main() -> int:
     run.mkdir(parents=True, exist_ok=True)
 
     env = os.environ.copy()
-    env["JCODE_HOME"] = str(home)
-    env["JCODE_RUNTIME_DIR"] = str(run)
-    env["JCODE_SOCKET"] = str(run / "jcode.sock")
-    env["JCODE_NO_TELEMETRY"] = "1"
-    env["JCODE_DEBUG_CONTROL"] = "1"
-    env["JCODE_TEMP_SERVER"] = "1"
-    env["JCODE_SERVER_OWNER_PID"] = str(os.getpid())
-    debug_sock = run / "jcode-debug.sock"
+    env["KCODE_HOME"] = str(home)
+    env["KCODE_RUNTIME_DIR"] = str(run)
+    env["KCODE_SOCKET"] = str(run / "kcode.sock")
+    env["KCODE_NO_TELEMETRY"] = "1"
+    env["KCODE_DEBUG_CONTROL"] = "1"
+    env["KCODE_TEMP_SERVER"] = "1"
+    env["KCODE_SERVER_OWNER_PID"] = str(os.getpid())
+    debug_sock = run / "kcode-debug.sock"
 
     print("╔══════════════════════════════════════════════════════════╗")
     print("║  repro #314: live transcript duplicate detector          ║")
     print("╚══════════════════════════════════════════════════════════╝")
     print(f"  binary : {binary}")
     print(f"  home   : {home}")
-    print(f"  socket : {env['JCODE_SOCKET']}")
+    print(f"  socket : {env['KCODE_SOCKET']}")
 
     server = subprocess.Popen(
-        [binary, "serve", "--socket", env["JCODE_SOCKET"], "--debug-socket",
+        [binary, "serve", "--socket", env["KCODE_SOCKET"], "--debug-socket",
          "--no-update", "--no-selfdev"],
         env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         preexec_fn=os.setsid,
@@ -485,7 +485,7 @@ def main() -> int:
     results: list[StageResult] = []
 
     try:
-        wait_for_socket(Path(env["JCODE_SOCKET"]))
+        wait_for_socket(Path(env["KCODE_SOCKET"]))
         wait_for_socket(debug_sock)
         print("  server : up")
 

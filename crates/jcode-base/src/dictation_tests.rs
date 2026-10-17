@@ -133,6 +133,14 @@ fn extract_session_short_name_from_jcode_window_title() {
         extract_session_short_name_from_window_title("🦊 jcode Fox"),
         Some("fox".to_string())
     );
+    assert_eq!(
+        extract_session_short_name_from_window_title("🌐 jcode Fox · last ~18s"),
+        Some("fox".to_string())
+    );
+    assert_eq!(
+        extract_session_short_name_from_window_title("🌐 jcode Mushroom · +2 -2 · last ~16s"),
+        Some("mushroom".to_string())
+    );
 }
 
 #[test]
@@ -150,9 +158,9 @@ fn normalize_session_short_name_strips_wrapping_punctuation() {
 #[test]
 fn remember_and_read_last_focused_session() {
     let _guard = crate::storage::lock_test_env();
-    let prev = std::env::var_os("JCODE_HOME");
+    let prev = std::env::var_os("KCODE_HOME");
     let temp = tempfile::TempDir::new().expect("tempdir");
-    crate::env::set_var("JCODE_HOME", temp.path());
+    crate::env::set_var("KCODE_HOME", temp.path());
 
     let active_dir = temp.path().join("active_pids");
     std::fs::create_dir_all(&active_dir).expect("create active_pids");
@@ -165,9 +173,9 @@ fn remember_and_read_last_focused_session() {
     );
 
     if let Some(prev) = prev {
-        crate::env::set_var("JCODE_HOME", prev);
+        crate::env::set_var("KCODE_HOME", prev);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
     }
 }
 
@@ -176,7 +184,7 @@ fn remember_and_read_last_focused_session() {
 fn focused_jcode_session_uses_niri_window_title_when_process_name_is_generic() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().expect("tempdir");
-    let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
+    let _home = EnvVarGuard::set("KCODE_HOME", temp.path());
 
     let active_dir = temp.path().join("active_pids");
     std::fs::create_dir_all(&active_dir).expect("create active_pids");
@@ -200,4 +208,60 @@ fn focused_jcode_session_uses_niri_window_title_when_process_name_is_generic() {
         focused_jcode_session().expect("resolve focused session"),
         Some("session_swan_123".to_string())
     );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn focused_cli_session_uses_client_registry_for_task_titled_windows() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let _home = EnvVarGuard::set("KCODE_HOME", temp.path());
+
+    let focused_process = ChildGuard::spawn_named("kitty");
+    let registry = temp.path().join("client_sessions");
+    std::fs::create_dir_all(&registry).expect("create registry");
+    std::fs::write(
+        registry.join(focused_process.pid().to_string()),
+        "session_fox_123",
+    )
+    .expect("register client");
+
+    let bin_dir = temp.path().join("bin");
+    install_fake_niri(
+        &bin_dir,
+        focused_process.pid(),
+        "🌐 Let MCP tools be added mid-session · work ~8m58s",
+    );
+    let prev_path = std::env::var_os("PATH").unwrap_or_default();
+    let mut path = OsString::from(bin_dir.as_os_str());
+    path.push(":");
+    path.push(prev_path);
+    let _path = EnvVarGuard::set("PATH", path);
+
+    assert_eq!(
+        super::focused_cli_session().expect("resolve focused session"),
+        Some("session_fox_123".to_string())
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn focused_cli_session_ignores_unrelated_windows() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let _home = EnvVarGuard::set("KCODE_HOME", temp.path());
+    std::fs::create_dir_all(temp.path().join("active_pids")).expect("active_pids");
+    std::fs::write(temp.path().join("active_pids/session_fox_1"), "1").expect("pid");
+    remember_last_focused_session("session_fox_1").expect("remember");
+
+    let focused_process = ChildGuard::spawn_named("firefox");
+    let bin_dir = temp.path().join("bin");
+    install_fake_niri(&bin_dir, focused_process.pid(), "Mozilla Firefox");
+    let prev_path = std::env::var_os("PATH").unwrap_or_default();
+    let mut path = OsString::from(bin_dir.as_os_str());
+    path.push(":");
+    path.push(prev_path);
+    let _path = EnvVarGuard::set("PATH", path);
+
+    assert_eq!(super::focused_cli_session().expect("resolve"), None);
 }

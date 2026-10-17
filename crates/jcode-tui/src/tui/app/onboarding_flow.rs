@@ -152,10 +152,8 @@ pub(crate) struct ImportReview {
 /// The actions on the import summary screen, left to right.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SummaryPill {
-    /// Import every detected login and move on.
+    /// Import every detected login and move on (default).
     Continue,
-    /// Skip importing and sign in with a Jcode subscription instead (default).
-    Subscription,
     /// Open the per-login checkbox list to import fewer logins.
     ImportLess,
     /// Open the telemetry settings sub-page.
@@ -163,9 +161,8 @@ pub(crate) enum SummaryPill {
 }
 
 impl SummaryPill {
-    const ORDER: [SummaryPill; 4] = [
+    const ORDER: [SummaryPill; 3] = [
         SummaryPill::Continue,
-        SummaryPill::Subscription,
         SummaryPill::ImportLess,
         SummaryPill::Telemetry,
     ];
@@ -188,7 +185,7 @@ impl SummaryPill {
 
 impl ImportReview {
     /// Create a review for the given candidates with every login pre-checked,
-    /// starting on the summary screen with the Jcode subscription preselected.
+    /// starting on the summary screen with Import preselected.
     /// Returns `None` if there are no candidates.
     pub(crate) fn new(
         candidates: Vec<crate::external_auth::ExternalAuthReviewCandidate>,
@@ -201,9 +198,9 @@ impl ImportReview {
             candidates,
             checked,
             cursor: 0,
-            continue_focused: false,
+            continue_focused: true,
             choosing: false,
-            summary_pill: SummaryPill::Subscription,
+            summary_pill: SummaryPill::Continue,
             telemetry: None,
             shown_at: Instant::now(),
         })
@@ -250,8 +247,9 @@ impl ImportReview {
         self.continue_focused = self.summary_pill == SummaryPill::Continue;
     }
 
-    /// Focus a specific summary pill (used by the onboarding simulator to land
-    /// directly on a given screen state).
+    /// Focus a specific summary pill (used by tests to land directly on a
+    /// given screen state).
+    #[cfg(test)]
     pub(crate) fn focus_summary_pill(&mut self, pill: SummaryPill) {
         self.summary_pill = pill;
         self.continue_focused = pill == SummaryPill::Continue;
@@ -637,7 +635,7 @@ fn external_transcripts_present(root: &std::path::Path, ext: &str) -> bool {
 }
 
 /// Resolve a path under the (sandbox-aware) external home so onboarding honors
-/// `JCODE_HOME`/external isolation, matching the import detectors.
+/// `KCODE_HOME`/external isolation, matching the import detectors.
 fn external_home_path(rel: &str) -> PathBuf {
     crate::storage::user_home_path(rel)
         .ok()
@@ -709,7 +707,7 @@ mod tests {
 
     #[test]
     fn external_oauth_present_requires_nonempty_file() {
-        let dir = std::env::temp_dir().join(format!("jcode-onb-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("kcode-onb-test-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let empty = dir.join("empty.json");
         let full = dir.join("full.json");
@@ -724,7 +722,7 @@ mod tests {
     #[test]
     fn external_transcripts_present_finds_nested_files() {
         let dir = std::env::temp_dir().join(format!(
-            "jcode-onb-transcripts-{}-{:?}",
+            "kcode-onb-transcripts-{}-{:?}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

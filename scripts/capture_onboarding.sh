@@ -6,7 +6,7 @@ output_dir=${1:-"$repo_root/.tmp/onboarding-screenshots"}
 mkdir -p "$output_dir"
 output_dir=$(cd "$output_dir" && pwd)
 
-export JCODE_ONBOARDING_SCREENSHOT_DIR="$output_dir"
+export KCODE_ONBOARDING_SCREENSHOT_DIR="$output_dir"
 
 cd "$repo_root"
 cargo test -p jcode-tui --lib onboarding_import_happy_path_images -- --ignored --nocapture

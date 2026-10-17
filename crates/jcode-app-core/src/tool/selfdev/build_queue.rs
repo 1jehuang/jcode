@@ -6,10 +6,10 @@ impl SelfDevTool {
             r#"cargo() {{
   case "${{1:-}}" in
     test|check|build|clippy|bench)
-      if [[ "${{JCODE_IN_DEV_CARGO:-0}}" == "1" || -z "${{JCODE_DEV_CARGO_SCRIPT:-}}" ]]; then
+      if [[ "${{KCODE_IN_DEV_CARGO:-0}}" == "1" || -z "${{KCODE_DEV_CARGO_SCRIPT:-}}" ]]; then
         command cargo "$@"
       else
-        JCODE_IN_DEV_CARGO=1 "${{JCODE_DEV_CARGO_SCRIPT}}" "$@"
+        KCODE_IN_DEV_CARGO=1 "${{KCODE_DEV_CARGO_SCRIPT}}" "$@"
       fi
       ;;
     *) command cargo "$@" ;;
@@ -94,7 +94,7 @@ export -f cargo
         cmd.args(&command.args)
             .current_dir(&repo_dir)
             .env(
-                "JCODE_DEV_CARGO_SCRIPT",
+                "KCODE_DEV_CARGO_SCRIPT",
                 repo_dir.join("scripts").join("dev_cargo.sh"),
             )
             .kill_on_drop(true)

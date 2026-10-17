@@ -191,9 +191,9 @@ mod tests {
     #[test]
     fn terminal_session_label_for_id_reads_custom_title_from_session() {
         let _guard = lock_test_env();
-        let previous_home = std::env::var_os("JCODE_HOME");
+        let previous_home = std::env::var_os("KCODE_HOME");
         let temp = tempfile::tempdir().expect("temp dir");
-        crate::env::set_var("JCODE_HOME", temp.path());
+        crate::env::set_var("KCODE_HOME", temp.path());
 
         let mut session = crate::session::Session::create_with_id(
             "session_fox_123".to_string(),
@@ -209,18 +209,18 @@ mod tests {
         );
 
         if let Some(previous_home) = previous_home {
-            crate::env::set_var("JCODE_HOME", previous_home);
+            crate::env::set_var("KCODE_HOME", previous_home);
         } else {
-            crate::env::remove_var("JCODE_HOME");
+            crate::env::remove_var("KCODE_HOME");
         }
     }
 
     #[test]
     fn terminal_session_label_for_id_prefers_todo_title_over_generated_title() {
         let _guard = lock_test_env();
-        let previous_home = std::env::var_os("JCODE_HOME");
+        let previous_home = std::env::var_os("KCODE_HOME");
         let temp = tempfile::tempdir().expect("temp dir");
-        crate::env::set_var("JCODE_HOME", temp.path());
+        crate::env::set_var("KCODE_HOME", temp.path());
 
         let session_id = "session_fox_456";
         let mut session = crate::session::Session::create_with_id(
@@ -252,9 +252,9 @@ mod tests {
         );
 
         if let Some(previous_home) = previous_home {
-            crate::env::set_var("JCODE_HOME", previous_home);
+            crate::env::set_var("KCODE_HOME", previous_home);
         } else {
-            crate::env::remove_var("JCODE_HOME");
+            crate::env::remove_var("KCODE_HOME");
         }
     }
 }

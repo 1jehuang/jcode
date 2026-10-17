@@ -11,13 +11,13 @@ fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
 fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
     let _guard = test_env_lock();
     let temp_home = tempfile::tempdir().expect("tempdir");
-    let prev_home = std::env::var_os("JCODE_HOME");
-    jcode_core::env::set_var("JCODE_HOME", temp_home.path());
+    let prev_home = std::env::var_os("KCODE_HOME");
+    jcode_core::env::set_var("KCODE_HOME", temp_home.path());
     let result = f();
     if let Some(prev_home) = prev_home {
-        jcode_core::env::set_var("JCODE_HOME", prev_home);
+        jcode_core::env::set_var("KCODE_HOME", prev_home);
     } else {
-        jcode_core::env::remove_var("JCODE_HOME");
+        jcode_core::env::remove_var("KCODE_HOME");
     }
     result
 }
@@ -27,7 +27,7 @@ fn create_git_repo_fixture() -> tempfile::TempDir {
     std::fs::create_dir_all(temp.path().join(".git")).expect("create .git dir");
     std::fs::write(
         temp.path().join("Cargo.toml"),
-        "[package]\nname = \"jcode\"\nversion = \"0.0.0\"\n",
+        "[package]\nname = \"kcode\"\nversion = \"0.0.0\"\n",
     )
     .expect("write Cargo.toml");
     std::process::Command::new("git")
@@ -173,13 +173,13 @@ fn test_binary_choice_for_canary_session() {
 #[test]
 fn test_find_repo_in_ancestors_walks_upward() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let repo = temp.path().join("jcode-repo");
+    let repo = temp.path().join("kcode-repo");
     let nested = repo.join("a").join("b").join("c");
 
     std::fs::create_dir_all(repo.join(".git")).expect("create .git");
     std::fs::write(
         repo.join("Cargo.toml"),
-        "[package]\nname = \"jcode\"\nversion = \"0.0.0\"\n",
+        "[package]\nname = \"kcode\"\nversion = \"0.0.0\"\n",
     )
     .expect("write Cargo.toml");
     std::fs::create_dir_all(&nested).expect("create nested dirs");
@@ -192,8 +192,8 @@ fn test_find_repo_in_ancestors_walks_upward() {
 fn test_client_update_candidate_prefers_dev_binary_for_selfdev() {
     let _guard = test_env_lock();
     let temp_home = tempfile::tempdir().expect("tempdir");
-    let prev_home = std::env::var_os("JCODE_HOME");
-    jcode_core::env::set_var("JCODE_HOME", temp_home.path());
+    let prev_home = std::env::var_os("KCODE_HOME");
+    jcode_core::env::set_var("KCODE_HOME", temp_home.path());
 
     let version = "test-current";
     let version_binary =
@@ -209,9 +209,9 @@ fn test_client_update_candidate_prefers_dev_binary_for_selfdev() {
     );
 
     if let Some(prev_home) = prev_home {
-        jcode_core::env::set_var("JCODE_HOME", prev_home);
+        jcode_core::env::set_var("KCODE_HOME", prev_home);
     } else {
-        jcode_core::env::remove_var("JCODE_HOME");
+        jcode_core::env::remove_var("KCODE_HOME");
     }
 }
 

@@ -1,3 +1,4 @@
+#![cfg_attr(test, allow(clippy::await_holding_lock))]
 use super::{Tool, ToolContext, ToolOutput};
 use crate::bus::{Bus, BusEvent, TodoEvent};
 use crate::todo::{
@@ -733,7 +734,13 @@ impl Tool for TodoTool {
         // deliberately handwritten. Never generate it from gate constants or
         // interpolate private thresholds, because that would teach the model
         // how to target the evaluator instead of reporting an honest assessment.
-        "Read or update structured todo items and optional goal-level assessments."
+        "Read or update structured todo items and optional goal-level assessments. \
+         Use this tool VERY frequently, far more than feels necessary. The user watches \
+         todo progress live, so a stale list looks like stalled work. For any task with \
+         more than one step: write the full plan before starting, mark an item \
+         in_progress before working on it, mark it completed the moment it is done \
+         (never batch completions), and add newly discovered work as soon as you find it. \
+         Expect to call this after nearly every meaningful step."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -826,12 +833,12 @@ impl Tool for TodoTool {
                             "feedback_loop_coverage": {
                                 "type": "string",
                                 "enum": ["narrow", "main_paths", "edge_and_integration_paths"],
-                                "description": "How broadly the checks exercise main workflows, integration boundaries, edge cases, packaging, and likely failure modes."
+                                "description": "Coverage of integration boundaries, edge cases, packaging, and likely failure modes."
                             },
                             "feedback_loop_traceability": {
                                 "type": "string",
                                 "enum": ["unmapped", "partial", "complete"],
-                                "description": "How completely requirements map to evidence. unmapped = requirements are not tied to checks; partial = only some explicit requirements or changed public outputs have concrete checks and observed results; complete = every explicit requirement and changed public output has a concrete check and observed result. Aggregate test counts alone do not establish complete traceability."
+                                "description": "How completely each requirement and changed output maps to a concrete check and observed result."
                             },
                             "delivery_state": {
                                 "type": "string",
@@ -1680,9 +1687,9 @@ mod tests {
     #[tokio::test]
     async fn an_ungrouped_goal_does_not_survive_into_a_grouped_next_task() {
         let _guard = crate::storage::lock_test_env();
-        let previous_home = std::env::var_os("JCODE_HOME");
+        let previous_home = std::env::var_os("KCODE_HOME");
         let dir = tempfile::TempDir::new().expect("tempdir");
-        crate::env::set_var("JCODE_HOME", dir.path());
+        crate::env::set_var("KCODE_HOME", dir.path());
         let session = "issue-695-ungrouped";
         let tool = TodoTool::new();
 
@@ -1731,9 +1738,9 @@ mod tests {
         assert_eq!(goals[0].group.as_deref(), Some("second task"));
 
         if let Some(home) = previous_home {
-            crate::env::set_var("JCODE_HOME", home);
+            crate::env::set_var("KCODE_HOME", home);
         } else {
-            crate::env::remove_var("JCODE_HOME");
+            crate::env::remove_var("KCODE_HOME");
         }
     }
 
@@ -1743,9 +1750,9 @@ mod tests {
     #[tokio::test]
     async fn moving_to_a_new_task_replaces_what_the_todos_panel_shows() {
         let _guard = crate::storage::lock_test_env();
-        let previous_home = std::env::var_os("JCODE_HOME");
+        let previous_home = std::env::var_os("KCODE_HOME");
         let dir = tempfile::TempDir::new().expect("tempdir");
-        crate::env::set_var("JCODE_HOME", dir.path());
+        crate::env::set_var("KCODE_HOME", dir.path());
         let session = "issue-695-new-task";
         let tool = TodoTool::new();
 
@@ -1811,9 +1818,9 @@ mod tests {
         assert_eq!(goals[0].group.as_deref(), Some("second task"));
 
         if let Some(home) = previous_home {
-            crate::env::set_var("JCODE_HOME", home);
+            crate::env::set_var("KCODE_HOME", home);
         } else {
-            crate::env::remove_var("JCODE_HOME");
+            crate::env::remove_var("KCODE_HOME");
         }
     }
 
@@ -1824,9 +1831,9 @@ mod tests {
     #[tokio::test]
     async fn a_moderate_first_write_returns_no_continuation_and_records_instead() {
         let _guard = crate::storage::lock_test_env();
-        let previous_home = std::env::var_os("JCODE_HOME");
+        let previous_home = std::env::var_os("KCODE_HOME");
         let dir = tempfile::TempDir::new().expect("tempdir");
-        crate::env::set_var("JCODE_HOME", dir.path());
+        crate::env::set_var("KCODE_HOME", dir.path());
         let session = "gate-deferral-execute";
 
         let output = TodoTool::new()
@@ -1945,17 +1952,17 @@ mod tests {
         assert!(digest.contains("feedback loop"));
 
         match previous_home {
-            Some(value) => crate::env::set_var("JCODE_HOME", value),
-            None => crate::env::remove_var("JCODE_HOME"),
+            Some(value) => crate::env::set_var("KCODE_HOME", value),
+            None => crate::env::remove_var("KCODE_HOME"),
         }
     }
 
     #[tokio::test]
     async fn low_ownership_completion_is_saved_without_mid_write_rejection() {
         let _guard = crate::storage::lock_test_env();
-        let previous_home = std::env::var_os("JCODE_HOME");
+        let previous_home = std::env::var_os("KCODE_HOME");
         let dir = tempfile::TempDir::new().expect("tempdir");
-        crate::env::set_var("JCODE_HOME", dir.path());
+        crate::env::set_var("KCODE_HOME", dir.path());
         let session = "ownership-save-before-turn-gate";
 
         let output = TodoTool::new()
@@ -2010,8 +2017,8 @@ mod tests {
         );
 
         match previous_home {
-            Some(value) => crate::env::set_var("JCODE_HOME", value),
-            None => crate::env::remove_var("JCODE_HOME"),
+            Some(value) => crate::env::set_var("KCODE_HOME", value),
+            None => crate::env::remove_var("KCODE_HOME"),
         }
     }
 

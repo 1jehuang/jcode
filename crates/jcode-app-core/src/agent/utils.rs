@@ -3,7 +3,7 @@ use std::path::Path;
 use std::process::Command;
 
 pub(super) fn trace_enabled() -> bool {
-    match std::env::var("JCODE_TRACE") {
+    match std::env::var("KCODE_TRACE") {
         Ok(value) => {
             let value = value.trim();
             !value.is_empty() && value != "0" && value.to_lowercase() != "false"

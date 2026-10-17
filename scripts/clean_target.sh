@@ -18,7 +18,7 @@
 #   scripts/clean_target.sh --apply --aggressive  # cargo clean stale profiles
 #
 # Env:
-#   JCODE_CLEAN_ACTIVE_WINDOW_MIN  activity window in minutes (default 20)
+#   KCODE_CLEAN_ACTIVE_WINDOW_MIN  activity window in minutes (default 20)
 
 set -euo pipefail
 
@@ -29,7 +29,7 @@ target_dir="${CARGO_TARGET_DIR:-$repo_root/target}"
 apply="false"
 aggressive="false"
 sweep_days=""
-activity_window_min="${JCODE_CLEAN_ACTIVE_WINDOW_MIN:-20}"
+activity_window_min="${KCODE_CLEAN_ACTIVE_WINDOW_MIN:-20}"
 
 expect_sweep_days="false"
 for arg in "$@"; do

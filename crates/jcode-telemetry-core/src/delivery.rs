@@ -24,7 +24,7 @@ pub(crate) fn http_client() -> Option<&'static reqwest::blocking::Client> {
     TELEMETRY_HTTP_CLIENT
         .get_or_init(|| {
             let built = reqwest::blocking::Client::builder()
-                .user_agent(jcode_provider_core::JCODE_USER_AGENT)
+                .user_agent(jcode_provider_core::KCODE_USER_AGENT)
                 .build();
             match built {
                 Ok(client) => Some(client),
@@ -41,6 +41,7 @@ pub(crate) fn post_payload(payload: serde_json::Value, timeout: Duration) -> boo
     if TELEMETRY_PERMANENTLY_REJECTED.load(Ordering::Relaxed) {
         return false;
     }
+    let breaker_exempt = payload_is_breaker_exempt(&payload);
     let Some(client) = http_client() else {
         logging::warn("telemetry HTTP client failed to build; dropping payload");
         return false;
@@ -54,7 +55,7 @@ pub(crate) fn post_payload(payload: serde_json::Value, timeout: Duration) -> boo
         Ok(response) if response.status().is_success() => true,
         Ok(response) => {
             let status = response.status();
-            if telemetry_status_is_permanent(status.as_u16()) {
+            if telemetry_status_is_permanent(status.as_u16()) && !breaker_exempt {
                 TELEMETRY_PERMANENTLY_REJECTED.store(true, Ordering::Relaxed);
                 logging::warn(&format!(
                     "telemetry endpoint permanently rejected payload with HTTP {status}; suppressing telemetry delivery for this process"
@@ -129,7 +130,7 @@ where
 {
     let (sender, receiver) = sync_channel(capacity);
     std::thread::Builder::new()
-        .name("jcode-telemetry".to_string())
+        .name("kcode-telemetry".to_string())
         .spawn(move || {
             while let Ok(payload) = receiver.recv() {
                 deliver(payload);
@@ -188,4 +189,11 @@ pub(crate) fn transcript_background_sender() -> Option<&'static SyncSender<Value
     sender(&TRANSCRIPT_BACKGROUND_SENDER, 64, |payload| {
         post_transcript_payload(payload, ASYNC_SEND_TIMEOUT);
     })
+}
+
+pub(crate) fn payload_is_breaker_exempt(payload: &serde_json::Value) -> bool {
+    matches!(
+        payload.get("event").and_then(|value| value.as_str()),
+        Some("usage_report")
+    )
 }

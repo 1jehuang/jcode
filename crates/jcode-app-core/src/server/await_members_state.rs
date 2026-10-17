@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{RwLock, mpsc};
 
-const AWAIT_MEMBERS_DIR: &str = "jcode-await-members";
+const AWAIT_MEMBERS_DIR: &str = "kcode-await-members";
 const FINAL_STATE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 const PENDING_STATE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 

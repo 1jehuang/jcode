@@ -2,18 +2,18 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 use super::provider_init::ProviderChoice;
 
+mod google;
+mod session;
+#[allow(unused_imports)]
+pub(crate) use google::{GoogleAccessTierArg, GoogleLoginArgs};
+pub(crate) use session::SessionCommand;
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 pub(crate) enum TranscriptModeArg {
     Insert,
     Append,
     Replace,
     Send,
-}
-
-#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
-pub(crate) enum GoogleAccessTierArg {
-    Full,
-    Readonly,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
@@ -27,7 +27,7 @@ pub(crate) enum ProviderAuthArg {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "jcode")]
+#[command(name = "kcode")]
 #[command(version = jcode_build_meta::version())]
 #[command(about = "J-Code: A coding agent using Claude Max or ChatGPT Pro subscriptions")]
 pub(crate) struct Args {
@@ -99,9 +99,8 @@ pub(crate) struct Args {
     #[arg(long, global = true)]
     pub(crate) no_selfdev: bool,
 
-    /// Start the onboarding simulator on launch (same as `/onboarding-sim`).
-    /// Steps through every first-run onboarding screen with synthetic data;
-    /// never touches real auth state.
+    /// Rehearse first-run onboarding on launch: the real flow, as if jcode
+    /// were new on this machine (same as `/onboarding-sim`).
     #[arg(long = "onboarding-sim")]
     pub(crate) onboarding_sim: bool,
 
@@ -256,9 +255,8 @@ pub(crate) enum Command {
         #[arg(long)]
         no_validate: bool,
 
-        /// Gmail/Google access tier for non-interactive flows. Defaults to full.
-        #[arg(long, value_enum)]
-        google_access_tier: Option<GoogleAccessTierArg>,
+        #[command(flatten)]
+        google: GoogleLoginArgs,
 
         /// OpenAI-compatible API base URL. Used with --provider openai-compatible/custom profiles.
         #[arg(long)]
@@ -412,14 +410,18 @@ pub(crate) enum Command {
         uninstall: bool,
     },
 
-    /// Install a launcher so jcode appears in your app launcher
+    /// Install platform launcher integration (Windows shortcut; macOS notification helper)
     SetupLauncher,
 
     /// Browser automation setup and status
     Browser {
-        /// Action (setup, status)
+        /// Action (setup, status, detect)
         #[arg(default_value = "setup")]
         action: String,
+
+        /// Browser to target: auto (default: detect your browser), firefox,
+        /// chrome, chromium, edge, brave, or safari
+        browser: Option<String>,
     },
 
     /// Replay a saved session in the TUI
@@ -590,7 +592,7 @@ pub(crate) enum Command {
 
     /// Serve the stable harness API on a Unix socket, for SDK clients.
     ///
-    /// This is the endpoint the TypeScript SDK (`@1jehuang/jcode-sdk`) connects to. It
+    /// This is the endpoint the TypeScript SDK (`@KooshaPari/KCode-sdk`) connects to. It
     /// ships in the released binary on purpose: the API is only "generally
     /// available" if reaching it does not require a Rust toolchain and a
     /// source checkout.
@@ -719,6 +721,100 @@ pub(crate) enum CloudCommand {
         #[command(subcommand)]
         action: CloudSessionsCommand,
     },
+
+    /// Move a live session (transcript, repo state, env notes) to a cloud host
+    /// and keep working there. Your local files stay editable. Git reconciles
+    /// both sides when the session comes back with `jcode cloud return`.
+    Move {
+        /// Session ID or name. Defaults to the session this command runs in.
+        #[arg(long)]
+        session: Option<String>,
+        #[command(flatten)]
+        target: CloudMoveTarget,
+        /// Allow moving while the session is mid-turn (the agent itself runs /cloud).
+        #[arg(long)]
+        allow_active: bool,
+        /// Prepare and verify only. Do not hand ownership to the cloud host.
+        #[arg(long)]
+        dry_run: bool,
+        /// After a successful move, attach this terminal to the cloud session.
+        #[arg(long)]
+        attach: bool,
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Bring a moved session back: pull the cloud transcript and merge its git
+    /// work into your local checkout with a normal 3-way merge.
+    Return {
+        #[arg(long)]
+        session: Option<String>,
+        #[command(flatten)]
+        target: CloudMoveTarget,
+        /// Bring the work back as refs only (refs/jcode-cloud/<session>/*) without touching the working tree.
+        #[arg(long)]
+        refs_only: bool,
+        /// After returning, resume the session in this terminal.
+        #[arg(long)]
+        attach: bool,
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show where moved sessions live and how their repos have diverged.
+    Where {
+        #[arg(long)]
+        session: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Attach this terminal to a session that lives on a cloud host.
+    Attach {
+        #[arg(long)]
+        session: Option<String>,
+    },
+
+    /// Internal: remote side of `cloud move` (reads a bundle tarball on stdin).
+    #[command(hide = true)]
+    Receive {
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Internal: remote side of `cloud move` commit phase.
+    #[command(hide = true)]
+    Activate {
+        #[arg(long)]
+        session: String,
+        #[arg(long)]
+        epoch: u64,
+    },
+
+    /// Internal: remote side of `cloud return` (writes a bundle tarball to stdout).
+    #[command(hide = true)]
+    Export {
+        #[arg(long)]
+        session: String,
+        #[arg(long)]
+        epoch: u64,
+    },
+}
+
+#[derive(Parser, Debug, Clone, Default)]
+pub(crate) struct CloudMoveTarget {
+    /// SSH host alias for the cloud machine. Defaults to [cloud] host in config
+    /// or $KCODE_CLOUD_HOST.
+    #[arg(long)]
+    pub(crate) host: Option<String>,
+    /// Remote jcode binary (name or path). Defaults to `jcode`.
+    #[arg(long)]
+    pub(crate) remote_binary: Option<String>,
+    /// Local command used in place of `ssh <host>` (for tests and custom
+    /// transports). Receives the remote shell command as its final argument.
+    /// Also read from $KCODE_CLOUD_TRANSPORT.
+    #[arg(long, hide = true)]
+    pub(crate) transport: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -777,7 +873,7 @@ pub(crate) enum CloudSessionsCommand {
     /// Upload the newest local Jcode session to Jade cloud storage
     UploadLatest {
         /// Directory containing local Jcode session JSON files
-        #[arg(long, default_value = "~/.jcode/sessions")]
+        #[arg(long, default_value = "~/.kcode/sessions")]
         sessions_dir: String,
 
         /// Upload without Jade's redaction pass
@@ -790,7 +886,7 @@ pub(crate) enum CloudSessionsCommand {
 
     /// Sync new or changed local sessions to Jade cloud storage (idempotent; safe to schedule)
     Sync {
-        /// Directory containing local Jcode session JSON files (default: ~/.jcode/sessions)
+        /// Directory containing local Jcode session JSON files (default: ~/.kcode/sessions)
         #[arg(long)]
         sessions_dir: Option<String>,
 
@@ -911,7 +1007,7 @@ pub(crate) struct JadeCloudOptions {
     #[arg(long)]
     pub(crate) region: Option<String>,
 
-    /// Path to the private Jade session helper. Defaults to $JCODE_JADE_SESSIONS_HELPER or ~/jade/scripts/jade_sessions.py.
+    /// Path to the private Jade session helper. Defaults to $KCODE_JADE_SESSIONS_HELPER or ~/jade/scripts/jade_sessions.py.
     #[arg(long)]
     pub(crate) helper: Option<String>,
 }
@@ -960,27 +1056,6 @@ pub(crate) enum ModelCommand {
         /// Show provider/selection summary before the list
         #[arg(long)]
         verbose: bool,
-    },
-}
-
-#[derive(Subcommand, Debug)]
-pub(crate) enum SessionCommand {
-    /// Rename a saved session's human-readable name/title
-    Rename {
-        /// Session ID or memorable short name, e.g. fox
-        session: String,
-
-        /// New session name/title
-        #[arg(required_unless_present = "clear")]
-        name: Option<String>,
-
-        /// Clear the custom session name/title
-        #[arg(long, conflicts_with = "name")]
-        clear: bool,
-
-        /// Emit JSON instead of human-readable output
-        #[arg(long)]
-        json: bool,
     },
 }
 
@@ -1134,7 +1209,7 @@ pub(crate) enum MemoryCommand {
         /// Search query
         query: String,
 
-        /// Use semantic search (embedding-based) instead of keyword
+        /// Use Jev relevance decisions instead of local keyword search (requires Jev access)
         #[arg(short, long)]
         semantic: bool,
     },

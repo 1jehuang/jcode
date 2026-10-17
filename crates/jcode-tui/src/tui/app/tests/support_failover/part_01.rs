@@ -13,7 +13,7 @@ use std::sync::{Arc as StdArc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 fn cleanup_background_task_files(task_id: &str) {
-    let task_dir = std::env::temp_dir().join("jcode-bg-tasks");
+    let task_dir = std::env::temp_dir().join("kcode-bg-tasks");
     let _ = std::fs::remove_file(task_dir.join(format!("{}.status.json", task_id)));
     let _ = std::fs::remove_file(task_dir.join(format!("{}.output", task_id)));
 }
@@ -320,12 +320,14 @@ fn debug_memory_profile_includes_app_owned_summary_for_large_client_state() {
 
 fn test_side_panel_snapshot(page_id: &str, title: &str) -> crate::side_panel::SidePanelSnapshot {
     crate::side_panel::SidePanelSnapshot {
+        focus_revision: 0,
         focused_page_id: Some(page_id.to_string()),
         pages: vec![crate::side_panel::SidePanelPage {
             id: page_id.to_string(),
             title: title.to_string(),
             file_path: format!("/tmp/{page_id}.md"),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
+            pdf_data: None,
             source: crate::side_panel::SidePanelPageSource::Managed,
             content: format!("# {title}"),
             updated_at_ms: 1,
@@ -333,16 +335,16 @@ fn test_side_panel_snapshot(page_id: &str, title: &str) -> crate::side_panel::Si
     }
 }
 
-/// Point `JCODE_HOME` at a per-process scratch directory if nothing set one.
+/// Point `KCODE_HOME` at a per-process scratch directory if nothing set one.
 ///
 /// This runs from `create_test_app`, so roughly 570 tests call it, and it
 /// mutates a process-global that Rust's parallel test threads all share. Tests
-/// that scope their own `JCODE_HOME` restore it by *removing* the variable, so
+/// that scope their own `KCODE_HOME` restore it by *removing* the variable, so
 /// without serialization this function would observe the gap and repoint
-/// `JCODE_HOME` at the shared scratch home while that test was still running.
+/// `KCODE_HOME` at the shared scratch home while that test was still running.
 /// That is the race behind jcode-tui's intermittent failures in unrelated
 /// ambient, header, and model-picker tests, which all read files under
-/// `JCODE_HOME` mid-assertion.
+/// `KCODE_HOME` mid-assertion.
 ///
 /// Taking the same lock those tests use makes the check-then-set atomic with
 /// respect to them. The lock is released on return, which is correct: it only
@@ -356,47 +358,47 @@ fn test_side_panel_snapshot(page_id: &str, title: &str) -> crate::side_panel::Si
 /// exclusion already covers the transition; a cross-thread `try_lock` miss
 /// falls back to the pre-serialization benign race for that one call.
 /// The shared per-process test home that `create_test_app` installs when no
-/// test has scoped its own `JCODE_HOME`.
+/// test has scoped its own `KCODE_HOME`.
 fn shared_test_jcode_home() -> &'static std::path::Path {
     static TEST_HOME: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
     TEST_HOME.get_or_init(|| {
-        let path = std::env::temp_dir().join(format!("jcode-test-home-{}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("kcode-test-home-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&path);
         path
     })
 }
 
 fn ensure_test_jcode_home_if_unset() {
-    if std::env::var_os("JCODE_HOME").is_some() {
+    if std::env::var_os("KCODE_HOME").is_some() {
         return;
     }
 
     // Serialize the unset -> set transition against tests that scope their
-    // own JCODE_HOME under `lock_test_env`. The mutex is not reentrant and
+    // own KCODE_HOME under `lock_test_env`. The mutex is not reentrant and
     // several tests hold it while calling `create_test_app` (e.g. the
     // pinned-todo-band test), so a blocking `lock_test_env()` here would
-    // self-deadlock whenever a preceding test removed JCODE_HOME on drop.
+    // self-deadlock whenever a preceding test removed KCODE_HOME on drop.
     // `try_lock` keeps the serialization when the lock is free and degrades
     // to the caller's own exclusion when this thread already holds it: if
     // try_lock fails because *we* hold the lock, no other thread can race
     // this read-modify-write anyway.
     let _env_lock = crate::storage::test_env_lock().try_lock();
 
-    if std::env::var_os("JCODE_HOME").is_some() {
+    if std::env::var_os("KCODE_HOME").is_some() {
         return;
     }
 
-    crate::env::set_var("JCODE_HOME", shared_test_jcode_home());
+    crate::env::set_var("KCODE_HOME", shared_test_jcode_home());
 }
 
 fn clear_persisted_test_ui_state() {
     // Only wipe ambient files in the *shared* per-process test home, and only
-    // while `JCODE_HOME` still points at it. `create_test_app` runs from ~800
-    // sites without the env lock, so following whatever `JCODE_HOME` happens
+    // while `KCODE_HOME` still points at it. `create_test_app` runs from ~800
+    // sites without the env lock, so following whatever `KCODE_HOME` happens
     // to be set to deleted the ambient queue of a concurrently running test
     // that scoped its own temporary home (#1142). A scoped home starts from an
     // empty tempdir and has no stale ambient state to clear anyway.
-    let home_is_shared = std::env::var_os("JCODE_HOME")
+    let home_is_shared = std::env::var_os("KCODE_HOME")
         .is_some_and(|home| std::path::Path::new(&home) == shared_test_jcode_home());
     if home_is_shared {
         let ambient_dir = shared_test_jcode_home().join("ambient");
@@ -409,11 +411,44 @@ fn clear_persisted_test_ui_state() {
     crate::auth::AuthStatus::invalidate_cache();
 }
 
+struct EnvRestoreGuard(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+impl EnvRestoreGuard {
+    fn capture(keys: impl IntoIterator<Item = &'static str>) -> Self {
+        Self(
+            keys.into_iter()
+                .map(|key| (key, std::env::var_os(key)))
+                .collect(),
+        )
+    }
+
+    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+        let guard = Self::capture([key]);
+        crate::env::set_var(key, value);
+        guard
+    }
+}
+
+impl Drop for EnvRestoreGuard {
+    fn drop(&mut self) {
+        for (key, value) in self.0.drain(..) {
+            if let Some(value) = value {
+                crate::env::set_var(key, value);
+            } else {
+                crate::env::remove_var(key);
+            }
+        }
+    }
+}
+
 fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
-    let prev_home = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", temp.path());
+    let _env_guard = EnvRestoreGuard::capture(["KCODE_HOME"]);
+    crate::env::set_var("KCODE_HOME", temp.path());
+    // Preserve inherited telemetry opt-out env. In this crate telemetry-core is
+    // a dependency, so cfg(test) does not stub its HTTP delivery path; inherited
+    // opt-out must keep blocking delivery for tests that exercise onboarding.
     crate::auth::claude::set_active_account_override(None);
     crate::auth::codex::set_active_account_override(None);
     crate::auth::AuthStatus::invalidate_cache();
@@ -428,18 +463,13 @@ fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
     crate::auth::codex::set_active_account_override(None);
     crate::auth::AuthStatus::invalidate_cache();
     crate::tui::app::helpers::clear_ambient_info_cache_for_tests();
-    if let Some(prev_home) = prev_home {
-        crate::env::set_var("JCODE_HOME", prev_home);
-    } else {
-        crate::env::remove_var("JCODE_HOME");
-    }
     // Drop any config loaded from the temp home so it cannot leak into the next
     // test, which is process-global state shared across this suite.
     crate::config::invalidate_config_cache();
     result
 }
 
-/// Run `f` in a hermetic `JCODE_HOME` with reasoning display pinned to
+/// Run `f` in a hermetic `KCODE_HOME` with reasoning display pinned to
 /// `current`.
 ///
 /// The reasoning-region tests assert live-then-anchored ("current") behaviour, but

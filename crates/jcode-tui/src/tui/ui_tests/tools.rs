@@ -172,7 +172,9 @@ fn test_token_badges_survive_full_terminal_draw() {
                         .unwrap_or_else(|| panic!("missing tool row: {rows:#?}"))
                         as u16;
                     let row = &rows[y as usize];
-                    assert!(row.contains("(6 lines)"), "{row}");
+                    // A standalone patch's summary lives on the inline diff
+                    // header, so only batch subcall rows still carry it.
+                    assert_eq!(row.contains("(6 lines)"), batch, "{row}");
                     assert!(row.trim_end().ends_with(&label), "{row}");
                     let x = (0..width)
                         .find(|&x| {
@@ -1388,7 +1390,7 @@ fn test_render_tool_message_keeps_bash_command_visible_when_row_is_narrow() {
     );
 }
 
-/// Regression for https://github.com/1jehuang/jcode/issues/284:
+/// Regression for https://github.com/KooshaPari/KCode/issues/284:
 /// While a tool call is still streaming, its arguments arrive separately and
 /// `input` is `null` (or an empty object) for many render frames. The summary
 /// must not show "action missing" / "command missing" placeholders in that

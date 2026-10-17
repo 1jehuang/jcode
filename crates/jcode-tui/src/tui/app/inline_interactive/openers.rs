@@ -37,6 +37,8 @@ impl App {
                     available: true,
                     detail: if target == AgentModelTarget::Swarm {
                         "/agents swarm · routing: /swarm-prompt".to_string()
+                    } else if target == AgentModelTarget::Memory {
+                        "/agents memory · extraction only, recall uses Jev".to_string()
                     } else {
                         format!("/agents {}", agent_model_target_slug(target))
                     },
@@ -291,6 +293,15 @@ impl App {
                     effort: None,
                 },
             );
+
+            if target == AgentModelTarget::Memory {
+                for entry in &mut picker.entries {
+                    for option in &mut entry.options {
+                        option.detail =
+                            format!("Extraction only; recall uses Jev. {}", option.detail);
+                    }
+                }
+            }
 
             picker.filtered = (0..picker.entries.len()).collect();
             picker.selected = picker

@@ -41,7 +41,7 @@ pub fn known_providers() -> Vec<String> {
     KNOWN_PROVIDERS.iter().map(|p| (*p).to_string()).collect()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ModelInfo {
     pub id: String,
     #[serde(default)]
@@ -51,6 +51,11 @@ pub struct ModelInfo {
     pub pricing: ModelPricing,
     #[serde(default)]
     pub created: Option<u64>,
+    /// Declared input modalities, e.g. `["text", "image"]`. Empty when the
+    /// catalog did not say, in which case callers keep their existing default
+    /// rather than inferring a capability the source never claimed.
+    #[serde(default)]
+    pub input: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -335,7 +340,7 @@ fn sanitize_cache_namespace(raw: &str) -> String {
 }
 
 fn configured_cache_namespace() -> String {
-    let raw = std::env::var("JCODE_OPENROUTER_CACHE_NAMESPACE")
+    let raw = std::env::var("KCODE_OPENROUTER_CACHE_NAMESPACE")
         .ok()
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
@@ -346,7 +351,7 @@ fn configured_cache_namespace() -> String {
 
 fn cache_path_for_namespace(namespace: &str) -> PathBuf {
     let namespace = sanitize_cache_namespace(namespace);
-    if let Ok(path) = std::env::var("JCODE_HOME") {
+    if let Ok(path) = std::env::var("KCODE_HOME") {
         return PathBuf::from(path)
             .join("cache")
             .join(format!("{}_models.json", namespace));
@@ -354,7 +359,7 @@ fn cache_path_for_namespace(namespace: &str) -> PathBuf {
 
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".jcode")
+        .join(".kcode")
         .join("cache")
         .join(format!("{}_models.json", namespace))
 }
@@ -556,7 +561,7 @@ fn endpoints_cache_path(model: &str) -> PathBuf {
     let namespace = configured_cache_namespace();
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".jcode")
+        .join(".kcode")
         .join("cache")
         .join(format!("{}_endpoints_{}.json", namespace, safe_name))
 }
@@ -697,7 +702,7 @@ impl ProviderRouting {
 pub fn parse_provider_routing_from_env() -> ProviderRouting {
     let mut routing = ProviderRouting::default();
 
-    if let Ok(providers) = std::env::var("JCODE_OPENROUTER_PROVIDER") {
+    if let Ok(providers) = std::env::var("KCODE_OPENROUTER_PROVIDER") {
         let order: Vec<String> = providers
             .split(',')
             .map(|s| s.trim().to_string())
@@ -708,7 +713,7 @@ pub fn parse_provider_routing_from_env() -> ProviderRouting {
         }
     }
 
-    if std::env::var("JCODE_OPENROUTER_NO_FALLBACK").is_ok() {
+    if std::env::var("KCODE_OPENROUTER_NO_FALLBACK").is_ok() {
         routing.allow_fallbacks = false;
     }
 

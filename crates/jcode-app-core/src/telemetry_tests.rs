@@ -11,9 +11,9 @@ fn lock_telemetry_test_state() -> std::sync::MutexGuard<'static, ()> {
 #[test]
 fn test_opt_out_env_var() {
     let _guard = lock_test_env();
-    crate::env::set_var("JCODE_NO_TELEMETRY", "1");
+    crate::env::set_var("KCODE_NO_TELEMETRY", "1");
     assert!(!is_enabled());
-    crate::env::remove_var("JCODE_NO_TELEMETRY");
+    crate::env::remove_var("KCODE_NO_TELEMETRY");
 }
 
 #[test]
@@ -310,9 +310,9 @@ fn test_onboarding_step_milestone_key_includes_provider_and_method() {
 #[test]
 fn test_install_marker_tracks_current_telemetry_id() {
     let _guard = lock_test_env();
-    let prev_home = std::env::var_os("JCODE_HOME");
+    let prev_home = std::env::var_os("KCODE_HOME");
     let temp = tempfile::TempDir::new().expect("create temp dir");
-    crate::env::set_var("JCODE_HOME", temp.path());
+    crate::env::set_var("KCODE_HOME", temp.path());
 
     assert!(!install_recorded_for_id("id-a"));
     mark_install_recorded("id-a");
@@ -320,8 +320,8 @@ fn test_install_marker_tracks_current_telemetry_id() {
     assert!(!install_recorded_for_id("id-b"));
 
     if let Some(prev_home) = prev_home {
-        crate::env::set_var("JCODE_HOME", prev_home);
+        crate::env::set_var("KCODE_HOME", prev_home);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
     }
 }

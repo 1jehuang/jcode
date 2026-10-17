@@ -434,7 +434,7 @@ def main():
     if not os.path.exists(SOCKET_PATH):
         print(f"\n✗ Debug socket not found at {SOCKET_PATH}")
         print("Make sure jcode server is running with debug control enabled.")
-        print("Enable with: touch ~/.jcode/debug_control")
+        print("Enable with: touch ~/.kcode/debug_control")
         sys.exit(1)
 
     total_passed = 0

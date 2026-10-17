@@ -48,12 +48,12 @@ chmod +x "$tmp/bin/uname" "$tmp/bin/nproc" "$tmp/bin/vm_stat"
 
 run_setup() {
   (
-    unset CARGO_BUILD_JOBS JCODE_BUILD_JOBS
+    unset CARGO_BUILD_JOBS KCODE_BUILD_JOBS
     export PATH="$tmp/bin:$PATH"
     export HOME="$tmp/home"
     export TMPDIR="$tmp/work"
-    export JCODE_BUILD_GIT_HASH=test
-    export JCODE_PARALLEL_FRONTEND=0
+    export KCODE_BUILD_GIT_HASH=test
+    export KCODE_PARALLEL_FRONTEND=0
     export SCCACHE_DISABLE=1
     for assignment in "$@"; do
       export "$assignment"
@@ -77,12 +77,12 @@ assert_line "$output" 'os=Darwin'
 assert_line "$output" 'build_jobs_status=adaptive:4 (cpus=8, mem_avail=7168MiB, budget=1792MiB/job)'
 assert_line "$output" 'cargo_build_jobs=4'
 
-# Both documented overrides bypass memory probing, with JCODE_BUILD_JOBS taking
+# Both documented overrides bypass memory probing, with KCODE_BUILD_JOBS taking
 # precedence when both are present.
 output=$(run_setup TEST_VM_STAT_MODE=failed CARGO_BUILD_JOBS=7)
 assert_line "$output" 'build_jobs_status=override:7'
 assert_line "$output" 'cargo_build_jobs=7'
-output=$(run_setup TEST_VM_STAT_MODE=failed CARGO_BUILD_JOBS=7 JCODE_BUILD_JOBS=3)
+output=$(run_setup TEST_VM_STAT_MODE=failed CARGO_BUILD_JOBS=7 KCODE_BUILD_JOBS=3)
 assert_line "$output" 'build_jobs_status=override:3'
 assert_line "$output" 'cargo_build_jobs=3'
 

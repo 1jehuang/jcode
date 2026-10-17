@@ -27,7 +27,7 @@ impl Drop for EnvVarGuard {
 async fn side_panel_tool_writes_page() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
-    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let _home = EnvVarGuard::set_path("KCODE_HOME", temp.path());
 
     let tool = SidePanelTool::new();
     let output = tool
@@ -58,7 +58,7 @@ async fn side_panel_tool_writes_page() {
 async fn side_panel_tool_loads_file_with_derived_page_id() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
-    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let _home = EnvVarGuard::set_path("KCODE_HOME", temp.path());
     let doc_path = temp.path().join("Project Plan.md");
     std::fs::write(&doc_path, "# Plan\n\nInitial").expect("write source file");
 

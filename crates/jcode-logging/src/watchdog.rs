@@ -224,10 +224,10 @@ fn read_trimmed(path: std::path::PathBuf) -> Option<String> {
 
 /// Start the watchdog monitor thread. Idempotent; extra calls are no-ops.
 ///
-/// Disable entirely with `JCODE_WATCHDOG=0`. Tune with
-/// `JCODE_WATCHDOG_STALL_SECS` and `JCODE_WATCHDOG_HEARTBEAT_SECS`.
+/// Disable entirely with `KCODE_WATCHDOG=0`. Tune with
+/// `KCODE_WATCHDOG_STALL_SECS` and `KCODE_WATCHDOG_HEARTBEAT_SECS`.
 pub fn start() {
-    if std::env::var("JCODE_WATCHDOG").is_ok_and(|value| value == "0" || value == "off") {
+    if std::env::var("KCODE_WATCHDOG").is_ok_and(|value| value == "0" || value == "off") {
         return;
     }
     if STARTED.swap(true, Ordering::SeqCst) {
@@ -236,14 +236,14 @@ pub fn start() {
     let _ = process_start();
     beat("startup");
 
-    let stall = Duration::from_secs(env_secs("JCODE_WATCHDOG_STALL_SECS", DEFAULT_STALL_SECS));
+    let stall = Duration::from_secs(env_secs("KCODE_WATCHDOG_STALL_SECS", DEFAULT_STALL_SECS));
     let heartbeat = Duration::from_secs(env_secs(
-        "JCODE_WATCHDOG_HEARTBEAT_SECS",
+        "KCODE_WATCHDOG_HEARTBEAT_SECS",
         DEFAULT_HEARTBEAT_SECS,
     ));
 
     std::thread::Builder::new()
-        .name("jcode-watchdog".to_string())
+        .name("kcode-watchdog".to_string())
         .spawn(move || monitor_loop(stall, heartbeat))
         .ok();
 }

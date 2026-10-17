@@ -106,7 +106,7 @@ fn request_fixture(
 fn build_lock_is_removed_on_drop_and_can_be_reacquired() {
     let _env_lock = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("temp jcode home");
-    let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
+    let _home = EnvVarGuard::set("KCODE_HOME", temp.path());
     let scope = format!("lock-drop-{}", std::process::id());
     let path = SelfDevTool::build_lock_path(&scope).expect("lock path");
 
@@ -130,8 +130,8 @@ fn terminal_request_history_is_archived_without_touching_active_requests() {
     // so taking a second env guard here would self-deadlock (issue #593).
     let _storage_guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("temp jcode home");
-    let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
-    let _limit = EnvVarGuard::set("JCODE_SELFDEV_REQUEST_HISTORY_LIMIT", "2");
+    let _home = EnvVarGuard::set("KCODE_HOME", temp.path());
+    let _limit = EnvVarGuard::set("KCODE_SELFDEV_REQUEST_HISTORY_LIMIT", "2");
 
     let base = Utc::now() - chrono::Duration::minutes(10);
     for index in 0..4 {
@@ -175,8 +175,8 @@ fn optimized_test_shell_command_routes_compile_subcommands_only() {
     );
 
     assert!(shell.contains("test|check|build|clippy|bench"));
-    assert!(shell.contains("JCODE_DEV_CARGO_SCRIPT"));
-    assert!(shell.contains("JCODE_IN_DEV_CARGO=1"));
+    assert!(shell.contains("KCODE_DEV_CARGO_SCRIPT"));
+    assert!(shell.contains("KCODE_IN_DEV_CARGO=1"));
     assert!(shell.contains("*) command cargo \"$@\" ;;"));
     assert!(shell.ends_with("cargo test -p jcode-base && cargo fmt --all -- --check"));
 }
@@ -191,7 +191,7 @@ fn optimized_test_shell_command_executes_raw_cargo_test_through_wrapper() {
     let capture = temp.path().join("args.txt");
     std::fs::write(
         &wrapper,
-        "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$JCODE_TEST_CAPTURE\"\n",
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$KCODE_TEST_CAPTURE\"\n",
     )
     .expect("write wrapper");
     let mut permissions = std::fs::metadata(&wrapper)
@@ -205,9 +205,9 @@ fn optimized_test_shell_command_executes_raw_cargo_test_through_wrapper() {
             "-lc",
             &SelfDevTool::optimized_test_shell_command("cargo test -p demo --lib"),
         ])
-        .env("JCODE_DEV_CARGO_SCRIPT", &wrapper)
-        .env("JCODE_TEST_CAPTURE", &capture)
-        .env_remove("JCODE_IN_DEV_CARGO")
+        .env("KCODE_DEV_CARGO_SCRIPT", &wrapper)
+        .env("KCODE_TEST_CAPTURE", &capture)
+        .env_remove("KCODE_IN_DEV_CARGO")
         .status()
         .expect("run optimized shell command");
 
@@ -273,7 +273,7 @@ fn test_reload_context_path() {
 fn test_reload_context_save_and_load_for_session_uses_session_scoped_file() {
     let _storage_guard = crate::storage::lock_test_env();
     let temp_home = tempfile::TempDir::new().expect("temp home");
-    let _home_guard = EnvVarGuard::set("JCODE_HOME", temp_home.path());
+    let _home_guard = EnvVarGuard::set("KCODE_HOME", temp_home.path());
 
     let ctx = ReloadContext {
         task_context: Some("Testing scoped reload context".to_string()),
@@ -362,29 +362,29 @@ fn test_recovery_directive_returns_none_when_no_reload_recovery_needed() {
 #[test]
 fn reload_timeout_secs_defaults_to_15() {
     let _storage_guard = crate::storage::lock_test_env();
-    let _guard = EnvVarGuard::remove("JCODE_SELFDEV_RELOAD_TIMEOUT_SECS");
+    let _guard = EnvVarGuard::remove("KCODE_SELFDEV_RELOAD_TIMEOUT_SECS");
     assert_eq!(SelfDevTool::reload_timeout_secs(), 15);
 }
 
 #[test]
 fn reload_timeout_secs_honors_valid_env_override() {
     let _storage_guard = crate::storage::lock_test_env();
-    let _guard = EnvVarGuard::set("JCODE_SELFDEV_RELOAD_TIMEOUT_SECS", "27");
+    let _guard = EnvVarGuard::set("KCODE_SELFDEV_RELOAD_TIMEOUT_SECS", "27");
     assert_eq!(SelfDevTool::reload_timeout_secs(), 27);
 }
 
 #[test]
 fn reload_timeout_secs_ignores_empty_invalid_and_zero_values() {
     let _storage_guard = crate::storage::lock_test_env();
-    let _guard = EnvVarGuard::set("JCODE_SELFDEV_RELOAD_TIMEOUT_SECS", "   ");
+    let _guard = EnvVarGuard::set("KCODE_SELFDEV_RELOAD_TIMEOUT_SECS", "   ");
     assert_eq!(SelfDevTool::reload_timeout_secs(), 15);
     drop(_guard);
 
-    let _guard = EnvVarGuard::set("JCODE_SELFDEV_RELOAD_TIMEOUT_SECS", "abc");
+    let _guard = EnvVarGuard::set("KCODE_SELFDEV_RELOAD_TIMEOUT_SECS", "abc");
     assert_eq!(SelfDevTool::reload_timeout_secs(), 15);
     drop(_guard);
 
-    let _guard = EnvVarGuard::set("JCODE_SELFDEV_RELOAD_TIMEOUT_SECS", "0");
+    let _guard = EnvVarGuard::set("KCODE_SELFDEV_RELOAD_TIMEOUT_SECS", "0");
     assert_eq!(SelfDevTool::reload_timeout_secs(), 15);
 }
 
@@ -482,8 +482,8 @@ fn non_selfdev_schema_only_exposes_onramp_actions() {
 async fn test_action_queues_command_in_test_mode() {
     let _storage_guard = crate::storage::lock_test_env();
     let temp_home = tempfile::TempDir::new().expect("temp home");
-    let _home_guard = EnvVarGuard::set("JCODE_HOME", temp_home.path());
-    let _test_guard = EnvVarGuard::set("JCODE_TEST_SESSION", "1");
+    let _home_guard = EnvVarGuard::set("KCODE_HOME", temp_home.path());
+    let _test_guard = EnvVarGuard::set("KCODE_TEST_SESSION", "1");
     let repo = create_repo_fixture();
 
     let tool = SelfDevTool::new();
@@ -556,8 +556,8 @@ fn reload_repo_resolver_uses_working_dir_when_primary_detection_fails() {
 async fn enter_creates_selfdev_session_in_test_mode() {
     let _storage_guard = crate::storage::lock_test_env();
     let temp_home = tempfile::TempDir::new().expect("temp home");
-    let _home_guard = EnvVarGuard::set("JCODE_HOME", temp_home.path());
-    let _test_guard = EnvVarGuard::set("JCODE_TEST_SESSION", "1");
+    let _home_guard = EnvVarGuard::set("KCODE_HOME", temp_home.path());
+    let _test_guard = EnvVarGuard::set("KCODE_TEST_SESSION", "1");
     let repo = create_repo_fixture();
 
     let mut parent = session::Session::create(None, Some("Origin Session".to_string()));
@@ -632,8 +632,8 @@ async fn enter_creates_selfdev_session_in_test_mode() {
 async fn enter_falls_back_to_fresh_session_when_parent_missing() {
     let _storage_guard = crate::storage::lock_test_env();
     let temp_home = tempfile::TempDir::new().expect("temp home");
-    let _home_guard = EnvVarGuard::set("JCODE_HOME", temp_home.path());
-    let _test_guard = EnvVarGuard::set("JCODE_TEST_SESSION", "1");
+    let _home_guard = EnvVarGuard::set("KCODE_HOME", temp_home.path());
+    let _test_guard = EnvVarGuard::set("KCODE_TEST_SESSION", "1");
     let repo = create_repo_fixture();
 
     let tool = SelfDevTool::new();
@@ -662,9 +662,9 @@ async fn enter_falls_back_to_fresh_session_when_parent_missing() {
 async fn reload_in_non_selfdev_session_is_upgrade_in_place() {
     let _storage_guard = crate::storage::lock_test_env();
     let temp_home = tempfile::TempDir::new().expect("temp home");
-    let _home_guard = EnvVarGuard::set("JCODE_HOME", temp_home.path());
+    let _home_guard = EnvVarGuard::set("KCODE_HOME", temp_home.path());
     // Test mode short-circuits the actual server reload signal.
-    let _test_guard = EnvVarGuard::set("JCODE_TEST_SESSION", "1");
+    let _test_guard = EnvVarGuard::set("KCODE_TEST_SESSION", "1");
 
     let mut session = session::Session::create(None, Some("Normal Session".to_string()));
     session.save().expect("save session");
@@ -690,7 +690,7 @@ async fn reload_in_non_selfdev_session_is_upgrade_in_place() {
 async fn socket_actions_require_selfdev_session() {
     let _storage_guard = crate::storage::lock_test_env();
     let temp_home = tempfile::TempDir::new().expect("temp home");
-    let _home_guard = EnvVarGuard::set("JCODE_HOME", temp_home.path());
+    let _home_guard = EnvVarGuard::set("KCODE_HOME", temp_home.path());
 
     let mut session = session::Session::create(None, Some("Normal Session".to_string()));
     session.save().expect("save session");
@@ -716,7 +716,7 @@ async fn socket_actions_require_selfdev_session() {
 async fn find_config_reports_key_paths() {
     let _storage_guard = crate::storage::lock_test_env();
     let temp_home = tempfile::TempDir::new().expect("temp home");
-    let _home_guard = EnvVarGuard::set("JCODE_HOME", temp_home.path());
+    let _home_guard = EnvVarGuard::set("KCODE_HOME", temp_home.path());
 
     let mut session = session::Session::create(None, Some("Normal Session".to_string()));
     session.save().expect("save session");
@@ -739,9 +739,9 @@ async fn find_config_reports_key_paths() {
 async fn setup_reports_dependency_checks() {
     let _storage_guard = crate::storage::lock_test_env();
     let temp_home = tempfile::TempDir::new().expect("temp home");
-    let _home_guard = EnvVarGuard::set("JCODE_HOME", temp_home.path());
+    let _home_guard = EnvVarGuard::set("KCODE_HOME", temp_home.path());
     // Test mode avoids attempting a real git clone when no repo is detected.
-    let _test_guard = EnvVarGuard::set("JCODE_TEST_SESSION", "1");
+    let _test_guard = EnvVarGuard::set("KCODE_TEST_SESSION", "1");
     let repo = create_repo_fixture();
 
     let mut session = session::Session::create(None, Some("Normal Session".to_string()));
@@ -770,8 +770,8 @@ async fn setup_reports_dependency_checks() {
 async fn build_requires_reason() {
     let _storage_guard = crate::storage::lock_test_env();
     let temp_home = tempfile::TempDir::new().expect("temp home");
-    let _home_guard = EnvVarGuard::set("JCODE_HOME", temp_home.path());
-    let _test_guard = EnvVarGuard::set("JCODE_TEST_SESSION", "1");
+    let _home_guard = EnvVarGuard::set("KCODE_HOME", temp_home.path());
+    let _test_guard = EnvVarGuard::set("KCODE_TEST_SESSION", "1");
     let repo = create_repo_fixture();
 
     let tool = SelfDevTool::new();
@@ -788,8 +788,8 @@ async fn build_requires_reason() {
 async fn build_queues_background_tasks_and_reports_queue_status() {
     let _storage_guard = crate::storage::lock_test_env();
     let temp_home = tempfile::TempDir::new().expect("temp home");
-    let _home_guard = EnvVarGuard::set("JCODE_HOME", temp_home.path());
-    let _test_guard = EnvVarGuard::set("JCODE_TEST_SESSION", "1");
+    let _home_guard = EnvVarGuard::set("KCODE_HOME", temp_home.path());
+    let _test_guard = EnvVarGuard::set("KCODE_TEST_SESSION", "1");
     let repo = create_repo_fixture();
 
     let mut session_one = session::Session::create(None, Some("First build session".to_string()));
@@ -863,8 +863,8 @@ async fn build_queues_background_tasks_and_reports_queue_status() {
 async fn build_reload_waits_for_build_then_reloads() {
     let _storage_guard = crate::storage::lock_test_env();
     let temp_home = tempfile::TempDir::new().expect("temp home");
-    let _home_guard = EnvVarGuard::set("JCODE_HOME", temp_home.path());
-    let _test_guard = EnvVarGuard::set("JCODE_TEST_SESSION", "1");
+    let _home_guard = EnvVarGuard::set("KCODE_HOME", temp_home.path());
+    let _test_guard = EnvVarGuard::set("KCODE_TEST_SESSION", "1");
     let repo = create_repo_fixture();
 
     let mut session = session::Session::create(None, Some("Build+reload session".to_string()));
@@ -922,8 +922,8 @@ async fn build_reload_waits_for_build_then_reloads() {
 async fn build_dedupes_identical_reason_and_version_with_attached_watcher() {
     let _storage_guard = crate::storage::lock_test_env();
     let temp_home = tempfile::TempDir::new().expect("temp home");
-    let _home_guard = EnvVarGuard::set("JCODE_HOME", temp_home.path());
-    let _test_guard = EnvVarGuard::set("JCODE_TEST_SESSION", "1");
+    let _home_guard = EnvVarGuard::set("KCODE_HOME", temp_home.path());
+    let _test_guard = EnvVarGuard::set("KCODE_TEST_SESSION", "1");
     let repo = create_repo_fixture();
 
     let mut session_one = session::Session::create(None, Some("Build A".to_string()));
@@ -982,8 +982,8 @@ async fn build_dedupes_identical_reason_and_version_with_attached_watcher() {
 async fn cancel_build_marks_request_cancelled_and_removes_it_from_queue() {
     let _storage_guard = crate::storage::lock_test_env();
     let temp_home = tempfile::TempDir::new().expect("temp home");
-    let _home_guard = EnvVarGuard::set("JCODE_HOME", temp_home.path());
-    let _test_guard = EnvVarGuard::set("JCODE_TEST_SESSION", "1");
+    let _home_guard = EnvVarGuard::set("KCODE_HOME", temp_home.path());
+    let _test_guard = EnvVarGuard::set("KCODE_TEST_SESSION", "1");
     let repo = create_repo_fixture();
 
     let mut session_one = session::Session::create(None, Some("Build A".to_string()));
@@ -1045,7 +1045,7 @@ async fn cancel_build_marks_request_cancelled_and_removes_it_from_queue() {
 fn status_output_prunes_stale_pending_requests() {
     let _storage_guard = crate::storage::lock_test_env();
     let temp_home = tempfile::TempDir::new().expect("temp home");
-    let _home_guard = EnvVarGuard::set("JCODE_HOME", temp_home.path());
+    let _home_guard = EnvVarGuard::set("KCODE_HOME", temp_home.path());
 
     let mut session = session::Session::create(None, Some("Stale Build".to_string()));
     session.short_name = Some("ghost".to_string());
@@ -1114,7 +1114,7 @@ fn freshly_queued_request_survives_reconcile_before_task_metadata_exists() {
     // killing the build instantly with "Queued build request disappeared".
     let _storage_guard = crate::storage::lock_test_env();
     let temp_home = tempfile::TempDir::new().expect("temp home");
-    let _home_guard = EnvVarGuard::set("JCODE_HOME", temp_home.path());
+    let _home_guard = EnvVarGuard::set("KCODE_HOME", temp_home.path());
 
     let mut session = session::Session::create(None, Some("Fresh Build".to_string()));
     session.save().expect("save session");
@@ -1170,8 +1170,8 @@ fn freshly_queued_request_survives_reconcile_before_task_metadata_exists() {
 async fn build_ignores_stale_pending_requests_when_computing_queue_position() {
     let _storage_guard = crate::storage::lock_test_env();
     let temp_home = tempfile::TempDir::new().expect("temp home");
-    let _home_guard = EnvVarGuard::set("JCODE_HOME", temp_home.path());
-    let _test_guard = EnvVarGuard::set("JCODE_TEST_SESSION", "1");
+    let _home_guard = EnvVarGuard::set("KCODE_HOME", temp_home.path());
+    let _test_guard = EnvVarGuard::set("KCODE_TEST_SESSION", "1");
     let repo = create_repo_fixture();
 
     let mut stale_session = session::Session::create(None, Some("Stale Build".to_string()));
@@ -1273,7 +1273,7 @@ async fn build_ignores_stale_pending_requests_when_computing_queue_position() {
 fn reconcile_pending_state_maps_superseded_background_status() {
     let _storage_guard = crate::storage::lock_test_env();
     let temp_home = tempfile::TempDir::new().expect("temp home");
-    let _home_guard = EnvVarGuard::set("JCODE_HOME", temp_home.path());
+    let _home_guard = EnvVarGuard::set("KCODE_HOME", temp_home.path());
 
     let mut session = session::Session::create(None, Some("Superseded Build".to_string()));
     session.short_name = Some("alpha".to_string());
@@ -1364,7 +1364,7 @@ fn reconcile_keeps_running_request_not_yet_registered_in_live_task_map() {
     // bootstrap grace window a Running-but-unregistered task must survive.
     let _storage_guard = crate::storage::lock_test_env();
     let temp_home = tempfile::TempDir::new().expect("temp home");
-    let _home_guard = EnvVarGuard::set("JCODE_HOME", temp_home.path());
+    let _home_guard = EnvVarGuard::set("KCODE_HOME", temp_home.path());
 
     let mut session = session::Session::create(None, Some("Racing Build".to_string()));
     session.save().expect("save session");

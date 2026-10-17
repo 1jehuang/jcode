@@ -1,7 +1,7 @@
 #[test]
 fn test_named_profile_survives_failed_openrouter_switch_then_transitions_on_success() {
     with_clean_provider_test_env(|| {
-        let jcode_home = std::env::var_os("JCODE_HOME").expect("test JCODE_HOME should be set");
+        let jcode_home = std::env::var_os("KCODE_HOME").expect("test KCODE_HOME should be set");
         std::fs::write(
             std::path::PathBuf::from(jcode_home).join("config.toml"),
             r#"
@@ -45,7 +45,6 @@ input = ["text"]
         });
 
         let provider = MultiProvider {
-            claude: RwLock::new(None),
             anthropic: RwLock::new(None),
             openai: RwLock::new(None),
             copilot_api: RwLock::new(None),
@@ -57,7 +56,6 @@ input = ["text"]
             openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
             active_openai_compatible_profile: RwLock::new(None),
             active: RwLock::new(ActiveProvider::Claude),
-            use_claude_cli: false,
             startup_notices: RwLock::new(Vec::new()),
             initial_provider: None,
             routes_memo: std::sync::Mutex::new(None),

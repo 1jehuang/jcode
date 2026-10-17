@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 impl App {
     pub(super) fn open_auth_browser(url: &str) -> bool {
-        // Honors --no-browser/NO_BROWSER/JCODE_NO_BROWSER and never opens real
+        // Honors --no-browser/NO_BROWSER/KCODE_NO_BROWSER and never opens real
         // browser windows from test binaries (login flows are exercised by TUI
         // tests; without this guard a test run pops OAuth pages on the
         // developer's desktop).
@@ -69,7 +69,7 @@ impl App {
     pub(super) fn show_jcode_subscription_status(&mut self) {
         let configured_key = crate::subscription_catalog::configured_api_key().is_some();
         let configured_base = crate::subscription_catalog::configured_api_base()
-            .unwrap_or_else(|| crate::subscription_catalog::DEFAULT_JCODE_API_BASE.to_string());
+            .unwrap_or_else(|| crate::subscription_catalog::DEFAULT_KCODE_API_BASE.to_string());
         let runtime_mode = crate::subscription_catalog::is_runtime_mode_enabled();
 
         let mut message = String::from("Jcode Hosted Model Status\n\n");
@@ -373,18 +373,18 @@ impl App {
             &mut summary,
             &mut errors,
             "jcode subscription API key",
-            crate::subscription_catalog::JCODE_API_KEY_ENV,
-            crate::subscription_catalog::JCODE_ENV_FILE,
+            crate::subscription_catalog::KCODE_API_KEY_ENV,
+            crate::subscription_catalog::KCODE_ENV_FILE,
         );
         for env_key in [
-            crate::subscription_catalog::JCODE_API_BASE_ENV,
-            crate::subscription_catalog::JCODE_ACCOUNT_ID_ENV,
-            crate::subscription_catalog::JCODE_ACCOUNT_EMAIL_ENV,
-            crate::subscription_catalog::JCODE_TIER_ENV,
+            crate::subscription_catalog::KCODE_API_BASE_ENV,
+            crate::subscription_catalog::KCODE_ACCOUNT_ID_ENV,
+            crate::subscription_catalog::KCODE_ACCOUNT_EMAIL_ENV,
+            crate::subscription_catalog::KCODE_TIER_ENV,
         ] {
             if let Err(err) = crate::provider_catalog::save_env_value_to_env_file(
                 env_key,
-                crate::subscription_catalog::JCODE_ENV_FILE,
+                crate::subscription_catalog::KCODE_ENV_FILE,
                 None,
             ) {
                 errors.push(format!("jcode subscription {}: {}", env_key, err));
@@ -781,7 +781,7 @@ impl App {
     }
 
     pub(super) fn open_jcode_account_management(&mut self) {
-        let url = crate::subscription_catalog::JCODE_ACCOUNT_URL;
+        let url = crate::subscription_catalog::KCODE_ACCOUNT_URL;
         let opened = Self::open_auth_browser(url);
         self.push_display_message(DisplayMessage::system(format!(
             "Jcode Account Management\n\n{}{}",
@@ -1026,8 +1026,7 @@ impl App {
                 )));
                 // Keep account-sensitive UI state in sync immediately.
                 crate::auth::AuthStatus::invalidate_cache();
-                self.context_limit = self.provider.context_window() as u64;
-                self.context_warning_shown = false;
+                self.set_context_limit_and_sync_budget(self.provider.context_window());
             }
             Err(e) => {
                 self.push_display_message(DisplayMessage::error(format!(
@@ -1098,8 +1097,7 @@ impl App {
                     label
                 )));
                 crate::auth::AuthStatus::invalidate_cache();
-                self.context_limit = self.provider.context_window() as u64;
-                self.context_warning_shown = false;
+                self.set_context_limit_and_sync_budget(self.provider.context_window());
             }
             Err(e) => {
                 self.push_display_message(DisplayMessage::error(format!(
@@ -1620,7 +1618,7 @@ impl App {
         let provider_id = openai_compatible_profile
             .map(|profile| profile.id.to_string())
             .unwrap_or_else(|| match key_name {
-                crate::subscription_catalog::JCODE_API_KEY_ENV => "jcode".to_string(),
+                crate::subscription_catalog::KCODE_API_KEY_ENV => "jcode".to_string(),
                 "OPENROUTER_API_KEY" => "openrouter".to_string(),
                 _ => provider.to_ascii_lowercase().replace(' ', "-"),
             });
@@ -1777,7 +1775,7 @@ impl App {
         self.set_status_notice("Grok Build: preparing sign-in...");
         self.begin_pending_login(PendingLogin::GrokBuild);
         self.push_display_message(DisplayMessage::system(
-            "Grok Build Login\n\nJcode is preparing the managed provider backend. The xAI sign-in URL and device code will appear here. You do not need to install the Grok CLI.\n\nType /cancel to dismiss this login."
+            "Grok Build Login\n\nRequesting an xAI sign-in URL and device code. They will appear here. You do not need to install the Grok CLI.\n\nType /cancel to dismiss this login."
                 .to_string(),
         ));
 
@@ -1821,17 +1819,6 @@ impl App {
 
             match crate::auth::grok_build::complete_device_login(&client, &authorization).await {
                 Ok(()) => {
-                    // The ACP executable is a private provider backend, not an
-                    // authentication dependency. Provision it only after the
-                    // native OAuth flow has completed.
-                    if let Err(error) = crate::auth::grok_build::ensure_cli().await {
-                        Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
-                            provider: "grok-build".to_string(),
-                            success: false,
-                            message: format!("Grok Build login succeeded, but its managed runtime could not be prepared: {error:#}"),
-                        }));
-                        return;
-                    }
                     Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
                         provider: "grok-build".to_string(),
                         success: true,
@@ -2304,70 +2291,74 @@ impl App {
                     ],
                 );
 
-                let save_result: anyhow::Result<()> =
-                    if let Some(resolved) = resolved_openai_compatible.as_ref() {
-                        (|| {
-                            if resolved.requires_api_key {
+                let save_result: anyhow::Result<()> = if let Some(resolved) =
+                    resolved_openai_compatible.as_ref()
+                {
+                    (|| {
+                        if resolved.requires_api_key {
+                            crate::provider_catalog::save_env_value_to_env_file(
+                                crate::provider_catalog::OPENAI_COMPAT_LOCAL_ENABLED_ENV,
+                                &resolved.env_file,
+                                None,
+                            )?;
+                            crate::provider_catalog::save_named_api_key(
+                                &resolved.env_file,
+                                &resolved.api_key_env,
+                                key.trim(),
+                            )
+                        } else {
+                            crate::provider_catalog::save_env_value_to_env_file(
+                                crate::provider_catalog::OPENAI_COMPAT_LOCAL_ENABLED_ENV,
+                                &resolved.env_file,
+                                Some("1"),
+                            )?;
+                            if key.trim().is_empty() {
                                 crate::provider_catalog::save_env_value_to_env_file(
-                                    crate::provider_catalog::OPENAI_COMPAT_LOCAL_ENABLED_ENV,
+                                    &resolved.api_key_env,
                                     &resolved.env_file,
                                     None,
-                                )?;
-                                crate::provider_catalog::save_env_value_to_env_file(
-                                    &resolved.api_key_env,
-                                    &resolved.env_file,
-                                    Some(key.trim()),
                                 )
                             } else {
-                                crate::provider_catalog::save_env_value_to_env_file(
-                                    crate::provider_catalog::OPENAI_COMPAT_LOCAL_ENABLED_ENV,
+                                crate::provider_catalog::save_named_api_key(
                                     &resolved.env_file,
-                                    Some("1"),
-                                )?;
-                                crate::provider_catalog::save_env_value_to_env_file(
                                     &resolved.api_key_env,
-                                    &resolved.env_file,
-                                    if key.trim().is_empty() {
-                                        None
-                                    } else {
-                                        Some(key.trim())
-                                    },
+                                    key.trim(),
                                 )
                             }
-                        })()
-                    } else if key_name == crate::subscription_catalog::JCODE_API_KEY_ENV {
-                        (|| {
-                            let mut content = format!("{}={}\n", key_name, key);
-                            if let Some(base) = crate::subscription_catalog::configured_api_base() {
-                                content.push_str(&format!(
-                                    "{}={}\n",
-                                    crate::subscription_catalog::JCODE_API_BASE_ENV,
-                                    base
-                                ));
-                            }
+                        }
+                    })()
+                } else if key_name == crate::subscription_catalog::KCODE_API_KEY_ENV {
+                    (|| {
+                        let mut content = format!("{}={}\n", key_name, key);
+                        if let Some(base) = crate::subscription_catalog::configured_api_base() {
+                            content.push_str(&format!(
+                                "{}={}\n",
+                                crate::subscription_catalog::KCODE_API_BASE_ENV,
+                                base
+                            ));
+                        }
 
-                            let config_dir = crate::storage::app_config_dir()?;
-                            std::fs::create_dir_all(&config_dir)?;
-                            crate::platform::set_directory_permissions_owner_only(&config_dir)?;
+                        let config_dir = crate::storage::app_config_dir()?;
+                        std::fs::create_dir_all(&config_dir)?;
+                        crate::platform::set_directory_permissions_owner_only(&config_dir)?;
 
-                            let file_path = config_dir.join(&env_file);
-                            std::fs::write(&file_path, content)?;
-                            crate::platform::set_permissions_owner_only(&file_path)?;
-                            crate::env::set_var(&key_name, &key);
-                            Ok(())
-                        })()
-                    } else if key_name == crate::provider::bedrock::API_KEY_ENV {
-                        (|| {
-                            Self::save_named_api_key(&env_file, &key_name, &key)?;
-                            crate::provider_catalog::save_env_value_to_env_file(
-                                crate::provider::bedrock::REGION_ENV,
-                                &env_file,
-                                Some("us-east-2"),
-                            )
-                        })()
-                    } else {
-                        Self::save_named_api_key(&env_file, &key_name, &key)
-                    };
+                        let file_path = config_dir.join(&env_file);
+                        std::fs::write(&file_path, content)?;
+                        crate::platform::set_permissions_owner_only(&file_path)?;
+                        Ok(())
+                    })()
+                } else if key_name == crate::provider::bedrock::API_KEY_ENV {
+                    (|| {
+                        crate::provider_catalog::save_named_api_key(&env_file, &key_name, &key)?;
+                        crate::provider_catalog::save_env_value_to_env_file(
+                            crate::provider::bedrock::REGION_ENV,
+                            &env_file,
+                            Some("us-east-2"),
+                        )
+                    })()
+                } else {
+                    crate::provider_catalog::save_named_api_key(&env_file, &key_name, &key)
+                };
 
                 match save_result {
                     Ok(()) => {
@@ -2390,7 +2381,7 @@ impl App {
                                 "bedrock",
                             );
                             if let Some(default_model) = default_model.as_deref() {
-                                crate::env::set_var("JCODE_BEDROCK_MODEL", default_model);
+                                crate::env::set_var("KCODE_BEDROCK_MODEL", default_model);
                             }
                         }
 
@@ -2411,7 +2402,7 @@ impl App {
                         let model_hint = effective_default_model
                             .map(|m| format!("\nSuggested default model: {}", m))
                             .unwrap_or_default();
-                        let guidance = if key_name == crate::subscription_catalog::JCODE_API_KEY_ENV
+                        let guidance = if key_name == crate::subscription_catalog::KCODE_API_KEY_ENV
                         {
                             format!(
                                 "Use /login jcode to access curated models via your router. If the model list looks stale, run /refresh-model-list.\nDocs: {}",
@@ -2517,7 +2508,7 @@ impl App {
                         }
                     };
                     if let Err(err) = crate::provider_catalog::save_env_value_to_env_file(
-                        "JCODE_OPENAI_COMPAT_API_BASE",
+                        "KCODE_OPENAI_COMPAT_API_BASE",
                         crate::provider_catalog::OPENAI_COMPAT_PROFILE.env_file,
                         Some(&normalized),
                     ) {
@@ -2755,7 +2746,7 @@ impl App {
                 .default_model
                 .as_deref()
                 .is_some_and(|model| !model.trim().is_empty());
-        let runtime_provider_explicit = std::env::var("JCODE_INITIAL_PROVIDER_EXPLICIT")
+        let runtime_provider_explicit = std::env::var("KCODE_INITIAL_PROVIDER_EXPLICIT")
             .ok()
             .is_some_and(|value| {
                 let value = value.trim().to_ascii_lowercase();
@@ -3379,21 +3370,6 @@ impl App {
         ))
     }
 
-    fn save_named_api_key(env_file: &str, key_name: &str, key: &str) -> anyhow::Result<()> {
-        if !crate::provider_catalog::is_safe_env_key_name(key_name) {
-            anyhow::bail!("Invalid API key variable name: {}", key_name);
-        }
-        if !crate::provider_catalog::is_safe_env_file_name(env_file) {
-            anyhow::bail!("Invalid env file name: {}", env_file);
-        }
-
-        let config_dir = crate::storage::app_config_dir()?;
-        let file_path = config_dir.join(env_file);
-        crate::storage::upsert_env_file_value(&file_path, key_name, Some(key))?;
-        crate::env::set_var(key_name, key);
-        Ok(())
-    }
-
     fn save_azure_config(
         endpoint: &str,
         model: &str,
@@ -3418,10 +3394,10 @@ impl App {
             Some(if use_entra { "1" } else { "0" }),
         )?;
         if let Some(api_key) = api_key {
-            crate::provider_catalog::save_env_value_to_env_file(
-                azure::API_KEY_ENV,
+            crate::provider_catalog::save_named_api_key(
                 azure::ENV_FILE,
-                Some(api_key),
+                azure::API_KEY_ENV,
+                api_key,
             )?;
         }
         azure::apply_runtime_env()?;
@@ -3473,7 +3449,7 @@ fn save_tui_openai_compatible_api_base(
             anyhow::anyhow!("OpenAI-compatible API base must be https://... or http://localhost.")
         })?;
         crate::provider_catalog::save_env_value_to_env_file(
-            "JCODE_OPENAI_COMPAT_API_BASE",
+            "KCODE_OPENAI_COMPAT_API_BASE",
             crate::provider_catalog::OPENAI_COMPAT_PROFILE.env_file,
             Some(&normalized),
         )?;
@@ -3495,10 +3471,10 @@ fn save_tui_openai_compatible_key(
             &resolved.env_file,
             None,
         )?;
-        crate::provider_catalog::save_env_value_to_env_file(
-            &resolved.api_key_env,
+        crate::provider_catalog::save_named_api_key(
             &resolved.env_file,
-            Some(key.trim()),
+            &resolved.api_key_env,
+            key.trim(),
         )?;
     } else {
         crate::provider_catalog::save_env_value_to_env_file(
@@ -3506,15 +3482,19 @@ fn save_tui_openai_compatible_key(
             &resolved.env_file,
             Some("1"),
         )?;
-        crate::provider_catalog::save_env_value_to_env_file(
-            &resolved.api_key_env,
-            &resolved.env_file,
-            if key.trim().is_empty() {
-                None
-            } else {
-                Some(key.trim())
-            },
-        )?;
+        if key.trim().is_empty() {
+            crate::provider_catalog::save_env_value_to_env_file(
+                &resolved.api_key_env,
+                &resolved.env_file,
+                None,
+            )?;
+        } else {
+            crate::provider_catalog::save_named_api_key(
+                &resolved.env_file,
+                &resolved.api_key_env,
+                key.trim(),
+            )?;
+        }
     }
     Ok(resolved)
 }

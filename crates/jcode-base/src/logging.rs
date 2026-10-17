@@ -1,6 +1,6 @@
 //! Logging infrastructure for jcode
 //!
-//! Logs to ~/.jcode/logs/ with automatic rotation
+//! Logs to ~/.kcode/logs/ with automatic rotation
 //!
 //! Supports thread-local context for server, session, provider, and model info.
 //!

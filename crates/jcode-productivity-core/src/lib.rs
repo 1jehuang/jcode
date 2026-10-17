@@ -29,7 +29,7 @@ pub struct ProductivityOutput {
 }
 
 /// Scan transcripts, compute the report, render markdown + PNG, and persist the
-/// PNG to `~/.jcode/generated-images/productivity-<timestamp>.png`.
+/// PNG to `~/.kcode/generated-images/productivity-<timestamp>.png`.
 pub fn generate() -> Result<ProductivityOutput> {
     let report = compute_report()?;
     let markdown = markdown::render_markdown(&report);

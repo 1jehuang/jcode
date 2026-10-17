@@ -4,7 +4,7 @@
 //! Several UI surfaces need to answer the same question -- the header provider
 //! tag (`(oauth:claude) ...`), the info widget auth badge, and the model-switch
 //! confirmation line. Historically each surface re-derived the answer from
-//! [`AuthStatus`] plus the `JCODE_RUNTIME_PROVIDER` override on its own, keyed on
+//! [`AuthStatus`] plus the `KCODE_RUNTIME_PROVIDER` override on its own, keyed on
 //! free-form provider strings (`"anthropic"` vs `"claude"`). That duplication is
 //! exactly how the surfaces silently drifted apart and how the header tag
 //! vanished entirely when one path matched `"claude"` and another `"anthropic"`.
@@ -44,7 +44,7 @@ pub struct ResolvedProviderAuth {
     pub has_oauth: bool,
     /// Whether an API key is configured at all.
     pub has_api_key: bool,
-    /// True when the active credential was pinned via `JCODE_RUNTIME_PROVIDER`
+    /// True when the active credential was pinned via `KCODE_RUNTIME_PROVIDER`
     /// rather than chosen by the auto heuristic. Lets surfaces distinguish a
     /// deliberate "use OAuth" from "auto happened to pick OAuth".
     pub explicit: bool,
@@ -60,7 +60,7 @@ impl ResolvedProviderAuth {
 
 /// Resolve the credential a dual-auth provider (Anthropic / OpenAI) will use.
 ///
-/// `runtime_provider` is the raw `JCODE_RUNTIME_PROVIDER` value (if any); it
+/// `runtime_provider` is the raw `KCODE_RUNTIME_PROVIDER` value (if any); it
 /// lets the user pin OAuth-vs-key explicitly and always wins over the auto
 /// heuristic. In "auto" mode we prefer OAuth (subscription) and fall back to the
 /// API key, matching the credential the provider layer actually selects.

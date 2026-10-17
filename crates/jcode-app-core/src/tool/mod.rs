@@ -4,19 +4,31 @@ pub mod apply_patch;
 pub mod bash;
 mod batch;
 pub mod bg;
+#[cfg(unix)]
+pub(crate) mod bridge_reload;
 pub mod browser;
+mod calendar;
+mod codemode;
 pub mod communicate;
+mod compile_remote;
 #[cfg(target_os = "macos")]
 mod computer;
 mod config_edit_notice;
 mod conversation_search;
 mod debug_socket;
+mod desktop_selfdev;
 mod discover;
 mod discover_secrets;
 pub mod edit;
+mod edit_stats;
 mod elicitation;
 pub mod feedback;
+mod file_diff;
+pub(crate) mod file_lock;
 mod gmail;
+// The initiative tool is intentionally unregistered (4928a1c92) but kept for re-enable.
+pub mod applet;
+#[allow(dead_code)]
 mod goal;
 pub mod inflight;
 pub mod invalid;
@@ -26,8 +38,11 @@ pub mod mcp;
 pub mod memory;
 pub mod multiedit;
 pub mod open;
+mod panel;
 pub mod patch;
 pub mod read;
+mod replace;
+pub(crate) mod sdk;
 pub mod selfdev;
 pub(crate) mod serde_coerce;
 pub mod session_search;
@@ -105,6 +120,7 @@ impl Drop for SessionToolPolicyRegistration {
             .is_some_and(|policy| policy.owner == Some(self.owner))
         {
             policies.remove(&self.session_id);
+            sdk::remove_session(&self.session_id);
         }
     }
 }
@@ -160,11 +176,23 @@ pub(crate) fn clear_session_tool_policy(session_id: &str) {
 }
 
 fn session_tool_policy(session_id: &str) -> Option<SessionToolPolicy> {
-    SESSION_TOOL_POLICIES
+    let mut policy = SESSION_TOOL_POLICIES
         .read()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(|e| e.into_inner())
         .get(session_id)
-        .cloned()
+        .cloned();
+    if let Some(config) = sdk::config(session_id) {
+        let policy = policy.get_or_insert_with(SessionToolPolicy::default);
+        if let Some(enabled) = config.enabled {
+            policy.allowed_tools = Some(enabled.into_iter().collect());
+            policy.disabled_tools.clear();
+        }
+        policy.disabled_tools.extend(config.disabled);
+        if let Some(allowed) = policy.allowed_tools.as_mut() {
+            allowed.extend(config.custom.into_iter().map(|t| t.name));
+        }
+    }
+    policy
 }
 
 #[cfg(test)]
@@ -184,18 +212,34 @@ pub(crate) fn session_tool_policy_allows_tool_for_test(
 /// Apply the current session policy to an MCP server tool invoked through a
 /// fixed deferred surface. Explicitly enabling the fixed surface authorizes its
 /// underlying MCP calls, while per-tool allow/deny entries remain effective.
+#[cfg(test)]
 pub(crate) fn session_mcp_dispatch_is_allowed(
     session_id: &str,
     dispatched_name: &str,
+    fixed_surface: &str,
+) -> bool {
+    session_mcp_alias_is_allowed(session_id, dispatched_name, dispatched_name, fixed_surface)
+}
+
+/// Enforce both the actual alias and the legacy normalized identity. A deny on
+/// either spelling wins, including when the caller uses the deferred surface.
+pub(crate) fn session_mcp_alias_is_allowed(
+    session_id: &str,
+    alias: &str,
+    legacy_name: &str,
     fixed_surface: &str,
 ) -> bool {
     let Some(policy) = session_tool_policy(session_id) else {
         return true;
     };
     let allowed = policy.allowed_tools.as_ref().is_none_or(|allowed| {
-        tool_name_is_allowed(allowed, dispatched_name) || allowed.contains(fixed_surface)
+        tool_name_is_allowed(allowed, alias)
+            || tool_name_is_allowed(allowed, legacy_name)
+            || allowed.contains(fixed_surface)
     });
-    allowed && !tool_name_is_disabled(&policy.disabled_tools, dispatched_name)
+    allowed
+        && !tool_name_is_disabled(&policy.disabled_tools, alias)
+        && !tool_name_is_disabled(&policy.disabled_tools, legacy_name)
 }
 
 /// Whether a tool call opted in to receiving an oversized (truncated) result.
@@ -224,12 +268,21 @@ fn accepts_large_output(input: &Value) -> bool {
     }
 }
 
+/// Aliases are surface-dependent, but policy follows original identities for
+/// the lifetime of the registry, including aliases retired after a reconnect.
+#[derive(Default)]
+struct McpPolicyIndex {
+    current: HashMap<String, (String, String)>,
+    history: HashMap<(String, String), HashSet<String>>,
+}
+
 /// Registry of available tools (Arc-wrapped for sharing)
 ///
 /// Clone creates a fresh CompactionManager so each subagent gets independent
 /// message history tracking. Tools and skills are shared via Arc.
 pub struct Registry {
     tools: Arc<RwLock<HashMap<String, Arc<dyn Tool>>>>,
+    mcp_policy: Arc<StdRwLock<McpPolicyIndex>>,
     skills: Arc<RwLock<SkillRegistry>>,
     compaction: Arc<RwLock<CompactionManager>>,
     search_index: tool_search::ToolSearchIndex,
@@ -241,6 +294,7 @@ pub struct Registry {
 /// Arc cycle. Upgrade this handle only for the duration of a tool call.
 pub(super) struct WeakRegistry {
     tools: std::sync::Weak<RwLock<HashMap<String, Arc<dyn Tool>>>>,
+    mcp_policy: Arc<StdRwLock<McpPolicyIndex>>,
     skills: Arc<RwLock<SkillRegistry>>,
     compaction: Arc<RwLock<CompactionManager>>,
     search_index: tool_search::ToolSearchIndex,
@@ -250,6 +304,7 @@ impl WeakRegistry {
     pub(super) fn upgrade(&self) -> Option<Registry> {
         Some(Registry {
             tools: self.tools.upgrade()?,
+            mcp_policy: Arc::clone(&self.mcp_policy),
             skills: Arc::clone(&self.skills),
             compaction: Arc::clone(&self.compaction),
             search_index: self.search_index.clone(),
@@ -261,6 +316,7 @@ impl Clone for Registry {
     fn clone(&self) -> Self {
         Self {
             tools: self.tools.clone(),
+            mcp_policy: Arc::clone(&self.mcp_policy),
             skills: self.skills.clone(),
             // Each clone gets a fresh CompactionManager to prevent parallel
             // subagents from corrupting each other's message history
@@ -274,6 +330,7 @@ impl Registry {
     fn downgrade(&self) -> WeakRegistry {
         WeakRegistry {
             tools: Arc::downgrade(&self.tools),
+            mcp_policy: Arc::clone(&self.mcp_policy),
             skills: Arc::clone(&self.skills),
             compaction: Arc::clone(&self.compaction),
             search_index: self.search_index.clone(),
@@ -309,6 +366,7 @@ impl Registry {
     pub fn empty() -> Self {
         Self {
             tools: Arc::new(RwLock::new(HashMap::new())),
+            mcp_policy: Arc::default(),
             skills: Arc::new(RwLock::new(SkillRegistry::default())),
             compaction: Arc::new(RwLock::new(CompactionManager::new())),
             search_index: tool_search::ToolSearchIndex::new(),
@@ -338,14 +396,12 @@ impl Registry {
                 "side_panel",
                 side_panel::SidePanelTool::new,
             );
+            Self::insert_tool_timed(&mut m, &mut timings, "panel", panel::PanelTool::new);
+            Self::insert_tool_timed(&mut m, &mut timings, "applet", applet::AppletTool::new);
             Self::insert_tool_timed(&mut m, &mut timings, "edit", edit::EditTool::new);
-            Self::insert_tool_timed(
-                &mut m,
-                &mut timings,
-                "multiedit",
-                multiedit::MultiEditTool::new,
-            );
-            Self::insert_tool_timed(&mut m, &mut timings, "patch", patch::PatchTool::new);
+            // `multiedit` merged into `edit`, and `patch` into `apply_patch`.
+            // Both old names still resolve through `resolve_tool_name`.
+            Self::insert_tool_timed(&mut m, &mut timings, "replace", replace::ReplaceTool::new);
             Self::insert_tool_timed(
                 &mut m,
                 &mut timings,
@@ -354,6 +410,12 @@ impl Registry {
             );
             Self::insert_tool_timed(&mut m, &mut timings, "ls", ls::LsTool::new);
             Self::insert_tool_timed(&mut m, &mut timings, "bash", bash::BashTool::new);
+            Self::insert_tool_timed(
+                &mut m,
+                &mut timings,
+                "compile_remote",
+                compile_remote::CompileRemoteTool::new,
+            );
             Self::insert_tool_timed(&mut m, &mut timings, "browser", browser::BrowserTool::new);
             Self::insert_tool_timed(&mut m, &mut timings, "open", open::OpenTool::new);
             #[cfg(target_os = "macos")]
@@ -412,8 +474,20 @@ impl Registry {
             // Initiative is temporarily unavailable. Keep its implementation and
             // saved data intact so it can be restored without a migration.
             Self::insert_tool_timed(&mut m, &mut timings, "gmail", gmail::GmailTool::new);
+            Self::insert_tool_timed(
+                &mut m,
+                &mut timings,
+                "calendar",
+                calendar::CalendarTool::new,
+            );
             Self::insert_tool_timed(&mut m, &mut timings, "schedule", ambient::ScheduleTool::new);
             Self::insert_tool_timed(&mut m, &mut timings, "selfdev", selfdev::SelfDevTool::new);
+            Self::insert_tool_timed(
+                &mut m,
+                &mut timings,
+                "desktop_selfdev",
+                desktop_selfdev::DesktopSelfDevTool::new,
+            );
             let nonzero: Vec<String> = timings
                 .iter()
                 .filter(|(_, ms)| *ms > 0)
@@ -455,6 +529,7 @@ impl Registry {
         let registry_struct_start = std::time::Instant::now();
         let registry = Self {
             tools: Arc::new(RwLock::new(HashMap::new())),
+            mcp_policy: Arc::default(),
             skills: skills.clone(),
             compaction: compaction.clone(),
             search_index: search_index.clone(),
@@ -477,6 +552,15 @@ impl Registry {
             "conversation_search",
             conversation_search::ConversationSearchTool::new(compaction),
         );
+        // Codemode is opt-in (`[tools] codemode = true`). When off, the tool
+        // is never registered, so it costs nothing and never reaches a model.
+        if codemode::enabled() {
+            Self::insert_tool(
+                &mut tools_map,
+                "codemode",
+                codemode::CodemodeTool::new(registry.downgrade()),
+            );
+        }
         // Integration discovery is on by default (opt-out); when disabled the
         // tool is never registered and no discovery endpoint is ever
         // contacted.
@@ -523,11 +607,7 @@ impl Registry {
         let tools = self.tools.read().await;
         let mut defs: Vec<ToolDefinition> = tools
             .iter()
-            .filter(|(name, _)| {
-                allowed_tools
-                    .map(|set| tool_name_is_allowed(set, name))
-                    .unwrap_or(true)
-            })
+            .filter(|(name, _)| allowed_tools.is_none_or(|set| self.tool_is_allowed(set, name)))
             .map(|(name, tool)| {
                 let mut def = tool.to_definition();
                 // Use registry key as the tool name (important for MCP tools where
@@ -548,6 +628,21 @@ impl Registry {
     pub async fn tool_names(&self) -> Vec<String> {
         let tools = self.tools.read().await;
         tools.keys().cloned().collect()
+    }
+
+    /// Tool definitions a session may call, honoring its registered allow and
+    /// deny policy. Per-server MCP tools are always listed individually and
+    /// the fixed `mcp_search`/`mcp_call` surface is omitted, because scripts
+    /// address MCP tools directly. Used by `codemode`.
+    pub(crate) async fn definitions_for_session(&self, session_id: &str) -> Vec<ToolDefinition> {
+        let policy = session_tool_policy(session_id);
+        let allowed = policy.as_ref().and_then(|p| p.allowed_tools.clone());
+        let mut defs = self.definitions(allowed.as_ref()).await;
+        if let Some(policy) = policy.as_ref() {
+            defs.retain(|def| !self.tool_is_disabled(&policy.disabled_tools, &def.name));
+        }
+        defs.retain(|def| !is_fixed_mcp_tool(&def.name));
+        defs
     }
 
     /// Enable test mode for memory tools (isolated storage)
@@ -624,6 +719,83 @@ impl Registry {
         crate::util::estimate_tokens(s)
     }
 
+    /// Paths a tool call names in its input, labelled by the input key they
+    /// came from, resolved against the session working directory. Covers the
+    /// common path keys, `paths` arrays (first 8), and `apply_patch` file
+    /// headers (Codex envelope and unified diff).
+    fn touched_paths(input: &Value, ctx: &ToolContext) -> Vec<(&'static str, std::path::PathBuf)> {
+        let mut touched = Vec::new();
+        let Some(object) = input.as_object() else {
+            return touched;
+        };
+        let resolve = |path: &str| ctx.resolve_path(std::path::Path::new(path));
+        for key in [
+            "file_path",
+            "path",
+            "target",
+            "target_path",
+            "old_path",
+            "new_path",
+        ] {
+            if let Some(path) = object.get(key).and_then(Value::as_str) {
+                touched.push((key, resolve(path)));
+            }
+        }
+        if let Some(paths) = object.get("paths").and_then(Value::as_array) {
+            for path in paths.iter().filter_map(Value::as_str).take(8) {
+                touched.push(("paths", resolve(path)));
+            }
+        }
+        if let Some(patch) = object.get("patch_text").and_then(Value::as_str) {
+            for path in Self::patch_paths(patch) {
+                if !touched
+                    .iter()
+                    .any(|(_, existing)| *existing == resolve(path))
+                {
+                    touched.push(("patch", resolve(path)));
+                }
+            }
+        }
+        touched
+    }
+
+    /// File paths named in patch headers. Deletions are included because the
+    /// path was still touched; `/dev/null` sides of unified diffs are not.
+    fn patch_paths(patch: &str) -> Vec<&str> {
+        let mut paths = Vec::new();
+        for line in patch.lines() {
+            let path = [
+                "*** Add File: ",
+                "*** Update File: ",
+                "*** Delete File: ",
+                "*** Move to: ",
+            ]
+            .iter()
+            .find_map(|prefix| line.strip_prefix(prefix))
+            .or_else(|| {
+                let header = line
+                    .strip_prefix("+++ ")
+                    .or_else(|| line.strip_prefix("--- "))?;
+                let header = header.split('\t').next().unwrap_or(header).trim();
+                if header == "/dev/null" {
+                    return None;
+                }
+                Some(
+                    header
+                        .strip_prefix("a/")
+                        .or_else(|| header.strip_prefix("b/"))
+                        .unwrap_or(header),
+                )
+            });
+            if let Some(path) = path.map(str::trim).filter(|path| !path.is_empty())
+                && !paths.contains(&path)
+            {
+                paths.push(path);
+            }
+        }
+        paths
+    }
+
     fn tool_lifecycle_fields(
         phase: &str,
         requested_name: &str,
@@ -657,31 +829,10 @@ impl Registry {
             keys.sort();
             fields.push(("input_keys".to_string(), keys.join(",")));
 
-            let path_fields = [
-                "file_path",
-                "path",
-                "target",
-                "target_path",
-                "old_path",
-                "new_path",
-            ];
-            let mut touched_paths = Vec::new();
-            for key in path_fields {
-                if let Some(path) = object.get(key).and_then(Value::as_str) {
-                    touched_paths.push(format!(
-                        "{key}:{}",
-                        ctx.resolve_path(std::path::Path::new(path)).display()
-                    ));
-                }
-            }
-            if let Some(paths) = object.get("paths").and_then(Value::as_array) {
-                for path in paths.iter().filter_map(Value::as_str).take(8) {
-                    touched_paths.push(format!(
-                        "paths:{}",
-                        ctx.resolve_path(std::path::Path::new(path)).display()
-                    ));
-                }
-            }
+            let touched_paths = Self::touched_paths(input, ctx)
+                .into_iter()
+                .map(|(key, path)| format!("{key}:{}", path.display()))
+                .collect::<Vec<_>>();
             if !touched_paths.is_empty() {
                 fields.push(("touched_paths".to_string(), touched_paths.join(",")));
                 fields.push((
@@ -708,20 +859,32 @@ impl Registry {
     /// Outputs that would push total context beyond this are truncated.
     const CONTEXT_GUARD_THRESHOLD: f32 = 0.90;
 
-    /// Fire the `post_tool` observer hook with tool outcome metadata.
-    /// No-op (without building the payload) when the hook is not configured.
-    fn fire_post_tool_hook(
+    /// Event payload shared by the `post_tool` observer and the
+    /// `post_tool_feedback` hook.
+    fn post_tool_event(
+        event_name: &'static str,
         resolved_name: &str,
+        input: &Value,
         ctx: &ToolContext,
-        result: &Result<ToolOutput>,
+        result: std::result::Result<&ToolOutput, &anyhow::Error>,
         latency_ms: u64,
-    ) {
-        if !crate::hooks::hook_configured("post_tool") {
-            return;
+    ) -> crate::hooks::HookEvent {
+        let mut unique_paths: Vec<String> = Vec::new();
+        for (_, path) in Self::touched_paths(input, ctx) {
+            let path = path.display().to_string();
+            if !unique_paths.contains(&path) {
+                unique_paths.push(path);
+            }
         }
-        let mut event = crate::hooks::HookEvent::new("post_tool")
+        let mut event = crate::hooks::HookEvent::new(event_name)
             .session_id(ctx.session_id.clone())
             .field("TOOL_NAME", resolved_name)
+            .field("TOOL_CALL_ID", ctx.tool_call_id.clone())
+            .field(
+                "TOOL_INPUT",
+                crate::hooks::truncate_tool_input(&input.to_string()),
+            )
+            .field("TOUCHED_PATHS", unique_paths.join("\n"))
             .field("STATUS", if result.is_ok() { "ok" } else { "error" })
             .field("DURATION_MS", latency_ms.to_string());
         if let Some(dir) = &ctx.working_dir {
@@ -737,7 +900,61 @@ impl Registry {
                 event = event.field("ERROR", message);
             }
         }
-        crate::hooks::dispatch_observer(event);
+        event
+    }
+
+    /// Fire the `post_tool` observer hook with tool outcome metadata.
+    /// No-op (without building the payload) when the hook is not configured.
+    fn fire_post_tool_hook(
+        resolved_name: &str,
+        input: &Value,
+        ctx: &ToolContext,
+        result: &Result<ToolOutput>,
+        latency_ms: u64,
+    ) {
+        if !crate::hooks::hook_configured("post_tool") {
+            return;
+        }
+        crate::hooks::dispatch_observer(Self::post_tool_event(
+            "post_tool",
+            resolved_name,
+            input,
+            ctx,
+            result.as_ref(),
+            latency_ms,
+        ));
+    }
+
+    /// Run the synchronous `post_tool_feedback` hooks after a successful tool
+    /// call and append whatever they print to the tool result, so linters and
+    /// checkers can feed findings straight back to the model.
+    async fn apply_post_tool_feedback(
+        resolved_name: &str,
+        input: &Value,
+        ctx: &ToolContext,
+        latency_ms: u64,
+        output: &mut ToolOutput,
+    ) {
+        if !crate::hooks::hook_configured("post_tool_feedback") {
+            return;
+        }
+        let event = Self::post_tool_event(
+            "post_tool_feedback",
+            resolved_name,
+            input,
+            ctx,
+            Ok(output),
+            latency_ms,
+        );
+        if let Some(feedback) =
+            crate::hooks::run_post_tool_feedback(&event, &input.to_string()).await
+        {
+            if !output.output.is_empty() && !output.output.ends_with('\n') {
+                output.output.push('\n');
+            }
+            output.output.push_str("\n[post_tool_feedback]\n");
+            output.output.push_str(&feedback);
+        }
     }
 
     /// Maximum fraction of context budget a single tool output may occupy.
@@ -790,6 +1007,18 @@ impl Registry {
         )
     }
 
+    /// Resolve a model-supplied tool name for a session: strips a
+    /// `functions.` namespace and maps aliases, but leaves SDK custom tool
+    /// names untouched so they are never rewritten to a built-in.
+    pub(crate) fn resolve_tool_name_for_session<'a>(session_id: &str, name: &'a str) -> &'a str {
+        let unqualified_name = name.strip_prefix("functions.").unwrap_or(name);
+        if sdk::custom(session_id, unqualified_name) {
+            unqualified_name
+        } else {
+            Self::resolve_tool_name(unqualified_name)
+        }
+    }
+
     /// Execute a tool by name
     pub async fn execute(&self, name: &str, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         // Mark this call in-flight for the whole execution so the missing
@@ -798,45 +1027,94 @@ impl Registry {
         // `tool::inflight`.
         let _in_flight = inflight::mark_tool_in_flight(&ctx.tool_call_id);
         let tools = self.tools.read().await;
-        let resolved_name = Self::resolve_tool_name(name);
-        if let Some(policy) = session_tool_policy(&ctx.session_id) {
+        let resolved_name = Self::resolve_tool_name_for_session(&ctx.session_id, name);
+        let is_custom = sdk::custom(&ctx.session_id, resolved_name);
+        if is_custom && let Some(config) = sdk::config(&ctx.session_id) {
+            let disabled = config.disabled.into_iter().collect();
+            anyhow::ensure!(
+                !self.tool_is_disabled(&disabled, resolved_name),
+                "Tool '{}' is disabled",
+                resolved_name
+            );
+        }
+        // Enforce product separation here too: batch/subcalls dispatch through
+        // the registry without going through Agent::validate_tool_allowed.
+        if !is_custom
+            && matches!(
+                resolved_name,
+                "selfdev" | "debug_socket" | "desktop_selfdev" | "jcode_docs"
+            )
+        {
+            let desktop = ctx
+                .working_dir
+                .as_deref()
+                .and_then(jcode_selfdev_types::desktop_repo_root)
+                .is_some();
+            if desktop && resolved_name == "jcode_docs" {
+                anyhow::bail!(
+                    "Tool 'jcode_docs' is disabled in Desktop self-development mode. Read the working tree documentation instead."
+                );
+            }
+            if desktop && matches!(resolved_name, "selfdev" | "debug_socket") {
+                anyhow::bail!(
+                    "Tool '{}' targets Jcode CLI, not Desktop. Use 'desktop_selfdev'.",
+                    resolved_name
+                );
+            }
+            if !desktop && resolved_name == "desktop_selfdev" {
+                anyhow::bail!("Tool 'desktop_selfdev' requires a Jcode Desktop source checkout.");
+            }
+        }
+        if !is_custom && let Some(policy) = session_tool_policy(&ctx.session_id) {
             if let Some(allowed) = policy.allowed_tools.as_ref()
-                && !tool_name_is_allowed(allowed, resolved_name)
+                && !self.tool_is_allowed(allowed, resolved_name)
             {
                 return Err(anyhow::anyhow!("Tool '{}' is not allowed", resolved_name));
             }
-            if tool_name_is_disabled(&policy.disabled_tools, resolved_name) {
+            if self.tool_is_disabled(&policy.disabled_tools, resolved_name) {
                 return Err(anyhow::anyhow!("Tool '{}' is disabled", resolved_name));
             }
         }
-        let tool = match tools.get(resolved_name) {
-            Some(tool) => tool.clone(),
-            None => {
-                // List available tools so the model can recover instead of
-                // spiraling through hallucinated names like "ToolSearch" (#104).
-                let mut available: Vec<&str> = tools.keys().map(|k| k.as_str()).collect();
-                available.sort_unstable();
-                let suggestions = Self::closest_tool_names(name, &available);
-                let mut msg = format!("Unknown tool: {name}.");
-                if !suggestions.is_empty() {
-                    msg.push_str(&format!(" Did you mean: {}?", suggestions.join(", ")));
+        let tool: Arc<dyn Tool> = if is_custom {
+            Arc::new(sdk::CallbackTool(resolved_name.into()))
+        } else {
+            match tools.get(resolved_name) {
+                Some(tool) => tool.clone(),
+                None => {
+                    // List available tools so the model can recover instead of
+                    // spiraling through hallucinated names like "ToolSearch" (#104).
+                    let mut available: Vec<&str> = tools.keys().map(|k| k.as_str()).collect();
+                    available.sort_unstable();
+                    let suggestions = Self::closest_tool_names(name, &available);
+                    let mut msg = format!("Unknown tool: {name}.");
+                    if !suggestions.is_empty() {
+                        msg.push_str(&format!(" Did you mean: {}?", suggestions.join(", ")));
+                    }
+                    msg.push_str(&format!(" Available tools: {}.", available.join(", ")));
+                    return Err(anyhow::anyhow!(msg));
                 }
-                msg.push_str(&format!(" Available tools: {}.", available.join(", ")));
-                return Err(anyhow::anyhow!(msg));
             }
         };
 
         // Drop the lock before executing
         drop(tools);
 
+        let working_dir = ctx
+            .working_dir
+            .as_ref()
+            .map(|dir| dir.display().to_string());
+        let input = crate::hooks::transform_tool_input(
+            &ctx.session_id,
+            working_dir.as_deref(),
+            resolved_name,
+            input,
+        )
+        .await;
+
         // User-configured pre_tool gate: external policy hook that can block
         // this call (exit 2). Skipped entirely when not configured.
         if crate::hooks::hook_configured("pre_tool") {
             let input_json = input.to_string();
-            let working_dir = ctx
-                .working_dir
-                .as_ref()
-                .map(|dir| dir.display().to_string());
             let decision = crate::hooks::run_pre_tool_gate(
                 &ctx.session_id,
                 working_dir.as_deref(),
@@ -865,7 +1143,7 @@ impl Registry {
         let latency_ms = started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
 
         crate::telemetry::record_tool_execution(resolved_name, &input, result.is_ok(), latency_ms);
-        Self::fire_post_tool_hook(resolved_name, &ctx, &result, latency_ms);
+        Self::fire_post_tool_hook(resolved_name, &input, &ctx, &result, latency_ms);
 
         let mut output = match result {
             Ok(output) => output,
@@ -878,6 +1156,8 @@ impl Registry {
                 return Err(error);
             }
         };
+
+        Self::apply_post_tool_feedback(resolved_name, &input, &ctx, latency_ms, &mut output).await;
 
         // Context overflow guard: check if this output would push us over the limit
         output = self
@@ -1051,7 +1331,165 @@ impl Registry {
                 .store_description(name.clone(), def.description);
         }
         let mut tools = self.tools.write().await;
+        let is_mcp = tool.mcp_identity().is_some();
         tools.insert(name, tool);
+        if is_mcp {
+            self.record_mcp_surface(&tools);
+        }
+    }
+
+    fn record_mcp_surface(&self, tools: &HashMap<String, Arc<dyn Tool>>) {
+        let mut index = self.mcp_policy.write().unwrap_or_else(|e| e.into_inner());
+        index.current.clear();
+        for (alias, tool) in tools {
+            if let Some((server, raw)) = tool.mcp_identity() {
+                let identity = (server.to_string(), raw.to_string());
+                index.current.insert(alias.clone(), identity.clone());
+                let names = index.history.entry(identity).or_default();
+                names.insert(alias.clone());
+                names.insert(crate::mcp::dispatch_name(server, raw));
+            }
+        }
+    }
+
+    fn mcp_alias(&self, server: &str, raw: &str) -> Option<String> {
+        self.mcp_policy
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .current
+            .iter()
+            .find(|(_, identity)| identity.0 == server && identity.1 == raw)
+            .map(|(alias, _)| alias.clone())
+    }
+
+    fn mcp_policy_names(&self, server: &str, raw: &str) -> HashSet<String> {
+        let index = self.mcp_policy.read().unwrap_or_else(|e| e.into_inner());
+        let mut names = index
+            .history
+            .get(&(server.into(), raw.into()))
+            .cloned()
+            .unwrap_or_default();
+        names.insert(crate::mcp::dispatch_name(server, raw));
+        names
+    }
+
+    fn policy_names(&self, name: &str) -> HashSet<String> {
+        let index = self.mcp_policy.read().unwrap_or_else(|e| e.into_inner());
+        let mut names = index
+            .current
+            .get(name)
+            .and_then(|identity| index.history.get(identity))
+            .cloned()
+            .unwrap_or_default();
+        names.insert(name.to_string());
+        names
+    }
+
+    pub(crate) fn tool_is_allowed(&self, allowed: &HashSet<String>, name: &str) -> bool {
+        self.policy_names(name)
+            .iter()
+            .any(|name| tool_name_is_allowed(allowed, name))
+    }
+
+    pub(crate) fn tool_is_disabled(&self, disabled: &HashSet<String>, name: &str) -> bool {
+        self.policy_names(name)
+            .iter()
+            .any(|name| tool_name_is_disabled(disabled, name))
+    }
+
+    /// Original `(server, tool)` for a registered MCP alias. Aliases are
+    /// sanitized for providers, so they cannot be split back reliably.
+    pub(crate) fn mcp_identity_for_alias(&self, alias: &str) -> Option<(String, String)> {
+        self.mcp_policy
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .current
+            .get(alias)
+            .cloned()
+    }
+
+    fn mcp_dispatch_is_allowed(
+        &self,
+        session: &str,
+        server: &str,
+        raw: &str,
+        alias: &str,
+        surface: &str,
+    ) -> bool {
+        let Some(policy) = session_tool_policy(session) else {
+            return true;
+        };
+        let mut names = self.mcp_policy_names(server, raw);
+        names.insert(alias.to_string());
+        policy.allowed_tools.as_ref().is_none_or(|allowed| {
+            allowed.contains(surface)
+                || names.iter().any(|name| tool_name_is_allowed(allowed, name))
+        }) && !names
+            .iter()
+            .any(|name| tool_name_is_disabled(&policy.disabled_tools, name))
+    }
+
+    /// Refresh connected servers, retaining cached proxies for offline servers.
+    /// Recompute aliases over the combined surface, not only the live subset.
+    pub async fn refresh_mcp_tools(
+        &self,
+        fresh: Vec<(String, Arc<dyn Tool>)>,
+        refreshed_servers: &[String],
+    ) {
+        let mut tools = self.tools.write().await;
+        let mut proxies: Vec<Arc<dyn Tool>> = tools
+            .values()
+            .filter(|tool| {
+                tool.mcp_identity()
+                    .is_some_and(|(server, _)| !refreshed_servers.iter().any(|s| s == server))
+            })
+            .cloned()
+            .collect();
+        proxies.extend(fresh.into_iter().map(|(_, tool)| tool));
+        let defs: Vec<_> = proxies
+            .iter()
+            .map(|tool| {
+                let (server, raw) = tool.mcp_identity().expect("MCP proxy");
+                (
+                    server.to_string(),
+                    crate::mcp::McpToolDef {
+                        name: raw.to_string(),
+                        description: None,
+                        input_schema: Value::Null,
+                    },
+                )
+            })
+            .collect();
+        let names = crate::mcp::dispatch_names(&defs);
+        tools.retain(|_, tool| tool.mcp_identity().is_none());
+        tools.extend(names.into_iter().zip(proxies));
+        self.record_mcp_surface(&tools);
+    }
+
+    /// Atomically replace the MCP surface. Aliases depend on the complete set,
+    /// so inserting only new keys leaves obsolete cached aliases callable.
+    pub async fn reconcile_mcp_tools(&self, fresh: Vec<(String, Arc<dyn Tool>)>) {
+        let mut tools = self.tools.write().await;
+        tools.retain(|_, tool| tool.mcp_identity().is_none());
+        tools.extend(fresh);
+        self.record_mcp_surface(&tools);
+    }
+
+    /// Remove exact server membership, never a lossy normalized prefix.
+    pub async fn unregister_mcp_server(&self, server: &str) -> Vec<String> {
+        let mut tools = self.tools.write().await;
+        let mut removed = Vec::new();
+        tools.retain(|name, tool| {
+            let keep = !tool
+                .mcp_identity()
+                .is_some_and(|(owner, _)| owner == server);
+            if !keep {
+                removed.push(name.clone());
+            }
+            keep
+        });
+        self.record_mcp_surface(&tools);
+        removed
     }
 
     /// Register MCP tools (MCP management and server tools)
@@ -1069,7 +1507,7 @@ impl Registry {
     }
 
     /// Like [`Self::register_mcp_tools`], but resolves project-local MCP config
-    /// (`.mcp.json`, `.jcode/mcp.json`, `.claude/mcp.json`) against
+    /// (`.mcp.json`, `.kcode/mcp.json`, `.claude/mcp.json`) against
     /// `working_dir` instead of the server process cwd. Remote/client sessions
     /// must pass their session working directory here (issue #420).
     pub async fn register_mcp_tools_for_dir(
@@ -1101,12 +1539,14 @@ impl Registry {
             .await;
         self.register(
             "mcp_search".to_string(),
-            Arc::new(mcp::McpSearchTool::new(Arc::clone(&mcp_manager))) as Arc<dyn Tool>,
+            Arc::new(mcp::McpSearchTool::new(Arc::clone(&mcp_manager)).with_registry(self.clone()))
+                as Arc<dyn Tool>,
         )
         .await;
         self.register(
             "mcp_call".to_string(),
-            Arc::new(mcp::McpCallTool::new(Arc::clone(&mcp_manager))) as Arc<dyn Tool>,
+            Arc::new(mcp::McpCallTool::new(Arc::clone(&mcp_manager)).with_registry(self.clone()))
+                as Arc<dyn Tool>,
         )
         .await;
 
@@ -1174,20 +1614,20 @@ impl Registry {
                         .collect()
                 };
                 let mut advertised_tool_count = 0usize;
+                let mut cached_tools = Vec::new();
                 for (server, cfg) in &config_servers {
                     if let Some(cached) = schema_cache.tools_for(server, cfg) {
-                        let tools = crate::mcp::create_mcp_tools_from_cached(
-                            server,
-                            cached,
-                            Arc::clone(&mcp_manager),
-                        );
-                        advertised_tool_count += tools.len();
-                        for (name, tool) in tools {
-                            self.register(name, tool).await;
-                        }
+                        advertised_tool_count += cached.len();
+                        cached_tools
+                            .extend(cached.iter().cloned().map(|tool| (server.clone(), tool)));
                         advertised_servers.insert(server.clone());
                     }
                 }
+                self.reconcile_mcp_tools(crate::mcp::create_mcp_tools_from_cached_many(
+                    &cached_tools,
+                    Arc::clone(&mcp_manager),
+                ))
+                .await;
                 if advertised_tool_count > 0 {
                     crate::logging::info(&format!(
                         "MCP: advertised {} cached tool(s) from {} server(s) at spawn \
@@ -1218,7 +1658,12 @@ impl Registry {
             let registry = self.clone();
             tokio::spawn(async move {
                 let (successes, failures) = {
-                    let manager = mcp_manager.write().await;
+                    // `connect_all` mutates the manager's internal connection
+                    // maps but does not mutate the manager object itself. A
+                    // read guard lets MCP list and other management actions
+                    // inspect those maps while a slow initialize handshake is
+                    // in flight.
+                    let manager = mcp_manager.read().await;
                     manager.connect_all().await.unwrap_or((0, Vec::new()))
                 };
 
@@ -1241,17 +1686,13 @@ impl Registry {
                 let tools = crate::mcp::create_mcp_tools(Arc::clone(&mcp_manager)).await;
                 let mut server_counts: std::collections::BTreeMap<String, usize> =
                     std::collections::BTreeMap::new();
-                for (name, tool) in &tools {
-                    if let Some(rest) = name.strip_prefix("mcp__")
-                        && let Some((server, _)) = rest.split_once("__")
-                    {
+                for (_, tool) in &tools {
+                    if let Some((server, _)) = tool.mcp_identity() {
                         *server_counts.entry(server.to_string()).or_default() += 1;
                     }
-                    // Idempotent: advertise-early may have already registered an
-                    // identical proxy. Re-registering refreshes it with the live
-                    // schema, which is correct (handles schema drift).
-                    registry.register(name.clone(), tool.clone()).await;
                 }
+                let connected = mcp_manager.read().await.connected_servers().await;
+                registry.refresh_mcp_tools(tools, &connected).await;
 
                 // Reconcile the on-disk schema cache with the live schemas so the
                 // next spawn can advertise the up-to-date tools with zero cache
@@ -1366,7 +1807,9 @@ impl Registry {
     /// Unregister a tool
     pub async fn unregister(&self, name: &str) -> Option<Arc<dyn Tool>> {
         let mut tools = self.tools.write().await;
-        tools.remove(name)
+        let removed = tools.remove(name);
+        self.record_mcp_surface(&tools);
+        removed
     }
 
     /// Unregister all tools matching a prefix
@@ -1380,6 +1823,7 @@ impl Registry {
         for name in &to_remove {
             tools.remove(name);
         }
+        self.record_mcp_surface(&tools);
         to_remove
     }
 

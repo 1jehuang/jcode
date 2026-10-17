@@ -18,7 +18,7 @@ by also attributing RESOURCE UTILIZATION to each spawned process:
   * voluntary / involuntary context switches
   * block I/O bytes read/written
 
-Everything runs under an isolated JCODE_HOME / JCODE_RUNTIME_DIR / JCODE_SOCKET
+Everything runs under an isolated KCODE_HOME / KCODE_RUNTIME_DIR / KCODE_SOCKET
 so it never touches the user's real shared server, logs, sessions, or creds.
 
 Two spawn shapes are profiled:
@@ -273,12 +273,12 @@ class ProcessMonitor:
 # --------------------------------------------------------------------------- #
 def isolated_env(root: str) -> dict[str, str]:
     env = os.environ.copy()
-    env["JCODE_HOME"] = os.path.join(root, "home")
-    env["JCODE_RUNTIME_DIR"] = os.path.join(root, "run")
-    env["JCODE_SOCKET"] = os.path.join(env["JCODE_RUNTIME_DIR"], "jcode.sock")
-    env["JCODE_NO_TELEMETRY"] = "1"
-    os.makedirs(env["JCODE_HOME"], exist_ok=True)
-    os.makedirs(env["JCODE_RUNTIME_DIR"], exist_ok=True)
+    env["KCODE_HOME"] = os.path.join(root, "home")
+    env["KCODE_RUNTIME_DIR"] = os.path.join(root, "run")
+    env["KCODE_SOCKET"] = os.path.join(env["KCODE_RUNTIME_DIR"], "kcode.sock")
+    env["KCODE_NO_TELEMETRY"] = "1"
+    os.makedirs(env["KCODE_HOME"], exist_ok=True)
+    os.makedirs(env["KCODE_RUNTIME_DIR"], exist_ok=True)
     return env
 
 
@@ -307,10 +307,10 @@ def find_child_server(env: dict[str, str], exclude: set[int]) -> int | None:
         if not cmd:
             continue
         argv = cmd.split("\0")
-        if "serve" in argv and any(env["JCODE_SOCKET"] in a or "serve" == a for a in argv):
+        if "serve" in argv and any(env["KCODE_SOCKET"] in a or "serve" == a for a in argv):
             # confirm it is our isolated daemon by socket env or socket arg
             envblob = _read(f"/proc/{pid}/environ") or ""
-            if env["JCODE_SOCKET"] in envblob or env["JCODE_SOCKET"] in cmd:
+            if env["KCODE_SOCKET"] in envblob or env["KCODE_SOCKET"] in cmd:
                 return pid
     return None
 
@@ -357,7 +357,7 @@ def parse_startup_profile(log_path: Path) -> StartupProfile | None:
 def profile_server_spawn(binary: str, sample_interval_s: float) -> dict | None:
     root = tempfile.mkdtemp(prefix="jcode-spawn-server-")
     env = isolated_env(root)
-    sock = env["JCODE_SOCKET"]
+    sock = env["KCODE_SOCKET"]
     proc = None
     try:
         t0 = time.perf_counter()
@@ -405,7 +405,7 @@ def profile_client_spawn(binary: str, sample_interval_s: float, hold_s: float) -
         return None
     root = tempfile.mkdtemp(prefix="jcode-spawn-client-")
     env = isolated_env(root)
-    log_path = Path(env["JCODE_HOME"]) / "logs" / f"jcode-{time.strftime('%Y-%m-%d')}.log"
+    log_path = Path(env["KCODE_HOME"]) / "logs" / f"jcode-{time.strftime('%Y-%m-%d')}.log"
     pid = None
     master_fd = None
     try:
@@ -419,7 +419,7 @@ def profile_client_spawn(binary: str, sample_interval_s: float, hold_s: float) -
                 pass
             os.execve(
                 binary,
-                [binary, "--no-update", "--socket", env["JCODE_SOCKET"]],
+                [binary, "--no-update", "--socket", env["KCODE_SOCKET"]],
                 env,
             )
             os._exit(127)
@@ -448,7 +448,7 @@ def profile_client_spawn(binary: str, sample_interval_s: float, hold_s: float) -
                     server_mon = ProcessMonitor(server_pid)
             if server_mon is not None:
                 server_mon.poll()
-                if server_ready_ms is None and socket_connectable(env["JCODE_SOCKET"]):
+                if server_ready_ms is None and socket_connectable(env["KCODE_SOCKET"]):
                     server_ready_ms = (time.perf_counter() - t0) * 1000.0
             time.sleep(sample_interval_s)
 
@@ -543,7 +543,7 @@ def print_resource_block(title: str, runs: list[dict]) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    default_bin = os.environ.get("JCODE_BENCH_BIN") or shutil.which("jcode") or "./target/release/jcode"
+    default_bin = os.environ.get("KCODE_BENCH_BIN") or shutil.which("jcode") or "./target/release/jcode"
     ap.add_argument("binary", nargs="?", default=default_bin)
     ap.add_argument("--runs", type=int, default=5)
     ap.add_argument("--sample-interval-ms", type=float, default=2.0)
@@ -571,7 +571,7 @@ def main() -> int:
     print(f"Binary : {binary}")
     print(f"Size   : {size/1048576:.1f} MB")
     print(f"Runs   : {args.runs}   sample interval: {args.sample_interval_ms} ms")
-    print(f"Host   : {os.cpu_count()} CPUs, isolated JCODE_HOME per run")
+    print(f"Host   : {os.cpu_count()} CPUs, isolated KCODE_HOME per run")
 
     interval = args.sample_interval_ms / 1000.0
     results: dict = {"binary": binary, "binary_size_bytes": size, "runs": args.runs}

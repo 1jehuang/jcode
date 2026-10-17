@@ -122,8 +122,8 @@ fn restored_closed_session_with_pending_user_message_during_reload_should_count_
 -> Result<()> {
     let _guard = crate::storage::lock_test_env();
     let runtime = tempfile::TempDir::new().map_err(|e| anyhow!(e))?;
-    let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
-    crate::env::set_var("JCODE_RUNTIME_DIR", runtime.path());
+    let prev_runtime = std::env::var_os("KCODE_RUNTIME_DIR");
+    crate::env::set_var("KCODE_RUNTIME_DIR", runtime.path());
     crate::server::write_reload_state(
         "reload-pending-user",
         "test-hash",
@@ -152,9 +152,9 @@ fn restored_closed_session_with_pending_user_message_during_reload_should_count_
 
     crate::server::clear_reload_marker();
     if let Some(prev_runtime) = prev_runtime {
-        crate::env::set_var("JCODE_RUNTIME_DIR", prev_runtime);
+        crate::env::set_var("KCODE_RUNTIME_DIR", prev_runtime);
     } else {
-        crate::env::remove_var("JCODE_RUNTIME_DIR");
+        crate::env::remove_var("KCODE_RUNTIME_DIR");
     }
 
     assert!(
@@ -169,8 +169,8 @@ fn restored_closed_session_with_pending_user_message_during_socket_ready_handoff
 -> Result<()> {
     let _guard = crate::storage::lock_test_env();
     let runtime = tempfile::TempDir::new().map_err(|e| anyhow!(e))?;
-    let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
-    crate::env::set_var("JCODE_RUNTIME_DIR", runtime.path());
+    let prev_runtime = std::env::var_os("KCODE_RUNTIME_DIR");
+    crate::env::set_var("KCODE_RUNTIME_DIR", runtime.path());
     crate::server::write_reload_state(
         "reload-pending-user-ready",
         "test-hash",
@@ -199,9 +199,9 @@ fn restored_closed_session_with_pending_user_message_during_socket_ready_handoff
 
     crate::server::clear_reload_marker();
     if let Some(prev_runtime) = prev_runtime {
-        crate::env::set_var("JCODE_RUNTIME_DIR", prev_runtime);
+        crate::env::set_var("KCODE_RUNTIME_DIR", prev_runtime);
     } else {
-        crate::env::remove_var("JCODE_RUNTIME_DIR");
+        crate::env::remove_var("KCODE_RUNTIME_DIR");
     }
 
     assert!(
@@ -215,8 +215,8 @@ fn restored_closed_session_with_pending_user_message_during_socket_ready_handoff
 fn restored_closed_session_with_pending_user_message_without_reload_marker_is_not_interrupted() {
     let _guard = crate::storage::lock_test_env();
     let runtime = tempfile::TempDir::new().expect("runtime dir");
-    let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
-    crate::env::set_var("JCODE_RUNTIME_DIR", runtime.path());
+    let prev_runtime = std::env::var_os("KCODE_RUNTIME_DIR");
+    crate::env::set_var("KCODE_RUNTIME_DIR", runtime.path());
     crate::server::clear_reload_marker();
 
     let agent = test_agent(vec![crate::session::StoredMessage {
@@ -239,9 +239,9 @@ fn restored_closed_session_with_pending_user_message_without_reload_marker_is_no
     );
 
     if let Some(prev_runtime) = prev_runtime {
-        crate::env::set_var("JCODE_RUNTIME_DIR", prev_runtime);
+        crate::env::set_var("KCODE_RUNTIME_DIR", prev_runtime);
     } else {
-        crate::env::remove_var("JCODE_RUNTIME_DIR");
+        crate::env::remove_var("KCODE_RUNTIME_DIR");
     }
 
     assert!(!interrupted);
@@ -273,8 +273,8 @@ fn restored_closed_session_without_reload_marker_is_not_interrupted() {
 fn mark_remote_reload_started_writes_starting_marker() -> Result<()> {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().map_err(|e| anyhow!(e))?;
-    let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
-    crate::env::set_var("JCODE_RUNTIME_DIR", temp.path());
+    let prev_runtime = std::env::var_os("KCODE_RUNTIME_DIR");
+    crate::env::set_var("KCODE_RUNTIME_DIR", temp.path());
 
     mark_remote_reload_started("reload-test");
 
@@ -285,9 +285,9 @@ fn mark_remote_reload_started_writes_starting_marker() -> Result<()> {
 
     crate::server::clear_reload_marker();
     if let Some(prev_runtime) = prev_runtime {
-        crate::env::set_var("JCODE_RUNTIME_DIR", prev_runtime);
+        crate::env::set_var("KCODE_RUNTIME_DIR", prev_runtime);
     } else {
-        crate::env::remove_var("JCODE_RUNTIME_DIR");
+        crate::env::remove_var("KCODE_RUNTIME_DIR");
     }
     Ok(())
 }
@@ -296,8 +296,8 @@ fn mark_remote_reload_started_writes_starting_marker() -> Result<()> {
 fn handle_reload_queues_signal_for_canary_session() -> Result<()> {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().map_err(|e| anyhow!(e))?;
-    let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
-    crate::env::set_var("JCODE_RUNTIME_DIR", temp.path());
+    let prev_runtime = std::env::var_os("KCODE_RUNTIME_DIR");
+    crate::env::set_var("KCODE_RUNTIME_DIR", temp.path());
 
     let rt = tokio::runtime::Runtime::new().map_err(|e| anyhow!(e))?;
     rt.block_on(async {
@@ -401,9 +401,9 @@ fn handle_reload_queues_signal_for_canary_session() -> Result<()> {
 
     crate::server::clear_reload_marker();
     if let Some(prev_runtime) = prev_runtime {
-        crate::env::set_var("JCODE_RUNTIME_DIR", prev_runtime);
+        crate::env::set_var("KCODE_RUNTIME_DIR", prev_runtime);
     } else {
-        crate::env::remove_var("JCODE_RUNTIME_DIR");
+        crate::env::remove_var("KCODE_RUNTIME_DIR");
     }
     Ok(())
 }
@@ -412,8 +412,8 @@ fn handle_reload_queues_signal_for_canary_session() -> Result<()> {
 async fn handle_reload_does_not_wait_for_busy_agent_lock() -> Result<()> {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().map_err(|e| anyhow!(e))?;
-    let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
-    crate::env::set_var("JCODE_RUNTIME_DIR", temp.path());
+    let prev_runtime = std::env::var_os("KCODE_RUNTIME_DIR");
+    crate::env::set_var("KCODE_RUNTIME_DIR", temp.path());
     let mut rx = crate::server::subscribe_reload_signal_for_tests();
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
@@ -467,9 +467,9 @@ async fn handle_reload_does_not_wait_for_busy_agent_lock() -> Result<()> {
     drop(busy_agent_lock);
     crate::server::clear_reload_marker();
     if let Some(prev_runtime) = prev_runtime {
-        crate::env::set_var("JCODE_RUNTIME_DIR", prev_runtime);
+        crate::env::set_var("KCODE_RUNTIME_DIR", prev_runtime);
     } else {
-        crate::env::remove_var("JCODE_RUNTIME_DIR");
+        crate::env::remove_var("KCODE_RUNTIME_DIR");
     }
     Ok(())
 }

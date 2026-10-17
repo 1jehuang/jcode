@@ -44,7 +44,7 @@ pub(crate) fn anthropic_api_pricing(model: &str) -> Option<RouteCheapnessEstimat
     core_pricing::anthropic_api_pricing(model)
 }
 
-/// Memoization is skipped in test builds: test sandboxes swap `JCODE_HOME`
+/// Memoization is skipped in test builds: test sandboxes swap `KCODE_HOME`
 /// and credential env vars between cases without going through
 /// `AuthStatus::invalidate_cache()`, so a TTL'd memo would leak state across
 /// tests. `test-support` covers downstream crates' test targets via feature
@@ -86,10 +86,11 @@ pub(crate) fn openai_effective_auth_mode() -> &'static str {
         Ok(creds) if !creds.refresh_token.is_empty() || creds.id_token.is_some() => "oauth",
         Ok(_) => "api-key",
         Err(_) => {
-            if std::env::var("OPENAI_API_KEY")
-                .ok()
-                .map(|v| !v.trim().is_empty())
-                .unwrap_or(false)
+            if crate::provider_catalog::load_api_key_from_env_or_config(
+                "OPENAI_API_KEY",
+                "openai.env",
+            )
+            .is_some()
             {
                 "api-key"
             } else {
@@ -109,7 +110,7 @@ pub(crate) fn openai_oauth_pricing(model: &str) -> RouteCheapnessEstimate {
 
 pub(crate) fn copilot_pricing(model: &str) -> RouteCheapnessEstimate {
     let zero_premium_mode = matches!(
-        std::env::var("JCODE_COPILOT_PREMIUM").ok().as_deref(),
+        std::env::var("KCODE_COPILOT_PREMIUM").ok().as_deref(),
         Some("0")
     );
     core_pricing::copilot_pricing(model, zero_premium_mode)
@@ -224,15 +225,80 @@ pub fn metered_pricing_for_source_with_tier(
     }
 
     // 3. Live models.dev catalog (disk cache; refreshes in the background).
-    let cost = crate::model_pricing::lookup(source_key, model)?;
+    let (cost, matched) = crate::model_pricing::lookup_with_provenance(source_key, model)?;
+    // A price borrowed from other providers' listings (reseller fallback) is
+    // a reasonable estimate, not the route's own published rate.
+    let (confidence, note) = match matched {
+        crate::model_pricing::PricingMatch::ProviderTable => {
+            (RouteCostConfidence::High, "models.dev pricing catalog")
+        }
+        crate::model_pricing::PricingMatch::CrossProvider => (
+            RouteCostConfidence::Medium,
+            "models.dev pricing catalog (inferred from other providers)",
+        ),
+    };
     Some(RouteCheapnessEstimate::metered(
         RouteCostSource::ModelsDevCatalog,
-        RouteCostConfidence::High,
+        confidence,
         usd_to_micros(cost.input_usd_per_mtok),
         usd_to_micros(cost.output_usd_per_mtok),
         cost.cache_read_usd_per_mtok.map(usd_to_micros),
-        Some("models.dev pricing catalog".to_string()),
+        Some(note.to_string()),
     ))
+}
+
+/// Estimated USD for one request's reported token usage on a per-token route.
+///
+/// `source_key` uses the activity-ledger convention (`claude:api-key`,
+/// `openai:api-key`, `openrouter`, `openai-compatible:<id>`). Returns `None`
+/// when the route cannot be priced, so callers can show "unknown" instead of
+/// a misleading `$0`.
+///
+/// Providers report usage in two conventions. Anthropic splits cache reads and
+/// writes out of `input`. OpenAI counts both inside `input`. Others are
+/// inferred: cache writes or reads larger than input imply split accounting.
+pub fn metered_usage_cost_usd(
+    source_key: &str,
+    model: &str,
+    input: u64,
+    output: u64,
+    cache_read: u64,
+    cache_creation: u64,
+) -> Option<f64> {
+    let estimate = metered_pricing_for_source(source_key, model)?;
+    let per_tok = |micros: u64| micros as f64 / 1_000_000.0 / 1_000_000.0;
+    let input_price = per_tok(estimate.input_price_per_mtok_micros?);
+    let output_price = per_tok(estimate.output_price_per_mtok_micros?);
+    let read_price = estimate
+        .cache_read_price_per_mtok_micros
+        .map(per_tok)
+        .unwrap_or(input_price);
+    let anthropic = source_key.starts_with("claude");
+    let openai = source_key.starts_with("openai:");
+    let split = anthropic || (!openai && (cache_creation > 0 || cache_read > input));
+    let fresh = if split {
+        input
+    } else {
+        input
+            .saturating_sub(cache_read)
+            .saturating_sub(cache_creation)
+    };
+    let write_multiplier = if anthropic {
+        if super::anthropic::is_cache_ttl_1h() {
+            2.0
+        } else {
+            1.25
+        }
+    } else if openai {
+        1.25
+    } else {
+        1.0
+    };
+    let cost = fresh as f64 * input_price
+        + output as f64 * output_price
+        + cache_read as f64 * read_price
+        + cache_creation as f64 * input_price * write_multiplier;
+    cost.is_finite().then_some(cost)
 }
 
 pub(crate) fn cheapness_for_route(
@@ -305,26 +371,43 @@ mod tests {
     use crate::env;
     use jcode_provider_core::{RouteBillingKind, RouteCostConfidence, RouteCostSource};
 
+    #[test]
+    fn metered_usage_cost_prices_split_and_subset_accounting() {
+        // Sonnet 4.5 API: $3 input, $15 output, $0.30 cache read per MTok.
+        let anthropic = metered_usage_cost_usd(
+            "claude:api-key",
+            "claude-sonnet-4-5",
+            1_000_000,
+            100_000,
+            1_000_000,
+            0,
+        )
+        .unwrap();
+        assert!((anthropic - (3.0 + 1.5 + 0.3)).abs() < 1e-9, "{anthropic}");
+        // Unpriced routes are unknown, never $0.
+        assert!(metered_usage_cost_usd("cursor", "whatever", 1, 1, 0, 0).is_none());
+    }
+
     fn with_clean_provider_test_env<T>(f: impl FnOnce() -> T) -> T {
         let _guard = crate::storage::lock_test_env();
         let temp = tempfile::tempdir().expect("tempdir");
-        let prev_home = std::env::var_os("JCODE_HOME");
+        let prev_home = std::env::var_os("KCODE_HOME");
         let prev_openai_api_key = std::env::var_os("OPENAI_API_KEY");
-        let prev_copilot_premium = std::env::var_os("JCODE_COPILOT_PREMIUM");
+        let prev_copilot_premium = std::env::var_os("KCODE_COPILOT_PREMIUM");
         crate::auth::claude::set_active_account_override(None);
         crate::auth::codex::set_active_account_override(None);
-        env::set_var("JCODE_HOME", temp.path());
+        env::set_var("KCODE_HOME", temp.path());
         env::remove_var("OPENAI_API_KEY");
-        env::remove_var("JCODE_COPILOT_PREMIUM");
+        env::remove_var("KCODE_COPILOT_PREMIUM");
 
         let result = f();
 
         crate::auth::claude::set_active_account_override(None);
         crate::auth::codex::set_active_account_override(None);
         if let Some(prev_home) = prev_home {
-            env::set_var("JCODE_HOME", prev_home);
+            env::set_var("KCODE_HOME", prev_home);
         } else {
-            env::remove_var("JCODE_HOME");
+            env::remove_var("KCODE_HOME");
         }
         if let Some(prev_openai_api_key) = prev_openai_api_key {
             env::set_var("OPENAI_API_KEY", prev_openai_api_key);
@@ -332,9 +415,9 @@ mod tests {
             env::remove_var("OPENAI_API_KEY");
         }
         if let Some(prev_copilot_premium) = prev_copilot_premium {
-            env::set_var("JCODE_COPILOT_PREMIUM", prev_copilot_premium);
+            env::set_var("KCODE_COPILOT_PREMIUM", prev_copilot_premium);
         } else {
-            env::remove_var("JCODE_COPILOT_PREMIUM");
+            env::remove_var("KCODE_COPILOT_PREMIUM");
         }
         result
     }
@@ -377,9 +460,9 @@ mod tests {
         // Regression for #1095: `model@Provider` pins used to miss both the
         // endpoint cache and the catalog and fall back to generic defaults.
         let _guard = crate::storage::lock_test_env();
-        let prev_ns = std::env::var_os("JCODE_OPENROUTER_CACHE_NAMESPACE");
+        let prev_ns = std::env::var_os("KCODE_OPENROUTER_CACHE_NAMESPACE");
         let namespace = format!("pricing-test-{}", std::process::id());
-        env::set_var("JCODE_OPENROUTER_CACHE_NAMESPACE", &namespace);
+        env::set_var("KCODE_OPENROUTER_CACHE_NAMESPACE", &namespace);
 
         let model = "deepseek/deepseek-v4-pro-0813";
         let endpoints: Vec<openrouter::EndpointInfo> = serde_json::from_value(serde_json::json!([
@@ -407,15 +490,15 @@ mod tests {
         let _ = std::fs::remove_file(
             dirs::home_dir()
                 .unwrap_or_else(|| std::path::PathBuf::from("."))
-                .join(".jcode")
+                .join(".kcode")
                 .join("cache")
                 .join(format!(
                     "{namespace}_endpoints_deepseek__deepseek-v4-pro-0813.json"
                 )),
         );
         match prev_ns {
-            Some(prev) => env::set_var("JCODE_OPENROUTER_CACHE_NAMESPACE", prev),
-            None => env::remove_var("JCODE_OPENROUTER_CACHE_NAMESPACE"),
+            Some(prev) => env::set_var("KCODE_OPENROUTER_CACHE_NAMESPACE", prev),
+            None => env::remove_var("KCODE_OPENROUTER_CACHE_NAMESPACE"),
         }
     }
 
@@ -444,7 +527,7 @@ mod tests {
     #[test]
     fn copilot_zero_mode_marks_estimate_high_confidence_and_zero_reference_cost() {
         with_clean_provider_test_env(|| {
-            env::set_var("JCODE_COPILOT_PREMIUM", "0");
+            env::set_var("KCODE_COPILOT_PREMIUM", "0");
             let estimate = copilot_pricing("claude-opus-4-6");
             assert_eq!(estimate.billing_kind, RouteBillingKind::IncludedQuota);
             assert_eq!(estimate.confidence, RouteCostConfidence::High);

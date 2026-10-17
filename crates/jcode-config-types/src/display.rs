@@ -2,7 +2,7 @@
 
 use crate::{
     DiagramDisplayMode, DiffDisplayMode, LatexRenderingMode, MarkdownSpacingMode,
-    NativeScrollbarConfig, OverscrollStatusMode, ReasoningDisplayMode, default_true,
+    NativeScrollbarConfig, ReasoningDisplayMode, default_true,
 };
 use serde::{Deserialize, Serialize};
 
@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DisplayConfig {
-    /// How to display file diffs (off/inline/full-inline/pinned/file, default: inline)
+    /// How to display file diffs (off/inline/full-inline/file, default: inline)
     #[serde(deserialize_with = "crate::serde_lenient::lenient_enum")]
     pub diff_mode: DiffDisplayMode,
     /// Legacy: "show_diffs = true/false" maps to diff_mode inline/off
@@ -60,8 +60,6 @@ pub struct DisplayConfig {
     pub prompt_entry_animation: bool,
     /// Disable specific animation variants by name (e.g. ["donut", "orbit_rings"])
     pub disabled_animations: Vec<String>,
-    /// Wrap long lines in the pinned diff pane (default: true)
-    pub diff_line_wrap: bool,
     /// Performance tier override: auto/full/reduced/minimal (default: auto)
     pub performance: String,
     /// FPS for animations (startup, idle donut): 1-120 (default: 60)
@@ -121,11 +119,6 @@ pub struct DisplayConfig {
     pub external_sessions: bool,
     /// Usage percentage wording: "left" (default) or "used".
     pub usage_display: String,
-    /// When to show the overscroll status line below the input
-    /// (off/on/overscroll, default: overscroll). "overscroll" is the elastic
-    /// reveal when scrolling past the bottom, "on" keeps it always visible.
-    #[serde(default, deserialize_with = "crate::serde_lenient::lenient_enum")]
-    pub overscroll_status: OverscrollStatusMode,
 }
 impl Default for DisplayConfig {
     fn default() -> Self {
@@ -148,7 +141,6 @@ impl Default for DisplayConfig {
             idle_animation: false,
             prompt_entry_animation: true,
             disabled_animations: Vec::new(),
-            diff_line_wrap: true,
             performance: String::new(),
             animation_fps: 60,
             redraw_fps: 60,
@@ -165,7 +157,6 @@ impl Default for DisplayConfig {
             active_sessions_manager: false,
             external_sessions: true,
             usage_display: "left".to_string(),
-            overscroll_status: OverscrollStatusMode::default(),
         }
     }
 }

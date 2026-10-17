@@ -22,7 +22,7 @@
 # Options:
 #   --session <id>    Session to resume (default: session_hog_1783086065415_4ad4ae66cd43dd5b)
 #   --idle-secs <n>   Idle wait before the idle phase (default: 30)
-#   --binary <path>   Client binary (default: ~/.jcode/builds/current/jcode)
+#   --binary <path>   Client binary (default: ~/.kcode/builds/current/jcode)
 #   --jcode <path>    jcode CLI used for `jcode debug ...` (default: ~/.local/bin/jcode)
 #   --cwd <path>      Working directory for the tester (default: $HOME)
 #   --skip-trim       Skip the forced-trim phase
@@ -37,8 +37,8 @@ set -euo pipefail
 
 SESSION_ID="session_hog_1783086065415_4ad4ae66cd43dd5b"
 IDLE_SECS=30
-JCODE_BIN="${JCODE_BIN:-$HOME/.local/bin/jcode}"
-CLIENT_BIN="$HOME/.jcode/builds/current/jcode"
+KCODE_BIN="${KCODE_BIN:-$HOME/.local/bin/jcode}"
+CLIENT_BIN="$HOME/.kcode/builds/current/jcode"
 TESTER_CWD="$HOME"
 SKIP_TRIM=0
 KEEP_TESTER=0
@@ -50,7 +50,7 @@ while [[ $# -gt 0 ]]; do
         --session)   SESSION_ID="$2"; shift 2 ;;
         --idle-secs) IDLE_SECS="$2"; shift 2 ;;
         --binary)    CLIENT_BIN="$2"; shift 2 ;;
-        --jcode)     JCODE_BIN="$2"; shift 2 ;;
+        --jcode)     KCODE_BIN="$2"; shift 2 ;;
         --cwd)       TESTER_CWD="$2"; shift 2 ;;
         --skip-trim) SKIP_TRIM=1; shift ;;
         --keep)      KEEP_TESTER=1; shift ;;
@@ -63,13 +63,13 @@ log() { printf '[memory_probe] %s\n' "$*" >&2; }
 die() { log "FATAL: $*"; exit 1; }
 
 command -v jq >/dev/null || die "jq is required"
-[[ -x "$JCODE_BIN" ]] || die "jcode CLI not found at $JCODE_BIN"
+[[ -x "$KCODE_BIN" ]] || die "jcode CLI not found at $KCODE_BIN"
 [[ -x "$CLIENT_BIN" ]] || CLIENT_BIN="$(command -v jcode)" || die "client binary not found"
-[[ -f "$HOME/.jcode/sessions/${SESSION_ID}.json" ]] \
-    || log "WARN: $HOME/.jcode/sessions/${SESSION_ID}.json not found; resume may create a new session"
+[[ -f "$HOME/.kcode/sessions/${SESSION_ID}.json" ]] \
+    || log "WARN: $HOME/.kcode/sessions/${SESSION_ID}.json not found; resume may create a new session"
 
 RUN_ID="probe_$(date -u +%Y%m%dT%H%M%SZ)_$$"
-SESSION_FILE="$HOME/.jcode/sessions/${SESSION_ID}.json"
+SESSION_FILE="$HOME/.kcode/sessions/${SESSION_ID}.json"
 SESSION_BYTES=$(stat -c %s "$SESSION_FILE" 2>/dev/null || echo 0)
 
 TESTER_ID=""
@@ -82,7 +82,7 @@ SPAWN_EPOCH_MS=""
 cleanup() {
     local rc=$?
     if [[ -n "$TESTER_ID" && "$KEEP_TESTER" -ne 1 ]]; then
-        "$JCODE_BIN" debug "tester:${TESTER_ID}:stop" >/dev/null 2>&1 || true
+        "$KCODE_BIN" debug "tester:${TESTER_ID}:stop" >/dev/null 2>&1 || true
         log "stopped tester $TESTER_ID"
     elif [[ -n "$TESTER_ID" ]]; then
         log "kept tester $TESTER_ID (pid $TESTER_PID) running (--keep)"
@@ -250,7 +250,7 @@ EOF
 chmod +x "$WRAPPER"
 
 log "spawning headless tester (binary wrapper resumes $SESSION_ID, ${SESSION_BYTES} byte session file)"
-SPAWN_OUT="$("$JCODE_BIN" debug "tester:spawn {\"binary\":\"$WRAPPER\",\"cwd\":\"$TESTER_CWD\",\"cols\":120,\"rows\":40}")" \
+SPAWN_OUT="$("$KCODE_BIN" debug "tester:spawn {\"binary\":\"$WRAPPER\",\"cwd\":\"$TESTER_CWD\",\"cols\":120,\"rows\":40}")" \
     || die "tester:spawn failed: $SPAWN_OUT"
 SPAWN_EPOCH_MS="$(now_ms)"
 TESTER_ID="$(jq -r '.id // empty' <<<"$SPAWN_OUT")"
@@ -258,7 +258,7 @@ TESTER_PID="$(jq -r '.pid // empty' <<<"$SPAWN_OUT")"
 [[ -n "$TESTER_ID" && -n "$TESTER_PID" ]] || die "could not parse tester:spawn response: $SPAWN_OUT"
 log "tester $TESTER_ID pid $TESTER_PID"
 
-TESTER_INFO="$("$JCODE_BIN" debug tester:list | jq -c --arg id "$TESTER_ID" '.[] | select(.id == $id)')"
+TESTER_INFO="$("$KCODE_BIN" debug tester:list | jq -c --arg id "$TESTER_ID" '.[] | select(.id == $id)')"
 CMD_PATH="$(jq -r '.debug_cmd_path' <<<"$TESTER_INFO")"
 RESP_PATH="$(jq -r '.debug_response_path' <<<"$TESTER_INFO")"
 [[ -n "$CMD_PATH" && -n "$RESP_PATH" ]] || die "could not resolve tester debug paths"

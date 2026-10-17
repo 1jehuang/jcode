@@ -44,7 +44,7 @@ impl AuthCredentialSource {
             Self::None => "none",
             Self::EnvironmentVariable => "environment variable",
             Self::AppConfigFile => "app config file",
-            Self::JcodeManagedFile => "jcode-managed file",
+            Self::JcodeManagedFile => "kcode-managed file",
             Self::TrustedExternalFile => "trusted external file",
             Self::TrustedExternalAppState => "trusted external app state",
             Self::LocalCliSession => "local CLI session",

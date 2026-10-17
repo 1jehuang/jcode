@@ -223,7 +223,7 @@ fn next_owned_tab_name() -> String {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    format!("jcode-chatgpt-web-{millis}-{sequence}")
+    format!("kcode-chatgpt-web-{millis}-{sequence}")
 }
 
 async fn wait_for_editor(tab_id: u64) -> Result<()> {
@@ -405,7 +405,7 @@ return { length: text.length, hash: hash >>> 0, submitDisabled: !submit || submi
 }
 
 async fn poll_for_response(tab_id: u64, tx: &mpsc::Sender<Result<StreamEvent>>) -> Result<String> {
-    let timeout_secs = std::env::var("JCODE_CHATGPT_WEB_TIMEOUT_SECS")
+    let timeout_secs = std::env::var("KCODE_CHATGPT_WEB_TIMEOUT_SECS")
         .ok()
         .and_then(|raw| raw.parse::<u64>().ok())
         .unwrap_or(900)
@@ -434,7 +434,7 @@ return true;
         }
         if Instant::now() >= deadline {
             anyhow::bail!(
-                "GPT-5.6 Pro web response timed out after {} seconds (override with JCODE_CHATGPT_WEB_TIMEOUT_SECS)",
+                "GPT-5.6 Pro web response timed out after {} seconds (override with KCODE_CHATGPT_WEB_TIMEOUT_SECS)",
                 timeout_secs
             );
         }
@@ -671,7 +671,9 @@ fn build_web_prompt(
                 | ContentBlock::ReasoningTrace { .. }
                 | ContentBlock::AnthropicThinking { .. }
                 | ContentBlock::OpenAIReasoning { .. }
-                | ContentBlock::OpenAICompaction { .. } => {}
+                | ContentBlock::OpenAICompaction { .. }
+                | ContentBlock::ToolReference { .. }
+                | ContentBlock::ProviderNative { .. } => {}
             }
         }
         conversation.push(json!({

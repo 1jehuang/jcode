@@ -29,14 +29,14 @@ def main() -> int:
 
     flick.ROWS, flick.COLS = 48, 160
     binary = str(Path(args.binary).resolve())
-    runtime = Path(os.environ.get("JCODE_RUNTIME_DIR") or f"/run/user/{os.getuid()}")
+    runtime = Path(os.environ.get("KCODE_RUNTIME_DIR") or f"/run/user/{os.getuid()}")
     env = os.environ.copy()
-    env["JCODE_SOCKET"] = env.get("JCODE_SOCKET") or str(runtime / "jcode.sock")
-    env["JCODE_DEBUG_CONTROL"] = "1"
-    env["JCODE_THEME"] = "dark"
-    debug_sock = runtime / "jcode-debug.sock"
+    env["KCODE_SOCKET"] = env.get("KCODE_SOCKET") or str(runtime / "kcode.sock")
+    env["KCODE_DEBUG_CONTROL"] = "1"
+    env["KCODE_THEME"] = "dark"
+    debug_sock = runtime / "kcode-debug.sock"
 
-    scratch = Path(os.environ.get("JCODE_SCRATCH_DIR") or tempfile.gettempdir())
+    scratch = Path(os.environ.get("KCODE_SCRATCH_DIR") or tempfile.gettempdir())
     root = Path(tempfile.mkdtemp(prefix="jcode-profile-real-", dir=str(scratch)))
     cmd_path, resp_path = root / "client_cmd", root / "client_resp"
 

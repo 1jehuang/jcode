@@ -3,33 +3,33 @@ use super::*;
 #[test]
 fn server_logging_enabled_defaults_on_and_respects_falsey_env() {
     let _guard = crate::storage::lock_test_env();
-    let prev = std::env::var_os("JCODE_RUNTIME_MEMORY_LOG");
+    let prev = std::env::var_os("KCODE_RUNTIME_MEMORY_LOG");
 
-    crate::env::remove_var("JCODE_RUNTIME_MEMORY_LOG");
+    crate::env::remove_var("KCODE_RUNTIME_MEMORY_LOG");
     assert!(server_logging_enabled());
 
-    crate::env::set_var("JCODE_RUNTIME_MEMORY_LOG", "0");
+    crate::env::set_var("KCODE_RUNTIME_MEMORY_LOG", "0");
     assert!(!server_logging_enabled());
 
-    crate::env::set_var("JCODE_RUNTIME_MEMORY_LOG", "false");
+    crate::env::set_var("KCODE_RUNTIME_MEMORY_LOG", "false");
     assert!(!server_logging_enabled());
 
-    crate::env::set_var("JCODE_RUNTIME_MEMORY_LOG", "1");
+    crate::env::set_var("KCODE_RUNTIME_MEMORY_LOG", "1");
     assert!(server_logging_enabled());
 
     if let Some(prev) = prev {
-        crate::env::set_var("JCODE_RUNTIME_MEMORY_LOG", prev);
+        crate::env::set_var("KCODE_RUNTIME_MEMORY_LOG", prev);
     } else {
-        crate::env::remove_var("JCODE_RUNTIME_MEMORY_LOG");
+        crate::env::remove_var("KCODE_RUNTIME_MEMORY_LOG");
     }
 }
 
 #[test]
 fn append_server_sample_writes_jsonl_under_memory_logs_dir() {
     let _guard = crate::storage::lock_test_env();
-    let prev_home = std::env::var_os("JCODE_HOME");
+    let prev_home = std::env::var_os("KCODE_HOME");
     let temp = tempfile::TempDir::new().expect("create temp dir");
-    crate::env::set_var("JCODE_HOME", temp.path());
+    crate::env::set_var("KCODE_HOME", temp.path());
 
     let sample = ServerRuntimeMemorySample {
         schema_version: 2,
@@ -74,18 +74,18 @@ fn append_server_sample_writes_jsonl_under_memory_logs_dir() {
     assert_eq!(parsed["kind"], "process");
 
     if let Some(prev) = prev_home {
-        crate::env::set_var("JCODE_HOME", prev);
+        crate::env::set_var("KCODE_HOME", prev);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
     }
 }
 
 #[test]
 fn append_client_sample_writes_jsonl_under_memory_logs_dir() {
     let _guard = crate::storage::lock_test_env();
-    let prev_home = std::env::var_os("JCODE_HOME");
+    let prev_home = std::env::var_os("KCODE_HOME");
     let temp = tempfile::TempDir::new().expect("create temp dir");
-    crate::env::set_var("JCODE_HOME", temp.path());
+    crate::env::set_var("KCODE_HOME", temp.path());
 
     let sample = ClientRuntimeMemorySample {
         schema_version: 2,
@@ -129,9 +129,9 @@ fn append_client_sample_writes_jsonl_under_memory_logs_dir() {
     assert!(contents.contains("\"session_test\""));
 
     if let Some(prev) = prev_home {
-        crate::env::set_var("JCODE_HOME", prev);
+        crate::env::set_var("KCODE_HOME", prev);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
     }
 }
 

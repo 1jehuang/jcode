@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 fn session(id: &str) -> SessionInfo {
     SessionInfo {
+        edit_stats: None,
         parent_session_id: (id == "persisted-2").then(|| "persisted-1".into()),
         agent_label: (id == "persisted-2").then(|| "API reviewer".into()),
         swarm_status: (id == "persisted-2").then(|| "running".into()),
@@ -32,6 +33,7 @@ fn session(id: &str) -> SessionInfo {
         last_active_at_ms: None,
         archived: false,
         archived_at_ms: None,
+        save_label: None,
     }
 }
 
@@ -114,6 +116,10 @@ impl UnixHarness {
             while !server_stop.load(Ordering::Acquire) {
                 match listener.accept() {
                     Ok((socket, _)) => {
+                        // On BSD/macOS accepted sockets can inherit the listener's nonblocking flag.
+                        socket
+                            .set_nonblocking(false)
+                            .expect("blocking accepted socket");
                         server_clients.fetch_add(1, Ordering::AcqRel);
                         let sessions = Arc::clone(&server_sessions);
                         let clients = Arc::clone(&server_clients);
@@ -219,6 +225,7 @@ fn serve_connection(
                 for index in 0..events_per_attach {
                     push(
                         ApiEvent::TextDelta {
+                            message_id: None,
                             session_id: session_id.clone(),
                             text: format!("{session_id}-{index}"),
                         },
@@ -324,11 +331,11 @@ fn missing_launch_binary_is_typed_and_cleans_up_its_temporary_home() {
             entry
                 .file_name()
                 .to_string_lossy()
-                .starts_with("jcode-sdk-instance-")
+                .starts_with("kcode-sdk-instance-")
         })
         .count();
     let error = match JcodeClient::launch(LaunchOptions {
-        binary: Some(PathBuf::from("jcode-definitely-not-installed-sdk-test")),
+        binary: Some(PathBuf::from("kcode-definitely-not-installed-sdk-test")),
         inherit_logins: false,
         startup_timeout: Duration::from_millis(100),
         cleanup_timeout: Duration::ZERO,
@@ -345,7 +352,7 @@ fn missing_launch_binary_is_typed_and_cleans_up_its_temporary_home() {
             entry
                 .file_name()
                 .to_string_lossy()
-                .starts_with("jcode-sdk-instance-")
+                .starts_with("kcode-sdk-instance-")
         })
         .count();
     assert_eq!(after, before, "failed launch leaked a temporary home");

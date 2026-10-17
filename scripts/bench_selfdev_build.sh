@@ -8,7 +8,7 @@
 #   2. leaf touch        - 1-line change in the root `jcode` bin crate
 #   3. tui touch         - 1-line change in jcode-tui (largest UI crate)
 #   4. core touch        - 1-line change in jcode-app-core (mid-stack crate)
-#   5. commit blast      - simulate HEAD moving (JCODE_BUILD_GIT_HASH change),
+#   5. commit blast      - simulate HEAD moving (KCODE_BUILD_GIT_HASH change),
 #                          which reruns jcode-build-meta's build script and
 #                          recompiles every crate that depends on it
 #                          (base, app-core, tui, setup-hints, telemetry-core, root)
@@ -95,10 +95,10 @@ touch_file "$core_file"
 run_build "core" || true
 revert_file "$core_file"
 
-echo "5. commit blast radius (simulated HEAD move via JCODE_BUILD_GIT_HASH):"
+echo "5. commit blast radius (simulated HEAD move via KCODE_BUILD_GIT_HASH):"
 fake_hash="bench$(date +%s | tail -c 4)"
 start=$(date +%s.%N)
-if JCODE_BUILD_GIT_HASH="$fake_hash" "${build_cmd[@]}" >/tmp/bench_selfdev_build_commit-blast.log 2>&1; then
+if KCODE_BUILD_GIT_HASH="$fake_hash" "${build_cmd[@]}" >/tmp/bench_selfdev_build_commit-blast.log 2>&1; then
     end=$(date +%s.%N)
     echo "$end $start" | awk '{printf "  commit-blast: %.1fs\n", $1 - $2}'
 else

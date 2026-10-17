@@ -50,7 +50,7 @@ fn onboarding_welcome_shows_telemetry_title_and_suggestions() {
         "telemetry notice should be rendered:\n{text}"
     );
     assert!(
-        text.contains("JCODE_NO_TELEMETRY=1"),
+        text.contains("KCODE_NO_TELEMETRY=1"),
         "telemetry opt-out hint should be rendered:\n{text}"
     );
     assert!(

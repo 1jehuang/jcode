@@ -1,5 +1,5 @@
 //! Opt-in acceptance against real local OpenSSH and a freshly built native CLI.
-//! Run: JCODE_SSH_TEST_BINARY=/absolute/path/to/jcode cargo test -p jcode-sdk \
+//! Run: KCODE_SSH_TEST_BINARY=/absolute/path/to/jcode cargo test -p jcode-sdk \
 //!   ssh::integration_tests::localhost_native_harness -- --ignored --nocapture
 //! No user's SSH config, keys, known_hosts, sessions, or daemon are accessed.
 
@@ -44,11 +44,11 @@ fn connect(options: &SshConnectOptions, config: &Path) -> Result<JcodeClient> {
 }
 
 #[test]
-#[ignore = "requires /usr/bin/sshd, ssh-keygen and JCODE_SSH_TEST_BINARY freshly built CLI"]
+#[ignore = "requires /usr/bin/sshd, ssh-keygen and KCODE_SSH_TEST_BINARY freshly built CLI"]
 fn localhost_native_harness() {
     let binary = std::fs::canonicalize(
-        std::env::var_os("JCODE_SSH_TEST_BINARY")
-            .expect("set JCODE_SSH_TEST_BINARY to the freshly built jcode CLI"),
+        std::env::var_os("KCODE_SSH_TEST_BINARY")
+            .expect("set KCODE_SSH_TEST_BINARY to the freshly built jcode CLI"),
     )
     .unwrap();
     let temp = tempfile::tempdir().unwrap();
@@ -60,9 +60,9 @@ fn localhost_native_harness() {
     let help = Command::new(&binary)
         .env_clear()
         .env("HOME", &home)
-        .env("JCODE_HOME", &home)
-        .env("JCODE_NO_TELEMETRY", "1")
-        .env("JCODE_RUNTIME_DIR", &runtime)
+        .env("KCODE_HOME", &home)
+        .env("KCODE_NO_TELEMETRY", "1")
+        .env("KCODE_RUNTIME_DIR", &runtime)
         .env("XDG_RUNTIME_DIR", &runtime)
         .current_dir(root)
         .args(["--no-update", "api", "--help"])
@@ -70,10 +70,10 @@ fn localhost_native_harness() {
         .unwrap();
     assert!(
         help.status.success() && String::from_utf8_lossy(&help.stdout).contains("--stdio"),
-        "JCODE_SSH_TEST_BINARY must be a fresh build supporting api --stdio: {}",
+        "KCODE_SSH_TEST_BINARY must be a fresh build supporting api --stdio: {}",
         String::from_utf8_lossy(&help.stderr)
     );
-    let daemon_socket = runtime.join("jcode.sock");
+    let daemon_socket = runtime.join("kcode.sock");
     let daemon_log = root.join("daemon.log");
     let mut daemon_command = Command::new(&binary);
     daemon_command
@@ -81,13 +81,13 @@ fn localhost_native_harness() {
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", &home)
-        .env("JCODE_HOME", &home)
+        .env("KCODE_HOME", &home)
         .env("XDG_RUNTIME_DIR", &runtime)
-        .env("JCODE_RUNTIME_DIR", &runtime)
-        .env("JCODE_SOCKET", &daemon_socket)
-        .env("JCODE_DEFERRED_AUTH_BOOTSTRAP", "1")
-        .env("JCODE_WAKE_MODE", "external")
-        .env("JCODE_NO_TELEMETRY", "1")
+        .env("KCODE_RUNTIME_DIR", &runtime)
+        .env("KCODE_SOCKET", &daemon_socket)
+        .env("KCODE_DEFERRED_AUTH_BOOTSTRAP", "1")
+        .env("KCODE_WAKE_MODE", "external")
+        .env("KCODE_NO_TELEMETRY", "1")
         .args(["--no-update", "serve"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -132,7 +132,7 @@ fn localhost_native_harness() {
         .port();
     let remote_script = root.join("remote.sh");
     std::fs::write(&remote_script, format!(
-        "export HOME={} JCODE_HOME={} XDG_RUNTIME_DIR={} JCODE_SOCKET={} JCODE_WAKE_MODE=external JCODE_NO_TELEMETRY=1\nexport JCODE_RUNTIME_DIR=\"$XDG_RUNTIME_DIR\"\ncd \"$HOME\" || exit 1\nexec /bin/sh -c \"$SSH_ORIGINAL_COMMAND\"\n",
+        "export HOME={} KCODE_HOME={} XDG_RUNTIME_DIR={} KCODE_SOCKET={} KCODE_WAKE_MODE=external KCODE_NO_TELEMETRY=1\nexport KCODE_RUNTIME_DIR=\"$XDG_RUNTIME_DIR\"\ncd \"$HOME\" || exit 1\nexec /bin/sh -c \"$SSH_ORIGINAL_COMMAND\"\n",
         shell_quote(home.to_str().unwrap()), shell_quote(home.to_str().unwrap()),
         shell_quote(runtime.to_str().unwrap()), shell_quote(daemon_socket.to_str().unwrap()),
     )).unwrap();
@@ -167,7 +167,7 @@ fn localhost_native_harness() {
     std::fs::write(
         &known_hosts,
         format!(
-            "jcode-test {}",
+            "kcode-test {}",
             std::fs::read_to_string(root.join("host_key.pub")).unwrap()
         ),
     )
@@ -180,8 +180,8 @@ fn localhost_native_harness() {
     let options = SshConnectOptions {
         remote_binary: binary.to_str().unwrap().to_owned(),
         connect_timeout: Duration::from_secs(15),
-        client_name: "jcode-sdk-ssh-acceptance".into(),
-        ..SshConnectOptions::new("jcode-test")
+        client_name: "kcode-sdk-ssh-acceptance".into(),
+        ..SshConnectOptions::new("kcode-test")
     };
     let client = connect(&options, &client_config).unwrap_or_else(|error| {
         panic!(

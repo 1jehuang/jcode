@@ -434,7 +434,7 @@ fn subscribe_working_dir_ignores_home_when_session_has_a_project_dir() {
 /// Issue #481: agent cwd, swarm grouping, and project-local MCP resolution must
 /// all bind to the *same* directory. If a rejected home-dir report still reached
 /// the swarm id or the MCP resolver, tools would run in the project while swarm
-/// membership and `.jcode/mcp.json` discovery pointed at home.
+/// membership and `.kcode/mcp.json` discovery pointed at home.
 #[test]
 fn effective_subscribe_working_dir_binds_all_consumers_to_one_directory() {
     let home = std::path::Path::new("/home/tester");
@@ -473,7 +473,7 @@ fn effective_subscribe_working_dir_binds_all_consumers_to_one_directory() {
 async fn apply_subscribe_working_dir_keeps_project_when_client_reports_home() {
     let home = dirs::home_dir().expect("home directory");
     let home_str = home.to_string_lossy().to_string();
-    let project = home.join("jcode-481-project");
+    let project = home.join("kcode-481-project");
     let project_str = project.to_string_lossy().to_string();
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
@@ -499,7 +499,7 @@ async fn apply_subscribe_working_dir_keeps_project_when_client_reports_home() {
     );
 
     // A genuine project-to-project move still applies.
-    let other = home.join("jcode-481-other");
+    let other = home.join("kcode-481-other");
     let other_str = other.to_string_lossy().to_string();
     apply_or_defer_subscribe_working_dir(&agent, &other_str, "session_test_481");
     assert_eq!(

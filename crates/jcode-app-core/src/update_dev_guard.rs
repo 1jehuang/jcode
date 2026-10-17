@@ -130,7 +130,7 @@ fn github_comparison(release_tag: &str, current_hash: &str) -> Result<bool> {
     );
     let client = reqwest::blocking::Client::builder()
         .timeout(super::UPDATE_CHECK_TIMEOUT)
-        .user_agent("jcode-updater")
+        .user_agent("kcode-updater")
         .build()
         .context("Cannot safely install release: failed to create GitHub comparison client")?;
     let response = super::github_api_request(&client, &url)

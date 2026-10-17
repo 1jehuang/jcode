@@ -22,6 +22,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -67,6 +69,10 @@ jobs:
         # binary", skipping all of its validation steps. This catches it in
         # seconds, on the job that already owns dependency hygiene.
         run: cargo metadata --locked --format-version 1 > /dev/null
+
+      - name: Warning budget gate contract tests
+        shell: bash
+        run: scripts/test_check_warning_budget.sh
 
       - name: Enforce warning budget
         shell: bash
@@ -152,6 +158,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -384,6 +392,8 @@ jobs:
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - uses: ilammy/msvc-dev-cmd@v1
         with:
@@ -629,6 +639,8 @@ jobs:
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - uses: dtolnay/rust-toolchain@stable
         with:

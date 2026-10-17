@@ -21,7 +21,7 @@ class DemoShopTests(unittest.TestCase):
             [sys.executable, str(SCRIPT), *args],
             capture_output=True,
             text=True,
-            env={**os.environ, "JCODE_DEMO_SHOP_STATE": str(state)},
+            env={**os.environ, "KCODE_DEMO_SHOP_STATE": str(state)},
             timeout=10,
         )
 

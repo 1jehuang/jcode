@@ -141,19 +141,19 @@ fn startup_dir() -> PathBuf {
     appdata.join(r"Microsoft\Windows\Start Menu\Programs\Startup")
 }
 fn startup_shortcut_path() -> PathBuf {
-    startup_dir().join("jcode-hotkey.lnk")
+    startup_dir().join("kcode-hotkey.lnk")
 }
 
 fn hotkey_vbs_path() -> Result<PathBuf> {
     Ok(storage::jcode_dir()?
         .join("hotkey")
-        .join("jcode-hotkey-launcher.vbs"))
+        .join("kcode-hotkey-launcher.vbs"))
 }
 
 fn legacy_hotkey_ps1_path() -> Result<PathBuf> {
     Ok(storage::jcode_dir()?
         .join("hotkey")
-        .join("jcode-hotkey.ps1"))
+        .join("kcode-hotkey.ps1"))
 }
 
 fn remove_file_if_exists(path: &Path) -> Result<()> {
@@ -175,8 +175,8 @@ $current = {current_pid}
 Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
   Where-Object {{
     ($_.ProcessId -ne $current) -and ($_.ProcessId -ne $PID) -and (
-      (($_.Name -eq 'powershell.exe' -or $_.Name -eq 'pwsh.exe') -and $_.CommandLine -like '*jcode-hotkey*') -or
-      (($_.Name -eq 'jcode.exe') -and $_.CommandLine -like '*--listen-windows-hotkey*')
+      (($_.Name -eq 'powershell.exe' -or $_.Name -eq 'pwsh.exe') -and $_.CommandLine -like '*kcode-hotkey*') -or
+      (($_.Name -eq 'kcode.exe') -and $_.CommandLine -like '*--listen-windows-hotkey*')
     )
   }} |
   ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}
@@ -870,7 +870,7 @@ mod tests {
                 .file_name()
                 .unwrap()
                 .to_string_lossy(),
-            "jcode-hotkey.lnk"
+            "kcode-hotkey.lnk"
         );
         assert_eq!(
             hotkey_vbs_path()
@@ -878,7 +878,7 @@ mod tests {
                 .file_name()
                 .unwrap()
                 .to_string_lossy(),
-            "jcode-hotkey-launcher.vbs"
+            "kcode-hotkey-launcher.vbs"
         );
         assert_eq!(
             legacy_hotkey_ps1_path()
@@ -886,7 +886,7 @@ mod tests {
                 .file_name()
                 .unwrap()
                 .to_string_lossy(),
-            "jcode-hotkey.ps1"
+            "kcode-hotkey.ps1"
         );
     }
 
@@ -905,8 +905,8 @@ mod tests {
     #[test]
     fn startup_shortcut_uses_native_listener_without_vbscript_or_bypass() {
         let script = render_startup_shortcut_script(
-            Path::new(r"C:\Users\O'Hara\Startup\jcode-hotkey.lnk"),
-            Path::new(r"C:\Program Files\Jcode O'Hara\jcode.exe"),
+            Path::new(r"C:\Users\O'Hara\Startup\kcode-hotkey.lnk"),
+            Path::new(r"C:\Program Files\Jcode O'Hara\kcode.exe"),
         );
         assert!(script.contains("$shortcut.TargetPath = 'powershell.exe'"));
         assert!(script.contains("-ExecutionPolicy RemoteSigned"));
@@ -1075,7 +1075,7 @@ pub(super) fn create_windows_desktop_shortcut(state: &mut SetupHintsState) -> Re
     };
 
     let desktop_dir = std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\Users\\Default".into());
-    let shortcut_path = format!("{}\\Desktop\\jcode.lnk", desktop_dir);
+    let shortcut_path = format!("{}\\Desktop\\kcode.lnk", desktop_dir);
 
     let ps_script = format!(
         r#"

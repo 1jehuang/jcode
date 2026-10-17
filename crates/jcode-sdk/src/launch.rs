@@ -83,10 +83,10 @@ pub struct LaunchOptions {
     /// Default model for spawned swarm workers, unless overridden per spawn.
     /// `inherit` defaults to the coordinator's model and auth route.
     /// This is applied as the operator-level
-    /// `JCODE_SWARM_MODEL` override and takes precedence over `env`.
+    /// `KCODE_SWARM_MODEL` override and takes precedence over `env`.
     pub swarm_model: Option<String>,
     /// Who executes autonomous wake requests. Applied as the operator-level
-    /// `JCODE_WAKE_MODE` override and takes precedence over `env`.
+    /// `KCODE_WAKE_MODE` override and takes precedence over `env`.
     pub wake_mode: Option<WakeMode>,
     /// How long to wait for the API socket to accept connections.
     pub startup_timeout: Duration,
@@ -122,7 +122,7 @@ impl Default for LaunchOptions {
             startup_timeout: Duration::from_secs(30),
             inherit_stderr: false,
             cleanup_timeout: Duration::from_secs(30),
-            client_name: concat!("jcode-sdk-rs/", env!("CARGO_PKG_VERSION")).to_string(),
+            client_name: concat!("kcode-sdk-rs/", env!("CARGO_PKG_VERSION")).to_string(),
             request_timeout: Some(Duration::from_secs(30)),
             api_socket: None,
             start_timeout: Duration::from_secs(30),
@@ -175,7 +175,7 @@ pub fn launch_instance(options: &LaunchOptions) -> Result<LaunchedInstance> {
             path.clone()
         }
         None => tempfile::Builder::new()
-            .prefix("jcode-sdk-instance-")
+            .prefix("kcode-sdk-instance-")
             .tempdir()
             .map_err(launch_io)?
             .keep(),
@@ -185,12 +185,12 @@ pub fn launch_instance(options: &LaunchOptions) -> Result<LaunchedInstance> {
     let runtime_dir = jcode_home.join("run");
     fs::create_dir_all(&runtime_dir).map_err(launch_io)?;
     set_owner_only_dir(&runtime_dir)?;
-    let socket_path = runtime_dir.join("jcode-api.sock");
+    let socket_path = runtime_dir.join("kcode-api.sock");
     for stale in [
-        "jcode-api.sock",
-        "jcode.sock",
-        "jcode-debug.sock",
-        "jcode.sock.hash",
+        "kcode-api.sock",
+        "kcode.sock",
+        "kcode-debug.sock",
+        "kcode.sock.hash",
     ] {
         let _ = fs::remove_file(runtime_dir.join(stale));
     }
@@ -210,7 +210,7 @@ pub fn launch_instance(options: &LaunchOptions) -> Result<LaunchedInstance> {
     let binary = options
         .binary
         .clone()
-        .unwrap_or_else(|| PathBuf::from("jcode"));
+        .unwrap_or_else(|| PathBuf::from("kcode"));
     let mut command = Command::new(&binary);
     command
         .args([OsStr::new("api-bridge"), OsStr::new("--api-socket")])
@@ -221,10 +221,10 @@ pub fn launch_instance(options: &LaunchOptions) -> Result<LaunchedInstance> {
                 .as_deref()
                 .unwrap_or_else(|| Path::new(".")),
         )
-        .env("JCODE_HOME", &jcode_home)
-        .env("JCODE_RUNTIME_DIR", &runtime_dir)
-        .env("JCODE_API_SOCKET", &socket_path)
-        .env("JCODE_SOCKET", runtime_dir.join("jcode.sock"))
+        .env("KCODE_HOME", &jcode_home)
+        .env("KCODE_RUNTIME_DIR", &runtime_dir)
+        .env("KCODE_API_SOCKET", &socket_path)
+        .env("KCODE_SOCKET", runtime_dir.join("kcode.sock"))
         .envs(options.env.iter())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -234,10 +234,10 @@ pub fn launch_instance(options: &LaunchOptions) -> Result<LaunchedInstance> {
             Stdio::piped()
         });
     if let Some(swarm_model) = options.swarm_model.as_deref() {
-        command.env("JCODE_SWARM_MODEL", swarm_model);
+        command.env("KCODE_SWARM_MODEL", swarm_model);
     }
     if let Some(wake_mode) = options.wake_mode {
-        command.env("JCODE_WAKE_MODE", wake_mode.as_str());
+        command.env("KCODE_WAKE_MODE", wake_mode.as_str());
     }
 
     let mut child = match command.spawn() {
@@ -335,9 +335,9 @@ pub fn launch_instance(options: &LaunchOptions) -> Result<LaunchedInstance> {
 
 /// Resolve the user's normal jcode home before a private instance overrides it.
 pub fn user_jcode_home() -> PathBuf {
-    std::env::var_os("JCODE_HOME")
+    std::env::var_os("KCODE_HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|| home_dir().join(".jcode"))
+        .unwrap_or_else(|| home_dir().join(".kcode"))
 }
 
 /// Share rotating login records with an instance and copy mutable config.
@@ -385,7 +385,7 @@ pub fn inherit_credentials(from_home: &Path, to_home: &Path) -> Result<Vec<PathB
             if !name.to_string_lossy().ends_with(".env") || !entry.path().is_file() {
                 continue;
             }
-            let relative = PathBuf::from("config").join("jcode").join(&name);
+            let relative = PathBuf::from("config").join("kcode").join(&name);
             link_credential_file(&entry.path(), to_home, &relative)?;
             inherited.push(relative);
         }
@@ -514,7 +514,7 @@ pub fn ensure_runtime(options: &LaunchOptions, progress: &Progress<'_>) -> Resul
     let jcode = options
         .binary
         .clone()
-        .unwrap_or_else(|| sibling_exe("jcode"));
+        .unwrap_or_else(|| sibling_exe("kcode"));
     if !socket_accepts(&legacy) {
         progress("starting jcode runtime...");
         spawn_detached(&jcode, &["serve"]).map_err(|error| {
@@ -526,7 +526,7 @@ pub fn ensure_runtime(options: &LaunchOptions, progress: &Progress<'_>) -> Resul
         wait_for_socket(&legacy, "jcode runtime", options.start_timeout)?;
     }
     progress("starting harness API bridge...");
-    let standalone_bridge = sibling_exe("jcode-harness-api-bridge");
+    let standalone_bridge = sibling_exe("kcode-harness-api-bridge");
     let (bridge, bridge_args): (&Path, &[&str]) = if standalone_bridge.is_file() {
         (&standalone_bridge, &[])
     } else {
@@ -581,7 +581,7 @@ pub fn wait_for_socket(path: &Path, what: &str, timeout: Duration) -> Result<()>
 fn read_daemon_pid(home: &Path, runtime_dir: &Path) -> Option<i32> {
     let raw = fs::read(home.join("servers.json")).ok()?;
     let registry: Value = serde_json::from_slice(&raw).ok()?;
-    let socket = runtime_dir.join("jcode.sock");
+    let socket = runtime_dir.join("kcode.sock");
     registry.as_object()?.values().find_map(|entry| {
         let entry = entry.as_object()?;
         if Path::new(entry.get("socket")?.as_str()?) != socket {
@@ -667,7 +667,7 @@ fn remove_ephemeral_home(home: &Path, timeout: Duration) {
         return;
     };
     if home.parent() != Some(std::env::temp_dir().as_path())
-        || !name.starts_with("jcode-sdk-instance-")
+        || !name.starts_with("kcode-sdk-instance-")
     {
         return;
     }
@@ -704,17 +704,17 @@ pub fn user_app_config_dir() -> PathBuf {
     }
     #[cfg(target_os = "windows")]
     {
-        return std::env::var_os("APPDATA")
+        std::env::var_os("APPDATA")
             .map(PathBuf::from)
             .unwrap_or_else(|| home_dir().join("AppData/Roaming"))
-            .join("jcode");
+            .join("kcode")
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| home_dir().join(".config"))
-            .join("jcode")
+            .join("kcode")
     }
 }
 
@@ -760,7 +760,7 @@ mod tests {
         let captured = sandbox.path().join("swarm-model.txt");
         fs::write(
             &binary,
-            "#!/bin/sh\nprintf '%s' \"$JCODE_SWARM_MODEL\" > \"$CAPTURE_PATH\"\nexit 1\n",
+            "#!/bin/sh\nprintf '%s' \"$KCODE_SWARM_MODEL\" > \"$CAPTURE_PATH\"\nexit 1\n",
         )
         .expect("write fake runtime");
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o700))
@@ -779,7 +779,7 @@ mod tests {
             captured.as_os_str().to_owned(),
         );
         options.env.insert(
-            OsString::from("JCODE_SWARM_MODEL"),
+            OsString::from("KCODE_SWARM_MODEL"),
             OsString::from("unwanted-model"),
         );
 
@@ -803,7 +803,7 @@ mod tests {
         let captured = sandbox.path().join("wake-mode.txt");
         fs::write(
             &binary,
-            "#!/bin/sh\nprintf '%s' \"$JCODE_WAKE_MODE\" > \"$CAPTURE_PATH\"\nexit 1\n",
+            "#!/bin/sh\nprintf '%s' \"$KCODE_WAKE_MODE\" > \"$CAPTURE_PATH\"\nexit 1\n",
         )
         .unwrap();
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
@@ -820,7 +820,7 @@ mod tests {
             .insert("CAPTURE_PATH".into(), captured.as_os_str().to_owned());
         options
             .env
-            .insert("JCODE_WAKE_MODE".into(), "internal".into());
+            .insert("KCODE_WAKE_MODE".into(), "internal".into());
         assert!(launch_instance(&options).is_err());
         assert_eq!(fs::read_to_string(captured).unwrap(), "external");
     }
@@ -828,7 +828,7 @@ mod tests {
     #[test]
     fn dropping_an_ephemeral_instance_stops_its_bridge_and_removes_its_home() {
         let home = tempfile::Builder::new()
-            .prefix("jcode-sdk-instance-")
+            .prefix("kcode-sdk-instance-")
             .tempdir()
             .expect("temp home")
             .keep();
@@ -840,7 +840,7 @@ mod tests {
             .expect("sleep child");
         let pid = child.id() as i32;
         let instance = LaunchedInstance {
-            socket_path: runtime_dir.join("jcode-api.sock"),
+            socket_path: runtime_dir.join("kcode-api.sock"),
             jcode_home: home.clone(),
             runtime_dir,
             child: Mutex::new(Some(child)),

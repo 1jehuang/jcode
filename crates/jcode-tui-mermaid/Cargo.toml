@@ -8,7 +8,7 @@ publish = false
 default = ["mmdr-size-api"]
 renderer = ["dep:mermaid-rs-renderer"]
 # Enables the renderer size API path. The pinned mmdr tag (v0.3.1+) ships the
-# size API, and build.rs enables it by default; set JCODE_MMDR_SIZE_API_DISABLE=1
+# size API, and build.rs enables it by default; set KCODE_MMDR_SIZE_API_DISABLE=1
 # to fall back to the legacy SVG-retarget path.
 mmdr-size-api = ["renderer"]
 

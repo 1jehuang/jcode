@@ -52,10 +52,10 @@ fn capture_to_temp(extra_args: &[&str]) -> Result<Vec<u8>> {
 
 pub fn screenshot() -> Result<ToolOutput> {
     // Check screenshot scope
-    let scope = std::env::var("JCODE_SCREENSHOT_SCOPE").unwrap_or_default();
+    let scope = std::env::var("KCODE_SCREENSHOT_SCOPE").unwrap_or_default();
     if scope == "browser_only" {
         bail!(
-            "Full desktop screenshots are restricted (JCODE_SCREENSHOT_SCOPE=browser_only). \
+            "Full desktop screenshots are restricted (KCODE_SCREENSHOT_SCOPE=browser_only). \
              Use the browser tool with 'screenshot' action instead."
         );
     }
@@ -227,7 +227,7 @@ try? handler.perform([req])
     let out = Command::new(&swift)
         .arg("-")
         .arg(image_path)
-        .env("JCODE_OCR_IMG", image_path)
+        .env("KCODE_OCR_IMG", image_path)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

@@ -118,7 +118,7 @@ pub fn snapshot_path() -> anyhow::Result<std::path::PathBuf> {
     Ok(jcode_storage::jcode_dir()?.join("keymap-snapshot.json"))
 }
 
-/// Collect a fresh snapshot and persist it to `~/.jcode/keymap-snapshot.json`.
+/// Collect a fresh snapshot and persist it to `~/.kcode/keymap-snapshot.json`.
 /// Returns the snapshot regardless of whether the write succeeded.
 pub fn refresh_and_save() -> KeymapSnapshot {
     let snapshot = collect_snapshot();

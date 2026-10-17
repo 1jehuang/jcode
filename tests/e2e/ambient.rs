@@ -522,7 +522,7 @@ fn test_ambient_config_defaults() {
 #[test]
 fn test_ambient_lock() {
     use jcode::ambient::AmbientLock;
-    let _env = setup_test_env().expect("failed to setup isolated JCODE_HOME");
+    let _env = setup_test_env().expect("failed to setup isolated KCODE_HOME");
 
     // First acquisition should succeed
     let lock1 = AmbientLock::try_acquire();

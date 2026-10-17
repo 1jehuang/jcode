@@ -45,7 +45,7 @@ verify referral URLs on the public web:
     python scripts/benchmark_attribution.py --live --live-web
 
 Live requests carry x-jcode-discovery-benchmark: 1 via
-JCODE_DISCOVERY_BENCHMARK=1 semantics: this runner calls the discovery HTTP
+KCODE_DISCOVERY_BENCHMARK=1 semantics: this runner calls the discovery HTTP
 API directly and always sends the benchmark header itself.
 """
 

@@ -49,7 +49,7 @@ pub(crate) async fn run_status(json: bool) -> Result<()> {
 }
 
 pub(crate) fn run_manage() -> Result<()> {
-    let url = crate::subscription_catalog::JCODE_ACCOUNT_URL;
+    let url = crate::subscription_catalog::KCODE_ACCOUNT_URL;
     println!("Opening Jcode account management: {url}");
     if crate::auth::browser_suppressed(false) {
         println!("Browser launch is disabled. Open the URL above manually.");
@@ -111,7 +111,7 @@ fn public_manage_url(candidate: Option<&str>) -> &str {
                         && parsed.password().is_none()
             )
         })
-        .unwrap_or(crate::subscription_catalog::JCODE_ACCOUNT_URL)
+        .unwrap_or(crate::subscription_catalog::KCODE_ACCOUNT_URL)
 }
 
 #[cfg(test)]
@@ -126,11 +126,11 @@ mod tests {
         );
         assert_eq!(
             public_manage_url(Some("https://evil.example/?key=jck_live_secret")),
-            crate::subscription_catalog::JCODE_ACCOUNT_URL
+            crate::subscription_catalog::KCODE_ACCOUNT_URL
         );
         assert_eq!(
             public_manage_url(Some("https://user:pass@jcode.sh/account")),
-            crate::subscription_catalog::JCODE_ACCOUNT_URL
+            crate::subscription_catalog::KCODE_ACCOUNT_URL
         );
     }
 }

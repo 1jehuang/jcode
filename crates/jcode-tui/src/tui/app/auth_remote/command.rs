@@ -27,9 +27,9 @@ impl Target {
         let host = crate::tui::ssh_remote_host().ok_or("SSH host is not configured")?;
         let target = Self {
             host,
-            binary: std::env::var("JCODE_SSH_BINARY").unwrap_or_else(|_| "jcode".into()),
-            cwd: std::env::var("JCODE_SSH_WORKING_DIR").ok(),
-            socket: std::env::var("JCODE_SSH_SERVER_SOCKET").ok(),
+            binary: std::env::var("KCODE_SSH_BINARY").unwrap_or_else(|_| "jcode".into()),
+            cwd: std::env::var("KCODE_SSH_WORKING_DIR").ok(),
+            socket: std::env::var("KCODE_SSH_SERVER_SOCKET").ok(),
         };
         if target.host.starts_with('-')
             || target.host.chars().any(char::is_whitespace)

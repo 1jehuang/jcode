@@ -84,6 +84,9 @@ pub(super) async fn test_persistent_ws_state() -> (PersistentWsState, tokio::tas
             last_response_completed_at: Instant::now(),
             message_count: 1,
             last_input_item_count: 1,
+            last_input_item_hashes: persistent_ws_input_item_hashes(&[
+                serde_json::json!({"role":"user","content":"previous"}),
+            ]),
         },
         server,
     )
@@ -138,6 +141,9 @@ async fn test_persistent_ws_state_with_ping_notify() -> (
             last_response_completed_at: Instant::now(),
             message_count: 1,
             last_input_item_count: 1,
+            last_input_item_hashes: persistent_ws_input_item_hashes(&[
+                serde_json::json!({"role":"user","content":"previous"}),
+            ]),
         },
         server,
         ping_notify,
@@ -160,7 +166,7 @@ impl LiveOpenAITestEnv {
         };
 
         let temp = tempfile::Builder::new()
-            .prefix("jcode-openai-live-")
+            .prefix("kcode-openai-live-")
             .tempdir()?;
         let target_auth = temp
             .path()
@@ -174,8 +180,8 @@ impl LiveOpenAITestEnv {
         )?;
         std::fs::copy(source_auth, &target_auth)?;
 
-        let jcode_home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
-        let transport = EnvVarGuard::set("JCODE_OPENAI_TRANSPORT", "https");
+        let jcode_home = EnvVarGuard::set_path("KCODE_HOME", temp.path());
+        let transport = EnvVarGuard::set("KCODE_OPENAI_TRANSPORT", "https");
 
         Ok(Some(Self {
             _lock: lock,
@@ -238,16 +244,16 @@ include!("openai_tests/parsing_tools.rs");
 #[test]
 fn openai_credential_mode_runtime_provider_identity_round_trips() {
     let _guard = jcode_base::storage::lock_test_env();
-    let previous = std::env::var_os("JCODE_RUNTIME_PROVIDER");
+    let previous = std::env::var_os("KCODE_RUNTIME_PROVIDER");
 
-    jcode_base::env::set_var("JCODE_RUNTIME_PROVIDER", "openai");
+    jcode_base::env::set_var("KCODE_RUNTIME_PROVIDER", "openai");
     assert_eq!(
         OpenAICredentialMode::from_runtime_env(jcode_provider_core::DualAuthProvider::OpenAI),
         OpenAICredentialMode::OAuth,
         "OAuth selection must surface as the OAuth runtime identity"
     );
 
-    jcode_base::env::set_var("JCODE_RUNTIME_PROVIDER", "openai-api");
+    jcode_base::env::set_var("KCODE_RUNTIME_PROVIDER", "openai-api");
     assert_eq!(
         OpenAICredentialMode::from_runtime_env(jcode_provider_core::DualAuthProvider::OpenAI),
         OpenAICredentialMode::ApiKey,
@@ -255,8 +261,8 @@ fn openai_credential_mode_runtime_provider_identity_round_trips() {
     );
 
     match previous {
-        Some(value) => jcode_base::env::set_var("JCODE_RUNTIME_PROVIDER", value),
-        None => jcode_base::env::remove_var("JCODE_RUNTIME_PROVIDER"),
+        Some(value) => jcode_base::env::set_var("KCODE_RUNTIME_PROVIDER", value),
+        None => jcode_base::env::remove_var("KCODE_RUNTIME_PROVIDER"),
     }
 }
 
@@ -289,7 +295,9 @@ async fn openai_available_efforts_follow_active_model_catalog_metadata() {
     );
     *provider.model.write().await = "gpt-5.6".to_string();
     assert_eq!(
-        provider.api_reasoning_effort(Some("swarm")).as_deref(),
+        provider
+            .api_reasoning_effort_with_swarm_root(Some("swarm"), Some("max"))
+            .as_deref(),
         Some("max")
     );
 
@@ -302,7 +310,9 @@ async fn openai_available_efforts_follow_active_model_catalog_metadata() {
             vec!["low".to_string(), "high".to_string(), "xhigh".to_string()],
         );
     assert_eq!(
-        provider.api_reasoning_effort(Some("swarm")).as_deref(),
+        provider
+            .api_reasoning_effort_with_swarm_root(Some("swarm"), Some("max"))
+            .as_deref(),
         Some("xhigh"),
         "swarm must clamp to the active model's strongest advertised effort"
     );
@@ -351,3 +361,5 @@ fn catalog_credential_identity_survives_token_refresh_but_changes_accounts() {
 }
 
 include!("openai_tests/persistent_terminal.rs");
+
+include!("openai_tests/persistent_prefix.rs");

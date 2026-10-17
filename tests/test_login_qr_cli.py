@@ -22,19 +22,19 @@ BLOCKS = "█▀▄"
 class LoginQrCliTests(unittest.TestCase):
     def run_login(self, flags, *, terminal=False, qr_opt_in=False):
         with tempfile.TemporaryDirectory(
-            prefix="jcode-qr-cli-", dir=os.environ.get("JCODE_SCRATCH_DIR")
+            prefix="jcode-qr-cli-", dir=os.environ.get("KCODE_SCRATCH_DIR")
         ) as home:
             # Deliberately omit browser/display, auth, and QR environment flags.
             env = {
                 "PATH": os.environ.get("PATH", ""),
                 "HOME": home,
-                "JCODE_HOME": str(Path(home) / "jcode"),
+                "KCODE_HOME": str(Path(home) / "jcode"),
                 "XDG_CONFIG_HOME": str(Path(home) / "config"),
                 "DO_NOT_TRACK": "1",
                 "TERM": "xterm-256color",
             }
             if qr_opt_in:
-                env["JCODE_SHOW_LOGIN_QR"] = "1"
+                env["KCODE_SHOW_LOGIN_QR"] = "1"
             command = [BINARY, "login", "--provider", "openai", *flags]
             if terminal:
                 import pty

@@ -11,8 +11,8 @@ async fn resume_session_restores_persisted_compaction_for_provider_context() -> 
             .as_nanos()
     ));
     std::fs::create_dir_all(&runtime_dir)?;
-    let socket_path = runtime_dir.join("jcode.sock");
-    let debug_socket_path = runtime_dir.join("jcode-debug.sock");
+    let socket_path = runtime_dir.join("kcode.sock");
+    let debug_socket_path = runtime_dir.join("kcode-debug.sock");
 
     let provider = CapturingCompactionProvider::new();
     let captured_messages = provider.captured_messages();
@@ -177,8 +177,8 @@ async fn test_debug_create_session_marks_debug() -> Result<()> {
             .as_nanos()
     ));
     std::fs::create_dir_all(&runtime_dir)?;
-    let socket_path = runtime_dir.join("jcode.sock");
-    let debug_socket_path = runtime_dir.join("jcode-debug.sock");
+    let socket_path = runtime_dir.join("kcode.sock");
+    let debug_socket_path = runtime_dir.join("kcode-debug.sock");
 
     let provider = MockProvider::new();
     let provider: Arc<dyn jcode::provider::Provider> = Arc::new(provider);
@@ -208,8 +208,8 @@ async fn test_debug_create_selfdev_session_marks_canary() -> Result<()> {
             .as_nanos()
     ));
     std::fs::create_dir_all(&runtime_dir)?;
-    let socket_path = runtime_dir.join("jcode.sock");
-    let debug_socket_path = runtime_dir.join("jcode-debug.sock");
+    let socket_path = runtime_dir.join("kcode.sock");
+    let debug_socket_path = runtime_dir.join("kcode-debug.sock");
 
     let provider = MockProvider::new();
     let provider: Arc<dyn jcode::provider::Provider> = Arc::new(provider);
@@ -244,8 +244,8 @@ async fn test_clear_preserves_debug_for_resumed_debug_session() -> Result<()> {
             .as_nanos()
     ));
     std::fs::create_dir_all(&runtime_dir)?;
-    let socket_path = runtime_dir.join("jcode.sock");
-    let debug_socket_path = runtime_dir.join("jcode-debug.sock");
+    let socket_path = runtime_dir.join("kcode.sock");
+    let debug_socket_path = runtime_dir.join("kcode-debug.sock");
 
     let provider = MockProvider::new();
     let provider: Arc<dyn jcode::provider::Provider> = Arc::new(provider);

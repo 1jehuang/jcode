@@ -16,10 +16,10 @@ impl TestEnvGuard {
     fn new() -> anyhow::Result<Self> {
         let lock = crate::storage::lock_test_env();
         let temp_home = tempfile::Builder::new()
-            .prefix("jcode-restart-snapshot-test-home-")
+            .prefix("kcode-restart-snapshot-test-home-")
             .tempdir()?;
-        let prev_home = std::env::var_os("JCODE_HOME");
-        crate::env::set_var("JCODE_HOME", temp_home.path());
+        let prev_home = std::env::var_os("KCODE_HOME");
+        crate::env::set_var("KCODE_HOME", temp_home.path());
         Ok(Self {
             prev_home,
             _temp_home: temp_home,
@@ -31,9 +31,9 @@ impl TestEnvGuard {
 impl Drop for TestEnvGuard {
     fn drop(&mut self) {
         if let Some(prev_home) = &self.prev_home {
-            crate::env::set_var("JCODE_HOME", prev_home);
+            crate::env::set_var("KCODE_HOME", prev_home);
         } else {
-            crate::env::remove_var("JCODE_HOME");
+            crate::env::remove_var("KCODE_HOME");
         }
     }
 }

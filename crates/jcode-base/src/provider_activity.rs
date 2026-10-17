@@ -6,7 +6,7 @@
 //!      mirroring the dollar figures the TUI cost paths compute, since most
 //!      providers do not expose per-key spend through their public APIs.
 //!
-//! Data persists to `~/.jcode/provider_activity.json` and is shared across
+//! Data persists to `~/.kcode/provider_activity.json` and is shared across
 //! processes (server records last-used, TUI records spend, `/usage` reads
 //! both), so queries re-read the file with a short TTL instead of trusting a
 //! process-local cache.
@@ -79,7 +79,7 @@ static LEDGER: Mutex<Option<CachedStore>> = Mutex::new(None);
 
 fn ledger_path() -> PathBuf {
     crate::storage::jcode_dir()
-        .unwrap_or_else(|_| PathBuf::from(".").join(".jcode"))
+        .unwrap_or_else(|_| PathBuf::from(".").join(".kcode"))
         .join("provider_activity.json")
 }
 
@@ -305,13 +305,27 @@ pub fn format_relative_age(unix_secs: u64) -> String {
 }
 
 /// Map a human-facing provider label (e.g. `"DeepSeek"`, `"OpenRouter"`,
-/// `"NVIDIA NIM"`) plus the optional `JCODE_RUNTIME_PROVIDER` key onto a
+/// `"NVIDIA NIM"`) plus the optional `KCODE_RUNTIME_PROVIDER` key onto a
 /// ledger source key. Used by spend recorders that only know display names.
 pub fn source_key_for_provider_label(label: &str, runtime_provider: Option<&str>) -> String {
     let normalized = label.trim().to_ascii_lowercase();
     let runtime = runtime_provider
         .map(|value| value.trim().to_ascii_lowercase())
         .filter(|value| !value.is_empty());
+
+    // A label that is already a ledger source key names its own profile:
+    // `openai-compatible:<id>` is the identity the ledger keys on, and the
+    // display-name lookups below cannot recover it (the profile's display name
+    // is e.g. `DeepSeek`, and the multiplexing OpenRouter slot reports the
+    // transport name for every direct profile). Without this, such a label
+    // falls through to the `contains("openai")` branch and is billed to
+    // `openai:api-key`.
+    if let Some(profile_id) = normalized.strip_prefix("openai-compatible:") {
+        let profile_id = profile_id.trim();
+        if !profile_id.is_empty() {
+            return format!("openai-compatible:{profile_id}");
+        }
+    }
 
     // OpenRouter first: the catalog also carries an `openrouter` compatible
     // profile, but the ledger treats the public aggregator as its own bucket.
@@ -416,7 +430,7 @@ mod tests {
         let _env_lock = lock_env();
         clear_ledger_cache();
         let temp = tempfile::tempdir().expect("tempdir");
-        let _home = EnvVarGuard::set("JCODE_HOME", temp.path().as_os_str());
+        let _home = EnvVarGuard::set("KCODE_HOME", temp.path().as_os_str());
 
         record_use("claude:oauth:claude-1");
         record_spend("claude:api-key", 0.25);
@@ -442,7 +456,7 @@ mod tests {
         let _env_lock = lock_env();
         clear_ledger_cache();
         let temp = tempfile::tempdir().expect("tempdir");
-        let _home = EnvVarGuard::set("JCODE_HOME", temp.path().as_os_str());
+        let _home = EnvVarGuard::set("KCODE_HOME", temp.path().as_os_str());
 
         record_spend("openai:api-key", 0.0);
         record_spend("openai:api-key", -1.0);
@@ -479,6 +493,28 @@ mod tests {
         assert_eq!(
             source_key_for_provider_label("Some Custom Endpoint", None),
             "some-custom-endpoint"
+        );
+    }
+
+    /// A label can already *be* a ledger source key: the `History` payload
+    /// reports the session's provider key, which for a direct profile is
+    /// `openai-compatible:<id>`. That key must survive the mapping; otherwise
+    /// it falls through to `contains("openai")` and the spend is attributed to
+    /// `openai:api-key` instead of the profile that served the request (#1286).
+    #[test]
+    fn source_key_mapping_keeps_an_already_prefixed_profile_key() {
+        assert_eq!(
+            source_key_for_provider_label("openai-compatible:deepseek", None),
+            "openai-compatible:deepseek"
+        );
+        assert_eq!(
+            source_key_for_provider_label("OpenAI-Compatible:NVIDIA-NIM", None),
+            "openai-compatible:nvidia-nim"
+        );
+        // An empty profile id is not a profile key; it keeps the old fallback.
+        assert_eq!(
+            source_key_for_provider_label("openai-compatible:", None),
+            "openai:api-key"
         );
     }
 

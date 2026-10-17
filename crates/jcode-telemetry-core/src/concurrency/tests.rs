@@ -197,13 +197,13 @@ fn clean_finish_unlocks_even_if_a_fork_inherited_the_file_description() {
 // wall-clock sleeps or assumptions about scheduling are used in crash tests.
 #[test]
 fn lease_subprocess_helper() {
-    let Some(dir) = std::env::var_os("JCODE_TEST_CONCURRENCY_DIR") else {
+    let Some(dir) = std::env::var_os("KCODE_TEST_CONCURRENCY_DIR") else {
         return;
     };
     let dir = PathBuf::from(dir);
     let mut command = [0];
     std::io::stdin().read_exact(&mut command).unwrap();
-    if std::env::var_os("JCODE_TEST_REGISTRY_CRASH").is_some() {
+    if std::env::var_os("KCODE_TEST_REGISTRY_CRASH").is_some() {
         let _registry = lock_registry(&dir).unwrap();
         std::fs::write(dir.join("registry.pending"), "interrupted publication").unwrap();
         println!("\nCONCURRENCY_READY 0");
@@ -233,12 +233,12 @@ impl Process {
                 "concurrency::tests::lease_subprocess_helper",
                 "--nocapture",
             ])
-            .env("JCODE_TEST_CONCURRENCY_DIR", dir)
+            .env("KCODE_TEST_CONCURRENCY_DIR", dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
         if registry_crash {
-            command.env("JCODE_TEST_REGISTRY_CRASH", "1");
+            command.env("KCODE_TEST_REGISTRY_CRASH", "1");
         }
         let mut child = command.spawn().unwrap();
         let output = BufReader::new(child.stdout.take().unwrap());

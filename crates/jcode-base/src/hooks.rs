@@ -3,9 +3,9 @@
 //! Hooks are external commands that jcode runs at well-defined lifecycle
 //! points so other programs can observe or gate agent behavior without
 //! forking jcode. They are configured in `[hooks]` in config.toml (or
-//! `JCODE_HOOK_*` env vars) and follow the same command-line conventions as
+//! `KCODE_HOOK_*` env vars) and follow the same command-line conventions as
 //! `[terminal] spawn_hook`: the command is parsed shell-style but executed
-//! directly (no shell), with `JCODE_HOOK_*` metadata env vars describing the
+//! directly (no shell), with `KCODE_HOOK_*` metadata env vars describing the
 //! event.
 //!
 //! Two dispatch styles:
@@ -17,10 +17,15 @@
 //!   exit. Exit 0 allows the tool call, exit 2 blocks it and the hook's
 //!   stderr is fed back to the model as the tool error. Any other outcome
 //!   (other exit codes, timeout, spawn failure) fails open with a warning.
+//! - **Feedback** (`post_tool_feedback`): jcode waits (with a timeout) after a
+//!   successful tool call. Anything the hook prints to stdout is appended to
+//!   the tool result the model sees (e.g. linter findings for an edited file).
+//!   Timeouts and spawn failures add nothing.
 //!
-//! Hook processes get `JCODE_HOOKS_DISABLED=1` in their environment so a
+//! Hook processes get `KCODE_HOOKS_DISABLED=1` in their environment so a
 //! hook that itself invokes jcode does not recursively trigger hooks.
 
+use serde_json::Value;
 use std::path::PathBuf;
 
 tokio::task_local! {
@@ -30,12 +35,15 @@ tokio::task_local! {
     static CLIENT_TERMINAL_ENV: Vec<(String, String)>;
 }
 
-/// Maximum bytes of JSON payload exported via `JCODE_HOOK_PAYLOAD`.
+/// Maximum bytes of JSON payload exported via `KCODE_HOOK_PAYLOAD`.
 const PAYLOAD_ENV_LIMIT: usize = 16 * 1024;
 /// Maximum bytes of tool input JSON exported to the pre_tool gate.
 const TOOL_INPUT_ENV_LIMIT: usize = 16 * 1024;
 /// Maximum chars of hook stderr used as a block reason.
 const BLOCK_REASON_LIMIT: usize = 2000;
+/// Maximum bytes of `post_tool_feedback` stdout appended to a tool result,
+/// per hook command.
+const FEEDBACK_LIMIT: usize = 8 * 1024;
 
 /// Decision returned by the `pre_tool` gate hook.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,7 +61,7 @@ pub struct HookEvent {
     pub session_id: Option<String>,
     pub cwd: Option<String>,
     /// Extra env fields. Keys are suffixes: ("STATUS", "ok") becomes
-    /// `JCODE_HOOK_STATUS=ok` and `"status": "ok"` in the JSON payload.
+    /// `KCODE_HOOK_STATUS=ok` and `"status": "ok"` in the JSON payload.
     pub fields: Vec<(&'static str, String)>,
 }
 
@@ -107,6 +115,7 @@ pub fn hook_commands(event: &str) -> Vec<String> {
         "session_end" => hooks.session_end.as_ref(),
         "pre_tool" => hooks.pre_tool.as_ref(),
         "post_tool" => hooks.post_tool.as_ref(),
+        "post_tool_feedback" => hooks.post_tool_feedback.as_ref(),
         _ => None,
     };
     raw.into_iter()
@@ -128,9 +137,105 @@ pub fn hook_configured(event: &str) -> bool {
     !hook_commands(event).is_empty()
 }
 
+/// Run configured tool-input transformers in declaration order. Transformers
+/// receive the current JSON tool input on stdin and may print a complete
+/// replacement JSON object to stdout. Invalid output, errors, and timeouts
+/// fail open and leave the current input untouched.
+pub async fn transform_tool_input(
+    session_id: &str,
+    working_dir: Option<&str>,
+    tool_name: &str,
+    input: Value,
+) -> Value {
+    if hooks_suppressed() {
+        return input;
+    }
+    let commands: Vec<String> = crate::config::config()
+        .hooks
+        .pre_tool_transform
+        .as_ref()
+        .into_iter()
+        .flat_map(|commands| commands.iter())
+        .map(str::trim)
+        .filter(|command| !command.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if commands.is_empty() {
+        return input;
+    }
+
+    let mut event = HookEvent::new("pre_tool_transform")
+        .session_id(session_id)
+        .field("TOOL_NAME", tool_name);
+    if let Some(cwd) = working_dir {
+        event = event.cwd(cwd);
+    }
+
+    let timeout = std::time::Duration::from_millis(
+        crate::config::config()
+            .hooks
+            .pre_tool_transform_timeout_ms
+            .max(1),
+    );
+    let mut current = input;
+    for command_line in commands {
+        let serialized = current.to_string();
+        let std_cmd = match build_hook_process(&command_line, &event) {
+            Ok(cmd) => cmd,
+            Err(error) => {
+                crate::logging::warn(&format!(
+                    "Tool transformer '{command_line}' is invalid: {error} (leaving input unchanged)"
+                ));
+                continue;
+            }
+        };
+        let mut cmd = tokio::process::Command::from(std_cmd);
+        cmd.stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        let mut child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                crate::logging::warn(&format!(
+                    "Tool transformer '{command_line}' failed to start: {error} (leaving input unchanged)"
+                ));
+                continue;
+            }
+        };
+        // A child that never reads stdin can block `write_all` once the pipe
+        // fills. Keep that write under the same deadline as process completion
+        // so a transformer always fails open within its configured timeout.
+        let output = match tokio::time::timeout(timeout, async {
+            if let Some(mut stdin) = child.stdin.take() {
+                use tokio::io::AsyncWriteExt;
+                stdin.write_all(serialized.as_bytes()).await?;
+            }
+            child.wait_with_output().await
+        })
+        .await
+        {
+            Ok(Ok(output)) if output.status.success() => output,
+            Ok(Ok(_)) | Ok(Err(_)) | Err(_) => continue,
+        };
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let candidate = stdout.trim();
+        if candidate.is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<Value>(candidate) {
+            Ok(value) if value.is_object() => current = value,
+            Ok(_) | Err(_) => crate::logging::warn(&format!(
+                "Tool transformer '{command_line}' returned invalid JSON object (leaving input unchanged)"
+            )),
+        }
+    }
+    current
+}
+
 /// True when running inside a hook process (recursion guard).
 fn hooks_suppressed() -> bool {
-    std::env::var_os("JCODE_HOOKS_DISABLED").is_some()
+    std::env::var_os("KCODE_HOOKS_DISABLED").is_some()
 }
 
 fn expand_home(program: &str) -> PathBuf {
@@ -153,7 +258,12 @@ fn truncate_bytes(value: &str, limit: usize) -> &str {
     &value[..end]
 }
 
-/// JSON payload mirroring the env fields, exported as `JCODE_HOOK_PAYLOAD`.
+/// Tool input JSON truncated to the size exported in `KCODE_HOOK_TOOL_INPUT`.
+pub fn truncate_tool_input(tool_input_json: &str) -> &str {
+    truncate_bytes(tool_input_json, TOOL_INPUT_ENV_LIMIT)
+}
+
+/// JSON payload mirroring the env fields, exported as `KCODE_HOOK_PAYLOAD`.
 fn payload_json(event: &HookEvent) -> String {
     let mut map = serde_json::Map::new();
     map.insert(
@@ -180,18 +290,18 @@ fn payload_json(event: &HookEvent) -> String {
 }
 
 fn apply_event_env(cmd: &mut std::process::Command, event: &HookEvent) {
-    cmd.env("JCODE_HOOKS_DISABLED", "1");
-    cmd.env("JCODE_HOOK_EVENT", event.event);
+    cmd.env("KCODE_HOOKS_DISABLED", "1");
+    cmd.env("KCODE_HOOK_EVENT", event.event);
     if let Some(session_id) = &event.session_id {
-        cmd.env("JCODE_HOOK_SESSION_ID", session_id);
+        cmd.env("KCODE_HOOK_SESSION_ID", session_id);
     }
     if let Some(cwd) = &event.cwd {
-        cmd.env("JCODE_HOOK_CWD", cwd);
+        cmd.env("KCODE_HOOK_CWD", cwd);
     }
     for (key, value) in &event.fields {
-        cmd.env(format!("JCODE_HOOK_{key}"), value);
+        cmd.env(format!("KCODE_HOOK_{key}"), value);
     }
-    cmd.env("JCODE_HOOK_PAYLOAD", payload_json(event));
+    cmd.env("KCODE_HOOK_PAYLOAD", payload_json(event));
 }
 
 fn build_hook_process(
@@ -213,6 +323,19 @@ fn build_hook_process(
     let _ = CLIENT_TERMINAL_ENV.try_with(|env| {
         crate::terminal_launch::apply_client_terminal_env(&mut cmd, env);
     });
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+
+        // A hook is background work the user never asked to see. Without this the
+        // child is a console application started by a process that may hold no
+        // console, so Windows allocates a fresh one — and on a host where Windows
+        // Terminal is the default terminal application that console is a new tab,
+        // one per hook event. The flag is inherited, so a script that shells out to
+        // `curl.exe` stays invisible too.
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
     Ok(cmd)
 }
 
@@ -232,7 +355,7 @@ pub fn dispatch_observer(event: HookEvent) {
                 cmd.stdin(std::process::Stdio::null())
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null());
-                match crate::platform::spawn_detached(&mut cmd) {
+                match crate::platform::spawn_detached_without_console_window(&mut cmd) {
                     Ok(child) => {
                         crate::platform::reap_detached(child);
                         crate::logging::debug(&format!(
@@ -254,8 +377,8 @@ pub fn dispatch_observer(event: HookEvent) {
 
 /// Run the `pre_tool` gate hook for a tool call, if configured.
 ///
-/// The hook receives `JCODE_HOOK_TOOL_NAME` plus the full tool input JSON on
-/// stdin (and truncated in `JCODE_HOOK_TOOL_INPUT`). Contract:
+/// The hook receives `KCODE_HOOK_TOOL_NAME` plus the full tool input JSON on
+/// stdin (and truncated in `KCODE_HOOK_TOOL_INPUT`). Contract:
 ///
 /// - exit 0: allow the tool call
 /// - exit 2: block it; stderr becomes the error shown to the model
@@ -375,6 +498,104 @@ async fn run_pre_tool_command(
     }
 }
 
+/// Run the `post_tool_feedback` hooks for a completed tool call, in
+/// declaration order, and collect what they print to stdout.
+///
+/// Each hook receives the event env vars plus the full tool input JSON on
+/// stdin. Trimmed stdout (capped at 8 KB per hook) is returned regardless of
+/// exit code, because linters conventionally exit non-zero when they report
+/// findings. Timeouts, spawn failures, and empty stdout contribute nothing.
+pub async fn run_post_tool_feedback(event: &HookEvent, tool_input_json: &str) -> Option<String> {
+    let command_lines = hook_commands("post_tool_feedback");
+    if command_lines.is_empty() {
+        return None;
+    }
+    let timeout = std::time::Duration::from_millis(
+        crate::config::config()
+            .hooks
+            .post_tool_feedback_timeout_ms
+            .max(1),
+    );
+    let mut sections = Vec::new();
+    for command_line in command_lines {
+        if let Some(text) =
+            run_post_tool_feedback_command(&command_line, event, tool_input_json, timeout).await
+        {
+            sections.push(text);
+        }
+    }
+    (!sections.is_empty()).then(|| sections.join("\n\n"))
+}
+
+async fn run_post_tool_feedback_command(
+    command_line: &str,
+    event: &HookEvent,
+    tool_input_json: &str,
+    timeout: std::time::Duration,
+) -> Option<String> {
+    let std_cmd = match build_hook_process(command_line, event) {
+        Ok(cmd) => cmd,
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "Hook 'post_tool_feedback' command '{command_line}' is invalid: {error}"
+            ));
+            return None;
+        }
+    };
+    let mut cmd = tokio::process::Command::from(std_cmd);
+    cmd.stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "Hook 'post_tool_feedback' command '{command_line}' failed to start: {error}"
+            ));
+            return None;
+        }
+    };
+    // Keep the stdin write under the deadline too: a hook that never reads
+    // stdin could otherwise block once the pipe fills.
+    let output = match tokio::time::timeout(timeout, async {
+        if let Some(mut stdin) = child.stdin.take() {
+            use tokio::io::AsyncWriteExt;
+            // A hook that exits without reading stdin closes the pipe; that
+            // is fine, its stdout still counts.
+            let _ = stdin.write_all(tool_input_json.as_bytes()).await;
+        }
+        child.wait_with_output().await
+    })
+    .await
+    {
+        Ok(Ok(output)) => output,
+        Ok(Err(error)) => {
+            crate::logging::warn(&format!(
+                "Hook 'post_tool_feedback' command '{command_line}' failed: {error}"
+            ));
+            return None;
+        }
+        Err(_elapsed) => {
+            crate::logging::warn(&format!(
+                "Hook 'post_tool_feedback' command '{command_line}' timed out after {}ms",
+                timeout.as_millis()
+            ));
+            return None;
+        }
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let text = stdout.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let mut text = truncate_bytes(text, FEEDBACK_LIMIT).to_string();
+    if text.len() < stdout.trim().len() {
+        text.push_str("\n[feedback truncated]");
+    }
+    Some(text)
+}
+
 #[cfg(test)]
 #[allow(clippy::await_holding_lock)]
 mod tests {
@@ -429,17 +650,128 @@ mod tests {
         }
         let reset = EnvReset(vec![
             (
-                "JCODE_HOOK_PRE_TOOL",
-                std::env::var_os("JCODE_HOOK_PRE_TOOL"),
+                "KCODE_HOOK_PRE_TOOL",
+                std::env::var_os("KCODE_HOOK_PRE_TOOL"),
             ),
             (
-                "JCODE_HOOK_PRE_TOOL_TIMEOUT_MS",
-                std::env::var_os("JCODE_HOOK_PRE_TOOL_TIMEOUT_MS"),
+                "KCODE_HOOK_PRE_TOOL_TIMEOUT_MS",
+                std::env::var_os("KCODE_HOOK_PRE_TOOL_TIMEOUT_MS"),
             ),
         ]);
-        crate::env::set_var("JCODE_HOOK_PRE_TOOL", hook);
-        crate::env::set_var("JCODE_HOOK_PRE_TOOL_TIMEOUT_MS", timeout_ms.to_string());
+        crate::env::set_var("KCODE_HOOK_PRE_TOOL", hook);
+        crate::env::set_var("KCODE_HOOK_PRE_TOOL_TIMEOUT_MS", timeout_ms.to_string());
         reset
+    }
+
+    #[cfg(unix)]
+    fn transform_test_config(hook: &str, timeout_ms: u64) -> impl Drop + use<> {
+        struct EnvReset(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        impl Drop for EnvReset {
+            fn drop(&mut self) {
+                for (key, previous) in self.0.drain(..) {
+                    match previous {
+                        Some(value) => crate::env::set_var(key, value),
+                        None => crate::env::remove_var(key),
+                    }
+                }
+            }
+        }
+        let reset = EnvReset(vec![
+            (
+                "KCODE_HOOK_PRE_TOOL_TRANSFORM",
+                std::env::var_os("KCODE_HOOK_PRE_TOOL_TRANSFORM"),
+            ),
+            (
+                "KCODE_HOOK_PRE_TOOL_TRANSFORM_TIMEOUT_MS",
+                std::env::var_os("KCODE_HOOK_PRE_TOOL_TRANSFORM_TIMEOUT_MS"),
+            ),
+        ]);
+        crate::env::set_var("KCODE_HOOK_PRE_TOOL_TRANSFORM", hook);
+        crate::env::set_var(
+            "KCODE_HOOK_PRE_TOOL_TRANSFORM_TIMEOUT_MS",
+            timeout_ms.to_string(),
+        );
+        reset
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn tool_transformers_compose_json_replacements() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let first = write_executable_script(
+            temp.path(),
+            "first.sh",
+            "#!/bin/sh\ncat >/dev/null\nprintf '%s' '{\"command\":\"first\"}'\n",
+        );
+        let second = write_executable_script(
+            temp.path(),
+            "second.sh",
+            "#!/bin/sh\ninput=$(cat)\n[ \"$input\" = '{\"command\":\"first\"}' ] || exit 1\nprintf '%s' '{\"command\":\"second\"}'\n",
+        );
+        let commands = serde_json::to_string(&vec![
+            first.to_string_lossy().into_owned(),
+            second.to_string_lossy().into_owned(),
+        ])
+        .expect("serialize transformer commands");
+        let _env = transform_test_config(&commands, 500);
+
+        let output = transform_tool_input(
+            "ses_transform",
+            Some("/work"),
+            "bash",
+            serde_json::json!({"command": "original"}),
+        )
+        .await;
+        assert_eq!(output, serde_json::json!({"command": "second"}));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn tool_transformer_fails_open_for_invalid_output_and_timeout() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let invalid = write_executable_script(
+            temp.path(),
+            "invalid.sh",
+            "#!/bin/sh\ncat >/dev/null\necho nope\n",
+        );
+        let hang = write_executable_script(temp.path(), "hang.sh", "#!/bin/sh\nsleep 30\n");
+        let commands = serde_json::to_string(&vec![
+            invalid.to_string_lossy().into_owned(),
+            hang.to_string_lossy().into_owned(),
+        ])
+        .expect("serialize transformer commands");
+        let _env = transform_test_config(&commands, 50);
+        let input = serde_json::json!({"command": "original"});
+
+        assert_eq!(
+            transform_tool_input("ses_transform", None, "bash", input.clone()).await,
+            input
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn tool_transformer_timeout_includes_stdin_delivery() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        // Keep stdin open but never consume it, causing an oversized write to
+        // block once the pipe fills.
+        let hang = write_executable_script(temp.path(), "hang.sh", "#!/bin/sh\nsleep 5\n");
+        let _env = transform_test_config(&hang.to_string_lossy(), 100);
+        let input = serde_json::json!({"command": "x".repeat(1024 * 1024)});
+
+        let started = std::time::Instant::now();
+        assert_eq!(
+            transform_tool_input("ses_transform", None, "bash", input.clone()).await,
+            input
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "stdin delivery exceeded the transformer timeout: {:?}",
+            started.elapsed()
+        );
     }
 
     #[cfg(unix)]
@@ -452,7 +784,7 @@ mod tests {
         let block = write_executable_script(
             temp.path(),
             "block.sh",
-            "#!/bin/sh\ncat > /dev/null\necho \"dangerous tool: $JCODE_HOOK_TOOL_NAME\" >&2\nexit 2\n",
+            "#!/bin/sh\ncat > /dev/null\necho \"dangerous tool: $KCODE_HOOK_TOOL_NAME\" >&2\nexit 2\n",
         );
         {
             let _env = gate_test_config(&block.to_string_lossy(), 5000);
@@ -591,13 +923,13 @@ mod tests {
             temp.path(),
             "observe.sh",
             &format!(
-                "#!/bin/sh\nprintf '%s|%s|%s|%s' \"$JCODE_HOOK_EVENT\" \"$JCODE_HOOK_SESSION_ID\" \"$JCODE_HOOK_STATUS\" \"$JCODE_HOOKS_DISABLED\" > {}\n",
+                "#!/bin/sh\nprintf '%s|%s|%s|%s' \"$KCODE_HOOK_EVENT\" \"$KCODE_HOOK_SESSION_ID\" \"$KCODE_HOOK_STATUS\" \"$KCODE_HOOKS_DISABLED\" > {}\n",
                 crate::terminal_launch::sh_escape(&record.to_string_lossy())
             ),
         );
 
-        let prev = std::env::var_os("JCODE_HOOK_TURN_END");
-        crate::env::set_var("JCODE_HOOK_TURN_END", script.to_string_lossy().to_string());
+        let prev = std::env::var_os("KCODE_HOOK_TURN_END");
+        crate::env::set_var("KCODE_HOOK_TURN_END", script.to_string_lossy().to_string());
 
         dispatch_observer(
             HookEvent::new("turn_end")
@@ -616,8 +948,8 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         match prev {
-            Some(value) => crate::env::set_var("JCODE_HOOK_TURN_END", value),
-            None => crate::env::remove_var("JCODE_HOOK_TURN_END"),
+            Some(value) => crate::env::set_var("KCODE_HOOK_TURN_END", value),
+            None => crate::env::remove_var("KCODE_HOOK_TURN_END"),
         }
         assert_eq!(recorded, "turn_end|ses_obs|ok|1");
     }
@@ -637,8 +969,8 @@ mod tests {
             ),
         );
 
-        let previous = std::env::var_os("JCODE_HOOK_TURN_END");
-        crate::env::set_var("JCODE_HOOK_TURN_END", script.to_string_lossy().to_string());
+        let previous = std::env::var_os("KCODE_HOOK_TURN_END");
+        crate::env::set_var("KCODE_HOOK_TURN_END", script.to_string_lossy().to_string());
         dispatch_observer(HookEvent::new("turn_end").session_id("ses_reap"));
 
         let mut pid: Option<u32> = None;
@@ -652,8 +984,8 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         match previous {
-            Some(value) => crate::env::set_var("JCODE_HOOK_TURN_END", value),
-            None => crate::env::remove_var("JCODE_HOOK_TURN_END"),
+            Some(value) => crate::env::set_var("KCODE_HOOK_TURN_END", value),
+            None => crate::env::remove_var("KCODE_HOOK_TURN_END"),
         }
 
         let pid = pid.expect("hook should record its pid");
@@ -690,9 +1022,9 @@ mod tests {
                 crate::terminal_launch::sh_escape(&second_record.to_string_lossy())
             ),
         );
-        let previous = std::env::var_os("JCODE_HOOK_SESSION_START");
+        let previous = std::env::var_os("KCODE_HOOK_SESSION_START");
         crate::env::set_var(
-            "JCODE_HOOK_SESSION_START",
+            "KCODE_HOOK_SESSION_START",
             format!(
                 "[{:?}, {:?}]",
                 first.to_string_lossy(),
@@ -708,8 +1040,8 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         match previous {
-            Some(value) => crate::env::set_var("JCODE_HOOK_SESSION_START", value),
-            None => crate::env::remove_var("JCODE_HOOK_SESSION_START"),
+            Some(value) => crate::env::set_var("KCODE_HOOK_SESSION_START", value),
+            None => crate::env::remove_var("KCODE_HOOK_SESSION_START"),
         }
         assert_eq!(std::fs::read_to_string(first_record).unwrap(), "first");
         assert_eq!(std::fs::read_to_string(second_record).unwrap(), "second");
@@ -749,7 +1081,7 @@ mod tests {
         let script = write_executable_script(
             temp.path(),
             "env.sh",
-            "#!/bin/sh\nprintf '%s|%s|%s|%s' \"$TMUX_PANE\" \"$HERDR_PANE_ID\" \"$JCODE_CLIENT_TMUX_PANE\" \"$JCODE_CLIENT_HERDR_PANE_ID\"\n",
+            "#!/bin/sh\nprintf '%s|%s|%s|%s' \"$TMUX_PANE\" \"$HERDR_PANE_ID\" \"$KCODE_CLIENT_TMUX_PANE\" \"$KCODE_CLIENT_HERDR_PANE_ID\"\n",
         );
         let previous_tmux = std::env::var_os("TMUX_PANE");
         let previous_herdr = std::env::var_os("HERDR_PANE_ID");

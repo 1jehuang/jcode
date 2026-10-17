@@ -37,7 +37,7 @@ The harness runs three checks against one live client:
 Each byte encoding is tried against a freshly reset fixture so we learn exactly
 which terminal encoding(s) work end to end.
 
-Everything runs in a throwaway JCODE_HOME / runtime dir / socket. The user's
+Everything runs in a throwaway KCODE_HOME / runtime dir / socket. The user's
 real server and sessions are never touched.
 
 Usage
@@ -259,14 +259,14 @@ def launch_client(binary: str, env: dict, session_id: str, name: str,
     # Route this client's file-based debug channel to per-client paths so we can
     # talk to *this* live TUI directly (fixture setup + state readback + the
     # synthetic-key positive control).
-    cenv["JCODE_DEBUG_CMD_PATH"] = str(debug_cmd)
-    cenv["JCODE_DEBUG_RESPONSE_PATH"] = str(debug_resp)
+    cenv["KCODE_DEBUG_CMD_PATH"] = str(debug_cmd)
+    cenv["KCODE_DEBUG_RESPONSE_PATH"] = str(debug_resp)
     proc = subprocess.Popen(
         [
             binary,
             "--no-update",
             "--no-selfdev",
-            "--socket", env["JCODE_SOCKET"],
+            "--socket", env["KCODE_SOCKET"],
             "--resume", session_id,
         ],
         stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
@@ -429,7 +429,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    default_bin = Path.home() / ".jcode" / "builds" / "current" / "jcode"
+    default_bin = Path.home() / ".kcode" / "builds" / "current" / "jcode"
     ap.add_argument("--binary", default=str(default_bin))
     ap.add_argument("--keep", action="store_true", help="keep temp home on exit")
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -447,14 +447,14 @@ def main() -> int:
     run.mkdir(parents=True, exist_ok=True)
 
     env = os.environ.copy()
-    env["JCODE_HOME"] = str(home)
-    env["JCODE_RUNTIME_DIR"] = str(run)
-    env["JCODE_SOCKET"] = str(run / "jcode.sock")
-    env["JCODE_NO_TELEMETRY"] = "1"
-    env["JCODE_DEBUG_CONTROL"] = "1"
-    env["JCODE_TEMP_SERVER"] = "1"
-    env["JCODE_SERVER_OWNER_PID"] = str(os.getpid())
-    debug_sock = run / "jcode-debug.sock"
+    env["KCODE_HOME"] = str(home)
+    env["KCODE_RUNTIME_DIR"] = str(run)
+    env["KCODE_SOCKET"] = str(run / "kcode.sock")
+    env["KCODE_NO_TELEMETRY"] = "1"
+    env["KCODE_DEBUG_CONTROL"] = "1"
+    env["KCODE_TEMP_SERVER"] = "1"
+    env["KCODE_SERVER_OWNER_PID"] = str(os.getpid())
+    debug_sock = run / "kcode-debug.sock"
     client_cmd_path = run / "client_debug_cmd"
     client_resp_path = run / "client_debug_resp"
 
@@ -465,7 +465,7 @@ def main() -> int:
     print(f"  home   : {home}")
 
     server = subprocess.Popen(
-        [binary, "serve", "--socket", env["JCODE_SOCKET"], "--debug-socket",
+        [binary, "serve", "--socket", env["KCODE_SOCKET"], "--debug-socket",
          "--no-update", "--no-selfdev"],
         env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         preexec_fn=os.setsid,
@@ -474,7 +474,7 @@ def main() -> int:
     client: LiveClient | None = None
     rc = 3
     try:
-        wait_for_socket(Path(env["JCODE_SOCKET"]))
+        wait_for_socket(Path(env["KCODE_SOCKET"]))
         wait_for_socket(debug_sock)
         print("  server : up")
 

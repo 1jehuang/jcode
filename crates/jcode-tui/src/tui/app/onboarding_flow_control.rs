@@ -210,7 +210,7 @@ impl App {
     /// `maybe_show_setup_hints`, so `launch_count` never advances and the
     /// new-user heuristic above would otherwise treat every spawn as a first run.
     /// Such sessions should never auto-start the guided onboarding flow.
-    fn is_selfdev_canary_session(&self) -> bool {
+    pub(super) fn is_selfdev_canary_session(&self) -> bool {
         if self.is_remote {
             self.remote_is_canary.unwrap_or(self.session.is_canary)
         } else {
@@ -246,8 +246,15 @@ impl App {
             return;
         }
         // Detect importable external logins and, if any, build a per-candidate
-        // yes/no walkthrough rendered by the onboarding welcome screen.
-        let import = match crate::external_auth::pending_external_auth_review_candidates() {
+        // yes/no walkthrough rendered by the onboarding welcome screen. A
+        // rehearsal lists every login on this machine, as a fresh install would,
+        // including ones jcode already trusts (importing those is a no-op).
+        let detected = if self.onboarding_sim_active() {
+            crate::external_auth::detected_external_auth_review_candidates()
+        } else {
+            crate::external_auth::pending_external_auth_review_candidates()
+        };
+        let import = match detected {
             Ok(candidates) => ImportReview::new(candidates),
             Err(err) => {
                 crate::logging::error(&format!(
@@ -296,11 +303,10 @@ impl App {
         // The import (if any) has resolved; leave the progress state.
         self.onboarding_import_in_progress = None;
         self.onboarding_import_error = None;
-        // Content sharing is opt-in and off by default. Respect an explicit
-        // choice from the telemetry settings page instead of overwriting it.
-        if !self.onboarding_telemetry_choice_made {
-            crate::telemetry::set_content_sharing_enabled(false);
-        }
+        // Content sharing is opt-in and off by default: a fresh install has no
+        // marker, so there is nothing to write here. Never clear an existing
+        // opt-in; re-running onboarding must not change settings the user
+        // already chose.
         self.set_onboarding_phase(OnboardingPhase::ModelSelect);
         self.onboarding_after_model_select();
     }
@@ -537,8 +543,8 @@ impl App {
     /// Returns true if the key was consumed.
     ///
     /// The screen has two modes:
-    ///   * Summary: detected logins plus Continue, Subscription, Import less,
-    ///     and Telemetry pills. Arrows/Tab move; Enter/Space commits.
+    ///   * Summary: detected logins plus Continue, Import less, and Telemetry
+    ///     pills. Arrows/Tab move; Enter/Space commits.
     ///   * Choose (checkbox list): per-login Yes/No rows.
     ///     - Up / Down / k / j -> move the cursor between logins
     ///     - Left / h / y -> choose "Yes" (import) for the highlighted login
@@ -549,9 +555,6 @@ impl App {
         // `finished` means the user committed the import (so we kick it off
         // outside the borrow).
         let mut finished = false;
-        // Set when the user wants to learn about the hosted Jcode subscription
-        // instead of importing one of the detected third-party logins.
-        let mut open_pricing = false;
         // Set when the user committed a telemetry level, so we persist it
         // outside the review borrow.
         let mut telemetry_choice = None;
@@ -578,7 +581,7 @@ impl App {
                     _ => return false,
                 }
             } else if !review.choosing {
-                // Summary: Continue, Subscription, Import less, and Telemetry pills.
+                // Summary: Continue, Import less, and Telemetry pills.
                 // Arrows/Tab move; Enter/Space commits the focused one.
                 match code {
                     KeyCode::Left
@@ -600,7 +603,6 @@ impl App {
                     KeyCode::Char('y') | KeyCode::Char('Y') => finished = true,
                     KeyCode::Enter | KeyCode::Char(' ') => match review.summary_pill {
                         SummaryPill::Continue => finished = true,
-                        SummaryPill::Subscription => open_pricing = true,
                         SummaryPill::ImportLess => review.enter_choose_mode(),
                         SummaryPill::Telemetry => review.open_telemetry(),
                     },
@@ -628,18 +630,13 @@ impl App {
             }
         }
         if let Some(level) = telemetry_choice {
-            level.persist();
             self.onboarding_telemetry_choice_made = true;
-            self.set_status_notice(level.status_label().to_string());
-            return true;
-        }
-        if open_pricing {
-            self.onboarding_import_error = None;
-            let url = crate::subscription_catalog::JCODE_PRICING_URL;
-            if super::helpers::open_path_or_url_detached(url).is_ok() {
-                self.set_status_notice(format!("Opened Jcode pricing: {url}"));
+            if self.onboarding_sim_active() {
+                // A rehearsal must leave this machine's real settings alone.
+                self.set_status_notice(format!("{} (rehearsal, not saved)", level.status_label()));
             } else {
-                self.set_status_notice(format!("Open Jcode pricing: {url}"));
+                level.persist();
+                self.set_status_notice(level.status_label().to_string());
             }
             return true;
         }
@@ -717,7 +714,13 @@ impl App {
         ) {
             return;
         }
-        if wants_openai {
+        if wants_openai && Self::openai_already_connected() {
+            // Re-running onboarding with OpenAI already signed in: there is
+            // nothing to sign in to, so continue as if the sign-in just
+            // finished instead of asking the user to log in again.
+            self.onboarding_after_login();
+            self.set_status_notice("OpenAI is already connected");
+        } else if wants_openai {
             self.onboarding_start_default_login();
         } else {
             self.onboarding_finish();
@@ -735,6 +738,14 @@ impl App {
             self.push_display_message(DisplayMessage::system(hint));
             self.set_status_notice(format!("Run {login} when you're ready"));
         }
+    }
+
+    /// Whether jcode already has a working OpenAI login.
+    fn openai_already_connected() -> bool {
+        crate::external_auth::provider_connected_in_jcode(
+            &crate::auth::AuthStatus::check_fast(),
+            "openai",
+        )
     }
 
     /// Refresh the status notice for the "Log in to OpenAI?" prompt.
@@ -849,31 +860,39 @@ impl App {
             ));
             return;
         };
+        let rehearsal = self.onboarding_sim_active();
         runtime.spawn(async move {
-            let outcome = match crate::external_auth::run_external_auth_auto_import_candidates(
-                &candidates,
-                &approved,
-            )
-            .await
-            {
-                Ok(outcome) => outcome,
-                Err(err) => {
-                    crate::bus::Bus::global().publish(crate::bus::BusEvent::LoginCompleted(
-                        crate::bus::LoginCompleted {
-                            provider: "auto-import".to_string(),
-                            success: false,
-                            message: format!("Auto import failed: {}", err),
-                        },
-                    ));
-                    return;
-                }
-            };
+            // Never let an imported source shadow a login jcode already has.
+            // Already-connected providers count as imported, so re-running
+            // onboarding on a set-up machine continues without a re-sign-in.
+            let outcome =
+                match crate::external_auth::run_external_auth_import_candidates_preserving_existing(
+                    &candidates,
+                    &approved,
+                )
+                .await
+                {
+                    Ok(outcome) => outcome,
+                    Err(err) => {
+                        crate::bus::Bus::global().publish(crate::bus::BusEvent::LoginCompleted(
+                            crate::bus::LoginCompleted {
+                                provider: "auto-import".to_string(),
+                                success: false,
+                                message: format!("Auto import failed: {}", err),
+                            },
+                        ));
+                        return;
+                    }
+                };
             // Auto-import bypasses the manual `pending_login` path, so record
             // `auth_success` here for each imported provider. Without this the
             // onboarding activation funnel undercounts every imported login
-            // (the happy path of the guided first-run flow).
+            // (the happy path of the guided first-run flow). Rehearsals are not
+            // real activations, so they stay out of the funnel.
             for (provider, method) in &outcome.imported_auth_labels {
-                crate::telemetry::record_auth_success(provider, method);
+                if !rehearsal {
+                    crate::telemetry::record_auth_success(provider, method);
+                }
             }
             // Preserve which runtime should become the first-run default. The old
             // synthetic `auto-import` provider discarded this information, so the
@@ -932,7 +951,7 @@ impl App {
     ///
     /// Resolving the most active Git repository requires a full session-list
     /// scan, which is a cold multi-hundred-millisecond disk walk on machines
-    /// with a large `~/.jcode/sessions` directory. Doing it inline on Enter made
+    /// with a large `~/.kcode/sessions` directory. Doing it inline on Enter made
     /// the suggested repository review action feel laggy, so run it
     /// off-thread as soon as the choice is displayed and have the key handler
     /// consume the cached answer.
@@ -1674,11 +1693,8 @@ impl App {
     /// Drive auto-advancing phases. Call once per tick/redraw. Returns true if
     /// the flow state changed (so the caller can request a redraw).
     pub(super) fn onboarding_tick(&mut self) -> bool {
-        // The onboarding simulator drives phases manually; never auto-advance
-        // while it is walking screens.
-        if self.onboarding_sim_active() {
-            return false;
-        }
+        // A rehearsal ticks exactly like a first run (countdowns, the import
+        // watchdog, model validation), so there is no special case here.
         // Fresh-install bootstrap: if we were already logged in at the CLI before
         // the TUI launched, no in-TUI login event fired, so evaluate (once)
         // whether to begin the guided flow now that the TUI is up.

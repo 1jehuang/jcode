@@ -17,7 +17,12 @@ fn unknown_ctrl_chord_sets_hotkey_feedback_with_suggestion() {
         .expect("unknown chord should set feedback");
     assert!(message.contains("Ctrl+M"), "{message}");
     assert!(message.contains("isn't bound"), "{message}");
-    assert!(message.contains("Alt+M"), "{message}");
+    // The suggestion renders the platform chord via alt_chord (Option symbol
+    // on macOS, Alt elsewhere); assert that instead of hardcoded "Alt+M".
+    assert!(
+        message.contains(&jcode_tui_core::keybind::alt_chord("M")),
+        "{message}"
+    );
     assert!(message.contains("side panel"), "{message}");
 
     // The renderer consumes the trait accessor; it must surface the same text
@@ -35,7 +40,7 @@ fn unknown_ctrl_chord_sets_hotkey_feedback_with_suggestion() {
 fn rare_known_hotkey_sets_feedback_and_repeats_stop_once_familiar() {
     let mut app = create_test_app();
 
-    // Ctrl+T toggles queue mode; a fresh JCODE_HOME has no usage history, so
+    // Ctrl+T toggles queue mode; a fresh KCODE_HOME has no usage history, so
     // the first press is "rare" and should explain itself.
     app.handle_key(KeyCode::Char('t'), KeyModifiers::CONTROL)
         .unwrap();

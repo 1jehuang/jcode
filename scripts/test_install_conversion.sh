@@ -38,7 +38,7 @@ case "$url" in
     ;;
   *jcode.sh/releases/v1.2.3/download-bases)
     printf 'https://mirror.invalid/releases/v1.2.3\n'
-    printf 'https://github.com/1jehuang/jcode/releases/download/v1.2.3\n'
+    printf 'https://github.com/KooshaPari/KCode/releases/download/v1.2.3\n'
     ;;
   *jcode.sh/releases/v1.2.3/SHA256SUMS)
     if [ "${METADATA_CHECKSUM_HTML:-0}" = "1" ]; then
@@ -57,7 +57,7 @@ case "$url" in
   *github.com*/releases/latest)
     [ "${FAIL_RELEASE:-0}" != "1" ] || exit 22
     [ "${FAIL_GITHUB_RELEASE:-0}" != "1" ] || exit 22
-    printf 'https://github.com/1jehuang/jcode/releases/tag/v1.2.3'
+    printf 'https://github.com/KooshaPari/KCode/releases/tag/v1.2.3'
     ;;
   *mirror.invalid*) exit 22 ;;
   *github.com*/releases/download/*)
@@ -94,15 +94,15 @@ telemetry_log="$tmp/telemetry.jsonl"
 hotkey_setup_log="$tmp/hotkey-setup.log"
 PATH="$tmp/bin:$PATH" \
 HOME="$tmp/home" \
-JCODE_HOME="$tmp/home/.jcode" \
-JCODE_INSTALL_DIR="$tmp/install" \
-JCODE_INSTALL_CONVERSION_ID="$conversion_id" \
-JCODE_SKIP_SERVER_RELOAD=1 \
+KCODE_HOME="$tmp/home/.kcode" \
+KCODE_INSTALL_DIR="$tmp/install" \
+KCODE_INSTALL_CONVERSION_ID="$conversion_id" \
+KCODE_SKIP_SERVER_RELOAD=1 \
 INSTALL_TELEMETRY_LOG="$telemetry_log" \
 HOTKEY_SETUP_LOG="$hotkey_setup_log" \
 bash "$repo_dir/scripts/install.sh" >/dev/null
 
-test "$(cat "$tmp/home/.jcode/install_conversion_id")" = "$conversion_id"
+test "$(cat "$tmp/home/.kcode/install_conversion_id")" = "$conversion_id"
 grep -q '"stage":"installer_start".*"outcome":"success"' "$telemetry_log"
 grep -q '"stage":"installer_finish".*"outcome":"success"' "$telemetry_log"
 test "$(cat "$hotkey_setup_log")" = "setup-hotkey"
@@ -111,10 +111,10 @@ test "$(cat "$hotkey_setup_log")" = "setup-hotkey"
 # must keep the complete install path working.
 PATH="$tmp/bin:$PATH" \
 HOME="$tmp/home-metadata-fallback" \
-JCODE_HOME="$tmp/home-metadata-fallback/.jcode" \
-JCODE_INSTALL_DIR="$tmp/install-metadata-fallback" \
-JCODE_SKIP_SERVER_RELOAD=1 \
-JCODE_NO_TELEMETRY=1 \
+KCODE_HOME="$tmp/home-metadata-fallback/.kcode" \
+KCODE_INSTALL_DIR="$tmp/install-metadata-fallback" \
+KCODE_SKIP_SERVER_RELOAD=1 \
+KCODE_NO_TELEMETRY=1 \
 FAIL_GITHUB_RELEASE=1 \
 bash "$repo_dir/scripts/install.sh" >/dev/null
 test -x "$tmp/install-metadata-fallback/jcode"
@@ -123,10 +123,10 @@ test -x "$tmp/install-metadata-fallback/jcode"
 # Treat that as invalid metadata and continue to GitHub's checksum file.
 PATH="$tmp/bin:$PATH" \
 HOME="$tmp/home-checksum-fallback" \
-JCODE_HOME="$tmp/home-checksum-fallback/.jcode" \
-JCODE_INSTALL_DIR="$tmp/install-checksum-fallback" \
-JCODE_SKIP_SERVER_RELOAD=1 \
-JCODE_NO_TELEMETRY=1 \
+KCODE_HOME="$tmp/home-checksum-fallback/.kcode" \
+KCODE_INSTALL_DIR="$tmp/install-checksum-fallback" \
+KCODE_SKIP_SERVER_RELOAD=1 \
+KCODE_NO_TELEMETRY=1 \
 METADATA_CHECKSUM_HTML=1 \
 bash "$repo_dir/scripts/install.sh" >/dev/null
 test -x "$tmp/install-checksum-fallback/jcode"
@@ -137,10 +137,10 @@ windows_url_log="$tmp/windows-arm64-urls.log"
 PATH="$tmp/bin:$PATH" \
 HOME="$tmp/home-windows-arm64" \
 LOCALAPPDATA="$tmp/localappdata-windows-arm64" \
-JCODE_HOME="$tmp/home-windows-arm64/.jcode" \
-JCODE_INSTALL_DIR="$tmp/install-windows-arm64" \
-JCODE_SKIP_SERVER_RELOAD=1 \
-JCODE_NO_TELEMETRY=1 \
+KCODE_HOME="$tmp/home-windows-arm64/.kcode" \
+KCODE_INSTALL_DIR="$tmp/install-windows-arm64" \
+KCODE_SKIP_SERVER_RELOAD=1 \
+KCODE_NO_TELEMETRY=1 \
 TEST_UNAME_S=MINGW64_NT-10.0 \
 TEST_UNAME_M=x86_64 \
 PROCESSOR_ARCHITECTURE=AMD64 \
@@ -155,10 +155,10 @@ test -x "$tmp/install-windows-arm64/jcode.exe"
 failure_log="$tmp/failure.jsonl"
 if PATH="$tmp/bin:$PATH" \
   HOME="$tmp/home-failure" \
-  JCODE_HOME="$tmp/home-failure/.jcode" \
-  JCODE_INSTALL_DIR="$tmp/install-failure" \
-  JCODE_INSTALL_CONVERSION_ID="$conversion_id" \
-  JCODE_SKIP_SERVER_RELOAD=1 \
+  KCODE_HOME="$tmp/home-failure/.kcode" \
+  KCODE_INSTALL_DIR="$tmp/install-failure" \
+  KCODE_INSTALL_CONVERSION_ID="$conversion_id" \
+  KCODE_SKIP_SERVER_RELOAD=1 \
   INSTALL_TELEMETRY_LOG="$failure_log" \
   FAIL_RELEASE=1 \
   bash "$repo_dir/scripts/install.sh" >/dev/null 2>&1; then
@@ -170,10 +170,10 @@ grep -q '"stage":"installer_finish".*"outcome":"failure".*"failure_stage":"relea
 checksum_failure_log="$tmp/checksum-failure.jsonl"
 if PATH="$tmp/bin:$PATH" \
   HOME="$tmp/home-checksum-failure" \
-  JCODE_HOME="$tmp/home-checksum-failure/.jcode" \
-  JCODE_INSTALL_DIR="$tmp/install-checksum-failure" \
-  JCODE_INSTALL_CONVERSION_ID="$conversion_id" \
-  JCODE_SKIP_SERVER_RELOAD=1 \
+  KCODE_HOME="$tmp/home-checksum-failure/.kcode" \
+  KCODE_INSTALL_DIR="$tmp/install-checksum-failure" \
+  KCODE_INSTALL_CONVERSION_ID="$conversion_id" \
+  KCODE_SKIP_SERVER_RELOAD=1 \
   INSTALL_TELEMETRY_LOG="$checksum_failure_log" \
   BAD_CHECKSUM=1 \
   bash "$repo_dir/scripts/install.sh" >/dev/null 2>&1; then
@@ -190,14 +190,14 @@ fi
 privacy_log="$tmp/privacy.jsonl"
 PATH="$tmp/bin:$PATH" \
 HOME="$tmp/home-private" \
-JCODE_HOME="$tmp/home-private/.jcode" \
-JCODE_INSTALL_DIR="$tmp/install-private" \
-JCODE_INSTALL_CONVERSION_ID="$conversion_id" \
-JCODE_SKIP_SERVER_RELOAD=1 \
-JCODE_NO_TELEMETRY=1 \
+KCODE_HOME="$tmp/home-private/.kcode" \
+KCODE_INSTALL_DIR="$tmp/install-private" \
+KCODE_INSTALL_CONVERSION_ID="$conversion_id" \
+KCODE_SKIP_SERVER_RELOAD=1 \
+KCODE_NO_TELEMETRY=1 \
 INSTALL_TELEMETRY_LOG="$privacy_log" \
 bash "$repo_dir/scripts/install.sh" >/dev/null
 test ! -e "$privacy_log"
-test ! -e "$tmp/home-private/.jcode/install_conversion_id"
+test ! -e "$tmp/home-private/.kcode/install_conversion_id"
 
 echo "installer conversion telemetry tests passed"

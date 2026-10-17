@@ -254,13 +254,13 @@ async fn live_list_windows() {
 #[tokio::test]
 #[ignore = "requires GUI + permissions"]
 async fn live_clipboard_roundtrip() {
-    run_action(json!({ "action": "set_clipboard", "text": "jcode-clip-test" }))
+    run_action(json!({ "action": "set_clipboard", "text": "kcode-clip-test" }))
         .await
         .unwrap();
     let out = run_action(json!({ "action": "get_clipboard" }))
         .await
         .unwrap();
-    assert!(out.output.contains("jcode-clip-test"));
+    assert!(out.output.contains("kcode-clip-test"));
 }
 
 #[tokio::test]

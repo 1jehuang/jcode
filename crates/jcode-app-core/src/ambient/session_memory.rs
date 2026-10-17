@@ -41,12 +41,19 @@ pub fn fit_section(content: &str) -> String {
 
 /// Build a session notes prompt from a custom template.
 ///
-/// Loads `template.md` from `~/.jcode/session-memory/config/`, substitutes
+/// Loads `template.md` from `~/.kcode/session-memory/config/`, substitutes
 /// `{{variable}}` placeholders, and returns the rendered text. Falls back
 /// to the raw content if no template is found.
 pub fn render_session_template(content: &str, variables: &HashMap<String, String>) -> String {
     let substitutor = VariableSubstitutor::new(variables.clone());
-    let loader = TemplateLoader::new();
+    let Ok(root) = crate::storage::jcode_dir() else {
+        return substitutor.substitute(content);
+    };
+    let loader = TemplateLoader::with_base_dir(
+        root.join("session-memory/config")
+            .to_string_lossy()
+            .into_owned(),
+    );
 
     match loader.load_template() {
         Some(template) => {

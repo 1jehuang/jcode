@@ -167,7 +167,7 @@ def start_resume_client(binary: str, env: dict[str, str], session_id: str) -> Li
             "--no-update",
             "--no-selfdev",
             "--socket",
-            env["JCODE_SOCKET"],
+            env["KCODE_SOCKET"],
             "--fresh-spawn",
             "--resume",
             session_id,
@@ -325,24 +325,24 @@ def main() -> None:
     home.mkdir(parents=True, exist_ok=True)
     run.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
-    env["JCODE_HOME"] = str(home)
-    env["JCODE_RUNTIME_DIR"] = str(run)
-    env["JCODE_SOCKET"] = str(run / "jcode.sock")
-    env["JCODE_NO_TELEMETRY"] = "1"
-    env["JCODE_DEBUG_CONTROL"] = "1"
-    env["JCODE_TEMP_SERVER"] = "1"
-    env["JCODE_SERVER_OWNER_PID"] = str(os.getpid())
-    debug_socket = run / "jcode-debug.sock"
+    env["KCODE_HOME"] = str(home)
+    env["KCODE_RUNTIME_DIR"] = str(run)
+    env["KCODE_SOCKET"] = str(run / "kcode.sock")
+    env["KCODE_NO_TELEMETRY"] = "1"
+    env["KCODE_DEBUG_CONTROL"] = "1"
+    env["KCODE_TEMP_SERVER"] = "1"
+    env["KCODE_SERVER_OWNER_PID"] = str(os.getpid())
+    debug_socket = run / "kcode-debug.sock"
 
     server = subprocess.Popen(
-        [args.binary, "serve", "--socket", env["JCODE_SOCKET"], "--debug-socket"],
+        [args.binary, "serve", "--socket", env["KCODE_SOCKET"], "--debug-socket"],
         env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         preexec_fn=os.setsid,
     )
     try:
-        wait_for_socket(Path(env["JCODE_SOCKET"]))
+        wait_for_socket(Path(env["KCODE_SOCKET"]))
         wait_for_socket(debug_socket)
         session_ids = [create_session(debug_socket, os.getcwd()) for _ in range(args.burst)]
 

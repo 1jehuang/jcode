@@ -10,9 +10,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let home = tempfile::tempdir()?;
     // This is a single-threaded probe until the first guard starts delivery.
     unsafe {
-        std::env::set_var("JCODE_HOME", home.path());
-        std::env::set_var("JCODE_CI", "1");
-        std::env::set_var("JCODE_NO_TELEMETRY", "0");
+        std::env::set_var("KCODE_HOME", home.path());
+        std::env::set_var("KCODE_CI", "1");
+        std::env::set_var("KCODE_NO_TELEMETRY", "0");
         std::env::set_var("DO_NOT_TRACK", "0");
     }
     let mut first = begin_concurrency_session("concurrency-probe-root-a", None);

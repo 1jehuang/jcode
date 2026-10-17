@@ -14,7 +14,7 @@
 # Usage: scripts/webfetch_corpus.sh [outdir]
 set -uo pipefail
 
-OUT="${1:-${JCODE_SCRATCH_DIR:-/tmp}/webfetch-corpus}"
+OUT="${1:-${KCODE_SCRATCH_DIR:-/tmp}/webfetch-corpus}"
 mkdir -p "$OUT"
 UA="Mozilla/5.0 (compatible; JCode/1.0)"
 

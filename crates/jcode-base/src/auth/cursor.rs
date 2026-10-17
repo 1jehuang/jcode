@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use reqwest::Client;
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
@@ -10,7 +11,7 @@ const CURSOR_API_BASE: &str = "https://api2.cursor.sh";
 // Cursor's server rejects stale client versions for chat ("Update Required").
 // This must track a real, currently-served Cursor IDE release (e.g. 3.8.x),
 // not the Composer model number. Override at runtime with
-// `JCODE_CURSOR_CLIENT_VERSION` if Cursor moves the floor again.
+// `KCODE_CURSOR_CLIENT_VERSION` if Cursor moves the floor again.
 const CURSOR_DIRECT_CLIENT_VERSION_DEFAULT: &str = "3.8.24";
 const CURSOR_OAUTH_CLIENT_ID: &str = "KbZUR41cY7W6zRSdpSUJ7I7mLYBKOCmB";
 pub const CURSOR_AUTH_FILE_SOURCE_ID: &str = "cursor_auth_json";
@@ -155,7 +156,7 @@ pub fn trust_external_auth_source(source: ExternalCursorAuthSource) -> Result<()
 
 /// Resolve the advertised client version for native Cursor API requests.
 pub fn cursor_direct_client_version() -> String {
-    std::env::var("JCODE_CURSOR_CLIENT_VERSION")
+    std::env::var("KCODE_CURSOR_CLIENT_VERSION")
         .ok()
         .map(|raw| raw.trim().to_string())
         .filter(|raw| !raw.is_empty())
@@ -250,7 +251,9 @@ fn read_vscdb_key(db_path: &PathBuf, key: &str) -> Result<String> {
         .query_row("SELECT value FROM ItemTable WHERE key = ?1", [key], |row| {
             row.get(0)
         })
-        .with_context(|| format!("Key '{key}' not found in {}", db_path.display()))?;
+        .optional()
+        .with_context(|| format!("Failed to query Cursor state at {}", db_path.display()))?
+        .unwrap_or_default();
     let value = value.trim().to_string();
     if value.is_empty() {
         anyhow::bail!("Key '{}' not found or empty in {}", key, db_path.display());
@@ -260,7 +263,7 @@ fn read_vscdb_key(db_path: &PathBuf, key: &str) -> Result<String> {
 
 /// Load Cursor API key. Checks in order:
 /// 1. `CURSOR_API_KEY` env var
-/// 2. Saved key in `~/.config/jcode/cursor.env`
+/// 2. Saved key in `~/.config/kcode/cursor.env`
 pub fn load_api_key() -> Result<String> {
     if let Ok(key) = std::env::var("CURSOR_API_KEY") {
         let trimmed = jcode_provider_env::sanitize_secret_value(&key);
@@ -291,16 +294,16 @@ pub fn load_api_key() -> Result<String> {
     )
 }
 
-/// Save a Cursor API key to `~/.config/jcode/cursor.env`.
+/// Save a Cursor API key to `~/.config/kcode/cursor.env`.
 pub fn save_api_key(key: &str) -> Result<()> {
     let file_path = config_file_path()?;
     crate::storage::upsert_env_file_value(&file_path, "CURSOR_API_KEY", Some(key))?;
-
-    crate::env::set_var("CURSOR_API_KEY", key);
+    // File only (#1386): `load_api_key` falls back to this file, and a process
+    // env copy would shadow later edits and leak into child processes.
     Ok(())
 }
 
-/// Remove the saved Cursor API key from `~/.config/jcode/cursor.env` and the
+/// Remove the saved Cursor API key from `~/.config/kcode/cursor.env` and the
 /// current process environment.
 pub fn clear_api_key() -> Result<()> {
     let file_path = config_file_path()?;
@@ -320,9 +323,9 @@ pub fn cursor_auth_file_path() -> Result<PathBuf> {
     #[cfg(target_os = "windows")]
     {
         // Keep private SDK/test instances private on Windows too. Without this
-        // branch, APPDATA points at the real user profile even when JCODE_HOME
+        // branch, APPDATA points at the real user profile even when KCODE_HOME
         // is set, unlike every other external credential lookup.
-        if std::env::var_os("JCODE_HOME").is_some() {
+        if std::env::var_os("KCODE_HOME").is_some() {
             return crate::storage::user_home_path("AppData/Roaming/Cursor/auth.json")
                 .context("No home directory found for Cursor auth.json");
         }
@@ -341,13 +344,13 @@ pub fn cursor_auth_file_path() -> Result<PathBuf> {
 
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
-        // Honor JCODE_HOME isolation (used by the onboarding sandbox and tests)
+        // Honor KCODE_HOME isolation (used by the onboarding sandbox and tests)
         // the same way every other external-CLI auth detector does. Without this,
         // Cursor would leak the real `~/.config/cursor/auth.json` into a sandbox
         // while Codex/Claude/Gemini/Copilot correctly look under
-        // `$JCODE_HOME/external/...`, so a fresh-install sandbox would show only
+        // `$KCODE_HOME/external/...`, so a fresh-install sandbox would show only
         // Cursor as importable.
-        if std::env::var_os("JCODE_HOME").is_some() {
+        if std::env::var_os("KCODE_HOME").is_some() {
             return crate::storage::user_home_path(".config/cursor/auth.json")
                 .context("No home directory found for Cursor auth.json");
         }

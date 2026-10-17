@@ -21,11 +21,7 @@ fn input_pane_screen_points(
     points
 }
 
-fn drag_copy(
-    app: &mut App,
-    start: (u16, u16),
-    end: (u16, u16),
-) -> String {
+fn drag_copy(app: &mut App, start: (u16, u16), end: (u16, u16)) -> String {
     let copied = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     let copied_for_closure = copied.clone();
     app.handle_copy_selection_mouse_with(
@@ -58,7 +54,7 @@ fn drag_copy(
             true
         },
     );
-    
+
     copied.lock().unwrap().clone()
 }
 
@@ -99,18 +95,15 @@ fn test_input_composer_drag_selects_and_copies_typed_text() {
 
     let copied = drag_copy(&mut app, start, end);
     assert_eq!(copied, "select this draft");
-    // Mouse-drag copy preserves the visible highlight; keyboard copy clears
-    // it.  Both notice variants are valid, so accept either.
-    let notice = app.status_notice();
-    assert!(
-        notice == Some("Copied selection".to_string())
-            || notice == Some("Copied selection · highlight remains visible".to_string()),
-        "expected a copy-success notice, got {notice:?}"
+    assert_eq!(
+        app.status_notice(),
+        Some("Copied selection · highlight remains visible".to_string())
     );
-    // Mouse-drag copy preserves the anchor and cursor (highlight stays
-    // visible until the next click).  Keyboard-initiated copy clears them.
-    // This test exercises the drag path, so accept either state.
-    let _ = (app.copy_selection_anchor, app.copy_selection_cursor);
+    // The highlight stays visible after copying (c7afd6620), but the drag ends.
+    assert!(!app.copy_selection_mode);
+    assert!(!app.copy_selection_dragging);
+    assert!(app.copy_selection_anchor.is_some());
+    assert!(app.copy_selection_cursor.is_some());
 }
 
 #[test]
@@ -419,9 +412,7 @@ fn test_input_composer_drag_then_release_copies_via_full_mouse_path() {
     assert!(
         matches!(
             app.status_notice().as_deref(),
-            Some("Copied selection")
-                | Some("Copied selection · highlight remains visible")
-                | Some("Failed to copy selection")
+            Some("Copied selection · highlight remains visible") | Some("Failed to copy selection")
         ),
         "drag release over the composer must attempt a copy, got {:?}",
         app.status_notice()

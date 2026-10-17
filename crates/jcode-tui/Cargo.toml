@@ -91,7 +91,7 @@ jcode-productivity-core = { path = "../jcode-productivity-core" }
 jcode-tui-workspace = { path = "../jcode-tui-workspace" }
 
 [features]
-default = ["pdf", "embeddings", "bedrock"]
+default = ["pdf", "bedrock"]
 # Exposes bench-only debug helpers (e.g. debug_copy_selection_text_for_bench)
 # consumed by the dev `tui_bench` binary in the root crate.
 dev-bins = []
@@ -116,6 +116,13 @@ jcode-app-core = { path = "../jcode-app-core", default-features = false, feature
 
 [target.'cfg(target_os = "macos")'.dependencies]
 global-hotkey = "0.7"
+
+# Built-in voice input (/voice, Ctrl+Space). macOS and Windows capture natively
+# through CoreAudio / WASAPI (system frameworks, like Jcode Desktop). Linux uses
+# an external recorder (pw-record, parecord, arecord, ...) so release builds
+# need no ALSA development headers.
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+jcode-base = { path = "../jcode-base", default-features = false, features = ["voice-capture"] }
 
 # Win32 console API for the terminal-abandonment probe
 # (`tui::app::terminal_liveness`). Reuses the same windows-sys version and

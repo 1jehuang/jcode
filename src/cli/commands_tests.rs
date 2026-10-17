@@ -12,11 +12,75 @@ use tokio::sync::mpsc as tokio_mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 #[test]
-fn memory_cli_project_import_uses_explicit_directory_and_persists() {
+fn server_reload_report_preserves_json_fields_and_exit_status_contract() {
+    let cases = [
+        (false, false, false, false),
+        (true, true, true, false),
+        (true, false, true, false),
+        (true, false, false, true),
+    ];
+
+    for (had_listener, already_current, handoff_ready, should_fail) in cases {
+        let report = ServerReloadReport {
+            socket: "/tmp/jcode.sock".to_string(),
+            had_listener,
+            forced: false,
+            reloaded: had_listener && !already_current,
+            already_current,
+            handoff_ready,
+            detail: "test reload outcome".to_string(),
+        };
+
+        let json = serde_json::to_value(&report).expect("serialize reload report");
+        assert_eq!(json["had_listener"], had_listener);
+        assert_eq!(json["already_current"], already_current);
+        assert_eq!(json["handoff_ready"], handoff_ready);
+
+        let result = validate_server_reload_report(&report);
+        assert_eq!(result.is_err(), should_fail, "report: {json}");
+        if should_fail {
+            assert!(
+                result
+                    .expect_err("not-ready handoff must fail")
+                    .to_string()
+                    .contains("never became ready")
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn server_reload_without_listener_is_a_successful_json_noop() {
+    let _env_lock = crate::storage::lock_test_env();
+    let _saved = SavedEnv::capture(&["KCODE_HOME", "KCODE_SOCKET"]);
+    let home = tempfile::tempdir().expect("tempdir");
+    crate::env::set_var("KCODE_HOME", home.path());
+    crate::env::set_var("KCODE_SOCKET", home.path().join("isolated.sock"));
+
+    let mut output = Vec::new();
+    let result = run_server_reload_command_to(false, true, &mut output).await;
+
+    result.expect("reload without a listener must be a successful no-op");
+    let report: serde_json::Value =
+        serde_json::from_slice(&output).expect("reload --json must emit one JSON report");
+    assert_eq!(report["had_listener"], false);
+    assert_eq!(report["already_current"], false);
+    assert_eq!(report["handoff_ready"], false);
+    assert_eq!(report["reloaded"], false);
+    assert_eq!(report["forced"], false);
+    assert!(
+        report["detail"]
+            .as_str()
+            .is_some_and(|detail| { detail.contains("No running jcode server found") })
+    );
+}
+
+#[tokio::test]
+async fn memory_cli_project_import_uses_explicit_directory_and_persists() {
     let _guard = crate::storage::lock_test_env();
-    let _saved = SavedEnv::capture(&["JCODE_HOME"]);
+    let _saved = SavedEnv::capture(&["KCODE_HOME"]);
     let temp = tempfile::tempdir().expect("temp dir");
-    crate::env::set_var("JCODE_HOME", temp.path().join("home"));
+    crate::env::set_var("KCODE_HOME", temp.path().join("home"));
     let project = temp.path().join("project");
     std::fs::create_dir_all(&project).expect("create project");
 
@@ -39,6 +103,7 @@ fn memory_cli_project_import_uses_explicit_directory_and_persists() {
         },
         Some(project.clone()),
     )
+    .await
     .expect("import project memory");
 
     let reloaded = crate::memory::MemoryManager::new()
@@ -53,8 +118,8 @@ fn memory_cli_project_import_uses_explicit_directory_and_persists() {
     );
 }
 
-#[test]
-fn memory_cli_project_import_fails_without_durable_project_store() {
+#[tokio::test]
+async fn memory_cli_project_import_fails_without_durable_project_store() {
     let temp = tempfile::tempdir().expect("temp dir");
     let input = temp.path().join("memories.json");
     std::fs::write(&input, "[]").expect("write import");
@@ -67,9 +132,63 @@ fn memory_cli_project_import_fails_without_durable_project_store() {
         },
         None,
     )
+    .await
     .expect_err("project import must require a durable store");
 
     assert!(error.to_string().contains("without a project directory"));
+}
+
+#[tokio::test]
+async fn memory_cli_semantic_requires_jev_but_keyword_search_remains_local() {
+    let _guard = crate::storage::lock_test_env();
+    let keys = [
+        "KCODE_HOME",
+        "KCODE_API_KEY",
+        "OPENROUTER_API_KEY",
+        "TYPESAFE_API_KEY",
+        "AIMLAPI_API_KEY",
+        "KCODE_MEMORY_JEV_PROVIDER",
+    ];
+    let _saved = SavedEnv::capture(&keys);
+    let temp = tempfile::tempdir().expect("temp dir");
+    crate::env::set_var("KCODE_HOME", temp.path().join("home"));
+    for key in &keys[1..] {
+        crate::env::remove_var(key);
+    }
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let manager = crate::memory::MemoryManager::new().with_project_dir(&project);
+    manager
+        .remember_project(crate::memory::MemoryEntry::new(
+            crate::memory::MemoryCategory::Fact,
+            "cli-jev-probe without embedding",
+        ))
+        .unwrap();
+    assert!(
+        manager
+            .list_all()
+            .unwrap()
+            .iter()
+            .all(|entry| entry.embedding.is_none())
+    );
+
+    let command = |semantic| MemorySubcommand::Search {
+        query: "cli-jev-probe".into(),
+        semantic,
+    };
+    run_memory_command_for_dir(command(false), Some(project.clone()))
+        .await
+        .expect("local keyword search must remain available without credentials");
+    let error = run_memory_command_for_dir(command(true), Some(project))
+        .await
+        .expect_err("--semantic must report missing Jev access, not silently use embeddings");
+    assert!(error.to_string().contains("Jev memory search failed"));
+    assert!(!format!("{error:#}").contains("cli-jev-probe"));
+
+    // Scope still comes from the explicit directory, never the process cwd.
+    run_memory_command_for_dir(command(true), Some(temp.path().join("empty-project")))
+        .await
+        .expect("an empty project must not leak another project's candidates");
 }
 
 struct SavedEnv {
@@ -152,6 +271,62 @@ impl Provider for FailingTestProvider {
     fn fork(&self) -> Arc<dyn Provider> {
         Arc::new(Self)
     }
+}
+
+struct OpenRouterSlotProvider;
+
+#[async_trait]
+impl Provider for OpenRouterSlotProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        Err(anyhow::anyhow!(
+            "the provider label test never sends a request"
+        ))
+    }
+
+    fn name(&self) -> &str {
+        "openrouter"
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self)
+    }
+}
+
+#[test]
+fn run_report_names_local_profile_instead_of_openrouter_slot() {
+    // Ollama/LM Studio share the OpenRouter transport slot (#804).
+    assert_eq!(
+        run_report_provider_name(&OpenRouterSlotProvider, Some("ollama")),
+        "ollama"
+    );
+    assert_eq!(
+        run_report_provider_name(&OpenRouterSlotProvider, Some("lmstudio")),
+        "lmstudio"
+    );
+    // Public OpenRouter and unknown identities keep the slot id.
+    assert_eq!(
+        run_report_provider_name(&OpenRouterSlotProvider, Some("openrouter")),
+        "openrouter"
+    );
+    assert_eq!(
+        run_report_provider_name(&OpenRouterSlotProvider, None),
+        "openrouter"
+    );
+    assert_eq!(
+        run_report_provider_name(&OpenRouterSlotProvider, Some("  ")),
+        "openrouter"
+    );
+    // Other providers keep their established name.
+    assert_eq!(
+        run_report_provider_name(&TestProvider, Some("openai-api")),
+        "test"
+    );
 }
 
 fn spawn_single_response_http_server(status: u16, body: &str) -> String {
@@ -395,7 +570,9 @@ fn run_auto_poke_followup_targets_below_threshold_todos() {
         }) => {
             assert_eq!(total_todos, 2);
             assert!(message.starts_with(crate::todo::TODO_COMPLETION_CONTINUATION_MESSAGE));
-            assert!(message.contains("completion confidence"));
+            assert!(message.contains("Validate further:"));
+            assert!(message.contains("\"todo a\""));
+            assert!(message.contains("\"todo b\""));
             assert!(!message.to_ascii_lowercase().contains("threshold"));
         }
         _ => panic!("expected confidence-summary follow-up"),
@@ -579,9 +756,9 @@ fn run_auto_poke_prefers_incomplete_todos_over_the_gate_digest() {
 #[test]
 fn open_todos_do_not_consume_the_pending_gate_digest() {
     let _guard = crate::storage::lock_test_env();
-    let previous_home = std::env::var_os("JCODE_HOME");
+    let previous_home = std::env::var_os("KCODE_HOME");
     let dir = tempfile::TempDir::new().expect("tempdir");
-    crate::env::set_var("JCODE_HOME", dir.path());
+    crate::env::set_var("KCODE_HOME", dir.path());
     let session = "run-gate-digest-open-todos";
 
     crate::todo::append_gate_observations(
@@ -642,8 +819,8 @@ fn open_todos_do_not_consume_the_pending_gate_digest() {
     );
 
     match previous_home {
-        Some(value) => crate::env::set_var("JCODE_HOME", value),
-        None => crate::env::remove_var("JCODE_HOME"),
+        Some(value) => crate::env::set_var("KCODE_HOME", value),
+        None => crate::env::remove_var("KCODE_HOME"),
     }
 }
 
@@ -652,9 +829,9 @@ fn open_todos_do_not_consume_the_pending_gate_digest() {
 #[test]
 fn take_run_gate_digest_consumes_the_log_and_respects_delivery() {
     let _guard = crate::storage::lock_test_env();
-    let previous_home = std::env::var_os("JCODE_HOME");
+    let previous_home = std::env::var_os("KCODE_HOME");
     let dir = tempfile::TempDir::new().expect("tempdir");
-    crate::env::set_var("JCODE_HOME", dir.path());
+    crate::env::set_var("KCODE_HOME", dir.path());
     let session = "run-gate-digest";
 
     crate::todo::append_gate_observations(
@@ -682,8 +859,8 @@ fn take_run_gate_digest_consumes_the_log_and_respects_delivery() {
     assert!(take_run_gate_digest(session, false).is_none());
 
     match previous_home {
-        Some(value) => crate::env::set_var("JCODE_HOME", value),
-        None => crate::env::remove_var("JCODE_HOME"),
+        Some(value) => crate::env::set_var("KCODE_HOME", value),
+        None => crate::env::remove_var("KCODE_HOME"),
     }
 }
 
@@ -712,13 +889,8 @@ fn run_auto_poke_followup_rechecks_completion_confidence_until_it_passes() {
         Some(ConfidenceState::Plausible),
         Some(ConfidenceState::Verified),
     )];
-    assert!(matches!(
-        build_run_auto_poke_follow_up_from_todos(&validated, false, None),
-        Some(RunAutoPokeFollowUp::ConfidenceSummary {
-            confidence_spike_challenge: true,
-            ..
-        })
-    ));
+    // A normal validation gain is not a reason to spend another model turn.
+    assert!(build_run_auto_poke_follow_up_from_todos(&validated, false, None).is_none());
     assert!(build_run_auto_poke_follow_up_from_todos(&validated, true, None).is_none());
 }
 
@@ -823,9 +995,9 @@ fn cloud_sessions_args_match_jade_helper_contract() {
 #[test]
 fn cloud_sessions_config_persists_secret_and_feeds_helper_env_without_args() {
     let _guard = crate::storage::lock_test_env();
-    let _saved = SavedEnv::capture(&["JCODE_HOME", "JADE_TOKEN_FOR_TEST"]);
+    let _saved = SavedEnv::capture(&["KCODE_HOME", "JADE_TOKEN_FOR_TEST"]);
     let temp = tempfile::tempdir().expect("tempdir");
-    crate::env::set_var("JCODE_HOME", temp.path());
+    crate::env::set_var("KCODE_HOME", temp.path());
     crate::env::set_var("JADE_TOKEN_FOR_TEST", "secret-token-value");
 
     run_cloud_sessions_configure(
@@ -913,9 +1085,9 @@ fn collect_sync_candidates_picks_only_session_json() {
 #[test]
 fn cloud_sessions_sync_dry_run_reports_without_uploading_or_writing_state() {
     let _guard = crate::storage::lock_test_env();
-    let _saved = SavedEnv::capture(&["JCODE_HOME", "JCODE_JADE_SESSIONS_HELPER"]);
+    let _saved = SavedEnv::capture(&["KCODE_HOME", "KCODE_JADE_SESSIONS_HELPER"]);
     let temp = tempfile::tempdir().expect("tempdir");
-    crate::env::set_var("JCODE_HOME", temp.path());
+    crate::env::set_var("KCODE_HOME", temp.path());
 
     // A dummy helper that should never run during a dry run.
     let helper = temp.path().join("never_runs.sh");
@@ -925,7 +1097,7 @@ fn cloud_sessions_sync_dry_run_reports_without_uploading_or_writing_state() {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
-    crate::env::set_var("JCODE_JADE_SESSIONS_HELPER", &helper);
+    crate::env::set_var("KCODE_JADE_SESSIONS_HELPER", &helper);
 
     let sessions_dir = temp.path().join("sessions");
     std::fs::create_dir_all(&sessions_dir).unwrap();
@@ -956,9 +1128,9 @@ fn cloud_sessions_sync_dry_run_reports_without_uploading_or_writing_state() {
 #[test]
 fn cloud_sessions_sync_respects_min_interval_throttle() {
     let _guard = crate::storage::lock_test_env();
-    let _saved = SavedEnv::capture(&["JCODE_HOME", "JCODE_JADE_SESSIONS_HELPER"]);
+    let _saved = SavedEnv::capture(&["KCODE_HOME", "KCODE_JADE_SESSIONS_HELPER"]);
     let temp = tempfile::tempdir().expect("tempdir");
-    crate::env::set_var("JCODE_HOME", temp.path());
+    crate::env::set_var("KCODE_HOME", temp.path());
 
     // Helper that would fail loudly if it ever ran during a throttled run.
     let helper = temp.path().join("must_not_run.sh");
@@ -968,7 +1140,7 @@ fn cloud_sessions_sync_respects_min_interval_throttle() {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
-    crate::env::set_var("JCODE_JADE_SESSIONS_HELPER", &helper);
+    crate::env::set_var("KCODE_JADE_SESSIONS_HELPER", &helper);
 
     let sessions_dir = temp.path().join("sessions");
     std::fs::create_dir_all(&sessions_dir).unwrap();
@@ -1123,8 +1295,8 @@ fn parse_cloud_session_list_json_rejects_unexpected_shapes() {
 
 #[test]
 fn resolve_jade_sessions_helper_prefers_explicit_and_env_paths() {
-    let _saved = SavedEnv::capture(&["JCODE_JADE_SESSIONS_HELPER"]);
-    crate::env::set_var("JCODE_JADE_SESSIONS_HELPER", "/tmp/from-env.py");
+    let _saved = SavedEnv::capture(&["KCODE_JADE_SESSIONS_HELPER"]);
+    crate::env::set_var("KCODE_JADE_SESSIONS_HELPER", "/tmp/from-env.py");
 
     assert_eq!(
         resolve_jade_sessions_helper(Some("/tmp/explicit.py")).unwrap(),
@@ -1198,20 +1370,20 @@ async fn auth_test_choice_plan_leaves_non_compat_provider_unchanged() {
 async fn auth_test_choice_plan_discovers_model_for_local_custom_compat_endpoint() {
     let _env_guard = crate::storage::lock_test_env();
     let _saved = SavedEnv::capture(&[
-        "JCODE_OPENAI_COMPAT_API_BASE",
-        "JCODE_OPENAI_COMPAT_API_KEY_NAME",
-        "JCODE_OPENAI_COMPAT_ENV_FILE",
-        "JCODE_OPENAI_COMPAT_DEFAULT_MODEL",
-        "JCODE_OPENAI_COMPAT_LOCAL_ENABLED",
-        "JCODE_OPENROUTER_API_BASE",
-        "JCODE_OPENROUTER_API_KEY_NAME",
-        "JCODE_OPENROUTER_ENV_FILE",
-        "JCODE_OPENROUTER_ALLOW_NO_AUTH",
+        "KCODE_OPENAI_COMPAT_API_BASE",
+        "KCODE_OPENAI_COMPAT_API_KEY_NAME",
+        "KCODE_OPENAI_COMPAT_ENV_FILE",
+        "KCODE_OPENAI_COMPAT_DEFAULT_MODEL",
+        "KCODE_OPENAI_COMPAT_LOCAL_ENABLED",
+        "KCODE_OPENROUTER_API_BASE",
+        "KCODE_OPENROUTER_API_KEY_NAME",
+        "KCODE_OPENROUTER_ENV_FILE",
+        "KCODE_OPENROUTER_ALLOW_NO_AUTH",
     ]);
     let api_base = spawn_single_response_http_server(200, r#"{"data":[{"id":"llama3.2"}]}"#);
-    crate::env::set_var("JCODE_OPENAI_COMPAT_API_BASE", &api_base);
-    crate::env::remove_var("JCODE_OPENAI_COMPAT_DEFAULT_MODEL");
-    crate::env::remove_var("JCODE_OPENAI_COMPAT_LOCAL_ENABLED");
+    crate::env::set_var("KCODE_OPENAI_COMPAT_API_BASE", &api_base);
+    crate::env::remove_var("KCODE_OPENAI_COMPAT_DEFAULT_MODEL");
+    crate::env::remove_var("KCODE_OPENAI_COMPAT_LOCAL_ENABLED");
     crate::provider_catalog::apply_openai_compatible_profile_env(None);
 
     let plan = auth_test_choice_plan(
@@ -1231,15 +1403,15 @@ async fn auth_test_choice_plan_discovers_model_for_local_custom_compat_endpoint(
 async fn auth_test_choice_plan_discovers_model_for_hosted_custom_compat_endpoint_with_api_key() {
     let _env_guard = crate::storage::lock_test_env();
     let _saved = SavedEnv::capture(&[
-        "JCODE_OPENAI_COMPAT_API_BASE",
-        "JCODE_OPENAI_COMPAT_API_KEY_NAME",
-        "JCODE_OPENAI_COMPAT_ENV_FILE",
-        "JCODE_OPENAI_COMPAT_DEFAULT_MODEL",
-        "JCODE_OPENAI_COMPAT_LOCAL_ENABLED",
-        "JCODE_OPENROUTER_API_BASE",
-        "JCODE_OPENROUTER_API_KEY_NAME",
-        "JCODE_OPENROUTER_ENV_FILE",
-        "JCODE_OPENROUTER_ALLOW_NO_AUTH",
+        "KCODE_OPENAI_COMPAT_API_BASE",
+        "KCODE_OPENAI_COMPAT_API_KEY_NAME",
+        "KCODE_OPENAI_COMPAT_ENV_FILE",
+        "KCODE_OPENAI_COMPAT_DEFAULT_MODEL",
+        "KCODE_OPENAI_COMPAT_LOCAL_ENABLED",
+        "KCODE_OPENROUTER_API_BASE",
+        "KCODE_OPENROUTER_API_KEY_NAME",
+        "KCODE_OPENROUTER_ENV_FILE",
+        "KCODE_OPENROUTER_ALLOW_NO_AUTH",
         "OPENAI_COMPAT_API_KEY",
         "NO_PROXY",
         "no_proxy",
@@ -1252,12 +1424,12 @@ async fn auth_test_choice_plan_discovers_model_for_hosted_custom_compat_endpoint
         200,
         r#"{"data":[{"id":"hosted-compatible-model"}]}"#,
     );
-    crate::env::set_var("JCODE_OPENAI_COMPAT_API_BASE", &api_base);
+    crate::env::set_var("KCODE_OPENAI_COMPAT_API_BASE", &api_base);
     crate::env::set_var("OPENAI_COMPAT_API_KEY", "test-key");
     crate::env::set_var("NO_PROXY", "0.0.0.0,127.0.0.1,localhost");
     crate::env::set_var("no_proxy", "0.0.0.0,127.0.0.1,localhost");
-    crate::env::remove_var("JCODE_OPENAI_COMPAT_DEFAULT_MODEL");
-    crate::env::remove_var("JCODE_OPENAI_COMPAT_LOCAL_ENABLED");
+    crate::env::remove_var("KCODE_OPENAI_COMPAT_DEFAULT_MODEL");
+    crate::env::remove_var("KCODE_OPENAI_COMPAT_LOCAL_ENABLED");
     crate::provider_catalog::apply_openai_compatible_profile_env(None);
 
     let resolved = crate::provider_catalog::resolve_openai_compatible_profile(
@@ -1284,20 +1456,20 @@ async fn auth_test_choice_plan_discovers_model_for_hosted_custom_compat_endpoint
 async fn auth_test_choice_plan_skips_local_custom_compat_endpoint_without_models() {
     let _env_guard = crate::storage::lock_test_env();
     let _saved = SavedEnv::capture(&[
-        "JCODE_OPENAI_COMPAT_API_BASE",
-        "JCODE_OPENAI_COMPAT_API_KEY_NAME",
-        "JCODE_OPENAI_COMPAT_ENV_FILE",
-        "JCODE_OPENAI_COMPAT_DEFAULT_MODEL",
-        "JCODE_OPENAI_COMPAT_LOCAL_ENABLED",
-        "JCODE_OPENROUTER_API_BASE",
-        "JCODE_OPENROUTER_API_KEY_NAME",
-        "JCODE_OPENROUTER_ENV_FILE",
-        "JCODE_OPENROUTER_ALLOW_NO_AUTH",
+        "KCODE_OPENAI_COMPAT_API_BASE",
+        "KCODE_OPENAI_COMPAT_API_KEY_NAME",
+        "KCODE_OPENAI_COMPAT_ENV_FILE",
+        "KCODE_OPENAI_COMPAT_DEFAULT_MODEL",
+        "KCODE_OPENAI_COMPAT_LOCAL_ENABLED",
+        "KCODE_OPENROUTER_API_BASE",
+        "KCODE_OPENROUTER_API_KEY_NAME",
+        "KCODE_OPENROUTER_ENV_FILE",
+        "KCODE_OPENROUTER_ALLOW_NO_AUTH",
     ]);
     let api_base = spawn_single_response_http_server(200, r#"{"data":[]}"#);
-    crate::env::set_var("JCODE_OPENAI_COMPAT_API_BASE", &api_base);
-    crate::env::remove_var("JCODE_OPENAI_COMPAT_DEFAULT_MODEL");
-    crate::env::remove_var("JCODE_OPENAI_COMPAT_LOCAL_ENABLED");
+    crate::env::set_var("KCODE_OPENAI_COMPAT_API_BASE", &api_base);
+    crate::env::remove_var("KCODE_OPENAI_COMPAT_DEFAULT_MODEL");
+    crate::env::remove_var("KCODE_OPENAI_COMPAT_LOCAL_ENABLED");
     crate::provider_catalog::apply_openai_compatible_profile_env(None);
 
     let plan = auth_test_choice_plan(
@@ -1417,10 +1589,10 @@ async fn restore_agent_session_if_requested_restores_resumed_session() {
 #[tokio::test]
 async fn one_shot_output_modes_close_sessions_and_clear_active_pid_markers() {
     let _guard = crate::storage::lock_test_env();
-    let _saved = SavedEnv::capture(&["JCODE_HOME", "JCODE_RUN_AUTO_POKE"]);
+    let _saved = SavedEnv::capture(&["KCODE_HOME", "KCODE_RUN_AUTO_POKE"]);
     let temp = tempfile::tempdir().expect("tempdir");
-    crate::env::set_var("JCODE_HOME", temp.path());
-    crate::env::set_var("JCODE_RUN_AUTO_POKE", "0");
+    crate::env::set_var("KCODE_HOME", temp.path());
+    crate::env::set_var("KCODE_RUN_AUTO_POKE", "0");
 
     for (mode, emit_json, emit_ndjson) in [
         ("plain", false, false),
@@ -1469,10 +1641,10 @@ async fn one_shot_output_modes_close_sessions_and_clear_active_pid_markers() {
 #[tokio::test]
 async fn resumed_one_shot_closes_the_restored_session() {
     let _guard = crate::storage::lock_test_env();
-    let _saved = SavedEnv::capture(&["JCODE_HOME", "JCODE_RUN_AUTO_POKE"]);
+    let _saved = SavedEnv::capture(&["KCODE_HOME", "KCODE_RUN_AUTO_POKE"]);
     let temp = tempfile::tempdir().expect("tempdir");
-    crate::env::set_var("JCODE_HOME", temp.path());
-    crate::env::set_var("JCODE_RUN_AUTO_POKE", "0");
+    crate::env::set_var("KCODE_HOME", temp.path());
+    crate::env::set_var("KCODE_RUN_AUTO_POKE", "0");
 
     let provider: Arc<dyn Provider> = Arc::new(TestProvider);
     let registry = Registry::new(provider.clone()).await;
@@ -1523,10 +1695,10 @@ async fn resumed_one_shot_closes_the_restored_session() {
 #[tokio::test]
 async fn one_shot_cleanup_preserves_the_original_command_error() {
     let _guard = crate::storage::lock_test_env();
-    let _saved = SavedEnv::capture(&["JCODE_HOME", "JCODE_RUN_AUTO_POKE"]);
+    let _saved = SavedEnv::capture(&["KCODE_HOME", "KCODE_RUN_AUTO_POKE"]);
     let temp = tempfile::tempdir().expect("tempdir");
-    crate::env::set_var("JCODE_HOME", temp.path());
-    crate::env::set_var("JCODE_RUN_AUTO_POKE", "0");
+    crate::env::set_var("KCODE_HOME", temp.path());
+    crate::env::set_var("KCODE_RUN_AUTO_POKE", "0");
 
     for (mode, emit_json, emit_ndjson) in [
         ("plain", false, false),

@@ -35,7 +35,7 @@ fn parse_target_rejects_custom_scheme() {
 #[test]
 fn resolve_target_treats_file_url_as_local_path() {
     let ctx = make_ctx();
-    let temp_file = std::env::temp_dir().join("jcode-open-tool-file-url.txt");
+    let temp_file = std::env::temp_dir().join("kcode-open-tool-file-url.txt");
     std::fs::write(&temp_file, "test").unwrap();
 
     let file_url = url::Url::from_file_path(&temp_file).unwrap().to_string();

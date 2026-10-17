@@ -58,13 +58,6 @@ pub(crate) fn tool_smoke_skip_detail_for_choice(
         );
     }
 
-    if matches!(choice, super::provider_init::ProviderChoice::GrokBuild) {
-        return Some(
-            "Skipped: Grok Build executes its isolated ACP coding-tool loop internally; it does not expose Jcode tool calls for the outer auth-test harness. Basic provider smoke validates the subscription transport."
-                .to_string(),
-        );
-    }
-
     if matches!(choice, super::provider_init::ProviderChoice::Fpt) {
         let model = effective_openai_compatible_auth_test_model(
             crate::provider_catalog::FPT_PROFILE,
@@ -104,7 +97,7 @@ fn effective_openai_compatible_auth_test_model(
         .filter(|model| !model.is_empty())
         .map(ToString::to_string)
         .or_else(|| {
-            std::env::var("JCODE_OPENROUTER_MODEL")
+            std::env::var("KCODE_OPENROUTER_MODEL")
                 .ok()
                 .map(|model| model.trim().to_string())
                 .filter(|model| !model.is_empty())
@@ -306,6 +299,9 @@ async fn run_provider_tool_smoke_for_choice(
             crate::session::Session::create(None, None),
             Some(allowed_tools),
         );
+        // The smoke test checks for an exact reply. Memory recall (and any
+        // plan-limit notice it raises) would add unrelated text to it.
+        agent.set_memory_enabled(false);
         let transcript_start = agent.messages().len();
         let output = agent.run_once_capture(prompt).await.with_context(|| {
             format!(
@@ -342,7 +338,9 @@ fn validate_auth_test_tool_smoke_transcript(
     for message in messages {
         for block in &message.content {
             match block {
-                crate::message::ContentBlock::ToolUse { id, name, input, .. } => {
+                crate::message::ContentBlock::ToolUse {
+                    id, name, input, ..
+                } => {
                     tool_uses.push((id.as_str(), name.as_str(), input));
                 }
                 crate::message::ContentBlock::ToolResult {
@@ -366,7 +364,9 @@ fn validate_auth_test_tool_smoke_transcript(
         id: tool_id.to_string(),
         name: tool_name.to_string(),
         input: input.clone(),
-        intent: None, thought_signature: None, };
+        intent: None,
+        thought_signature: None,
+    };
     if let Some(error) = tool_call.validation_error() {
         anyhow::bail!("tool smoke emitted invalid tool call: {error}");
     }
@@ -511,7 +511,7 @@ pub(crate) fn auth_test_error_is_retryable(err: &anyhow::Error) -> bool {
 /// class of confusion about which target a result actually described.
 fn auth_test_report_label(report: &AuthTestProviderReport) -> String {
     if report.provider == "openai-compatible"
-        && let Ok(profile) = std::env::var("JCODE_NAMED_PROVIDER_PROFILE")
+        && let Ok(profile) = std::env::var("KCODE_NAMED_PROVIDER_PROFILE")
         && !profile.trim().is_empty()
     {
         return format!("{} (openai-compatible profile)", profile.trim());
@@ -563,9 +563,9 @@ mod report_label_tests {
     #[test]
     fn named_profile_is_named_in_the_report_header() {
         let _guard = crate::storage::lock_test_env();
-        let saved = std::env::var("JCODE_NAMED_PROVIDER_PROFILE").ok();
+        let saved = std::env::var("KCODE_NAMED_PROVIDER_PROFILE").ok();
 
-        crate::env::set_var("JCODE_NAMED_PROVIDER_PROFILE", "company-gateway");
+        crate::env::set_var("KCODE_NAMED_PROVIDER_PROFILE", "company-gateway");
         let label = auth_test_report_label(&report("openai-compatible"));
         assert!(
             label.contains("company-gateway"),
@@ -575,7 +575,7 @@ mod report_label_tests {
         // A builtin provider must be unaffected even while a profile is set.
         assert_eq!(auth_test_report_label(&report("deepseek")), "deepseek");
 
-        crate::env::remove_var("JCODE_NAMED_PROVIDER_PROFILE");
+        crate::env::remove_var("KCODE_NAMED_PROVIDER_PROFILE");
         assert_eq!(
             auth_test_report_label(&report("openai-compatible")),
             "openai-compatible",
@@ -583,8 +583,8 @@ mod report_label_tests {
         );
 
         match saved {
-            Some(value) => crate::env::set_var("JCODE_NAMED_PROVIDER_PROFILE", value),
-            None => crate::env::remove_var("JCODE_NAMED_PROVIDER_PROFILE"),
+            Some(value) => crate::env::set_var("KCODE_NAMED_PROVIDER_PROFILE", value),
+            None => crate::env::remove_var("KCODE_NAMED_PROVIDER_PROFILE"),
         }
     }
 }
@@ -615,7 +615,9 @@ mod auth_tool_smoke_tests {
                 vec![crate::message::ContentBlock::ToolUse {
                     id: "call_1".to_string(),
                     name: AUTH_TEST_TOOL_NAME.to_string(),
-                    input: serde_json::json!({"command": AUTH_TEST_TOOL_COMMAND}), thought_signature: None, }],
+                    input: serde_json::json!({"command": AUTH_TEST_TOOL_COMMAND}),
+                    thought_signature: None,
+                }],
             ),
             stored_message(
                 crate::message::Role::User,

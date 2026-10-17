@@ -14,7 +14,7 @@ fn launch_hotkeys_config_round_trips_toml() {
                 LaunchHotkeyEntry {
                     chord: "cmd+;".into(),
                     dir: "/Users/jeremy/jcode-github".into(),
-                    label: "jcode-github".into(),
+                    label: "kcode-github".into(),
                     self_dev: false,
                 },
                 LaunchHotkeyEntry {

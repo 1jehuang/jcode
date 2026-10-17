@@ -54,10 +54,10 @@ pub fn pin_truecolor_for_tests() {
 /// (Ghostty / iTerm2 / kitty / WezTerm / Alacritty) are unaffected and keep
 /// full truecolor.
 ///
-/// Overridable with `JCODE_GLYPH_SAFE_MODE=on|off` (shared with the perf
+/// Overridable with `KCODE_GLYPH_SAFE_MODE=on|off` (shared with the perf
 /// policy) so users can force or disable the compatibility behavior.
 fn fragile_glyph_cache_terminal() -> bool {
-    if let Ok(raw) = std::env::var("JCODE_GLYPH_SAFE_MODE") {
+    if let Ok(raw) = std::env::var("KCODE_GLYPH_SAFE_MODE") {
         match raw.trim().to_ascii_lowercase().as_str() {
             "1" | "true" | "yes" | "on" => return true,
             "0" | "false" | "no" | "off" => return false,
@@ -149,7 +149,7 @@ pub fn clear_buf(area: Rect, buf: &mut Buffer) {
 /// terminals.
 ///
 /// User color configuration is *not* applied here. It is applied once per
-/// frame at the buffer level (`palette::adapt_buffer_for_palette`) so a color
+/// frame at the buffer level (`theme_mode::adapt_buffer_for_display`) so a color
 /// can never be remapped twice. See `palette` for why that choke point is the
 /// single place colors are substituted.
 #[inline]
@@ -164,7 +164,7 @@ pub fn rgb(r: u8, g: u8, b: u8) -> Color {
 // The xterm-256 color cube: indices 16-231 map to a 6x6x6 RGB cube.
 // Each axis uses values: 0, 95, 135, 175, 215, 255 (indices 0-5).
 // Indices 232-255 are a grayscale ramp from rgb(8,8,8) to rgb(238,238,238).
-fn rgb_to_xterm256(r: u8, g: u8, b: u8) -> u8 {
+pub(crate) fn rgb_to_xterm256(r: u8, g: u8, b: u8) -> u8 {
     let gray_avg = (r as u16 + g as u16 + b as u16) / 3;
 
     let cube_idx = nearest_cube_index(r, g, b);
@@ -502,7 +502,7 @@ mod tests {
         // The explicit off override must win even on a macOS fragile terminal.
         temp_env_scope(
             &[
-                ("JCODE_GLYPH_SAFE_MODE", Some("off")),
+                ("KCODE_GLYPH_SAFE_MODE", Some("off")),
                 ("TERM_PROGRAM", Some("vscode")),
             ],
             || {
@@ -513,7 +513,7 @@ mod tests {
 
     #[test]
     fn test_fragile_terminal_override_on_forces_quantize() {
-        temp_env_scope(&[("JCODE_GLYPH_SAFE_MODE", Some("on"))], || {
+        temp_env_scope(&[("KCODE_GLYPH_SAFE_MODE", Some("on"))], || {
             assert!(fragile_glyph_cache_terminal());
         });
     }
@@ -525,14 +525,14 @@ mod tests {
     fn test_detect_color_capability_downgrades_on_fragile_override() {
         temp_env_scope(
             &[
-                ("JCODE_GLYPH_SAFE_MODE", Some("on")),
+                ("KCODE_GLYPH_SAFE_MODE", Some("on")),
                 ("COLORTERM", Some("truecolor")),
             ],
             || assert_eq!(detect_color_capability(), ColorCapability::Color256),
         );
         temp_env_scope(
             &[
-                ("JCODE_GLYPH_SAFE_MODE", Some("off")),
+                ("KCODE_GLYPH_SAFE_MODE", Some("off")),
                 ("COLORTERM", Some("truecolor")),
             ],
             || assert_eq!(detect_color_capability(), ColorCapability::TrueColor),
@@ -579,21 +579,21 @@ mod tests {
     fn test_fragile_terminal_detects_vscode_and_apple_terminal() {
         temp_env_scope(
             &[
-                ("JCODE_GLYPH_SAFE_MODE", None),
+                ("KCODE_GLYPH_SAFE_MODE", None),
                 ("TERM_PROGRAM", Some("vscode")),
             ],
             || assert!(fragile_glyph_cache_terminal()),
         );
         temp_env_scope(
             &[
-                ("JCODE_GLYPH_SAFE_MODE", None),
+                ("KCODE_GLYPH_SAFE_MODE", None),
                 ("TERM_PROGRAM", Some("Apple_Terminal")),
             ],
             || assert!(fragile_glyph_cache_terminal()),
         );
         temp_env_scope(
             &[
-                ("JCODE_GLYPH_SAFE_MODE", None),
+                ("KCODE_GLYPH_SAFE_MODE", None),
                 ("TERM_PROGRAM", Some("ghostty")),
             ],
             || assert!(!fragile_glyph_cache_terminal()),

@@ -174,7 +174,7 @@ impl AuthMethodChoice {
     pub fn precondition_message(self) -> Option<&'static str> {
         match self {
             AuthMethodChoice::BlockedConfigUnwritable => Some(
-                "jcode cannot write its config directory, so a login could not be saved. Fix directory permissions (or set JCODE_HOME) and try again.",
+                "jcode cannot write its config directory, so a login could not be saved. Fix directory permissions (or set KCODE_HOME) and try again.",
             ),
             AuthMethodChoice::ApiKeyNonInteractive => Some(
                 "This terminal is not interactive. Provide an API key via the provider's environment variable or `jcode provider add --api-key-stdin`.",

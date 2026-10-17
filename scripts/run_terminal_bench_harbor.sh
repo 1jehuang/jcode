@@ -3,10 +3,10 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
-DEFAULT_BINARY_DIR=${JCODE_HARBOR_BINARY_DIR:-/tmp/jcode-compat-dist}
-DEFAULT_BINARY_PATH=${JCODE_HARBOR_BINARY:-$DEFAULT_BINARY_DIR/jcode-linux-x86_64}
-DEFAULT_MODEL=${JCODE_TB_MODEL:-openai/gpt-5.4}
-DEFAULT_PATH=${JCODE_TB_PATH:-/tmp/terminal-bench-2}
+DEFAULT_BINARY_DIR=${KCODE_HARBOR_BINARY_DIR:-/tmp/jcode-compat-dist}
+DEFAULT_BINARY_PATH=${KCODE_HARBOR_BINARY:-$DEFAULT_BINARY_DIR/jcode-linux-x86_64}
+DEFAULT_MODEL=${KCODE_TB_MODEL:-openai/gpt-5.4}
+DEFAULT_PATH=${KCODE_TB_PATH:-/tmp/terminal-bench-2}
 
 have_model=0
 have_agent_import=0
@@ -31,20 +31,20 @@ if [[ ! -x "$DEFAULT_BINARY_PATH" ]]; then
   "$REPO_ROOT/scripts/build_linux_compat.sh" "$DEFAULT_BINARY_DIR"
 fi
 
-OPENAI_AUTH=${JCODE_HARBOR_OPENAI_AUTH:-$HOME/.jcode/openai-auth.json}
+OPENAI_AUTH=${KCODE_HARBOR_OPENAI_AUTH:-$HOME/.kcode/openai-auth.json}
 if [[ ! -f "$OPENAI_AUTH" ]]; then
   echo "OpenAI OAuth file not found at $OPENAI_AUTH" >&2
   exit 1
 fi
 
 export PYTHONPATH="$REPO_ROOT/scripts${PYTHONPATH:+:$PYTHONPATH}"
-export JCODE_HARBOR_BINARY="$DEFAULT_BINARY_PATH"
-export JCODE_HARBOR_OPENAI_AUTH="$OPENAI_AUTH"
-export JCODE_OPENAI_REASONING_EFFORT=${JCODE_OPENAI_REASONING_EFFORT:-high}
-export JCODE_OPENAI_SERVICE_TIER=${JCODE_OPENAI_SERVICE_TIER:-priority}
-export JCODE_NO_TELEMETRY=${JCODE_NO_TELEMETRY:-1}
+export KCODE_HARBOR_BINARY="$DEFAULT_BINARY_PATH"
+export KCODE_HARBOR_OPENAI_AUTH="$OPENAI_AUTH"
+export KCODE_OPENAI_REASONING_EFFORT=${KCODE_OPENAI_REASONING_EFFORT:-high}
+export KCODE_OPENAI_SERVICE_TIER=${KCODE_OPENAI_SERVICE_TIER:-priority}
+export KCODE_NO_TELEMETRY=${KCODE_NO_TELEMETRY:-1}
 
-HARBOR_BIN=${JCODE_HARBOR_BIN:-}
+HARBOR_BIN=${KCODE_HARBOR_BIN:-}
 if [[ -z "$HARBOR_BIN" ]]; then
   CACHED_HARBOR="$HOME/.cache/uv/archive-v0/qtLT-I4hA5Q9ne5Zq-5cn/bin/harbor"
   if [[ -x "$CACHED_HARBOR" ]]; then
@@ -68,8 +68,8 @@ cmd+=("$@")
 
 {
   echo "Running Harbor with jcode adapter"
-  echo "  binary: $JCODE_HARBOR_BINARY"
-  echo "  auth:   $JCODE_HARBOR_OPENAI_AUTH"
+  echo "  binary: $KCODE_HARBOR_BINARY"
+  echo "  auth:   $KCODE_HARBOR_OPENAI_AUTH"
   echo "  model:  ${DEFAULT_MODEL}"
 } >&2
 

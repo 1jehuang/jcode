@@ -37,7 +37,7 @@ total=${#MODELS[@]}
 i=0
 for m in "${MODELS[@]}"; do
   i=$((i+1))
-  echo "JCODE_PROGRESS {\"current\":$i,\"total\":$total,\"unit\":\"models\",\"message\":\"$m\"}" >&2
+  echo "KCODE_PROGRESS {\"current\":$i,\"total\":$total,\"unit\":\"models\",\"message\":\"$m\"}" >&2
 
   # --- chat smoke ---
   chat_out=$(timeout "$CHAT_TIMEOUT" "$JC" run --provider antigravity -m "$m" --no-update --no-selfdev "$CHAT_PROMPT" 2>&1)

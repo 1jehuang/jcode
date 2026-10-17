@@ -84,6 +84,84 @@ pub(super) fn swarm_is_self_or_ancestor(
             .any(|candidate| candidate == ancestor)
 }
 
+/// Members spawned by `session_id`, directly or transitively.
+pub(super) fn swarm_descendants(
+    members: &HashMap<String, SwarmMember>,
+    session_id: &str,
+) -> Vec<String> {
+    let mut descendants: Vec<String> = members
+        .keys()
+        .filter(|candidate| {
+            candidate.as_str() != session_id
+                && swarm_ancestors(members, candidate)
+                    .iter()
+                    .any(|ancestor| ancestor == session_id)
+        })
+        .cloned()
+        .collect();
+    descendants.sort();
+    descendants
+}
+
+/// Stop the running turns of every worker `session_id` spawned (workers run
+/// their own server-side turns, so cancelling only the coordinator left them
+/// spending tokens). Idle workers are left alone. Returns the stopped ids.
+pub(super) async fn cancel_spawned_descendant_turns(
+    session_id: &str,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    event_history: Option<&Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>>,
+    event_counter: Option<&Arc<std::sync::atomic::AtomicU64>>,
+    swarm_event_tx: Option<&broadcast::Sender<SwarmEvent>>,
+) -> Vec<String> {
+    let descendants = swarm_descendants(&*swarm_members.read().await, session_id);
+    let mut stopped = Vec::new();
+    for descendant in descendants {
+        let signals = crate::turn_cancel_registry::active_turn_signals(&descendant);
+        if signals.is_empty() {
+            continue;
+        }
+        for signal in &signals {
+            signal.fire();
+        }
+        // Workers usually have no attached client; the status update below
+        // is what the coordinator's swarm view shows.
+        fanout_session_event(
+            swarm_members,
+            &descendant,
+            ServerEvent::TurnStopped {
+                reason: crate::protocol::TurnStopReason::Interrupted,
+                message: format!("Stopped because its coordinator {session_id} was interrupted."),
+                provider_stop_reason: None,
+            },
+        )
+        .await;
+        update_member_status(
+            &descendant,
+            "stopped",
+            Some("coordinator interrupted".to_string()),
+            swarm_members,
+            swarms_by_id,
+            event_history,
+            event_counter,
+            swarm_event_tx,
+        )
+        .await;
+        stopped.push(descendant);
+    }
+    if !stopped.is_empty() {
+        let names = stopped.join(",");
+        crate::logging::info(&format!(
+            "SWARM_CASCADE_CANCEL coordinator={session_id} stopped={names}"
+        ));
+    }
+    stopped
+}
+
+#[cfg(test)]
+#[path = "swarm_cascade_tests.rs"]
+mod swarm_cascade_tests;
+
 const DEFAULT_SWARM_STATUS_DEBOUNCE_MEMBER_THRESHOLD: usize = 2;
 const DEFAULT_SWARM_STATUS_DEBOUNCE_MS: u64 = 75;
 const DEFAULT_SWARM_TASK_HEARTBEAT_SECS: u64 = 10;
@@ -116,7 +194,7 @@ fn swarm_status_debounce_member_threshold() -> usize {
     static CACHED: OnceLock<AtomicUsize> = OnceLock::new();
     CACHED
         .get_or_init(|| {
-            let configured = std::env::var("JCODE_SWARM_STATUS_DEBOUNCE_MEMBER_THRESHOLD")
+            let configured = std::env::var("KCODE_SWARM_STATUS_DEBOUNCE_MEMBER_THRESHOLD")
                 .ok()
                 .and_then(|value| value.trim().parse::<usize>().ok())
                 .filter(|value| *value > 0)
@@ -130,7 +208,7 @@ fn swarm_status_debounce_ms() -> u64 {
     static CACHED: OnceLock<AtomicU64> = OnceLock::new();
     CACHED
         .get_or_init(|| {
-            let configured = std::env::var("JCODE_SWARM_STATUS_DEBOUNCE_MS")
+            let configured = std::env::var("KCODE_SWARM_STATUS_DEBOUNCE_MS")
                 .ok()
                 .and_then(|value| value.trim().parse::<u64>().ok())
                 .filter(|value| *value > 0)
@@ -167,21 +245,21 @@ fn log_swarm_lifecycle(phase: &str, fields: Vec<(&str, String)>) {
 
 pub(super) fn swarm_task_heartbeat_interval() -> Duration {
     Duration::from_secs(configured_positive_u64(
-        "JCODE_SWARM_TASK_HEARTBEAT_SECS",
+        "KCODE_SWARM_TASK_HEARTBEAT_SECS",
         DEFAULT_SWARM_TASK_HEARTBEAT_SECS,
     ))
 }
 
 pub(super) fn swarm_task_stale_after() -> Duration {
     Duration::from_secs(configured_positive_u64(
-        "JCODE_SWARM_TASK_STALE_AFTER_SECS",
+        "KCODE_SWARM_TASK_STALE_AFTER_SECS",
         DEFAULT_SWARM_TASK_STALE_AFTER_SECS,
     ))
 }
 
 pub(super) fn swarm_task_sweep_interval() -> Duration {
     Duration::from_secs(configured_positive_u64(
-        "JCODE_SWARM_TASK_SWEEP_INTERVAL_SECS",
+        "KCODE_SWARM_TASK_SWEEP_INTERVAL_SECS",
         DEFAULT_SWARM_TASK_SWEEP_INTERVAL_SECS,
     ))
 }
@@ -191,7 +269,7 @@ pub(super) fn swarm_task_sweep_interval() -> Duration {
 /// history to grow forever.
 pub(super) fn swarm_terminal_member_retention() -> Duration {
     Duration::from_secs(configured_positive_u64(
-        "JCODE_SWARM_TERMINAL_MEMBER_RETENTION_SECS",
+        "KCODE_SWARM_TERMINAL_MEMBER_RETENTION_SECS",
         DEFAULT_SWARM_TERMINAL_MEMBER_RETENTION_SECS,
     ))
 }
@@ -200,7 +278,7 @@ pub(super) fn swarm_terminal_member_retention() -> Duration {
 /// has elapsed. Startup loading performs the same pruning synchronously.
 pub(super) fn swarm_terminal_member_gc_interval() -> Duration {
     Duration::from_secs(configured_positive_u64(
-        "JCODE_SWARM_TERMINAL_MEMBER_GC_INTERVAL_SECS",
+        "KCODE_SWARM_TERMINAL_MEMBER_GC_INTERVAL_SECS",
         DEFAULT_SWARM_TERMINAL_MEMBER_GC_INTERVAL_SECS,
     ))
 }
@@ -209,7 +287,7 @@ pub(super) fn swarm_terminal_member_gc_interval() -> Duration {
 /// See [`DEFAULT_SWARM_STATUS_BROADCAST_TERMINAL_SECS`].
 pub(super) fn swarm_status_broadcast_terminal_retention() -> Duration {
     Duration::from_secs(configured_positive_u64(
-        "JCODE_SWARM_STATUS_BROADCAST_TERMINAL_SECS",
+        "KCODE_SWARM_STATUS_BROADCAST_TERMINAL_SECS",
         DEFAULT_SWARM_STATUS_BROADCAST_TERMINAL_SECS,
     ))
 }
@@ -264,7 +342,7 @@ pub(super) fn member_status_is_dead(status: &str) -> bool {
 const DEFAULT_SWARM_IDLE_WORKER_REAP_SECS: u64 = 30 * 60;
 
 pub(super) fn swarm_idle_worker_reap_after() -> Option<Duration> {
-    let secs = std::env::var("JCODE_SWARM_IDLE_WORKER_REAP_SECS")
+    let secs = std::env::var("KCODE_SWARM_IDLE_WORKER_REAP_SECS")
         .ok()
         .and_then(|value| value.trim().parse::<u64>().ok())
         .unwrap_or(DEFAULT_SWARM_IDLE_WORKER_REAP_SECS);
@@ -1904,15 +1982,23 @@ mod tests {
 
     #[test]
     fn idle_worker_reap_window_env_zero_disables() {
-        let _env_lock = crate::storage::lock_test_env();
-        crate::env::set_var("JCODE_SWARM_IDLE_WORKER_REAP_SECS", "0");
+        // Note: mutating the process env in tests is racy in general, but this
+        // env var is read on every call (not cached), and no other test touches
+        // it.
+        unsafe {
+            std::env::set_var("KCODE_SWARM_IDLE_WORKER_REAP_SECS", "0");
+        }
         assert_eq!(super::swarm_idle_worker_reap_after(), None);
-        crate::env::set_var("JCODE_SWARM_IDLE_WORKER_REAP_SECS", "90");
+        unsafe {
+            std::env::set_var("KCODE_SWARM_IDLE_WORKER_REAP_SECS", "90");
+        }
         assert_eq!(
             super::swarm_idle_worker_reap_after(),
             Some(Duration::from_secs(90))
         );
-        crate::env::remove_var("JCODE_SWARM_IDLE_WORKER_REAP_SECS");
+        unsafe {
+            std::env::remove_var("KCODE_SWARM_IDLE_WORKER_REAP_SECS");
+        }
         assert!(super::swarm_idle_worker_reap_after().is_some());
     }
 
@@ -2173,7 +2259,7 @@ mod tests {
     /// `broadcast_swarm_status_now` snapshots member statuses under
     /// `swarm_members.read()`, drops the guard, then awaits
     /// `fanout_session_event` (a `swarm_members.write()` acquisition) before
-    /// sending. Swarms below `JCODE_SWARM_STATUS_DEBOUNCE_MEMBER_THRESHOLD`
+    /// sending. Swarms below `KCODE_SWARM_STATUS_DEBOUNCE_MEMBER_THRESHOLD`
     /// (default 2) take this immediate, non-debounced path on every status
     /// change, so two concurrent broadcasts can deliver an old snapshot after
     /// a newer one on the same ordered mpsc channel. A last-write-wins

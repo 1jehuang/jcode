@@ -320,7 +320,7 @@ fn detect() -> SystemProfile {
     // Highest priority: explicit env override (used by tests/CI to keep the
     // tier deterministic regardless of host load, and by users to force a
     // tier for one invocation without editing config).
-    let env_tier = std::env::var("JCODE_PERF_TIER").ok().and_then(|raw| {
+    let env_tier = std::env::var("KCODE_PERF_TIER").ok().and_then(|raw| {
         match raw.trim().to_ascii_lowercase().as_str() {
             "full" => Some(PerformanceTier::Full),
             "reduced" => Some(PerformanceTier::Reduced),
@@ -363,7 +363,7 @@ fn detect() -> SystemProfile {
 /// Alacritty) are unaffected and excluded.
 fn detect_fragile_glyph_cache(terminal: &str) -> bool {
     // Opt-out / opt-in override for users who want to force the behavior.
-    if let Ok(raw) = std::env::var("JCODE_GLYPH_SAFE_MODE") {
+    if let Ok(raw) = std::env::var("KCODE_GLYPH_SAFE_MODE") {
         match raw.trim().to_ascii_lowercase().as_str() {
             "1" | "true" | "yes" | "on" => return true,
             "0" | "false" | "no" | "off" => return false,
@@ -908,15 +908,19 @@ mod tests {
     fn test_detect_fragile_glyph_cache_targets_macos_terminals() {
         let _env_lock = crate::storage::lock_test_env();
         // Env override must not leak between cases.
-        let prev = std::env::var("JCODE_GLYPH_SAFE_MODE").ok();
-        crate::env::remove_var("JCODE_GLYPH_SAFE_MODE");
+        let prev = std::env::var("KCODE_GLYPH_SAFE_MODE").ok();
+        unsafe {
+            std::env::remove_var("KCODE_GLYPH_SAFE_MODE");
+        }
         assert!(detect_fragile_glyph_cache("vscode"));
         assert!(detect_fragile_glyph_cache("apple_terminal"));
         assert!(!detect_fragile_glyph_cache("ghostty"));
         assert!(!detect_fragile_glyph_cache("iterm.app"));
         assert!(!detect_fragile_glyph_cache("kitty"));
         if let Some(prev) = prev {
-            crate::env::set_var("JCODE_GLYPH_SAFE_MODE", prev);
+            unsafe {
+                std::env::set_var("KCODE_GLYPH_SAFE_MODE", prev);
+            }
         }
     }
 }

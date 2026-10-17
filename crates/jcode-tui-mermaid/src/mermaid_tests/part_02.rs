@@ -387,7 +387,7 @@ fn image_state_cache_enforces_source_byte_budget() {
 #[test]
 fn png_dimension_probe_needs_only_the_header() {
     let path = std::env::temp_dir().join(format!(
-        "jcode-png-header-{}-{}.png",
+        "kcode-png-header-{}-{}.png",
         std::process::id(),
         std::thread::current().name().unwrap_or("test")
     ));

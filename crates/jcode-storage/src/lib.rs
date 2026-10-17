@@ -4,7 +4,9 @@ use serde::de::DeserializeOwned;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+pub mod product_paths;
 mod remove;
+pub mod session_import;
 pub use remove::{remove_durable_state_file, remove_state_file};
 
 #[cfg(windows)]
@@ -84,11 +86,24 @@ static SECRET_HARDEN_STATE: LazyLock<Mutex<SecretHardenState>> =
 mod active_pids;
 pub use active_pids::{
     SessionCounts, SessionPresence, StreamingGuard, active_pids_dir, active_session_ids,
-    find_active_session_id_by_pid, internal_pids_dir, mark_streaming, register_active_pid,
-    session_counts, session_is_internal, session_presence, set_session_internal,
-    streaming_pids_dir, unmark_streaming, unregister_active_pid, user_session_counts,
-    user_session_presence,
+    find_active_session_id_by_pid, internal_pids_dir, mark_streaming, prune_active_pids_owned_by,
+    register_active_pid, session_counts, session_is_internal, session_presence,
+    set_session_internal, streaming_pids_dir, streaming_session_ids, unmark_streaming,
+    unregister_active_pid, user_session_counts, user_session_presence,
 };
+
+mod session_lease;
+pub use session_lease::{
+    SessionLease, SessionLeaseBlock, read_session_lease, remove_session_lease, session_lease_block,
+    session_leases_dir, write_session_lease,
+};
+
+/// Serialize this crate's tests that mutate `KCODE_HOME`.
+#[cfg(test)]
+pub(crate) fn test_jcode_home_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// Platform-aware runtime directory for sockets and ephemeral state.
 ///
@@ -96,13 +111,19 @@ pub use active_pids::{
 /// - macOS: `$TMPDIR` (per-user, e.g. `/var/folders/xx/.../T/`)
 /// - Fallback: `std::env::temp_dir()`
 ///
-/// Can be overridden with `$JCODE_RUNTIME_DIR`.
+/// Can be overridden with `$KCODE_RUNTIME_DIR`.
 pub fn runtime_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("JCODE_RUNTIME_DIR") {
-        return PathBuf::from(dir);
+    if let Ok(dir) = std::env::var("KCODE_RUNTIME_DIR") {
+        let path = PathBuf::from(dir);
+        if product_paths::require_kcode_path(&path).is_ok() {
+            return path;
+        }
     }
     if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
-        return PathBuf::from(dir);
+        let path = PathBuf::from(dir);
+        if product_paths::require_kcode_path(&path).is_ok() {
+            return path;
+        }
     }
     #[cfg(target_os = "macos")]
     {
@@ -117,7 +138,7 @@ pub fn runtime_dir() -> PathBuf {
 }
 
 fn fallback_runtime_dir() -> PathBuf {
-    std::env::temp_dir().join(format!("jcode-{}", runtime_user_discriminator()))
+    std::env::temp_dir().join(format!("kcode-{}", runtime_user_discriminator()))
 }
 
 #[cfg(unix)]
@@ -151,24 +172,28 @@ fn ensure_private_runtime_dir(path: &Path) {
 }
 
 pub fn jcode_dir() -> Result<PathBuf> {
-    if let Ok(path) = std::env::var("JCODE_HOME") {
-        return Ok(PathBuf::from(path));
+    if let Ok(path) = std::env::var("KCODE_HOME") {
+        let path = PathBuf::from(path);
+        product_paths::require_kcode_path(&path)?;
+        return Ok(path);
     }
 
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("No home directory"))?;
-    Ok(home.join(".jcode"))
+    let path = home.join(".kcode");
+    product_paths::require_kcode_path(&path)?;
+    Ok(path)
 }
 
-/// Whether `JCODE_HOME` redirects this process away from the user's real
-/// `~/.jcode` directory.
+/// Whether `KCODE_HOME` redirects this process away from the user's real
+/// `~/.kcode` directory.
 ///
 /// Sandboxed runs must not consult machine-global resources, such as the macOS
-/// Keychain, that cannot be redirected beneath `JCODE_HOME`.
+/// Keychain, that cannot be redirected beneath `KCODE_HOME`.
 pub fn running_with_sandboxed_home() -> bool {
-    let Some(configured) = std::env::var_os("JCODE_HOME").map(PathBuf::from) else {
+    let Some(configured) = std::env::var_os("KCODE_HOME").map(PathBuf::from) else {
         return false;
     };
-    let Some(default) = dirs::home_dir().map(|home| home.join(".jcode")) else {
+    let Some(default) = dirs::home_dir().map(|home| home.join(".kcode")) else {
         return true;
     };
 
@@ -188,13 +213,16 @@ pub fn logs_dir() -> Result<PathBuf> {
 /// `/run/user/<uid>` on Linux) that is wiped on reboot, so it must only hold
 /// sockets and truly ephemeral state. State that has to outlive a reboot,
 /// such as swarm plans and member records, belongs here instead: it resolves
-/// to `~/.jcode/state` (respecting `JCODE_HOME`).
+/// to `~/.kcode/state` (respecting `KCODE_HOME`).
 ///
-/// When `JCODE_RUNTIME_DIR` is set (tests and sandboxed temp servers), it
+/// When `KCODE_RUNTIME_DIR` is set (tests and sandboxed temp servers), it
 /// takes precedence so isolated runs never touch the real jcode home.
 pub fn durable_state_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("JCODE_RUNTIME_DIR") {
-        return PathBuf::from(dir).join("durable-state");
+    if let Ok(dir) = std::env::var("KCODE_RUNTIME_DIR") {
+        let path = PathBuf::from(dir);
+        if product_paths::require_kcode_path(&path).is_ok() {
+            return path.join("durable-state");
+        }
     }
     match jcode_dir() {
         Ok(dir) => dir.join("state"),
@@ -205,21 +233,23 @@ pub fn durable_state_dir() -> PathBuf {
 /// Resolve jcode's app-owned config directory.
 ///
 /// Default location is the platform config dir + `jcode` (for example
-/// `~/.config/jcode` on Linux). When `JCODE_HOME` is set, sandbox this under
-/// `$JCODE_HOME/config/jcode` so self-dev/tests do not leak into the user's
+/// `~/.config/jcode` on Linux). When `KCODE_HOME` is set, sandbox this under
+/// `$KCODE_HOME/config/jcode` so self-dev/tests do not leak into the user's
 /// real config directory.
 pub fn app_config_dir() -> Result<PathBuf> {
-    if let Ok(path) = std::env::var("JCODE_HOME") {
-        return Ok(PathBuf::from(path).join("config").join("jcode"));
+    if std::env::var_os("KCODE_HOME").is_some() {
+        return Ok(jcode_dir()?.join("config").join("kcode"));
     }
 
     let config_dir =
         dirs::config_dir().ok_or_else(|| anyhow::anyhow!("No config directory found"))?;
-    Ok(config_dir.join("jcode"))
+    let path = config_dir.join("kcode");
+    product_paths::require_kcode_path(&path)?;
+    Ok(path)
 }
 
 /// Resolve a path under the user's home directory, but sandbox it under
-/// `$JCODE_HOME/external/` when `JCODE_HOME` is set.
+/// `$KCODE_HOME/external/` when `KCODE_HOME` is set.
 ///
 /// This keeps external provider auth files isolated during tests and sandboxed
 /// runs without changing default on-disk locations for normal users.
@@ -232,8 +262,8 @@ pub fn user_home_path(relative: impl AsRef<Path>) -> Result<PathBuf> {
         );
     }
 
-    if let Ok(path) = std::env::var("JCODE_HOME") {
-        return Ok(PathBuf::from(path).join("external").join(relative));
+    if std::env::var_os("KCODE_HOME").is_some() {
+        return Ok(jcode_dir()?.join("external").join(relative));
     }
 
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("No home directory"))?;
@@ -248,8 +278,10 @@ pub fn harden_user_config_permissions() {
     #[cfg(windows)]
     {
         if let Some(config_dir) = dirs::config_dir() {
-            let jcode_config_dir = config_dir.join("jcode");
-            if jcode_config_dir.exists() {
+            let jcode_config_dir = config_dir.join("kcode");
+            if product_paths::require_kcode_path(&jcode_config_dir).is_ok()
+                && jcode_config_dir.exists()
+            {
                 schedule_windows_path_hardening(&jcode_config_dir, true);
             }
         }
@@ -259,14 +291,15 @@ pub fn harden_user_config_permissions() {
         {
             schedule_windows_path_hardening(&jcode_home, true);
         }
-        return;
     }
 
     #[cfg(not(windows))]
     {
         if let Some(config_dir) = dirs::config_dir() {
-            let jcode_config_dir = config_dir.join("jcode");
-            if jcode_config_dir.exists() {
+            let jcode_config_dir = config_dir.join("kcode");
+            if product_paths::require_kcode_path(&jcode_config_dir).is_ok()
+                && jcode_config_dir.exists()
+            {
                 let _ = jcode_core::fs::set_directory_permissions_owner_only(&jcode_config_dir);
             }
         }
@@ -287,7 +320,6 @@ pub fn harden_secret_file_permissions(path: &Path) {
     #[cfg(windows)]
     {
         harden_secret_file_permissions_windows(path);
-        return;
     }
 
     #[cfg(not(windows))]
@@ -332,7 +364,7 @@ fn schedule_windows_path_hardening(path: &Path, directory: bool) {
     }
 
     if std::thread::Builder::new()
-        .name("jcode-windows-acl-harden".to_string())
+        .name("kcode-windows-acl-harden".to_string())
         .spawn(|| {
             std::thread::sleep(SECRET_HARDEN_DEFER_DELAY);
             run_windows_hardening_worker();
@@ -714,7 +746,7 @@ mod windows_hardening_tests {
     fn first_path_starts_one_worker_and_repeated_paths_are_coalesced() {
         let mut state = SecretHardenState::default();
         let now = Instant::now();
-        let directory = Path::new(r"C:\Users\test\.jcode");
+        let directory = Path::new(r"C:\Users\test\.kcode");
         let file = directory.join("auth.json");
 
         assert!(state.enqueue(directory, true, now));
@@ -729,7 +761,7 @@ mod windows_hardening_tests {
     fn recently_attempted_paths_are_not_requeued() {
         let mut state = SecretHardenState::default();
         let attempted_at = Instant::now();
-        let file = PathBuf::from(r"C:\Users\test\.jcode\auth.json");
+        let file = PathBuf::from(r"C:\Users\test\.kcode\auth.json");
         state
             .files
             .insert(file.clone(), SecretHardenAttempt::Succeeded(attempted_at));
@@ -743,7 +775,7 @@ mod windows_hardening_tests {
     fn failed_paths_retry_after_shorter_backoff() {
         let mut state = SecretHardenState::default();
         let attempted_at = Instant::now();
-        let file = PathBuf::from(r"C:\Users\test\.jcode\auth.json");
+        let file = PathBuf::from(r"C:\Users\test\.kcode\auth.json");
         state
             .files
             .insert(file.clone(), SecretHardenAttempt::Failed(attempted_at));
@@ -757,7 +789,7 @@ mod windows_hardening_tests {
     fn in_flight_paths_are_not_requeued() {
         let mut state = SecretHardenState::default();
         let now = Instant::now();
-        let file = PathBuf::from(r"C:\Users\test\.jcode\auth.json");
+        let file = PathBuf::from(r"C:\Users\test\.kcode\auth.json");
         state
             .files
             .insert(file.clone(), SecretHardenAttempt::InFlight);
@@ -767,7 +799,7 @@ mod windows_hardening_tests {
     }
 }
 
-/// Serialize tests that mutate `JCODE_HOME` (or any other process-wide env
+/// Serialize tests that mutate `KCODE_HOME` (or any other process-wide env
 /// var the storage layer reads). Shared by `active_pids` and `remove` test
 /// modules so they cannot race when both touch the env.
 #[cfg(test)]

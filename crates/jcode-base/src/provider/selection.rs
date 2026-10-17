@@ -53,7 +53,7 @@ impl MultiProvider {
     }
 
     pub(super) fn initial_provider_from_env() -> Option<ActiveProvider> {
-        let explicit = std::env::var("JCODE_INITIAL_PROVIDER_EXPLICIT")
+        let explicit = std::env::var("KCODE_INITIAL_PROVIDER_EXPLICIT")
             .ok()
             .is_some_and(|value| {
                 matches!(
@@ -65,7 +65,7 @@ impl MultiProvider {
             return None;
         }
 
-        std::env::var("JCODE_ACTIVE_PROVIDER")
+        std::env::var("KCODE_ACTIVE_PROVIDER")
             .ok()
             .and_then(|value| Self::parse_provider_hint(&value))
     }
@@ -148,6 +148,7 @@ impl MultiProvider {
         };
         let model_spec = match &api_method_kind {
             ModelRouteApiMethod::Copilot => format!("copilot:{}", bare_name),
+            ModelRouteApiMethod::GrokBuild => crate::provider::grok_build_model_spec(bare_name),
             ModelRouteApiMethod::ClaudeOAuth => format!("claude-oauth:{}", bare_name),
             ModelRouteApiMethod::AnthropicApiKey if provider_display == "Anthropic" => {
                 format!("claude-api:{}", bare_name)
@@ -168,6 +169,7 @@ impl MultiProvider {
 
         let provider_key = match &api_method_kind {
             ModelRouteApiMethod::JcodeSubscription => Some("jcode".to_string()),
+            ModelRouteApiMethod::GrokBuild => Some("grok-build".to_string()),
             ModelRouteApiMethod::AnthropicApiKey
                 if provider_display == "Anthropic"
                     && crate::provider::provider_for_model(bare_name) == Some("claude") =>
@@ -451,10 +453,22 @@ impl MultiProvider {
         if model.is_empty() {
             return String::new();
         }
-        // The model itself carries explicit OpenRouter route identity. Honor it
-        // before persisted route metadata, which may come from an older buggy
-        // session and contradict the pin.
-        if crate::provider::explicit_model_provider_prefix(model).is_none() && model.contains('@') {
+        // A worker model override can carry its own transport while the child
+        // still has its parent's saved route. Honor the explicit model first.
+        if crate::provider::explicit_model_provider_prefix(model).is_some()
+            || model.split_once(':').is_some_and(|(prefix, rest)| {
+                !prefix.trim().is_empty()
+                    && !rest.trim().is_empty()
+                    && (crate::provider_catalog::resolve_openai_compatible_profile_selection(
+                        prefix,
+                    )
+                    .is_some()
+                        || crate::config::config().providers.contains_key(prefix))
+            })
+        {
+            return model.to_string();
+        }
+        if model.contains('@') {
             return format!("openrouter:{model}");
         }
         if let Some(api_method) = route_api_method
@@ -463,6 +477,9 @@ impl MultiProvider {
         {
             match ModelRouteApiMethod::parse(api_method) {
                 ModelRouteApiMethod::JcodeSubscription => return model.to_string(),
+                ModelRouteApiMethod::GrokBuild => {
+                    return crate::provider::grok_build_model_spec(model);
+                }
                 ModelRouteApiMethod::ClaudeOAuth => return format!("claude-oauth:{model}"),
                 ModelRouteApiMethod::AnthropicApiKey => return format!("claude-api:{model}"),
                 ModelRouteApiMethod::OpenAIOAuth => return format!("openai-oauth:{model}"),
@@ -715,6 +732,26 @@ mod tests {
             ),
             "nvidia-nim:nvidia/example"
         );
+    }
+
+    #[test]
+    fn session_route_explicit_model_override_wins_over_inherited_transport() {
+        for (model, inherited_route) in [
+            ("openai-api:gpt-5.5", "claude-api"),
+            ("claude-oauth:claude-opus-4-6", "openai-api"),
+            ("openrouter:z-ai/glm-5.3", "claude-api"),
+            ("cerebras:qwen-3-235b-a22b-instruct-2507", "claude-api"),
+        ] {
+            assert_eq!(
+                MultiProvider::model_switch_request_for_session_route(
+                    model,
+                    Some(inherited_route),
+                    Some(inherited_route),
+                ),
+                model,
+                "worker override {model} must not inherit {inherited_route}",
+            );
+        }
     }
 
     #[test]

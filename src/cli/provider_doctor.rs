@@ -89,7 +89,7 @@ fn emit_report(report: &DoctorReport, emit_json: bool) {
     } else {
         let colorize = std::io::stdout().is_terminal()
             && std::env::var_os("NO_COLOR").is_none()
-            && std::env::var_os("JCODE_NO_COLOR").is_none();
+            && std::env::var_os("KCODE_NO_COLOR").is_none();
         print!("{}", format_report(report, colorize));
     }
 }
@@ -194,7 +194,7 @@ fn next_step_hint(checkpoint: &str) -> String {
         cp::TOOL_CALL_PARSE
         | cp::TOOL_EXECUTION_LOOP
         | cp::TOOL_RESULT_FOLLOWUP
-        | cp::REAL_JCODE_TOOL_SMOKE => {
+        | cp::REAL_KCODE_TOOL_SMOKE => {
             "  Next: this model did not produce a valid tool call. It may not support tools well."
         }
         _ => "",

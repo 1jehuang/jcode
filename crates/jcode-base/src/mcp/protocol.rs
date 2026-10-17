@@ -402,7 +402,7 @@ impl McpConfig {
     /// Claude Code configuration is intentionally not imported here. It is a
     /// live source read by `load_for_dir`, so persisting it would make deleted
     /// servers survive in jcode's snapshot and would duplicate inline secrets.
-    /// This only runs while ~/.jcode/mcp.json does not exist.
+    /// This only runs while ~/.kcode/mcp.json does not exist.
     fn import_from_codex_once() {
         let jcode_mcp = match crate::storage::jcode_dir() {
             Ok(dir) => dir.join("mcp.json"),
@@ -510,6 +510,11 @@ impl McpConfig {
                         .get("shared")
                         .and_then(|v| v.as_bool())
                         .unwrap_or(true);
+                    // Codex uses `enabled = false` to keep a server registered
+                    // but not started; carrying it over keeps disabled servers
+                    // disabled after the one-time import instead of silently
+                    // activating them.
+                    let enabled = server.get("enabled").and_then(|v| v.as_bool());
                     config.servers.insert(
                         name.clone(),
                         McpServerConfig {
@@ -520,7 +525,7 @@ impl McpConfig {
                             transport: None,
                             url: None,
                             headers: std::collections::HashMap::new(),
-                            enabled: None,
+                            enabled,
                             disabled: None,
                             timeout_secs: None,
                         },
@@ -574,12 +579,12 @@ impl McpConfig {
     }
 
     /// Load project-local MCP config files from `project_root`, in override
-    /// order: `.jcode/mcp.json`, then `.mcp.json` (Claude Code project config),
+    /// order: `.kcode/mcp.json`, then `.mcp.json` (Claude Code project config),
     /// then `.claude/mcp.json` (legacy compatibility). Later files override
     /// same-named servers from earlier ones.
     fn load_project_locals(project_root: &std::path::Path) -> Self {
         let mut merged = Self::default();
-        for relative in [".jcode/mcp.json", ".mcp.json", ".claude/mcp.json"] {
+        for relative in [".kcode/mcp.json", ".mcp.json", ".claude/mcp.json"] {
             let path = project_root.join(relative);
             if path.exists()
                 && let Ok(config) = Self::load_from_file(&path)
@@ -598,7 +603,7 @@ impl McpConfig {
     }
 
     /// Load from default locations, resolving project-local config
-    /// (`.jcode/mcp.json`, `.mcp.json`, `.claude/mcp.json`, and the per-project
+    /// (`.kcode/mcp.json`, `.mcp.json`, `.claude/mcp.json`, and the per-project
     /// entries in `~/.claude.json`) against `project_dir` instead of the
     /// process working directory when provided.
     ///
@@ -614,9 +619,9 @@ impl McpConfig {
         Self::import_from_codex_once();
 
         let mut merged = Self::default();
-        let claude_mcp_enabled = std::env::var_os("JCODE_DISABLE_CLAUDE_MCP").is_none();
+        let claude_mcp_enabled = std::env::var_os("KCODE_DISABLE_CLAUDE_MCP").is_none();
 
-        // Load jcode's own global config (~/.jcode/mcp.json)
+        // Load jcode's own global config (~/.kcode/mcp.json)
         if let Ok(jcode_dir) = crate::storage::jcode_dir() {
             let jcode_mcp = jcode_dir.join("mcp.json");
             if jcode_mcp.exists() {
@@ -646,7 +651,7 @@ impl McpConfig {
 
         // Older Claude Code global config is also a live source. Reading it on
         // every load preserves compatibility without copying any inline env
-        // values into ~/.jcode/mcp.json.
+        // values into ~/.kcode/mcp.json.
         if claude_mcp_enabled
             && let Ok(claude_mcp) = crate::storage::user_home_path(".claude/mcp.json")
         {
@@ -698,7 +703,7 @@ impl McpConfig {
     /// (HTTP/SSE) never displaces a working stdio entry for the same name.
     ///
     /// Without this, a `type: http` entry in `~/.claude.json` would overwrite a
-    /// working stdio server from `~/.jcode/mcp.json` and then be dropped by the
+    /// working stdio server from `~/.kcode/mcp.json` and then be dropped by the
     /// non-stdio filter, silently losing the server (issue #653).
     fn merge_servers_preferring_runnable(
         existing: &mut std::collections::HashMap<String, McpServerConfig>,

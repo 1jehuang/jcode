@@ -1,6 +1,6 @@
 //! Configuration file support for jcode
 //!
-//! Config is loaded from `~/.jcode/config.toml` (or `$JCODE_HOME/config.toml`)
+//! Config is loaded from `~/.kcode/config.toml` (or `$KCODE_HOME/config.toml`)
 //! Environment variables override config file settings.
 
 pub use jcode_config_types::{
@@ -10,9 +10,9 @@ pub use jcode_config_types::{
     HookCommands, HooksConfig, KeybindingsConfig, LatexRenderingMode, LaunchHotkeyEntry,
     LaunchHotkeysConfig, MarkdownSpacingMode, NamedProviderAuth, NamedProviderConfig,
     NamedProviderModelConfig, NamedProviderType, NativeScrollbarConfig, NotificationsConfig,
-    OverscrollStatusMode, PowerConfig, ProviderConfig, ReasoningDisplayMode, SafetyConfig,
-    SessionPickerResumeAction, SponsorsConfig, SwarmSpawnMode, SwarmStripLayout, TerminalConfig,
-    UpdateChannel, WebSearchConfig, WebSearchEngine,
+    PowerConfig, ProviderConfig, ReasoningDisplayMode, SafetyConfig, SessionPickerResumeAction,
+    SponsorsConfig, SwarmSpawnMode, SwarmStripLayout, TerminalConfig, UpdateChannel,
+    WebSearchConfig, WebSearchEngine,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -29,165 +29,185 @@ const CONFIG_CACHE_CHECK_INTERVAL: Duration = if cfg!(test) {
 
 const CONFIG_ENV_KEYS: &[&str] = &[
     "HOME",
-    "JCODE_ACP_PROFILE",
-    "JCODE_ACP_TOOL_PROFILE",
-    "JCODE_ACTIVE_SESSIONS_MANAGER",
-    "JCODE_EXTERNAL_SESSIONS",
-    "JCODE_AMBIENT_ENABLED",
-    "JCODE_AMBIENT_MAX_INTERVAL",
-    "JCODE_AMBIENT_MIN_INTERVAL",
-    "JCODE_AMBIENT_MODEL",
-    "JCODE_AMBIENT_PROACTIVE",
-    "JCODE_AMBIENT_PROVIDER",
-    "JCODE_AMBIENT_VISIBLE",
-    "JCODE_ANIMATION_FPS",
-    "JCODE_AUTO_POKE",
-    "JCODE_AUTOJUDGE_ENABLED",
-    "JCODE_AUTOJUDGE_MODEL",
-    "JCODE_AUTOREVIEW_ENABLED",
-    "JCODE_AUTOREVIEW_MODEL",
-    "JCODE_AUTO_POKE",
-    "JCODE_AUTO_SERVER_RELOAD",
-    "JCODE_CHECK_UPDATES",
-    "JCODE_BING_API_KEY",
-    "JCODE_BING_API_KEY_ENV",
-    "JCODE_BING_MARKET",
-    "JCODE_CENTERED_TOGGLE_KEY",
-    "JCODE_CHAT_NATIVE_SCROLLBAR",
-    "JCODE_COMPACT_NOTIFICATIONS",
-    "JCODE_COPY_BADGE_ALT_LABEL",
-    "JCODE_COPY_SELECTION_TOGGLE_KEY",
-    "JCODE_COPILOT_PREMIUM",
-    "JCODE_CROSS_PROVIDER_FAILOVER",
-    "JCODE_DEBUG_SOCKET",
-    "JCODE_DEFAULT_REASONING_DISPLAY",
-    "JCODE_DICTATION_COMMAND",
-    "JCODE_DICTATION_KEY",
-    "JCODE_DICTATION_MODE",
-    "JCODE_DICTATION_TIMEOUT_SECS",
-    "JCODE_DIFF_LINE_WRAP",
-    "JCODE_DIFF_MODE",
-    "JCODE_DIFF_MODE_CYCLE_KEY",
-    "JCODE_DIAGRAM_PANE_TOGGLE_KEY",
-    "JCODE_DISABLE_BASE_TOOLS",
-    "JCODE_DISABLED_ANIMATIONS",
-    "JCODE_DISABLED_TOOLS",
-    "JCODE_DISCORD_BOT_TOKEN",
-    "JCODE_DISCORD_BOT_USER_ID",
-    "JCODE_DISCORD_CHANNEL_ID",
-    "JCODE_DISCORD_REPLY_ENABLED",
-    "JCODE_DISPLAY_CENTERED",
-    "JCODE_EFFORT_DECREASE_KEY",
-    "JCODE_EFFORT_INCREASE_KEY",
-    "JCODE_EMAIL_REPLY_ENABLED",
-    "JCODE_EMAIL_TO",
-    "JCODE_FOCUS_HOOK",
-    "JCODE_GATEWAY_BIND_ADDR",
-    "JCODE_GATEWAY_ENABLED",
-    "JCODE_GATEWAY_PORT",
-    "JCODE_HOME",
-    "JCODE_HOOK_PRE_TOOL",
-    "JCODE_HOOK_PRE_TOOL_TIMEOUT_MS",
-    "JCODE_HOOK_POST_TOOL",
-    "JCODE_HOOK_SESSION_END",
-    "JCODE_HOOK_SESSION_START",
-    "JCODE_HOOK_TURN_END",
-    "JCODE_HOOK_TURN_START",
-    "JCODE_IDLE_ANIMATION",
-    "JCODE_IMAP_HOST",
-    "JCODE_INFO_WIDGET_TOGGLE_KEY",
-    "JCODE_JADE_RELAY_API_BASE",
-    "JCODE_JADE_RELAY_ENABLED",
-    "JCODE_JADE_RELAY_LAUNCH_ENABLED",
-    "JCODE_JADE_RELAY_LAUNCH_WORKING_DIR",
-    "JCODE_JADE_RELAY_REPLY_ENABLED",
-    "JCODE_JADE_RELAY_SESSION_ID",
-    "JCODE_JADE_RELAY_TOKEN",
-    "JCODE_JADE_RELAY_TOKEN_ID",
-    "JCODE_JADE_RELAY_USER_ID",
-    "JCODE_KV_CACHE_MISS_NOTICES",
-    "JCODE_LATEX_RENDERING",
-    "JCODE_MARKDOWN_SPACING",
-    "JCODE_MEMORY_EMBEDDING_BACKEND",
-    "JCODE_MEMORY_EMBEDDING_BASE_URL",
-    "JCODE_MEMORY_EMBEDDING_DIM",
-    "JCODE_MEMORY_EMBEDDING_MODEL",
-    "JCODE_MEMORY_ENABLED",
-    "JCODE_ENABLE_MERMAID",
-    "JCODE_MEMORY_MODEL",
-    "JCODE_MEMORY_SIDECAR_ENABLED",
-    "JCODE_PERSIST_MEMORY_INJECTIONS",
-    "JCODE_MESSAGE_TIMESTAMPS",
-    "JCODE_MODEL",
-    "JCODE_MODEL_SWITCH_KEY",
-    "JCODE_MODEL_SWITCH_PREV_KEY",
-    "JCODE_MOUSE_CAPTURE",
-    "JCODE_NEW_TERMINAL_KEY",
-    "JCODE_NO_EMOJI",
-    "JCODE_NTFY_SERVER",
-    "JCODE_NTFY_TOPIC",
-    "JCODE_OPENAI_NATIVE_COMPACTION_MODE",
-    "JCODE_OPENAI_NATIVE_COMPACTION_THRESHOLD_TOKENS",
-    "JCODE_OPENAI_REASONING_EFFORT",
-    "JCODE_OPENAI_SERVICE_TIER",
-    "JCODE_OPENAI_TRANSPORT",
-    "JCODE_ANTHROPIC_REASONING_EFFORT",
-    "JCODE_PRESERVE_REASONING_CONTEXT",
-    "JCODE_PERFORMANCE",
-    "JCODE_PIN_IMAGES",
-    "JCODE_PIN_TODOS",
-    "JCODE_PREVENT_SLEEP_WHILE_STREAMING",
-    "JCODE_PROVIDER",
-    "JCODE_PROMPT_ENTRY_ANIMATION",
-    "JCODE_QUEUE_MODE",
-    "JCODE_REASONING_DISPLAY",
-    "JCODE_REDRAW_FPS",
-    "JCODE_SAME_PROVIDER_ACCOUNT_FAILOVER",
-    "JCODE_SCROLL_BOOKMARK_KEY",
-    "JCODE_SCROLL_DOWN_FALLBACK_KEY",
-    "JCODE_SCROLL_DOWN_KEY",
-    "JCODE_SCROLL_PAGE_DOWN_KEY",
-    "JCODE_SCROLL_PAGE_UP_KEY",
-    "JCODE_SCROLL_PROMPT_DOWN_KEY",
-    "JCODE_SCROLL_PROMPT_UP_KEY",
-    "JCODE_SCROLL_UP_FALLBACK_KEY",
-    "JCODE_SCROLL_UP_KEY",
-    "JCODE_SEARXNG_URL",
-    "JCODE_SHOW_AGENTGREP_OUTPUT",
-    "JCODE_SHOW_BASH_OUTPUT",
-    "JCODE_SHOW_DIFFS",
-    "JCODE_SHOW_THINKING",
-    "JCODE_SIDE_PANEL_TOGGLE_KEY",
-    "JCODE_SIDE_PANEL_NATIVE_SCROLLBAR",
-    "JCODE_SMTP_PASSWORD",
-    "JCODE_SPAWN_HOOK",
-    "JCODE_STREAM_IDLE_TIMEOUT_SECS",
-    "JCODE_MAX_RETRIES",
-    "JCODE_MCP_TOOLS",
-    "JCODE_MCP_TOOLS_TOKEN_THRESHOLD",
-    "JCODE_RETRY_BACKOFF_CAP_SECS",
-    "JCODE_SWARM_ENABLED",
-    "JCODE_SWARM_EFFORT",
-    "JCODE_SWARM_MODEL",
-    "JCODE_SWARM_MAX_CONCURRENT_AGENTS",
-    "JCODE_SWARM_SPAWN_MODE",
-    "JCODE_SWARM_STRIP_LAYOUT",
-    "JCODE_TELEGRAM_BOT_TOKEN",
-    "JCODE_TELEGRAM_CHAT_ID",
-    "JCODE_TELEGRAM_REPLY_ENABLED",
-    "JCODE_TOOL_CALL_DETAILS",
-    "JCODE_TOOL_PROFILE",
-    "JCODE_TOOLS",
-    "JCODE_TRUSTED_EXTERNAL_AUTH_SOURCES",
-    "JCODE_TYPING_SCROLL_LOCK_TOGGLE_KEY",
-    "JCODE_UPDATE_CHANNEL",
-    "JCODE_WAKE_MODE",
-    "JCODE_WEBSEARCH_ENGINE",
-    "JCODE_WEBSEARCH_FALLBACK_ENGINES",
-    "JCODE_WORKSPACE_DOWN_KEY",
-    "JCODE_WORKSPACE_LEFT_KEY",
-    "JCODE_WORKSPACE_RIGHT_KEY",
-    "JCODE_WORKSPACE_UP_KEY",
+    "KCODE_ACP_PROFILE",
+    "KCODE_ACP_TOOL_PROFILE",
+    "KCODE_ACTIVE_SESSIONS_MANAGER",
+    "KCODE_EXTERNAL_SESSIONS",
+    "KCODE_AMBIENT_ENABLED",
+    "KCODE_AMBIENT_MAX_INTERVAL",
+    "KCODE_AMBIENT_MIN_INTERVAL",
+    "KCODE_AMBIENT_MODEL",
+    "KCODE_AMBIENT_PROACTIVE",
+    "KCODE_AMBIENT_PROVIDER",
+    "KCODE_AMBIENT_VISIBLE",
+    "KCODE_ANIMATION_FPS",
+    "KCODE_AUTO_POKE",
+    "KCODE_AUTOJUDGE_ENABLED",
+    "KCODE_AUTOJUDGE_MODEL",
+    "KCODE_AUTOREVIEW_ENABLED",
+    "KCODE_AUTOREVIEW_MODEL",
+    "KCODE_AUTO_SERVER_RELOAD",
+    "KCODE_CHECK_UPDATES",
+    "KCODE_BING_API_KEY",
+    "KCODE_BLOCK_LID_CLOSE",
+    "KCODE_BING_API_KEY_ENV",
+    "KCODE_BING_MARKET",
+    "KCODE_CENTERED_TOGGLE_KEY",
+    "KCODE_CHAT_NATIVE_SCROLLBAR",
+    "KCODE_COMPACT_NOTIFICATIONS",
+    "KCODE_COPY_BADGE_ALT_LABEL",
+    "KCODE_COPY_SELECTION_TOGGLE_KEY",
+    "KCODE_COPILOT_PREMIUM",
+    "KCODE_GEMINI_FORCE_OAUTH",
+    "GOOGLE_CLOUD_PROJECT",
+    "GOOGLE_CLOUD_PROJECT_ID",
+    "KCODE_WAKE_MODE",
+    "KCODE_CROSS_PROVIDER_FAILOVER",
+    "KCODE_DEBUG_SOCKET",
+    "KCODE_DEFAULT_REASONING_DISPLAY",
+    "KCODE_DICTATION_COMMAND",
+    "KCODE_DICTATION_RECORDER",
+    "KCODE_DICTATION_KEY",
+    "KCODE_DICTATION_MODE",
+    "KCODE_DICTATION_TIMEOUT_SECS",
+    "KCODE_DIFF_LINE_WRAP",
+    "KCODE_DIFF_MODE",
+    "KCODE_DIFF_MODE_CYCLE_KEY",
+    "KCODE_DIAGRAM_PANE_TOGGLE_KEY",
+    "KCODE_DIAGRAM_PANE_VISIBILITY_TOGGLE_KEY",
+    "KCODE_DISABLE_BASE_TOOLS",
+    "KCODE_DISABLED_ANIMATIONS",
+    "KCODE_DISABLED_TOOLS",
+    "KCODE_DISCORD_BOT_TOKEN",
+    "KCODE_DISCORD_BOT_USER_ID",
+    "KCODE_DISCORD_CHANNEL_ID",
+    "KCODE_DISCORD_REPLY_ENABLED",
+    "KCODE_DISPLAY_CENTERED",
+    "KCODE_EFFORT_DECREASE_KEY",
+    "KCODE_EFFORT_INCREASE_KEY",
+    "KCODE_SPEED_DECREASE_KEY",
+    "KCODE_SPEED_INCREASE_KEY",
+    "KCODE_EMAIL_REPLY_ENABLED",
+    "KCODE_EMAIL_TO",
+    "KCODE_FOCUS_HOOK",
+    "KCODE_GATEWAY_BIND_ADDR",
+    "KCODE_GATEWAY_ENABLED",
+    "KCODE_GATEWAY_PORT",
+    "KCODE_HOME",
+    "KCODE_HOOK_PRE_TOOL",
+    "KCODE_HOOK_PRE_TOOL_TRANSFORM",
+    "KCODE_HOOK_PRE_TOOL_TRANSFORM_TIMEOUT_MS",
+    "KCODE_HOOK_PRE_TOOL_TIMEOUT_MS",
+    "KCODE_HOOK_POST_TOOL",
+    "KCODE_HOOK_POST_TOOL_FEEDBACK",
+    "KCODE_HOOK_POST_TOOL_FEEDBACK_TIMEOUT_MS",
+    "KCODE_HOOK_SESSION_END",
+    "KCODE_HOOK_SESSION_START",
+    "KCODE_HOOK_TURN_END",
+    "KCODE_HOOK_TURN_START",
+    "KCODE_IDLE_ANIMATION",
+    "KCODE_IMAP_HOST",
+    "KCODE_INFO_WIDGET_TOGGLE_KEY",
+    "KCODE_JADE_RELAY_API_BASE",
+    "KCODE_JADE_RELAY_ENABLED",
+    "KCODE_JADE_RELAY_LAUNCH_ENABLED",
+    "KCODE_JADE_RELAY_LAUNCH_WORKING_DIR",
+    "KCODE_JADE_RELAY_REPLY_ENABLED",
+    "KCODE_JADE_RELAY_SESSION_ID",
+    "KCODE_JADE_RELAY_TOKEN",
+    "KCODE_JADE_RELAY_TOKEN_ID",
+    "KCODE_JADE_RELAY_USER_ID",
+    "KCODE_KV_CACHE_MISS_NOTICES",
+    "KCODE_LATEX_RENDERING",
+    "KCODE_MARKDOWN_SPACING",
+    "KCODE_MEMORY_EMBEDDING_BACKEND",
+    "KCODE_MEMORY_EMBEDDING_BASE_URL",
+    "KCODE_MEMORY_EMBEDDING_DIM",
+    "KCODE_MEMORY_EMBEDDING_MODEL",
+    "KCODE_MEMORY_ENABLED",
+    "KCODE_MEMORY_JEV_PROVIDER",
+    "KCODE_ENABLE_MERMAID",
+    "KCODE_MEMORY_MODEL",
+    "KCODE_MEMORY_SIDECAR_ENABLED",
+    "KCODE_PERSIST_MEMORY_INJECTIONS",
+    "KCODE_MESSAGE_TIMESTAMPS",
+    "KCODE_MODEL",
+    "KCODE_MODEL_SWITCH_KEY",
+    "KCODE_MODEL_SWITCH_PREV_KEY",
+    "KCODE_MOUSE_CAPTURE",
+    "KCODE_NEW_TERMINAL_KEY",
+    "KCODE_NO_EMOJI",
+    "KCODE_NTFY_SERVER",
+    "KCODE_NTFY_TOPIC",
+    "KCODE_OPENAI_NATIVE_COMPACTION_MODE",
+    "KCODE_OPENAI_NATIVE_COMPACTION_THRESHOLD_TOKENS",
+    "KCODE_OPENAI_REASONING_EFFORT",
+    "KCODE_OPENAI_SERVICE_TIER",
+    "KCODE_OPENAI_TRANSPORT",
+    "KCODE_ANTHROPIC_REASONING_EFFORT",
+    "KCODE_PRESERVE_REASONING_CONTEXT",
+    "KCODE_PERFORMANCE",
+    "KCODE_PIN_IMAGES",
+    "KCODE_PIN_TODOS",
+    "KCODE_PREVENT_SLEEP_WHILE_STREAMING",
+    "KCODE_PROVIDER",
+    "KCODE_PROMPT_ENTRY_ANIMATION",
+    "KCODE_QUEUE_MODE",
+    "KCODE_REASONING_DISPLAY",
+    "KCODE_REDRAW_FPS",
+    "KCODE_SAME_PROVIDER_ACCOUNT_FAILOVER",
+    "KCODE_SCROLL_BOOKMARK_KEY",
+    "KCODE_SCROLL_DOWN_FALLBACK_KEY",
+    "KCODE_SCROLL_DOWN_KEY",
+    "KCODE_SCROLL_PAGE_DOWN_KEY",
+    "KCODE_SCROLL_PAGE_UP_KEY",
+    "KCODE_SCROLL_PROMPT_DOWN_KEY",
+    "KCODE_SCROLL_PROMPT_UP_KEY",
+    "KCODE_SCROLL_UP_FALLBACK_KEY",
+    "KCODE_SCROLL_UP_KEY",
+    "KCODE_SEARXNG_URL",
+    "KCODE_SHOW_AGENTGREP_OUTPUT",
+    "KCODE_SHOW_BASH_OUTPUT",
+    "KCODE_SHOW_DIFFS",
+    "KCODE_SHOW_THINKING",
+    "KCODE_SIDE_PANEL_TOGGLE_KEY",
+    "KCODE_SIDE_PANEL_NATIVE_SCROLLBAR",
+    "KCODE_SMTP_PASSWORD",
+    "KCODE_SPAWN_HOOK",
+    "KCODE_STREAM_IDLE_TIMEOUT_SECS",
+    "KCODE_MAX_RETRIES",
+    "KCODE_MCP_TOOLS",
+    "KCODE_MCP_TOOLS_TOKEN_THRESHOLD",
+    "KCODE_CODEMODE",
+    "KCODE_RETRY_BACKOFF_CAP_SECS",
+    "KCODE_SWARM_ENABLED",
+    "KCODE_SWARM_EFFORT",
+    "KCODE_SWARM_ROOT_EFFORT",
+    "KCODE_SWARM_DEEP_ROOT_EFFORT",
+    "KCODE_SWARM_MODEL",
+    "KCODE_SWARM_MAX_CONCURRENT_AGENTS",
+    "KCODE_SWARM_SPAWN_MODE",
+    "KCODE_SWARM_STRIP_LAYOUT",
+    "KCODE_TELEGRAM_BOT_TOKEN",
+    "KCODE_TELEGRAM_CHAT_ID",
+    "KCODE_TELEGRAM_REPLY_ENABLED",
+    "KCODE_TOOL_CALL_DETAILS",
+    "KCODE_TOOL_PROFILE",
+    "KCODE_TOOLS",
+    "KCODE_TRUSTED_EXTERNAL_AUTH_SOURCES",
+    "KCODE_TYPING_SCROLL_LOCK_TOGGLE_KEY",
+    "KCODE_UPDATE_CHANNEL",
+    "KCODE_VOICE_INPUT_KEY",
+    "KCODE_WEBSEARCH_ENGINE",
+    "KCODE_WEBSEARCH_FALLBACK_ENGINES",
+    "KCODE_WEBSEARCH_NATIVE_ALLOWED_DOMAINS",
+    "KCODE_WEBSEARCH_NATIVE_BLOCKED_DOMAINS",
+    "KCODE_WEBSEARCH_NATIVE_MAX_USES",
+    "KCODE_WEBSEARCH_PREFER_NATIVE",
+    "KCODE_WORKSPACE_DOWN_KEY",
+    "KCODE_WORKSPACE_LEFT_KEY",
+    "KCODE_WORKSPACE_RIGHT_KEY",
+    "KCODE_WORKSPACE_UP_KEY",
     "XDG_CONFIG_HOME",
 ];
 
@@ -224,7 +244,7 @@ struct ConfigCache {
 static CONFIG_CACHE: LazyLock<RwLock<ConfigCache>> = LazyLock::new(|| {
     let config = leak_config(Config::load());
     // Fingerprint after the load: applying env overrides may set env vars
-    // (e.g. copilot_premium -> JCODE_COPILOT_PREMIUM), and fingerprinting
+    // (e.g. copilot_premium -> KCODE_COPILOT_PREMIUM), and fingerprinting
     // first would guarantee a spurious full reload on the next check.
     let fingerprint = ConfigCacheFingerprint::current();
     // Seed the global context-limit cache from named provider configs on first
@@ -293,7 +313,7 @@ pub fn config() -> &'static Config {
             ));
             cache.config = leak_config(Config::load());
             // Loading applies env overrides that can themselves set env vars
-            // (e.g. copilot_premium propagates config -> JCODE_COPILOT_PREMIUM).
+            // (e.g. copilot_premium propagates config -> KCODE_COPILOT_PREMIUM).
             // Re-fingerprint after the load so those self-inflicted env changes
             // don't trigger a guaranteed second reload on the next check.
             cache.fingerprint = ConfigCacheFingerprint::current();
@@ -549,6 +569,12 @@ pub struct Config {
 
     /// Global "launch a new jcode" hotkeys (macOS). Baked once by auto-import.
     pub launch_hotkeys: LaunchHotkeysConfig,
+
+    /// `[desktop.*]` tables owned by Jcode Desktop (voice, workspace,
+    /// appearance, ...). The CLI never interprets them, but it must round-trip
+    /// them verbatim so a CLI settings save never wipes Desktop preferences.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub desktop: Option<toml::Table>,
 }
 
 /// Controls who owns autonomous wake execution.
@@ -602,13 +628,16 @@ impl Default for AcpConfig {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum McpToolsMode {
-    /// Expose individual tools until their serialized definitions exceed the
-    /// configured threshold, then use the fixed search/call surface.
+    /// Never change the cached tool list for MCP changes. Providers with
+    /// native deferred loading (Claude, OpenAI gpt-5.4+) get MCP tools as
+    /// deferred definitions; others get the fixed `mcp_search`/`mcp_call`
+    /// surface, with new tools described in the transcript.
     #[default]
     Auto,
     /// Always expose every MCP server tool as a top-level tool definition.
+    /// Adding a server mid-session then invalidates the prompt cache.
     Eager,
-    /// Expose only the fixed `mcp_search` and `mcp_call` tools.
+    /// Same as `Auto` (kept for existing configs).
     Deferred,
 }
 
@@ -646,13 +675,19 @@ pub struct ToolConfig {
     pub disable_base_tools: bool,
     /// MCP tool exposure mode: auto (default), eager, or deferred.
     pub mcp_tools: McpToolsMode,
-    /// In auto mode, defer MCP tools when their definitions exceed this token estimate.
+    /// Ignored. `auto` used to switch MCP exposure at this token estimate,
+    /// which changed the cached tool list mid-session. Kept so existing
+    /// configs and the env override still parse.
     #[serde(
         alias = "mcp_tools_threshold",
         alias = "mcp_tools_auto_threshold",
         alias = "mcp_tools_auto_threshold_tokens"
     )]
     pub mcp_tools_token_threshold: usize,
+    /// Opt-in Codemode: expose a `codemode` tool that runs model-written
+    /// JavaScript in an embedded QuickJS sandbox able to call every other
+    /// tool (including MCP tools). Off by default.
+    pub codemode: bool,
 }
 
 impl Default for ToolConfig {
@@ -664,6 +699,7 @@ impl Default for ToolConfig {
             disable_base_tools: false,
             mcp_tools: McpToolsMode::Auto,
             mcp_tools_token_threshold: 8_000,
+            codemode: false,
         }
     }
 }
@@ -728,9 +764,8 @@ impl ToolConfig {
                     "read",
                     "write",
                     "edit",
-                    "multiedit",
+                    "replace",
                     "apply_patch",
-                    "patch",
                     "agentgrep",
                     "ls",
                     "batch",
@@ -747,9 +782,8 @@ impl ToolConfig {
                     "read",
                     "write",
                     "edit",
-                    "multiedit",
+                    "replace",
                     "apply_patch",
-                    "patch",
                     "agentgrep",
                     "ls",
                 ]
@@ -799,6 +833,14 @@ pub struct DictationConfig {
     pub key: String,
     /// Maximum time to wait for the command to finish (0 = no timeout).
     pub timeout_secs: u64,
+    /// Personal names or terms sent as recognition context to built-in voice
+    /// transcription. Appended to the built-in vocabulary every user gets
+    /// (Jcode names plus common coding agent terms), for this user only.
+    pub vocabulary: Vec<String>,
+    /// Built-in voice input: optional shell command that records the
+    /// microphone and prints raw mono 16 kHz s16le PCM to stdout. Empty means
+    /// auto-detect (pw-record, parecord, arecord, rec, ffmpeg).
+    pub recorder: String,
 }
 
 impl Default for DictationConfig {
@@ -808,6 +850,8 @@ impl Default for DictationConfig {
             mode: crate::protocol::TranscriptMode::Send,
             key: "off".to_string(),
             timeout_secs: 90,
+            vocabulary: Vec::new(),
+            recorder: String::new(),
         }
     }
 }
@@ -837,7 +881,7 @@ fn sponsors_is_default(sponsors: &SponsorsConfig) -> bool {
     sponsors.enabled && is_default_discovery_endpoint(&sponsors.endpoint)
 }
 
-/// Endpoints that only ever came from a shipped default, never a user choice.
+/// Endpoints used by shipped defaults. These may also be explicit user choices.
 fn is_default_discovery_endpoint(endpoint: &str) -> bool {
     matches!(
         endpoint.trim_end_matches('/'),

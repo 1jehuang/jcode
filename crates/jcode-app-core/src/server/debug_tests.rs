@@ -62,6 +62,7 @@ mod tests {
         assert!(help.contains("message_async:<text>"));
         assert!(help.contains("client:frame"));
         assert!(help.contains("client:picker"));
+        assert!(help.contains("agent:context"));
     }
 
     #[test]
@@ -403,7 +404,7 @@ mod transcript_routing_tests {
      {
         let _guard = crate::storage::lock_test_env();
         let temp = tempfile::TempDir::new().expect("tempdir");
-        let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
+        let _home = EnvVarGuard::set("KCODE_HOME", temp.path());
 
         let active_dir = temp.path().join("active_pids");
         std::fs::create_dir_all(&active_dir).expect("create active_pids");
@@ -759,25 +760,25 @@ mod debug_execution_tests {
 
     #[test]
     fn debug_message_timeout_secs_reads_valid_env_values() {
-        let _guard = EnvVarGuard::set("JCODE_DEBUG_MESSAGE_TIMEOUT_SECS", "17");
+        let _guard = EnvVarGuard::set("KCODE_DEBUG_MESSAGE_TIMEOUT_SECS", "17");
         assert_eq!(debug_message_timeout_secs(), Some(17));
     }
 
     #[test]
     fn debug_message_timeout_secs_ignores_missing_empty_invalid_and_zero() {
-        let _guard = EnvVarGuard::remove("JCODE_DEBUG_MESSAGE_TIMEOUT_SECS");
+        let _guard = EnvVarGuard::remove("KCODE_DEBUG_MESSAGE_TIMEOUT_SECS");
         assert_eq!(debug_message_timeout_secs(), None);
         drop(_guard);
 
-        let _guard = EnvVarGuard::set("JCODE_DEBUG_MESSAGE_TIMEOUT_SECS", "   ");
+        let _guard = EnvVarGuard::set("KCODE_DEBUG_MESSAGE_TIMEOUT_SECS", "   ");
         assert_eq!(debug_message_timeout_secs(), None);
         drop(_guard);
 
-        let _guard = EnvVarGuard::set("JCODE_DEBUG_MESSAGE_TIMEOUT_SECS", "abc");
+        let _guard = EnvVarGuard::set("KCODE_DEBUG_MESSAGE_TIMEOUT_SECS", "abc");
         assert_eq!(debug_message_timeout_secs(), None);
         drop(_guard);
 
-        let _guard = EnvVarGuard::set("JCODE_DEBUG_MESSAGE_TIMEOUT_SECS", "0");
+        let _guard = EnvVarGuard::set("KCODE_DEBUG_MESSAGE_TIMEOUT_SECS", "0");
         assert_eq!(debug_message_timeout_secs(), None);
     }
 }

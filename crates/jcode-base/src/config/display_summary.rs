@@ -23,6 +23,8 @@ impl Config {
 - Model prev: `{}`
 - Effort increase: `{}`
 - Effort decrease: `{}`
+- Speed increase: `{}`
+- Speed decrease: `{}`
 - Centered toggle: `{}`
 - Prompt up: `{}`
 - Prompt down: `{}`
@@ -45,7 +47,6 @@ impl Config {
 - Markdown spacing: {}
 - LaTeX rendering: {}
 - Pin images: {}
-- Diff line wrap: {}
 - Queue mode: {}
 - Auto server reload: {}
 - Mouse capture: {}
@@ -83,6 +84,7 @@ impl Config {
 - Disable base tools: {}
 - MCP tools: {}
 - MCP auto threshold: {} tokens
+- Codemode: {}
 
 **Provider:**
 - Default model: {}
@@ -98,11 +100,13 @@ impl Config {
 **Agent models:**
 - Swarm / subagent: {}
 - Swarm spawn mode: {}
+- Swarm root effort: {}
+- Deep swarm root effort: {}
 - Spawn hook: {}
 - Review: {}
 - Judge: {}
-- Memory: {}
-- Memory sidecar: {}
+- Memory recall: Jev ({})
+- Memory extraction sidecar: {}
 - Ambient: {}
 
 **Gateway:**
@@ -130,7 +134,7 @@ impl Config {
 - Discord replies: {}
 
 *Edit the config file or set environment variables to customize.*
-*Environment variables (e.g., `JCODE_SCROLL_UP_KEY`, `JCODE_GATEWAY_ENABLED`) override file settings.*"#,
+*Environment variables (e.g., `KCODE_SCROLL_UP_KEY`, `KCODE_GATEWAY_ENABLED`) override file settings.*"#,
             path,
             self.keybindings.scroll_up,
             self.keybindings.scroll_down,
@@ -142,6 +146,8 @@ impl Config {
             self.keybindings.model_switch_prev,
             self.keybindings.effort_increase,
             self.keybindings.effort_decrease,
+            self.keybindings.speed_increase,
+            self.keybindings.speed_decrease,
             self.keybindings.centered_toggle,
             self.keybindings.scroll_prompt_up,
             self.keybindings.scroll_prompt_down,
@@ -173,7 +179,6 @@ impl Config {
             self.display.markdown_spacing.label(),
             self.display.latex_rendering.as_str(),
             self.display.pin_images,
-            self.display.diff_line_wrap,
             self.display.queue_mode,
             self.display.auto_server_reload,
             self.display.mouse_capture,
@@ -248,6 +253,7 @@ impl Config {
             self.tools.disable_base_tools,
             self.tools.mcp_tools.as_str(),
             self.tools.mcp_tools_token_threshold,
+            self.tools.codemode,
             self.provider
                 .default_model
                 .as_deref()
@@ -280,6 +286,8 @@ impl Config {
                 .as_deref()
                 .unwrap_or("(inherit current session)"),
             self.agents.swarm_spawn_mode.as_str(),
+            self.agents.root_effort_for_swarm(false),
+            self.agents.root_effort_for_swarm(true),
             self.terminal
                 .spawn_hook
                 .as_deref()
@@ -292,10 +300,7 @@ impl Config {
                 .model
                 .as_deref()
                 .unwrap_or("(inherit current session)"),
-            self.agents
-                .memory_model
-                .as_deref()
-                .unwrap_or("(sidecar auto-select)"),
+            self.agents.memory_jev_provider,
             if self.agents.memory_sidecar_enabled {
                 "enabled"
             } else {

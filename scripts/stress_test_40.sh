@@ -6,7 +6,7 @@
 set -euo pipefail
 
 NUM_INSTANCES=${1:-40}
-JCODE_BIN="${JCODE_BIN:-$(which jcode)}"
+KCODE_BIN="${KCODE_BIN:-$(which jcode)}"
 LOG_DIR="/tmp/jcode-stress-test-$(date +%s)"
 mkdir -p "$LOG_DIR"
 
@@ -16,7 +16,7 @@ DEBUG_SOCK="/run/user/$(id -u)/jcode-debug.sock"
 echo "========================================="
 echo " jcode Stress Test: $NUM_INSTANCES instances"
 echo "========================================="
-echo "Binary: $JCODE_BIN"
+echo "Binary: $KCODE_BIN"
 echo "Log dir: $LOG_DIR"
 echo "Main socket: $MAIN_SOCK"
 echo ""
@@ -184,7 +184,7 @@ for i in $(seq 1 $NUM_INSTANCES); do
 
     # Each instance gets its own pseudo-terminal via script(1)
     # We connect to the existing server, which creates sessions
-    script -q -c "$JCODE_BIN --no-update --no-selfdev" /dev/null \
+    script -q -c "$KCODE_BIN --no-update --no-selfdev" /dev/null \
         > "$LOG_DIR/instance_${i}_stdout.log" \
         2> "$LOG_DIR/instance_${i}_stderr.log" &
     pid=$!
@@ -311,7 +311,7 @@ echo "========================================="
 echo ""
 echo "Configuration:"
 echo "  Instances spawned: $NUM_INSTANCES"
-echo "  Binary: $JCODE_BIN"
+echo "  Binary: $KCODE_BIN"
 echo ""
 
 # Spawn time stats

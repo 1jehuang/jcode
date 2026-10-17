@@ -1,7 +1,7 @@
 //! Persistent memory event log for post-session analysis.
 //!
 //! Writes structured JSONL (one JSON object per line) to:
-//!   `~/.jcode/logs/memory-events-YYYY-MM-DD.jsonl`
+//!   `~/.kcode/logs/memory-events-YYYY-MM-DD.jsonl`
 //!
 //! Every memory pipeline event - embedding search, sidecar verification,
 //! injection, extraction, maintenance, tool actions - is captured with
@@ -49,7 +49,7 @@ impl MemoryLogger {
 }
 
 fn log_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".jcode").join("logs"))
+    dirs::home_dir().map(|h| h.join(".kcode").join("logs"))
 }
 
 fn ensure_logger(date: &str) -> bool {
@@ -443,7 +443,7 @@ mod tests {
     #[test]
     fn memory_log_cleanup_respects_14_day_window() {
         let dir = std::env::temp_dir().join(format!(
-            "jcode-mem-cleanup-test-{}-{}",
+            "kcode-mem-cleanup-test-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
@@ -468,7 +468,7 @@ mod tests {
         // 10 days old: within the window -> kept.
         let recent = write("memory-events-2000-02-01.jsonl", 10);
         // Old, but not a memory-events file -> must be left alone here.
-        let other = write("jcode-2000-01-01.log", 20);
+        let other = write("kcode-2000-01-01.log", 20);
 
         cleanup_old_memory_logs_in(&dir, Local::now());
 

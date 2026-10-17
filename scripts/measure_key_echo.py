@@ -20,8 +20,8 @@ def main() -> int:
     run = root / "run"
     run.mkdir(parents=True)
     env = os.environ.copy()
-    env["JCODE_SOCKET"] = "/run/user/1000/jcode.sock"
-    env["JCODE_DEBUG_CONTROL"] = "1"
+    env["KCODE_SOCKET"] = "/run/user/1000/jcode.sock"
+    env["KCODE_DEBUG_CONTROL"] = "1"
     dbg = Path("/run/user/1000/jcode-debug.sock")
     cmd_p, resp_p = run / "cmd", run / "resp"
 

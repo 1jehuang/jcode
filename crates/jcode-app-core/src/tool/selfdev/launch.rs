@@ -167,11 +167,11 @@ impl SelfDevTool {
         if !launch.launched {
             let command_preview = launch
                 .command_preview()
-                .unwrap_or_else(|| format!("jcode --resume {} self-dev", launch.session_id));
+                .unwrap_or_else(|| format!("kcode --resume {} self-dev", launch.session_id));
             return Ok(ToolOutput::new(format!(
                 "Created self-dev session {} but could not find a supported terminal to spawn automatically.\n\nRun manually:\n`{} --resume {} self-dev`",
                 launch.session_id,
-                launch.exe.as_ref().map(|exe| exe.display().to_string()).unwrap_or_else(|| "jcode".to_string()),
+                launch.exe.as_ref().map(|exe| exe.display().to_string()).unwrap_or_else(|| "kcode".to_string()),
                 launch.session_id
             ))
             .with_metadata(json!({
@@ -191,7 +191,7 @@ impl SelfDevTool {
                 .exe
                 .as_ref()
                 .map(|exe| exe.display().to_string())
-                .unwrap_or_else(|| "jcode".to_string()),
+                .unwrap_or_else(|| "kcode".to_string()),
             launch.session_id
         );
 

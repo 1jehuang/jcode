@@ -57,7 +57,7 @@ impl App {
 
         if command.is_empty() {
             self.push_display_message(DisplayMessage::error(
-                "Dictation is not configured. Set `[dictation].command` in `~/.jcode/config.toml`."
+                "Dictation is not configured. Set `[dictation].command` in `~/.kcode/config.toml`."
                     .to_string(),
             ));
             self.set_status_notice("Dictation not configured");

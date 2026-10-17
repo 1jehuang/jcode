@@ -49,10 +49,10 @@
 //! than a PNG-cache hit (also enforced by the counter assertions).
 //!
 //! `#[ignore]`-d: run explicitly, twice for fresh nonces, and once with the
-//! legacy SVG-retarget backend (`JCODE_MMDR_SIZE_API_DISABLE=1` is a
+//! legacy SVG-retarget backend (`KCODE_MMDR_SIZE_API_DISABLE=1` is a
 //! compile-time toggle consumed by build.rs, so it triggers a rebuild):
 //!   cargo test -p jcode-tui-mermaid --test layout_cache_cross_width_parity -- --ignored --nocapture
-//!   JCODE_MMDR_SIZE_API_DISABLE=1 cargo test -p jcode-tui-mermaid --test layout_cache_cross_width_parity -- --ignored --nocapture
+//!   KCODE_MMDR_SIZE_API_DISABLE=1 cargo test -p jcode-tui-mermaid --test layout_cache_cross_width_parity -- --ignored --nocapture
 //! The report header prints `render_size_backend` so runs are
 //! distinguishable. Global hit/miss counters are safe to delta-assert because
 //! this binary contains exactly one test.

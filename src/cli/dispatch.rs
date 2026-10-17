@@ -1,6 +1,6 @@
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::io::IsTerminal;
 use std::process::{Command as ProcessCommand, Stdio};
 use std::time::Instant;
@@ -23,7 +23,7 @@ use provider_init::ProviderChoice;
 
 #[cfg(any(target_os = "linux", test))]
 fn is_file_controlled_debug_client() -> bool {
-    std::env::var_os("JCODE_DEBUG_CMD_PATH").is_some()
+    std::env::var_os("KCODE_DEBUG_CMD_PATH").is_some()
 }
 
 #[cfg(target_os = "linux")]
@@ -72,6 +72,14 @@ fn arm_debug_client_parent_death_signal() {
 fn arm_debug_client_parent_death_signal() {}
 
 pub(crate) async fn run_main(mut args: Args) -> Result<()> {
+    if let Some(Command::Session(SessionCommand::ImportJcode { session })) = &args.command {
+        if args.ssh.is_some() {
+            anyhow::bail!(
+                "Session import is local; run it on the machine holding the jcode sessions"
+            );
+        }
+        return commands::session_commands::import_jcode_session_command(session);
+    }
     arm_debug_client_parent_death_signal();
     if args.ssh.is_some() {
         // A remote session ID and working directory belong to the remote host.
@@ -101,28 +109,28 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
         .filter(|value| !value.is_empty())
     {
         provider_catalog::apply_named_provider_profile_env(profile_name)?;
-        crate::env::set_var("JCODE_PROVIDER_PROFILE_NAME", profile_name);
-        crate::env::set_var("JCODE_PROVIDER_PROFILE_ACTIVE", "1");
-        args.provider = ProviderChoice::OpenaiCompatible;
+        crate::env::set_var("KCODE_PROVIDER_PROFILE_NAME", profile_name);
+        crate::env::set_var("KCODE_PROVIDER_PROFILE_ACTIVE", "1");
+        args.provider = provider_choice_for_named_profile(profile_name);
     }
 
     if let Some(tool_profile) = args.tool_profile.as_deref() {
-        crate::env::set_var("JCODE_TOOL_PROFILE", tool_profile);
+        crate::env::set_var("KCODE_TOOL_PROFILE", tool_profile);
     }
     if let Some(tools) = args.tools.as_deref() {
-        crate::env::set_var("JCODE_TOOLS", tools);
+        crate::env::set_var("KCODE_TOOLS", tools);
     }
     if let Some(disabled_tools) = args.disabled_tools.as_deref() {
-        crate::env::set_var("JCODE_DISABLED_TOOLS", disabled_tools);
+        crate::env::set_var("KCODE_DISABLED_TOOLS", disabled_tools);
     }
     if args.disable_base_tools {
-        crate::env::set_var("JCODE_DISABLE_BASE_TOOLS", "1");
+        crate::env::set_var("KCODE_DISABLE_BASE_TOOLS", "1");
     }
     if let Some(mcp_tools) = args.mcp_tools.as_deref() {
-        crate::env::set_var("JCODE_MCP_TOOLS", mcp_tools);
+        crate::env::set_var("KCODE_MCP_TOOLS", mcp_tools);
     }
     if let Some(threshold) = args.mcp_tools_token_threshold {
-        crate::env::set_var("JCODE_MCP_TOOLS_TOKEN_THRESHOLD", threshold.to_string());
+        crate::env::set_var("KCODE_MCP_TOOLS_TOKEN_THRESHOLD", threshold.to_string());
     }
     if args.tool_profile.is_some()
         || args.tools.is_some()
@@ -142,13 +150,14 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             server_name,
         }) => {
             let serve_start = Instant::now();
-            crate::env::set_var("JCODE_NON_INTERACTIVE", "1");
+            crate::env::set_var("KCODE_NON_INTERACTIVE", "1");
             if temporary_server {
                 server::configure_temporary_server(owner_pid, temp_idle_timeout_secs);
             }
             let provider_start = Instant::now();
             let provider =
-                provider_init::init_provider(&args.provider, args.model.as_deref()).await?;
+                provider_init::init_provider_for_serve(&args.provider, args.model.as_deref())
+                    .await?;
             let provider_ms = provider_start.elapsed().as_millis();
             let server_new_start = Instant::now();
             let server = server::Server::new_with_name(provider, server_name);
@@ -176,7 +185,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
         #[cfg(unix)]
         Some(Command::ApiBridge { api_socket, stdio }) => {
             if stdio {
-                crate::env::set_var("JCODE_NON_INTERACTIVE", "1");
+                crate::env::set_var("KCODE_NON_INTERACTIVE", "1");
                 tokio::time::timeout(
                     std::time::Duration::from_secs(30),
                     spawn_server(
@@ -219,7 +228,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             let api_socket = api_socket
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(jcode_harness_api_server::api_socket_path);
-            // The global `--socket` (and `JCODE_SOCKET`) already selects the
+            // The global `--socket` (and `KCODE_SOCKET`) already selects the
             // daemon socket; `set_socket_path` exported it during startup.
             let legacy_socket = jcode_harness_api_server::legacy_socket_path();
             jcode_harness_api_server::run_bridge(api_socket, legacy_socket).await?;
@@ -227,7 +236,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
         Some(Command::Server { action }) => match action {
             #[cfg(unix)]
             ServerCommand::Stdio => {
-                crate::env::set_var("JCODE_NON_INTERACTIVE", "1");
+                crate::env::set_var("KCODE_NON_INTERACTIVE", "1");
                 tokio::time::timeout(
                     std::time::Duration::from_secs(30),
                     spawn_server_with_executable(
@@ -306,37 +315,32 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             flow_id,
             cancel,
             no_validate,
-            google_access_tier,
+            google,
             api_base,
             api_key,
             api_key_env,
         }) => {
+            let mut options = login::LoginOptions {
+                no_browser,
+                print_auth_url,
+                callback_url,
+                auth_code,
+                json,
+                complete,
+                flow_id,
+                cancel,
+                no_validate,
+                openai_compatible_api_base: api_base,
+                openai_compatible_api_key: api_key,
+                openai_compatible_api_key_env: api_key_env,
+                openai_compatible_default_model: args.model.clone(),
+                ..Default::default()
+            };
+            google.apply(&mut options)?;
             login::run_login(
                 &login_provider.unwrap_or(args.provider),
                 account.as_deref(),
-                login::LoginOptions {
-                    no_browser,
-                    print_auth_url,
-                    callback_url,
-                    auth_code,
-                    json,
-                    complete,
-                    flow_id,
-                    cancel,
-                    no_validate,
-                    google_access_tier: google_access_tier.map(|tier| match tier {
-                        super::args::GoogleAccessTierArg::Full => {
-                            auth::google::GmailAccessTier::Full
-                        }
-                        super::args::GoogleAccessTierArg::Readonly => {
-                            auth::google::GmailAccessTier::ReadOnly
-                        }
-                    }),
-                    openai_compatible_api_base: api_base,
-                    openai_compatible_api_key: api_key,
-                    openai_compatible_api_key_env: api_key_env,
-                    openai_compatible_default_model: args.model.clone(),
-                },
+                options,
             )
             .await?;
         }
@@ -436,21 +440,19 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             }
         },
         Some(Command::Memory(subcmd)) => {
-            commands::run_memory_command(map_memory_subcommand(subcmd))?;
+            commands::run_memory_command(map_memory_subcommand(subcmd)).await?;
         }
-        Some(Command::Session(subcmd)) => match subcmd {
-            SessionCommand::Rename {
-                session,
-                name,
-                clear,
-                json,
-            } => commands::run_session_rename_command(&session, name.as_deref(), clear, json)?,
-        },
+        Some(Command::Session(subcmd)) => commands::session_commands::run_session_command(subcmd)?,
         Some(Command::Ambient(subcmd)) => {
             commands::run_ambient_command(map_ambient_subcommand(subcmd)).await?;
         }
+        Some(Command::Cloud(CloudCommand::Sessions { action })) => {
+            commands::run_cloud_command(commands::CloudSubcommand::Sessions(
+                map_cloud_sessions_subcommand(action),
+            ))?;
+        }
         Some(Command::Cloud(subcmd)) => {
-            commands::run_cloud_command(map_cloud_subcommand(subcmd))?;
+            super::cloud_move::run_cli(subcmd)?;
         }
         Some(Command::Pair { list, revoke }) => {
             commands::run_pair_command(list, revoke)?;
@@ -484,8 +486,8 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
         Some(Command::SetupLauncher) => {
             setup_hints::run_setup_launcher()?;
         }
-        Some(Command::Browser { action }) => {
-            commands::run_browser(&action).await?;
+        Some(Command::Browser { action, browser }) => {
+            commands::run_browser(&action, browser.as_deref()).await?;
         }
         Some(Command::Replay {
             session,
@@ -538,7 +540,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             let coverage_path = coverage_file.as_deref().map(std::path::Path::new);
             let colorize = std::io::stdout().is_terminal()
                 && std::env::var_os("NO_COLOR").is_none()
-                && std::env::var_os("JCODE_NO_COLOR").is_none();
+                && std::env::var_os("KCODE_NO_COLOR").is_none();
             if let Some(provider) = provider_query {
                 let model = model_query
                     .or_else(|| args.model.clone())
@@ -641,6 +643,39 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
     Ok(())
 }
 
+/// Transport for `--provider-profile <name>` (issue #1560: this used to force
+/// OpenAI-compatible unconditionally). Anthropic-compatible profiles go
+/// through `Auto`, the same path as `default_provider = "<name>"`: the env
+/// applied by `apply_named_provider_profile_env` already selects the
+/// Anthropic Messages runtime with the profile's base URL and auth, while
+/// `AnthropicApi` would pin an Anthropic API-key credential the profile may
+/// not have (e.g. `auth = "none"`).
+fn provider_choice_for_named_profile(profile_name: &str) -> ProviderChoice {
+    // Same source as `apply_named_provider_profile_env`, which already
+    // validated that the profile exists.
+    match crate::config::Config::load_strict() {
+        Ok(config) => provider_choice_for_named_profile_in(profile_name, &config),
+        Err(_) => provider_choice_for_named_profile_in(profile_name, crate::config::config()),
+    }
+}
+
+fn provider_choice_for_named_profile_in(
+    profile_name: &str,
+    config: &crate::config::Config,
+) -> ProviderChoice {
+    match config.providers.get(profile_name) {
+        Some(profile)
+            if matches!(
+                profile.provider_type,
+                crate::config::NamedProviderType::AnthropicCompatible
+            ) =>
+        {
+            ProviderChoice::Auto
+        }
+        _ => ProviderChoice::OpenaiCompatible,
+    }
+}
+
 fn auth_doctor_provider_arg<'a>(
     positional_provider: Option<&'a str>,
     global_provider: &'a ProviderChoice,
@@ -668,7 +703,7 @@ fn resolve_resume_arg(args: &mut Args) -> Result<()> {
             Err(e) => {
                 match resume_resolution_failure_action(&resume_id, |key| std::env::var_os(key)) {
                     // During a reload/update/restart handoff the client re-execs
-                    // itself with `--resume <id>` and `JCODE_RESUMING=1`. In the
+                    // itself with `--resume <id>` and `KCODE_RESUMING=1`. In the
                     // client/server architecture the shared server is the authority
                     // for session lifecycle, so an id that is not in the local store
                     // can still be valid server-side. Hard-exiting here dumped the
@@ -718,7 +753,7 @@ fn resume_resolution_failure_action<F, V>(
 where
     F: Fn(&str) -> Option<V>,
 {
-    if var_os("JCODE_RESUMING").is_some() {
+    if var_os("KCODE_RESUMING").is_some() {
         ResumeResolutionFailureAction::DeferToServer
     } else {
         ResumeResolutionFailureAction::Exit
@@ -765,14 +800,6 @@ fn map_ambient_subcommand(subcmd: AmbientCommand) -> commands::AmbientSubcommand
         AmbientCommand::Trigger => commands::AmbientSubcommand::Trigger,
         AmbientCommand::Stop => commands::AmbientSubcommand::Stop,
         AmbientCommand::RunVisible => commands::AmbientSubcommand::RunVisible,
-    }
-}
-
-fn map_cloud_subcommand(subcmd: CloudCommand) -> commands::CloudSubcommand {
-    match subcmd {
-        CloudCommand::Sessions { action } => {
-            commands::CloudSubcommand::Sessions(map_cloud_sessions_subcommand(action))
-        }
     }
 }
 
@@ -913,6 +940,9 @@ fn map_transcript_mode(mode: TranscriptModeArg) -> crate::protocol::TranscriptMo
 
 async fn run_default_command(args: Args) -> Result<()> {
     startup_profile::mark("run_main_none_branch");
+    // The TUI's first frame reads the auth snapshot (welcome/onboarding gate).
+    // Probe it now on a side thread so it overlaps the setup work below.
+    crate::auth::AuthStatus::prewarm_fast_in_background();
 
     let explicit_provider_or_model = args.provider != ProviderChoice::Auto
         || args.model.is_some()
@@ -999,7 +1029,7 @@ async fn run_default_command(args: Args) -> Result<()> {
     // server check/spawn below. Safe only because nothing has entered raw mode
     // or started reading stdin yet, and it is skipped for exec handoffs where
     // the inherited terminal is already live.
-    if std::env::var_os("JCODE_RESUMING").is_none() {
+    if std::env::var_os("KCODE_RESUMING").is_none() {
         crate::tui::theme_detect::prewarm_theme_mode();
     }
     let mut server_running = if args.fresh_spawn {
@@ -1013,7 +1043,7 @@ async fn run_default_command(args: Args) -> Result<()> {
         server_running = wait_for_existing_reload_server("client startup").await;
     }
 
-    if !server_running && std::env::var("JCODE_RESUMING").is_ok() {
+    if !server_running && std::env::var("KCODE_RESUMING").is_ok() {
         server_running = wait_for_resuming_server(
             "client startup without reload marker",
             std::time::Duration::from_secs(5),
@@ -1062,7 +1092,7 @@ async fn run_default_command(args: Args) -> Result<()> {
     }
 
     startup_profile::mark("pre_tui_client");
-    if std::env::var("JCODE_RESUMING").is_err() && server_running {
+    if std::env::var("KCODE_RESUMING").is_err() && server_running {
         output::stderr_info("Connecting to server...");
     }
     tui_launch::run_tui_client(
@@ -1202,6 +1232,18 @@ fn try_acquire_spawn_lock(path: &std::path::Path) -> Result<Option<SpawnLockGuar
     use std::fs::OpenOptions;
     use std::os::fd::AsRawFd;
 
+    // The client acquires this lock before the daemon creates its socket directory.
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "Failed to create JCode runtime directory {}",
+                parent.display()
+            )
+        })?;
+    }
     let file = OpenOptions::new()
         .create(true)
         .write(true)
@@ -1264,7 +1306,7 @@ pub(crate) async fn maybe_prompt_server_bootstrap_login(
     // legacy headless CLI bootstrap flow. On Windows those reads may trigger
     // expensive security-product inspection even when credentials are already
     // configured, delaying every cold launch before the server is spawned.
-    let cli_bootstrap_requested = std::env::var_os("JCODE_CLI_BOOTSTRAP_LOGIN").is_some();
+    let cli_bootstrap_requested = std::env::var_os("KCODE_CLI_BOOTSTRAP_LOGIN").is_some();
     if !should_detect_cli_bootstrap_credentials(provider_choice, cli_bootstrap_requested) {
         startup_profile::mark("cred_check_done");
         return Ok(());
@@ -1283,7 +1325,7 @@ pub(crate) async fn maybe_prompt_server_bootstrap_login(
     //
     // The only thing left to honor at the CLI layer is an explicit headless
     // bootstrap (e.g. CI / non-interactive provisioning), which opts in via the
-    // `JCODE_CLI_BOOTSTRAP_LOGIN` env var.
+    // `KCODE_CLI_BOOTSTRAP_LOGIN` env var.
     if cred_state.has_any {
         return Ok(());
     }
@@ -1383,14 +1425,14 @@ async fn spawn_server_with_executable(
     let mut cmd = ProcessCommand::new(&exe);
     cmd.env_remove(selfdev::CLIENT_SELFDEV_ENV);
     if client_requested_selfdev {
-        cmd.env("JCODE_DEBUG_CONTROL", "1");
+        cmd.env("KCODE_DEBUG_CONTROL", "1");
     }
     cmd.arg("--provider").arg(provider_choice.as_arg_value());
     // The interactive TUI owns first-run onboarding/login. Let the spawned
     // server boot with a deferred (credential-less) provider when nothing is
     // configured yet, instead of bailing; the TUI activates a provider via the
     // in-TUI `/login` flow. See init_provider_with_options.
-    cmd.env("JCODE_DEFERRED_AUTH_BOOTSTRAP", "1");
+    cmd.env("KCODE_DEFERRED_AUTH_BOOTSTRAP", "1");
     if let Some(provider_profile) = provider_profile {
         cmd.arg("--provider-profile").arg(provider_profile);
     }

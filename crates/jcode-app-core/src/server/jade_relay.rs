@@ -78,7 +78,7 @@ impl RelayListenerConfig {
         Some(Self {
             api,
             session_id: session_id.to_string(),
-            process_existing_prompts: env_flag("JCODE_JADE_RELAY_PROCESS_EXISTING_PROMPTS"),
+            process_existing_prompts: env_flag("KCODE_JADE_RELAY_PROCESS_EXISTING_PROMPTS"),
         })
     }
 }
@@ -130,7 +130,7 @@ fn session_command_event_types_param() -> String {
 }
 
 fn default_device_id() -> String {
-    if let Ok(value) = std::env::var("JCODE_JADE_RELAY_DEVICE_ID")
+    if let Ok(value) = std::env::var("KCODE_JADE_RELAY_DEVICE_ID")
         && !value.trim().is_empty()
     {
         return value.trim().to_string();
@@ -138,7 +138,7 @@ fn default_device_id() -> String {
     let host = std::env::var("HOSTNAME")
         .or_else(|_| std::env::var("COMPUTERNAME"))
         .unwrap_or_else(|_| "device".to_string());
-    format!("jcode-{host}")
+    format!("kcode-{host}")
 }
 
 pub(super) fn spawn_if_configured(

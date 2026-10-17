@@ -35,12 +35,12 @@ cargo build --profile selfdev -p jcode-harness-api-server --bin jcode-harness-ap
 
 # The bridge translates onto whatever daemon the environment points at, and that
 # daemon answers with whatever provider the environment selected. Inheriting
-# JCODE_ACTIVE_PROVIDER therefore makes this suite pass or fail based on the
+# KCODE_ACTIVE_PROVIDER therefore makes this suite pass or fail based on the
 # caller's shell: a stale login for one provider turns every turn into a fatal
 # auth error, even though the same machine answers fine through failover. Let
 # provider selection fall back to the configured default instead.
 echo "== starting bridge on $socket =="
-JCODE_API_SOCKET="$socket" JCODE_ACTIVE_PROVIDER= ./target/selfdev/jcode-harness-api-bridge >"$log" 2>&1 &
+KCODE_API_SOCKET="$socket" KCODE_ACTIVE_PROVIDER= ./target/selfdev/jcode-harness-api-bridge >"$log" 2>&1 &
 bridge_pid=$!
 cleanup() {
   kill "$bridge_pid" 2>/dev/null || true
@@ -57,13 +57,13 @@ if [ ! -S "$socket" ]; then
 fi
 
 echo "== driving a real turn =="
-JCODE_API_SOCKET="$socket" node "$sdk_dir/test/live-turn.mjs"
+KCODE_API_SOCKET="$socket" node "$sdk_dir/test/live-turn.mjs"
 
 echo "== exercising the control surface =="
-JCODE_API_SOCKET="$socket" node "$sdk_dir/test/live-control.mjs"
+KCODE_API_SOCKET="$socket" node "$sdk_dir/test/live-control.mjs"
 
 echo "== exercising models, effort, compaction, rename, and undo =="
-JCODE_API_SOCKET="$socket" node "$sdk_dir/test/live-capabilities.mjs"
+KCODE_API_SOCKET="$socket" node "$sdk_dir/test/live-capabilities.mjs"
 
 # `launch()` starts its own daemon and bridge, so these run against a private
 # instance rather than the shared socket above. That is the point: the

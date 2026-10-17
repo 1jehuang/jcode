@@ -7,7 +7,7 @@ fn generic_credential_paths_for_provider(
 
     match provider.target {
         crate::provider_catalog::LoginProviderTarget::Jcode => {
-            vec![config_dir.join(crate::subscription_catalog::JCODE_ENV_FILE)]
+            vec![config_dir.join(crate::subscription_catalog::KCODE_ENV_FILE)]
         }
         crate::provider_catalog::LoginProviderTarget::OpenRouter => {
             vec![config_dir.join("openrouter.env")]
@@ -59,7 +59,7 @@ fn auth_state_label(state: crate::auth::AuthState) -> &'static str {
 /// "openai-compatible" for a profile the user named explicitly is what made
 /// #712 so hard to diagnose.
 fn probe_display_name(provider: crate::provider_catalog::LoginProviderDescriptor) -> String {
-    if let Ok(profile) = std::env::var("JCODE_NAMED_PROVIDER_PROFILE")
+    if let Ok(profile) = std::env::var("KCODE_NAMED_PROVIDER_PROFILE")
         && !profile.trim().is_empty()
         && provider.id == "openai-compatible"
     {
@@ -162,7 +162,7 @@ async fn probe_gemini_auth(report: &mut AuthTestProviderReport) {
     // Prefer the official Gemini Developer API key when configured: it is a
     // static credential (no refresh handshake) pointed at
     // generativelanguage.googleapis.com, so we only assert that it loads.
-    if crate::auth::gemini::has_api_key() {
+    if crate::auth::gemini::uses_api_key() {
         let detail = match crate::auth::gemini::api_key() {
             Some(_) => "Loaded Gemini Developer API key (generativelanguage.googleapis.com).",
             None => "Gemini Developer API key reported present but failed to load.",

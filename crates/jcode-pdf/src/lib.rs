@@ -36,7 +36,7 @@ mod tests {
 
     #[test]
     fn malformed_pdf_returns_error_instead_of_panicking() {
-        let dir = std::env::temp_dir().join("jcode-pdf-test");
+        let dir = std::env::temp_dir().join("kcode-pdf-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("malformed.pdf");
         let mut f = std::fs::File::create(&path).unwrap();

@@ -42,7 +42,7 @@ fn push_esc_skip_hint(lines: &mut Vec<Line<'static>>, align: Alignment) {
 /// clean full-cell semicircles. Kitty does; ghostty, Apple Terminal, and the
 /// VS Code terminal draw them as small floating glyphs that break the capsule
 /// illusion, so those fall back to half-block caps that render solidly
-/// everywhere. Override with `JCODE_ROUNDED_PILLS=on|off`.
+/// everywhere. Override with `KCODE_ROUNDED_PILLS=on|off`.
 fn rounded_pill_caps_supported() -> bool {
     static SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *SUPPORTED.get_or_init(|| {
@@ -51,7 +51,7 @@ fn rounded_pill_caps_supported() -> bool {
         if cfg!(test) {
             return true;
         }
-        if let Ok(raw) = std::env::var("JCODE_ROUNDED_PILLS") {
+        if let Ok(raw) = std::env::var("KCODE_ROUNDED_PILLS") {
             match raw.trim().to_ascii_lowercase().as_str() {
                 "1" | "true" | "yes" | "on" => return true,
                 "0" | "false" | "no" | "off" => return false,
@@ -135,21 +135,15 @@ fn continue_pill_line(focused: bool, align: Alignment) -> Line<'static> {
     Line::from(lozenge_pill_spans("Continue", focused)).alignment(align)
 }
 
-/// The summary-screen action row. A new user can import the logins we found or
-/// use a Jcode subscription, with secondary controls for a selective import and
-/// telemetry settings.
+/// The summary-screen action row. A new user can import the logins we found,
+/// with secondary controls for a selective import and telemetry settings.
 fn import_summary_pills_line(
     focused: crate::tui::ImportSummaryPill,
     align: Alignment,
 ) -> Line<'static> {
     use crate::tui::ImportSummaryPill as Pill;
     let mut spans = Vec::new();
-    spans.extend(lozenge_pill_spans("Import", focused == Pill::Continue));
-    spans.push(Span::raw("   "));
-    spans.extend(lozenge_pill_spans(
-        "Jcode subscription",
-        focused == Pill::Subscription,
-    ));
+    spans.extend(lozenge_pill_spans("Continue", focused == Pill::Continue));
     spans.push(Span::raw("   "));
     spans.extend(lozenge_pill_spans(
         "Import less",
@@ -208,7 +202,7 @@ fn telemetry_settings_lines(
     if env_forced_off {
         lines.push(
             Line::from(Span::styled(
-                "Your environment already disables telemetry (JCODE_NO_TELEMETRY).",
+                "Your environment already disables telemetry (KCODE_NO_TELEMETRY).",
                 dim,
             ))
             .alignment(align),
@@ -359,7 +353,7 @@ fn telemetry_header_lines(width: u16) -> Vec<Line<'static>> {
     let lines = vec![
         "jcode collects anonymous usage statistics (version, OS, session",
         "activity, and crash reasons). No code, prompts, or personal data.",
-        "Change anytime: /telemetry (or export JCODE_NO_TELEMETRY=1)",
+        "Change anytime: /telemetry (or export KCODE_NO_TELEMETRY=1)",
     ];
     lines
         .into_iter()
@@ -536,13 +530,6 @@ fn welcome_body_lines(app: &dyn TuiState) -> Vec<Line<'static>> {
                     lines.extend(import_summary_lines(&prompt));
                     lines.push(Line::from(""));
                     lines.push(import_summary_pills_line(prompt.summary_pill, align));
-                    lines.push(
-                        Line::from(Span::styled(
-                            "$10 to $20 inference, $20 to $40; then provider API prices. Scales through Solo.",
-                            Style::default().fg(dim_color()),
-                        ))
-                        .alignment(align),
-                    );
                 }
                 Some(prompt) => {
                     // Choose mode: a short "Import:" label, the Continue pill,

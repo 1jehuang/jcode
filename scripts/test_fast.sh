@@ -13,9 +13,9 @@ echo "=== Fast test loop (library + primary jcode binary) ==="
 # Bedrock SDK, and PDF extraction. Those integrations have dedicated/full-suite
 # coverage, but compiling them on every inner-loop test adds hundreds of crates
 # and substantial peak RSS. Keep the fast loop minimal unless explicitly
-# overridden with JCODE_DEV_FEATURE_PROFILE=default/full.
-export JCODE_DEV_FEATURE_PROFILE="${JCODE_DEV_FEATURE_PROFILE:-minimal}"
-echo "Feature profile: $JCODE_DEV_FEATURE_PROFILE"
+# overridden with KCODE_DEV_FEATURE_PROFILE=default/full.
+export KCODE_DEV_FEATURE_PROFILE="${KCODE_DEV_FEATURE_PROFILE:-minimal}"
+echo "Feature profile: $KCODE_DEV_FEATURE_PROFILE"
 
 # Only the primary `jcode` binary contains unit tests. `test_api` and
 # `jcode-harness` are executable smoke tools with no #[test] functions, so

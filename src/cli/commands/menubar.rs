@@ -138,13 +138,13 @@ pub fn run_menubar_command(once: bool, json: bool) -> Result<()> {
 /// them needing to run `jcode menubar` by hand.
 ///
 /// This is a best-effort, fire-and-forget singleton: it records the helper's
-/// PID in the *global* `~/.jcode/menubar.pid` (see [`global_menubar_dir`]) and
+/// PID in the *global* `~/.kcode/menubar.pid` (see [`global_menubar_dir`]) and
 /// only spawns a new detached process when no live helper is already running.
 /// Failures are silently ignored so they never disrupt normal session startup.
 ///
 /// The macOS menu bar is a single per-login-session resource, so this guards
 /// hard against sandboxed jcode processes (tests, self-dev, onboarding) ever
-/// spawning a helper: each such process runs with a throwaway `$JCODE_HOME`,
+/// spawning a helper: each such process runs with a throwaway `$KCODE_HOME`,
 /// and without this guard every distinct sandbox home spawned its own helper
 /// and drew its own duplicate status item into the one real menu bar.
 #[cfg(target_os = "macos")]
@@ -153,12 +153,12 @@ pub fn ensure_menubar_helper_running() {
     use std::process::{Command, Stdio};
 
     // Allow users to opt out entirely.
-    if std::env::var_os("JCODE_NO_MENUBAR").is_some() {
+    if std::env::var_os("KCODE_NO_MENUBAR").is_some() {
         return;
     }
 
     // Sandboxed jcode (tests / self-dev / onboarding, anything with a throwaway
-    // `$JCODE_HOME`) must never manage the real user's global menu bar.
+    // `$KCODE_HOME`) must never manage the real user's global menu bar.
     if running_in_menubar_sandbox() {
         return;
     }
@@ -183,7 +183,7 @@ pub fn ensure_menubar_helper_running() {
     let mut command = Command::new(exe);
     command
         .arg("menubar")
-        .env("JCODE_NO_MENUBAR", "1")
+        .env("KCODE_NO_MENUBAR", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -208,30 +208,30 @@ pub fn ensure_menubar_helper_running() {}
 ///
 /// The macOS menu bar is a single per-login-session resource shared by every
 /// jcode process for this user, so this state must live at a fixed location
-/// that does **not** depend on `$JCODE_HOME`. Sandboxes (tests, self-dev,
-/// onboarding) override `$JCODE_HOME` with throwaway temp dirs; anchoring to
-/// the real home (`$HOME/.jcode`) gives every process the same lock inode so
+/// that does **not** depend on `$KCODE_HOME`. Sandboxes (tests, self-dev,
+/// onboarding) override `$KCODE_HOME` with throwaway temp dirs; anchoring to
+/// the real home (`$HOME/.kcode`) gives every process the same lock inode so
 /// the singleton actually holds across them. For a normal (non-sandboxed)
 /// launch this is exactly `crate::storage::jcode_dir()`, so behavior for the
 /// real user is unchanged.
 #[cfg(target_os = "macos")]
 fn global_menubar_dir() -> Option<std::path::PathBuf> {
     let home = dirs::home_dir()?;
-    let dir = home.join(".jcode");
+    let dir = home.join(".kcode");
     let _ = std::fs::create_dir_all(&dir);
     Some(dir)
 }
 
 /// True when this process is a sandboxed jcode that must not own the real
-/// user's global menu bar. A throwaway `$JCODE_HOME` (anything other than the
-/// real `~/.jcode`) or an explicit test/temp marker means "sandbox".
+/// user's global menu bar. A throwaway `$KCODE_HOME` (anything other than the
+/// real `~/.kcode`) or an explicit test/temp marker means "sandbox".
 #[cfg(target_os = "macos")]
 fn running_in_menubar_sandbox() -> bool {
     is_menubar_sandbox(
-        env_truthy("JCODE_TEST_SESSION"),
-        env_truthy("JCODE_TEMP_SERVER"),
-        std::env::var_os("JCODE_HOME").as_deref(),
-        dirs::home_dir().map(|home| home.join(".jcode")).as_deref(),
+        env_truthy("KCODE_TEST_SESSION"),
+        env_truthy("KCODE_TEMP_SERVER"),
+        std::env::var_os("KCODE_HOME").as_deref(),
+        dirs::home_dir().map(|home| home.join(".kcode")).as_deref(),
     )
 }
 
@@ -250,7 +250,7 @@ fn env_truthy(key: &str) -> bool {
 /// unit-tested without mutating process-global environment state.
 ///
 /// - An explicit test/temp marker forces "sandbox".
-/// - A `$JCODE_HOME` that differs from the real `~/.jcode` is a sandbox home.
+/// - A `$KCODE_HOME` that differs from the real `~/.kcode` is a sandbox home.
 /// - No override (or an override equal to the real home) is the real user.
 #[cfg(target_os = "macos")]
 fn is_menubar_sandbox(
@@ -263,7 +263,7 @@ fn is_menubar_sandbox(
         return true;
     }
 
-    // No explicit override: the real user's default `~/.jcode`.
+    // No explicit override: the real user's default `~/.kcode`.
     let Some(custom_home) = custom_home else {
         return false;
     };
@@ -316,9 +316,9 @@ mod macos {
     /// Acquire the exclusive, system-wide "only one menu bar helper" lock.
     ///
     /// Uses a non-blocking `flock(LOCK_EX | LOCK_NB)` on the *global*
-    /// `~/.jcode/menubar.lock` (see [`super::global_menubar_dir`]) so the lock
+    /// `~/.kcode/menubar.lock` (see [`super::global_menubar_dir`]) so the lock
     /// is shared across every jcode process for this OS user, including ones
-    /// running with a sandboxed `$JCODE_HOME`. The menu bar itself is a single
+    /// running with a sandboxed `$KCODE_HOME`. The menu bar itself is a single
     /// per-login-session resource, so the guard must be global too.
     ///
     /// Returns `Some(guard)` if we are the sole helper, or `None` if another
@@ -372,7 +372,7 @@ mod macos {
     }
 
     /// Autosave name under which macOS persists the status item's position.
-    const STATUS_ITEM_AUTOSAVE: &str = "jcode-menubar";
+    const STATUS_ITEM_AUTOSAVE: &str = "kcode-menubar";
 
     /// Number of fixed items at the end of the menu (separator, New Window,
     /// separator, Quit). Session rows are inserted between the summary header
@@ -439,7 +439,7 @@ mod macos {
         // to spawn from sandboxes) plus the global singleton lock below, but a
         // stray `jcode menubar` invoked directly inside a test harness should
         // still never realize a status item.
-        if super::env_truthy("JCODE_TEST_SESSION") || super::env_truthy("JCODE_TEMP_SERVER") {
+        if super::env_truthy("KCODE_TEST_SESSION") || super::env_truthy("KCODE_TEMP_SERVER") {
             return;
         }
 
@@ -844,9 +844,9 @@ mod tests {
     #[test]
     fn session_menu_item_title_loads_persisted_todo_title() {
         let _guard = crate::storage::lock_test_env();
-        let previous_home = std::env::var_os("JCODE_HOME");
-        let temp = tempfile::tempdir().expect("create temporary JCODE_HOME");
-        crate::env::set_var("JCODE_HOME", temp.path());
+        let previous_home = std::env::var_os("KCODE_HOME");
+        let temp = tempfile::tempdir().expect("create temporary KCODE_HOME");
+        crate::env::set_var("KCODE_HOME", temp.path());
 
         let session_id = "session_buffalo_1781229104969_6d487ff77287de4f";
         let mut session = crate::session::Session::create_with_id(
@@ -878,18 +878,18 @@ mod tests {
         );
 
         if let Some(previous_home) = previous_home {
-            crate::env::set_var("JCODE_HOME", previous_home);
+            crate::env::set_var("KCODE_HOME", previous_home);
         } else {
-            crate::env::remove_var("JCODE_HOME");
+            crate::env::remove_var("KCODE_HOME");
         }
     }
 
     #[test]
     fn menu_presence_includes_only_user_root_sessions() {
         let _guard = crate::storage::lock_test_env();
-        let previous_home = std::env::var_os("JCODE_HOME");
-        let temp = tempfile::tempdir().expect("create temporary JCODE_HOME");
-        crate::env::set_var("JCODE_HOME", temp.path());
+        let previous_home = std::env::var_os("KCODE_HOME");
+        let temp = tempfile::tempdir().expect("create temporary KCODE_HOME");
+        crate::env::set_var("KCODE_HOME", temp.path());
 
         let mut root = crate::session::Session::create_with_id(
             "session_fox_root".to_string(),
@@ -930,9 +930,9 @@ mod tests {
         debug.mark_closed();
         child.mark_closed();
         if let Some(previous_home) = previous_home {
-            crate::env::set_var("JCODE_HOME", previous_home);
+            crate::env::set_var("KCODE_HOME", previous_home);
         } else {
-            crate::env::remove_var("JCODE_HOME");
+            crate::env::remove_var("KCODE_HOME");
         }
     }
 
@@ -952,7 +952,7 @@ mod tests {
         use std::ffi::OsStr;
         use std::path::Path;
 
-        let real = Path::new("/Users/me/.jcode");
+        let real = Path::new("/Users/me/.kcode");
 
         // Real user, no override: not a sandbox -> owns the menu bar.
         assert!(!is_menubar_sandbox(false, false, None, Some(real)));
@@ -960,7 +960,7 @@ mod tests {
         assert!(!is_menubar_sandbox(
             false,
             false,
-            Some(OsStr::new("/Users/me/.jcode")),
+            Some(OsStr::new("/Users/me/.kcode")),
             Some(real),
         ));
 

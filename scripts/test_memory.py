@@ -228,8 +228,8 @@ def main():
                 os.remove(s)
 
         env = os.environ.copy()
-        env['JCODE_DEBUG_CONTROL'] = '1'
-        env['JCODE_SOCKET'] = test_socket
+        env['KCODE_DEBUG_CONTROL'] = '1'
+        env['KCODE_SOCKET'] = test_socket
 
         proc = subprocess.Popen(
             ['jcode', 'serve'],

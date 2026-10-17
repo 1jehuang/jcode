@@ -37,7 +37,7 @@ fn direct_api_url_supports_standard_and_profile_overrides() {
     assert_eq!(direct_api_url(), "https://proxy.example/v1/messages");
 
     let _profile = EnvVarGuard::set(
-        "JCODE_ANTHROPIC_API_BASE",
+        "KCODE_ANTHROPIC_API_BASE",
         "https://gateway.example/anthropic/v1/messages",
     );
     assert_eq!(
@@ -50,14 +50,14 @@ fn direct_api_url_supports_standard_and_profile_overrides() {
 fn configured_direct_headers_parse_and_reject_invalid_values() {
     let _lock = jcode_base::storage::lock_test_env();
     let _headers = EnvVarGuard::set(
-        "JCODE_ANTHROPIC_HEADERS",
+        "KCODE_ANTHROPIC_HEADERS",
         r#"{"x-tenant":"alpha","x-route":"claude"}"#,
     );
     let parsed = configured_direct_headers().expect("valid custom headers");
     assert_eq!(parsed.get("x-tenant").unwrap(), "alpha");
     assert_eq!(parsed.get("x-route").unwrap(), "claude");
 
-    let _invalid = EnvVarGuard::set("JCODE_ANTHROPIC_HEADERS", r#"{"bad header":"x"}"#);
+    let _invalid = EnvVarGuard::set("KCODE_ANTHROPIC_HEADERS", r#"{"bad header":"x"}"#);
     assert!(configured_direct_headers().is_err());
 }
 
@@ -67,20 +67,20 @@ fn anthropic_auth_token_selects_bearer_without_affecting_explicit_profile_auth()
     let _token = EnvVarGuard::set("ANTHROPIC_AUTH_TOKEN", "gateway-token");
     assert_eq!(direct_auth_mode(), "bearer");
 
-    let _explicit = EnvVarGuard::set("JCODE_ANTHROPIC_AUTH", "header");
+    let _explicit = EnvVarGuard::set("KCODE_ANTHROPIC_AUTH", "header");
     assert_eq!(direct_auth_mode(), "header");
 }
 
 #[test]
 fn named_profile_runtime_captures_transport_and_credential_immutably() {
     let _lock = jcode_base::storage::lock_test_env();
-    let _base = EnvVarGuard::set("JCODE_ANTHROPIC_API_BASE", "https://one.example/v1");
-    let _auth = EnvVarGuard::set("JCODE_ANTHROPIC_AUTH", "bearer");
-    let _key_name = EnvVarGuard::set("JCODE_ANTHROPIC_API_KEY_NAME", "PROFILE_ONE_KEY");
+    let _base = EnvVarGuard::set("KCODE_ANTHROPIC_API_BASE", "https://one.example/v1");
+    let _auth = EnvVarGuard::set("KCODE_ANTHROPIC_AUTH", "bearer");
+    let _key_name = EnvVarGuard::set("KCODE_ANTHROPIC_API_KEY_NAME", "PROFILE_ONE_KEY");
     let _key = EnvVarGuard::set("PROFILE_ONE_KEY", "one-secret");
     let provider = AnthropicProvider::new();
 
-    let _changed_base = EnvVarGuard::set("JCODE_ANTHROPIC_API_BASE", "https://two.example/v1");
+    let _changed_base = EnvVarGuard::set("KCODE_ANTHROPIC_API_BASE", "https://two.example/v1");
     let _changed_key = EnvVarGuard::set("PROFILE_ONE_KEY", "two-secret");
     assert_eq!(
         provider.direct_transport.api_url,
@@ -97,7 +97,7 @@ fn named_profile_runtime_captures_transport_and_credential_immutably() {
 fn named_anthropic_profile_accepts_its_configured_custom_model() {
     let _lock = jcode_base::storage::lock_test_env();
     let _home = tempfile::TempDir::new().expect("temp home");
-    let _home_guard = EnvVarGuard::set("JCODE_HOME", _home.path());
+    let _home_guard = EnvVarGuard::set("KCODE_HOME", _home.path());
     std::fs::write(
         _home.path().join("config.toml"),
         r#"
@@ -109,7 +109,7 @@ fn named_anthropic_profile_accepts_its_configured_custom_model() {
     )
     .expect("write config");
     jcode_base::config::Config::invalidate_cache();
-    let _profile = EnvVarGuard::set("JCODE_NAMED_PROVIDER_PROFILE", "custom");
+    let _profile = EnvVarGuard::set("KCODE_NAMED_PROVIDER_PROFILE", "custom");
     let models = active_anthropic_profile_models().expect("active profile models");
     assert!(models.iter().any(|model| model == "claude-private"));
     assert!(!models.iter().any(|model| model == "not-configured"));
@@ -223,7 +223,7 @@ fn test_anthropic_reasoning_effort_request_parts() {
         provider.build_reasoning_request_parts("claude-sonnet-4-6", true);
 
     match thinking.expect("adaptive thinking should be enabled") {
-        ApiThinking::Adaptive { display } => assert_eq!(display, Some("summarized")),
+        ApiThinking::Adaptive { display, .. } => assert_eq!(display, Some("summarized")),
         ApiThinking::Enabled { .. } => panic!("Claude 4.6 should use adaptive thinking"),
     }
     assert_eq!(
@@ -293,7 +293,7 @@ fn test_anthropic_show_thinking_enables_adaptive_thinking_without_effort() {
     let (thinking, output_config, temperature) =
         provider.build_reasoning_request_parts_inner("claude-sonnet-4-6", true, true);
     match thinking.expect("show_thinking should enable adaptive thinking") {
-        ApiThinking::Adaptive { display } => assert_eq!(display, Some("summarized")),
+        ApiThinking::Adaptive { display, .. } => assert_eq!(display, Some("summarized")),
         ApiThinking::Enabled { .. } => panic!("Sonnet 4.6 should use adaptive thinking"),
     }
     assert!(
@@ -361,7 +361,7 @@ fn test_anthropic_fable_defaults_to_high_effort() {
         "high",
     );
     match thinking.expect("Fable default effort should enable adaptive thinking") {
-        ApiThinking::Adaptive { display } => assert_eq!(display, Some("summarized")),
+        ApiThinking::Adaptive { display, .. } => assert_eq!(display, Some("summarized")),
         ApiThinking::Enabled { .. } => panic!("Fable 5 should use adaptive thinking"),
     }
 
@@ -484,7 +484,7 @@ fn test_anthropic_opus_defaults_to_xhigh_effort() {
         "xhigh",
     );
     match thinking.expect("Opus default effort should enable adaptive thinking") {
-        ApiThinking::Adaptive { display } => assert_eq!(display, Some("summarized")),
+        ApiThinking::Adaptive { display, .. } => assert_eq!(display, Some("summarized")),
         ApiThinking::Enabled { .. } => panic!("Opus 4.8 should use adaptive thinking"),
     }
 
@@ -548,17 +548,17 @@ fn test_anthropic_max_alias_uses_strongest_real_effort() {
         AnthropicProvider::actual_effort_for_model("claude-sonnet-4-6", "xhigh"),
         "high"
     );
-    // Swarm rungs pin to the strongest supported level.
+    // The default resolved swarm effort preserves strongest-supported mapping.
     assert_eq!(
-        AnthropicProvider::actual_effort_for_model("claude-opus-4-8", "swarm"),
+        AnthropicProvider::resolved_effort_for_model("claude-opus-4-8", "max"),
         "max"
     );
     assert_eq!(
-        AnthropicProvider::actual_effort_for_model("claude-sonnet-4-6", "swarm-deep"),
+        AnthropicProvider::resolved_effort_for_model("claude-sonnet-4-6", "max"),
         "max"
     );
     assert_eq!(
-        AnthropicProvider::actual_effort_for_model("claude-opus-4-5", "swarm"),
+        AnthropicProvider::resolved_effort_for_model("claude-opus-4-5", "max"),
         "high"
     );
 }
@@ -764,30 +764,30 @@ fn test_anthropic_signed_thinking_replayed_in_request_blocks() {
 }
 
 #[tokio::test]
-#[ignore = "live smoke: requires ANTHROPIC_API_KEY, or set JCODE_LIVE_ANTHROPIC_ALLOW_OAUTH=1 to use Claude OAuth credentials"]
+#[ignore = "live smoke: requires ANTHROPIC_API_KEY, or set KCODE_LIVE_ANTHROPIC_ALLOW_OAUTH=1 to use Claude OAuth credentials"]
 async fn live_anthropic_reasoning_smoke() -> Result<()> {
     let _env_lock = jcode_base::storage::lock_test_env();
     let using_api_key = std::env::var_os("ANTHROPIC_API_KEY").is_some();
-    let allow_oauth = std::env::var_os("JCODE_LIVE_ANTHROPIC_ALLOW_OAUTH").is_some();
+    let allow_oauth = std::env::var_os("KCODE_LIVE_ANTHROPIC_ALLOW_OAUTH").is_some();
     if !using_api_key && !allow_oauth {
         eprintln!(
-            "skipping live Anthropic smoke: set ANTHROPIC_API_KEY or JCODE_LIVE_ANTHROPIC_ALLOW_OAUTH=1"
+            "skipping live Anthropic smoke: set ANTHROPIC_API_KEY or KCODE_LIVE_ANTHROPIC_ALLOW_OAUTH=1"
         );
         return Ok(());
     }
 
-    let _max_tokens = EnvVarGuard::set_if_missing("JCODE_ANTHROPIC_MAX_TOKENS", "2048");
-    let model = std::env::var("JCODE_LIVE_ANTHROPIC_MODEL")
-        .or_else(|_| std::env::var("JCODE_ANTHROPIC_MODEL"))
+    let _max_tokens = EnvVarGuard::set_if_missing("KCODE_ANTHROPIC_MAX_TOKENS", "2048");
+    let model = std::env::var("KCODE_LIVE_ANTHROPIC_MODEL")
+        .or_else(|_| std::env::var("KCODE_ANTHROPIC_MODEL"))
         .unwrap_or_else(|_| "claude-sonnet-4-6".to_string());
-    let effort = std::env::var("JCODE_LIVE_ANTHROPIC_REASONING_EFFORT")
+    let effort = std::env::var("KCODE_LIVE_ANTHROPIC_REASONING_EFFORT")
         .unwrap_or_else(|_| "low".to_string());
-    let prompt = std::env::var("JCODE_LIVE_ANTHROPIC_PROMPT")
+    let prompt = std::env::var("KCODE_LIVE_ANTHROPIC_PROMPT")
         .unwrap_or_else(|_| "Live smoke test: answer exactly OK.".to_string());
-    let system = std::env::var("JCODE_LIVE_ANTHROPIC_SYSTEM").unwrap_or_else(|_| {
+    let system = std::env::var("KCODE_LIVE_ANTHROPIC_SYSTEM").unwrap_or_else(|_| {
         "You are a live provider smoke test. Keep the answer tiny.".to_string()
     });
-    let require_thinking = std::env::var_os("JCODE_LIVE_ANTHROPIC_REQUIRE_THINKING").is_some();
+    let require_thinking = std::env::var_os("KCODE_LIVE_ANTHROPIC_REQUIRE_THINKING").is_some();
 
     let provider = AnthropicProvider::new();
     provider.set_model(&model)?;
@@ -824,7 +824,7 @@ async fn live_anthropic_reasoning_smoke() -> Result<()> {
     if require_thinking {
         assert!(
             thinking_bytes > 0,
-            "live Anthropic response did not include thinking deltas despite JCODE_LIVE_ANTHROPIC_REQUIRE_THINKING"
+            "live Anthropic response did not include thinking deltas despite KCODE_LIVE_ANTHROPIC_REQUIRE_THINKING"
         );
     }
     Ok(())
@@ -871,7 +871,7 @@ async fn test_dangling_tool_use_repair() {
         // Missing tool_results for tool_123 and tool_456!
     ];
 
-    let formatted = provider.format_messages(&messages, false);
+    let formatted = provider.format_messages(&messages, false, &[]);
 
     // Should have 3 messages:
     // 1. User: "Hello"
@@ -905,6 +905,166 @@ async fn test_dangling_tool_use_repair() {
     }
     assert!(found_ids.contains("tool_123"));
     assert!(found_ids.contains("tool_456"));
+}
+
+#[tokio::test]
+async fn test_orphaned_tool_result_is_rewritten_as_text() {
+    // Mirrors a real stuck session: the assistant called tool_a, the interrupt
+    // repair answered it, then a late result for a tool_use that is not in the
+    // transcript was persisted right after. Anthropic 400s on that orphan.
+    let provider = AnthropicProvider::new();
+    let msg = |role, content| Message {
+        role,
+        content,
+        timestamp: None,
+        tool_duration_ms: None,
+    };
+    let messages = vec![
+        msg(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "go".to_string(),
+                cache_control: None,
+            }],
+        ),
+        msg(
+            Role::Assistant,
+            vec![ContentBlock::ToolUse {
+                id: "tool_a".to_string(),
+                name: "bash".to_string(),
+                input: serde_json::json!({}),
+                thought_signature: None,
+            }],
+        ),
+        msg(
+            Role::User,
+            vec![ContentBlock::ToolResult {
+                tool_use_id: "tool_a".to_string(),
+                content: "ok".to_string(),
+                is_error: None,
+            }],
+        ),
+        msg(
+            Role::User,
+            vec![ContentBlock::ToolResult {
+                tool_use_id: "tool_ghost".to_string(),
+                content: "no leftovers".to_string(),
+                is_error: None,
+            }],
+        ),
+    ];
+
+    let formatted = provider.format_messages(&messages, false, &[]);
+    let last = formatted.last().unwrap();
+    assert_eq!(last.role, "user");
+    assert!(matches!(
+        &last.content[0],
+        ApiContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "tool_a"
+    ));
+    for block in &last.content {
+        if let ApiContentBlock::ToolResult { tool_use_id, .. } = block {
+            assert_ne!(tool_use_id, "tool_ghost");
+        }
+    }
+    assert!(last.content.iter().any(|b| matches!(
+        b,
+        ApiContentBlock::Text { text, .. } if text.contains("tool_ghost") && text.contains("no leftovers")
+    )));
+}
+
+/// Assert the formatted history alternates roles and that every tool_use is
+/// answered by a tool_result in the immediately following user message.
+fn assert_tool_uses_answered_in_next_message(formatted: &[ApiMessage]) {
+    for pair in formatted.windows(2) {
+        assert_ne!(pair[0].role, pair[1].role, "roles must alternate");
+    }
+    for (i, msg) in formatted.iter().enumerate() {
+        if msg.role != "assistant" {
+            continue;
+        }
+        for block in &msg.content {
+            let ApiContentBlock::ToolUse { id, .. } = block else {
+                continue;
+            };
+            let next = formatted
+                .get(i + 1)
+                .unwrap_or_else(|| panic!("tool_use {id} has no next message"));
+            assert_eq!(next.role, "user", "tool_use {id} not followed by user");
+            assert!(
+                next.content.iter().any(|b| matches!(
+                    b,
+                    ApiContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == id
+                )),
+                "tool_use {id} not answered in message {}",
+                i + 1
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_displaced_tool_result_still_answers_tool_use_in_place() {
+    // The only result for tool_x arrives after another assistant turn. The
+    // dangling repair sees a result somewhere and skips it, and the orphan
+    // rewrite turns the late result into text, so tool_x would otherwise be
+    // left without a tool_result right after it (HTTP 400).
+    let provider = AnthropicProvider::new();
+    let msg = |role, content| Message {
+        role,
+        content,
+        timestamp: None,
+        tool_duration_ms: None,
+    };
+    let text = |t: &str| ContentBlock::Text {
+        text: t.to_string(),
+        cache_control: None,
+    };
+    let messages = vec![
+        msg(Role::User, vec![text("go")]),
+        msg(
+            Role::Assistant,
+            vec![ContentBlock::ToolUse {
+                id: "tool_x".to_string(),
+                name: "bash".to_string(),
+                input: serde_json::json!({}),
+                thought_signature: None,
+            }],
+        ),
+        msg(Role::User, vec![text("are you there?")]),
+        msg(Role::Assistant, vec![text("yes")]),
+        msg(
+            Role::User,
+            vec![ContentBlock::ToolResult {
+                tool_use_id: "tool_x".to_string(),
+                content: "late output".to_string(),
+                is_error: None,
+            }],
+        ),
+    ];
+
+    let formatted = provider.format_messages(&messages, false, &[]);
+
+    let next = &formatted[2];
+    assert_eq!(formatted[1].role, "assistant");
+    assert_eq!(next.role, "user");
+    // The late result is now moved up to directly follow its call (real
+    // output, not a synthetic error), ahead of the interjected user text.
+    assert!(matches!(
+        &next.content[0],
+        ApiContentBlock::ToolResult { tool_use_id, is_error: false, .. } if tool_use_id == "tool_x"
+    ));
+    assert!(next.content.iter().any(|b| matches!(
+        b,
+        ApiContentBlock::Text { text, .. } if text == "are you there?"
+    )));
+    let dump = serde_json::to_string(&formatted).unwrap();
+    assert!(dump.contains("late output"), "{dump}");
+    assert!(
+        !dump.contains("Recovered orphaned tool output"),
+        "the result was paired, nothing should be rewritten: {dump}"
+    );
+
+    assert_tool_uses_answered_in_next_message(&formatted);
 }
 
 #[tokio::test]
@@ -945,7 +1105,7 @@ async fn test_no_repair_when_tool_results_present() {
         },
     ];
 
-    let formatted = provider.format_messages(&messages, false);
+    let formatted = provider.format_messages(&messages, false, &[]);
 
     // Should have exactly 3 messages (no synthetic ones added)
     assert_eq!(formatted.len(), 3);
@@ -1027,7 +1187,7 @@ async fn test_parallel_image_tool_results_stay_contiguous() {
         make_image_result("tool_c", "c.png"),
     ];
 
-    let formatted = provider.format_messages(&messages, false);
+    let formatted = provider.format_messages(&messages, false, &[]);
 
     // assistant message + merged user tool_result message
     assert_eq!(formatted.len(), 2);
@@ -1568,7 +1728,7 @@ async fn test_sanitize_tool_ids_with_dots() {
         },
     ];
 
-    let formatted = provider.format_messages(&messages, false);
+    let formatted = provider.format_messages(&messages, false, &[]);
 
     let sanitized_id = "chatcmpl-BF2xX_tool_call_0";
     for msg in &formatted {
@@ -1613,7 +1773,7 @@ async fn test_sanitize_dangling_tool_ids_with_dots() {
         },
     ];
 
-    let formatted = provider.format_messages(&messages, false);
+    let formatted = provider.format_messages(&messages, false, &[]);
 
     let sanitized_id = "call_with_dots";
     for msg in &formatted {
@@ -1639,16 +1799,16 @@ async fn test_sanitize_dangling_tool_ids_with_dots() {
 #[test]
 fn credential_mode_runtime_provider_identity_round_trips() {
     let _guard = jcode_base::storage::lock_test_env();
-    let previous = std::env::var_os("JCODE_RUNTIME_PROVIDER");
+    let previous = std::env::var_os("KCODE_RUNTIME_PROVIDER");
 
-    jcode_base::env::set_var("JCODE_RUNTIME_PROVIDER", "claude");
+    jcode_base::env::set_var("KCODE_RUNTIME_PROVIDER", "claude");
     assert_eq!(
         AnthropicCredentialMode::from_runtime_env(jcode_provider_core::DualAuthProvider::Anthropic),
         AnthropicCredentialMode::OAuth,
         "OAuth selection must surface as the OAuth runtime identity"
     );
 
-    jcode_base::env::set_var("JCODE_RUNTIME_PROVIDER", "claude-api");
+    jcode_base::env::set_var("KCODE_RUNTIME_PROVIDER", "claude-api");
     assert_eq!(
         AnthropicCredentialMode::from_runtime_env(jcode_provider_core::DualAuthProvider::Anthropic),
         AnthropicCredentialMode::ApiKey,
@@ -1656,8 +1816,8 @@ fn credential_mode_runtime_provider_identity_round_trips() {
     );
 
     match previous {
-        Some(value) => jcode_base::env::set_var("JCODE_RUNTIME_PROVIDER", value),
-        None => jcode_base::env::remove_var("JCODE_RUNTIME_PROVIDER"),
+        Some(value) => jcode_base::env::set_var("KCODE_RUNTIME_PROVIDER", value),
+        None => jcode_base::env::remove_var("KCODE_RUNTIME_PROVIDER"),
     }
 }
 
@@ -1665,9 +1825,9 @@ fn credential_mode_runtime_provider_identity_round_trips() {
 async fn auto_mode_falls_back_to_api_key_when_oauth_is_expired() {
     let _guard = jcode_base::storage::lock_test_env();
     let temp = tempfile::TempDir::new().unwrap();
-    let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
+    let _home = EnvVarGuard::set("KCODE_HOME", temp.path());
     let _api_key = EnvVarGuard::set("ANTHROPIC_API_KEY", "test-anthropic-api-key");
-    let _runtime = EnvVarGuard::set("JCODE_RUNTIME_PROVIDER", "auto");
+    let _runtime = EnvVarGuard::set("KCODE_RUNTIME_PROVIDER", "auto");
 
     jcode_base::auth::claude::upsert_account(jcode_base::auth::claude::AnthropicAccount {
         label: "claude-1".to_string(),
@@ -1698,9 +1858,9 @@ async fn auto_mode_falls_back_to_api_key_when_oauth_is_expired() {
 async fn explicit_oauth_mode_does_not_silently_fall_back_to_api_key() {
     let _guard = jcode_base::storage::lock_test_env();
     let temp = tempfile::TempDir::new().unwrap();
-    let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
+    let _home = EnvVarGuard::set("KCODE_HOME", temp.path());
     let _api_key = EnvVarGuard::set("ANTHROPIC_API_KEY", "test-anthropic-api-key");
-    let _runtime = EnvVarGuard::set("JCODE_RUNTIME_PROVIDER", "claude");
+    let _runtime = EnvVarGuard::set("KCODE_RUNTIME_PROVIDER", "claude");
 
     jcode_base::auth::claude::upsert_account(jcode_base::auth::claude::AnthropicAccount {
         label: "claude-1".to_string(),
@@ -1872,6 +2032,13 @@ fn anthropic_fallback_honors_server_recommendation() {
         "claude-opus-4-8"
     );
 
+    let opus_55 = anthropic_recommended_model_from_error("please use opus 5.5. learn more")
+        .expect("decimal release recommendation should resolve");
+    assert_eq!(
+        AnthropicProvider::normalized_model_key(&opus_55),
+        "claude-opus-5-5"
+    );
+
     // A recommendation pointing at a retired model is ignored (falls through to
     // quality ranking).
     let retired_rec = "model x not available. please use mythos 1.";
@@ -2023,7 +2190,7 @@ fn ping_keepalive_emits_streaming_phase_event() {
 #[test]
 fn test_anthropic_opus_5_low_effort_reaches_the_wire() {
     // Benchmark campaigns pin `claude-opus-5` at `low` effort. Opus 5 also
-    // *defaults* to `low` (jcode's default model/effort pairing), and an
+    // *defaults* to `low`, and an
     // explicit `low` must survive normalization, must NOT be silently
     // promoted, and must land in `output_config.effort` on the request.
     assert!(AnthropicProvider::model_supports_output_effort(
@@ -2032,6 +2199,11 @@ fn test_anthropic_opus_5_low_effort_reaches_the_wire() {
     assert_eq!(
         AnthropicProvider::default_reasoning_effort_for_model("claude-opus-5").as_deref(),
         Some("low"),
+    );
+    // Opus 5.5 is jcode's default Claude model and defaults to `medium`.
+    assert_eq!(
+        AnthropicProvider::default_reasoning_effort_for_model("claude-opus-5-5").as_deref(),
+        Some("medium"),
     );
     assert_eq!(
         AnthropicProvider::normalize_reasoning_effort("low").as_deref(),
@@ -2073,11 +2245,9 @@ fn test_anthropic_opus_5_low_effort_reaches_the_wire() {
 /// `stop_reason: tool_use` with no tool call for the agent to run.
 #[test]
 fn test_anthropic_unknown_content_block_start_does_not_drop_event() {
-    for block_type in [
-        "server_tool_use",
-        "web_search_tool_result",
-        "some_future_block",
-    ] {
+    // Server tool blocks (`server_tool_use`, `web_search_tool_result`) are
+    // captured for replay; see native_web_search_sse_tests.rs.
+    for block_type in ["some_future_block", "code_execution_tool_result_future"] {
         let mut state = SseStreamState::default();
         let event = SseEvent {
             event_type: "content_block_start".to_string(),
@@ -2100,6 +2270,192 @@ fn test_anthropic_unknown_content_block_start_does_not_drop_event() {
         assert!(
             !state.current_thinking_block,
             "{block_type}: unknown block must not start a thinking block"
+        );
+    }
+}
+
+#[test]
+fn configured_swarm_root_effort_controls_adaptive_and_manual_thinking() {
+    let mut provider = AnthropicProvider::new();
+    provider.max_tokens_override = Some(32_768);
+    for mode in ["swarm", "swarm-deep"] {
+        *provider.reasoning_effort.write().unwrap() = Some(mode.to_string());
+        for (effort, budget) in [
+            ("minimal", 1_024),
+            ("low", 1_024),
+            ("medium", 4_096),
+            ("high", 8_192),
+            ("max", 16_384),
+        ] {
+            let (thinking, output, temperature) = provider
+                .build_reasoning_request_parts_with_effort(
+                    "claude-opus-4-5",
+                    true,
+                    true,
+                    Some(effort),
+                );
+            assert!(
+                matches!(thinking, Some(ApiThinking::Enabled { budget_tokens }) if budget_tokens == budget)
+            );
+            assert_eq!(
+                output.unwrap().effort,
+                if effort == "minimal" {
+                    "low"
+                } else if effort == "max" {
+                    "high"
+                } else {
+                    effort
+                }
+            );
+            assert_eq!(temperature, None);
+        }
+        let (thinking, output, _) = provider.build_reasoning_request_parts_with_effort(
+            "claude-opus-4-8",
+            false,
+            true,
+            Some("low"),
+        );
+        assert!(matches!(thinking, Some(ApiThinking::Adaptive { .. })));
+        assert_eq!(output.unwrap().effort, "low");
+        for model in ["claude-opus-4-8", "claude-opus-4-5"] {
+            let (thinking, output, temperature) =
+                provider.build_reasoning_request_parts_with_effort(model, true, true, Some("none"));
+            assert!(thinking.is_none());
+            assert!(output.is_none());
+            assert_eq!(temperature, Some(1.0));
+        }
+        assert_eq!(provider.stored_reasoning_effort().as_deref(), Some(mode));
+    }
+    assert_eq!(
+        AnthropicProvider::manual_thinking_budget("max", 8_192),
+        Some(8_191)
+    );
+    assert_eq!(
+        AnthropicProvider::manual_thinking_budget("low", 1_024),
+        None
+    );
+}
+
+#[test]
+fn configured_swarm_root_effort_reads_real_config() {
+    // Run this single test in a child process so changing config cannot race
+    // other provider tests or reuse an already-initialized global config cache.
+    if std::env::var_os("KCODE_TEST_SWARM_ROOT_CHILD").is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                std::thread::current().name().unwrap(),
+                "--nocapture",
+            ])
+            .env("KCODE_TEST_SWARM_ROOT_CHILD", "1")
+            .env("KCODE_SWARM_ROOT_EFFORT", "low")
+            .env("KCODE_SWARM_DEEP_ROOT_EFFORT", "none")
+            .output()
+            .expect("run isolated config test");
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let mut provider = AnthropicProvider::new();
+    provider.max_tokens_override = Some(32_768);
+    for mode in ["swarm", "swarm-deep"] {
+        *provider.reasoning_effort.write().unwrap() = Some(mode.into());
+        for model in ["claude-opus-4-8", "claude-opus-4-5"] {
+            let (thinking, output, temperature) =
+                provider.build_reasoning_request_parts_inner(model, true, true);
+            if mode == "swarm" {
+                assert_eq!(output.unwrap().effort, "low");
+                assert_eq!(temperature, None);
+                if model == "claude-opus-4-5" {
+                    assert!(matches!(
+                        thinking,
+                        Some(ApiThinking::Enabled {
+                            budget_tokens: 1_024
+                        })
+                    ));
+                } else {
+                    assert!(matches!(thinking, Some(ApiThinking::Adaptive { .. })));
+                }
+            } else {
+                assert!(thinking.is_none());
+                assert!(output.is_none());
+                assert_eq!(temperature, Some(1.0));
+            }
+        }
+        assert_eq!(provider.stored_reasoning_effort().as_deref(), Some(mode));
+    }
+}
+
+#[test]
+fn opus_55_request_json_supports_api_and_oauth_without_forced_tools() {
+    let provider = AnthropicProvider::new();
+    for model in ["claude-opus-5-5", "claude-fable-5-1"] {
+        for is_oauth in [false, true] {
+            for show_thinking in [false, true] {
+                for effort in [None, Some("none"), Some("low"), Some("xhigh"), Some("max")] {
+                    let (thinking, output_config, temperature) = provider
+                        .build_reasoning_request_parts_with_effort(
+                            model,
+                            is_oauth,
+                            show_thinking,
+                            effort,
+                        );
+                    let request = ApiRequest {
+                        model: model.to_string(),
+                        max_tokens: jcode_provider_core::anthropic::anthropic_max_output_tokens(
+                            model,
+                        ),
+                        system: None,
+                        messages: vec![],
+                        tools: None,
+                        metadata: None,
+                        thinking,
+                        output_config,
+                        temperature,
+                        service_tier: None,
+                        stream: true,
+                    };
+                    let value = serde_json::to_value(&request).unwrap();
+                    assert_eq!(value["thinking"]["type"], "adaptive");
+                    assert_eq!(value["thinking"]["display"], "summarized");
+                    assert_eq!(
+                        value["thinking"]["block_binding"]["prefix_mismatch_behavior"],
+                        "drop_block"
+                    );
+                    assert_eq!(value["max_tokens"], 128_000);
+                    assert!(value.get("temperature").is_none());
+                    assert!(value.get("tool_choice").is_none());
+                    match effort {
+                        None => assert!(value.get("output_config").is_none()),
+                        Some("none") => assert_eq!(value["output_config"]["effort"], "low"),
+                        Some(effort) => assert_eq!(value["output_config"]["effort"], effort),
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn opus_55_empty_signed_thinking_is_replayed_unchanged() {
+    let provider = AnthropicProvider::new();
+    for is_oauth in [false, true] {
+        let blocks = provider.format_content_blocks(
+            &[ContentBlock::AnthropicThinking {
+                thinking: String::new(),
+                signature: "model-and-prefix-bound-signature".to_string(),
+            }],
+            is_oauth,
+        );
+        assert_eq!(
+            serde_json::to_value(blocks).unwrap(),
+            serde_json::json!([{
+                "type": "thinking", "thinking": "", "signature": "model-and-prefix-bound-signature"
+            }])
         );
     }
 }

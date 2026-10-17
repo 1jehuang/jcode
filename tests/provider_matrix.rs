@@ -29,32 +29,32 @@ fn lock_env() -> MutexGuard<'static, ()> {
 
 fn tracked_env_vars() -> Vec<String> {
     let mut keys: HashSet<String> = [
-        "JCODE_HOME",
+        "KCODE_HOME",
         "XDG_CONFIG_HOME",
-        "JCODE_OPENROUTER_API_BASE",
-        "JCODE_OPENROUTER_API_KEY_NAME",
-        "JCODE_OPENROUTER_ENV_FILE",
-        "JCODE_OPENROUTER_CACHE_NAMESPACE",
-        "JCODE_OPENROUTER_PROVIDER_FEATURES",
-        "JCODE_OPENROUTER_ALLOW_NO_AUTH",
-        "JCODE_OPENROUTER_PROVIDER",
-        "JCODE_OPENROUTER_NO_FALLBACK",
-        "JCODE_OPENROUTER_MODEL",
-        "JCODE_OPENROUTER_MODEL_CATALOG",
-        "JCODE_OPENROUTER_STATIC_MODELS",
-        "JCODE_OPENROUTER_AUTH_HEADER",
-        "JCODE_OPENROUTER_AUTH_HEADER_NAME",
-        "JCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
-        "JCODE_OPENROUTER_THINKING",
-        "JCODE_OPENAI_COMPAT_API_BASE",
-        "JCODE_OPENAI_COMPAT_API_KEY_NAME",
-        "JCODE_OPENAI_COMPAT_ENV_FILE",
-        "JCODE_OPENAI_COMPAT_SETUP_URL",
-        "JCODE_OPENAI_COMPAT_DEFAULT_MODEL",
-        "JCODE_OPENAI_COMPAT_LOCAL_ENABLED",
-        "JCODE_NAMED_PROVIDER_PROFILE",
-        "JCODE_PROVIDER_PROFILE_ACTIVE",
-        "JCODE_PROVIDER_PROFILE_NAME",
+        "KCODE_OPENROUTER_API_BASE",
+        "KCODE_OPENROUTER_API_KEY_NAME",
+        "KCODE_OPENROUTER_ENV_FILE",
+        "KCODE_OPENROUTER_CACHE_NAMESPACE",
+        "KCODE_OPENROUTER_PROVIDER_FEATURES",
+        "KCODE_OPENROUTER_ALLOW_NO_AUTH",
+        "KCODE_OPENROUTER_PROVIDER",
+        "KCODE_OPENROUTER_NO_FALLBACK",
+        "KCODE_OPENROUTER_MODEL",
+        "KCODE_OPENROUTER_MODEL_CATALOG",
+        "KCODE_OPENROUTER_STATIC_MODELS",
+        "KCODE_OPENROUTER_AUTH_HEADER",
+        "KCODE_OPENROUTER_AUTH_HEADER_NAME",
+        "KCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
+        "KCODE_OPENROUTER_THINKING",
+        "KCODE_OPENAI_COMPAT_API_BASE",
+        "KCODE_OPENAI_COMPAT_API_KEY_NAME",
+        "KCODE_OPENAI_COMPAT_ENV_FILE",
+        "KCODE_OPENAI_COMPAT_SETUP_URL",
+        "KCODE_OPENAI_COMPAT_DEFAULT_MODEL",
+        "KCODE_OPENAI_COMPAT_LOCAL_ENABLED",
+        "KCODE_NAMED_PROVIDER_PROFILE",
+        "KCODE_PROVIDER_PROFILE_ACTIVE",
+        "KCODE_PROVIDER_PROFILE_NAME",
         "ANTHROPIC_API_KEY",
         "OPENAI_API_KEY",
         "OPENROUTER_API_KEY",
@@ -101,9 +101,9 @@ impl TestEnv {
             jcode::env::remove_var(key);
         }
 
-        let config_root = temp.path().join("config").join("jcode");
+        let config_root = temp.path().join("config").join("kcode");
         std::fs::create_dir_all(&config_root)?;
-        jcode::env::set_var("JCODE_HOME", temp.path());
+        jcode::env::set_var("KCODE_HOME", temp.path());
         jcode::config::invalidate_config_cache();
         apply_openai_compatible_profile_env(None);
         AuthStatus::invalidate_cache();
@@ -116,7 +116,7 @@ impl TestEnv {
     }
 
     fn config_dir(&self) -> PathBuf {
-        self.temp.path().join("config").join("jcode")
+        self.temp.path().join("config").join("kcode")
     }
 
     fn config_file(&self) -> PathBuf {
@@ -176,25 +176,25 @@ impl OpenAiCompatibleBaseState {
 
 fn clear_openai_compatible_runtime_env() {
     for key in [
-        "JCODE_OPENAI_COMPAT_API_BASE",
-        "JCODE_OPENAI_COMPAT_API_KEY_NAME",
-        "JCODE_OPENAI_COMPAT_ENV_FILE",
-        "JCODE_OPENAI_COMPAT_SETUP_URL",
-        "JCODE_OPENAI_COMPAT_DEFAULT_MODEL",
-        "JCODE_OPENAI_COMPAT_LOCAL_ENABLED",
+        "KCODE_OPENAI_COMPAT_API_BASE",
+        "KCODE_OPENAI_COMPAT_API_KEY_NAME",
+        "KCODE_OPENAI_COMPAT_ENV_FILE",
+        "KCODE_OPENAI_COMPAT_SETUP_URL",
+        "KCODE_OPENAI_COMPAT_DEFAULT_MODEL",
+        "KCODE_OPENAI_COMPAT_LOCAL_ENABLED",
         "OPENAI_COMPAT_API_KEY",
-        "JCODE_OPENROUTER_API_BASE",
-        "JCODE_OPENROUTER_API_KEY_NAME",
-        "JCODE_OPENROUTER_ENV_FILE",
-        "JCODE_OPENROUTER_CACHE_NAMESPACE",
-        "JCODE_OPENROUTER_PROVIDER_FEATURES",
-        "JCODE_OPENROUTER_ALLOW_NO_AUTH",
-        "JCODE_OPENROUTER_MODEL_CATALOG",
-        "JCODE_OPENROUTER_MODEL",
-        "JCODE_OPENROUTER_STATIC_MODELS",
-        "JCODE_PROVIDER_PROFILE_ACTIVE",
-        "JCODE_PROVIDER_PROFILE_NAME",
-        "JCODE_NAMED_PROVIDER_PROFILE",
+        "KCODE_OPENROUTER_API_BASE",
+        "KCODE_OPENROUTER_API_KEY_NAME",
+        "KCODE_OPENROUTER_ENV_FILE",
+        "KCODE_OPENROUTER_CACHE_NAMESPACE",
+        "KCODE_OPENROUTER_PROVIDER_FEATURES",
+        "KCODE_OPENROUTER_ALLOW_NO_AUTH",
+        "KCODE_OPENROUTER_MODEL_CATALOG",
+        "KCODE_OPENROUTER_MODEL",
+        "KCODE_OPENROUTER_STATIC_MODELS",
+        "KCODE_PROVIDER_PROFILE_ACTIVE",
+        "KCODE_PROVIDER_PROFILE_NAME",
+        "KCODE_NAMED_PROVIDER_PROFILE",
     ] {
         jcode::env::remove_var(key);
     }
@@ -318,31 +318,31 @@ fn apply_competing_compatible_state(
 fn assert_runtime_profile_env(profile: OpenAiCompatibleProfile, context: &str) {
     let resolved = resolve_openai_compatible_profile(profile);
     assert_eq!(
-        std::env::var("JCODE_OPENROUTER_API_BASE").ok().as_deref(),
+        std::env::var("KCODE_OPENROUTER_API_BASE").ok().as_deref(),
         Some(resolved.api_base.as_str()),
         "runtime api base mismatch for {context}"
     );
     assert_eq!(
-        std::env::var("JCODE_OPENROUTER_API_KEY_NAME")
+        std::env::var("KCODE_OPENROUTER_API_KEY_NAME")
             .ok()
             .as_deref(),
         Some(resolved.api_key_env.as_str()),
         "runtime api key env mismatch for {context}"
     );
     assert_eq!(
-        std::env::var("JCODE_OPENROUTER_ENV_FILE").ok().as_deref(),
+        std::env::var("KCODE_OPENROUTER_ENV_FILE").ok().as_deref(),
         Some(resolved.env_file.as_str()),
         "runtime env file mismatch for {context}"
     );
     assert_eq!(
-        std::env::var("JCODE_OPENROUTER_CACHE_NAMESPACE")
+        std::env::var("KCODE_OPENROUTER_CACHE_NAMESPACE")
             .ok()
             .as_deref(),
         Some(resolved.id.as_str()),
         "runtime cache namespace mismatch for {context}"
     );
     assert_eq!(
-        std::env::var("JCODE_OPENROUTER_ALLOW_NO_AUTH")
+        std::env::var("KCODE_OPENROUTER_ALLOW_NO_AUTH")
             .ok()
             .as_deref(),
         (!resolved.requires_api_key).then_some("1"),
@@ -352,16 +352,16 @@ fn assert_runtime_profile_env(profile: OpenAiCompatibleProfile, context: &str) {
 
 fn assert_no_compatible_runtime_profile_env(context: &str) {
     for key in [
-        "JCODE_OPENROUTER_API_BASE",
-        "JCODE_OPENROUTER_API_KEY_NAME",
-        "JCODE_OPENROUTER_ENV_FILE",
-        "JCODE_OPENROUTER_CACHE_NAMESPACE",
-        "JCODE_OPENROUTER_PROVIDER_FEATURES",
-        "JCODE_OPENROUTER_ALLOW_NO_AUTH",
-        "JCODE_OPENROUTER_STATIC_MODELS",
-        "JCODE_PROVIDER_PROFILE_ACTIVE",
-        "JCODE_PROVIDER_PROFILE_NAME",
-        "JCODE_NAMED_PROVIDER_PROFILE",
+        "KCODE_OPENROUTER_API_BASE",
+        "KCODE_OPENROUTER_API_KEY_NAME",
+        "KCODE_OPENROUTER_ENV_FILE",
+        "KCODE_OPENROUTER_CACHE_NAMESPACE",
+        "KCODE_OPENROUTER_PROVIDER_FEATURES",
+        "KCODE_OPENROUTER_ALLOW_NO_AUTH",
+        "KCODE_OPENROUTER_STATIC_MODELS",
+        "KCODE_PROVIDER_PROFILE_ACTIVE",
+        "KCODE_PROVIDER_PROFILE_NAME",
+        "KCODE_NAMED_PROVIDER_PROFILE",
     ] {
         assert!(
             std::env::var_os(key).is_none(),
@@ -373,8 +373,8 @@ fn assert_no_compatible_runtime_profile_env(context: &str) {
 
 fn assert_no_active_compatible_profile_lock(context: &str) {
     for key in [
-        "JCODE_PROVIDER_PROFILE_ACTIVE",
-        "JCODE_PROVIDER_PROFILE_NAME",
+        "KCODE_PROVIDER_PROFILE_ACTIVE",
+        "KCODE_PROVIDER_PROFILE_NAME",
     ] {
         assert!(
             std::env::var_os(key).is_none(),
@@ -635,7 +635,7 @@ fn provider_matrix_openai_compatible_auth_state_space_material_states_preserve_l
                         OpenAiCompatibleBaseState::SavedRemote
                         | OpenAiCompatibleBaseState::SavedLocal => {
                             save_env_value_to_env_file(
-                                "JCODE_OPENAI_COMPAT_API_BASE",
+                                "KCODE_OPENAI_COMPAT_API_BASE",
                                 env_file,
                                 Some(base_state.expected_api_base()),
                             )?;
@@ -652,7 +652,7 @@ fn provider_matrix_openai_compatible_auth_state_space_material_states_preserve_l
 
                     if has_default_model {
                         save_env_value_to_env_file(
-                            "JCODE_OPENAI_COMPAT_DEFAULT_MODEL",
+                            "KCODE_OPENAI_COMPAT_DEFAULT_MODEL",
                             env_file,
                             Some(&model),
                         )?;
@@ -699,24 +699,24 @@ fn provider_matrix_openai_compatible_auth_state_space_material_states_preserve_l
                     apply_openai_compatible_profile_env(Some(OPENAI_COMPAT_PROFILE));
                     AuthStatus::invalidate_cache();
                     assert_eq!(
-                        std::env::var("JCODE_OPENROUTER_API_BASE").ok().as_deref(),
+                        std::env::var("KCODE_OPENROUTER_API_BASE").ok().as_deref(),
                         Some(resolved.api_base.as_str()),
                         "runtime api base mismatch for {state_label}"
                     );
                     assert_eq!(
-                        std::env::var("JCODE_OPENROUTER_API_KEY_NAME")
+                        std::env::var("KCODE_OPENROUTER_API_KEY_NAME")
                             .ok()
                             .as_deref(),
                         Some(resolved.api_key_env.as_str()),
                         "runtime api key env mismatch for {state_label}"
                     );
                     assert_eq!(
-                        std::env::var("JCODE_OPENROUTER_ENV_FILE").ok().as_deref(),
+                        std::env::var("KCODE_OPENROUTER_ENV_FILE").ok().as_deref(),
                         Some(resolved.env_file.as_str()),
                         "runtime env file mismatch for {state_label}"
                     );
                     assert_eq!(
-                        std::env::var("JCODE_OPENROUTER_ALLOW_NO_AUTH")
+                        std::env::var("KCODE_OPENROUTER_ALLOW_NO_AUTH")
                             .ok()
                             .as_deref(),
                         (base_state == OpenAiCompatibleBaseState::SavedLocal).then_some("1"),
@@ -782,27 +782,27 @@ fn provider_matrix_env_credentials_activate_openrouter_runtime() -> Result<()> {
         AuthStatus::invalidate_cache();
 
         assert_eq!(
-            std::env::var("JCODE_OPENROUTER_API_BASE").ok().as_deref(),
+            std::env::var("KCODE_OPENROUTER_API_BASE").ok().as_deref(),
             Some(resolved.api_base.as_str())
         );
         assert_eq!(
-            std::env::var("JCODE_OPENROUTER_API_KEY_NAME")
+            std::env::var("KCODE_OPENROUTER_API_KEY_NAME")
                 .ok()
                 .as_deref(),
             Some(resolved.api_key_env.as_str())
         );
         assert_eq!(
-            std::env::var("JCODE_OPENROUTER_ENV_FILE").ok().as_deref(),
+            std::env::var("KCODE_OPENROUTER_ENV_FILE").ok().as_deref(),
             Some(resolved.env_file.as_str())
         );
         assert_eq!(
-            std::env::var("JCODE_OPENROUTER_CACHE_NAMESPACE")
+            std::env::var("KCODE_OPENROUTER_CACHE_NAMESPACE")
                 .ok()
                 .as_deref(),
             Some(resolved.id.as_str())
         );
         assert_eq!(
-            std::env::var("JCODE_OPENROUTER_PROVIDER_FEATURES")
+            std::env::var("KCODE_OPENROUTER_PROVIDER_FEATURES")
                 .ok()
                 .as_deref(),
             Some("0")
@@ -864,12 +864,12 @@ fn provider_matrix_custom_compat_overrides_flow_into_runtime() -> Result<()> {
     env.clear_profile_keys();
 
     jcode::env::set_var(
-        "JCODE_OPENAI_COMPAT_API_BASE",
+        "KCODE_OPENAI_COMPAT_API_BASE",
         "https://api.groq.com/openai/v1/",
     );
-    jcode::env::set_var("JCODE_OPENAI_COMPAT_API_KEY_NAME", "GROQ_API_KEY");
-    jcode::env::set_var("JCODE_OPENAI_COMPAT_ENV_FILE", "groq.env");
-    jcode::env::set_var("JCODE_OPENAI_COMPAT_DEFAULT_MODEL", "openai/gpt-oss-120b");
+    jcode::env::set_var("KCODE_OPENAI_COMPAT_API_KEY_NAME", "GROQ_API_KEY");
+    jcode::env::set_var("KCODE_OPENAI_COMPAT_ENV_FILE", "groq.env");
+    jcode::env::set_var("KCODE_OPENAI_COMPAT_DEFAULT_MODEL", "openai/gpt-oss-120b");
 
     apply_openai_compatible_profile_env(Some(OPENAI_COMPAT_PROFILE));
     let resolved = resolve_openai_compatible_profile(OPENAI_COMPAT_PROFILE);
@@ -884,17 +884,17 @@ fn provider_matrix_custom_compat_overrides_flow_into_runtime() -> Result<()> {
     assert_eq!(resolved.api_key_env, "GROQ_API_KEY");
     assert_eq!(resolved.env_file, "groq.env");
     assert_eq!(
-        std::env::var("JCODE_OPENROUTER_API_BASE").ok().as_deref(),
+        std::env::var("KCODE_OPENROUTER_API_BASE").ok().as_deref(),
         Some("https://api.groq.com/openai/v1")
     );
     assert_eq!(
-        std::env::var("JCODE_OPENROUTER_API_KEY_NAME")
+        std::env::var("KCODE_OPENROUTER_API_KEY_NAME")
             .ok()
             .as_deref(),
         Some("GROQ_API_KEY")
     );
     assert_eq!(
-        std::env::var("JCODE_OPENROUTER_ENV_FILE").ok().as_deref(),
+        std::env::var("KCODE_OPENROUTER_ENV_FILE").ok().as_deref(),
         Some("groq.env")
     );
     assert!(jcode::provider::openrouter::has_credentials());
@@ -914,7 +914,7 @@ fn provider_matrix_custom_local_compat_without_api_key_activates_openrouter_runt
     let env = TestEnv::new()?;
     env.clear_profile_keys();
 
-    jcode::env::set_var("JCODE_OPENAI_COMPAT_API_BASE", "http://localhost:11434/v1");
+    jcode::env::set_var("KCODE_OPENAI_COMPAT_API_BASE", "http://localhost:11434/v1");
 
     apply_openai_compatible_profile_env(Some(OPENAI_COMPAT_PROFILE));
     let resolved = resolve_openai_compatible_profile(OPENAI_COMPAT_PROFILE);
@@ -923,7 +923,7 @@ fn provider_matrix_custom_local_compat_without_api_key_activates_openrouter_runt
     assert_eq!(resolved.api_base, "http://localhost:11434/v1");
     assert!(!resolved.requires_api_key);
     assert_eq!(
-        std::env::var("JCODE_OPENROUTER_ALLOW_NO_AUTH")
+        std::env::var("KCODE_OPENROUTER_ALLOW_NO_AUTH")
             .ok()
             .as_deref(),
         Some("1")

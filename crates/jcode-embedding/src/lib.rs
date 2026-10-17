@@ -537,7 +537,7 @@ mod tests {
     #[test]
     fn minilm_embedding_is_numerically_stable_across_inference_engines() {
         let dir = std::env::var_os("HOME")
-            .map(|h| std::path::PathBuf::from(h).join(".jcode/models/all-MiniLM-L6-v2"))
+            .map(|h| std::path::PathBuf::from(h).join(".kcode/models/all-MiniLM-L6-v2"))
             .filter(|d| is_model_available(d));
         let Some(dir) = dir else {
             eprintln!("skip: MiniLM model not present locally");
@@ -575,7 +575,7 @@ mod tests {
     #[test]
     fn minilm_related_beats_unrelated_if_present() {
         let dir = std::env::var_os("HOME")
-            .map(|h| std::path::PathBuf::from(h).join(".jcode/models/all-MiniLM-L6-v2"))
+            .map(|h| std::path::PathBuf::from(h).join(".kcode/models/all-MiniLM-L6-v2"))
             .filter(|d| is_model_available(d));
         match dir {
             Some(d) => related_beats_unrelated(&d),
@@ -591,7 +591,7 @@ mod tests {
     #[test]
     fn alt_model_related_beats_unrelated_if_present() {
         let dir = std::env::var_os("HOME")
-            .map(|h| std::path::PathBuf::from(h).join("jcode-memory-bench/models/e5-small-v2"))
+            .map(|h| std::path::PathBuf::from(h).join("kcode-memory-bench/models/e5-small-v2"))
             .filter(|d| is_model_available(d));
         let Some(d) = dir else {
             eprintln!("skip: e5-small-v2 model not present locally");
@@ -614,7 +614,7 @@ mod tests {
     #[test]
     fn cross_encoder_scores_relevant_higher_if_present() {
         let dir = std::env::var_os("HOME")
-            .map(|h| std::path::PathBuf::from(h).join("jcode-memory-bench/models/ce-minilm-l6"))
+            .map(|h| std::path::PathBuf::from(h).join("kcode-memory-bench/models/ce-minilm-l6"))
             .filter(|d| d.join("model.onnx").exists() && d.join("tokenizer.json").exists());
         let Some(d) = dir else {
             eprintln!("skip: cross-encoder model not present locally");

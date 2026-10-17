@@ -27,7 +27,7 @@ OLD_WRAP="$OLD_DIR/jcode-linux-x86_64"
 # Fetch + extract the real old release binary if it is not already present.
 if [ ! -x "$OLD_WRAP" ]; then
   mkdir -p "$OLD_DIR"
-  url="$(curl -fsSL "https://api.github.com/repos/1jehuang/jcode/releases/tags/$OLD_VERSION" \
+  url="$(curl -fsSL "https://api.github.com/repos/KooshaPari/KCode/releases/tags/$OLD_VERSION" \
         | grep -o 'https://[^"]*jcode-linux-x86_64.tar.gz' | head -1)"
   [ -n "$url" ] || { echo "could not resolve $OLD_VERSION linux asset URL"; exit 2; }
   echo "Downloading old server $OLD_VERSION ..."
@@ -37,16 +37,16 @@ fi
 [ -x "$OLD_WRAP" ] || { echo "missing old binary $OLD_WRAP after download"; exit 2; }
 
 SANDBOX="$(mktemp -d /tmp/jcode-stale-sandbox.XXXXXX)"
-export JCODE_HOME="$SANDBOX/home"
-export JCODE_RUNTIME_DIR="$SANDBOX/runtime"
+export KCODE_HOME="$SANDBOX/home"
+export KCODE_RUNTIME_DIR="$SANDBOX/runtime"
 # Hard isolation: pin the socket explicitly so we can NEVER touch the real
 # global daemon at /run/user/<uid>/jcode.sock.
-export JCODE_SOCKET="$SANDBOX/runtime/jcode.sock"
+export KCODE_SOCKET="$SANDBOX/runtime/jcode.sock"
 # Make the new client's clean release version comparable (debug build is dirty).
-export JCODE_TEST_CLIENT_VERSION_OVERRIDE="v0.22.0 (sandbox)"
-mkdir -p "$JCODE_HOME" "$JCODE_RUNTIME_DIR"
+export KCODE_TEST_CLIENT_VERSION_OVERRIDE="v0.22.0 (sandbox)"
+mkdir -p "$KCODE_HOME" "$KCODE_RUNTIME_DIR"
 
-BUILDS="$JCODE_HOME/builds"
+BUILDS="$KCODE_HOME/builds"
 mkdir -p "$BUILDS/versions/0.14.6" "$BUILDS/versions/0.22.0" \
          "$BUILDS/shared-server" "$BUILDS/stable" "$BUILDS/current"
 
@@ -108,7 +108,7 @@ log "Starting OLD v0.14.6 daemon"
 SERVER_PID=$!
 # Wait for the socket to appear.
 for _ in $(seq 1 40); do
-  [ -S "$JCODE_SOCKET" ] && break
+  [ -S "$KCODE_SOCKET" ] && break
   sleep 0.25
 done
 sleep 1
@@ -124,7 +124,7 @@ echo "shared-server-version after repair: $(cat "$BUILDS/shared-server-version")
 
 # Give the handoff a moment.
 for _ in $(seq 1 40); do
-  [ -S "$JCODE_SOCKET" ] && break
+  [ -S "$KCODE_SOCKET" ] && break
   sleep 0.25
 done
 sleep 2

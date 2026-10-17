@@ -114,7 +114,7 @@ async fn binary_version_command() -> Result<()> {
     use std::process::Command;
     let _env = setup_test_env()?;
 
-    let output = Command::new(env!("CARGO_BIN_EXE_jcode"))
+    let output = Command::new(env!("CARGO_BIN_EXE_kcode"))
         .arg("--version")
         .output()?;
 
@@ -159,24 +159,24 @@ async fn binary_integration_reload_handoff() -> Result<()> {
     std::fs::create_dir_all(&home_dir)?;
     std::fs::create_dir_all(&install_dir)?;
 
-    let socket_path = runtime_dir.join("jcode.sock");
-    let debug_socket_path = runtime_dir.join("jcode-debug.sock");
+    let socket_path = runtime_dir.join("kcode.sock");
+    let debug_socket_path = runtime_dir.join("kcode-debug.sock");
 
     let stderr_file = std::fs::File::create(&stderr_path)?;
-    let mut child = Command::new(env!("CARGO_BIN_EXE_jcode"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_kcode"))
         .arg("--no-update")
         .arg("--socket")
         .arg(&socket_path)
         .arg("serve")
         // This test must exercise the real exec-based reload handoff, not the
         // in-process test shortcut used by other e2e cases.
-        .env_remove("JCODE_TEST_SESSION")
-        .env("JCODE_HOME", &home_dir)
-        .env("JCODE_RUNTIME_DIR", &runtime_dir)
-        .env("JCODE_INSTALL_DIR", &install_dir)
-        .env("JCODE_DEBUG_CONTROL", "1")
-        .env("JCODE_TEMP_SERVER", "1")
-        .env("JCODE_SERVER_OWNER_PID", std::process::id().to_string())
+        .env_remove("KCODE_TEST_SESSION")
+        .env("KCODE_HOME", &home_dir)
+        .env("KCODE_RUNTIME_DIR", &runtime_dir)
+        .env("KCODE_INSTALL_DIR", &install_dir)
+        .env("KCODE_DEBUG_CONTROL", "1")
+        .env("KCODE_TEMP_SERVER", "1")
+        .env("KCODE_SERVER_OWNER_PID", std::process::id().to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::from(stderr_file))
@@ -286,12 +286,12 @@ async fn binary_integration_selfdev_reload_reconnects_quickly() -> Result<()> {
     std::fs::create_dir_all(&home_dir)?;
     std::fs::create_dir_all(&install_dir)?;
 
-    let _home_guard = EnvVarGuard::set("JCODE_HOME", &home_dir);
-    let _runtime_guard = EnvVarGuard::set("JCODE_RUNTIME_DIR", &runtime_dir);
-    let _install_guard = EnvVarGuard::set("JCODE_INSTALL_DIR", &install_dir);
+    let _home_guard = EnvVarGuard::set("KCODE_HOME", &home_dir);
+    let _runtime_guard = EnvVarGuard::set("KCODE_RUNTIME_DIR", &runtime_dir);
+    let _install_guard = EnvVarGuard::set("KCODE_INSTALL_DIR", &install_dir);
 
-    let socket_path = runtime_dir.join("jcode.sock");
-    let debug_socket_path = runtime_dir.join("jcode-debug.sock");
+    let socket_path = runtime_dir.join("kcode.sock");
+    let debug_socket_path = runtime_dir.join("kcode-debug.sock");
     let mut command = Command::new(&release_binary);
     command
         .arg("--no-update")
@@ -299,10 +299,10 @@ async fn binary_integration_selfdev_reload_reconnects_quickly() -> Result<()> {
         .arg("antigravity")
         .arg("self-dev")
         .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .env_remove("JCODE_TEST_SESSION")
-        .env("JCODE_HOME", &home_dir)
-        .env("JCODE_RUNTIME_DIR", &runtime_dir)
-        .env("JCODE_INSTALL_DIR", &install_dir);
+        .env_remove("KCODE_TEST_SESSION")
+        .env("KCODE_HOME", &home_dir)
+        .env("KCODE_RUNTIME_DIR", &runtime_dir)
+        .env("KCODE_INSTALL_DIR", &install_dir);
 
     let mut child = spawn_pty_child(command)?;
 
@@ -392,14 +392,14 @@ async fn binary_integration_selfdev_client_reload_resumes_session() -> Result<()
     std::fs::create_dir_all(&home_dir)?;
     std::fs::create_dir_all(&install_dir)?;
 
-    let _home_guard = EnvVarGuard::set("JCODE_HOME", &home_dir);
-    let _runtime_guard = EnvVarGuard::set("JCODE_RUNTIME_DIR", &runtime_dir);
-    let _install_guard = EnvVarGuard::set("JCODE_INSTALL_DIR", &install_dir);
+    let _home_guard = EnvVarGuard::set("KCODE_HOME", &home_dir);
+    let _runtime_guard = EnvVarGuard::set("KCODE_RUNTIME_DIR", &runtime_dir);
+    let _install_guard = EnvVarGuard::set("KCODE_INSTALL_DIR", &install_dir);
 
-    let socket_path = runtime_dir.join("jcode.sock");
-    let debug_socket_path = runtime_dir.join("jcode-debug.sock");
+    let socket_path = runtime_dir.join("kcode.sock");
+    let debug_socket_path = runtime_dir.join("kcode-debug.sock");
     let starter_binary = temp_root.path().join("jcode-selfdev-client-starter");
-    std::fs::copy(env!("CARGO_BIN_EXE_jcode"), &starter_binary)?;
+    std::fs::copy(env!("CARGO_BIN_EXE_kcode"), &starter_binary)?;
     let starter_mtime = std::fs::metadata(&release_binary)?
         .modified()?
         .checked_sub(Duration::from_secs(60))
@@ -413,10 +413,10 @@ async fn binary_integration_selfdev_client_reload_resumes_session() -> Result<()
         .arg("antigravity")
         .arg("self-dev")
         .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .env_remove("JCODE_TEST_SESSION")
-        .env("JCODE_HOME", &home_dir)
-        .env("JCODE_RUNTIME_DIR", &runtime_dir)
-        .env("JCODE_INSTALL_DIR", &install_dir);
+        .env_remove("KCODE_TEST_SESSION")
+        .env("KCODE_HOME", &home_dir)
+        .env("KCODE_RUNTIME_DIR", &runtime_dir)
+        .env("KCODE_INSTALL_DIR", &install_dir);
 
     let mut child = spawn_pty_child(command)?;
 
@@ -554,14 +554,14 @@ async fn binary_integration_selfdev_full_reload_resumes_session_quickly() -> Res
     std::fs::create_dir_all(&home_dir)?;
     std::fs::create_dir_all(&install_dir)?;
 
-    let _home_guard = EnvVarGuard::set("JCODE_HOME", &home_dir);
-    let _runtime_guard = EnvVarGuard::set("JCODE_RUNTIME_DIR", &runtime_dir);
-    let _install_guard = EnvVarGuard::set("JCODE_INSTALL_DIR", &install_dir);
+    let _home_guard = EnvVarGuard::set("KCODE_HOME", &home_dir);
+    let _runtime_guard = EnvVarGuard::set("KCODE_RUNTIME_DIR", &runtime_dir);
+    let _install_guard = EnvVarGuard::set("KCODE_INSTALL_DIR", &install_dir);
 
-    let socket_path = runtime_dir.join("jcode.sock");
-    let debug_socket_path = runtime_dir.join("jcode-debug.sock");
+    let socket_path = runtime_dir.join("kcode.sock");
+    let debug_socket_path = runtime_dir.join("kcode-debug.sock");
     let starter_binary = temp_root.path().join("jcode-selfdev-full-reload-starter");
-    std::fs::copy(env!("CARGO_BIN_EXE_jcode"), &starter_binary)?;
+    std::fs::copy(env!("CARGO_BIN_EXE_kcode"), &starter_binary)?;
     let starter_mtime = std::fs::metadata(&release_binary)?
         .modified()?
         .checked_sub(Duration::from_secs(60))
@@ -575,10 +575,10 @@ async fn binary_integration_selfdev_full_reload_resumes_session_quickly() -> Res
         .arg("antigravity")
         .arg("self-dev")
         .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .env_remove("JCODE_TEST_SESSION")
-        .env("JCODE_HOME", &home_dir)
-        .env("JCODE_RUNTIME_DIR", &runtime_dir)
-        .env("JCODE_INSTALL_DIR", &install_dir);
+        .env_remove("KCODE_TEST_SESSION")
+        .env("KCODE_HOME", &home_dir)
+        .env("KCODE_RUNTIME_DIR", &runtime_dir)
+        .env("KCODE_INSTALL_DIR", &install_dir);
 
     let mut child = spawn_pty_child(command)?;
 

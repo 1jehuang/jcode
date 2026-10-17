@@ -1,6 +1,6 @@
 //! Logging infrastructure for jcode
 //!
-//! Logs to ~/.jcode/logs/ with automatic rotation
+//! Logs to ~/.kcode/logs/ with automatic rotation
 //!
 //! Supports thread-local context for server, session, provider, and model info.
 
@@ -40,7 +40,7 @@ impl LogLevel {
     }
 
     fn is_enabled(self) -> bool {
-        !matches!(self, Self::Debug) || std::env::var("JCODE_TRACE").is_ok()
+        !matches!(self, Self::Debug) || std::env::var("KCODE_TRACE").is_ok()
     }
 }
 
@@ -192,7 +192,7 @@ impl Logger {
 
         // Use date-based log file
         let date = Local::now().format("%Y-%m-%d");
-        let path = log_dir.join(format!("jcode-{}.log", date));
+        let path = log_dir.join(format!("kcode-{}.log", date));
 
         let file = OpenOptions::new()
             .create(true)
@@ -237,7 +237,7 @@ pub fn init() {
 
     if !CLEANUP_STARTED.swap(true, Ordering::SeqCst) {
         std::thread::Builder::new()
-            .name("jcode-log-cleanup".to_string())
+            .name("kcode-log-cleanup".to_string())
             .spawn(cleanup_old_logs)
             .ok();
     }
@@ -294,13 +294,13 @@ pub fn truncate_for_log(value: &str, max_chars: usize) -> String {
     format!("{}… [{} chars total]", truncated, value.chars().count())
 }
 
-/// Log a debug message (only if JCODE_TRACE is set)
+/// Log a debug message (only if KCODE_TRACE is set)
 #[expect(
     clippy::collapsible_if,
     reason = "Debug logging keeps env gating and logger access explicit"
 )]
 pub fn debug(message: &str) {
-    if std::env::var("JCODE_TRACE").is_ok() {
+    if std::env::var("KCODE_TRACE").is_ok() {
         if let Ok(mut guard) = LOGGER.lock() {
             if let Some(logger) = guard.as_mut() {
                 logger.write("DEBUG", message);
@@ -459,7 +459,7 @@ where
 
 fn structured_json_enabled() -> bool {
     matches!(
-        std::env::var("JCODE_LOG_JSON").as_deref(),
+        std::env::var("KCODE_LOG_JSON").as_deref(),
         Ok("1" | "true" | "TRUE" | "yes" | "YES")
     )
 }
@@ -564,7 +564,7 @@ pub fn current_session() -> Option<String> {
 pub fn log_path() -> Option<PathBuf> {
     let log_dir = log_dir()?;
     let date = Local::now().format("%Y-%m-%d");
-    Some(log_dir.join(format!("jcode-{}.log", date)))
+    Some(log_dir.join(format!("kcode-{}.log", date)))
 }
 
 /// Remove daily `jcode-*.log` / `jcode-desktop-*.log` files older than 7 days.
@@ -589,7 +589,7 @@ fn cleanup_old_logs_in(log_dir: &std::path::Path, now: chrono::DateTime<Local>) 
         // Only consider our own date-stamped log files.
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        let is_jcode_log = (name.starts_with("jcode-") || name.starts_with("jcode-desktop-"))
+        let is_jcode_log = (name.starts_with("kcode-") || name.starts_with("kcode-desktop-"))
             && name.ends_with(".log");
         if !is_jcode_log {
             continue;
@@ -745,7 +745,7 @@ mod tests {
         use std::time::{Duration, SystemTime};
 
         let dir = std::env::temp_dir().join(format!(
-            "jcode-log-cleanup-test-{}-{}",
+            "kcode-log-cleanup-test-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
@@ -767,10 +767,10 @@ mod tests {
         };
 
         // Old log files that SHOULD be deleted.
-        let old_log = write("jcode-2000-01-01.log", true);
-        let old_desktop = write("jcode-desktop-2000-01-01.log", true);
+        let old_log = write("kcode-2000-01-01.log", true);
+        let old_desktop = write("kcode-desktop-2000-01-01.log", true);
         // Recent log file that SHOULD survive.
-        let new_log = write("jcode-2099-01-01.log", false);
+        let new_log = write("kcode-2099-01-01.log", false);
         // Non-log data that SHOULD survive even though it is old.
         let old_memory = write("memory-events-2000-01-01.jsonl", true);
         let old_other = write("notes-2000-01-01.txt", true);

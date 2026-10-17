@@ -33,7 +33,7 @@ pub use reload::{ReloadRecoveryDirective, persisted_background_tasks_note};
 pub use status::selfdev_status_output;
 
 /// Public GitHub source used when cloning the jcode repository for self-dev.
-pub const JCODE_REPO_URL: &str = "https://github.com/1jehuang/jcode.git";
+pub const KCODE_REPO_URL: &str = "https://github.com/KooshaPari/KCode.git";
 
 #[derive(Debug, Deserialize)]
 struct SelfDevInput {
@@ -186,7 +186,7 @@ impl BuildRequest {
     }
 
     fn terminal_history_limit() -> usize {
-        std::env::var("JCODE_SELFDEV_REQUEST_HISTORY_LIMIT")
+        std::env::var("KCODE_SELFDEV_REQUEST_HISTORY_LIMIT")
             .ok()
             .and_then(|value| value.trim().parse::<usize>().ok())
             .filter(|limit| *limit > 0)
@@ -341,7 +341,7 @@ impl BuildRequest {
         self.status_file.as_ref().map(PathBuf::from).or_else(|| {
             self.background_task_id.as_ref().map(|task_id| {
                 std::env::temp_dir()
-                    .join("jcode-bg-tasks")
+                    .join("kcode-bg-tasks")
                     .join(format!("{}.status.json", task_id))
             })
         })
@@ -514,12 +514,13 @@ impl SelfDevTool {
                             "test",
                             "cancel-build",
                             "reload",
+                            "reload-bridge",
                             "status",
                             "find-config",
                             "socket-info",
                             "socket-help"
                         ],
-                        "description": "Action. `build-reload` queues a build and, once it finishes successfully, reloads onto the new binary in one step."
+                        "description": "Action. `build-reload` queues a build and, once it finishes successfully, reloads onto the new binary in one step. `reload-bridge` restarts the harness API bridge (Desktop/SDK socket) onto the latest build as a daemon task that survives this connection dropping; never restart the bridge by hand from bash."
                     },
                     "prompt": { "type": "string" },
                     "context": { "type": "string" },
@@ -648,6 +649,31 @@ impl Tool for SelfDevTool {
                 self.do_cancel_build(params.request_id, params.task_id, &ctx)
                     .await
             }
+            "reload-bridge" | "reload_bridge" => {
+                if !is_selfdev {
+                    Ok(ToolOutput::new(SelfDevTool::selfdev_only_action_message(
+                        "reload-bridge",
+                    )))
+                } else {
+                    #[cfg(unix)]
+                    {
+                        match crate::tool::bridge_reload::cli_bridge_launch() {
+                            Ok(launch) => Ok(crate::tool::bridge_reload::spawn_bridge_reload(
+                                &ctx.session_id,
+                                launch,
+                            )
+                            .await),
+                            Err(error) => Err(error),
+                        }
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        Ok(ToolOutput::new(
+                            "reload-bridge is only supported on Unix platforms.",
+                        ))
+                    }
+                }
+            }
             "socket-info" => {
                 if is_selfdev {
                     self.do_socket_info().await
@@ -668,7 +694,7 @@ impl Tool for SelfDevTool {
             }
             _ => Ok(ToolOutput::new(format!(
                 "Unknown action: {}. In a self-dev session use 'enter', 'setup', 'build', \
-                 'build-reload', 'test', 'cancel-build', 'reload', 'status', 'find-config', \
+                 'build-reload', 'test', 'cancel-build', 'reload', 'reload-bridge', 'status', 'find-config', \
                  'socket-info', or 'socket-help'. Outside self-dev mode use 'enter', 'setup', \
                  'reload', 'status', or 'find-config'.",
                 action
@@ -681,7 +707,7 @@ impl Tool for SelfDevTool {
 
 impl SelfDevTool {
     fn is_test_session() -> bool {
-        std::env::var("JCODE_TEST_SESSION")
+        std::env::var("KCODE_TEST_SESSION")
             .map(|value| {
                 let trimmed = value.trim();
                 !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
@@ -690,7 +716,7 @@ impl SelfDevTool {
     }
 
     fn reload_timeout_secs() -> u64 {
-        std::env::var("JCODE_SELFDEV_RELOAD_TIMEOUT_SECS")
+        std::env::var("KCODE_SELFDEV_RELOAD_TIMEOUT_SECS")
             .ok()
             .and_then(|raw| raw.trim().parse::<u64>().ok())
             .filter(|secs| *secs > 0)
@@ -701,7 +727,7 @@ impl SelfDevTool {
     /// builds ahead of it in the queue) to finish before giving up and telling
     /// the agent to reload manually.
     fn build_reload_wait_secs() -> u64 {
-        std::env::var("JCODE_SELFDEV_BUILD_WAIT_SECS")
+        std::env::var("KCODE_SELFDEV_BUILD_WAIT_SECS")
             .ok()
             .and_then(|raw| raw.trim().parse::<u64>().ok())
             .filter(|secs| *secs > 0)

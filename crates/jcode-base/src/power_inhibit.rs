@@ -27,7 +27,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
 /// Legacy/global override shared with the desktop app: when set, never inhibit.
-const DISABLE_ENV: &str = "JCODE_DISABLE_POWER_INHIBIT";
+const DISABLE_ENV: &str = "KCODE_DISABLE_POWER_INHIBIT";
 
 /// How long each spawned helper holds the lock before it must be refreshed.
 /// Bounding this is what makes orphaned locks self-heal after a crash/reload.
@@ -78,7 +78,7 @@ impl Default for PowerInhibitor {
 
 impl PowerInhibitor {
     /// Build an inhibitor. The inhibitor is "available" on supported platforms
-    /// unless the legacy `JCODE_DISABLE_POWER_INHIBIT` env escape hatch is set.
+    /// unless the legacy `KCODE_DISABLE_POWER_INHIBIT` env escape hatch is set.
     ///
     /// The user-facing config toggle is intentionally *not* baked in here: the
     /// caller evaluates it per-reconcile (via [`PowerInhibitor::set_active`]) so
@@ -298,7 +298,7 @@ impl WindowsPowerGuard {
         let (stop_tx, stop_rx) = mpsc::channel();
         let (done_tx, done_rx) = mpsc::sync_channel(1);
         let thread = thread::Builder::new()
-            .name("jcode-power-inhibit".to_string())
+            .name("kcode-power-inhibit".to_string())
             .spawn(move || run_windows_power_guard(ready_tx, stop_rx, done_tx))?;
 
         match ready_rx.recv() {

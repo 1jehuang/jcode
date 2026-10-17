@@ -63,8 +63,8 @@ def load_tasks(args: argparse.Namespace) -> list[str]:
 
 
 def ensure_binary(root: Path, env: dict[str, str]) -> Path:
-    binary_dir = Path(env.get("JCODE_HARBOR_BINARY_DIR", "/tmp/jcode-compat-dist")).expanduser()
-    binary_path = Path(env.get("JCODE_HARBOR_BINARY", str(binary_dir / "jcode-linux-x86_64"))).expanduser()
+    binary_dir = Path(env.get("KCODE_HARBOR_BINARY_DIR", "/tmp/jcode-compat-dist")).expanduser()
+    binary_path = Path(env.get("KCODE_HARBOR_BINARY", str(binary_dir / "jcode-linux-x86_64"))).expanduser()
     if not (binary_path.exists() and os.access(binary_path, os.X_OK)):
         run([str(root / "scripts" / "build_linux_compat.sh"), str(binary_dir)], env=env, cwd=root)
     return binary_path.resolve()
@@ -74,11 +74,11 @@ def current_settings(root: Path, args: argparse.Namespace) -> dict[str, Any]:
     env = os.environ.copy()
     binary_path = ensure_binary(root, env)
     openai_auth = resolve_existing_file([
-        env.get("JCODE_HARBOR_OPENAI_AUTH"),
-        "~/.jcode/openai-auth.json",
+        env.get("KCODE_HARBOR_OPENAI_AUTH"),
+        "~/.kcode/openai-auth.json",
     ])
     if openai_auth is None:
-        raise SystemExit("OpenAI OAuth file not found. Set JCODE_HARBOR_OPENAI_AUTH or log in first.")
+        raise SystemExit("OpenAI OAuth file not found. Set KCODE_HARBOR_OPENAI_AUTH or log in first.")
     settings: dict[str, Any] = {
         "schema_version": 1,
         "created_at": dt.datetime.now(dt.UTC).isoformat(),
@@ -86,8 +86,8 @@ def current_settings(root: Path, args: argparse.Namespace) -> dict[str, Any]:
         "git_head": capture(["git", "rev-parse", "HEAD"], cwd=root),
         "runner_script": str((root / "scripts" / "run_terminal_bench_harbor.sh").resolve()),
         "model": args.model,
-        "reasoning_effort": os.environ.get("JCODE_OPENAI_REASONING_EFFORT", "high"),
-        "service_tier": os.environ.get("JCODE_OPENAI_SERVICE_TIER", "priority"),
+        "reasoning_effort": os.environ.get("KCODE_OPENAI_REASONING_EFFORT", "high"),
+        "service_tier": os.environ.get("KCODE_OPENAI_SERVICE_TIER", "priority"),
         "binary_path": str(binary_path),
         "binary_sha256": sha256_file(binary_path),
         "openai_auth_path": str(openai_auth),
@@ -310,7 +310,7 @@ def execute_task_process(
     )
     print(f"\n=== Running task {task} as {job_name} ===", flush=True)
     env = os.environ.copy()
-    env["JCODE_HARBOR_CURRENT_TASK"] = task
+    env["KCODE_HARBOR_CURRENT_TASK"] = task
     proc = subprocess.run(cmd, text=True, env=env)
     return task, job_name, task_jobs_dir, proc.returncode
 

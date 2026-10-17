@@ -624,10 +624,13 @@ fn test_remote_fallback_offer_accept_stages_switch_and_resends() {
     app.remote_model_switch_in_flight = true;
     app.handle_server_event(
         crate::protocol::ServerEvent::ModelChanged {
+            context_window: None,
             id: 0,
             model: "claude-sonnet-4".to_string(),
             provider_name: Some("Anthropic".to_string()),
             error: None,
+            resolved_credential: None,
+            reasoning_effort: None,
         },
         &mut remote,
     );
@@ -668,10 +671,13 @@ fn test_remote_fallback_resend_dropped_when_switch_fails() {
 
     app.handle_server_event(
         crate::protocol::ServerEvent::ModelChanged {
+            context_window: None,
             id: 0,
             model: "claude-sonnet-4".to_string(),
             provider_name: None,
             error: Some("switch failed".to_string()),
+            resolved_credential: None,
+            reasoning_effort: None,
         },
         &mut remote,
     );
@@ -886,8 +892,8 @@ fn test_info_widget_data_includes_connection_type() {
 fn test_remote_tui_state_prefers_cached_model_during_brief_connecting_phase() {
     let _guard = crate::storage::lock_test_env();
     let temp_home = tempfile::TempDir::new().expect("create temp home");
-    let prev_home = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", temp_home.path());
+    let prev_home = std::env::var_os("KCODE_HOME");
+    crate::env::set_var("KCODE_HOME", temp_home.path());
 
     let session_id = "session_otter_123";
     let mut session = crate::session::Session::create_with_id(
@@ -908,9 +914,9 @@ fn test_remote_tui_state_prefers_cached_model_during_brief_connecting_phase() {
     );
 
     if let Some(prev_home) = prev_home {
-        crate::env::set_var("JCODE_HOME", prev_home);
+        crate::env::set_var("KCODE_HOME", prev_home);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
     }
 }
 
@@ -918,8 +924,8 @@ fn test_remote_tui_state_prefers_cached_model_during_brief_connecting_phase() {
 fn test_remote_tui_state_falls_back_to_cached_model_after_startup_phase_clears() {
     let _guard = crate::storage::lock_test_env();
     let temp_home = tempfile::TempDir::new().expect("create temp home");
-    let prev_home = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", temp_home.path());
+    let prev_home = std::env::var_os("KCODE_HOME");
+    crate::env::set_var("KCODE_HOME", temp_home.path());
 
     let session_id = "session_otter_124";
     let mut session = crate::session::Session::create_with_id(
@@ -937,9 +943,9 @@ fn test_remote_tui_state_falls_back_to_cached_model_after_startup_phase_clears()
     assert_eq!(crate::tui::TuiState::provider_name(&app), "openai");
 
     if let Some(prev_home) = prev_home {
-        crate::env::set_var("JCODE_HOME", prev_home);
+        crate::env::set_var("KCODE_HOME", prev_home);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
     }
 }
 
@@ -947,8 +953,8 @@ fn test_remote_tui_state_falls_back_to_cached_model_after_startup_phase_clears()
 fn test_new_for_remote_uses_startup_stub_without_loading_full_transcript() {
     let _guard = crate::storage::lock_test_env();
     let temp_home = tempfile::TempDir::new().expect("create temp home");
-    let prev_home = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", temp_home.path());
+    let prev_home = std::env::var_os("KCODE_HOME");
+    crate::env::set_var("KCODE_HOME", temp_home.path());
 
     let session_id = "session_otter_stub_125";
     let mut session = crate::session::Session::create_with_id(
@@ -987,37 +993,37 @@ fn test_new_for_remote_uses_startup_stub_without_loading_full_transcript() {
     assert_eq!(crate::tui::TuiState::provider_model(&app), "gpt-5.4");
 
     if let Some(prev_home) = prev_home {
-        crate::env::set_var("JCODE_HOME", prev_home);
+        crate::env::set_var("KCODE_HOME", prev_home);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
     }
 }
 
-/// Run `f` with the shared env lock held and `JCODE_MODEL`/`JCODE_PROVIDER`
+/// Run `f` with the shared env lock held and `KCODE_MODEL`/`KCODE_PROVIDER`
 /// neutralized. Remote header tests assert on startup-phase labels, which are
 /// only shown when no model hint is known; a sibling test that persisted a
-/// config `default_model` (shared test home) or exported `JCODE_MODEL` would
+/// config `default_model` (shared test home) or exported `KCODE_MODEL` would
 /// otherwise leak a concrete model into the header.
 fn with_neutral_remote_model_hints<T>(f: impl FnOnce() -> T) -> T {
     let _guard = crate::storage::lock_test_env();
-    let prev_model = std::env::var_os("JCODE_MODEL");
-    let prev_provider = std::env::var_os("JCODE_PROVIDER");
+    let prev_model = std::env::var_os("KCODE_MODEL");
+    let prev_provider = std::env::var_os("KCODE_PROVIDER");
     // "unknown" is sanitized to no-hint and, unlike removing the var, also
     // suppresses the config default_model fallback.
-    crate::env::set_var("JCODE_MODEL", "unknown");
-    crate::env::remove_var("JCODE_PROVIDER");
+    crate::env::set_var("KCODE_MODEL", "unknown");
+    crate::env::remove_var("KCODE_PROVIDER");
 
     let result = f();
 
     if let Some(prev_model) = prev_model {
-        crate::env::set_var("JCODE_MODEL", prev_model);
+        crate::env::set_var("KCODE_MODEL", prev_model);
     } else {
-        crate::env::remove_var("JCODE_MODEL");
+        crate::env::remove_var("KCODE_MODEL");
     }
     if let Some(prev_provider) = prev_provider {
-        crate::env::set_var("JCODE_PROVIDER", prev_provider);
+        crate::env::set_var("KCODE_PROVIDER", prev_provider);
     } else {
-        crate::env::remove_var("JCODE_PROVIDER");
+        crate::env::remove_var("KCODE_PROVIDER");
     }
     result
 }
@@ -1037,10 +1043,10 @@ fn test_remote_tui_state_shows_connected_after_startup_phase_clears_without_mode
 #[test]
 fn test_remote_tui_state_hides_brief_connecting_phase_without_cached_model() {
     let _guard = crate::storage::lock_test_env();
-    let prev_model = std::env::var_os("JCODE_MODEL");
-    let prev_provider = std::env::var_os("JCODE_PROVIDER");
-    crate::env::set_var("JCODE_MODEL", "unknown");
-    crate::env::remove_var("JCODE_PROVIDER");
+    let prev_model = std::env::var_os("KCODE_MODEL");
+    let prev_provider = std::env::var_os("KCODE_PROVIDER");
+    crate::env::set_var("KCODE_MODEL", "unknown");
+    crate::env::remove_var("KCODE_PROVIDER");
 
     let app = App::new_for_remote(None);
 
@@ -1051,24 +1057,24 @@ fn test_remote_tui_state_hides_brief_connecting_phase_without_cached_model() {
     assert_eq!(crate::tui::TuiState::provider_name(&app), "");
 
     if let Some(prev_model) = prev_model {
-        crate::env::set_var("JCODE_MODEL", prev_model);
+        crate::env::set_var("KCODE_MODEL", prev_model);
     } else {
-        crate::env::remove_var("JCODE_MODEL");
+        crate::env::remove_var("KCODE_MODEL");
     }
     if let Some(prev_provider) = prev_provider {
-        crate::env::set_var("JCODE_PROVIDER", prev_provider);
+        crate::env::set_var("KCODE_PROVIDER", prev_provider);
     } else {
-        crate::env::remove_var("JCODE_PROVIDER");
+        crate::env::remove_var("KCODE_PROVIDER");
     }
 }
 
 #[test]
 fn test_remote_tui_state_prefers_configured_model_during_brief_connecting_phase() {
     let _guard = crate::storage::lock_test_env();
-    let prev_model = std::env::var_os("JCODE_MODEL");
-    let prev_provider = std::env::var_os("JCODE_PROVIDER");
-    crate::env::set_var("JCODE_MODEL", "gpt-5.4");
-    crate::env::set_var("JCODE_PROVIDER", "openai");
+    let prev_model = std::env::var_os("KCODE_MODEL");
+    let prev_provider = std::env::var_os("KCODE_PROVIDER");
+    crate::env::set_var("KCODE_MODEL", "gpt-5.4");
+    crate::env::set_var("KCODE_PROVIDER", "openai");
 
     let app = App::new_for_remote(None);
 
@@ -1076,14 +1082,14 @@ fn test_remote_tui_state_prefers_configured_model_during_brief_connecting_phase(
     assert_eq!(crate::tui::TuiState::provider_name(&app), "openai");
 
     if let Some(prev_model) = prev_model {
-        crate::env::set_var("JCODE_MODEL", prev_model);
+        crate::env::set_var("KCODE_MODEL", prev_model);
     } else {
-        crate::env::remove_var("JCODE_MODEL");
+        crate::env::remove_var("KCODE_MODEL");
     }
     if let Some(prev_provider) = prev_provider {
-        crate::env::set_var("JCODE_PROVIDER", prev_provider);
+        crate::env::set_var("KCODE_PROVIDER", prev_provider);
     } else {
-        crate::env::remove_var("JCODE_PROVIDER");
+        crate::env::remove_var("KCODE_PROVIDER");
     }
 }
 
@@ -1289,7 +1295,7 @@ fn test_info_widget_remote_openai_uses_remote_provider_for_usage_and_context() {
     app.remote_provider_name = Some("OpenAI".to_string());
     app.remote_provider_model = Some("gpt-5.4".to_string());
     app.remote_resolved_credential = Some(jcode_provider_core::ResolvedCredential::Oauth);
-    app.update_context_limit_for_model("gpt-5.4");
+    app.update_context_limit_for_model("gpt-5.4", None);
 
     let data = crate::tui::TuiState::info_widget_data(&app);
 
@@ -1307,11 +1313,46 @@ fn test_info_widget_remote_openai_uses_remote_provider_for_usage_and_context() {
 }
 
 #[test]
+fn test_remote_context_limit_survives_a_later_local_re_derivation() {
+    // The server resolves the window for a model chosen server-side and sends
+    // it on attach. The startup and model-switch paths then call
+    // update_context_limit_for_model with None, which for a model absent from
+    // the static catalog fell through to the client's inert provider and the
+    // generic 200_000 default, overwriting a correct 1M value. Measured on
+    // stealth/space-bunny-alpha@Stealth: the panel showed 200000 while the
+    // route carried 1000000.
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.remote_provider_name = Some("OpenRouter".to_string());
+    app.remote_provider_model = Some("stealth/space-bunny-alpha@Stealth".to_string());
+
+    app.update_context_limit_for_model("stealth/space-bunny-alpha@Stealth", Some(1_000_000));
+    assert_eq!(app.context_limit, 1_000_000, "server window must be adopted");
+
+    // A later local re-derivation must not undo it.
+    app.update_context_limit_for_model("stealth/space-bunny-alpha@Stealth", None);
+    assert_eq!(
+        app.context_limit, 1_000_000,
+        "a None call must not downgrade the window the server already reported"
+    );
+
+    let data = crate::tui::TuiState::info_widget_data(&app);
+    assert_eq!(data.context_limit, Some(1_000_000));
+
+    // The compaction budget has to move with it, or a 1M route keeps triggering
+    // compaction about five times too early.
+    let compaction = app.registry.compaction();
+    if let Ok(manager) = compaction.try_read() {
+        assert_eq!(manager.token_budget(), 1_000_000);
+    }
+}
+
+#[test]
 fn test_info_widget_remote_model_falls_back_to_model_provider_detection() {
     let mut app = create_test_app();
     app.is_remote = true;
     app.remote_provider_model = Some("gpt-5.4".to_string());
-    app.update_context_limit_for_model("gpt-5.4");
+    app.update_context_limit_for_model("gpt-5.4", None);
 
     let data = crate::tui::TuiState::info_widget_data(&app);
 
@@ -1471,22 +1512,41 @@ fn test_info_widget_remote_openai_uses_explicit_route_when_credential_is_missing
 #[test]
 fn test_info_widget_local_direct_api_runtime_shows_cost_based_usage() {
     let _guard = crate::storage::lock_test_env();
+    // Restore on unwind, not only on the success path: a mid-test assertion
+    // panic used to leave these vars cleared, poisoning concurrently running
+    // auth tests that read the same process env (openrouter/named-profile
+    // state) and turning this test into a cross-suite flake source.
+    struct RestoreEnv(Vec<(&'static str, Option<std::ffi::OsString>)>);
+    impl Drop for RestoreEnv {
+        fn drop(&mut self) {
+            for (key, value) in self.0.drain(..) {
+                if let Some(value) = value {
+                    crate::env::set_var(key, value);
+                } else {
+                    crate::env::remove_var(key);
+                }
+            }
+            crate::auth::AuthStatus::invalidate_cache();
+        }
+    }
     let tracked_env = [
-        "JCODE_RUNTIME_PROVIDER",
-        "JCODE_OPENROUTER_ALLOW_NO_AUTH",
-        "JCODE_OPENROUTER_API_BASE",
-        "JCODE_OPENROUTER_PROVIDER_FEATURES",
-        "JCODE_OPENROUTER_TRANSPORT_STATE",
-        "JCODE_OPENROUTER_CACHE_NAMESPACE",
-        "JCODE_NAMED_PROVIDER_PROFILE",
-        "JCODE_PROVIDER_PROFILE_ACTIVE",
-        "JCODE_PROVIDER_PROFILE_NAME",
+        "KCODE_RUNTIME_PROVIDER",
+        "KCODE_OPENROUTER_ALLOW_NO_AUTH",
+        "KCODE_OPENROUTER_API_BASE",
+        "KCODE_OPENROUTER_PROVIDER_FEATURES",
+        "KCODE_OPENROUTER_TRANSPORT_STATE",
+        "KCODE_OPENROUTER_CACHE_NAMESPACE",
+        "KCODE_NAMED_PROVIDER_PROFILE",
+        "KCODE_PROVIDER_PROFILE_ACTIVE",
+        "KCODE_PROVIDER_PROFILE_NAME",
     ];
-    let saved_env = tracked_env
-        .iter()
-        .map(|&key| (key, std::env::var_os(key)))
-        .collect::<Vec<_>>();
-    for &key in &tracked_env {
+    let _restore = RestoreEnv(
+        tracked_env
+            .into_iter()
+            .map(|key| (key, std::env::var_os(key)))
+            .collect(),
+    );
+    for key in tracked_env {
         crate::env::remove_var(key);
     }
 
@@ -1530,8 +1590,8 @@ fn test_info_widget_local_direct_api_runtime_shows_cost_based_usage() {
     ];
 
     for (runtime_provider, provider_name, model, expected_auth) in cases {
-        crate::env::set_var("JCODE_RUNTIME_PROVIDER", runtime_provider);
-        crate::env::remove_var("JCODE_OPENROUTER_ALLOW_NO_AUTH");
+        crate::env::set_var("KCODE_RUNTIME_PROVIDER", runtime_provider);
+        crate::env::remove_var("KCODE_OPENROUTER_ALLOW_NO_AUTH");
         crate::auth::AuthStatus::invalidate_cache();
 
         let mut app = create_named_provider_test_app(provider_name, model);
@@ -1561,8 +1621,8 @@ fn test_info_widget_local_direct_api_runtime_shows_cost_based_usage() {
         assert!(usage.total_cost > 0.0);
     }
 
-    crate::env::set_var("JCODE_RUNTIME_PROVIDER", "jcode");
-    crate::env::remove_var("JCODE_OPENROUTER_ALLOW_NO_AUTH");
+    crate::env::set_var("KCODE_RUNTIME_PROVIDER", "jcode");
+    crate::env::remove_var("KCODE_OPENROUTER_ALLOW_NO_AUTH");
     let mut app = create_named_provider_test_app("openrouter", "subscription-model");
     app.streaming.streaming_input_tokens = 1_000;
     app.streaming.streaming_output_tokens = 1_000;
@@ -1578,8 +1638,8 @@ fn test_info_widget_local_direct_api_runtime_shows_cost_based_usage() {
     );
     assert!(data.usage_info.is_none());
 
-    crate::env::set_var("JCODE_RUNTIME_PROVIDER", "openai-compatible");
-    crate::env::set_var("JCODE_OPENROUTER_ALLOW_NO_AUTH", "1");
+    crate::env::set_var("KCODE_RUNTIME_PROVIDER", "openai-compatible");
+    crate::env::set_var("KCODE_OPENROUTER_ALLOW_NO_AUTH", "1");
     let mut app = create_named_provider_test_app("openrouter", "local-model");
     app.streaming.streaming_input_tokens = 1_000;
     app.streaming.streaming_output_tokens = 1_000;
@@ -1594,15 +1654,6 @@ fn test_info_widget_local_direct_api_runtime_shows_cost_based_usage() {
         crate::tui::info_widget::AuthMethod::Unknown
     );
     assert!(data.usage_info.is_none());
-
-    for (key, value) in saved_env {
-        if let Some(value) = value {
-            crate::env::set_var(key, value);
-        } else {
-            crate::env::remove_var(key);
-        }
-    }
-    crate::auth::AuthStatus::invalidate_cache();
 }
 
 #[test]
@@ -1615,8 +1666,8 @@ fn test_anthropic_api_cost_accounts_for_split_cache_tokens() {
     //   - bill cache-creation (cache-write) tokens, which Anthropic charges at a
     //     premium over the input rate.
     let _guard = crate::storage::lock_test_env();
-    let saved_runtime = std::env::var_os("JCODE_RUNTIME_PROVIDER");
-    crate::env::set_var("JCODE_RUNTIME_PROVIDER", "claude-api");
+    let saved_runtime = std::env::var_os("KCODE_RUNTIME_PROVIDER");
+    crate::env::set_var("KCODE_RUNTIME_PROVIDER", "claude-api");
     crate::auth::AuthStatus::invalidate_cache();
 
     // claude-sonnet-4-6 API pricing: input $3/Mtok, output $15/Mtok,
@@ -1646,9 +1697,9 @@ fn test_anthropic_api_cost_accounts_for_split_cache_tokens() {
     );
 
     if let Some(value) = saved_runtime {
-        crate::env::set_var("JCODE_RUNTIME_PROVIDER", value);
+        crate::env::set_var("KCODE_RUNTIME_PROVIDER", value);
     } else {
-        crate::env::remove_var("JCODE_RUNTIME_PROVIDER");
+        crate::env::remove_var("KCODE_RUNTIME_PROVIDER");
     }
     crate::auth::AuthStatus::invalidate_cache();
 }
@@ -1729,6 +1780,7 @@ fn test_resumed_session_seeds_cost_from_history_token_totals() {
     crate::provider::anthropic::set_cache_ttl_1h(true);
 
     let totals = crate::protocol::TokenUsageTotals {
+        cache_prompt_tokens: Some(141_000),
         messages_with_token_usage: 3,
         input_tokens: 1_000,
         output_tokens: 2_000,
@@ -1850,8 +1902,8 @@ fn test_remote_fast_mode_tier_bills_premium_rates_and_reprices_on_toggle() {
 fn test_info_widget_local_gemini_shows_oauth_auth_method() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().expect("create temp dir");
-    let prev_home = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", temp.path());
+    let prev_home = std::env::var_os("KCODE_HOME");
+    crate::env::set_var("KCODE_HOME", temp.path());
 
     let path = crate::auth::gemini::tokens_path().expect("gemini tokens path");
     crate::storage::write_json_secret(
@@ -1878,9 +1930,9 @@ fn test_info_widget_local_gemini_shows_oauth_auth_method() {
     assert!(data.usage_info.is_none());
 
     if let Some(prev_home) = prev_home {
-        crate::env::set_var("JCODE_HOME", prev_home);
+        crate::env::set_var("KCODE_HOME", prev_home);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
     }
     crate::auth::AuthStatus::invalidate_cache();
 }
@@ -2489,5 +2541,167 @@ fn test_credential_failure_breaker_resets_on_turn_success() {
     assert_eq!(
         app.consecutive_credential_failures, 0,
         "a successful turn must reset the credential-failure streak"
+    );
+}
+
+/// An OAuth -> API-key route switch must update the auth badge immediately,
+/// instead of keeping the previous route's server-resolved credential.
+#[test]
+fn test_remote_model_changed_updates_resolved_credential() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+
+    app.is_remote = true;
+    app.remote_provider_name = Some("Claude".to_string());
+    app.remote_resolved_credential = Some(jcode_provider_core::ResolvedCredential::Oauth);
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ModelChanged {
+            context_window: None,
+            id: 0,
+            model: "claude-opus-5-5".to_string(),
+            provider_name: Some("Claude".to_string()),
+            error: None,
+            resolved_credential: Some(jcode_provider_core::ResolvedCredential::ApiKey),
+            reasoning_effort: None,
+        },
+        &mut remote,
+    );
+
+    assert_eq!(
+        app.remote_resolved_credential,
+        Some(jcode_provider_core::ResolvedCredential::ApiKey)
+    );
+    let data = crate::tui::TuiState::info_widget_data(&app);
+    assert_eq!(
+        data.auth_method,
+        crate::tui::info_widget::AuthMethod::AnthropicApiKey
+    );
+}
+
+fn model_changed_event(
+    error: Option<&str>,
+    reasoning_effort: Option<&str>,
+) -> crate::protocol::ServerEvent {
+    crate::protocol::ServerEvent::ModelChanged {
+        context_window: None,
+        id: 0,
+        model: "gpt-5.6-terra".to_string(),
+        provider_name: Some("OpenAI".to_string()),
+        error: error.map(str::to_string),
+        resolved_credential: None,
+        reasoning_effort: reasoning_effort.map(str::to_string),
+    }
+}
+
+/// The panel's window and the compaction budget must not disagree. Every site that
+/// assigns `context_limit` directly used to update the panel while skipping the
+/// budget sync, so a correct panel could sit on a stale compaction trigger — about
+/// five times too early on a 1M route.
+#[test]
+fn test_setting_context_limit_also_syncs_the_compaction_budget() {
+    let mut app = create_test_app();
+
+    app.set_context_limit_and_sync_budget(1_000_000);
+
+    assert_eq!(app.context_limit, 1_000_000, "panel must show the new window");
+    let budget = app.registry.compaction().try_read().expect("compaction lock").token_budget();
+    assert_eq!(
+        budget, 1_000_000,
+        "compaction budget must follow the panel limit, or the session compacts early"
+    );
+}
+
+/// The server re-sends ModelChanged on resume so the client learns the resolved
+/// context window. Re-reporting the model the client already runs must adopt the
+/// window without announcing a phantom "Switched to model" line.
+#[test]
+fn test_remote_model_changed_for_same_model_adopts_window_silently() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+    app.is_remote = true;
+    app.remote_provider_model = Some("gpt-5.6-terra".to_string());
+    let before = app.display_messages().len();
+
+    let crate::protocol::ServerEvent::ModelChanged {
+        id,
+        model,
+        provider_name,
+        error,
+        resolved_credential,
+        reasoning_effort,
+        ..
+    } = model_changed_event(None, None)
+    else {
+        unreachable!()
+    };
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ModelChanged {
+            id,
+            model,
+            provider_name,
+            context_window: Some(1_000_000),
+            error,
+            resolved_credential,
+            reasoning_effort,
+        },
+        &mut remote,
+    );
+
+    assert_eq!(app.context_limit, 1_000_000);
+    assert!(
+        !app.display_messages()[before..]
+            .iter()
+            .any(|msg| msg.content.contains("Switched to model")),
+        "a resume re-report of the same model must not announce a switch"
+    );
+
+    app.remote_provider_model = Some("other-model".to_string());
+    app.handle_server_event(model_changed_event(None, None), &mut remote);
+    assert!(
+        app.display_messages()[before..]
+            .iter()
+            .any(|msg| msg.content.contains("Switched to model: gpt-5.6-terra")),
+        "a real switch is still announced"
+    );
+}
+
+/// Issue #1504: the effort chip must follow the effort the server reports for
+/// the switched-to model: adopt a new level, clear on `None`, and leave the
+/// running model's effort untouched when the switch fails.
+#[test]
+fn test_remote_model_changed_updates_reasoning_effort() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+    app.is_remote = true;
+
+    app.remote_reasoning_effort = Some("medium".to_string());
+    app.handle_server_event(model_changed_event(None, Some("high")), &mut remote);
+    assert_eq!(app.remote_reasoning_effort.as_deref(), Some("high"));
+
+    app.handle_server_event(model_changed_event(None, None), &mut remote);
+    assert!(
+        app.remote_reasoning_effort.is_none(),
+        "a switch to a model without effort must clear the chip"
+    );
+
+    app.remote_reasoning_effort = Some("low".to_string());
+    app.handle_server_event(
+        model_changed_event(Some("switch failed"), None),
+        &mut remote,
+    );
+    assert_eq!(
+        app.remote_reasoning_effort.as_deref(),
+        Some("low"),
+        "a failed switch keeps the running model's effort"
     );
 }

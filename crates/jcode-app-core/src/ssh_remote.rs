@@ -76,7 +76,7 @@ pub fn find_profile(name: &str) -> Result<Option<SshRemoteProfile>> {
         return Ok(None);
     };
     // Older MVP builds could save a pasted command like `ssh user@host`. Normalize on load so
-    // users do not have to manually repair ~/.jcode/ssh_remotes.json.
+    // users do not have to manually repair ~/.kcode/ssh_remotes.json.
     profile.ssh_target = normalize_ssh_target(&profile.ssh_target)?;
     Ok(Some(profile))
 }

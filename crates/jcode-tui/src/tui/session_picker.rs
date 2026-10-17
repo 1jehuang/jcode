@@ -1045,7 +1045,7 @@ impl SessionPicker {
         let (tx, rx) = std::sync::mpsc::channel();
         let thread_session_id = cache_session_id.clone();
         let _ = std::thread::Builder::new()
-            .name("jcode-session-preview-loader".to_string())
+            .name("kcode-session-preview-loader".to_string())
             .spawn(move || {
                 let preview = Self::load_preview_for_target(resume_target, external_path);
                 let _ = tx.send(preview);
@@ -2396,7 +2396,7 @@ impl SessionPicker {
                 self.render(frame);
                 // Standalone picker loop bypasses `ui::draw`; adapt for light
                 // terminal themes here (no-op on dark).
-                jcode_tui_style::adapt_buffer_for_theme(frame.buffer_mut());
+                jcode_tui_style::adapt_buffer_for_display(frame.buffer_mut());
                 crate::tui::ui::adapt_buffer_for_emoji_preference(frame.buffer_mut());
             })?;
             if event::poll(Duration::from_millis(100))? {

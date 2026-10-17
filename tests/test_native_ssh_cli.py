@@ -2,12 +2,12 @@
 """Opt-in native SSH acceptance against a built CLI and an explicitly chosen host.
 
 Required environment (no network access when unset):
-  JCODE_NATIVE_SSH_BINARY=/absolute/path/to/local/jcode
-  JCODE_NATIVE_SSH_HOST=jcode-dev
-  JCODE_NATIVE_SSH_REMOTE_BINARY=/absolute/path/to/remote-wrapper
-  JCODE_NATIVE_SSH_CWD=/absolute/remote/workspace
-Optional JCODE_NATIVE_SSH_SERVER_SOCKET selects a prestarted isolated daemon.
-The remote wrapper should select an isolated JCODE_HOME/JCODE_RUNTIME_DIR and a
+  KCODE_NATIVE_SSH_BINARY=/absolute/path/to/local/jcode
+  KCODE_NATIVE_SSH_HOST=jcode-dev
+  KCODE_NATIVE_SSH_REMOTE_BINARY=/absolute/path/to/remote-wrapper
+  KCODE_NATIVE_SSH_CWD=/absolute/remote/workspace
+Optional KCODE_NATIVE_SSH_SERVER_SOCKET selects a prestarted isolated daemon.
+The remote wrapper should select an isolated KCODE_HOME/KCODE_RUNTIME_DIR and a
 fresh matching binary. Host keys must already be verified in system known_hosts.
 
 Run: python3 tests/test_native_ssh_cli.py
@@ -41,7 +41,7 @@ import time
 import unittest
 import uuid
 
-PREFIX = "JCODE_NATIVE_SSH_"
+PREFIX = "KCODE_NATIVE_SSH_"
 MAX_FRAME = 8 * 1024 * 1024
 MAX_STDERR = 16 * 1024
 TIMEOUT = 60
@@ -267,7 +267,7 @@ def child_terminal():
 def tui_acceptance(config, env, local_cwd, session_id, sentinel, *, exit_mode="quit"):
     require(exit_mode in {"quit", "sighup"}, "Unknown TUI exit mode")
     # Only sockets live here. Keep this path short for Unix sockaddr limits,
-    # independently of potentially long JCODE_SCRATCH_DIR artifact paths.
+    # independently of potentially long KCODE_SCRATCH_DIR artifact paths.
     socket_temp = tempfile.TemporaryDirectory(prefix="jssh-", dir="/tmp")
     child_env = dict(env, TMPDIR=socket_temp.name)
     master, slave = pty.openpty()
@@ -364,7 +364,7 @@ def tui_acceptance(config, env, local_cwd, session_id, sentinel, *, exit_mode="q
 
 def run_acceptance(config):
     require(sys.platform.startswith("linux"), "PTY owned-child acceptance requires Linux /proc")
-    with tempfile.TemporaryDirectory(prefix="jcode-native-ssh-", dir=os.environ.get("JCODE_SCRATCH_DIR")) as root:
+    with tempfile.TemporaryDirectory(prefix="jcode-native-ssh-", dir=os.environ.get("KCODE_SCRATCH_DIR")) as root:
         root = Path(root)
         home = root / "jcode"
         runtime = root / "runtime"
@@ -372,15 +372,15 @@ def run_acceptance(config):
         runtime.mkdir(mode=0o700)
         # Keep the user's real HOME only for explicitly requested system SSH
         # identity/config. Isolate all Jcode state and disable local UI hooks.
-        env = {key: value for key, value in os.environ.items() if not key.startswith("JCODE_")}
+        env = {key: value for key, value in os.environ.items() if not key.startswith("KCODE_")}
         for key in ("DISPLAY", "WAYLAND_DISPLAY", "KITTY_LISTEN_ON", "TMUX", "ZELLIJ"):
             env.pop(key, None)
-        env.update(JCODE_HOME=str(home), JCODE_RUNTIME_DIR=str(runtime), XDG_RUNTIME_DIR=str(runtime),
-                   JCODE_NO_TELEMETRY="1", JCODE_WAKE_MODE="external", TERM="xterm-256color",
+        env.update(KCODE_HOME=str(home), KCODE_RUNTIME_DIR=str(runtime), XDG_RUNTIME_DIR=str(runtime),
+                   KCODE_NO_TELEMETRY="1", KCODE_WAKE_MODE="external", TERM="xterm-256color",
                    DO_NOT_TRACK="1", NO_COLOR="0")
         # SSH agent may live under the original XDG runtime, but its absolute
         # SSH_AUTH_SOCK value is deliberately retained above.
-        sentinel = "JCODE_SSH_CONTEXT_" + uuid.uuid4().hex
+        sentinel = "KCODE_SSH_CONTEXT_" + uuid.uuid4().hex
         instance = "native-ssh-acceptance-" + uuid.uuid4().hex
         pipeline = subprocess.run(
             ["ssh", *SSH_FLAGS, "--", config["HOST"], remote_command(config)],

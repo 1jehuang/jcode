@@ -39,10 +39,10 @@ fn a_hanging_tex_toolchain_never_blocks_the_markdown_draw_path() {
     let stub = hanging_stub(dir.path(), "hanging-tex");
     // SAFETY: single-threaded test process setup before any render runs.
     unsafe {
-        std::env::set_var("JCODE_LATEX_COMMAND", &stub);
-        std::env::set_var("JCODE_DVIPNG_COMMAND", &stub);
-        std::env::set_var("JCODE_PDFLATEX_COMMAND", &stub);
-        std::env::set_var("JCODE_PDFTOCAIRO_COMMAND", &stub);
+        std::env::set_var("KCODE_LATEX_COMMAND", &stub);
+        std::env::set_var("KCODE_DVIPNG_COMMAND", &stub);
+        std::env::set_var("KCODE_PDFLATEX_COMMAND", &stub);
+        std::env::set_var("KCODE_PDFTOCAIRO_COMMAND", &stub);
     }
 
     // Unique sources so no earlier run left a cached artifact on disk.

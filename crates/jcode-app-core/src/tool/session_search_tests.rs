@@ -9,16 +9,16 @@ use std::time::Instant;
 fn with_temp_home<T>(f: impl FnOnce(&Path) -> T) -> T {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().expect("create temp dir");
-    let previous_home = std::env::var("JCODE_HOME").ok();
-    crate::env::set_var("JCODE_HOME", temp.path());
+    let previous_home = std::env::var("KCODE_HOME").ok();
+    crate::env::set_var("KCODE_HOME", temp.path());
     std::fs::create_dir_all(temp.path().join("sessions")).expect("create sessions dir");
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(temp.path())));
 
     if let Some(previous_home) = previous_home {
-        crate::env::set_var("JCODE_HOME", previous_home);
+        crate::env::set_var("KCODE_HOME", previous_home);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
     }
 
     result.unwrap_or_else(|payload| std::panic::resume_unwind(payload))
@@ -183,14 +183,14 @@ fn timestamped_session_collection_respects_recent_limit_without_mtime_stat() {
 }
 
 #[test]
-#[ignore = "local performance benchmark over the real ~/.jcode session corpus"]
+#[ignore = "local performance benchmark over the real ~/.kcode session corpus"]
 fn bench_real_session_search_corpus() {
-    if std::env::var("JCODE_SESSION_SEARCH_BENCH_REAL")
+    if std::env::var("KCODE_SESSION_SEARCH_BENCH_REAL")
         .ok()
         .as_deref()
         != Some("1")
     {
-        eprintln!("set JCODE_SESSION_SEARCH_BENCH_REAL=1 to run against the real session corpus");
+        eprintln!("set KCODE_SESSION_SEARCH_BENCH_REAL=1 to run against the real session corpus");
         return;
     }
 
@@ -322,7 +322,9 @@ fn system_reminders_are_hidden_by_default_and_opt_in_searchable() {
             vec![text("display-role-needle")],
             Some(StoredDisplayRole::System),
         );
-        session.save().expect("save system session");
+        // Only hidden messages here, so bypass the untouched-session gate
+        // (783c979a0) to exercise search over persisted hidden content.
+        session.save_prepared().expect("save system session");
 
         let options = SearchOptions::for_test("current-session");
         assert!(run_search(home, "secret-system-needle", &options).is_empty());

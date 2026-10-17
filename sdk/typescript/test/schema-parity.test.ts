@@ -14,6 +14,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   API_VERSION_MAJOR,
+  API_VERSION_MINOR,
   KNOWN_EVENT_KINDS,
   KNOWN_REQUEST_KINDS,
 } from "../dist/index.js";
@@ -68,14 +69,21 @@ test("protocol major version matches the Rust constant", () => {
   assert.equal(API_VERSION_MAJOR, Number(match![1]));
 });
 
+test("protocol minor version matches the Rust constant", () => {
+  const source = fs.readFileSync(path.join(rustCrate, "lib.rs"), "utf8");
+  const match = /API_VERSION_MINOR: u32 = (\d+)/.exec(source);
+  assert.ok(match, "API_VERSION_MINOR not found");
+  assert.equal(API_VERSION_MINOR, Number(match![1]));
+});
+
 test("socket path rules match the Rust resolver", async () => {
   const source = fs.readFileSync(path.join(rustCrate, "sockets.rs"), "utf8");
-  for (const key of ["JCODE_RUNTIME_DIR", "XDG_RUNTIME_DIR", "JCODE_API_SOCKET", "JCODE_SOCKET"]) {
+  for (const key of ["KCODE_RUNTIME_DIR", "XDG_RUNTIME_DIR", "KCODE_API_SOCKET", "KCODE_SOCKET"]) {
     assert.ok(source.includes(key), `${key} missing from Rust resolver`);
   }
   const sdk = fs.readFileSync(path.resolve(here, "../src/sockets.ts"), "utf8");
-  for (const key of ["JCODE_RUNTIME_DIR", "XDG_RUNTIME_DIR", "JCODE_API_SOCKET", "JCODE_SOCKET"]) {
+  for (const key of ["KCODE_RUNTIME_DIR", "XDG_RUNTIME_DIR", "KCODE_API_SOCKET", "KCODE_SOCKET"]) {
     assert.ok(sdk.includes(key), `${key} missing from SDK resolver`);
   }
-  assert.ok(source.includes("jcode-api.sock") && sdk.includes("jcode-api.sock"));
+  assert.ok(source.includes("kcode-api.sock") && sdk.includes("kcode-api.sock"));
 });

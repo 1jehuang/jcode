@@ -8,18 +8,18 @@ if [[ $# -gt 0 ]]; then
   shift
 fi
 
-sandbox_name=${JCODE_ONBOARDING_SANDBOX:-default}
+sandbox_name=${KCODE_ONBOARDING_SANDBOX:-default}
 if [[ ! "$sandbox_name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ || "$sandbox_name" == "." || "$sandbox_name" == ".." ]]; then
   echo "Invalid onboarding sandbox name: $sandbox_name" >&2
   exit 2
 fi
-scratch_root=${JCODE_SCRATCH_DIR:-$HOME/.jcode/scratch}
+scratch_root=${KCODE_SCRATCH_DIR:-$HOME/.kcode/scratch}
 sandbox_parent="$scratch_root/onboarding"
 sandbox_root_default="$sandbox_parent/$sandbox_name"
-sandbox_root=${JCODE_ONBOARDING_DIR:-$sandbox_root_default}
+sandbox_root=${KCODE_ONBOARDING_DIR:-$sandbox_root_default}
 jcode_home="$sandbox_root/home"
 runtime_dir="$sandbox_root/runtime"
-marker_file="$sandbox_root/.jcode-onboarding-sandbox"
+marker_file="$sandbox_root/.kcode-onboarding-sandbox"
 
 ensure_dirs() {
   mkdir -p "$jcode_home" "$runtime_dir"
@@ -34,12 +34,12 @@ run_in_sandbox() {
     cd "$repo_root"
     # Strip any inherited self-dev markers so the sandbox behaves like a real
     # first-run install. `--no-selfdev` only prevents *setting*
-    # JCODE_CLIENT_SELFDEV_MODE; it cannot unset one inherited from a parent
+    # KCODE_CLIENT_SELFDEV_MODE; it cannot unset one inherited from a parent
     # self-dev shell, which would otherwise force every sandbox session canary
     # (suppressing the new-session suggestion cards we are trying to verify).
-    env -u JCODE_CLIENT_SELFDEV_MODE -u JCODE_SELFDEV -u JCODE_CANARY \
-      JCODE_HOME="$jcode_home" \
-      JCODE_RUNTIME_DIR="$runtime_dir" \
+    env -u KCODE_CLIENT_SELFDEV_MODE -u KCODE_SELFDEV -u KCODE_CANARY \
+      KCODE_HOME="$jcode_home" \
+      KCODE_RUNTIME_DIR="$runtime_dir" \
       "$@"
   )
 }
@@ -76,10 +76,10 @@ Commands:
   help                   Show this help
 
 Environment overrides:
-  JCODE_ONBOARDING_SANDBOX   Sandbox name (default: default)
-  JCODE_ONBOARDING_DIR       Explicit sandbox directory
-  JCODE_AUTH_FIXTURE_DIR     Fixture store (default: .tmp/auth-fixtures)
-  JCODE_ONBOARDING_KEEP_EXTERNAL=1
+  KCODE_ONBOARDING_SANDBOX   Sandbox name (default: default)
+  KCODE_ONBOARDING_DIR       Explicit sandbox directory
+  KCODE_AUTH_FIXTURE_DIR     Fixture store (default: .tmp/auth-fixtures)
+  KCODE_ONBOARDING_KEEP_EXTERNAL=1
                               Keep copied real credentials after fresh-real exits
 
 Examples:
@@ -94,8 +94,8 @@ EOF
 print_env() {
   ensure_dirs
   cat <<EOF
-export JCODE_HOME="$jcode_home"
-export JCODE_RUNTIME_DIR="$runtime_dir"
+export KCODE_HOME="$jcode_home"
+export KCODE_RUNTIME_DIR="$runtime_dir"
 EOF
 }
 
@@ -103,7 +103,7 @@ status() {
   ensure_dirs
   echo "Sandbox name: $sandbox_name"
   echo "Sandbox root: $sandbox_root"
-  echo "JCODE_HOME:   $jcode_home"
+  echo "KCODE_HOME:   $jcode_home"
   echo "RUNTIME_DIR:  $runtime_dir"
   echo
 
@@ -150,9 +150,9 @@ purge_external() {
 open_shell() {
   ensure_dirs
   echo "Opening sandbox shell"
-  echo "  JCODE_HOME=$jcode_home"
-  echo "  JCODE_RUNTIME_DIR=$runtime_dir"
-  env JCODE_HOME="$jcode_home" JCODE_RUNTIME_DIR="$runtime_dir" bash --noprofile --norc
+  echo "  KCODE_HOME=$jcode_home"
+  echo "  KCODE_RUNTIME_DIR=$runtime_dir"
+  env KCODE_HOME="$jcode_home" KCODE_RUNTIME_DIR="$runtime_dir" bash --noprofile --norc
 }
 
 run_jcode() {
@@ -161,21 +161,21 @@ run_jcode() {
   # auto-detect the repository and join the shared self-dev server (remote
   # mode), which both breaks isolation and skips local-only first-run behavior
   # like the new-session model validation. `--no-selfdev` keeps it standalone,
-  # spawning its own server under the sandbox's JCODE_RUNTIME_DIR. Set
-  # JCODE_SANDBOX_SELFDEV=1 to opt back into the shared-server behavior.
+  # spawning its own server under the sandbox's KCODE_RUNTIME_DIR. Set
+  # KCODE_SANDBOX_SELFDEV=1 to opt back into the shared-server behavior.
   local prefix=()
-  if [[ "${JCODE_SANDBOX_SELFDEV:-0}" != "1" ]]; then
+  if [[ "${KCODE_SANDBOX_SELFDEV:-0}" != "1" ]]; then
     prefix=(--no-selfdev)
   fi
   # Allow pointing the sandbox at an already-built binary (e.g. the selfdev
   # profile output) without rebuilding the debug binary. Falls back to the
   # debug binary, then to `cargo run`.
-  if [[ -n "${JCODE_SANDBOX_BIN:-}" ]]; then
-    if [[ -x "$JCODE_SANDBOX_BIN" ]]; then
-      run_in_sandbox "$JCODE_SANDBOX_BIN" "${prefix[@]}" "$@"
+  if [[ -n "${KCODE_SANDBOX_BIN:-}" ]]; then
+    if [[ -x "$KCODE_SANDBOX_BIN" ]]; then
+      run_in_sandbox "$KCODE_SANDBOX_BIN" "${prefix[@]}" "$@"
       return
     fi
-    echo "JCODE_SANDBOX_BIN=$JCODE_SANDBOX_BIN is not executable" >&2
+    echo "KCODE_SANDBOX_BIN=$KCODE_SANDBOX_BIN is not executable" >&2
     return 1
   fi
   local binary_path="$repo_root/target/debug/jcode"
@@ -187,14 +187,14 @@ run_jcode() {
 }
 
 run_auth_fixture() {
-  JCODE_ONBOARDING_SANDBOX="$sandbox_name" \
-    JCODE_ONBOARDING_DIR="$sandbox_root" \
+  KCODE_ONBOARDING_SANDBOX="$sandbox_name" \
+    KCODE_ONBOARDING_DIR="$sandbox_root" \
     "$repo_root/scripts/auth_fixture.sh" "$@"
 }
 
 # Copy one real file from $HOME into the sandbox's external/ tree, preserving its
 # relative path. jcode resolves every external credential/transcript lookup to
-# $JCODE_HOME/external/<same-relative-path-as-$HOME> when JCODE_HOME is set, so
+# $KCODE_HOME/external/<same-relative-path-as-$HOME> when KCODE_HOME is set, so
 # seeding here makes your real logins/transcripts visible to the onboarding
 # import + continue steps. Copies (never symlinks: jcode rejects symlinked auth
 # files) and never touches the originals.
@@ -358,10 +358,10 @@ case "$command" in
     else
       rc=$?
     fi
-    if [[ "${JCODE_ONBOARDING_KEEP_EXTERNAL:-0}" != "1" ]]; then
+    if [[ "${KCODE_ONBOARDING_KEEP_EXTERNAL:-0}" != "1" ]]; then
       purge_external
     else
-      echo "Keeping copied external credentials because JCODE_ONBOARDING_KEEP_EXTERNAL=1."
+      echo "Keeping copied external credentials because KCODE_ONBOARDING_KEEP_EXTERNAL=1."
     fi
     exit "$rc"
     ;;

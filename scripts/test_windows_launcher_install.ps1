@@ -7,7 +7,7 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $installScript = Join-Path $repoRoot 'scripts\install.ps1'
 
 $originalLocalAppData = $env:LOCALAPPDATA
-$originalImportOnly = $env:JCODE_INSTALL_PS1_IMPORT_ONLY
+$originalImportOnly = $env:KCODE_INSTALL_PS1_IMPORT_ONLY
 $testRoot = Join-Path $env:TEMP ("jcode-windows-launcher-tests-{0}" -f ([guid]::NewGuid().ToString('N')))
 New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
 
@@ -32,7 +32,7 @@ function Assert-PathCount([string]$PathValue, [string]$Entry, [int]$ExpectedCoun
 
 try {
     $env:LOCALAPPDATA = Join-Path $testRoot 'LocalAppData'
-    $env:JCODE_INSTALL_PS1_IMPORT_ONLY = '1'
+    $env:KCODE_INSTALL_PS1_IMPORT_ONLY = '1'
     . $installScript
 
     $installDir = Join-Path $env:LOCALAPPDATA 'jcode\bin'
@@ -126,7 +126,7 @@ try {
     Assert-True ($shortcutScript -match '(?m)^\$shortcut\.Save\(\)\r?$') 'shortcut script should call Save without escaping the variable name'
     Assert-True (-not $shortcutScript.Contains('`$shortcut')) 'shortcut script should not contain literal backticks before shortcut variables'
     [void][scriptblock]::Create($shortcutScript)
-    Assert-True ($installText.Contains('JCODE_WINDOWS_SETUP_SKIP_PROCESS_LIFECYCLE')) 'isolated verification should be able to create shortcut files without stopping or spawning real user listeners'
+    Assert-True ($installText.Contains('KCODE_WINDOWS_SETUP_SKIP_PROCESS_LIFECYCLE')) 'isolated verification should be able to create shortcut files without stopping or spawning real user listeners'
 
     Write-Host 'test_upgrade_replaces_launcher_no_extra_path'
     $sourceDir = Join-Path $testRoot 'sources'
@@ -138,7 +138,7 @@ try {
     Install-JcodeLauncher -SourcePath $sourceV1 -LauncherPath $launcherPath | Out-Null
     Install-JcodeLauncher -SourcePath $sourceV2 -LauncherPath $launcherPath | Out-Null
     Assert-Equal 'version-two' (Get-Content -Path $launcherPath -Raw) 'upgrade should replace launcher contents with the new build'
-    $tempLaunchers = @(Get-ChildItem -LiteralPath $installDir -Filter '.jcode-launcher-*.tmp.exe' -Force -ErrorAction SilentlyContinue)
+    $tempLaunchers = @(Get-ChildItem -LiteralPath $installDir -Filter '.kcode-launcher-*.tmp.exe' -Force -ErrorAction SilentlyContinue)
     Assert-Equal 0 $tempLaunchers.Count 'launcher upgrade should clean temporary files'
     $upgradePath = Resolve-JcodePathUpdate -InstallDir $installDir -CurrentPath $pathUpdate.Path
     Assert-Equal $false $upgradePath.Changed 'upgrade should not add another PATH entry when launcher dir is already present'
@@ -160,14 +160,14 @@ try {
 
         Assert-Equal (Get-FileHash -LiteralPath $replacementLauncher -Algorithm SHA256).Hash (Get-FileHash -LiteralPath $runningLauncher -Algorithm SHA256).Hash 'live upgrade should place the replacement at the stable launcher path'
         Assert-Equal $false $runningProcess.HasExited 'live upgrade should not terminate the process using the previous launcher'
-        $runningBackups = @(Get-ChildItem -LiteralPath $runningDir -Filter '.jcode-launcher-old-*.exe' -Force -ErrorAction SilentlyContinue)
+        $runningBackups = @(Get-ChildItem -LiteralPath $runningDir -Filter '.kcode-launcher-old-*.exe' -Force -ErrorAction SilentlyContinue)
         Assert-Equal 1 $runningBackups.Count 'live upgrade should retain exactly one locked old launcher until the process exits'
     } finally {
         Stop-ProcessTree -ProcessId $runningProcess.Id
         try { Wait-Process -Id $runningProcess.Id -Timeout 10 -ErrorAction SilentlyContinue } catch {}
     }
     Remove-JcodeStaleLauncherBackups -LauncherDir $runningDir
-    $runningBackups = @(Get-ChildItem -LiteralPath $runningDir -Filter '.jcode-launcher-old-*.exe' -Force -ErrorAction SilentlyContinue)
+    $runningBackups = @(Get-ChildItem -LiteralPath $runningDir -Filter '.kcode-launcher-old-*.exe' -Force -ErrorAction SilentlyContinue)
     Assert-Equal 0 $runningBackups.Count 'stale live-upgrade launchers should be removable after the old process exits'
 
     Write-Host 'test_launcher_replacement_failure_rolls_back'
@@ -206,8 +206,8 @@ try {
     }
     Assert-Equal $true $rollbackThrew 'launcher replacement should surface a final move failure'
     Assert-Equal 'known-good' (Get-Content -LiteralPath $rollbackLauncher -Raw) 'launcher replacement should restore the previous stable launcher after a final move failure'
-    Assert-Equal 0 @(Get-ChildItem -LiteralPath $rollbackDir -Filter '.jcode-launcher-*.tmp.exe' -Force -ErrorAction SilentlyContinue).Count 'rollback should remove temporary launcher files'
-    Assert-Equal 0 @(Get-ChildItem -LiteralPath $rollbackDir -Filter '.jcode-launcher-old-*.exe' -Force -ErrorAction SilentlyContinue).Count 'rollback should restore rather than retain the previous launcher backup'
+    Assert-Equal 0 @(Get-ChildItem -LiteralPath $rollbackDir -Filter '.kcode-launcher-*.tmp.exe' -Force -ErrorAction SilentlyContinue).Count 'rollback should remove temporary launcher files'
+    Assert-Equal 0 @(Get-ChildItem -LiteralPath $rollbackDir -Filter '.kcode-launcher-old-*.exe' -Force -ErrorAction SilentlyContinue).Count 'rollback should restore rather than retain the previous launcher backup'
 
     Write-Host 'test_uninstall_removes_launcher_and_only_jcode_path'
     $removeCurrentPath = "$installDir;C:\Keep;$installVariant;C:\Keep"
@@ -219,6 +219,6 @@ try {
     Write-Host 'All Windows launcher install tests passed.' -ForegroundColor Green
 } finally {
     if ($null -eq $originalLocalAppData) { Remove-Item Env:LOCALAPPDATA -ErrorAction SilentlyContinue } else { $env:LOCALAPPDATA = $originalLocalAppData }
-    if ($null -eq $originalImportOnly) { Remove-Item Env:JCODE_INSTALL_PS1_IMPORT_ONLY -ErrorAction SilentlyContinue } else { $env:JCODE_INSTALL_PS1_IMPORT_ONLY = $originalImportOnly }
+    if ($null -eq $originalImportOnly) { Remove-Item Env:KCODE_INSTALL_PS1_IMPORT_ONLY -ErrorAction SilentlyContinue } else { $env:KCODE_INSTALL_PS1_IMPORT_ONLY = $originalImportOnly }
     Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction SilentlyContinue
 }

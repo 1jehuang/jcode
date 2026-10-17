@@ -13,7 +13,7 @@ client attributed the burn to `sample_orbit_rings`, `blit_idle`, and full-screen
 `Cell::clone` / `to_vec`.
 
 CPU is therefore the only honest signal here, and it must be measured as an A/B
-against `JCODE_IDLE_ANIMATION=false`, otherwise "0.3 cores" cannot be attributed
+against `KCODE_IDLE_ANIMATION=false`, otherwise "0.3 cores" cannot be attributed
 to the animation rather than to ordinary client work.
 
 Usage
@@ -63,16 +63,16 @@ def cpu_seconds(pid: int) -> float | None:
 def run_once(binary: str, session: str, animation: bool, window_s: float,
              rows: int, cols: int) -> dict:
     flick.ROWS, flick.COLS = rows, cols
-    runtime = Path(os.environ.get("JCODE_RUNTIME_DIR")
+    runtime = Path(os.environ.get("KCODE_RUNTIME_DIR")
                    or f"/run/user/{os.getuid()}")
     env = os.environ.copy()
-    env["JCODE_SOCKET"] = env.get("JCODE_SOCKET") or str(runtime / "jcode.sock")
-    env["JCODE_DEBUG_CONTROL"] = "1"
-    env["JCODE_THEME"] = "dark"
+    env["KCODE_SOCKET"] = env.get("KCODE_SOCKET") or str(runtime / "kcode.sock")
+    env["KCODE_DEBUG_CONTROL"] = "1"
+    env["KCODE_THEME"] = "dark"
     if not animation:
-        env["JCODE_IDLE_ANIMATION"] = "false"
+        env["KCODE_IDLE_ANIMATION"] = "false"
 
-    scratch = Path(os.environ.get("JCODE_SCRATCH_DIR") or tempfile.gettempdir())
+    scratch = Path(os.environ.get("KCODE_SCRATCH_DIR") or tempfile.gettempdir())
     root = Path(tempfile.mkdtemp(prefix="jcode-animcpu-", dir=str(scratch)))
     cmd_path, resp_path = root / "client_cmd", root / "client_resp"
 
@@ -147,9 +147,9 @@ def main() -> int:
     args = ap.parse_args()
 
     binary = str(Path(args.binary).resolve())
-    runtime = Path(os.environ.get("JCODE_RUNTIME_DIR")
+    runtime = Path(os.environ.get("KCODE_RUNTIME_DIR")
                    or f"/run/user/{os.getuid()}")
-    debug_sock = runtime / "jcode-debug.sock"
+    debug_sock = runtime / "kcode-debug.sock"
     session = args.session or recent_session(debug_sock, str(REPO_ROOT))
     if not session:
         session = flick.dbg(debug_sock, f"create_session:{REPO_ROOT}").strip()

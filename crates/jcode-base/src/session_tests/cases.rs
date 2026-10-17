@@ -4,7 +4,7 @@ use anyhow::{Result, anyhow};
 #[test]
 fn test_session_exists_roundtrip() -> Result<()> {
     let tmp_dir = std::env::temp_dir().join(format!(
-        "jcode-session-test-{}",
+        "kcode-session-test-{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|e| anyhow!(e))?
@@ -32,9 +32,9 @@ fn test_session_exists_roundtrip() -> Result<()> {
 #[test]
 fn derive_session_provider_key_prefers_runtime_identity_over_transport() {
     let _lock = lock_env();
-    let _runtime = EnvVarGuard::set("JCODE_RUNTIME_PROVIDER", "azure-openai");
-    let _namespace = EnvVarGuard::set("JCODE_OPENROUTER_CACHE_NAMESPACE", "azure-cache");
-    let _active = EnvVarGuard::set("JCODE_ACTIVE_PROVIDER", "openrouter");
+    let _runtime = EnvVarGuard::set("KCODE_RUNTIME_PROVIDER", "azure-openai");
+    let _namespace = EnvVarGuard::set("KCODE_OPENROUTER_CACHE_NAMESPACE", "azure-cache");
+    let _active = EnvVarGuard::set("KCODE_ACTIVE_PROVIDER", "openrouter");
 
     assert_eq!(
         derive_session_provider_key("openrouter").as_deref(),
@@ -45,9 +45,9 @@ fn derive_session_provider_key_prefers_runtime_identity_over_transport() {
 #[test]
 fn derive_session_provider_key_falls_back_to_openrouter_namespace() {
     let _lock = lock_env();
-    let _runtime = EnvVarGuard::remove("JCODE_RUNTIME_PROVIDER");
-    let _namespace = EnvVarGuard::set("JCODE_OPENROUTER_CACHE_NAMESPACE", "azure-openai");
-    let _active = EnvVarGuard::set("JCODE_ACTIVE_PROVIDER", "openrouter");
+    let _runtime = EnvVarGuard::remove("KCODE_RUNTIME_PROVIDER");
+    let _namespace = EnvVarGuard::set("KCODE_OPENROUTER_CACHE_NAMESPACE", "azure-openai");
+    let _active = EnvVarGuard::set("KCODE_ACTIVE_PROVIDER", "openrouter");
 
     assert_eq!(
         derive_session_provider_key("openrouter").as_deref(),
@@ -58,14 +58,36 @@ fn derive_session_provider_key_falls_back_to_openrouter_namespace() {
 #[test]
 fn derive_session_provider_key_keeps_openai_compatible_profile_namespace() {
     let _lock = lock_env();
-    let _runtime = EnvVarGuard::set("JCODE_RUNTIME_PROVIDER", "openai-compatible");
-    let _namespace = EnvVarGuard::set("JCODE_OPENROUTER_CACHE_NAMESPACE", "zai");
-    let _active = EnvVarGuard::set("JCODE_ACTIVE_PROVIDER", "openrouter");
+    let _runtime = EnvVarGuard::set("KCODE_RUNTIME_PROVIDER", "openai-compatible");
+    let _namespace = EnvVarGuard::set("KCODE_OPENROUTER_CACHE_NAMESPACE", "zai");
+    let _active = EnvVarGuard::set("KCODE_ACTIVE_PROVIDER", "openrouter");
 
     assert_eq!(
         derive_session_provider_key("openrouter").as_deref(),
         Some("zai")
     );
+}
+
+#[test]
+fn save_label_becomes_the_session_title() {
+    let mut session = Session::create_with_id(
+        "session_save_label_123".to_string(),
+        None,
+        Some("Generated title".to_string()),
+    );
+    session.mark_saved(None);
+    assert_eq!(session.display_title(), Some("Generated title"));
+
+    session.mark_saved(Some("  yc mcp  ".to_string()));
+    assert_eq!(session.save_label.as_deref(), Some("yc mcp"));
+    assert_eq!(session.custom_title.as_deref(), Some("yc mcp"));
+    assert_eq!(session.display_title(), Some("yc mcp"));
+
+    // Legacy bookmarks saved a label without setting the title.
+    session.custom_title = None;
+    assert_eq!(session.display_title(), Some("yc mcp"));
+    session.unmark_saved();
+    assert_eq!(session.display_title(), Some("Generated title"));
 }
 
 #[test]
@@ -219,6 +241,7 @@ fn token_usage_totals_counts_cache_reported_inputs_only_when_cache_fields_exist(
         }],
         None,
         Some(StoredTokenUsage {
+            prompt_tokens: None,
             input_tokens: 100,
             output_tokens: 10,
             cache_read_input_tokens: None,
@@ -233,6 +256,7 @@ fn token_usage_totals_counts_cache_reported_inputs_only_when_cache_fields_exist(
         }],
         None,
         Some(StoredTokenUsage {
+            prompt_tokens: None,
             input_tokens: 200,
             output_tokens: 20,
             cache_read_input_tokens: Some(150),
@@ -287,11 +311,11 @@ fn initial_session_context_preserves_explicitly_bound_cwd_when_inserted() -> Res
     let _env_lock = lock_env();
     let original_cwd = std::env::current_dir().map_err(|e| anyhow!(e))?;
     let first_dir = tempfile::Builder::new()
-        .prefix("jcode-session-context-first-")
+        .prefix("kcode-session-context-first-")
         .tempdir()
         .map_err(|e| anyhow!(e))?;
     let second_dir = tempfile::Builder::new()
-        .prefix("jcode-session-context-second-")
+        .prefix("kcode-session-context-second-")
         .tempdir()
         .map_err(|e| anyhow!(e))?;
 
@@ -335,11 +359,11 @@ fn initial_session_context_can_refresh_before_real_conversation() -> Result<()> 
     let _env_lock = lock_env();
     let original_cwd = std::env::current_dir().map_err(|e| anyhow!(e))?;
     let first_dir = tempfile::Builder::new()
-        .prefix("jcode-session-context-stale-")
+        .prefix("kcode-session-context-stale-")
         .tempdir()
         .map_err(|e| anyhow!(e))?;
     let second_dir = tempfile::Builder::new()
-        .prefix("jcode-session-context-real-")
+        .prefix("kcode-session-context-real-")
         .tempdir()
         .map_err(|e| anyhow!(e))?;
 
@@ -384,11 +408,11 @@ fn initial_session_context_does_not_refresh_after_real_conversation() -> Result<
     let _env_lock = lock_env();
     let original_cwd = std::env::current_dir().map_err(|e| anyhow!(e))?;
     let first_dir = tempfile::Builder::new()
-        .prefix("jcode-session-context-original-")
+        .prefix("kcode-session-context-original-")
         .tempdir()
         .map_err(|e| anyhow!(e))?;
     let second_dir = tempfile::Builder::new()
-        .prefix("jcode-session-context-late-")
+        .prefix("kcode-session-context-late-")
         .tempdir()
         .map_err(|e| anyhow!(e))?;
 
@@ -455,10 +479,10 @@ fn existing_non_empty_session_does_not_get_retroactive_session_context() {
 fn load_startup_stub_preserves_metadata_but_skips_heavy_vectors() -> Result<()> {
     let _env_lock = lock_env();
     let temp_home = tempfile::Builder::new()
-        .prefix("jcode-startup-stub-test-")
+        .prefix("kcode-startup-stub-test-")
         .tempdir()
         .map_err(|e| anyhow!(e))?;
-    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+    let _home = EnvVarGuard::set("KCODE_HOME", temp_home.path().as_os_str());
 
     let session_id = "session_startup_stub_roundtrip";
     let mut session = Session::create_with_id(
@@ -532,10 +556,10 @@ fn load_startup_stub_preserves_metadata_but_skips_heavy_vectors() -> Result<()> 
 fn load_for_remote_startup_preserves_messages_and_replay_but_skips_heavy_vectors() -> Result<()> {
     let _env_lock = lock_env();
     let temp_home = tempfile::Builder::new()
-        .prefix("jcode-remote-startup-test-")
+        .prefix("kcode-remote-startup-test-")
         .tempdir()
         .map_err(|e| anyhow!(e))?;
-    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+    let _home = EnvVarGuard::set("KCODE_HOME", temp_home.path().as_os_str());
 
     let session_id = "session_remote_startup_roundtrip";
     let mut session = Session::create_with_id(
@@ -601,7 +625,7 @@ fn load_for_remote_startup_preserves_messages_and_replay_but_skips_heavy_vectors
 #[test]
 fn test_create_marks_debug_when_test_session_env_enabled() {
     let _env_lock = lock_env();
-    let _test_flag = EnvVarGuard::set("JCODE_TEST_SESSION", "1");
+    let _test_flag = EnvVarGuard::set("KCODE_TEST_SESSION", "1");
 
     let s1 = Session::create(None, None);
     assert!(s1.is_debug);
@@ -613,7 +637,7 @@ fn test_create_marks_debug_when_test_session_env_enabled() {
 #[test]
 fn test_create_not_debug_when_test_session_env_disabled() {
     let _env_lock = lock_env();
-    let _test_flag = EnvVarGuard::set("JCODE_TEST_SESSION", "0");
+    let _test_flag = EnvVarGuard::set("KCODE_TEST_SESSION", "0");
 
     let s = Session::create(None, None);
     assert!(!s.is_debug);
@@ -623,11 +647,11 @@ fn test_create_not_debug_when_test_session_env_disabled() {
 fn test_recover_crashed_sessions_preserves_debug_flag() -> Result<()> {
     let _env_lock = lock_env();
     let temp_home = tempfile::Builder::new()
-        .prefix("jcode-recover-debug-test-")
+        .prefix("kcode-recover-debug-test-")
         .tempdir()
         .map_err(|e| anyhow!(e))?;
-    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
-    let _test_flag = EnvVarGuard::set("JCODE_TEST_SESSION", "0");
+    let _home = EnvVarGuard::set("KCODE_HOME", temp_home.path().as_os_str());
+    let _test_flag = EnvVarGuard::set("KCODE_TEST_SESSION", "0");
 
     let mut crashed = Session::create_with_id(
         "session_recover_debug_source".to_string(),
@@ -657,11 +681,11 @@ fn test_recover_crashed_sessions_preserves_debug_flag() -> Result<()> {
 fn test_recover_crashed_sessions_by_ids_restores_only_selected_group() -> Result<()> {
     let _env_lock = lock_env();
     let temp_home = tempfile::Builder::new()
-        .prefix("jcode-recover-selected-crash-test-")
+        .prefix("kcode-recover-selected-crash-test-")
         .tempdir()
         .map_err(|e| anyhow!(e))?;
-    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
-    let _test_flag = EnvVarGuard::set("JCODE_TEST_SESSION", "0");
+    let _home = EnvVarGuard::set("KCODE_HOME", temp_home.path().as_os_str());
+    let _test_flag = EnvVarGuard::set("KCODE_TEST_SESSION", "0");
 
     let now = Utc::now();
     for (id, active_at) in [
@@ -701,10 +725,10 @@ fn test_recover_crashed_sessions_by_ids_restores_only_selected_group() -> Result
 fn untouched_session_is_not_persisted_until_real_conversation_starts() -> Result<()> {
     let _env_lock = lock_env();
     let temp_home = tempfile::Builder::new()
-        .prefix("jcode-session-lazy-save-test-")
+        .prefix("kcode-session-lazy-save-test-")
         .tempdir()
         .map_err(|e| anyhow!(e))?;
-    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+    let _home = EnvVarGuard::set("KCODE_HOME", temp_home.path().as_os_str());
 
     let id = "session_untouched_lazy_save";
     let mut session = Session::create_with_id(id.to_string(), None, None);
@@ -728,7 +752,7 @@ fn untouched_session_is_not_persisted_until_real_conversation_starts() -> Result
 fn empty_fork_is_persisted_before_first_visible_message() -> Result<()> {
     let _env_lock = lock_env();
     let temp_home = tempfile::tempdir()?;
-    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+    let _home = EnvVarGuard::set("KCODE_HOME", temp_home.path().as_os_str());
     let mut child = Session::create(Some("session_empty_parent".into()), None);
     child.append_fork_notice("session_empty_parent", "empty parent");
     assert_eq!(child.visible_conversation_message_count(), 0);
@@ -755,10 +779,10 @@ fn session_created_with_title_is_persisted_before_first_visible_message() -> Res
     // the untouched-session gate, so later lookups by id found nothing.
     let _env_lock = lock_env();
     let temp_home = tempfile::Builder::new()
-        .prefix("jcode-session-titled-save-test-")
+        .prefix("kcode-session-titled-save-test-")
         .tempdir()
         .map_err(|e| anyhow!(e))?;
-    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+    let _home = EnvVarGuard::set("KCODE_HOME", temp_home.path().as_os_str());
 
     let id = "session_titled_eager_save";
     let mut session = Session::create_with_id(id.to_string(), None, Some("review".to_string()));
@@ -775,10 +799,10 @@ fn session_created_with_title_is_persisted_before_first_visible_message() -> Res
 fn test_save_persists_full_session_content() -> Result<()> {
     let _env_lock = lock_env();
     let temp_home = tempfile::Builder::new()
-        .prefix("jcode-session-save-test-")
+        .prefix("kcode-session-save-test-")
         .tempdir()
         .map_err(|e| anyhow!(e))?;
-    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+    let _home = EnvVarGuard::set("KCODE_HOME", temp_home.path().as_os_str());
 
     let mut session = Session::create_with_id(
         "session_save_persist_test".to_string(),
@@ -830,10 +854,10 @@ fn test_save_persists_full_session_content() -> Result<()> {
 fn test_save_persists_compaction_state() -> Result<()> {
     let _env_lock = lock_env();
     let temp_home = tempfile::Builder::new()
-        .prefix("jcode-session-compaction-save-test-")
+        .prefix("kcode-session-compaction-save-test-")
         .tempdir()
         .map_err(|e| anyhow!(e))?;
-    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+    let _home = EnvVarGuard::set("KCODE_HOME", temp_home.path().as_os_str());
 
     let mut session = Session::create_with_id(
         "session_compaction_persist_test".to_string(),
@@ -859,10 +883,10 @@ fn test_save_persists_compaction_state() -> Result<()> {
 fn test_save_persists_provider_key() -> Result<()> {
     let _env_lock = lock_env();
     let temp_home = tempfile::Builder::new()
-        .prefix("jcode-session-provider-key-save-test-")
+        .prefix("kcode-session-provider-key-save-test-")
         .tempdir()
         .map_err(|e| anyhow!(e))?;
-    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+    let _home = EnvVarGuard::set("KCODE_HOME", temp_home.path().as_os_str());
 
     let mut session = Session::create_with_id(
         "session_provider_key_persist_test".to_string(),
@@ -884,10 +908,10 @@ fn test_save_persists_provider_key() -> Result<()> {
 fn test_save_persists_reasoning_effort() -> Result<()> {
     let _env_lock = lock_env();
     let temp_home = tempfile::Builder::new()
-        .prefix("jcode-session-reasoning-effort-save-test-")
+        .prefix("kcode-session-reasoning-effort-save-test-")
         .tempdir()
         .map_err(|e| anyhow!(e))?;
-    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+    let _home = EnvVarGuard::set("KCODE_HOME", temp_home.path().as_os_str());
 
     let mut session = Session::create_with_id(
         "session_reasoning_effort_persist_test".to_string(),
@@ -909,10 +933,10 @@ fn test_save_persists_reasoning_effort() -> Result<()> {
 fn test_save_appends_journal_and_load_replays_it() -> Result<()> {
     let _env_lock = lock_env();
     let temp_home = tempfile::Builder::new()
-        .prefix("jcode-session-journal-test-")
+        .prefix("kcode-session-journal-test-")
         .tempdir()
         .map_err(|e| anyhow!(e))?;
-    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+    let _home = EnvVarGuard::set("KCODE_HOME", temp_home.path().as_os_str());
 
     let mut session = Session::create_with_id(
         "session_journal_append_test".to_string(),
@@ -956,10 +980,10 @@ fn test_save_appends_journal_and_load_replays_it() -> Result<()> {
 fn test_save_checkpoints_after_full_mutation_and_clears_journal() -> Result<()> {
     let _env_lock = lock_env();
     let temp_home = tempfile::Builder::new()
-        .prefix("jcode-session-checkpoint-test-")
+        .prefix("kcode-session-checkpoint-test-")
         .tempdir()
         .map_err(|e| anyhow!(e))?;
-    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+    let _home = EnvVarGuard::set("KCODE_HOME", temp_home.path().as_os_str());
 
     let mut session = Session::create_with_id(
         "session_journal_checkpoint_test".to_string(),
@@ -1004,10 +1028,10 @@ fn test_save_checkpoints_after_full_mutation_and_clears_journal() -> Result<()> 
 fn test_journal_replay_skips_corrupt_line_and_keeps_tail() -> Result<()> {
     let _env_lock = lock_env();
     let temp_home = tempfile::Builder::new()
-        .prefix("jcode-session-journal-corrupt-test-")
+        .prefix("kcode-session-journal-corrupt-test-")
         .tempdir()
         .map_err(|e| anyhow!(e))?;
-    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+    let _home = EnvVarGuard::set("KCODE_HOME", temp_home.path().as_os_str());
 
     let session_id = "session_journal_corrupt_tail_test";
     let mut session = Session::create_with_id(
@@ -1063,14 +1087,119 @@ fn test_journal_replay_skips_corrupt_line_and_keeps_tail() -> Result<()> {
     Ok(())
 }
 
+fn text_block(text: &str) -> ContentBlock {
+    ContentBlock::Text {
+        text: text.to_string(),
+        cache_control: None,
+    }
+}
+
+/// #1632: a process killed between writing the checkpoint snapshot and
+/// deleting the journal must not duplicate the journaled messages on the next
+/// load, and later genuinely-new journal entries must still replay.
+#[test]
+fn test_interrupted_checkpoint_does_not_duplicate_journal_messages() -> Result<()> {
+    let _env_lock = lock_env();
+    let temp_home = tempfile::Builder::new()
+        .prefix("kcode-session-journal-interrupted-checkpoint-")
+        .tempdir()
+        .map_err(|e| anyhow!(e))?;
+    let _home = EnvVarGuard::set("KCODE_HOME", temp_home.path().as_os_str());
+
+    let session_id = "session_interrupted_checkpoint_test";
+    let mut session = Session::create_with_id(session_id.to_string(), None, Some("t".into()));
+    session.add_message(Role::User, vec![text_block("start")]);
+    session.save()?;
+
+    session.add_message(
+        Role::Assistant,
+        vec![ContentBlock::ToolUse {
+            id: "toolu_1".into(),
+            name: "bash".into(),
+            input: serde_json::json!({"command": "ls"}),
+            thought_signature: None,
+        }],
+    );
+    session.save()?;
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::ToolResult {
+            tool_use_id: "toolu_1".into(),
+            content: "ok".into(),
+            is_error: None,
+        }],
+    );
+    session.save()?;
+
+    let journal_path = session_journal_path(session_id)?;
+    let stale_journal = std::fs::read_to_string(&journal_path)?;
+    assert_eq!(stale_journal.lines().count(), 2);
+
+    // Checkpoint, then put the journal back as if the delete never happened.
+    session.mark_messages_full_dirty();
+    session.save()?;
+    assert!(!journal_path.exists());
+    std::fs::write(&journal_path, &stale_journal)?;
+
+    let loaded = Session::load(session_id)?;
+    assert_eq!(
+        loaded.messages.len(),
+        3,
+        "journal replay duplicated messages"
+    );
+    let remote = Session::load_for_remote_startup(session_id)?;
+    assert_eq!(remote.messages.len(), 3);
+
+    // A genuinely new entry after the stale prefix still replays.
+    let mut resumed = loaded;
+    resumed.add_message(Role::Assistant, vec![text_block("after restart")]);
+    resumed.save()?;
+    let reloaded = Session::load(session_id)?;
+    assert_eq!(reloaded.messages.len(), 4);
+    assert_eq!(reloaded.messages[3].content_preview(), "after restart");
+    let mut ids: Vec<_> = reloaded.messages.iter().map(|m| m.id.clone()).collect();
+    ids.dedup();
+    assert_eq!(ids.len(), 4);
+    Ok(())
+}
+
+/// #1632: snapshots that were already written with duplicated messages (by
+/// builds before idempotent replay) are repaired on load and on the next save.
+#[test]
+fn test_load_repairs_snapshot_with_duplicated_message_ids() -> Result<()> {
+    let _env_lock = lock_env();
+    let temp_home = tempfile::Builder::new()
+        .prefix("kcode-session-duplicate-ids-")
+        .tempdir()
+        .map_err(|e| anyhow!(e))?;
+    let _home = EnvVarGuard::set("KCODE_HOME", temp_home.path().as_os_str());
+
+    let session_id = "session_duplicate_ids_test";
+    let mut session = Session::create_with_id(session_id.to_string(), None, Some("t".into()));
+    session.add_message(Role::User, vec![text_block("one")]);
+    session.add_message(Role::Assistant, vec![text_block("two")]);
+    let dup = session.messages[1].clone();
+    session.messages.push(dup);
+    session.mark_messages_full_dirty();
+    session.save()?;
+
+    let mut loaded = Session::load(session_id)?;
+    assert_eq!(loaded.messages.len(), 2);
+    loaded.save()?;
+    let raw: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(session_path(session_id)?)?)?;
+    assert_eq!(raw["messages"].as_array().map(Vec::len), Some(2));
+    Ok(())
+}
+
 #[test]
 fn test_journal_replay_salvages_glued_entries_on_torn_line() -> Result<()> {
     let _env_lock = lock_env();
     let temp_home = tempfile::Builder::new()
-        .prefix("jcode-session-journal-glued-test-")
+        .prefix("kcode-session-journal-glued-test-")
         .tempdir()
         .map_err(|e| anyhow!(e))?;
-    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+    let _home = EnvVarGuard::set("KCODE_HOME", temp_home.path().as_os_str());
 
     let session_id = "session_journal_glued_test";
     let mut session = Session::create_with_id(
@@ -1124,10 +1253,10 @@ fn test_journal_replay_salvages_glued_entries_on_torn_line() -> Result<()> {
 fn test_corrupt_journal_heals_via_checkpoint_on_next_save() -> Result<()> {
     let _env_lock = lock_env();
     let temp_home = tempfile::Builder::new()
-        .prefix("jcode-session-journal-heal-test-")
+        .prefix("kcode-session-journal-heal-test-")
         .tempdir()
         .map_err(|e| anyhow!(e))?;
-    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+    let _home = EnvVarGuard::set("KCODE_HOME", temp_home.path().as_os_str());
 
     let session_id = "session_journal_heal_test";
     let mut session = Session::create_with_id(
@@ -1232,6 +1361,43 @@ fn test_redacted_for_export_redacts_tool_result_and_tool_input() -> Result<()> {
     assert!(!input_str.contains("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123"));
     assert!(!input_str.contains("short-secret-value"));
     assert!(input_str.contains("fn add(a: i32, b: i32)"));
+    Ok(())
+}
+
+#[test]
+fn test_redacted_for_export_redacts_provider_native_items_only_in_copy() -> Result<()> {
+    let mut session = Session::create_with_id(
+        "session_redact_native_test".to_string(),
+        None,
+        Some("redaction test".to_string()),
+    );
+    let item = serde_json::json!({
+        "type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search",
+        "input": {"query": "why does ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123 fail"}
+    });
+    session.add_message(
+        Role::Assistant,
+        vec![ContentBlock::ProviderNative {
+            provider: "anthropic".to_string(),
+            item: item.clone(),
+        }],
+    );
+
+    let persisted = session.redacted_for_export();
+    let ContentBlock::ProviderNative { item: exported, .. } = &persisted.messages[0].content[0]
+    else {
+        return Err(anyhow!("expected provider-native block"));
+    };
+    assert!(
+        !exported
+            .to_string()
+            .contains("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123")
+    );
+    // The live session keeps the item verbatim for replay.
+    let ContentBlock::ProviderNative { item: stored, .. } = &session.messages[0].content[0] else {
+        return Err(anyhow!("expected provider-native block"));
+    };
+    assert_eq!(stored, &item);
     Ok(())
 }
 
@@ -1472,7 +1638,7 @@ fn test_render_messages_renders_reasoning_before_answer_in_stored_order() {
     use jcode_render_core::REASONING_SENTINEL;
 
     let _env_lock = lock_env();
-    let _mode = EnvVarGuard::set("JCODE_REASONING_DISPLAY", "full");
+    let _mode = EnvVarGuard::set("KCODE_REASONING_DISPLAY", "full");
     crate::config::invalidate_config_cache();
 
     let mut session = Session::create_with_id(
@@ -1515,7 +1681,7 @@ fn test_render_messages_renders_persisted_reasoning() {
     use jcode_render_core::REASONING_SENTINEL;
 
     let _env_lock = lock_env();
-    let _mode = EnvVarGuard::set("JCODE_REASONING_DISPLAY", "full");
+    let _mode = EnvVarGuard::set("KCODE_REASONING_DISPLAY", "full");
     crate::config::invalidate_config_cache();
 
     let mut session = Session::create_with_id(
@@ -1564,7 +1730,7 @@ fn test_render_messages_renders_legacy_reasoning_variant() {
     use jcode_render_core::REASONING_SENTINEL;
 
     let _env_lock = lock_env();
-    let _mode = EnvVarGuard::set("JCODE_REASONING_DISPLAY", "full");
+    let _mode = EnvVarGuard::set("KCODE_REASONING_DISPLAY", "full");
     crate::config::invalidate_config_cache();
 
     let mut session = Session::create_with_id(
@@ -1596,7 +1762,7 @@ fn test_render_messages_hides_persisted_reasoning_in_current_mode() {
     use jcode_render_core::REASONING_SENTINEL;
 
     let _env_lock = lock_env();
-    let _mode = EnvVarGuard::set("JCODE_REASONING_DISPLAY", "current");
+    let _mode = EnvVarGuard::set("KCODE_REASONING_DISPLAY", "current");
     crate::config::invalidate_config_cache();
 
     let mut session = Session::create_with_id(
@@ -1643,7 +1809,7 @@ fn test_render_messages_hides_persisted_reasoning_in_off_mode() {
     use jcode_render_core::REASONING_SENTINEL;
 
     let _env_lock = lock_env();
-    let _mode = EnvVarGuard::set("JCODE_REASONING_DISPLAY", "off");
+    let _mode = EnvVarGuard::set("KCODE_REASONING_DISPLAY", "off");
     crate::config::invalidate_config_cache();
 
     let mut session = Session::create_with_id(
@@ -2106,10 +2272,10 @@ fn test_render_messages_and_images_share_tool_resolution_and_labels() {
 fn reasoning_trace_survives_session_save_and_load() -> Result<()> {
     let _env_lock = lock_env();
     let temp_home = tempfile::Builder::new()
-        .prefix("jcode-reasoning-persist-test-")
+        .prefix("kcode-reasoning-persist-test-")
         .tempdir()
         .map_err(|e| anyhow!(e))?;
-    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+    let _home = EnvVarGuard::set("KCODE_HOME", temp_home.path().as_os_str());
 
     let session_id = "session_reasoning_trace_roundtrip";
     let mut session = Session::create_with_id(session_id.to_string(), None, None);
@@ -2336,7 +2502,7 @@ fn fork_notice_is_model_visible_but_hidden_from_transcript() {
 fn streaming_guard_creates_visible_macos_sleep_assertion() {
     let _lock = lock_env();
     let temp = tempfile::tempdir().expect("tempdir");
-    let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
+    let _home = EnvVarGuard::set("KCODE_HOME", temp.path());
 
     let reason = "Jcode streaming model response";
     {
@@ -2661,4 +2827,133 @@ fn rendered_image_history_boundary_is_backward_compatible() {
         serde_json::from_value::<RenderedImage>(encoded).unwrap(),
         image
     );
+}
+
+#[test]
+fn cache_prompt_totals_preserve_mixed_provider_accounting_and_legacy_unknown() {
+    let mut session = Session::create_with_id("cache_prompt_totals".into(), None, None);
+    for usage in [
+        // Inclusive OpenAI input: read and write are subsets.
+        StoredTokenUsage {
+            prompt_tokens: Some(10_000),
+            input_tokens: 10_000,
+            output_tokens: 100,
+            cache_read_input_tokens: Some(6_000),
+            cache_creation_input_tokens: Some(2_000),
+        },
+        // Anthropic uncached input: read and write are disjoint.
+        StoredTokenUsage {
+            prompt_tokens: Some(10_000),
+            input_tokens: 1_000,
+            output_tokens: 100,
+            cache_read_input_tokens: Some(7_000),
+            cache_creation_input_tokens: Some(2_000),
+        },
+    ] {
+        let json = serde_json::to_string(&usage).unwrap();
+        let restored: StoredTokenUsage = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.prompt_tokens, Some(10_000));
+        session.add_message_ext(Role::Assistant, vec![], None, Some(restored));
+    }
+    let totals = session.token_usage_totals();
+    assert_eq!(totals.cache_prompt_tokens, Some(20_000));
+    assert_eq!(totals.cache_reported_input_tokens, 11_000);
+    assert_eq!(totals.cache_read_input_tokens, 13_000);
+    assert_eq!(totals.cache_creation_input_tokens, 4_000);
+    let legacy: StoredTokenUsage = serde_json::from_str(r#"{"input_tokens":10000,"output_tokens":100,"cache_read_input_tokens":6000,"cache_creation_input_tokens":2000}"#).unwrap();
+    assert_eq!(legacy.prompt_tokens, None);
+    session.add_message_ext(Role::Assistant, vec![], None, Some(legacy));
+    assert_eq!(session.token_usage_totals().cache_prompt_tokens, None);
+    assert_eq!(session.token_usage_totals().cache_read_input_tokens, 19_000);
+}
+
+#[test]
+fn system_prompt_persists_before_first_message_and_across_metadata_updates() -> Result<()> {
+    let _lock = lock_env();
+    let home = tempfile::tempdir()?;
+    let _home = EnvVarGuard::set("KCODE_HOME", home.path());
+    for prompt in ["custom system prompt", ""] {
+        let mut session = Session::create(None, None);
+        assert_eq!(session.system_prompt, None);
+        session.system_prompt = Some(prompt.into());
+        session.save()?;
+        assert_eq!(
+            Session::load(&session.id)?.system_prompt.as_deref(),
+            Some(prompt)
+        );
+        assert_eq!(
+            Session::load_startup_stub(&session.id)?
+                .system_prompt
+                .as_deref(),
+            Some(prompt)
+        );
+        // Unchanged prompt survives metadata-only journal persistence too.
+        session.model = Some("test-model".into());
+        session.save()?;
+        assert_eq!(
+            Session::load(&session.id)?.system_prompt.as_deref(),
+            Some(prompt)
+        );
+        session.system_prompt = Some("replacement".into());
+        session.save()?;
+        assert_eq!(
+            Session::load_startup_stub(&session.id)?
+                .system_prompt
+                .as_deref(),
+            Some("replacement")
+        );
+        session.system_prompt = None;
+        session.save()?;
+        assert_eq!(Session::load(&session.id)?.system_prompt, None);
+    }
+    Ok(())
+}
+
+#[test]
+fn system_prompt_missing_in_legacy_session_defaults_to_none() -> Result<()> {
+    let session = Session::create_with_id("legacy-prompt-test".into(), None, None);
+    let json = serde_json::to_value(&session)?;
+    assert!(json.get("system_prompt").is_none());
+    let restored: Session = serde_json::from_value(json)?;
+    assert_eq!(restored.system_prompt, None);
+    Ok(())
+}
+
+#[test]
+fn first_visible_user_prompt_becomes_the_generated_title() {
+    let mut session = Session::create_with_id("session_prompt_title_1".to_string(), None, None);
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "<system-reminder>\n# Session Context\n</system-reminder>".into(),
+            cache_control: None,
+        }],
+    );
+    session.add_message_with_display_role(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "background finished".into(),
+            cache_control: None,
+        }],
+        Some(StoredDisplayRole::BackgroundTask),
+    );
+    assert_eq!(session.title, None);
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "<transcription>\nFix the   sidebar names\n</transcription>".into(),
+            cache_control: None,
+        }],
+    );
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "second prompt".into(),
+            cache_control: None,
+        }],
+    );
+    assert_eq!(session.display_title(), Some("Fix the sidebar names"));
+
+    session.rename_title(Some("Custom".into()));
+    assert_eq!(session.display_title(), Some("Custom"));
 }

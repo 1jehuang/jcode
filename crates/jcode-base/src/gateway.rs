@@ -565,7 +565,7 @@ pub fn resolve_connect_host(bind_addr: &str) -> String {
         return bind_addr.to_string();
     }
 
-    if let Some(host) = std::env::var("JCODE_GATEWAY_HOST")
+    if let Some(host) = std::env::var("KCODE_GATEWAY_HOST")
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())

@@ -2,6 +2,30 @@
 
 use serde::{Deserialize, Serialize};
 
+/// A session-local tool executed by the client, or an effective tool description.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SessionToolDefinition {
+    pub name: String,
+    pub description: String,
+    /// JSON Schema for the input. Must be a JSON object.
+    pub parameters: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Replacement tool configuration for a live session, not a patch.
+/// Reconfigure after daemon restart or loading a persisted session. Custom
+/// tools execute on the configuring client's connection.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ToolConfiguration {
+    /// Omitted/null inherits defaults. Empty disables all built-in/MCP tools.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disabled: Vec<String>,
+    /// Additive custom tools, overriding a built-in/MCP tool with the same name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custom: Vec<SessionToolDefinition>,
+}
+
 /// Curated request surface. Internally-tagged on `"req"`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "req", rename_all = "snake_case")]
@@ -41,6 +65,10 @@ pub enum ApiRequest {
     CreateSession {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         working_dir: Option<String>,
+        /// Replace the complete assembled system prompt for this session.
+        /// An empty string is an explicit empty override.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        system_prompt: Option<String>,
     },
 
     /// Attach to an existing session and subscribe to its event stream.
@@ -65,6 +93,24 @@ pub enum ApiRequest {
         /// Persist the message as context without starting a model turn.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         no_reply: bool,
+    },
+
+    /// Replace the attached session's tool configuration.
+    ConfigureTools {
+        session_id: String,
+        tools: ToolConfiguration,
+    },
+
+    /// List the effective tools available to the attached session.
+    ListTools { session_id: String },
+
+    /// Complete a client-executed custom tool call. Acknowledged with `Ok`.
+    ToolResult {
+        session_id: String,
+        call_id: String,
+        output: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
 
     /// Cancel the in-flight generation.
@@ -136,6 +182,16 @@ pub enum ApiRequest {
     /// No tokens or callback input travel in this request.
     NotifyAuthChanged { provider: String },
 
+    /// Drop the daemon's cached quota and quota cooldown for one subscription
+    /// login after the client redeemed a banked usage reset out of band.
+    /// `provider` is `claude` or `openai`. `account_label: None` is the default
+    /// login. This never redeems a reset and carries no credentials.
+    InvalidateUsage {
+        provider: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account_label: Option<String>,
+    },
+
     /// Read one UTF-8 file under the session working directory.
     ReadFile {
         session_id: String,
@@ -191,6 +247,33 @@ pub enum ApiRequest {
         title: Option<String>,
     },
 
+    /// Bookmark (`saved: true`) or unbookmark a session. A non-empty `label`
+    /// also becomes the session's title, announced with `SessionRenamed`.
+    SetSessionSaved {
+        session_id: String,
+        saved: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
+
+    /// The user pressed something in an agent applet instance. The server
+    /// stores `state` into the instance, then delivers the action to the agent.
+    AppletAction {
+        session_id: String,
+        instance: String,
+        action: jcode_applet_types::Action,
+        #[serde(default)]
+        state: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_key: Option<String>,
+    },
+
+    /// The user closed an agent applet instance. The agent is not woken.
+    CloseApplet {
+        session_id: String,
+        instance: String,
+    },
+
     /// Restore the history that the last `Rewind` removed.
     ///
     /// `Rewind` is destructive, so without an undo a client cannot offer it
@@ -202,6 +285,11 @@ pub enum ApiRequest {
     /// The counterpart to `SoftInterrupt`: a client that lets a user queue a
     /// follow-up must also let them take it back before it lands.
     CancelSoftInterrupts { session_id: String },
+
+    /// Move the currently running tool call to the background so the turn can
+    /// continue without waiting for it. The TUI's Alt+B. Acknowledged with
+    /// `Ok` whether or not a tool was running.
+    BackgroundTool { session_id: String },
 
     /// Liveness check.
     Ping,

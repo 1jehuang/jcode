@@ -438,7 +438,10 @@ fn model_picker_route_is_current(
             .unwrap_or(true)
 }
 
-const RECOMMENDED_MODELS: &[&str] = &["gpt-5.5", "claude-opus-4-8"];
+const RECOMMENDED_MODELS: &[&str] = &[
+    jcode_provider_core::DEFAULT_OPENAI_MODEL,
+    jcode_provider_core::DEFAULT_CLAUDE_MODEL,
+];
 
 fn model_picker_recommendation_rank(name: &str) -> usize {
     RECOMMENDED_MODELS
@@ -662,7 +665,7 @@ impl App {
         if let Some(model) = snapshot.provider_model
             && self.remote_provider_model.as_deref() != Some(model.as_str())
         {
-            self.update_context_limit_for_model(&model);
+            self.update_context_limit_for_model(&model, None);
             self.remote_provider_model = Some(model);
             provider_meta_changed = true;
         }
@@ -724,7 +727,7 @@ impl App {
             .filter(|route| {
                 route
                     .api_method
-                    .eq_ignore_ascii_case(crate::subscription_catalog::JCODE_ROUTE_API_METHOD)
+                    .eq_ignore_ascii_case(crate::subscription_catalog::KCODE_ROUTE_API_METHOD)
             })
             .filter_map(|route| crate::subscription_catalog::canonical_model_id(&route.model))
             .collect::<HashSet<_>>();
@@ -742,8 +745,8 @@ impl App {
         {
             routes.push(crate::provider::ModelRoute {
                 model: model.id.to_string(),
-                provider: crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME.to_string(),
-                api_method: crate::subscription_catalog::JCODE_ROUTE_API_METHOD.to_string(),
+                provider: crate::subscription_catalog::KCODE_PROVIDER_DISPLAY_NAME.to_string(),
+                api_method: crate::subscription_catalog::KCODE_ROUTE_API_METHOD.to_string(),
                 available: true,
                 detail: crate::subscription_catalog::routing_policy_detail(model),
                 usage: None,
@@ -782,7 +785,7 @@ impl App {
         // Do not mix in locally configured Anthropic/OpenAI credentials merely
         // because a curated model also belongs to one of those upstreams.
         let provider_is_jcode_subscription = remote_provider_name.is_some_and(|name| {
-            name.eq_ignore_ascii_case(crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME)
+            name.eq_ignore_ascii_case(crate::subscription_catalog::KCODE_PROVIDER_DISPLAY_NAME)
         });
         if provider_is_jcode_subscription {
             routes.clear();
@@ -798,7 +801,7 @@ impl App {
             && routes.iter().all(|route| {
                 route
                     .api_method
-                    .eq_ignore_ascii_case(crate::subscription_catalog::JCODE_ROUTE_API_METHOD)
+                    .eq_ignore_ascii_case(crate::subscription_catalog::KCODE_ROUTE_API_METHOD)
             });
         if poisoned_by_jcode_subscription {
             // Version 1 could turn a mixed provider catalog into all-Jcode rows
@@ -1070,7 +1073,7 @@ impl App {
             self.cursor_pos = 0;
         }
 
-        if std::env::var("JCODE_LOG_MODEL_PICKER_TIMING").is_ok() {
+        if std::env::var("KCODE_LOG_MODEL_PICKER_TIMING").is_ok() {
             crate::logging::info(&format!(
                 "[TIMING] model_picker_open: cache_hit=true, remote={}, simplified={}, routes={}, models={}, entries={}, total={}ms",
                 self.is_remote,
@@ -1924,7 +1927,7 @@ impl App {
         let entries_ms = entries_started.elapsed().as_millis();
         let total_ms = picker_started.elapsed().as_millis();
 
-        if total_ms >= 250 || std::env::var("JCODE_LOG_MODEL_PICKER_TIMING").is_ok() {
+        if total_ms >= 250 || std::env::var("KCODE_LOG_MODEL_PICKER_TIMING").is_ok() {
             crate::logging::info(&format!(
                 "[TIMING] model_picker_open: remote={}, simplified={}, routes={}, models={}, entries={}, routes={}ms, grouping={}ms, timestamps={}ms, entries_sort={}ms, total={}ms",
                 self.is_remote,
@@ -2739,7 +2742,7 @@ impl App {
         }
 
         let default_cwd = std::env::current_dir().unwrap_or_default();
-        let socket = std::env::var("JCODE_SOCKET").ok();
+        let socket = std::env::var("KCODE_SOCKET").ok();
         let mut spawned = 0usize;
         let mut failed = Vec::new();
         let mut names = Vec::with_capacity(targets.len());
@@ -2997,7 +3000,7 @@ impl App {
 
         let exe = launch_client_executable();
         let cwd = std::env::current_dir().unwrap_or_default();
-        let socket = std::env::var("JCODE_SOCKET").ok();
+        let socket = std::env::var("KCODE_SOCKET").ok();
         let mut spawned = 0usize;
         let mut failed = Vec::new();
 
@@ -3772,7 +3775,7 @@ impl App {
                                     self.status_detail = None;
                                     self.invalidate_model_picker_cache();
                                     let active_model = self.provider.model();
-                                    self.update_context_limit_for_model(&active_model);
+                                    self.update_context_limit_for_model(&active_model, None);
                                     self.session.provider_key = crate::provider::MultiProvider::session_provider_key_after_model_switch(
                                         &spec,
                                         self.provider.name(),
@@ -4433,39 +4436,39 @@ mod tests {
         };
 
         assert!(model_picker_route_is_recommended(
-            "gpt-5.5",
+            jcode_provider_core::DEFAULT_OPENAI_MODEL,
             &openai_oauth_route
         ));
         assert!(!model_picker_route_is_recommended(
-            "gpt-5.5",
+            jcode_provider_core::DEFAULT_OPENAI_MODEL,
             &openai_api_key_route
         ));
         assert!(!model_picker_route_is_recommended(
-            "gpt-5.5",
+            jcode_provider_core::DEFAULT_OPENAI_MODEL,
             &copilot_route
         ));
         assert!(!model_picker_route_is_recommended(
-            "gpt-5.5",
+            jcode_provider_core::DEFAULT_OPENAI_MODEL,
             &unavailable_openai_oauth_route,
         ));
 
-        // Current policy (see jcode-provider-core): claude-opus-4-8 is the
-        // recommended Anthropic flagship; older Opus and OpenRouter/Copilot
-        // routes are not recommended.
+        // Recommendations follow the curated defaults (see jcode-provider-core):
+        // the default Claude flagship is recommended; older Opus and
+        // OpenRouter/Copilot routes are not.
         assert!(model_picker_route_is_recommended(
-            "claude-opus-4-8",
-            &claude_oauth_route,
-        ));
-        assert!(!model_picker_route_is_recommended(
-            "claude-opus-4-7",
+            jcode_provider_core::DEFAULT_CLAUDE_MODEL,
             &claude_oauth_route,
         ));
         assert!(!model_picker_route_is_recommended(
             "claude-opus-4-8",
+            &claude_oauth_route,
+        ));
+        assert!(!model_picker_route_is_recommended(
+            jcode_provider_core::DEFAULT_CLAUDE_MODEL,
             &claude_openrouter_route,
         ));
         assert!(!model_picker_route_is_recommended(
-            "claude-opus-4-8",
+            jcode_provider_core::DEFAULT_CLAUDE_MODEL,
             &copilot_route,
         ));
 

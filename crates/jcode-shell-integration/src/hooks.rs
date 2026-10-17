@@ -125,7 +125,7 @@ fn zsh_hooks(f: &FeatureFlags) -> String {
             out.push_str("    printf '\\033]133;B\\007'\n");
         }
         if f.command_timing {
-            out.push_str("    __JCODE_CMD_START=$(date +%s%N)\n");
+            out.push_str("    __KCODE_CMD_START=$(date +%s%N)\n");
         }
         out.push_str("}\n\n");
     }

@@ -8,16 +8,17 @@
 import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
+import { assertKcodePath } from "./product.js";
 
 export function runtimeDir(): string {
-  const explicit = process.env.JCODE_RUNTIME_DIR;
-  if (explicit) return explicit;
+  const explicit = process.env.KCODE_RUNTIME_DIR;
+  if (explicit) return assertKcodePath(explicit);
   const xdg = process.env.XDG_RUNTIME_DIR;
-  if (xdg) return xdg;
+  if (xdg) return assertKcodePath(xdg);
   if (process.platform === "darwin" && process.env.TMPDIR) {
-    return process.env.TMPDIR;
+    return assertKcodePath(process.env.TMPDIR);
   }
-  return path.join(os.tmpdir(), `jcode-${userDiscriminator()}`);
+  return path.join(assertKcodePath(os.tmpdir()), `kcode-${userDiscriminator()}`);
 }
 
 function userDiscriminator(): string {
@@ -52,18 +53,18 @@ export function transportEndpoint(socketPath: string): string {
   // Same rule as the Rust side: a readable stem for diagnosis, plus a hash of
   // the normalized path so two different paths never collide.
   const stem =
-    (path.parse(socketPath).name.match(/[A-Za-z0-9\-_]/g) ?? []).join("").slice(0, 32) || "jcode";
+    (path.parse(socketPath).name.match(/[A-Za-z0-9\-_]/g) ?? []).join("").slice(0, 32) || "kcode";
   const normalized = socketPath.replace(/\\/g, "/").toLowerCase();
   const hash = createHash("sha256").update(normalized).digest("hex").slice(0, 16);
   return `\\\\.\\pipe\\${stem}-${hash}`;
 }
 
-/** Path of the versioned harness API socket. `JCODE_API_SOCKET` overrides. */
+/** Path of the versioned harness API socket. `KCODE_API_SOCKET` overrides. */
 export function apiSocketPath(): string {
-  return process.env.JCODE_API_SOCKET ?? path.join(runtimeDir(), "jcode-api.sock");
+  return assertKcodePath(process.env.KCODE_API_SOCKET ?? path.join(runtimeDir(), "kcode-api.sock"));
 }
 
-/** Path of the internal daemon socket. `JCODE_SOCKET` overrides. */
+/** Path of the internal daemon socket. `KCODE_SOCKET` overrides. */
 export function legacySocketPath(): string {
-  return process.env.JCODE_SOCKET ?? path.join(runtimeDir(), "jcode.sock");
+  return assertKcodePath(process.env.KCODE_SOCKET ?? path.join(runtimeDir(), "kcode.sock"));
 }

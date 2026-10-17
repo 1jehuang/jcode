@@ -61,7 +61,7 @@ benchmark_tool() {
 }
 
 # Find debug socket
-DEBUG_SOCK="${JCODE_DEBUG_SOCK:-/run/user/$(id -u)/jcode-debug.sock}"
+DEBUG_SOCK="${KCODE_DEBUG_SOCK:-/run/user/$(id -u)/jcode-debug.sock}"
 
 if [ ! -S "$DEBUG_SOCK" ]; then
     echo "ERROR: Debug socket not found at $DEBUG_SOCK"

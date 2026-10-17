@@ -9,38 +9,39 @@ fn with_clean_provider_test_env<T>(f: impl FnOnce() -> T) -> T {
     // and per-test overrides can re-register a different stub.
     register_test_external_runtimes();
     let temp = tempfile::tempdir().expect("tempdir");
-    let prev_home = std::env::var_os("JCODE_HOME");
+    let prev_home = std::env::var_os("KCODE_HOME");
     let prev_subscription =
-        std::env::var_os(crate::subscription_catalog::JCODE_SUBSCRIPTION_ACTIVE_ENV);
+        std::env::var_os(crate::subscription_catalog::KCODE_SUBSCRIPTION_ACTIVE_ENV);
     let mut profile_env_keys = vec![
         "OPENROUTER_API_KEY",
         "DEEPSEEK_API_KEY",
         "KIMI_API_KEY",
-        "JCODE_OPENROUTER_API_BASE",
-        "JCODE_OPENROUTER_API_KEY_NAME",
-        "JCODE_OPENROUTER_ENV_FILE",
-        "JCODE_OPENROUTER_CACHE_NAMESPACE",
-        "JCODE_OPENROUTER_PROVIDER_FEATURES",
-        "JCODE_OPENROUTER_TRANSPORT_STATE",
-        "JCODE_OPENROUTER_ALLOW_NO_AUTH",
-        "JCODE_OPENROUTER_MODEL_CATALOG",
-        "JCODE_OPENROUTER_MODEL",
-        "JCODE_OPENROUTER_STATIC_MODELS",
-        "JCODE_OPENAI_COMPAT_API_BASE",
-        "JCODE_OPENAI_COMPAT_API_KEY_NAME",
-        "JCODE_OPENAI_COMPAT_ENV_FILE",
-        "JCODE_OPENAI_COMPAT_DEFAULT_MODEL",
-        "JCODE_OPENAI_COMPAT_LOCAL_ENABLED",
+        "KCODE_OPENROUTER_API_BASE",
+        "KCODE_OPENROUTER_API_KEY_NAME",
+        "KCODE_OPENROUTER_ENV_FILE",
+        "KCODE_OPENROUTER_CACHE_NAMESPACE",
+        "KCODE_OPENROUTER_PROVIDER_FEATURES",
+        "KCODE_OPENROUTER_TRANSPORT_STATE",
+        "KCODE_OPENROUTER_ALLOW_NO_AUTH",
+        "KCODE_OPENROUTER_MODEL_CATALOG",
+        "KCODE_OPENROUTER_MODEL",
+        "KCODE_OPENROUTER_STATIC_MODELS",
+        "KCODE_OPENAI_COMPAT_API_BASE",
+        "KCODE_OPENAI_COMPAT_API_KEY_NAME",
+        "KCODE_OPENAI_COMPAT_ENV_FILE",
+        "KCODE_OPENAI_COMPAT_DEFAULT_MODEL",
+        "KCODE_OPENAI_COMPAT_LOCAL_ENABLED",
         "OPENAI_COMPAT_API_KEY",
         "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
-        "JCODE_RUNTIME_PROVIDER",
-        "JCODE_ACTIVE_PROVIDER",
-        "JCODE_INITIAL_PROVIDER_EXPLICIT",
-        "JCODE_OPENAI_MODEL",
-        "JCODE_NAMED_PROVIDER_PROFILE",
-        "JCODE_PROVIDER_PROFILE_ACTIVE",
-        "JCODE_PROVIDER_PROFILE_NAME",
+        "ANTHROPIC_AUTH_TOKEN",
+        "KCODE_RUNTIME_PROVIDER",
+        "KCODE_ACTIVE_PROVIDER",
+        "KCODE_INITIAL_PROVIDER_EXPLICIT",
+        "KCODE_OPENAI_MODEL",
+        "KCODE_NAMED_PROVIDER_PROFILE",
+        "KCODE_PROVIDER_PROFILE_ACTIVE",
+        "KCODE_PROVIDER_PROFILE_NAME",
     ];
     for profile in crate::provider_catalog::openai_compatible_profiles() {
         if !profile_env_keys.contains(&profile.api_key_env) {
@@ -51,7 +52,7 @@ fn with_clean_provider_test_env<T>(f: impl FnOnce() -> T) -> T {
         .into_iter()
         .map(|key| (key, std::env::var_os(key)))
         .collect::<Vec<_>>();
-    crate::env::set_var("JCODE_HOME", temp.path());
+    crate::env::set_var("KCODE_HOME", temp.path());
     for (key, _) in &saved_profile_env {
         crate::env::remove_var(key);
     }
@@ -70,17 +71,17 @@ fn with_clean_provider_test_env<T>(f: impl FnOnce() -> T) -> T {
     crate::auth::claude::set_active_account_override(None);
     crate::auth::codex::set_active_account_override(None);
     if let Some(prev_home) = prev_home {
-        crate::env::set_var("JCODE_HOME", prev_home);
+        crate::env::set_var("KCODE_HOME", prev_home);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
     }
     if let Some(prev_subscription) = prev_subscription {
         crate::env::set_var(
-            crate::subscription_catalog::JCODE_SUBSCRIPTION_ACTIVE_ENV,
+            crate::subscription_catalog::KCODE_SUBSCRIPTION_ACTIVE_ENV,
             prev_subscription,
         );
     } else {
-        crate::env::remove_var(crate::subscription_catalog::JCODE_SUBSCRIPTION_ACTIVE_ENV);
+        crate::env::remove_var(crate::subscription_catalog::KCODE_SUBSCRIPTION_ACTIVE_ENV);
     }
     for (key, value) in saved_profile_env {
         if let Some(value) = value {
@@ -134,7 +135,7 @@ fn with_env_var<T>(key: &str, value: &str, f: impl FnOnce() -> T) -> T {
 fn save_test_openai_compatible_login_config(default_model: &str) {
     let env_file = crate::provider_catalog::OPENAI_COMPAT_PROFILE.env_file;
     crate::provider_catalog::save_env_value_to_env_file(
-        "JCODE_OPENAI_COMPAT_API_BASE",
+        "KCODE_OPENAI_COMPAT_API_BASE",
         env_file,
         Some("https://example-openai-compatible.test/v1"),
     )
@@ -146,7 +147,7 @@ fn save_test_openai_compatible_login_config(default_model: &str) {
     )
     .expect("save api key");
     crate::provider_catalog::save_env_value_to_env_file(
-        "JCODE_OPENAI_COMPAT_DEFAULT_MODEL",
+        "KCODE_OPENAI_COMPAT_DEFAULT_MODEL",
         env_file,
         Some(default_model),
     )
@@ -154,7 +155,7 @@ fn save_test_openai_compatible_login_config(default_model: &str) {
 }
 
 fn save_test_openrouter_model_cache(namespace: &str, source_api_base: &str, model_ids: &[&str]) {
-    let jcode_home = std::env::var_os("JCODE_HOME").expect("test JCODE_HOME should be set");
+    let jcode_home = std::env::var_os("KCODE_HOME").expect("test KCODE_HOME should be set");
     let cache_dir = std::path::PathBuf::from(jcode_home).join("cache");
     std::fs::create_dir_all(&cache_dir).expect("create model cache dir");
     let cache = jcode_provider_openrouter::DiskCache {
@@ -168,6 +169,7 @@ fn save_test_openrouter_model_cache(namespace: &str, source_api_base: &str, mode
                 context_length: None,
                 pricing: jcode_provider_openrouter::ModelPricing::default(),
                 created: None,
+                ..Default::default()
             })
             .collect(),
     };
@@ -181,13 +183,13 @@ fn save_test_openrouter_model_cache(namespace: &str, source_api_base: &str, mode
 
 fn clear_openai_compatible_runtime_env() {
     for key in [
-        "JCODE_OPENAI_COMPAT_API_BASE",
-        "JCODE_OPENAI_COMPAT_API_KEY_NAME",
-        "JCODE_OPENAI_COMPAT_ENV_FILE",
-        "JCODE_OPENAI_COMPAT_DEFAULT_MODEL",
-        "JCODE_OPENAI_COMPAT_LOCAL_ENABLED",
+        "KCODE_OPENAI_COMPAT_API_BASE",
+        "KCODE_OPENAI_COMPAT_API_KEY_NAME",
+        "KCODE_OPENAI_COMPAT_ENV_FILE",
+        "KCODE_OPENAI_COMPAT_DEFAULT_MODEL",
+        "KCODE_OPENAI_COMPAT_LOCAL_ENABLED",
         "OPENAI_COMPAT_API_KEY",
-        "JCODE_OPENROUTER_CACHE_NAMESPACE",
+        "KCODE_OPENROUTER_CACHE_NAMESPACE",
     ] {
         crate::env::remove_var(key);
     }
@@ -208,7 +210,6 @@ fn test_multi_provider_with_openai() -> MultiProvider {
     save_test_openai_oauth_credentials();
     crate::env::set_var("OPENAI_API_KEY", "sk-test-openai-api-key");
     MultiProvider {
-        claude: RwLock::new(None),
         anthropic: RwLock::new(None),
         openai: RwLock::new(Some(test_openai_runtime() as Arc<dyn Provider>)),
         copilot_api: RwLock::new(None),
@@ -220,7 +221,6 @@ fn test_multi_provider_with_openai() -> MultiProvider {
         openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
         active_openai_compatible_profile: RwLock::new(None),
         active: RwLock::new(ActiveProvider::OpenAI),
-        use_claude_cli: false,
         startup_notices: RwLock::new(Vec::new()),
         initial_provider: None,
         routes_memo: std::sync::Mutex::new(None),
@@ -766,10 +766,10 @@ fn standard_openrouter_catalog_refresh_fires_when_named_profile_owns_slot() {
             // OpenRouter catalog refresh must STILL fire so `/model` can list
             // openrouter.ai models (issue #292). Cache is missing -> not fresh.
             crate::env::set_var(
-                "JCODE_OPENROUTER_API_BASE",
+                "KCODE_OPENROUTER_API_BASE",
                 "https://integrate.api.nvidia.com/v1",
             );
-            crate::env::set_var("JCODE_OPENROUTER_CACHE_NAMESPACE", "mynvidia");
+            crate::env::set_var("KCODE_OPENROUTER_CACHE_NAMESPACE", "mynvidia");
 
             // Other tests in this process may already have attempted (or be
             // running) an `openrouter` catalog refresh; clear the process-wide
@@ -781,7 +781,7 @@ fn standard_openrouter_catalog_refresh_fires_when_named_profile_owns_slot() {
                 openrouter::maybe_schedule_standard_openrouter_catalog_refresh(
                     "unit test named profile owns slot"
                 ),
-                "standard OpenRouter refresh must fire even when a named profile sets JCODE_OPENROUTER_* env"
+                "standard OpenRouter refresh must fire even when a named profile sets KCODE_OPENROUTER_* env"
             );
         });
     });
@@ -1011,7 +1011,6 @@ fn test_openrouter_runtime() -> anyhow::Result<Arc<dyn Provider>> {
 
 fn test_multi_provider_with_cursor() -> MultiProvider {
     MultiProvider {
-        claude: RwLock::new(None),
         anthropic: RwLock::new(None),
         openai: RwLock::new(None),
         copilot_api: RwLock::new(None),
@@ -1023,12 +1022,73 @@ fn test_multi_provider_with_cursor() -> MultiProvider {
         openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
         active_openai_compatible_profile: RwLock::new(None),
         active: RwLock::new(ActiveProvider::Cursor),
-        use_claude_cli: false,
         startup_notices: RwLock::new(Vec::new()),
         initial_provider: None,
         routes_memo: std::sync::Mutex::new(None),
         post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     }
+}
+
+struct NativeBridgeProvider {
+    tx: NativeToolResultSender,
+}
+
+#[async_trait::async_trait]
+impl Provider for NativeBridgeProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> anyhow::Result<EventStream> {
+        anyhow::bail!("native bridge provider must not complete")
+    }
+
+    fn name(&self) -> &'static str {
+        "cursor"
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self {
+            tx: self.tx.clone(),
+        })
+    }
+
+    fn native_result_sender(&self) -> Option<NativeToolResultSender> {
+        Some(self.tx.clone())
+    }
+}
+
+/// Regression: Cursor's AgentService only resumes a turn after the MCP tool
+/// result is written back onto its stream. The agent loop reaches the runtime
+/// through `MultiProvider`, so a `None` here silently dropped every result and
+/// hung Cursor turns right after the local tool finished.
+#[test]
+fn cursor_native_result_sender_reaches_the_active_cursor_runtime() {
+    let runtime = enter_test_runtime();
+    runtime.block_on(async {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let provider = test_multi_provider_with_cursor();
+        *provider
+            .cursor
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some(Arc::new(NativeBridgeProvider { tx }));
+
+        let sender = provider
+            .native_result_sender()
+            .expect("Cursor must expose its native tool result bridge");
+        sender
+            .send(NativeToolResult::success(
+                "stream:1:exec".to_string(),
+                "ok".to_string(),
+            ))
+            .await
+            .expect("send native result");
+        let received = rx.recv().await.expect("runtime receives the result");
+        assert_eq!(received.request_id, "stream:1:exec");
+    });
 }
 
 struct PrewarmRecordingProvider {
@@ -1141,7 +1201,8 @@ fn new_session_fork_reloads_changed_config_provider_and_model() {
 }
 include!("tests/auth_refresh.rs");
 include!("tests/model_resolution.rs");
-include!("tests/model_picker_config_models.rs");
+#[path = "tests/model_picker_config_models.rs"]
+mod model_picker_config_models;
 include!("tests/issue_534_profile_preservation.rs");
 include!("tests/fallback_failover.rs");
 include!("tests/catalog_subscription.rs");
@@ -1205,4 +1266,22 @@ fn profile_catalog_cache_needs_refresh_for_missing_cache() {
             "a missing catalog cache must be reported as needing a refresh"
         );
     });
+}
+
+#[test]
+fn jcode_subscription_model_prefix_parses_explicit_specs() {
+    assert_eq!(
+        super::jcode_subscription_model_prefix("jcode:gpt-5.5"),
+        Some("gpt-5.5")
+    );
+    assert_eq!(
+        super::jcode_subscription_model_prefix("kcode-subscription: gpt-5.5 "),
+        Some("gpt-5.5")
+    );
+    assert_eq!(super::jcode_subscription_model_prefix("jcode:"), None);
+    assert_eq!(super::jcode_subscription_model_prefix("gpt-5.5"), None);
+    assert_eq!(
+        super::jcode_subscription_model_prefix("openai:gpt-5.5"),
+        None
+    );
 }

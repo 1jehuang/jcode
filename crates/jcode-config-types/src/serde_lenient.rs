@@ -41,7 +41,7 @@ where
 mod tests {
     use crate::{
         DiagramDisplayMode, DiffDisplayMode, DisplayConfig, LatexRenderingMode,
-        MarkdownSpacingMode, OverscrollStatusMode, ReasoningDisplayMode,
+        MarkdownSpacingMode, ReasoningDisplayMode,
     };
 
     fn parse(json: &str) -> DisplayConfig {
@@ -90,13 +90,19 @@ mod tests {
     fn unknown_diff_and_latex_modes_fall_back_to_defaults() {
         let display = parse(
             r#"{"centered": true, "diff_mode": "nope", "latex_rendering": "nope",
-                "markdown_spacing": "nope", "overscroll_status": "nope"}"#,
+                "markdown_spacing": "nope"}"#,
         );
         assert!(display.centered);
         assert_eq!(display.diff_mode, DiffDisplayMode::default());
         assert_eq!(display.latex_rendering, LatexRenderingMode::default());
         assert_eq!(display.markdown_spacing, MarkdownSpacingMode::default());
-        assert_eq!(display.overscroll_status, OverscrollStatusMode::default());
+    }
+
+    /// The removed `overscroll_status` option must not break existing configs.
+    #[test]
+    fn legacy_overscroll_status_key_is_ignored() {
+        let display = parse(r#"{"centered": true, "overscroll_status": "on"}"#);
+        assert!(display.centered);
     }
 
     /// Valid values must still round-trip (leniency must not swallow them).

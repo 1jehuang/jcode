@@ -92,7 +92,7 @@ impl RepairAgent {
 }
 
 /// Resolve a path under the (sandbox-aware) external home so detection honors
-/// `JCODE_HOME`/external isolation, matching the onboarding import detectors.
+/// `KCODE_HOME`/external isolation, matching the onboarding import detectors.
 fn external_home_path(rel: &str) -> PathBuf {
     crate::storage::user_home_path(rel)
         .ok()
@@ -144,7 +144,7 @@ pub(crate) fn build_repair_brief(
     let provider = provider_hint.unwrap_or("<provider>");
     let log_line = jcode_logging::log_path()
         .map(|p| format!("Logs:    {}", p.display()))
-        .unwrap_or_else(|| "Logs:    ~/.jcode/logs/jcode-<date>.log".to_string());
+        .unwrap_or_else(|| "Logs:    ~/.kcode/logs/jcode-<date>.log".to_string());
 
     let mut brief = String::new();
     brief.push_str(
@@ -199,7 +199,7 @@ the onboarding screen to choose the provider you just fixed).\n",
 
 /// Stable path where the latest onboarding repair brief is written, so a helper
 /// agent launched in this directory can simply `cat` it without the user having
-/// to paste anything. Lives under the jcode home so it honors `JCODE_HOME`.
+/// to paste anything. Lives under the jcode home so it honors `KCODE_HOME`.
 pub(crate) fn repair_brief_path() -> Option<PathBuf> {
     crate::storage::jcode_dir()
         .ok()

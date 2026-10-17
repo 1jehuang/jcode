@@ -164,11 +164,11 @@ def run_claude_cli(prompt: str, workdir: str, model: str = "opus") -> RunResult:
 def run_jcode(prompt: str, workdir: str, jcode_binary: str, model: str = "claude-opus-4-5-20251101") -> RunResult:
     """Run jcode and capture token usage from trace output."""
     try:
-        # Create a temporary JCODE_HOME to avoid polluting user's sessions
+        # Create a temporary KCODE_HOME to avoid polluting user's sessions
         with tempfile.TemporaryDirectory() as tmpdir:
             env = os.environ.copy()
-            env["JCODE_HOME"] = tmpdir
-            env["JCODE_TRACE"] = "1"
+            env["KCODE_HOME"] = tmpdir
+            env["KCODE_TRACE"] = "1"
 
             result = subprocess.run(
                 [

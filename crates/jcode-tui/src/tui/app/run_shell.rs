@@ -2,10 +2,10 @@ use super::idle_animation_repaint::{copy_cells_in, idle_animation_partial_repain
 use super::*;
 
 fn report_reload_interaction_gap() {
-    let Ok(started) = std::env::var("JCODE_RELOAD_GAP_STARTED_MS") else {
+    let Ok(started) = std::env::var("KCODE_RELOAD_GAP_STARTED_MS") else {
         return;
     };
-    crate::env::remove_var("JCODE_RELOAD_GAP_STARTED_MS");
+    crate::env::remove_var("KCODE_RELOAD_GAP_STARTED_MS");
     let Some(started_ms) = started.parse::<u128>().ok() else {
         return;
     };
@@ -119,7 +119,7 @@ pub(super) fn status_spinner_only_symbol(app: &App) -> Option<&'static str> {
 }
 
 fn is_slash_command_input(input: &str) -> bool {
-    input.trim_start().starts_with('/')
+    super::has_safe_slash_command_token(input)
 }
 
 /// Whether the floating command-suggestion palette may be on screen for the
@@ -467,6 +467,8 @@ impl StatusSpinnerRenderer {
     ) -> Result<()> {
         // Painting a frame is progress, including during long streaming turns.
         crate::logging::watchdog::beat("tui.draw");
+        app.refresh_terminal_title_metrics();
+        app.sync_herdr_agent_state();
         let invalidation = full_frame_invalidation(app.force_full_redraw, app.force_full_repaint);
         let force_full_redraw = invalidation != FullFrameInvalidation::None;
         // Wrap the whole frame (optional clear + diff flush) in a synchronized update so the
@@ -626,8 +628,9 @@ fn render_status_spinner_into_buffer_mut(buffer: &mut Buffer, area: Rect, symbol
         1,
         // The spinner cell is patched outside the full-frame draw, so apply
         // light-theme adaptation here explicitly (no-op on dark themes).
-        Style::default().fg(jcode_tui_style::adapt_color_for_theme(
+        Style::default().fg(jcode_tui_style::adapt_foreground_for_display(
             jcode_tui_style::theme::ai_color(),
+            ratatui::style::Color::Reset,
         )),
     );
 }
@@ -767,6 +770,7 @@ impl App {
             rebuild_session: self.rebuild_requested.take(),
             update_session: self.update_requested.take(),
             restart_session: self.restart_requested.take(),
+            cloud_handoff: self.cloud_handoff_requested.take(),
             exit_code: self.requested_exit_code,
             session_id: Some(self.session.id.clone()),
         })
@@ -1008,6 +1012,7 @@ impl App {
             rebuild_session: self.rebuild_requested.take(),
             update_session: self.update_requested.take(),
             restart_session: self.restart_requested.take(),
+            cloud_handoff: self.cloud_handoff_requested.take(),
             exit_code: self.requested_exit_code,
             session_id: if self.is_remote {
                 self.remote_session_id.clone()

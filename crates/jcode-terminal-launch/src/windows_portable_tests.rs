@@ -17,7 +17,7 @@ use super::windows_command_line;
 #[test]
 fn windows_command_line_quotes_a_resume_invocation_on_every_platform() {
     let line = windows_command_line(&[
-        r"C:\Program Files\jcode\jcode.exe".to_string(),
+        r"C:\Program Files\jcode\kcode.exe".to_string(),
         "--resume".to_string(),
         "session_penguin_123".to_string(),
     ]);
@@ -25,7 +25,7 @@ fn windows_command_line_quotes_a_resume_invocation_on_every_platform() {
     // The exe path contains a space, so it must be quoted or cmd.exe would
     // treat "C:\Program" as the program.
     assert!(
-        line.contains(r#""C:\Program Files\jcode\jcode.exe""#),
+        line.contains(r#""C:\Program Files\jcode\kcode.exe""#),
         "unquoted program path would break on a default Windows install: {line}"
     );
     assert!(line.contains("--resume"), "{line}");

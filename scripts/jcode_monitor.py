@@ -56,7 +56,7 @@ class MonitorState:
 def get_socket_path() -> str:
     """Get the jcode debug socket path"""
     runtime_dir = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
-    return os.path.join(runtime_dir, "jcode-debug.sock")
+    return os.path.join(runtime_dir, "kcode-debug.sock")
 
 
 def connect_to_socket(path: str) -> Optional[socket.socket]:

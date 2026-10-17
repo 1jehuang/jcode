@@ -1,7 +1,8 @@
 use super::{
-    build_resume_command, effort_display_label, extract_bracketed_system_message,
-    format_countdown_until, gather_ambient_info_inner, inferred_reasoning_efforts,
-    partition_queued_messages, resume_invocation_args, resumed_window_title,
+    build_resume_command, effort_display_label, effort_display_label_with_root,
+    extract_bracketed_system_message, format_countdown_until, gather_ambient_info_inner,
+    inferred_reasoning_efforts, partition_queued_messages, resume_invocation_args,
+    resumed_window_title,
 };
 use crate::ambient::{AmbientManager, Priority, Recurrence, ScheduleRequest, ScheduleTarget};
 use crate::terminal_launch::{detected_resume_terminal, shell_command};
@@ -160,16 +161,40 @@ fn inferred_reasoning_efforts_use_provider_specific_order_and_max_semantics() {
 }
 
 #[test]
-fn swarm_effort_display_labels_are_marked_beta() {
+fn swarm_effort_display_labels_use_configured_root_and_preserve_modes() {
+    for (level, title) in [
+        ("none", "None"),
+        ("minimal", "Minimal"),
+        ("low", "Low"),
+        ("medium", "Medium"),
+        ("high", "High"),
+        ("xhigh", "xHigh"),
+        ("max", "Max"),
+    ] {
+        assert_eq!(
+            effort_display_label_with_root("swarm", Some(level)),
+            format!("Swarm ({title} + light fan-out) [Beta]")
+        );
+        assert_eq!(
+            effort_display_label_with_root("swarm-deep", Some(level)),
+            format!("Swarm Deep ({title} + task graph) [Beta]")
+        );
+        assert_eq!(effort_display_label_with_root("high", Some(level)), "High");
+    }
+}
+
+#[test]
+fn swarm_effort_display_labels_default_to_max() {
     assert_eq!(
-        effort_display_label("swarm"),
-        "Swarm (light fan-out) [Beta]"
+        effort_display_label_with_root("swarm", None),
+        "Swarm (Max + light fan-out) [Beta]"
     );
     assert_eq!(
-        effort_display_label("swarm-deep"),
+        effort_display_label_with_root("swarm-deep", None),
         "Swarm Deep (Max + task graph) [Beta]"
     );
     assert_eq!(effort_display_label("high"), "High");
+    assert_eq!(effort_display_label("future"), "future");
 }
 
 #[cfg(unix)]
@@ -298,10 +323,10 @@ fn resume_invocation_args_omits_blank_socket() {
     );
 }
 
-/// Pin JCODE_HOME to a tempdir containing a `builds/current/jcode` binary so
+/// Pin KCODE_HOME to a tempdir containing a `builds/current/jcode` binary so
 /// `launch_client_executable()` resolves deterministically, independent of
 /// whether the developer machine has a published local build channel and of
-/// other tests mutating JCODE_HOME in parallel. Returns the guards that keep
+/// other tests mutating KCODE_HOME in parallel. Returns the guards that keep
 /// the environment pinned for the duration of the test.
 fn pinned_resume_test_home() -> (
     std::sync::MutexGuard<'static, ()>,
@@ -312,8 +337,8 @@ fn pinned_resume_test_home() -> (
     let temp = tempfile::tempdir().expect("tempdir");
     let current = temp.path().join("builds").join("current");
     std::fs::create_dir_all(&current).expect("create builds/current");
-    std::fs::write(current.join("jcode"), b"#!/bin/sh\n").expect("write fake jcode binary");
-    let home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    std::fs::write(current.join("kcode"), b"#!/bin/sh\n").expect("write fake jcode binary");
+    let home = EnvVarGuard::set_path("KCODE_HOME", temp.path());
     (env_lock, temp, home)
 }
 
@@ -387,7 +412,7 @@ fn format_countdown_until_handles_subminute_and_minutes() {
 fn gather_ambient_info_filters_to_session_reminders_when_ambient_disabled() {
     let _env_lock = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
-    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let _home = EnvVarGuard::set_path("KCODE_HOME", temp.path());
 
     let mut manager = AmbientManager::new().expect("ambient manager");
     let first_due = Utc::now() + ChronoDuration::minutes(5);
@@ -447,9 +472,9 @@ fn gather_ambient_info_filters_to_session_reminders_when_ambient_disabled() {
         .expect("schedule second reminder");
 
     // This test exercises queue filtering, not the stale-while-revalidate cache.
-    // Read synchronously while the temporary JCODE_HOME and its files are pinned:
+    // Read synchronously while the temporary KCODE_HOME and its files are pinned:
     // an unrelated in-flight cache refresh can otherwise overwrite the cleared
-    // process-global cache with data loaded under another test's JCODE_HOME.
+    // process-global cache with data loaded under another test's KCODE_HOME.
     let info = gather_ambient_info_inner(false).expect("ambient info");
     assert!(info.show_widget);
     assert_eq!(info.queue_count, 3);
@@ -474,7 +499,7 @@ fn invalidate_todos_cache_backdates_entry_so_next_gather_refetches() {
 
     let _env_lock = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
-    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let _home = EnvVarGuard::set_path("KCODE_HOME", temp.path());
     clear_todos_cache_for_tests();
 
     let session_id = "freshness-test-session";

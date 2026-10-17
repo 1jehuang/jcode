@@ -3,8 +3,8 @@ use std::fs::OpenOptions;
 use std::io::{self, BufRead, BufReader, Write};
 
 fn append_log(value: &Value) -> io::Result<()> {
-    let path = std::env::var("JCODE_FAKE_GROK_ACP_LOG")
-        .map_err(|e| io::Error::other(format!("JCODE_FAKE_GROK_ACP_LOG not set: {e}")))?;
+    let path = std::env::var("KCODE_FAKE_GROK_ACP_LOG")
+        .map_err(|e| io::Error::other(format!("KCODE_FAKE_GROK_ACP_LOG not set: {e}")))?;
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
     writeln!(file, "{value}")?;
     Ok(())
@@ -86,10 +86,10 @@ fn main() -> io::Result<()> {
             )?,
             "session/set_model" => response(id, json!({}))?,
             "session/prompt" => {
-                if std::env::var_os("JCODE_FAKE_GROK_ACP_HANG").is_some() {
+                if std::env::var_os("KCODE_FAKE_GROK_ACP_HANG").is_some() {
                     continue;
                 }
-                if std::env::var_os("JCODE_FAKE_GROK_ACP_PAYMENT_REQUIRED").is_some() {
+                if std::env::var_os("KCODE_FAKE_GROK_ACP_PAYMENT_REQUIRED").is_some() {
                     eprintln!(
                         "Error: Internal error: {{\"message\":\"API error (status 402 Payment Required): Grok Build usage balance exhausted\",\"http_status\":402}}"
                     );

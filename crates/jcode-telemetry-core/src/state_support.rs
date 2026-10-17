@@ -279,7 +279,7 @@ fn find_jcode_repo_in_ancestors(start: &Path) -> Option<PathBuf> {
 }
 
 fn telemetry_jcode_repo_dir() -> Option<PathBuf> {
-    if let Ok(path) = std::env::var("JCODE_REPO_DIR") {
+    if let Ok(path) = std::env::var("KCODE_REPO_DIR") {
         let path = PathBuf::from(path);
         if is_jcode_repo_dir(&path) {
             return Some(path);
@@ -325,7 +325,7 @@ pub(super) fn build_channel() -> String {
     // Build provenance is separate from runtime automation. Official release
     // artifacts are produced by CI/CD but are normally run by real users, so
     // they must remain in release usage while still being identifiable.
-    if option_env!("JCODE_CI_BUILD").is_some() {
+    if option_env!("KCODE_CI_BUILD").is_some() {
         return "ci_release".to_string();
     }
     "release".to_string()
@@ -339,7 +339,7 @@ pub(super) fn is_ci() -> bool {
     // Explicit runtime provenance wins over heuristics. This lets CI/CD jobs
     // classify themselves accurately even on an unknown provider, and lets a
     // controlled non-CI environment override an inherited generic CI marker.
-    if let Ok(value) = std::env::var("JCODE_CI") {
+    if let Ok(value) = std::env::var("KCODE_CI") {
         match value.trim().to_ascii_lowercase().as_str() {
             "1" | "true" | "yes" | "on" => return true,
             "0" | "false" | "no" | "off" => return false,
@@ -373,7 +373,7 @@ pub(super) fn is_ci() -> bool {
     // Test harnesses are automation too: a `cargo test` / nextest run that
     // exercises telemetry mints a throwaway id per process and never reaches
     // session_end, which is exactly the traffic shape that inflated DAU.
-    std::env::var("NEXTEST").is_ok() || std::env::var("JCODE_E2E_BIN").is_ok()
+    std::env::var("NEXTEST").is_ok() || std::env::var("KCODE_E2E_BIN").is_ok()
 }
 
 pub(super) fn ran_from_cargo() -> bool {

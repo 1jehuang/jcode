@@ -212,7 +212,7 @@ fn spawn_bridge_thread(
     stop: Arc<AtomicBool>,
 ) -> Option<JoinHandle<()>> {
     match thread::Builder::new()
-        .name("jcode-handterm-scroll".to_string())
+        .name("kcode-handterm-scroll".to_string())
         .spawn(move || bridge_thread(socket_path, updates_rx, commands_tx, stop))
     {
         Ok(thread) => Some(thread),
@@ -344,7 +344,7 @@ mod bridge_tests {
             .expect("clock should be after epoch")
             .as_nanos();
         std::env::temp_dir().join(format!(
-            "jcode-handterm-{label}-{}-{nonce:x}.sock",
+            "kcode-handterm-{label}-{}-{nonce:x}.sock",
             std::process::id()
         ))
     }

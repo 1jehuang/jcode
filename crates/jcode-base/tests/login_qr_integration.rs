@@ -4,7 +4,7 @@ use std::process::{Command, Stdio};
 
 #[test]
 fn openai_browserless_login_prints_qr() {
-    if std::env::var_os("JCODE_QR_LOGIN_TEST_CHILD").is_some() {
+    if std::env::var_os("KCODE_QR_LOGIN_TEST_CHILD").is_some() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -23,10 +23,10 @@ fn openai_browserless_login_prints_qr() {
             "openai_browserless_login_prints_qr",
             "--nocapture",
         ])
-        .env("JCODE_QR_LOGIN_TEST_CHILD", "1")
-        .env("JCODE_HOME", home.path())
-        .env_remove("JCODE_SHOW_LOGIN_QR")
-        .env_remove("JCODE_LOGIN_QR")
+        .env("KCODE_QR_LOGIN_TEST_CHILD", "1")
+        .env("KCODE_HOME", home.path())
+        .env_remove("KCODE_SHOW_LOGIN_QR")
+        .env_remove("KCODE_LOGIN_QR")
         .stdin(Stdio::null())
         .output()
         .unwrap();

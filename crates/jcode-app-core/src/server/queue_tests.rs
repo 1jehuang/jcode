@@ -128,19 +128,16 @@ async fn queue_soft_interrupt_for_session_registers_queue_on_fallback_lookup() {
 async fn queue_soft_interrupt_for_session_persists_when_live_queue_is_unavailable() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().expect("temp dir");
-    let prev_home = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", temp.path());
+    let prev_home = std::env::var_os("KCODE_HOME");
+    crate::env::set_var("KCODE_HOME", temp.path());
 
     let agent = test_agent().await;
     let session_id = {
         let guard = agent.lock().await;
         guard.session_id().to_string()
     };
-    // KCode fork: Session::save() suppresses blank sessions (persistence.rs),
-    // so session_exists() would return false and the queued==true assertion below
-    // would fail deterministically. Add a title so the fixture actually persists.
-    crate::session::Session::create_with_id(session_id.clone(), None, Some("persist test".into()))
-        .save()
+    crate::session::Session::create_with_id(session_id.clone(), None, None)
+        .save_prepared()
         .expect("save session snapshot");
 
     // KCode fork: surface persistence regressions explicitly instead of via the queued==false panic.
@@ -187,8 +184,8 @@ async fn queue_soft_interrupt_for_session_persists_when_live_queue_is_unavailabl
     );
 
     if let Some(prev_home) = prev_home {
-        crate::env::set_var("JCODE_HOME", prev_home);
+        crate::env::set_var("KCODE_HOME", prev_home);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
     }
 }

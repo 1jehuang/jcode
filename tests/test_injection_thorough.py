@@ -20,7 +20,7 @@ import sys
 import re
 
 RUNTIME_DIR = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
-SOCKET_PATH = os.path.join(RUNTIME_DIR, "jcode-debug.sock")
+SOCKET_PATH = os.path.join(RUNTIME_DIR, "kcode-debug.sock")
 
 def send_cmd(sock, cmd, session_id=None, timeout=120):
     """Send a debug command and get the response."""

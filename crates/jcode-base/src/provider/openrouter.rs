@@ -37,7 +37,7 @@ pub use jcode_provider_openrouter::{
 /// The cache is validated against the endpoint it was fetched from before it is
 /// trusted. The `openrouter` namespace is written by the standard OpenRouter
 /// refresh, but it is also the default namespace for a direct compatible runtime
-/// that never set `JCODE_OPENROUTER_CACHE_NAMESPACE`, so another endpoint's
+/// that never set `KCODE_OPENROUTER_CACHE_NAMESPACE`, so another endpoint's
 /// catalog can land there and silently decide the picker (issue #1824). Reading
 /// through the shared validated cache reader keeps one validation discipline
 /// instead of a second copy: a cache whose `source_api_base` does not match
@@ -45,10 +45,7 @@ pub use jcode_provider_openrouter::{
 /// authoritative "OpenRouter does not serve this model".
 pub fn standard_catalog_lists_model(model_id: &str) -> Option<bool> {
     let (models, _cache_is_stale) =
-        crate::provider_declared_models::cached_live_models_for_namespace(
-            "openrouter",
-            DEFAULT_API_BASE,
-        )?;
+        super::cached_live_models_for_namespace("openrouter", DEFAULT_API_BASE)?;
     Some(models.iter().any(|model| model == model_id))
 }
 
@@ -98,14 +95,14 @@ pub fn get_api_key() -> Option<String> {
 
 const DEFAULT_API_KEY_NAME: &str = "OPENROUTER_API_KEY";
 const DEFAULT_ENV_FILE: &str = "openrouter.env";
-const OPENROUTER_TRANSPORT_STATE_ENV: &str = "JCODE_OPENROUTER_TRANSPORT_STATE";
+const OPENROUTER_TRANSPORT_STATE_ENV: &str = "KCODE_OPENROUTER_TRANSPORT_STATE";
 
 fn explicit_openrouter_runtime_configured() -> bool {
     [
-        "JCODE_OPENROUTER_API_BASE",
-        "JCODE_OPENROUTER_API_KEY_NAME",
-        "JCODE_OPENROUTER_ENV_FILE",
-        "JCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
+        "KCODE_OPENROUTER_API_BASE",
+        "KCODE_OPENROUTER_API_KEY_NAME",
+        "KCODE_OPENROUTER_ENV_FILE",
+        "KCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
     ]
     .iter()
     .any(|var| std::env::var_os(var).is_some())
@@ -126,17 +123,17 @@ fn autodetected_openai_compatible_profile()
         return Some(compat);
     }
 
+    // Check credentials first and only fully resolve (default-model ranking
+    // reads each profile's cached catalog from disk) the profiles that match.
+    // Resolving every profile up front was wasted work on every provider
+    // construction.
     let mut matches = openai_compatible_profiles()
         .iter()
         .filter(|profile| profile.id != OPENAI_COMPAT_PROFILE.id)
-        .filter_map(|profile| {
-            let resolved = resolve_openai_compatible_profile(*profile);
-            if crate::provider_catalog::openai_compatible_profile_is_configured(*profile) {
-                Some(resolved)
-            } else {
-                None
-            }
+        .filter(|profile| {
+            crate::provider_catalog::openai_compatible_profile_is_configured(**profile)
         })
+        .map(|profile| resolve_openai_compatible_profile(*profile))
         .collect::<Vec<_>>();
 
     if matches.len() == 1 {
@@ -147,7 +144,7 @@ fn autodetected_openai_compatible_profile()
 }
 
 fn configured_api_base() -> String {
-    let raw = std::env::var("JCODE_OPENROUTER_API_BASE")
+    let raw = std::env::var("KCODE_OPENROUTER_API_BASE")
         .ok()
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
@@ -155,7 +152,7 @@ fn configured_api_base() -> String {
         .unwrap_or_else(|| DEFAULT_API_BASE.to_string());
     normalize_api_base(&raw).unwrap_or_else(|| {
         crate::logging::warn(&format!(
-            "Ignoring invalid JCODE_OPENROUTER_API_BASE '{}'; using {}",
+            "Ignoring invalid KCODE_OPENROUTER_API_BASE '{}'; using {}",
             raw, DEFAULT_API_BASE
         ));
         DEFAULT_API_BASE.to_string()
@@ -163,7 +160,7 @@ fn configured_api_base() -> String {
 }
 
 fn configured_api_key_name() -> String {
-    let raw = std::env::var("JCODE_OPENROUTER_API_KEY_NAME")
+    let raw = std::env::var("KCODE_OPENROUTER_API_KEY_NAME")
         .ok()
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
@@ -173,7 +170,7 @@ fn configured_api_key_name() -> String {
         raw
     } else {
         crate::logging::warn(&format!(
-            "Ignoring invalid JCODE_OPENROUTER_API_KEY_NAME '{}'; using {}",
+            "Ignoring invalid KCODE_OPENROUTER_API_KEY_NAME '{}'; using {}",
             raw, DEFAULT_API_KEY_NAME
         ));
         DEFAULT_API_KEY_NAME.to_string()
@@ -181,7 +178,7 @@ fn configured_api_key_name() -> String {
 }
 
 fn configured_env_file_name() -> String {
-    let raw = std::env::var("JCODE_OPENROUTER_ENV_FILE")
+    let raw = std::env::var("KCODE_OPENROUTER_ENV_FILE")
         .ok()
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
@@ -191,7 +188,7 @@ fn configured_env_file_name() -> String {
         raw
     } else {
         crate::logging::warn(&format!(
-            "Ignoring invalid JCODE_OPENROUTER_ENV_FILE '{}'; using {}",
+            "Ignoring invalid KCODE_OPENROUTER_ENV_FILE '{}'; using {}",
             raw, DEFAULT_ENV_FILE
         ));
         DEFAULT_ENV_FILE.to_string()
@@ -207,12 +204,12 @@ fn parse_env_bool(value: &str) -> Option<bool> {
 }
 
 fn provider_features_enabled(api_base: &str) -> bool {
-    if let Ok(raw) = std::env::var("JCODE_OPENROUTER_PROVIDER_FEATURES") {
+    if let Ok(raw) = std::env::var("KCODE_OPENROUTER_PROVIDER_FEATURES") {
         if let Some(value) = parse_env_bool(&raw) {
             return value;
         }
         crate::logging::warn(&format!(
-            "Ignoring invalid JCODE_OPENROUTER_PROVIDER_FEATURES '{}'; expected true/false",
+            "Ignoring invalid KCODE_OPENROUTER_PROVIDER_FEATURES '{}'; expected true/false",
             raw
         ));
     }
@@ -220,14 +217,14 @@ fn provider_features_enabled(api_base: &str) -> bool {
 }
 
 fn configured_dynamic_bearer_provider() -> Option<String> {
-    std::env::var("JCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER")
+    std::env::var("KCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER")
         .ok()
         .map(|v| v.trim().to_ascii_lowercase())
         .filter(|v| !v.is_empty())
 }
 
 fn configured_allow_no_auth() -> bool {
-    std::env::var("JCODE_OPENROUTER_ALLOW_NO_AUTH")
+    std::env::var("KCODE_OPENROUTER_ALLOW_NO_AUTH")
         .ok()
         .and_then(|raw| parse_env_bool(&raw))
         .or_else(|| {
@@ -280,7 +277,7 @@ impl OpenRouterTransportState {
         }
 
         if Self::runtime_provider_is_direct_compatible(runtime_provider.as_deref())
-            || std::env::var_os("JCODE_NAMED_PROVIDER_PROFILE").is_some()
+            || std::env::var_os("KCODE_NAMED_PROVIDER_PROFILE").is_some()
         {
             return Self::DirectApiKey;
         }

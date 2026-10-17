@@ -79,7 +79,7 @@ fn rebuild_reload_candidate(repo_dir: &Path, is_selfdev: bool) -> PathBuf {
 }
 
 fn exec_rebuilt_session(exe: &Path, session_id: &str, cwd: &Path, is_selfdev: bool) -> Result<()> {
-    crate::env::set_var("JCODE_RESUMING", "1");
+    crate::env::set_var("KCODE_RESUMING", "1");
 
     let mut cmd = ProcessCommand::new(exe);
     if is_selfdev {

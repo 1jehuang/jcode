@@ -17,6 +17,7 @@ fn prewarm_test_tool() -> ToolDefinition {
             "properties": { "key": { "type": "string" } },
             "required": ["key"]
         }),
+        defer_loading: false,
     }
 }
 
@@ -43,15 +44,17 @@ async fn wait_for_prewarm(slot: &openai_websocket_prewarm::PrewarmSlot) {
 }
 
 #[tokio::test]
+// The tungstenite handshake callback signature fixes the large Err type.
+#[allow(clippy::result_large_err)]
 async fn websocket_v2_prewarm_is_adopted_by_complete_without_losing_request_state() {
     let _lock = jcode_base::storage::lock_test_env();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind local websocket server");
     let addr = listener.local_addr().expect("local websocket address");
-    let _base = EnvVarGuard::set("JCODE_OPENAI_API_BASE", &format!("http://{addr}/v1"));
-    let _transport = EnvVarGuard::set("JCODE_OPENAI_TRANSPORT", "websocket");
-    let _prewarm = EnvVarGuard::set("JCODE_OPENAI_PREWARM", "1");
+    let _base = EnvVarGuard::set("KCODE_OPENAI_API_BASE", &format!("http://{addr}/v1"));
+    let _transport = EnvVarGuard::set("KCODE_OPENAI_TRANSPORT", "websocket");
+    let _prewarm = EnvVarGuard::set("KCODE_OPENAI_PREWARM", "1");
 
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept prewarm connection");
@@ -209,7 +212,7 @@ async fn unfinished_or_incompatible_prewarm_is_cancelled_without_foreground_wait
     let _lock = jcode_base::storage::lock_test_env();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let _base = EnvVarGuard::set("JCODE_OPENAI_API_BASE", &format!("http://{addr}/v1"));
+    let _base = EnvVarGuard::set("KCODE_OPENAI_API_BASE", &format!("http://{addr}/v1"));
     let credentials = prewarm_test_credentials();
     let slot = Arc::new(openai_websocket_prewarm::PrewarmSlot::default());
     let request = serde_json::json!({
@@ -250,7 +253,7 @@ async fn ready_prewarm_with_different_settings_is_invalidated() {
     let _lock = jcode_base::storage::lock_test_env();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let _base = EnvVarGuard::set("JCODE_OPENAI_API_BASE", &format!("http://{addr}/v1"));
+    let _base = EnvVarGuard::set("KCODE_OPENAI_API_BASE", &format!("http://{addr}/v1"));
     let credentials = prewarm_test_credentials();
     let slot = Arc::new(openai_websocket_prewarm::PrewarmSlot::default());
     let request = serde_json::json!({
@@ -285,7 +288,7 @@ async fn rejected_warmup_is_not_adopted() {
     let _lock = jcode_base::storage::lock_test_env();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let _base = EnvVarGuard::set("JCODE_OPENAI_API_BASE", &format!("http://{addr}/v1"));
+    let _base = EnvVarGuard::set("KCODE_OPENAI_API_BASE", &format!("http://{addr}/v1"));
     let credentials = prewarm_test_credentials();
     let slot = Arc::new(openai_websocket_prewarm::PrewarmSlot::default());
     let request =

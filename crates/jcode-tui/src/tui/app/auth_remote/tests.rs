@@ -26,21 +26,21 @@ pub(super) fn with_app(f: impl FnOnce(&mut App)) {
     }
     let _restore = Restore(
         [
-            "JCODE_HOME",
-            "JCODE_SSH_REMOTE",
-            "JCODE_SSH_BINARY",
-            "JCODE_SSH_WORKING_DIR",
-            "JCODE_SSH_SERVER_SOCKET",
+            "KCODE_HOME",
+            "KCODE_SSH_REMOTE",
+            "KCODE_SSH_BINARY",
+            "KCODE_SSH_WORKING_DIR",
+            "KCODE_SSH_SERVER_SOCKET",
         ]
         .into_iter()
         .map(|key| (key, std::env::var_os(key)))
         .collect(),
     );
-    crate::env::set_var("JCODE_HOME", home.path());
-    crate::env::set_var("JCODE_SSH_REMOTE", "test-remote");
-    crate::env::set_var("JCODE_SSH_BINARY", "/remote/jcode");
-    crate::env::set_var("JCODE_SSH_WORKING_DIR", "/remote/repo");
-    crate::env::remove_var("JCODE_SSH_SERVER_SOCKET");
+    crate::env::set_var("KCODE_HOME", home.path());
+    crate::env::set_var("KCODE_SSH_REMOTE", "test-remote");
+    crate::env::set_var("KCODE_SSH_BINARY", "/remote/jcode");
+    crate::env::set_var("KCODE_SSH_WORKING_DIR", "/remote/repo");
+    crate::env::remove_var("KCODE_SSH_SERVER_SOCKET");
     let mut app = App::new_for_remote(None);
     f(&mut app);
 }

@@ -101,7 +101,7 @@ def run_tool(
 
 
 def main() -> int:
-    jcode = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("JCODE_BIN", "jcode")
+    jcode = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("KCODE_BIN", "jcode")
     server = HTTPServer(("127.0.0.1", 0), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     endpoint = f"http://127.0.0.1:{server.server_port}/discovery"
@@ -114,12 +114,12 @@ def main() -> int:
         (home / "config.toml").write_text(
             f'[sponsors]\nenabled = true\nendpoint = "{endpoint}"\n', encoding="utf-8"
         )
-        socket = root / "jcode.sock"
+        socket = root / "kcode.sock"
         env = {
             **os.environ,
-            "JCODE_HOME": str(home),
-            "JCODE_RUNTIME_DIR": str(root),
-            "JCODE_DISCOVERY_BENCHMARK": "1",
+            "KCODE_HOME": str(home),
+            "KCODE_RUNTIME_DIR": str(root),
+            "KCODE_DISCOVERY_BENCHMARK": "1",
         }
         workspace = root / "workspace"
         workspace.mkdir()

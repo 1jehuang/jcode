@@ -425,7 +425,7 @@ fn ordinary_wrapped_commands_still_run_immediately() {
 
 #[test]
 fn read_only_find_with_stderr_redirect_is_safe() {
-    let command = "find ~/.jcode -maxdepth 3 -type f \\
+    let command = "find ~/.kcode -maxdepth 3 -type f \\
                    \\( -name '*.log' -o -name '*events*' \\) \\
                    -printf '%T@ %p\\n' 2>/dev/null | sort -nr | head -20";
     let assessment = assess(command, &ctx());
@@ -436,7 +436,7 @@ fn read_only_find_with_stderr_redirect_is_safe() {
 #[test]
 fn harmless_command_operands_are_not_redirect_targets() {
     for command in [
-        "grep needle /home/u/.jcode/config 2>/dev/null",
+        "grep needle /home/u/.kcode/config 2>/dev/null",
         "find / -name '*.conf' 2>/dev/null",
         "printf '%s\\n' /home/u/.ssh/id_ed25519 >/tmp/list",
     ] {
@@ -622,7 +622,7 @@ fn reassignment_does_not_override_trusted_protection() {
     }
     for command in [
         "HOME=/etc; rm -rf $HOME/cache",
-        "JCODE_SCRATCH_DIR=/etc; rm -rf $JCODE_SCRATCH_DIR/passwd",
+        "KCODE_SCRATCH_DIR=/etc; rm -rf $KCODE_SCRATCH_DIR/passwd",
     ] {
         assert!(level(command) >= RiskLevel::Confirm, "{command}");
     }

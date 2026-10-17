@@ -46,6 +46,11 @@ fn block_tokens(block: &ContentBlock) -> usize {
         }
         ContentBlock::ToolResult { content, .. } => rough_token_count(content),
         ContentBlock::Image { .. } => IMAGE_TOKEN_COST,
+        ContentBlock::ToolReference {
+            tool_use_id,
+            tool_name,
+        } => rough_token_count(tool_use_id) + rough_token_count(tool_name),
+        ContentBlock::ProviderNative { item, .. } => rough_token_count(&item.to_string()),
         ContentBlock::OpenAICompaction { encrypted_content } => {
             rough_token_count(encrypted_content)
         }

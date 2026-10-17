@@ -29,9 +29,9 @@ const MAX_OUTPUT_LEN: usize = 30000;
 const DEFAULT_TIMEOUT_MS: u64 = 120000;
 const STDIN_POLL_INTERVAL_MS: u64 = 500;
 const STDIN_INITIAL_DELAY_MS: u64 = 300;
-const PROGRESS_MARKER_PREFIX: &str = "JCODE_PROGRESS ";
-const CHECKPOINT_MARKER_PREFIX: &str = "JCODE_CHECKPOINT ";
-const BACKGROUND_PROGRESS_GUIDANCE: &str = "For long-running background commands, prefer scripts or commands that periodically print progress updates. Best format: print lines starting with `JCODE_PROGRESS ` followed by JSON like {\"percent\":42,\"message\":\"Running\"} or {\"current\":120,\"total\":1000,\"unit\":\"batches\",\"message\":\"Epoch 2/5\",\"eta_seconds\":30}. Supported JSON fields are `percent`, `message`, `current`, `total`, `unit`, `eta_seconds`, and optional `kind`=`indeterminate` or `kind`=`checkpoint`. For milestone-style wakeups, print `JCODE_CHECKPOINT {\"message\":\"Unit tests passed\"}`. Generic fallback output that can be parsed includes `42%`, `3/10 tests`, `3 of 10 steps`, `1.5/3.0 GiB`, or phase lines like `Compiling ...`, `Downloading ...`, `Running ...`, and `Building ...`. If you are writing the script yourself, add these progress/checkpoint lines explicitly. Put large temporary files, worktrees, and virtual environments under `$JCODE_SCRATCH_DIR`, not `/tmp`, because `/tmp` may be RAM-backed.";
+const PROGRESS_MARKER_PREFIX: &str = "KCODE_PROGRESS ";
+const CHECKPOINT_MARKER_PREFIX: &str = "KCODE_CHECKPOINT ";
+const BACKGROUND_PROGRESS_GUIDANCE: &str = "For long-running background commands, prefer scripts or commands that periodically print progress updates. Best format: print lines starting with `KCODE_PROGRESS ` followed by JSON like {\"percent\":42,\"message\":\"Running\"} or {\"current\":120,\"total\":1000,\"unit\":\"batches\",\"message\":\"Epoch 2/5\",\"eta_seconds\":30}. Supported JSON fields are `percent`, `message`, `current`, `total`, `unit`, `eta_seconds`, and optional `kind`=`indeterminate` or `kind`=`checkpoint`. For milestone-style wakeups, print `KCODE_CHECKPOINT {\"message\":\"Unit tests passed\"}`. Generic fallback output that can be parsed includes `42%`, `3/10 tests`, `3 of 10 steps`, `1.5/3.0 GiB`, or phase lines like `Compiling ...`, `Downloading ...`, `Running ...`, and `Building ...`. If you are writing the script yourself, add these progress/checkpoint lines explicitly. Put large temporary files, worktrees, and virtual environments under `$KCODE_SCRATCH_DIR`, not `/tmp`, because `/tmp` may be RAM-backed.";
 const BASH_TOOL_DESCRIPTION: &str = "Run a bash command.";
 const WINDOWS_SHELL_TOOL_DESCRIPTION: &str =
     "Run a Windows cmd.exe command (compatibility name `bash`). Use cmd.exe syntax, not Bash.";
@@ -54,12 +54,12 @@ fn wrap_repo_cargo_commands(command: &str, working_dir: Option<&Path>) -> Option
     }
 
     Some(format!(
-        r#"export JCODE_DEV_CARGO_SCRIPT={wrapper}
+        r#"export KCODE_DEV_CARGO_SCRIPT={wrapper}
 cargo() {{
-  if [[ "${{JCODE_IN_DEV_CARGO:-0}}" == "1" ]]; then
+  if [[ "${{KCODE_IN_DEV_CARGO:-0}}" == "1" ]]; then
     command cargo "$@"
   else
-    JCODE_IN_DEV_CARGO=1 "$JCODE_DEV_CARGO_SCRIPT" "$@"
+    KCODE_IN_DEV_CARGO=1 "$KCODE_DEV_CARGO_SCRIPT" "$@"
   fi
 }}
 export -f cargo
@@ -460,7 +460,7 @@ pub(super) enum ProgressLineUpdate {
 }
 
 /// Parse one output line for any supported progress signal: explicit
-/// `JCODE_CHECKPOINT`/`JCODE_PROGRESS` markers first, then heuristic patterns
+/// `KCODE_CHECKPOINT`/`KCODE_PROGRESS` markers first, then heuristic patterns
 /// (ratios, percentages, byte ratios, phase prefixes).
 pub(super) fn parse_progress_line(line: &str) -> Result<Option<ProgressLineUpdate>> {
     if let Some(progress) = parse_checkpoint_marker(line) {
@@ -604,7 +604,7 @@ fn spawn_detached_progress_follower(task_id: String, output_file: std::path::Pat
 
 #[cfg(not(windows))]
 fn tool_scratch_dir() -> Option<std::path::PathBuf> {
-    let dir = std::env::var_os("JCODE_SCRATCH_DIR")
+    let dir = std::env::var_os("KCODE_SCRATCH_DIR")
         .filter(|value| !value.is_empty())
         .map(std::path::PathBuf::from)
         .or_else(|| {
@@ -619,7 +619,7 @@ fn tool_scratch_dir() -> Option<std::path::PathBuf> {
 #[cfg(not(windows))]
 fn configure_tool_scratch(command: &mut TokioCommand) {
     if let Some(dir) = tool_scratch_dir() {
-        command.env("TMPDIR", &dir).env("JCODE_SCRATCH_DIR", dir);
+        command.env("TMPDIR", &dir).env("KCODE_SCRATCH_DIR", dir);
     }
 }
 
@@ -687,11 +687,11 @@ fn build_detached_shell_wrapper(command: &str) -> StdCommand {
     let mut cmd = StdCommand::new("bash");
     cmd.arg("-lc")
         .arg(
-            r#"eval "$JCODE_RELOAD_DETACH_COMMAND"; status=$?; printf '\n--- Command finished with exit code: %s ---\n' "$status"; exit "$status""#,
+            r#"eval "$KCODE_RELOAD_DETACH_COMMAND"; status=$?; printf '\n--- Command finished with exit code: %s ---\n' "$status"; exit "$status""#,
         )
-        .env("JCODE_RELOAD_DETACH_COMMAND", command);
+        .env("KCODE_RELOAD_DETACH_COMMAND", command);
     if let Some(dir) = tool_scratch_dir() {
-        cmd.env("TMPDIR", &dir).env("JCODE_SCRATCH_DIR", dir);
+        cmd.env("TMPDIR", &dir).env("KCODE_SCRATCH_DIR", dir);
     }
     cmd
 }
@@ -743,7 +743,7 @@ mod utf8_truncation_tests {
         );
 
         let probe_path = std::env::temp_dir().join(format!(
-            "jcode-cmd-quoting-probe-{}.cmd",
+            "kcode-cmd-quoting-probe-{}.cmd",
             std::process::id()
         ));
         std::fs::write(
@@ -779,12 +779,15 @@ mod utf8_truncation_tests {
     }
 
     #[cfg(unix)]
-    #[tokio::test]
-    async fn build_shell_command_uses_disk_backed_scratch_directory() {
+    #[test]
+    fn build_shell_command_uses_disk_backed_scratch_directory() {
+        // Keep KCODE_HOME stable until the final directory assertion. Running
+        // synchronously avoids holding the environment MutexGuard across await.
+        let _env_lock = crate::storage::lock_test_env();
         let expected = super::tool_scratch_dir().expect("jcode scratch directory");
-        let output = build_shell_command("printf '%s\\n%s\\n' \"$TMPDIR\" \"$JCODE_SCRATCH_DIR\"")
+        let output = build_shell_command("printf '%s\\n%s\\n' \"$TMPDIR\" \"$KCODE_SCRATCH_DIR\"")
+            .as_std_mut()
             .output()
-            .await
             .expect("run bash command");
         assert!(output.status.success(), "bash command should succeed");
         let stdout = String::from_utf8(output.stdout).expect("utf-8 scratch paths");
@@ -818,9 +821,12 @@ struct BashInput {
     timeout: Option<u64>,
     #[serde(default)]
     run_in_background: Option<bool>,
-    #[serde(default = "default_true")]
+    #[serde(
+        default = "default_true",
+        deserialize_with = "deserialize_bool_or_default::<_, true>"
+    )]
     notify: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_bool_or_default::<_, false>")]
     wake: bool,
     /// For background runs: wake the agent after this many seconds with no
     /// new output and no progress events. Resets on activity.
@@ -833,6 +839,18 @@ struct BashInput {
 
 fn default_true() -> bool {
     true
+}
+
+// OpenAI strict schemas represent omitted optional arguments as explicit null.
+// Serde's `default` only handles missing keys, so accept null separately while
+// retaining the same defaults and rejecting non-boolean values.
+fn deserialize_bool_or_default<'de, D, const DEFAULT: bool>(
+    deserializer: D,
+) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<bool>::deserialize(deserializer)?.unwrap_or(DEFAULT))
 }
 
 #[path = "bash_destructive_gate.rs"]
@@ -898,7 +916,80 @@ impl Tool for BashTool {
         }
 
         // Foreground execution with stdin detection
-        self.execute_foreground(&params, &ctx).await
+        let hint = file_edit_hint(&params.command);
+        let mut output = self.execute_foreground(&params, &ctx).await?;
+        if let Some(hint) = hint {
+            output.output.push_str("\n\n");
+            output.output.push_str(hint);
+        }
+        Ok(output)
+    }
+}
+
+const FILE_EDIT_HINT: &str = "Note: this command edits files in place. Next time use `edit` \
+(exact replacements, all-or-nothing, pass `edits` for several), `replace` (regex or multi-file, \
+with expected_count), or `apply_patch` (multi-file patches). They fail loudly on a missed match \
+instead of silently writing nothing, and show a reviewable diff.";
+
+/// Detect shell commands that rewrite source files in place, where a missed
+/// match silently does nothing. The command still runs, the agent is nudged.
+fn file_edit_hint(command: &str) -> Option<&'static str> {
+    let compact: String = command.split_whitespace().collect::<Vec<_>>().join(" ");
+    let sed_in_place = compact.split(['|', ';', '&']).any(|segment| {
+        let mut words = segment.split_whitespace();
+        words.next() == Some("sed")
+            && words.any(|word| {
+                word == "--in-place"
+                    || word.starts_with("--in-place=")
+                    || (word.starts_with('-') && !word.starts_with("--") && word[1..].contains('i'))
+            })
+    });
+    let perl_in_place = compact
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .any(|pair| pair[0] == "perl" && pair[1].starts_with('-') && pair[1].contains('i'));
+    let script_rewrite = (compact.contains("python") || compact.contains("node "))
+        && (compact.contains(".replace(") || compact.contains("re.sub("))
+        && (compact.contains(",'w')")
+            || compact.contains(",\"w\")")
+            || compact.contains(", 'w')")
+            || compact.contains(", \"w\")")
+            || compact.contains("write_text(")
+            || compact.contains("writeFileSync("));
+    (sed_in_place || perl_in_place || script_rewrite).then_some(FILE_EDIT_HINT)
+}
+
+#[cfg(test)]
+mod file_edit_hint_tests {
+    use super::file_edit_hint;
+
+    #[test]
+    fn flags_in_place_edits() {
+        for command in [
+            "sed -i 's/a/b/' src/main.rs",
+            "cd x && sed -Ei 's/a/b/g' f.rs",
+            "sed --in-place=.bak 's/a/b/' f",
+            "perl -pi -e 's/a/b/' f.rs",
+            "python3 - <<'EOF'\ns=open(p).read()\ns=s.replace('a','b')\nopen(p,'w').write(s)\nEOF",
+            "python3 -c \"import pathlib;p=pathlib.Path('f');p.write_text(p.read_text().replace('a','b'))\"",
+        ] {
+            assert!(file_edit_hint(command).is_some(), "{command}");
+        }
+    }
+
+    #[test]
+    fn ignores_read_only_commands() {
+        for command in [
+            "sed -n '1,20p' f.rs",
+            "sed 's/a/b/' f.rs",
+            "grep -i foo f.rs",
+            "cargo test -p jcode-app-core",
+            "python3 -c \"print('a'.replace('a','b'))\"",
+            "git diff --ignore-space-change",
+        ] {
+            assert!(file_edit_hint(command).is_none(), "{command}");
+        }
     }
 }
 
@@ -922,6 +1013,7 @@ impl BashTool {
 
         let mut command = build_shell_command(&params.command);
         command
+            .env("KCODE_SESSION_ID", &ctx.session_id)
             .kill_on_drop(true)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -1141,6 +1233,7 @@ impl BashTool {
         let display_name = summarize_background_command(params.intent.as_deref(), &params.command);
 
         let mut cmd = build_detached_shell_wrapper(&params.command);
+        cmd.env("KCODE_SESSION_ID", &ctx.session_id);
         let stdout = OpenOptions::new()
             .create(true)
             .append(true)
@@ -1289,6 +1382,7 @@ impl BashTool {
         let description = params.intent.clone();
         let display_name = summarize_background_command(description.as_deref(), &command);
         let working_dir = ctx.working_dir.clone();
+        let session_id_env = ctx.session_id.clone();
         let timeout_ms = params.timeout.map(|timeout| timeout.min(600000));
         let timeout_duration = timeout_ms.map(Duration::from_millis);
 
@@ -1303,6 +1397,7 @@ impl BashTool {
                 wake,
 				move |output_path| async move {
 					let mut cmd = build_shell_command(&command);
+					cmd.env("KCODE_SESSION_ID", &session_id_env);
 					#[cfg(unix)]
 					unsafe {
 						cmd.pre_exec(|| {

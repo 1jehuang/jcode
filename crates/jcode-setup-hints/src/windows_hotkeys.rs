@@ -354,9 +354,9 @@ mod tests {
     fn args_for(entry: &WindowsHotkey) -> String {
         let hotkey = entry.chord.canonical();
         if entry.self_dev {
-            format!(r#"-e "C:\jcode.exe" --spawn-hotkey "{hotkey}" self-dev"#)
+            format!(r#"-e "C:\kcode.exe" --spawn-hotkey "{hotkey}" self-dev"#)
         } else {
-            format!(r#"-e "C:\jcode.exe" --spawn-hotkey "{hotkey}""#)
+            format!(r#"-e "C:\kcode.exe" --spawn-hotkey "{hotkey}""#)
         }
     }
 
@@ -421,8 +421,8 @@ mod tests {
             &entries,
             "wt.exe",
             args_for,
-            "C:\\Users\\u\\.jcode\\hotkey\\last_dir",
-            "C:\\Users\\u\\.jcode\\hotkey\\last_repo",
+            "C:\\Users\\u\\.kcode\\hotkey\\last_dir",
+            "C:\\Users\\u\\.kcode\\hotkey\\last_repo",
         )
         .unwrap();
 
@@ -436,7 +436,7 @@ mod tests {
         assert!(script.contains("Win+Shift+F23"));
         assert!(script.contains("Resolve-JcodeFixedDir 'C:\\Users\\u\\jcode'"));
         assert!(script.contains("Resolve-JcodeDir $null"));
-        assert!(script.contains("Resolve-JcodeDir 'C:\\Users\\u\\.jcode\\hotkey\\last_repo'"));
+        assert!(script.contains("Resolve-JcodeDir 'C:\\Users\\u\\.kcode\\hotkey\\last_repo'"));
 
         // Self-dev entry passes the subcommand; others do not.
         assert_eq!(script.matches("self-dev").count(), 2); // label + args

@@ -459,6 +459,7 @@ mod tests {
         assert_eq!(NOVITA_PROFILE.api_key_env, "NOVITA_API_KEY");
         assert_eq!(NOVITA_PROFILE.env_file, "novita.env");
         assert_eq!(NOVITA_PROFILE.default_model, Some("zai-org/glm-5.3"));
+        const { assert!(NOVITA_PROFILE.requires_api_key) };
         assert!(openai_compatible_profiles().contains(&NOVITA_PROFILE));
         for input in ["novita", "novita-ai", "novita.ai", " NOVITA "] {
             assert_eq!(resolve_login_provider(input), Some(NOVITA_LOGIN_PROVIDER));
@@ -545,6 +546,7 @@ mod tests {
         assert_eq!(BELVEDIR_PROFILE.api_key_env, "BELVEDIR_API_KEY");
         assert_eq!(BELVEDIR_PROFILE.env_file, "belvedir.env");
         assert_eq!(BELVEDIR_PROFILE.default_model, Some("auto"));
+        const { assert!(BELVEDIR_PROFILE.requires_api_key) };
 
         let provider = resolve_login_provider("belvedir.ai").expect("Belvedir alias resolves");
         assert_eq!(provider.id, "belvedir");

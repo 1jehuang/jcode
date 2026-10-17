@@ -433,10 +433,10 @@ pub async fn wait_for_callback_async_on_listener(
 /// Perform OAuth login for Claude
 pub async fn login_claude(no_browser: bool) -> Result<OAuthTokens> {
     let (verifier, challenge) = generate_pkce();
-    if let Ok(code) = std::env::var("JCODE_CLAUDE_AUTH_CODE") {
+    if let Ok(code) = std::env::var("KCODE_CLAUDE_AUTH_CODE") {
         let trimmed = code.trim();
         if trimmed.is_empty() {
-            anyhow::bail!("JCODE_CLAUDE_AUTH_CODE is set but empty");
+            anyhow::bail!("KCODE_CLAUDE_AUTH_CODE is set but empty");
         }
         eprintln!("Exchanging code for tokens...");
         return exchange_claude_code(&verifier, trimmed, claude::REDIRECT_URI).await;
@@ -444,7 +444,7 @@ pub async fn login_claude(no_browser: bool) -> Result<OAuthTokens> {
 
     if !std::io::stdin().is_terminal() {
         anyhow::bail!(
-            "Claude login needs an authorization code from stdin. Re-run in an interactive terminal, or set JCODE_CLAUDE_AUTH_CODE."
+            "Claude login needs an authorization code from stdin. Re-run in an interactive terminal, or set KCODE_CLAUDE_AUTH_CODE."
         );
     }
 

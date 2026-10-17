@@ -9,7 +9,7 @@ pub const OPENCODE_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     api_base: "https://opencode.ai/zen/v1",
     api_key_env: "OPENCODE_API_KEY",
     env_file: "opencode.env",
-    setup_url: "https://github.com/1jehuang/jcode#openai-compatible-providers",
+    setup_url: "https://github.com/KooshaPari/KCode#openai-compatible-providers",
     default_model: Some("minimax-m2.7"),
     requires_api_key: true,
 };
@@ -20,7 +20,7 @@ pub const OPENCODE_GO_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile
     api_base: "https://opencode.ai/zen/go/v1",
     api_key_env: "OPENCODE_GO_API_KEY",
     env_file: "opencode-go.env",
-    setup_url: "https://github.com/1jehuang/jcode#openai-compatible-providers",
+    setup_url: "https://github.com/KooshaPari/KCode#openai-compatible-providers",
     default_model: Some("kimi-k2.5"),
     requires_api_key: true,
 };
@@ -53,7 +53,7 @@ pub const AI302_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     api_base: "https://api.302.ai/v1",
     api_key_env: "302AI_API_KEY",
     env_file: "302ai.env",
-    setup_url: "https://github.com/1jehuang/jcode#openai-compatible-providers",
+    setup_url: "https://github.com/KooshaPari/KCode#openai-compatible-providers",
     default_model: Some("qwen3-235b-a22b-instruct-2507"),
     requires_api_key: true,
 };
@@ -64,7 +64,7 @@ pub const BASETEN_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     api_base: "https://inference.baseten.co/v1",
     api_key_env: "BASETEN_API_KEY",
     env_file: "baseten.env",
-    setup_url: "https://github.com/1jehuang/jcode#openai-compatible-providers",
+    setup_url: "https://github.com/KooshaPari/KCode#openai-compatible-providers",
     default_model: Some("zai-org/GLM-4.7"),
     requires_api_key: true,
 };
@@ -86,7 +86,7 @@ pub const CORTECS_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     api_base: "https://api.cortecs.ai/v1",
     api_key_env: "CORTECS_API_KEY",
     env_file: "cortecs.env",
-    setup_url: "https://github.com/1jehuang/jcode#openai-compatible-providers",
+    setup_url: "https://github.com/KooshaPari/KCode#openai-compatible-providers",
     default_model: Some("kimi-k2.5"),
     requires_api_key: true,
 };
@@ -201,7 +201,7 @@ pub const FIRMWARE_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     api_base: "https://app.frogbot.ai/api/v1",
     api_key_env: "FIRMWARE_API_KEY",
     env_file: "firmware.env",
-    setup_url: "https://github.com/1jehuang/jcode#openai-compatible-providers",
+    setup_url: "https://github.com/KooshaPari/KCode#openai-compatible-providers",
     default_model: Some("kimi-k2.5"),
     requires_api_key: true,
 };
@@ -212,7 +212,7 @@ pub const HUGGING_FACE_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfil
     api_base: "https://router.huggingface.co/v1",
     api_key_env: "HF_TOKEN",
     env_file: "huggingface.env",
-    setup_url: "https://github.com/1jehuang/jcode#openai-compatible-providers",
+    setup_url: "https://github.com/KooshaPari/KCode#openai-compatible-providers",
     default_model: Some("zai-org/GLM-4.7"),
     requires_api_key: true,
 };
@@ -223,7 +223,7 @@ pub const MOONSHOT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     api_base: "https://api.moonshot.ai/v1",
     api_key_env: "MOONSHOT_API_KEY",
     env_file: "moonshotai.env",
-    setup_url: "https://github.com/1jehuang/jcode#openai-compatible-providers",
+    setup_url: "https://github.com/KooshaPari/KCode#openai-compatible-providers",
     default_model: Some("kimi-k2.5"),
     requires_api_key: true,
 };
@@ -234,7 +234,7 @@ pub const NEBIUS_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     api_base: "https://api.tokenfactory.nebius.com/v1",
     api_key_env: "NEBIUS_API_KEY",
     env_file: "nebius.env",
-    setup_url: "https://github.com/1jehuang/jcode#openai-compatible-providers",
+    setup_url: "https://github.com/KooshaPari/KCode#openai-compatible-providers",
     default_model: Some("openai/gpt-oss-120b"),
     requires_api_key: true,
 };
@@ -245,7 +245,7 @@ pub const SCALEWAY_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     api_base: "https://api.scaleway.ai/v1",
     api_key_env: "SCALEWAY_API_KEY",
     env_file: "scaleway.env",
-    setup_url: "https://github.com/1jehuang/jcode#openai-compatible-providers",
+    setup_url: "https://github.com/KooshaPari/KCode#openai-compatible-providers",
     default_model: Some("qwen3-coder-30b-a3b-instruct"),
     requires_api_key: true,
 };
@@ -256,7 +256,7 @@ pub const STACKIT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     api_base: "https://api.openai-compat.model-serving.eu01.onstackit.cloud/v1",
     api_key_env: "STACKIT_API_KEY",
     env_file: "stackit.env",
-    setup_url: "https://github.com/1jehuang/jcode#openai-compatible-providers",
+    setup_url: "https://github.com/KooshaPari/KCode#openai-compatible-providers",
     default_model: Some("openai/gpt-oss-120b"),
     requires_api_key: true,
 };
@@ -478,18 +478,33 @@ pub const CELERIS_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     requires_api_key: true,
 };
 
+// Yolo-Auto is an OpenAI-compatible gateway. Its `/v1/models` listing is
+// authenticated, so the full catalog is discovered with the account key after
+// login; `default_model` keeps the documented `yolo` alias selected until that
+// refresh lands, and `yolo-small` is the other documented alias.
+pub const YOLO_AUTO_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
+    id: "yolo-auto",
+    display_name: "Yolo-Auto",
+    api_base: "https://yolo-auto.com/v1",
+    api_key_env: "YOLO_AUTO_API_KEY",
+    env_file: "yolo-auto.env",
+    setup_url: "https://yolo-auto.com/docs",
+    default_model: Some("yolo"),
+    requires_api_key: true,
+};
+
 pub const OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     id: "openai-compatible",
     display_name: "OpenAI-compatible",
     api_base: "https://api.openai.com/v1",
     api_key_env: "OPENAI_COMPAT_API_KEY",
     env_file: "openai-compatible.env",
-    setup_url: "https://github.com/1jehuang/jcode#openai-compatible-providers",
+    setup_url: "https://github.com/KooshaPari/KCode#openai-compatible-providers",
     default_model: None,
     requires_api_key: true,
 };
 
-pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 42] = [
+pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 43] = [
     OPENCODE_PROFILE,
     OPENCODE_GO_PROFILE,
     ZAI_PROFILE,
@@ -529,6 +544,7 @@ pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 42] = [
     XIAOMI_MIMO_PROFILE,
     META_MUSE_PROFILE,
     CELERIS_PROFILE,
+    YOLO_AUTO_PROFILE,
     LMSTUDIO_PROFILE,
     OLLAMA_PROFILE,
     OPENAI_COMPAT_PROFILE,
@@ -573,7 +589,7 @@ pub const AUTO_IMPORT_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDes
     order: LoginProviderSurfaceOrder::new(Some(1), Some(1), None, None, None),
 };
 
-pub const JCODE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
+pub const KCODE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
     id: "jcode",
     display_name: "Jcode Subscription",
     auth_kind: LoginProviderAuthKind::ApiKey,
@@ -1241,6 +1257,19 @@ pub const CELERIS_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescrip
     order: LoginProviderSurfaceOrder::new(Some(38), Some(38), Some(38), Some(38), Some(38)),
 };
 
+pub const YOLO_AUTO_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
+    id: "yolo-auto",
+    display_name: "Yolo-Auto",
+    auth_kind: LoginProviderAuthKind::ApiKey,
+    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
+    auth_status_method: "API key",
+    aliases: &[],
+    menu_detail: "API key, OpenAI-compatible API",
+    recommended: false,
+    target: LoginProviderTarget::OpenAiCompatible(YOLO_AUTO_PROFILE),
+    order: LoginProviderSurfaceOrder::new(Some(38), Some(38), Some(38), Some(38), Some(38)),
+};
+
 pub const GOOGLE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
     id: "google",
     display_name: "Google/Gmail",
@@ -1254,13 +1283,13 @@ pub const GOOGLE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescript
     order: LoginProviderSurfaceOrder::new(Some(13), None, None, None, None),
 };
 
-pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 54] = [
+pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 55] = [
     AUTO_IMPORT_LOGIN_PROVIDER,
     CLAUDE_LOGIN_PROVIDER,
     ANTHROPIC_API_LOGIN_PROVIDER,
     OPENAI_LOGIN_PROVIDER,
     OPENAI_API_LOGIN_PROVIDER,
-    JCODE_LOGIN_PROVIDER,
+    KCODE_LOGIN_PROVIDER,
     OPENROUTER_LOGIN_PROVIDER,
     ORCAROUTER_LOGIN_PROVIDER,
     BEDROCK_LOGIN_PROVIDER,
@@ -1300,6 +1329,7 @@ pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 54] = [
     XIAOMI_MIMO_LOGIN_PROVIDER,
     META_MUSE_LOGIN_PROVIDER,
     CELERIS_LOGIN_PROVIDER,
+    YOLO_AUTO_LOGIN_PROVIDER,
     LMSTUDIO_LOGIN_PROVIDER,
     OLLAMA_LOGIN_PROVIDER,
     OPENAI_COMPAT_LOGIN_PROVIDER,

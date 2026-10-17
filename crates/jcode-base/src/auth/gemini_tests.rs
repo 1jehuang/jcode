@@ -148,8 +148,8 @@ fn uses_hardcoded_credentials_when_env_missing() {
 fn imports_cli_oauth_tokens_when_native_tokens_missing() {
     let _guard = lock_test_env();
     let temp = tempfile::TempDir::new().expect("tempdir");
-    let prev_home = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", temp.path());
+    let prev_home = std::env::var_os("KCODE_HOME");
+    crate::env::set_var("KCODE_HOME", temp.path());
 
     let cli_path = gemini_cli_oauth_path().expect("cli path");
     std::fs::create_dir_all(cli_path.parent().unwrap()).expect("create cli dir");
@@ -170,9 +170,9 @@ fn imports_cli_oauth_tokens_when_native_tokens_missing() {
     assert_eq!(tokens.expires_at, 4102444800000);
 
     if let Some(prev_home) = prev_home {
-        crate::env::set_var("JCODE_HOME", prev_home);
+        crate::env::set_var("KCODE_HOME", prev_home);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
     }
 }
 
@@ -183,8 +183,8 @@ fn imports_cli_oauth_tokens_without_changing_external_permissions() {
 
     let _guard = lock_test_env();
     let temp = tempfile::TempDir::new().expect("tempdir");
-    let prev_home = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", temp.path());
+    let prev_home = std::env::var_os("KCODE_HOME");
+    crate::env::set_var("KCODE_HOME", temp.path());
 
     let cli_path = gemini_cli_oauth_path().expect("cli path");
     std::fs::create_dir_all(cli_path.parent().unwrap()).expect("create cli dir");
@@ -223,8 +223,8 @@ fn imports_cli_oauth_tokens_without_changing_external_permissions() {
     assert_eq!(file_mode, 0o644);
 
     if let Some(prev_home) = prev_home {
-        crate::env::set_var("JCODE_HOME", prev_home);
+        crate::env::set_var("KCODE_HOME", prev_home);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
     }
 }

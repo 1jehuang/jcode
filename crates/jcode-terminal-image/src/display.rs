@@ -132,10 +132,10 @@ fn in_tmux() -> bool {
 
 /// iTerm2's inline-image protocol corrupts jcode's TUI output in real iTerm2,
 /// so image display is disabled there unless the user opts back in with
-/// `JCODE_ITERM2_IMAGES=1`.
+/// `KCODE_ITERM2_IMAGES=1`.
 fn iterm2_images_enabled() -> bool {
     matches!(
-        std::env::var("JCODE_ITERM2_IMAGES")
+        std::env::var("KCODE_ITERM2_IMAGES")
             .unwrap_or_default()
             .trim()
             .to_ascii_lowercase()
@@ -154,7 +154,10 @@ fn iterm2_protocol() -> ImageProtocol {
 
 fn is_kitty_terminal_name(value: &str) -> bool {
     let value = value.to_ascii_lowercase();
-    value.contains("kitty") || value.contains("ghostty") || value.contains("handterm")
+    value.contains("kitty")
+        || value.contains("ghostty")
+        || value.contains("handterm")
+        || value == "kcode-desktop"
 }
 
 /// Display parameters for terminal images
@@ -542,6 +545,45 @@ mod tests {
     fn handterm_uses_kitty_graphics_protocol() {
         assert!(is_kitty_terminal_name("handterm"));
         assert!(is_kitty_terminal_name("HandTerm"));
+    }
+
+    #[test]
+    fn jcode_desktop_uses_kitty_graphics_protocol() {
+        assert!(is_kitty_terminal_name("kcode-desktop"));
+        assert!(is_kitty_terminal_name("Jcode-Desktop"));
+        assert!(!is_kitty_terminal_name("jcode"));
+        assert!(!is_kitty_terminal_name("xterm-256color"));
+    }
+
+    #[test]
+    fn jcode_desktop_environment_uses_kitty_graphics() {
+        // Isolate environment-dependent detection from the parallel test suite.
+        const CHILD: &str = "KCODE_TEST_DESKTOP_IMAGE_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            assert_eq!(ImageProtocol::detect(), ImageProtocol::Kitty);
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "display::tests::jcode_desktop_environment_uses_kitty_graphics",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("TERM", "xterm-256color")
+            .env("TERM_PROGRAM", "kcode-desktop")
+            .env("COLORTERM", "truecolor")
+            .env_remove("KITTY_WINDOW_ID")
+            .env_remove("LC_TERMINAL")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "Desktop protocol detection failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
     }
 
     #[test]

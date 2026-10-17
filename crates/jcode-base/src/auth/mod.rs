@@ -1,3 +1,4 @@
+pub mod account_pool;
 pub mod account_store;
 pub mod active_method;
 pub mod antigravity;
@@ -48,10 +49,10 @@ use std::path::Path;
 use std::sync::{Mutex, RwLock};
 use std::time::Instant;
 
-/// Cached auth status plus the `JCODE_HOME` it was computed under.
+/// Cached auth status plus the `KCODE_HOME` it was computed under.
 ///
-/// Auth probes read credential files relative to `JCODE_HOME`. Tests swap
-/// `JCODE_HOME` to per-test temp dirs, and a status computed under one home
+/// Auth probes read credential files relative to `KCODE_HOME`. Tests swap
+/// `KCODE_HOME` to per-test temp dirs, and a status computed under one home
 /// must never be served for another (issue #361: parallel provider tests
 /// intermittently observed another test's auth snapshot through this global
 /// cache). In production the home never changes, so the key check is free.
@@ -63,7 +64,7 @@ static AUTH_STATUS_FAST_CACHE: std::sync::LazyLock<RwLock<Option<CachedAuthStatu
     std::sync::LazyLock::new(|| RwLock::new(None));
 
 fn auth_cache_home_key() -> Option<std::ffi::OsString> {
-    std::env::var_os("JCODE_HOME")
+    std::env::var_os("KCODE_HOME")
 }
 
 const AUTH_STATUS_CACHE_TTL_SECS: u64 = 30;
@@ -112,7 +113,7 @@ enum AuthProbeMode {
 pub fn browser_suppressed(cli_no_browser: bool) -> bool {
     cli_no_browser
         || env_truthy("NO_BROWSER")
-        || env_truthy("JCODE_NO_BROWSER")
+        || env_truthy("KCODE_NO_BROWSER")
         || running_in_test_harness()
         || browser_unusable_here()
 }
@@ -136,28 +137,45 @@ fn browser_unusable_here() -> bool {
 }
 
 /// True when the current process is a Rust test binary (`cargo test` /
-/// `cargo nextest`). Test binaries always run from `target/**/deps/`, a
-/// location no installed or self-dev jcode binary ever runs from.
+/// `cargo nextest`). Cargo places hashed test executables in `deps/` beneath
+/// its build directory, which can be relocated with `CARGO_TARGET_DIR`.
 ///
 /// Used to keep tests from opening real browser windows (OAuth login pages,
 /// files) on the developer's desktop: many login/onboarding flows are
 /// exercised by TUI tests, and without this guard each test run could pop
-/// multiple browser tabs. Set `JCODE_ALLOW_BROWSER_IN_TESTS=1` to opt out
+/// multiple browser tabs. Set `KCODE_ALLOW_BROWSER_IN_TESTS=1` to opt out
 /// (e.g. for an intentionally interactive live test).
 pub fn running_in_test_harness() -> bool {
     static IN_TEST_HARNESS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *IN_TEST_HARNESS.get_or_init(|| {
-        if env_truthy("JCODE_ALLOW_BROWSER_IN_TESTS") {
+        if env_truthy("KCODE_ALLOW_BROWSER_IN_TESTS") {
             return false;
         }
         std::env::current_exe()
             .ok()
-            .map(|exe| {
-                let path = exe.to_string_lossy().replace('\\', "/");
-                path.contains("/target/") && path.contains("/deps/")
-            })
+            .map(|exe| is_test_harness_path(&exe.to_string_lossy()))
             .unwrap_or(false)
     })
+}
+
+fn is_test_harness_path(path: &str) -> bool {
+    let path = path.replace('\\', "/");
+    // Preserve detection for the default target tree, including custom runners.
+    if path.contains("/target/") && path.contains("/deps/") {
+        return true;
+    }
+    let mut components = path.rsplit('/');
+    let Some(filename) = components.next() else {
+        return false;
+    };
+    if components.next() != Some("deps") {
+        return false;
+    }
+    let stem = filename.strip_suffix(".exe").unwrap_or(filename);
+    let Some((name, hash)) = stem.rsplit_once('-') else {
+        return false;
+    };
+    !name.is_empty() && hash.len() == 16 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn env_truthy(key: &str) -> bool {
@@ -171,7 +189,7 @@ fn env_truthy(key: &str) -> bool {
 }
 
 fn auth_timing_logging_enabled() -> bool {
-    env_truthy("JCODE_AUTH_TIMING")
+    env_truthy("KCODE_AUTH_TIMING")
 }
 
 fn openai_api_key_configured() -> bool {
@@ -315,12 +333,43 @@ impl AuthStatus {
             return status.clone();
         }
 
+        // Single-flight: a startup prewarm (see `prewarm_fast_in_background`)
+        // may already be probing. Wait for it and reuse its snapshot instead of
+        // running a second identical probe in parallel on the frame thread.
+        static PROBE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _probe_guard = PROBE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Ok(cache) = AUTH_STATUS_FAST_CACHE.read()
+            && let Some((ref status, ref when, ref cached_home)) = *cache
+            && when.elapsed().as_secs() < AUTH_STATUS_FAST_CACHE_TTL_SECS
+            && *cached_home == home_key
+        {
+            return status.clone();
+        }
+
         let status = Self::check_uncached_fast();
         if let Ok(mut cache) = AUTH_STATUS_FAST_CACHE.write() {
             *cache = Some((status.clone(), Instant::now(), home_key));
         }
 
         status
+    }
+
+    /// Start the fast auth probe on a background thread so the first TUI
+    /// frame finds a warm snapshot instead of paying ~5-10ms of credential
+    /// file reads inline. Safe to call any time: [`Self::check_fast`] is
+    /// single-flight, so a caller that races the prewarm waits for it rather
+    /// than probing twice.
+    pub fn prewarm_fast_in_background() {
+        if running_in_test_harness() {
+            return;
+        }
+        let _ = std::thread::Builder::new()
+            .name("auth-prewarm".into())
+            .spawn(|| {
+                let _ = Self::check_fast();
+            });
     }
 
     /// Non-blocking auth snapshot for per-frame render paths (the TUI header).
@@ -337,7 +386,7 @@ impl AuthStatus {
     /// The only blocking case is the very first call in a process with no
     /// cached snapshot at all, which matches the old behavior for frame one.
     /// Tests always take the blocking path: background refreshes racing
-    /// per-test `JCODE_HOME` swaps would poison the shared cache.
+    /// per-test `KCODE_HOME` swaps would poison the shared cache.
     pub fn check_fast_nonblocking() -> Self {
         if running_in_test_harness() {
             return Self::check_fast();
@@ -402,6 +451,7 @@ impl AuthStatus {
             || self.gemini == AuthState::Available
             || self.cursor == AuthState::Available
             || self.grok_build == AuthState::Available
+            || self.openai_compatible_any == AuthState::Available
     }
 
     /// Emit a structured, non-secret snapshot of which providers currently have
@@ -561,12 +611,12 @@ impl AuthStatus {
                     if crate::subscription_catalog::has_router_base() {
                         format!(
                             "API key (`{}`) + router base",
-                            crate::subscription_catalog::JCODE_API_KEY_ENV
+                            crate::subscription_catalog::KCODE_API_KEY_ENV
                         )
                     } else {
                         format!(
                             "API key (`{}`), router base pending",
-                            crate::subscription_catalog::JCODE_API_KEY_ENV
+                            crate::subscription_catalog::KCODE_API_KEY_ENV
                         )
                     }
                 } else {
@@ -609,11 +659,9 @@ impl AuthStatus {
             }
             crate::provider_catalog::LoginProviderTarget::GrokBuild => {
                 if self.grok_build == AuthState::Available {
-                    "Jcode-managed Grok Build backend; subscription login is verified over ACP at request time".to_string()
-                } else if grok_build::cli_available() {
-                    "subscription login not configured (backend managed by Jcode)".to_string()
+                    "Grok CLI subscription login (xAI OIDC, auto-refreshed)".to_string()
                 } else {
-                    "not configured (Jcode downloads the provider backend during login)".to_string()
+                    "not configured (run `jcode login --provider grok-build`)".to_string()
                 }
             }
             crate::provider_catalog::LoginProviderTarget::OpenAiCompatible(profile) => {
@@ -728,11 +776,11 @@ impl AuthStatus {
             ),
             crate::provider_catalog::LoginProviderTarget::Jcode => {
                 let (source, detail) = summarize_sources(vec![
-                    env_source(crate::subscription_catalog::JCODE_API_KEY_ENV),
+                    env_source(crate::subscription_catalog::KCODE_API_KEY_ENV),
                     config_source(
-                        crate::subscription_catalog::JCODE_API_KEY_ENV,
-                        crate::subscription_catalog::JCODE_ENV_FILE,
-                        "~/.config/jcode/jcode-subscription.env",
+                        crate::subscription_catalog::KCODE_API_KEY_ENV,
+                        crate::subscription_catalog::KCODE_ENV_FILE,
+                        "~/.config/kcode/jcode-subscription.env",
                     ),
                 ]);
                 (
@@ -749,7 +797,7 @@ impl AuthStatus {
                     config_source(
                         "OPENROUTER_API_KEY",
                         "openrouter.env",
-                        "~/.config/jcode/openrouter.env",
+                        "~/.config/kcode/openrouter.env",
                     ),
                     external_api_key_source("OPENROUTER_API_KEY"),
                 ]);
@@ -764,7 +812,7 @@ impl AuthStatus {
             crate::provider_catalog::LoginProviderTarget::OpenAiApiKey => {
                 let (source, detail) = summarize_sources(vec![
                     env_source("OPENAI_API_KEY"),
-                    config_source("OPENAI_API_KEY", "openai.env", "~/.config/jcode/openai.env"),
+                    config_source("OPENAI_API_KEY", "openai.env", "~/.config/kcode/openai.env"),
                     external_api_key_source("OPENAI_API_KEY"),
                 ]);
                 (
@@ -777,8 +825,8 @@ impl AuthStatus {
             }
             crate::provider_catalog::LoginProviderTarget::ClaudeApiKey => {
                 // The Anthropic API key is most commonly stored in the app
-                // config file (`~/.config/jcode/anthropic.env`), *not* an env
-                // var and *not* `~/.jcode/auth.json` (which holds the separate
+                // config file (`~/.config/kcode/anthropic.env`), *not* an env
+                // var and *not* `~/.kcode/auth.json` (which holds the separate
                 // OAuth accounts). List every place it can live so the real
                 // source is always discoverable instead of looking "absent".
                 let (source, detail) = summarize_sources(vec![
@@ -786,7 +834,7 @@ impl AuthStatus {
                     config_source(
                         "ANTHROPIC_API_KEY",
                         "anthropic.env",
-                        "~/.config/jcode/anthropic.env",
+                        "~/.config/kcode/anthropic.env",
                     ),
                     external_api_key_source("ANTHROPIC_API_KEY"),
                 ]);
@@ -805,7 +853,7 @@ impl AuthStatus {
                     config_source(
                         crate::auth::azure::API_KEY_ENV,
                         crate::auth::azure::ENV_FILE,
-                        "~/.config/jcode/azure-openai.env",
+                        "~/.config/kcode/azure-openai.env",
                     ),
                 ]);
                 (
@@ -826,10 +874,10 @@ impl AuthStatus {
                     config_source(
                         crate::provider::bedrock::API_KEY_ENV,
                         crate::provider::bedrock::ENV_FILE,
-                        "~/.config/jcode/bedrock.env",
+                        "~/.config/kcode/bedrock.env",
                     ),
                     env_source("AWS_PROFILE"),
-                    env_source("JCODE_BEDROCK_PROFILE"),
+                    env_source("KCODE_BEDROCK_PROFILE"),
                     env_source("AWS_ACCESS_KEY_ID"),
                 ]);
                 (
@@ -847,16 +895,13 @@ impl AuthStatus {
                     AuthCredentialSource::None
                 },
                 if state == AuthState::Available {
-                    "Grok Build subscription login managed through Jcode".to_string()
-                } else if grok_build::cli_available() {
-                    "Jcode-managed backend provisioned; subscription login not configured"
-                        .to_string()
+                    "Grok CLI OIDC session in $GROK_HOME/auth.json".to_string()
                 } else {
-                    "Jcode-managed Grok Build backend not provisioned".to_string()
+                    "Grok Build subscription login not configured".to_string()
                 },
                 AuthExpiryConfidence::Unknown,
-                AuthRefreshSupport::ExternalManaged,
-                AuthValidationMethod::CommandProbe,
+                AuthRefreshSupport::Automatic,
+                AuthValidationMethod::PresenceCheck,
             ),
             crate::provider_catalog::LoginProviderTarget::OpenAiCompatible(profile) => {
                 // Prefer the active named config profile's credential location
@@ -867,7 +912,7 @@ impl AuthStatus {
                 {
                     summarize_sources(vec![
                         env_source(&key_env),
-                        config_source(&key_env, &env_file, format!("~/.config/jcode/{}", env_file)),
+                        config_source(&key_env, &env_file, format!("~/.config/kcode/{}", env_file)),
                         external_api_key_source(&key_env),
                     ])
                 } else {
@@ -878,7 +923,7 @@ impl AuthStatus {
                         config_source(
                             &resolved.api_key_env,
                             &resolved.env_file,
-                            format!("~/.config/jcode/{}", resolved.env_file),
+                            format!("~/.config/kcode/{}", resolved.env_file),
                         ),
                         external_api_key_source(&resolved.api_key_env),
                     ])
@@ -991,7 +1036,7 @@ fn build_auth_status_uncached(mode: AuthProbeMode) -> (AuthStatus, Vec<(&'static
         // An official Gemini Developer API key is a static credential with no
         // expiry handshake, so treat its presence as immediately Available and
         // fall back to OAuth token state otherwise.
-        status.gemini = if gemini::has_api_key() {
+        status.gemini = if gemini::uses_api_key() {
             AuthState::Available
         } else {
             refreshable_token_state(
@@ -1005,11 +1050,22 @@ fn build_auth_status_uncached(mode: AuthProbeMode) -> (AuthStatus, Vec<(&'static
         probe_cursor_status(&mut status, mode)
     });
     record_auth_probe_step(&mut timings, "grok_build", || {
-        status.grok_build = if grok_build::cli_available() && grok_build::has_cached_login() {
+        status.grok_build = if grok_build::has_cached_login() {
             AuthState::Available
         } else {
             AuthState::NotConfigured
         }
+    });
+    record_auth_probe_step(&mut timings, "openai_compatible", || {
+        let configured = crate::provider_catalog::openai_compatible_profiles()
+            .iter()
+            .copied()
+            .any(crate::provider_catalog::openai_compatible_profile_is_configured);
+        status.openai_compatible_any = if configured {
+            AuthState::Available
+        } else {
+            AuthState::NotConfigured
+        };
     });
     record_auth_probe_step(&mut timings, "google", || probe_google_status(&mut status));
 
@@ -1323,13 +1379,13 @@ fn assessment_for_key(
                 AuthCredentialSource::None
             },
             if state == AuthState::Available {
-                "Grok CLI cached login".to_string()
+                "Grok CLI OIDC session".to_string()
             } else {
-                "Grok CLI unavailable".to_string()
+                "Grok Build subscription login not configured".to_string()
             },
             AuthExpiryConfidence::Unknown,
-            AuthRefreshSupport::ExternalManaged,
-            AuthValidationMethod::CommandProbe,
+            AuthRefreshSupport::Automatic,
+            AuthValidationMethod::PresenceCheck,
         ),
         LoginProviderAuthStateKey::Google => {
             let (source, detail) = summarize_sources(vec![google_source()]);
@@ -1439,7 +1495,7 @@ fn anthropic_oauth_source(status: &AuthStatus) -> Option<(AuthCredentialSource, 
     {
         return Some((
             AuthCredentialSource::JcodeManagedFile,
-            "~/.jcode/auth.json".to_string(),
+            "~/.kcode/auth.json".to_string(),
         ));
     }
     if let Some(source) = crate::auth::claude::preferred_external_auth_source()
@@ -1470,7 +1526,7 @@ fn openai_oauth_source(status: &AuthStatus) -> Option<(AuthCredentialSource, Str
     {
         return Some((
             AuthCredentialSource::JcodeManagedFile,
-            "~/.jcode/openai-auth.json".to_string(),
+            "~/.kcode/openai-auth.json".to_string(),
         ));
     }
     if crate::auth::codex::legacy_auth_allowed() && crate::auth::codex::legacy_auth_source_exists()
@@ -1581,8 +1637,8 @@ fn cursor_source() -> Option<(AuthCredentialSource, String)> {
             format!("trusted Cursor app state ({})", path.display()),
         ));
     }
-    if config_source("CURSOR_API_KEY", "cursor.env", "~/.config/jcode/cursor.env").is_some() {
-        return config_source("CURSOR_API_KEY", "cursor.env", "~/.config/jcode/cursor.env");
+    if config_source("CURSOR_API_KEY", "cursor.env", "~/.config/kcode/cursor.env").is_some() {
+        return config_source("CURSOR_API_KEY", "cursor.env", "~/.config/kcode/cursor.env");
     }
     None
 }

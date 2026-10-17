@@ -51,12 +51,12 @@ async fn live_openai_gpt_5_4_and_fast_requests_succeed() -> Result<()> {
     jcode_base::provider::populate_context_limits(catalog.context_limits.clone());
     jcode_base::provider::populate_account_models(catalog.available_models.clone());
 
-    let Some(plain_response) = live_openai_smoke("gpt-5.4", "JCODE_GPT54_OK").await? else {
+    let Some(plain_response) = live_openai_smoke("gpt-5.4", "KCODE_GPT54_OK").await? else {
         eprintln!("skipping live OpenAI response test: no real OAuth credentials");
         return Ok(());
     };
     assert!(
-        plain_response.contains("JCODE_GPT54_OK"),
+        plain_response.contains("KCODE_GPT54_OK"),
         "unexpected GPT-5.4 response: {}",
         plain_response
     );
@@ -67,13 +67,13 @@ async fn live_openai_gpt_5_4_and_fast_requests_succeed() -> Result<()> {
         .any(|model| model == "gpt-5.3-codex-spark")
     {
         let Some(fast_response) =
-            live_openai_smoke("gpt-5.3-codex-spark", "JCODE_GPT53_SPARK_OK").await?
+            live_openai_smoke("gpt-5.3-codex-spark", "KCODE_GPT53_SPARK_OK").await?
         else {
             eprintln!("skipping live OpenAI fast-model test: no real OAuth credentials");
             return Ok(());
         };
         assert!(
-            fast_response.contains("JCODE_GPT53_SPARK_OK"),
+            fast_response.contains("KCODE_GPT53_SPARK_OK"),
             "unexpected gpt-5.3-codex-spark response: {}",
             fast_response
         );
@@ -84,13 +84,13 @@ async fn live_openai_gpt_5_4_and_fast_requests_succeed() -> Result<()> {
         .any(|model| model == "gpt-5.4[1m]")
     {
         let Some(long_context_response) =
-            live_openai_smoke("gpt-5.4[1m]", "JCODE_GPT54_1M_OK").await?
+            live_openai_smoke("gpt-5.4[1m]", "KCODE_GPT54_1M_OK").await?
         else {
             eprintln!("skipping live OpenAI 1m test: no real OAuth credentials");
             return Ok(());
         };
         assert!(
-            long_context_response.contains("JCODE_GPT54_1M_OK"),
+            long_context_response.contains("KCODE_GPT54_1M_OK"),
             "unexpected GPT-5.4[1m] response: {}",
             long_context_response
         );
@@ -503,6 +503,7 @@ async fn test_record_websocket_success_clears_normalized_keys() {
 
 #[tokio::test]
 async fn persistent_ws_does_not_reuse_response_cancelled_before_completion() {
+    let _env_lock = jcode_base::storage::lock_test_env();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind test websocket listener");
@@ -542,6 +543,9 @@ async fn persistent_ws_does_not_reuse_response_cancelled_before_completion() {
         last_response_completed_at: Instant::now(),
         message_count: 1,
         last_input_item_count: 1,
+        last_input_item_hashes: persistent_ws_input_item_hashes(&[
+            serde_json::json!({"type":"message","role":"user","content":"first"}),
+        ]),
     })));
     let (tx, rx) = mpsc::channel(1);
     drop(rx); // Mirrors a soft interrupt cancelling the active stream consumer.
@@ -569,6 +573,7 @@ async fn persistent_ws_does_not_reuse_response_cancelled_before_completion() {
 
 #[tokio::test]
 async fn persistent_ws_rejects_identity_changed_by_another_fork() {
+    let _env_lock = jcode_base::storage::lock_test_env();
     let (state, server) = test_persistent_ws_state().await;
     let persistent_ws = Arc::new(Mutex::new(Some(state)));
     let mut credentials = prewarm_test_credentials();
@@ -596,6 +601,7 @@ async fn persistent_ws_rejects_identity_changed_by_another_fork() {
 
 #[tokio::test]
 async fn persistent_ws_rechecks_identity_after_presend_backpressure() {
+    let _env_lock = jcode_base::storage::lock_test_env();
     let (state, server) = test_persistent_ws_state().await;
     let persistent_ws = Arc::new(Mutex::new(Some(state)));
     let credentials = Arc::new(RwLock::new(prewarm_test_credentials()));

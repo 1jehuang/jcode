@@ -159,7 +159,7 @@ fn load_save_roundtrip_via_temp_home() {
     let tmp = tempfile::tempdir().unwrap();
     // Point the jcode dir at a temp location.
     unsafe {
-        std::env::set_var("JCODE_HOME", tmp.path());
+        std::env::set_var("KCODE_HOME", tmp.path());
     }
 
     let mut cache = McpSchemaCache::default();
@@ -173,6 +173,6 @@ fn load_save_roundtrip_via_temp_home() {
     assert_eq!(tools[0].name, "alpha");
 
     unsafe {
-        std::env::remove_var("JCODE_HOME");
+        std::env::remove_var("KCODE_HOME");
     }
 }

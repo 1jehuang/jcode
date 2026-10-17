@@ -20,6 +20,7 @@ use super::{
 };
 use crate::agent::Agent;
 use crate::protocol::ServerEvent;
+use futures::FutureExt;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -118,26 +119,29 @@ pub(super) async fn spawn_tracked_live_turn(
     let session_id = session_id.to_string();
     tokio::spawn(async move {
         let start_message_index = agent.message_count();
-        let result = if let Some(display_role) = display_role {
-            agent
-                .run_once_streaming_mpsc_with_display_role(
+        let (result, stop_reason) = catch_live_turn_panic(async {
+            if let Some(display_role) = display_role {
+                agent
+                    .run_once_streaming_mpsc_with_display_role(
+                        &message,
+                        vec![],
+                        system_reminder,
+                        event_tx.clone(),
+                        Some(display_role),
+                    )
+                    .await
+            } else {
+                process_locked_message_streaming_mpsc(
+                    &mut agent,
                     &message,
                     vec![],
                     system_reminder,
                     event_tx.clone(),
-                    Some(display_role),
                 )
                 .await
-        } else {
-            process_locked_message_streaming_mpsc(
-                &mut agent,
-                &message,
-                vec![],
-                system_reminder,
-                event_tx.clone(),
-            )
-            .await
-        };
+            }
+        })
+        .await;
         let completion_report = result
             .is_ok()
             .then(|| agent.latest_assistant_text_after(start_message_index))
@@ -180,6 +184,11 @@ pub(super) async fn spawn_tracked_live_turn(
                     Some(&swarm.event_tx),
                 )
                 .await;
+                let _ = event_tx.send(ServerEvent::TurnStopped {
+                    reason: stop_reason,
+                    message: crate::util::format_error_chain(&error),
+                    provider_stop_reason: None,
+                });
                 let _ = event_tx.send(ServerEvent::Error {
                     id: 0,
                     message: crate::util::format_error_chain(&error),
@@ -238,4 +247,53 @@ pub(super) async fn run_live_system_turn_if_idle(
     )
     .await;
     true
+}
+
+/// Catch only unwind panics. A killed process cannot emit a trustworthy event.
+async fn catch_live_turn_panic<F>(turn: F) -> (anyhow::Result<()>, crate::protocol::TurnStopReason)
+where
+    F: std::future::Future<Output = anyhow::Result<()>>,
+{
+    use crate::protocol::TurnStopReason;
+    match std::panic::AssertUnwindSafe(turn).catch_unwind().await {
+        Ok(result) => (result, TurnStopReason::Failure),
+        Err(payload) => {
+            let message = payload
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| payload.downcast_ref::<&str>().copied())
+                .unwrap_or("unknown panic");
+            (
+                Err(anyhow::anyhow!("Processing task panicked: {}", message)),
+                TurnStopReason::Crash,
+            )
+        }
+    }
+}
+
+#[cfg(test)]
+mod stop_reason_tests {
+    use super::catch_live_turn_panic;
+    use crate::protocol::TurnStopReason;
+
+    #[tokio::test]
+    async fn abnormal_stop_classifies_panics_without_parsing_error_strings() {
+        let (result, reason) = catch_live_turn_panic(async { panic!("provider exploded") }).await;
+        assert_eq!(reason, TurnStopReason::Crash);
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("provider exploded")
+        );
+        let (result, reason) = catch_live_turn_panic(async {
+            Err(anyhow::anyhow!(
+                "Processing task panicked: just provider text"
+            ))
+        })
+        .await;
+        assert_eq!(reason, TurnStopReason::Failure);
+        assert!(result.is_err());
+        assert!(catch_live_turn_panic(async { Ok(()) }).await.0.is_ok());
+    }
 }

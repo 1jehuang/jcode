@@ -251,6 +251,7 @@ async fn warm_socket(
                             // continuation must send ALL input, including reasoning.
                             message_count: 0,
                             last_input_item_count: 0,
+                            last_input_item_hashes: Vec::new(),
                         });
                     }
                     Some("response.in_progress") => {}
@@ -423,7 +424,7 @@ mod tests {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let creds = jcode_base::auth::codex::load_credentials()?;
         let model =
-            std::env::var("JCODE_OPENAI_LIVE_MODEL").unwrap_or_else(|_| "gpt-5.6-sol".to_string());
+            std::env::var("KCODE_OPENAI_LIVE_MODEL").unwrap_or_else(|_| "gpt-5.6-sol".to_string());
         let system = "Reply to each message with exactly OK. Do not use tools.";
         let messages = vec![ChatMessage::user("Connection test.")];
         let mut times = Vec::new();

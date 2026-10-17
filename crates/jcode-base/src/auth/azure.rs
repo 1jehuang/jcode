@@ -69,26 +69,26 @@ pub fn method_detail() -> String {
 pub fn apply_runtime_env() -> Result<()> {
     let endpoint = load_endpoint().ok_or_else(|| {
         anyhow::anyhow!(
-            "{} not found in environment or ~/.config/jcode/{}",
+            "{} not found in environment or ~/.config/kcode/{}",
             ENDPOINT_ENV,
             ENV_FILE
         )
     })?;
 
-    crate::env::set_var("JCODE_OPENROUTER_API_BASE", endpoint);
-    crate::env::set_var("JCODE_OPENROUTER_API_KEY_NAME", API_KEY_ENV);
-    crate::env::set_var("JCODE_OPENROUTER_ENV_FILE", ENV_FILE);
-    crate::env::set_var("JCODE_OPENROUTER_CACHE_NAMESPACE", "azure-openai");
-    crate::env::set_var("JCODE_OPENROUTER_PROVIDER_FEATURES", "0");
-    crate::env::set_var("JCODE_OPENROUTER_TRANSPORT_STATE", "direct-api-key");
-    crate::env::set_var("JCODE_OPENROUTER_MODEL_CATALOG", "0");
+    crate::env::set_var("KCODE_OPENROUTER_API_BASE", endpoint);
+    crate::env::set_var("KCODE_OPENROUTER_API_KEY_NAME", API_KEY_ENV);
+    crate::env::set_var("KCODE_OPENROUTER_ENV_FILE", ENV_FILE);
+    crate::env::set_var("KCODE_OPENROUTER_CACHE_NAMESPACE", "azure-openai");
+    crate::env::set_var("KCODE_OPENROUTER_PROVIDER_FEATURES", "0");
+    crate::env::set_var("KCODE_OPENROUTER_TRANSPORT_STATE", "direct-api-key");
+    crate::env::set_var("KCODE_OPENROUTER_MODEL_CATALOG", "0");
 
     if uses_entra_id() {
-        crate::env::set_var("JCODE_OPENROUTER_AUTH_HEADER", "authorization-bearer");
-        crate::env::set_var("JCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER", "azure");
+        crate::env::set_var("KCODE_OPENROUTER_AUTH_HEADER", "authorization-bearer");
+        crate::env::set_var("KCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER", "azure");
     } else {
-        crate::env::set_var("JCODE_OPENROUTER_AUTH_HEADER", "api-key");
-        crate::env::remove_var("JCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER");
+        crate::env::set_var("KCODE_OPENROUTER_AUTH_HEADER", "api-key");
+        crate::env::remove_var("KCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER");
     }
 
     Ok(())

@@ -291,7 +291,7 @@ mod tests {
     #[test]
     fn generated_image_side_panel_markdown_prefers_compact_useful_metadata() {
         let dir = std::env::temp_dir().join(format!(
-            "jcode-generated-image-side-panel-test-{}",
+            "kcode-generated-image-side-panel-test-{}",
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).expect("create temp generated image dir");
@@ -347,7 +347,7 @@ mod tests {
     #[test]
     fn generated_image_side_panel_title_includes_filename_and_dimensions() {
         let dir = std::env::temp_dir().join(format!(
-            "jcode-generated-image-title-test-{}",
+            "kcode-generated-image-title-test-{}",
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).expect("create temp generated image dir");

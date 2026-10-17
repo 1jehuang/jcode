@@ -14,7 +14,7 @@ set -euo pipefail
 #
 # Delegating to dev_cargo.sh unifies both paths: test/check builds now get the
 # same MemAvailable-based CARGO_BUILD_JOBS throttle, the same fast linker, and
-# the same remote-cargo handling (dev_cargo.sh performs its own JCODE_REMOTE_CARGO
+# the same remote-cargo handling (dev_cargo.sh performs its own KCODE_REMOTE_CARGO
 # preflight, so we no longer duplicate it here). dev_cargo.sh passes every arg
 # straight through to cargo, only layering env/setup, so `test`/`check`/`build`
 # semantics are unchanged. The low-memory *selfdev profile* overrides remain

@@ -230,6 +230,17 @@ async fn wait_for_reload_handoff_before_reconnect(
         return Ok(None);
     }
 
+    // The marker stays `SocketReady` for up to RELOAD_MARKER_MAX_AGE after a
+    // reload completes. Any client launched in that window would otherwise
+    // flash "Waiting for reload handoff..." (an extra notice row that shoved
+    // the layout) even though the replacement server is already serving.
+    if !state.server_reload_in_progress
+        && crate::server::recent_reload_state(RELOAD_MARKER_MAX_AGE)
+            .is_some_and(|marker| marker.phase == crate::server::ReloadPhase::SocketReady)
+    {
+        return Ok(None);
+    }
+
     state.disconnect_start.get_or_insert_with(Instant::now);
     app.set_remote_startup_phase(super::super::RemoteStartupPhase::WaitingForReload);
     app.set_status_notice("Waiting for reload handoff...");
@@ -420,6 +431,9 @@ pub(in crate::tui::app) async fn connect_with_retry(
         }
     } {
         Ok(remote) => {
+            // Request IDs are scoped to a connection. Old acknowledgements cannot
+            // arrive on this new socket and must not swallow a new turn's Done.
+            app.usage_reset.invalidate_requests.clear();
             crate::logging::info(&format!(
                 "[TIMING] remote bootstrap: connected after {}ms (resume={:?}, reconnect_attempts={})",
                 app.app_started.elapsed().as_millis(),

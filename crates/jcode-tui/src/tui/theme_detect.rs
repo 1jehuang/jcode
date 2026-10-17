@@ -2,7 +2,7 @@
 //!
 //! Resolves the theme mode once per process, before the TUI enters raw mode:
 //!
-//! 1. `JCODE_THEME=dark|light` env override (also accepts `auto`).
+//! 1. `KCODE_THEME=dark|light` env override (also accepts `auto`).
 //! 2. `display.theme` config: "dark", "light", or "auto"/empty.
 //! 3. Auto: query the terminal's background color (OSC 11 via
 //!    `terminal-colorsaurus`) and classify by perceived lightness. Terminals
@@ -40,7 +40,7 @@ pub fn prewarm_theme_mode() {
         return;
     }
     if let Ok(handle) = std::thread::Builder::new()
-        .name("jcode-theme-detect".to_string())
+        .name("kcode-theme-detect".to_string())
         .spawn(resolve_theme_mode)
     {
         *slot = Some(handle);
@@ -126,7 +126,7 @@ fn resolve_theme_mode_without_terminal_query() -> ThemeMode {
 }
 
 fn resolve_configured_theme(query_terminal: bool) -> ThemeMode {
-    let configured = std::env::var("JCODE_THEME")
+    let configured = std::env::var("KCODE_THEME")
         .ok()
         .filter(|v| !v.trim().is_empty())
         .unwrap_or_else(|| crate::config::config().display.theme.clone());

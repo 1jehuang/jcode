@@ -335,7 +335,7 @@ pub fn record_frame(frame: FrameCapture) {
 fn debug_path() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("jcode")
+        .join("kcode")
         .join("visual-debug.txt")
 }
 

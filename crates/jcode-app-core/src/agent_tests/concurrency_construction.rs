@@ -8,12 +8,12 @@ struct IsolatedTelemetryEnv {
 impl IsolatedTelemetryEnv {
     fn new() -> Self {
         let home = tempfile::tempdir().unwrap();
-        let previous = ["JCODE_HOME", "JCODE_NO_TELEMETRY"]
+        let previous = ["KCODE_HOME", "KCODE_NO_TELEMETRY"]
             .into_iter()
             .map(|key| (key, std::env::var_os(key)))
             .collect();
-        crate::env::set_var("JCODE_HOME", home.path());
-        crate::env::set_var("JCODE_NO_TELEMETRY", "1");
+        crate::env::set_var("KCODE_HOME", home.path());
+        crate::env::set_var("KCODE_NO_TELEMETRY", "1");
         Self {
             _home: home,
             previous,

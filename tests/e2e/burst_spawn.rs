@@ -195,8 +195,8 @@ async fn run_burst_resume_attach_stress(burst_size: usize) -> Result<()> {
         .file_name()
         .and_then(|value| value.to_str())
         .unwrap_or("burst");
-    let socket_path = runtime_dir.join("jcode.sock");
-    let debug_socket_path = runtime_dir.join("jcode-debug.sock");
+    let socket_path = runtime_dir.join("kcode.sock");
+    let debug_socket_path = runtime_dir.join("kcode-debug.sock");
 
     let mut expected_session_ids = Vec::with_capacity(burst_size);
     for idx in 0..burst_size {
@@ -411,8 +411,8 @@ async fn burst_retry_takeover_without_local_history_keeps_existing_live_clients_
         .file_name()
         .and_then(|value| value.to_str())
         .unwrap_or("burst-live");
-    let socket_path = runtime_dir.join("jcode.sock");
-    let debug_socket_path = runtime_dir.join("jcode-debug.sock");
+    let socket_path = runtime_dir.join("kcode.sock");
+    let debug_socket_path = runtime_dir.join("kcode-debug.sock");
 
     let live_session_count = 10usize;
     let mut live_session_ids = Vec::with_capacity(live_session_count);
@@ -584,8 +584,8 @@ async fn burst_attach_detach_reattach_restores_live_clients_cleanly() -> Result<
         .file_name()
         .and_then(|value| value.to_str())
         .unwrap_or("burst-reattach");
-    let socket_path = runtime_dir.join("jcode.sock");
-    let debug_socket_path = runtime_dir.join("jcode-debug.sock");
+    let socket_path = runtime_dir.join("kcode.sock");
+    let debug_socket_path = runtime_dir.join("kcode-debug.sock");
 
     let burst_size = 6usize;
     let mut session_ids = Vec::with_capacity(burst_size);

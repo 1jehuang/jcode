@@ -28,23 +28,23 @@ fn tracked_env_vars() -> Vec<String> {
         "HOME",
         "APPDATA",
         "XDG_CONFIG_HOME",
-        "JCODE_HOME",
+        "KCODE_HOME",
         "NO_PROXY",
         "no_proxy",
-        "JCODE_OPENROUTER_API_BASE",
-        "JCODE_OPENROUTER_API_KEY_NAME",
-        "JCODE_OPENROUTER_ENV_FILE",
-        "JCODE_OPENROUTER_CACHE_NAMESPACE",
-        "JCODE_OPENROUTER_PROVIDER_FEATURES",
-        "JCODE_OPENROUTER_ALLOW_NO_AUTH",
-        "JCODE_OPENROUTER_MODEL_CATALOG",
-        "JCODE_OPENROUTER_MODEL",
-        "JCODE_OPENROUTER_STATIC_MODELS",
-        "JCODE_OPENROUTER_AUTH_HEADER",
-        "JCODE_OPENROUTER_AUTH_HEADER_NAME",
-        "JCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
-        "JCODE_OPENROUTER_PROVIDER",
-        "JCODE_OPENROUTER_NO_FALLBACK",
+        "KCODE_OPENROUTER_API_BASE",
+        "KCODE_OPENROUTER_API_KEY_NAME",
+        "KCODE_OPENROUTER_ENV_FILE",
+        "KCODE_OPENROUTER_CACHE_NAMESPACE",
+        "KCODE_OPENROUTER_PROVIDER_FEATURES",
+        "KCODE_OPENROUTER_ALLOW_NO_AUTH",
+        "KCODE_OPENROUTER_MODEL_CATALOG",
+        "KCODE_OPENROUTER_MODEL",
+        "KCODE_OPENROUTER_STATIC_MODELS",
+        "KCODE_OPENROUTER_AUTH_HEADER",
+        "KCODE_OPENROUTER_AUTH_HEADER_NAME",
+        "KCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
+        "KCODE_OPENROUTER_PROVIDER",
+        "KCODE_OPENROUTER_NO_FALLBACK",
         "OPENROUTER_API_KEY",
         "AUTH_FLOW_TEST_KEY",
     ]
@@ -88,7 +88,7 @@ impl TestEnv {
         jcode::env::set_var("HOME", temp.path());
         jcode::env::set_var("XDG_CONFIG_HOME", temp.path().join("config"));
         jcode::env::set_var("APPDATA", temp.path().join("AppData").join("Roaming"));
-        jcode::env::set_var("JCODE_HOME", temp.path().join("jcode-home"));
+        jcode::env::set_var("KCODE_HOME", temp.path().join("jcode-home"));
         jcode::env::set_var("NO_PROXY", "127.0.0.1,localhost");
         jcode::env::set_var("no_proxy", "127.0.0.1,localhost");
         AuthStatus::invalidate_cache();
@@ -108,21 +108,21 @@ impl TestEnv {
         allow_no_auth: bool,
     ) {
         let _ = self.temp.path();
-        jcode::env::set_var("JCODE_OPENROUTER_API_BASE", api_base);
-        jcode::env::set_var("JCODE_OPENROUTER_API_KEY_NAME", "AUTH_FLOW_TEST_KEY");
-        jcode::env::set_var("JCODE_OPENROUTER_ENV_FILE", "auth-flow-test.env");
-        jcode::env::set_var("JCODE_OPENROUTER_CACHE_NAMESPACE", cache_namespace);
-        jcode::env::set_var("JCODE_OPENROUTER_PROVIDER_FEATURES", "0");
-        jcode::env::set_var("JCODE_OPENROUTER_MODEL_CATALOG", "1");
+        jcode::env::set_var("KCODE_OPENROUTER_API_BASE", api_base);
+        jcode::env::set_var("KCODE_OPENROUTER_API_KEY_NAME", "AUTH_FLOW_TEST_KEY");
+        jcode::env::set_var("KCODE_OPENROUTER_ENV_FILE", "auth-flow-test.env");
+        jcode::env::set_var("KCODE_OPENROUTER_CACHE_NAMESPACE", cache_namespace);
+        jcode::env::set_var("KCODE_OPENROUTER_PROVIDER_FEATURES", "0");
+        jcode::env::set_var("KCODE_OPENROUTER_MODEL_CATALOG", "1");
         if let Some(key) = key {
             jcode::env::set_var("AUTH_FLOW_TEST_KEY", key);
         } else {
             jcode::env::remove_var("AUTH_FLOW_TEST_KEY");
         }
         if allow_no_auth {
-            jcode::env::set_var("JCODE_OPENROUTER_ALLOW_NO_AUTH", "1");
+            jcode::env::set_var("KCODE_OPENROUTER_ALLOW_NO_AUTH", "1");
         } else {
-            jcode::env::remove_var("JCODE_OPENROUTER_ALLOW_NO_AUTH");
+            jcode::env::remove_var("KCODE_OPENROUTER_ALLOW_NO_AUTH");
         }
         AuthStatus::invalidate_cache();
     }
@@ -320,8 +320,8 @@ fn live_models_contract_supports_api_key_header_mode() -> Result<()> {
         Some("sk-header-contract"),
         false,
     );
-    jcode::env::set_var("JCODE_OPENROUTER_AUTH_HEADER", "api-key");
-    jcode::env::set_var("JCODE_OPENROUTER_AUTH_HEADER_NAME", "x-api-key");
+    jcode::env::set_var("KCODE_OPENROUTER_AUTH_HEADER", "api-key");
+    jcode::env::set_var("KCODE_OPENROUTER_AUTH_HEADER_NAME", "x-api-key");
 
     let provider = OpenRouterProvider::new()?;
     let models = run_current_thread(provider.fetch_models())?;
@@ -390,7 +390,7 @@ fn model_picker_cache_miss_schedules_single_background_refresh_and_updates_route
         None,
         true,
     );
-    jcode::env::set_var("JCODE_OPENROUTER_MODEL", "background-race-selected-model");
+    jcode::env::set_var("KCODE_OPENROUTER_MODEL", "background-race-selected-model");
 
     let provider = OpenRouterProvider::new()?;
     run_current_thread(async {
@@ -463,9 +463,9 @@ fn live_model_catalog_failure_keeps_static_and_selected_model_picker_fallbacks()
         Some("sk-catalog-failure"),
         false,
     );
-    jcode::env::set_var("JCODE_OPENROUTER_MODEL", "selected-fallback-model");
+    jcode::env::set_var("KCODE_OPENROUTER_MODEL", "selected-fallback-model");
     jcode::env::set_var(
-        "JCODE_OPENROUTER_STATIC_MODELS",
+        "KCODE_OPENROUTER_STATIC_MODELS",
         "selected-fallback-model\nstatic-fallback-model",
     );
 

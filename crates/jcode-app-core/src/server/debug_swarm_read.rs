@@ -781,7 +781,7 @@ pub(super) async fn maybe_handle_swarm_read_command(
             return Err(anyhow::anyhow!("swarm:id requires a path"));
         }
         let path = PathBuf::from(path_str);
-        let env_override = std::env::var("JCODE_SWARM_ID")
+        let env_override = std::env::var("KCODE_SWARM_ID")
             .ok()
             .filter(|s| !s.trim().is_empty());
         let git_common = git_common_dir_for(&path);
@@ -791,7 +791,7 @@ pub(super) async fn maybe_handle_swarm_read_command(
             serde_json::json!({
                 "path": path_str,
                 "swarm_id": swarm_id,
-                "source": if env_override.is_some() { "env:JCODE_SWARM_ID" }
+                "source": if env_override.is_some() { "env:KCODE_SWARM_ID" }
                           else if is_git_repo { "git_common_dir" }
                           else { "none" },
                 "env_override": env_override,

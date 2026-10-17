@@ -239,7 +239,7 @@ fn test_mixed_file_and_image_drop_keeps_file_and_attaches_image() {
     let file = dir.path().join("notes with spaces.txt");
     let image = dir.path().join("screenshot.png");
     std::fs::write(&file, b"notes").unwrap();
-    std::fs::write(&image, b"png bytes").unwrap();
+    std::fs::write(&image, crate::tui::app::input::tiny_png_bytes_for_test()).unwrap();
     let dropped = format!(
         "{} {}",
         file.display().to_string().replace(' ', "\\ "),
@@ -258,7 +258,7 @@ fn test_terminal_image_drop_attaches_image_instead_of_routing_as_a_skill() {
     let mut app = create_test_app();
     let dir = tempfile::tempdir().unwrap();
     let image = dir.path().join("dropped screenshot.png");
-    std::fs::write(&image, b"png bytes").unwrap();
+    std::fs::write(&image, crate::tui::app::input::tiny_png_bytes_for_test()).unwrap();
 
     app.handle_paste(image.display().to_string());
 
@@ -277,7 +277,7 @@ fn test_typed_absolute_image_path_promotes_before_slash_routing() {
     let mut app = create_test_app();
     let dir = tempfile::tempdir().unwrap();
     let image = dir.path().join("dropped photo.png");
-    std::fs::write(&image, b"png bytes").unwrap();
+    std::fs::write(&image, crate::tui::app::input::tiny_png_bytes_for_test()).unwrap();
     app.set_input_for_test(image.display().to_string());
 
     assert!(crate::tui::app::input::promote_dropped_images(&mut app));
@@ -291,7 +291,7 @@ fn test_incremental_terminal_drop_promotes_immediately_when_path_completes() {
     let mut app = create_test_app();
     let dir = tempfile::tempdir().unwrap();
     let image = dir.path().join("instant.png");
-    std::fs::write(&image, b"png bytes").unwrap();
+    std::fs::write(&image, crate::tui::app::input::tiny_png_bytes_for_test()).unwrap();
 
     for ch in image.display().to_string().chars() {
         crate::tui::app::input::handle_text_input(&mut app, &ch.to_string());
@@ -863,6 +863,23 @@ fn test_startup_update_up_to_date_removes_transient_card() {
 }
 
 #[test]
+fn test_startup_update_skipped_stays_quiet() {
+    let mut app = create_test_app();
+    app.handle_update_status(UpdateStatus::Checking);
+    app.handle_update_status(UpdateStatus::Skipped {
+        reason: "no upstream configured".to_string(),
+    });
+    assert!(
+        app.display_messages()
+            .iter()
+            .all(|message| message.title.as_deref() != Some("Update"))
+    );
+    assert!(app.status_notice().is_none());
+    assert!(app.background_client_action.is_none());
+    assert!(app.pending_background_client_reload.is_none());
+}
+
+#[test]
 fn test_startup_update_diverged_offers_merge_without_failure_card() {
     let mut app = create_test_app();
 
@@ -964,10 +981,10 @@ fn test_startup_update_error_replaces_checking_card() {
 fn test_selfdev_command_spawns_session_in_test_mode() {
     let _guard = crate::storage::lock_test_env();
     let temp_home = tempfile::TempDir::new().expect("temp home");
-    let prev_home = std::env::var_os("JCODE_HOME");
-    let prev_test = std::env::var_os("JCODE_TEST_SESSION");
-    crate::env::set_var("JCODE_HOME", temp_home.path());
-    crate::env::set_var("JCODE_TEST_SESSION", "1");
+    let prev_home = std::env::var_os("KCODE_HOME");
+    let prev_test = std::env::var_os("KCODE_TEST_SESSION");
+    crate::env::set_var("KCODE_HOME", temp_home.path());
+    crate::env::set_var("KCODE_TEST_SESSION", "1");
 
     let repo = create_jcode_repo_fixture();
     let mut app = create_test_app();
@@ -995,14 +1012,14 @@ fn test_selfdev_command_spawns_session_in_test_mode() {
     );
 
     if let Some(prev_home) = prev_home {
-        crate::env::set_var("JCODE_HOME", prev_home);
+        crate::env::set_var("KCODE_HOME", prev_home);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
     }
     if let Some(prev_test) = prev_test {
-        crate::env::set_var("JCODE_TEST_SESSION", prev_test);
+        crate::env::set_var("KCODE_TEST_SESSION", prev_test);
     } else {
-        crate::env::remove_var("JCODE_TEST_SESSION");
+        crate::env::remove_var("KCODE_TEST_SESSION");
     }
 }
 

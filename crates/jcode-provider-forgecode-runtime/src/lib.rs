@@ -96,7 +96,9 @@ impl ForgeCodeProvider {
                     | ContentBlock::AnthropicThinking { .. }
                     | ContentBlock::OpenAIReasoning { .. } => {}
                     ContentBlock::Image { .. } => {}
-                    ContentBlock::OpenAICompaction { .. } => {}
+                    ContentBlock::OpenAICompaction { .. }
+                    | ContentBlock::ToolReference { .. }
+                    | ContentBlock::ProviderNative { .. } => {}
                 }
             }
             if !parts.is_empty() {

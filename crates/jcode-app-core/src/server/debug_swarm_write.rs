@@ -721,17 +721,17 @@ mod tests {
     impl Drop for EnvGuard {
         fn drop(&mut self) {
             if let Some(value) = self.runtime.take() {
-                crate::env::set_var("JCODE_RUNTIME_DIR", value);
+                crate::env::set_var("KCODE_RUNTIME_DIR", value);
             } else {
-                crate::env::remove_var("JCODE_RUNTIME_DIR");
+                crate::env::remove_var("KCODE_RUNTIME_DIR");
             }
         }
     }
 
     fn isolated_runtime(dir: &tempfile::TempDir) -> EnvGuard {
         let lock = crate::storage::lock_test_env();
-        let runtime = std::env::var_os("JCODE_RUNTIME_DIR");
-        crate::env::set_var("JCODE_RUNTIME_DIR", dir.path());
+        let runtime = std::env::var_os("KCODE_RUNTIME_DIR");
+        crate::env::set_var("KCODE_RUNTIME_DIR", dir.path());
         EnvGuard {
             _lock: lock,
             runtime,

@@ -159,8 +159,8 @@ mod tests {
     async fn terminal_usage_recorded_once_before_delivery() {
         let _lock = jcode_base::storage::lock_test_env();
         let temp = tempfile::tempdir().unwrap();
-        let old = std::env::var_os("JCODE_HOME");
-        jcode_base::env::set_var("JCODE_HOME", temp.path());
+        let old = std::env::var_os("KCODE_HOME");
+        jcode_base::env::set_var("KCODE_HOME", temp.path());
         let mut recorder = OAuthUsageRecorder {
             label: Some("captured".into()),
             model: "gpt-5.5".into(),
@@ -196,9 +196,9 @@ mod tests {
         );
         assert!(!temp.path().join("provider_activity.json").exists());
         if let Some(old) = old {
-            jcode_base::env::set_var("JCODE_HOME", old);
+            jcode_base::env::set_var("KCODE_HOME", old);
         } else {
-            jcode_base::env::remove_var("JCODE_HOME");
+            jcode_base::env::remove_var("KCODE_HOME");
         }
     }
 }

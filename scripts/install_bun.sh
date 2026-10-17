@@ -7,7 +7,7 @@
 set -euo pipefail
 
 REPO="1jehuang/jcode"
-RELEASE_METADATA_BASE="${JCODE_RELEASE_METADATA_BASE:-https://jcode.sh/releases}"
+RELEASE_METADATA_BASE="${KCODE_RELEASE_METADATA_BASE:-https://jcode.sh/releases}"
 INSTALL_STAGE="startup"
 INSTALL_SUCCEEDED=0
 INSTALL_OS="unknown"
@@ -44,7 +44,7 @@ sha256_file() {
 }
 
 valid_conversion_id() {
-  printf '%s' "${JCODE_INSTALL_CONVERSION_ID:-}" |
+  printf '%s' "${KCODE_INSTALL_CONVERSION_ID:-}" |
     grep -Eiq '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
 }
 
@@ -54,16 +54,16 @@ telemetry_value() {
 
 report_install_funnel() {
   local stage="$1" outcome="$2" failure_stage="${3:-}"
-  [ "${JCODE_NO_TELEMETRY:-}" != "1" ] || return 0
+  [ "${KCODE_NO_TELEMETRY:-}" != "1" ] || return 0
   [ "${DO_NOT_TRACK:-}" != "1" ] || return 0
   valid_conversion_id || return 0
   local payload
   payload=$(printf '{"id":"%s","event":"install_funnel","version":"%s","os":"%s","arch":"%s","conversion_id":"%s","stage":"%s","outcome":"%s","source":"installer","install_method":"%s","failure_stage":"%s"}' \
-    "$JCODE_INSTALL_CONVERSION_ID" \
+    "$KCODE_INSTALL_CONVERSION_ID" \
     "$(telemetry_value "$INSTALL_VERSION")" \
     "$(telemetry_value "$INSTALL_OS")" \
     "$(telemetry_value "$INSTALL_ARCH")" \
-    "$JCODE_INSTALL_CONVERSION_ID" \
+    "$KCODE_INSTALL_CONVERSION_ID" \
     "$(telemetry_value "$stage")" \
     "$(telemetry_value "$outcome")" \
     "$(telemetry_value "$INSTALL_METHOD")" \
@@ -73,12 +73,12 @@ report_install_funnel() {
 }
 
 persist_install_conversion_id() {
-  [ "${JCODE_NO_TELEMETRY:-}" != "1" ] || return 0
+  [ "${KCODE_NO_TELEMETRY:-}" != "1" ] || return 0
   [ "${DO_NOT_TRACK:-}" != "1" ] || return 0
   valid_conversion_id || return 0
-  local jcode_home="${JCODE_HOME:-$HOME/.jcode}"
+  local jcode_home="${KCODE_HOME:-$HOME/.jcode}"
   mkdir -p "$jcode_home" 2>/dev/null || return 0
-  (umask 077; printf '%s\n' "$JCODE_INSTALL_CONVERSION_ID" > "$jcode_home/install_conversion_id") \
+  (umask 077; printf '%s\n' "$KCODE_INSTALL_CONVERSION_ID" > "$jcode_home/install_conversion_id") \
     2>/dev/null || return 0
   chmod 600 "$jcode_home/install_conversion_id" 2>/dev/null || true
 }
@@ -204,16 +204,16 @@ report_install_funnel "installer_start" "success" ""
 # Install directory
 # ---------------------------------------------------------------------------
 if [ "$IS_WINDOWS" = true ]; then
-  INSTALL_DIR="${JCODE_INSTALL_DIR:-$LOCALAPPDATA/jcode/bin}"
+  INSTALL_DIR="${KCODE_INSTALL_DIR:-$LOCALAPPDATA/jcode/bin}"
 else
-  INSTALL_DIR="${JCODE_INSTALL_DIR:-$HOME/.local/bin}"
+  INSTALL_DIR="${KCODE_INSTALL_DIR:-$HOME/.local/bin}"
 fi
 
 # ---------------------------------------------------------------------------
 # Version resolution (same dual-source strategy as install.sh)
 # ---------------------------------------------------------------------------
 INSTALL_STAGE="release_lookup"
-VERSION="${JCODE_VERSION:-}"
+VERSION="${KCODE_VERSION:-}"
 if [ -z "$VERSION" ]; then
   METADATA_VERSION=$(bun_fetch "$RELEASE_METADATA_BASE/latest/version" 2>/dev/null | tr -d '\r\n' || true)
   LATEST_RELEASE_URL=$(curl -fsSIL --retry 2 --connect-timeout 10 \
@@ -395,8 +395,8 @@ if [ "$IS_WINDOWS" = true ]; then
       "[Environment]::GetEnvironmentVariable('Path','User')" 2>/dev/null | tr -d '\r' || true)
     if ! echo "$current_user_path" | grep -qF "$win_install_dir"; then
       new_user_path="$win_install_dir;$current_user_path"
-      JCODE_NEW_USER_PATH="$new_user_path" powershell.exe -NoProfile -NonInteractive -Command \
-        '[Environment]::SetEnvironmentVariable("Path", $env:JCODE_NEW_USER_PATH, "User")' >/dev/null 2>&1 || true
+      KCODE_NEW_USER_PATH="$new_user_path" powershell.exe -NoProfile -NonInteractive -Command \
+        '[Environment]::SetEnvironmentVariable("Path", $env:KCODE_NEW_USER_PATH, "User")' >/dev/null 2>&1 || true
     fi
   fi
   info "Added $win_install_dir to your user PATH."

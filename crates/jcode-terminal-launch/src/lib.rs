@@ -9,19 +9,19 @@ pub struct TerminalCommand {
     pub title: Option<String>,
     pub fresh_spawn: bool,
     /// What this spawn is for (e.g. "resume", "selfdev", "swarm-agent").
-    /// Exported as `JCODE_SPAWN_KIND` to spawn hooks and spawned terminals.
+    /// Exported as `KCODE_SPAWN_KIND` to spawn hooks and spawned terminals.
     pub kind: Option<String>,
     /// The jcode session this terminal will run, when known.
-    /// Exported as `JCODE_SPAWN_SESSION_ID`.
+    /// Exported as `KCODE_SPAWN_SESSION_ID`.
     pub session_id: Option<String>,
-    /// Extra metadata env entries (e.g. `JCODE_SPAWN_SWARM_ID`) exported to
+    /// Extra metadata env entries (e.g. `KCODE_SPAWN_SWARM_ID`) exported to
     /// spawn hooks and spawned terminals. Applied after the first-class
-    /// `JCODE_SPAWN_*` keys, so entries here win on key collisions.
+    /// `KCODE_SPAWN_*` keys, so entries here win on key collisions.
     pub extra_env: Vec<(String, String)>,
     /// Terminal-identifying env vars captured from the *client* that requested
     /// this spawn (see [`snapshot_client_terminal_env`]). When set, these
     /// override the (possibly stale) server-inherited values for the same keys
-    /// and are also exported under a `JCODE_CLIENT_*` prefix so spawn/focus
+    /// and are also exported under a `KCODE_CLIENT_*` prefix so spawn/focus
     /// hooks can target the terminal the user is actually attached to (#405).
     pub client_terminal_env: Vec<(String, String)>,
 }
@@ -155,12 +155,12 @@ pub fn snapshot_client_terminal_env() -> Vec<(String, String)> {
 pub fn apply_client_terminal_env(cmd: &mut Command, env: &[(String, String)]) {
     for key in CLIENT_TERMINAL_ENV_VARS {
         cmd.env_remove(key);
-        cmd.env_remove(format!("JCODE_CLIENT_{key}"));
+        cmd.env_remove(format!("KCODE_CLIENT_{key}"));
     }
     for (key, value) in env {
         if CLIENT_TERMINAL_ENV_VARS.contains(&key.as_str()) {
             cmd.env(key, value);
-            cmd.env(format!("JCODE_CLIENT_{key}"), value);
+            cmd.env(format!("KCODE_CLIENT_{key}"), value);
         }
     }
 }
@@ -374,7 +374,7 @@ fn resume_terminal_candidates_with_client_env(
 
     // A tmux client already owns the user's terminal layout. Prefer a pane in
     // that exact client over opening another emulator window. Explicit
-    // JCODE_TERMINAL and configured spawn hooks still take precedence.
+    // KCODE_TERMINAL and configured spawn hooks still take precedence.
     let in_herdr = terminal_env_value(client_terminal_env, "HERDR_ENV").is_some()
         && terminal_env_value(client_terminal_env, "HERDR_PANE_ID").is_some();
     let in_inner_multiplexer = in_herdr
@@ -421,14 +421,14 @@ fn resume_terminal_candidates_with_client_env(
 
 #[cfg(unix)]
 pub fn resume_terminal_candidates() -> Vec<String> {
-    let configured_terminal = std::env::var("JCODE_TERMINAL").ok();
+    let configured_terminal = std::env::var("KCODE_TERMINAL").ok();
     resume_terminal_candidates_with_client_env(&[], configured_terminal.as_deref())
 }
 
 #[cfg(not(unix))]
 pub fn resume_terminal_candidates() -> Vec<String> {
     let mut candidates = Vec::new();
-    if let Ok(term) = std::env::var("JCODE_TERMINAL") {
+    if let Ok(term) = std::env::var("KCODE_TERMINAL") {
         push_unique_terminal(&mut candidates, term);
     }
     if let Some(term) = detected_resume_terminal() {
@@ -449,7 +449,7 @@ pub fn spawn_command_in_new_terminal_with(
 
     #[cfg(unix)]
     let candidates = {
-        let configured_terminal = std::env::var("JCODE_TERMINAL").ok();
+        let configured_terminal = std::env::var("KCODE_TERMINAL").ok();
         resume_terminal_candidates_with_client_env(
             &command.client_terminal_env,
             configured_terminal.as_deref(),
@@ -559,52 +559,52 @@ pub fn expand_home(program: &str) -> PathBuf {
     PathBuf::from(program)
 }
 
-/// The `JCODE_SPAWN_*` metadata env exported to spawn hooks and to terminals
+/// The `KCODE_SPAWN_*` metadata env exported to spawn hooks and to terminals
 /// launched by the built-in fallback:
 ///
-/// - `JCODE_SPAWN_KIND`: why this spawn happened ("resume", "selfdev",
+/// - `KCODE_SPAWN_KIND`: why this spawn happened ("resume", "selfdev",
 ///   "swarm-agent", ...), when known.
-/// - `JCODE_SPAWN_SESSION_ID`: the jcode session the window will run.
-/// - `JCODE_SPAWN_TITLE`: the suggested window/tab title.
-/// - `JCODE_SPAWN_CWD`: the working directory for the session.
-/// - `JCODE_SPAWN_PROGRAM`: path of the jcode binary to execute.
-/// - `JCODE_SPAWN_COMMAND`: the full command line, shell-escaped, for hooks
+/// - `KCODE_SPAWN_SESSION_ID`: the jcode session the window will run.
+/// - `KCODE_SPAWN_TITLE`: the suggested window/tab title.
+/// - `KCODE_SPAWN_CWD`: the working directory for the session.
+/// - `KCODE_SPAWN_PROGRAM`: path of the jcode binary to execute.
+/// - `KCODE_SPAWN_COMMAND`: the full command line, shell-escaped, for hooks
 ///   (like tmux) that take a single shell-command string.
 ///
-/// `TerminalCommand::extra_env` entries (e.g. `JCODE_SPAWN_SWARM_ID`,
-/// `JCODE_SPAWN_COORDINATOR_SESSION_ID`) are appended last and win collisions.
+/// `TerminalCommand::extra_env` entries (e.g. `KCODE_SPAWN_SWARM_ID`,
+/// `KCODE_SPAWN_COORDINATOR_SESSION_ID`) are appended last and win collisions.
 fn spawn_metadata_env(command: &TerminalCommand, cwd: &Path) -> Vec<(String, String)> {
     let mut env: Vec<(String, String)> = Vec::new();
     if let Some(kind) = &command.kind {
-        env.push(("JCODE_SPAWN_KIND".to_string(), kind.clone()));
+        env.push(("KCODE_SPAWN_KIND".to_string(), kind.clone()));
     }
     if let Some(session_id) = &command.session_id {
-        env.push(("JCODE_SPAWN_SESSION_ID".to_string(), session_id.clone()));
+        env.push(("KCODE_SPAWN_SESSION_ID".to_string(), session_id.clone()));
     }
     if let Some(title) = &command.title {
-        env.push(("JCODE_SPAWN_TITLE".to_string(), title.clone()));
+        env.push(("KCODE_SPAWN_TITLE".to_string(), title.clone()));
     }
     env.push((
-        "JCODE_SPAWN_CWD".to_string(),
+        "KCODE_SPAWN_CWD".to_string(),
         cwd.to_string_lossy().into_owned(),
     ));
     env.push((
-        "JCODE_SPAWN_PROGRAM".to_string(),
+        "KCODE_SPAWN_PROGRAM".to_string(),
         command.program.to_string_lossy().into_owned(),
     ));
     env.push((
-        "JCODE_SPAWN_COMMAND".to_string(),
+        "KCODE_SPAWN_COMMAND".to_string(),
         shell_command(&command_parts(command)),
     ));
     // Re-export the requesting client's terminal env so spawn/focus hooks use
     // the client's terminal, not the server's stale startup env (#405). Each
     // var is exported both under its native name (overriding the inherited
     // value the spawned process/hook would otherwise see) and under a
-    // `JCODE_CLIENT_<NAME>` alias so hooks can explicitly distinguish the
+    // `KCODE_CLIENT_<NAME>` alias so hooks can explicitly distinguish the
     // client's terminal from the server's.
     for (key, value) in &command.client_terminal_env {
         env.push((key.clone(), value.clone()));
-        env.push((format!("JCODE_CLIENT_{key}"), value.clone()));
+        env.push((format!("KCODE_CLIENT_{key}"), value.clone()));
     }
     env.extend(command.extra_env.iter().cloned());
     env
@@ -616,9 +616,9 @@ fn spawn_metadata_env(command: &TerminalCommand, cwd: &Path) -> Vec<(String, Str
 /// arguments are appended as additional argv entries (the `$TERMINAL -e`
 /// convention), so `hook --flag` becomes `hook --flag <jcode> <args...>`.
 /// The hook runs in the session working directory with the full
-/// `JCODE_SPAWN_*` metadata env set (see [`spawn_metadata_env`]); hooks that
+/// `KCODE_SPAWN_*` metadata env set (see [`spawn_metadata_env`]); hooks that
 /// need a single shell-command string (tmux, kitty `@ launch`) can use
-/// `$JCODE_SPAWN_COMMAND` instead of the appended argv.
+/// `$KCODE_SPAWN_COMMAND` instead of the appended argv.
 pub fn build_hook_spawn_command(
     hook: &str,
     command: &TerminalCommand,
@@ -638,7 +638,7 @@ pub fn build_hook_spawn_command(
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     if command.fresh_spawn {
-        cmd.env("JCODE_FRESH_SPAWN", "1");
+        cmd.env("KCODE_FRESH_SPAWN", "1");
     }
     for (key, value) in spawn_metadata_env(command, cwd) {
         cmd.env(key, value);
@@ -654,7 +654,7 @@ fn build_spawn_command(term: &str, command: &TerminalCommand, cwd: &Path) -> Opt
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     if command.fresh_spawn {
-        cmd.env("JCODE_FRESH_SPAWN", "1");
+        cmd.env("KCODE_FRESH_SPAWN", "1");
     }
 
     match term {
@@ -666,7 +666,12 @@ fn build_spawn_command(term: &str, command: &TerminalCommand, cwd: &Path) -> Opt
             // than requiring every user to configure an equivalent spawn hook.
             let herdr = terminal_env_value(&command.client_terminal_env, "HERDR_BIN_PATH")
                 .unwrap_or_else(|| "herdr".to_string());
-            let shell = shell_command(&command_parts(command));
+            // Unlike tmux/zellij, herdr runs the command inside an interactive
+            // shell, which would outlive jcode and leave an empty pane behind
+            // (e.g. after `swarm stop`). Exit that shell when jcode exits
+            // cleanly so the pane closes, but keep it open after a failure so
+            // the error stays readable.
+            let shell = format!("{} && exit", shell_command(&command_parts(command)));
             let script = concat!(
                 "set -eu; ",
                 "response=\"$(\"$1\" pane split --current --direction right --cwd \"$2\" --focus)\"; ",
@@ -680,11 +685,11 @@ fn build_spawn_command(term: &str, command: &TerminalCommand, cwd: &Path) -> Opt
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
-                .args(["-c", script, "jcode-herdr-spawn", &herdr])
+                .args(["-c", script, "kcode-herdr-spawn", &herdr])
                 .arg(cwd)
                 .arg(shell);
             if command.fresh_spawn {
-                cmd.env("JCODE_FRESH_SPAWN", "1");
+                cmd.env("KCODE_FRESH_SPAWN", "1");
             }
         }
         #[cfg(unix)]
@@ -741,7 +746,7 @@ fn build_spawn_command(term: &str, command: &TerminalCommand, cwd: &Path) -> Opt
                 .args([
                     "-c",
                     macos_ghostty_spawn_wrapper(),
-                    "jcode-ghostty-spawn",
+                    "kcode-ghostty-spawn",
                     &macos_ghostty_applescript(command, cwd),
                     &macos_terminal_inner_script(command, cwd),
                 ]);
@@ -819,7 +824,7 @@ fn build_spawn_command(term: &str, command: &TerminalCommand, cwd: &Path) -> Opt
     // Export spawn metadata to the terminal process so programs running
     // inside (shells, multiplexers) can also see why the window was opened.
     // Note: terminals launched indirectly (macOS `open`/`osascript` paths) do
-    // not inherit this env, matching the existing JCODE_FRESH_SPAWN caveat.
+    // not inherit this env, matching the existing KCODE_FRESH_SPAWN caveat.
     for (key, value) in spawn_metadata_env(command, cwd) {
         cmd.env(key, value);
     }
@@ -867,7 +872,7 @@ fn macos_terminal_inner_script(command: &TerminalCommand, cwd: &Path) -> String 
         "cd {} && exec {}{}",
         sh_escape(&cwd.to_string_lossy()),
         if command.fresh_spawn {
-            "env JCODE_FRESH_SPAWN=1 "
+            "env KCODE_FRESH_SPAWN=1 "
         } else {
             ""
         },
@@ -960,19 +965,19 @@ mod tests {
             .collect::<std::collections::HashMap<_, _>>();
         assert_eq!(env["HERDR_PANE_ID"].as_deref(), Some("client-pane"));
         assert_eq!(
-            env["JCODE_CLIENT_HERDR_PANE_ID"].as_deref(),
+            env["KCODE_CLIENT_HERDR_PANE_ID"].as_deref(),
             Some("client-pane")
         );
         assert_eq!(env["TMUX_PANE"], None);
         assert!(!env.contains_key("UNTRUSTED_CLIENT_VAR"));
-        assert!(!env.contains_key("JCODE_CLIENT_UNTRUSTED_CLIENT_VAR"));
+        assert!(!env.contains_key("KCODE_CLIENT_UNTRUSTED_CLIENT_VAR"));
     }
 
     #[test]
     fn spawn_metadata_env_reexports_client_terminal_env_with_native_and_client_keys() {
         // A spawn carrying the requesting client's terminal env (#405) should
         // export each var both natively (overriding the spawned process's
-        // inherited/stale value) and under a `JCODE_CLIENT_*` alias so hooks can
+        // inherited/stale value) and under a `KCODE_CLIENT_*` alias so hooks can
         // distinguish the client's terminal from the server's.
         let command = TerminalCommand::new("/usr/local/bin/jcode", vec!["--resume".to_string()])
             .kind("swarm-agent")
@@ -992,13 +997,13 @@ mod tests {
 
         assert_eq!(lookup("ZELLIJ_SESSION_NAME").as_deref(), Some("sessionB"));
         assert_eq!(
-            lookup("JCODE_CLIENT_ZELLIJ_SESSION_NAME").as_deref(),
+            lookup("KCODE_CLIENT_ZELLIJ_SESSION_NAME").as_deref(),
             Some("sessionB")
         );
         assert_eq!(lookup("DISPLAY").as_deref(), Some(":1"));
-        assert_eq!(lookup("JCODE_CLIENT_DISPLAY").as_deref(), Some(":1"));
+        assert_eq!(lookup("KCODE_CLIENT_DISPLAY").as_deref(), Some(":1"));
         // The first-class spawn metadata still flows through.
-        assert_eq!(lookup("JCODE_SPAWN_KIND").as_deref(), Some("swarm-agent"));
+        assert_eq!(lookup("KCODE_SPAWN_KIND").as_deref(), Some("swarm-agent"));
     }
 
     #[test]
@@ -1008,8 +1013,8 @@ mod tests {
             .session_id("ses_plain");
         let env = spawn_metadata_env(&command, Path::new("/tmp/work"));
         assert!(
-            !env.iter().any(|(k, _)| k.starts_with("JCODE_CLIENT_")),
-            "no client terminal env should produce no JCODE_CLIENT_* keys"
+            !env.iter().any(|(k, _)| k.starts_with("KCODE_CLIENT_")),
+            "no client terminal env should produce no KCODE_CLIENT_* keys"
         );
     }
 
@@ -1167,9 +1172,9 @@ mod tests {
     #[cfg(unix)]
     fn missing_tmux_binary_falls_back_to_detected_emulator() {
         let _guard = ENV_LOCK.lock().unwrap();
-        let previous_terminal = std::env::var_os("JCODE_TERMINAL");
+        let previous_terminal = std::env::var_os("KCODE_TERMINAL");
         unsafe {
-            std::env::remove_var("JCODE_TERMINAL");
+            std::env::remove_var("KCODE_TERMINAL");
         }
         let command =
             TerminalCommand::new("/usr/local/bin/jcode", vec![]).client_terminal_env(vec![
@@ -1194,8 +1199,8 @@ mod tests {
             });
 
         match previous_terminal {
-            Some(value) => unsafe { std::env::set_var("JCODE_TERMINAL", value) },
-            None => unsafe { std::env::remove_var("JCODE_TERMINAL") },
+            Some(value) => unsafe { std::env::set_var("KCODE_TERMINAL", value) },
+            None => unsafe { std::env::remove_var("KCODE_TERMINAL") },
         }
         assert!(matches!(result, Ok(true)));
         assert_eq!(attempts, vec!["tmux", "kitty"]);
@@ -1342,10 +1347,13 @@ mod tests {
         assert_eq!(args[0], "-c");
         assert!(args[1].contains("pane split --current --direction right"));
         assert!(args[1].contains("pane run \"$pane_id\""));
-        assert_eq!(args[2], "jcode-herdr-spawn");
+        assert_eq!(args[2], "kcode-herdr-spawn");
         assert_eq!(args[3], "/opt/herdr/bin/herdr");
         assert_eq!(args[4], "/work/a b");
-        assert_eq!(args[5], "'/usr/local/bin/jcode' '--resume' 'ses herdr'");
+        assert_eq!(
+            args[5],
+            "'/usr/local/bin/jcode' '--resume' 'ses herdr' && exit"
+        );
     }
 
     #[test]
@@ -1354,7 +1362,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = std::env::temp_dir().join(format!(
-            "jcode-herdr-test-{}-{}",
+            "kcode-herdr-test-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1403,7 +1411,7 @@ mod tests {
         );
         assert_eq!(
             lines[1],
-            "pane run w9:p12 '/opt/Jcode App/jcode' '--resume' 'session with spaces'"
+            "pane run w9:p12 '/opt/Jcode App/jcode' '--resume' 'session with spaces' && exit"
         );
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1428,7 +1436,7 @@ mod tests {
     #[cfg(not(unix))]
     fn windows_cmd_fallback_runs_jcode_under_cmd_k() {
         let command = TerminalCommand::new(
-            std::path::PathBuf::from(r"C:\Program Files\jcode\jcode.exe"),
+            std::path::PathBuf::from(r"C:\Program Files\jcode\kcode.exe"),
             vec!["self-dev".to_string()],
         )
         .title("jcode");
@@ -1438,7 +1446,7 @@ mod tests {
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect();
         assert_eq!(&args[..5], ["/C", "start", "jcode", "cmd.exe", "/K"]);
-        assert!(args[5].contains(r#""C:\Program Files\jcode\jcode.exe""#));
+        assert!(args[5].contains(r#""C:\Program Files\jcode\kcode.exe""#));
         assert!(args[5].contains("self-dev"));
     }
 
@@ -1467,7 +1475,7 @@ mod tests {
         let script = macos_terminal_inner_script(&command, Path::new("/tmp"));
         assert_eq!(
             script,
-            "cd '/tmp' && exec env JCODE_FRESH_SPAWN=1 '/usr/local/bin/jcode'"
+            "cd '/tmp' && exec env KCODE_FRESH_SPAWN=1 '/usr/local/bin/jcode'"
         );
     }
 
@@ -1515,7 +1523,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = std::env::temp_dir().join(format!(
-            "jcode-ghostty-fallback-{}-{}",
+            "kcode-ghostty-fallback-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1542,7 +1550,7 @@ mod tests {
             .args([
                 "-c",
                 macos_ghostty_spawn_wrapper(),
-                "jcode-ghostty-test",
+                "kcode-ghostty-test",
                 "invalid applescript",
                 "cd '/work tree' && exec '/opt/jcode' '--resume' 'ses ghost'",
             ])
@@ -1615,7 +1623,7 @@ mod tests {
         .title("🦊 jcode ses_abc")
         .kind("swarm-agent")
         .session_id("ses_abc")
-        .spawn_env("JCODE_SPAWN_SWARM_ID", "swarm-1")
+        .spawn_env("KCODE_SPAWN_SWARM_ID", "swarm-1")
         .fresh_spawn();
 
         let cmd = build_hook_spawn_command("tmux-hook --flag", &command, Path::new("/work/dir"))
@@ -1637,35 +1645,35 @@ mod tests {
         );
 
         assert_eq!(
-            env_value(&cmd, "JCODE_SPAWN_KIND").as_deref(),
+            env_value(&cmd, "KCODE_SPAWN_KIND").as_deref(),
             Some("swarm-agent")
         );
         assert_eq!(
-            env_value(&cmd, "JCODE_SPAWN_SESSION_ID").as_deref(),
+            env_value(&cmd, "KCODE_SPAWN_SESSION_ID").as_deref(),
             Some("ses_abc")
         );
         assert_eq!(
-            env_value(&cmd, "JCODE_SPAWN_TITLE").as_deref(),
+            env_value(&cmd, "KCODE_SPAWN_TITLE").as_deref(),
             Some("🦊 jcode ses_abc")
         );
         assert_eq!(
-            env_value(&cmd, "JCODE_SPAWN_CWD").as_deref(),
+            env_value(&cmd, "KCODE_SPAWN_CWD").as_deref(),
             Some("/work/dir")
         );
         assert_eq!(
-            env_value(&cmd, "JCODE_SPAWN_PROGRAM").as_deref(),
+            env_value(&cmd, "KCODE_SPAWN_PROGRAM").as_deref(),
             Some("/usr/local/bin/jcode")
         );
         #[cfg(unix)]
         assert_eq!(
-            env_value(&cmd, "JCODE_SPAWN_COMMAND").as_deref(),
+            env_value(&cmd, "KCODE_SPAWN_COMMAND").as_deref(),
             Some("'/usr/local/bin/jcode' '--resume' 'ses_abc'")
         );
         assert_eq!(
-            env_value(&cmd, "JCODE_SPAWN_SWARM_ID").as_deref(),
+            env_value(&cmd, "KCODE_SPAWN_SWARM_ID").as_deref(),
             Some("swarm-1")
         );
-        assert_eq!(env_value(&cmd, "JCODE_FRESH_SPAWN").as_deref(), Some("1"));
+        assert_eq!(env_value(&cmd, "KCODE_FRESH_SPAWN").as_deref(), Some("1"));
     }
 
     #[test]
@@ -1681,11 +1689,11 @@ mod tests {
         let cmd = build_spawn_command("kitty", &command, Path::new("/work/dir"))
             .expect("kitty spawn command should build");
         assert_eq!(
-            env_value(&cmd, "JCODE_SPAWN_KIND").as_deref(),
+            env_value(&cmd, "KCODE_SPAWN_KIND").as_deref(),
             Some("resume")
         );
         assert_eq!(
-            env_value(&cmd, "JCODE_SPAWN_SESSION_ID").as_deref(),
+            env_value(&cmd, "KCODE_SPAWN_SESSION_ID").as_deref(),
             Some("ses_abc")
         );
     }

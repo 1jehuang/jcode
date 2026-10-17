@@ -3,18 +3,18 @@
 
 Run offline: python3 tests/test_native_ssh_login.py --self-test
 Run live only after the coordinator deploys matching binaries:
-  JCODE_NATIVE_SSH_LOGIN=1 \\
-  JCODE_NATIVE_SSH_BINARY=/absolute/local/jcode \\
-  JCODE_NATIVE_SSH_HOST=explicit-verified-ec2-alias \\
-  JCODE_NATIVE_SSH_CWD=/home/ubuntu/jcode \\
-  JCODE_NATIVE_SSH_LOGIN_REMOTE_EXECUTABLE=/absolute/remote/ELF/jcode \\
+  KCODE_NATIVE_SSH_LOGIN=1 \\
+  KCODE_NATIVE_SSH_BINARY=/absolute/local/jcode \\
+  KCODE_NATIVE_SSH_HOST=explicit-verified-ec2-alias \\
+  KCODE_NATIVE_SSH_CWD=/home/ubuntu/jcode \\
+  KCODE_NATIVE_SSH_LOGIN_REMOTE_EXECUTABLE=/absolute/remote/ELF/jcode \\
     python3 tests/test_native_ssh_login.py
 
 No opt-in means no subprocess or network access. No builds, AWS API, installation,
 SSH configuration edits, browser opening, OAuth completion, or model prompts.
 The remote executable MUST be an actual ELF, not a wrapper that could reset HOME.
 We create our own private wrapper under ~/.cache/jcode-login-acceptance/, with an
-empty HOME, JCODE_HOME, runtime and explicit private server socket. The wrapper
+empty HOME, KCODE_HOME, runtime and explicit private server socket. The wrapper
 executes the real CLI and rejects every completion except a synthetic localhost
 callback whose state demonstrably differs from the remote pending state. It also
 sets a closed loopback HTTP proxy as defense in depth, not as packet-capture proof.
@@ -72,7 +72,7 @@ import test_native_ssh_cli as native
 PREFIX = native.PREFIX
 require = native.require
 TIMEOUT = native.TIMEOUT
-INVALID_CODE_PREFIX = "JCODE_SSH_LOGIN_INVALID_"
+INVALID_CODE_PREFIX = "KCODE_SSH_LOGIN_INVALID_"
 CANCEL_COMPLETE = "Pending authorization was removed on the remote host."
 CREDENTIAL_NAMES = {
     "openai-auth.json", "claude-auth.json", "auth.json", ".credentials.json",
@@ -89,12 +89,12 @@ root = pathlib.Path(ROOT)
 env = {
     "PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": str(root / "home"),
     "USER": "jcode-login-acceptance", "LANG": "C.UTF-8", "TERM": "xterm-256color",
-    "JCODE_HOME": str(root / "jcode"), "JCODE_RUNTIME_DIR": str(root / "runtime"),
+    "KCODE_HOME": str(root / "jcode"), "KCODE_RUNTIME_DIR": str(root / "runtime"),
     "XDG_RUNTIME_DIR": str(root / "runtime"),
     "XDG_CONFIG_HOME": str(root / "home" / ".config"),
     "XDG_CACHE_HOME": str(root / "home" / ".cache"),
-    "JCODE_NO_BROWSER": "1", "NO_BROWSER": "1", "BROWSER": "/bin/false",
-    "JCODE_NO_TELEMETRY": "1", "DO_NOT_TRACK": "1", "JCODE_WAKE_MODE": "external",
+    "KCODE_NO_BROWSER": "1", "NO_BROWSER": "1", "BROWSER": "/bin/false",
+    "KCODE_NO_TELEMETRY": "1", "DO_NOT_TRACK": "1", "KCODE_WAKE_MODE": "external",
     "HTTP_PROXY": "http://127.0.0.1:9", "HTTPS_PROXY": "http://127.0.0.1:9",
     "ALL_PROXY": "http://127.0.0.1:9", "NO_PROXY": "",
 }
@@ -136,7 +136,7 @@ if "--callback-url" in args:
         if (len(payload) > 16384 or parsed.scheme != "http" or
             parsed.hostname not in ("localhost", "127.0.0.1") or parsed.path != "/auth/callback" or
             len(query.get("state", [])) != 1 or len(query.get("code", [])) != 1 or
-            not query["code"][0].startswith("JCODE_SSH_LOGIN_INVALID_") or not states or
+            not query["code"][0].startswith("KCODE_SSH_LOGIN_INVALID_") or not states or
             query["state"][0] in states):
             refuse()
     except (ValueError, KeyError, UnicodeError):
@@ -293,7 +293,7 @@ else:
 
 def configured():
     if os.environ.get(PREFIX + "LOGIN") != "1":
-        print("SKIP native SSH login acceptance: set JCODE_NATIVE_SSH_LOGIN=1 explicitly")
+        print("SKIP native SSH login acceptance: set KCODE_NATIVE_SSH_LOGIN=1 explicitly")
         return None
     executable = os.environ.get(PREFIX + "LOGIN_REMOTE_EXECUTABLE", "")
     require(executable.startswith("/") and not any(ord(c) < 32 or ord(c) == 127 for c in executable),
@@ -575,20 +575,20 @@ def run_acceptance(config):
     print(json.dumps({"isolated_remote_root": config["ROOT"], "server_socket": config["SERVER_SOCKET"],
                       "owner": config["OWNER"], "cleanup": "coordinator owns isolated daemon/artifacts"}))
     try:
-        with tempfile.TemporaryDirectory(prefix="jcode-ssh-login-", dir=os.environ.get("JCODE_SCRATCH_DIR")) as root:
+        with tempfile.TemporaryDirectory(prefix="jcode-ssh-login-", dir=os.environ.get("KCODE_SCRATCH_DIR")) as root:
             root = Path(root)
             for name in ("home", "jcode", "runtime"):
                 (root / name).mkdir(mode=0o700)
             env = {key: value for key, value in os.environ.items()
                    if key in {"PATH", "USER", "LOGNAME", "LANG", "LC_ALL", "SSH_AUTH_SOCK", "SSH_AGENT_PID"}}
-            env.update(HOME=str(root / "home"), JCODE_HOME=str(root / "jcode"),
-                       JCODE_RUNTIME_DIR=str(root / "runtime"), XDG_RUNTIME_DIR=str(root / "runtime"),
+            env.update(HOME=str(root / "home"), KCODE_HOME=str(root / "jcode"),
+                       KCODE_RUNTIME_DIR=str(root / "runtime"), XDG_RUNTIME_DIR=str(root / "runtime"),
                        XDG_CONFIG_HOME=str(root / "home" / ".config"),
                        XDG_CACHE_HOME=str(root / "home" / ".cache"),
-                       JCODE_NO_BROWSER="1", NO_BROWSER="1", BROWSER="/bin/false",
-                       JCODE_NO_TELEMETRY="1", DO_NOT_TRACK="1", JCODE_WAKE_MODE="external",
+                       KCODE_NO_BROWSER="1", NO_BROWSER="1", BROWSER="/bin/false",
+                       KCODE_NO_TELEMETRY="1", DO_NOT_TRACK="1", KCODE_WAKE_MODE="external",
                        TERM="xterm-256color", NO_COLOR="0")
-            sentinel = "JCODE_SSH_LOGIN_CONTEXT_" + uuid.uuid4().hex
+            sentinel = "KCODE_SSH_LOGIN_CONTEXT_" + uuid.uuid4().hex
             instance = "ssh-login-acceptance-" + uuid.uuid4().hex
             with native.Bridge(config) as bridge:
                 header = bridge.handshake()
@@ -872,9 +872,9 @@ class HarnessSelfTests(unittest.TestCase):
             self.assertTrue(json.loads(audit)["state_mismatch"])
             self.assertTrue(json.loads(audit)["mismatch_verified"])
             env = run.call_args.kwargs["env"]
-            self.assertEqual(env["JCODE_HOME"], str(root / "jcode"))
+            self.assertEqual(env["KCODE_HOME"], str(root / "jcode"))
             self.assertEqual(env["HOME"], str(root / "home"))
-            self.assertEqual(env["JCODE_NO_BROWSER"], "1")
+            self.assertEqual(env["KCODE_NO_BROWSER"], "1")
 
     def test_remote_wrapper_refuses_matching_state_real_code_and_inline_secrets(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -883,7 +883,7 @@ class HarnessSelfTests(unittest.TestCase):
             pending.mkdir(parents=True)
             (pending / "openai.json").write_text(json.dumps({"login": {"state": "actual-remote-state"}}))
             cases = [
-                (["--callback-url", "-"], b"http://localhost:1455/auth/callback?code=JCODE_SSH_LOGIN_INVALID_test&state=actual-remote-state"),
+                (["--callback-url", "-"], b"http://localhost:1455/auth/callback?code=KCODE_SSH_LOGIN_INVALID_test&state=actual-remote-state"),
                 (["--callback-url", "-"], b"http://localhost:1455/auth/callback?code=real-auth-code&state=wrong"),
                 (["--callback-url", "secret-inline"], b""),
                 (["--auth-code", "-"], b""),

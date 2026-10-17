@@ -15,9 +15,9 @@ use super::Config;
 #[test]
 fn configured_colors_survive_a_real_config_file_round_trip() {
     let _guard = crate::storage::lock_test_env();
-    let prev_home = std::env::var_os("JCODE_HOME");
+    let prev_home = std::env::var_os("KCODE_HOME");
     let dir = tempfile::TempDir::new().expect("tempdir");
-    crate::env::set_var("JCODE_HOME", dir.path());
+    crate::env::set_var("KCODE_HOME", dir.path());
     Config::invalidate_cache();
 
     // The file jcode writes for a new user must document colors and parse.
@@ -76,9 +76,9 @@ fn configured_colors_survive_a_real_config_file_round_trip() {
     );
 
     if let Some(prev) = prev_home {
-        crate::env::set_var("JCODE_HOME", prev);
+        crate::env::set_var("KCODE_HOME", prev);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
     }
 }
 
@@ -87,16 +87,16 @@ fn configured_colors_survive_a_real_config_file_round_trip() {
 ///
 /// The unit tests in `jcode-config-types` cover lenient enum parsing in
 /// isolation. This covers the path the reporter actually took: hand-written
-/// `~/.jcode/config.toml`, loaded through the same global cache the running
+/// `~/.kcode/config.toml`, loaded through the same global cache the running
 /// process uses, then read back through the summary they would check. The
 /// original bug was invisible at the field level precisely because it happened
 /// during whole-file parsing, so it needs a file-level test.
 #[test]
 fn reported_display_config_survives_a_real_config_file_round_trip() {
     let _guard = crate::storage::lock_test_env();
-    let prev_home = std::env::var_os("JCODE_HOME");
+    let prev_home = std::env::var_os("KCODE_HOME");
     let dir = tempfile::TempDir::new().expect("tempdir");
-    crate::env::set_var("JCODE_HOME", dir.path());
+    crate::env::set_var("KCODE_HOME", dir.path());
     Config::invalidate_cache();
 
     let path = Config::path().expect("config path");
@@ -153,8 +153,8 @@ fn reported_display_config_survives_a_real_config_file_round_trip() {
     );
 
     match prev_home {
-        Some(prev) => crate::env::set_var("JCODE_HOME", prev),
-        None => crate::env::remove_var("JCODE_HOME"),
+        Some(prev) => crate::env::set_var("KCODE_HOME", prev),
+        None => crate::env::remove_var("KCODE_HOME"),
     }
     Config::invalidate_cache();
 }

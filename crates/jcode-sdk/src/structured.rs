@@ -100,7 +100,7 @@ impl<T> StructuredTurnResult<T> {
         Self {
             data,
             attempts,
-            text: turn.text,
+            text: turn.final_text,
             reasoning: turn.reasoning,
             tool_calls: turn.tool_calls,
             usage: turn.usage,
@@ -251,14 +251,15 @@ impl JcodeClient {
 
         for attempt_number in 1..=options.max_retries.saturating_add(1) {
             let turn = self.run(session_id, &prompt, options.run_options())?;
-            let validation = validate_structured_text::<T>(&turn.text, &validator, &options.schema);
+            let validation =
+                validate_structured_text::<T>(&turn.final_text, &validator, &options.schema);
             let errors = match &validation {
                 Ok(_) => Vec::new(),
                 Err(errors) => errors.clone(),
             };
             let attempt = StructuredOutputAttempt {
                 attempt: attempt_number,
-                text: turn.text.clone(),
+                text: turn.final_text.clone(),
                 errors,
             };
             attempts.push(attempt.clone());

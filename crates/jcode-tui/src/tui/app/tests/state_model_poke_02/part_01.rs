@@ -30,12 +30,14 @@ fn test_tool_side_panel_focus_supports_horizontal_pan_keys() {
     let mut app = create_test_app();
     app.diff_mode = crate::config::DiffDisplayMode::Inline;
     app.side_panel = crate::side_panel::SidePanelSnapshot {
+        focus_revision: 0,
         focused_page_id: Some("plan".to_string()),
         pages: vec![crate::side_panel::SidePanelPage {
             id: "plan".to_string(),
             title: "Plan".to_string(),
             file_path: "".to_string(),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
+            pdf_data: None,
             source: crate::side_panel::SidePanelPageSource::Managed,
             content: "hello".to_string(),
             updated_at_ms: 1,
@@ -60,12 +62,14 @@ fn test_tool_side_panel_focus_supports_image_zoom_keys() {
     let mut app = create_test_app();
     app.diff_mode = crate::config::DiffDisplayMode::Inline;
     app.side_panel = crate::side_panel::SidePanelSnapshot {
+        focus_revision: 0,
         focused_page_id: Some("plan".to_string()),
         pages: vec![crate::side_panel::SidePanelPage {
             id: "plan".to_string(),
             title: "Plan".to_string(),
             file_path: "".to_string(),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
+            pdf_data: None,
             source: crate::side_panel::SidePanelPageSource::Managed,
             content: "hello".to_string(),
             updated_at_ms: 1,
@@ -97,12 +101,14 @@ fn test_mouse_horizontal_scroll_over_tool_side_panel_pans_without_focus_change()
     app.diff_pane_scroll_x = 0;
     app.diff_pane_focus = false;
     app.side_panel = crate::side_panel::SidePanelSnapshot {
+        focus_revision: 0,
         focused_page_id: Some("plan".to_string()),
         pages: vec![crate::side_panel::SidePanelPage {
             id: "plan".to_string(),
             title: "Plan".to_string(),
             file_path: "".to_string(),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
+            pdf_data: None,
             source: crate::side_panel::SidePanelPageSource::Managed,
             content: "hello".to_string(),
             updated_at_ms: 1,
@@ -138,12 +144,14 @@ fn test_ctrl_mouse_scroll_over_tool_side_panel_zooms_images() {
     app.side_panel_image_zoom_percent = 100;
     app.diff_pane_focus = false;
     app.side_panel = crate::side_panel::SidePanelSnapshot {
+        focus_revision: 0,
         focused_page_id: Some("plan".to_string()),
         pages: vec![crate::side_panel::SidePanelPage {
             id: "plan".to_string(),
             title: "Plan".to_string(),
             file_path: "".to_string(),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
+            pdf_data: None,
             source: crate::side_panel::SidePanelPageSource::Managed,
             content: "hello".to_string(),
             updated_at_ms: 1,
@@ -622,6 +630,25 @@ fn test_fuzzy_command_suggestions() {
 }
 
 #[test]
+fn test_swarm_effort_autocomplete_and_help() {
+    let app = create_test_app();
+    let suggestions = app.get_suggestions_for("/effort swarm");
+    for mode in ["swarm", "swarm-deep"] {
+        let command = format!("/effort {mode}");
+        let (_, label) = suggestions
+            .iter()
+            .find(|(cmd, _)| cmd == &command)
+            .expect("both swarm modes should be suggested");
+        assert_eq!(*label, super::effort_display_label(mode));
+        assert!(label.contains("[Beta]"));
+    }
+    let help = app.command_help("effort").expect("effort help");
+    assert!(help.contains("swarm_root_effort"));
+    assert!(help.contains("swarm_deep_root_effort"));
+    assert!(!help.contains("run at max reasoning"));
+}
+
+#[test]
 fn test_refresh_model_list_command_suggestions() {
     let app = create_test_app();
     let suggestions = app.get_suggestions_for("/refresh");
@@ -944,12 +971,12 @@ fn test_top_level_command_suggestions_include_project_local_skills() {
     let mut app = create_test_app();
 
     // Hermetic project-local skill: the suggestion list must surface skills
-    // found under <working_dir>/.jcode/skills, independent of the skills
+    // found under <working_dir>/.kcode/skills, independent of the skills
     // installed on the machine running the tests.
     let temp = tempfile::tempdir().expect("tempdir");
     let skill_dir = temp
         .path()
-        .join(".jcode")
+        .join(".kcode")
         .join("skills")
         .join("optimization");
     std::fs::create_dir_all(&skill_dir).expect("create skill dir");
@@ -1004,31 +1031,37 @@ fn test_top_level_command_suggestions_include_all_non_hidden_commands() {
 #[test]
 fn test_logout_clear_anthropic_accounts_removes_all_accounts_once() {
     with_temp_jcode_home(|| {
+        // `account_store::upsert_account` assigns its own canonical label
+        // (`claude-<animal>`) and ignores the requested one for a new account,
+        // so capture what it actually returns instead of assuming the request
+        // was honoured.
+        let mut assigned = Vec::new();
         for index in 1..=3 {
-            crate::auth::claude::upsert_account(crate::auth::claude::AnthropicAccount {
-                label: format!("requested-{index}"),
-                access: format!("access-{index}"),
-                refresh: format!("refresh-{index}"),
-                expires: 100 + index,
-                email: None,
-                subscription_type: None,
-                scopes: Vec::new(),
-            })
-            .unwrap();
+            assigned.push(
+                crate::auth::claude::upsert_account(crate::auth::claude::AnthropicAccount {
+                    label: format!("requested-{index}"),
+                    access: format!("access-{index}"),
+                    refresh: format!("refresh-{index}"),
+                    expires: 100 + index,
+                    email: None,
+                    subscription_type: None,
+                    scopes: Vec::new(),
+                })
+                .unwrap(),
+            );
         }
-        crate::auth::claude::set_active_account("claude-panda").unwrap();
+        let last = assigned
+            .last()
+            .expect("three accounts were created")
+            .clone();
+        crate::auth::claude::set_active_account(&last).unwrap();
 
         let labels: Vec<_> = crate::auth::claude::list_accounts()
             .unwrap()
             .into_iter()
             .map(|account| account.label)
             .collect();
-        // Account labels are assigned from a stable animal pool (see
-        // crates/kcode-base/src/auth/account_store.rs::canonical_account_label):
-        // the 1st account is "claude-otter", the 2nd is "claude-fox", etc.
-        // The `requested-{index}` input labels are placeholders that
-        // `upsert_account` rewrites; the test then activates the third.
-        assert_eq!(labels, vec!["claude-otter", "claude-fox", "claude-panda"]);
+        assert_eq!(labels, assigned);
 
         assert_eq!(crate::auth::claude::clear_accounts().unwrap(), 3);
         assert!(crate::auth::claude::list_accounts().unwrap().is_empty());
@@ -1078,12 +1111,14 @@ fn test_context_command_reports_session_context_snapshot() {
         app.pending_images
             .push(("image/png".to_string(), "abc".to_string()));
         app.side_panel = crate::side_panel::SidePanelSnapshot {
+            focus_revision: 0,
             focused_page_id: Some("goals".to_string()),
             pages: vec![crate::side_panel::SidePanelPage {
                 id: "goals".to_string(),
                 title: "Goals".to_string(),
                 file_path: "".to_string(),
                 format: crate::side_panel::SidePanelPageFormat::Markdown,
+                pdf_data: None,
                 source: crate::side_panel::SidePanelPageSource::Managed,
                 content: "goal details".to_string(),
                 updated_at_ms: 0,
@@ -1184,8 +1219,8 @@ fn test_goals_show_suggestions_include_goal_ids() {
     let temp = tempfile::tempdir().expect("tempdir");
     let project = temp.path().join("repo");
     std::fs::create_dir_all(&project).expect("project dir");
-    let prev_home = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", temp.path());
+    let prev_home = std::env::var_os("KCODE_HOME");
+    crate::env::set_var("KCODE_HOME", temp.path());
 
     let goal = crate::goal::create_goal(
         crate::goal::GoalCreateInput {
@@ -1208,9 +1243,9 @@ fn test_goals_show_suggestions_include_goal_ids() {
     );
 
     if let Some(prev_home) = prev_home {
-        crate::env::set_var("JCODE_HOME", prev_home);
+        crate::env::set_var("KCODE_HOME", prev_home);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
     }
 }
 
@@ -1231,11 +1266,16 @@ fn configure_test_remote_models_with_openai_recommendations(app: &mut App) {
         "gpt-5.3-codex-spark".to_string(),
         "gpt-5.3-codex".to_string(),
         "claude-opus-4-8".to_string(),
+        jcode_provider_core::DEFAULT_OPENAI_MODEL.to_string(),
+        jcode_provider_core::DEFAULT_CLAUDE_MODEL.to_string(),
     ];
     app.remote_model_options = app
         .remote_available_entries
         .iter()
-        .filter(|model| model.as_str() != "claude-opus-4-8")
+        .filter(|model| {
+            model.as_str() != "claude-opus-4-8"
+                && model.as_str() != jcode_provider_core::DEFAULT_CLAUDE_MODEL
+        })
         .cloned()
         .map(|model| crate::provider::ModelRoute {
             model,
@@ -1265,6 +1305,17 @@ fn configure_test_remote_models_with_openai_recommendations(app: &mut App) {
         usage: None,
         cheapness: None,
     });
+    for api_method in ["claude-oauth", "claude-api"] {
+        app.remote_model_options.push(crate::provider::ModelRoute {
+            model: jcode_provider_core::DEFAULT_CLAUDE_MODEL.to_string(),
+            provider: "Anthropic".to_string(),
+            api_method: api_method.to_string(),
+            available: true,
+            detail: String::new(),
+            usage: None,
+            cheapness: None,
+        });
+    }
 }
 
 fn configure_test_remote_openrouter_provider_routes(app: &mut App) {
@@ -1390,7 +1441,7 @@ fn test_swarm_prompt_command_is_discoverable_in_suggestions_and_help() {
         .command_help("swarm-prompt")
         .expect("/swarm-prompt should have detailed help");
     assert!(help.contains("/swarm-prompt"));
-    assert!(help.contains(".jcode/swarm-prompt.md"));
+    assert!(help.contains(".kcode/swarm-prompt.md"));
     assert!(help.contains("Restart or reload Jcode"));
 }
 
@@ -1462,12 +1513,14 @@ fn test_panel_image_preview_click_render_dismiss_and_restore() {
     let mut app = create_test_app();
     app.diff_mode = crate::config::DiffDisplayMode::Inline;
     app.side_panel = crate::side_panel::SidePanelSnapshot {
+        focus_revision: 0,
         focused_page_id: Some("preview".into()),
         pages: vec![crate::side_panel::SidePanelPage {
             id: "preview".into(),
             title: "Preview fixture".into(),
             file_path: "".into(),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
+            pdf_data: None,
             source: crate::side_panel::SidePanelPageSource::Managed,
             content: format!(
                 "# Preview fixture\n\n![Image]({})\n\nAfter image",

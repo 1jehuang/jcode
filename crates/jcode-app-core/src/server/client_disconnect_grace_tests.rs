@@ -36,8 +36,8 @@ struct Home {
 impl Home {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let previous = std::env::var_os("JCODE_HOME");
-        crate::env::set_var("JCODE_HOME", dir.path());
+        let previous = std::env::var_os("KCODE_HOME");
+        crate::env::set_var("KCODE_HOME", dir.path());
         Self {
             _dir: dir,
             previous,
@@ -47,8 +47,8 @@ impl Home {
 impl Drop for Home {
     fn drop(&mut self) {
         match self.previous.take() {
-            Some(value) => crate::env::set_var("JCODE_HOME", value),
-            None => crate::env::remove_var("JCODE_HOME"),
+            Some(value) => crate::env::set_var("KCODE_HOME", value),
+            None => crate::env::remove_var("KCODE_HOME"),
         }
     }
 }
@@ -116,13 +116,25 @@ impl Fixture {
     }
 
     async fn cleanup(&self, processing: bool, grace: Duration) {
+        assert!(
+            self.cleanup_task(processing, grace, &mut None)
+                .await
+                .is_none()
+        );
+    }
+
+    async fn cleanup_task(
+        &self,
+        processing: bool,
+        grace: Duration,
+        task: &mut Option<tokio::task::JoinHandle<()>>,
+    ) -> Option<tokio::task::JoinHandle<()>> {
         let (swarm_events, _) = broadcast::channel(8);
-        let mut task = None;
         cleanup_client_connection(
             &self.sessions,
             &self.id,
             processing,
-            &mut task,
+            task,
             tokio::spawn(std::future::pending()),
             &self.members,
             &Arc::new(RwLock::new(HashMap::new())),
@@ -144,7 +156,7 @@ impl Fixture {
             grace,
         )
         .await
-        .unwrap();
+        .unwrap()
     }
 
     async fn wait_for_detach(&self) {
@@ -284,6 +296,65 @@ async fn interrupted_session_does_not_wait_for_reconnect_grace() {
     )
     .await
     .unwrap();
+    assert!(fixture.sessions.read().await.is_empty());
+    assert!(matches!(
+        fixture.agent.lock().await.session_for_split().status,
+        SessionStatus::Crashed { .. }
+    ));
+}
+
+#[tokio::test]
+async fn busy_successor_retains_owner_task_and_completion_receiver() {
+    let _lock = crate::storage::lock_test_env();
+    let _home = Home::new();
+    let fixture = Fixture::new(true).await;
+    fixture.attach_successor().await;
+    let (finish, wait) = tokio::sync::oneshot::channel();
+    let (done, mut completions) = mpsc::unbounded_channel();
+    let mut task = Some(tokio::spawn(async move {
+        wait.await.unwrap();
+        done.send("completed").unwrap();
+    }));
+    let writer = fixture
+        .cleanup_task(true, Duration::ZERO, &mut task)
+        .await
+        .expect("successor returns ownership to lifecycle continuation");
+    assert!(!task.as_ref().unwrap().is_finished());
+    assert!(fixture.sessions.read().await.contains_key(&fixture.id));
+    assert!(fixture.connections.read().await.contains_key("successor"));
+    assert!(!fixture.connections.read().await.contains_key("original"));
+    writer.abort();
+    finish.send(()).unwrap();
+    task.take().unwrap().await.expect("owner was not cancelled");
+    assert_eq!(completions.recv().await, Some("completed"));
+    fixture.cleanup(false, Duration::ZERO).await;
+    assert!(fixture.sessions.read().await.contains_key(&fixture.id));
+}
+
+#[tokio::test]
+async fn busy_without_successor_aborts_owner_and_marks_crashed() {
+    let _lock = crate::storage::lock_test_env();
+    let _home = Home::new();
+    crate::server::clear_reload_marker();
+    let fixture = Fixture::new(true).await;
+    let (dropped, observed_drop) = tokio::sync::oneshot::channel::<()>();
+    let mut task = Some(tokio::spawn(async move {
+        let _guard = dropped;
+        std::future::pending::<()>().await;
+    }));
+    assert!(
+        fixture
+            .cleanup_task(true, Duration::ZERO, &mut task)
+            .await
+            .is_none()
+    );
+    assert!(task.is_none());
+    assert!(
+        timeout(Duration::from_secs(1), observed_drop)
+            .await
+            .unwrap()
+            .is_err()
+    );
     assert!(fixture.sessions.read().await.is_empty());
     assert!(matches!(
         fixture.agent.lock().await.session_for_split().status,

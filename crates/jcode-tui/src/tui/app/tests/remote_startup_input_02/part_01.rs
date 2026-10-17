@@ -258,8 +258,8 @@ fn test_remote_placeholder_only_openai_routes_are_replaced_with_real_routes() {
 #[test]
 fn test_remote_hydrated_catalog_restores_missing_direct_bedrock_route() {
     with_temp_jcode_home(|| {
-        let previous_enable = std::env::var_os("JCODE_BEDROCK_ENABLE");
-        crate::env::set_var("JCODE_BEDROCK_ENABLE", "1");
+        let previous_enable = std::env::var_os("KCODE_BEDROCK_ENABLE");
+        crate::env::set_var("KCODE_BEDROCK_ENABLE", "1");
         crate::auth::AuthStatus::invalidate_cache();
 
         let model = "amazon.nova-pro-v1:0";
@@ -280,8 +280,8 @@ fn test_remote_hydrated_catalog_restores_missing_direct_bedrock_route() {
         app.open_model_picker();
 
         match previous_enable {
-            Some(value) => crate::env::set_var("JCODE_BEDROCK_ENABLE", value),
-            None => crate::env::remove_var("JCODE_BEDROCK_ENABLE"),
+            Some(value) => crate::env::set_var("KCODE_BEDROCK_ENABLE", value),
+            None => crate::env::remove_var("KCODE_BEDROCK_ENABLE"),
         }
         crate::auth::AuthStatus::invalidate_cache();
 
@@ -437,7 +437,7 @@ fn test_remote_jcode_subscription_catalog_is_not_augmented_with_local_auth_route
         let mut app = create_test_app();
         app.is_remote = true;
         app.remote_provider_name =
-            Some(crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME.to_string());
+            Some(crate::subscription_catalog::KCODE_PROVIDER_DISPLAY_NAME.to_string());
         app.remote_available_entries = vec![
             "claude-opus-4-8".to_string(),
             "gpt-5.5".to_string(),
@@ -470,8 +470,8 @@ fn test_remote_jcode_subscription_catalog_is_not_augmented_with_local_auth_route
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(app.remote_model_options.len(), expected.len());
         assert!(app.remote_model_options.iter().all(|route| {
-            route.provider == crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
-                && route.api_method == crate::subscription_catalog::JCODE_ROUTE_API_METHOD
+            route.provider == crate::subscription_catalog::KCODE_PROVIDER_DISPLAY_NAME
+                && route.api_method == crate::subscription_catalog::KCODE_ROUTE_API_METHOD
                 && route.available
         }));
         assert_eq!(
@@ -520,8 +520,8 @@ fn test_remote_mixed_catalog_keeps_jcode_subscription_separate_from_other_provid
         },
         crate::provider::ModelRoute {
             model: "claude-opus-4-8".to_string(),
-            provider: crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME.to_string(),
-            api_method: crate::subscription_catalog::JCODE_ROUTE_API_METHOD.to_string(),
+            provider: crate::subscription_catalog::KCODE_PROVIDER_DISPLAY_NAME.to_string(),
+            api_method: crate::subscription_catalog::KCODE_ROUTE_API_METHOD.to_string(),
             available: true,
             detail: "managed subscription route".to_string(),
             usage: None,
@@ -529,8 +529,8 @@ fn test_remote_mixed_catalog_keeps_jcode_subscription_separate_from_other_provid
         },
         crate::provider::ModelRoute {
             model: "gpt-5.5".to_string(),
-            provider: crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME.to_string(),
-            api_method: crate::subscription_catalog::JCODE_ROUTE_API_METHOD.to_string(),
+            provider: crate::subscription_catalog::KCODE_PROVIDER_DISPLAY_NAME.to_string(),
+            api_method: crate::subscription_catalog::KCODE_ROUTE_API_METHOD.to_string(),
             available: true,
             detail: "managed subscription route".to_string(),
             usage: None,
@@ -538,8 +538,8 @@ fn test_remote_mixed_catalog_keeps_jcode_subscription_separate_from_other_provid
         },
         crate::provider::ModelRoute {
             model: "gpt-5.6-sol".to_string(),
-            provider: crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME.to_string(),
-            api_method: crate::subscription_catalog::JCODE_ROUTE_API_METHOD.to_string(),
+            provider: crate::subscription_catalog::KCODE_PROVIDER_DISPLAY_NAME.to_string(),
+            api_method: crate::subscription_catalog::KCODE_ROUTE_API_METHOD.to_string(),
             available: true,
             detail: "managed subscription route".to_string(),
             usage: None,
@@ -563,8 +563,8 @@ fn test_remote_mixed_catalog_keeps_jcode_subscription_separate_from_other_provid
         .remote_model_options
         .iter()
         .filter(|route| {
-            route.provider == crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
-                && route.api_method == crate::subscription_catalog::JCODE_ROUTE_API_METHOD
+            route.provider == crate::subscription_catalog::KCODE_PROVIDER_DISPLAY_NAME
+                && route.api_method == crate::subscription_catalog::KCODE_ROUTE_API_METHOD
         })
         .collect::<Vec<_>>();
     assert_eq!(jcode_routes.len(), 3);
@@ -586,7 +586,7 @@ fn test_remote_mixed_catalog_keeps_jcode_subscription_separate_from_other_provid
             && route.api_method == "openrouter"
     }));
     assert!(app.remote_model_options.iter().all(|route| {
-        route.provider != crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
+        route.provider != crate::subscription_catalog::KCODE_PROVIDER_DISPLAY_NAME
             || matches!(
                 route.model.as_str(),
                 "claude-opus-4-8" | "gpt-5.5" | "gpt-5.6-sol"
@@ -598,13 +598,13 @@ fn test_remote_mixed_catalog_keeps_jcode_subscription_separate_from_other_provid
 #[test]
 fn test_remote_hydrated_catalog_adds_entitled_jcode_subscription_routes() {
     with_temp_jcode_home(|| {
-        let previous_key = std::env::var_os(crate::subscription_catalog::JCODE_API_KEY_ENV);
-        let previous_tier = std::env::var_os(crate::subscription_catalog::JCODE_TIER_ENV);
+        let previous_key = std::env::var_os(crate::subscription_catalog::KCODE_API_KEY_ENV);
+        let previous_tier = std::env::var_os(crate::subscription_catalog::KCODE_TIER_ENV);
         crate::env::set_var(
-            crate::subscription_catalog::JCODE_API_KEY_ENV,
+            crate::subscription_catalog::KCODE_API_KEY_ENV,
             "jcode_test_subscription_key",
         );
-        crate::env::set_var(crate::subscription_catalog::JCODE_TIER_ENV, "plus");
+        crate::env::set_var(crate::subscription_catalog::KCODE_TIER_ENV, "plus");
 
         let mut app = create_test_app();
         app.is_remote = true;
@@ -659,21 +659,21 @@ fn test_remote_hydrated_catalog_adds_entitled_jcode_subscription_routes() {
 
         match previous_key {
             Some(value) => {
-                crate::env::set_var(crate::subscription_catalog::JCODE_API_KEY_ENV, value)
+                crate::env::set_var(crate::subscription_catalog::KCODE_API_KEY_ENV, value)
             }
-            None => crate::env::remove_var(crate::subscription_catalog::JCODE_API_KEY_ENV),
+            None => crate::env::remove_var(crate::subscription_catalog::KCODE_API_KEY_ENV),
         }
         match previous_tier {
-            Some(value) => crate::env::set_var(crate::subscription_catalog::JCODE_TIER_ENV, value),
-            None => crate::env::remove_var(crate::subscription_catalog::JCODE_TIER_ENV),
+            Some(value) => crate::env::set_var(crate::subscription_catalog::KCODE_TIER_ENV, value),
+            None => crate::env::remove_var(crate::subscription_catalog::KCODE_TIER_ENV),
         }
 
         let jcode_routes = app
             .remote_model_options
             .iter()
             .filter(|route| {
-                route.provider == crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
-                    && route.api_method == crate::subscription_catalog::JCODE_ROUTE_API_METHOD
+                route.provider == crate::subscription_catalog::KCODE_PROVIDER_DISPLAY_NAME
+                    && route.api_method == crate::subscription_catalog::KCODE_ROUTE_API_METHOD
             })
             .collect::<Vec<_>>();
         let expected = crate::subscription_catalog::curated_models()
@@ -702,7 +702,7 @@ fn test_remote_hydrated_catalog_adds_entitled_jcode_subscription_routes() {
                 && route.api_method == "openrouter"
         }));
         assert!(app.remote_model_options.iter().all(|route| {
-            route.provider != crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
+            route.provider != crate::subscription_catalog::KCODE_PROVIDER_DISPLAY_NAME
                 || crate::subscription_catalog::find_curated_model(&route.model)
                     .is_some_and(|model| {
                         crate::subscription_catalog::JcodeTier::Plus.allows(model.min_tier)
@@ -714,8 +714,8 @@ fn test_remote_hydrated_catalog_adds_entitled_jcode_subscription_routes() {
 #[test]
 fn test_remote_non_jcode_catalog_repairs_poisoned_all_jcode_routes() {
     with_temp_jcode_home(|| {
-        let previous_tier = std::env::var_os(crate::subscription_catalog::JCODE_TIER_ENV);
-        crate::env::set_var(crate::subscription_catalog::JCODE_TIER_ENV, "plus");
+        let previous_tier = std::env::var_os(crate::subscription_catalog::KCODE_TIER_ENV);
+        crate::env::set_var(crate::subscription_catalog::KCODE_TIER_ENV, "plus");
 
         let mut app = create_test_app();
         app.is_remote = true;
@@ -732,8 +732,8 @@ fn test_remote_non_jcode_catalog_repairs_poisoned_all_jcode_routes() {
             .iter()
             .map(|model| crate::provider::ModelRoute {
                 model: model.clone(),
-                provider: crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME.to_string(),
-                api_method: crate::subscription_catalog::JCODE_ROUTE_API_METHOD.to_string(),
+                provider: crate::subscription_catalog::KCODE_PROVIDER_DISPLAY_NAME.to_string(),
+                api_method: crate::subscription_catalog::KCODE_ROUTE_API_METHOD.to_string(),
                 available: true,
                 detail: "poisoned version 1 cache".to_string(),
                 usage: None,
@@ -744,16 +744,16 @@ fn test_remote_non_jcode_catalog_repairs_poisoned_all_jcode_routes() {
         app.open_model_picker();
 
         match previous_tier {
-            Some(value) => crate::env::set_var(crate::subscription_catalog::JCODE_TIER_ENV, value),
-            None => crate::env::remove_var(crate::subscription_catalog::JCODE_TIER_ENV),
+            Some(value) => crate::env::set_var(crate::subscription_catalog::KCODE_TIER_ENV, value),
+            None => crate::env::remove_var(crate::subscription_catalog::KCODE_TIER_ENV),
         }
 
         let jcode_routes = app
             .remote_model_options
             .iter()
             .filter(|route| {
-                route.provider == crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
-                    && route.api_method == crate::subscription_catalog::JCODE_ROUTE_API_METHOD
+                route.provider == crate::subscription_catalog::KCODE_PROVIDER_DISPLAY_NAME
+                    && route.api_method == crate::subscription_catalog::KCODE_ROUTE_API_METHOD
             })
             .collect::<Vec<_>>();
         assert_eq!(
@@ -770,10 +770,10 @@ fn test_remote_non_jcode_catalog_repairs_poisoned_all_jcode_routes() {
         );
         assert!(app.remote_model_options.iter().any(|route| {
             route.model == "deepseek/deepseek-v4-pro"
-                && route.provider != crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
+                && route.provider != crate::subscription_catalog::KCODE_PROVIDER_DISPLAY_NAME
         }));
         assert!(app.remote_model_options.iter().all(|route| {
-            route.provider != crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
+            route.provider != crate::subscription_catalog::KCODE_PROVIDER_DISPLAY_NAME
                 || matches!(
                     route.model.as_str(),
                     "claude-fable-5" | "claude-opus-4-8" | "gpt-5.5" | "gpt-5.6-sol"
@@ -1026,8 +1026,84 @@ fn test_handle_key_super_z_undoes_input_change() {
     app.handle_key(KeyCode::Char('z'), KeyModifiers::SUPER)
         .unwrap();
 
-    assert_eq!(app.input(), "a");
-    assert_eq!(app.cursor_pos(), 1);
+    assert_eq!(app.input(), "");
+    assert_eq!(app.cursor_pos(), 0);
+}
+
+#[test]
+fn test_korean_typing_undo_groups_contiguous_syllables() {
+    let mut app = create_test_app();
+    for syllable in ['가', '나', '다'] {
+        app.handle_key(KeyCode::Char(syllable), KeyModifiers::empty())
+            .unwrap();
+    }
+    assert_eq!(app.input(), "가나다");
+    app.handle_key(KeyCode::Char('z'), KeyModifiers::SUPER)
+        .unwrap();
+    assert_eq!(app.input(), "");
+    assert_eq!(app.cursor_pos(), 0);
+
+    input::handle_text_input(&mut app, "가");
+    input::handle_text_input(&mut app, "나다");
+    assert_eq!(app.input(), "가나다");
+    app.handle_key(KeyCode::Char('z'), KeyModifiers::SUPER)
+        .unwrap();
+    assert_eq!(app.input(), "");
+}
+
+#[test]
+fn test_typing_undo_preserves_space_and_cursor_edit_boundaries() {
+    let mut app = create_test_app();
+    for c in ['가', '나', ' ', '다'] {
+        app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
+            .unwrap();
+    }
+    app.handle_key(KeyCode::Char('z'), KeyModifiers::SUPER)
+        .unwrap();
+    assert_eq!(app.input(), "가나 ");
+    app.handle_key(KeyCode::Char('z'), KeyModifiers::SUPER)
+        .unwrap();
+    assert_eq!(app.input(), "가나");
+    app.handle_key(KeyCode::Left, KeyModifiers::empty()).unwrap();
+    app.handle_key(KeyCode::Char('다'), KeyModifiers::empty())
+        .unwrap();
+    app.handle_key(KeyCode::Char('z'), KeyModifiers::SUPER)
+        .unwrap();
+    assert_eq!(app.input(), "가나");
+}
+
+#[test]
+fn test_typing_undo_does_not_merge_paste_or_later_burst() {
+    let mut app = create_test_app();
+    app.handle_key(KeyCode::Char('가'), KeyModifiers::empty())
+        .unwrap();
+    input::insert_input_text(&mut app, "붙여넣기");
+    app.handle_key(KeyCode::Char('나'), KeyModifiers::empty())
+        .unwrap();
+    app.undo_input_change();
+    assert_eq!(app.input(), "가붙여넣기");
+    app.undo_input_change();
+    assert_eq!(app.input(), "가");
+
+    app.input_typing_undo = Some((Instant::now() - Duration::from_secs(2), app.cursor_pos()));
+    app.handle_key(KeyCode::Char('다'), KeyModifiers::empty())
+        .unwrap();
+    app.undo_input_change();
+    assert_eq!(app.input(), "가");
+}
+
+#[test]
+fn test_picker_swallowed_space_starts_new_typing_undo_step() {
+    let mut app = create_test_app();
+    for c in "/model".chars() {
+        app.handle_key(KeyCode::Char(c), KeyModifiers::empty()).unwrap();
+    }
+    assert_eq!(app.input(), "/model ");
+    app.handle_key(KeyCode::Char(' '), KeyModifiers::empty()).unwrap();
+    app.handle_key(KeyCode::Char('g'), KeyModifiers::empty()).unwrap();
+    assert_eq!(app.input(), "/model g");
+    app.undo_input_change();
+    assert_eq!(app.input(), "/model ");
 }
 
 #[test]
@@ -1102,13 +1178,13 @@ fn test_handle_key_ctrl_z_undoes_typing() {
 
     app.handle_key(KeyCode::Char('z'), KeyModifiers::CONTROL)
         .unwrap();
-    assert_eq!(app.input(), "ab");
-    assert_eq!(app.cursor_pos(), 2);
+    assert_eq!(app.input(), "");
+    assert_eq!(app.cursor_pos(), 0);
 
     app.handle_key(KeyCode::Char('z'), KeyModifiers::CONTROL)
         .unwrap();
-    assert_eq!(app.input(), "a");
-    assert_eq!(app.cursor_pos(), 1);
+    assert_eq!(app.input(), "");
+    assert_eq!(app.cursor_pos(), 0);
 }
 
 #[test]
@@ -1241,30 +1317,36 @@ fn test_ctrl_tab_toggles_queue_mode() {
 
 #[test]
 fn test_auto_poke_starts_enabled_by_default() {
-    let app = create_test_app();
+    // Hold the shared env lock with a clean home so a concurrent test that
+    // saves `features.auto_poke = false` cannot leak into this app's config.
+    with_temp_jcode_home(|| {
+        let app = create_test_app();
 
-    assert!(app.auto_poke_incomplete_todos);
+        assert!(app.auto_poke_incomplete_todos);
+    });
 }
 
 #[test]
 fn test_ctrl_p_toggles_auto_poke_locally() {
-    let mut app = create_test_app();
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
 
-    assert!(app.auto_poke_incomplete_todos);
+        assert!(app.auto_poke_incomplete_todos);
 
-    app.handle_key(KeyCode::Char('p'), KeyModifiers::CONTROL)
-        .unwrap();
-    assert!(!app.auto_poke_incomplete_todos);
-    assert_eq!(app.status_notice(), Some("Poke: OFF".to_string()));
+        app.handle_key(KeyCode::Char('p'), KeyModifiers::CONTROL)
+            .unwrap();
+        assert!(!app.auto_poke_incomplete_todos);
+        assert_eq!(app.status_notice(), Some("Poke: OFF".to_string()));
 
-    app.handle_key(KeyCode::Char('p'), KeyModifiers::CONTROL)
-        .unwrap();
-    assert!(app.auto_poke_incomplete_todos);
-    assert_eq!(app.status_notice(), Some("Poke: ON".to_string()));
-    assert!(app.display_messages().iter().any(|msg| {
-        msg.content
-            .contains("Auto-poke enabled. Nothing unfinished right now")
-    }));
+        app.handle_key(KeyCode::Char('p'), KeyModifiers::CONTROL)
+            .unwrap();
+        assert!(app.auto_poke_incomplete_todos);
+        assert_eq!(app.status_notice(), Some("Poke: ON".to_string()));
+        assert!(app.display_messages().iter().any(|msg| {
+            msg.content
+                .contains("Auto-poke enabled. Nothing unfinished right now")
+        }));
+    });
 }
 
 #[test]
@@ -1293,6 +1375,7 @@ fn test_create_transfer_session_from_parent_copies_todos_and_uses_compacted_cont
         app.session.working_dir = Some("/tmp".to_string());
         app.session.model = Some("test-model".to_string());
         app.session.provider_key = Some("test-provider".to_string());
+        app.session.system_prompt = Some("custom transfer prompt".to_string());
         app.session.messages.push(crate::session::StoredMessage {
             id: "msg-1".to_string(),
             role: Role::User,
@@ -1343,9 +1426,21 @@ fn test_create_transfer_session_from_parent_copies_todos_and_uses_compacted_cont
         assert_eq!(child.compaction, Some(transfer_compaction));
         assert_eq!(child.model.as_deref(), Some("test-model"));
         assert_eq!(child.provider_key.as_deref(), Some("test-provider"));
+        assert_eq!(child.system_prompt, app.session.system_prompt);
         assert_eq!(child.working_dir.as_deref(), Some("/tmp"));
         assert_eq!(child_todos.len(), 1);
         assert_eq!(child_todos[0].content, "Carry this forward");
+        for prompt in [None, Some("")] {
+            app.session.system_prompt = prompt.map(str::to_string);
+            let (child_id, _) = super::commands::create_transfer_session_from_parent(
+                &app.session.id,
+                &app.session,
+                None,
+            )
+            .expect("create transfer session with optional prompt");
+            let child = crate::session::Session::load(&child_id).expect("load child session");
+            assert_eq!(child.system_prompt, app.session.system_prompt);
+        }
     });
 }
 
@@ -1609,12 +1704,14 @@ fn test_retrieve_pending_message_edits_queued_message() {
 fn test_retrieve_pending_message_with_alt_and_super_up() {
     // Ctrl+Up, Alt(Option)+Up and Cmd(Super)+Up must all recall a queued message
     // so the gesture works regardless of which modifier the terminal forwards.
+    // Alt+Up only recalls when the speed-tier keys are unbound.
     for modifier in [
         KeyModifiers::CONTROL,
         KeyModifiers::ALT,
         KeyModifiers::SUPER,
     ] {
         let mut app = create_test_app();
+        app.speed_switch_keys = crate::tui::keybind::SpeedSwitchKeys::default();
         app.queue_mode = true;
         app.is_processing = true;
 
@@ -1633,6 +1730,166 @@ fn test_retrieve_pending_message_with_alt_and_super_up() {
         assert_eq!(app.queued_count(), 0, "modifier {modifier:?}");
         assert_eq!(app.input(), "hello", "modifier {modifier:?}");
         assert_eq!(app.cursor_pos(), 5, "modifier {modifier:?}");
+    }
+}
+
+#[test]
+fn test_alt_up_down_cycle_speed_tier_by_default() {
+    use crate::tui::TuiState as _;
+    let mut app = create_test_app();
+    app.speed_switch_keys = crate::tui::keybind::SpeedSwitchKeys {
+        increase: Some(crate::tui::keybind::KeyBinding {
+            code: KeyCode::Up,
+            modifiers: KeyModifiers::ALT,
+        }),
+        decrease: Some(crate::tui::keybind::KeyBinding {
+            code: KeyCode::Down,
+            modifiers: KeyModifiers::ALT,
+        }),
+    };
+    app.set_input_for_test("draft");
+
+    app.handle_key(KeyCode::Up, KeyModifiers::ALT).unwrap();
+
+    // The speed key is consumed: no history recall, draft untouched, and a
+    // speed notice (or an availability notice for the mock provider) shows.
+    assert_eq!(app.input(), "draft");
+    let notice = app.status_notice().unwrap_or_default();
+    assert!(notice.starts_with("Speed"), "unexpected notice: {notice}");
+
+    app.handle_key(KeyCode::Down, KeyModifiers::ALT).unwrap();
+    assert_eq!(app.input(), "draft");
+    let notice = app.status_notice().unwrap_or_default();
+    assert!(notice.starts_with("Speed"), "unexpected notice: {notice}");
+}
+
+#[test]
+fn test_local_speed_cycle_walks_standard_fast_ultrafast_and_clamps() {
+    use crate::tui::TuiState as _;
+    use std::sync::{Arc as StdArc, Mutex as StdMutex};
+
+    #[derive(Clone)]
+    struct UltraMock(StdArc<StdMutex<Option<String>>>);
+
+    #[async_trait::async_trait]
+    impl Provider for UltraMock {
+        async fn complete(
+            &self,
+            _messages: &[Message],
+            _tools: &[crate::message::ToolDefinition],
+            _system: &str,
+            _resume_session_id: Option<&str>,
+        ) -> Result<crate::provider::EventStream> {
+            unimplemented!("UltraMock")
+        }
+        fn name(&self) -> &str {
+            "openai"
+        }
+        fn model(&self) -> String {
+            "gpt-6-astra".to_string()
+        }
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(self.clone())
+        }
+        fn service_tier(&self) -> Option<String> {
+            self.0.lock().unwrap().clone()
+        }
+        fn set_service_tier(&self, tier: &str) -> anyhow::Result<()> {
+            *self.0.lock().unwrap() = match tier {
+                "off" => None,
+                other => Some(other.to_string()),
+            };
+            Ok(())
+        }
+    }
+
+    let tier = StdArc::new(StdMutex::new(None));
+    let provider: Arc<dyn Provider> = Arc::new(UltraMock(tier.clone()));
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
+    let mut app = App::new_for_test_harness(provider, registry);
+    app.speed_switch_keys = crate::tui::keybind::SpeedSwitchKeys {
+        increase: Some(crate::tui::keybind::KeyBinding {
+            code: KeyCode::Up,
+            modifiers: KeyModifiers::ALT,
+        }),
+        decrease: Some(crate::tui::keybind::KeyBinding {
+            code: KeyCode::Down,
+            modifiers: KeyModifiers::ALT,
+        }),
+    };
+
+    let mut press = |app: &mut App, code| {
+        app.handle_key(code, KeyModifiers::ALT).unwrap();
+        (tier.lock().unwrap().clone(), app.status_notice().unwrap_or_default())
+    };
+
+    assert_eq!(
+        press(&mut app, KeyCode::Up),
+        (Some("priority".into()), "Speed: Fast ○●○".into())
+    );
+    assert_eq!(
+        press(&mut app, KeyCode::Up),
+        (Some("ultrafast".into()), "Speed: Ultrafast ○○●".into())
+    );
+    assert_eq!(
+        press(&mut app, KeyCode::Up),
+        (
+            Some("ultrafast".into()),
+            "Speed: Ultrafast ○○● (already at max)".into()
+        )
+    );
+    assert_eq!(
+        press(&mut app, KeyCode::Down),
+        (Some("priority".into()), "Speed: Fast ○●○".into())
+    );
+    assert_eq!(
+        press(&mut app, KeyCode::Down),
+        (None, "Speed: Standard ●○○".into())
+    );
+    assert_eq!(
+        press(&mut app, KeyCode::Down),
+        (None, "Speed: Standard ●○○ (already at min)".into())
+    );
+}
+
+#[test]
+fn test_remote_alt_up_sends_next_speed_tier_over_the_wire() {
+    use tokio::io::AsyncBufReadExt;
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    for (current, expected) in [(None, "priority"), (Some("priority"), "ultrafast")] {
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.remote_provider_name = Some("openai".to_string());
+        app.remote_provider_model = Some("gpt-6-astra".to_string());
+        app.remote_service_tier = current.map(str::to_string);
+        app.speed_switch_keys = crate::tui::keybind::SpeedSwitchKeys {
+            increase: Some(crate::tui::keybind::KeyBinding {
+                code: KeyCode::Up,
+                modifiers: KeyModifiers::ALT,
+            }),
+            decrease: None,
+        };
+        rt.block_on(async {
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            let peer = remote.take_dummy_peer().unwrap();
+            let mut reader = tokio::io::BufReader::new(peer);
+            app.handle_remote_key(KeyCode::Up, KeyModifiers::ALT, &mut remote)
+                .await
+                .unwrap();
+            let mut line = String::new();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                reader.read_line(&mut line),
+            )
+            .await
+            .expect("speed key must send a wire request")
+            .unwrap();
+            let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(request["type"], "set_service_tier", "request: {line}");
+            assert_eq!(request["service_tier"], expected, "request: {line}");
+        });
     }
 }
 

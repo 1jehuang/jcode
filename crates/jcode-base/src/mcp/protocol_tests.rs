@@ -4,11 +4,11 @@ use super::*;
 fn issue_790_load_uses_process_cwd_while_unbound_load_for_dir_does_not() {
     let _guard = crate::storage::lock_test_env();
     let original_cwd = std::env::current_dir().expect("current cwd");
-    let previous_home = std::env::var_os("JCODE_HOME");
+    let previous_home = std::env::var_os("KCODE_HOME");
     let home = tempfile::tempdir().expect("home tempdir");
     let project = tempfile::tempdir().expect("project tempdir");
     let other_project = tempfile::tempdir().expect("other project tempdir");
-    crate::env::set_var("JCODE_HOME", home.path());
+    crate::env::set_var("KCODE_HOME", home.path());
     std::env::set_current_dir(project.path()).expect("set project cwd");
     std::fs::write(
         project.path().join(".mcp.json"),
@@ -41,9 +41,9 @@ fn issue_790_load_uses_process_cwd_while_unbound_load_for_dir_does_not() {
 
     std::env::set_current_dir(original_cwd).expect("restore cwd");
     if let Some(previous_home) = previous_home {
-        crate::env::set_var("JCODE_HOME", previous_home);
+        crate::env::set_var("KCODE_HOME", previous_home);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
     }
     result.expect("MCP cwd isolation assertions");
 }
@@ -262,12 +262,12 @@ fn expansion_after_merge_ignores_shadowed_references() {
 #[test]
 fn load_for_dir_expands_the_winning_merged_definition() {
     let _guard = crate::storage::lock_test_env();
-    let previous_home = std::env::var_os("JCODE_HOME");
-    let previous_value = std::env::var_os("JCODE_MCP_EXPANSION_TEST_VALUE");
+    let previous_home = std::env::var_os("KCODE_HOME");
+    let previous_value = std::env::var_os("KCODE_MCP_EXPANSION_TEST_VALUE");
     let home = tempfile::tempdir().expect("home tempdir");
     let project = tempfile::tempdir().expect("project tempdir");
-    crate::env::set_var("JCODE_HOME", home.path());
-    crate::env::set_var("JCODE_MCP_EXPANSION_TEST_VALUE", "expanded-value");
+    crate::env::set_var("KCODE_HOME", home.path());
+    crate::env::set_var("KCODE_MCP_EXPANSION_TEST_VALUE", "expanded-value");
 
     std::fs::write(
         home.path().join("mcp.json"),
@@ -276,7 +276,7 @@ fn load_for_dir_expands_the_winning_merged_definition() {
     .unwrap();
     std::fs::write(
         project.path().join(".mcp.json"),
-        r#"{"mcpServers":{"same-name":{"command":"project-bin","args":["${JCODE_MCP_EXPANSION_TEST_VALUE}"]}}}"#,
+        r#"{"mcpServers":{"same-name":{"command":"project-bin","args":["${KCODE_MCP_EXPANSION_TEST_VALUE}"]}}}"#,
     )
     .unwrap();
 
@@ -288,12 +288,12 @@ fn load_for_dir_expands_the_winning_merged_definition() {
     });
 
     match previous_home {
-        Some(value) => crate::env::set_var("JCODE_HOME", value),
-        None => crate::env::remove_var("JCODE_HOME"),
+        Some(value) => crate::env::set_var("KCODE_HOME", value),
+        None => crate::env::remove_var("KCODE_HOME"),
     }
     match previous_value {
-        Some(value) => crate::env::set_var("JCODE_MCP_EXPANSION_TEST_VALUE", value),
-        None => crate::env::remove_var("JCODE_MCP_EXPANSION_TEST_VALUE"),
+        Some(value) => crate::env::set_var("KCODE_MCP_EXPANSION_TEST_VALUE", value),
+        None => crate::env::remove_var("KCODE_MCP_EXPANSION_TEST_VALUE"),
     }
     result.expect("merged config expansion assertions");
 }
@@ -383,15 +383,15 @@ fn test_load_project_locals_resolves_against_given_dir_not_cwd() {
 
 #[test]
 fn test_load_project_locals_merge_order() {
-    // `.jcode/mcp.json` loads first, then `.mcp.json` overrides same-named
+    // `.kcode/mcp.json` loads first, then `.mcp.json` overrides same-named
     // servers, then `.claude/mcp.json`.
     let temp = tempfile::tempdir().expect("tempdir");
     let project = temp.path();
-    std::fs::create_dir_all(project.join(".jcode")).unwrap();
+    std::fs::create_dir_all(project.join(".kcode")).unwrap();
     std::fs::create_dir_all(project.join(".claude")).unwrap();
     std::fs::write(
-        project.join(".jcode/mcp.json"),
-        r#"{"servers":{"shared-name":{"command":"jcode-bin"},"jcode-only":{"command":"a"}}}"#,
+        project.join(".kcode/mcp.json"),
+        r#"{"servers":{"shared-name":{"command":"kcode-bin"},"kcode-only":{"command":"a"}}}"#,
     )
     .unwrap();
     std::fs::write(
@@ -410,9 +410,9 @@ fn test_load_project_locals_merge_order() {
     assert_eq!(
         config.servers.get("shared-name").unwrap().command,
         "claude-bin",
-        ".mcp.json must override .jcode/mcp.json for same-named servers"
+        ".mcp.json must override .kcode/mcp.json for same-named servers"
     );
-    assert!(config.servers.contains_key("jcode-only"));
+    assert!(config.servers.contains_key("kcode-only"));
     assert!(config.servers.contains_key("legacy-only"));
 }
 
@@ -530,9 +530,9 @@ fn http_entry_does_not_displace_a_working_stdio_server_of_the_same_name() {
     // losing a working server (issue #653).
     let temp = tempfile::tempdir().expect("tempdir");
     let project = temp.path();
-    std::fs::create_dir_all(project.join(".jcode")).unwrap();
+    std::fs::create_dir_all(project.join(".kcode")).unwrap();
     std::fs::write(
-        project.join(".jcode/mcp.json"),
+        project.join(".kcode/mcp.json"),
         r#"{"servers":{"github":{"type":"stdio","command":"npx","args":["-y","mcp-remote"]}}}"#,
     )
     .unwrap();
@@ -557,9 +557,9 @@ fn stdio_entry_still_overrides_an_existing_http_entry() {
     // still win over a non-runnable http one from an earlier config.
     let temp = tempfile::tempdir().expect("tempdir");
     let project = temp.path();
-    std::fs::create_dir_all(project.join(".jcode")).unwrap();
+    std::fs::create_dir_all(project.join(".kcode")).unwrap();
     std::fs::write(
-        project.join(".jcode/mcp.json"),
+        project.join(".kcode/mcp.json"),
         r#"{"servers":{"github":{"type":"http","url":"https://example.invalid/mcp/"}}}"#,
     )
     .unwrap();
@@ -578,9 +578,9 @@ fn stdio_entry_of_same_transport_still_overrides_by_precedence() {
     // Same-transport collisions keep the existing last-writer-wins behavior.
     let temp = tempfile::tempdir().expect("tempdir");
     let project = temp.path();
-    std::fs::create_dir_all(project.join(".jcode")).unwrap();
+    std::fs::create_dir_all(project.join(".kcode")).unwrap();
     std::fs::write(
-        project.join(".jcode/mcp.json"),
+        project.join(".kcode/mcp.json"),
         r#"{"servers":{"github":{"command":"old-bin"}}}"#,
     )
     .unwrap();
@@ -597,15 +597,15 @@ fn stdio_entry_of_same_transport_still_overrides_by_precedence() {
 #[test]
 fn claude_json_http_entry_does_not_displace_jcode_stdio_server() {
     // The exact configuration from issue #653: `github` is stdio in
-    // ~/.jcode/mcp.json and http in ~/.claude.json. The http entry used to win
+    // ~/.kcode/mcp.json and http in ~/.claude.json. The http entry used to win
     // the merge and then be dropped by the non-stdio filter, so a working
     // server vanished with no indication it had been overwritten.
     let _guard = crate::storage::lock_test_env();
     let original_cwd = std::env::current_dir().expect("current cwd");
-    let previous_home = std::env::var_os("JCODE_HOME");
+    let previous_home = std::env::var_os("KCODE_HOME");
     let home = tempfile::tempdir().expect("home tempdir");
     let project = tempfile::tempdir().expect("project tempdir");
-    crate::env::set_var("JCODE_HOME", home.path());
+    crate::env::set_var("KCODE_HOME", home.path());
     std::env::set_current_dir(project.path()).expect("set project cwd");
 
     std::fs::write(
@@ -613,7 +613,7 @@ fn claude_json_http_entry_does_not_displace_jcode_stdio_server() {
         r#"{"mcpServers":{"github":{"type":"stdio","command":"npx","args":["-y","mcp-remote"]}}}"#,
     )
     .expect("write jcode mcp config");
-    // `user_home_path()` maps external configs under JCODE_HOME to an
+    // `user_home_path()` maps external configs under KCODE_HOME to an
     // `external/` subdirectory, so this is where ~/.claude.json is read from.
     let external = home.path().join("external");
     std::fs::create_dir_all(&external).expect("create external dir");
@@ -635,9 +635,9 @@ fn claude_json_http_entry_does_not_displace_jcode_stdio_server() {
 
     std::env::set_current_dir(original_cwd).expect("restore cwd");
     if let Some(previous_home) = previous_home {
-        crate::env::set_var("JCODE_HOME", previous_home);
+        crate::env::set_var("KCODE_HOME", previous_home);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
     }
     result.expect("issue #653 merge assertions");
 }
@@ -645,9 +645,9 @@ fn claude_json_http_entry_does_not_displace_jcode_stdio_server() {
 #[test]
 fn claude_is_live_while_codex_is_a_one_time_snapshot() {
     let _guard = crate::storage::lock_test_env();
-    let previous_home = std::env::var_os("JCODE_HOME");
+    let previous_home = std::env::var_os("KCODE_HOME");
     let home = tempfile::tempdir().expect("home tempdir");
-    crate::env::set_var("JCODE_HOME", home.path());
+    crate::env::set_var("KCODE_HOME", home.path());
 
     let external = home.path().join("external");
     let codex_dir = external.join(".codex");
@@ -704,19 +704,74 @@ env = { TOKEN = "codex-inline-secret" }
     });
 
     if let Some(previous_home) = previous_home {
-        crate::env::set_var("JCODE_HOME", previous_home);
+        crate::env::set_var("KCODE_HOME", previous_home);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
     }
     result.expect("live Claude and snapshot Codex assertions");
 }
 
 #[test]
+fn codex_import_preserves_enabled_false() {
+    let _guard = crate::storage::lock_test_env();
+    let previous_home = std::env::var_os("KCODE_HOME");
+    let home = tempfile::tempdir().expect("home tempdir");
+    crate::env::set_var("KCODE_HOME", home.path());
+
+    let codex_dir = home.path().join("external").join(".codex");
+    std::fs::create_dir_all(&codex_dir).expect("create codex config dir");
+    std::fs::write(
+        codex_dir.join("config.toml"),
+        r#"[mcp_servers.disabled_one]
+command = "disabled-bin"
+enabled = false
+
+[mcp_servers.active_one]
+command = "active-bin"
+"#,
+    )
+    .expect("write Codex config");
+
+    let result = std::panic::catch_unwind(|| {
+        let config = McpConfig::load_for_dir(None);
+        let disabled = config
+            .servers
+            .get("disabled_one")
+            .expect("disabled server is still imported");
+        assert!(
+            !disabled.is_enabled(),
+            "enabled = false must survive the import instead of silently activating the server"
+        );
+        assert!(
+            config
+                .servers
+                .get("active_one")
+                .expect("default-enabled server")
+                .is_enabled()
+        );
+
+        let snapshot =
+            std::fs::read_to_string(home.path().join("mcp.json")).expect("Codex snapshot");
+        assert!(
+            snapshot.contains(r#""enabled": false"#),
+            "snapshot should record the disabled state: {snapshot}"
+        );
+    });
+
+    if let Some(previous_home) = previous_home {
+        crate::env::set_var("KCODE_HOME", previous_home);
+    } else {
+        crate::env::remove_var("KCODE_HOME");
+    }
+    result.expect("codex enabled=false import assertions");
+}
+
+#[test]
 fn claude_only_config_never_creates_a_jcode_snapshot() {
     let _guard = crate::storage::lock_test_env();
-    let previous_home = std::env::var_os("JCODE_HOME");
+    let previous_home = std::env::var_os("KCODE_HOME");
     let home = tempfile::tempdir().expect("home tempdir");
-    crate::env::set_var("JCODE_HOME", home.path());
+    crate::env::set_var("KCODE_HOME", home.path());
 
     let external = home.path().join("external");
     std::fs::create_dir_all(&external).expect("create external config dir");
@@ -736,9 +791,9 @@ fn claude_only_config_never_creates_a_jcode_snapshot() {
     });
 
     if let Some(previous_home) = previous_home {
-        crate::env::set_var("JCODE_HOME", previous_home);
+        crate::env::set_var("KCODE_HOME", previous_home);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
     }
     result.expect("Claude no-snapshot assertions");
 }
@@ -746,9 +801,9 @@ fn claude_only_config_never_creates_a_jcode_snapshot() {
 #[test]
 fn legacy_claude_config_is_live_and_deletions_do_not_leave_a_snapshot() {
     let _guard = crate::storage::lock_test_env();
-    let previous_home = std::env::var_os("JCODE_HOME");
+    let previous_home = std::env::var_os("KCODE_HOME");
     let home = tempfile::tempdir().expect("home tempdir");
-    crate::env::set_var("JCODE_HOME", home.path());
+    crate::env::set_var("KCODE_HOME", home.path());
 
     let legacy_dir = home.path().join("external/.claude");
     std::fs::create_dir_all(&legacy_dir).expect("create legacy Claude config dir");
@@ -784,9 +839,9 @@ fn legacy_claude_config_is_live_and_deletions_do_not_leave_a_snapshot() {
     });
 
     if let Some(previous_home) = previous_home {
-        crate::env::set_var("JCODE_HOME", previous_home);
+        crate::env::set_var("KCODE_HOME", previous_home);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
     }
     result.expect("legacy Claude live-source assertions");
 }
@@ -794,22 +849,22 @@ fn legacy_claude_config_is_live_and_deletions_do_not_leave_a_snapshot() {
 #[test]
 fn disabling_claude_mcp_skips_both_live_sources_but_preserves_jcode_sources() {
     let _guard = crate::storage::lock_test_env();
-    let previous_home = std::env::var_os("JCODE_HOME");
-    let previous_disable = std::env::var_os("JCODE_DISABLE_CLAUDE_MCP");
+    let previous_home = std::env::var_os("KCODE_HOME");
+    let previous_disable = std::env::var_os("KCODE_DISABLE_CLAUDE_MCP");
     let home = tempfile::tempdir().expect("home tempdir");
     let project = tempfile::tempdir().expect("project tempdir");
-    crate::env::set_var("JCODE_HOME", home.path());
-    crate::env::set_var("JCODE_DISABLE_CLAUDE_MCP", "1");
+    crate::env::set_var("KCODE_HOME", home.path());
+    crate::env::set_var("KCODE_DISABLE_CLAUDE_MCP", "1");
 
     std::fs::write(
         home.path().join("mcp.json"),
-        r#"{"mcpServers":{"jcode-global":{"command":"jcode-global"}}}"#,
+        r#"{"mcpServers":{"kcode-global":{"command":"kcode-global"}}}"#,
     )
     .expect("write jcode global config");
-    std::fs::create_dir_all(project.path().join(".jcode")).expect("create jcode project dir");
+    std::fs::create_dir_all(project.path().join(".kcode")).expect("create jcode project dir");
     std::fs::write(
-        project.path().join(".jcode/mcp.json"),
-        r#"{"mcpServers":{"jcode-project":{"command":"jcode-project"}}}"#,
+        project.path().join(".kcode/mcp.json"),
+        r#"{"mcpServers":{"kcode-project":{"command":"kcode-project"}}}"#,
     )
     .expect("write jcode project config");
 
@@ -828,21 +883,21 @@ fn disabling_claude_mcp_skips_both_live_sources_but_preserves_jcode_sources() {
 
     let result = std::panic::catch_unwind(|| {
         let config = McpConfig::load_for_dir(Some(project.path()));
-        assert!(config.servers.contains_key("jcode-global"));
-        assert!(config.servers.contains_key("jcode-project"));
+        assert!(config.servers.contains_key("kcode-global"));
+        assert!(config.servers.contains_key("kcode-project"));
         assert!(!config.servers.contains_key("claude-current"));
         assert!(!config.servers.contains_key("claude-legacy"));
     });
 
     if let Some(previous_home) = previous_home {
-        crate::env::set_var("JCODE_HOME", previous_home);
+        crate::env::set_var("KCODE_HOME", previous_home);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
     }
     if let Some(previous_disable) = previous_disable {
-        crate::env::set_var("JCODE_DISABLE_CLAUDE_MCP", previous_disable);
+        crate::env::set_var("KCODE_DISABLE_CLAUDE_MCP", previous_disable);
     } else {
-        crate::env::remove_var("JCODE_DISABLE_CLAUDE_MCP");
+        crate::env::remove_var("KCODE_DISABLE_CLAUDE_MCP");
     }
     result.expect("Claude MCP opt-out assertions");
 }
@@ -854,9 +909,9 @@ fn mcp_source_logs_explain_provenance_without_config_values() {
     assert!(live.contains("source values were not copied"));
 
     let imported =
-        McpConfig::codex_import_log_message(1, 2, std::path::Path::new("/sandbox/.jcode/mcp.json"));
+        McpConfig::codex_import_log_message(1, 2, std::path::Path::new("/sandbox/.kcode/mcp.json"));
     assert!(imported.contains("One-time imported 1 server(s) from Codex CLI"));
-    assert!(imported.contains("/sandbox/.jcode/mcp.json"));
+    assert!(imported.contains("/sandbox/.kcode/mcp.json"));
     assert!(imported.contains("2 configured environment value(s)"));
     assert!(imported.contains("may contain secrets"));
     assert!(imported.contains("Claude Code MCP configuration remains live and was not copied"));

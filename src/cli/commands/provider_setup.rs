@@ -9,7 +9,7 @@ use crate::config::{
 };
 use crate::provider_catalog::{
     api_base_uses_localhost, is_safe_env_file_name, is_safe_env_key_name, normalize_api_base,
-    resolve_login_provider, save_env_value_to_env_file,
+    resolve_login_provider, save_named_api_key,
 };
 
 #[derive(Debug)]
@@ -149,7 +149,7 @@ pub(crate) fn configure_provider_profile(
         api_key_env.as_deref(),
         env_file.as_deref(),
     ) {
-        save_env_value_to_env_file(env_key, file_name, Some(key))?;
+        save_named_api_key(file_name, env_key, key)?;
     }
     let api_key_stored = api_key.is_some() && env_file.is_some();
 
@@ -244,14 +244,14 @@ pub(crate) fn configure_provider_profile(
         auth: auth_label(&auth).to_string(),
         default_set: options.set_default,
         run_command: format!(
-            "jcode --provider-profile {} --model {} run 'hello'",
+            "kcode --provider-profile {} --model {} run 'hello'",
             shell_quote(&name),
             shell_quote(&model)
         ),
         auth_test_command: format!(
-            "jcode --provider-profile {} auth-test --prompt {}",
+            "kcode --provider-profile {} auth-test --prompt {}",
             shell_quote(&name),
-            shell_quote("Reply exactly JCODE_PROVIDER_SETUP_OK")
+            shell_quote("Reply exactly KCODE_PROVIDER_SETUP_OK")
         ),
     })
 }
@@ -401,7 +401,7 @@ fn derived_api_key_env(name: &str) -> String {
             }
         })
         .collect::<String>();
-    format!("JCODE_PROVIDER_{}_API_KEY", suffix)
+    format!("KCODE_PROVIDER_{}_API_KEY", suffix)
 }
 
 fn append_profile_section(
@@ -667,8 +667,8 @@ mod tests {
     fn provider_add_writes_named_profile_env_file_and_default() {
         let _lock = crate::storage::lock_test_env();
         let temp = tempfile::TempDir::new().expect("temp dir");
-        let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
-        let _key = EnvVarGuard::remove("JCODE_PROVIDER_MY_API_API_KEY");
+        let _home = EnvVarGuard::set("KCODE_HOME", temp.path());
+        let _key = EnvVarGuard::remove("KCODE_PROVIDER_MY_API_API_KEY");
         let config_path = temp.path().join("config.toml");
         std::fs::write(
             &config_path,
@@ -694,7 +694,7 @@ mod tests {
         assert_eq!(profile.default_model.as_deref(), Some("model-a"));
         assert_eq!(
             profile.api_key_env.as_deref(),
-            Some("JCODE_PROVIDER_MY_API_API_KEY")
+            Some("KCODE_PROVIDER_MY_API_API_KEY")
         );
         assert_eq!(profile.env_file.as_deref(), Some("provider-my-api.env"));
         assert_eq!(profile.models[0].context_window, Some(128_000));
@@ -702,17 +702,17 @@ mod tests {
         let env_file = temp
             .path()
             .join("config")
-            .join("jcode")
+            .join("kcode")
             .join("provider-my-api.env");
         let env_content = std::fs::read_to_string(env_file).expect("env file");
-        assert!(env_content.contains("JCODE_PROVIDER_MY_API_API_KEY=secret-test-key"));
+        assert!(env_content.contains("KCODE_PROVIDER_MY_API_API_KEY=secret-test-key"));
     }
 
     #[test]
     fn provider_add_rejects_remote_without_api_key_source() {
         let _lock = crate::storage::lock_test_env();
         let temp = tempfile::TempDir::new().expect("temp dir");
-        let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
+        let _home = EnvVarGuard::set("KCODE_HOME", temp.path());
         let mut options = base_options();
         options.api_key = None;
         options.set_default = false;
@@ -725,7 +725,7 @@ mod tests {
     fn provider_add_allows_localhost_without_api_key() {
         let _lock = crate::storage::lock_test_env();
         let temp = tempfile::TempDir::new().expect("temp dir");
-        let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
+        let _home = EnvVarGuard::set("KCODE_HOME", temp.path());
         let mut options = base_options();
         options.base_url = "http://localhost:8000/v1".to_string();
         options.api_key = None;

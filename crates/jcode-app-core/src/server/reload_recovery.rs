@@ -375,8 +375,8 @@ mod tests {
     impl IsolatedHome {
         fn new() -> Self {
             let temp = tempfile::TempDir::new().expect("jcode home");
-            let prev_home = std::env::var_os("JCODE_HOME");
-            crate::env::set_var("JCODE_HOME", temp.path());
+            let prev_home = std::env::var_os("KCODE_HOME");
+            crate::env::set_var("KCODE_HOME", temp.path());
             Self {
                 prev_home,
                 _temp: temp,
@@ -387,9 +387,9 @@ mod tests {
     impl Drop for IsolatedHome {
         fn drop(&mut self) {
             if let Some(prev) = self.prev_home.take() {
-                crate::env::set_var("JCODE_HOME", prev);
+                crate::env::set_var("KCODE_HOME", prev);
             } else {
-                crate::env::remove_var("JCODE_HOME");
+                crate::env::remove_var("KCODE_HOME");
             }
         }
     }

@@ -73,7 +73,6 @@ pub(crate) struct FramePerfStats {
     pub chat_scrollbar_visible: bool,
     pub use_packed_layout: bool,
     pub has_side_panel_content: bool,
-    pub has_pinned_content: bool,
     pub has_file_diff_edits: bool,
 }
 
@@ -445,7 +444,7 @@ pub(crate) fn wall_clock_ms() -> u64 {
 fn slow_frame_threshold_ms() -> f64 {
     static THRESHOLD_MS: OnceLock<f64> = OnceLock::new();
     *THRESHOLD_MS.get_or_init(|| {
-        std::env::var("JCODE_TUI_SLOW_FRAME_MS")
+        std::env::var("KCODE_TUI_SLOW_FRAME_MS")
             .ok()
             .and_then(|raw| raw.trim().parse::<f64>().ok())
             .filter(|value| value.is_finite() && *value > 0.0)
@@ -463,7 +462,7 @@ fn flicker_detection_enabled() -> bool {
     {
         static ENABLED: OnceLock<bool> = OnceLock::new();
         *ENABLED.get_or_init(|| {
-            std::env::var("JCODE_TUI_FLICKER_DETECTION")
+            std::env::var("KCODE_TUI_FLICKER_DETECTION")
                 .ok()
                 .map(|raw| {
                     matches!(
@@ -634,7 +633,6 @@ pub(super) struct ChatLayoutMetrics {
     pub chat_scrollbar_visible: bool,
     pub use_packed_layout: bool,
     pub has_side_panel_content: bool,
-    pub has_pinned_content: bool,
     pub has_file_diff_edits: bool,
 }
 
@@ -647,7 +645,6 @@ pub(super) fn note_chat_layout(metrics: ChatLayoutMetrics) {
         chat_scrollbar_visible,
         use_packed_layout,
         has_side_panel_content,
-        has_pinned_content,
         has_file_diff_edits,
     } = metrics;
     with_frame_perf_stats_mut(|stats| {
@@ -660,7 +657,6 @@ pub(super) fn note_chat_layout(metrics: ChatLayoutMetrics) {
         stats.chat_scrollbar_visible = chat_scrollbar_visible;
         stats.use_packed_layout = use_packed_layout;
         stats.has_side_panel_content = has_side_panel_content;
-        stats.has_pinned_content = has_pinned_content;
         stats.has_file_diff_edits = has_file_diff_edits;
     });
 }
@@ -1244,8 +1240,8 @@ pub(crate) fn recent_flicker_ui_notice() -> Option<FlickerUiNotice> {
 
     let log_hint = crate::logging::log_path()
         .map(|path| abbreviate_flicker_log_path(&path))
-        .unwrap_or_else(|| "~/.jcode/logs/".to_string());
-    let summary = format!("▲ flicker detected ({})", flicker_event_label(&event.kind));
+        .unwrap_or_else(|| "~/.kcode/logs/".to_string());
+    let summary = format!("⚠ flicker detected ({})", flicker_event_label(&event.kind));
     let hint = format!("logs: {} · debug: client:flicker-frames 32", log_hint);
     Some(FlickerUiNotice { summary, hint })
 }

@@ -7,18 +7,18 @@ fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
     let _env_guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
     let saved_env = [
-        "JCODE_HOME",
-        "JCODE_OPENAI_COMPAT_API_BASE",
-        "JCODE_OPENAI_COMPAT_API_KEY_NAME",
-        "JCODE_OPENAI_COMPAT_ENV_FILE",
-        "JCODE_OPENAI_COMPAT_SETUP_URL",
-        "JCODE_OPENAI_COMPAT_DEFAULT_MODEL",
-        "JCODE_OPENAI_COMPAT_LOCAL_ENABLED",
+        "KCODE_HOME",
+        "KCODE_OPENAI_COMPAT_API_BASE",
+        "KCODE_OPENAI_COMPAT_API_KEY_NAME",
+        "KCODE_OPENAI_COMPAT_ENV_FILE",
+        "KCODE_OPENAI_COMPAT_SETUP_URL",
+        "KCODE_OPENAI_COMPAT_DEFAULT_MODEL",
+        "KCODE_OPENAI_COMPAT_LOCAL_ENABLED",
         "OPENAI_COMPAT_API_KEY",
     ]
     .map(|key| (key, std::env::var_os(key)));
 
-    crate::env::set_var("JCODE_HOME", temp.path());
+    crate::env::set_var("KCODE_HOME", temp.path());
     for (key, _) in saved_env.iter().skip(1) {
         crate::env::remove_var(key);
     }
@@ -86,7 +86,7 @@ fn tui_openai_compatible_api_base_keeps_jcode_docs_and_remote_endpoint() -> anyh
         let resolved = save_tui_openai_compatible_api_base("https://api.deepseek.com/")?;
         assert_eq!(resolved.api_base, "https://api.deepseek.com");
         assert!(resolved.requires_api_key);
-        assert!(resolved.setup_url.contains("github.com/1jehuang/jcode"));
+        assert!(resolved.setup_url.contains("github.com/KooshaPari/KCode"));
         assert!(!resolved.setup_url.contains("opencode.ai"));
         Ok(())
     })
@@ -115,6 +115,10 @@ fn tui_openai_compatible_key_save_persists_key_for_current_session() -> anyhow::
             .as_deref(),
             Some("sk-test-tui-login")
         );
+        assert!(
+            std::env::var_os(&resolved.api_key_env).is_none(),
+            "saving must not poison the process env (issue #1386)"
+        );
         Ok(())
     })
 }
@@ -129,10 +133,17 @@ fn tui_api_key_logout_clears_saved_key_and_process_env() -> anyhow::Result<()> {
         )
         .map(|_| resolved)?;
 
+        // Saving is file-only (#1386), so the key is readable from the env file
+        // and never copied into the process environment.
         assert_eq!(
-            std::env::var(&resolved.api_key_env).as_deref(),
-            Ok("sk-test-tui-login")
+            crate::provider_catalog::load_api_key_from_env_or_config(
+                &resolved.api_key_env,
+                &resolved.env_file,
+            )
+            .as_deref(),
+            Some("sk-test-tui-login")
         );
+        assert!(std::env::var_os(&resolved.api_key_env).is_none());
 
         App::clear_api_key_login(&resolved.api_key_env, &resolved.env_file)?;
 
@@ -152,44 +163,44 @@ fn tui_api_key_logout_clears_saved_key_and_process_env() -> anyhow::Result<()> {
 fn tui_jcode_subscription_logout_clears_credentials_and_preserves_api_base() -> anyhow::Result<()> {
     with_temp_jcode_home(|| {
         crate::provider_catalog::save_env_value_to_env_file(
-            crate::subscription_catalog::JCODE_API_KEY_ENV,
-            crate::subscription_catalog::JCODE_ENV_FILE,
+            crate::subscription_catalog::KCODE_API_KEY_ENV,
+            crate::subscription_catalog::KCODE_ENV_FILE,
             Some("test-jcode-key"),
         )?;
         crate::provider_catalog::save_env_value_to_env_file(
-            crate::subscription_catalog::JCODE_API_BASE_ENV,
-            crate::subscription_catalog::JCODE_ENV_FILE,
+            crate::subscription_catalog::KCODE_API_BASE_ENV,
+            crate::subscription_catalog::KCODE_ENV_FILE,
             Some("https://subscription.example/v1"),
         )?;
         crate::provider_catalog::save_env_value_to_env_file(
-            crate::subscription_catalog::JCODE_ACCOUNT_ID_ENV,
-            crate::subscription_catalog::JCODE_ENV_FILE,
+            crate::subscription_catalog::KCODE_ACCOUNT_ID_ENV,
+            crate::subscription_catalog::KCODE_ENV_FILE,
             Some("acct_test"),
         )?;
         crate::provider_catalog::save_env_value_to_env_file(
-            crate::subscription_catalog::JCODE_ACCOUNT_EMAIL_ENV,
-            crate::subscription_catalog::JCODE_ENV_FILE,
+            crate::subscription_catalog::KCODE_ACCOUNT_EMAIL_ENV,
+            crate::subscription_catalog::KCODE_ENV_FILE,
             Some("user@example.com"),
         )?;
 
         crate::subscription_catalog::clear_account_credentials()?;
 
-        assert!(std::env::var_os(crate::subscription_catalog::JCODE_API_KEY_ENV).is_none());
+        assert!(std::env::var_os(crate::subscription_catalog::KCODE_API_KEY_ENV).is_none());
         assert_eq!(
-            std::env::var(crate::subscription_catalog::JCODE_API_BASE_ENV).as_deref(),
+            std::env::var(crate::subscription_catalog::KCODE_API_BASE_ENV).as_deref(),
             Ok("https://subscription.example/v1")
         );
-        assert!(std::env::var_os(crate::subscription_catalog::JCODE_ACCOUNT_ID_ENV).is_none());
-        assert!(std::env::var_os(crate::subscription_catalog::JCODE_ACCOUNT_EMAIL_ENV).is_none());
+        assert!(std::env::var_os(crate::subscription_catalog::KCODE_ACCOUNT_ID_ENV).is_none());
+        assert!(std::env::var_os(crate::subscription_catalog::KCODE_ACCOUNT_EMAIL_ENV).is_none());
         assert!(crate::subscription_catalog::configured_api_key().is_none());
         for env_key in [
-            crate::subscription_catalog::JCODE_ACCOUNT_ID_ENV,
-            crate::subscription_catalog::JCODE_ACCOUNT_EMAIL_ENV,
+            crate::subscription_catalog::KCODE_ACCOUNT_ID_ENV,
+            crate::subscription_catalog::KCODE_ACCOUNT_EMAIL_ENV,
         ] {
             assert!(
                 crate::provider_catalog::load_env_value_from_env_or_config(
                     env_key,
-                    crate::subscription_catalog::JCODE_ENV_FILE,
+                    crate::subscription_catalog::KCODE_ENV_FILE,
                 )
                 .is_none()
             );

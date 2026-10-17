@@ -16,7 +16,7 @@ fn ollama_context_window_does_not_over_report_before_the_catalog_is_probed() {
     // advertised window here would over-budget the request and make the
     // conversation look like it lost its history.
     let _lock = ENV_LOCK.lock();
-    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
+    let _namespace = EnvVarGuard::remove("KCODE_OPENROUTER_CACHE_NAMESPACE");
     let mut config = jcode_base::config::NamedProviderConfig {
         base_url: "http://localhost:11434/v1".to_string(),
         auth: jcode_base::config::NamedProviderAuth::None,
@@ -44,7 +44,7 @@ fn explicit_context_window_still_wins_over_the_ollama_clamp() {
     // has raised OLLAMA_CONTEXT_LENGTH and declared the matching window must be
     // believed, otherwise the fix for over-reporting becomes under-reporting.
     let _lock = ENV_LOCK.lock();
-    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
+    let _namespace = EnvVarGuard::remove("KCODE_OPENROUTER_CACHE_NAMESPACE");
     let mut config = jcode_base::config::NamedProviderConfig {
         base_url: "http://localhost:11434/v1".to_string(),
         auth: jcode_base::config::NamedProviderAuth::None,
@@ -70,7 +70,7 @@ fn explicit_context_window_still_wins_over_the_ollama_clamp() {
 #[test]
 fn ollama_cloud_model_is_not_clamped_to_the_local_runner_default() {
     let _lock = ENV_LOCK.lock();
-    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
+    let _namespace = EnvVarGuard::remove("KCODE_OPENROUTER_CACHE_NAMESPACE");
     let mut config = jcode_base::config::NamedProviderConfig {
         base_url: "http://localhost:11434/v1".to_string(),
         auth: jcode_base::config::NamedProviderAuth::None,

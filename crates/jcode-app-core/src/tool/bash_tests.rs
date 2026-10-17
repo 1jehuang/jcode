@@ -8,6 +8,76 @@ use serde_json::json;
 use tokio::sync::mpsc;
 
 #[test]
+fn bash_optional_nulls_use_omitted_defaults() {
+    let omitted: BashInput = serde_json::from_value(json!({"command": "printf ok"})).unwrap();
+    let nulls: BashInput = serde_json::from_value(json!({
+        "command": "printf ok",
+        "intent": null,
+        "accept_large_output": null,
+        "timeout": null,
+        "run_in_background": null,
+        "notify": null,
+        "wake": null,
+        "stall_wake_seconds": null,
+        "justification": null
+    }))
+    .unwrap();
+    assert!(nulls.notify);
+    assert!(!nulls.wake);
+    assert_eq!(nulls.notify, omitted.notify);
+    assert_eq!(nulls.wake, omitted.wake);
+    assert_eq!(nulls.run_in_background, omitted.run_in_background);
+    assert_eq!(nulls.timeout, omitted.timeout);
+    assert_eq!(nulls.stall_wake_seconds, omitted.stall_wake_seconds);
+    assert_eq!(nulls.justification, omitted.justification);
+    assert_eq!(nulls.intent, omitted.intent);
+}
+
+#[test]
+fn bash_optional_booleans_preserve_explicit_values() {
+    for value in [false, true] {
+        let input: BashInput = serde_json::from_value(json!({
+            "command": "printf ok", "notify": value, "wake": value,
+            "run_in_background": value
+        }))
+        .unwrap();
+        assert_eq!(input.notify, value);
+        assert_eq!(input.wake, value);
+        assert_eq!(input.run_in_background, Some(value));
+    }
+}
+
+#[test]
+fn bash_optional_booleans_still_reject_invalid_types() {
+    for key in ["notify", "wake", "run_in_background"] {
+        for value in [json!("false"), json!(0), json!([]), json!({})] {
+            let mut input = json!({"command": "printf ok"});
+            input[key] = value;
+            assert!(serde_json::from_value::<BashInput>(input).is_err());
+        }
+    }
+    assert!(serde_json::from_value::<BashInput>(json!({"command": null})).is_err());
+    assert!(serde_json::from_value::<BashInput>(json!({})).is_err());
+}
+
+#[tokio::test]
+async fn bash_executes_with_null_optional_arguments() {
+    let output = BashTool::new()
+        .execute(
+            json!({
+                "command": "printf null-options-ok",
+                "notify": null, "wake": null, "run_in_background": null,
+                "timeout": null, "stall_wake_seconds": null, "justification": null,
+                "intent": null, "accept_large_output": null
+            }),
+            make_ctx(None),
+        )
+        .await
+        .unwrap();
+    assert!(output.output.contains("null-options-ok"));
+}
+
+#[test]
 fn repository_commands_export_a_logged_cargo_function() {
     let repo =
         crate::build::find_repo_in_ancestors(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
@@ -15,8 +85,8 @@ fn repository_commands_export_a_logged_cargo_function() {
     let wrapped = wrap_repo_cargo_commands("cargo test -p demo && echo done", Some(&repo))
         .expect("jcode repository has dev_cargo.sh");
 
-    assert!(wrapped.contains("export JCODE_DEV_CARGO_SCRIPT="));
-    assert!(wrapped.contains("JCODE_IN_DEV_CARGO=1 \"$JCODE_DEV_CARGO_SCRIPT\" \"$@\""));
+    assert!(wrapped.contains("export KCODE_DEV_CARGO_SCRIPT="));
+    assert!(wrapped.contains("KCODE_IN_DEV_CARGO=1 \"$KCODE_DEV_CARGO_SCRIPT\" \"$@\""));
     assert!(wrapped.contains("export -f cargo"));
     assert!(wrapped.ends_with("cargo test -p demo && echo done"));
 }
@@ -267,6 +337,13 @@ async fn test_foreground_timeout_promotes_and_command_keeps_running() {
         .expect("task_id should be present")
         .to_string();
 
+    // Promotion must retain an output artifact before returning, even though
+    // this in-process path only fills it once the command finishes.
+    assert!(
+        crate::background::global().output(&task_id).await.is_some(),
+        "output artifact should exist immediately after promotion"
+    );
+
     // Wait for the promoted command to finish on its own.
     let mut final_status = None;
     for _ in 0..40 {
@@ -445,7 +522,7 @@ async fn test_stderr_captured_with_stdin() {
 #[test]
 fn test_parse_progress_marker_handles_percent_payloads() {
     let progress = parse_progress_marker(
-        r#"JCODE_PROGRESS {"percent":25,"message":"Downloading dependencies"}"#,
+        r#"KCODE_PROGRESS {"percent":25,"message":"Downloading dependencies"}"#,
     )
     .expect("marker should parse");
 
@@ -528,7 +605,7 @@ async fn test_background_command_progress_marker_updates_status_and_stays_out_of
     let result = tool
             .execute(
                 json!({
-                    "command": "printf '%s\n' 'JCODE_PROGRESS {\"current\":3,\"total\":10,\"unit\":\"steps\",\"message\":\"Building\"}'; sleep 0.1; echo done",
+                    "command": "printf '%s\n' 'KCODE_PROGRESS {\"current\":3,\"total\":10,\"unit\":\"steps\",\"message\":\"Building\"}'; sleep 0.1; echo done",
                     "run_in_background": true,
                     "notify": false,
                     "wake": false,
@@ -577,7 +654,7 @@ async fn test_background_command_progress_marker_updates_status_and_stays_out_of
         .expect("output should exist");
     assert!(output.contains("done"), "output was: {output}");
     assert!(
-        !output.contains("JCODE_PROGRESS"),
+        !output.contains("KCODE_PROGRESS"),
         "progress marker should be hidden from output: {output}"
     );
 }
@@ -872,11 +949,11 @@ fn test_bash_tool_schema_advertises_background_progress_guidance() {
         .expect("run_in_background description should be a string");
 
     assert!(
-        command_description.contains("JCODE_SCRATCH_DIR"),
+        command_description.contains("KCODE_SCRATCH_DIR"),
         "command description should keep the scratch-dir guidance"
     );
     assert!(
-        background_description.contains("JCODE_PROGRESS"),
+        background_description.contains("KCODE_PROGRESS"),
         "background description should mention the progress marker format"
     );
 }
@@ -1043,7 +1120,7 @@ async fn indirect_dispatch_paths_cannot_bypass_the_gate() {
 
 #[test]
 fn parse_progress_line_classifies_markers_checkpoints_and_heuristics() {
-    let update = parse_progress_line(r#"JCODE_PROGRESS {"percent":40,"message":"Working"}"#)
+    let update = parse_progress_line(r#"KCODE_PROGRESS {"percent":40,"message":"Working"}"#)
         .expect("parser should not fail")
         .expect("progress marker should parse");
     match update {
@@ -1051,7 +1128,7 @@ fn parse_progress_line_classifies_markers_checkpoints_and_heuristics() {
         other => panic!("expected a progress update, got {other:?}"),
     }
 
-    let update = parse_progress_line(r#"JCODE_CHECKPOINT {"message":"Tests passed"}"#)
+    let update = parse_progress_line(r#"KCODE_CHECKPOINT {"message":"Tests passed"}"#)
         .expect("parser should not fail")
         .expect("checkpoint marker should parse");
     match update {

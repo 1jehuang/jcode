@@ -208,7 +208,7 @@ ensure_release_draft() {
 
 if [[ "$MODE" == "prepare-fast" ]]; then
     echo "▸ Refreshing the warm selfdev Linux build before the version bump..."
-    JCODE_REMOTE_CARGO=0 scripts/dev_cargo.sh build --profile selfdev -p jcode --bin jcode
+    KCODE_REMOTE_CARGO=0 scripts/dev_cargo.sh build --profile selfdev -p jcode --bin jcode
     source_bin="target/selfdev/jcode"
     [[ -x "$source_bin" ]] || { echo "Error: selfdev binary not found: $source_bin" >&2; exit 1; }
     prepared_marker="target/selfdev/fast-release-prepared"
@@ -226,7 +226,7 @@ fi
 
 if [[ "$MODE" == "prepare-fast-macos" ]]; then
     echo "▸ Refreshing the macOS arm64 build before the version bump..."
-    JCODE_RELEASE_BUILD=1 JCODE_BUILD_SEMVER="$VERSION_NUM" \
+    KCODE_RELEASE_BUILD=1 KCODE_BUILD_SEMVER="$VERSION_NUM" \
         CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-1}" \
         cargo build --release --target aarch64-apple-darwin --bin jcode
     source_bin="target/aarch64-apple-darwin/release/jcode"
@@ -300,11 +300,21 @@ if [[ "$MODE" == "fast-local" ]]; then
     cat > "$DIST/jcode-linux-x86_64" <<WRAPPER
 #!/usr/bin/env sh
 set -eu
-export JCODE_RUNTIME_RELEASE_SEMVER="$VERSION_NUM"
-export JCODE_RUNTIME_RELEASE_GIT_HASH="$(git rev-parse --short HEAD)"
-export JCODE_RUNTIME_RELEASE_GIT_DATE="$(git log -1 --format=%ci)"
-export JCODE_RUNTIME_RELEASE_GIT_TAG="$VERSION"
-self_dir=\$(CDPATH= cd -- "\$(dirname -- "\$0")" && pwd)
+export KCODE_RUNTIME_RELEASE_SEMVER="$VERSION_NUM"
+export KCODE_RUNTIME_RELEASE_GIT_HASH="$(git rev-parse --short HEAD)"
+export KCODE_RUNTIME_RELEASE_GIT_DATE="$(git log -1 --format=%ci)"
+export KCODE_RUNTIME_RELEASE_GIT_TAG="$VERSION"
+self=\$0
+# The launcher and channel entries are symlinks to this wrapper; resolve them
+# so the payload is found next to the real file, not next to the symlink.
+while [ -L "\$self" ]; do
+    link=\$(readlink -- "\$self")
+    case \$link in
+        /*) self=\$link ;;
+        *) self=\$(dirname -- "\$self")/\$link ;;
+    esac
+done
+self_dir=\$(CDPATH= cd -- "\$(dirname -- "\$self")" && pwd)
 exec "\$self_dir/jcode-linux-x86_64.bin" "\$@"
 WRAPPER
     chmod +x "$DIST/jcode-linux-x86_64"
@@ -390,12 +400,12 @@ fi
 # Standard local distribution build: Linux + macOS in parallel.
 echo "▸ Building Linux x86_64 + macOS aarch64 in parallel..."
 (
-    JCODE_RELEASE_BUILD=1 JCODE_BUILD_SEMVER="$VERSION_NUM" scripts/build_linux_compat.sh "$DIST" >/dev/null
+    KCODE_RELEASE_BUILD=1 KCODE_BUILD_SEMVER="$VERSION_NUM" scripts/build_linux_compat.sh "$DIST" >/dev/null
     echo "  ✅ Linux done ($(elapsed)s)"
 ) &
 LINUX_PID=$!
 (
-    JCODE_RELEASE_BUILD=1 JCODE_BUILD_SEMVER="$VERSION_NUM" \
+    KCODE_RELEASE_BUILD=1 KCODE_BUILD_SEMVER="$VERSION_NUM" \
         CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-1}" \
         cargo build --release --target aarch64-apple-darwin --bin jcode 2>/dev/null
     cp target/aarch64-apple-darwin/release/jcode "$DIST/jcode-macos-aarch64"

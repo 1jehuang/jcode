@@ -59,7 +59,7 @@ fn run_enable() -> Result<()> {
     }
 
     if crate::telemetry::opt_out_forced_by_env() {
-        println!("Telemetry remains disabled because JCODE_NO_TELEMETRY or DO_NOT_TRACK is set.");
+        println!("Telemetry remains disabled because KCODE_NO_TELEMETRY or DO_NOT_TRACK is set.");
     } else {
         println!("Telemetry enabled.");
     }

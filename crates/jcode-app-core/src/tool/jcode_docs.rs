@@ -56,7 +56,7 @@ impl Tool for JcodeDocsTool {
     }
 
     fn description(&self) -> &str {
-        "Search bundled, version-matched Jcode documentation. Use this first for questions about Jcode features, configuration, architecture, tools, or behavior."
+        "Search bundled Jcode docs. Use first for questions about Jcode itself."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -117,9 +117,9 @@ impl Tool for JcodeDocsTool {
 fn list_docs() -> String {
     let mut output = format!(
         "Bundled Jcode documentation ({} files):\n",
-        JCODE_DOCS.len()
+        KCODE_DOCS.len()
     );
-    for (path, body) in JCODE_DOCS {
+    for (path, body) in KCODE_DOCS {
         let title = body
             .lines()
             .find_map(|line| line.strip_prefix("# "))
@@ -130,7 +130,7 @@ fn list_docs() -> String {
 }
 
 fn read_doc(path: &str) -> Result<String> {
-    let (_, body) = JCODE_DOCS
+    let (_, body) = KCODE_DOCS
         .iter()
         .find(|(candidate, _)| *candidate == path)
         .ok_or_else(|| {
@@ -208,7 +208,7 @@ fn terms(query: &str) -> Vec<String> {
 
 fn sections() -> Vec<Section<'static>> {
     let mut result = Vec::new();
-    for (path, document) in JCODE_DOCS {
+    for (path, document) in KCODE_DOCS {
         let mut heading = "Overview".to_string();
         let mut body = String::new();
         for line in document.lines() {
@@ -267,10 +267,10 @@ mod tests {
 
     #[test]
     fn corpus_includes_current_docs_but_not_plans() {
-        assert!(JCODE_DOCS.iter().any(|(path, _)| *path == "README.md"));
-        assert!(JCODE_DOCS.iter().any(|(path, _)| *path == "docs/README.md"));
+        assert!(KCODE_DOCS.iter().any(|(path, _)| *path == "README.md"));
+        assert!(KCODE_DOCS.iter().any(|(path, _)| *path == "docs/README.md"));
         assert!(
-            !JCODE_DOCS
+            !KCODE_DOCS
                 .iter()
                 .any(|(path, _)| path.starts_with("docs/plans/"))
         );

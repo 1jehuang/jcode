@@ -120,13 +120,13 @@ impl SelfDevTool {
             None => {
                 let target = Self::selfdev_clone_dir()
                     .map(|p| p.display().to_string())
-                    .unwrap_or_else(|_| "~/.jcode/source/jcode".to_string());
+                    .unwrap_or_else(|_| "~/.kcode/source/jcode".to_string());
                 checks.push(SetupCheck::missing(
                     "repository",
                     "no local jcode checkout found",
                     format!(
                         "Clone the source manually: `git clone {} {}`.",
-                        super::JCODE_REPO_URL,
+                        super::KCODE_REPO_URL,
                         target
                     ),
                 ));
@@ -314,7 +314,7 @@ impl SelfDevTool {
 
     /// Resolve the default location for a cloned self-dev source checkout.
     fn selfdev_clone_dir() -> Result<std::path::PathBuf> {
-        Ok(storage::jcode_dir()?.join("source").join("jcode"))
+        Ok(storage::jcode_dir()?.join("source").join("kcode"))
     }
 
     /// Clone the jcode source into the default self-dev source directory.
@@ -336,7 +336,7 @@ impl SelfDevTool {
 
         let status = Command::new("git")
             .arg("clone")
-            .arg(super::JCODE_REPO_URL)
+            .arg(super::KCODE_REPO_URL)
             .arg(&repo_dir)
             .status()
             .map_err(|e| anyhow::anyhow!("failed to run git clone: {e}"))?;

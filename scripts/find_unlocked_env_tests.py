@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Find tests that mutate the process-global JCODE_HOME without the shared lock.
+"""Find tests that mutate the process-global KCODE_HOME without the shared lock.
 
 Rust runs tests in parallel threads of one process, so any test that changes
-JCODE_HOME changes it for every concurrently running test. `storage::lock_test_env`
+KCODE_HOME changes it for every concurrently running test. `storage::lock_test_env`
 is the repo's convention for serializing those. A test that mutates the variable
 without holding that lock can swap the home directory out from under an unrelated
 test mid-assertion, which is the shape of jcode-tui's intermittent failures.
@@ -16,11 +16,11 @@ import sys
 CRATE = sys.argv[1] if len(sys.argv) > 1 else "crates/jcode-tui/src"
 
 files = subprocess.run(
-    ["grep", "-rl", "JCODE_HOME", "--include=*.rs", CRATE],
+    ["grep", "-rl", "KCODE_HOME", "--include=*.rs", CRATE],
     capture_output=True, text=True,
 ).stdout.split()
 
-MUTATES = re.compile(r'(set_var\s*\(\s*"JCODE_HOME"|set_path\s*\(\s*"JCODE_HOME"|remove_var\s*\(\s*"JCODE_HOME")')
+MUTATES = re.compile(r'(set_var\s*\(\s*"KCODE_HOME"|set_path\s*\(\s*"KCODE_HOME"|remove_var\s*\(\s*"KCODE_HOME")')
 FN_START = re.compile(r"^\s*(?:async\s+)?fn\s+([A-Za-z0-9_]+)")
 LOCK = re.compile(r"lock_test_env\s*\(\)")
 
@@ -58,4 +58,4 @@ for path in files:
 
 for path, name in offenders:
     print(f"{path}: {name}")
-print(f"\n{len(offenders)} function(s) mutate JCODE_HOME without the shared test-env lock")
+print(f"\n{len(offenders)} function(s) mutate KCODE_HOME without the shared test-env lock")

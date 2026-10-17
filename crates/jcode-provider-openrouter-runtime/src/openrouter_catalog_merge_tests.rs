@@ -32,7 +32,7 @@ use crate::*;
 #[test]
 fn named_profile_static_models_survive_live_catalog_refresh() {
     let _lock = ENV_LOCK.lock();
-    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
+    let _namespace = EnvVarGuard::remove("KCODE_OPENROUTER_CACHE_NAMESPACE");
     let _key = EnvVarGuard::set("TEST_NAMED_MERGE_KEY", "test-key");
 
     let profile = jcode_base::config::NamedProviderConfig {
@@ -62,6 +62,7 @@ fn named_profile_static_models_survive_live_catalog_refresh() {
             context_length: Some(128_000),
             pricing: Default::default(),
             created: None,
+            ..Default::default()
         }];
         cache.fetched = true;
         cache.cached_at = Some(1);
@@ -80,7 +81,7 @@ fn named_profile_static_models_survive_live_catalog_refresh() {
 #[test]
 fn builtin_profile_is_not_treated_as_user_named() {
     let _lock = ENV_LOCK.lock();
-    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
+    let _namespace = EnvVarGuard::remove("KCODE_OPENROUTER_CACHE_NAMESPACE");
     let _key = EnvVarGuard::set("CEREBRAS_API_KEY", "test-key");
 
     let profile = jcode_base::config::NamedProviderConfig {
@@ -101,7 +102,7 @@ fn builtin_profile_is_not_treated_as_user_named() {
 #[test]
 fn profile_shadowing_builtin_name_with_other_base_is_user_named() {
     let _lock = ENV_LOCK.lock();
-    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
+    let _namespace = EnvVarGuard::remove("KCODE_OPENROUTER_CACHE_NAMESPACE");
     let _key = EnvVarGuard::set("TEST_SHADOW_KEY", "test-key");
 
     let profile = jcode_base::config::NamedProviderConfig {
@@ -128,7 +129,7 @@ fn profile_shadowing_builtin_name_with_other_base_is_user_named() {
 async fn config_toml_models_survive_a_real_catalog_fetch() {
     let (_api_base, provider) = {
         let _lock = ENV_LOCK.lock();
-        let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
+        let _namespace = EnvVarGuard::remove("KCODE_OPENROUTER_CACHE_NAMESPACE");
 
         let api_base = spawn_models_server(
             r#"{
@@ -139,7 +140,7 @@ async fn config_toml_models_survive_a_real_catalog_fetch() {
             }"#,
         );
 
-        // Exactly the shape a user writes in ~/.jcode/config.toml.
+        // Exactly the shape a user writes in ~/.kcode/config.toml.
         let toml_src = format!(
             r#"
 base_url = "{api_base}"
@@ -180,10 +181,64 @@ context_window = 128000
     );
 }
 
+/// A pinned `<model>@<Provider>` variant is routing syntax, not the catalog id.
+/// OpenRouter's `/models` lists `stealth/space-bunny-alpha` while the pinned runtime
+/// model is `stealth/space-bunny-alpha@Stealth`. Matching only the pinned form missed
+/// every catalog entry, so `context_window()` fell through to the 200K default even
+/// though the catalog entry carries `context_length` 1000000. Measured live: the panel
+/// reported 200K while the on-disk catalog already carried the correct number.
+#[tokio::test]
+async fn pinned_variant_suffix_still_matches_the_catalog_entry() {
+    let _lock = ENV_LOCK.lock();
+    let _namespace = EnvVarGuard::remove("KCODE_OPENROUTER_CACHE_NAMESPACE");
+    let temp = tempfile::tempdir().expect("temp jcode home");
+    let _home = EnvVarGuard::set("KCODE_HOME", temp.path().to_str().expect("utf8 temp path"));
+
+    let api_base = spawn_models_server(
+        r#"{
+            "object": "list",
+            "data": [
+                {"id": "stealth/space-bunny-alpha", "object": "model", "context_length": 1000000}
+            ]
+        }"#,
+    );
+
+    let toml_src = format!(
+        r#"
+base_url = "{api_base}"
+auth = "none"
+model_catalog = true
+default_model = "stealth/space-bunny-alpha"
+"#
+    );
+    let profile: jcode_base::config::NamedProviderConfig =
+        toml::from_str(&toml_src).expect("config.toml profile should parse");
+
+    let provider = OpenRouterProvider::new_named_openai_compatible("orvariant", &profile)
+        .expect("named profile should initialize");
+
+    provider
+        .fetch_models()
+        .await
+        .expect("live catalog fetch should succeed");
+
+    // The pinned form the runtime actually carries.
+    {
+        let mut model = provider.model.try_write().expect("model lock");
+        *model = "stealth/space-bunny-alpha@Stealth".to_string();
+    }
+
+    assert_eq!(
+        provider.context_window(),
+        1_000_000,
+        "a pinned @Provider suffix must not hide the model from the catalog"
+    );
+}
+
 /// Regression test for issue #607.
 ///
 /// Every `new_named_openai_compatible()` constructor sets the process-global
-/// `JCODE_OPENROUTER_CACHE_NAMESPACE` env var, so with several named profiles
+/// `KCODE_OPENROUTER_CACHE_NAMESPACE` env var, so with several named profiles
 /// in one process the last one constructed wins and every profile's foreground
 /// cache read/write collides on a single `<last-profile>_models.json`. The
 /// picker then shows another provider's catalog, or refetches and clobbers it,
@@ -192,8 +247,8 @@ context_window = 128000
 fn named_profiles_keep_distinct_disk_cache_namespaces() {
     let _lock = ENV_LOCK.lock();
     let temp = tempfile::tempdir().expect("temp jcode home");
-    let _home = EnvVarGuard::set("JCODE_HOME", temp.path().to_str().expect("utf8 temp path"));
-    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
+    let _home = EnvVarGuard::set("KCODE_HOME", temp.path().to_str().expect("utf8 temp path"));
+    let _namespace = EnvVarGuard::remove("KCODE_OPENROUTER_CACHE_NAMESPACE");
     let _key = EnvVarGuard::set("TEST_NS_KEY", "test-key");
 
     let make_profile = |base_url: &str| jcode_base::config::NamedProviderConfig {

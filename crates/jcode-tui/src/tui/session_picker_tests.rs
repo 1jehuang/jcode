@@ -634,8 +634,8 @@ fn test_filter_matches_recent_message_content() {
 fn test_loading_preview_refreshes_search_index_for_picker_filtering() {
     let _env_lock = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("temp dir");
-    let previous_home = std::env::var("JCODE_HOME").ok();
-    crate::env::set_var("JCODE_HOME", temp.path());
+    let previous_home = std::env::var("KCODE_HOME").ok();
+    crate::env::set_var("KCODE_HOME", temp.path());
 
     let mut session = Session::create_with_id(
         "session_preview_search".to_string(),
@@ -671,9 +671,9 @@ fn test_loading_preview_refreshes_search_index_for_picker_filtering() {
     assert_eq!(picker.visible_sessions.len(), 1);
 
     if let Some(previous_home) = previous_home {
-        crate::env::set_var("JCODE_HOME", previous_home);
+        crate::env::set_var("KCODE_HOME", previous_home);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        crate::env::remove_var("KCODE_HOME");
     }
 }
 
@@ -1425,23 +1425,11 @@ fn onboarding_banner_renders_prompt_and_both_action_rows() {
         review_x < 50,
         "suggested prompt should span the visual center: {lines:#?}"
     );
-    // The "Start in the current directory" row is right-aligned to the
-    // onboarding band (`Alignment::Right` on a 120-col buffer ⇒ roughly
-    // column 84 for the leading `◖` glyph).  The earlier test asserted
-    // `start_x >= 95`, which doesn't match the right-aligned layout.  We
-    // keep the spirit of the assertion (the row should sit in the right
-    // half of the buffer) without an exact column.
+    let width = buffer.area.width as usize;
+    let start_end = lines[start_y].trim_end().chars().count();
     assert!(
-        start_x > buffer.area.width as usize / 2,
-        "blank-session action should stay in the right half of the onboarding band: \
-         start_x={start_x} width={width}; lines={lines:#?}",
-        width = buffer.area.width
-    );
-    assert!(
-        start_y >= buffer.area.height as usize - 3,
-        "blank-session action should stay in the bottom rows: start_y={start_y} \
-         height={height}; lines={lines:#?}",
-        height = buffer.area.height
+        start_y >= buffer.area.height as usize - 3 && start_x > width / 2 && start_end + 4 >= width,
+        "blank-session action should stay secondary in the bottom-right: {lines:#?}"
     );
 }
 

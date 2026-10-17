@@ -95,14 +95,14 @@ def build_specs() -> dict[str, ToolSpec]:
             name="jcode_memory_off",
             argv=[jcode, "--no-update", "--no-selfdev"],
             version_argv=[jcode, "version"],
-            env={"JCODE_NO_TELEMETRY": "1", "JCODE_MEMORY_ENABLED": "0"},
+            env={"KCODE_NO_TELEMETRY": "1", "KCODE_MEMORY_ENABLED": "0"},
             jcode=True,
         ),
         "jcode_memory_on": ToolSpec(
             name="jcode_memory_on",
             argv=[jcode, "--no-update", "--no-selfdev"],
             version_argv=[jcode, "version"],
-            env={"JCODE_NO_TELEMETRY": "1", "JCODE_MEMORY_ENABLED": "1"},
+            env={"KCODE_NO_TELEMETRY": "1", "KCODE_MEMORY_ENABLED": "1"},
             jcode=True,
         ),
         "pi": ToolSpec(
@@ -352,17 +352,17 @@ def run_tool(spec: ToolSpec, sessions: int, cwd: Path, timeout_s: float, settle_
     cleanup_pgids: list[int] = []
     temp_root: str | None = None
     try:
-        if spec.jcode:
+        if spec.kcode:
             temp_root = tempfile.mkdtemp(prefix="jcode-memory-bench-")
             env = os.environ.copy()
             if spec.env:
                 env.update(spec.env)
-            env["JCODE_HOME"] = os.path.join(temp_root, "home")
-            env["JCODE_RUNTIME_DIR"] = os.path.join(temp_root, "run")
-            env["JCODE_TEMP_SERVER"] = "1"
-            env["JCODE_SERVER_OWNER_PID"] = str(os.getpid())
-            os.makedirs(env["JCODE_HOME"], exist_ok=True)
-            os.makedirs(env["JCODE_RUNTIME_DIR"], exist_ok=True)
+            env["KCODE_HOME"] = os.path.join(temp_root, "home")
+            env["KCODE_RUNTIME_DIR"] = os.path.join(temp_root, "run")
+            env["KCODE_TEMP_SERVER"] = "1"
+            env["KCODE_SERVER_OWNER_PID"] = str(os.getpid())
+            os.makedirs(env["KCODE_HOME"], exist_ok=True)
+            os.makedirs(env["KCODE_RUNTIME_DIR"], exist_ok=True)
             for auth_name in (
                 "anthropic-auth.json",
                 "openai-auth.json",
@@ -370,16 +370,16 @@ def run_tool(spec: ToolSpec, sessions: int, cwd: Path, timeout_s: float, settle_
                 "gemini_oauth.json",
                 "config.toml",
             ):
-                real_auth = Path.home() / ".jcode" / auth_name
-                bench_auth = Path(env["JCODE_HOME"]) / auth_name
+                real_auth = Path.home() / ".kcode" / auth_name
+                bench_auth = Path(env["KCODE_HOME"]) / auth_name
                 if real_auth.exists() and not bench_auth.exists():
                     bench_auth.symlink_to(real_auth)
             if spec.name == "jcode_memory_on":
-                real_models = Path.home() / ".jcode" / "models"
-                bench_models = Path(env["JCODE_HOME"]) / "models"
+                real_models = Path.home() / ".kcode" / "models"
+                bench_models = Path(env["KCODE_HOME"]) / "models"
                 if real_models.exists() and not bench_models.exists():
                     bench_models.symlink_to(real_models)
-            socket_path = os.path.join(env["JCODE_RUNTIME_DIR"], "bench.sock")
+            socket_path = os.path.join(env["KCODE_RUNTIME_DIR"], "bench.sock")
             server_proc = subprocess.Popen(
                 [spec.argv[0], "--no-update", "--no-selfdev", "serve", "--socket", socket_path],
                 cwd=str(cwd),

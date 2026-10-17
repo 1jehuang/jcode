@@ -66,15 +66,15 @@ fn auth_status_default_all_not_configured() {
 #[test]
 fn auth_status_check_fast_includes_bedrock_probe() {
     let _lock = crate::storage::lock_test_env();
-    let prev_bedrock_enable = std::env::var_os("JCODE_BEDROCK_ENABLE");
+    let prev_bedrock_enable = std::env::var_os("KCODE_BEDROCK_ENABLE");
 
-    crate::env::set_var("JCODE_BEDROCK_ENABLE", "1");
+    crate::env::set_var("KCODE_BEDROCK_ENABLE", "1");
     AuthStatus::invalidate_cache();
 
     let status = AuthStatus::check_fast();
     assert_eq!(status.bedrock, AuthState::Available);
 
-    restore_env_var("JCODE_BEDROCK_ENABLE", prev_bedrock_enable);
+    restore_env_var("KCODE_BEDROCK_ENABLE", prev_bedrock_enable);
     AuthStatus::invalidate_cache();
 }
 
@@ -87,63 +87,63 @@ fn full_and_fast_auth_status_match_for_shared_probe_fields() {
     std::fs::create_dir_all(&home).expect("create temp home");
     std::fs::create_dir_all(&xdg).expect("create temp xdg config");
     let saved = [
-        "JCODE_HOME",
+        "KCODE_HOME",
         "XDG_CONFIG_HOME",
         "HOME",
-        crate::subscription_catalog::JCODE_API_KEY_ENV,
+        crate::subscription_catalog::KCODE_API_KEY_ENV,
         "ANTHROPIC_API_KEY",
         "OPENAI_API_KEY",
         "OPENROUTER_API_KEY",
-        "JCODE_OPENROUTER_API_BASE",
-        "JCODE_OPENROUTER_API_KEY_NAME",
-        "JCODE_OPENROUTER_ENV_FILE",
-        "JCODE_OPENROUTER_CACHE_NAMESPACE",
-        "JCODE_OPENROUTER_PROVIDER_FEATURES",
-        "JCODE_OPENROUTER_TRANSPORT_STATE",
-        "JCODE_OPENROUTER_ALLOW_NO_AUTH",
-        "JCODE_OPENROUTER_MODEL_CATALOG",
-        "JCODE_OPENROUTER_STATIC_MODELS",
-        "JCODE_OPENROUTER_MODEL",
-        "JCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
+        "KCODE_OPENROUTER_API_BASE",
+        "KCODE_OPENROUTER_API_KEY_NAME",
+        "KCODE_OPENROUTER_ENV_FILE",
+        "KCODE_OPENROUTER_CACHE_NAMESPACE",
+        "KCODE_OPENROUTER_PROVIDER_FEATURES",
+        "KCODE_OPENROUTER_TRANSPORT_STATE",
+        "KCODE_OPENROUTER_ALLOW_NO_AUTH",
+        "KCODE_OPENROUTER_MODEL_CATALOG",
+        "KCODE_OPENROUTER_STATIC_MODELS",
+        "KCODE_OPENROUTER_MODEL",
+        "KCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
         crate::auth::azure::ENDPOINT_ENV,
         crate::auth::azure::API_KEY_ENV,
         crate::auth::azure::MODEL_ENV,
         crate::auth::azure::USE_ENTRA_ENV,
-        "JCODE_BEDROCK_ENABLE",
+        "KCODE_BEDROCK_ENABLE",
         "COPILOT_GITHUB_TOKEN",
         "GH_TOKEN",
         "GITHUB_TOKEN",
         "CURSOR_API_KEY",
         "CURSOR_ACCESS_TOKEN",
         "CURSOR_REFRESH_TOKEN",
-        "JCODE_CURSOR_CLI_PATH",
+        "KCODE_CURSOR_CLI_PATH",
     ]
     .into_iter()
     .map(|key| (key, std::env::var_os(key)))
     .collect::<Vec<_>>();
 
-    crate::env::set_var("JCODE_HOME", temp.path().join("jcode-home"));
+    crate::env::set_var("KCODE_HOME", temp.path().join("kcode-home"));
     crate::env::set_var("XDG_CONFIG_HOME", &xdg);
     crate::env::set_var("HOME", &home);
     crate::env::set_var(
-        crate::subscription_catalog::JCODE_API_KEY_ENV,
-        "jcode-test-key",
+        crate::subscription_catalog::KCODE_API_KEY_ENV,
+        "kcode-test-key",
     );
     crate::env::set_var("ANTHROPIC_API_KEY", "anthropic-test-key");
     crate::env::set_var("OPENAI_API_KEY", "openai-test-key");
     crate::env::set_var("OPENROUTER_API_KEY", "openrouter-test-key");
     for key in [
-        "JCODE_OPENROUTER_API_BASE",
-        "JCODE_OPENROUTER_API_KEY_NAME",
-        "JCODE_OPENROUTER_ENV_FILE",
-        "JCODE_OPENROUTER_CACHE_NAMESPACE",
-        "JCODE_OPENROUTER_PROVIDER_FEATURES",
-        "JCODE_OPENROUTER_TRANSPORT_STATE",
-        "JCODE_OPENROUTER_ALLOW_NO_AUTH",
-        "JCODE_OPENROUTER_MODEL_CATALOG",
-        "JCODE_OPENROUTER_STATIC_MODELS",
-        "JCODE_OPENROUTER_MODEL",
-        "JCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
+        "KCODE_OPENROUTER_API_BASE",
+        "KCODE_OPENROUTER_API_KEY_NAME",
+        "KCODE_OPENROUTER_ENV_FILE",
+        "KCODE_OPENROUTER_CACHE_NAMESPACE",
+        "KCODE_OPENROUTER_PROVIDER_FEATURES",
+        "KCODE_OPENROUTER_TRANSPORT_STATE",
+        "KCODE_OPENROUTER_ALLOW_NO_AUTH",
+        "KCODE_OPENROUTER_MODEL_CATALOG",
+        "KCODE_OPENROUTER_STATIC_MODELS",
+        "KCODE_OPENROUTER_MODEL",
+        "KCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
     ] {
         crate::env::remove_var(key);
     }
@@ -154,7 +154,7 @@ fn full_and_fast_auth_status_match_for_shared_probe_fields() {
     crate::env::set_var(crate::auth::azure::API_KEY_ENV, "azure-test-key");
     crate::env::set_var(crate::auth::azure::MODEL_ENV, "gpt-test-deployment");
     crate::env::remove_var(crate::auth::azure::USE_ENTRA_ENV);
-    crate::env::set_var("JCODE_BEDROCK_ENABLE", "1");
+    crate::env::set_var("KCODE_BEDROCK_ENABLE", "1");
     crate::env::set_var("COPILOT_GITHUB_TOKEN", "gho_test_token");
     crate::env::remove_var("GH_TOKEN");
     crate::env::remove_var("GITHUB_TOKEN");
@@ -162,7 +162,7 @@ fn full_and_fast_auth_status_match_for_shared_probe_fields() {
     crate::env::remove_var("CURSOR_ACCESS_TOKEN");
     crate::env::remove_var("CURSOR_REFRESH_TOKEN");
     crate::env::set_var(
-        "JCODE_CURSOR_CLI_PATH",
+        "KCODE_CURSOR_CLI_PATH",
         temp.path().join("missing-cursor-agent"),
     );
     AuthStatus::invalidate_cache();
@@ -196,13 +196,13 @@ fn full_and_fast_auth_status_document_cursor_cli_exception() {
     std::fs::create_dir_all(&home).expect("create temp home");
     std::fs::create_dir_all(&xdg).expect("create temp xdg config");
     let saved = [
-        "JCODE_HOME",
+        "KCODE_HOME",
         "XDG_CONFIG_HOME",
         "HOME",
         "CURSOR_API_KEY",
         "CURSOR_ACCESS_TOKEN",
         "CURSOR_REFRESH_TOKEN",
-        "JCODE_CURSOR_CLI_PATH",
+        "KCODE_CURSOR_CLI_PATH",
     ]
     .into_iter()
     .map(|key| (key, std::env::var_os(key)))
@@ -212,24 +212,25 @@ fn full_and_fast_auth_status_document_cursor_cli_exception() {
         "#!/bin/sh\nif [ \"$1\" = \"status\" ]; then\n  echo \"Authenticated\\nAccount: test@example.com\"\n  exit 0\nfi\nexit 1\n",
     );
 
-    crate::env::set_var("JCODE_HOME", temp.path().join("jcode-home"));
+    crate::env::set_var("KCODE_HOME", temp.path().join("kcode-home"));
     crate::env::set_var("XDG_CONFIG_HOME", &xdg);
     crate::env::set_var("HOME", &home);
     crate::env::remove_var("CURSOR_API_KEY");
     crate::env::remove_var("CURSOR_ACCESS_TOKEN");
     crate::env::remove_var("CURSOR_REFRESH_TOKEN");
-    crate::env::set_var("JCODE_CURSOR_CLI_PATH", &mock_cli);
+    crate::env::set_var("KCODE_CURSOR_CLI_PATH", &mock_cli);
     AuthStatus::invalidate_cache();
 
     let (full, _) = build_auth_status_uncached(AuthProbeMode::Full);
     let (fast, _) = build_auth_status_uncached(AuthProbeMode::Fast);
 
-    assert_eq!(full.cursor, AuthState::Available);
+    // Since 203c5cc95 (native Cursor auth), neither full nor fast auth treats an
+    // authenticated cursor-agent CLI session as usable credentials.
+    assert_eq!(full.cursor, AuthState::NotConfigured);
     assert_eq!(fast.cursor, AuthState::NotConfigured);
     assert_eq!(
-        full.cursor,
-        AuthState::Available,
-        "Full auth probes cursor-agent status; fast auth intentionally skips CLI/vscdb probes"
+        full.cursor, fast.cursor,
+        "cursor-agent CLI sessions are no longer probed by full or fast auth"
     );
 
     for (key, value) in saved {
@@ -475,12 +476,12 @@ fn auth_status_check_fast_ignores_expired_full_cache() {
 fn copilot_recent_token_exchange_failure_is_not_auto_usable() {
     let _lock = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().expect("create temp dir");
-    let prev_home = std::env::var_os("JCODE_HOME");
+    let prev_home = std::env::var_os("KCODE_HOME");
     let prev_copilot_token = std::env::var_os("COPILOT_GITHUB_TOKEN");
     let prev_gh_token = std::env::var_os("GH_TOKEN");
     let prev_github_token = std::env::var_os("GITHUB_TOKEN");
 
-    crate::env::set_var("JCODE_HOME", temp.path());
+    crate::env::set_var("KCODE_HOME", temp.path());
     crate::env::remove_var("COPILOT_GITHUB_TOKEN");
     crate::env::remove_var("GH_TOKEN");
     crate::env::remove_var("GITHUB_TOKEN");
@@ -520,7 +521,7 @@ fn copilot_recent_token_exchange_failure_is_not_auto_usable() {
     assert_eq!(status.copilot, AuthState::Available);
     assert!(status.copilot_has_api_token);
 
-    restore_env_var("JCODE_HOME", prev_home);
+    restore_env_var("KCODE_HOME", prev_home);
     restore_env_var("COPILOT_GITHUB_TOKEN", prev_copilot_token);
     restore_env_var("GH_TOKEN", prev_gh_token);
     restore_env_var("GITHUB_TOKEN", prev_github_token);
@@ -532,13 +533,29 @@ fn copilot_recent_token_exchange_failure_is_not_auto_usable() {
 fn openrouter_like_status_is_provider_specific() {
     let _lock = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().expect("create temp dir");
-    let prev_home = std::env::var_os("JCODE_HOME");
-    let prev_chutes = std::env::var_os("CHUTES_API_KEY");
-    let prev_opencode = std::env::var_os("OPENCODE_API_KEY");
+    // Issue #1479: a jcode-launched shell with an active named provider
+    // profile exports these, and the named-profile check short-circuits the
+    // per-provider key lookup. Clear them so the test sees only its own env.
+    let keys = [
+        "KCODE_HOME",
+        "CHUTES_API_KEY",
+        "OPENCODE_API_KEY",
+        "KCODE_NAMED_PROVIDER_PROFILE",
+        "KCODE_OPENROUTER_ALLOW_NO_AUTH",
+        "KCODE_OPENROUTER_API_KEY_NAME",
+        "KCODE_OPENROUTER_ENV_FILE",
+        "KCODE_OPENROUTER_API_BASE",
+    ];
+    let saved = keys
+        .into_iter()
+        .map(|key| (key, std::env::var_os(key)))
+        .collect::<Vec<_>>();
+    for key in keys {
+        crate::env::remove_var(key);
+    }
 
-    crate::env::set_var("JCODE_HOME", temp.path());
+    crate::env::set_var("KCODE_HOME", temp.path());
     crate::env::set_var("CHUTES_API_KEY", "chutes-test-key");
-    crate::env::remove_var("OPENCODE_API_KEY");
     AuthStatus::invalidate_cache();
 
     let status = AuthStatus::check_fast();
@@ -553,9 +570,9 @@ fn openrouter_like_status_is_provider_specific() {
         "API key (`CHUTES_API_KEY`)".to_string()
     );
 
-    restore_env_var("JCODE_HOME", prev_home);
-    restore_env_var("CHUTES_API_KEY", prev_chutes);
-    restore_env_var("OPENCODE_API_KEY", prev_opencode);
+    for (key, value) in saved {
+        restore_env_var(key, value);
+    }
     AuthStatus::invalidate_cache();
 }
 
@@ -564,17 +581,17 @@ fn openrouter_status_excludes_shared_compatible_transport() {
     let _lock = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().expect("create temp dir");
     let keys = [
-        "JCODE_HOME",
+        "KCODE_HOME",
         "OPENAI_API_KEY",
         "OPENROUTER_API_KEY",
-        "JCODE_OPENROUTER_API_BASE",
-        "JCODE_OPENROUTER_API_KEY_NAME",
-        "JCODE_OPENROUTER_ENV_FILE",
-        "JCODE_OPENROUTER_PROVIDER_FEATURES",
-        "JCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
-        "JCODE_OPENROUTER_ALLOW_NO_AUTH",
-        "JCODE_NAMED_PROVIDER_PROFILE",
-        "JCODE_OPENROUTER_TRANSPORT_STATE",
+        "KCODE_OPENROUTER_API_BASE",
+        "KCODE_OPENROUTER_API_KEY_NAME",
+        "KCODE_OPENROUTER_ENV_FILE",
+        "KCODE_OPENROUTER_PROVIDER_FEATURES",
+        "KCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
+        "KCODE_OPENROUTER_ALLOW_NO_AUTH",
+        "KCODE_NAMED_PROVIDER_PROFILE",
+        "KCODE_OPENROUTER_TRANSPORT_STATE",
     ];
     let saved = keys
         .into_iter()
@@ -584,7 +601,7 @@ fn openrouter_status_excludes_shared_compatible_transport() {
     for key in keys {
         crate::env::remove_var(key);
     }
-    crate::env::set_var("JCODE_HOME", temp.path());
+    crate::env::set_var("KCODE_HOME", temp.path());
 
     crate::env::set_var("OPENAI_API_KEY", "openai-test-key");
     assert!(!crate::provider::openrouter::has_openrouter_credentials());
@@ -594,13 +611,13 @@ fn openrouter_status_excludes_shared_compatible_transport() {
         AuthState::NotConfigured
     );
 
-    crate::env::set_var("JCODE_OPENROUTER_API_BASE", "https://example.test/v1");
-    crate::env::set_var("JCODE_OPENROUTER_API_KEY_NAME", "OPENAI_API_KEY");
+    crate::env::set_var("KCODE_OPENROUTER_API_BASE", "https://example.test/v1");
+    crate::env::set_var("KCODE_OPENROUTER_API_KEY_NAME", "OPENAI_API_KEY");
     assert!(crate::provider::openrouter::has_credentials());
     assert!(!crate::provider::openrouter::has_openrouter_credentials());
 
-    crate::env::remove_var("JCODE_OPENROUTER_API_BASE");
-    crate::env::remove_var("JCODE_OPENROUTER_API_KEY_NAME");
+    crate::env::remove_var("KCODE_OPENROUTER_API_BASE");
+    crate::env::remove_var("KCODE_OPENROUTER_API_KEY_NAME");
     crate::env::remove_var("OPENAI_API_KEY");
     crate::env::set_var("OPENROUTER_API_KEY", "openrouter-test-key");
     assert!(crate::provider::openrouter::has_openrouter_credentials());
@@ -618,7 +635,7 @@ fn azure_readiness_distinguishes_credentials_from_deployment_validation() {
     let _lock = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().expect("create temp dir");
     let saved = [
-        "JCODE_HOME",
+        "KCODE_HOME",
         crate::auth::azure::ENDPOINT_ENV,
         crate::auth::azure::API_KEY_ENV,
         crate::auth::azure::MODEL_ENV,
@@ -628,7 +645,7 @@ fn azure_readiness_distinguishes_credentials_from_deployment_validation() {
     .map(|key| (key, std::env::var_os(key)))
     .collect::<Vec<_>>();
 
-    crate::env::set_var("JCODE_HOME", temp.path());
+    crate::env::set_var("KCODE_HOME", temp.path());
     crate::env::set_var(
         crate::auth::azure::ENDPOINT_ENV,
         "https://example.openai.azure.com",
@@ -694,14 +711,14 @@ fn cursor_status_is_available_when_api_key_exists_without_cli() {
     let prev_access_token = std::env::var_os("CURSOR_ACCESS_TOKEN");
     let prev_refresh_token = std::env::var_os("CURSOR_REFRESH_TOKEN");
     let prev_api_key = std::env::var_os("CURSOR_API_KEY");
-    let prev_cli_path = std::env::var_os("JCODE_CURSOR_CLI_PATH");
+    let prev_cli_path = std::env::var_os("KCODE_CURSOR_CLI_PATH");
     let temp = tempfile::TempDir::new().expect("create temp dir");
 
     crate::env::remove_var("CURSOR_ACCESS_TOKEN");
     crate::env::remove_var("CURSOR_REFRESH_TOKEN");
     crate::env::set_var("CURSOR_API_KEY", "cursor-test-key");
     crate::env::set_var(
-        "JCODE_CURSOR_CLI_PATH",
+        "KCODE_CURSOR_CLI_PATH",
         temp.path().join("missing-cursor-agent"),
     );
     AuthStatus::invalidate_cache();
@@ -712,7 +729,7 @@ fn cursor_status_is_available_when_api_key_exists_without_cli() {
     restore_env_var("CURSOR_ACCESS_TOKEN", prev_access_token);
     restore_env_var("CURSOR_REFRESH_TOKEN", prev_refresh_token);
     restore_env_var("CURSOR_API_KEY", prev_api_key);
-    restore_env_var("JCODE_CURSOR_CLI_PATH", prev_cli_path);
+    restore_env_var("KCODE_CURSOR_CLI_PATH", prev_cli_path);
     AuthStatus::invalidate_cache();
 }
 
@@ -723,7 +740,7 @@ fn cursor_status_is_available_for_native_auth_without_cli() {
     let prev_access_token = std::env::var_os("CURSOR_ACCESS_TOKEN");
     let prev_refresh_token = std::env::var_os("CURSOR_REFRESH_TOKEN");
     let prev_api_key = std::env::var_os("CURSOR_API_KEY");
-    let prev_cli_path = std::env::var_os("JCODE_CURSOR_CLI_PATH");
+    let prev_cli_path = std::env::var_os("KCODE_CURSOR_CLI_PATH");
     let temp = tempfile::TempDir::new().expect("create temp dir");
 
     crate::env::set_var(
@@ -733,7 +750,7 @@ fn cursor_status_is_available_for_native_auth_without_cli() {
     crate::env::remove_var("CURSOR_REFRESH_TOKEN");
     crate::env::remove_var("CURSOR_API_KEY");
     crate::env::set_var(
-        "JCODE_CURSOR_CLI_PATH",
+        "KCODE_CURSOR_CLI_PATH",
         temp.path().join("missing-cursor-agent"),
     );
     AuthStatus::invalidate_cache();
@@ -744,7 +761,7 @@ fn cursor_status_is_available_for_native_auth_without_cli() {
     restore_env_var("CURSOR_ACCESS_TOKEN", prev_access_token);
     restore_env_var("CURSOR_REFRESH_TOKEN", prev_refresh_token);
     restore_env_var("CURSOR_API_KEY", prev_api_key);
-    restore_env_var("JCODE_CURSOR_CLI_PATH", prev_cli_path);
+    restore_env_var("KCODE_CURSOR_CLI_PATH", prev_cli_path);
     AuthStatus::invalidate_cache();
 }
 
@@ -753,7 +770,7 @@ fn cursor_status_is_available_for_native_auth_without_cli() {
 fn cursor_status_is_available_for_authenticated_cli_session() {
     let _lock = crate::storage::lock_test_env();
     let prev_api_key = std::env::var_os("CURSOR_API_KEY");
-    let prev_cli_path = std::env::var_os("JCODE_CURSOR_CLI_PATH");
+    let prev_cli_path = std::env::var_os("KCODE_CURSOR_CLI_PATH");
     let temp = tempfile::TempDir::new().expect("create temp dir");
     let mock_cli = write_mock_cursor_agent(
         temp.path(),
@@ -761,22 +778,24 @@ fn cursor_status_is_available_for_authenticated_cli_session() {
     );
 
     crate::env::remove_var("CURSOR_API_KEY");
-    crate::env::set_var("JCODE_CURSOR_CLI_PATH", &mock_cli);
+    crate::env::set_var("KCODE_CURSOR_CLI_PATH", &mock_cli);
     AuthStatus::invalidate_cache();
 
+    // Since 203c5cc95 jcode uses native Cursor auth only; a cursor-agent CLI
+    // session alone must not report Cursor as available.
     let status = AuthStatus::check();
-    assert_eq!(status.cursor, AuthState::Available);
+    assert_eq!(status.cursor, AuthState::NotConfigured);
 
     restore_env_var("CURSOR_API_KEY", prev_api_key);
-    restore_env_var("JCODE_CURSOR_CLI_PATH", prev_cli_path);
+    restore_env_var("KCODE_CURSOR_CLI_PATH", prev_cli_path);
     AuthStatus::invalidate_cache();
 }
 
 #[test]
 fn configured_api_key_source_uses_valid_overrides() {
     let _lock = crate::storage::lock_test_env();
-    let key_var = "JCODE_OPENAI_COMPAT_API_KEY_NAME";
-    let file_var = "JCODE_OPENAI_COMPAT_ENV_FILE";
+    let key_var = "KCODE_OPENAI_COMPAT_API_KEY_NAME";
+    let file_var = "KCODE_OPENAI_COMPAT_ENV_FILE";
     let prev_key = std::env::var(key_var).ok();
     let prev_file = std::env::var(file_var).ok();
 
@@ -809,8 +828,8 @@ fn configured_api_key_source_uses_valid_overrides() {
 #[test]
 fn configured_api_key_source_rejects_invalid_values() {
     let _lock = crate::storage::lock_test_env();
-    let key_var = "JCODE_OPENAI_COMPAT_API_KEY_NAME";
-    let file_var = "JCODE_OPENAI_COMPAT_ENV_FILE";
+    let key_var = "KCODE_OPENAI_COMPAT_API_KEY_NAME";
+    let file_var = "KCODE_OPENAI_COMPAT_ENV_FILE";
     let prev_key = std::env::var(key_var).ok();
     let prev_file = std::env::var(file_var).ok();
 
@@ -850,12 +869,12 @@ fn anthropic_api_provider_reports_api_key_independently_of_oauth() {
     let xdg = temp.path().join("xdg");
     std::fs::create_dir_all(&home).expect("create temp home");
     std::fs::create_dir_all(&xdg).expect("create temp xdg config");
-    let saved = ["JCODE_HOME", "XDG_CONFIG_HOME", "HOME", "ANTHROPIC_API_KEY"]
+    let saved = ["KCODE_HOME", "XDG_CONFIG_HOME", "HOME", "ANTHROPIC_API_KEY"]
         .into_iter()
         .map(|key| (key, std::env::var_os(key)))
         .collect::<Vec<_>>();
 
-    crate::env::set_var("JCODE_HOME", temp.path().join("jcode-home"));
+    crate::env::set_var("KCODE_HOME", temp.path().join("kcode-home"));
     crate::env::set_var("XDG_CONFIG_HOME", &xdg);
     crate::env::set_var("HOME", &home);
     crate::env::remove_var("ANTHROPIC_API_KEY");
@@ -904,12 +923,12 @@ fn claude_oauth_provider_reports_oauth_independently_of_api_key() {
     let xdg = temp.path().join("xdg");
     std::fs::create_dir_all(&home).expect("create temp home");
     std::fs::create_dir_all(&xdg).expect("create temp xdg config");
-    let saved = ["JCODE_HOME", "XDG_CONFIG_HOME", "HOME", "ANTHROPIC_API_KEY"]
+    let saved = ["KCODE_HOME", "XDG_CONFIG_HOME", "HOME", "ANTHROPIC_API_KEY"]
         .into_iter()
         .map(|key| (key, std::env::var_os(key)))
         .collect::<Vec<_>>();
 
-    crate::env::set_var("JCODE_HOME", temp.path().join("jcode-home"));
+    crate::env::set_var("KCODE_HOME", temp.path().join("kcode-home"));
     crate::env::set_var("XDG_CONFIG_HOME", &xdg);
     crate::env::set_var("HOME", &home);
     // API key present, no OAuth anywhere: the OAuth provider must stay
@@ -944,18 +963,46 @@ fn claude_oauth_provider_reports_oauth_independently_of_api_key() {
 /// Test binaries must never open real browser windows: login/onboarding flows
 /// are exercised heavily by unit tests, and each ungated `open::that` pops an
 /// OAuth page on the developer's desktop. `running_in_test_harness` detects
-/// the `target/**/deps/` test-binary path, and `browser_suppressed` must honor
-/// it even without --no-browser or NO_BROWSER/JCODE_NO_BROWSER.
+/// the Cargo `deps/` test-binary path, and `browser_suppressed` must honor
+/// it even without --no-browser or NO_BROWSER/KCODE_NO_BROWSER.
 #[test]
 fn browser_suppressed_inside_test_harness_without_env_overrides() {
     assert!(
         super::running_in_test_harness(),
-        "test binary should be detected as a test harness (exe under target/**/deps/)"
+        "test binary should be detected even with a custom Cargo target directory"
     );
     assert!(
         super::browser_suppressed(false),
         "browser opens must be suppressed in test binaries even without --no-browser/env vars"
     );
+}
+
+#[test]
+fn test_harness_paths_include_custom_cargo_target_directories() {
+    for path in [
+        "/work/target/debug/deps/test_binary-0123456789abcdef",
+        "/work/target/debug/deps/custom_runner",
+        "/build-cache/debug/deps/test_binary-0123456789abcdef",
+        "/build-cache/aarch64-apple-darwin/release/deps/test_binary-0123456789abcdef",
+        r"C:\build-cache\debug\deps\test_binary-0123456789abcdef.exe",
+    ] {
+        assert!(
+            super::is_test_harness_path(path),
+            "missed test binary: {path}"
+        );
+    }
+    for path in [
+        "/usr/local/bin/jcode",
+        "/work/target/debug/jcode",
+        "/build-cache/debug/deps/jcode",
+        "/build-cache/debug/deps/libjcode-0123456789abcdef.rlib",
+        "/build-cache/debug/deps/test_binary-not_a_cargo_hash",
+    ] {
+        assert!(
+            !super::is_test_harness_path(path),
+            "not a test binary: {path}"
+        );
+    }
 }
 
 /// Antigravity/Gemini access tokens live about an hour and are refreshed

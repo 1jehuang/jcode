@@ -7,13 +7,13 @@ if [[ $# -gt 0 ]]; then
   shift
 fi
 
-sandbox_name=${JCODE_ONBOARDING_SANDBOX:-default}
+sandbox_name=${KCODE_ONBOARDING_SANDBOX:-default}
 sandbox_root_default="$repo_root/.tmp/onboarding/$sandbox_name"
-sandbox_root=${JCODE_ONBOARDING_DIR:-$sandbox_root_default}
+sandbox_root=${KCODE_ONBOARDING_DIR:-$sandbox_root_default}
 jcode_home="$sandbox_root/home"
 runtime_dir="$sandbox_root/runtime"
 fixture_root_default="$repo_root/.tmp/auth-fixtures"
-fixture_root=${JCODE_AUTH_FIXTURE_DIR:-$fixture_root_default}
+fixture_root=${KCODE_AUTH_FIXTURE_DIR:-$fixture_root_default}
 
 usage() {
   cat <<EOF
@@ -22,18 +22,18 @@ Usage: $(basename "$0") <command> [args...]
 Commands:
   list                         List saved local auth fixtures
   path [name]                  Print fixture root, or a specific fixture path
-  save <name>                  Save the current sandbox JCODE_HOME as a fixture
-  load <name>                  Replace the sandbox JCODE_HOME with a saved fixture
-  reset-sandbox                Remove only the current sandbox JCODE_HOME
+  save <name>                  Save the current sandbox KCODE_HOME as a fixture
+  load <name>                  Replace the sandbox KCODE_HOME with a saved fixture
+  reset-sandbox                Remove only the current sandbox KCODE_HOME
   delete <name>                Delete a saved fixture
   env <name>                   Print exports for running against a loaded fixture
   run <name> -- <args...>      Load fixture, then run jcode with args in sandbox
   help                         Show this help
 
 Environment overrides:
-  JCODE_ONBOARDING_SANDBOX     Sandbox name to load into/from (default: default)
-  JCODE_ONBOARDING_DIR         Explicit onboarding sandbox directory
-  JCODE_AUTH_FIXTURE_DIR       Fixture store (default: .tmp/auth-fixtures)
+  KCODE_ONBOARDING_SANDBOX     Sandbox name to load into/from (default: default)
+  KCODE_ONBOARDING_DIR         Explicit onboarding sandbox directory
+  KCODE_AUTH_FIXTURE_DIR       Fixture store (default: .tmp/auth-fixtures)
 
 Notes:
   Fixtures are local developer state under .tmp by default. They may contain real
@@ -91,9 +91,9 @@ run_jcode() {
   (
     cd "$repo_root"
     if [[ -x "$binary_path" ]]; then
-      env JCODE_HOME="$jcode_home" JCODE_RUNTIME_DIR="$runtime_dir" "$binary_path" "$@"
+      env KCODE_HOME="$jcode_home" KCODE_RUNTIME_DIR="$runtime_dir" "$binary_path" "$@"
     else
-      env JCODE_HOME="$jcode_home" JCODE_RUNTIME_DIR="$runtime_dir" cargo run --bin jcode -- "$@"
+      env KCODE_HOME="$jcode_home" KCODE_RUNTIME_DIR="$runtime_dir" cargo run --bin jcode -- "$@"
     fi
   )
 }
@@ -113,7 +113,7 @@ save_fixture() {
   meta=$(metadata_path "$name")
   ensure_parent_dirs
   if [[ ! -d "$jcode_home" ]]; then
-    echo "sandbox JCODE_HOME does not exist: $jcode_home" >&2
+    echo "sandbox KCODE_HOME does not exist: $jcode_home" >&2
     exit 1
   fi
   mkdir -p "$(dirname "$dst")"
@@ -143,7 +143,7 @@ load_fixture() {
   copy_dir_contents "$src" "$jcode_home"
   chmod -R go-rwx "$jcode_home" 2>/dev/null || true
   echo "Loaded auth fixture '$name' into sandbox '$sandbox_name'"
-  echo "JCODE_HOME=$jcode_home"
+  echo "KCODE_HOME=$jcode_home"
 }
 
 delete_fixture() {
@@ -181,7 +181,7 @@ case "$command" in
   reset-sandbox)
     rm -rf "$jcode_home"
     mkdir -p "$jcode_home" "$runtime_dir"
-    echo "Reset sandbox JCODE_HOME: $jcode_home"
+    echo "Reset sandbox KCODE_HOME: $jcode_home"
     ;;
   delete)
     name=$(require_name "${1:-}")
@@ -191,8 +191,8 @@ case "$command" in
     name=$(require_name "${1:-}")
     load_fixture "$name" >/dev/null
     cat <<EOF
-export JCODE_HOME="$jcode_home"
-export JCODE_RUNTIME_DIR="$runtime_dir"
+export KCODE_HOME="$jcode_home"
+export KCODE_RUNTIME_DIR="$runtime_dir"
 EOF
     ;;
   run)

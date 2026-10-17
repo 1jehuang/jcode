@@ -8,12 +8,12 @@ use std::time::{Duration, Instant};
 #[test]
 #[ignore = "takes ~20s; exercises the real monitor thread and log file"]
 fn stalled_process_emits_watchdog_stall_event() {
-    let dir = std::env::temp_dir().join(format!("jcode-wd-probe-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("kcode-wd-probe-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     unsafe {
         std::env::set_var("HOME", &dir);
-        std::env::set_var("JCODE_WATCHDOG_STALL_SECS", "5");
-        std::env::set_var("JCODE_WATCHDOG_HEARTBEAT_SECS", "5");
+        std::env::set_var("KCODE_WATCHDOG_STALL_SECS", "5");
+        std::env::set_var("KCODE_WATCHDOG_HEARTBEAT_SECS", "5");
     }
 
     jcode_logging::init();

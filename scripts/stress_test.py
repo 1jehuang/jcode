@@ -65,7 +65,7 @@ def get_server_pid():
             capture_output=True, text=True, timeout=5
         )
         for line in result.stdout.splitlines():
-            if "jcode.sock" in line and "LISTEN" in line:
+            if "kcode.sock" in line and "LISTEN" in line:
                 parts = line.split()
                 return int(parts[1])
     except:
@@ -142,7 +142,7 @@ if not os.path.exists(MAIN_SOCK):
 
 if not os.path.exists(DEBUG_SOCK):
     print_err(f"No debug socket at {DEBUG_SOCK}")
-    print("  Enable with: touch ~/.jcode/debug_control")
+    print("  Enable with: touch ~/.kcode/debug_control")
     sys.exit(1)
 
 # Test connectivity

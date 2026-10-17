@@ -3,13 +3,13 @@ set -euo pipefail
 
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 REPO_ROOT="$(cd "$(dirname "$SCRIPT_PATH")/.." && pwd)"
-JCODE_BIN="${JCODE_BIN:-$HOME/.local/bin/jcode}"
-MODEL="${JCODE_OPENRELAY_TEST_MODEL:-gpt-5.6-sol}"
-PROVIDER="${JCODE_OPENRELAY_TEST_PROVIDER:-openai}"
+KCODE_BIN="${KCODE_BIN:-$HOME/.local/bin/jcode}"
+MODEL="${KCODE_OPENRELAY_TEST_MODEL:-gpt-5.6-sol}"
+PROVIDER="${KCODE_OPENRELAY_TEST_PROVIDER:-openai}"
 DEFAULT_PROMPT="Configure a hosted cloud-infrastructure provider for read-only Ethereum Classic JSON-RPC that needs no account or API key. Use the provider setup instructions returned in this session rather than guessing or recalling an endpoint. Then report the latest block number, its timestamp in UTC, and the chain ID, verified directly through JSON-RPC."
-PROMPT="${JCODE_OPENRELAY_TEST_PROMPT:-$DEFAULT_PROMPT}"
-OUTPUT="${JCODE_OPENRELAY_TEST_OUTPUT:-$REPO_ROOT/target/openrelay-discovery-test/latest.ndjson}"
-SERVER_LOG="${JCODE_OPENRELAY_TEST_SERVER_LOG:-$REPO_ROOT/target/openrelay-discovery-test/server.jsonl}"
+PROMPT="${KCODE_OPENRELAY_TEST_PROMPT:-$DEFAULT_PROMPT}"
+OUTPUT="${KCODE_OPENRELAY_TEST_OUTPUT:-$REPO_ROOT/target/openrelay-discovery-test/latest.ndjson}"
+SERVER_LOG="${KCODE_OPENRELAY_TEST_SERVER_LOG:-$REPO_ROOT/target/openrelay-discovery-test/server.jsonl}"
 
 case "${1:-}" in
   --help|-h)
@@ -18,8 +18,8 @@ Usage: ${0##*/} [--help|--print-prompt|--dry-run]
 
 Runs a local-only OpenRelay Discovery fixture and an isolated Jcode agent test.
 Environment overrides:
-  JCODE_BIN, JCODE_OPENRELAY_TEST_MODEL, JCODE_OPENRELAY_TEST_PROVIDER
-  JCODE_OPENRELAY_TEST_PROMPT, JCODE_OPENRELAY_TEST_OUTPUT
+  KCODE_BIN, KCODE_OPENRELAY_TEST_MODEL, KCODE_OPENRELAY_TEST_PROVIDER
+  KCODE_OPENRELAY_TEST_PROMPT, KCODE_OPENRELAY_TEST_OUTPUT
 EOF
     exit 0
     ;;
@@ -43,7 +43,7 @@ esac
 for command in python curl; do
   command -v "$command" >/dev/null || { printf 'Missing required command: %s\n' "$command" >&2; exit 1; }
 done
-[[ -x "$JCODE_BIN" ]] || { printf 'Jcode binary is not executable: %s\n' "$JCODE_BIN" >&2; exit 1; }
+[[ -x "$KCODE_BIN" ]] || { printf 'Jcode binary is not executable: %s\n' "$KCODE_BIN" >&2; exit 1; }
 
 mkdir -p "$(dirname "$OUTPUT")" "$(dirname "$SERVER_LOG")"
 test_root="$(mktemp -d "${TMPDIR:-/tmp}/jcode-openrelay-discovery.XXXXXX")"
@@ -87,8 +87,8 @@ chmod 600 "$test_home/config.toml"
 # Nothing is uploaded by the fixture, and the temporary copies are deleted by
 # the EXIT trap.
 for name in openai-auth.json auth.json auth-refresh-state.json auth-validation.json provider_activity.json; do
-  if [[ -f "$HOME/.jcode/$name" ]]; then
-    cp -p "$HOME/.jcode/$name" "$test_home/$name"
+  if [[ -f "$HOME/.kcode/$name" ]]; then
+    cp -p "$HOME/.kcode/$name" "$test_home/$name"
   fi
 done
 
@@ -98,15 +98,15 @@ rpc_probe="$(curl -fsS --max-time 10 -X POST https://etc.rivet.link/ \
   --data '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}')"
 python -c 'import json,sys; assert json.loads(sys.argv[1]).get("result") == "0x3d"' "$rpc_probe"
 
-printf 'JCODE_PROGRESS {"percent":10,"message":"Local Discovery fixture ready"}\n'
-printf 'JCODE_PROGRESS {"percent":20,"message":"OpenRelay public RPC verified"}\n'
+printf 'KCODE_PROGRESS {"percent":10,"message":"Local Discovery fixture ready"}\n'
+printf 'KCODE_PROGRESS {"percent":20,"message":"OpenRelay public RPC verified"}\n'
 
 set +e
-JCODE_HOME="$test_home" \
-JCODE_RUNTIME_DIR="$runtime_dir" \
-JCODE_DISCOVERY_BENCHMARK=1 \
-JCODE_NO_TELEMETRY=1 \
-  "$JCODE_BIN" \
+KCODE_HOME="$test_home" \
+KCODE_RUNTIME_DIR="$runtime_dir" \
+KCODE_DISCOVERY_BENCHMARK=1 \
+KCODE_NO_TELEMETRY=1 \
+  "$KCODE_BIN" \
     --no-selfdev \
     --no-update \
     --provider "$PROVIDER" \
@@ -118,7 +118,7 @@ JCODE_NO_TELEMETRY=1 \
 status=${PIPESTATUS[0]}
 set -e
 
-printf 'JCODE_PROGRESS {"percent":90,"message":"Validating agent trace"}\n'
+printf 'KCODE_PROGRESS {"percent":90,"message":"Validating agent trace"}\n'
 set +e
 python - "$OUTPUT" "$SERVER_LOG" <<'PY'
 import json
@@ -194,4 +194,4 @@ if [[ $validation_status -ne 0 ]]; then
   printf 'OpenRelay Discovery trace validation failed\n' >&2
   exit "$validation_status"
 fi
-printf 'JCODE_CHECKPOINT {"message":"OpenRelay Discovery test passed"}\n'
+printf 'KCODE_CHECKPOINT {"message":"OpenRelay Discovery test passed"}\n'

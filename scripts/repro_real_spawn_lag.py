@@ -5,7 +5,7 @@ home.
 
 Why this exists
 ---------------
-`repro_input_lag.py` (isolated mode) creates an empty `JCODE_HOME`, so a fresh
+`repro_input_lag.py` (isolated mode) creates an empty `KCODE_HOME`, so a fresh
 client lands on the onboarding welcome screen with no transcript. That is not what
 the user spawns into. Their real environment has:
 
@@ -145,21 +145,21 @@ def main() -> int:
 
     # Talk to the user's real server, with their real home/config/sessions. This
     # is the configuration the lag report came from.
-    runtime = Path(os.environ.get("JCODE_RUNTIME_DIR")
+    runtime = Path(os.environ.get("KCODE_RUNTIME_DIR")
                    or f"/run/user/{os.getuid()}")
     env = os.environ.copy()
-    env["JCODE_SOCKET"] = env.get("JCODE_SOCKET") or str(runtime / "jcode.sock")
-    env["JCODE_DEBUG_CONTROL"] = "1"
-    env["JCODE_THEME"] = "dark"  # never race the client for the OSC 11 reply
-    debug_sock = runtime / "jcode-debug.sock"
+    env["KCODE_SOCKET"] = env.get("KCODE_SOCKET") or str(runtime / "kcode.sock")
+    env["KCODE_DEBUG_CONTROL"] = "1"
+    env["KCODE_THEME"] = "dark"  # never race the client for the OSC 11 reply
+    debug_sock = runtime / "kcode-debug.sock"
 
-    scratch = Path(os.environ.get("JCODE_SCRATCH_DIR") or tempfile.gettempdir())
+    scratch = Path(os.environ.get("KCODE_SCRATCH_DIR") or tempfile.gettempdir())
     run = Path(tempfile.mkdtemp(prefix="jcode-realspawn-", dir=str(scratch)))
     cmd_path, resp_path = run / "client_cmd", run / "client_resp"
 
     print("== real-environment spawn lag ==")
     print(f"  binary : {binary}")
-    print(f"  socket : {env['JCODE_SOCKET']}")
+    print(f"  socket : {env['KCODE_SOCKET']}")
 
     session = args.session or recent_session(debug_sock, str(REPO_ROOT))
     if not session:

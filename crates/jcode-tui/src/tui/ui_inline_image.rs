@@ -467,7 +467,7 @@ fn prewarm_sender() -> &'static mpsc::SyncSender<PrewarmRequest> {
     PREWARM_TX.get_or_init(|| {
         let (tx, rx) = mpsc::sync_channel::<PrewarmRequest>(PREWARM_QUEUE_CAPACITY);
         if let Err(err) = std::thread::Builder::new()
-            .name("jcode-inline-image-prewarm".to_string())
+            .name("kcode-inline-image-prewarm".to_string())
             .spawn(move || prewarm_worker(rx))
         {
             crate::logging::warn(&format!(
@@ -1322,7 +1322,7 @@ mod tests {
     #[test]
     fn generated_image_label_is_truncated_to_one_terminal_row() {
         let mut generated = item(1536, 864);
-        generated.label = "/home/jeremy/jcode/.jcode/generated-images/1783707839145-ig_0c5e377de871aba5016a51388779588196944d98eff2c7aa30.png".to_string();
+        generated.label = "/home/jeremy/jcode/.kcode/generated-images/1783707839145-ig_0c5e377de871aba5016a51388779588196944d98eff2c7aa30.png".to_string();
 
         let line = image_label_line(&generated, 52, true, ImageExpandLevel::Fit);
         let text = jcode_tui_render::line_plain_text(&line);

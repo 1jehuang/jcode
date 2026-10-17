@@ -83,6 +83,7 @@ pub(super) async fn detach_client_attachment(
     clippy::too_many_arguments,
     reason = "disconnect cleanup updates sessions, swarms, files, channels, debug state, and shutdown signals together"
 )]
+/// Returns the event task when a successor needs this lifecycle to finish its turn.
 pub(super) async fn cleanup_client_connection(
     sessions: &SessionAgents,
     client_session_id: &str,
@@ -107,7 +108,7 @@ pub(super) async fn cleanup_client_connection(
     swarm_event_tx: &broadcast::Sender<SwarmEvent>,
     client_event_tx: &mpsc::UnboundedSender<crate::protocol::ServerEvent>,
     idle_reconnect_grace: Duration,
-) -> Result<()> {
+) -> Result<Option<tokio::task::JoinHandle<()>>> {
     let disposition = disconnect_disposition(disconnected_while_processing(
         client_is_processing,
         processing_task.as_ref(),
@@ -124,14 +125,6 @@ pub(super) async fn cleanup_client_connection(
     } else {
         false
     };
-
-    // A live processing task owns the agent mutex. Abort it before trying to
-    // persist the disconnect disposition; otherwise cleanup waits two seconds,
-    // times out, and leaves the durable session `Active` precisely when an
-    // interrupted desktop turn must become `Crashed`.
-    if let Some(handle) = processing_task.take() {
-        handle.abort();
-    }
 
     detach_client_attachment(
         client_session_id,
@@ -163,7 +156,7 @@ pub(super) async fn cleanup_client_connection(
                     .values()
                     .any(|info| info.session_id == client_session_id)
             {
-                return Ok(());
+                return Ok(None);
             }
             if tokio::time::Instant::now() >= deadline {
                 break;
@@ -195,8 +188,23 @@ pub(super) async fn cleanup_client_connection(
             "Skipping destructive disconnect cleanup for {} because another client is still attached",
             client_session_id
         ));
+        // The lifecycle, not the socket, owns completion bookkeeping. Return
+        // its writer handle so it can retain and await the task using the same
+        // continuation path as an explicitly detached remote turn. Merely
+        // dropping the JoinHandle here would lose completion/status handling.
+        if processing_task.is_some() {
+            return Ok(Some(event_handle));
+        }
         event_handle.abort();
-        return Ok(());
+        return Ok(None);
+    }
+
+    // A live processing task owns the agent mutex. Abort it before trying to
+    // persist the disconnect disposition; otherwise cleanup waits two seconds,
+    // times out, and leaves the durable session `Active` precisely when an
+    // interrupted desktop turn must become `Crashed`.
+    if let Some(handle) = processing_task.take() {
+        handle.abort();
     }
 
     {
@@ -206,6 +214,14 @@ pub(super) async fn cleanup_client_connection(
 
             match lock_result {
                 Ok(mut agent) => {
+                    // Concurrency telemetry delivery blocks (bounded at
+                    // ~800ms) and is pure reporting. Finishing it inline held
+                    // the server-wide connections lock for ~250ms on every
+                    // disconnect, stalling the next client's attach. Detach
+                    // the guard and finish it on a blocking worker instead.
+                    if let Some(mut concurrency) = agent.take_concurrency_session() {
+                        tokio::task::spawn_blocking(move || concurrency.finish());
+                    }
                     match disposition {
                         DisconnectDisposition::Closed => {
                             agent.mark_closed();
@@ -346,7 +362,7 @@ pub(super) async fn cleanup_client_connection(
 
     drop(connections);
     event_handle.abort();
-    Ok(())
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -394,7 +410,7 @@ mod tests {
     fn running_disconnect_during_reload_is_expected() {
         let _guard = crate::storage::lock_test_env();
         let runtime = tempfile::TempDir::new().expect("create runtime dir");
-        crate::env::set_var("JCODE_RUNTIME_DIR", runtime.path());
+        crate::env::set_var("KCODE_RUNTIME_DIR", runtime.path());
         crate::server::clear_reload_marker();
         crate::server::write_reload_state(
             "test-request",
@@ -408,14 +424,14 @@ mod tests {
         );
         assert_eq!(disconnect_disposition(false), DisconnectDisposition::Closed);
         crate::server::clear_reload_marker();
-        crate::env::remove_var("JCODE_RUNTIME_DIR");
+        crate::env::remove_var("KCODE_RUNTIME_DIR");
     }
 
     #[test]
     fn running_disconnect_during_recent_socket_ready_reload_is_expected() {
         let _guard = crate::storage::lock_test_env();
         let runtime = tempfile::TempDir::new().expect("create runtime dir");
-        crate::env::set_var("JCODE_RUNTIME_DIR", runtime.path());
+        crate::env::set_var("KCODE_RUNTIME_DIR", runtime.path());
         crate::server::clear_reload_marker();
         crate::server::write_reload_state(
             "test-request",
@@ -428,6 +444,6 @@ mod tests {
             DisconnectDisposition::Reloading
         );
         crate::server::clear_reload_marker();
-        crate::env::remove_var("JCODE_RUNTIME_DIR");
+        crate::env::remove_var("KCODE_RUNTIME_DIR");
     }
 }

@@ -9,7 +9,7 @@ fn gemini_profile() -> ResolvedOpenAiCompatibleProfile {
 /// Point config resolution at a scratch home with no Gemini key anywhere.
 fn isolated_home() -> tempfile::TempDir {
     let home = tempfile::tempdir().expect("tempdir");
-    crate::env::set_var("JCODE_HOME", home.path());
+    crate::env::set_var("KCODE_HOME", home.path());
     crate::env::remove_var("GEMINI_API_KEY");
     crate::env::remove_var("GOOGLE_API_KEY");
     home
@@ -22,7 +22,7 @@ fn no_notice_when_nothing_is_configured() {
 
     assert_eq!(existing_api_key_notice(&gemini_profile()), None);
 
-    crate::env::remove_var("JCODE_HOME");
+    crate::env::remove_var("KCODE_HOME");
 }
 
 #[test]
@@ -41,7 +41,7 @@ fn notice_names_the_environment_variable_when_the_env_wins() {
     assert!(notice.contains("Ctrl+C"), "{notice}");
 
     crate::env::remove_var("GEMINI_API_KEY");
-    crate::env::remove_var("JCODE_HOME");
+    crate::env::remove_var("KCODE_HOME");
 }
 
 #[test]
@@ -61,5 +61,5 @@ fn notice_names_the_config_file_when_only_the_file_has_a_key() {
     assert!(notice.contains("gemini.env"), "{notice}");
     assert!(!notice.contains("environment variable"), "{notice}");
 
-    crate::env::remove_var("JCODE_HOME");
+    crate::env::remove_var("KCODE_HOME");
 }

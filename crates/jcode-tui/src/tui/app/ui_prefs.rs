@@ -64,8 +64,8 @@ mod tests {
     fn inline_images_visibility_round_trips_through_disk() {
         let _guard = crate::storage::lock_test_env();
         let temp = tempfile::tempdir().expect("tempdir");
-        let prev_home = std::env::var_os("JCODE_HOME");
-        crate::env::set_var("JCODE_HOME", temp.path());
+        let prev_home = std::env::var_os("KCODE_HOME");
+        crate::env::set_var("KCODE_HOME", temp.path());
 
         // Default before any toggle: visible.
         assert!(inline_images_visible());
@@ -77,9 +77,9 @@ mod tests {
         assert!(inline_images_visible(), "visible state should persist");
 
         if let Some(prev_home) = prev_home {
-            crate::env::set_var("JCODE_HOME", prev_home);
+            crate::env::set_var("KCODE_HOME", prev_home);
         } else {
-            crate::env::remove_var("JCODE_HOME");
+            crate::env::remove_var("KCODE_HOME");
         }
     }
 
@@ -87,17 +87,17 @@ mod tests {
     fn save_preserves_unknown_future_fields_via_load_modify_write() {
         let _guard = crate::storage::lock_test_env();
         let temp = tempfile::tempdir().expect("tempdir");
-        let prev_home = std::env::var_os("JCODE_HOME");
-        crate::env::set_var("JCODE_HOME", temp.path());
+        let prev_home = std::env::var_os("KCODE_HOME");
+        crate::env::set_var("KCODE_HOME", temp.path());
 
         save_inline_images_visible(false);
         let prefs = load();
         assert_eq!(prefs.inline_images_visible, Some(false));
 
         if let Some(prev_home) = prev_home {
-            crate::env::set_var("JCODE_HOME", prev_home);
+            crate::env::set_var("KCODE_HOME", prev_home);
         } else {
-            crate::env::remove_var("JCODE_HOME");
+            crate::env::remove_var("KCODE_HOME");
         }
     }
 }

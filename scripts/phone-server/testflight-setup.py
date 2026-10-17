@@ -5,7 +5,7 @@ Run after a build reaches App Store Connect (PLA must be accepted):
   /tmp/ascvenv/bin/python scripts/phone-server/testflight-setup.py
 
 Idempotent. Does three things:
-1. Finds the com.jcode.mobile app and its latest build.
+1. Finds the com.kcode.mobile app and its latest build.
 2. Ensures an internal beta group exists with the account holder as tester.
 3. Assigns the latest build to that group so it is installable in TestFlight.
 """
@@ -19,7 +19,7 @@ import urllib.error
 KEY_ID = "XJKP4235XC"
 ISSUER = "f1147f07-48fe-4850-9171-f37d4b2dee41"
 KEY_PATH = "/home/jeremy/Downloads/AuthKey_XJKP4235XC.p8"
-BUNDLE_ID = "com.jcode.mobile"
+BUNDLE_ID = "com.kcode.mobile"
 TESTER_EMAIL = "jeremyhuang55555@gmail.com"
 GROUP_NAME = "internal"
 API = "https://api.appstoreconnect.apple.com/v1"

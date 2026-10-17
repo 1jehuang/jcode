@@ -89,9 +89,31 @@ so `mount-cloud/fabian` displays as `mount-cloud-fabian`.
 ### Server Shutdown
 
 The server shuts down when:
-- **Idle timeout**: no clients connected for 5 minutes (configurable)
+- **Idle timeout**: no clients connected and no live headless swarm workers for
+  5 minutes. The shared-server timeout is fixed at 300 seconds
+  (`IDLE_TIMEOUT_SECS` in `crates/jcode-app-core/src/server.rs`), not configurable
+  through `[server]`. The monitor checks every 10 seconds, so shutdown can occur
+  slightly later than five minutes.
 - **Manual**: server process is killed
 - **Reload**: server execs into a new binary (same socket path)
+
+Debug-control servers disable the shared-server idle monitor. Temporary servers
+use a separate lifecycle policy.
+
+### Session Ownership Markers (`active_pids`)
+
+`~/.jcode/active_pids/<session_id>` contains the PID of the process that owns the
+session. In server mode this is the daemon PID, so multiple sessions can share
+the same PID. Despite the directory name, “active” means process ownership, not
+that a terminal window is open, a client is connected, or a model is generating.
+A daemon-held session can remain registered after its client disconnects.
+
+Markers are removed when sessions are closed or removed. They can be left behind
+after a process exits, so a marker alone does not prove its owner is alive.
+`active_session_ids()` lists marker names without checking PID liveness, whereas
+`session_presence()` filters out dead owners. These markers support lifecycle
+and crash recovery, not window tracking. Separate `streaming_pids` markers track
+model-response generation.
 
 ### Remote Client Working Directory
 
@@ -153,5 +175,5 @@ When running `jcode` inside the jcode repository:
 | Subsequent `jcode` | Connects to existing server |
 | Kill a client | Server + other clients unaffected |
 | `/reload` | Server execs new binary, clients reconnect |
-| All clients close | Server idle-timeout after 5 min |
+| All clients close | Shared-server idle timeout after 5 min without live headless swarm workers (unless debug control is enabled) |
 | Resume session | `jcode --resume fox` reconnects to existing session |

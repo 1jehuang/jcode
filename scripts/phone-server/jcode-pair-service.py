@@ -32,7 +32,7 @@ class H(http.server.BaseHTTPRequestHandler):
             return self._send(404, {'error': 'not found'})
         env = dict(os.environ)
         env['PATH'] = '/home/ec2-user/.local/bin:' + env.get('PATH', '')
-        env['JCODE_GATEWAY_HOST'] = HOST
+        env['KCODE_GATEWAY_HOST'] = HOST
         try:
             out = subprocess.run(
                 ['sudo', '-u', 'ec2-user', '-i', 'jcode', 'pair'],

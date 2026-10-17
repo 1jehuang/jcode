@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Benchmark and optionally regression-check jcode startup time.
 
-This script runs isolated startup measurements under a temporary JCODE_HOME and
-JCODE_RUNTIME_DIR so it does not interfere with the user's real server, logs, or
+This script runs isolated startup measurements under a temporary KCODE_HOME and
+KCODE_RUNTIME_DIR so it does not interfere with the user's real server, logs, or
 credentials.
 
 Cold client startup is measured by launching the normal default client path in a
@@ -105,12 +105,12 @@ def run_simple_timing(binary: str, *args: str, runs: int) -> list[float]:
 
 def isolated_env(root: str) -> dict[str, str]:
     env = os.environ.copy()
-    env["JCODE_HOME"] = os.path.join(root, "home")
-    env["JCODE_RUNTIME_DIR"] = os.path.join(root, "run")
-    env["JCODE_SOCKET"] = os.path.join(env["JCODE_RUNTIME_DIR"], "jcode.sock")
-    env["JCODE_NO_TELEMETRY"] = "1"
-    os.makedirs(env["JCODE_HOME"], exist_ok=True)
-    os.makedirs(env["JCODE_RUNTIME_DIR"], exist_ok=True)
+    env["KCODE_HOME"] = os.path.join(root, "home")
+    env["KCODE_RUNTIME_DIR"] = os.path.join(root, "run")
+    env["KCODE_SOCKET"] = os.path.join(env["KCODE_RUNTIME_DIR"], "kcode.sock")
+    env["KCODE_NO_TELEMETRY"] = "1"
+    os.makedirs(env["KCODE_HOME"], exist_ok=True)
+    os.makedirs(env["KCODE_RUNTIME_DIR"], exist_ok=True)
     return env
 
 
@@ -134,7 +134,7 @@ def measure_server_startup(binary: str, runs: int) -> list[float]:
     for _ in range(runs):
         root = tempfile.mkdtemp(prefix="jcode-server-bench-")
         env = isolated_env(root)
-        socket_path = env["JCODE_SOCKET"]
+        socket_path = env["KCODE_SOCKET"]
         proc = None
         try:
             start = time.perf_counter()
@@ -207,11 +207,11 @@ def measure_cold_client_startup(binary: str, runs: int) -> list[StartupProfile]:
     for _ in range(runs):
         root = tempfile.mkdtemp(prefix="jcode-cold-bench-")
         env = isolated_env(root)
-        log_path = Path(env["JCODE_HOME"]) / "logs" / f"jcode-{time.strftime('%Y-%m-%d')}.log"
+        log_path = Path(env["KCODE_HOME"]) / "logs" / f"jcode-{time.strftime('%Y-%m-%d')}.log"
         try:
             command = (
                 f"{binary} --no-update --debug-socket "
-                f"--socket {env['JCODE_SOCKET']}"
+                f"--socket {env['KCODE_SOCKET']}"
             )
             subprocess.run(
                 ["timeout", "3s", script_bin, "-qefc", command, "/dev/null"],

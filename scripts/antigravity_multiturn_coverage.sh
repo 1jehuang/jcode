@@ -100,7 +100,7 @@ total=${#MODELS[@]}
 i=0
 for m in "${MODELS[@]}"; do
   i=$((i + 1))
-  echo "JCODE_PROGRESS {\"current\":$i,\"total\":$total,\"unit\":\"models\",\"message\":\"$m\"}" >&2
+  echo "KCODE_PROGRESS {\"current\":$i,\"total\":$total,\"unit\":\"models\",\"message\":\"$m\"}" >&2
 
   t1=- t2=- t3=- t4=- note="" session=""
 

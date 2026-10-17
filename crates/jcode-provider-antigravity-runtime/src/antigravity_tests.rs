@@ -103,8 +103,8 @@ fn available_models_display_includes_dynamic_cache_and_current_override() {
 fn available_models_display_seeds_from_persisted_catalog() {
     let _guard = jcode_base::storage::lock_test_env();
     let temp = tempfile::TempDir::new().expect("temp dir");
-    let previous = std::env::var_os("JCODE_HOME");
-    jcode_base::env::set_var("JCODE_HOME", temp.path());
+    let previous = std::env::var_os("KCODE_HOME");
+    jcode_base::env::set_var("KCODE_HOME", temp.path());
 
     let path = jcode_base::provider::antigravity::persisted_catalog_path().expect("catalog path");
     jcode_base::storage::write_json(
@@ -124,6 +124,7 @@ fn available_models_display_seeds_from_persisted_catalog() {
             }],
             fetched_at_rfc3339: Utc::now().to_rfc3339(),
             default_model_id: Some("gemini-3-flash".to_string()),
+            endpoint: None,
         },
     )
     .expect("write persisted catalog");
@@ -140,9 +141,9 @@ fn available_models_display_seeds_from_persisted_catalog() {
     );
 
     if let Some(previous) = previous {
-        jcode_base::env::set_var("JCODE_HOME", previous);
+        jcode_base::env::set_var("KCODE_HOME", previous);
     } else {
-        jcode_base::env::remove_var("JCODE_HOME");
+        jcode_base::env::remove_var("KCODE_HOME");
     }
 }
 
