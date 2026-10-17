@@ -968,14 +968,11 @@ impl OpenRouterProvider {
     /// profiles in one process the last one constructed wins and all profiles
     /// collide on a single `<last-profile>_models.json`. The background refresh
     /// path already passes an explicit namespace; the foreground paths did not.
-    /// See issue #607.
-    ///
-    /// Standard/direct OpenRouter and built-in profiles keep the existing
-    /// env-var-driven `cache_path()` semantics.
+    /// See issues #607 and #1824. Built-in profiles need the same isolation:
+    /// a runtime's endpoint stays fixed even when another provider changes the
+    /// process-global namespace. Only unbound runtimes retain env-driven paths.
     pub(crate) fn foreground_cache_namespace(&self) -> Option<String> {
-        self.is_user_named_profile()
-            .then(|| self.profile_id.clone())
-            .flatten()
+        self.profile_id.clone()
     }
 
     /// The disk cache entry usable for this provider, i.e. its own namespace
@@ -988,7 +985,7 @@ impl OpenRouterProvider {
     }
 
     /// Load this provider's own model disk cache, ignoring the process-global
-    /// namespace env var for user-named profiles (#607).
+    /// namespace env var for all bound profiles (#607, #1824).
     pub(crate) fn load_disk_cache_entry_for_this_profile(
         &self,
     ) -> Option<jcode_provider_openrouter::DiskCache> {
