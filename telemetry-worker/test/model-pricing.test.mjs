@@ -44,6 +44,38 @@ test("opaque router aliases stay unpriced rather than guessed", () => {
   assert.ok(!normalizeLabel("tommy-jcode:latest").includes("latest"));
 });
 
+test("unknown and subscription routes do not masquerade as free inference", () => {
+  for (const label of [
+    "unknown", "default", "auto", "auto/router", "pool", "pool12",
+    "mystery:cloud", "ollama/mystery:cloud", "vendor-coding-plan/mystery",
+    "mystery-token-plan",
+  ]) {
+    const row = priceOf(label);
+    assert.equal(row.kind, "unpriced", label);
+    assert.equal(row.input, null, label);
+  }
+  assert.equal(priceOf("vendor-coding-plan/claude-opus-5-5").input, 4,
+    "subscription-backed inference retains its underlying model's list price");
+  for (const label of ["mock", "free", "openrouter/free", "model:free", "ollama/local-model"]) {
+    assert.equal(priceOf(label).kind, "free", label);
+  }
+});
+
+test("upsert repairs obsolete free classifications without erasing catalog rates", () => {
+  const db = new DatabaseSync(":memory:");
+  db.exec(readFileSync(new URL("../migrations/0023_model_prices.sql", import.meta.url), "utf8"));
+  const put = (kind, input) => db.prepare(UPSERT_PRICE_SQL)
+    .run("unknown", null, null, input, null, null, null, 0, kind);
+  const get = () => db.prepare("SELECT price_kind, input_usd_per_mtok AS i FROM model_prices WHERE model='unknown'").get();
+  put("free", 0);
+  put("unpriced", null);
+  assert.deepEqual({ ...get() }, { price_kind: "unpriced", i: null });
+  put("catalog", 4);
+  put("unpriced", null);
+  assert.deepEqual({ ...get() }, { price_kind: "catalog", i: 4 });
+  db.close();
+});
+
 test("upsert never downgrades a known price to unpriced", () => {
   assert.match(UPSERT_PRICE_SQL, /WHERE \(CASE excluded\.price_kind/);
 });

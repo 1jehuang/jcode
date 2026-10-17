@@ -44,25 +44,19 @@ const LABEL_ALIASES = new Map([
   ["codex-auto-review-spark", "gpt-5.3-codex-spark"],
 ]);
 
-// Model labels that are not real priced models: local/mock/routing sentinels.
-// These are recorded as price_kind='free' so the dashboard can separate
-// "genuinely $0" from "we failed to find a price".
+// Only explicit free routes and local/mock model labels are known to cost $0.
+// Unknown/router aliases and subscription/cloud routes are NOT free models:
+// their underlying inference still has list-price value. Keep them unpriced
+// when resolution fails so missing attribution is visible in coverage.
 const FREE_LABEL_PATTERNS = [
   /^mock$/i,
-  /^unknown$/i,
-  /^default$/i,
-  /^auto(\/.*)?$/i,
-  /^pool\d*$/i,
   /^free$/i,
   /^openrouter\/free$/i,
   /:free$/i,
   /-free$/i,
   /^ollama\//i,
-  /:cloud$/i,
   /^qwen[\d.]*(-coder)?:\d+b$/i,
   /^qwen\d[\d.]*:\d+b$/i,
-  /-coding-plan\//i,
-  /-token-plan/i,
 ];
 
 const EFFORT = "xhigh|x-high|max-effort|max|high|medium|low|none|minimal";
@@ -120,6 +114,8 @@ export function normalizeLabel(label) {
 }
 
 export function isFreeLabel(label) {
+  // Ollama cloud inference is not established as free by its route prefix.
+  if (/:cloud$/i.test(label)) return false;
   return FREE_LABEL_PATTERNS.some((re) => re.test(label));
 }
 
@@ -280,14 +276,16 @@ function familyEstimate(label, families) {
   return null;
 }
 
-// Parameterized upsert. Never downgrade: a transient catalog miss must not
-// erase a price we had, and a family estimate must not replace an exact price.
+// Preserve known catalog prices and estimates across transient catalog misses.
+// A prior 'free' classification is not a known catalog price: allow the resolver
+// to correct it to 'unpriced' when a routing/subscription alias was mislabeled.
 export const PRICE_KIND_RANK_SQL = (col) =>
   `(CASE ${col} WHEN 'unpriced' THEN 0 WHEN 'family_estimate' THEN 1 ELSE 2 END)`;
 export const UPSERT_PRICE_SQL = `INSERT INTO model_prices (model, source_model, source_provider, input_usd_per_mtok, output_usd_per_mtok, cache_read_usd_per_mtok, cache_write_usd_per_mtok, input_includes_cache_read, price_kind, updated_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
 ON CONFLICT(model) DO UPDATE SET source_model=excluded.source_model, source_provider=excluded.source_provider, input_usd_per_mtok=excluded.input_usd_per_mtok, output_usd_per_mtok=excluded.output_usd_per_mtok, cache_read_usd_per_mtok=excluded.cache_read_usd_per_mtok, cache_write_usd_per_mtok=excluded.cache_write_usd_per_mtok, input_includes_cache_read=excluded.input_includes_cache_read, price_kind=excluded.price_kind, updated_at=datetime('now')
-WHERE ${PRICE_KIND_RANK_SQL("excluded.price_kind")} >= ${PRICE_KIND_RANK_SQL("model_prices.price_kind")}`;
+WHERE ${PRICE_KIND_RANK_SQL("excluded.price_kind")} >= ${PRICE_KIND_RANK_SQL("model_prices.price_kind")}
+   OR (model_prices.price_kind = 'free' AND excluded.price_kind = 'unpriced')`;
 
 export function upsertParams(r) {
   return [
