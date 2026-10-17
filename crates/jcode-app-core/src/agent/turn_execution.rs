@@ -40,7 +40,10 @@ impl Agent {
         let input_id = self.add_message(
             Role::User,
             vec![ContentBlock::Text {
-                text: user_message.to_string(),
+                text: crate::prompt::with_swarm_user_message_reminder(
+                    user_message,
+                    self.provider.reasoning_effort().as_deref(),
+                ),
                 cache_control: None,
             }],
         );
@@ -77,7 +80,10 @@ impl Agent {
         let input_id = self.add_message_with_display_role(
             Role::User,
             vec![ContentBlock::Text {
-                text: user_message.to_string(),
+                text: crate::prompt::with_swarm_user_message_reminder(
+                    user_message,
+                    self.provider.reasoning_effort().as_deref(),
+                ),
                 cache_control: None,
             }],
             display_role,

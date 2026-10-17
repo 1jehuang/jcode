@@ -89,3 +89,29 @@ async fn swarm_effort_does_not_touch_system_prompt() {
     assert!(!full.contains("# Swarm Effort"));
     assert!(!full.contains("Deep Task Graph"));
 }
+
+#[tokio::test]
+async fn run_once_path_also_appends_reminder() {
+    let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let provider: Arc<dyn Provider> = Arc::new(EffortProvider {
+        effort: Some("swarm".into()),
+    });
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    // The provider errors on complete; we only care about the stored message.
+    let _ = agent.run_once_capture("ship it").await;
+    let text = agent
+        .messages()
+        .iter()
+        .filter(|m| m.role == Role::User)
+        .flat_map(|m| m.content.iter())
+        .find_map(|block| match block {
+            ContentBlock::Text { text, .. } if text.starts_with("ship it") => Some(text.clone()),
+            _ => None,
+        })
+        .expect("user text");
+    assert_eq!(
+        text,
+        "ship it\n\nUse swarms to get things done in parallel."
+    );
+}
