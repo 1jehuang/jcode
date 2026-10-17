@@ -88,11 +88,16 @@ sync_manifest_stable() {
     printf '%s\n' "$new_stable" > "$marker" || channel_failed=1
     [ "$channel_failed" = 0 ]
   }
-  if ! update_stable_channel_files; then
-    return 2
+  # The sync needs both the manifest and jq; without either, run the channel
+  # writes unlocked and skip the sync. The check must run before any channel
+  # write: when the lock is acquirable, the writes happen only inside it,
+  # otherwise a second installer could flip the marker to its version while
+  # the lock holder is still patching, leaving marker and manifest naming
+  # different versions (the exact interleaving the lock exists to prevent).
+  if [ ! -f "$manifest" ] || ! command -v jq >/dev/null 2>&1; then
+    update_stable_channel_files || return 2
+    return 1
   fi
-  [ -f "$manifest" ] || return 1
-  command -v jq >/dev/null 2>&1 || return 1
   lock="${manifest}.lock"
 
   # Exclusive-create the lock (noclobber), recording our PID so recovery can
