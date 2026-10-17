@@ -91,6 +91,7 @@ impl Client {
             target_session_id,
             client_instance_id: None,
             client_has_local_history,
+            history_base: None,
             allow_session_takeover,
             crash_on_disconnect: false,
             continue_on_disconnect: false,

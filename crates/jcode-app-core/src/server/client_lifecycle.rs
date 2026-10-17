@@ -1448,7 +1448,8 @@ pub(super) async fn handle_client(
                             &server_icon,
                             None,
                             supports_pdf_panels,
-                        )
+                            None,
+                    )
                         .await
                         .is_err()
                         {
@@ -1509,7 +1510,8 @@ pub(super) async fn handle_client(
                             &server_icon,
                             None,
                             supports_pdf_panels,
-                        )
+                            None,
+                    )
                         .await
                         .is_err()
                         {
@@ -1579,6 +1581,7 @@ pub(super) async fn handle_client(
                 target_session_id,
                 client_instance_id,
                 client_has_local_history,
+                history_base,
                 allow_session_takeover,
                 crash_on_disconnect: _,
                 continue_on_disconnect: requested_continuation,
@@ -1641,6 +1644,7 @@ pub(super) async fn handle_client(
                                 subscribe_working_dir.as_deref(),
                                 client_instance_id.as_deref(),
                                 client_has_local_history,
+                                history_base,
                                 allow_session_takeover,
                                 &mut client_selfdev,
                                 &mut client_session_id,
@@ -1806,7 +1810,8 @@ pub(super) async fn handle_client(
                     &server_icon,
                     None,
                     supports_pdf_panels,
-                )
+                    None,
+            )
                 .await
                 .is_err()
                 {
@@ -1905,6 +1910,7 @@ pub(super) async fn handle_client(
                         resume_working_dir.as_deref(),
                         client_instance_id.as_deref(),
                         client_has_local_history,
+                        None,
                         allow_session_takeover,
                         &mut client_selfdev,
                         &mut client_session_id,

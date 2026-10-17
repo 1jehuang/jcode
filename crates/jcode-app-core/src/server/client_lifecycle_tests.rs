@@ -858,6 +858,7 @@ fn subscribe_request(working_dir: Option<&str>) -> Request {
         target_session_id: None,
         client_instance_id: None,
         client_has_local_history: false,
+        history_base: None,
         allow_session_takeover: false,
         crash_on_disconnect: false,
         continue_on_disconnect: false,

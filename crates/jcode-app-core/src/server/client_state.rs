@@ -180,6 +180,7 @@ pub(super) async fn handle_get_history(
     server_icon: &str,
     was_interrupted: Option<bool>,
     supports_pdf_panels: bool,
+    history_base: Option<crate::protocol::HistoryBase>,
 ) -> Result<()> {
     let history_start = Instant::now();
     let activity =
@@ -206,6 +207,7 @@ pub(super) async fn handle_get_history(
             was_interrupted,
             activity,
             supports_pdf_panels,
+            history_base,
         )
         .await?;
         crate::logging::info(&format!(
@@ -230,6 +232,7 @@ pub(super) async fn handle_get_history(
         HistoryPayloadMode::Full,
         true,
         supports_pdf_panels,
+        history_base,
     )
     .await?;
     let send_history_ms = history_start.elapsed().as_millis();
@@ -337,6 +340,7 @@ pub(super) async fn handle_get_model_catalog(
         id,
         session_id: session_id.to_string(),
         messages: Vec::new(),
+        messages_base_count: None,
         images: Vec::new(),
         provider_name,
         provider_model,
@@ -464,6 +468,40 @@ pub(super) async fn handle_get_compacted_history(
         },
     )
     .await
+}
+
+/// Trim History to the messages after the client's verified prefix.
+///
+/// Returns the full list with `None` when no base was offered, the base is
+/// longer than the transcript, or the fingerprint disagrees (rewind,
+/// compaction, edited tool output, different session), so a stale client
+/// prefix can never survive.
+pub(super) fn apply_history_base(
+    messages: Vec<HistoryMessage>,
+    history_base: Option<crate::protocol::HistoryBase>,
+) -> (Vec<HistoryMessage>, Option<usize>) {
+    let Some(base) = history_base else {
+        return (messages, None);
+    };
+    if base.count == 0 || base.count > messages.len() {
+        return (messages, None);
+    }
+    let fingerprint = crate::protocol::history_prefix_fingerprint(
+        messages[..base.count]
+            .iter()
+            .map(crate::protocol::HistoryMessageRef::from),
+    );
+    if fingerprint != base.fingerprint {
+        crate::logging::info(&format!(
+            "History base mismatch: count={}, sending full transcript of {} messages",
+            base.count,
+            messages.len()
+        ));
+        return (messages, None);
+    }
+    let mut messages = messages;
+    let tail = messages.split_off(base.count);
+    (tail, Some(base.count))
 }
 
 fn rendered_to_history_message(msg: crate::session::RenderedMessage) -> HistoryMessage {
@@ -622,6 +660,7 @@ async fn send_history_from_persisted_session(
     was_interrupted: Option<bool>,
     activity: Option<SessionActivitySnapshot>,
     supports_pdf_panels: bool,
+    history_base: Option<crate::protocol::HistoryBase>,
 ) -> Result<()> {
     let loaded = super::run_blocking_io(|| {
         crate::session::Session::load_for_remote_startup(session_id)
@@ -667,10 +706,11 @@ async fn send_history_from_persisted_session(
         .then(|| session_interrupted_by_reload(&session));
     drop(session);
 
-    let messages = rendered_messages
+    let messages: Vec<HistoryMessage> = rendered_messages
         .into_iter()
         .map(rendered_to_history_message)
         .collect();
+    let (messages, messages_base_count) = apply_history_base(messages, history_base);
     let side_panel = super::client_writer::side_panel_for_client(
         crate::side_panel::snapshot_for_session(session_id).unwrap_or_default(),
         supports_pdf_panels,
@@ -688,6 +728,7 @@ async fn send_history_from_persisted_session(
         id,
         session_id: session_id.to_string(),
         messages,
+        messages_base_count,
         images,
         provider_name,
         provider_model,
@@ -786,6 +827,7 @@ async fn send_history_with_guard(
     payload_mode: HistoryPayloadMode,
     include_model_catalog: bool,
     supports_pdf_panels: bool,
+    history_base: Option<crate::protocol::HistoryBase>,
 ) -> Result<()> {
     let history_start = Instant::now();
     let catalog_provider = include_model_catalog.then(|| agent_guard.provider_handle());
@@ -987,10 +1029,12 @@ async fn send_history_with_guard(
                 ),
             )
         });
+    let (messages, messages_base_count) = apply_history_base(messages, history_base);
     let history_event = ServerEvent::History {
         id,
         session_id: session_id.to_string(),
         messages,
+        messages_base_count,
         images,
         provider_name: Some(provider_name),
         provider_model: Some(provider_model),

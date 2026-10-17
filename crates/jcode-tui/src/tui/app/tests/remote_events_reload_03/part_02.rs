@@ -36,6 +36,7 @@ fn test_metadata_only_history_preserves_fast_restored_startup_state() {
             id: 1,
             session_id: session_id.to_string(),
             messages: vec![],
+            messages_base_count: None,
             images: vec![],
             provider_name: Some("openai".to_string()),
             provider_model: Some("gpt-5.4".to_string()),
@@ -110,6 +111,7 @@ fn test_duplicate_history_for_same_session_is_ignored_after_fast_path_restore() 
 
     app.handle_server_event(
         crate::protocol::ServerEvent::History {
+            messages_base_count: None,
             id: 1,
             session_id: "ses_fast_path".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
@@ -495,4 +497,100 @@ fn test_service_tier_reported_fast_alias_confirms_and_badge_tracks_applied() {
         }, &mut remote,
     );
     assert_eq!(app.info_widget_data().service_tier, None);
+}
+
+fn delta_history_event(
+    session_id: &str,
+    messages: Vec<crate::protocol::HistoryMessage>,
+    messages_base_count: Option<usize>,
+) -> crate::protocol::ServerEvent {
+    crate::protocol::ServerEvent::History {
+        messages_base_count,
+        id: 1,
+        session_id: session_id.to_string(),
+        messages,
+        images: vec![],
+        provider_name: None,
+        provider_model: None,
+        subagent_model: None,
+        agent_model_overrides: Default::default(),
+        autoreview_enabled: None,
+        autojudge_enabled: None,
+        available_models: vec![],
+        available_model_routes: vec![],
+        mcp_servers: vec![],
+        skills: vec![],
+        total_tokens: None,
+        token_usage_totals: None,
+        all_sessions: vec![],
+        client_count: None,
+        is_canary: None,
+        reload_recovery: None,
+        server_version: None,
+        server_name: None,
+        server_icon: None,
+        server_has_update: None,
+        was_interrupted: None,
+        connection_type: None,
+        status_detail: None,
+        upstream_provider: None,
+        provider_oauth_email: None,
+        provider_oauth_account_label: None,
+        resolved_credential: None,
+        reasoning_effort: None,
+        service_tier: None,
+        available_service_tiers: None,
+        compaction_mode: crate::config::CompactionMode::Reactive,
+        activity: None,
+        side_panel: crate::side_panel::SidePanelSnapshot::default(),
+        applets: Default::default(),
+    }
+}
+
+#[test]
+fn test_delta_history_rebuilds_transcript_from_advertised_prefix() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    let prefix = vec![
+        DisplayMessage::user("hello".to_string()),
+        DisplayMessage::assistant("hi there".to_string()),
+    ];
+    app.advertised_history_base = Some(crate::tui::app::AdvertisedHistoryBase {
+        session_id: "ses_delta".to_string(),
+        base: crate::protocol::HistoryBase {
+            count: 2,
+            fingerprint: 0,
+        },
+        prefix: Some(prefix),
+    });
+    let tail = vec![crate::protocol::HistoryMessage {
+        response_stats: None,
+        role: "assistant".to_string(),
+        content: "new since reload".to_string(),
+        tool_calls: None,
+        tool_data: None,
+    }];
+    app.handle_server_event(delta_history_event("ses_delta", tail, Some(2)), &mut remote);
+    let contents: Vec<_> = app
+        .display_messages()
+        .iter()
+        .filter(|m| m.role != "system")
+        .map(|m| m.content.as_str())
+        .collect();
+    assert_eq!(contents, vec!["hello", "hi there", "new since reload"]);
+    assert!(app.advertised_history_base.is_none());
+    assert!(remote.has_loaded_history());
+}
+
+#[test]
+fn test_delta_history_without_prefix_requests_full_history() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.handle_server_event(delta_history_event("ses_delta", vec![], Some(5)), &mut remote);
+    assert!(app.idle_hibernation.history_reload_needed);
+    assert!(!remote.has_loaded_history());
 }

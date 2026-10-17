@@ -188,6 +188,7 @@ fn test_handle_server_event_history_clears_connection_type_on_session_change_whe
             id: 1,
             session_id: "session_new".to_string(),
             messages: vec![],
+            messages_base_count: None,
             images: vec![],
             provider_name: Some("claude".to_string()),
             provider_model: Some("claude-sonnet-4-20250514".to_string()),
@@ -246,6 +247,7 @@ fn test_handle_server_event_history_preserves_connection_type_for_same_session_w
             id: 1,
             session_id: "session_same".to_string(),
             messages: vec![],
+            messages_base_count: None,
             images: vec![],
             provider_name: Some("claude".to_string()),
             provider_model: Some("claude-sonnet-4-20250514".to_string()),
@@ -304,6 +306,7 @@ fn test_handle_server_event_history_preserves_reasoning_effort_for_same_session_
             id: 1,
             session_id: "session_same".to_string(),
             messages: vec![],
+            messages_base_count: None,
             images: vec![],
             provider_name: Some("anthropic".to_string()),
             provider_model: Some("claude-opus-4-1".to_string()),
@@ -389,6 +392,7 @@ fn test_handle_server_event_history_session_change_clears_streaming_preview_diag
             id: 1,
             session_id: "session_new".to_string(),
             messages: vec![],
+            messages_base_count: None,
             images: vec![],
             provider_name: Some("claude".to_string()),
             provider_model: Some("claude-sonnet-4-20250514".to_string()),
@@ -487,6 +491,7 @@ fn test_handle_server_event_history_same_session_rewind_reapply_clears_streaming
     // Truncated payload after the rewind: same session id, fewer messages.
     app.handle_server_event(
         crate::protocol::ServerEvent::History {
+            messages_base_count: None,
             id: 2,
             session_id: "session_rewind_preview".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
@@ -602,6 +607,7 @@ fn test_handle_server_event_history_same_session_midstream_duplicate_is_dropped_
     // Same-session, rewind-truncated payload this client never requested.
     app.handle_server_event(
         crate::protocol::ServerEvent::History {
+            messages_base_count: None,
             id: 3,
             session_id: "session_midstream_dup".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
@@ -689,6 +695,7 @@ fn test_handle_server_event_history_same_session_midstream_duplicate_is_dropped_
         );
         app.handle_server_event(
             crate::protocol::ServerEvent::History {
+                messages_base_count: None,
                 id: 3,
                 session_id: "session_midstream_dup".to_string(),
                 messages: vec![crate::protocol::HistoryMessage {
@@ -796,6 +803,7 @@ fn test_handle_server_event_history_same_session_rewind_then_late_done_does_not_
     // Truncated payload after the rewind: same session id, fewer messages.
     app.handle_server_event(
         crate::protocol::ServerEvent::History {
+            messages_base_count: None,
             id: 2,
             session_id: "session_rewind_done_race".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
@@ -895,6 +903,7 @@ fn test_handle_server_event_history_session_change_clears_pending_interleaves() 
             id: 1,
             session_id: "session_new".to_string(),
             messages: vec![],
+            messages_base_count: None,
             images: vec![],
             provider_name: Some("claude".to_string()),
             provider_model: Some("claude-sonnet-4-20250514".to_string()),
@@ -1638,6 +1647,7 @@ fn test_pending_startup_notice_survives_history_bootstrap_for_fresh_session() {
             id: 1,
             session_id: "session_new".to_string(),
             messages: vec![],
+            messages_base_count: None,
             images: vec![],
             provider_name: Some("claude".to_string()),
             provider_model: Some("claude-sonnet-4-20250514".to_string()),

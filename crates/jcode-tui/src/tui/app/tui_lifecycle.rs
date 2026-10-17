@@ -500,6 +500,9 @@ impl App {
             remote_startup_phase: None,
             remote_startup_phase_started: None,
             pending_startup_transcript: None,
+            pending_history_base: None,
+            startup_display_snapshot: None,
+            advertised_history_base: None,
             model_catalog_after_history: false,
             remote_reasoning_effort: None,
             remote_service_tier: None,
@@ -980,6 +983,9 @@ impl App {
             remote_startup_phase: None,
             remote_startup_phase_started: None,
             pending_startup_transcript: None,
+            pending_history_base: None,
+            startup_display_snapshot: None,
+            advertised_history_base: None,
             model_catalog_after_history: false,
             remote_reasoning_effort: None,
             remote_service_tier: None,
@@ -1273,6 +1279,61 @@ impl App {
 
     /// Show the background-rendered local transcript once it is ready, unless
     /// server History already superseded it. Returns true when it changed.
+    /// Base to advertise in a Subscribe resuming `session_id`. Waits briefly
+    /// for the startup transcript thread, which renders in tens of ms, far
+    /// less than a full History transfer during a reconnect storm.
+    pub(super) fn take_history_base_for_subscribe(
+        &mut self,
+        session_id: &str,
+    ) -> Option<crate::protocol::HistoryBase> {
+        let rx = self.pending_history_base.take()?;
+        let (id, base) = rx
+            .recv_timeout(std::time::Duration::from_millis(150))
+            .ok()?;
+        if id != session_id {
+            return None;
+        }
+        let prefix = self
+            .startup_display_snapshot
+            .take()
+            .filter(|(snapshot_id, display)| snapshot_id == &id && display.len() == base.count)
+            .map(|(_, display)| display);
+        self.advertised_history_base = Some(AdvertisedHistoryBase {
+            session_id: id,
+            base,
+            prefix,
+        });
+        Some(base)
+    }
+
+    /// Display prefix for a delta History of `count` base messages, if this
+    /// client advertised exactly that base for `session_id`.
+    pub(super) fn take_history_base_prefix(
+        &mut self,
+        session_id: &str,
+        count: usize,
+    ) -> Option<Vec<DisplayMessage>> {
+        let advertised = self.advertised_history_base.as_ref()?;
+        if advertised.session_id != session_id || advertised.base.count != count {
+            self.advertised_history_base = None;
+            return None;
+        }
+        if advertised.prefix.is_none() && self.pending_startup_transcript.is_some() {
+            // The transcript thread already sent the base and renders the
+            // display list right after; wait for it rather than refetching.
+            if let Some(rx) = self.pending_startup_transcript.take()
+                && let Ok(item) = rx.recv_timeout(std::time::Duration::from_secs(2))
+            {
+                let (tx, rx) = std::sync::mpsc::channel();
+                let _ = tx.send(item);
+                self.pending_startup_transcript = Some(rx);
+                self.poll_pending_startup_transcript();
+            }
+        }
+        let prefix = self.advertised_history_base.take()?.prefix?;
+        (prefix.len() == count).then_some(prefix)
+    }
+
     pub(super) fn poll_pending_startup_transcript(&mut self) -> bool {
         let Some(rx) = self.pending_startup_transcript.as_ref() else {
             return false;
@@ -1280,6 +1341,16 @@ impl App {
         match rx.try_recv() {
             Ok((session_id, display, images)) => {
                 self.pending_startup_transcript = None;
+                if let Some(advertised) = self.advertised_history_base.as_mut() {
+                    if advertised.session_id == session_id
+                        && advertised.prefix.is_none()
+                        && advertised.base.count == display.len()
+                    {
+                        advertised.prefix = Some(display.clone());
+                    }
+                } else if self.pending_history_base.is_some() {
+                    self.startup_display_snapshot = Some((session_id.clone(), display.clone()));
+                }
                 if self.display_messages().is_empty() {
                     self.replace_display_messages(display);
                     self.remote_side_pane_images = images;
@@ -1433,6 +1504,7 @@ impl App {
                 // local copy off the UI thread and show it as soon as it is
                 // ready; server History still replaces it when it arrives.
                 let (tx, rx) = std::sync::mpsc::channel();
+                let (base_tx, base_rx) = std::sync::mpsc::channel();
                 let id = session_id.clone();
                 let spawned = std::thread::Builder::new()
                     .name("jcode-startup-transcript".to_string())
@@ -1444,6 +1516,22 @@ impl App {
                         let (rendered, images) =
                             crate::session::render_messages_and_images(&session);
                         drop(session);
+                        // Same shape as server History messages, so the
+                        // server can verify this prefix and send only the
+                        // tail (delta History).
+                        let mut fingerprinter = crate::protocol::HistoryFingerprinter::default();
+                        for message in &rendered {
+                            fingerprinter.push(crate::protocol::HistoryMessageRef {
+                                role: &message.role,
+                                content: &message.content,
+                                tool_calls: &message.tool_calls,
+                                tool_data: message.tool_data.as_ref(),
+                            });
+                        }
+                        if fingerprinter.count() > 0 {
+                            let _ = base_tx.send((id.clone(), fingerprinter.base()));
+                        }
+                        drop(base_tx);
                         let display =
                             jcode_tui_messages::display_messages_from_rendered_messages(rendered);
                         crate::logging::info(&format!(
@@ -1456,6 +1544,9 @@ impl App {
                     });
                 if spawned.is_ok() {
                     app.pending_startup_transcript = Some(rx);
+                    if !crate::tui::is_ssh_remote() {
+                        app.pending_history_base = Some(base_rx);
+                    }
                 }
             } else {
                 app.restore_remote_startup_history(session_id);

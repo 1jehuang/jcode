@@ -1301,6 +1301,7 @@ pub(super) async fn handle_resume_session(
     working_dir_override: Option<&str>,
     client_instance_id: Option<&str>,
     client_has_local_history: bool,
+    history_base: Option<crate::protocol::HistoryBase>,
     allow_session_takeover: bool,
     client_selfdev: &mut bool,
     client_session_id: &mut String,
@@ -1514,6 +1515,7 @@ pub(super) async fn handle_resume_session(
             server_icon,
             None,
             supports_pdf_panels,
+            None,
         )
         .await?;
         let _ = client_event_tx.send(ServerEvent::Done { id });
@@ -1882,6 +1884,7 @@ pub(super) async fn handle_resume_session(
                 server_icon,
                 Some(was_interrupted),
                 supports_pdf_panels,
+                None,
             )
             .await;
             persist_restored().await;

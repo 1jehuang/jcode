@@ -77,7 +77,7 @@ fn ssh_remote_subscribe_keeps_remote_only_id_and_filters_control_done() {
             #[allow(unused_mut)]
             let mut listener = crate::transport::Listener::bind(&socket).unwrap();
             let mut connection = crate::tui::backend::RemoteConnection::connect_with_session(
-                Some("remote-only-session"), Some("ssh-client"), true, false,
+                Some("remote-only-session"), Some("ssh-client"), true, None, false,
                 Some("/remote/project"),
             ).await.unwrap();
             let (stream, _) = listener.accept().await.unwrap();
@@ -163,6 +163,7 @@ fn ssh_remote_history_is_authoritative_even_when_empty_or_server_version_differs
             id: 1,
             session_id: "remote-only-session".into(),
             messages: vec![],
+            messages_base_count: None,
             images: vec![],
             provider_name: Some("remote-provider".into()),
             provider_model: Some("remote-model".into()),

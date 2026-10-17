@@ -777,6 +777,7 @@ impl AcpRuntime {
                 target_session_id: None,
                 client_instance_id: Some("acp".to_string()),
                 client_has_local_history: false,
+                history_base: None,
                 allow_session_takeover: false,
                 terminal_env: crate::terminal_launch::snapshot_client_terminal_env(),
             })
@@ -834,6 +835,7 @@ impl AcpRuntime {
                 target_session_id: Some(target_session_id.clone()),
                 client_instance_id: Some("acp".to_string()),
                 client_has_local_history: false,
+                history_base: None,
                 allow_session_takeover: false,
                 terminal_env: crate::terminal_launch::snapshot_client_terminal_env(),
             })

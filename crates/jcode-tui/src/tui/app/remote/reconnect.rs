@@ -397,12 +397,15 @@ pub(in crate::tui::app) async fn connect_with_retry(
     let client_has_local_history = !crate::tui::is_ssh_remote()
         && session_to_resume.is_some()
         && !app.display_messages().is_empty();
+    let history_base =
+        session_to_resume.and_then(|session_id| app.take_history_base_for_subscribe(session_id));
     let client_instance_id = app.remote_client_instance_id.clone();
     let allow_session_takeover = should_allow_reconnect_takeover(app, state, session_to_resume);
     let connect = RemoteConnection::connect_with_session(
         session_to_resume,
         Some(client_instance_id.as_str()),
         client_has_local_history,
+        history_base,
         allow_session_takeover,
         remote_working_dir,
     );

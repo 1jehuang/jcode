@@ -1747,7 +1747,8 @@ pub(in crate::tui::app) fn handle_server_event(
             false
         }
         ServerEvent::History {
-            messages,
+            mut messages,
+            messages_base_count,
             images,
             session_id,
             provider_name,
@@ -1785,6 +1786,41 @@ pub(in crate::tui::app) fn handle_server_event(
             side_panel,
             ..
         } => {
+            if let Some(base_count) = messages_base_count {
+                // Delta History: the server verified our advertised prefix and
+                // sent only the messages after it. Rebuild the full list so the
+                // rest of this handler (fingerprints, replace) is unchanged.
+                let Some(prefix) = app.take_history_base_prefix(&session_id, base_count) else {
+                    crate::logging::warn(&format!(
+                        "Delta History for {} (base={}) without a matching local prefix; requesting full history",
+                        session_id, base_count
+                    ));
+                    app.idle_hibernation.history_reload_needed = true;
+                    return true;
+                };
+                let tail = std::mem::take(&mut messages);
+                messages.reserve(prefix.len() + tail.len());
+                messages.extend(
+                    prefix
+                        .into_iter()
+                        .map(|msg| crate::protocol::HistoryMessage {
+                            response_stats: None,
+                            role: msg.role,
+                            content: msg.content,
+                            tool_calls: (!msg.tool_calls.is_empty()).then_some(msg.tool_calls),
+                            tool_data: msg.tool_data,
+                        }),
+                );
+                messages.extend(tail);
+                crate::logging::info(&format!(
+                    "Applied delta History for {}: base={}, total={}",
+                    session_id,
+                    base_count,
+                    messages.len()
+                ));
+            } else {
+                app.advertised_history_base = None;
+            }
             let prev_session_id = app.remote_session_id.clone();
             app.remote_provider_oauth_email = provider_oauth_email.clone();
             app.remote_provider_oauth_account_label = provider_oauth_account_label;

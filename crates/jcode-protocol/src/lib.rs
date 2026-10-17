@@ -78,6 +78,126 @@ pub enum CommDeliveryMode {
     Wake,
 }
 
+/// A client's claim about the transcript prefix it already holds, used to
+/// request only the remaining History messages.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HistoryBase {
+    /// Number of leading History messages the client holds.
+    pub count: usize,
+    /// [`history_prefix_fingerprint`] of those messages.
+    pub fingerprint: u64,
+}
+
+/// Stable, process-independent fingerprint of History messages, shared by the
+/// client (to describe what it has) and the server (to verify the claim).
+/// Covers every field the client renders, so any divergence falls back to a
+/// full transcript.
+pub fn history_prefix_fingerprint<'a>(
+    messages: impl IntoIterator<Item = HistoryMessageRef<'a>>,
+) -> u64 {
+    let mut fingerprinter = HistoryFingerprinter::default();
+    for message in messages {
+        fingerprinter.push(message);
+    }
+    fingerprinter.finish()
+}
+
+/// Streaming form of [`history_prefix_fingerprint`], so a client can extend
+/// the fingerprint of an applied transcript with a delta tail without
+/// re-hashing (or retaining) the prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HistoryFingerprinter {
+    hash: u64,
+    count: usize,
+}
+
+impl Default for HistoryFingerprinter {
+    fn default() -> Self {
+        // FNV-1a 64: deterministic across processes and builds, unlike
+        // std's randomized DefaultHasher.
+        Self {
+            hash: 0xcbf2_9ce4_8422_2325,
+            count: 0,
+        }
+    }
+}
+
+impl HistoryFingerprinter {
+    fn feed(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.hash ^= u64::from(*byte);
+            self.hash = self.hash.wrapping_mul(0x0100_0000_01b3);
+        }
+        // Separator so field boundaries cannot alias.
+        self.hash ^= 0xff;
+        self.hash = self.hash.wrapping_mul(0x0100_0000_01b3);
+    }
+
+    pub fn push(&mut self, message: HistoryMessageRef<'_>) {
+        self.count += 1;
+        self.feed(message.role.as_bytes());
+        self.feed(message.content.as_bytes());
+        for call in message.tool_calls {
+            self.feed(call.as_bytes());
+        }
+        self.feed(&(message.tool_calls.len() as u64).to_le_bytes());
+        match message.tool_data {
+            Some(tool) => {
+                self.feed(b"tool");
+                self.feed(tool.id.as_bytes());
+                self.feed(tool.name.as_bytes());
+                self.feed(
+                    serde_json::to_string(&tool.input)
+                        .unwrap_or_default()
+                        .as_bytes(),
+                );
+            }
+            None => self.feed(b"-"),
+        }
+    }
+
+    /// Number of messages pushed so far.
+    pub fn count(&self) -> usize {
+        self.count
+    }
+
+    /// Fingerprint of everything pushed so far. Does not consume, so more
+    /// messages can be pushed afterwards.
+    pub fn finish(&self) -> u64 {
+        let mut done = *self;
+        done.feed(&(self.count as u64).to_le_bytes());
+        done.hash
+    }
+
+    pub fn base(&self) -> HistoryBase {
+        HistoryBase {
+            count: self.count,
+            fingerprint: self.finish(),
+        }
+    }
+}
+
+/// Borrowed view of the fields [`history_prefix_fingerprint`] covers, so the
+/// client can fingerprint its rendered transcript without converting it.
+#[derive(Debug, Clone, Copy)]
+pub struct HistoryMessageRef<'a> {
+    pub role: &'a str,
+    pub content: &'a str,
+    pub tool_calls: &'a [String],
+    pub tool_data: Option<&'a ToolCall>,
+}
+
+impl<'a> From<&'a HistoryMessage> for HistoryMessageRef<'a> {
+    fn from(message: &'a HistoryMessage) -> Self {
+        Self {
+            role: &message.role,
+            content: &message.content,
+            tool_calls: message.tool_calls.as_deref().unwrap_or(&[]),
+            tool_data: message.tool_data.as_ref(),
+        }
+    }
+}
+
 /// A message in conversation history (for sync)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryMessage {

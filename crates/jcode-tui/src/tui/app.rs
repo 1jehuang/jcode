@@ -923,6 +923,13 @@ struct CostState {
 
 /// State for an in-progress OAuth/API-key login flow triggered by `/login`.
 /// TUI Application state
+/// See [`App::advertised_history_base`].
+pub(crate) struct AdvertisedHistoryBase {
+    pub(crate) session_id: String,
+    pub(crate) base: crate::protocol::HistoryBase,
+    pub(crate) prefix: Option<Vec<DisplayMessage>>,
+}
+
 pub struct App {
     provider: Arc<dyn Provider>,
     registry: Registry,
@@ -1303,6 +1310,16 @@ pub struct App {
             Vec<crate::session::RenderedImage>,
         )>,
     >,
+    /// Fingerprint of the locally rendered startup transcript, delivered by
+    /// the startup transcript thread before display conversion so the
+    /// reconnect can advertise it as `history_base` in Subscribe.
+    pending_history_base: Option<std::sync::mpsc::Receiver<(String, crate::protocol::HistoryBase)>>,
+    /// The base advertised in the last Subscribe, plus the exact display
+    /// prefix it describes, kept until History arrives so a delta History can
+    /// be reconstructed even if the visible transcript changed meanwhile.
+    advertised_history_base: Option<AdvertisedHistoryBase>,
+    /// Unmodified startup transcript, kept only while a base is pending.
+    startup_display_snapshot: Option<(String, Vec<DisplayMessage>)>,
     remote_reasoning_effort: Option<String>,
     remote_service_tier: Option<String>,
     remote_available_service_tiers: Option<Vec<String>>,

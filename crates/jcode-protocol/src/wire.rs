@@ -166,6 +166,11 @@ pub enum Request {
         client_instance_id: Option<String>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         client_has_local_history: bool,
+        /// Prefix of the transcript the client already rendered locally. When
+        /// it matches the server's view, History carries only the messages
+        /// after it (`messages_base_count`), instead of the full transcript.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        history_base: Option<crate::HistoryBase>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         allow_session_takeover: bool,
         /// Legacy ownership hint, retained for wire compatibility. Disconnects

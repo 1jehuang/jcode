@@ -364,6 +364,7 @@ impl WsTestClient {
         self.next_id += 1;
         let working_dir = std::env::current_dir()?.to_string_lossy().into_owned();
         self.send_request(Request::Subscribe {
+            history_base: None,
             system_prompt: None,
             supports_pdf_panels: false,
             supports_user_response: false,

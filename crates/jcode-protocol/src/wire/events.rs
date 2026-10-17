@@ -559,6 +559,11 @@ pub enum ServerEvent {
         id: u64,
         session_id: String,
         messages: Vec<HistoryMessage>,
+        /// When set, `messages` holds only the messages after the first
+        /// `messages_base_count` messages, which the client already has (it
+        /// sent a matching `history_base`). Absent means a full transcript.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        messages_base_count: Option<usize>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<jcode_session_types::RenderedImage>,
         /// Provider name (e.g. "anthropic", "openai")

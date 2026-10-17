@@ -706,6 +706,7 @@ fn test_history_provider_oauth_email_roundtrip_redacts_debug() -> Result<()> {
 #[test]
 fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
     let event = ServerEvent::History {
+        messages_base_count: None,
         id: 101,
         session_id: "ses_test_456".to_string(),
         messages: vec![HistoryMessage {
@@ -963,4 +964,50 @@ fn test_agent_models_session_setter_and_response_roundtrip() -> Result<()> {
         if session_id == "session-a" && overrides.get("review").map(String::as_str) == Some("inherit"))
     );
     Ok(())
+}
+
+#[test]
+fn history_prefix_fingerprint_is_stable_and_streaming_consistent() {
+    let message = |role: &str, content: &str| HistoryMessage {
+        response_stats: None,
+        role: role.to_string(),
+        content: content.to_string(),
+        tool_calls: None,
+        tool_data: None,
+    };
+    let messages = vec![message("user", "hi"), message("assistant", "hello")];
+    let whole =
+        crate::history_prefix_fingerprint(messages.iter().map(crate::HistoryMessageRef::from));
+    // Pinned value: client and server may run different builds, so the
+    // fingerprint must never depend on process state or hasher seeds.
+    assert_eq!(whole, 0x3396_f126_1f30_6a9e, "got {whole:#x}");
+    let mut streaming = crate::HistoryFingerprinter::default();
+    streaming.push((&messages[0]).into());
+    let first = streaming.finish();
+    streaming.push((&messages[1]).into());
+    assert_eq!(streaming.finish(), whole);
+    assert_eq!(streaming.base().count, 2);
+    assert_ne!(first, whole);
+    // Field boundaries must not alias.
+    let shifted = vec![message("user", "hia"), message("ssistant", "hello")];
+    assert_ne!(
+        crate::history_prefix_fingerprint(shifted.iter().map(crate::HistoryMessageRef::from)),
+        whole
+    );
+}
+
+#[test]
+fn history_delta_fields_are_backward_compatible() {
+    let event: ServerEvent = serde_json::from_str(
+        r#"{"type":"history","id":1,"session_id":"s","messages":[]}"#,
+    )
+    .expect("legacy History without messages_base_count");
+    let ServerEvent::History {
+        messages_base_count,
+        ..
+    } = event
+    else {
+        panic!("expected history");
+    };
+    assert_eq!(messages_base_count, None);
 }
