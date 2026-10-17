@@ -9,6 +9,31 @@ use crate::tui::connection_type_icon;
 use ratatui::prelude::*;
 #[path = "ui_header/account_router.rs"]
 mod account_router;
+
+/// UI chrome is single-line. Budget the same trailing cell as the transcript
+/// preparer so even an exactly-full header cannot acquire a continuation row.
+fn fit_header_lines(lines: Vec<Line<'static>>, width: u16) -> Vec<Line<'static>> {
+    let budget = usize::from(width.saturating_sub(1));
+    lines
+        .into_iter()
+        .map(|mut line| {
+            for span in &mut line.spans {
+                if span.content.chars().any(char::is_control) {
+                    span.content = span
+                        .content
+                        .chars()
+                        .map(|c| if c.is_control() { ' ' } else { c })
+                        .collect::<String>()
+                        .into();
+                }
+            }
+            let mut fitted = jcode_tui_render::truncate_line_with_ellipsis_to_width(&line, budget);
+            fitted.style = line.style;
+            fitted.alignment = line.alignment;
+            fitted
+        })
+        .collect()
+}
 #[cfg(test)]
 use std::sync::OnceLock;
 
@@ -528,7 +553,10 @@ fn configured_auth_count(auth: &AuthStatus) -> usize {
 pub(super) fn build_persistent_header(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
     let auth = app.auth_status();
     let active = ActiveCredentialOverrides::from_app(app);
-    build_persistent_header_with_auth(app, width, &auth, active)
+    fit_header_lines(
+        build_persistent_header_with_auth(app, width, &auth, active),
+        width,
+    )
 }
 
 fn build_persistent_header_with_auth(
@@ -764,7 +792,10 @@ fn build_persistent_header_with_auth(
 pub(crate) fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
     let auth = app.auth_status();
     let active = ActiveCredentialOverrides::from_app(app);
-    build_header_lines_with_auth(app, width, &auth, active)
+    fit_header_lines(
+        build_header_lines_with_auth(app, width, &auth, active),
+        width,
+    )
 }
 
 fn build_header_lines_with_auth(
@@ -936,8 +967,14 @@ pub(in crate::tui) fn build_header_sections(
     let auth = app.auth_status();
     let active = ActiveCredentialOverrides::from_app(app);
     (
-        build_persistent_header_with_auth(app, width, &auth, active),
-        build_header_lines_with_auth(app, width, &auth, active),
+        fit_header_lines(
+            build_persistent_header_with_auth(app, width, &auth, active),
+            width,
+        ),
+        fit_header_lines(
+            build_header_lines_with_auth(app, width, &auth, active),
+            width,
+        ),
     )
 }
 
@@ -952,6 +989,52 @@ mod tests {
     use async_trait::async_trait;
     use std::sync::Arc;
     use std::sync::OnceLock;
+
+    #[test]
+    fn header_rows_clip_unicode_and_controls_without_losing_style() {
+        let style = Style::default().fg(Color::Magenta);
+        let source = vec![
+            Line::from(vec![
+                Span::styled("账号 👩‍💻 e\u{301} ", style),
+                Span::raw("/very/long/path\nwith\ttabs and a long account email@example.com"),
+            ])
+            .alignment(Alignment::Left),
+        ];
+        for width in [0u16, 1, 2, 3, 8, 18, 40, 80] {
+            let fitted = fit_header_lines(source.clone(), width);
+            assert_eq!(fitted.len(), 1);
+            assert!(fitted[0].width() <= usize::from(width.saturating_sub(1)));
+            assert_eq!(fitted[0].alignment, Some(Alignment::Left));
+            assert!(
+                fitted[0]
+                    .spans
+                    .iter()
+                    .all(|span| !span.content.chars().any(char::is_control))
+            );
+            if width >= 8 {
+                assert_eq!(fitted[0].spans[0].style, style);
+            }
+        }
+    }
+
+    #[test]
+    fn startup_header_never_adds_wraparound_rows_at_narrow_widths() {
+        let app = create_test_app();
+        for width in [2u16, 8, 18, 32, 40, 60, 80, 120] {
+            let (mut lines, secondary) = build_header_sections(&app, width);
+            lines.extend(secondary);
+            for line in lines {
+                let budget = usize::from(width.saturating_sub(1));
+                assert!(line.width() <= budget, "width={width}: {line:?}");
+                let wrapped = jcode_tui_markdown::wrap_line(line, budget);
+                assert_eq!(
+                    wrapped.len(),
+                    1,
+                    "header must stay one visual row at width={width}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn changelog_override_is_cleared_after_a_render_test_panics() {

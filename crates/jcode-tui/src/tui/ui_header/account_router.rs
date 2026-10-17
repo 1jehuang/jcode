@@ -158,24 +158,29 @@ fn inventory_lines(
             && selected
             && credential == Some(ActiveCredential::OAuth);
         let usage = crate::usage::cached_account_usage_snapshot(usage_provider, &account.label);
-        let quota = usage.as_ref().and_then(remaining_bar).unwrap_or_default();
+        let quota = usage.as_ref().and_then(|usage| {
+            remaining_bar(usage, crate::config::config().display.usage_display_used())
+        });
+        let mut row = detail(
+            if expired {
+                "×"
+            } else if is_current {
+                "●"
+            } else {
+                "○"
+            },
+            format!("{name:<12} {}", masked_identity(account.email.as_deref())),
+            is_current && !expired,
+        );
+        if let Some(quota) = quota {
+            row.spans
+                .push(Span::styled(" · ", Style::default().fg(dim_color())));
+            row.spans.extend(quota.spans);
+        }
         entries.push((
             account_key(account.provider, Some(&account.label)),
             true,
-            detail(
-                if expired {
-                    "×"
-                } else if is_current {
-                    "●"
-                } else {
-                    "○"
-                },
-                format!(
-                    "{name:<12} {}{quota}",
-                    masked_identity(account.email.as_deref())
-                ),
-                is_current && !expired,
-            ),
+            row,
         ));
     }
     for (name, key, provider) in [
@@ -261,7 +266,10 @@ fn inventory_lines(
     lines
 }
 
-fn remaining_bar(usage: &crate::usage::AccountUsageSnapshot) -> Option<String> {
+fn remaining_bar(
+    usage: &crate::usage::AccountUsageSnapshot,
+    display_used: bool,
+) -> Option<Line<'static>> {
     if usage.error.is_some() {
         return None;
     }
@@ -269,18 +277,19 @@ fn remaining_bar(usage: &crate::usage::AccountUsageSnapshot) -> Option<String> {
     if !used.is_finite() || !(0.0..=1.0).contains(&used) {
         return None;
     }
-    let remaining = 1.0 - used;
-    let filled = (remaining * 4.0).round() as usize;
     let label = match usage.primary_label.as_deref().unwrap_or("5h") {
         "5-hour" | "5-hour window" => "5h",
         "7-day" | "7-day window" => "7d",
         label => label,
     };
-    Some(format!(
-        " · {label} [{}{}] {:.0}% left",
-        "█".repeat(filled),
-        "░".repeat(4 - filled),
-        remaining * 100.0
+    let used_pct = (used * 100.0).round() as u8;
+    Some(crate::tui::info_widget::render_usage_limit_bar(
+        label,
+        used_pct,
+        100u8.saturating_sub(used_pct),
+        None,
+        22,
+        display_used,
     ))
 }
 
@@ -491,16 +500,22 @@ mod tests {
             resets_at: None,
             error: None,
         };
+        let bar = remaining_bar(&usage, false).unwrap();
+        assert!(text(vec![bar.clone()]).contains("52% left"));
+        assert!(text(vec![bar.clone()]).contains('▰'));
+        assert!(text(vec![bar.clone()]).contains('▱'));
+        assert!(!text(vec![bar.clone()]).contains('['));
         assert_eq!(
-            remaining_bar(&usage).as_deref(),
-            Some(" · 5h [██░░] 52% left")
+            bar,
+            crate::tui::info_widget::render_usage_limit_bar("5h", 48, 52, None, 22, false)
         );
+        assert!(text(vec![remaining_bar(&usage, true).unwrap()]).contains("48% used"));
         for ratio in [None, Some(f32::NAN), Some(-0.1), Some(1.1)] {
             usage.five_hour_ratio = ratio;
-            assert!(remaining_bar(&usage).is_none());
+            assert!(remaining_bar(&usage, false).is_none());
         }
         usage.five_hour_ratio = Some(0.0);
         usage.error = Some("unavailable".into());
-        assert!(remaining_bar(&usage).is_none());
+        assert!(remaining_bar(&usage, false).is_none());
     }
 }

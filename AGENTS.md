@@ -4,6 +4,16 @@
 
 - Jcode Desktop is in a separate repository.
 
+## TUI style
+
+- UI chrome must not wrap: startup headers, account rows, status labels, and
+  other compact UI rows should fit their available terminal-cell width or
+  truncate with an ellipsis. Count Unicode display cells, not characters.
+  Preserve one logical row per visual row, including at narrow widths.
+  Chat prose and other intentionally multiline content may wrap normally.
+- Reuse the info widget's limit-bar renderer for usage indicators instead of
+  introducing a different bar glyph, color, or used/remaining convention.
+
 ## Development Workflow
 
 - **Use the user's Git identity** - Create commits with the configured

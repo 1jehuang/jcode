@@ -219,7 +219,7 @@ pub(super) fn render_usage_compact(
     lines
 }
 
-fn render_labeled_bar(
+pub(crate) fn render_labeled_bar(
     label: &str,
     used_pct: u8,
     left_pct: u8,
