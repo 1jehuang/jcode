@@ -1136,6 +1136,7 @@ impl Agent {
         working_dir: Option<&str>,
     ) -> Result<SessionStatus> {
         let restore_start = Instant::now();
+        let restore_cpu_start = crate::server::thread_cpu_ms();
         let load_start = Instant::now();
         let mut session = Session::load(session_id)?;
         if let Some(working_dir) = working_dir {
@@ -1208,7 +1209,7 @@ impl Agent {
         let save_ms = save_start.elapsed().as_millis();
 
         logging::info(&format!(
-            "[TIMING] restore_session: session={}, messages={}, restored_soft_interrupts={}, load={}ms, assign={}ms, reset={}ms, model={}ms, mark_active={}ms, compaction={}ms, env_snapshot={}ms, save={}ms, total={}ms",
+            "[TIMING] restore_session: session={}, messages={}, restored_soft_interrupts={}, load={}ms, assign={}ms, reset={}ms, model={}ms, mark_active={}ms, compaction={}ms, env_snapshot={}ms, save={}ms, total={}ms, cpu={:.0}ms",
             session_id,
             self.session.messages.len(),
             restored_soft_interrupts,
@@ -1221,6 +1222,7 @@ impl Agent {
             env_snapshot_ms,
             save_ms,
             restore_start.elapsed().as_millis(),
+            crate::server::thread_cpu_ms() - restore_cpu_start,
         ));
         logging::info(&format!(
             "Session restored: {} messages in session",

@@ -152,6 +152,52 @@ impl McpSchemaCache {
         }
     }
 
+    /// Persist `tools` for `server` unless this process already recorded the
+    /// identical catalog under the same config. Each session reports every
+    /// shared server's connection, so without this a reload storm cloned,
+    /// compared, and rewrote the whole cache hundreds of times (~30ms CPU each).
+    /// Returns true when the file was written.
+    pub fn sync_server(server: &str, config: &McpServerConfig, tools: &[McpToolDef]) -> bool {
+        use std::hash::{Hash, Hasher};
+        static SEEN: std::sync::LazyLock<std::sync::Mutex<BTreeMap<String, u64>>> =
+            std::sync::LazyLock::new(Default::default);
+        let mut catalog = std::collections::hash_map::DefaultHasher::new();
+        fingerprint_config(config).hash(&mut catalog);
+        for tool in tools {
+            tool.name.hash(&mut catalog);
+            tool.description.hash(&mut catalog);
+            tool.input_schema.to_string().hash(&mut catalog);
+        }
+        let catalog = catalog.finish();
+        // Include the file's identity so an external edit (another process,
+        // a manual reset) is never masked by the in-process memo.
+        let digest = || {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            catalog.hash(&mut hasher);
+            if let Some(path) = cache_path()
+                && let Ok(meta) = std::fs::metadata(&path)
+            {
+                meta.len().hash(&mut hasher);
+                meta.modified().ok().hash(&mut hasher);
+            }
+            hasher.finish()
+        };
+        if let Ok(seen) = SEEN.lock()
+            && seen.get(server) == Some(&digest())
+        {
+            return false;
+        }
+        let mut cache = Self::load();
+        let written = cache.update(server, config, tools.to_vec());
+        if written {
+            cache.save();
+        }
+        if let Ok(mut seen) = SEEN.lock() {
+            seen.insert(server.to_string(), digest());
+        }
+        written
+    }
+
     /// Insert/replace the cached schemas for a server. Returns true if the entry
     /// actually changed (new server, or different fingerprint/tools), so callers
     /// can avoid rewriting the file when nothing changed.
