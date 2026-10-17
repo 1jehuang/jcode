@@ -564,13 +564,45 @@ fn configured_laya_base() -> String {
     LAYA_DEFAULT_BASE.to_owned()
 }
 
+fn trusted_laya_base(base: &str) -> Result<String> {
+    let url = Url::parse(base.trim()).map_err(|_| anyhow!("Invalid Laya base URL"))?;
+    let trusted_http_host = url.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("localhost")
+            || host.eq_ignore_ascii_case("dragon")
+            || host
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| match ip {
+                    std::net::IpAddr::V4(v4) => {
+                        v4.is_loopback()
+                            || v4.is_private()
+                            || (v4.octets()[0] == 100 && (64..=127).contains(&v4.octets()[1]))
+                    }
+                    std::net::IpAddr::V6(v6) => {
+                        v6.is_loopback() || (v6.segments()[0] & 0xfe00) == 0xfc00
+                    }
+                })
+    });
+    ensure!(
+        url.host_str().is_some()
+            && (url.scheme() == "https" || (url.scheme() == "http" && trusted_http_host))
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none(),
+        "Laya endpoint requires HTTPS (HTTP only for loopback, private LAN, or Tailscale), without URL credentials, query, or fragment"
+    );
+    Ok(url.as_str().trim_end_matches('/').to_owned())
+}
+
 fn laya_endpoint(base: &str) -> Result<String> {
     let effective = if base.trim().is_empty() {
         LAYA_DEFAULT_BASE
     } else {
         base.trim()
     };
-    let root = trusted_gateway_base(effective)?;
+    let root = trusted_laya_base(effective)?;
     if let Some(stripped) = root.strip_suffix("/v1/systemone") {
         Ok(format!("{stripped}/v1/systemone"))
     } else if let Some(stripped) = root.strip_suffix("/v1") {
@@ -1159,6 +1191,12 @@ mod tests {
                 .endpoint("http://localhost:8080/v1")
                 .unwrap(),
             "http://localhost:8080/v1/systemone"
+        );
+        assert_eq!(
+            JevProvider::Laya
+                .endpoint("http://100.87.178.69:8000")
+                .unwrap(),
+            "http://100.87.178.69:8000/v1/systemone"
         );
     }
 
