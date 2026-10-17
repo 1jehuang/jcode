@@ -21,7 +21,7 @@ def pick_sessions(n, home):
             break
     return ids
 
-async def one(sock, sid, cwd):
+async def one(sock, sid, cwd, chunk):
     t0 = time.perf_counter()
     r, w = await asyncio.open_unix_connection(sock, limit=1 << 30)
     req = {"type": "subscribe", "id": 1, "working_dir": cwd,
@@ -30,7 +30,7 @@ async def one(sock, sid, cwd):
     first = None
     try:
         while True:
-            line = await asyncio.wait_for(r.readline(), 60)
+            line = await asyncio.wait_for(read_line(r, chunk), 60)
             if not line:
                 return sid, None, "eof"
             if first is None:
@@ -44,15 +44,34 @@ async def one(sock, sid, cwd):
     finally:
         w.close()
 
+async def read_line(r, chunk):
+    """Read one line using reads of at most `chunk` bytes, like a client
+    with a fixed-size read buffer (yields to the loop between reads)."""
+    if chunk <= 0:
+        return await r.readline()
+    buf = bytearray()
+    while True:
+        data = await r.read(chunk)
+        if not data:
+            return bytes(buf)
+        buf += data
+        i = buf.find(b"\n")
+        if i >= 0:
+            # push back the remainder
+            r._buffer[0:0] = buf[i + 1:]
+            return bytes(buf[: i + 1])
+        await asyncio.sleep(0)
+
 async def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--socket", required=True)
     ap.add_argument("-n", type=int, default=40)
     ap.add_argument("--home", default=os.path.expanduser("~/.jcode"))
+    ap.add_argument("--chunk", type=int, default=0, help="client read size in bytes (0 = unbounded)")
     a = ap.parse_args()
     ids = pick_sessions(a.n, a.home)
     t0 = time.perf_counter()
-    res = await asyncio.gather(*(one(a.socket, s, os.getcwd()) for s in ids))
+    res = await asyncio.gather(*(one(a.socket, s, os.getcwd(), a.chunk) for s in ids))
     wall = time.perf_counter() - t0
     ok = sorted(t for _, t, _ in res if t is not None)
     bad = [(s, e) for s, t, e in res if t is None]
