@@ -38,11 +38,13 @@
 //! that are not in the schema and the idempotency requirement on every mutation.
 
 pub mod msp;
+pub mod provider;
 
 pub use msp::{
     ClassifiedFrame, MspError, MspInbound, MspTransport, MuseHostConfig, is_valid_client_name,
     new_command_id,
 };
+pub use provider::{MUSE_CODE_MODELS, MuseCodeProvider, ROUTE_API_METHOD};
 
 /// Stable machine-facing provider id.
 pub const PROVIDER_ID: &str = "muse-code";

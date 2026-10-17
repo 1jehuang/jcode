@@ -3337,6 +3337,7 @@ dependencies = [
  "jcode-provider-doctor",
  "jcode-provider-gemini-runtime",
  "jcode-provider-grok-build-runtime",
+ "jcode-provider-muse-code-runtime",
  "jcode-provider-openai-runtime",
  "jcode-provider-openrouter-runtime",
  "jcode-selfdev-types",
@@ -4093,6 +4094,11 @@ name = "jcode-provider-muse-code-runtime"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "futures",
+ "jcode-base",
+ "jcode-message-types",
+ "jcode-provider-core",
  "serde_json",
  "tokio",
  "uuid",

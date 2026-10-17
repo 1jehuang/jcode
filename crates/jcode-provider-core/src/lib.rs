@@ -849,6 +849,7 @@ pub enum RuntimeKey {
     RemoteCatalog,
     Current,
     GrokBuild,
+    MuseCode,
     /// Catch-all for unrecognized `api_method` strings.
     ///
     /// This must be a struct variant, not `Other(String)`. Serde's internally
@@ -881,6 +882,7 @@ impl RuntimeKey {
             ModelRouteApiMethod::RemoteCatalog => Self::RemoteCatalog,
             ModelRouteApiMethod::Current => Self::Current,
             ModelRouteApiMethod::GrokBuild => Self::GrokBuild,
+            ModelRouteApiMethod::MuseCode => Self::MuseCode,
             ModelRouteApiMethod::Other(method) => Self::Other {
                 method: method.clone(),
             },
@@ -908,6 +910,7 @@ impl RuntimeKey {
             Self::RemoteCatalog => "remote-catalog".to_string(),
             Self::Current => "current".to_string(),
             Self::GrokBuild => "grok-build".to_string(),
+            Self::MuseCode => "muse-code".to_string(),
             Self::Other { method } => method.clone(),
         }
     }
@@ -993,6 +996,7 @@ impl RouteSelection {
             RuntimeKey::Bedrock => format!("bedrock:{model}"),
             RuntimeKey::Antigravity => format!("antigravity:{model}"),
             RuntimeKey::GrokBuild => grok_build_model_spec(model),
+            RuntimeKey::MuseCode => muse_code_model_spec(model),
             RuntimeKey::Gemini
             | RuntimeKey::CodeAssistOAuth
             | RuntimeKey::RemoteCatalog
@@ -1008,6 +1012,15 @@ impl RouteSelection {
 pub fn grok_build_model_spec(model: &str) -> String {
     let bare = model.strip_prefix("grok-build:").unwrap_or(model).trim();
     format!("grok-build:{bare}")
+}
+
+/// Muse Code routing spec: `muse-wonder-1.0` and `muse-code:muse-wonder-1.0`
+/// both become `muse-code:muse-wonder-1.0`, mirroring [`grok_build_model_spec`]
+/// so `MultiProvider::set_model` dispatches to the Muse Code runtime instead of
+/// treating the bare id as the active provider's model.
+pub fn muse_code_model_spec(model: &str) -> String {
+    let bare = model.strip_prefix("muse-code:").unwrap_or(model).trim();
+    format!("muse-code:{bare}")
 }
 
 /// OpenRouter catalog id for a bare model: claude models gain an `anthropic/`
@@ -1045,6 +1058,7 @@ pub enum ModelRouteApiMethod {
     RemoteCatalog,
     Current,
     GrokBuild,
+    MuseCode,
     Other(String),
 }
 
@@ -1089,6 +1103,7 @@ impl ModelRouteApiMethod {
         match lower.as_str() {
             "jcode-subscription" => Self::JcodeSubscription,
             "grok-build" | "grok-build-acp" => Self::GrokBuild,
+            "muse-code" | "muse-code-msp" => Self::MuseCode,
             "openrouter" => Self::OpenRouter,
             "openai-compatible" => Self::OpenAiCompatible { profile_id: None },
             "copilot" => Self::Copilot,
@@ -1168,6 +1183,7 @@ impl ModelRouteApiMethod {
             Self::RemoteCatalog => "remote-catalog".to_string(),
             Self::Current => "current".to_string(),
             Self::GrokBuild => "grok-build-acp".to_string(),
+            Self::MuseCode => "muse-code-msp".to_string(),
             Self::Other(method) => method
                 .split_once(':')
                 .map(|(method, _)| method)
