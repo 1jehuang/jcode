@@ -5,6 +5,34 @@ pub enum StdinState {
     Unknown,
 }
 
+/// Returns `true` when stdin is connected to an interactive terminal
+/// (i.e., not piped or redirected).
+///
+/// This is the primary check for "should we show interactive UI?".
+/// Works correctly on Unix (`isatty`) and Windows (`GetConsoleMode` via
+/// `std::io::IsTerminal`).
+pub fn is_stdin_interactive() -> bool {
+    std::io::IsTerminal::is_terminal(&std::io::stdin())
+}
+
+/// Returns `true` when stdin is connected to a terminal device.
+///
+/// Equivalent to [`is_stdin_interactive`] — a terminal handle implies
+/// interactive, and piped/redirected stdin is never a terminal.
+pub fn is_stdin_terminal() -> bool {
+    std::io::IsTerminal::is_terminal(&std::io::stdin())
+}
+
+/// Returns `true` when stdin is being fed from a pipe or redirect
+/// (i.e., not a terminal).
+///
+/// On Unix this is the negation of `isatty(STDIN_FILENO)`.
+/// On Windows this is the negation of `GetConsoleMode` on the stdin handle,
+/// which correctly handles redirected handles, pipes, and conpty.
+pub fn is_stdin_pipe() -> bool {
+    !std::io::IsTerminal::is_terminal(&std::io::stdin())
+}
+
 pub fn is_waiting_for_stdin(pid: u32) -> StdinState {
     #[cfg(target_os = "linux")]
     return linux::check(pid);
