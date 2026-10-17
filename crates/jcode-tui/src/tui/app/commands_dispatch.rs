@@ -41,6 +41,7 @@ pub(super) fn ssh_unsupported_command(input: &str) -> bool {
             | "/compact-notifications"
             | "/show-agentgrep-output"
             | "/tool-call-details"
+            | "/overview"
             | "/colors"
             | "/theme"
             | "/telemetry"
@@ -366,6 +367,8 @@ mod tests {
             "/todos",
             "/review",
             "/subagent investigate",
+            "/overview",
+            "/overview off",
         ] {
             assert!(super::ssh_unsupported_command(command), "{command}");
         }

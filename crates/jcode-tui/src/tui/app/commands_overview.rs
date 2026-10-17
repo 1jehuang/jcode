@@ -73,13 +73,14 @@ pub(super) fn handle_overview_command(app: &mut App, trimmed: &str) -> bool {
             )))
         }
         Err(error) => app.push_display_message(DisplayMessage::error(format!(
-            "Applied {} for this session, but failed to save it as the default: {}",
-            if enabled {
+            "Info panel was not changed: saving the choice to config failed ({}). \
+             The live layout still follows the previous default ({}).",
+            error,
+            if crate::config::config().display.single_overview {
                 "single overview"
             } else {
                 "separate widgets"
-            },
-            error
+            }
         ))),
     }
 
