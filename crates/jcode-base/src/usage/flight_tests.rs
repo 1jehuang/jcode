@@ -31,6 +31,25 @@ fn sample() -> UsageData {
 }
 
 #[test]
+fn response_diagnostics_capture_only_bounded_printable_retry_hints() {
+    let mut log = RequestLog::new("label:diagnostics-test");
+    for value in ["120", "Sun, 18 Oct 2026 00:15:00 GMT"] {
+        log.received(429, Some(value));
+        assert_eq!(log.status, Some(429));
+        assert_eq!(log.retry_after.as_deref(), Some(value));
+    }
+    for value in ["", "10\nforged-log-line", "\u{7f}"] {
+        log.received(429, Some(value));
+        assert!(log.retry_after.is_none());
+    }
+    log.received(429, Some(&"9".repeat(129)));
+    assert!(log.retry_after.is_none());
+    log.received(200, None);
+    assert_eq!(log.status, Some(200));
+    assert!(log.retry_after.is_none());
+}
+
+#[test]
 fn concurrent_callers_make_one_probe() {
     with_home(|runtime| {
         runtime.block_on(async {

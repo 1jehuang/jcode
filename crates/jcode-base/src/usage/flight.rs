@@ -76,12 +76,14 @@ where
     result
 }
 
-/// Only an opaque scope hash and response status are logged, never tokens or
-/// response bodies. Drop also records cancellations and body-read timeouts.
+/// Only an opaque scope hash, status, and bounded Retry-After hint are logged.
+/// Never log credentials or response bodies. Drop also records cancellations
+/// and body-read timeouts.
 pub(super) struct RequestLog {
     scope: String,
     started: Instant,
     pub status: Option<u16>,
+    retry_after: Option<String>,
 }
 
 impl RequestLog {
@@ -93,17 +95,33 @@ impl RequestLog {
             scope,
             started: Instant::now(),
             status: None,
+            retry_after: None,
         }
+    }
+
+    pub fn received(&mut self, status: u16, retry_after: Option<&str>) {
+        self.status = Some(status);
+        self.retry_after = retry_after
+            .filter(|value| {
+                !value.is_empty()
+                    && value.len() <= 128
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_graphic() || byte == b' ')
+            })
+            .map(str::to_owned);
     }
 }
 
 impl Drop for RequestLog {
     fn drop(&mut self) {
         crate::logging::info(&format!(
-            "Anthropic usage probe finish scope={} status={:?} duration_ms={}",
+            "Anthropic usage probe finish scope={} status={:?} retry_after={:?} duration_ms={} pid={}",
             self.scope,
             self.status,
-            self.started.elapsed().as_millis()
+            self.retry_after,
+            self.started.elapsed().as_millis(),
+            std::process::id()
         ));
     }
 }

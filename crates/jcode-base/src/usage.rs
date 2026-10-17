@@ -111,7 +111,13 @@ async fn fetch_anthropic_usage_data_uncached(
         }
     };
 
-    request_log.status = Some(response.status().as_u16());
+    request_log.received(
+        response.status().as_u16(),
+        response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok()),
+    );
     if !response.status().is_success() {
         let status = response.status();
         // Cache the status immediately: a stalled error body must not discard
