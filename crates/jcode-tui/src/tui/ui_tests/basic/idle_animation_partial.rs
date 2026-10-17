@@ -14,15 +14,15 @@
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
-/// Pin the performance tier before reading any redraw policy.
+/// Pin the perf tier before reading any redraw policy.
 ///
 /// `redraw_interval` and `periodic_redraw_required` consult
 /// `perf::tui_policy()`, and the auto-detected tier depends on host load: under a
 /// parallel cargo build the host can look Reduced/Minimal, where the decorative
-/// animation is legitimately disabled. `pin_full_profile_for_tests` is
-/// first-initialization-wins, so a test that reads the policy without pinning
-/// inherits whatever another test happened to establish. That is exactly how these
-/// tests flaked once in a full parallel suite while passing in isolation.
+/// animation is legitimately disabled. Every donut assertion in this file must
+/// call this, before any sibling test can poison the process-global profile
+/// with real host detection. Tests that skip it pass in isolation but flake in
+/// a full parallel suite, which is exactly the failure mode documented here.
 fn pin_full_tier() {
     crate::perf::pin_full_profile_for_tests();
 }
@@ -79,6 +79,7 @@ fn render_full(state: &TestState, width: u16, height: u16) -> Terminal<TestBacke
 fn draw_publishes_the_animated_rows_only_when_the_animation_rendered() {
     let _idle_animation = IdleAnimationEnvGuard::enable();
     let _lock = viewport_snapshot_test_lock();
+    pin_full_tier();
     clear_flicker_frame_history_for_tests();
 
     let idle = idle_animation_state(1.0);
@@ -111,6 +112,7 @@ fn draw_publishes_the_animated_rows_only_when_the_animation_rendered() {
 fn partial_repaint_matches_a_full_frame_at_the_same_animation_time() {
     let _idle_animation = IdleAnimationEnvGuard::enable();
     let _lock = viewport_snapshot_test_lock();
+    pin_full_tier();
     clear_flicker_frame_history_for_tests();
 
     // Frame 1: full render at t0, which is what the run loop keeps around.
@@ -159,6 +161,7 @@ fn advancing_the_animation_actually_changes_the_animated_rows() {
     // animation were static, "matches a full frame" would be trivially true and
     // the fast path could silently freeze the animation.
     let _lock = viewport_snapshot_test_lock();
+    pin_full_tier();
     clear_flicker_frame_history_for_tests();
 
     let first = render_full(&idle_animation_state(1.0), 100, 40);
@@ -231,6 +234,7 @@ fn partial_repaint_does_no_layout_or_transcript_work() {
     // frame republishes layout/viewport bookkeeping, a partial repaint must
     // touch none of it and must not resize or relayout anything.
     let _lock = viewport_snapshot_test_lock();
+    pin_full_tier();
     clear_flicker_frame_history_for_tests();
 
     let state = idle_animation_state(1.0);
