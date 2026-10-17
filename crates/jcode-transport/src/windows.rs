@@ -67,14 +67,30 @@ impl Listener {
     }
 
     pub async fn accept(&mut self) -> io::Result<(Stream, PipeAddr)> {
-        self.current_server.connect().await?;
-
-        let connected = std::mem::replace(
-            &mut self.current_server,
-            ServerOptions::new().create(&self.pipe_name)?,
-        );
-
-        Ok((Stream::Server(connected), PipeAddr))
+        loop {
+            match self.current_server.connect().await {
+                Ok(()) => {
+                    let connected = std::mem::replace(
+                        &mut self.current_server,
+                        ServerOptions::new().create(&self.pipe_name)?,
+                    );
+                    return Ok((Stream::Server(connected), PipeAddr));
+                }
+                Err(error)
+                    if error.raw_os_error()
+                        == Some(windows_sys::Win32::Foundation::ERROR_NO_DATA as i32) =>
+                {
+                    // A readiness probe can open and close this instance before
+                    // accept is polled. Windows then reports ERROR_NO_DATA (232),
+                    // not a new connection. Retire that instance and keep serving:
+                    // propagating the error would terminate the daemon/bridge.
+                    // Create the replacement before dropping the old handle so
+                    // the pipe name remains owned throughout the transition.
+                    self.current_server = ServerOptions::new().create(&self.pipe_name)?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 }
 
@@ -526,6 +542,81 @@ mod tests {
             .await
             .expect("split stream exchange should not stall");
         peer.await.expect("peer task");
+    }
+
+    /// Exercise the exact cold-start race: a synchronous readiness probe
+    /// closes its client handle before the server polls ConnectNamedPipe.
+    #[tokio::test]
+    async fn accept_survives_closed_readiness_probes() {
+        let path = std::env::temp_dir().join(format!(
+            "jcode-closed-probe-{}-{}.sock",
+            std::process::id(),
+            BUSY_PIPE_TEST_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut listener = Listener::bind(&path).expect("bind named pipe");
+
+        for _ in 0..8 {
+            assert!(
+                is_socket_path(&path),
+                "probe must open the waiting instance"
+            );
+            // Prove this is the reported failure, rather than merely hoping to
+            // win a scheduling race. ConnectNamedPipe is sticky until reset.
+            let error = listener.current_server.connect().await.unwrap_err();
+            assert_eq!(
+                error.raw_os_error(),
+                Some(windows_sys::Win32::Foundation::ERROR_NO_DATA as i32),
+                "closed pre-accept probe must reproduce Windows error 232"
+            );
+
+            let exchange = async {
+                let server = async {
+                    let (mut stream, _) = listener.accept().await.expect("accept after probe");
+                    let mut request = [0; 4];
+                    stream.read_exact(&mut request).await.expect("read request");
+                    assert_eq!(&request, b"ping");
+                    stream.write_all(b"pong").await.expect("write response");
+                };
+                let client = async {
+                    let mut stream = Stream::connect(&path).await.expect("connect after probe");
+                    stream.write_all(b"ping").await.expect("write request");
+                    let mut response = [0; 4];
+                    stream
+                        .read_exact(&mut response)
+                        .await
+                        .expect("read response");
+                    assert_eq!(&response, b"pong");
+                };
+                tokio::join!(server, client);
+            };
+            tokio::time::timeout(std::time::Duration::from_secs(5), exchange)
+                .await
+                .expect("listener must remain usable after a closed probe");
+        }
+    }
+
+    #[tokio::test]
+    async fn accepted_client_disconnect_does_not_stop_listener() {
+        let path = std::env::temp_dir().join(format!(
+            "jcode-client-disconnect-{}-{}.sock",
+            std::process::id(),
+            BUSY_PIPE_TEST_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut listener = Listener::bind(&path).expect("bind named pipe");
+        for _ in 0..8 {
+            let client = Stream::connect(&path).await.expect("connect client");
+            let (mut server, _) = listener.accept().await.expect("accept client");
+            drop(client);
+            let mut byte = [0];
+            let read =
+                tokio::time::timeout(std::time::Duration::from_secs(5), server.read(&mut byte))
+                    .await
+                    .expect("disconnected read must not hang");
+            assert!(
+                matches!(read, Ok(0)) || read.is_err_and(|e| e.kind() == io::ErrorKind::BrokenPipe),
+                "closed client should report EOF or broken pipe"
+            );
+        }
     }
 
     #[tokio::test]
