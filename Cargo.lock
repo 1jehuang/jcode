@@ -4585,6 +4585,7 @@ version = "0.1.0"
 dependencies = [
  "jcode-plan",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
