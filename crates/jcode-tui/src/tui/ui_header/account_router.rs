@@ -169,7 +169,7 @@ fn inventory_lines(
             } else {
                 "○"
             },
-            format!("{name:<12} {}", masked_identity(account.email.as_deref())),
+            format!("{name:<9} {}", masked_identity(account.email.as_deref())),
             is_current && !expired,
         );
         if let Some(quota) = quota {
@@ -198,7 +198,7 @@ fn inventory_lines(
                 false,
                 detail(
                     if is_current { "●" } else { "○" },
-                    format!("{name:<12} API key"),
+                    format!("{name:<9} API key"),
                     is_current,
                 ),
             ));
@@ -232,7 +232,7 @@ fn inventory_lines(
                 "○"
             };
             let label = if api_key {
-                format!("{name:<12} API key")
+                format!("{name:<9} API key")
             } else {
                 name.into()
             };
@@ -283,14 +283,19 @@ fn remaining_bar(
         label => label,
     };
     let used_pct = (used * 100.0).round() as u8;
-    Some(crate::tui::info_widget::render_usage_limit_bar(
+    let mut bar = crate::tui::info_widget::render_usage_limit_bar(
         label,
         used_pct,
         100u8.saturating_sub(used_pct),
         None,
         22,
         display_used,
-    ))
+    );
+    // Inline quotas do not need the info widget's fixed-width label column.
+    if let Some(label) = bar.spans.first_mut() {
+        label.content = format!("{} ", label.content.trim_end()).into();
+    }
+    Some(bar)
 }
 
 fn detail(dot: &str, label: String, ready: bool) -> Line<'static> {
@@ -505,10 +510,9 @@ mod tests {
         assert!(text(vec![bar.clone()]).contains('▰'));
         assert!(text(vec![bar.clone()]).contains('▱'));
         assert!(!text(vec![bar.clone()]).contains('['));
-        assert_eq!(
-            bar,
-            crate::tui::info_widget::render_usage_limit_bar("5h", 48, 52, None, 22, false)
-        );
+        assert_eq!(bar.spans[0].content, "5h ");
+        let shared = crate::tui::info_widget::render_usage_limit_bar("5h", 48, 52, None, 22, false);
+        assert_eq!(bar.spans[1..], shared.spans[1..]);
         assert!(text(vec![remaining_bar(&usage, true).unwrap()]).contains("48% used"));
         for ratio in [None, Some(f32::NAN), Some(-0.1), Some(1.1)] {
             usage.five_hour_ratio = ratio;
