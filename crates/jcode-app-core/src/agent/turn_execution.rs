@@ -926,7 +926,7 @@ impl Agent {
             .iter()
             .any(|n| n == "user_response");
         if was_enabled != enabled {
-            self.registry.set_user_response_enabled(enabled).await;
+            self.registry.set_desktop_ui_enabled(enabled).await;
             self.invalidate_sdk_tools();
         }
     }

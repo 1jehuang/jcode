@@ -46,8 +46,10 @@ async fn user_response_capability_updates_locked_tool_surface() {
             .any(|d| d.name == "user_response")
     );
     assert!(agent.locked_tools.is_some());
+    assert!(!agent.tool_names().await.iter().any(|n| n == "applet"));
     agent.set_desktop_response_capability(true).await;
     assert!(agent.locked_tools.is_none());
+    assert!(agent.tool_names().await.iter().any(|n| n == "applet"));
     assert!(
         agent
             .tool_definitions()
@@ -62,6 +64,7 @@ async fn user_response_capability_updates_locked_tool_surface() {
     );
     agent.set_desktop_response_capability(false).await;
     assert!(agent.locked_tools.is_none());
+    assert!(!agent.tool_names().await.iter().any(|n| n == "applet"));
     assert!(
         !agent
             .tool_definitions()
