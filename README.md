@@ -23,7 +23,7 @@ jcode; its release installers and npm runtime packages do not install KCode.
 The most RAM efficient harness <br>
 The most intelligent harness
 
-> **Fork note:** This is a [KooshaPari](https://github.com/KooshaPari) fork of [1jehuang/jcode](https://github.com/1jehuang/jcode). Latest fork release: **v0.85.0-k1.0.0**.
+> **Fork note:** This is a [KooshaPari](https://github.com/KooshaPari) fork of [1jehuang/jcode](https://github.com/1jehuang/jcode). Latest fork release: **v0.85.1-k1.1.1**.
 
 <a href="https://trendshift.io/repositories/25042?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-25042" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/25042" alt="1jehuang/jcode | Trendshift" width="250" height="55"></a>
 
@@ -63,7 +63,7 @@ bun run --bun https://jcode.sh/install_bun.sh
 ```
 
 ```bash
-# GitHub Packages (replace <version> with desired release, e.g. 0.85.0-k1.0.0)
+# GitHub Packages (replace <version> with desired release, e.g. 0.85.1-k1.1.1)
 docker pull ghcr.io/KooshaPari/jcode/jcode-linux-x86_64:<version>
 ```
 

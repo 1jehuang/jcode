@@ -75,6 +75,20 @@ pub fn derive_swarm_task_label(text: &str) -> Option<String> {
     Some(format!("{}…", truncated.trim_end()))
 }
 
+/// Role a member of a swarm plays within the work graph.
+///
+/// The swarm coordination model distinguishes two first-class roles
+/// (an ordinary [`Agent`](SwarmRole::Agent) and the
+/// [`Coordinator`](SwarmRole::Coordinator) that owns the plan and
+/// dispatches work) plus an open-ended
+/// [`Other`](SwarmRole::Other) bucket for any custom role strings a
+/// downstream harness wants to surface (for example a future
+/// `Reviewer` or `ToolRunner` that the coordinator knows how to
+/// schedule but the core scheduler does not enumerate). The
+/// serialized form is the lowercase role name; deserialization is
+/// total — unknown roles collapse into
+/// [`Other`](SwarmRole::Other) so older tool-definitions do not
+/// break newer agents.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum SwarmRole {
     Agent,
@@ -120,6 +134,24 @@ impl<'de> Deserialize<'de> for SwarmRole {
     }
 }
 
+/// Lifecycle state of a swarm member.
+///
+/// Every agent in a swarm moves through these states as its
+/// coordinator tracks it. The set is intentionally broader than a
+/// typical three-state (`Running`/`Done`/`Failed`) FSM: intermediate
+/// states like [`Spawned`](SwarmLifecycleStatus::Spawned),
+/// [`Ready`](SwarmLifecycleStatus::Ready),
+/// [`Queued`](SwarmLifecycleStatus::Queued),
+/// [`Blocked`](SwarmLifecycleStatus::Blocked),
+/// [`Pending`](SwarmLifecycleStatus::Pending),
+/// [`Todo`](SwarmLifecycleStatus::Todo), and
+/// [`RunningStale`](SwarmLifecycleStatus::RunningStale) carry
+/// information the TUI needs to render honest progress, and
+/// [`Crashed`](SwarmLifecycleStatus::Crashed) is distinct from
+/// [`Failed`](SwarmLifecycleStatus::Failed) so a transport-level
+/// panic is not confused with a normal completion failure.
+/// [`Other`](SwarmLifecycleStatus::Other) catches custom states
+/// from external orchestrators.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum SwarmLifecycleStatus {
     Spawned,

@@ -75,6 +75,26 @@ use std::time::Duration;
 pub type EventStream = Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>;
 
 /// Provider trait for LLM backends.
+///
+/// Every backend that can serve chat-completion requests implements this
+/// trait. The harness is provider-agnostic at the call site: any code
+/// that wants tokens just holds `Arc<dyn Provider>` and calls
+/// [`complete`](Provider::complete) or
+/// [`complete_split`](Provider::complete_split). Each implementor is
+/// responsible for translating the workspace's neutral
+/// [`Message`]/[`ToolDefinition`] model into whatever the upstream API
+/// actually wants (Anthropic Messages, OpenAI Chat Completions,
+/// Gemini generateContent, OpenAI-compat profiles, etc.).
+///
+/// The trait is intentionally narrow — it only covers the streaming
+/// completion contract plus the small set of identity-metadata
+/// accessors (`name`, `model`, `display_name`, `active_auth_method_*`)
+/// that the TUI, billing, and info-widget surfaces key off. Storage,
+/// retry, model selection, failover, pricing, and reasoning-effort
+/// logic live in sibling modules (`selection`, `failover`, `fallback_pick`,
+/// `pricing`, `reasoning`, `attempt_tracker`, `retry_after`, ...) so the
+/// trait itself stays a stable contract for downstream `jcode-provider-*`
+/// crates.
 // async_trait adds must_use to methods returning an already must-use boxed Future.
 #[allow(clippy::double_must_use)]
 #[async_trait]

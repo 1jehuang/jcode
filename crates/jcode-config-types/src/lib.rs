@@ -10,7 +10,23 @@ pub use keybindings::{
     keybinding_default, keybinding_defaults_report, validate_keybinding_defaults,
 };
 
-/// Compaction mode
+/// Compaction mode: when and how should the agent shrink its transcript
+/// into a shorter summary before sending it to the model again.
+///
+/// The workspace supports three policies:
+/// - [`Reactive`](CompactionMode::Reactive) (default): wait until the
+///   context budget is exhausted, then summarize.
+/// - [`Proactive`](CompactionMode::Proactive): estimate the next-turn
+///   growth rate (from the tool-definitions, message-rate, and recent
+///   output size) and preemptively compact before the budget runs out.
+/// - [`Semantic`](CompactionMode::Semantic): re-rank messages by
+///   topic-shift and relevance scoring so that compaction keeps the
+///   highest-signal turns even when many turns share a topic.
+///
+/// The choice is exposed at runtime via the
+/// `JCODE_OPENAI_NATIVE_COMPACTION_MODE` env var
+/// (see [`crates/jcode-base/src/config/env_overrides.rs`]) and
+/// serialized to JSON in lowercase.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum CompactionMode {
@@ -43,6 +59,23 @@ impl CompactionMode {
 }
 
 /// Agent operating mode: controls what the agent is allowed to do.
+///
+/// Three modes gate the tool surface:
+/// - [`Execute`](AgentMode::Execute) (default): autonomous implementation
+///   — read, edit, build, commit, push, open PRs. Tools are unrestricted.
+/// - [`Manager`](AgentMode::Manager): plans, delegates via swarm,
+///   reviews worker output. Cannot write files or run build commands
+///   directly (`write`, `edit`, `multiedit`, `apply_patch`, `patch`,
+///   `gmail` are all blocked — see
+///   [`AgentMode::is_tool_blocked`]). Used for
+///   the coordinator role in [`crate::SwarmRole::Coordinator`].
+/// - [`Researcher`](AgentMode::Researcher): read-only. May read, search,
+///   run tests, but never modifies the workspace. Used by the web search
+///   and analysis tools, and by ambient/autojudge workers.
+///
+/// The choice is serialized in lowercase ("execute", "manager",
+/// "researcher") on the wire; `parse` accepts a few short aliases
+/// ("exec", "mgr", "res", "research") for ergonomics.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentMode {

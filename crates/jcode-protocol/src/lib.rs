@@ -34,6 +34,18 @@ pub use memory_snapshots::{
     MemoryStepStatusSnapshot,
 };
 
+/// How a transcript message should be merged into the running
+/// conversation history.
+///
+/// Used by the protocol's inter-session handoff path so that a session
+/// resuming from a snapshot can either
+/// [`Insert`](TranscriptMode::Insert) at an arbitrary position,
+/// [`Append`](TranscriptMode::Append) to the tail,
+/// [`Replace`](TranscriptMode::Replace) a previous message (used for
+/// stream rescans and mid-turn correction), or
+/// [`Send`](TranscriptMode::Send) (default — leaves history
+/// untouched and just transmits the new message). The wire form is
+/// snake_case.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TranscriptMode {
@@ -52,7 +64,20 @@ pub enum CommDeliveryMode {
     Wake,
 }
 
-/// A message in conversation history (for sync)
+/// A single message in a session's conversation history, used by the
+/// cross-session sync surface.
+///
+/// Every front-end ([`jcode-tui`], [`jcode-sdk`], web clients reading
+/// from `jcode-harness-api`) reads and writes sessions as a `Vec<HistoryMessage>`.
+/// The fields are deliberately JSON-friendly and omit empty optionals:
+/// - `role` and `content` are always present (a "role" of `""` is the
+///   sentinel for a system event such as a tool-call result).
+/// - `tool_calls` carries the list of tool-call names the assistant
+///   invoked in this turn; absent when the message has no tool calls.
+/// - `tool_data` holds the actual structured [`ToolCall`] payload when
+///   needed for replay.
+/// - `response_stats` is set when the provider returned token telemetry
+///   for this turn; surfaces use it to render per-turn cost.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryMessage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
