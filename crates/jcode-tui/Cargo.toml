@@ -116,3 +116,14 @@ jcode-app-core = { path = "../jcode-app-core", default-features = false, feature
 
 [target.'cfg(target_os = "macos")'.dependencies]
 global-hotkey = "0.7"
+
+# Win32 console API for the terminal-abandonment probe
+# (`tui::app::terminal_liveness`). Reuses the same windows-sys version and
+# feature set as jcode-core: `Win32_System_Console` for GetStdHandle /
+# GetConsoleMode / GetConsoleWindow, and `Win32_Foundation` for
+# INVALID_HANDLE_VALUE and HWND.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Console",
+] }
