@@ -2834,6 +2834,15 @@ pub(super) async fn handle_client(
                     Some(&swarm_event_tx),
                 )
                 .await;
+                super::comm_control::close_reporter_task_on_terminal_report(
+                    &req_session_id,
+                    &status,
+                    &swarm_members,
+                    &swarms_by_id,
+                    &swarm_plans,
+                    &swarm_coordinators,
+                )
+                .await;
                 let _ = client_event_tx.send(ServerEvent::CommReportResponse {
                     id,
                     status,

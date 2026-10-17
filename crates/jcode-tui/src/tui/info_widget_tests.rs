@@ -467,7 +467,7 @@ fn loop_suffix_renders_safely_at_tiny_sizes() {
 
 #[test]
 fn swarm_plan_gate_items_render_like_normal_items() {
-    // Deep-mode critique gates share the plan item shape; only the id differs.
+    // Gate-style ids from older plans share the plan item shape.
     let mut gate = plan_item("explore-root::gate", "queued");
     gate.content = "Critique the work of 'explore-root' adversarially.".to_string();
     gate.blocked_by = vec!["explore-root".to_string()];
