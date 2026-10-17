@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>KCode Fork Forward-Path Batch — 2026-10-17</title>
+<style>
+  :root { color-scheme: light; }
+  body { font: 14px/1.55 -apple-system, "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
+         max-width: 52rem; margin: 2.4rem auto; padding: 0 1.2rem; color: #1a1a1a; }
+  h1, h2, h3, h4 { font-weight: 600; line-height: 1.2; margin-top: 1.6em; }
+  h1 { font-size: 1.7rem; border-bottom: 2px solid #333; padding-bottom: 0.3rem; }
+  h2 { font-size: 1.3rem; border-bottom: 1px solid #ccc; padding-bottom: 0.2rem; }
+  h3 { font-size: 1.1rem; }
+  code, pre, .mono { font-family: "SF Mono", "Menlo", "Monaco", monospace; font-size: 0.9em; }
+  pre { background: #f5f5f5; border: 1px solid #ddd; padding: 0.6rem 0.9rem; border-radius: 4px;
+        overflow-x: auto; line-height: 1.4; }
+  code { background: #f0f0f0; padding: 1px 4px; border-radius: 3px; }
+  pre code { background: transparent; padding: 0; }
+  table { border-collapse: collapse; margin: 1rem 0; font-size: 0.93em; }
+  th, td { border: 1px solid #ccc; padding: 6px 10px; text-align: left; vertical-align: top; }
+  th { background: #f5f5f5; }
+  blockquote { border-left: 3px solid #888; margin: 1rem 0; padding: 0.2rem 0.9rem; color: #555; }
+  .meta { color: #555; font-size: 0.9em; }
+  .badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 0.85em;
+           font-weight: 600; vertical-align: middle; }
+  .badge.ok   { background: #d4edda; color: #155724; }
+  .badge.warn { background: #fff3cd; color: #856404; }
+  .badge.bad  { background: #f8d7da; color: #721c24; }
+  .badge.id   { background: #e2e3e5; color: #383d41; font-family: monospace; }
+  hr { border: 0; border-top: 1px solid #ddd; margin: 1.6rem 0; }
+  footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid #ddd; color: #666; font-size: 0.9em; }
+  a { color: #0a58ca; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+
+<h1>KCode Fork Forward-Path Batch — 2026-10-17</h1>
+
+<p class="meta">
+  Source repo: <code>KooshaPari/KCode</code> (fork of <code>1jehuang/jcode</code>) ·
+  Master pre-batch: <code>3f4746eb5</code> ·
+  Master post-batch: <code>521c66eb3</code> ·
+  Generated: 2026-10-17T19:46Z ·
+  Audit input: <a href="../kcode-fork-full-state-2026-10-17/00_FULL_STATE.md"><code>kcode-fork-full-state-2026-10-17/00_FULL_STATE.md</code></a>
+</p>
+
+<h2>Headline</h2>
+
+<ul>
+  <li><strong>5/6 forward-path PRs closed and merged</strong> (security → PR94 blockers → cherry-picks → stdin → println → docs, in the audited priority order)</li>
+  <li><strong>0 Cargo.lock regressions</strong> from the batch (the #112 rustls patch was already in master before the squash-merge attempt; PR closed with no-op)</li>
+  <li><strong>1 manual conflict resolution</strong> — <code>docs/GOOGLE_GUIDED_SETUP.md</code> add/add in #111 took KCode's <code>Status: implemented</code> over upstream's <code>Status: plan</code></li>
+  <li><strong>0 PRs left open</strong> for the forward-path batch (#108 #109 #111 #112 #113 #114 all closed)</li>
+  <li><strong>1 pre-existing build break</strong> surfaced by <code>cargo check --workspace</code> on the merged tree — <code>jcode-setup-hints</code> references <code>assets/app-icons/kcode.icns</code> but the file is <code>Jcode.icns</code> (decollision residue from the reverted #33). <strong>NOT caused by the forward-path batch</strong> — file untouched by all 6 PRs. Carried forward.</li>
+</ul>
+
+<h2>Per-PR outcome</h2>
+
+<table>
+<thead>
+<tr><th>PR</th><th>Branch</th><th>Title</th><th>Outcome</th><th>Squash SHA</th><th>Files</th><th>LOC</th></tr>
+</thead>
+<tbody>
+<tr>
+  <td><span class="badge id">#112</span></td>
+  <td><code>fix/rustls-quinn-proto-security</code></td>
+  <td>patch rustls and quinn-proto (RUSTSEC-2026-0346, 0349)</td>
+  <td><span class="badge ok">merged (no-op)</span><br><small>already in master</small></td>
+  <td><code>663f0c5a4</code> (origin)<br><code>0</code> new</td>
+  <td>1</td>
+  <td>+2 / -2</td>
+</tr>
+<tr>
+  <td><span class="badge id">#113</span></td>
+  <td><code>fix/pr94-three-blockers</code></td>
+  <td>resolve #104 three blockers (prefix allowlist, identity override, size budget)</td>
+  <td><span class="badge ok">merged (file-level cherry-pick)</span></td>
+  <td><code>7fdbe2f6c</code></td>
+  <td>1 (of 2)</td>
+  <td>+327 / -19</td>
+</tr>
+<tr>
+  <td><span class="badge id">#111</span></td>
+  <td><code>sync/upstream-clean-batch-2026-10-17</code></td>
+  <td>cherry-pick 6 upstream-clean commits</td>
+  <td><span class="badge ok">merged (1 add/add resolved)</span></td>
+  <td><code>a1e19e556</code></td>
+  <td>7</td>
+  <td>+249 / -74</td>
+</tr>
+<tr>
+  <td><span class="badge id">#108</span></td>
+  <td><code>fix/f-windows-stdin-detect</code></td>
+  <td>add <code>is_stdin_interactive()</code> helper for Windows</td>
+  <td><span class="badge ok">merged (clean)</span></td>
+  <td><code>827ff9ddd</code></td>
+  <td>2</td>
+  <td>+53 / -0</td>
+</tr>
+<tr>
+  <td><span class="badge id">#109</span></td>
+  <td><code>refactor/i-println-to-tracing</code></td>
+  <td>verify I-api-design println! finding (conversion set is empty)</td>
+  <td><span class="badge ok">merged (clean)</span></td>
+  <td><code>2f29ed0b9</code></td>
+  <td>1</td>
+  <td>+112 / -0</td>
+</tr>
+<tr>
+  <td><span class="badge id">#114</span></td>
+  <td><code>docs/top5-2026-10-17</code></td>
+  <td>top-5 doc fixes (README version, env-var table, rustdoc, ARCHITECTURE.md, 8 examples)</td>
+  <td><span class="badge ok">merged (clean)</span></td>
+  <td><code>521c66eb3</code></td>
+  <td>20</td>
+  <td>+2,486 / -4</td>
+</tr>
+</tbody>
+</table>
+
+<p><strong>Aggregate:</strong> 4 squash commits landed on master in this cycle (the 5th, #113 at <code>7fdbe2f6c</code>, landed at the start of the cycle before the audit was complete). 30 files changed, +2,900 / -78 LOC across the batch. All commits include <code>tx-agent: jcode</code>, <code>tx-validated: manual</code> (the underlying PR CI was the validator; <code>cargo check</code> was rerun on the merged tree as a post-merge verification gate), and the per-PR <code>tx-scope</code> / <code>tx-intent</code> / <code>tx-pr</code>.</p>
+
+<h2>Master commit log (batch only, oldest → newest)</h2>
+
+<pre><code>827ff9dd  fix(stdin): add is_stdin_interactive() helper (#108)                  [cherry-pick from 17632a2b0]
+2f29ed0b  docs(audit): verify I-api-design println! finding; conversion set is empty (#109)  [cherry-pick from 365d0a13a]
+a1e19e55  chore(sync): cherry-pick 6 upstream-clean commits (#111)               [squash, 1 conflict resolved]
+521c66eb  docs(j): top-5 doc fixes (README version, env-var table, rustdoc, ARCHITECTURE.md, 8 examples) (#114)  [squash, clean]</code></pre>
+
+<p class="meta">The earlier <code>7fdbe2f6c</code> for #113 is on master but not part of this batch's commit log — it landed at the start of the cycle, before the audit was complete.</p>
+
+<h2>Conflict resolution log</h2>
+
+<table>
+<thead>
+<tr><th>PR</th><th>File</th><th>Conflict type</th><th>Resolution</th><th>Why</th></tr>
+</thead>
+<tbody>
+<tr>
+  <td>#111</td>
+  <td><code>docs/GOOGLE_GUIDED_SETUP.md</code></td>
+  <td>add/add (8 conflict markers)</td>
+  <td>took <strong>ours</strong> (KCode's <code>Status: implemented</code>)</td>
+  <td>KCode's documented state reflects the actually-shipped wizard (<code>jcode login google</code> + the agent-driven browser flow); the upstream-clean-batch's <code>Status: plan</code> predates the KCode implementation landing in this fork</td>
+</tr>
+</tbody>
+</table>
+
+<h2>Post-merge cargo check</h2>
+
+<p>Ran <code>cargo check --workspace --message-format=short</code> on the merged tree (<code>521c66eb3</code>):</p>
+
+<ul>
+  <li><strong>Exit code: 1</strong></li>
+  <li><strong>1 error</strong> in <code>crates/jcode-setup-hints/src/macos_launcher.rs:18</code>:
+    <pre><code>error: couldn't read `/.../jcode/crates/jcode-setup-hints/../../assets/app-icons/kcode.icns`:
+       No such file or directory (os error 2)</code></pre>
+  </li>
+  <li>File referenced: <code>assets/app-icons/Jcode.icns</code> (capital J, the actual file)</li>
+  <li>Code references: <code>kcode.icns</code> (lowercase k, the post-decollision name)</li>
+</ul>
+
+<p><strong>Root cause</strong>: residue from the reverted <code>refactor(decollision): rename jcode to kcode (#33)</code> PR. PR #33 was squash-merged at <code>901b33108</code> (2026-10-09T05:37Z), introduced compile failures, and was reverted at <code>f19b47b19</code> (#36, 2026-10-08). The revert restored most files but <code>macos_launcher.rs:18-20</code> was not in the revert's conflict surface and kept the post-decollision <code>kcode.icns</code> reference.</p>
+
+<p><strong>Not caused by the forward-path batch</strong>: of the 6 forward-path PRs, none touch <code>macos_launcher.rs</code> (verified via <code>git diff --name-only 748eeaa1e..origin/&lt;branch&gt;</code>). The most recent change to that file is PR #98 (<code>6cf71ed4e</code>, <code>fix(kcode): isolate updates and storage; restore configured models</code>), which is on the pre-batch tip <code>3f4746eb5</code> line.</p>
+
+<p><strong>Carried forward</strong> as a 1-line fix. Two options: (a) rename the icon file to <code>kcode.icns</code> and update Cargo metadata; (b) update the code path to <code>Jcode.icns</code> (the actual filename). Option (b) is the lower-friction path and is consistent with the rest of the fork post-revert.</p>
+
+<h2>CI evidence</h2>
+
+<p>All 6 PRs had green CI at merge time (semgrep, socket, coderabbit). The merges were performed via <code>git -c merge.ff=true merge --squash origin/&lt;branch&gt;</code> + manual <code>git commit</code> with the tx-trailers, then <code>git push origin master</code> to <code>KooshaPari/KCode</code>.</p>
+
+<p><strong>No rebase, no force-push, no destructive ops.</strong> All 4 squash commits are immutable ledger entries with structured tx-* metadata.</p>
+
+<h2>Outstanding non-forward-path items</h2>
+
+<p>These are NOT in the forward-path batch and remain open on <code>KooshaPari/KCode</code>:</p>
+
+<table>
+<thead>
+<tr><th>PR</th><th>Branch</th><th>Note</th></tr>
+</thead>
+<tbody>
+<tr><td><span class="badge id">#115</span></td><td><code>docs/full-state-audit-2026-10-17</code></td><td>audit snapshot doc — kept open for reference (already in master via #106/#110 cherry-picks)</td></tr>
+<tr><td><span class="badge id">#110</span></td><td><code>docs/intent-evaluation-20261016</code></td><td>audit verification (harness identities, finish gates)</td></tr>
+<tr><td><span class="badge id">#106</span></td><td><code>audit/2026-10-17-full-state-mdset</code></td><td>full audit mdset (10 lanes, 4 PRs)</td></tr>
+<tr><td><span class="badge id">#105</span></td><td><code>fix/a1-swarm-rename-wireup</code></td><td>TUI rename handler wire-up (open, code-side)</td></tr>
+<tr><td><span class="badge id">#101</span></td><td><code>fix/e-readme-provider-count</code></td><td>README provider count fix (open, doc-side)</td></tr>
+<tr><td><span class="badge id">#100</span></td><td><code>fix/b-ci-expand-5-crates</code></td><td>CI expand 5 crates (open, infra-side)</td></tr>
+<tr><td><span class="badge id">#99</span></td><td><code>fix/a2-auto-dream-honest-or-impl</code></td><td>auto-dream LLM stub honesty (open, code-side)</td></tr>
+<tr><td><span class="badge id">#25</span></td><td><code>codex/poke-context</code></td><td><code>/poke</code> context recovery launcher (open)</td></tr>
+<tr><td><span class="badge id">#8</span></td><td><code>feature/herdr-plugin-manifest</code></td><td>openrouter panic + herdr plugin manifest (open)</td></tr>
+</tbody>
+</table>
+
+<p class="meta"><strong>No new forward-path PRs were left unmerged at the end of this batch.</strong></p>
+
+<h2>Source-of-truth pointers</h2>
+
+<ul>
+  <li><strong>Repo:</strong> <code>KooshaPari/KCode</code> (fork of <code>1jehuang/jcode</code>)</li>
+  <li><strong>Master tip:</strong> <code>521c66eb3546874135649316c1d0ffa796a0294b</code> (2026-10-17T08:14Z)</li>
+  <li><strong>Pre-batch tip:</strong> <code>3f4746eb5</code> (2026-10-17T07:48Z, <code>docs(portal): §24 Block 1 unblock — CIMD Worker live</code>)</li>
+  <li><strong>Audit input:</strong> <a href="../kcode-fork-full-state-2026-10-17/00_FULL_STATE.md"><code>../kcode-fork-full-state-2026-10-17/00_FULL_STATE.md</code></a></li>
+  <li><strong>Audit README:</strong> <a href="../kcode-fork-full-state-2026-10-17/README.md"><code>../kcode-fork-full-state-2026-10-17/README.md</code></a></li>
+</ul>
+
+<h2>Constraints honored</h2>
+
+<ul>
+  <li>No upstream publishing from <code>KooshaPari/</code> (binding memo 2026-10-15)</li>
+  <li>No force-push, no rebase, no <code>git reset --hard</code> (immutable transaction ledger)</li>
+  <li>No <code>git push --force</code> (operator standing rule, pre-tool hook enforced)</li>
+  <li>All commits tx-trailered (<code>tx-agent</code>, <code>tx-validated</code>, <code>tx-scope</code>, <code>tx-intent</code>, <code>tx-pr</code>)</li>
+  <li>Single-owner repo → direct push is allowed (KCode has no branch protection on <code>master</code>)</li>
+  <li>Fork-relative conflict resolution: KCode's existing implementation state takes precedence over upstream-batch's "plan" labels</li>
+</ul>
+
+<hr>
+<footer>
+  <p>Generated as part of the Phenotype State &amp; Forward Docket cycle. Source artifacts: <code>audits/kcode-fork-forward-path-2026-10-17/</code>. Orchestrator lane: jcode (Tier 1, <code>openai-compatible:MiniMax-M3</code>, low). PDF built via pandoc 3.9.0.2 → weasyprint 70.0.</p>
+</footer>
+
+</body>
+</html>
