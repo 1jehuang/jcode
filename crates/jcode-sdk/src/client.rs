@@ -129,9 +129,10 @@ impl Transport for UnixTransport {
         }
         #[cfg(windows)]
         {
-            // Closing the reader and writer handles interrupts named-pipe I/O.
-            // They are owned by the client and dropped during shutdown.
-            None
+            let pipe = self.0.try_clone().ok()?;
+            Some(Arc::new(move || {
+                let _ = pipe.shutdown(std::net::Shutdown::Both);
+            }))
         }
     }
 
