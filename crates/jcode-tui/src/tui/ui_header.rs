@@ -7,6 +7,8 @@ use crate::auth::{AuthState, AuthStatus};
 use crate::tui::color_support::rgb;
 use crate::tui::connection_type_icon;
 use ratatui::prelude::*;
+#[path = "ui_header/account_router.rs"]
+mod account_router;
 #[cfg(test)]
 use std::sync::OnceLock;
 
@@ -54,6 +56,13 @@ impl Drop for ChangelogEntriesOverrideGuard {
     fn drop(&mut self) {
         set_unseen_changelog_entries_override_for_tests(None);
     }
+}
+
+pub(super) fn account_router_generation() -> u64 {
+    if crate::tui::is_ssh_remote() {
+        return 0;
+    }
+    account_router::generation()
 }
 
 pub(crate) fn capitalize(s: &str) -> String {
@@ -332,113 +341,6 @@ impl ActiveCredentialOverrides {
             _ => None,
         }
     }
-}
-
-/// Configured providers with their full labels, in display order.
-fn auth_full_specs(
-    auth: &AuthStatus,
-    active: ActiveCredentialOverrides,
-) -> Vec<(String, AuthState)> {
-    fn provider_label(name: &str, state: AuthState, method: Option<&str>) -> String {
-        match (state, method) {
-            (AuthState::NotConfigured, _) => name.to_string(),
-            (_, Some(method)) if !method.is_empty() => format!("{}({})", name, method),
-            _ => name.to_string(),
-        }
-    }
-
-    // The auth list is a credential *inventory* (what is configured), while
-    // the provider tag above reports the *active* route. When both credentials
-    // are configured, mark the active one with `*` so the two surfaces read as
-    // one consistent story ("oauth*+key" = both configured, OAuth in use)
-    // instead of an ambiguous "oauth+key" that looks like both are being used
-    // at once.
-    fn dual_method_label(
-        provider: jcode_provider_core::ActiveProvider,
-        auth: &AuthStatus,
-        active: ActiveCredentialOverrides,
-    ) -> Option<&'static str> {
-        use crate::auth::{ActiveCredential, resolve_dual_credential_auth};
-        let runtime_provider = std::env::var("JCODE_RUNTIME_PROVIDER").ok();
-        let resolved = resolve_dual_credential_auth(provider, auth, runtime_provider.as_deref())?;
-        // Prefer the app's authoritative answer over the env heuristic.
-        let active = active.get(provider).unwrap_or(resolved.active);
-        Some(match (resolved.has_oauth, resolved.has_api_key) {
-            (true, true) => match active {
-                ActiveCredential::OAuth => "oauth*+key",
-                ActiveCredential::ApiKey => "oauth+key*",
-            },
-            (true, false) => "oauth",
-            (false, true) => "key",
-            (false, false) => return None,
-        })
-    }
-
-    let anthropic_label = provider_label(
-        "anthropic",
-        auth.anthropic.state,
-        dual_method_label(jcode_provider_core::ActiveProvider::Claude, auth, active),
-    );
-
-    let openai_label = provider_label(
-        "openai",
-        auth.openai,
-        dual_method_label(jcode_provider_core::ActiveProvider::OpenAI, auth, active),
-    );
-
-    let gemini_label = if auth.gemini != AuthState::NotConfigured {
-        provider_label("gemini", auth.gemini, Some("oauth"))
-    } else {
-        provider_label("gemini", auth.gemini, None)
-    };
-
-    vec![
-        (anthropic_label, auth.anthropic.state),
-        ("openrouter".to_string(), auth.openrouter),
-        (openai_label, auth.openai),
-        (provider_label("cursor", auth.cursor, None), auth.cursor),
-        (provider_label("copilot", auth.copilot, None), auth.copilot),
-        (gemini_label, auth.gemini),
-        (
-            provider_label("antigravity", auth.antigravity, None),
-            auth.antigravity,
-        ),
-    ]
-}
-
-/// Vertical auth inventory: one line per provider. Configured providers get
-/// green/yellow dots; unconfigured ones get a dim hollow dot so they read as
-/// available-to-add without cluttering the `/login` heading.
-pub(super) fn build_auth_status_lines(
-    auth: &AuthStatus,
-    active: ActiveCredentialOverrides,
-) -> Vec<Line<'static>> {
-    let specs = auth_full_specs(auth, active);
-    // Only list providers the user actually has credentials for. When nothing
-    // is configured at all, fall back to the full list so the `/login` heading
-    // still shows what can be added.
-    let configured: Vec<_> = specs
-        .iter()
-        .filter(|(_, state)| *state != AuthState::NotConfigured)
-        .cloned()
-        .collect();
-    let shown = if configured.is_empty() {
-        specs
-    } else {
-        configured
-    };
-    shown
-        .into_iter()
-        .map(|(label, state)| {
-            Line::from(vec![
-                Span::styled(
-                    auth_dot_char(state),
-                    Style::default().fg(auth_dot_color(state)),
-                ),
-                Span::styled(format!(" {}", label), Style::default().fg(dim_color())),
-            ])
-        })
-        .collect()
 }
 
 fn header_provider_auth_tag(
@@ -875,8 +777,8 @@ fn build_header_lines_with_auth(
     let align = ratatui::layout::Alignment::Left;
     let w = width as usize;
 
-    // Auth inventory: `/login` heading, then one provider per line (dim
-    // hollow dot for unconfigured providers).
+    // Local startup inventory uses saved metadata only. SSH must never present
+    // this machine's credentials as the remote server's inventory.
     let (login_heading, auth_lines) = if let Some(host) = crate::tui::ssh_remote_host() {
         // The native protocol reports the active route, not a complete remote
         // credential inventory. Do not render the laptop's (or an empty)
@@ -884,8 +786,13 @@ fn build_header_lines_with_auth(
         (format!("/login to authenticate on {host}"), Vec::new())
     } else {
         (
-            "/login to add provider".to_string(),
-            build_auth_status_lines(auth, active),
+            "Account router · /account to manage · /login to add credential".to_string(),
+            account_router::lines(
+                auth,
+                active,
+                &app.provider_name(),
+                app.startup_oauth_account_label().as_deref(),
+            ),
         )
     };
     lines.push(
@@ -1523,16 +1430,6 @@ mod tests {
             header_provider_auth_tag("anthropic", &both, overrides),
             "api-key"
         );
-        let rendered = build_auth_status_lines(&both, overrides)
-            .iter()
-            .flat_map(|line| line.spans.iter())
-            .map(|span| span.content.as_ref())
-            .collect::<String>();
-        assert!(
-            rendered.contains("anthropic(oauth+key*)"),
-            "rendered: {rendered}"
-        );
-
         if let Some(value) = prev {
             crate::env::set_var("JCODE_RUNTIME_PROVIDER", value);
         }
@@ -1699,96 +1596,6 @@ mod tests {
             "brief connecting placeholder should not render the secondary detail line"
         );
         assert!(!rendered.contains("(remote)"));
-    }
-
-    #[test]
-    fn auth_status_lines_show_all_providers_with_state_dots() {
-        let auth = AuthStatus {
-            anthropic: ProviderAuth {
-                state: AuthState::Expired,
-                has_oauth: true,
-                oauth_state: AuthState::Expired,
-                has_api_key: false,
-            },
-            openai: AuthState::Available,
-            openai_has_oauth: false,
-            openai_has_api_key: true,
-            ..AuthStatus::default()
-        };
-
-        let rendered = build_auth_status_lines(&auth, ActiveCredentialOverrides::default())
-            .iter()
-            .flat_map(|line| line.spans.iter())
-            .map(|span| span.content.as_ref())
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        assert!(
-            rendered.contains("anthropic(oauth)"),
-            "rendered: {rendered}"
-        );
-        assert!(rendered.contains("openai(key)"), "rendered: {rendered}");
-        // Providers the user has no credentials for stay out of the header.
-        assert!(!rendered.contains("openrouter"), "rendered: {rendered}");
-        assert!(!rendered.contains("copilot"), "rendered: {rendered}");
-        assert!(!rendered.contains("○"), "rendered: {rendered}");
-    }
-
-    #[test]
-    fn auth_status_lines_list_all_providers_when_nothing_configured() {
-        let lines =
-            build_auth_status_lines(&AuthStatus::default(), ActiveCredentialOverrides::default());
-        assert!(
-            !lines.is_empty(),
-            "all providers should be listed: {lines:?}"
-        );
-    }
-
-    #[test]
-    fn auth_status_line_marks_active_credential_when_both_configured() {
-        let _guard = crate::storage::lock_test_env();
-        let prev = std::env::var_os("JCODE_RUNTIME_PROVIDER");
-        let auth = AuthStatus {
-            anthropic: ProviderAuth {
-                state: AuthState::Available,
-                has_oauth: true,
-                oauth_state: AuthState::Available,
-                has_api_key: true,
-            },
-            ..AuthStatus::default()
-        };
-
-        let rendered_with = |runtime: Option<&str>| {
-            match runtime {
-                Some(value) => crate::env::set_var("JCODE_RUNTIME_PROVIDER", value),
-                None => crate::env::remove_var("JCODE_RUNTIME_PROVIDER"),
-            }
-            build_auth_status_lines(&auth, ActiveCredentialOverrides::default())
-                .iter()
-                .flat_map(|line| line.spans.iter())
-                .map(|span| span.content.as_ref())
-                .collect::<String>()
-        };
-
-        // Auto prefers OAuth: the star must sit on oauth, matching the header
-        // provider tag's active-route answer.
-        let rendered = rendered_with(None);
-        assert!(
-            rendered.contains("anthropic(oauth*+key)"),
-            "rendered: {rendered}"
-        );
-
-        // Pinning the API key moves the star, keeping both surfaces consistent.
-        let rendered = rendered_with(Some("claude-api"));
-        assert!(
-            rendered.contains("anthropic(oauth+key*)"),
-            "rendered: {rendered}"
-        );
-
-        match prev {
-            Some(value) => crate::env::set_var("JCODE_RUNTIME_PROVIDER", value),
-            None => crate::env::remove_var("JCODE_RUNTIME_PROVIDER"),
-        }
     }
 
     #[test]

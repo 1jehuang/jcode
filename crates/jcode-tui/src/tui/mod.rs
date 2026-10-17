@@ -824,6 +824,11 @@ pub trait TuiState {
         None
     }
 
+    /// Session-bound OAuth account for the current provider, when known.
+    fn startup_oauth_account_label(&self) -> Option<String> {
+        None
+    }
+
     // ---- Stream / status ----
     fn streaming_tokens(&self) -> (u64, u64);
     fn streaming_cache_tokens(&self) -> (Option<u64>, Option<u64>);
