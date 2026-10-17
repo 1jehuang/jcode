@@ -40,6 +40,12 @@ fn env_is_set(value: Option<&str>) -> bool {
     value.map(|v| !v.trim().is_empty()).unwrap_or(false)
 }
 
+/// HERDR_WEBUI exported by herdr-webui's builtin backend into every pane.
+/// Read via `var_os` so a non-UTF-8 value cannot fail the lookup.
+fn herdr_webui_env() -> Option<String> {
+    std::env::var_os("HERDR_WEBUI").map(|v| v.to_string_lossy().into_owned())
+}
+
 /// Detect whether jcode is running inside a known multiplexer, using the same
 /// signals the multiplexers themselves expose to child processes.
 pub(super) fn detect_multiplexer(
@@ -228,7 +234,21 @@ pub(super) fn infer_protocol_from_env(
     term_program: Option<&str>,
     lc_terminal: Option<&str>,
     kitty_window_id: Option<&str>,
+    herdr_webui: Option<&str>,
 ) -> Option<ProtocolType> {
+    // herdr-webui's browser terminal renders direct Kitty placements (inline
+    // read-tool images), but not the Unicode-placeholder virtual placements
+    // ratatui-image's Kitty path emits, so those placeholder cells would leak
+    // through as literal U+10EEEE glyphs. Its builtin backend exports
+    // HERDR_WEBUI=1 into every pane while advertising TERM_PROGRAM=ghostty
+    // (and scrubbing KITTY_WINDOW_ID) so inline images keep Kitty; that hint
+    // must not select a native protocol here. Returning None keeps the
+    // picker's Halfblocks default, so diagrams and math render as text art
+    // instead of garbage, matching any other graphics-less terminal.
+    if env_is_set(herdr_webui) {
+        return None;
+    }
+
     let term = term.unwrap_or("").to_ascii_lowercase();
     let term_program = term_program.unwrap_or("").to_ascii_lowercase();
     let lc_terminal = lc_terminal.unwrap_or("").to_ascii_lowercase();
@@ -350,6 +370,7 @@ fn fast_picker() -> Picker {
         std::env::var("TERM_PROGRAM").ok().as_deref(),
         std::env::var("LC_TERMINAL").ok().as_deref(),
         std::env::var("KITTY_WINDOW_ID").ok().as_deref(),
+        herdr_webui_env().as_deref(),
     ) {
         picker.set_protocol_type(protocol);
     }
@@ -371,7 +392,21 @@ fn probe_picker() -> Picker {
     match Picker::from_query_stdio() {
         Ok(probed) => {
             let mut protocol = probed.protocol_type();
-            if protocol == ProtocolType::Iterm2 && real_iterm2_without_opt_in() {
+            if env_is_set(herdr_webui_env().as_deref())
+                && matches!(
+                    protocol,
+                    ProtocolType::Kitty | ProtocolType::Iterm2 | ProtocolType::Sixel
+                )
+            {
+                // The builtin pane's Ghostty core answers the probe and claims
+                // Kitty, but the browser renderer cannot draw the Unicode
+                // placeholder cells that the Kitty protocol path emits; a probe
+                // answer must never unlock placements the webui cannot show.
+                crate::log_info(
+                    "Mermaid picker stdio probe detected a native protocol inside herdr-webui; falling back to halfblocks",
+                );
+                protocol = ProtocolType::Halfblocks;
+            } else if protocol == ProtocolType::Iterm2 && real_iterm2_without_opt_in() {
                 crate::log_info(
                     "Probe reported iTerm2 images, but iTerm2 image output is disabled;                      falling back to halfblocks",
                 );
@@ -427,6 +462,7 @@ pub fn init_picker() {
             std::env::var("TERM_PROGRAM").ok().as_deref(),
             std::env::var("LC_TERMINAL").ok().as_deref(),
             std::env::var("KITTY_WINDOW_ID").ok().as_deref(),
+            herdr_webui_env().as_deref(),
         );
         let multiplexer = detect_multiplexer_from_env();
         let probe_override = std::env::var("JCODE_MERMAID_PICKER_PROBE")
@@ -491,6 +527,30 @@ thread_local! {
     /// of relying on process-wide ordering.
     static IMAGE_PROTOCOL_OVERRIDE: std::cell::Cell<Option<bool>> =
         const { std::cell::Cell::new(None) };
+
+    /// Scoped override for the herdr-webui pane state. Reads the real env in
+    /// production; tests pin it so parallel test threads never observe the
+    /// developer's ambient HERDR_WEBUI (a jcode self-dev session can itself
+    /// run inside a webui pane, which would otherwise make gate tests
+    /// machine-dependent).
+    static HERDR_WEBUI_OVERRIDE: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Run `f` with the herdr-webui pane state forced on/off on the current
+/// thread (or `None` to restore the env-based detection).
+pub fn with_herdr_webui_override<T>(inside_webui: Option<bool>, f: impl FnOnce() -> T) -> T {
+    HERDR_WEBUI_OVERRIDE.with(|cell| {
+        let prev = cell.replace(inside_webui);
+        struct Reset<'a>(&'a std::cell::Cell<Option<bool>>, Option<bool>);
+        impl Drop for Reset<'_> {
+            fn drop(&mut self) {
+                self.0.set(self.1);
+            }
+        }
+        let _reset = Reset(cell, prev);
+        f()
+    })
 }
 
 /// Run `f` with image-protocol availability forced on/off on the current
@@ -536,6 +596,17 @@ pub fn native_image_protocol_available() -> bool {
         return enabled;
     }
     protocol_supports_native_images(protocol_type(), VIDEO_EXPORT_MODE.load(Ordering::Relaxed))
+}
+
+/// Whether the current terminal can draw Mermaid diagrams as rendered output
+/// rather than highlighted source. Native image protocols always qualify;
+/// herdr-webui panes also qualify because the browser terminal draws the
+/// Halfblocks text art the picker falls back to there.
+pub fn mermaid_text_render_available() -> bool {
+    let inside_webui = HERDR_WEBUI_OVERRIDE
+        .with(|cell| cell.get())
+        .unwrap_or_else(|| env_is_set(herdr_webui_env().as_deref()));
+    native_image_protocol_available() || inside_webui
 }
 
 fn protocol_uses_text_image_fallback(
@@ -799,20 +870,20 @@ mod tests {
     #[test]
     fn infer_protocol_detects_kitty_family() {
         assert_eq!(
-            infer_protocol_from_env(Some("xterm-kitty"), None, None, None),
+            infer_protocol_from_env(Some("xterm-kitty"), None, None, None, None),
             Some(ProtocolType::Kitty)
         );
         assert_eq!(
-            infer_protocol_from_env(None, Some("ghostty"), None, None),
+            infer_protocol_from_env(None, Some("ghostty"), None, None, None),
             Some(ProtocolType::Kitty)
         );
         assert_eq!(
-            infer_protocol_from_env(None, Some("HandTerm"), None, None),
+            infer_protocol_from_env(None, Some("HandTerm"), None, None, None),
             Some(ProtocolType::Kitty)
         );
         // KITTY_WINDOW_ID present is sufficient.
         assert_eq!(
-            infer_protocol_from_env(Some("xterm-256color"), None, None, Some("3")),
+            infer_protocol_from_env(Some("xterm-256color"), None, None, Some("3"), None),
             Some(ProtocolType::Kitty)
         );
     }
@@ -821,25 +892,52 @@ mod tests {
     fn infer_protocol_detects_iterm_and_sixel() {
         // Real iTerm2 breaks on inline images, so it reports no protocol.
         assert_eq!(
-            infer_protocol_from_env(None, Some("iTerm.app"), None, None),
+            infer_protocol_from_env(None, Some("iTerm.app"), None, None, None),
             None
         );
         assert_eq!(
-            infer_protocol_from_env(None, Some("WezTerm"), None, None),
+            infer_protocol_from_env(None, Some("WezTerm"), None, None, None),
             Some(ProtocolType::Iterm2)
         );
         assert_eq!(
-            infer_protocol_from_env(Some("xterm-sixel"), None, None, None),
+            infer_protocol_from_env(Some("xterm-sixel"), None, None, None, None),
             Some(ProtocolType::Sixel)
         );
         assert_eq!(
-            infer_protocol_from_env(Some("foot"), Some("foot"), None, None),
+            infer_protocol_from_env(Some("foot"), Some("foot"), None, None, None),
             Some(ProtocolType::Sixel)
         );
         // foot sets TERM=foot but no TERM_PROGRAM.
         assert_eq!(
-            infer_protocol_from_env(Some("foot"), None, None, None),
+            infer_protocol_from_env(Some("foot"), None, None, None, None),
             Some(ProtocolType::Sixel)
+        );
+    }
+
+    #[test]
+    fn herdr_webui_overrides_kitty_hints_to_keep_halfblocks() {
+        // herdr-webui advertises a Ghostty-capable pane so inline read-tool
+        // images keep Kitty, but its browser renderer cannot draw the
+        // Unicode-placeholder virtual placements the mermaid viewport emits,
+        // so diagram/math rendering must stay on Halfblocks there.
+        assert_eq!(
+            infer_protocol_from_env(None, Some("ghostty"), None, None, Some("1")),
+            None
+        );
+        assert_eq!(
+            infer_protocol_from_env(Some("xterm-kitty"), None, None, Some("3"), Some("1")),
+            None
+        );
+        // Only the builtin webui backend exports HERDR_WEBUI; standalone herdr
+        // panes (HERDR_ENV) keep pass-through behavior untouched.
+        assert_eq!(
+            infer_protocol_from_env(None, Some("ghostty"), None, None, None),
+            Some(ProtocolType::Kitty)
+        );
+        // Empty value must not trigger the gate.
+        assert_eq!(
+            infer_protocol_from_env(None, Some("ghostty"), None, None, Some("")),
+            Some(ProtocolType::Kitty)
         );
     }
 
@@ -850,12 +948,13 @@ mod tests {
                 Some("xterm-kitty"),
                 Some("WezTerm"),
                 None,
-                Some("stale-kitty-window")
+                Some("stale-kitty-window"),
+                None
             ),
             Some(ProtocolType::Iterm2)
         );
         assert_eq!(
-            infer_protocol_from_env(Some("xterm-256color"), Some("konsole"), None, None),
+            infer_protocol_from_env(Some("xterm-256color"), Some("konsole"), None, None, None),
             None
         );
     }
@@ -864,7 +963,7 @@ mod tests {
     fn infer_protocol_misses_inside_masking_multiplexer() {
         // Herdr/tmux advertise a bland TERM with no graphics hints.
         assert_eq!(
-            infer_protocol_from_env(Some("xterm-256color"), None, None, None),
+            infer_protocol_from_env(Some("xterm-256color"), None, None, None, None),
             None
         );
     }
@@ -1037,6 +1136,28 @@ mod tests {
             Some(ProtocolType::Halfblocks),
             true
         ));
+    }
+
+    #[test]
+    fn mermaid_text_render_available_follows_native_protocol_and_webui_gate() {
+        // A native protocol always unlocks mermaid rendering...
+        with_image_protocol_override(Some(true), || {
+            assert!(mermaid_text_render_available());
+        });
+        // ...and herdr-webui panes qualify too, because the browser terminal
+        // draws the Halfblocks text art the picker falls back to there. Pinned
+        // per-thread so an ambient HERDR_WEBUI in the dev environment cannot
+        // make this test machine-dependent.
+        with_herdr_webui_override(Some(false), || {
+            with_image_protocol_override(Some(false), || {
+                assert!(!mermaid_text_render_available());
+            });
+        });
+        with_herdr_webui_override(Some(true), || {
+            with_image_protocol_override(Some(false), || {
+                assert!(mermaid_text_render_available());
+            });
+        });
     }
 
     #[test]
