@@ -73,17 +73,13 @@ curl -fsSL https://jcode.sh/install | bash
 
 Swarm workers run headless, so this is the number that matters when you fan out agents.
 
-<div align="center">
-
 | Tool | Extra RAM per session | Comparison |
-|---|---:|---:|
+|---|---|---|
 | **jcode** | **~3.1 MB** | baseline |
 | **Claude Code** | ~164 MB | **~54× more RAM** |
 | **Codex CLI** | pending | |
 | **OpenCode** | pending | |
 | **pi** | pending | |
-
-</div>
 
 Each session completes 5 real model turns with tool calls, then total PSS of every process is measured. [Reproduce](scripts/bench_headless_memory.py).
 
@@ -91,17 +87,13 @@ Each session completes 5 real model turns with tool calls, then total PSS of eve
 
 Time until typed text appears on screen, across 10 interactive launches.
 
-<div align="center">
-
 | Tool | Time to first input | Comparison |
-|---|---:|---:|
+|---|---|---|
 | **jcode** | **48.7 ms** | baseline |
 | **pi** | 596.4 ms | **12.2× slower** |
 | **Codex CLI** | 905.8 ms | **18.6× slower** |
 | **OpenCode** | 1047.9 ms | **21.5× slower** |
 | **Claude Code** | 3512.8 ms | **72.2× slower** |
-
-</div>
 
 Full numbers on [jcode.sh](https://jcode.sh).
 
