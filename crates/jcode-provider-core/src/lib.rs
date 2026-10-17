@@ -554,6 +554,8 @@ pub async fn collect_simple_completion<P: Provider + ?Sized>(
         tool_duration_ms: None,
     }];
 
+    let mut provider_name = provider.name().to_string();
+    let model = provider.model();
     let response = provider.complete(&messages, &[], system, None).await?;
     let mut result = String::new();
     let mut usage = SimpleCompletionUsage::default();
@@ -576,12 +578,69 @@ pub async fn collect_simple_completion<P: Provider + ?Sized>(
                 cache_read_input_tokens,
                 cache_creation_input_tokens,
             ),
+            Ok(StreamEvent::UpstreamProvider { provider }) => provider_name = provider,
+            Ok(StreamEvent::Error { message, .. }) => {
+                return Err(SimpleCompletionError {
+                    usage,
+                    provider: provider_name,
+                    model,
+                    source: anyhow::anyhow!(message),
+                }
+                .into());
+            }
             Ok(_) => {}
-            Err(err) => return Err(err),
+            Err(source) => {
+                return Err(SimpleCompletionError {
+                    usage,
+                    provider: provider_name,
+                    model,
+                    source,
+                }
+                .into());
+            }
         }
     }
 
     Ok((result, usage))
+}
+
+/// Failed simple completion with the usage already observed before failure.
+/// Dropping the completion future (for example on timeout) cannot return this
+/// snapshot. Cancellation accounting requires a separate observer lifecycle.
+#[derive(Debug)]
+pub struct SimpleCompletionError {
+    pub usage: SimpleCompletionUsage,
+    pub provider: String,
+    pub model: String,
+    source: anyhow::Error,
+}
+
+impl SimpleCompletionError {
+    pub fn new(
+        source: anyhow::Error,
+        usage: SimpleCompletionUsage,
+        provider: String,
+        model: String,
+    ) -> Self {
+        Self {
+            usage,
+            provider,
+            model,
+            source,
+        }
+    }
+}
+
+impl std::fmt::Display for SimpleCompletionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.source, f)
+    }
+}
+
+impl std::error::Error for SimpleCompletionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
 }
 
 /// Provider-reported usage for a non-agent completion.

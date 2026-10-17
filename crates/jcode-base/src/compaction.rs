@@ -1768,7 +1768,14 @@ async fn generate_compaction_artifact(
             &prompt,
             "You are a helpful assistant that summarizes conversations.",
         )
-        .await?;
+        .await
+        .inspect_err(|error| {
+            crate::telemetry::record_simple_completion_failure_usage(
+                None,
+                crate::telemetry::UsageSource::Compaction,
+                error,
+            );
+        })?;
     crate::telemetry::record_simple_completion_usage(
         None,
         provider.name(),

@@ -356,6 +356,13 @@ impl Sidecar {
         let (text, usage) = provider
             .complete_simple_with_usage(user_message, system)
             .await
+            .inspect_err(|error| {
+                crate::telemetry::record_simple_completion_failure_usage(
+                    None,
+                    crate::telemetry::UsageSource::Sidecar,
+                    error,
+                );
+            })
             .context("Sidecar completion via active provider failed")?;
         crate::telemetry::record_simple_completion_usage(
             None,
