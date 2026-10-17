@@ -156,11 +156,18 @@ impl MuseHostConfig {
     }
 }
 
+/// In-flight requests awaiting a response, keyed by JSON-RPC id.
+///
+/// Aliased because the nested `Arc<Mutex<HashMap<u64, oneshot::Sender<...>>>>`
+/// shape appears in the struct, the spawn path and the reader task, and clippy's
+/// `type_complexity` lint (denied in CI) rejects it written out.
+type PendingRequests = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, MspError>>>>>;
+
 /// A live MSP connection to a `muse serve` process.
 pub struct MspTransport {
     child: Child,
     stdin: Arc<Mutex<ChildStdin>>,
-    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, MspError>>>>>,
+    pending: PendingRequests,
     events: broadcast::Sender<MspInbound>,
     next_id: AtomicU64,
     request_timeout: Duration,
@@ -196,8 +203,7 @@ impl MspTransport {
             .context("muse serve produced no stdout")?;
 
         let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
-        let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, MspError>>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
+        let pending: PendingRequests = Arc::new(Mutex::new(HashMap::new()));
 
         let reader_pending = Arc::clone(&pending);
         let reader_events = events.clone();
@@ -414,7 +420,7 @@ fn truncate(value: &str, max: usize) -> String {
 
 async fn read_loop(
     stdout: tokio::process::ChildStdout,
-    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, MspError>>>>>,
+    pending: PendingRequests,
     events: broadcast::Sender<MspInbound>,
 ) {
     let mut lines = BufReader::new(stdout).lines();
