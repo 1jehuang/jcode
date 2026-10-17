@@ -1460,6 +1460,13 @@ pub(crate) fn pinned_todo_band_lines(
             Style::default().fg(dim_color()),
         )));
     } else {
+        if app.pinned_todos_expanded() {
+            more_line = Some(lines.len());
+            lines.push(Line::from(Span::styled(
+                "  ▴ Collapse todos",
+                Style::default().fg(dim_color()),
+            )));
+        }
         lines.extend(card_lines);
     }
     (lines, more_line)

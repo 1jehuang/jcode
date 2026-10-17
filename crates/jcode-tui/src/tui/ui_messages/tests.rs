@@ -835,9 +835,23 @@ fn render_todos_message_shows_grouped_card_with_status_glyphs() {
         todo("2", "Render the card", "in_progress", Some("todo card")),
         todo("3", "Unrelated cleanup", "pending", None),
     ];
-    let msg = DisplayMessage::todos(serde_json::to_string(&todos).unwrap());
+    let msg = DisplayMessage::todos(
+        serde_json::json!({
+            "todos": todos,
+            "plan": {
+                "user_intention": "Keep overall progress visible",
+                "understands_user_intent": "clear"
+            }
+        })
+        .to_string(),
+    );
 
     let lines = render_todos_message(&msg, 100, crate::config::DiffDisplayMode::Off);
+    let intent_row = lines
+        .iter()
+        .position(|line| extract_line_text(line).contains("Keep overall progress visible"))
+        .unwrap();
+    assert_eq!(extract_line_text(&lines[intent_row + 1]).trim(), "●●○");
     let plain = lines
         .iter()
         .map(extract_line_text)

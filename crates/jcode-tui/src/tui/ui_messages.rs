@@ -1337,6 +1337,11 @@ fn render_todos_message_with_cap(
         };
         let has_groups = todos.iter().any(|t| group_of(t).is_some());
         if has_groups {
+            lines.push(render_todo_status_header(
+                todos.iter(),
+                base_indent,
+                inner_width,
+            ));
             let mut groups: Vec<(Option<String>, Vec<&crate::todo::TodoItem>)> = Vec::new();
             for todo in &todos {
                 let key = group_of(todo);
