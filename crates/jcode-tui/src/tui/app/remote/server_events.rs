@@ -2,6 +2,7 @@ use super::*;
 use crate::tool::selfdev::ReloadContext;
 use crate::tui::TuiState;
 use crate::tui::app as app_mod;
+use crate::tui::app::{KvCacheMissReason, KvCacheMissSample};
 use crate::tui::app::remote::input_dispatch::restore_pending_startup_prompt_echo;
 use crate::tui::app::remote::swarm_plan_core::RemoteSwarmPlanSnapshot;
 use crate::tui::app::remote::swarm_status_core::swarm_status_transition_notice;
@@ -127,6 +128,56 @@ fn should_defer_history_for_runtime_identity(
         client_detected_stale,
         allow_runtime_identity_mismatch(),
     )
+}
+
+#[cfg(test)]
+#[path = "kv_cache_miss_tests.rs"]
+mod kv_cache_miss_tests;
+
+fn handle_kv_cache_miss(
+    app: &mut App,
+    reason: &str,
+    missed_tokens: u64,
+    message: String,
+    notices_enabled: bool,
+) -> bool {
+    // TokenUsage normally records the local classification first. Do not
+    // duplicate that notice, but do not require a baseline after reconnect.
+    if let Some(turn_number) = app.kv_cache.kv_cache_turn_number {
+        let call_index = app.kv_cache.kv_cache_turn_call_index;
+        if app.kv_cache.kv_cache_miss_samples.iter().any(|sample| {
+            sample.turn_number == turn_number && sample.call_index == call_index
+        }) {
+            return false;
+        }
+        let reason = match reason {
+            "provider_switch" => KvCacheMissReason::ProviderSwitch,
+            "model_switch" => KvCacheMissReason::ModelSwitch,
+            "upstream_switch" => KvCacheMissReason::UpstreamSwitch,
+            "expired" => KvCacheMissReason::Expired,
+            "system_changed" => KvCacheMissReason::HarnessSystemChanged,
+            "tools_changed" => KvCacheMissReason::HarnessToolsChanged,
+            "prefix_changed" => KvCacheMissReason::HarnessPrefixChanged,
+            "zero_read" => KvCacheMissReason::ZeroRead,
+            "low_read" => KvCacheMissReason::LowRead,
+            _ => KvCacheMissReason::Unknown,
+        };
+        app.kv_cache.kv_cache_miss_samples.push(KvCacheMissSample {
+            turn_number,
+            call_index,
+            missed_tokens,
+            reason,
+        });
+        let overflow = app.kv_cache.kv_cache_miss_samples.len()
+            .saturating_sub(App::KV_CACHE_MAX_MISS_SAMPLES);
+        app.kv_cache.kv_cache_miss_samples.drain(..overflow);
+    }
+    if notices_enabled {
+        // Use the normal transcript insertion path for chronological insertion.
+        app.push_kv_cache_notice(message);
+        return true;
+    }
+    false
 }
 
 #[cfg(test)]
@@ -719,6 +770,18 @@ pub(in crate::tui::app) fn handle_server_event(
             app.batch_progress = Some(progress);
             false
         }
+        ServerEvent::KvCacheMiss {
+            reason,
+            missed_tokens,
+            message,
+            ..
+        } => handle_kv_cache_miss(
+            app,
+            &reason,
+            missed_tokens,
+            message,
+            crate::config::config().features.kv_cache_miss_notices,
+        ),
         ServerEvent::TokenUsage {
             input,
             output,

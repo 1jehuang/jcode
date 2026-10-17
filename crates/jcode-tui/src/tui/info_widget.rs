@@ -71,6 +71,7 @@ use tips::render_tips_widget;
 pub(crate) use todos_render::swarm_plan_todos;
 use todos_render::{render_todos_compact, render_todos_expanded, render_todos_widget};
 use usage_render::{render_usage_compact, render_usage_widget};
+pub(crate) use usage_render::render_labeled_bar as render_usage_limit_bar;
 
 /// Overview rows used by the Changes section, mirroring [`render_sections`].
 pub(super) fn changes_section_height(data: &InfoWidgetData) -> u16 {
@@ -1769,7 +1770,7 @@ fn kv_cache_pcts(cache: &CacheHitInfo) -> Option<(u8, Option<u8>, Option<u8>, Co
     ))
 }
 
-/// Border headline: `KV cache 90% yield` (or `priming`).
+/// Border headline: `KV cache 90% yield`, or observed hit rate without a baseline.
 fn render_kv_cache_title(cache: &CacheHitInfo) -> Line<'static> {
     let mut spans = vec![frame::label("KV cache ")];
     match kv_cache_pcts(cache) {
@@ -1780,8 +1781,14 @@ fn render_kv_cache_title(cache: &CacheHitInfo) -> Line<'static> {
             ));
             spans.push(frame::dim(" yield"));
         }
-        Some((_, None, _, color)) => {
-            spans.push(Span::styled("priming", Style::default().fg(color).bold()));
+        Some((lifetime_pct, None, _, color)) => {
+            // Restored sessions lack the historical reusable-prefix denominator.
+            // That is missing telemetry, not evidence the cache is still warming.
+            spans.push(Span::styled(
+                format!("{lifetime_pct}%"),
+                Style::default().fg(color).bold(),
+            ));
+            spans.push(frame::dim(" hit"));
         }
         None => {}
     }
@@ -1847,7 +1854,7 @@ fn render_kv_cache_summary_line(cache: &CacheHitInfo) -> Line<'static> {
         ));
     } else {
         spans.push(Span::styled(
-            "priming",
+            format!("hit {}%", lifetime_pct),
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         ));
     }

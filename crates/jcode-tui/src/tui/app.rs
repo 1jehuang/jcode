@@ -2456,6 +2456,8 @@ impl App {
     }
 
     fn record_kv_cache_miss_sample(&mut self, request: &PendingKvCacheRequest) {
+        // A first fill without a reusable-prefix baseline is not a proven
+        // cache loss, even with an explicit zero read. Do not label it a miss.
         let Some(baseline) = request.baseline.as_ref() else {
             return;
         };
@@ -2477,20 +2479,9 @@ impl App {
         let optimal_pct = ratio_pct(read_tokens, expected_tokens);
         let reason =
             self.classify_kv_cache_miss_reason(request, baseline, read_tokens, optimal_pct);
-        if optimal_pct >= Self::KV_CACHE_OPTIMAL_OK_PCT
-            && !matches!(
-                reason,
-                KvCacheMissReason::ProviderSwitch
-                    | KvCacheMissReason::ModelSwitch
-                    | KvCacheMissReason::UpstreamSwitch
-                    | KvCacheMissReason::Expired
-                    | KvCacheMissReason::HarnessSystemChanged
-                    | KvCacheMissReason::HarnessToolsChanged
-                    | KvCacheMissReason::HarnessPrefixChanged
-            )
-        {
-            return;
-        }
+        // Compare the previous reusable prefix, not the current prompt's new
+        // tail. Keep the absolute tolerance for provider block rounding, but
+        // do not hide substantial losses merely because a large cache is >85% warm.
 
         self.kv_cache.kv_cache_miss_samples.push(KvCacheMissSample {
             turn_number: request.turn_number,
@@ -2505,30 +2496,25 @@ impl App {
         }
 
         self.maybe_push_kv_cache_miss_notice(
-            request.turn_number,
+            request,
             reason,
             missed_tokens,
+            read_tokens,
+            expected_tokens,
             baseline.completed_at,
         );
     }
 
-    /// Surface a loud in-chat alarm when a request missed the KV cache for a
-    /// harness-caused (avoidable) reason. Provider/model/upstream switches and
-    /// TTL expiry are legitimate and intentionally excluded — those are user- or
-    /// time-driven, not harness bugs. The harness should essentially never
-    /// invalidate the prefix cache on its own, so when it does we want it to be
-    /// visible immediately rather than buried in logs.
-    ///
-    /// Some harness actions do legitimately change the prompt mid-session
-    /// (config reloads, skill reloads). Those sites document the invalidation
-    /// in `cache_invalidation` when it happens; if a documented cause is found
-    /// between the baseline and this request, the notice attributes the miss
-    /// to it (informational) instead of raising the unexplained-bust alarm.
+    /// Surface explicit, meaningful cache loss as soon as usage is known.
+    /// Expected route changes and expiry are informational, not harness blame.
+    /// Documented harness invalidations are attributed to their source.
     fn maybe_push_kv_cache_miss_notice(
         &mut self,
-        turn_number: usize,
+        request: &PendingKvCacheRequest,
         reason: KvCacheMissReason,
         missed_tokens: u64,
+        read_tokens: u64,
+        expected_tokens: u64,
         baseline_completed_at: Instant,
     ) {
         if !crate::config::config().features.kv_cache_miss_notices {
@@ -2538,9 +2524,22 @@ impl App {
             KvCacheMissReason::HarnessSystemChanged => "system prompt changed mid-session",
             KvCacheMissReason::HarnessToolsChanged => "tool set changed mid-session",
             KvCacheMissReason::HarnessPrefixChanged => "an earlier message was modified",
-            // Not harness-caused: provider/model/upstream switch, TTL expiry,
-            // and the soft zero/low-read diagnostics. Skip the alarm for these.
-            _ => return,
+            KvCacheMissReason::ProviderSwitch => {
+                "provider changed; cache reuse is not guaranteed across providers"
+            }
+            KvCacheMissReason::ModelSwitch => {
+                "model changed; cache reuse is not guaranteed across models"
+            }
+            KvCacheMissReason::UpstreamSwitch => {
+                "upstream route changed; cache may be on another server"
+            }
+            KvCacheMissReason::Expired => "cache retention elapsed",
+            KvCacheMissReason::ZeroRead => {
+                "provider reported no cached prefix; eviction or routing may explain this"
+            }
+            KvCacheMissReason::LowRead | KvCacheMissReason::Unknown => {
+                "provider reused less of the previous prefix; cause not established"
+            }
         };
 
         let token_label = if missed_tokens >= 1_000_000 {
@@ -2553,21 +2552,41 @@ impl App {
 
         // Documented invalidation between the baseline and now: expected
         // resend, attribute instead of alarm.
-        if let Some(cause) = crate::cache_invalidation::most_recent_since(baseline_completed_at) {
-            self.push_display_message(DisplayMessage::system(format!(
-                "ℹ️ KV cache refresh [{}] turn {}: ~{} tokens resent ({}).",
-                cause.source, turn_number, token_label, detail,
-            )));
+        let harness_change = matches!(
+            reason,
+            KvCacheMissReason::HarnessSystemChanged
+                | KvCacheMissReason::HarnessToolsChanged
+                | KvCacheMissReason::HarnessPrefixChanged
+        );
+        let usage = format!(
+            "turn {} call {}: {} cached / {} expected tokens",
+            request.turn_number, request.call_index, read_tokens, expected_tokens
+        );
+        if harness_change
+            && let Some(cause) = crate::cache_invalidation::most_recent_since(baseline_completed_at)
+        {
+            self.push_kv_cache_notice(format!(
+                "ℹ️ KV cache refresh [{}] {}: ~{} tokens resent ({}).",
+                cause.source, usage, token_label, detail,
+            ));
             return;
         }
 
-        self.push_display_message(DisplayMessage::system(format!(
-            "⚠️ KV cache miss [{}] turn {}: ~{} tokens resent ({}). See KV_CACHE_USAGE in logs.",
+        self.push_kv_cache_notice(format!(
+            "{} KV cache miss [{}] {}: ~{} tokens resent ({}). See KV_CACHE_USAGE in logs.",
+            if harness_change { "⚠️" } else { "ℹ️" },
             reason.label(),
-            turn_number,
+            usage,
             token_label,
             detail,
-        )));
+        ));
+    }
+
+    /// Usage arrives at the end of the affected request. Commit its buffered
+    /// text first so the diagnostic cannot appear before the output it describes.
+    pub(super) fn push_kv_cache_notice(&mut self, message: String) {
+        self.commit_pending_streaming_assistant_message();
+        self.push_display_message(DisplayMessage::system(message));
     }
 
     fn classify_kv_cache_miss_reason(
@@ -2618,7 +2637,9 @@ impl App {
         if read_tokens == 0 {
             return KvCacheMissReason::ZeroRead;
         }
-        if optimal_pct < Self::KV_CACHE_OPTIMAL_OK_PCT {
+        if optimal_pct < Self::KV_CACHE_OPTIMAL_OK_PCT
+            || baseline.input_tokens.saturating_sub(read_tokens) >= Self::KV_CACHE_MIN_MISSED_TOKENS
+        {
             return KvCacheMissReason::LowRead;
         }
         KvCacheMissReason::Unknown

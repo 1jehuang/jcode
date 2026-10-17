@@ -102,6 +102,29 @@ fn kv_cache_widget_shows_session_hit_ratio() {
 }
 
 #[test]
+fn kv_cache_without_reuse_baseline_shows_observed_hit_rate() {
+    let cache = CacheHitInfo {
+        prompt_tokens: Some(100_000),
+        read_tokens: 4_000,
+        last_prompt_tokens: Some(100_000),
+        last_read_tokens: Some(4_000),
+        ..Default::default()
+    };
+    let data = InfoWidgetData {
+        cache_hit_info: Some(cache.clone()),
+        ..Default::default()
+    };
+    let framed = render_kv_cache_widget(&data, Rect::new(0, 0, 50, 5));
+    let text = lines_text_concat(&framed.all_lines());
+    assert!(text.contains("4% hit"), "{text}");
+    assert!(!text.contains("priming"), "{text}");
+    let compact = lines_text_concat(&[super::render_kv_cache_summary_line(&cache)]);
+    assert!(compact.contains("hit 4%"), "{compact}");
+    assert!(compact.contains("last 4%"), "{compact}");
+    assert!(!compact.contains("priming"), "{compact}");
+}
+
+#[test]
 fn todos_widgets_show_item_and_aggregate_confidence() {
     let data = InfoWidgetData {
         todos: vec![

@@ -1205,12 +1205,11 @@ pub struct FeatureConfig {
     /// Persist auto-recalled memory injections into normal session history instead of sending
     /// them as request-only ephemeral suffix messages (default: false)
     pub persist_memory_injections: bool,
-    /// Surface an in-chat system message whenever a request misses the KV cache
-    /// for a harness-caused (avoidable) reason: the system prompt, tool set, or
-    /// message prefix changed without the conversation legitimately growing.
-    /// These should essentially never happen, so the notice acts as a loud alarm
-    /// that something in the harness silently invalidated the prefix cache
-    /// (default: true).
+    /// Surface an in-chat system message for each meaningful observed KV cache
+    /// miss, including low/zero reads, route changes, expiry, and harness prefix
+    /// changes. Missing telemetry and ordinary first-request cache fills are not
+    /// classified as misses. Harness changes without a documented cause raise a
+    /// warning, while explained misses are informational (default: true).
     pub kv_cache_miss_notices: bool,
     /// Update channel: "stable" (releases only) or "main" (latest commits)
     pub update_channel: UpdateChannel,
