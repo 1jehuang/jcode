@@ -2072,7 +2072,7 @@ mod tests {
                     } else {
                         served += 1;
                         let sse = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n\
-                             data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}}}\n\n\
+                             data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n\
                              data: [DONE]\n\n"
                             .to_string();
                         ("HTTP/1.1 200 OK", sse)
