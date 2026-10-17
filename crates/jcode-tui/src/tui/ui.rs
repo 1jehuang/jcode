@@ -2558,16 +2558,22 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
         frame.buffer_mut().clone_from(frozen);
         if let Some(notice) = app.hibernation_notice() {
             // Keep the transcript, draft and scroll exactly as last painted.
-            // Two bottom rows fit the measured RSS detail on normal terminals.
+            // The notice replaces only the status line row.
             let area = frame.area();
-            let height = area.height.min(2);
-            let banner = Rect::new(area.x, area.bottom() - height, area.width, height);
-            clear_area(frame, banner);
+            let row = last_status_area()
+                .filter(|row| area.contains(row.as_position()) && row.bottom() <= area.bottom())
+                .unwrap_or_else(|| {
+                    Rect::new(
+                        area.x,
+                        area.bottom().saturating_sub(1),
+                        area.width,
+                        area.height.min(1),
+                    )
+                });
+            clear_area(frame, row);
             frame.render_widget(
-                Paragraph::new(notice)
-                    .style(Style::default().fg(Color::Cyan))
-                    .wrap(ratatui::widgets::Wrap { trim: false }),
-                banner,
+                Paragraph::new(notice).style(Style::default().fg(dim_color())),
+                row,
             );
         }
         // In particular do not send deferred Kitty deletions while the frozen

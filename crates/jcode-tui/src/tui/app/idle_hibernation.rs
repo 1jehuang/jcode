@@ -272,12 +272,11 @@ fn hibernation_notice(before: Option<u64>, after: Option<u64>) -> String {
                 "unchanged".to_string()
             };
             format!(
-                "Hibernated · TUI RSS {change} · type to resume\nRSS {:.1} → {:.1} MiB",
-                before as f64 / 1_048_576.0,
+                "💤 Hibernated · TUI RSS {change} ({:.0} MiB) · type to resume",
                 after as f64 / 1_048_576.0,
             )
         }
-        _ => "Hibernated · type to resume\nTUI RSS measurement unavailable".to_string(),
+        _ => "💤 Hibernated · type to resume".to_string(),
     }
 }
 
@@ -484,7 +483,7 @@ mod tests {
         assert!(hibernation_notice(Some(100 * mib), Some(70 * mib)).contains("-30.0 MiB"));
         assert!(hibernation_notice(Some(70 * mib), Some(100 * mib)).contains("+30.0 MiB"));
         assert!(hibernation_notice(Some(70 * mib), Some(70 * mib)).contains("unchanged"));
-        assert!(hibernation_notice(None, Some(100)).contains("unavailable"));
+        assert!(!hibernation_notice(None, Some(100)).contains('\n'));
     }
 
     #[test]
@@ -533,14 +532,14 @@ mod tests {
     }
 
     #[test]
-    fn idle_hibernation_notice_shows_measured_rss_on_narrow_screen() {
+    fn idle_hibernation_notice_shows_measured_rss_on_one_status_row() {
         let _render_lock = crate::tui::ui::render_state_test_lock();
         let mut app = app();
         let now = expire_idle_timer(&mut app);
         assert!(app.poll_idle_hibernation_at(now, 1800));
-        app.enter_idle_hibernation(Some(&Buffer::empty(Rect::new(0, 0, 40, 10))));
+        app.enter_idle_hibernation(Some(&Buffer::empty(Rect::new(0, 0, 70, 10))));
         app.idle_hibernation.notice = hibernation_notice(Some(100 << 20), Some(70 << 20));
-        let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(70, 10)).unwrap();
         terminal
             .draw(|frame| crate::tui::ui::draw(frame, &app))
             .unwrap();
