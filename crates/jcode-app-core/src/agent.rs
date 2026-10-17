@@ -14,6 +14,8 @@ mod provider;
 mod response_recovery;
 mod status;
 mod streaming;
+#[cfg(test)]
+mod swarm_reminder_tests;
 mod tool_markup_recovery;
 mod tools;
 mod turn_execution;
