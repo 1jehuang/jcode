@@ -31,6 +31,87 @@ fn openai_usage_cache() -> &'static std::sync::Mutex<HashMap<String, OpenAIUsage
     OPENAI_ACCOUNT_USAGE_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
+/// Read fresh usage attributed to a saved account without probing credentials,
+/// reading files, waiting for a cache lock, or scheduling a network refresh.
+/// Missing, stale, and failed reports are unknown, not zero usage.
+pub fn cached_account_usage_snapshot(
+    provider: super::MultiAccountProviderKind,
+    label: &str,
+) -> Option<AccountUsageSnapshot> {
+    let label = label.trim();
+    if label.is_empty() {
+        return None;
+    }
+    let key = format!("label:{label}");
+    match provider {
+        super::MultiAccountProviderKind::Anthropic => {
+            let map = ANTHROPIC_USAGE_CACHE.get()?.try_lock().ok()?;
+            let data = map.get(&key)?;
+            if data.is_stale() || data.last_error.is_some() {
+                return None;
+            }
+            Some(anthropic_snapshot_from_usage(label.into(), None, data))
+        }
+        super::MultiAccountProviderKind::OpenAI => {
+            let map = OPENAI_ACCOUNT_USAGE_CACHE.get()?.try_lock().ok()?;
+            let data = map.get(&key)?;
+            if data.is_stale() || data.last_error.is_some() {
+                return None;
+            }
+            Some(openai_snapshot_from_usage(label.into(), None, data))
+        }
+    }
+}
+
+#[cfg(test)]
+mod account_snapshot_tests {
+    use super::*;
+    use crate::usage::MultiAccountProviderKind;
+
+    #[test]
+    fn cached_account_snapshot_is_scoped_fresh_and_nonblocking() {
+        let label = "router-cache-only-test";
+        let key = format!("label:{label}");
+        let provider = MultiAccountProviderKind::Anthropic;
+        let data = UsageData {
+            five_hour: 0.42,
+            fetched_at: Some(Instant::now()),
+            ..Default::default()
+        };
+        store_anthropic_usage(key.clone(), data.clone());
+        let snapshot = cached_account_usage_snapshot(provider, label).unwrap();
+        assert_eq!(snapshot.five_hour_ratio, Some(0.42));
+        assert_eq!(snapshot.label, label);
+        assert!(cached_account_usage_snapshot(provider, "router-other-account").is_none());
+        assert!(cached_account_usage_snapshot(MultiAccountProviderKind::OpenAI, label).is_none());
+        {
+            let _guard = anthropic_usage_cache().lock().unwrap();
+            assert!(cached_account_usage_snapshot(provider, label).is_none());
+        }
+        store_anthropic_usage(
+            key.clone(),
+            UsageData {
+                fetched_at: Some(
+                    Instant::now()
+                        - super::super::CACHE_DURATION
+                        - std::time::Duration::from_secs(1),
+                ),
+                ..data.clone()
+            },
+        );
+        assert!(cached_account_usage_snapshot(provider, label).is_none());
+        store_anthropic_usage(
+            key.clone(),
+            UsageData {
+                last_error: Some("unavailable".into()),
+                ..data
+            },
+        );
+        assert!(cached_account_usage_snapshot(provider, label).is_none());
+        anthropic_usage_cache().lock().unwrap().remove(&key);
+    }
+}
+
 pub(super) fn invalidate_openai_usage_after_reset(access_token: &str, account_label: Option<&str>) {
     if let Ok(mut map) = openai_usage_cache().lock() {
         OPENAI_USAGE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
