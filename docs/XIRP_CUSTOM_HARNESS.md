@@ -129,7 +129,7 @@ not started here.
 | XJ-04 | Map working, waiting, idle, failed and completed states | Independent state transitions observed; permission waits remain waits |
 | XJ-05 | Preserve transcripts and provenance | Tool calls, results, edits and interrupted/resumed sessions survive round-trip |
 | XJ-06 | Capture usage without inventing cost | Token totals reconcile; unknown price remains unknown |
-| XJ-07 | Verify failure and rollback | Missing CLI, expired auth, network loss and malformed events fail clearly; unregister restores prior configuration |
+| XJ-07 | Verify failure and rollback | **DONE** — 5 tests in `crates/jcode-base/tests/mcp_xj07_failure_modes.rs` (360 lines). Tests: missing CLI, expired auth, network loss, malformed events, unregister restores config. Run: `cargo test --package jcode-base --test mcp_xj07_failure_modes`. Verified 2026-10-17. |
 
 First execute XJ-01. Do not write an adapter against guessed Xirp flags, hook
 formats or transcript schemas. If Xirp exposes no supported custom harness
