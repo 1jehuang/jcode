@@ -17,6 +17,7 @@ jcode-base = { path = "../jcode-base", default-features = false }
 jcode-message-types = { path = "../jcode-message-types" }
 jcode-provider-core = { path = "../jcode-provider-core" }
 jcode-provider-openrouter-runtime = { path = "../jcode-provider-openrouter-runtime" }
+serde_json = { version = "1", features = ["raw_value"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }
