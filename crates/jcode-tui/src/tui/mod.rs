@@ -1181,6 +1181,10 @@ pub trait TuiState {
     fn suggestion_prompts(&self) -> Vec<(String, String)>;
     /// Cache TTL status - shows whether the prompt cache is warm/cold based on idle time
     fn cache_ttl_status(&self) -> Option<CacheTtlInfo>;
+    /// Keep a reset offer visible briefly without rearming on usage refresh.
+    fn reset_hint_visible(&self, _key: &str) -> bool {
+        true
+    }
     /// Read-only reset guidance for the active OpenAI OAuth account.
     fn openai_reset_hint(&self) -> Option<String> {
         // SSH sessions may use a different login on the remote host. Local
@@ -1194,11 +1198,16 @@ pub trait TuiState {
         }
         let usage = crate::usage::get_openai_usage_sync();
         let account_label = crate::auth::codex::active_account_label();
-        crate::tui::ui::input_ui::openai_reset_status_hint(
+        let hint = crate::tui::ui::input_ui::openai_reset_status_hint(
             auth_method,
             &usage,
             account_label.as_deref(),
-        )
+        )?;
+        let credits = usage.openai_reset_credits.as_ref()?;
+        // Stable across polling and countdown changes. A different account or
+        // number of credits is a new offer worth showing again.
+        let key = format!("{:?}:{}", account_label, credits.available_count);
+        self.reset_hint_visible(&key).then_some(hint)
     }
     /// Whether the notification line has content to show
     fn has_notification(&self) -> bool {

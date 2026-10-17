@@ -2,6 +2,19 @@
 // unknown-chord near-miss suggestions, driven through App::handle_key.
 
 #[test]
+fn reset_hint_expires_without_rearming_on_poll() {
+    use crate::tui::TuiState as _;
+    let app = create_test_app();
+    assert!(app.reset_hint_visible("work:2"));
+    *app.reset_hint_seen.borrow_mut() =
+        Some(("work:2".into(), Instant::now() - Duration::from_secs(15)));
+    assert!(!app.reset_hint_visible("work:2"));
+    assert!(!app.reset_hint_visible("work:2"));
+    assert!(app.reset_hint_visible("work:3"));
+    assert!(app.reset_hint_visible("personal:3"));
+}
+
+#[test]
 fn unknown_ctrl_chord_sets_hotkey_feedback_with_suggestion() {
     let mut app = create_test_app();
     assert!(app.hotkey_feedback.is_none());

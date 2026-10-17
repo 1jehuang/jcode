@@ -1023,6 +1023,16 @@ impl crate::tui::TuiState for App {
         self.voice_input_status_line()
     }
 
+    fn reset_hint_visible(&self, key: &str) -> bool {
+        let mut seen = self.reset_hint_seen.borrow_mut();
+        let now = Instant::now();
+        if seen.as_ref().is_none_or(|(previous, _)| previous != key) {
+            *seen = Some((key.to_owned(), now));
+        }
+        seen.as_ref()
+            .is_some_and(|(_, shown)| now.duration_since(*shown) < Duration::from_secs(15))
+    }
+
     fn status_notice(&self) -> Option<String> {
         if self.idle_hibernation.frame.is_some() {
             return Some(self.idle_hibernation.notice.clone());

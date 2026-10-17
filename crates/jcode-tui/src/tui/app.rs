@@ -948,6 +948,7 @@ pub struct App {
     /// it applied it. See `jcode_tui_messages::anchor`.
     pending_resize_anchor: Option<PendingResizeAnchor>,
     input: String,
+    reset_hint_seen: RefCell<Option<(String, Instant)>>,
     command_candidates_cache: RefCell<Option<CommandCandidatesCache>>,
     /// Per-input memo for `command_suggestions()`; see
     /// [`CommandSuggestionsCache`].
