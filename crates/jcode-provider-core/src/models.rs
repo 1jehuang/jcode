@@ -63,6 +63,9 @@ pub const ALL_OPENAI_MODELS: &[&str] = &[
     // GPT-6 Astra: newest OpenAI flagship (live on api.openai.com and
     // OpenRouter as of 2026-09). Listed explicitly because the frontier
     // auto-promoter only accepts bare numeric ids and would skip the suffix.
+    // GPT-6.1 Sol (2026-10-16): latest generation, ranked above Astra so
+    // failover and flagship selection prefer it.
+    "gpt-6.1-sol",
     DEFAULT_OPENAI_MODEL,
     "gpt-5.6-sol",
     "gpt-5.6-pro",
