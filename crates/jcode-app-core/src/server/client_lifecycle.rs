@@ -520,7 +520,19 @@ pub(super) async fn handle_client(
 
     new_agent.set_memory_enabled(crate::config::config().features.memory);
     let prewarm_start = std::time::Instant::now();
-    new_agent.prewarm_provider_idle().await;
+    // A target-aware Subscribe replaces this placeholder with the restored
+    // session right away, so warming its provider is wasted work on the
+    // resume critical path (p50 ~200ms per reconnect in a reload storm).
+    let resuming_existing_session = matches!(
+        &initial_request,
+        Request::Subscribe {
+            target_session_id: Some(_),
+            ..
+        }
+    );
+    if !resuming_existing_session {
+        new_agent.prewarm_provider_idle().await;
+    }
     let prewarm_ms = prewarm_start.elapsed().as_millis();
 
     crate::logging::info(&format!(
