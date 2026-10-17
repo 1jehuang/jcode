@@ -816,6 +816,10 @@ impl App {
                                             status_spinner_renderer.draw_full(self, terminal)?;
                                         }
                                     }
+                                    StreamEvent::ServiceTier { tier, requested } => {
+                                        self.remote_reported_service_tier = Some((requested, tier.clone()));
+                                        self.status_detail = Some(format!("Provider tier: {tier}"));
+                                    }
                                     StreamEvent::TextDone => {}
                     StreamEvent::MessageEnd { .. } => {
                                         self.pause_streaming_tps(true);

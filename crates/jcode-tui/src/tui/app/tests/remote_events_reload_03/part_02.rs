@@ -393,3 +393,104 @@ fn test_remote_error_with_retry_after_keeps_pending_for_auto_retry() {
     assert_eq!(last.role, "system");
     assert!(last.content.contains("Will auto-retry in 3 seconds"));
 }
+#[test]
+fn test_service_tier_reported_deduplicates_and_does_not_confirm_old_request() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.remote_service_tier = Some("ultrafast".to_string());
+    let before = app.display_messages().len();
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ServiceTierReported {
+            requested: Some("priority".to_string()),
+            tier: "priority".to_string(),
+        },
+        &mut remote,
+    );
+    assert_eq!(app.display_messages().len(), before);
+    for _ in 0..2 {
+        app.handle_server_event(
+            crate::protocol::ServerEvent::ServiceTierReported {
+                requested: Some("ultrafast".to_string()),
+                tier: "default".to_string(),
+            },
+            &mut remote,
+        );
+    }
+    assert_eq!(app.display_messages().len(), before + 1);
+    assert_eq!(app.remote_service_tier.as_deref(), Some("ultrafast"));
+    assert!(
+        app.display_messages()
+            .last()
+            .unwrap()
+            .content
+            .contains("Requested ultrafast, but provider reports default")
+    );
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ServiceTierReported {
+            requested: Some("ultrafast".to_string()),
+            tier: "ultrafast".to_string(),
+        },
+        &mut remote,
+    );
+    assert_eq!(app.display_messages().len(), before + 2);
+    assert!(
+        app.display_messages()
+            .last()
+            .unwrap()
+            .content
+            .contains("Provider confirmed service tier: ultrafast")
+    );
+}
+
+#[test]
+fn test_service_tier_reported_default_is_quiet_without_explicit_change() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    let before = app.display_messages().len();
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ServiceTierReported {
+            requested: None,
+            tier: "default".to_string(),
+        },
+        &mut remote,
+    );
+    assert_eq!(app.display_messages().len(), before);
+}
+
+#[test]
+fn test_service_tier_reported_fast_alias_confirms_and_badge_tracks_applied() {
+    use crate::tui::TuiState;
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    app.is_remote = true;
+    app.remote_service_tier = Some("fast".into());
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    assert!(app.info_widget_data().service_tier.unwrap().contains("unconfirmed"));
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ServiceTierReported {
+            requested: Some("priority".into()), tier: "default".into(),
+        }, &mut remote,
+    );
+    assert!(app.info_widget_data().service_tier.unwrap().contains("default applied"));
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ServiceTierReported {
+            requested: Some("priority".into()), tier: "priority".into(),
+        }, &mut remote,
+    );
+    assert_eq!(app.info_widget_data().service_tier.as_deref(), Some("fast"));
+    app.remote_service_tier = None;
+    app.remote_reported_service_tier = None;
+    app.remote_service_tier_confirmation_pending = true;
+    assert_eq!(app.info_widget_data().service_tier.as_deref(), Some("Standard requested (unconfirmed)"));
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ServiceTierReported {
+            requested: None, tier: "default".into(),
+        }, &mut remote,
+    );
+    assert_eq!(app.info_widget_data().service_tier, None);
+}

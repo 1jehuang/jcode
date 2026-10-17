@@ -1896,6 +1896,14 @@ fn test_remote_alt_up_sends_next_speed_tier_over_the_wire() {
                 app.handle_remote_key(KeyCode::Up, KeyModifiers::ALT, &mut remote)
                     .await
                     .unwrap();
+                assert_eq!(app.remote_service_tier.as_deref(), current);
+                assert_eq!(
+                    app.status_notice(),
+                    Some(format!(
+                        "Speed: {} requested (waiting for server)",
+                        service_tier_display_label(expected)
+                    ))
+                );
                 let mut line = String::new();
                 tokio::time::timeout(
                     std::time::Duration::from_secs(2),

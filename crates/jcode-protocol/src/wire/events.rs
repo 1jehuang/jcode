@@ -209,6 +209,13 @@ pub enum ServerEvent {
     #[serde(rename = "status_detail")]
     StatusDetail { detail: String },
 
+    /// Effective tier reported for a request, alongside its configured tier.
+    #[serde(rename = "service_tier_reported")]
+    ServiceTierReported {
+        requested: Option<String>,
+        tier: String,
+    },
+
     /// Provider has finished the visible assistant message, but the turn may still be
     /// finalizing bookkeeping such as session IDs or completion trailers.
     ///
@@ -690,6 +697,9 @@ pub enum ServerEvent {
     #[serde(rename = "service_tier_changed")]
     ServiceTierChanged {
         id: u64,
+        /// Accepted but waiting for access to session configuration, not applied.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        pending: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         service_tier: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]

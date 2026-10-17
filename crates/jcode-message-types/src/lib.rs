@@ -819,6 +819,11 @@ pub enum StreamEvent {
     ConnectionPhase { phase: ConnectionPhase },
     /// Provider-supplied human-readable transport detail for the status line
     StatusDetail { detail: String },
+    /// Effective tier reported by the provider, never inferred from configuration.
+    ServiceTier {
+        tier: String,
+        requested: Option<String>,
+    },
     /// Error occurred
     Error {
         message: String,

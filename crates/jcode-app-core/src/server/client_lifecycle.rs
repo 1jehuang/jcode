@@ -337,6 +337,7 @@ async fn refresh_session_control_handle(
         agent_guard.background_tool_signal(),
         agent_guard.graceful_shutdown_signal(),
     )
+    .with_provider(agent_guard.provider_handle())
 }
 
 #[expect(
@@ -560,7 +561,8 @@ pub(super) async fn handle_client(
         new_agent.soft_interrupt_queue(),
         new_agent.background_tool_signal(),
         new_agent.graceful_shutdown_signal(),
-    );
+    )
+    .with_provider(new_agent.provider_handle());
 
     // Register the shutdown signal in the server-level map so
     // graceful_shutdown_sessions can signal it without locking the agent mutex
@@ -2040,7 +2042,7 @@ pub(super) async fn handle_client(
             }
 
             Request::SetServiceTier { id, service_tier } => {
-                handle_set_service_tier(id, service_tier, &agent, &client_event_tx).await;
+                handle_set_service_tier(id, service_tier, &agent, session_control.provider_handle(), &client_event_tx).await;
             }
 
             Request::SetTransport { id, transport } => {

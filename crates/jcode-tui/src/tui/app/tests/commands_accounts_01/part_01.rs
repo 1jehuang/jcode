@@ -1521,7 +1521,7 @@ fn test_fast_on_while_processing_mentions_next_request_locally() {
     assert_eq!(last.role, "system");
     assert_eq!(
         last.content,
-        "✓ Fast mode on (Fast)\nApplies to the next request/turn. The current in-flight request keeps its existing tier."
+        "✓ Fast mode configured on (Fast)\nRequested for the next provider request, including later in this turn. The current in-flight request is unchanged. Provider acceptance is not yet confirmed."
     );
     assert_eq!(
         app.status_notice(),

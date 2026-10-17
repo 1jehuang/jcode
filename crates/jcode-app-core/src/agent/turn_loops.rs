@@ -599,6 +599,11 @@ impl Agent {
                         }
                         self.last_status_detail = Some(detail);
                     }
+                    StreamEvent::ServiceTier { tier, .. } => {
+                        if trace {
+                            eprintln!("[trace] provider_service_tier={tier}");
+                        }
+                    }
                     StreamEvent::RetryRollback { attempt, max } => {
                         // Transient transport fault mid-stream; the provider is
                         // replaying the request. Discard this attempt's partial

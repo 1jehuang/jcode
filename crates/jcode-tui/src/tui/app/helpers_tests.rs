@@ -177,7 +177,9 @@ fn swarm_effort_display_labels_use_configured_root_and_preserve_modes() {
         );
         assert_eq!(
             effort_display_label_with_root("swarm-deep", Some(level)),
-            format!("☢ Swarm Deep ({title} + task graph, WARNING: recursive agents / high token cost) [Beta]")
+            format!(
+                "☢ Swarm Deep ({title} + task graph, WARNING: recursive agents / high token cost) [Beta]"
+            )
         );
         assert_eq!(effort_display_label_with_root("high", Some(level)), "High");
     }
