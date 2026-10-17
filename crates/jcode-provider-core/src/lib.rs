@@ -286,6 +286,14 @@ pub trait Provider: Send + Sync {
         Ok(())
     }
 
+    /// Whether cached model names lack capabilities needed by this provider.
+    /// Allows startup to refresh legacy snapshots without fetching every
+    /// provider's catalog unconditionally. Implementations must not block on
+    /// async locks from this synchronous UI-facing probe.
+    fn model_capabilities_need_refresh(&self) -> bool {
+        false
+    }
+
     /// Force-refresh model catalog data and return a before/after summary.
     async fn refresh_model_catalog(&self) -> Result<ModelCatalogRefreshSummary> {
         let before_models = self.available_models_display();

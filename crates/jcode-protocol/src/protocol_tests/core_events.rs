@@ -583,6 +583,7 @@ fn test_history_event_decodes_without_compaction_mode_for_older_servers() -> Res
         side_panel,
         agent_model_overrides,
         provider_oauth_email,
+        available_service_tiers,
         ..
     } = decoded
     else {
@@ -599,6 +600,35 @@ fn test_history_event_decodes_without_compaction_mode_for_older_servers() -> Res
     assert!(!side_panel.has_pages());
     assert!(agent_model_overrides.is_empty());
     assert!(provider_oauth_email.is_none());
+    assert!(available_service_tiers.is_none());
+    assert!(!encode_event(&parse_event_json(json)?).contains("available_service_tiers"));
+    Ok(())
+}
+
+#[test]
+fn test_history_available_service_tiers_roundtrip() -> Result<()> {
+    for tiers in [vec!["priority".to_string(), "flex".to_string()], Vec::new()] {
+        let mut event =
+            parse_event_json(r#"{"type":"history","id":1,"session_id":"test","messages":[]}"#)?;
+        let ServerEvent::History {
+            available_service_tiers,
+            ..
+        } = &mut event
+        else {
+            return Err(anyhow!("wrong event type"));
+        };
+        *available_service_tiers = Some(tiers.clone());
+        let wire = encode_event(&event);
+        assert!(wire.contains("\"available_service_tiers\":"));
+        let ServerEvent::History {
+            available_service_tiers,
+            ..
+        } = parse_event_json(wire.trim())?
+        else {
+            return Err(anyhow!("wrong event type"));
+        };
+        assert_eq!(available_service_tiers, Some(tiers));
+    }
     Ok(())
 }
 
@@ -639,6 +669,7 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         provider_model: Some("gpt-5.4".to_string()),
         available_models: vec!["gpt-5.4".to_string()],
         available_model_routes: Vec::new(),
+        available_service_tiers: None,
         mcp_servers: Vec::new(),
         skills: Vec::new(),
         total_tokens: Some((123, 45)),

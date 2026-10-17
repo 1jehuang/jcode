@@ -17,6 +17,117 @@ use tokio::sync::{Mutex, RwLock, mpsc};
 
 struct MockProvider(Option<&'static str>);
 
+#[derive(Clone)]
+struct CapabilityRefreshProvider {
+    refreshed: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait]
+impl Provider for CapabilityRefreshProvider {
+    async fn complete(
+        &self,
+        _: &[Message],
+        _: &[ToolDefinition],
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<EventStream> {
+        anyhow::bail!("not used")
+    }
+
+    fn name(&self) -> &str {
+        "capability-refresh-regression"
+    }
+    fn model(&self) -> String {
+        "known-model".into()
+    }
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+    fn available_models_display(&self) -> Vec<String> {
+        vec![self.model()]
+    }
+    fn model_capabilities_need_refresh(&self) -> bool {
+        !self.refreshed.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    async fn prefetch_models(&self) -> Result<()> {
+        self.refreshed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+    fn available_service_tiers(&self) -> Vec<&'static str> {
+        if self.model_capabilities_need_refresh() {
+            Vec::new()
+        } else {
+            vec!["priority", "flex"]
+        }
+    }
+}
+
+#[tokio::test]
+async fn model_prefetch_hydrates_capabilities_with_existing_model_names() {
+    let _guard = crate::storage::lock_test_env();
+    let temp_home = tempfile::TempDir::new().unwrap();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp_home.path());
+    let provider: Arc<dyn Provider> = Arc::new(CapabilityRefreshProvider {
+        refreshed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    });
+    let session_id = "capability-refresh-session";
+    let session = crate::session::Session::create_with_id(session_id.into(), None, None);
+    let agent = Arc::new(Mutex::new(Agent::new_with_session(
+        provider.clone(),
+        Registry::empty(),
+        session,
+        None,
+    )));
+    assert!(!provider.available_models_display().is_empty());
+    assert!(provider.available_service_tiers().is_empty());
+    let mut events = crate::bus::Bus::global().subscribe();
+    super::spawn_model_prefetch_update(provider.clone(), agent.clone());
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if matches!(
+                events.recv().await.unwrap(),
+                crate::bus::BusEvent::ModelsUpdated
+            ) && !provider.model_capabilities_need_refresh()
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("capability-only hydration must publish a catalog update");
+    assert_eq!(provider.available_models_display(), vec!["known-model"]);
+    assert_eq!(provider.available_service_tiers(), vec!["priority", "flex"]);
+
+    let (stream, mut peer) = crate::transport::stream_pair().unwrap();
+    let (_, writer) = stream.into_split();
+    let writer = Arc::new(Mutex::new(writer));
+    handle_get_model_catalog(44, session_id, &agent, &provider, &writer)
+        .await
+        .unwrap();
+    drop(writer);
+    let mut bytes = Vec::new();
+    peer.read_to_end(&mut bytes).await.unwrap();
+    let event: crate::protocol::ServerEvent = serde_json::from_slice(&bytes).unwrap();
+    let crate::protocol::ServerEvent::History {
+        available_service_tiers,
+        ..
+    } = event
+    else {
+        panic!("expected history")
+    };
+    assert_eq!(
+        available_service_tiers,
+        Some(vec!["priority".into(), "flex".into()])
+    );
+    if let Some(home) = prev_home {
+        crate::env::set_var("JCODE_HOME", home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
 struct IdentityProvider {
     credential: Option<jcode_provider_core::ResolvedCredential>,
     label: Option<&'static str>,
@@ -139,6 +250,14 @@ impl Provider for MockProvider {
 
     fn model(&self) -> String {
         "mock-model".to_string()
+    }
+
+    fn available_service_tiers(&self) -> Vec<&'static str> {
+        if self.0.is_some() {
+            vec!["priority", "flex"]
+        } else {
+            Vec::new()
+        }
     }
 
     fn service_tier(&self) -> Option<String> {
@@ -318,6 +437,7 @@ async fn handle_get_history_busy_fresh_session_returns_empty_without_waiting() {
                 provider_model,
                 reasoning_effort,
                 service_tier,
+                available_service_tiers,
                 activity,
                 all_sessions,
                 client_count,
@@ -330,6 +450,10 @@ async fn handle_get_history_busy_fresh_session_returns_empty_without_waiting() {
                 assert_eq!(provider_model.as_deref(), Some("mock-model"));
                 assert_eq!(reasoning_effort.as_deref(), Some("high"));
                 assert_eq!(service_tier.as_deref(), Some("priority"));
+                assert_eq!(
+                    available_service_tiers,
+                    Some(vec!["priority".to_string(), "flex".to_string()])
+                );
                 assert_eq!(
                     activity.is_some_and(|activity| activity.is_processing),
                     index >= 3
@@ -551,6 +675,7 @@ async fn assert_history_service_tier_and_pdf_capability(
             messages,
             activity,
             service_tier,
+            available_service_tiers,
             side_panel,
             ..
         } => {
@@ -566,6 +691,14 @@ async fn assert_history_service_tier_and_pdf_capability(
                 }
             );
             assert_eq!(service_tier.as_deref(), tier);
+            assert_eq!(
+                available_service_tiers,
+                Some(if tier.is_some() {
+                    vec!["priority".to_string(), "flex".to_string()]
+                } else {
+                    Vec::new()
+                })
+            );
             assert_eq!(
                 side_panel,
                 super::super::client_writer::side_panel_for_client(
@@ -668,6 +801,7 @@ async fn assert_model_catalog_service_tier(tier: Option<&'static str>, busy: boo
             provider_name,
             provider_model,
             service_tier,
+            available_service_tiers,
             reasoning_effort,
             ..
         } => {
@@ -683,6 +817,14 @@ async fn assert_model_catalog_service_tier(tier: Option<&'static str>, busy: boo
                 })
             );
             assert_eq!(service_tier.as_deref(), tier);
+            assert_eq!(
+                available_service_tiers,
+                Some(if tier.is_some() {
+                    vec!["priority".to_string(), "flex".to_string()]
+                } else {
+                    Vec::new()
+                })
+            );
             assert_eq!(reasoning_effort.as_deref(), Some("high"));
         }
         other => panic!("expected history event, got {:?}", other),

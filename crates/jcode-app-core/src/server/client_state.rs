@@ -262,6 +262,7 @@ pub(super) async fn handle_get_model_catalog(
         available_model_routes,
         resolved_credential,
         service_tier,
+        available_service_tiers,
         reasoning_effort,
         source,
         provider_oauth_email,
@@ -276,6 +277,14 @@ pub(super) async fn handle_get_model_catalog(
                     catalog.model_routes,
                     agent_guard.active_resolved_credential(),
                     agent_guard.provider_handle().service_tier(),
+                    Some(
+                        agent_guard
+                            .provider_handle()
+                            .available_service_tiers()
+                            .into_iter()
+                            .map(str::to_string)
+                            .collect(),
+                    ),
                     agent_guard.provider_handle().reasoning_effort(),
                     "live",
                     provider_oauth_email(agent_guard.provider_handle().as_ref()),
@@ -304,6 +313,13 @@ pub(super) async fn handle_get_model_catalog(
                     model_routes,
                     provider.active_resolved_credential(),
                     provider.service_tier(),
+                    Some(
+                        provider
+                            .available_service_tiers()
+                            .into_iter()
+                            .map(str::to_string)
+                            .collect(),
+                    ),
                     provider.reasoning_effort(),
                     "fallback",
                     provider_oauth_email(provider.as_ref()),
@@ -323,6 +339,7 @@ pub(super) async fn handle_get_model_catalog(
         provider_model,
         available_models,
         available_model_routes,
+        available_service_tiers,
         mcp_servers: Vec::new(),
         skills: Vec::new(),
         total_tokens: None,
@@ -676,6 +693,13 @@ async fn send_history_from_persisted_session(
         autojudge_enabled,
         available_models: Vec::new(),
         available_model_routes: Vec::new(),
+        available_service_tiers: Some(
+            provider
+                .available_service_tiers()
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        ),
         mcp_servers: Vec::new(),
         skills: Vec::new(),
         total_tokens: optional_total_tokens(token_usage_totals),
@@ -851,6 +875,14 @@ async fn send_history_with_guard(
         )
     };
 
+    let available_service_tiers = Some(
+        agent_guard
+            .provider_handle()
+            .available_service_tiers()
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+    );
     let provider_oauth_email = provider_oauth_email(agent_guard.provider_handle().as_ref());
     let inferred_interrupted = was_interrupted
         .is_none()
@@ -962,6 +994,7 @@ async fn send_history_with_guard(
         autojudge_enabled,
         available_models,
         available_model_routes,
+        available_service_tiers,
         mcp_servers,
         skills,
         total_tokens: optional_total_tokens(token_usage_totals),
@@ -1215,7 +1248,8 @@ pub(super) fn spawn_model_prefetch_update(provider: Arc<dyn Provider>, agent: Ar
             )
         };
 
-        if !initial_models.is_empty() {
+        let needs_capability_refresh = provider.model_capabilities_need_refresh();
+        if !initial_models.is_empty() && !needs_capability_refresh {
             return;
         }
 
@@ -1239,7 +1273,7 @@ pub(super) fn spawn_model_prefetch_update(provider: Arc<dyn Provider>, agent: Ar
             )
         };
 
-        if refreshed.0 == initial_models && refreshed.1.is_empty() {
+        if !needs_capability_refresh && refreshed.0 == initial_models && refreshed.1.is_empty() {
             return;
         }
 

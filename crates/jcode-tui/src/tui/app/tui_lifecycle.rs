@@ -502,6 +502,7 @@ impl App {
             model_catalog_after_history: false,
             remote_reasoning_effort: None,
             remote_service_tier: None,
+            remote_available_service_tiers: None,
             remote_reported_service_tier: None,
             remote_service_tier_confirmation_pending: false,
             remote_transport: None,
@@ -980,6 +981,7 @@ impl App {
             model_catalog_after_history: false,
             remote_reasoning_effort: None,
             remote_service_tier: None,
+            remote_available_service_tiers: None,
             remote_reported_service_tier: None,
             remote_service_tier_confirmation_pending: false,
             remote_transport: None,
@@ -1319,6 +1321,9 @@ impl App {
         self.set_side_panel_snapshot(
             crate::side_panel::snapshot_for_session(session_id).unwrap_or_default(),
         );
+        if self.remote_session_id.as_deref() != Some(session_id) {
+            self.remote_available_service_tiers = None;
+        }
         self.remote_session_id = Some(session_id.to_string());
         session.strip_transcript_for_remote_client();
         // Strip clears transcript vectors but keeps capacity; free buffers.

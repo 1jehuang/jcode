@@ -1648,6 +1648,9 @@ pub(in crate::tui::app) fn handle_server_event(
             false
         }
         ServerEvent::SessionId { session_id } => {
+            if app.remote_session_id.as_deref() != Some(session_id.as_str()) {
+                app.remote_available_service_tiers = None;
+            }
             remote.set_session_id(session_id.clone());
             app.remote_session_id = Some(session_id.clone());
             crate::set_current_session(&session_id);
@@ -1774,6 +1777,7 @@ pub(in crate::tui::app) fn handle_server_event(
             provider_oauth_email,
             reasoning_effort,
             service_tier,
+            available_service_tiers,
             compaction_mode,
             activity,
             token_usage_totals,
@@ -1870,6 +1874,7 @@ pub(in crate::tui::app) fn handle_server_event(
             app.note_client_focus(true);
             let session_changed = prev_session_id.as_deref() != Some(session_id.as_str());
             if session_changed {
+                app.remote_available_service_tiers = None;
                 app.usage_reset.openai_quota_rejected = false;
             }
             // The initial Subscribe snapshot predates an early startup Message
@@ -1966,6 +1971,9 @@ pub(in crate::tui::app) fn handle_server_event(
                 available_model_routes,
             );
             let catalog_outcome = app.replace_remote_model_catalog_snapshot(model_catalog_snapshot);
+            if let Some(tiers) = available_service_tiers {
+                app.remote_available_service_tiers = Some(tiers);
+            }
             // History is authoritative from here on: a later ModelChanged is a
             // real switch and must announce itself.
             app.remote_session_facts_provisional = false;
@@ -2588,6 +2596,9 @@ pub(in crate::tui::app) fn handle_server_event(
                 ));
                 app.set_status_notice("Model switch failed");
             } else {
+                // ModelChanged predates capability metadata. Fetch the typed
+                // History catalog after a successful model/account switch.
+                app.model_catalog_after_history = true;
                 if app.remote_provider_model.as_deref() != Some(model.as_str())
                     || app.remote_provider_oauth_email != provider_oauth_email
                     || app.remote_resolved_credential != resolved_credential
@@ -2595,6 +2606,7 @@ pub(in crate::tui::app) fn handle_server_event(
                         .as_ref()
                         .is_some_and(|name| app.remote_provider_name.as_ref() != Some(name))
                 {
+                    app.remote_available_service_tiers = None;
                     app.usage_reset.openai_quota_rejected = false;
                 }
                 app.remote_provider_oauth_email = provider_oauth_email;
@@ -2671,6 +2683,9 @@ pub(in crate::tui::app) fn handle_server_event(
             available_models,
             available_model_routes,
         } => {
+            // Prefetch can hydrate account capabilities after initial History.
+            // This legacy event has no tiers, so request authoritative metadata.
+            app.model_catalog_after_history = true;
             let model_catalog_snapshot = jcode_provider_core::ModelCatalogSnapshot::new(
                 provider_name,
                 provider_model,

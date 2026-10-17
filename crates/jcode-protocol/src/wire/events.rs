@@ -573,6 +573,9 @@ pub enum ServerEvent {
         /// Route metadata for available models
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         available_model_routes: Vec<jcode_provider_core::ModelRoute>,
+        /// Authoritative service tiers from the live provider, including an empty unsupported list.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        available_service_tiers: Option<Vec<String>>,
         /// Connected MCP server names
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         mcp_servers: Vec<String>,

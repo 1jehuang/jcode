@@ -468,11 +468,100 @@ fn startup_history(session_id: &str) -> ServerEvent {
         resolved_credential: None,
         reasoning_effort: None,
         service_tier: None,
+        available_service_tiers: None,
         compaction_mode: crate::config::CompactionMode::Reactive,
         activity: None,
         side_panel: crate::side_panel::SidePanelSnapshot::default(),
         applets: Default::default(),
     }
+}
+
+#[test]
+fn history_speed_capabilities_are_authoritative_and_identity_scoped() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    let history = |session: &str, model: &str, tiers: Option<Vec<String>>| {
+        let mut event = startup_history(session);
+        if let ServerEvent::History {
+            provider_name,
+            provider_model,
+            available_service_tiers,
+            ..
+        } = &mut event
+        {
+            *provider_name = Some("openai".into());
+            *provider_model = Some(model.into());
+            *available_service_tiers = tiers;
+        }
+        event
+    };
+    handle_server_event(
+        &mut app,
+        history(
+            "speed-session",
+            "gpt-6-astra",
+            Some(vec!["priority".into()]),
+        ),
+        &mut remote,
+    );
+    assert_eq!(
+        app.remote_available_service_tiers,
+        Some(vec!["priority".into()])
+    );
+    // Missing capability metadata from an old server does not erase a known
+    // capability snapshot for the same identity.
+    handle_server_event(
+        &mut app,
+        history("speed-session", "gpt-6-astra", None),
+        &mut remote,
+    );
+    assert_eq!(
+        app.remote_available_service_tiers,
+        Some(vec!["priority".into()])
+    );
+    handle_server_event(
+        &mut app,
+        history("speed-session", "gpt-6-astra", Some(vec![])),
+        &mut remote,
+    );
+    assert_eq!(app.remote_available_service_tiers, Some(vec![]));
+    handle_server_event(
+        &mut app,
+        history("speed-session", "gpt-6.1-sol", None),
+        &mut remote,
+    );
+    assert_eq!(app.remote_available_service_tiers, None);
+    app.remote_available_service_tiers = Some(vec!["priority".into()]);
+    let model_changed = serde_json::from_value(serde_json::json!({
+        "type": "model_changed", "id": 1, "model": "gpt-6-astra", "provider_name": "openai"
+    }))
+    .unwrap();
+    app.model_catalog_after_history = false;
+    handle_server_event(&mut app, model_changed, &mut remote);
+    assert_eq!(app.remote_available_service_tiers, None);
+    assert!(app.model_catalog_after_history);
+    app.model_catalog_after_history = false;
+    handle_server_event(
+        &mut app,
+        ServerEvent::AvailableModelsUpdated {
+            provider_name: Some("openai".into()),
+            provider_model: Some("gpt-6-astra".into()),
+            available_models: vec![],
+            available_model_routes: vec![],
+        },
+        &mut remote,
+    );
+    assert!(app.model_catalog_after_history);
+    app.remote_available_service_tiers = Some(vec!["priority".into()]);
+    handle_server_event(
+        &mut app,
+        history("another-speed-session", "gpt-6-astra", None),
+        &mut remote,
+    );
+    assert_eq!(app.remote_available_service_tiers, None);
 }
 
 #[test]

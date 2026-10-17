@@ -185,6 +185,7 @@ fn test_openai_model_catalog_hydrates_from_disk_cache() {
             )]
             .into_iter()
             .collect(),
+            ..Default::default()
         });
 
         assert_eq!(
@@ -202,6 +203,65 @@ fn test_openai_model_catalog_hydrates_from_disk_cache() {
         );
 
         crate::auth::codex::set_active_account_override(None);
+    });
+}
+
+#[test]
+fn test_openai_service_tiers_scoped_disk_cache() {
+    with_clean_provider_test_env(|| {
+        let catalog = OpenAIModelCatalog {
+            available_models: vec!["sol".to_string(), "empty".to_string()],
+            service_tiers: [
+                ("sol".to_string(), vec!["priority".to_string()]),
+                ("empty".to_string(), vec![]),
+            ]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        persist_openai_model_catalog_for_scope("tiers-a", &catalog);
+        persist_openai_model_catalog_for_scope(
+            "tiers-b",
+            &OpenAIModelCatalog {
+                available_models: vec!["astra".to_string()],
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            cached_openai_service_tiers_for_scope("tiers-a"),
+            Some(catalog.service_tiers)
+        );
+        assert_eq!(
+            cached_openai_service_tiers_for_scope("tiers-b"),
+            Some(Default::default())
+        );
+        assert_eq!(cached_openai_service_tiers_for_scope("tiers-missing"), None);
+        // A subsequent snapshot replaces old claims, rather than leaking them.
+        persist_openai_model_catalog_for_scope(
+            "tiers-a",
+            &OpenAIModelCatalog {
+                available_models: vec!["sol".to_string()],
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            cached_openai_service_tiers_for_scope("tiers-a"),
+            Some(Default::default())
+        );
+        let path = crate::storage::app_config_dir()
+            .unwrap()
+            .join("openai_model_catalog_cache.json");
+        crate::storage::write_json(
+            &path,
+            &serde_json::json!({
+                "scopes": {"legacy": {"models": ["sol"], "observed_at_unix_secs": 1}}
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            cached_openai_service_tiers_for_scope("legacy"),
+            Some(Default::default())
+        );
     });
 }
 

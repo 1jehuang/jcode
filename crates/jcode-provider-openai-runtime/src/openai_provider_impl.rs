@@ -895,6 +895,27 @@ impl Provider for OpenAIProvider {
         self.available_models_for_switching()
     }
 
+    fn model_capabilities_need_refresh(&self) -> bool {
+        if self.is_browser_only()
+            || !self
+                .credentials
+                .try_read()
+                .is_ok_and(|creds| Self::is_chatgpt_mode(&creds))
+        {
+            return false;
+        }
+        let model = jcode_provider_core::model_id::canonical(&self.model());
+        if is_chatgpt_web_model(&model) {
+            return false;
+        }
+        let tiers = self
+            .model_service_tiers
+            .read()
+            .unwrap_or_else(|p| p.into_inner());
+        !tiers.contains_key(&model)
+            && !tiers.contains_key(jcode_provider_core::model_id::slash_base(&model))
+    }
+
     async fn prefetch_models(&self) -> Result<()> {
         if self.is_browser_only() {
             return Ok(());
@@ -970,6 +991,11 @@ impl Provider for OpenAIProvider {
             Ok(mut efforts) => *efforts = catalog.reasoning_efforts.clone(),
             Err(poisoned) => *poisoned.into_inner() = catalog.reasoning_efforts.clone(),
         }
+        *self
+            .model_service_tiers
+            .write()
+            .unwrap_or_else(|p| p.into_inner()) = catalog.service_tiers.clone();
+        self.warn_unsupported_service_tier();
         self.revalidate_reasoning_effort();
         jcode_base::provider::persist_openai_model_catalog_for_scope(&scope, &catalog);
         if !catalog.context_limits.is_empty() {
@@ -1066,15 +1092,7 @@ impl Provider for OpenAIProvider {
     }
 
     fn service_tier(&self) -> Option<String> {
-        let tier = self
-            .service_tier
-            .read()
-            .map(|guard| guard.clone())
-            .unwrap_or_else(|poisoned| poisoned.into_inner().clone());
-        tier.filter(|tier| {
-            tier != "ultrafast"
-                || jcode_provider_core::service_tier::openai_model_supports_ultrafast(&self.model())
-        })
+        self.effective_service_tier(&self.model())
     }
 
     fn native_compaction_mode(&self) -> Option<String> {
@@ -1088,12 +1106,15 @@ impl Provider for OpenAIProvider {
 
     fn set_service_tier(&self, service_tier: &str) -> Result<()> {
         let normalized = Self::normalize_service_tier(service_tier)?;
-        if normalized.as_deref() == Some("ultrafast")
-            && !jcode_provider_core::service_tier::openai_model_supports_ultrafast(&self.model())
+        if normalized
+            .as_deref()
+            .is_some_and(|tier| !self.supports_service_tier(&self.model(), tier))
         {
             anyhow::bail!(
-                "Ultrafast is not supported for OpenAI model '{}'",
-                self.model()
+                "Service tier '{}' is not supported for OpenAI model '{}'. Available tiers: {} (or off)",
+                service_tier,
+                self.model(),
+                self.available_service_tiers().join(", ")
             );
         }
         let mut guard = self
@@ -1105,11 +1126,11 @@ impl Provider for OpenAIProvider {
     }
 
     fn available_service_tiers(&self) -> Vec<&'static str> {
-        if jcode_provider_core::service_tier::openai_model_supports_ultrafast(&self.model()) {
-            vec!["priority", "ultrafast", "flex"]
-        } else {
-            vec!["priority", "flex"]
-        }
+        let model = self.model();
+        ["priority", "ultrafast", "flex"]
+            .into_iter()
+            .filter(|tier| self.supports_service_tier(&model, tier))
+            .collect()
     }
 
     fn transport(&self) -> Option<String> {
@@ -1253,7 +1274,18 @@ impl Provider for OpenAIProvider {
                     .unwrap_or_else(|p| p.into_inner())
                     .clone(),
             )),
-            service_tier: Arc::new(StdRwLock::new(self.service_tier())),
+            model_service_tiers: Arc::new(StdRwLock::new(
+                self.model_service_tiers
+                    .read()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .clone(),
+            )),
+            service_tier: Arc::new(StdRwLock::new(
+                self.service_tier
+                    .read()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .clone(),
+            )),
             native_compaction_mode: self.native_compaction_mode,
             native_compaction_threshold_tokens: self.native_compaction_threshold_tokens,
             transport_mode: Arc::clone(&self.transport_mode),

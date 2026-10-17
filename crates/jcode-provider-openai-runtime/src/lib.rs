@@ -713,6 +713,7 @@ pub struct OpenAIProvider {
     max_output_tokens: Option<u32>,
     reasoning_effort: Arc<StdRwLock<Option<String>>>,
     model_reasoning_efforts: Arc<StdRwLock<HashMap<String, Vec<String>>>>,
+    model_service_tiers: Arc<StdRwLock<HashMap<String, Vec<String>>>>,
     service_tier: Arc<StdRwLock<Option<String>>>,
     native_compaction_mode: OpenAINativeCompactionMode,
     native_compaction_threshold_tokens: usize,
@@ -873,6 +874,10 @@ impl OpenAIProvider {
             max_output_tokens,
             reasoning_effort: Arc::new(StdRwLock::new(reasoning_effort)),
             model_reasoning_efforts: Arc::new(StdRwLock::new(model_reasoning_efforts)),
+            model_service_tiers: Arc::new(StdRwLock::new(
+                jcode_base::provider::cached_openai_service_tiers_for_scope(&catalog_scope)
+                    .unwrap_or_default(),
+            )),
             service_tier: Arc::new(StdRwLock::new(service_tier)),
             native_compaction_mode,
             native_compaction_threshold_tokens,
@@ -885,6 +890,7 @@ impl OpenAIProvider {
             browser_only: Arc::new(AtomicBool::new(browser_only)),
         };
         provider.revalidate_reasoning_effort();
+        provider.warn_unsupported_service_tier();
         provider
     }
 
@@ -917,6 +923,7 @@ impl OpenAIProvider {
                 Ok(mut guard) => {
                     *guard = credentials;
                     self.browser_only.store(false, AtomicOrdering::Release);
+                    drop(guard);
                     self.reload_cached_reasoning_efforts();
                 }
                 Err(_) => {
@@ -936,6 +943,7 @@ impl OpenAIProvider {
             Ok(mut guard) => {
                 *guard = credentials;
                 self.browser_only.store(false, AtomicOrdering::Release);
+                drop(guard);
                 self.reload_cached_reasoning_efforts();
             }
             Err(_) => {
@@ -970,6 +978,14 @@ impl OpenAIProvider {
     }
 
     fn reload_cached_reasoning_efforts(&self) {
+        let tiers =
+            jcode_base::provider::cached_openai_service_tiers_for_scope(&self.catalog_scope())
+                .unwrap_or_default();
+        *self
+            .model_service_tiers
+            .write()
+            .unwrap_or_else(|p| p.into_inner()) = tiers;
+        self.warn_unsupported_service_tier();
         let cached =
             jcode_base::provider::cached_openai_reasoning_efforts_for_scope(&self.catalog_scope())
                 .unwrap_or_default();
@@ -978,6 +994,47 @@ impl OpenAIProvider {
             Err(poisoned) => *poisoned.into_inner() = cached,
         }
         self.revalidate_reasoning_effort();
+    }
+
+    fn supports_service_tier(&self, model: &str, tier: &str) -> bool {
+        if tier == "flex" {
+            return true;
+        }
+        let model = jcode_provider_core::model_id::canonical(model);
+        let tiers = self
+            .model_service_tiers
+            .read()
+            .unwrap_or_else(|p| p.into_inner());
+        if let Some(advertised) = tiers
+            .get(&model)
+            .or_else(|| tiers.get(jcode_provider_core::model_id::slash_base(&model)))
+        {
+            return advertised.iter().any(|id| id == tier);
+        }
+        tier != "ultrafast"
+            || jcode_provider_core::service_tier::openai_model_supports_ultrafast(&model)
+    }
+
+    fn effective_service_tier(&self, model: &str) -> Option<String> {
+        self.service_tier
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+            .filter(|tier| self.supports_service_tier(model, tier))
+    }
+
+    fn warn_unsupported_service_tier(&self) {
+        let model = self.model();
+        let stored = self
+            .service_tier
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        if let Some(tier) = stored.filter(|tier| !self.supports_service_tier(&model, tier)) {
+            jcode_base::logging::warn(&format!(
+                "OpenAI model '{model}' does not advertise configured service tier '{tier}'; omitting it from requests (configuration unchanged)"
+            ));
+        }
     }
 
     pub(crate) fn credential_mode_snapshot(&self) -> OpenAICredentialMode {
@@ -1320,11 +1377,7 @@ impl OpenAIProvider {
         // Map the `swarm` sentinel (and any future aliases) to the real effort
         // value the API understands.
         let api_reasoning_effort = self.api_reasoning_effort(reasoning_effort.as_deref());
-        let service_tier = self
-            .service_tier
-            .read()
-            .map(|guard| guard.clone())
-            .unwrap_or_else(|poisoned| poisoned.into_inner().clone());
+        let service_tier = self.effective_service_tier(model_id);
         let native_compaction_threshold =
             self.native_compaction_threshold_for_context_window(self.context_window());
         Self::build_response_request(
@@ -1387,12 +1440,8 @@ impl OpenAIProvider {
             request["reasoning"] = openai_stream_runtime::reasoning_payload(effort);
         }
 
-        // A saved override or a previous model's tier must not leak Ultrafast
-        // onto an unsupported model, including after a model switch.
-        if let Some(service_tier) = service_tier
-            && (service_tier != "ultrafast"
-                || jcode_provider_core::service_tier::openai_model_supports_ultrafast(model_id))
-        {
+        // The provider filters against the actual request model before building.
+        if let Some(service_tier) = service_tier {
             request["service_tier"] = serde_json::json!(service_tier);
         }
 

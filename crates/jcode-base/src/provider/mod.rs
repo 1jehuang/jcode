@@ -363,12 +363,12 @@ pub use self::models::{
 };
 pub use self::models::{
     begin_openai_model_catalog_refresh_for_scope, cached_openai_model_ids_for_scope,
-    cached_openai_reasoning_efforts_for_scope, clear_model_unavailable_for_scope,
-    finish_openai_model_catalog_refresh_for_scope, get_best_available_openai_model_for_scope,
-    known_openai_model_ids_for_scope, model_availability_for_scope,
-    openai_catalog_scope_for_credential, persist_openai_model_catalog_for_scope,
-    populate_account_models_for_scope, record_model_unavailable_for_scope,
-    refresh_openai_model_catalog_in_background_for_scope,
+    cached_openai_reasoning_efforts_for_scope, cached_openai_service_tiers_for_scope,
+    clear_model_unavailable_for_scope, finish_openai_model_catalog_refresh_for_scope,
+    get_best_available_openai_model_for_scope, known_openai_model_ids_for_scope,
+    model_availability_for_scope, openai_catalog_scope_for_credential,
+    persist_openai_model_catalog_for_scope, populate_account_models_for_scope,
+    record_model_unavailable_for_scope, refresh_openai_model_catalog_in_background_for_scope,
     should_refresh_openai_model_catalog_for_scope,
 };
 pub use self::selection::DefaultModelSelection;

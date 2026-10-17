@@ -29,6 +29,8 @@ pub struct OpenAIModelCatalog {
     pub context_limits: HashMap<String, usize>,
     /// Ordered reasoning-effort values advertised by each Codex model.
     pub reasoning_efforts: HashMap<String, Vec<String>>,
+    /// Empty entries explicitly deny optional tiers, missing entries are unknown.
+    pub service_tiers: HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -89,6 +91,7 @@ pub(crate) fn parse_openai_model_catalog(data: &serde_json::Value) -> OpenAIMode
 
     let mut available: HashSet<String> = HashSet::new();
     let mut limits: HashMap<String, usize> = HashMap::new();
+    let mut service_tiers = HashMap::new();
     let mut reasoning_efforts: HashMap<String, Vec<String>> = HashMap::new();
 
     for model in models.into_iter().flatten() {
@@ -107,6 +110,42 @@ pub(crate) fn parse_openai_model_catalog(data: &serde_json::Value) -> OpenAIMode
         }
 
         available.insert(slug.clone());
+
+        // Modern metadata wins even when malformed. Invalid data is unknown,
+        // never an authoritative denial or a reason to use legacy metadata.
+        if let Some(values) = model
+            .get("service_tiers")
+            .or_else(|| model.get("additional_speed_tiers"))
+            .and_then(|value| value.as_array())
+        {
+            let mut tiers = Vec::new();
+            let mut malformed = false;
+            for value in values {
+                let Some(raw) = value
+                    .as_str()
+                    .or_else(|| value.get("id").and_then(|id| id.as_str()))
+                else {
+                    malformed = true;
+                    continue;
+                };
+                let normalized = raw.trim().to_ascii_lowercase();
+                if normalized.is_empty() {
+                    malformed = true;
+                    continue;
+                }
+                let tier = if normalized == "fast" {
+                    "priority".to_string()
+                } else {
+                    normalized
+                };
+                if !tiers.contains(&tier) {
+                    tiers.push(tier);
+                }
+            }
+            if !malformed {
+                service_tiers.insert(slug.clone(), tiers);
+            }
+        }
 
         if let Some(ctx) = model
             .get("context_window")
@@ -151,6 +190,7 @@ pub(crate) fn parse_openai_model_catalog(data: &serde_json::Value) -> OpenAIMode
         available_models,
         context_limits: limits,
         reasoning_efforts,
+        service_tiers,
     }
 }
 
@@ -329,13 +369,41 @@ pub async fn fetch_openai_api_key_model_catalog(api_key: &str) -> Result<OpenAIM
     Ok(OpenAIModelCatalog {
         available_models,
         context_limits: HashMap::new(),
-        reasoning_efforts: HashMap::new(),
+        ..Default::default()
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn openai_catalog_service_tiers_preserve_known_and_unknown() {
+        let catalog = parse_openai_model_catalog(&serde_json::json!({
+            "models": [
+                {"slug":"sol", "service_tiers":[{"id":"priority"}, "fast", " PRIORITY "]},
+                {"slug":"astra", "additional_speed_tiers":["fast"]},
+                {"slug":"empty", "service_tiers":[], "additional_speed_tiers":["fast"]},
+                {"slug":"missing"},
+                {"slug":"null", "service_tiers":null, "additional_speed_tiers":["fast"]},
+                {"slug":"wrong", "service_tiers":"priority"},
+                {"slug":"invalid", "service_tiers":[{}, 7]},
+                {"slug":"mixed", "service_tiers":["priority", {}]},
+                {"slug":"blank", "service_tiers":[" "]},
+                {"slug":"legacy-object", "additional_speed_tiers":[{"id":"fast"}]}
+            ]
+        }));
+        for model in ["sol", "astra", "legacy-object"] {
+            assert_eq!(
+                catalog.service_tiers.get(model),
+                Some(&vec!["priority".to_string()])
+            );
+        }
+        assert_eq!(catalog.service_tiers.get("empty"), Some(&vec![]));
+        for model in ["missing", "null", "wrong", "invalid", "mixed", "blank"] {
+            assert!(!catalog.service_tiers.contains_key(model), "{model}");
+        }
+    }
 
     #[test]
     fn openai_catalog_parses_string_and_object_reasoning_efforts() {

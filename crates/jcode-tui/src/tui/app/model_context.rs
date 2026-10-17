@@ -978,9 +978,11 @@ impl App {
     pub(super) fn cycle_speed_tier(&mut self, direction: i8) {
         let provider_name = self.provider.name().to_string();
         let model = self.provider.model();
-        let ladder = jcode_provider_core::service_tier::speed_tier_ladder(
+        let available = self.provider.available_service_tiers();
+        let ladder = jcode_provider_core::service_tier::speed_tier_ladder_with_capabilities(
             Some(&provider_name),
             Some(&model),
+            Some(&available),
         );
         let current = self.provider.service_tier();
         let Some((index, next, at_end)) = jcode_provider_core::service_tier::step_speed_tier(
