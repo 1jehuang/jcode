@@ -7,6 +7,221 @@ fn extract_line_text(line: &Line<'_>) -> String {
         .collect::<String>()
 }
 
+#[test]
+fn usage_card_fits_content_on_wide_terminals() {
+    let msg =
+        DisplayMessage::system("# Updated\n+ OpenAI - available\n  Banked resets: 12 available");
+    let render = |width| render_usage_message(&msg, width, crate::config::DiffDisplayMode::Off);
+    let lines = render(240);
+    assert_eq!(lines, render(120));
+    assert_eq!(lines, render(160));
+    assert_eq!(
+        lines[0].width(),
+        "  Banked resets: 12 available".width() + 4
+    );
+    assert!(lines.iter().all(|line| line.width() == lines[0].width()));
+    assert!(extract_line_text(&lines[0]).contains("Usage"));
+    assert!(extract_line_text(lines.last().unwrap()).starts_with('╰'));
+}
+
+#[test]
+fn usage_card_never_overflows_even_tiny_terminals() {
+    let mut msg = DisplayMessage::system(
+        "# Usage updated\n+ 工作账户 e\u{301} - available\n  Weekly: █████░░░░░ 50% · resets in 2h 5m\n  Session resets: 1 available\n\n! Claude - error\n  error: unavailable",
+    );
+    msg.title = Some("使用情况 with a very long title".into());
+    for width in 0..=120 {
+        let lines = render_usage_message(&msg, width, crate::config::DiffDisplayMode::Off);
+        assert_eq!(lines.is_empty(), width == 0, "width {width}");
+        for line in &lines {
+            assert!(
+                line.width() <= usize::from(width),
+                "width {width}: {line:?}"
+            );
+        }
+        if width >= 10 {
+            assert!(lines.iter().all(|line| line.width() == lines[0].width()));
+        }
+    }
+}
+
+#[test]
+fn usage_card_preserves_unicode_and_wrapped_metadata() {
+    let msg = DisplayMessage::system(
+        "+ 工作账户 e\u{301} - available\n  Weekly: █████░░░░░ 50% · resets in 2h 5m\n  Session resets: 1 available",
+    );
+    for width in [10, 18, 20, 32, 40, 60, 120] {
+        let lines = render_usage_message(&msg, width, crate::config::DiffDisplayMode::Off);
+        let body: String = lines[1..lines.len() - 1]
+            .iter()
+            .map(|line| {
+                let text = extract_line_text(line);
+                text.strip_prefix("│ ")
+                    .unwrap()
+                    .strip_suffix(" │")
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect();
+        let body = without_whitespace(&body);
+        for expected in [
+            "工作账户e\u{301}",
+            "available",
+            "50%",
+            "resetsin2h5m",
+            "Sessionresets:1available",
+        ] {
+            assert!(body.contains(expected), "width {width}: {body}");
+        }
+    }
+    assert_eq!(
+        msg.content.matches(" - available").count(),
+        1,
+        "report protocol is unchanged"
+    );
+}
+
+#[test]
+fn usage_card_styles_heading_and_account_statuses() {
+    use ratatui::style::Modifier;
+    let msg = DisplayMessage::system(
+        "# Updated\n+ OpenAI - available\n~ Work - 70% used\n! Claude - hard limit\n! Other - error\nProvider - no data",
+    );
+    let lines = render_usage_message(&msg, 120, crate::config::DiffDisplayMode::Off);
+    let spans: Vec<_> = lines.iter().flat_map(|line| &line.spans).collect();
+    for name in ["Updated", "OpenAI", "Work", "Claude", "Other"] {
+        let span = spans.iter().find(|span| span.content == name).unwrap();
+        assert_eq!(span.style.fg, Some(Color::White));
+        assert!(span.style.add_modifier.contains(Modifier::BOLD));
+    }
+    for (status, color) in [
+        (" · available", rgb(100, 220, 170)),
+        (" · 70% used", rgb(255, 200, 100)),
+        (" · hard limit", Color::Red),
+        (" · error", Color::Red),
+    ] {
+        assert!(
+            spans
+                .iter()
+                .any(|span| span.content == status && span.style.fg == Some(color))
+        );
+    }
+    assert!(
+        spans
+            .iter()
+            .any(|span| span.content == "Provider - no data" && span.style.fg == Some(dim_color()))
+    );
+}
+
+#[test]
+fn usage_card_keeps_narrow_gauges_and_words_together() {
+    let msg = DisplayMessage::system(
+        "+ OpenAI - available\n  5-hour window: ███████░░░░░░░ 50% · resets in 2h 5m\n\n~ Claude - 70% used",
+    );
+    for width in [20, 40, 60] {
+        let lines = render_usage_message(&msg, width, crate::config::DiffDisplayMode::Off);
+        let texts: Vec<_> = lines.iter().map(extract_line_text).collect();
+        let gauges: Vec<_> = texts.iter().filter(|text| text.contains('█')).collect();
+        assert_eq!(gauges.len(), 1, "width {width}: {texts:?}");
+        assert!(gauges[0].contains("50%"), "width {width}: {texts:?}");
+        assert!(texts.iter().any(|text| text.contains("available")));
+        assert!(texts.iter().any(|text| text.contains("resets")));
+        assert!(texts.iter().any(|text| text.contains("──────")));
+        if width == 40 {
+            assert!(!gauges[0].contains("resets"));
+        }
+    }
+}
+
+#[test]
+fn usage_card_compacts_long_summary_without_mutating_report() {
+    let report =
+        "# Showing cached usage while refreshing all connected accounts\n+ OpenAI - available";
+    let msg = DisplayMessage::system(report);
+    let lines = render_usage_message(&msg, 20, crate::config::DiffDisplayMode::Off);
+    assert!(extract_line_text(&lines[1]).contains('…'));
+    assert!(extract_line_text(&lines[2]).contains("OpenAI"));
+    assert_eq!(msg.content, report);
+}
+
+#[test]
+fn usage_card_colors_utilization_and_dims_empty_bars_and_countdowns() {
+    use ratatui::style::Modifier;
+    for (percent, color) in [
+        (0, rgb(100, 220, 170)),
+        (69, rgb(100, 220, 170)),
+        (70, rgb(255, 200, 100)),
+        (89, rgb(255, 200, 100)),
+        (90, Color::Red),
+        (100, Color::Red),
+    ] {
+        let bar = if percent == 0 {
+            "░░░░"
+        } else {
+            "██░░"
+        };
+        let msg = DisplayMessage::system(format!("  Weekly: {bar} {percent}% · resets in 2h"));
+        let lines = render_usage_message(&msg, 120, crate::config::DiffDisplayMode::Off);
+        let spans: Vec<_> = lines.iter().flat_map(|line| &line.spans).collect();
+        let value = spans
+            .iter()
+            .find(|span| span.content == format!(" {percent}%"))
+            .unwrap();
+        assert_eq!(value.style.fg, Some(color));
+        assert!(value.style.add_modifier.contains(Modifier::BOLD));
+        for span in spans
+            .iter()
+            .filter(|span| span.content.contains('░') || span.content.contains("resets in"))
+        {
+            assert_eq!(span.style.fg, Some(dim_color()));
+        }
+        if percent > 0 {
+            assert!(
+                spans
+                    .iter()
+                    .any(|span| span.content == "██" && span.style.fg == Some(color))
+            );
+        }
+    }
+}
+
+#[test]
+fn usage_card_highlights_reset_counts_and_handles_empty_reports() {
+    use ratatui::style::Modifier;
+    for label in ["Banked", "Session"] {
+        for count in [0_u64, 1, 12, u64::MAX] {
+            let msg =
+                DisplayMessage::system(format!("  {label} resets: {count} available · next in 2d"));
+            let lines = render_usage_message(&msg, 120, crate::config::DiffDisplayMode::Off);
+            let spans: Vec<_> = lines.iter().flat_map(|line| &line.spans).collect();
+            let number = spans
+                .iter()
+                .find(|span| span.content == count.to_string())
+                .unwrap();
+            assert!(number.style.add_modifier.contains(Modifier::BOLD));
+            assert_eq!(
+                number.style.fg,
+                Some(if count == 0 {
+                    dim_color()
+                } else {
+                    rgb(100, 220, 170)
+                })
+            );
+            assert!(
+                spans.iter().any(|span| span.content.contains("next in 2d")
+                    && span.style.fg == Some(dim_color()))
+            );
+        }
+    }
+    for content in ["", "\n", "x"] {
+        let mut msg = DisplayMessage::system(content);
+        msg.title = Some("U".into());
+        let lines = render_usage_message(&msg, 120, crate::config::DiffDisplayMode::Off);
+        assert!(!lines.is_empty());
+        assert!(lines.iter().all(|line| line.width() == lines[0].width()));
+    }
+}
+
 fn without_whitespace(text: &str) -> String {
     text.chars().filter(|ch| !ch.is_whitespace()).collect()
 }
