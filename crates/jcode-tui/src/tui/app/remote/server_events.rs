@@ -1775,6 +1775,7 @@ pub(in crate::tui::app) fn handle_server_event(
             upstream_provider,
             resolved_credential,
             provider_oauth_email,
+            provider_oauth_account_label,
             reasoning_effort,
             service_tier,
             available_service_tiers,
@@ -1786,6 +1787,7 @@ pub(in crate::tui::app) fn handle_server_event(
         } => {
             let prev_session_id = app.remote_session_id.clone();
             app.remote_provider_oauth_email = provider_oauth_email.clone();
+            app.remote_provider_oauth_account_label = provider_oauth_account_label;
             if resolved_credential == Some(jcode_provider_core::ResolvedCredential::Oauth)
                 && let Some(email) = provider_oauth_email
                 && let Some(provider) = provider_name.as_deref()
@@ -2569,6 +2571,7 @@ pub(in crate::tui::app) fn handle_server_event(
             error,
             resolved_credential,
             provider_oauth_email,
+            provider_oauth_account_label,
             reasoning_effort,
             context_window,
             ..
@@ -2610,6 +2613,7 @@ pub(in crate::tui::app) fn handle_server_event(
                     app.usage_reset.openai_quota_rejected = false;
                 }
                 app.remote_provider_oauth_email = provider_oauth_email;
+                app.remote_provider_oauth_account_label = provider_oauth_account_label;
                 // The server also re-sends ModelChanged on resume so the client
                 // learns the server-resolved context window. That is not a
                 // user-visible switch, so only announce an actual model change.

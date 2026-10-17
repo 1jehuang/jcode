@@ -266,6 +266,7 @@ pub(super) async fn handle_get_model_catalog(
         reasoning_effort,
         source,
         provider_oauth_email,
+        provider_oauth_account_label,
     ) = {
         match agent.try_lock() {
             Ok(agent_guard) => {
@@ -288,6 +289,7 @@ pub(super) async fn handle_get_model_catalog(
                     agent_guard.provider_handle().reasoning_effort(),
                     "live",
                     provider_oauth_email(agent_guard.provider_handle().as_ref()),
+                    agent_guard.provider_handle().oauth_account_label(),
                 )
             }
             Err(_) => {
@@ -323,6 +325,7 @@ pub(super) async fn handle_get_model_catalog(
                     provider.reasoning_effort(),
                     "fallback",
                     provider_oauth_email(provider.as_ref()),
+                    provider.oauth_account_label(),
                 )
             }
         }
@@ -358,6 +361,7 @@ pub(super) async fn handle_get_model_catalog(
         upstream_provider: None,
         resolved_credential,
         provider_oauth_email,
+        provider_oauth_account_label,
         reasoning_effort,
         // Catalog replies still use History, so the TUI applies this field as
         // authoritative. Omitting it falsely turns off /fast status and its badge.
@@ -720,6 +724,7 @@ async fn send_history_from_persisted_session(
         upstream_provider: None,
         resolved_credential: provider.active_resolved_credential(),
         provider_oauth_email: provider_oauth_email(provider.as_ref()),
+        provider_oauth_account_label: provider.oauth_account_label(),
         reasoning_effort,
         // The transcript is persisted, but the tier is live provider state and
         // can be read without waiting for the busy agent's mutex.
@@ -884,6 +889,7 @@ async fn send_history_with_guard(
             .collect(),
     );
     let provider_oauth_email = provider_oauth_email(agent_guard.provider_handle().as_ref());
+    let provider_oauth_account_label = agent_guard.provider_handle().oauth_account_label();
     let inferred_interrupted = was_interrupted
         .is_none()
         .then(|| session_interrupted_by_reload(agent_guard.session_for_history()));
@@ -1013,6 +1019,7 @@ async fn send_history_with_guard(
         upstream_provider,
         resolved_credential,
         provider_oauth_email,
+        provider_oauth_account_label,
         reasoning_effort,
         service_tier,
         compaction_mode,

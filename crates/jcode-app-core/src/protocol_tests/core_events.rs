@@ -242,6 +242,7 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         upstream_provider: None,
         resolved_credential: None,
         provider_oauth_email: None,
+        provider_oauth_account_label: None,
         reasoning_effort: None,
         service_tier: None,
         subagent_model: None,

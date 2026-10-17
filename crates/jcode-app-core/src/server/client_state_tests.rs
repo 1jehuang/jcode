@@ -267,6 +267,10 @@ impl Provider for MockProvider {
     fn reasoning_effort(&self) -> Option<String> {
         Some("high".to_string())
     }
+
+    fn oauth_account_label(&self) -> Option<String> {
+        self.0.map(|_| "daemon-work".to_string())
+    }
 }
 
 #[tokio::test]
@@ -435,6 +439,7 @@ async fn handle_get_history_busy_fresh_session_returns_empty_without_waiting() {
                 images,
                 provider_name,
                 provider_model,
+                provider_oauth_account_label,
                 reasoning_effort,
                 service_tier,
                 available_service_tiers,
@@ -448,6 +453,7 @@ async fn handle_get_history_busy_fresh_session_returns_empty_without_waiting() {
                 assert!(images.is_empty());
                 assert_eq!(provider_name.as_deref(), Some("Mock Profile"));
                 assert_eq!(provider_model.as_deref(), Some("mock-model"));
+                assert_eq!(provider_oauth_account_label.as_deref(), Some("daemon-work"));
                 assert_eq!(reasoning_effort.as_deref(), Some("high"));
                 assert_eq!(service_tier.as_deref(), Some("priority"));
                 assert_eq!(
@@ -677,9 +683,14 @@ async fn assert_history_service_tier_and_pdf_capability(
             service_tier,
             available_service_tiers,
             side_panel,
+            provider_oauth_account_label,
             ..
         } => {
             assert_eq!(id, 42);
+            assert_eq!(
+                provider_oauth_account_label.as_deref(),
+                tier.map(|_| "daemon-work")
+            );
             assert_eq!(returned_session_id, session_id);
             assert_eq!(messages.len(), 1);
             assert_eq!(
@@ -803,9 +814,14 @@ async fn assert_model_catalog_service_tier(tier: Option<&'static str>, busy: boo
             service_tier,
             available_service_tiers,
             reasoning_effort,
+            provider_oauth_account_label,
             ..
         } => {
             assert_eq!(id, 43);
+            assert_eq!(
+                provider_oauth_account_label.as_deref(),
+                tier.map(|_| "daemon-work")
+            );
             assert_eq!(returned_session_id, session_id);
             assert_eq!(provider_name.as_deref(), Some("Mock Profile"));
             assert_eq!(

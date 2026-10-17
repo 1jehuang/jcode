@@ -239,6 +239,7 @@ impl Agent {
             // `ModelChanged` and resync the UI/context-limit.
             let model_at_request_start = provider.model().to_string();
             let credential_at_request_start = provider.active_resolved_credential();
+            let oauth_account_label_at_request_start = provider.oauth_account_label();
             let oauth_email_at_request_start =
                 crate::server::provider_oauth_email(provider.as_ref());
             let resume_session_id = self.provider_session_id.clone();
@@ -1253,9 +1254,11 @@ impl Agent {
             let oauth_email_after_stream =
                 crate::server::provider_oauth_email(self.provider.as_ref());
             let credential_after_stream = self.provider.active_resolved_credential();
+            let oauth_account_label_after_stream = self.provider.oauth_account_label();
             if model_after_stream != model_at_request_start
                 || credential_after_stream != credential_at_request_start
                 || oauth_email_after_stream != oauth_email_at_request_start
+                || oauth_account_label_after_stream != oauth_account_label_at_request_start
             {
                 let _ = event_tx.send(ServerEvent::ModelChanged {
                     id: 0,
@@ -1265,6 +1268,7 @@ impl Agent {
                     error: None,
                     resolved_credential: credential_after_stream,
                     provider_oauth_email: oauth_email_after_stream,
+                    provider_oauth_account_label: oauth_account_label_after_stream,
                     reasoning_effort: self.provider.reasoning_effort(),
                 });
             }

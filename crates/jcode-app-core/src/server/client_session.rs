@@ -1854,6 +1854,7 @@ pub(super) async fn handle_resume_session(
                 resumed_context_window,
                 resumed_credential,
                 resumed_reasoning_effort,
+                resumed_oauth_account_label,
             ) = {
                 let guard = agent.lock().await;
                 (
@@ -1862,6 +1863,7 @@ pub(super) async fn handle_resume_session(
                     guard.provider_context_window(),
                     guard.active_resolved_credential(),
                     guard.provider_reasoning_effort(),
+                    guard.provider_handle().oauth_account_label(),
                 )
             };
 
@@ -1918,6 +1920,7 @@ pub(super) async fn handle_resume_session(
                     agent.lock().await.provider_handle().as_ref(),
                 ),
                 reasoning_effort: resumed_reasoning_effort,
+                provider_oauth_account_label: resumed_oauth_account_label,
             });
             // Resolve project-local MCP config against the restored session's
             // working dir, not the server process cwd (issue #420).

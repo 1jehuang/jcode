@@ -634,6 +634,10 @@ pub enum ServerEvent {
         /// only while daemon usage telemetry is enabled. Never a credential.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_oauth_email: Option<ProviderOAuthEmail>,
+        /// Authoritative live provider OAuth account label, independent of telemetry.
+        /// None means the provider has no known OAuth account label.
+        #[serde(default)]
+        provider_oauth_account_label: Option<String>,
         /// Reasoning effort for providers that expose it
         #[serde(skip_serializing_if = "Option::is_none")]
         reasoning_effort: Option<String>,
@@ -742,6 +746,10 @@ pub enum ServerEvent {
         /// Effective OAuth identity for the selected model-provider account.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_oauth_email: Option<ProviderOAuthEmail>,
+        /// Authoritative live provider OAuth account label, independent of telemetry.
+        /// None means the provider has no known OAuth account label.
+        #[serde(default)]
+        provider_oauth_account_label: Option<String>,
         /// Effort the switched-to model runs with. A switch can clear an
         /// effort the new model does not advertise, so clients must not keep
         /// showing the old one. Always serialized (`null` = no effort) so a

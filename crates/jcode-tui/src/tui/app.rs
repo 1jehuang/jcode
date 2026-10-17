@@ -1283,6 +1283,8 @@ pub struct App {
     /// re-deriving it from the provider name.
     remote_resolved_credential: Option<jcode_provider_core::ResolvedCredential>,
     remote_provider_oauth_email: Option<crate::protocol::ProviderOAuthEmail>,
+    /// Daemon-selected saved account identity, independent of telemetry/email sharing.
+    remote_provider_oauth_account_label: Option<String>,
     oauth_notice_displayed_at: Option<Instant>,
     /// Remote model/provider/context/effort/credential were seeded from the
     /// last launch's `remote_header_hint` and have not yet been confirmed by

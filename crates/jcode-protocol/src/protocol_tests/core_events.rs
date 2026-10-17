@@ -1,3 +1,52 @@
+#[test]
+fn provider_oauth_account_label_defaults_and_roundtrips() -> Result<()> {
+    for legacy in [
+        r#"{"type":"history","id":1,"session_id":"test","messages":[]}"#,
+        r#"{"type":"model_changed","id":1,"model":"test"}"#,
+    ] {
+        for label in [None, Some("work"), Some("personal-α")] {
+            let mut value: serde_json::Value = serde_json::from_str(legacy)?;
+            if let Some(label) = label {
+                value["provider_oauth_account_label"] = label.into();
+            }
+            let event = parse_event_json(&value.to_string())?;
+            let actual = match &event {
+                ServerEvent::History {
+                    provider_oauth_account_label,
+                    ..
+                }
+                | ServerEvent::ModelChanged {
+                    provider_oauth_account_label,
+                    ..
+                } => provider_oauth_account_label.as_deref(),
+                _ => return Err(anyhow!("wrong event type")),
+            };
+            assert_eq!(actual, label);
+            let wire = encode_event(&event);
+            let encoded: serde_json::Value = serde_json::from_str(wire.trim())?;
+            assert_eq!(
+                encoded["provider_oauth_account_label"],
+                serde_json::json!(label)
+            );
+            let decoded = parse_event_json(wire.trim())?;
+            match decoded {
+                ServerEvent::History {
+                    provider_oauth_account_label,
+                    ..
+                }
+                | ServerEvent::ModelChanged {
+                    provider_oauth_account_label,
+                    ..
+                } => {
+                    assert_eq!(provider_oauth_account_label.as_deref(), label);
+                }
+                _ => return Err(anyhow!("wrong event type")),
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The server resolves the real window and reports it here. A remote client
 /// cannot derive it itself: its provider is an inert placeholder with no model
 /// catalog, and the static resolver has no entry for a model it does not
@@ -12,6 +61,7 @@ fn test_model_changed_roundtrip_carries_context_window() -> Result<()> {
         error: None,
         resolved_credential: None,
         provider_oauth_email: None,
+        provider_oauth_account_label: None,
         reasoning_effort: None,
     };
     let json = encode_event(&event);
@@ -40,6 +90,7 @@ fn test_model_changed_without_context_window_stays_absent() -> Result<()> {
         error: None,
         resolved_credential: None,
         provider_oauth_email: None,
+        provider_oauth_account_label: None,
         reasoning_effort: None,
     };
     let json = encode_event(&event);
@@ -696,6 +747,7 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         upstream_provider: None,
         resolved_credential: None,
         provider_oauth_email: None,
+        provider_oauth_account_label: None,
         reasoning_effort: None,
         service_tier: None,
         subagent_model: None,

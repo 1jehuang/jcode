@@ -58,15 +58,23 @@ struct WidgetRouteInfo {
     is_remote: bool,
 }
 
+fn remote_oauth_account_label<'a>(
+    server_label: Option<&'a str>,
+    route_api_method: Option<&'a str>,
+) -> Option<&'a str> {
+    server_label
+        .filter(|label| !label.is_empty() && !label.chars().any(char::is_control))
+        .or_else(|| route_api_method.and_then(jcode_provider_core::oauth_account_label))
+}
+
 fn remote_openai_widget_usage_for_route(
     route_api_method: Option<&str>,
+    server_label: Option<&str>,
     quota_rejected: bool,
     output_tps: Option<f32>,
     lookup: impl FnOnce(&str) -> Option<crate::usage::AccountUsageSnapshot>,
 ) -> crate::tui::info_widget::UsageInfo {
-    let snapshot = route_api_method
-        .and_then(jcode_provider_core::oauth_account_label)
-        .and_then(lookup);
+    let snapshot = remote_oauth_account_label(server_label, route_api_method).and_then(lookup);
     remote_openai_widget_usage(snapshot.as_ref(), quota_rejected, output_tps)
 }
 
@@ -568,6 +576,7 @@ impl App {
                     // credentials and can show a different account's windows.
                     return Some(remote_openai_widget_usage_for_route(
                         self.session.route_api_method.as_deref(),
+                        self.remote_provider_oauth_account_label.as_deref(),
                         self.usage_reset.openai_quota_rejected,
                         output_tps,
                         |label| {
@@ -1924,11 +1933,11 @@ impl crate::tui::TuiState for App {
         if !self.is_remote {
             return self.provider.oauth_account_label();
         }
-        self.session
-            .route_api_method
-            .as_deref()
-            .and_then(jcode_provider_core::oauth_account_label)
-            .map(str::to_owned)
+        remote_oauth_account_label(
+            self.remote_provider_oauth_account_label.as_deref(),
+            self.session.route_api_method.as_deref(),
+        )
+        .map(str::to_owned)
     }
 
     fn diagram_mode(&self) -> crate::config::DiagramDisplayMode {
@@ -2522,9 +2531,28 @@ mod sidebar_usage_tests {
     }
 
     #[test]
+    fn remote_sidebar_usage_uses_daemon_label_without_saved_route() {
+        for route in [None, Some("openai-oauth@stale-personal-account")] {
+            let info = remote_openai_widget_usage_for_route(
+                route,
+                Some("solosystems"),
+                false,
+                None,
+                |label| {
+                    assert_eq!(label, "solosystems");
+                    Some(snapshot())
+                },
+            );
+            assert!(info.available);
+            assert_eq!(info.five_hour, 1.0);
+        }
+    }
+
+    #[test]
     fn remote_sidebar_usage_uses_bound_label_not_global_account() {
         let info = remote_openai_widget_usage_for_route(
             Some("openai-oauth@solosystems"),
+            None,
             false,
             None,
             |label| {
@@ -2543,7 +2571,7 @@ mod sidebar_usage_tests {
     #[test]
     fn remote_sidebar_usage_without_bound_account_never_looks_up_global_usage() {
         for route in [None, Some("openai-oauth"), Some("openai-api-key")] {
-            let info = remote_openai_widget_usage_for_route(route, false, None, |_| {
+            let info = remote_openai_widget_usage_for_route(route, None, false, None, |_| {
                 panic!("unbound route must not look up another account")
             });
             assert!(!info.available);

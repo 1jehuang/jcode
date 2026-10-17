@@ -803,6 +803,7 @@ mod tests {
                     provider_name: Some("OpenAI".into()),
                     error: error.map(str::to_string),
                     provider_oauth_email: None,
+                    provider_oauth_account_label: None,
                     resolved_credential: Some(jcode_provider_core::ResolvedCredential::Oauth),
                     reasoning_effort: None,
                     context_window: None,

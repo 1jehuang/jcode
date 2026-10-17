@@ -404,6 +404,7 @@ fn send_model_changed_result(
                 error: None,
                 resolved_credential,
                 provider_oauth_email: super::provider_oauth_email(agent.provider_handle().as_ref()),
+                provider_oauth_account_label: agent.provider_handle().oauth_account_label(),
                 reasoning_effort,
             });
         }
@@ -424,6 +425,7 @@ fn send_model_changed_result(
                 error: Some(error.to_string()),
                 resolved_credential: None,
                 provider_oauth_email: None,
+                provider_oauth_account_label: None,
                 reasoning_effort: None,
             });
         }
@@ -446,6 +448,7 @@ fn apply_cycle_model(
             error: Some("Model switching is not available for this provider.".to_string()),
             resolved_credential: None,
             provider_oauth_email: None,
+            provider_oauth_account_label: None,
             reasoning_effort: None,
         });
         return;
