@@ -204,6 +204,23 @@ impl JevClient {
         Self::for_purpose(JevPurpose::Suggestions)
     }
 
+    pub fn for_suggestions_with_selector(config_selector: &str) -> Result<Self> {
+        let (provider, api_key, endpoint, me_endpoint) =
+            Self::resolve_with_suggestions_default(config_selector)?;
+        let client = client_builder()
+            .build()
+            .map_err(|_| anyhow!("Could not initialize the Jev decision client"))?;
+        Ok(Self {
+            client,
+            hedge_clients: Vec::new(),
+            purpose: JevPurpose::Suggestions,
+            provider,
+            api_key,
+            endpoint,
+            me_endpoint,
+        })
+    }
+
     /// True when the active route supports direct SystemOne `choice` questions
     /// (`OpenJev`, `TypeSafe`, `OpenRouter`, `Aimlapi`). `Jcode` subscription
     /// decisions only accept `noul` outside of Browser mode.
@@ -239,28 +256,57 @@ impl JevClient {
     }
 
     fn resolve(purpose: JevPurpose) -> Result<(JevProvider, String, String, Option<String>)> {
-        let selector = match purpose {
-            JevPurpose::Suggestions => match std::env::var(SUGGESTIONS_PROVIDER_ENV) {
-                Ok(value) => value,
-                Err(std::env::VarError::NotPresent) => {
-                    crate::config::config().suggested_replies.jev_provider.clone()
-                }
-                Err(_) => bail!("{SUGGESTIONS_PROVIDER_ENV} must contain a valid provider name"),
-            },
-            _ => purpose.selector_with(
-                |key| std::env::var(key),
-                || crate::config::config().agents.memory_jev_provider.clone(),
-            )?,
+        if purpose == JevPurpose::Suggestions {
+            return Self::resolve_with_suggestions_default(
+                &crate::config::config().suggested_replies.jev_provider,
+            );
+        }
+        let selector = purpose.selector_with(
+            |key| std::env::var(key),
+            || crate::config::config().agents.memory_jev_provider.clone(),
+        )?;
+        Self::resolve_for_selector(purpose, &selector)
+    }
+
+    fn resolve_with_suggestions_default(
+        config_default: &str,
+    ) -> Result<(JevProvider, String, String, Option<String>)> {
+        let fallback = || {
+            let trimmed = config_default.trim();
+            if trimmed.is_empty() {
+                "auto".to_string()
+            } else {
+                trimmed.to_string()
+            }
         };
+        let selector = match std::env::var(SUGGESTIONS_PROVIDER_ENV) {
+            Ok(value) => {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    fallback()
+                } else {
+                    trimmed.to_string()
+                }
+            }
+            Err(std::env::VarError::NotPresent) => fallback(),
+            Err(_) => bail!("{SUGGESTIONS_PROVIDER_ENV} must contain a valid provider name"),
+        };
+        Self::resolve_for_selector(JevPurpose::Suggestions, &selector)
+    }
+
+    fn resolve_for_selector(
+        purpose: JevPurpose,
+        selector: &str,
+    ) -> Result<(JevProvider, String, String, Option<String>)> {
         // Unlike the API-key helper, this does not consult registered
         // cross-provider fallback resolvers or the shared compatible slot.
         let load = |env: &str, file: &str| {
             crate::provider_catalog::load_env_value_from_env_or_config(env, file)
         };
         let (provider, api_key) = match purpose {
-            JevPurpose::Voice => resolve_voice_with(&selector, load)?,
-            JevPurpose::Suggestions => resolve_suggestions_with(&selector, load)?,
-            _ => resolve_with(&selector, load)?,
+            JevPurpose::Voice => resolve_voice_with(selector, load)?,
+            JevPurpose::Suggestions => resolve_suggestions_with(selector, load)?,
+            _ => resolve_with(selector, load)?,
         };
         let base = match provider {
             JevProvider::Jcode => crate::subscription_api::configured_api_base(),
@@ -567,8 +613,11 @@ fn configured_laya_base() -> String {
 fn trusted_laya_base(base: &str) -> Result<String> {
     let url = Url::parse(base.trim()).map_err(|_| anyhow!("Invalid Laya base URL"))?;
     let trusted_http_host = url.host_str().is_some_and(|host| {
-        host.eq_ignore_ascii_case("localhost")
-            || host.eq_ignore_ascii_case("dragon")
+        let lower = host.to_ascii_lowercase();
+        lower == "localhost"
+            || lower == "dragon"
+            || lower.ends_with(".ts.net")
+            || lower.ends_with(".local")
             || host
                 .trim_start_matches('[')
                 .trim_end_matches(']')
@@ -603,9 +652,11 @@ fn laya_endpoint(base: &str) -> Result<String> {
         base.trim()
     };
     let root = trusted_laya_base(effective)?;
-    if let Some(stripped) = root.strip_suffix("/v1/systemone") {
-        Ok(format!("{stripped}/v1/systemone"))
-    } else if let Some(stripped) = root.strip_suffix("/v1") {
+    if let Some(stripped) = root
+        .strip_suffix("/v1/systemone")
+        .or_else(|| root.strip_suffix("/v1/decisions"))
+        .or_else(|| root.strip_suffix("/v1"))
+    {
         Ok(format!("{stripped}/v1/systemone"))
     } else {
         Ok(format!("{root}/v1/systemone"))
@@ -1198,6 +1249,20 @@ mod tests {
                 .unwrap(),
             "http://100.87.178.69:8000/v1/systemone"
         );
+        assert_eq!(
+            JevProvider::Laya
+                .endpoint("http://127.0.0.1:8080/v1/decisions")
+                .unwrap(),
+            "http://127.0.0.1:8080/v1/systemone"
+        );
+        for invalid in [
+            "http://public.example.com:8080",
+            "http://user:secret@127.0.0.1:8080",
+            "http://127.0.0.1:8080?token=secret",
+            "http://127.0.0.1:8080#frag",
+        ] {
+            assert!(JevProvider::Laya.endpoint(invalid).is_err(), "{invalid}");
+        }
     }
 
     #[test]

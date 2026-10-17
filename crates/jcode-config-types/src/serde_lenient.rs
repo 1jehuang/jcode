@@ -37,7 +37,7 @@ where
 
 #[derive(Deserialize)]
 #[serde(untagged)]
-enum LenientBoolInput {
+pub(crate) enum LenientBoolInput {
     Bool(bool),
     Int(i64),
     Str(String),

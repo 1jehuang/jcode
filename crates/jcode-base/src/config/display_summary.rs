@@ -115,6 +115,7 @@ impl Config {
 
 **Suggested Replies:**
 - Enabled: {}
+- Jev provider (`jev_provider`): {}
 - OpenGF mode (`use_open_gf`): {}
 - Max secondary suggestions: {}
 - Confidence threshold: {:.2}
@@ -322,6 +323,7 @@ impl Config {
             self.gateway.bind_addr,
             self.gateway.port,
             self.suggested_replies.enabled,
+            self.suggested_replies.jev_provider,
             self.suggested_replies.use_open_gf,
             self.suggested_replies.clamped_max_secondary(),
             self.suggested_replies.clamped_confidence_threshold(),

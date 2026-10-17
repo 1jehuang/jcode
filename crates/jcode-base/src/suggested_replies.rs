@@ -474,8 +474,8 @@ pub async fn evaluate_cascade(
         None
     };
 
-    // Attempt OpenJev / SystemOne evaluation if a JevClient route is available.
-    if let Ok(client) = crate::jev::JevClient::for_suggestions() {
+    // Attempt OpenJev / Laya / SystemOne evaluation if a JevClient route is available.
+    if let Ok(client) = crate::jev::JevClient::for_suggestions_with_selector(&config.jev_provider) {
         let state = json!(crate::util::truncate_str(transcript_tail, 6000));
 
         // Iteration 1: Determine macro branch (from OpenGF if present, else via SystemOne).
