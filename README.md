@@ -351,8 +351,6 @@ The devil is in the details. There are many undocumented optimizations and nicet
 
 Anthropic's Claude cache goes cold after 5 minutes. If you initiate Claude after these 5 minutes, you have a cache miss, potentially costing you lots of tokens. The ui warns you when the cache went cold, and notfies you if there was an unexpected cache miss. 
 
-jcode comes with instructions on how to set up Firefox Agent Bridge. Ask you agent to set it up, and then you will have browser automation in jcode as well. 
-
 Agent grep is a grep tool I made for the jcode agent. It adds file structure information (ie the list of functions, their displacement, etc) to the grep return, so that the agent can infer more of what the file doesn without actually reading the file. It also implements a harness-level integration that adaptively truncates returns based on what the agent has already seen. This saves on context a lot.
 
 Inputs are by default interleaved with the working agent. It sends the input as soon as it safely can without breaking the KV cache. Submit with shift enter instead, and it will send a queue send, and wait for the agent to fully finish its turn before sending.
@@ -361,10 +359,3 @@ Resume sessions from different harnesses. Claude code broke on you? Resume the s
 
 Skills are not all loaded on startup. The conversation is embedded as a semantic vector, and will automatically inject a skill if there is an embedding hit similar to memories. The agent has a skill tool for you to manually activate a skill at anytime. You may also activate via slash commands. 
 
-## Browser Automation
-
-The built-in `browser` tool lets agents navigate pages, fill forms, upload files,
-and capture screenshots through Firefox Agent Bridge. Ask your agent to set it
-up and handle browser tasks directly.
-
-See [Browser Provider Protocol](docs/BROWSER_PROVIDER_PROTOCOL.md) for details.
