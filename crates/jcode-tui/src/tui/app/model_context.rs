@@ -1647,8 +1647,33 @@ impl App {
                 lines.push("  hard limit reached".to_string());
             }
 
+            if let Some(credits) = &provider.openai_reset_credits {
+                lines.push(format!(
+                    "  Banked resets: {} available",
+                    credits.available_count
+                ));
+            }
+            if let Some(offer) = &provider.anthropic_limit_reset {
+                let next = offer
+                    .next_available_at
+                    .as_deref()
+                    .filter(|_| !offer.available)
+                    .map(crate::usage::format_reset_time)
+                    .map(|time| format!(" · next in {}", time))
+                    .unwrap_or_default();
+                lines.push(format!(
+                    "  Session resets: {} available{}",
+                    u64::from(offer.available),
+                    next
+                ));
+            }
+
             if provider.limits.is_empty() && provider.extra_info.is_empty() {
-                lines.push("  no usage data available".to_string());
+                if provider.openai_reset_credits.is_none()
+                    && provider.anthropic_limit_reset.is_none()
+                {
+                    lines.push("  no usage data available".to_string());
+                }
                 continue;
             }
 
@@ -1693,7 +1718,11 @@ impl App {
             format!("! {} - {:.0}% used", provider.provider_name, max_percent)
         } else if max_percent >= 70.0 {
             format!("~ {} - {:.0}% used", provider.provider_name, max_percent)
-        } else if provider.limits.is_empty() && provider.extra_info.is_empty() {
+        } else if provider.limits.is_empty()
+            && provider.extra_info.is_empty()
+            && provider.openai_reset_credits.is_none()
+            && provider.anthropic_limit_reset.is_none()
+        {
             format!("{} - no data", provider.provider_name)
         } else if max_percent > 0.0 {
             format!("+ {} - {:.0}% used", provider.provider_name, max_percent)
