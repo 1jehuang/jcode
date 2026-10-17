@@ -328,7 +328,7 @@ impl MultiProvider {
 
         result.spawn_anthropic_catalog_refresh_if_needed();
         result.spawn_openai_catalog_refresh_if_needed();
-        result.auto_select_active_multi_account();
+        result.select_fresh_session_pool_route();
         crate::logging::info(&format!(
             "[TIMING] provider_init: anthropic={}, openai={}, copilot={}, antigravity={}, gemini={}, cursor={}, bedrock={}, openrouter={}, total={}ms",
             result
@@ -374,6 +374,109 @@ impl MultiProvider {
             provider_init_start.elapsed().as_millis()
         ));
         result
+    }
+
+    /// New sessions start at the head of the user's pool, not at the saved
+    /// default left behind by a previous session. This is deliberately a local
+    /// model/account binding: never promote the fallback or change active logins.
+    fn select_fresh_session_pool_route(&self) {
+        if self.initial_provider.is_some() {
+            return;
+        }
+        let pool = crate::auth::account_pool::AccountPool::load();
+        let routes: Vec<_> = self
+            .model_routes()
+            .into_iter()
+            .filter_map(|route| {
+                let spec = jcode_provider_core::RouteSelection::from_model_route(&route)
+                    .routed_model_spec();
+                let approved = route.available && Self::is_failover_route_pool_approved(&spec);
+                let (method, _) = spec.split_once(':')?;
+                let mut exhausted = false;
+                let key = if let Some((method, label)) = method.split_once('@') {
+                    let provider = match method {
+                        "claude-oauth" => "claude",
+                        "openai-oauth" => "openai",
+                        _ => return None,
+                    };
+                    let kind = if provider == "claude" {
+                        crate::usage::MultiAccountProviderKind::Anthropic
+                    } else {
+                        crate::usage::MultiAccountProviderKind::OpenAI
+                    };
+                    exhausted = models::provider_unavailability_detail_for_account_label(
+                        provider,
+                        Some(label),
+                    )
+                    .is_some()
+                        || crate::usage::cached_account_usage_snapshot(kind, label)
+                            .is_some_and(|snapshot| snapshot.exhausted);
+                    if !pool.is_member(
+                        &crate::auth::account_pool::account_key(provider, Some(label)),
+                        true,
+                    ) || !models::is_agent_model_for_failover(&route.model, provider)
+                    {
+                        return None;
+                    }
+                    crate::auth::account_pool::account_key(provider, Some(label))
+                } else {
+                    match method {
+                        "claude-api" | "anthropic-api-key" => "anthropic-api".to_owned(),
+                        "openai-api-key" => "openai-api".to_owned(),
+                        other => other.to_owned(),
+                    }
+                };
+                if !approved && !exhausted {
+                    return None;
+                }
+                Some((key, route.model, spec, approved && !exhausted))
+            })
+            .collect();
+        let mut keys = Vec::new();
+        for (key, _, _, _) in &routes {
+            if !keys.iter().any(|(existing, _)| existing == key) {
+                keys.push((key.clone(), true));
+            }
+        }
+        let cfg = crate::config::config();
+        let configured_model = cfg.provider.default_model.as_deref();
+        let configured_model = configured_model.map(|model| {
+            explicit_model_provider_prefix(model)
+                .map(|(_, _, bare)| bare)
+                .or_else(|| {
+                    model.split_once(':').and_then(|(method, bare)| {
+                        jcode_provider_core::oauth_account_label(method).map(|_| bare)
+                    })
+                })
+                .unwrap_or(model)
+        });
+        // Only when every ready route fails do we bind a known exhausted pool
+        // login. The request router can then explain the quota failure instead
+        // of silently falling through to an unrelated saved manual API key.
+        for ready in [true, false] {
+            for key in pool.partition(&keys).0 {
+                // Exclusion is authoritative even if a malformed saved pool also
+                // lists the same billing identity among its members.
+                if pool.excluded.iter().any(|excluded| excluded == key) {
+                    continue;
+                }
+                let mut candidates: Vec<_> = routes
+                    .iter()
+                    .filter(|route| route.0 == key && route.3 == ready)
+                    .collect();
+                candidates.sort_by_key(|(_, model, _, _)| {
+                    (
+                        configured_model != Some(model.as_str()),
+                        jcode_provider_core::model_generation_rank(model),
+                    )
+                });
+                for (_, _, spec, _) in candidates {
+                    if self.set_model(spec).is_ok() {
+                        return;
+                    }
+                }
+            }
+        }
     }
 
     pub(super) fn spawn_openai_catalog_refresh_if_needed(&self) {

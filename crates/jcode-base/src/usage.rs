@@ -16,7 +16,6 @@ mod openai_helpers;
 mod openai_reset;
 mod provider_fetch;
 mod remote_accounts;
-pub use remote_accounts::set_remote_account_usage;
 pub use accessors::*;
 pub use anthropic_reset::{
     AnthropicLimitResetOffer, AnthropicLimitResetOutcome, AnthropicLimitResetUnavailable,
@@ -24,8 +23,8 @@ pub use anthropic_reset::{
     invalidate_anthropic_usage_reset_state, prepare_anthropic_limit_reset,
 };
 use api_keys::enqueue_api_key_usage_tasks;
-pub use cache::{cached_account_usage_snapshot, cached_account_usage_status_snapshot};
 use cache::*;
+pub use cache::{cached_account_usage_snapshot, cached_account_usage_status_snapshot};
 pub use jcode_usage_types::{OpenAiResetCredits, ProviderUsage, ProviderUsageProgress, UsageLimit};
 pub use model::*;
 pub use openai_reset::{
@@ -34,6 +33,7 @@ pub use openai_reset::{
     prepare_openai_usage_reset_for_account,
 };
 use provider_fetch::*;
+pub use remote_accounts::set_remote_account_usage;
 
 use anyhow::{Context, Result};
 pub use display::{format_reset_time, format_usage_bar};
@@ -83,6 +83,7 @@ async fn fetch_anthropic_usage_data(access_token: String, cache_key: String) -> 
         };
     }
 
+    let probe_started = Instant::now();
     let client = crate::provider::shared_http_client();
     let response = crate::provider::anthropic::apply_oauth_attribution_headers(
         client
@@ -127,6 +128,16 @@ async fn fetch_anthropic_usage_data(access_token: String, cache_key: String) -> 
         }
     };
 
+    let quota_known = data
+        .five_hour
+        .as_ref()
+        .and_then(|window| window.utilization)
+        .is_some()
+        && data
+            .seven_day
+            .as_ref()
+            .and_then(|window| window.utilization)
+            .is_some();
     let usage = UsageData {
         five_hour: data
             .five_hour
@@ -169,6 +180,21 @@ async fn fetch_anthropic_usage_data(access_token: String, cache_key: String) -> 
         last_error: None,
     };
 
+    if let Some(label) = cache_key.strip_prefix("label:")
+        && quota_known
+        && !usage.is_stale()
+        && [usage.five_hour, usage.seven_day]
+            .into_iter()
+            .chain(usage.seven_day_opus)
+            .chain(usage.model_scoped.iter().map(|window| window.utilization))
+            .all(|ratio| ratio.is_finite() && (0.0..0.99).contains(&ratio))
+    {
+        crate::provider::models::clear_quota_unavailability_after_probe(
+            "claude",
+            label,
+            probe_started,
+        );
+    }
     disk_cache::store_success(&cache_key, &usage);
     store_anthropic_usage(cache_key, usage.clone());
     Ok(usage)

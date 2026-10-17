@@ -209,6 +209,7 @@ pub(super) async fn fetch_openai_usage_for_account(
         return provider_report_from_openai_usage_data(display_name, &cached);
     }
 
+    let probe_started = Instant::now();
     let client = crate::provider::shared_http_client();
     let mut builder = client
         .get(OPENAI_USAGE_URL)
@@ -287,6 +288,24 @@ pub(super) async fn fetch_openai_usage_for_account(
     };
 
     let parsed = parse_openai_usage_payload(&json);
+
+    if let Some(label) = account_label
+        && generation == openai_usage_generation()
+        && !parsed.hard_limit_reached
+        && !parsed.limits.is_empty()
+        && !super::display::usage_reset_passed(
+            parsed.limits.iter().map(|limit| limit.resets_at.as_deref()),
+        )
+        && parsed.limits.iter().all(|limit| {
+            limit.usage_percent.is_finite() && (0.0..99.0).contains(&limit.usage_percent)
+        })
+    {
+        crate::provider::models::clear_quota_unavailability_after_probe(
+            "openai",
+            label,
+            probe_started,
+        );
+    }
 
     // Read-only detail lookup. Failure must not hide otherwise valid usage.
     let available_expirations = if parsed.available_reset_count.is_some_and(|count| count > 0) {

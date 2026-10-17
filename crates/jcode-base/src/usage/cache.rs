@@ -82,6 +82,33 @@ mod account_snapshot_tests {
     use crate::usage::MultiAccountProviderKind;
 
     #[test]
+    fn anthropic_snapshot_either_shared_window_exhausted_and_errors_unknown() {
+        for (five_hour, seven_day, expected) in [
+            (1.0, 0.2, true),
+            (0.2, 1.0, true),
+            (1.0, 1.0, true),
+            (0.2, 0.3, false),
+        ] {
+            let mut usage = UsageData {
+                five_hour,
+                seven_day,
+                fetched_at: Some(Instant::now()),
+                ..Default::default()
+            };
+            let snapshot = anthropic_snapshot_from_usage("scope".into(), None, &usage);
+            assert_eq!(snapshot.exhausted, expected);
+            assert_eq!(snapshot.five_hour_ratio, Some(five_hour));
+            assert_eq!(snapshot.seven_day_ratio, Some(seven_day));
+            usage.last_error = Some("transport failed".into());
+            let unknown = anthropic_snapshot_from_usage("scope".into(), None, &usage);
+            assert!(!unknown.exhausted);
+            assert!(unknown.five_hour_ratio.is_none());
+            assert!(unknown.seven_day_ratio.is_none());
+            assert!(unknown.error.is_some());
+        }
+    }
+
+    #[test]
     fn cached_account_snapshot_is_scoped_fresh_and_nonblocking() {
         let label = "router-cache-only-test";
         let key = format!("label:{label}");
@@ -516,11 +543,12 @@ pub(super) fn anthropic_snapshot_from_usage(
     AccountUsageSnapshot {
         label,
         email,
-        exhausted: usage.five_hour >= 0.99 && usage.seven_day >= 0.99,
+        exhausted: usage.last_error.is_none()
+            && (usage.five_hour >= 0.99 || usage.seven_day >= 0.99),
         primary_label: Some("5h".to_string()),
-        five_hour_ratio: Some(usage.five_hour),
+        five_hour_ratio: usage.last_error.is_none().then_some(usage.five_hour),
         secondary_label: Some("7d".to_string()),
-        seven_day_ratio: Some(usage.seven_day),
+        seven_day_ratio: usage.last_error.is_none().then_some(usage.seven_day),
         resets_at: usage
             .five_hour_resets_at
             .clone()
