@@ -11,16 +11,25 @@ rollups to `session_end` totals: they describe overlapping traffic.
 `daily_model_usage` preserves older clients' provider-native counter semantics.
 The v2 wire contract uses disjoint input/output/cache-read/cache-write buckets
 and an immutable `occurred_at`. Never apply a second cache subtraction to v2.
-The legacy
-`token-value` dashboards estimate historical usage from session-end snapshots.
+The legacy `token-value` dashboards estimate historical usage from session-end
+snapshots.
 Those snapshots cannot reliably attribute a session that switched models, and
 missing session ends cannot be reconstructed from those snapshots alone. Do not
 present either source as a complete provider invoice or as cash expenditure.
+
+Dollar valuation is a separate estimate. The dashboards use the stored model
+catalog and labeled family estimates, not a historical invoice ledger. They do
+not reconstruct every service-tier multiplier, cache lifetime, modality-specific
+rate, subscription discount or historical price change. Keep unpriced coverage
+visible rather than describing unknown inference as free.
 
 ## Required reliability properties
 
 - Persist a usage report before starting asynchronous delivery. Keep its event
   identity and original occurrence time unchanged across retries and restarts.
+- Send retryable v2 reports only to `/v2/usage`. An older server returns 404
+  without modifying legacy counters. Never retry these reports against the old
+  `/v1/event` endpoint or silently fall back to it.
 - Remove a pending report only after a positive durable database acknowledgment.
   A successful backup firehose write alone is not a durable accounting receipt.
 - Deduplicate and update counters atomically on the server. A lost HTTP response
@@ -42,8 +51,10 @@ present either source as a complete provider invoice or as cash expenditure.
    an isolated database first. Do not prune raw history as part of this rollout.
    Migration `0031_usage_report_receipts.sql` requires migrations `0027` and
    earlier. Deploy the worker with its `FIREHOSE_USAGE` binding before releasing
-   the client. A new client must not treat an old server's generic HTTP success
-   as confirmation of durable, idempotent accounting.
+   the client. If deployment order is reversed, v2 reports remain pending on
+   disk until the new endpoint is available. A new client must not treat an old
+   server's generic HTTP success as confirmation of durable, idempotent
+   accounting.
 2. Verify schema readiness, migration order and configured usage backup binding.
 3. Exercise the actual ingestion handler with a fixed report identity:
    submit twice, then verify one counter increment and identical accounting day.
@@ -80,7 +91,10 @@ one million expirations/day or a stalled cron can still outgrow the budget.
 These protections apply to usage that the provider actually reports and the
 client observes. They cannot recover a billed request for which no usage was
 returned, a machine crash before usage was captured, opted-out telemetry,
-permanently lost local storage, or records discarded by older clients.
+permanently lost local storage, or records discarded by older clients. Generic
+helper failures preserve observed usage, but dropping a helper future before it
+returns still needs a separate cancellation observer. Invalid native-compaction
+response JSON cannot expose counters that were never successfully parsed.
 
 A fallback analytics dataset is useful for incident analysis, but its retention,
 sampling and asynchronous delivery mean it is not proof of invoice-grade
