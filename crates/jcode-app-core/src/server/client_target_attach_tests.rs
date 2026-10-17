@@ -51,6 +51,7 @@ fn subscribe(target: &str) -> Request {
         system_prompt: None,
         supports_pdf_panels: false,
         supports_user_response: false,
+        supports_server_failover: false,
         id: 71,
         working_dir: None,
         target_session_id: Some(target.into()),

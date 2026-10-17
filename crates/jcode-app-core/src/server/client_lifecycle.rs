@@ -87,6 +87,8 @@ struct ProcessingMessage {
     images: Vec<(String, String)>,
     system_reminder: Option<String>,
     active_skill: Option<String>,
+    /// Retry on the next pool account after a usage limit (API clients).
+    server_failover: bool,
 }
 
 struct ProcessingState<'a> {
@@ -486,6 +488,7 @@ pub(super) async fn handle_client(
     let mut model_usage_updates_enabled = false;
     let mut supports_pdf_panels = false;
     let mut supports_user_response = false;
+    let mut supports_server_failover = false;
     // Client selfdev status is determined by Subscribe request, not server's env
     let mut client_selfdev = false;
 
@@ -1173,6 +1176,7 @@ pub(super) async fn handle_client(
                         images,
                         system_reminder,
                         active_skill,
+                        server_failover: supports_server_failover,
                     },
                     &client_session_id,
                     &mut ProcessingState {
@@ -1292,6 +1296,7 @@ pub(super) async fn handle_client(
                             images,
                             system_reminder: None,
                             active_skill: None,
+                            server_failover: supports_server_failover,
                         },
                         &client_session_id,
                         &mut ProcessingState {
@@ -1556,6 +1561,7 @@ pub(super) async fn handle_client(
                 system_prompt,
                 supports_pdf_panels: requested_pdf_panels,
                 supports_user_response: requested_user_response,
+                supports_server_failover: requested_server_failover,
                 working_dir: subscribe_working_dir,
                 selfdev,
                 target_session_id,
@@ -1593,6 +1599,7 @@ pub(super) async fn handle_client(
                 continue_on_disconnect = requested_continuation;
                 supports_pdf_panels = requested_pdf_panels;
                 supports_user_response = requested_user_response;
+                supports_server_failover = requested_server_failover;
                 active_terminal_env = terminal_env;
                 current_client_instance_id = client_instance_id.clone();
                 {
@@ -3430,6 +3437,7 @@ async fn start_processing_message(
         images,
         system_reminder,
         active_skill,
+        server_failover,
     } = message;
     if server_reload_starting() {
         crate::logging::info(&format!(
@@ -3513,7 +3521,14 @@ async fn start_processing_message(
         let mut stop_reason = crate::protocol::TurnStopReason::Failure;
         let result = match std::panic::AssertUnwindSafe(crate::hooks::with_client_terminal_env(
             client_terminal_env,
-            process_message_streaming_mpsc(agent, &content, images, system_reminder, event_tx),
+            super::turn_failover::process_message_with_server_failover(
+                agent,
+                &content,
+                images,
+                system_reminder,
+                event_tx,
+                server_failover,
+            ),
         ))
         .catch_unwind()
         .await

@@ -851,6 +851,7 @@ fn subscribe_request(working_dir: Option<&str>) -> Request {
         system_prompt: None,
         supports_pdf_panels: false,
         supports_user_response: false,
+        supports_server_failover: false,
         id: 1,
         working_dir: working_dir.map(str::to_string),
         selfdev: None,
@@ -1001,6 +1002,7 @@ fn reload_starting_rejects_new_turn_without_spawning_processing_task() {
                 images: Vec::new(),
                 system_reminder: None,
                 active_skill: None,
+                server_failover: false,
             },
             "session_guard",
             &mut ProcessingState {
@@ -1102,6 +1104,7 @@ async fn client_initiated_turn_fans_out_stream_and_terminal_events_to_live_attac
             images: Vec::new(),
             system_reminder: None,
             active_skill: None,
+            server_failover: false,
         },
         session_id,
         &mut ProcessingState {
@@ -1227,6 +1230,7 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
                 images: Vec::new(),
                 system_reminder: Some(continuation.to_string()),
                 active_skill: None,
+                server_failover: false,
             },
             session_id,
             &mut ProcessingState {
@@ -1327,6 +1331,7 @@ fn reload_starting_rejects_new_turns_for_multiple_sessions() {
                     images: Vec::new(),
                     system_reminder: None,
                     active_skill: None,
+                    server_failover: false,
                 },
                 session_id,
                 &mut ProcessingState {

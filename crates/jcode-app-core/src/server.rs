@@ -59,6 +59,7 @@ mod swarm_labels;
 mod swarm_mutation_state;
 mod swarm_persistence;
 mod swarm_watchdog;
+mod turn_failover;
 mod util;
 
 pub(super) use self::await_members_state::AwaitMembersRuntime;

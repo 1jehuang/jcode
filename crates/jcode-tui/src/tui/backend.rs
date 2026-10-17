@@ -358,6 +358,7 @@ impl RemoteConnection {
             system_prompt: None,
             supports_pdf_panels: false,
             supports_user_response: false,
+            supports_server_failover: false,
             id: conn.next_request_id,
             working_dir,
             selfdev,

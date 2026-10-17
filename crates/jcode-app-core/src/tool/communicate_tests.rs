@@ -1484,6 +1484,7 @@ impl RawClient {
             system_prompt: None,
             supports_pdf_panels: false,
             supports_user_response: false,
+            supports_server_failover: false,
             id,
             working_dir: Some(working_dir.display().to_string()),
             selfdev: None,

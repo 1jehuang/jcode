@@ -174,6 +174,29 @@ impl Agent {
         result
     }
 
+    /// Re-run the model loop for the turn already in history, without
+    /// appending a new user message. Used after the server switched routes
+    /// because the previous account hit a usage limit: the failed request is
+    /// retried on the new route exactly as if it had never been sent.
+    pub(crate) async fn continue_turn_after_failover(
+        &mut self,
+        system_reminder: Option<String>,
+        event_tx: mpsc::UnboundedSender<ServerEvent>,
+    ) -> Result<()> {
+        if self.is_graceful_shutdown() {
+            return Ok(());
+        }
+        self.current_turn_system_reminder =
+            system_reminder.filter(|value| !value.trim().is_empty());
+        let turn_started_at = Instant::now();
+        let start_message_index = self.message_count();
+        self.fire_turn_start_hook("failover");
+        let result = self.run_turn_streaming_mpsc(event_tx).await;
+        self.current_turn_system_reminder = None;
+        self.fire_turn_end_hook(&result, turn_started_at, start_message_index);
+        result
+    }
+
     /// Append and persist a user message without starting a model turn.
     pub(crate) fn append_user_context_message(
         &mut self,

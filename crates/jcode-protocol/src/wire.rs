@@ -172,6 +172,11 @@ pub enum Request {
         /// Desktop can render user_response tool calls as inline answers.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         supports_user_response: bool,
+        /// The client has no account-router countdown of its own (Desktop,
+        /// SDK). On a usage/rate-limit failure the server switches to the next
+        /// pool-approved account and retries the turn itself.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        supports_server_failover: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         working_dir: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -595,7 +595,7 @@ fn apply_set_model(
     send_model_changed_result(id, result, current, agent, client_event_tx);
 }
 
-fn automatic_failover_source_is_pool_member(agent: &Agent) -> bool {
+pub(super) fn automatic_failover_source_is_pool_member(agent: &Agent) -> bool {
     let provider = agent.provider_handle();
     let name = provider.name().to_ascii_lowercase();
     let name = match name.as_str() {
