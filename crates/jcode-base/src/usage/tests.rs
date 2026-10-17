@@ -60,6 +60,41 @@ fn test_usage_data_becomes_stale_when_reset_time_has_passed() {
 }
 
 #[test]
+fn test_anthropic_error_backoff_survives_expired_last_good_windows() {
+    for (error, ttl) in [
+        (
+            "Usage API error (429 Too Many Requests)",
+            RATE_LIMIT_BACKOFF,
+        ),
+        ("Usage probe timed out", ERROR_BACKOFF),
+    ] {
+        let mut data = UsageData {
+            five_hour: 0.7,
+            five_hour_resets_at: Some("2020-01-01T00:00:00Z".into()),
+            model_scoped: vec![ModelScopedUsageWindow {
+                model_name: "Fable".into(),
+                utilization: 0.9,
+                resets_at: Some("2020-01-01T00:00:00Z".into()),
+            }],
+            fetched_at: Some(Instant::now()),
+            last_error: Some(error.into()),
+            ..Default::default()
+        };
+        assert!(
+            !data.is_stale(),
+            "expired last-good data must not bypass error backoff"
+        );
+        let display = data.display_snapshot();
+        assert_eq!(display.five_hour, 0.0);
+        assert!(display.last_error.is_some());
+        data.fetched_at = Some(Instant::now() - ttl - Duration::from_secs(1));
+        assert!(data.is_stale(), "expired error backoff must allow retry");
+        data.fetched_at = None;
+        assert!(data.is_stale());
+    }
+}
+
+#[test]
 fn test_openai_usage_data_becomes_stale_when_reset_time_has_passed() {
     let data = OpenAIUsageData {
         five_hour: Some(OpenAIUsageWindow {

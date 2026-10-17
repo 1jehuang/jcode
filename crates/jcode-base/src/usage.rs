@@ -11,6 +11,7 @@ mod api_keys;
 mod cache;
 mod disk_cache;
 mod display;
+mod flight;
 mod model;
 mod openai_helpers;
 mod openai_reset;
@@ -70,24 +71,23 @@ static PROVIDER_USAGE_CACHE: std::sync::OnceLock<
 > = std::sync::OnceLock::new();
 
 async fn fetch_anthropic_usage_data(access_token: String, cache_key: String) -> Result<UsageData> {
-    if let Some(cached) = cached_anthropic_usage(&cache_key) {
-        return Ok(cached);
-    }
-    // Short-lived CLI processes (`jcode usage --json`) share one fetch cadence
-    // and one 429 backoff through the persisted cache.
-    if let Some(shared) = disk_cache::fresh(&cache_key) {
-        store_anthropic_usage(cache_key, shared.clone());
-        return match &shared.last_error {
-            Some(error) if shared.fetched_at.is_none() => Err(anyhow::anyhow!(error.clone())),
-            _ => Ok(shared),
-        };
-    }
+    flight::fetch(cache_key.clone(), || {
+        fetch_anthropic_usage_data_uncached(access_token, cache_key, USAGE_URL)
+    })
+    .await
+}
 
+async fn fetch_anthropic_usage_data_uncached(
+    access_token: String,
+    cache_key: String,
+    url: &str,
+) -> Result<UsageData> {
+    let mut request_log = flight::RequestLog::new(&cache_key);
     let probe_started = Instant::now();
     let client = crate::provider::shared_http_client();
     let response = crate::provider::anthropic::apply_oauth_attribution_headers(
         client
-            .get(USAGE_URL)
+            .get(url)
             .header("Accept", "application/json")
             .header("Content-Type", "application/json")
             .header(
@@ -111,10 +111,12 @@ async fn fetch_anthropic_usage_data(access_token: String, cache_key: String) -> 
         }
     };
 
+    request_log.status = Some(response.status().as_u16());
     if !response.status().is_success() {
         let status = response.status();
-        let error_text = response.text().await.unwrap_or_default();
-        let message = format!("Usage API error ({}): {}", status, error_text);
+        // Cache the status immediately: a stalled error body must not discard
+        // a received 429 when an outer timeout cancels the request.
+        let message = format!("Usage API error ({})", status);
         return cache_anthropic_usage_failure(cache_key, message);
     }
 

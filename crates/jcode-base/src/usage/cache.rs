@@ -82,6 +82,30 @@ mod account_snapshot_tests {
     use crate::usage::MultiAccountProviderKind;
 
     #[test]
+    fn anthropic_keys_share_saved_identity_without_exposing_token_prefixes() {
+        let token = "shared-prefix-20chars-account-a";
+        let accounts = [("saved-a", token)];
+        let key =
+            |label| anthropic_usage_cache_key_with_accounts(token, label, accounts.into_iter());
+        assert_eq!(key(Some("saved-a")), "label:saved-a");
+        assert_eq!(key(None), key(Some("saved-a")));
+        assert_eq!(key(Some("default")), key(None));
+        let unknown = anthropic_usage_cache_key_with_accounts(token, None, std::iter::empty());
+        let other = anthropic_usage_cache_key_with_accounts(
+            "shared-prefix-20chars-account-b",
+            None,
+            std::iter::empty(),
+        );
+        assert_ne!(unknown, other);
+        assert!(unknown.starts_with("token:sha256:"));
+        assert!(!unknown.contains("shared-prefix"));
+        assert_eq!(
+            unknown,
+            anthropic_usage_cache_key_with_accounts(token, Some("default"), std::iter::empty())
+        );
+    }
+
+    #[test]
     fn anthropic_snapshot_either_shared_window_exhausted_and_errors_unknown() {
         for (five_hour, seven_day, expected) in [
             (1.0, 0.2, true),
@@ -188,22 +212,28 @@ pub(super) fn invalidate_openai_usage_after_reset(access_token: &str, account_la
 /// Forget one Claude login's quota after a session-limit reset so the next
 /// check fetches fresh limits. `None` clears token-keyed (unlabelled) entries.
 pub(super) fn invalidate_anthropic_usage_after_reset(account_label: Option<&str>) {
+    let label = account_label
+        .map(str::trim)
+        .filter(|label| !label.is_empty());
     if let Ok(mut map) = anthropic_usage_cache().lock() {
-        match account_label
-            .map(str::trim)
-            .filter(|label| !label.is_empty())
-        {
+        match label {
             Some(label) => {
                 map.remove(&format!("label:{label}"));
-                let key = format!("label:{label}");
-                super::disk_cache::invalidate(|candidate| candidate == key);
             }
             None => {
                 map.retain(|key, _| !key.starts_with("token:") && key != "label:default");
-                super::disk_cache::invalidate(|key| {
-                    key.starts_with("token:") || key == "label:default"
-                });
             }
+        }
+    }
+    // Never hold the memory mutex while waiting for the on-disk transaction.
+    // Fetch completion writes disk first, then memory.
+    match label {
+        Some(label) => {
+            let key = format!("label:{label}");
+            super::disk_cache::invalidate(|candidate| candidate == key);
+        }
+        None => {
+            super::disk_cache::invalidate(|key| key.starts_with("token:") || key == "label:default")
         }
     }
     if let Some(cache) = super::PROVIDER_USAGE_CACHE.get()
@@ -215,19 +245,44 @@ pub(super) fn invalidate_anthropic_usage_after_reset(account_label: Option<&str>
 }
 
 pub(super) fn anthropic_usage_cache_key(access_token: &str, account_label: Option<&str>) -> String {
+    let accounts = crate::auth::claude::list_accounts().unwrap_or_default();
+    anthropic_usage_cache_key_with_accounts(
+        access_token,
+        account_label,
+        accounts
+            .iter()
+            .map(|a| (a.label.as_str(), a.access.as_str())),
+    )
+}
+
+fn anthropic_usage_cache_key_with_accounts<'a>(
+    access_token: &str,
+    account_label: Option<&str>,
+    accounts: impl Iterator<Item = (&'a str, &'a str)>,
+) -> String {
+    // Routing passes a token while account polling passes a label. Resolve the
+    // exact full token so both paths share freshness and, critically, backoff.
+    if !access_token.is_empty()
+        && let Some((label, _)) = accounts
+            .into_iter()
+            .find(|(_, token)| *token == access_token)
+    {
+        return format!("label:{label}");
+    }
     if let Some(label) = account_label
         .map(str::trim)
-        .filter(|label| !label.is_empty())
+        .filter(|label| !label.is_empty() && *label != "default")
     {
         return format!("label:{}", label);
     }
 
-    let prefix = access_token
-        .get(..20)
-        .unwrap_or(access_token)
-        .trim()
-        .to_string();
-    format!("token:{}", prefix)
+    // Unknown/external credentials have no stable saved label. Never persist
+    // credential prefixes, and never merge tokens that share the same prefix.
+    use sha2::{Digest, Sha256};
+    format!(
+        "token:sha256:{}",
+        hex::encode(Sha256::digest(access_token.as_bytes()))
+    )
 }
 
 pub(super) fn openai_usage_cache_key(access_token: &str, account_label: Option<&str>) -> String {
@@ -251,6 +306,16 @@ pub(super) fn cached_anthropic_usage(cache_key: &str) -> Option<UsageData> {
     let map = cache.lock().ok()?;
     let cached = map.get(cache_key)?.clone();
     (!cached.is_stale()).then_some(cached)
+}
+
+/// Credential refresh callers must respect the shared backoff too, before
+/// attempting any network operation with an expired credential.
+pub(super) fn cached_or_shared_anthropic_usage(cache_key: &str) -> Option<UsageData> {
+    cached_anthropic_usage(cache_key).or_else(|| {
+        let data = super::disk_cache::fresh(cache_key)?;
+        store_anthropic_usage(cache_key.to_string(), data.clone());
+        Some(data)
+    })
 }
 
 pub(super) fn store_anthropic_usage(cache_key: String, data: UsageData) {

@@ -8,8 +8,10 @@
 
 use super::{CACHE_DURATION, ERROR_BACKOFF, ModelScopedUsageWindow, RATE_LIMIT_BACKOFF, UsageData};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::fs::{File, OpenOptions};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 /// Last good limits stay useful while the endpoint is throttled. Rolled-over
@@ -66,8 +68,52 @@ fn load() -> HashMap<String, Entry> {
         .unwrap_or_default()
 }
 
+fn open_lock(path: &Path) -> std::io::Result<File> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut options = OpenOptions::new();
+    options.create(true).read(true).write(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
+/// The lock inode is separate from the JSON file, which atomic writes replace.
+/// Never delete lock files: a second inode would permit concurrent owners.
+fn map_lock(path: &Path) -> std::io::Result<File> {
+    let lock = open_lock(&path.with_extension("lock"))?;
+    lock.lock()?;
+    Ok(lock)
+}
+
+/// Hold across the cache recheck and HTTP request. Closing the file releases the
+/// lock on cancellation or process exit. Contention never blocks a Tokio worker.
+pub(super) async fn lock_probe(key: &str) -> anyhow::Result<File> {
+    let root = crate::storage::jcode_dir()?;
+    let name = hex::encode(Sha256::digest(key.as_bytes()));
+    let lock = open_lock(
+        &root
+            .join("anthropic_usage_locks")
+            .join(format!("{name}.lock")),
+    )?;
+    loop {
+        match lock.try_lock() {
+            Ok(()) => return Ok(lock),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+        }
+    }
+}
+
 fn update(key: &str, change: impl FnOnce(&mut Entry)) {
     let Some(path) = path() else { return };
+    let Ok(_lock) = map_lock(&path) else { return };
     let mut map = load();
     change(map.entry(key.to_string()).or_default());
     // Drop logins whose only data is long expired.
@@ -126,7 +172,7 @@ pub(super) fn fresh(key: &str) -> Option<UsageData> {
         } else {
             ERROR_BACKOFF
         };
-        if age(at) < backoff && good.is_none_or(|good| good.fetched_unix_ms < at) {
+        if age(at) < backoff && good.is_none_or(|good| good.fetched_unix_ms <= at) {
             return Some(match good {
                 // Report stale-but-real limits and note why they are stale.
                 Some(good) => {
@@ -185,6 +231,7 @@ pub(super) fn store_error(key: &str, error: &str) {
 /// Forget persisted data for a login after a limit reset.
 pub(super) fn invalidate(matches: impl Fn(&str) -> bool) {
     let Some(path) = path() else { return };
+    let Ok(_lock) = map_lock(&path) else { return };
     let mut map = load();
     let before = map.len();
     map.retain(|key, _| !matches(key));
@@ -196,6 +243,154 @@ pub(super) fn invalidate(matches: impl Fn(&str) -> bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const WORKER_ENV: &str = "JCODE_USAGE_CACHE_TEST_WORKER";
+
+    // Run this test in isolated copies of the real test executable. It never
+    // reads a user's credentials or contacts a provider.
+    #[test]
+    fn subprocess_worker() {
+        let Ok(mode) = std::env::var(WORKER_ENV) else {
+            return;
+        };
+        let root = crate::storage::jcode_dir().unwrap();
+        let started = Instant::now();
+        while !root.join("start-workers").exists() {
+            assert!(started.elapsed() < Duration::from_secs(15));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        if mode == "writes" {
+            let index = std::env::var("JCODE_USAGE_CACHE_TEST_INDEX").unwrap();
+            for entry in 0..20 {
+                store_success(&format!("label:worker-{index}-{entry}"), &sample());
+            }
+        } else {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let key = "label:subprocess-flight".to_string();
+                let data = super::super::flight::fetch(key.clone(), || async {
+                    use std::io::Write;
+                    let mut counter = OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(root.join("probes"))
+                        .unwrap();
+                    counter.write_all(b"probe\n").unwrap();
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    super::super::cache_anthropic_usage_failure(
+                        key,
+                        "Usage API error (429 Too Many Requests)".into(),
+                    )
+                })
+                .await
+                .unwrap();
+                assert_eq!(data.five_hour, 0.4);
+                assert!(data.last_error.unwrap().contains("429"));
+            });
+        }
+    }
+
+    fn run_workers(mode: &str, count: usize) {
+        let root = crate::storage::jcode_dir().unwrap();
+        let mut workers = Vec::new();
+        for index in 0..count {
+            workers.push(
+                std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "usage::disk_cache::tests::subprocess_worker",
+                        "--nocapture",
+                    ])
+                    .env(WORKER_ENV, mode)
+                    .env("JCODE_USAGE_CACHE_TEST_INDEX", index.to_string())
+                    .env("JCODE_HOME", &root)
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .unwrap(),
+            );
+        }
+        std::fs::write(root.join("start-workers"), b"ready").unwrap();
+        for worker in workers {
+            let output = worker.wait_with_output().unwrap();
+            assert!(
+                output.status.success(),
+                "fixture worker failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    #[test]
+    fn subprocess_updates_preserve_every_account() {
+        with_home(|| {
+            run_workers("writes", 6);
+            let map = load();
+            assert_eq!(map.len(), 120);
+            for index in 0..6 {
+                for entry in 0..20 {
+                    assert!(map.contains_key(&format!("label:worker-{index}-{entry}")));
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn subprocess_probes_coalesce_and_share_rate_limit_backoff() {
+        with_home(|| {
+            let mut map = HashMap::new();
+            map.insert(
+                "label:subprocess-flight".to_string(),
+                Entry {
+                    last_good: Some(Snapshot {
+                        fetched_unix_ms: now_ms() - 600_000,
+                        five_hour: 0.4,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            );
+            crate::storage::write_json_secret(&path().unwrap(), &map).unwrap();
+            run_workers("probe", 6);
+            assert_eq!(
+                std::fs::read_to_string(crate::storage::jcode_dir().unwrap().join("probes"))
+                    .unwrap(),
+                "probe\n"
+            );
+            let data = fresh("label:subprocess-flight").unwrap();
+            assert_eq!(data.five_hour, 0.4);
+            assert!(data.last_error.unwrap().contains("429"));
+        });
+    }
+
+    #[test]
+    fn equal_timestamp_failure_takes_precedence_over_success() {
+        with_home(|| {
+            let at = now_ms();
+            let map = HashMap::from([(
+                "label:equal".to_string(),
+                Entry {
+                    last_good: Some(Snapshot {
+                        fetched_unix_ms: at,
+                        ..Default::default()
+                    }),
+                    error: Some("Usage API error (429 Too Many Requests)".into()),
+                    error_unix_ms: Some(at),
+                },
+            )]);
+            crate::storage::write_json_secret(&path().unwrap(), &map).unwrap();
+            assert!(
+                fresh("label:equal")
+                    .unwrap()
+                    .last_error
+                    .unwrap()
+                    .contains("429")
+            );
+        });
+    }
 
     fn with_home<T>(f: impl FnOnce() -> T) -> T {
         let _guard = crate::storage::lock_test_env();
@@ -253,6 +448,52 @@ mod tests {
             assert!(throttled.last_error.unwrap().contains("429"));
             invalidate(|key| key == "label:b");
             assert!(fresh("label:b").is_none());
+        });
+    }
+
+    #[test]
+    fn expired_backoff_allows_one_new_probe_and_failure_keeps_limits_unknown() {
+        with_home(|| {
+            let key = "label:expired-backoff-fixture";
+            let map = HashMap::from([(
+                key.to_string(),
+                Entry {
+                    last_good: Some(Snapshot {
+                        fetched_unix_ms: now_ms() - 1_000_000,
+                        five_hour: 0.4,
+                        ..Default::default()
+                    }),
+                    error: Some("Usage API error (429 Too Many Requests)".into()),
+                    error_unix_ms: Some(now_ms() - 901_000),
+                },
+            )]);
+            crate::storage::write_json_secret(&path().unwrap(), &map).unwrap();
+            assert!(fresh(key).is_none());
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let data = super::super::flight::fetch(key.into(), || async {
+                    super::super::cache_anthropic_usage_failure(
+                        key.into(),
+                        "Usage API error (429 Too Many Requests)".into(),
+                    )
+                })
+                .await
+                .unwrap();
+                assert_eq!(data.five_hour, 0.4);
+                let snapshot =
+                    super::super::anthropic_snapshot_from_usage("fixture".into(), None, &data);
+                assert!(snapshot.error.is_some());
+                assert_eq!(snapshot.five_hour_ratio, None);
+                assert!(!snapshot.exhausted);
+                super::super::flight::fetch(key.into(), || async {
+                    panic!("renewed backoff must be reused")
+                })
+                .await
+                .unwrap();
+            });
         });
     }
 }

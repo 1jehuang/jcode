@@ -151,7 +151,7 @@ pub async fn fetch_oauth_account_usage(
                 bounded_probe(account.label.clone(), account.email.clone(), async move {
                     let cache_key =
                         anthropic_usage_cache_key(&account.access, Some(&account.label));
-                    let usage = if let Some(cached) = cached_anthropic_usage(&cache_key) {
+                    let usage = if let Some(cached) = cached_or_shared_anthropic_usage(&cache_key) {
                         Ok(cached)
                     } else {
                         let now = chrono::Utc::now().timestamp_millis();

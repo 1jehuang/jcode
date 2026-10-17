@@ -110,6 +110,17 @@ impl UsageData {
 
     /// Check if data is stale and should be refreshed
     pub fn is_stale(&self) -> bool {
+        // A last-good window can roll over while a failed probe is backing
+        // off. Its old reset must not schedule another refresh every frame.
+        // display_snapshot still clears rolled-over limits independently.
+        if self.last_error.is_some() {
+            let ttl = if self.is_rate_limited() {
+                RATE_LIMIT_BACKOFF
+            } else {
+                ERROR_BACKOFF
+            };
+            return self.fetched_at.is_none_or(|at| at.elapsed() > ttl);
+        }
         if usage_reset_passed([
             self.five_hour_resets_at.as_deref(),
             self.seven_day_resets_at.as_deref(),
@@ -121,19 +132,8 @@ impl UsageData {
             return true;
         }
 
-        match self.fetched_at {
-            Some(t) => {
-                let ttl = if self.is_rate_limited() {
-                    RATE_LIMIT_BACKOFF
-                } else if self.last_error.is_some() {
-                    ERROR_BACKOFF
-                } else {
-                    CACHE_DURATION
-                };
-                t.elapsed() > ttl
-            }
-            None => true,
-        }
+        self.fetched_at
+            .is_none_or(|at| at.elapsed() > CACHE_DURATION)
     }
 
     /// Check if the last error was a rate limit (429)

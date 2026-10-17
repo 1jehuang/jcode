@@ -16,10 +16,16 @@ async fn fetch_usage() -> Result<UsageData> {
     let creds = auth::claude::load_credentials().context("Failed to load Claude credentials")?;
 
     let now = chrono::Utc::now().timestamp_millis();
-    let active_label =
-        auth::claude::active_account_label().unwrap_or_else(auth::claude::primary_account_label);
+    let active_label = auth::claude::active_account_label();
+    let initial_key = anthropic_usage_cache_key(&creds.access_token, active_label.as_deref());
+    if let Some(data) = cached_or_shared_anthropic_usage(&initial_key) {
+        return Ok(data);
+    }
+    let refresh_label = active_label
+        .clone()
+        .unwrap_or_else(auth::claude::primary_account_label);
     let access_token = if creds.expires_at < now + 300_000 && !creds.refresh_token.is_empty() {
-        match auth::oauth::refresh_claude_tokens_for_account(&creds.refresh_token, &active_label)
+        match auth::oauth::refresh_claude_tokens_for_account(&creds.refresh_token, &refresh_label)
             .await
         {
             Ok(refreshed) => refreshed.access_token,
@@ -29,7 +35,7 @@ async fn fetch_usage() -> Result<UsageData> {
         creds.access_token
     };
 
-    let cache_key = anthropic_usage_cache_key(&access_token, Some(&active_label));
+    let cache_key = anthropic_usage_cache_key(&access_token, active_label.as_deref());
     fetch_anthropic_usage_data(access_token, cache_key).await
 }
 
@@ -298,7 +304,7 @@ pub fn fetch_usage_for_account_sync(
 ) -> Result<UsageData> {
     let cache_key = anthropic_usage_cache_key(access_token, None);
 
-    if let Some(cached) = cached_anthropic_usage(&cache_key) {
+    if let Some(cached) = cached_or_shared_anthropic_usage(&cache_key) {
         return Ok(cached);
     }
 

@@ -21,8 +21,13 @@ pub(super) async fn fetch_anthropic_usage_for_token(
     account_label: String,
     expires_at: i64,
 ) -> ProviderUsage {
+    let initial_key = anthropic_usage_cache_key(&access_token, Some(&account_label));
+    let cached = cached_or_shared_anthropic_usage(&initial_key);
     let now_ms = chrono::Utc::now().timestamp_millis();
-    let access_token = if expires_at < now_ms + 300_000 && !refresh_token.is_empty() {
+    let access_token = if cached.is_none()
+        && expires_at < now_ms + 300_000
+        && !refresh_token.is_empty()
+    {
         match crate::auth::oauth::refresh_claude_tokens_for_account(&refresh_token, &account_label)
             .await
         {
@@ -46,7 +51,11 @@ pub(super) async fn fetch_anthropic_usage_for_token(
     };
 
     let cache_key = anthropic_usage_cache_key(&access_token, Some(&account_label));
-    match fetch_anthropic_usage_data(access_token.clone(), cache_key).await {
+    let usage = match cached {
+        Some(data) => Ok(data),
+        None => fetch_anthropic_usage_data(access_token.clone(), cache_key).await,
+    };
+    match usage {
         Ok(data) => {
             let mut report = provider_report_from_usage_data(display_name, &data);
             // Availability can be inspected before reaching the five-hour wall.
