@@ -102,7 +102,35 @@ impl McpSchemaCache {
         let Some(path) = cache_path() else {
             return Self::default();
         };
-        let Ok(content) = std::fs::read_to_string(&path) else {
+        // Every session parses this (~1MB) file at spawn and again after each
+        // of its MCP connections, so a reload storm parsed it hundreds of times.
+        // Reuse the parsed copy while the file is unchanged.
+        type Memo = Option<(PathBuf, std::time::SystemTime, u64, McpSchemaCache)>;
+        static MEMO: std::sync::LazyLock<std::sync::Mutex<Memo>> =
+            std::sync::LazyLock::new(Default::default);
+        let stamp = std::fs::metadata(&path)
+            .ok()
+            .and_then(|meta| Some((meta.modified().ok()?, meta.len())));
+        if let Some((mtime, len)) = stamp
+            && let Ok(memo) = MEMO.lock()
+            && let Some((memo_path, memo_mtime, memo_len, cache)) = memo.as_ref()
+            && *memo_path == path
+            && *memo_mtime == mtime
+            && *memo_len == len
+        {
+            return cache.clone();
+        }
+        let loaded = Self::load_uncached(&path);
+        if let Some((mtime, len)) = stamp
+            && let Ok(mut memo) = MEMO.lock()
+        {
+            *memo = Some((path, mtime, len, loaded.clone()));
+        }
+        loaded
+    }
+
+    fn load_uncached(path: &std::path::Path) -> Self {
+        let Ok(content) = std::fs::read_to_string(path) else {
             return Self::default();
         };
         match serde_json::from_str::<Self>(&content) {
