@@ -671,11 +671,25 @@ mod tests {
         let error = result.err().expect("must time out");
         assert!(format!("{error:#}").contains("timed out"));
         assert!(start.elapsed() < Duration::from_secs(3));
-        let pid: i32 = std::fs::read_to_string(pid_file)
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
+        // The shell writes the pid file right after spawn; under load that
+        // write can land after the timeout error returns, so poll instead of
+        // reading once and failing on a not-yet-written file.
+        let pid: i32 = {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                let pid = std::fs::read_to_string(&pid_file)
+                    .ok()
+                    .and_then(|content| content.trim().parse().ok());
+                if let Some(pid) = pid {
+                    break pid;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "child never wrote its pid file"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        };
         assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "child must be reaped");
     }
 

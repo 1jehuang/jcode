@@ -188,9 +188,9 @@ sys.exit(1 if mode in ('warning', 'legacy-warning') else 0)
             let (stream, _) = listener.accept().unwrap();
             // The flow's python fixture runs before the notification lands; under
             // full-suite load that spawn can take seconds. Hang guard, not latency budget.
-            stream
-                .set_read_timeout(Some(Duration::from_secs(10)))
-                .unwrap();
+            // If the writer already sent and closed, macOS rejects SO_RCVTIMEO with
+            // EINVAL, but the line is already buffered and the read returns at once.
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
             let mut line = String::new();
             std::io::BufReader::new(stream)
                 .read_line(&mut line)
