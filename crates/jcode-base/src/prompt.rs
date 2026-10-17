@@ -772,7 +772,44 @@ where
 }
 
 /// Get git branch and status summary
+///
+/// Every connecting client builds a session context, and a reload reconnects
+/// dozens at once, each forking three `git` processes for usually the same
+/// repo (avg 0.8s, up to 2.4s under that storm). Share one probe per
+/// directory across concurrent callers and reuse it briefly. The TTL is short
+/// enough that a genuinely new session still sees current status.
 fn get_git_info(working_dir: Option<&Path>) -> Option<String> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, LazyLock, Mutex};
+    use std::time::{Duration, Instant};
+
+    const TTL: Duration = Duration::from_secs(3);
+    type Slot = Arc<Mutex<Option<(Instant, Option<String>)>>>;
+    static CACHE: LazyLock<Mutex<HashMap<Option<std::path::PathBuf>, Slot>>> =
+        LazyLock::new(Default::default);
+
+    let key = working_dir.map(Path::to_path_buf);
+    let slot = CACHE
+        .lock()
+        .map(|mut cache| cache.entry(key).or_default().clone())
+        .ok();
+    let Some(slot) = slot else {
+        return get_git_info_uncached(working_dir);
+    };
+    // Holding the per-directory lock while probing makes concurrent callers
+    // for the same repo wait for one result instead of forking their own.
+    let mut entry = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some((at, info)) = entry.as_ref()
+        && at.elapsed() < TTL
+    {
+        return info.clone();
+    }
+    let info = get_git_info_uncached(working_dir);
+    *entry = Some((Instant::now(), info.clone()));
+    info
+}
+
+fn get_git_info_uncached(working_dir: Option<&Path>) -> Option<String> {
     let mut command = Command::new("git");
     if let Some(dir) = working_dir {
         command.current_dir(dir);
