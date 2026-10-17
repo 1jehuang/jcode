@@ -293,7 +293,7 @@ impl MultiProvider {
             // the caller's cancellable countdown has accepted this exact route.
             return Err(anyhow!(prompt.to_error_message()));
         }
-        if let Some(current) = self.selected_account_for_provider(provider) {
+        if let Some(current) = current {
             let key = Self::provider_key(provider);
             let pool = crate::auth::account_pool::AccountPool::load();
             if saved_account_labels(key).contains(&current)
