@@ -12,6 +12,8 @@ use std::time::Duration;
 const PROVIDER_ENV: &str = "JCODE_MEMORY_JEV_PROVIDER";
 const BROWSER_PROVIDER_ENV: &str = "JCODE_BROWSER_JEV_PROVIDER";
 const VOICE_PROVIDER_ENV: &str = "JCODE_VOICE_JEV_PROVIDER";
+const LAYA_BASE_URL_ENV: &str = "JCODE_LAYA_BASE_URL";
+const LAYA_DEFAULT_BASE: &str = "http://127.0.0.1:8080";
 const MAX_REQUEST_BYTES: usize = 80 * 1024;
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 const MAX_ME_BYTES: usize = 16 * 1024;
@@ -88,6 +90,7 @@ impl JevPurpose {
 enum JevProvider {
     OpenRouter,
     TypeSafe,
+    Laya,
     Aimlapi,
     Jcode,
 }
@@ -97,6 +100,7 @@ impl JevProvider {
         match self {
             Self::OpenRouter => "openrouter",
             Self::TypeSafe => "typesafe",
+            Self::Laya => "laya",
             Self::Aimlapi => "aimlapi",
             Self::Jcode => "jcode",
         }
@@ -106,6 +110,7 @@ impl JevProvider {
         match self {
             Self::OpenRouter => ("OPENROUTER_API_KEY", "openrouter.env"),
             Self::TypeSafe => ("TYPESAFE_API_KEY", "typesafe.env"),
+            Self::Laya => ("LAYA_API_KEY", "laya.env"),
             Self::Aimlapi => ("AIMLAPI_API_KEY", "aimlapi.env"),
             Self::Jcode => (
                 crate::subscription_catalog::JCODE_API_KEY_ENV,
@@ -116,7 +121,7 @@ impl JevProvider {
 
     fn max_questions(self) -> usize {
         match self {
-            Self::TypeSafe => TYPESAFE_MAX_QUESTIONS,
+            Self::TypeSafe | Self::Laya => TYPESAFE_MAX_QUESTIONS,
             _ => MAX_QUESTIONS,
         }
     }
@@ -125,6 +130,7 @@ impl JevProvider {
         match self {
             Self::OpenRouter | Self::Jcode => "typesafe/jev-1.13",
             Self::TypeSafe => "jev-latest",
+            Self::Laya => "laya-latest",
             Self::Aimlapi => "typesafe/jev",
         }
     }
@@ -133,6 +139,7 @@ impl JevProvider {
         Ok(match self {
             Self::OpenRouter => "https://openrouter.ai/api/alpha/decisions".into(),
             Self::TypeSafe => "https://api.typesafe.ai/v1/systemone".into(),
+            Self::Laya => laya_endpoint(gateway_base)?,
             Self::Aimlapi => "https://api.aimlapi.com/v1/decisions".into(),
             Self::Jcode => format!("{}/decisions", trusted_gateway_base(gateway_base)?),
         })
@@ -180,8 +187,9 @@ impl JevClient {
 
     fn for_purpose(purpose: JevPurpose) -> Result<Self> {
         let (provider, api_key, endpoint, me_endpoint) = Self::resolve(purpose)?;
+        let bypass_proxy = should_bypass_proxy(provider, &endpoint);
         let build = || {
-            client_builder()
+            client_builder_for(bypass_proxy)
                 .build()
                 .map_err(|_| anyhow!("Could not initialize the Jev decision client"))
         };
@@ -220,10 +228,10 @@ impl JevClient {
         } else {
             resolve_with(&selector, load)?
         };
-        let base = if provider == JevProvider::Jcode {
-            crate::subscription_api::configured_api_base()
-        } else {
-            String::new()
+        let base = match provider {
+            JevProvider::Jcode => crate::subscription_api::configured_api_base(),
+            JevProvider::Laya => configured_laya_base(),
+            _ => String::new(),
         };
         let endpoint = provider.endpoint(&base)?;
         let me_endpoint = if provider == JevProvider::Jcode {
@@ -364,9 +372,11 @@ impl JevClient {
     async fn send_once(&self, client: &Client, endpoint: &str, body: Vec<u8>) -> Result<Response> {
         let mut request = client
             .post(endpoint)
-            .bearer_auth(&self.api_key)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body);
+        if !self.api_key.is_empty() {
+            request = request.bearer_auth(&self.api_key);
+        }
         if self.provider == JevProvider::Jcode && self.purpose == JevPurpose::Browser {
             // The gateway budgets browser handoffs separately so background
             // memory recall cannot exhaust interactive browsing.
@@ -417,11 +427,33 @@ fn retry_after(response: &Response) -> Option<Duration> {
     (delay <= MAX_RETRY_AFTER).then_some(delay)
 }
 
+#[cfg(test)]
 fn client_builder() -> reqwest::ClientBuilder {
-    Client::builder()
+    client_builder_for(false)
+}
+
+fn client_builder_for(bypass_proxy: bool) -> reqwest::ClientBuilder {
+    let builder = Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(25))
-        .redirect(reqwest::redirect::Policy::none())
+        .redirect(reqwest::redirect::Policy::none());
+    if bypass_proxy {
+        builder.no_proxy()
+    } else {
+        builder
+    }
+}
+
+/// Local/private HTTP endpoints (loopback, LAN, Tailscale) must connect directly
+/// rather than routing plaintext request bodies and bearer tokens through an
+/// ambient `HTTP_PROXY` / `ALL_PROXY`.
+fn should_bypass_proxy(provider: JevProvider, endpoint: &str) -> bool {
+    endpoint.starts_with("http://")
+        || (provider == JevProvider::Laya
+            && Url::parse(endpoint)
+                .ok()
+                .and_then(|url| url.host_str().map(is_trusted_local_or_private_host))
+                .unwrap_or(true))
 }
 
 fn resolve_voice_with(
@@ -430,18 +462,18 @@ fn resolve_voice_with(
 ) -> Result<(JevProvider, String)> {
     match selector.trim().to_ascii_lowercase().as_str() {
         "auto" => resolve_providers(&[JevProvider::Jcode, JevProvider::TypeSafe], load),
-        "typesafe" | "jcode" | "subscription" | "jcode-subscription" => {
+        "typesafe" | "laya" | "jcode" | "subscription" | "jcode-subscription" => {
             resolve_with(selector, load)
         }
         _ => bail!(
-            "Invalid voice Jev provider. Choose auto, typesafe, or jcode; voice never uses OpenRouter or AIMLAPI"
+            "Invalid voice Jev provider. Choose auto, typesafe, laya, or jcode; voice never uses OpenRouter or AIMLAPI"
         ),
     }
 }
 
 fn resolve_with(
     selector: &str,
-    load: impl FnMut(&str, &str) -> Option<String>,
+    mut load: impl FnMut(&str, &str) -> Option<String>,
 ) -> Result<(JevProvider, String)> {
     let providers: &[JevProvider] = match selector.trim().to_ascii_lowercase().as_str() {
         "auto" => &[
@@ -456,11 +488,101 @@ fn resolve_with(
         ],
         "openrouter" => &[JevProvider::OpenRouter],
         "typesafe" => &[JevProvider::TypeSafe],
+        "laya" => return resolve_laya_with(&mut load),
         "aimlapi" => &[JevProvider::Aimlapi],
         "jcode" | "subscription" | "jcode-subscription" => &[JevProvider::Jcode],
-        _ => bail!("Invalid Jev provider. Choose auto, openrouter, typesafe, aimlapi, or jcode"),
+        _ => bail!("Invalid Jev provider. Choose auto, laya, openrouter, typesafe, aimlapi, or jcode"),
     };
     resolve_providers(providers, load)
+}
+
+fn resolve_laya_with(
+    load: &mut impl FnMut(&str, &str) -> Option<String>,
+) -> Result<(JevProvider, String)> {
+    let (env, file) = JevProvider::Laya.credentials();
+    if let Some(key) = load(env, file) {
+        let key = jcode_provider_env::sanitize_secret_value(&key);
+        if !key.is_empty() {
+            ensure!(
+                reqwest::header::HeaderValue::from_str(&format!("Bearer {key}")).is_ok(),
+                "The selected Jev provider credential is not a valid HTTP bearer value"
+            );
+            return Ok((JevProvider::Laya, key.to_owned()));
+        }
+    }
+    Ok((JevProvider::Laya, String::new()))
+}
+
+fn configured_laya_base() -> String {
+    if let Some(base) =
+        crate::provider_catalog::load_env_value_from_env_or_config(LAYA_BASE_URL_ENV, "laya.env")
+            .or_else(|| {
+                crate::provider_catalog::load_env_value_from_env_or_config(
+                    "LAYA_BASE_URL",
+                    "laya.env",
+                )
+            })
+    {
+        let trimmed = jcode_provider_env::sanitize_secret_value(&base);
+        if !trimmed.is_empty() {
+            return trimmed.to_owned();
+        }
+    }
+    LAYA_DEFAULT_BASE.to_owned()
+}
+
+fn is_trusted_local_or_private_host(host: &str) -> bool {
+    let lower = host.to_ascii_lowercase();
+    lower == "localhost"
+        || lower.ends_with(".ts.net")
+        || lower.ends_with(".local")
+        || host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| match ip {
+                std::net::IpAddr::V4(v4) => {
+                    v4.is_loopback()
+                        || v4.is_private()
+                        || (v4.octets()[0] == 100 && (64..=127).contains(&v4.octets()[1]))
+                }
+                std::net::IpAddr::V6(v6) => {
+                    v6.is_loopback() || (v6.segments()[0] & 0xfe00) == 0xfc00
+                }
+            })
+}
+
+fn trusted_laya_base(base: &str) -> Result<String> {
+    let url = Url::parse(base.trim()).map_err(|_| anyhow!("Invalid Laya base URL"))?;
+    let trusted_http_host = url.host_str().is_some_and(is_trusted_local_or_private_host);
+    ensure!(
+        url.host_str().is_some()
+            && (url.scheme() == "https" || (url.scheme() == "http" && trusted_http_host))
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none(),
+        "Laya endpoint requires HTTPS (HTTP only for loopback, private LAN, or Tailscale), without URL credentials, query, or fragment"
+    );
+    Ok(url.as_str().trim_end_matches('/').to_owned())
+}
+
+fn laya_endpoint(base: &str) -> Result<String> {
+    let effective = if base.trim().is_empty() {
+        LAYA_DEFAULT_BASE
+    } else {
+        base.trim()
+    };
+    let root = trusted_laya_base(effective)?;
+    if let Some(stripped) = root
+        .strip_suffix("/v1/systemone")
+        .or_else(|| root.strip_suffix("/v1/decisions"))
+        .or_else(|| root.strip_suffix("/v1"))
+    {
+        Ok(format!("{stripped}/v1/systemone"))
+    } else {
+        Ok(format!("{root}/v1/systemone"))
+    }
 }
 
 fn resolve_providers(
@@ -801,6 +923,13 @@ mod tests {
             provider.endpoint("").unwrap(),
             "https://api.typesafe.ai/v1/systemone"
         );
+        let (provider, _) = resolve_voice_with("laya", |_, _| None).unwrap();
+        assert_eq!(provider, JevProvider::Laya);
+        assert_eq!(provider.model(), "laya-latest");
+        assert_eq!(
+            provider.endpoint("").unwrap(),
+            "http://127.0.0.1:8080/v1/systemone"
+        );
         for selector in ["auto", "typesafe", "jcode"] {
             let error = resolve_voice_with(selector, |env, _| {
                 assert!(matches!(env, "JCODE_API_KEY" | "TYPESAFE_API_KEY"));
@@ -950,6 +1079,14 @@ mod tests {
                 "jev-latest",
             ),
             (
+                "laya",
+                JevProvider::Laya,
+                "LAYA_API_KEY",
+                "laya.env",
+                "http://127.0.0.1:8080/v1/systemone",
+                "laya-latest",
+            ),
+            (
                 "aimlapi",
                 JevProvider::Aimlapi,
                 "AIMLAPI_API_KEY",
@@ -974,10 +1111,48 @@ mod tests {
             assert_eq!(provider, expected);
             assert_eq!(secret, format!("test-{selector}"));
             assert_eq!(
-                provider.endpoint("https://api.jcode.sh/v1/").unwrap(),
+                provider.endpoint(if provider == JevProvider::Laya {
+                    ""
+                } else {
+                    "https://api.jcode.sh/v1/"
+                }).unwrap(),
                 endpoint
             );
             assert_eq!(provider.model(), model);
+        }
+        // Laya works without an API key on loopback and normalizes custom base URLs.
+        let (provider, secret) = resolve_with("laya", |_, _| None).unwrap();
+        assert_eq!(provider, JevProvider::Laya);
+        assert!(secret.is_empty());
+        assert_eq!(
+            JevProvider::Laya.endpoint("http://127.0.0.1:8000").unwrap(),
+            "http://127.0.0.1:8000/v1/systemone"
+        );
+        assert_eq!(
+            JevProvider::Laya
+                .endpoint("http://localhost:8080/v1")
+                .unwrap(),
+            "http://localhost:8080/v1/systemone"
+        );
+        assert_eq!(
+            JevProvider::Laya
+                .endpoint("http://100.87.178.69:8000")
+                .unwrap(),
+            "http://100.87.178.69:8000/v1/systemone"
+        );
+        assert_eq!(
+            JevProvider::Laya
+                .endpoint("http://node.tailnet.ts.net:8000/v1/decisions")
+                .unwrap(),
+            "http://node.tailnet.ts.net:8000/v1/systemone"
+        );
+        for invalid in [
+            "http://public.example.com:8080",
+            "http://user:secret@127.0.0.1:8080",
+            "http://127.0.0.1:8080?token=secret",
+            "http://127.0.0.1:8080#frag",
+        ] {
+            assert!(JevProvider::Laya.endpoint(invalid).is_err(), "{invalid}");
         }
     }
 
@@ -1983,5 +2158,81 @@ mod tests {
             assert_eq!(requests.len(), 1);
             assert!(requests[0].starts_with("GET /v1/me "));
         }
+    }
+
+    #[tokio::test]
+    async fn laya_local_and_private_requests_bypass_http_proxy_including_voice_hedges() {
+        let _guard = crate::storage::lock_test_env();
+        let proxy_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        proxy_listener.set_nonblocking(true).unwrap();
+        let proxy_url = format!("http://{}", proxy_listener.local_addr().unwrap());
+
+        let (base, seen) =
+            concurrent_mock(vec![(Duration::from_secs(3), 200), (Duration::ZERO, 200)]);
+
+        let prev_http_proxy = std::env::var_os("HTTP_PROXY");
+        let prev_all_proxy = std::env::var_os("ALL_PROXY");
+        let prev_no_proxy = std::env::var_os("NO_PROXY");
+        let prev_voice_provider = std::env::var_os(VOICE_PROVIDER_ENV);
+        let prev_laya_base = std::env::var_os(LAYA_BASE_URL_ENV);
+        let prev_laya_key = std::env::var_os("LAYA_API_KEY");
+
+        crate::env::set_var("HTTP_PROXY", &proxy_url);
+        crate::env::set_var("ALL_PROXY", &proxy_url);
+        crate::env::remove_var("NO_PROXY");
+        crate::env::set_var(VOICE_PROVIDER_ENV, "laya");
+        crate::env::set_var(LAYA_BASE_URL_ENV, &base);
+        crate::env::set_var("LAYA_API_KEY", "laya-private-key");
+
+        assert!(should_bypass_proxy(
+            JevProvider::Laya,
+            "http://127.0.0.1:8080/v1/systemone"
+        ));
+        assert!(should_bypass_proxy(
+            JevProvider::Laya,
+            "http://100.87.178.69:8000/v1/systemone"
+        ));
+        assert!(!should_bypass_proxy(
+            JevProvider::TypeSafe,
+            "https://api.typesafe.ai/v1/systemone"
+        ));
+
+        let client = JevClient::for_voice().unwrap();
+        let value = client
+            .evaluate(json!({"transcript": "private-voice-state"}), questions())
+            .await;
+
+        match prev_http_proxy {
+            Some(v) => crate::env::set_var("HTTP_PROXY", v),
+            None => crate::env::remove_var("HTTP_PROXY"),
+        }
+        match prev_all_proxy {
+            Some(v) => crate::env::set_var("ALL_PROXY", v),
+            None => crate::env::remove_var("ALL_PROXY"),
+        }
+        match prev_no_proxy {
+            Some(v) => crate::env::set_var("NO_PROXY", v),
+            None => crate::env::remove_var("NO_PROXY"),
+        }
+        match prev_voice_provider {
+            Some(v) => crate::env::set_var(VOICE_PROVIDER_ENV, v),
+            None => crate::env::remove_var(VOICE_PROVIDER_ENV),
+        }
+        match prev_laya_base {
+            Some(v) => crate::env::set_var(LAYA_BASE_URL_ENV, v),
+            None => crate::env::remove_var(LAYA_BASE_URL_ENV),
+        }
+        match prev_laya_key {
+            Some(v) => crate::env::set_var("LAYA_API_KEY", v),
+            None => crate::env::remove_var("LAYA_API_KEY"),
+        }
+
+        let value = value.unwrap();
+        assert!(validate_answers(&value, &questions()).is_ok());
+        assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(
+            proxy_listener.accept().is_err(),
+            "capture proxy must never receive local Laya primary or hedge requests"
+        );
     }
 }
