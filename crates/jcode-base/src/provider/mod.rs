@@ -415,6 +415,8 @@ pub struct MultiProvider {
     /// switches, catalog display, or auth refresh handling.
     openai_compatible_profiles: RwLock<HashMap<String, Arc<dyn Provider>>>,
     active_openai_compatible_profile: RwLock<Option<String>>,
+    /// Stable application session identity, retained across runtime replacement.
+    session_id: RwLock<Option<String>>,
     active: RwLock<ActiveProvider>,
     /// Notifications generated during provider/account auto-selection.
     /// The TUI should drain and display these on session start.
@@ -441,6 +443,19 @@ pub struct MultiProvider {
 }
 
 impl MultiProvider {
+    fn bound_session_id(&self) -> Option<String> {
+        self.session_id
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn bind_provider_session(&self, provider: &dyn Provider) {
+        if let Some(session_id) = self.bound_session_id() {
+            provider.set_session_id(&session_id);
+        }
+    }
+
     #[cfg(test)]
     fn same_provider_account_candidates(provider: ActiveProvider) -> Vec<String> {
         account_failover::same_provider_account_candidates(provider)
@@ -1686,6 +1701,13 @@ impl Default for MultiProvider {
 
 #[async_trait]
 impl Provider for MultiProvider {
+    fn set_session_id(&self, session_id: &str) {
+        *self
+            .session_id
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(session_id.to_owned());
+    }
+
     fn catalog_sharing_identity(&self) -> Option<String> {
         Some(format!(
             "{:?}",
@@ -1712,6 +1734,7 @@ impl Provider for MultiProvider {
             ActiveProvider::OpenRouter => self.active_openrouter_execution_provider(),
         };
         if let Some(provider) = provider {
+            self.bind_provider_session(provider.as_ref());
             provider.prewarm(tools, system_static).await;
         }
     }
@@ -2914,6 +2937,7 @@ impl Provider for MultiProvider {
             openrouter: RwLock::new(openrouter),
             openai_compatible_profiles: RwLock::new(HashMap::new()),
             active_openai_compatible_profile: RwLock::new(None),
+            session_id: RwLock::new(self.bound_session_id()),
             active: RwLock::new(active),
             startup_notices: RwLock::new(Vec::new()),
             initial_provider: self.initial_provider,

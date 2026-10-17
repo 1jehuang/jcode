@@ -305,6 +305,8 @@ struct PersistentWsState {
     /// Actual handshake identity. Never logged. Forks can update shared
     /// credentials without directly clearing this provider's private socket.
     identity: (String, Option<String>, String),
+    /// Cache affinity used by the handshake. A session rebind must reconnect.
+    cache_key: Option<String>,
     last_response_id: String,
     connected_at: Instant,
     last_activity_at: Instant,
@@ -706,6 +708,7 @@ pub struct OpenAIProvider {
     oauth_account: StdRwLock<Option<String>>,
     model: Arc<RwLock<String>>,
     prompt_cache_key: Option<String>,
+    cache_session_id: StdRwLock<String>,
     prompt_cache_retention: Option<String>,
     max_output_tokens: Option<u32>,
     reasoning_effort: Arc<StdRwLock<Option<String>>>,
@@ -727,6 +730,25 @@ pub struct OpenAIProvider {
 }
 
 impl OpenAIProvider {
+    fn new_cache_session_id() -> String {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+        format!(
+            "jcode-{}-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_micros(),
+            NEXT_ID.fetch_add(1, AtomicOrdering::Relaxed)
+        )
+    }
+
+    fn cache_routing_key(&self) -> String {
+        self.prompt_cache_key.clone().unwrap_or_else(|| {
+            self.cache_session_id
+                .read()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone()
+        })
+    }
+
     fn effective_prompt_cache_retention<'a>(
         model_id: &str,
         configured: Option<&'a str>,
@@ -846,6 +868,7 @@ impl OpenAIProvider {
             oauth_account: StdRwLock::new(None),
             model: Arc::new(RwLock::new(model)),
             prompt_cache_key,
+            cache_session_id: StdRwLock::new(Self::new_cache_session_id()),
             prompt_cache_retention,
             max_output_tokens,
             reasoning_effort: Arc::new(StdRwLock::new(reasoning_effort)),
@@ -1313,7 +1336,7 @@ impl OpenAIProvider {
             self.max_output_tokens,
             api_reasoning_effort.as_deref(),
             service_tier.as_deref(),
-            self.prompt_cache_key.as_deref(),
+            Some(&self.cache_routing_key()),
             self.prompt_cache_retention.as_deref(),
             native_compaction_threshold,
         )
@@ -1382,15 +1405,16 @@ impl OpenAIProvider {
             ]);
         }
 
-        if !is_chatgpt_mode {
-            if let Some(key) = prompt_cache_key {
-                request["prompt_cache_key"] = serde_json::json!(key);
-            }
-            if let Some(retention) =
+        // Codex sends this for OAuth too. ChatGPT additionally derives cache
+        // affinity from the matching session-id transport header.
+        if let Some(key) = prompt_cache_key {
+            request["prompt_cache_key"] = serde_json::json!(key);
+        }
+        if !is_chatgpt_mode
+            && let Some(retention) =
                 Self::effective_prompt_cache_retention(model_id, prompt_cache_retention)
-            {
-                request["prompt_cache_retention"] = serde_json::json!(retention);
-            }
+        {
+            request["prompt_cache_retention"] = serde_json::json!(retention);
         }
 
         request

@@ -78,6 +78,7 @@ pub(super) async fn test_persistent_ws_state() -> (PersistentWsState, tokio::tas
         PersistentWsState {
             ws_stream: client_ws,
             identity: openai_websocket_prewarm::prewarm_identity(&prewarm_test_credentials()),
+            cache_key: None,
             last_response_id: "resp_test".to_string(),
             connected_at: Instant::now(),
             last_activity_at: Instant::now(),
@@ -135,6 +136,7 @@ async fn test_persistent_ws_state_with_ping_notify() -> (
         PersistentWsState {
             ws_stream: client_ws,
             identity: openai_websocket_prewarm::prewarm_identity(&prewarm_test_credentials()),
+            cache_key: None,
             last_response_id: "resp_test".to_string(),
             connected_at: Instant::now(),
             last_activity_at: Instant::now(),
@@ -363,5 +365,6 @@ fn catalog_credential_identity_survives_token_refresh_but_changes_accounts() {
 include!("openai_tests/persistent_terminal.rs");
 
 include!("openai_tests/persistent_prefix.rs");
+include!("openai_tests/cache_affinity.rs");
 
 include!("openai_tests/persistent_cancellation.rs");

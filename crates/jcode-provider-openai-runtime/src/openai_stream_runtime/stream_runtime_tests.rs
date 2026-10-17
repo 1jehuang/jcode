@@ -140,3 +140,49 @@ fn auth_errors_remain_non_retryable() {
     assert!(!is_retryable_error("401 unauthorized"));
     assert!(!is_retryable_error("invalid api key"));
 }
+#[test]
+fn cache_affinity_https_matches_websocket_session_header() {
+    let client = Client::new();
+    let mut credentials = CodexCredentials {
+        access_token: "fixture-token".into(),
+        refresh_token: "fixture-refresh".into(),
+        id_token: None,
+        account_id: Some("fixture-account".into()),
+        expires_at: None,
+    };
+    for oauth in [true, false] {
+        if !oauth {
+            credentials.refresh_token.clear();
+        }
+        let http = response_http_request(
+            &client,
+            "https://example.test/responses",
+            &credentials.access_token,
+            oauth,
+            credentials.account_id.as_deref(),
+            Some("persisted-session"),
+        )
+        .json(&serde_json::json!({"prompt_cache_key":"persisted-session"}))
+        .build()
+        .unwrap();
+        let ws = openai_websocket_prewarm::websocket_request(
+            &credentials,
+            &credentials.access_token,
+            Some("persisted-session"),
+        )
+        .unwrap();
+        assert_eq!(
+            http.headers().get("session-id"),
+            ws.headers().get("session-id")
+        );
+        assert_eq!(http.headers().contains_key("session-id"), oauth);
+        assert_eq!(
+            http.headers().get("chatgpt-account-id"),
+            ws.headers().get("chatgpt-account-id")
+        );
+        assert_eq!(http.headers()["authorization"], "Bearer fixture-token");
+        if oauth {
+            assert_eq!(http.headers()["session-id"], "persisted-session");
+        }
+    }
+}

@@ -431,6 +431,7 @@ impl Agent {
     /// `tool_definitions`, this does not pin the tool snapshot or consume the
     /// one-shot late-MCP-discovery check before the first real turn.
     pub(crate) async fn prewarm_provider(&self) {
+        self.provider.set_session_id(&self.session.id);
         if self.session.is_canary {
             self.registry.register_selfdev_tools().await;
         }
@@ -1158,6 +1159,7 @@ impl Agent {
         // Restore provider_session_id for Claude CLI session resume
         self.provider_session_id = session.provider_session_id.clone();
         self.session = session;
+        self.provider.set_session_id(&self.session.id);
         self.refresh_agents_md_snapshot();
         self._tool_policy_registration = crate::tool::register_session_tool_policy(
             &self.session.id,

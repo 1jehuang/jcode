@@ -79,6 +79,11 @@ pub type EventStream = Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>;
 /// Provider trait for LLM backends.
 #[async_trait]
 pub trait Provider: Send + Sync {
+    /// Bind requests to a stable application session for provider-side affinity.
+    /// This is distinct from a provider response id used to resume a stream.
+    /// Backends without session-affinity support can retain the default no-op.
+    fn set_session_id(&self, _session_id: &str) {}
+
     /// Prepare provider-specific request state before the foreground completion.
     ///
     /// The default is intentionally a no-op. Implementations must not send user

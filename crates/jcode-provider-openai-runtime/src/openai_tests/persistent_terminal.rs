@@ -73,6 +73,7 @@ async fn persistent_terminal_public_case(
     *provider.persistent_ws.lock().await = Some(PersistentWsState {
         ws_stream,
         identity: openai_websocket_prewarm::prewarm_identity(&prewarm_test_credentials()),
+        cache_key: Some(provider.cache_routing_key()),
         last_response_id: "resp_stale".into(),
         connected_at: Instant::now(),
         last_activity_at: Instant::now(),
@@ -185,6 +186,7 @@ async fn persistent_terminal_failure_invalidates_before_mutex_handoff() {
     let persistent_ws = Arc::new(Mutex::new(Some(PersistentWsState {
         ws_stream,
         identity: openai_websocket_prewarm::prewarm_identity(&prewarm_test_credentials()),
+        cache_key: None,
         last_response_id: "resp_stale".into(),
         connected_at: Instant::now(),
         last_activity_at: Instant::now(),

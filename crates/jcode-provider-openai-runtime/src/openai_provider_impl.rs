@@ -13,6 +13,22 @@ fn catalog_error_is_auth_rejection(err: &anyhow::Error) -> bool {
 
 #[async_trait]
 impl Provider for OpenAIProvider {
+    fn set_session_id(&self, session_id: &str) {
+        if session_id.is_empty() {
+            return;
+        }
+        let mut current = self
+            .cache_session_id
+            .write()
+            .unwrap_or_else(|p| p.into_inner());
+        if *current != session_id {
+            *current = session_id.to_owned();
+            drop(current);
+            self.prewarm.clear();
+            self.clear_persistent_ws_try("OpenAI session changed");
+        }
+    }
+
     fn set_oauth_account(&self, label: Option<&str>) -> Result<()> {
         let selected = label
             .map(jcode_base::auth::codex::load_credentials_for_account)
@@ -1214,6 +1230,12 @@ impl Provider for OpenAIProvider {
             oauth_account: StdRwLock::new(self.oauth_account_label()),
             model: Arc::new(RwLock::new(model)),
             prompt_cache_key: self.prompt_cache_key.clone(),
+            cache_session_id: StdRwLock::new(
+                self.cache_session_id
+                    .read()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .clone(),
+            ),
             prompt_cache_retention: self.prompt_cache_retention.clone(),
             max_output_tokens: self.max_output_tokens,
             // Copy the raw stored effort (not the surfaced effective value) so

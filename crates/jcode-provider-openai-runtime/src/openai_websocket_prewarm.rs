@@ -14,6 +14,7 @@ const PREWARM_TTL: Duration = Duration::from_secs(30);
 pub(super) fn websocket_request(
     credentials: &CodexCredentials,
     access_token: &str,
+    cache_key: Option<&str>,
 ) -> Result<Request<()>> {
     let mut request = OpenAIProvider::responses_ws_url(credentials).into_client_request()?;
     let headers = request.headers_mut();
@@ -25,6 +26,9 @@ pub(super) fn websocket_request(
     headers.insert("OpenAI-Beta", HeaderValue::from_static(WEBSOCKET_V2_BETA));
     if OpenAIProvider::is_chatgpt_mode(credentials) {
         headers.insert("originator", HeaderValue::from_static(ORIGINATOR));
+        if let Some(cache_key) = cache_key {
+            headers.insert("session-id", HeaderValue::from_str(cache_key)?);
+        }
         if let Some(account_id) = credentials.account_id.as_ref() {
             headers.insert("chatgpt-account-id", HeaderValue::from_str(account_id)?);
         }
@@ -124,7 +128,11 @@ impl PrewarmSlot {
                         }),
                     "credentials are not ready for prewarm"
                 );
-                let handshake = websocket_request(&creds, &creds.access_token)?;
+                let handshake = websocket_request(
+                    &creds,
+                    &creds.access_token,
+                    payload.get("prompt_cache_key").and_then(Value::as_str),
+                )?;
                 let identity = prewarm_identity(&creds);
                 drop(creds);
                 let (socket, _) = connect_async(handshake).await?;
@@ -243,6 +251,10 @@ async fn warm_socket(
                         return Ok(PersistentWsState {
                             ws_stream: socket,
                             identity,
+                            cache_key: request
+                                .get("prompt_cache_key")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned),
                             last_response_id: id.to_owned(),
                             connected_at,
                             last_activity_at: Instant::now(),
@@ -283,17 +295,19 @@ mod tests {
     #[test]
     fn v2_handshake_preserves_api_key_and_oauth_authentication() {
         let mut creds = credentials();
-        let api = websocket_request(&creds, "test-access").unwrap();
+        let api = websocket_request(&creds, "test-access", Some("test-session")).unwrap();
         assert_eq!(api.headers()["OpenAI-Beta"], WEBSOCKET_V2_BETA);
         assert_eq!(api.headers()["Authorization"], "Bearer test-access");
         assert!(!api.headers().contains_key("originator"));
         assert!(!api.headers().contains_key("chatgpt-account-id"));
+        assert!(!api.headers().contains_key("session-id"));
         creds.refresh_token = "test-refresh".into();
         creds.account_id = Some("test-account".into());
-        let oauth = websocket_request(&creds, "test-access").unwrap();
+        let oauth = websocket_request(&creds, "test-access", Some("test-session")).unwrap();
         assert_eq!(oauth.headers()["OpenAI-Beta"], WEBSOCKET_V2_BETA);
         assert_eq!(oauth.headers()["Authorization"], "Bearer test-access");
         assert_eq!(oauth.headers()["originator"], ORIGINATOR);
+        assert_eq!(oauth.headers()["session-id"], "test-session");
         assert_eq!(oauth.headers()["chatgpt-account-id"], "test-account");
     }
 

@@ -1,6 +1,7 @@
 use super::*;
 mod catalog_memo;
 mod saved_account_selection;
+mod session_binding;
 use crate::provider::models::{ensure_model_allowed_for_subscription, filtered_display_models};
 
 fn with_clean_provider_test_env<T>(f: impl FnOnce() -> T) -> T {
@@ -223,6 +224,7 @@ fn test_multi_provider_with_openai() -> MultiProvider {
         openrouter: RwLock::new(None),
         openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
         active_openai_compatible_profile: RwLock::new(None),
+        session_id: RwLock::new(None),
         active: RwLock::new(ActiveProvider::OpenAI),
         startup_notices: RwLock::new(Vec::new()),
         initial_provider: None,
@@ -953,6 +955,7 @@ fn test_multi_provider_with_cursor() -> MultiProvider {
         openrouter: RwLock::new(None),
         openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
         active_openai_compatible_profile: RwLock::new(None),
+        session_id: RwLock::new(None),
         active: RwLock::new(ActiveProvider::Cursor),
         startup_notices: RwLock::new(Vec::new()),
         initial_provider: None,

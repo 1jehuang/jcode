@@ -299,6 +299,7 @@ impl MultiProvider {
             openrouter: RwLock::new(openrouter),
             openai_compatible_profiles: RwLock::new(HashMap::new()),
             active_openai_compatible_profile: RwLock::new(None),
+            session_id: RwLock::new(None),
             active: RwLock::new(active),
             startup_notices: RwLock::new(Vec::new()),
             initial_provider,

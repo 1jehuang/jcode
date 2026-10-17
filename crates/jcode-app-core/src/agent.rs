@@ -430,6 +430,7 @@ impl Agent {
         disabled_tools: HashSet<String>,
     ) -> Self {
         let t = Instant::now();
+        provider.set_session_id(&session.id);
         let skills = SkillRegistry::shared_snapshot();
         let skills_ms = t.elapsed().as_millis();
         let tool_config = &crate::config::config().tools;

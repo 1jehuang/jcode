@@ -171,6 +171,30 @@ fn ws_stall_diagnostics(
 }
 
 /// Stream the response from OpenAI API
+fn response_http_request(
+    client: &Client,
+    url: &str,
+    access_token: &str,
+    is_chatgpt_mode: bool,
+    account_id: Option<&str>,
+    cache_key: Option<&str>,
+) -> reqwest::RequestBuilder {
+    let mut builder = client
+        .post(url)
+        .header("Authorization", format!("Bearer {access_token}"));
+    if is_chatgpt_mode {
+        builder = builder.header("originator", ORIGINATOR);
+        if let Some(key) = cache_key {
+            builder = builder.header("session-id", key);
+        }
+        if let Some(account_id) = account_id {
+            builder = builder.header("chatgpt-account-id", account_id);
+        }
+    }
+    builder
+}
+
+/// Stream the response from OpenAI API
 pub(super) async fn stream_response(
     client: Client,
     credentials: Arc<RwLock<CodexCredentials>>,
@@ -223,16 +247,14 @@ pub(super) async fn stream_response(
     let account_id = creds.account_id.clone();
     drop(creds);
 
-    let mut builder = client
-        .post(&url)
-        .header("Authorization", format!("Bearer {}", access_token));
-
-    if is_chatgpt_mode {
-        builder = builder.header("originator", ORIGINATOR);
-        if let Some(account_id) = account_id.as_ref() {
-            builder = builder.header("chatgpt-account-id", account_id);
-        }
-    }
+    let builder = response_http_request(
+        &client,
+        &url,
+        &access_token,
+        is_chatgpt_mode,
+        account_id.as_deref(),
+        request.get("prompt_cache_key").and_then(Value::as_str),
+    );
 
     emit_connection_phase(&tx, ConnectionPhase::SendingRequest).await;
     let connect_start = std::time::Instant::now();
@@ -635,6 +657,19 @@ async fn continue_persistent_ws_locked(
             vec![
                 ("model", request_model.clone()),
                 ("reason", "handshake_identity_changed".to_string()),
+            ],
+        );
+        return PersistentWsResult::NotAvailable;
+    }
+
+    if state.cache_key.as_deref() != request.get("prompt_cache_key").and_then(Value::as_str) {
+        *guard = None;
+        log_openai_stream_lifecycle(
+            jcode_base::logging::LogLevel::Info,
+            "persistent_state_reset",
+            vec![
+                ("model", request_model.clone()),
+                ("reason", "cache_session_changed".to_string()),
             ],
         );
         return PersistentWsResult::NotAvailable;
@@ -1408,8 +1443,12 @@ async fn stream_response_websocket_authenticated(
     }
     let mut usage_recorder = OAuthUsageRecorder::capture(&creds, &request);
     let catalog_scope = OpenAIProvider::catalog_scope_for(&creds);
-    let ws_request = openai_websocket_prewarm::websocket_request(&creds, &access_token)
-        .map_err(OpenAIStreamFailure::Other)?;
+    let ws_request = openai_websocket_prewarm::websocket_request(
+        &creds,
+        &access_token,
+        request.get("prompt_cache_key").and_then(Value::as_str),
+    )
+    .map_err(OpenAIStreamFailure::Other)?;
     let mut identity = openai_websocket_prewarm::prewarm_identity(&creds);
     identity.0 = access_token;
     drop(creds);
@@ -1475,6 +1514,10 @@ async fn stream_response_websocket_authenticated(
             .map(Vec::as_slice)
             .unwrap_or(&[]),
     );
+    let cache_key = request
+        .get("prompt_cache_key")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     let mut request_event = request;
     if !request_event.is_object() {
         return Err(OpenAIStreamFailure::Other(anyhow::anyhow!(
@@ -1800,6 +1843,7 @@ async fn stream_response_websocket_authenticated(
             ],
         );
         *guard = Some(PersistentWsState {
+            cache_key,
             ws_stream,
             identity,
             last_response_id: resp_id,

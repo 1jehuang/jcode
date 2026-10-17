@@ -32,6 +32,7 @@ async fn persistent_cancellation_keepalive_abort_invalidates_before_handoff() {
     let persistent = Arc::new(Mutex::new(Some(PersistentWsState {
         ws_stream,
         identity: openai_websocket_prewarm::prewarm_identity(&prewarm_test_credentials()),
+        cache_key: None,
         last_response_id: "resp_previous".into(),
         connected_at,
         last_activity_at: connected_at - Duration::from_secs(20),
@@ -125,6 +126,7 @@ async fn persistent_cancellation_public_drop_releases_chain_and_reconnects() {
     *provider.persistent_ws.lock().await = Some(PersistentWsState {
         ws_stream,
         identity: openai_websocket_prewarm::prewarm_identity(&prewarm_test_credentials()),
+        cache_key: Some(provider.cache_routing_key()),
         last_response_id: "resp_previous".into(),
         connected_at: Instant::now(),
         last_activity_at: Instant::now(),
@@ -182,6 +184,7 @@ async fn persistent_cancellation_aborted_future_invalidates_before_handoff() {
     let persistent = Arc::new(Mutex::new(Some(PersistentWsState {
         ws_stream,
         identity: openai_websocket_prewarm::prewarm_identity(&prewarm_test_credentials()),
+        cache_key: None,
         last_response_id: "resp_previous".into(),
         connected_at: Instant::now(),
         last_activity_at: Instant::now(),
