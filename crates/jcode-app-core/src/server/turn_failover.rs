@@ -226,6 +226,175 @@ mod tests {
         assert!(error_wants_failover(&prompt.to_error_message()));
     }
 
+    use crate::message::{Message, StreamEvent, ToolDefinition};
+    use crate::provider::{EventStream, ModelRoute, Provider};
+    use async_trait::async_trait;
+    use std::sync::Mutex as StdMutex;
+
+    /// Fails with a usage limit while on the Anthropic API key, succeeds once
+    /// the route switches to the OpenAI API key.
+    #[derive(Clone)]
+    struct TwoAccountProvider {
+        on_openai: Arc<StdMutex<bool>>,
+        calls: Arc<StdMutex<Vec<(bool, usize)>>>,
+    }
+
+    #[async_trait]
+    impl Provider for TwoAccountProvider {
+        async fn complete(
+            &self,
+            messages: &[Message],
+            _: &[ToolDefinition],
+            _: &str,
+            _: Option<&str>,
+        ) -> anyhow::Result<EventStream> {
+            let on_openai = *self.on_openai.lock().unwrap();
+            self.calls.lock().unwrap().push((on_openai, messages.len()));
+            if !on_openai {
+                anyhow::bail!("HTTP 429: usage_limit_reached for this account");
+            }
+            let events = vec![
+                Ok(StreamEvent::TextDelta("answered on backup".into())),
+                Ok(StreamEvent::MessageEnd { stop_reason: None }),
+            ];
+            Ok(Box::pin(futures::stream::iter(events)))
+        }
+        fn name(&self) -> &str {
+            if *self.on_openai.lock().unwrap() {
+                "OpenAI"
+            } else {
+                "Claude"
+            }
+        }
+        fn model(&self) -> String {
+            if *self.on_openai.lock().unwrap() {
+                "gpt-6.1-sol".into()
+            } else {
+                "claude-opus-5-5".into()
+            }
+        }
+        fn active_resolved_credential(&self) -> Option<jcode_provider_core::ResolvedCredential> {
+            Some(jcode_provider_core::ResolvedCredential::ApiKey)
+        }
+        fn set_model(&self, model: &str) -> anyhow::Result<()> {
+            *self.on_openai.lock().unwrap() = model.starts_with("openai-api:");
+            Ok(())
+        }
+        fn model_routes(&self) -> Vec<ModelRoute> {
+            vec![ModelRoute {
+                model: "gpt-6.1-sol".into(),
+                provider: "OpenAI".into(),
+                api_method: "openai-api".into(),
+                available: true,
+                detail: String::new(),
+                cheapness: None,
+                usage: None,
+            }]
+        }
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(self.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn usage_limit_switches_pool_account_and_retries_same_turn() {
+        let _guard = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let prev_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", home.path());
+        crate::config::Config::invalidate_cache();
+        let mut pool = crate::auth::account_pool::AccountPool::default();
+        pool.members = vec!["anthropic-api".into(), "openai-api".into()];
+        pool.save().unwrap();
+
+        let provider = TwoAccountProvider {
+            on_openai: Arc::new(StdMutex::new(false)),
+            calls: Arc::new(StdMutex::new(Vec::new())),
+        };
+        let provider_dyn: Arc<dyn Provider> = Arc::new(provider.clone());
+        let registry = crate::tool::Registry::new(Arc::clone(&provider_dyn)).await;
+        let session =
+            crate::session::Session::create_with_id("session_server_failover".into(), None, None);
+        let agent = Arc::new(Mutex::new(Agent::new_with_session(
+            provider_dyn,
+            registry,
+            session,
+            None,
+        )));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        let result = process_message_with_server_failover(
+            Arc::clone(&agent),
+            "hello",
+            Vec::new(),
+            None,
+            tx,
+            true,
+        )
+        .await;
+
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        let calls = provider.calls.lock().unwrap().clone();
+        let user_messages = agent
+            .lock()
+            .await
+            .messages()
+            .iter()
+            .filter(|message| {
+                message.role == crate::message::Role::User
+                    && message.content.iter().any(|block| {
+                        matches!(block, crate::message::ContentBlock::Text { text, .. }
+                            if text.contains("hello"))
+                    })
+            })
+            .count();
+        match prev_home {
+            Some(value) => crate::env::set_var("JCODE_HOME", value),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+        crate::config::Config::invalidate_cache();
+
+        assert!(
+            result.is_ok(),
+            "turn should succeed after failover: {result:?}"
+        );
+        assert_eq!(
+            calls.iter().map(|(openai, _)| *openai).collect::<Vec<_>>(),
+            vec![false, true],
+            "one failed request on the source, one retry on the target"
+        );
+        assert_eq!(calls[0].1, calls[1].1, "retry must resend the same history");
+        assert_eq!(user_messages, 1, "the user message must not be duplicated");
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ServerEvent::ModelChanged { model, error: None, .. } if model == "gpt-6.1-sol"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ServerEvent::ConnectionPhase { phase } if phase.starts_with("retrying on")
+        )));
+    }
+
+    #[tokio::test]
+    async fn disabled_clients_keep_the_original_error() {
+        let _guard = crate::storage::lock_test_env();
+        let provider = TwoAccountProvider {
+            on_openai: Arc::new(StdMutex::new(false)),
+            calls: Arc::new(StdMutex::new(Vec::new())),
+        };
+        let provider_dyn: Arc<dyn Provider> = Arc::new(provider.clone());
+        let registry = crate::tool::Registry::new(Arc::clone(&provider_dyn)).await;
+        let agent = Arc::new(Mutex::new(Agent::new(provider_dyn, registry)));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let result =
+            process_message_with_server_failover(agent, "hello", Vec::new(), None, tx, false).await;
+        assert!(result.is_err());
+        assert_eq!(provider.calls.lock().unwrap().len(), 1);
+    }
+
     #[test]
     fn context_and_generic_errors_do_not_switch_accounts() {
         // Context overflows are handled by compaction, not account switching.
