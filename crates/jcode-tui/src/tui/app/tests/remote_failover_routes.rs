@@ -532,6 +532,57 @@ fn test_remote_auth_error_arms_fallback_offer_with_resend_payload() {
     );
 }
 
+/// A spent OAuth account shows exactly one error line and one switch line:
+/// no retry notice, no stopped-poking message, no usage card.
+#[test]
+fn test_remote_usage_limit_shows_error_and_single_switch_line() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.is_remote = true;
+    app.auto_poke_incomplete_todos = true;
+    app.remote_provider_name = Some("OpenAI".to_string());
+    app.remote_provider_model = Some("gpt-5.5".to_string());
+    app.remote_model_options = vec![
+        openai_oauth_route("gpt-5.5"),
+        claude_oauth_route("claude-sonnet-4"),
+    ];
+    app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        content: "hi".to_string(),
+        images: vec![],
+        is_system: false,
+        system_reminder: None,
+        auto_retry: true,
+        retry_attempts: 0,
+        retry_at: None,
+    });
+    app.last_submitted_input = Some("hi".to_string());
+    app.is_processing = true;
+    app.status = ProcessingStatus::Streaming;
+    let before = app.display_messages().len();
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Error {
+            id: 22,
+            message: "usage_limit_reached: The usage limit has been reached".to_string(),
+            retry_after_secs: None,
+        },
+        &mut remote,
+    );
+
+    let added: Vec<_> = app.display_messages()[before..].to_vec();
+    assert_eq!(added.len(), 2, "{added:?}");
+    assert_eq!(added[0].role, "error");
+    assert!(added[0].content.contains("usage limit"));
+    assert_eq!(added[1].role, "system");
+    assert!(added[1].content.starts_with('↪'), "{}", added[1].content);
+    assert!(!added[1].content.contains('\n'));
+    assert!(app.rate_limit_pending_message.is_none());
+    assert!(!app.usage_reset.refresh_usage);
+}
+
 /// Accepting a remote fallback offer stages the route switch (SetRoute via the
 /// dispatcher) and the payload resend; the ModelChanged confirmation then
 /// dispatches the resend through process_remote_followups.
