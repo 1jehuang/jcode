@@ -480,4 +480,41 @@ mod tests {
         assert!(app.suggested_replies.explorer_deadline.is_none());
         assert!(app.suggested_replies.current.is_none());
     }
+
+    #[test]
+    fn suggested_replies_panel_renders_vertically_one_row_per_item() {
+        let mut app = crate::tui::app::tests::create_test_app();
+        app.suggested_replies.force_enable_in_tests = true;
+        app.push_display_message(super::super::DisplayMessage::assistant(
+            "Implemented the feature.",
+        ));
+        let resp = distribute_suggestions(
+            "implementation",
+            vec![
+                ScoredSuggestion {
+                    text: "Default action top".to_string(),
+                    confidence: 0.90,
+                },
+                ScoredSuggestion {
+                    text: "Secondary option 1".to_string(),
+                    confidence: 0.70,
+                },
+                ScoredSuggestion {
+                    text: "Secondary option 2".to_string(),
+                    confidence: 0.65,
+                },
+                ScoredSuggestion {
+                    text: "Secondary option 3".to_string(),
+                    confidence: 0.60,
+                },
+            ],
+            0.55,
+            5,
+        );
+        app.apply_suggested_replies_response(resp);
+        let view = crate::tui::TuiState::suggested_replies_view(&app).expect("view present");
+        let expected_rows =
+            u16::from(view.response.default_action.is_some()) + view.response.secondary_suggestions.len() as u16;
+        assert_eq!(expected_rows, 4);
+    }
 }

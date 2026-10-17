@@ -80,13 +80,9 @@ pub(super) fn inline_ui_height(app: &dyn TuiState) -> u16 {
         }
         None => {
             if let Some(view) = app.suggested_replies_view() {
-                let has_default = view.response.default_action.is_some();
-                let has_secondary = !view.response.secondary_suggestions.is_empty();
-                match (has_default, has_secondary) {
-                    (true, true) => 2,
-                    (true, false) | (false, true) => 1,
-                    (false, false) => 0,
-                }
+                let default_rows = u16::from(view.response.default_action.is_some());
+                let secondary_rows = view.response.secondary_suggestions.len().min(5) as u16;
+                default_rows + secondary_rows
             } else {
                 0
             }
@@ -205,13 +201,8 @@ fn draw_suggested_replies_panel(frame: &mut Frame, view: &SuggestedRepliesView, 
         current_row = current_row.saturating_add(1);
     }
 
-    if current_row < area.y.saturating_add(area.height)
-        && !view.response.secondary_suggestions.is_empty()
-    {
-        let mut row_spans: Vec<Span<'static>> = Vec::new();
-        let mut cursor_x = area.x;
-        let max_x = area.x.saturating_add(area.width);
-
+    if !view.response.secondary_suggestions.is_empty() {
+        let max_y = area.y.saturating_add(area.height);
         for (idx, text) in view
             .response
             .secondary_suggestions
@@ -219,25 +210,16 @@ fn draw_suggested_replies_panel(frame: &mut Frame, view: &SuggestedRepliesView, 
             .take(5)
             .enumerate()
         {
-            if idx > 0 {
-                if cursor_x.saturating_add(1) >= max_x {
-                    break;
-                }
-                row_spans.push(Span::raw(" "));
-                cursor_x = cursor_x.saturating_add(1);
-            }
-            let remaining = max_x.saturating_sub(cursor_x) as usize;
-            if remaining < 8 {
+            if current_row >= max_y {
                 break;
             }
-            let max_pill_chars = remaining.saturating_sub(6).clamp(4, 32);
+            let max_pill_chars = (area.width as usize).saturating_sub(10).max(8);
             let short = crate::util::truncate_str(text, max_pill_chars);
             let pill_label = format!("{}. {}", idx + 1, short);
-            let pill_width = (UnicodeWidthStr::width(pill_label.as_str()) + 4) as u16;
-            if cursor_x.saturating_add(pill_width) > max_x {
-                break;
-            }
-            let is_focused = matches!(view.focus, Some(SuggestedReplyFocus::Secondary(i)) if i == idx);
+            let pill_width = (UnicodeWidthStr::width(pill_label.as_str()) + 4)
+                .min(area.width as usize) as u16;
+            let is_focused =
+                matches!(view.focus, Some(SuggestedReplyFocus::Secondary(i)) if i == idx);
             let (fill, text_fg) = if is_focused {
                 (rgb(96, 152, 224), rgb(18, 22, 30))
             } else {
@@ -248,22 +230,24 @@ fn draw_suggested_replies_panel(frame: &mut Frame, view: &SuggestedRepliesView, 
             if is_focused {
                 pill_style = pill_style.add_modifier(Modifier::BOLD);
             }
-            row_spans.push(Span::styled(left_cap, cap_style));
-            row_spans.push(Span::styled(format!(" {pill_label} "), pill_style));
-            row_spans.push(Span::styled(right_cap, cap_style));
+            let row_spans = vec![
+                Span::styled(left_cap, cap_style),
+                Span::styled(format!(" {pill_label} "), pill_style),
+                Span::styled(right_cap, cap_style),
+            ];
 
             hit_regions.push(SuggestedReplyHitRegion {
                 rect: Rect {
-                    x: cursor_x,
+                    x: area.x,
                     y: current_row,
                     width: pill_width,
                     height: 1,
                 },
                 target: SuggestedReplyFocus::Secondary(idx),
             });
-            cursor_x = cursor_x.saturating_add(pill_width);
+            lines.push(Line::from(row_spans));
+            current_row = current_row.saturating_add(1);
         }
-        lines.push(Line::from(row_spans));
     }
 
     set_suggested_reply_hit_regions(hit_regions);
