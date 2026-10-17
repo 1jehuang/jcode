@@ -2180,10 +2180,8 @@ fn test_login_preview_enter_after_navigation_starts_selected_login() {
         .filtered
         .iter()
         .position(|&index| {
-            picker.entries[index].options.iter().any(|option| {
-                matches!(&option.action, crate::tui::PickerAction::Login(provider)
+            matches!(&picker.entries[index].action, crate::tui::PickerAction::Login(provider)
                 if provider.id == "anthropic-api")
-            })
         })
         .expect("Anthropic API key login should be listed");
     for _ in 0..target {
