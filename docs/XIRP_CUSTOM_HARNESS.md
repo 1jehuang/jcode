@@ -53,6 +53,12 @@ Conclusion for XJ-01: Xirp supports exactly five hardcoded harnesses. There is
 no plugin system, no adapter interface, no config-file harness declaration, and
 no ACP client surface exposed to third parties. First-class custom harness
 support requires a change inside Spotify's `@chirp/squab` orchestrator.
+Re-verified under Xirp 0.54.0 (`xirp 0.54.0+app.39e027324`) on 2026-10-15:
+`xirp api send agents:list` still reports exactly five harnesses
+(`agentName`: claude, codex, gemini, pi, cursor), and cursor now reports
+`"version": "2026.10.12-d47ca18"` (was `null` under 0.49.0); claude reports
+`"2.1.197 (Claude Code)"` and codex `"codex-cli 0.162.1"`. No new harness or
+adapter entry appeared.
 
 Consequences for the remaining IDs:
 - XJ-02, XJ-04, XJ-05 are unimplementable against this build. They depend on

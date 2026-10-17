@@ -7,18 +7,23 @@ reading chat history. Update after every meaningful change.
 
 ## How to read this file
 
-**Four files, read in this order:**
+**Six files, read in this order:**
 
-- `RESUME.md` (this file) — verified evidence, including everything observed in a
-  signed-in Portal session.
-- `PORTAL-FINDINGS.md` — row-level detail from that authenticated inspection:
-  the 42 Sources rows, the 11 affected repos, the 16 wiki suggestions and their
-  accuracy audit, automation runs, the session-launch test, and the admin/CIMD
-  discovery.
-- `APPENDICES.md` — deeper OAuth, CIMD and bridge-verification records.
-- `STATE.md` — continuation half: exact revisions, completed work, remaining
-  tasks, blockers, constraints, open questions, broken gates and the evidence
-  file map.
+1. `RESUME.md` (this file) — verified evidence, including everything observed in a
+   signed-in Portal session.
+2. `PORTAL-FINDINGS.md` — row-level detail from that authenticated inspection:
+   the 42 Sources rows, the 11 affected repos, the 16 wiki suggestions and their
+   accuracy audit, automation runs, and the session-launch test.
+3. `APPENDICES.md` — Appendices A-D: OAuth discovery, the CIMD allow-list proof,
+   PR 619 validation, and the bridge-selection detail.
+4. `APPENDICES-OAUTH.md` — Appendices E-F: the Portal admin surface, the CIMD
+   hosting analysis, and the Xirp 0.54.0 upgrade record.
+5. `STATE.md` — continuation half: exact revisions, completed work, remaining
+   tasks, blockers, constraints, open questions, broken gates and the evidence
+   file map.
+6. `portal-cimd.client-metadata.template.json` and
+   `jcode-cimd.worker.js` — the prepared-but-undeployed CIMD artifacts, with
+   `scripts/derive_callback_port.py` in the repo root computing the callback port.
 
 Sections separate **verified outcomes** (something observed, with the command
 that observed it) from **claims** (believed, not proven) and **blockers**.
@@ -31,11 +36,11 @@ Anything in "Claims" must not be reported as working setup.
 ### 1.1 Installed versions
 | Component | Observed value | How |
 |---|---|---|
-| Xirp CLI | `xirp 0.49.0+app.db5402dc7` | `xirp --version` |
-| Xirp app | `/Applications/Xirp.app`, asar 43,952,738 bytes | `ls -la` |
+| Xirp CLI | `xirp 0.54.0+app.39e027324` (upgraded from 0.49.0 on 2026-10-15) | `xirp --version` |
+| Xirp app | `/Applications/Xirp.app`, asar 43,952,738 bytes **as of 0.49.0** — re-measure if the bundle matters | `ls -la` |
 | Jcode CLI | `jcode v0.97.0 (94392e100)` | `jcode --version` |
 | KCode fork | `kcode v0.0.0-dev (bb6174b21)` | `kcode --version` |
-| Orchestrator | `@chirp/squab` **0.11.11** (bundled inside Xirp) | asar `package.json` |
+| Orchestrator | `@chirp/squab` **0.11.11** — measured inside 0.49.0; **also 0.11.11** under 0.54.0 (re-measured 2026-10-15 via `@electron/asar extract-file`) | asar `package.json` |
 
 Jcode launcher chain: `~/.local/bin/jcode` -> symlink ->
 `~/.jcode/builds/current/jcode`.
@@ -206,6 +211,16 @@ wrong. `kcode.yaml` correctly declares
 `phenotype.dev/former-name: "KCode"`. It is accurate. Likewise `github.yaml`
 correctly maps to `KooshaPari/.github` (id 1199812615), which my zz-filtered
 inventory omitted only because the name begins with a dot. Do not "fix" either.
+
+**(b) The 42 figure is the GitHub App's repository grant.** I could not
+verify this directly (`/user/installations` returns HTTP 403 with the current
+`gh` token, because the endpoint requires the GitHub Apps management scope,
+not the user token). It is therefore a stored claim that 42 is the count of
+repositories the Portal GitHub App has been granted access to. If true, the
+gap is "16 private repos outside the App grant". If false, the 42 is the App
+selection and the 46 − 42 = 4 gap is something else entirely. Resolve by
+owner-side check at GitHub → Settings → GitHub Apps → the Portal app →
+Configure → Repository access.
 
 **(c) Eighteen current repos have no descriptor at all.** All are private or
 archived, which is consistent with the public-only design, except `.github`
