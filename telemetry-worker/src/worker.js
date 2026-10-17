@@ -324,10 +324,36 @@ function writeConcurrencyFirehose(env, body) {
   }
 }
 
+// Append-only dedicated usage schema. No existing main firehose slots change.
+// AE is a sampled forensic backup, not a durable ACK or additive rollup.
+export const FIREHOSE_USAGE_SCHEMA = {
+  blobs: ["event", "event_id", "session_id", "id", "version", "os", "arch",
+    "source", "provider", "model", "build_channel", "occurred_at", "country"],
+  doubles: ["input_tokens", "output_tokens", "cache_read_input_tokens",
+    "cache_creation_input_tokens", "total_tokens", "responses", "is_ci", "usage_contract_version"],
+};
+function writeUsageFirehose(env, body) {
+  const sink = env.FIREHOSE_USAGE;
+  if (!sink || typeof sink.writeDataPoint !== "function") return false;
+  try {
+    const blobs = FIREHOSE_USAGE_SCHEMA.blobs.map((key) => String(body[key] ?? ""));
+    const encoder = new TextEncoder();
+    if (encoder.encode(String(body.id)).length > 96
+      || blobs.reduce((n, blob) => n + encoder.encode(blob).length, 0) > 16384) return false;
+    sink.writeDataPoint({ indexes: [String(body.id)], blobs,
+      doubles: FIREHOSE_USAGE_SCHEMA.doubles.map((key) => Number(body[key] ?? 0)) });
+    return true;
+  } catch (err) {
+    console.warn("usage firehose write failed", err?.message || err);
+    return false;
+  }
+}
+
 function writeFirehose(env, body) {
   // Geo is dimensioned separately from every event family, so it is written
   // before the per-family dispatch below (which returns early).
   writeGeoFirehose(env, body);
+  if (body.event === "usage_report") return writeUsageFirehose(env, body);
   if (body.event === "session_concurrency") {
     return writeConcurrencyFirehose(env, body);
   }
@@ -615,10 +641,14 @@ export default {
       return jsonResponse({ error: "Concurrency storage unavailable", durable: durableOk,
         concurrency_durable: false, firehose: false }, 503, cors);
     }
+    if (body.event === "usage_report" && !durableOk) {
+      return jsonResponse({ error: "Usage storage unavailable", durable: false, firehose: firehoseOk }, 503, cors);
+    }
     if (!durableOk && !firehoseOk) {
       return jsonResponse({ error: "Internal error" }, 500, cors);
     }
     return jsonResponse({ ok: true, durable: durableOk, firehose: firehoseOk,
+      ...(body.event === "usage_report" ? { id: body.id, event_id: body.event_id } : {}),
       ...(CONCURRENCY_EVENTS.includes(body.event) ? { concurrency_durable: concurrencyDurable === true } : {}),
     }, 200, cors);
   },
@@ -640,6 +670,16 @@ export default {
           }
         } catch {
           console.warn("private OAuth account retention failed");
+        }
+        try {
+          for (let batch = 0; batch < 100; batch++) {
+            const result = await env.DB.prepare(`DELETE FROM usage_report_ledger WHERE receipt_key IN (
+              SELECT receipt_key FROM usage_report_ledger WHERE created_at < unixepoch('now', '-8 days') LIMIT 10000
+            )`).run();
+            if ((result.meta?.changes || 0) < 10000) break;
+          }
+        } catch (err) {
+          console.warn("usage ledger retention failed", err?.message || err);
         }
         await repairDailyActivityYesterday(env);
         // Price any model label first seen recently, so new models (e.g.
@@ -1069,7 +1109,8 @@ async function insertEvent(env, body) {
   // the firehose for per-session detail and rolled up here; no raw events row.
   if (body.event === "usage_report") {
     await recordDailyModelUsage(env, body);
-    await recordCountryDaily(env, body);
+    // Receipt insert and rollup trigger commit together. Ancillary country
+    // writes cannot turn a committed usage receipt into a failed ACK.
     return;
   }
 
@@ -2237,11 +2278,29 @@ function normalizeUsageLabel(value) {
   return value.trim().slice(0, 120);
 }
 
-// Validates a `usage_report` and maps it onto the shared firehose blobs:
-// provider/model go to provider_end/model_end (the model that served the
-// response) and source goes to `step`, so per-response detail stays queryable
-// in Analytics Engine without widening the full FIREHOSE_SCHEMA.
+// Validates legacy native buckets separately from canonical disjoint v2.
+// Dedicated FIREHOSE_USAGE preserves all buckets and the contract version.
 export function normalizeUsageReportEvent(body) {
+  if (typeof body.id !== "string" || !body.id.trim() || new TextEncoder().encode(body.id).length > 96) return "Invalid usage_report id";
+  for (const field of ["provider", "model", "build_channel"]) {
+    if (body[field] != null && (typeof body[field] !== "string" || body[field].trim().length > 120)) return `Invalid usage_report ${field}`;
+  }
+  body.usage_contract_version ??= 1;
+  if (![1, 2].includes(body.usage_contract_version)) return "Invalid usage_report usage_contract_version";
+  if (body.usage_contract_version === 2 && body.occurred_at == null) return "Missing usage_report occurred_at";
+  if (typeof body.event_id !== "string" || !body.event_id.trim() || body.event_id.length > 120) return "Invalid usage_report event_id";
+  if (body.is_ci != null && typeof body.is_ci !== "boolean") return "Invalid usage_report is_ci";
+  body.is_ci ??= false;
+  body.build_channel = normalizeUsageLabel(body.build_channel);
+  if (body.occurred_at != null) {
+    const value = body.occurred_at;
+    const timestamp = typeof value === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(value) ? Date.parse(value) : NaN;
+    if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString().slice(0, 10) !== value.slice(0, 10)
+      || timestamp < Date.now() - 7 * 86400000 || timestamp > Date.now() + 300000) {
+      return "Invalid or expired usage_report occurred_at";
+    }
+    body.occurred_at = new Date(timestamp).toISOString();
+  }
   if (!USAGE_REPORT_SOURCES.has(body.source)) {
     return "Invalid usage_report source";
   }
@@ -2250,12 +2309,18 @@ export function normalizeUsageReportEvent(body) {
   if (!body.model) {
     return "Missing usage_report model";
   }
+  const suppliedTotal = body.total_tokens;
   for (const field of USAGE_TOKEN_FIELDS) {
     const value = body[field] ?? 0;
     if (!Number.isInteger(value) || value < 0 || value > MAX_USAGE_TOKENS_PER_REPORT) {
       return `Invalid usage_report ${field}`;
     }
     body[field] = value;
+  }
+  if (body.usage_contract_version === 2) {
+    const total = body.input_tokens + body.output_tokens + body.cache_read_input_tokens + body.cache_creation_input_tokens;
+    if (total > MAX_USAGE_TOKENS_PER_REPORT || (suppliedTotal != null && suppliedTotal !== total)) return "Invalid usage_report total_tokens";
+    body.total_tokens = total;
   }
   const responses = body.responses ?? 1;
   if (!Number.isInteger(responses) || responses < 1 || responses > 10_000) {
@@ -2269,21 +2334,16 @@ export function normalizeUsageReportEvent(body) {
 }
 
 async function recordDailyModelUsage(env, body) {
-  const usageDate = new Date().toISOString().slice(0, 10);
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify([body.id, body.event_id])));
+  const receiptKey = digest;
+  const usageDate = (body.occurred_at || new Date().toISOString()).slice(0, 10);
   await env.DB.prepare(`
-    INSERT INTO daily_model_usage (
+    INSERT INTO usage_report_ledger (
       usage_date, source, provider, model, build_channel, is_ci, responses,
       input_tokens, output_tokens, cache_read_input_tokens,
-      cache_creation_input_tokens, total_tokens
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(usage_date, source, provider, model, build_channel, is_ci) DO UPDATE SET
-      responses = responses + excluded.responses,
-      input_tokens = input_tokens + excluded.input_tokens,
-      output_tokens = output_tokens + excluded.output_tokens,
-      cache_read_input_tokens = cache_read_input_tokens + excluded.cache_read_input_tokens,
-      cache_creation_input_tokens = cache_creation_input_tokens + excluded.cache_creation_input_tokens,
-      total_tokens = total_tokens + excluded.total_tokens,
-      updated_at = datetime('now')
+      cache_creation_input_tokens, total_tokens, receipt_key, usage_contract_version
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(receipt_key) DO NOTHING
   `).bind(
     usageDate,
     body.source,
@@ -2297,6 +2357,8 @@ async function recordDailyModelUsage(env, body) {
     body.cache_read_input_tokens,
     body.cache_creation_input_tokens,
     body.total_tokens,
+    receiptKey,
+    body.usage_contract_version,
   ).run();
 }
 
