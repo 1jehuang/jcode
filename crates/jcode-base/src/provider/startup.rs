@@ -92,6 +92,7 @@ impl MultiProvider {
             }
         }
 
+        let creds_start = std::time::Instant::now();
         let has_claude_creds =
             auth::claude::load_credentials().is_ok() || anthropic::has_anthropic_api_key();
         let has_openai_creds = auth::codex::load_credentials().is_ok();
@@ -104,6 +105,8 @@ impl MultiProvider {
             .is_available();
         let has_bedrock_creds = bedrock::BedrockProvider::has_credentials();
         let has_openrouter_creds = openrouter::has_credentials();
+        let creds_ms = creds_start.elapsed().as_millis();
+        let runtimes_start = std::time::Instant::now();
 
         if std::env::var_os("JCODE_USE_CLAUDE_CLI").is_some() {
             crate::logging::warn(
@@ -327,8 +330,14 @@ impl MultiProvider {
         }
 
         result.spawn_anthropic_catalog_refresh_if_needed();
+        let runtimes_ms = runtimes_start.elapsed().as_millis();
+        let route_start = std::time::Instant::now();
         result.spawn_openai_catalog_refresh_if_needed();
         result.select_fresh_session_pool_route();
+        let route_ms = route_start.elapsed().as_millis();
+        crate::logging::info(&format!(
+            "[TIMING] provider_init parts: creds={creds_ms}ms, runtimes={runtimes_ms}ms, route={route_ms}ms"
+        ));
         crate::logging::info(&format!(
             "[TIMING] provider_init: anthropic={}, openai={}, copilot={}, antigravity={}, gemini={}, cursor={}, bedrock={}, openrouter={}, total={}ms",
             result
