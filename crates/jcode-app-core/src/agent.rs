@@ -588,7 +588,12 @@ impl Agent {
         agent.session.provider_key = agent.provider_key_for_new_session();
         agent.reconcile_explicit_provider_pin_route();
         mark("provider", &mut lap);
-        agent.session.ensure_initial_session_context_message();
+        // A provisional Agent is usually replaced by a resumed session (every
+        // reconnect after a reload), so do not fork the git/hardware probes
+        // for its context message until it actually becomes the session.
+        if track_concurrency {
+            agent.session.ensure_initial_session_context_message();
+        }
         mark("context_msg", &mut lap);
         agent.seed_compaction_from_session();
         mark("compaction", &mut lap);
@@ -1190,6 +1195,10 @@ impl Agent {
     pub(crate) fn activate_concurrency_tracking(&mut self) {
         if self.concurrency_session.is_some() {
             return;
+        }
+        // Provisional agents defer their context message until committed.
+        if self.session.ensure_initial_session_context_message() {
+            self.seed_compaction_from_session();
         }
         self.concurrency_session = Some(crate::telemetry::begin_concurrency_session(
             &self.session.id,

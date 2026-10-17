@@ -81,3 +81,24 @@ async fn headless_parent_is_set_before_concurrency_tracking_begins() {
     assert!(root.session.parent_id.is_none());
     assert!(format!("{:?}", root.concurrency_session).contains("child: false"));
 }
+
+/// Reconnects after a reload build a provisional Agent that is immediately
+/// replaced by the resumed session. Building its session-context message forks
+/// git probes, so it is deferred until the Agent commits to a session.
+#[tokio::test]
+async fn provisional_agent_defers_session_context_until_committed() {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedTelemetryEnv::new();
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new_provisional_with_initial_working_dir(provider, registry, None);
+    assert!(
+        !agent.session.has_session_context_message(),
+        "a placeholder must not build the session context"
+    );
+    agent.activate_concurrency_tracking();
+    assert!(
+        agent.session.has_session_context_message(),
+        "a committed session gets its context message"
+    );
+}
