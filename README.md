@@ -15,7 +15,8 @@
 
 <p>
   <strong>High-performance coding agents.</strong><br>
-  Run more agents with less RAM for your multi-agent development workflow.
+  Run dozens of agents in parallel without melting your machine.<br>
+  Built for heavy multi-agent dev workflows.
 </p>
 
 [![Last Commit](https://badgen.net/github/last-commit/1jehuang/jcode/master?icon=github)](https://github.com/1jehuang/jcode/commits/master)
