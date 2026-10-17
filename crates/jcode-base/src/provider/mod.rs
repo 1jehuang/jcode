@@ -2312,6 +2312,13 @@ impl Provider for MultiProvider {
         self.fresh_routes_memo_entry().routes
     }
 
+    fn model_capabilities_need_refresh(&self) -> bool {
+        matches!(self.active_provider(), ActiveProvider::OpenAI)
+            && self
+                .openai_provider()
+                .is_some_and(|provider| provider.model_capabilities_need_refresh())
+    }
+
     async fn prefetch_models(&self) -> Result<()> {
         let anthropic = self.anthropic_provider();
         let openai = self.openai_provider();
