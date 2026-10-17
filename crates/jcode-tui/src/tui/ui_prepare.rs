@@ -973,6 +973,11 @@ pub(crate) fn invalidate_header_prep_cache() {
     if let Ok(mut cache) = header_prep_cache().lock() {
         *cache = None;
     }
+    // Prepared frames embed the header. Clearing only the header sub-cache
+    // leaves an exact full-frame hit displaying old account dots and quotas.
+    if let Ok(mut cache) = full_prep_cache().lock() {
+        *cache = FullPrepCacheState::default();
+    }
 }
 
 /// Hash of the header inputs that are cheap to read every frame. Anything
