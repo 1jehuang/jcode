@@ -398,6 +398,48 @@ jobs:
             --skip test_prompt_entry_shimmer_color_moves_across_positions \
             --skip right_fact_stack_uses_neutral_gray_except_for_context_usage
 
+      # Audit B-7b: CI's `build` job named only 7 of 92 workspace crates in its
+      # lib-test invocations, so ~80% of lib-tests (75 of 92 crates) were never
+      # run in CI. This block adds 4 of the 5 highest-leverage crates by test
+      # count and user-surface criticality to close the gap incrementally.
+      # jcode-provider-openrouter-runtime is intentionally skipped: it has a
+      # pre-existing test failure (`autodetected_profile_seeds_default_model_
+      # and_cache_namespace` expects `glm-4.5` but the autodetected default is
+      # now `glm-5.3`, a model-name drift) at HEAD 748eeaa1e. Tracked
+      # separately; the 4 added here are the audit-clean subset. Order is
+      # test-count descending so the heaviest fixtures fail fast if they break.
+      # Each step uses the same timeout wrapper as the TUI cohort above
+      # (consistency, host may be Linux or macOS per matrix). All four are
+      # shared by every session at runtime; a regression here reaches every
+      # user and would not have been caught by the prior 7-crate gate.
+      - name: Run jcode-command-risk lib tests (audit B-7b)
+        shell: bash
+        run: |
+          python3 .github/scripts/run_with_timeout.py 600 \
+            "$(rustup which cargo)" test --locked --target ${{ matrix.target }} \
+            -p jcode-command-risk --lib -- --nocapture
+
+      - name: Run jcode-tui-markdown lib tests (audit B-7b)
+        shell: bash
+        run: |
+          python3 .github/scripts/run_with_timeout.py 600 \
+            "$(rustup which cargo)" test --locked --target ${{ matrix.target }} \
+            -p jcode-tui-markdown --lib -- --nocapture --test-threads=1
+
+      - name: Run jcode-provider-openai-runtime lib tests (audit B-7b)
+        shell: bash
+        run: |
+          python3 .github/scripts/run_with_timeout.py 600 \
+            "$(rustup which cargo)" test --locked --target ${{ matrix.target }} \
+            -p jcode-provider-openai-runtime --lib -- --nocapture
+
+      - name: Run jcode-provider-core lib tests (audit B-7b)
+        shell: bash
+        run: |
+          python3 .github/scripts/run_with_timeout.py 600 \
+            "$(rustup which cargo)" test --locked --target ${{ matrix.target }} \
+            -p jcode-provider-core --lib -- --nocapture
+
       - name: Compile integration test binaries
         shell: bash
         # Build the integration-test binaries up front (not counted against the
