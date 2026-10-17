@@ -73,15 +73,15 @@ curl -fsSL https://jcode.sh/install | bash
 
 Swarm workers run headless, so this is the number that matters when you fan out agents.
 
-| Tool | Extra RAM per session | Comparison |
-|---|---|---|
-| **jcode** | **~3.1 MB** | baseline |
-| **Claude Code** | ~164 MB | **~54× more RAM** |
-| **Codex CLI** | pending | |
-| **OpenCode** | pending | |
-| **pi** | pending | |
+| Tool | First session | Each additional session | Comparison (additional) |
+|---|---|---|---|
+| **jcode** | **32.9 MB** | **~6.4 MB** | baseline |
+| **OpenCode** | 637.1 MB | ~5.9 MB | about the same |
+| **pi** | 84.0 MB | ~79.6 MB | **12.4× more RAM** |
+| **Claude Code** | 272.9 MB | ~169.3 MB | **26.5× more RAM** |
+| **Codex CLI** | 398.6 MB | ~194.1 MB | **30.3× more RAM** |
 
-Each session completes 5 real model turns with tool calls, then total PSS of every process is measured. [Reproduce](scripts/bench_headless_memory.py).
+Each session completes 5 real model turns with tool calls, then total PSS of every process is measured at 1, 5, and 10 concurrent sessions, averaged over two runs. jcode, OpenCode, pi, and Codex CLI used `gpt-5.4`; Claude Code used Claude Sonnet. [Reproduce](scripts/bench_headless_memory.py).
 
 ### Time to first input
 

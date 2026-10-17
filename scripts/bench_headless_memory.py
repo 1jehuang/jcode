@@ -553,12 +553,16 @@ def run_opencode(sessions: int, turns: int, cwd: str, model: str, env: dict[str,
                 th.join()
             first = replies.get(ids[0], {})
             parts = first.get("parts") or []
-            tool_uses += sum(1 for p in parts if p.get("type") == "tool")
             texts = [p.get("text", "") for p in parts if p.get("type") == "text"]
             last = (texts[-1] if texts else last)[:200]
             time.sleep(1.0)
             samples.append((f"turn{t + 1}", *sum_tree_pss([server.pid], [pgid])))
             log(f"opencode sessions={sessions} turn {t + 1} pss={samples[-1][1]} MB")
+        try:
+            history = http_json("GET", f"{base}/session/{ids[0]}/message", timeout=30) or []
+            tool_uses = sum(1 for m in history for p in (m.get("parts") or []) if p.get("type") == "tool")
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"history: {exc}")
         version = subprocess.run([binary, "--version"], capture_output=True, text=True, env=env).stdout.strip()
         return {"tool": "OpenCode", "sessions": sessions, "samples": samples, "errors": errors,
                 "version": version, "checks": {"tool_uses": tool_uses, "last_response": last}}
