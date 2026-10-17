@@ -444,6 +444,9 @@ const ALL_GEMINI_MODELS: &[&str] = &[
 /// `fast` variants never do.
 const ALL_GROK_MODELS: &[&str] = &["grok-4.7", "grok-4.6", "grok-4.5", "grok-code-fast-1"];
 
+/// Models Muse Code actually exposes via its own `model/list`, flagship first.
+const ALL_MUSE_CODE_MODELS: &[&str] = &["muse-wonder-1.0", "muse-spark-1.3", "muse-spark-1.2"];
+
 /// Flagship-first preference tiers used only to break ties when falling back to
 /// an arbitrary matching route after a login. Each inner slice is one curated
 /// family ordered best-first; earlier families outrank later ones. Returns an
@@ -470,6 +473,7 @@ fn provider_preferred_model_orders(
             crate::provider::ALL_OPENAI_MODELS,
         ],
         Some("grok-build") => &[ALL_GROK_MODELS],
+        Some("muse-code") => &[ALL_MUSE_CODE_MODELS],
         Some("bedrock") => &[ALL_BEDROCK_MODELS],
         // Azure hosts the OpenAI family.
         Some("azure-openai") => &[crate::provider::ALL_OPENAI_MODELS],
@@ -667,12 +671,17 @@ fn frontier_families(activation: &AuthActivationResult) -> &'static [FrontierFam
         prefix: "grok",
         flagship_token: None,
     };
+    const MUSE: FrontierFamily = FrontierFamily {
+        prefix: "muse",
+        flagship_token: None,
+    };
     match activation.provider_id.as_deref() {
         Some("claude") | Some("claude-api") => &[CLAUDE, FABLE],
         Some("openai") | Some("openai-api") | Some("azure-openai") => &[GPT],
         // Copilot/Cursor proxy both families under canonical ids.
         Some("copilot") | Some("cursor") | Some("openrouter") => &[CLAUDE, FABLE, GPT],
         Some("grok-build") => &[GROK],
+        Some("muse-code") => &[MUSE],
         // Bedrock hosts Claude under `anthropic.claude-opus-...` (prefix stripped
         // by normalize), so the Claude family applies.
         Some("bedrock") => &[CLAUDE],
@@ -965,6 +974,9 @@ fn route_matches_activation(route: &ModelRoute, activation: &AuthActivationResul
         "grok-build" => {
             return matches!(api_method, crate::provider::ModelRouteApiMethod::GrokBuild);
         }
+        "muse-code" => {
+            return matches!(api_method, crate::provider::ModelRouteApiMethod::MuseCode);
+        }
         "azure-openai" => {
             // Azure OpenAI reuses the OpenRouter transport (configured via Azure
             // env), so its routes carry the `openrouter` api_method while keeping
@@ -1061,6 +1073,7 @@ fn normalized_login_provider_id(provider_id: &str) -> Option<&'static str> {
         "openrouter" => Some("openrouter"),
         "jcode" | "subscription" | "jcode-subscription" => Some("jcode"),
         "grok-build" => Some("grok-build"),
+        "muse-code" => Some("muse-code"),
         "bedrock" | "aws-bedrock" | "aws_bedrock" => Some("bedrock"),
         "cursor" => Some("cursor"),
         "copilot" => Some("copilot"),
@@ -1108,6 +1121,7 @@ pub fn model_switch_request_for_provider_id(
         Some("openrouter") => format!("openrouter:{}", model),
         Some("jcode") => model.to_string(),
         Some("grok-build") => crate::provider::grok_build_model_spec(model),
+        Some("muse-code") => crate::provider::muse_code_model_spec(model),
         Some("bedrock") => format!("bedrock:{}", model),
         Some("cursor") => format!("cursor:{}", model),
         Some("copilot") => format!("copilot:{}", model),

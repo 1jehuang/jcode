@@ -107,6 +107,11 @@ pub enum ProviderChoice {
         alias = "meta-ai"
     )]
     MetaMuse,
+    /// Muse Code subscription: drives the local `muse` binary over the Muse
+    /// Session Protocol (MSP). No login flow of its own; the `muse` process owns
+    /// the subscription credential.
+    #[value(name = "muse-code", alias = "muse-code-msp")]
+    MuseCode,
     #[value(alias = "celeris-ai", alias = "celeris1", alias = "celeris-1")]
     Celeris,
     YoloAuto,
@@ -186,6 +191,7 @@ impl ProviderChoice {
             Self::NvidiaNim => "nvidia-nim",
             Self::XiaomiMimo => "xiaomi-mimo",
             Self::MetaMuse => "meta-muse",
+            Self::MuseCode => "muse-code",
             Self::Celeris => "celeris",
             Self::YoloAuto => "yolo-auto",
             Self::Lmstudio => "lmstudio",
@@ -1616,6 +1622,18 @@ async fn init_provider_with_model_policy(
                 crate::provider::external::GROK_BUILD_RUNTIME,
             )
             .ok_or_else(|| anyhow::anyhow!("Grok Build runtime is not registered"))?
+        }
+        ProviderChoice::MuseCode => {
+            disable_subscription_runtime_mode();
+            init_notice(
+                "Using Muse Code subscription (drives the local `muse` binary over MSP; run `muse` once to sign in)",
+            );
+            clear_initial_model_provider();
+            crate::env::set_var("JCODE_ACTIVE_PROVIDER", "muse-code");
+            crate::provider::external::instantiate_external_provider(
+                crate::provider::external::MUSE_CODE_RUNTIME,
+            )
+            .ok_or_else(|| anyhow::anyhow!("Muse Code runtime is not registered"))?
         }
         ProviderChoice::Openrouter => {
             disable_subscription_runtime_mode();

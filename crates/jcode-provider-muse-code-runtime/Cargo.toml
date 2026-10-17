@@ -1,0 +1,26 @@
+[package]
+name = "jcode-provider-muse-code-runtime"
+version = "0.1.0"
+edition = "2024"
+description = "Muse Code subscription runtime for jcode over the Muse Session Protocol (MSP)"
+
+[lib]
+name = "jcode_provider_muse_code_runtime"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+futures = "0.3"
+serde_json = "1"
+tokio = { version = "1", features = ["io-util", "macros", "process", "rt", "rt-multi-thread", "sync", "time"] }
+uuid = { version = "1", features = ["v4", "v7"] }
+
+# default-features = false: see jcode-provider-openrouter-runtime/Cargo.toml.
+jcode-base = { path = "../jcode-base", default-features = false }
+jcode-logging = { path = "../jcode-logging" }
+jcode-message-types = { path = "../jcode-message-types" }
+jcode-provider-core = { path = "../jcode-provider-core" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }

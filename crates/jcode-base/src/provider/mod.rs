@@ -65,8 +65,9 @@ pub use jcode_provider_core::{
     PremiumMode, Provider, RouteBillingKind, RouteCheapnessEstimate, RouteCostConfidence,
     RouteCostSource, RouteSelection, RuntimeKey, dedupe_model_routes,
     explicit_model_provider_prefix, fresh_transport_client, grok_build_model_spec,
-    inferred_reasoning_efforts, model_name_for_provider, normalize_copilot_model_name,
-    provider_from_model_key, shared_http_client, summarize_model_catalog_refresh,
+    inferred_reasoning_efforts, model_name_for_provider, muse_code_model_spec,
+    normalize_copilot_model_name, provider_from_model_key, shared_http_client,
+    summarize_model_catalog_refresh,
 };
 pub use jcode_provider_core::{
     FallbackPickOptions, error_looks_like_credential_failure, model_route_provider_labels_match,
@@ -370,6 +371,10 @@ pub use self::state::{ProviderModelSelectionSource, ProviderRuntimeState, Provid
 pub use session_restore::*;
 
 pub(crate) const GROK_BUILD_PROFILE_ID: &str = "grok-build";
+
+/// Profile id for the Muse Code subscription runtime, installed into the same
+/// registry the Grok Build profile uses.
+pub(crate) const MUSE_CODE_PROFILE_ID: &str = "muse-code";
 
 /// MultiProvider wraps multiple providers and allows seamless model switching
 pub struct MultiProvider {
@@ -2054,6 +2059,31 @@ impl Provider for MultiProvider {
             provider.set_model(target_model)?;
             registry.install_compatible_profile(GROK_BUILD_PROFILE_ID, provider);
             registry.set_active_compatible_profile(GROK_BUILD_PROFILE_ID);
+            self.set_active_provider(ActiveProvider::OpenRouter);
+            return Ok(());
+        }
+
+        // `muse-code:<model>` is the explicit spec for the Muse Code
+        // subscription runtime. Without this branch a saved or restored Muse
+        // route fell through to the active provider, so selecting Muse could
+        // silently leave the conversation on another provider.
+        if let Some(target_model) = requested_model.strip_prefix("muse-code:") {
+            let target_model = target_model.trim();
+            if target_model.is_empty() {
+                anyhow::bail!("Muse Code model cannot be empty");
+            }
+            let registry = ProviderRegistry::new(self);
+            let provider = registry
+                .compatible_profile(MUSE_CODE_PROFILE_ID)
+                .or_else(|| {
+                    external::instantiate_expected_external_provider(external::MUSE_CODE_RUNTIME)
+                })
+                .ok_or_else(|| {
+                    anyhow!("Muse Code is not available; is `muse` installed and signed in?")
+                })?;
+            provider.set_model(target_model)?;
+            registry.install_compatible_profile(MUSE_CODE_PROFILE_ID, provider);
+            registry.set_active_compatible_profile(MUSE_CODE_PROFILE_ID);
             self.set_active_provider(ActiveProvider::OpenRouter);
             return Ok(());
         }
