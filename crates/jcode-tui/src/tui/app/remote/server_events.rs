@@ -2,10 +2,10 @@ use super::*;
 use crate::tool::selfdev::ReloadContext;
 use crate::tui::TuiState;
 use crate::tui::app as app_mod;
-use crate::tui::app::{KvCacheMissReason, KvCacheMissSample};
 use crate::tui::app::remote::input_dispatch::restore_pending_startup_prompt_echo;
 use crate::tui::app::remote::swarm_plan_core::RemoteSwarmPlanSnapshot;
 use crate::tui::app::remote::swarm_status_core::swarm_status_transition_notice;
+use crate::tui::app::{KvCacheMissReason, KvCacheMissSample};
 
 fn allow_runtime_identity_mismatch() -> bool {
     std::env::var_os("JCODE_ALLOW_SERVER_VERSION_MISMATCH").is_some()
@@ -145,12 +145,35 @@ fn handle_kv_cache_miss(
     // duplicate that notice, but do not require a baseline after reconnect.
     if let Some(turn_number) = app.kv_cache.kv_cache_turn_number {
         let call_index = app.kv_cache.kv_cache_turn_call_index;
-        if app.kv_cache.kv_cache_miss_samples.iter().any(|sample| {
-            sample.turn_number == turn_number && sample.call_index == call_index
-        }) {
+        if let Some(sample) = app
+            .kv_cache
+            .kv_cache_miss_samples
+            .iter_mut()
+            .find(|sample| sample.turn_number == turn_number && sample.call_index == call_index)
+        {
+            // TokenUsage can arrive before the daemon's native-compaction
+            // attribution. Correct that provisional local notice in place,
+            // rather than deduplicating away the more authoritative cause.
+            if reason == "compaction" && sample.reason != KvCacheMissReason::Compaction {
+                sample.reason = KvCacheMissReason::Compaction;
+                sample.missed_tokens = missed_tokens;
+                if notices_enabled {
+                    let marker = format!("turn {turn_number} call {call_index}:");
+                    if let Some(idx) = app.display_messages.iter().rposition(|entry| {
+                        entry.role == "system"
+                            && entry.content.contains("KV cache miss [")
+                            && entry.content.contains(&marker)
+                    }) {
+                        return app.replace_display_message_content(idx, message);
+                    }
+                    app.push_kv_cache_notice(message);
+                    return true;
+                }
+            }
             return false;
         }
         let reason = match reason {
+            "compaction" => KvCacheMissReason::Compaction,
             "provider_switch" => KvCacheMissReason::ProviderSwitch,
             "model_switch" => KvCacheMissReason::ModelSwitch,
             "upstream_switch" => KvCacheMissReason::UpstreamSwitch,
@@ -168,7 +191,10 @@ fn handle_kv_cache_miss(
             missed_tokens,
             reason,
         });
-        let overflow = app.kv_cache.kv_cache_miss_samples.len()
+        let overflow = app
+            .kv_cache
+            .kv_cache_miss_samples
+            .len()
             .saturating_sub(App::KV_CACHE_MAX_MISS_SAMPLES);
         app.kv_cache.kv_cache_miss_samples.drain(..overflow);
     }
@@ -919,16 +945,21 @@ pub(in crate::tui::app) fn handle_server_event(
                     app.streaming.streaming_cache_read_tokens.unwrap_or(0),
                     app.streaming.streaming_cache_creation_tokens.unwrap_or(0),
                 );
-                if let Some(baseline) = app.kv_cache.kv_cache_baseline.as_mut() {
-                    // Store the effective prompt (input + read + creation): for
-                    // split-accounting providers bare `input` is only the
-                    // uncached remainder, while the whole effective prompt is
-                    // what gets resent when the cache goes cold.
-                    baseline.input_tokens = effective_prompt_tokens;
+                let reusable_tokens = crate::compaction::reusable_cache_tokens_from_usage(
+                    &app.kv_cache_provider_name(),
+                    input,
+                    app.streaming.streaming_cache_read_tokens,
+                    app.streaming.streaming_cache_creation_tokens,
+                );
+                if let Some(baseline) = app.kv_cache.kv_cache_baseline.as_mut()
+                    && baseline.cache_generation == app.kv_cache.cache_generation
+                {
+                    // Late snapshots refine the written boundary, not the
+                    // uncached tail. Never recreate an invalidated baseline.
+                    baseline.input_tokens = reusable_tokens;
                     baseline.completed_at = Instant::now();
+                    app.token_accounting.cache_next_optimal_input_tokens = Some(reusable_tokens);
                 }
-                app.token_accounting.cache_next_optimal_input_tokens =
-                    Some(effective_prompt_tokens);
                 app.last_api_completed = Some(Instant::now());
                 app.last_api_completed_provider = Some(<App as TuiState>::provider_name(app));
                 app.last_api_completed_model = Some(<App as TuiState>::provider_model(app));

@@ -127,3 +127,134 @@ fn remote_kv_cache_miss_disabled_suppresses_notice_but_retains_widget_sample() {
         KvCacheMissReason::Unknown
     );
 }
+
+#[test]
+fn remote_compaction_refresh_corrects_provisional_miss_in_place() {
+    let mut app = create_test_app();
+    app.kv_cache.kv_cache_turn_number = Some(19);
+    app.kv_cache.kv_cache_turn_call_index = 36;
+    app.kv_cache.kv_cache_miss_samples.push(KvCacheMissSample {
+        turn_number: 19,
+        call_index: 36,
+        missed_tokens: 216_517,
+        reason: KvCacheMissReason::ZeroRead,
+    });
+    app.push_display_message(DisplayMessage::system(
+        "ℹ️ KV cache miss [zero read] turn 19 call 36: provisional",
+    ));
+    app.push_display_message(DisplayMessage::system("later transcript event"));
+    let count = app.display_messages.len();
+    let corrected =
+        "ℹ️ KV cache refresh [provider_auto_compaction] turn 19 call 36: expected rebuild";
+    assert!(handle_kv_cache_miss(
+        &mut app,
+        "compaction",
+        204_393,
+        corrected.into(),
+        true
+    ));
+    assert_eq!(app.display_messages.len(), count);
+    assert_eq!(app.display_messages[count - 2].content, corrected);
+    assert_eq!(
+        app.display_messages[count - 1].content,
+        "later transcript event"
+    );
+    assert_eq!(app.kv_cache.kv_cache_miss_samples.len(), 1);
+    assert_eq!(
+        app.kv_cache.kv_cache_miss_samples[0].reason,
+        KvCacheMissReason::Compaction
+    );
+    assert_eq!(app.kv_cache.kv_cache_miss_samples[0].missed_tokens, 204_393);
+    assert!(!handle_kv_cache_miss(
+        &mut app,
+        "compaction",
+        204_393,
+        corrected.into(),
+        true
+    ));
+}
+
+#[test]
+fn remote_compaction_refresh_maps_without_local_baseline() {
+    let mut app = create_test_app();
+    app.kv_cache.kv_cache_turn_number = Some(2);
+    app.kv_cache.kv_cache_turn_call_index = 1;
+    assert!(handle_kv_cache_miss(
+        &mut app,
+        "compaction",
+        12_000,
+        "expected refresh".into(),
+        true
+    ));
+    assert_eq!(
+        app.kv_cache.kv_cache_miss_samples[0].reason,
+        KvCacheMissReason::Compaction
+    );
+    assert_eq!(
+        app.kv_cache.kv_cache_miss_samples[0].reason.label(),
+        "compaction refresh"
+    );
+}
+
+#[test]
+fn remote_compaction_refresh_keeps_disabled_notices_hidden() {
+    let mut app = create_test_app();
+    app.kv_cache.kv_cache_turn_number = Some(2);
+    app.kv_cache.kv_cache_turn_call_index = 1;
+    assert!(!handle_kv_cache_miss(
+        &mut app,
+        "zero_read",
+        12_000,
+        "hidden miss".into(),
+        false
+    ));
+    let count = app.display_messages.len();
+    assert!(!handle_kv_cache_miss(
+        &mut app,
+        "compaction",
+        11_000,
+        "hidden refresh".into(),
+        false
+    ));
+    assert_eq!(app.display_messages.len(), count);
+    assert_eq!(
+        app.kv_cache.kv_cache_miss_samples[0].reason,
+        KvCacheMissReason::Compaction
+    );
+}
+
+#[test]
+fn remote_compaction_notice_follows_buffered_response() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = RemoteConnection::dummy();
+    app.streaming.streaming_text = "response before compaction".into();
+    handle_server_event(
+        &mut app,
+        ServerEvent::Compaction {
+            trigger: "automatic".into(),
+            pre_tokens: Some(216_517),
+            post_tokens: None,
+            tokens_saved: None,
+            duration_ms: None,
+            messages_dropped: None,
+            messages_compacted: None,
+            summary_chars: None,
+            active_messages: None,
+        },
+        &mut remote,
+    );
+    let count = app.display_messages.len();
+    assert_eq!(
+        app.display_messages[count - 2].content,
+        "response before compaction"
+    );
+    assert!(
+        app.display_messages[count - 1]
+            .content
+            .starts_with("📦 Compacted (automatic): ~216,517 tokens")
+    );
+    assert!(!app.display_messages[count - 1].content.contains("unknown"));
+    assert!(app.streaming.streaming_text.is_empty());
+}
