@@ -555,7 +555,7 @@ pub async fn collect_simple_completion<P: Provider + ?Sized>(
     }];
 
     let mut provider_name = provider.name().to_string();
-    let model = provider.model();
+    let mut model = provider.model();
     let response = provider.complete(&messages, &[], system, None).await?;
     let mut result = String::new();
     let mut usage = SimpleCompletionUsage::default();
@@ -572,12 +572,15 @@ pub async fn collect_simple_completion<P: Provider + ?Sized>(
                 output_tokens,
                 cache_read_input_tokens,
                 cache_creation_input_tokens,
-            }) => usage.observe(
-                input_tokens,
-                output_tokens,
-                cache_read_input_tokens,
-                cache_creation_input_tokens,
-            ),
+            }) => {
+                model = provider.model();
+                usage.observe(
+                    input_tokens,
+                    output_tokens,
+                    cache_read_input_tokens,
+                    cache_creation_input_tokens,
+                );
+            }
             Ok(StreamEvent::UpstreamProvider { provider }) => provider_name = provider,
             Ok(StreamEvent::Error { message, .. }) => {
                 return Err(SimpleCompletionError {

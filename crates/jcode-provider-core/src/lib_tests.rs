@@ -1,9 +1,10 @@
 use super::*;
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct SimpleFailureProvider {
     error_event: bool,
     fail: bool,
+    model_reads: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 #[async_trait]
@@ -51,7 +52,15 @@ impl Provider for SimpleFailureProvider {
         "route"
     }
     fn model(&self) -> String {
-        "test-model".into()
+        if self
+            .model_reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            == 0
+        {
+            "requested-alias".into()
+        } else {
+            "test-model".into()
+        }
     }
     fn fork(&self) -> Arc<dyn Provider> {
         Arc::new(self.clone())
@@ -63,6 +72,7 @@ async fn simple_completion_failure_preserves_partial_usage_and_source() {
     let provider = SimpleFailureProvider {
         error_event: false,
         fail: true,
+        ..Default::default()
     };
     let error = provider
         .complete_simple_with_usage("prompt", "system")
@@ -87,6 +97,7 @@ async fn simple_completion_error_event_is_not_success() {
     let provider = SimpleFailureProvider {
         error_event: true,
         fail: true,
+        ..Default::default()
     };
     let error = provider
         .complete_simple_with_usage("prompt", "system")
@@ -109,6 +120,7 @@ async fn simple_completion_success_returns_usage_once() {
     let provider = SimpleFailureProvider {
         error_event: false,
         fail: false,
+        ..Default::default()
     };
     let (text, usage) = provider
         .complete_simple_with_usage("prompt", "system")
