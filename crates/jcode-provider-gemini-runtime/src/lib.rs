@@ -868,7 +868,7 @@ impl Provider for GeminiProvider {
                 let _ = tx
                     .send(Ok(StreamEvent::TokenUsage {
                         input_tokens: usage.prompt_token_count,
-                        output_tokens: usage.candidates_token_count,
+                        output_tokens: usage.output_token_count(),
                         cache_read_input_tokens: usage.cached_content_token_count,
                         cache_creation_input_tokens: None,
                     }))

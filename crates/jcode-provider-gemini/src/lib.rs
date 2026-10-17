@@ -545,7 +545,20 @@ pub struct GeminiUsageMetadata {
     #[serde(default)]
     pub candidates_token_count: Option<u64>,
     #[serde(default)]
+    pub thoughts_token_count: Option<u64>,
+    #[serde(default)]
     pub cached_content_token_count: Option<u64>,
+}
+
+impl GeminiUsageMetadata {
+    /// Billable output includes candidates and thinking tokens.
+    /// Do not infer output from totalTokenCount, which includes tool-use prompts.
+    pub fn output_token_count(&self) -> Option<u64> {
+        match (self.candidates_token_count, self.thoughts_token_count) {
+            (Some(candidates), Some(thoughts)) => Some(candidates.saturating_add(thoughts)),
+            (candidates, thoughts) => candidates.or(thoughts),
+        }
+    }
 }
 
 pub fn gemini_fallback_models(current_model: &str) -> Vec<&'static str> {
@@ -700,6 +713,53 @@ pub fn choose_onboard_tier(res: &LoadCodeAssistResponse) -> GeminiUserTier {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn response_usage_counts_thinking_without_inventing_output() {
+        for (metadata, expected) in [
+            (json!({"thoughtsTokenCount": 13}), Some(13)),
+            (
+                json!({"candidatesTokenCount": 7, "thoughtsTokenCount": 13}),
+                Some(20),
+            ),
+            (json!({"candidatesTokenCount": 7}), Some(7)),
+            (json!({}), None),
+            (
+                json!({"candidatesTokenCount": null, "thoughtsTokenCount": null}),
+                None,
+            ),
+            (json!({"thoughtsTokenCount": 0}), Some(0)),
+            (json!({"candidatesTokenCount": 0}), Some(0)),
+            (
+                json!({"candidatesTokenCount": 0, "thoughtsTokenCount": 0}),
+                Some(0),
+            ),
+            (
+                json!({"candidatesTokenCount": u64::MAX, "thoughtsTokenCount": 1}),
+                Some(u64::MAX),
+            ),
+            (
+                json!({"promptTokenCount": 10, "totalTokenCount": 100, "toolUsePromptTokenCount": 90}),
+                None,
+            ),
+            (
+                json!({"candidatesTokenCount": 7, "thoughtsTokenCount": 13, "totalTokenCount": 120, "toolUsePromptTokenCount": 90}),
+                Some(20),
+            ),
+        ] {
+            let response: VertexGenerateContentResponse = serde_json::from_value(json!({
+                "usageMetadata": metadata
+            }))
+            .unwrap();
+            assert_eq!(
+                response.usage_metadata.unwrap().output_token_count(),
+                expected,
+                "{metadata}"
+            );
+        }
+        let response: VertexGenerateContentResponse = serde_json::from_value(json!({})).unwrap();
+        assert!(response.usage_metadata.is_none());
+    }
 
     #[test]
     fn compatible_schema_strips_nested_property_names() {
