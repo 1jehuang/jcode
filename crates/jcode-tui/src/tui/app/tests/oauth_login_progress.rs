@@ -191,6 +191,8 @@ fn oauth_login_progress_real_frame_has_clickable_link_and_expand_button() {
     let collapsed = render_and_snap(&app, &mut terminal);
     assert!(!collapsed.contains("client_id=jcode-fixture"));
     assert!(collapsed.contains("Login only:"));
+    assert!(collapsed.contains("login>"));
+    println!("Observed collapsed login frame:\n{collapsed}");
     let find = |terminal: &ratatui::Terminal<ratatui::backend::TestBackend>, needle: &str| {
         let buf = terminal.backend().buffer();
         for row in 0..buf.area().height {
@@ -215,6 +217,7 @@ fn oauth_login_progress_real_frame_has_clickable_link_and_expand_button() {
     assert!(app.try_toggle_swarm_expand_at(col + 2, row));
     let expanded = render_and_snap(&app, &mut terminal);
     assert!(expanded.contains("client_id=jcode-fixture"));
+    println!("Observed expanded login frame:\n{expanded}");
     let (col, row) = find(&terminal, "▾ collapse");
     assert!(app.try_toggle_swarm_expand_at(col + 2, row));
     let collapsed = render_and_snap(&app, &mut terminal);
@@ -225,4 +228,5 @@ fn oauth_login_progress_real_frame_has_clickable_link_and_expand_button() {
     assert!(!success.contains("▸ expand"));
     assert!(!success.contains("Open OpenAI sign-in"));
     assert!(!success.contains("Login only:"));
+    println!("Observed successful login frame:\n{success}");
 }
