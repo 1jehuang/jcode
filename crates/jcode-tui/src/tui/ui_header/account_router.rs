@@ -157,16 +157,13 @@ fn inventory_lines(
         let is_current = current_provider == Some(provider)
             && selected
             && credential == Some(ActiveCredential::OAuth);
-        let usage = crate::usage::cached_account_usage_snapshot(usage_provider, &account.label);
+        let usage =
+            crate::usage::cached_account_usage_status_snapshot(usage_provider, &account.label);
         let quota = usage.as_ref().and_then(|usage| {
             remaining_bar(usage, crate::config::config().display.usage_display_used())
         });
         let mut row = detail(
-            if expired {
-                AuthState::Expired
-            } else {
-                AuthState::Available
-            },
+            oauth_credential_status(expired, usage.as_ref()),
             format!("{name:<9} {}", masked_identity(account.email.as_deref())),
             is_current,
         );
@@ -289,16 +286,79 @@ fn remaining_bar(
     Some(bar)
 }
 
-fn detail(state: AuthState, label: String, selected: bool) -> Line<'static> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CredentialStatus {
+    Available,
+    Attention,
+    Blocked,
+    Unknown,
+}
+
+impl From<AuthState> for CredentialStatus {
+    fn from(state: AuthState) -> Self {
+        match state {
+            AuthState::Available => Self::Available,
+            AuthState::Expired => Self::Attention,
+            AuthState::NotConfigured => Self::Unknown,
+        }
+    }
+}
+
+fn oauth_credential_status(
+    expired: bool,
+    usage: Option<&crate::usage::AccountUsageSnapshot>,
+) -> CredentialStatus {
+    if expired {
+        return CredentialStatus::Attention;
+    }
+    let Some(usage) = usage else {
+        return CredentialStatus::Unknown;
+    };
+    if let Some(error) = usage.error.as_deref() {
+        // Only an explicit HTTP authentication rejection is conclusive. A
+        // timeout, 403 quota-scope denial, or 429 usage-endpoint throttle is not.
+        let unauthorized = ["Usage API error (401", "API error (401", "HTTP 401"]
+            .iter()
+            .filter_map(|prefix| error.strip_prefix(prefix))
+            .any(|suffix| suffix.starts_with([' ', ')', ':']) || suffix.is_empty());
+        return if unauthorized {
+            CredentialStatus::Blocked
+        } else {
+            CredentialStatus::Unknown
+        };
+    }
+    if usage.exhausted
+        || [usage.five_hour_ratio, usage.seven_day_ratio]
+            .into_iter()
+            .flatten()
+            .any(|ratio| ratio == 1.0)
+    {
+        return CredentialStatus::Blocked;
+    }
+    if [usage.five_hour_ratio, usage.seven_day_ratio]
+        .into_iter()
+        .flatten()
+        .any(|ratio| ratio.is_finite() && (0.0..=1.0).contains(&ratio))
+    {
+        CredentialStatus::Available
+    } else {
+        CredentialStatus::Unknown
+    }
+}
+
+fn detail(state: impl Into<CredentialStatus>, label: String, selected: bool) -> Line<'static> {
+    let (dot, color) = match state.into() {
+        CredentialStatus::Available => ("●", auth_dot_color(AuthState::Available)),
+        CredentialStatus::Attention => ("◐", auth_dot_color(AuthState::Expired)),
+        CredentialStatus::Blocked => ("●", rgb(255, 100, 100)),
+        CredentialStatus::Unknown => ("○", auth_dot_color(AuthState::NotConfigured)),
+    };
     Line::from(vec![
         Span::styled(
             if selected { "> " } else { "  " },
             Style::default().fg(auth_dot_color(AuthState::Available)),
         ),
-        Span::styled(
-            auth_dot_char(state),
-            Style::default().fg(auth_dot_color(state)),
-        ),
+        Span::styled(dot, Style::default().fg(color)),
         Span::styled(format!(" {label}"), Style::default().fg(dim_color())),
     ])
 }
@@ -382,16 +442,18 @@ mod tests {
         assert!(text(vec![lines[1].clone()]).contains("a***e@example.com"));
         assert!(text(vec![lines[2].clone()]).contains("API key"));
         assert!(text(vec![lines[3].clone()]).contains("a***a@example.com"));
-        assert_eq!(lines[3].spans[1].content, "●");
-        assert_eq!(lines[0].spans[1].content, "●");
-        assert_eq!(rendered.matches('●').count(), 4);
+        assert_eq!(lines[3].spans[1].content, "○");
+        assert_eq!(lines[0].spans[1].content, "○");
+        assert_eq!(rendered.matches('●').count(), 1);
         assert_eq!(lines[3].spans[0].content, "> ");
         assert_eq!(rendered.matches('>').count(), 1);
-        for line in &lines {
-            assert_eq!(
-                line.spans[1].style.fg,
-                Some(auth_dot_color(AuthState::Available))
-            );
+        for (index, line) in lines.iter().enumerate() {
+            let state = if index == 2 {
+                AuthState::Available
+            } else {
+                AuthState::NotConfigured
+            };
+            assert_eq!(line.spans[1].style.fg, Some(auth_dot_color(state)));
         }
         for word in [
             "active",
@@ -467,10 +529,10 @@ mod tests {
         );
         assert_eq!(lines[0].spans[0].content, "  ");
         assert_eq!(lines[1].spans[0].content, "> ");
-        assert_eq!(lines[1].spans[1].content, "●");
+        assert_eq!(lines[1].spans[1].content, "○");
         assert_eq!(
             lines[1].spans[1].style.fg,
-            Some(auth_dot_color(AuthState::Available))
+            Some(auth_dot_color(AuthState::NotConfigured))
         );
         assert!(!text(lines).contains("API key"));
     }
@@ -487,6 +549,114 @@ mod tests {
                 assert_eq!(row.spans[0].content, if selected { "> " } else { "  " });
                 assert_eq!(row.spans[1].content, auth_dot_char(state));
                 assert_eq!(row.spans[1].style.fg, Some(auth_dot_color(state)));
+                assert_eq!(row.width(), 14);
+            }
+        }
+    }
+
+    #[test]
+    fn router_inventory_usability_requires_account_scoped_evidence() {
+        let mut usage = crate::usage::AccountUsageSnapshot {
+            label: "one".into(),
+            email: None,
+            exhausted: false,
+            primary_label: Some("5h".into()),
+            five_hour_ratio: Some(0.48),
+            secondary_label: None,
+            seven_day_ratio: None,
+            resets_at: None,
+            error: None,
+        };
+        assert_eq!(
+            oauth_credential_status(false, None),
+            CredentialStatus::Unknown
+        );
+        assert_eq!(
+            oauth_credential_status(true, None),
+            CredentialStatus::Attention
+        );
+        assert_eq!(
+            oauth_credential_status(false, Some(&usage)),
+            CredentialStatus::Available
+        );
+        usage.exhausted = true;
+        assert_eq!(
+            oauth_credential_status(false, Some(&usage)),
+            CredentialStatus::Blocked
+        );
+        usage.exhausted = false;
+        usage.five_hour_ratio = Some(1.0);
+        assert_eq!(
+            oauth_credential_status(false, Some(&usage)),
+            CredentialStatus::Blocked
+        );
+        usage.five_hour_ratio = Some(0.48);
+        usage.seven_day_ratio = Some(1.0);
+        assert_eq!(
+            oauth_credential_status(false, Some(&usage)),
+            CredentialStatus::Blocked
+        );
+        usage.seven_day_ratio = None;
+        for error in [
+            "Usage API error (401 Unauthorized): invalid token",
+            "API error (401 Unauthorized)",
+            "HTTP 401",
+        ] {
+            usage.error = Some(error.into());
+            assert_eq!(
+                oauth_credential_status(false, Some(&usage)),
+                CredentialStatus::Blocked,
+                "{error}"
+            );
+        }
+        // Probe failures cannot make old quota values look authoritative.
+        usage.exhausted = true;
+        for error in [
+            "timeout",
+            "API error (403 Forbidden)",
+            "API error (429 Too Many Requests)",
+            "API error (500): body mentions 401 Unauthorized",
+            "HTTP 4010",
+        ] {
+            usage.error = Some(error.into());
+            assert_eq!(
+                oauth_credential_status(false, Some(&usage)),
+                CredentialStatus::Unknown,
+                "{error}"
+            );
+        }
+        usage.error = None;
+        usage.exhausted = false;
+        for ratio in [None, Some(f32::NAN), Some(-0.1), Some(1.1)] {
+            usage.five_hour_ratio = ratio;
+            assert_eq!(
+                oauth_credential_status(false, Some(&usage)),
+                CredentialStatus::Unknown
+            );
+        }
+        for (status, dot, color) in [
+            (
+                CredentialStatus::Available,
+                "●",
+                auth_dot_color(AuthState::Available),
+            ),
+            (
+                CredentialStatus::Attention,
+                "◐",
+                auth_dot_color(AuthState::Expired),
+            ),
+            (CredentialStatus::Blocked, "●", rgb(255, 100, 100)),
+            (
+                CredentialStatus::Unknown,
+                "○",
+                auth_dot_color(AuthState::NotConfigured),
+            ),
+        ] {
+            for selected in [false, true] {
+                let row = detail(status, "credential".into(), selected);
+                assert_eq!(row.spans[0].content, if selected { "> " } else { "  " });
+                assert_eq!(row.spans[1].content, dot);
+                assert_eq!(row.spans[1].style.fg, Some(color));
                 assert_eq!(row.width(), 14);
             }
         }
