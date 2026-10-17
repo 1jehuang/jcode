@@ -180,6 +180,15 @@ static THEME_SET: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
 static HIGHLIGHT_CACHE: LazyLock<Mutex<HighlightCache>> =
     LazyLock::new(|| Mutex::new(HighlightCache::new()));
 
+/// Release derived syntax-highlighted lines. Syntax definitions and themes
+/// remain available, so waking a view only needs to re-highlight its content.
+pub fn clear_highlight_cache() {
+    let mut cache = HIGHLIGHT_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    cache.release();
+}
+
 const HIGHLIGHT_CACHE_LIMIT: usize = 256;
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -453,6 +462,10 @@ impl HighlightCache {
         self.entries.get(&hash).cloned()
     }
 
+    fn release(&mut self) {
+        *self = Self::new();
+    }
+
     fn insert(&mut self, hash: u64, lines: Vec<Line<'static>>) {
         // Evict if cache is too large
         if self.entries.len() >= HIGHLIGHT_CACHE_LIMIT {
@@ -460,6 +473,24 @@ impl HighlightCache {
         }
         self.entries.insert(hash, lines);
     }
+}
+
+#[cfg(test)]
+#[test]
+fn highlight_cache_release_drops_capacity_and_can_rebuild() {
+    let mut cache = HighlightCache::new();
+    cache.insert(1, vec![Line::from("highlighted text".repeat(100))]);
+    let retained_lines = cache.get(1).unwrap();
+    cache.release();
+    assert!(cache.entries.is_empty());
+    assert_eq!(cache.entries.capacity(), 0);
+    assert!(cache.get(1).is_none());
+    assert!(
+        !retained_lines.is_empty(),
+        "caller-owned lines remain valid"
+    );
+    cache.insert(2, vec![Line::from("rebuilt")]);
+    assert_eq!(cache.get(2).unwrap()[0].to_string(), "rebuilt");
 }
 
 fn hash_code(code: &str, lang: Option<&str>) -> u64 {
