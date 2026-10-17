@@ -883,11 +883,10 @@ impl App {
         match self.provider.set_model(&next_model) {
             Ok(()) => {
                 self.finalize_model_switch(&next_model);
-                let auth_suffix = self
-                    .provider
-                    .active_auth_method_label()
-                    .map(|method| format!(" (via {})", method))
-                    .unwrap_or_default();
+                let auth_suffix = switched_model_account_suffix(
+                    self.provider.active_auth_method_label(),
+                    self.provider.active_oauth_account_email().as_deref(),
+                );
                 self.push_display_message(DisplayMessage::system(format!(
                     "✓ Switched to model: {}{}",
                     next_model, auth_suffix

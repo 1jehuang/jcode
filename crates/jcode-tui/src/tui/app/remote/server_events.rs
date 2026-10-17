@@ -2514,9 +2514,19 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.invalidate_model_picker_cache();
                 app.persist_remote_header_hint();
                 if model_actually_changed && !app.auth_catalog_refresh_pending {
+                    let is_oauth = app.remote_resolved_credential
+                        == Some(jcode_provider_core::ResolvedCredential::Oauth);
+                    let suffix = crate::tui::app::helpers::switched_model_account_suffix(
+                        app.remote_resolved_credential
+                            .map(|credential| credential.auth_method_label()),
+                        app.remote_provider_oauth_email
+                            .as_ref()
+                            .filter(|_| is_oauth)
+                            .map(|email| email.as_str()),
+                    );
                     app.push_display_message(DisplayMessage::system(format!(
-                        "✓ Switched to model: {}",
-                        model
+                        "✓ Switched to model: {}{}",
+                        model, suffix
                     )));
                 }
                 if model_actually_changed {

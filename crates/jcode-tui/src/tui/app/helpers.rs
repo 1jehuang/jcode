@@ -674,6 +674,42 @@ pub(super) fn fast_mode_default_message(default_enabled: bool, default_label: &s
     )
 }
 
+/// Shorten an account email for one-line notices. Keeps the domain intact
+/// and truncates a long local part with an ellipsis, so the account stays
+/// recognizable without wrapping the line.
+pub(crate) fn truncate_account_email(email: &str, max_chars: usize) -> String {
+    let trimmed = email.trim();
+    if trimmed.chars().count() <= max_chars {
+        return trimmed.to_string();
+    }
+    let Some((local, domain)) = trimmed.split_once('@') else {
+        let kept: String = trimmed.chars().take(max_chars.saturating_sub(1)).collect();
+        return format!("{kept}…");
+    };
+    let domain_len = domain.chars().count() + 1;
+    let local_budget = max_chars.saturating_sub(domain_len + 1).max(3);
+    let kept: String = local.chars().take(local_budget).collect();
+    format!("{kept}…@{domain}")
+}
+
+/// Suffix for "Switched to model" notices: auth method plus the account
+/// email when the route authenticates with OAuth.
+pub(crate) fn switched_model_account_suffix(
+    auth_label: Option<&str>,
+    oauth_email: Option<&str>,
+) -> String {
+    let email = oauth_email
+        .map(str::trim)
+        .filter(|email| !email.is_empty())
+        .map(|email| truncate_account_email(email, 28));
+    match (auth_label, email) {
+        (Some(label), Some(email)) => format!(" (via {label} · {email})"),
+        (Some(label), None) => format!(" (via {label})"),
+        (None, Some(email)) => format!(" ({email})"),
+        (None, None) => String::new(),
+    }
+}
+
 pub(super) fn mask_email(email: &str) -> String {
     let trimmed = email.trim();
     let Some((local, domain)) = trimmed.split_once('@') else {
@@ -1743,5 +1779,34 @@ pub(crate) fn porcelain_status_letter(index: u8, worktree: u8) -> char {
         b'D' => 'D',
         b'R' | b'C' => 'R',
         _ => 'M',
+    }
+}
+
+#[cfg(test)]
+mod switched_model_account_suffix_tests {
+    use super::{switched_model_account_suffix, truncate_account_email};
+
+    #[test]
+    fn short_email_is_shown_whole() {
+        assert_eq!(
+            switched_model_account_suffix(Some("OAuth"), Some("me@example.com")),
+            " (via OAuth · me@example.com)"
+        );
+    }
+
+    #[test]
+    fn long_email_truncates_local_part_and_keeps_domain() {
+        let out = truncate_account_email("averyveryverylongusername@example.com", 28);
+        assert_eq!(out, "averyveryverylo…@example.com");
+        assert_eq!(out.chars().count(), 28);
+    }
+
+    #[test]
+    fn no_email_keeps_existing_suffix() {
+        assert_eq!(
+            switched_model_account_suffix(Some("API key"), None),
+            " (via API key)"
+        );
+        assert_eq!(switched_model_account_suffix(None, Some("  ")), "");
     }
 }
