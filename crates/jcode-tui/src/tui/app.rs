@@ -307,6 +307,30 @@ struct PendingModelPickerLoad {
     signature: ModelPickerCacheSignature,
     picker_started: Instant,
     receiver: mpsc::Receiver<anyhow::Result<ModelPickerRoutesResult>>,
+    /// Write the normalized routes back into `remote_model_options` when the
+    /// background build lands (remote hot path).
+    store_remote_routes: bool,
+}
+
+/// App-state snapshot the picker entry builder needs off the UI thread.
+#[derive(Debug, Clone)]
+struct ModelPickerBuildContext {
+    is_remote: bool,
+    current_model: String,
+    current_provider: String,
+    remote_provider_name: Option<String>,
+    current_api_method: Option<String>,
+    current_effort: Option<String>,
+    recent_authenticated_provider: Option<String>,
+}
+
+enum ModelPickerBuildOutcome {
+    Empty,
+    Built {
+        entries: Vec<super::PickerEntry>,
+        model_count: usize,
+        routes: Vec<crate::provider::ModelRoute>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -338,8 +362,7 @@ struct ModelPickerCache {
 }
 
 struct ModelPickerRoutesResult {
-    routes: Vec<crate::provider::ModelRoute>,
-    routes_ms: u128,
+    outcome: ModelPickerBuildOutcome,
 }
 
 #[derive(Debug, Clone)]
@@ -576,6 +599,8 @@ pub struct RunResult {
     pub update_session: Option<String>,
     /// Session ID to restart (exec into current binary, no build)
     pub restart_session: Option<String>,
+    /// Idle hibernation exited the client: wait for a key, then resume this session
+    pub hibernate_session: Option<String>,
     /// After `/cloud` or `/local`: exec into the session at its new location.
     pub cloud_handoff: Option<CloudHandoff>,
     /// Exit code to use (for canary wrapper communication)
@@ -1147,6 +1172,8 @@ pub struct App {
     pending_background_client_reload: Option<(String, crate::bus::ClientMaintenanceAction)>,
     // Restart: if set, exec into current binary with this session ID (no build)
     restart_requested: Option<String>,
+    // Exit-mode idle hibernation: quit and leave a waiter that resumes this session
+    hibernate_exit_requested: Option<String>,
     // `/cloud` or `/local` finished: reattach at the new location on quit.
     cloud_handoff_requested: Option<CloudHandoff>,
     // Pasted content storage (displayed as placeholders, expanded on submit)
@@ -1262,6 +1289,8 @@ pub struct App {
     remote_startup_phase_started: Option<Instant>,
     /// Local transcript rendered off-thread during a reload fast start, so
     /// the conversation appears without waiting for the server's History.
+    /// Send GetModelCatalog once bootstrap History has arrived.
+    model_catalog_after_history: bool,
     pending_startup_transcript: Option<
         std::sync::mpsc::Receiver<(
             String,
@@ -1289,8 +1318,6 @@ pub struct App {
     remote_is_canary: Option<bool>,
     // Remote server version (from server)
     remote_server_version: Option<String>,
-    /// Send GetModelCatalog once bootstrap History has arrived.
-    model_catalog_after_history: bool,
     // Whether the remote server has a newer binary available
     remote_server_has_update: Option<bool>,
     // Auto-reload server when stale (set on first connect if server_has_update)
