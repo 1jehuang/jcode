@@ -1899,78 +1899,64 @@ impl App {
             }
         }
 
-        let entry_usage = |entry: &PickerEntry| {
-            entry.active_option().and_then(|route| {
-                shared_usage.get(&(
-                    model_entry_base_name(entry),
-                    route.provider.clone(),
-                    route.api_method.clone(),
-                ))
+        // Precompute every sort key once. The comparator used to rebuild an
+        // owned (model, provider, api_method) lookup key for both sides of
+        // every comparison, which dominated picker open time on large
+        // catalogs (~11k entries => ~1M String allocations).
+        struct EntrySortKey<'u, U> {
+            prefix: (u8, u8, u8),
+            usage: Option<&'u U>,
+            rest: (std::cmp::Reverse<u64>, u8, usize, u8, u8),
+        }
+        let sort_keys: Vec<_> = entries
+            .iter()
+            .map(|entry| {
+                let usage = if shared_usage.is_empty() {
+                    None
+                } else {
+                    entry.active_option().and_then(|route| {
+                        shared_usage.get(&(
+                            model_entry_base_name(entry),
+                            route.provider.clone(),
+                            route.api_method.clone(),
+                        ))
+                    })
+                };
+                let recent = entry
+                    .options
+                    .iter()
+                    .any(|option| option.detail.contains("recently added"));
+                let avail = entry.options.first().map(|r| r.available).unwrap_or(false);
+                EntrySortKey {
+                    prefix: (
+                        u8::from(!entry.is_current),
+                        u8::from(!entry.is_favorite),
+                        u8::from(!recent),
+                    ),
+                    usage,
+                    rest: (
+                        std::cmp::Reverse(entry.usage_score as u64),
+                        u8::from(!entry.recommended),
+                        if entry.recommended {
+                            entry.recommendation_rank
+                        } else {
+                            usize::MAX
+                        },
+                        u8::from(!avail),
+                        u8::from(entry.old),
+                    ),
+                }
             })
-        };
-        entries.sort_by(|a, b| {
-            let a_current = if a.is_current { 0u8 } else { 1 };
-            let b_current = if b.is_current { 0u8 } else { 1 };
-            let a_recent = if a
-                .options
-                .iter()
-                .any(|option| option.detail.contains("recently added"))
-            {
-                0u8
-            } else {
-                1
-            };
-            let b_recent = if b
-                .options
-                .iter()
-                .any(|option| option.detail.contains("recently added"))
-            {
-                0u8
-            } else {
-                1
-            };
-            let a_rec = if a.recommended { 0u8 } else { 1 };
-            let b_rec = if b.recommended { 0u8 } else { 1 };
-            let a_favorite = if a.is_favorite { 0u8 } else { 1 };
-            let b_favorite = if b.is_favorite { 0u8 } else { 1 };
-            let a_usage = std::cmp::Reverse(a.usage_score);
-            let b_usage = std::cmp::Reverse(b.usage_score);
-            let a_rec_rank = if a.recommended {
-                a.recommendation_rank
-            } else {
-                usize::MAX
-            };
-            let b_rec_rank = if b.recommended {
-                b.recommendation_rank
-            } else {
-                usize::MAX
-            };
-            let a_avail = if a.options.first().map(|r| r.available).unwrap_or(false) {
-                0u8
-            } else {
-                1
-            };
-            let b_avail = if b.options.first().map(|r| r.available).unwrap_or(false) {
-                0u8
-            } else {
-                1
-            };
-            let a_old = if a.old { 1u8 } else { 0 };
-            let b_old = if b.old { 1u8 } else { 0 };
-            a_current
-                .cmp(&b_current)
-                .then(a_favorite.cmp(&b_favorite))
-                .then(a_recent.cmp(&b_recent))
-                .then(jcode_provider_core::compare_model_usage(
-                    entry_usage(a),
-                    entry_usage(b),
-                ))
-                .then(a_usage.cmp(&b_usage))
-                .then(a_rec.cmp(&b_rec))
-                .then(a_rec_rank.cmp(&b_rec_rank))
-                .then(a_avail.cmp(&b_avail))
-                .then(a_old.cmp(&b_old))
-                .then(a.name.cmp(&b.name))
+            .collect();
+        let mut order: Vec<usize> = (0..entries.len()).collect();
+        order.sort_by(|&ai, &bi| {
+            let (ka, kb) = (&sort_keys[ai], &sort_keys[bi]);
+            let (a, b) = (&entries[ai], &entries[bi]);
+            ka.prefix
+                .cmp(&kb.prefix)
+                .then_with(|| jcode_provider_core::compare_model_usage(ka.usage, kb.usage))
+                .then_with(|| ka.rest.cmp(&kb.rest))
+                .then_with(|| a.name.cmp(&b.name))
                 .then_with(|| {
                     a.active_option()
                         .map(|route| route.provider.as_str())
@@ -1982,6 +1968,12 @@ impl App {
                         .cmp(&b.active_option().map(|route| route.api_method.as_str()))
                 })
         });
+        drop(sort_keys);
+        let mut slots: Vec<Option<PickerEntry>> = entries.into_iter().map(Some).collect();
+        let mut entries: Vec<PickerEntry> = order
+            .into_iter()
+            .filter_map(|index| slots[index].take())
+            .collect();
         let entries_ms = entries_started.elapsed().as_millis();
         let total_ms = picker_started.elapsed().as_millis();
 
