@@ -319,6 +319,41 @@ fn test_rename_session_clear_request_roundtrip_omits_title() -> Result<()> {
 }
 
 #[test]
+fn test_rename_session_target_session_id_roundtrip() -> Result<()> {
+    let req = Request::RenameSwarmSession {
+        id: 42,
+        title: Some("worker label".to_string()),
+        target_session_id: "session_worker_abc".to_string(),
+    };
+    let json = serde_json::to_string(&req)?;
+    assert!(json.contains("\"target_session_id\":\"session_worker_abc\""));
+    assert!(json.contains("rename_swarm_session"));
+    let decoded = parse_request_json(&json)?;
+    let Request::RenameSwarmSession {
+        title,
+        target_session_id,
+        ..
+    } = decoded
+    else {
+        return Err(anyhow!("wrong request type"));
+    };
+    assert_eq!(title.as_deref(), Some("worker label"));
+    assert_eq!(target_session_id.as_str(), "session_worker_abc");
+    Ok(())
+}
+
+#[test]
+fn test_rename_session_without_target_session_id_omits_field() -> Result<()> {
+    let req = Request::RenameSession {
+        id: 43,
+        title: Some("self rename".to_string()),
+    };
+    let json = serde_json::to_string(&req)?;
+    assert!(!json.contains("target_session_id"));
+    Ok(())
+}
+
+#[test]
 fn test_event_roundtrip() -> Result<()> {
     let event = ServerEvent::TextDelta {
         text: "hello".to_string(),
@@ -729,4 +764,25 @@ fn test_error_event_retry_after_back_compat_default() -> Result<()> {
     assert_eq!(message, "oops");
     assert_eq!(retry_after_secs, None);
     Ok(())
+}
+
+#[test]
+fn swarm_rename_is_rejected_by_legacy_server_and_requires_target() {
+    #[derive(Debug, serde::Deserialize)]
+    #[serde(tag = "type")]
+    enum LegacyRequest {
+        #[serde(rename = "rename_session")]
+        RenameSession {
+            #[serde(rename = "id")]
+            _id: u64,
+        },
+    }
+    let request = Request::RenameSwarmSession {
+        id: 44,
+        title: Some("worker".into()),
+        target_session_id: "worker-session".into(),
+    };
+    let json = serde_json::to_string(&request).unwrap();
+    assert!(serde_json::from_str::<LegacyRequest>(&json).is_err());
+    assert!(parse_request_json(r#"{"type":"rename_swarm_session","id":44}"#).is_err());
 }

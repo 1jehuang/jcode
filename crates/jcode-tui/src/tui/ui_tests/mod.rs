@@ -156,6 +156,7 @@ struct TestState {
     swarm_filter_query: String,
     swarm_rename_active: bool,
     swarm_rename_buffer: String,
+    pending_swarm_rename: Option<(String, String)>,
 }
 
 impl crate::tui::TuiState for TestState {

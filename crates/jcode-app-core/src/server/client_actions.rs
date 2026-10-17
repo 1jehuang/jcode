@@ -742,7 +742,14 @@ pub(super) async fn handle_rename_session(
     );
 
     let (renamed_session_id, display_title) = {
-        let mut agent_guard = agent.lock().await;
+        let Ok(mut agent_guard) = agent.try_lock() else {
+            let _ = client_event_tx.send(ServerEvent::Error {
+                id,
+                message: "session is busy; retry rename when idle".to_string(),
+                retry_after_secs: None,
+            });
+            return;
+        };
         match agent_guard.rename_session_title(normalized_title.clone()) {
             Ok(display_title) => (agent_guard.session_id().to_string(), display_title),
             Err(error) => {

@@ -873,7 +873,7 @@ impl RemoteConnection {
         self.send_request(request).await
     }
 
-    /// Set or clear the custom session display title on the server.
+    /// Bookmark or unbookmark the active session on the server.
     pub async fn set_session_saved(&mut self, saved: bool, label: Option<String>) -> Result<()> {
         let request = Request::SetSessionSaved {
             id: self.next_request_id,
@@ -884,10 +884,24 @@ impl RemoteConnection {
         self.send_request(request).await
     }
 
-    pub async fn rename_session(&mut self, title: Option<String>) -> Result<()> {
-        let request = Request::RenameSession {
-            id: self.next_request_id,
-            title,
+    /// Set or clear the custom session display title on the server.
+    /// When `target_session_id` is set, renames that specific session
+    /// (used by the coordinator to rename swarm members).
+    pub async fn rename_session(
+        &mut self,
+        title: Option<String>,
+        target_session_id: Option<String>,
+    ) -> Result<()> {
+        let request = match target_session_id {
+            Some(target_session_id) => Request::RenameSwarmSession {
+                id: self.next_request_id,
+                title,
+                target_session_id,
+            },
+            None => Request::RenameSession {
+                id: self.next_request_id,
+                title,
+            },
         };
         self.next_request_id += 1;
         self.send_request(request).await

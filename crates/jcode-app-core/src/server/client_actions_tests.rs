@@ -1066,3 +1066,31 @@ async fn daemon_saved_flag_survives_later_session_writes() {
         crate::env::remove_var("KCODE_HOME");
     }
 }
+
+#[tokio::test]
+async fn rename_busy_session_returns_without_waiting_for_agent() {
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let agent = Arc::new(Mutex::new(Agent::new(provider, registry)));
+    let busy_guard = agent.lock().await;
+    let swarm_members = Arc::new(RwLock::new(HashMap::new()));
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    timeout(
+        Duration::from_secs(1),
+        handle_rename_session(
+            101,
+            Some("worker".into()),
+            &agent,
+            "worker-session",
+            &swarm_members,
+            &event_tx,
+        ),
+    )
+    .await
+    .expect("rename must not wait for a busy agent");
+    assert!(matches!(
+        event_rx.try_recv(),
+        Ok(ServerEvent::Error { id: 101, .. })
+    ));
+    drop(busy_guard);
+}

@@ -2438,6 +2438,10 @@ pub(super) fn handle_pre_control_shortcuts(
     {
         use crate::tui::TuiState as _;
         if app.swarm_panel_focused() && app.handle_swarm_panel_key(code, modifiers) {
+            // Drain any pending swarm rename. In local mode there is no server
+            // to forward to; the rename is a no-op. The drain prevents stale
+            // state from leaking across frames.
+            let _ = app.drain_pending_swarm_rename();
             return true;
         }
     }

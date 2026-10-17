@@ -1863,6 +1863,9 @@ impl crate::tui::TuiState for App {
     fn swarm_rename_buffer(&self) -> &str {
         &self.swarm_rename_buffer
     }
+    fn drain_pending_swarm_rename(&mut self) -> Option<(String, String)> {
+        self.pending_swarm_rename.take()
+    }
     fn filtered_swarm_members(&self) -> Vec<crate::protocol::SwarmMemberStatus> {
         let members = self.inline_swarm_members();
         if self.swarm_filter_query.is_empty() {
@@ -2336,6 +2339,7 @@ impl App {
                 }
             }
             Some(SwarmPanelAction::StartRename) => {
+                self.swarm_rename_target = None;
                 let members = self.filtered_swarm_members();
                 if !members.is_empty() {
                     self.swarm_rename_active = true;
@@ -2349,6 +2353,7 @@ impl App {
                     if let Some(session_id) = ordered.get(idx)
                         && let Some(member) = members.iter().find(|m| &m.session_id == session_id)
                     {
+                        self.swarm_rename_target = Some(session_id.clone());
                         self.swarm_rename_buffer = member
                             .friendly_name
                             .clone()
@@ -2369,13 +2374,14 @@ impl App {
                 let new_label = self.swarm_rename_buffer.clone();
                 self.swarm_rename_active = false;
                 self.swarm_rename_buffer.clear();
-                // TODO: Send rename command to swarm coordinator
-                // SwarmCommand::RenameAgent { session_id, new_label }
-                let _ = new_label;
-                self.set_status_notice("Rename sent (TODO: wire to swarm coordinator)");
+                // Preserve the identity across live gallery reordering.
+                if let Some(session_id) = self.swarm_rename_target.take() {
+                    self.pending_swarm_rename = Some((session_id, new_label));
+                }
                 true
             }
             Some(SwarmPanelAction::RenameEscape) => {
+                self.swarm_rename_target = None;
                 self.swarm_rename_active = false;
                 self.swarm_rename_buffer.clear();
                 true

@@ -728,6 +728,12 @@ pub trait TuiState {
     fn swarm_rename_buffer(&self) -> &str {
         ""
     }
+    /// Drain a pending swarm rename (target_session_id, new_label) if the
+    /// RenameConfirm handler populated one. Returns `None` on subsequent calls
+    /// until the next RenameConfirm.
+    fn drain_pending_swarm_rename(&mut self) -> Option<(String, String)> {
+        None
+    }
     /// Indices of agents selected for batch operations (multi-select via Space).
     fn swarm_selected_set(&self) -> &std::collections::HashSet<usize> {
         // Return a static empty set as default; overridden by App impl.

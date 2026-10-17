@@ -2114,6 +2114,33 @@ pub(super) async fn handle_client(
                 .await;
             }
 
+            Request::RenameSwarmSession {
+                id,
+                title,
+                target_session_id,
+            } => {
+                let target_agent =
+                    { sessions.read().await.get(&target_session_id).cloned() };
+                if let Some(target_agent) = target_agent {
+                    handle_rename_session(
+                        id,
+                        title,
+                        &target_agent,
+                        &target_session_id,
+                        &swarm_members,
+                        &client_event_tx,
+                    )
+                    .await;
+                } else {
+                    let _ = client_event_tx.send(ServerEvent::Error {
+                        id,
+                        message: format!(
+                            "target session not found: {target_session_id}"
+                        ),
+                        retry_after_secs: None,
+                    });
+                }
+            }
             Request::RenameSession { id, title } => {
                 if reject_if_agent_busy_for_request(
                     id,

@@ -638,6 +638,14 @@ async fn handle_remote_key_internal(
     {
         use crate::tui::TuiState as _;
         if app.swarm_panel_focused() && app.handle_swarm_panel_key(code, modifiers) {
+            // Drain a pending swarm rename queued by the RenameConfirm handler
+            // and dispatch it to the server for the target member session.
+            if let Some((target_session_id, new_label)) = app.drain_pending_swarm_rename() {
+                remote
+                    .rename_session(Some(new_label), Some(target_session_id))
+                    .await?;
+                app.set_status_notice("Rename sent to swarm member");
+            }
             return Ok(());
         }
     }
@@ -2090,12 +2098,12 @@ async fn handle_remote_key_internal(
                     }
 
                     if title == "--clear" {
-                        remote.rename_session(None).await?;
+                        remote.rename_session(None, None).await?;
                         app.set_status_notice("Clearing session name...");
                         return Ok(());
                     }
 
-                    remote.rename_session(Some(title.to_string())).await?;
+                    remote.rename_session(Some(title.to_string()), None).await?;
                     app.set_status_notice("Renaming session...");
                     return Ok(());
                 }

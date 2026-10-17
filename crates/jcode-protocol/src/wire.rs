@@ -399,6 +399,16 @@ pub enum Request {
         label: Option<String>,
     },
 
+    /// Rename a swarm member. Older servers reject this distinct verb rather
+    /// than silently renaming the connection's own session.
+    #[serde(rename = "rename_swarm_session")]
+    RenameSwarmSession {
+        id: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        target_session_id: String,
+    },
+
     /// Split the current session — clone conversation into a new session
     #[serde(rename = "split")]
     Split { id: u64 },
