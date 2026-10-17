@@ -156,6 +156,10 @@ agentgrep is jcode's grep tool, built for agents. Each match comes back with the
 
 Supports a [wide range of providers](https://jcode.sh/docs#providers), including Claude OAuth and OpenAI Codex OAuth.
 
+For Tsubasa, run `jcode login --provider tsubasa` with `TSUBASA_API_KEY`. The
+profile offers `tsubasa-pro` and `tsubasa-fast`, each with a 32,768-token context
+window, using Chat Completions at `https://api.tsubasa.sh/v1`.
+
 ## Customizability / Self-Dev
 
 Jcode is inventing a new form of customizability. One that doesn't limit you to what a plugin or extension can do. Tell your jcode agent to enter self dev mode, and it will start modifying its own source code. Jcode is optimized to iterate on itself. There is significant infrastructure around self development, which allows it to edit, build, and test its own source code, then reload its own binary and continue work in your (potentially many) sessions, fully automatically.

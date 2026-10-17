@@ -656,3 +656,25 @@ fn grok_build_subscription_request_spoofs_grok_cli_and_uses_oidc_bearer() {
     assert_eq!(body["messages"][0]["role"], "system");
     assert!(body.get("reasoning_effort").is_none());
 }
+
+#[test]
+fn strict_openai_schema_endpoint_detects_tsubasa_profile_with_custom_base() {
+    assert!(OpenRouterProvider::strict_openai_schema_endpoint(
+        Some("tsubasa"),
+        "https://api.tsubasa.sh/v1"
+    ));
+    assert!(OpenRouterProvider::strict_openai_schema_endpoint(
+        Some("TSUBASA"),
+        "http://localhost:8000/v1"
+    ));
+}
+
+#[test]
+fn tsubasa_profile_does_not_advertise_image_input() {
+    let provider = OpenRouterProvider {
+        profile_id: Some("tsubasa".to_string()),
+        supports_provider_features: false,
+        ..make_custom_compatible_provider()
+    };
+    assert!(!provider.supports_image_input());
+}
