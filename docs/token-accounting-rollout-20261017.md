@@ -36,6 +36,20 @@ The health endpoint at 10:55:51 UTC returned `ok:true`, database size
 Current headroom was about 1.21 GB below the soft limit. This is not a forecast
 of future growth or proof that the scheduled cleanup has already run.
 
+## Whole-result recheck
+
+At 10:56:38 UTC, repeated the real pending-report acceptance path after the
+complete rollout: both deliveries again returned matching durable acknowledgments
+and backup success, and production D1 again contained exactly one compact receipt.
+The backlog had fallen to 1,233 reports, with 573 canonical responses stored.
+At 10:56:49 UTC, all production canonical groups satisfied nonnegative bucket
+counts and `total = input + output + cache_read + cache_write` (zero invalid
+groups). Canonical response count had grown to 640. The public endpoint rejected
+an empty JSON request with HTTP 400 instead of accepting an unversioned event.
+Health remained green at 6,787,952,640 bytes during this repeated check.
+These checks exercise the actual deployed HTTP/ACK/database boundary, not only
+the local adapter or packaging checks.
+
 ## Remaining limits
 
 The deployment/authentication blocker is resolved. Historical missing reports,
