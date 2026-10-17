@@ -1291,7 +1291,7 @@ impl App {
             return None;
         };
         let wait_start = Instant::now();
-        let received = rx.recv_timeout(std::time::Duration::from_millis(150));
+        let received = rx.recv_timeout(std::time::Duration::from_millis(1500));
         crate::logging::info(&format!(
             "history_base: subscribe {} waited {}ms, result={:?}",
             session_id,
