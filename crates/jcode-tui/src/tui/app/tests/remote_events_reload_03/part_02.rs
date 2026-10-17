@@ -401,10 +401,12 @@ fn test_remote_error_with_retry_after_keeps_pending_for_auto_retry() {
 }
 #[test]
 fn test_service_tier_reported_deduplicates_and_does_not_confirm_old_request() {
+    use crate::tui::TuiState;
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.is_remote = true;
     app.remote_service_tier = Some("ultrafast".to_string());
     app.remote_service_tier_confirmation_pending = true;
     let before = app.display_messages().len();
@@ -427,6 +429,13 @@ fn test_service_tier_reported_deduplicates_and_does_not_confirm_old_request() {
     }
     assert_eq!(app.display_messages().len(), before + 1);
     assert_eq!(app.remote_service_tier.as_deref(), Some("ultrafast"));
+    let badge = app.info_widget_data().service_tier.unwrap();
+    assert_eq!(
+        badge,
+        "Ultrafast requested, provider reports default (unconfirmed)"
+    );
+    assert!(!badge.contains("applied"));
+    assert!(!badge.split_whitespace().any(|word| word == "confirmed"));
     assert!(
         app.display_messages()
             .last()
@@ -443,9 +452,35 @@ fn test_service_tier_reported_deduplicates_and_does_not_confirm_old_request() {
     );
     assert_eq!(app.display_messages().len(), before + 1);
     assert_eq!(
+        app.info_widget_data().service_tier.as_deref(),
+        Some("ultrafast")
+    );
+    assert_eq!(
         app.remote_reported_service_tier,
         Some((Some("ultrafast".into()), "ultrafast".into()))
     );
+}
+
+#[test]
+fn test_service_tier_reported_match_notification_is_only_a_report() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.remote_service_tier = Some("ultrafast".into());
+    app.remote_service_tier_confirmation_pending = true;
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ServiceTierReported {
+            requested: Some("ultrafast".into()),
+            tier: "ultrafast".into(),
+        },
+        &mut remote,
+    );
+    let messages = app.display_messages();
+    let message = &messages.last().unwrap().content;
+    assert_eq!(message, "Provider reports service tier: ultrafast.");
+    assert!(!message.contains("confirmed"));
+    assert!(!message.contains("applied"));
 }
 
 #[test]
@@ -466,7 +501,7 @@ fn test_service_tier_reported_default_is_quiet_without_explicit_change() {
 }
 
 #[test]
-fn test_service_tier_reported_fast_alias_confirms_and_badge_tracks_applied() {
+fn test_service_tier_reported_fast_alias_matches_and_badge_tracks_reports() {
     use crate::tui::TuiState;
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -480,7 +515,13 @@ fn test_service_tier_reported_fast_alias_confirms_and_badge_tracks_applied() {
             requested: Some("priority".into()), tier: "default".into(),
         }, &mut remote,
     );
-    assert!(app.info_widget_data().service_tier.unwrap().contains("default applied"));
+    let badge = app.info_widget_data().service_tier.unwrap();
+    assert_eq!(
+        badge,
+        "Fast requested, provider reports default (unconfirmed)"
+    );
+    assert!(!badge.contains("applied"));
+    assert!(!badge.split_whitespace().any(|word| word == "confirmed"));
     app.handle_server_event(
         crate::protocol::ServerEvent::ServiceTierReported {
             requested: Some("priority".into()), tier: "priority".into(),

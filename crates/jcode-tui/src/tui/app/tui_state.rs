@@ -1838,15 +1838,15 @@ impl crate::tui::TuiState for App {
                     .map(|requested| {
                         let label = super::service_tier_display_label(&requested);
                         match self.remote_reported_service_tier.as_ref() {
-                            Some((sent, applied))
+                            Some((sent, reported))
                                 if super::service_tier_display_label(
                                     sent.as_deref().unwrap_or("default"),
                                 ) == label =>
                             {
-                                if super::service_tier_display_label(applied) == label {
+                                if super::service_tier_display_label(reported) == label {
                                     requested
                                 } else {
-                                    format!("{label} requested, {applied} applied")
+                                    format!("{label} requested, provider reports {reported} (unconfirmed)")
                                 }
                             }
                             _ => format!("{label} requested (unconfirmed)"),

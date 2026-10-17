@@ -1074,7 +1074,7 @@ pub(in crate::tui::app) fn handle_server_event(
             // transcript when confirming an explicit speed change.
             if pending {
                 let message = if matches {
-                    format!("Provider confirmed service tier: {tier}.")
+                    format!("Provider reports service tier: {tier}.")
                 } else {
                     format!(
                         "Requested {requested_label}, but provider reports {tier}. Requested speed is not confirmed."

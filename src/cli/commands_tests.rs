@@ -42,10 +42,34 @@ fn ndjson_preserves_provider_reported_service_tier_without_inferring_it() {
     assert_eq!(
         events[0],
         serde_json::json!({
-            "type": "service_tier", "requested": "ultrafast", "tier": "default"
+            "type": "service_tier", "requested": "ultrafast", "tier": "default",
+            "report_status": "reported_mismatch"
         })
     );
     assert!(events[2]["requested"].is_null());
+}
+
+#[test]
+fn ndjson_service_tier_status_never_infers_confirmation() {
+    for (requested, reported, expected) in [
+        (None, None, "not_reported"),
+        (Some("ultrafast"), Some("auto"), "unresolved"),
+        (Some("ultrafast"), Some("default"), "reported_mismatch"),
+        (Some("ultrafast"), Some("ultrafast"), "reported_match"),
+        (Some("fast"), Some("priority"), "reported_match"),
+        (Some("off"), Some("standard"), "reported_match"),
+        (None, Some("default"), "reported_match"),
+        (Some("flex"), Some("default"), "reported_mismatch"),
+        (Some("future-tier"), Some("default"), "reported_mismatch"),
+    ] {
+        let state = NdjsonRunState {
+            requested_service_tier: requested.map(str::to_string),
+            served_service_tier: reported.map(str::to_string),
+            ..Default::default()
+        };
+        assert_eq!(state.service_tier_report_status(), expected);
+        assert!(!state.service_tier_report_status().contains("confirmed"));
+    }
 }
 
 #[test]

@@ -2128,6 +2128,33 @@ struct NdjsonRunState {
     usage: crate::agent::TokenUsage,
 }
 
+impl NdjsonRunState {
+    /// Compare wire metadata only. A match is not independent confirmation of
+    /// backend routing or billing, especially on subscription-backed endpoints.
+    fn service_tier_report_status(&self) -> &'static str {
+        let Some(reported) = self.served_service_tier.as_deref() else {
+            return "not_reported";
+        };
+        if reported == "auto" {
+            return "unresolved";
+        }
+        fn canonical(tier: &str) -> &str {
+            match tier {
+                "off" | "standard" | "default" | "auto" => "default",
+                "fast" | "priority" => "priority",
+                _ => tier,
+            }
+        }
+        if canonical(self.requested_service_tier.as_deref().unwrap_or("default"))
+            == canonical(reported)
+        {
+            "reported_match"
+        } else {
+            "reported_mismatch"
+        }
+    }
+}
+
 pub fn run_auth_status_command(emit_json: bool) -> Result<()> {
     report_info::run_auth_status_command(emit_json)
 }
@@ -3284,6 +3311,10 @@ async fn run_single_message_command_ndjson(
                     "connection_phase": state.connection_phase,
                     "status_detail": state.status_detail,
                     "requested_service_tier": state.requested_service_tier,
+                    "reported_service_tier": state.served_service_tier,
+                    "service_tier_report_status": state.service_tier_report_status(),
+                    // Retained for compatibility; this is provider-reported
+                    // metadata, not independently verified serving evidence.
                     "served_service_tier": state.served_service_tier,
                 }),
             )?;
@@ -3395,6 +3426,7 @@ fn emit_ndjson_event(
                     "type": "service_tier",
                     "requested": requested,
                     "tier": tier,
+                    "report_status": state.service_tier_report_status(),
                 }),
             )
         }
