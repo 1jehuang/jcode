@@ -1843,7 +1843,11 @@ async fn sdk_socket_workflow(response_only: bool) {
     let mut other_session =
         crate::session::Session::create_with_id("sdk_other_session".into(), None, None);
     other_session.working_dir = Some(home._home.path().to_string_lossy().into_owned());
+    // An existing session, not an empty panel: empty untitled sessions are
+    // never written to disk and get a 30s reconnect grace on disconnect.
+    other_session.title = Some("sdk other session".into());
     other_session.save().unwrap();
+    assert!(crate::session::session_exists("sdk_other_session"));
     let other_registry = Registry::new(provider_template.clone()).await;
     sessions.write().await.insert(
         "sdk_other_session".into(),
