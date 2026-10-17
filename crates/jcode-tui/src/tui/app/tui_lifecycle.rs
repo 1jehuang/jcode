@@ -1286,10 +1286,19 @@ impl App {
         &mut self,
         session_id: &str,
     ) -> Option<crate::protocol::HistoryBase> {
-        let rx = self.pending_history_base.take()?;
-        let (id, base) = rx
-            .recv_timeout(std::time::Duration::from_millis(150))
-            .ok()?;
+        let Some(rx) = self.pending_history_base.take() else {
+            crate::logging::info("history_base: none pending for subscribe");
+            return None;
+        };
+        let wait_start = Instant::now();
+        let received = rx.recv_timeout(std::time::Duration::from_millis(150));
+        crate::logging::info(&format!(
+            "history_base: subscribe {} waited {}ms, result={:?}",
+            session_id,
+            wait_start.elapsed().as_millis(),
+            received.as_ref().map(|(_, base)| base.count)
+        ));
+        let (id, base) = received.ok()?;
         if id != session_id {
             return None;
         }
