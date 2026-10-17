@@ -606,7 +606,15 @@ fn automatic_failover_source_is_pool_member(agent: &Agent) -> bool {
     };
     let key = match (name, provider.active_resolved_credential()) {
         ("claude" | "openai", Some(jcode_provider_core::ResolvedCredential::Oauth)) => {
-            let Some(label) = provider.oauth_account_label() else {
+            // Unpinned sessions run on the global active login, which is
+            // exactly the account the router just proposed leaving.
+            let Some(label) = provider.oauth_account_label().or_else(|| {
+                if name == "openai" {
+                    crate::auth::codex::active_account_label()
+                } else {
+                    crate::auth::claude::active_account_label()
+                }
+            }) else {
                 return false;
             };
             let exists = if name == "openai" {
@@ -672,18 +680,25 @@ fn apply_set_route(
 
     let current = agent.provider_model();
     let result = {
-        let result = if automatic_failover
-            && (crate::config::Config::load()
-                .provider
-                .cross_provider_failover
-                != crate::config::CrossProviderFailoverMode::Countdown
-                || !automatic_failover_source_is_pool_member(agent)
-                || !crate::provider::MultiProvider::is_failover_route_pool_approved(
-                    &selection.routed_model_spec(),
-                )) {
-            Err(anyhow::anyhow!(
-                "Auto-switch canceled: target account is no longer eligible in your auto-switch group."
-            ))
+        let ineligible = if !automatic_failover {
+            None
+        } else if crate::config::Config::load()
+            .provider
+            .cross_provider_failover
+            != crate::config::CrossProviderFailoverMode::Countdown
+        {
+            Some("countdown auto-switch is disabled")
+        } else if !automatic_failover_source_is_pool_member(agent) {
+            Some("source account is not in the auto-switch group")
+        } else if !crate::provider::MultiProvider::is_failover_route_pool_approved(
+            &selection.routed_model_spec(),
+        ) {
+            Some("target account is not eligible in the auto-switch group")
+        } else {
+            None
+        };
+        let result = if let Some(why) = ineligible {
+            Err(anyhow::anyhow!("Auto-switch canceled: {why}."))
         } else {
             agent.set_route_selection(&selection)
         };

@@ -576,7 +576,15 @@ fn test_handle_turn_error_failover_prompt_countdown_can_switch_and_retry() {
             estimated_input_tokens: 8_000,
         };
 
+        let before = app.display_messages.len();
         app.handle_turn_error(failover_error_message(&prompt));
+        let added = &app.display_messages[before..];
+        assert_eq!(added.len(), 2, "{added:?}");
+        assert_eq!(added[0].role, "error");
+        assert!(added[0].content.contains("OAuth usage exhausted"));
+        assert_eq!(added[1].role, "system");
+        assert!(added[1].content.starts_with("↪ Switching to OpenAI"));
+        assert!(!added[1].content.contains('\n'));
         assert!(app.pending_provider_failover.is_some());
         assert_eq!(active_provider.lock().unwrap().as_str(), "claude");
         assert!(!app.pending_turn);
