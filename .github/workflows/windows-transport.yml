@@ -6,10 +6,12 @@ on:
     branches: [master]
     paths:
       - 'crates/jcode-transport/**'
+      - 'crates/jcode-sdk/**'
       - '.github/workflows/windows-transport.yml'
   pull_request:
     paths:
       - 'crates/jcode-transport/**'
+      - 'crates/jcode-sdk/**'
       - '.github/workflows/windows-transport.yml'
 
 permissions:
@@ -61,10 +63,15 @@ jobs:
       - name: Check transport
         shell: pwsh
         run: |
-          justrust check --local --locked -p jcode-transport --target ${{ matrix.target }}
+          justrust check --local --locked -p jcode-transport -p jcode-sdk --target ${{ matrix.target }}
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Test native named pipes
         shell: pwsh
         run: |
           justrust test --local --locked -p jcode-transport --target ${{ matrix.target }} -- --nocapture
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Test packaged companion discovery
+        shell: pwsh
+        run: |
+          justrust test --local --locked -p jcode-sdk --target ${{ matrix.target }} sibling_executable -- --nocapture
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
