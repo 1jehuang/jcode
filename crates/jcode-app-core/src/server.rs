@@ -20,7 +20,6 @@ pub(crate) use client_state::provider_oauth_email;
 mod client_writer;
 mod comm_await;
 mod comm_control;
-mod comm_graph;
 mod comm_plan;
 mod comm_session;
 mod comm_sync;

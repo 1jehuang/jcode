@@ -1049,11 +1049,12 @@ impl OpenAIProvider {
         }
         match value.as_str() {
             // `swarm` is a UI sentinel meaning "configured root effort + use the swarm tool".
-            // We keep it stored so the UI/session reflect it and the agent injects
-            // the swarm directive; it is translated to a real effort at request time
-            // by `api_reasoning_effort`.
-            "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "swarm"
-            | "swarm-deep" => Some(value),
+            // We keep it stored so the UI/session reflect it and the agent appends
+            // the swarm reminder to user messages; it is translated to a real
+            // effort at request time by `api_reasoning_effort`.
+            "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "swarm" => {
+                Some(value)
+            }
             other => {
                 jcode_base::logging::info(&format!(
                     "Warning: Ignoring unsupported OpenAI reasoning effort '{}'; expected none|minimal|low|medium|high|xhigh|max.",

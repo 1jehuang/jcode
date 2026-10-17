@@ -4072,25 +4072,29 @@ impl App {
                     .join(", ")
             ));
         }
+        let model_input = crate::prompt::with_swarm_user_message_reminder(
+            &input,
+            self.provider.reasoning_effort().as_deref(),
+        );
         if images.is_empty() {
             self.current_turn_system_reminder = mission_turn_reminder(&self.session.id);
-            self.add_provider_message(Message::user(&input));
+            self.add_provider_message(Message::user(&model_input));
             self.session.add_message(
                 Role::User,
                 vec![ContentBlock::Text {
-                    text: input.clone(),
+                    text: model_input.clone(),
                     cache_control: None,
                 }],
             );
         } else {
             self.current_turn_system_reminder = mission_turn_reminder(&self.session.id);
-            self.add_provider_message(Message::user_with_images(&input, images.clone()));
+            self.add_provider_message(Message::user_with_images(&model_input, images.clone()));
             let mut blocks: Vec<ContentBlock> = images
                 .into_iter()
                 .map(|(media_type, data)| ContentBlock::Image { media_type, data })
                 .collect();
             blocks.push(ContentBlock::Text {
-                text: input.clone(),
+                text: model_input.clone(),
                 cache_control: None,
             });
             self.session.add_message(Role::User, blocks);
@@ -4168,6 +4172,10 @@ impl App {
                 merge_turn_reminders(reminder, mission_turn_reminder(&self.session.id));
 
             if has_combined {
+                let combined = crate::prompt::with_swarm_user_message_reminder(
+                    &combined,
+                    self.provider.reasoning_effort().as_deref(),
+                );
                 self.add_provider_message(Message::user(&combined));
                 self.session.add_message(
                     Role::User,

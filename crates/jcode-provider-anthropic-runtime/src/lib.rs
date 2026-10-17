@@ -743,9 +743,7 @@ impl AnthropicProvider {
             "off" | "disabled" => Some("none".to_string()),
             // `swarm` is a UI sentinel meaning "configured root effort + use the swarm tool".
             // Stored verbatim; resolved to a real effort in `actual_effort_for_model`.
-            "none" | "low" | "medium" | "high" | "xhigh" | "max" | "swarm" | "swarm-deep" => {
-                Some(value)
-            }
+            "none" | "low" | "medium" | "high" | "xhigh" | "max" | "swarm" => Some(value),
             other => {
                 jcode_base::logging::info(&format!(
                     "Warning: Ignoring unsupported Anthropic reasoning effort '{}'; expected none|low|medium|high|xhigh|max.",
@@ -777,14 +775,12 @@ impl AnthropicProvider {
         }
     }
 
-    /// Like [`Self::actual_effort_for_model`], but preserves the swarm sentinels
-    /// (light `swarm` and `swarm-deep`) so the stored/UI value keeps reflecting
-    /// the chosen swarm mode. Used when persisting the user's choice; request
-    /// building resolves swarm to a real effort.
+    /// Like [`Self::actual_effort_for_model`], but preserves the `swarm`
+    /// sentinel so the stored/UI value keeps reflecting swarm mode. Used when
+    /// persisting the user's choice; request building resolves swarm to a real
+    /// effort.
     fn store_effort_for_model(model: &str, effort: &str) -> String {
-        if jcode_base::prompt::is_deep_swarm_effort(effort) {
-            jcode_base::prompt::SWARM_DEEP_EFFORT.to_string()
-        } else if jcode_base::prompt::is_swarm_effort(effort) {
+        if jcode_base::prompt::is_swarm_effort(effort) {
             jcode_base::prompt::SWARM_EFFORT.to_string()
         } else {
             Self::actual_effort_for_model(model, effort)
@@ -1592,11 +1588,10 @@ impl Provider for AnthropicProvider {
                     | "xhigh"
                     | "max"
                     | "swarm"
-                    | "swarm-deep"
             )
         {
             anyhow::bail!(
-                "Unsupported Anthropic reasoning effort '{}'; expected none|low|medium|high|xhigh|max|swarm|swarm-deep",
+                "Unsupported Anthropic reasoning effort '{}'; expected none|low|medium|high|xhigh|max|swarm",
                 effort
             );
         }
@@ -1637,7 +1632,7 @@ impl Provider for AnthropicProvider {
         if Self::model_supports_max_effort(&model) {
             efforts.push("max");
         }
-        efforts.extend(["swarm", "swarm-deep"]);
+        efforts.push("swarm");
         efforts
     }
 

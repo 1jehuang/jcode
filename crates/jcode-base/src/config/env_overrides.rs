@@ -411,16 +411,10 @@ impl Config {
                 Some(trimmed.to_string())
             };
         }
-        for (key, target) in [
-            (
-                "JCODE_SWARM_ROOT_EFFORT",
-                &mut self.agents.swarm_root_effort,
-            ),
-            (
-                "JCODE_SWARM_DEEP_ROOT_EFFORT",
-                &mut self.agents.swarm_deep_root_effort,
-            ),
-        ] {
+        for (key, target) in [(
+            "JCODE_SWARM_ROOT_EFFORT",
+            &mut self.agents.swarm_root_effort,
+        )] {
             if let Ok(value) = std::env::var(key) {
                 let value = value.trim();
                 *target = (!value.is_empty()).then(|| value.to_string());

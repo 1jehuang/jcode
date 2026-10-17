@@ -986,7 +986,7 @@ impl Provider for OpenAIProvider {
             && !jcode_base::prompt::is_swarm_effort(&requested)
         {
             anyhow::bail!(
-                "Unsupported OpenAI reasoning effort '{}'; expected none|minimal|low|medium|high|xhigh|max|swarm|swarm-deep",
+                "Unsupported OpenAI reasoning effort '{}'; expected none|minimal|low|medium|high|xhigh|max|swarm",
                 effort
             );
         }
@@ -1028,9 +1028,9 @@ impl Provider for OpenAIProvider {
         // medium/high/xhigh.
         if jcode_provider_core::is_openai_api_only_pro_model(&model) {
             return if model.starts_with("gpt-5-pro") {
-                vec!["high", "swarm", "swarm-deep"]
+                vec!["high", "swarm"]
             } else {
-                vec!["medium", "high", "xhigh", "swarm", "swarm-deep"]
+                vec!["medium", "high", "xhigh", "swarm"]
             };
         }
         let advertised = self
@@ -1043,7 +1043,7 @@ impl Provider for OpenAIProvider {
                 .iter()
                 .filter_map(|effort| jcode_provider_core::canonical_reasoning_effort(effort))
                 .collect();
-            efforts.extend(["swarm", "swarm-deep"]);
+            efforts.push("swarm");
             return efforts;
         }
         jcode_provider_core::OPENAI_SELECTABLE_EFFORTS.to_vec()

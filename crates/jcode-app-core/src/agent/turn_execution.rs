@@ -219,8 +219,16 @@ impl Agent {
             .into_iter()
             .map(|(media_type, data)| ContentBlock::Image { media_type, data })
             .collect();
+        let text = if continues_turn {
+            user_message.to_string()
+        } else {
+            crate::prompt::with_swarm_user_message_reminder(
+                user_message,
+                self.provider.reasoning_effort().as_deref(),
+            )
+        };
         blocks.push(ContentBlock::Text {
-            text: user_message.to_string(),
+            text,
             cache_control: None,
         });
 

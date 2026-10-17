@@ -501,13 +501,11 @@ wake_mode = "internal"
 # Env override: JCODE_SWARM_EFFORT
 # swarm_effort = "medium"
 #
-# Root model reasoning while /effort swarm or /effort swarm-deep is selected.
-# These are independent of worker swarm_effort. Supported levels:
-# none|minimal|low|medium|high|xhigh|max. Unset/invalid = low.
-# Providers map unsupported levels to their supported range.
-# Env overrides: JCODE_SWARM_ROOT_EFFORT, JCODE_SWARM_DEEP_ROOT_EFFORT
+# Root model reasoning while /effort swarm is selected. Independent of worker
+# swarm_effort. Supported levels: none|minimal|low|medium|high|xhigh|max.
+# Unset/invalid = low. Providers map unsupported levels to their supported range.
+# Env override: JCODE_SWARM_ROOT_EFFORT
 swarm_root_effort = "low"
-swarm_deep_root_effort = "low"
 #
 # How swarm-created agents are spawned:
 #   "inline"   - in-process (no window), shown as a live gallery viewport in the coordinator (default)
@@ -518,10 +516,9 @@ swarm_deep_root_effort = "low"
 # Env override: JCODE_SWARM_SPAWN_MODE
 swarm_spawn_mode = "inline"
 #
-# Max live swarm worker agents in one swarm. This RAM-safety budget applies to
-# recursive ad hoc spawning and deep-mode run_plan parallelism. Completed/stopped
-# workers free their slots. 0 disables this guard and leaves only the absolute
-# per-swarm hard cap of 1000. Light mode uses a smaller fixed fan-out.
+# Max live swarm worker agents in one swarm (RAM-safety budget for spawning).
+# Completed/stopped workers free their slots. 0 disables this guard and leaves
+# only the absolute per-swarm hard cap of 1000.
 # Env override: JCODE_SWARM_MAX_CONCURRENT_AGENTS
 swarm_max_concurrent_agents = 32
 #

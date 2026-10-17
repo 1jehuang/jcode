@@ -7,27 +7,6 @@ fn default_true() -> bool {
     true
 }
 
-/// Wire spec for a task-DAG node submitted by an agent (seed/expand/inject).
-/// Mirrors `jcode_plan::dag::NodeSpec` but kept as an explicit wire type so the
-/// protocol stays self-describing and serde-stable.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct TaskGraphNodeSpec {
-    pub id: String,
-    pub content: String,
-    /// "explore" | "implement" | "verify" | "fix" | "synthesize". Defaults to
-    /// "explore" when absent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kind: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub depends_on: Vec<String>,
-    #[serde(default, skip_serializing_if = "is_zero_u8")]
-    pub priority: u8,
-}
-
-fn is_zero_u8(value: &u8) -> bool {
-    *value == 0
-}
-
 fn is_false(value: &bool) -> bool {
     !*value
 }
@@ -657,49 +636,6 @@ pub enum Request {
         proposer_session: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
-    },
-
-    /// Seed the swarm task DAG in one call (the first agent's draft). Replaces or
-    /// initializes the shared plan with a validated graph of nodes + edges.
-    #[serde(rename = "comm_seed_graph")]
-    CommSeedGraph {
-        id: u64,
-        session_id: String,
-        /// "deep" (comprehensive, gated) or "light" (fan-out).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        mode: Option<String>,
-        nodes: Vec<TaskGraphNodeSpec>,
-    },
-
-    /// Decompose a node the caller owns into a child sub-DAG (composite path). In
-    /// deep mode a critique/verify gate is auto-inserted.
-    #[serde(rename = "comm_expand_node")]
-    CommExpandNode {
-        id: u64,
-        session_id: String,
-        node_id: String,
-        children: Vec<TaskGraphNodeSpec>,
-    },
-
-    /// Complete a node the caller owns with a typed handoff artifact. In deep mode
-    /// the artifact is validated for thinness.
-    #[serde(rename = "comm_complete_node")]
-    CommCompleteNode {
-        id: u64,
-        session_id: String,
-        node_id: String,
-        /// Handoff artifact as a JSON object string.
-        artifact_json: String,
-    },
-
-    /// Inject gap/fix nodes from a gate that found a problem, re-blocking the gate
-    /// (and its composite parent) until the new nodes drain.
-    #[serde(rename = "comm_inject_gap")]
-    CommInjectGap {
-        id: u64,
-        session_id: String,
-        gate_id: String,
-        nodes: Vec<TaskGraphNodeSpec>,
     },
 
     /// Spawn a new agent session (coordinator only)

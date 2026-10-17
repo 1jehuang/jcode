@@ -915,7 +915,7 @@ impl App {
         // Remote/self-dev sessions infer the level list from provider+model (the
         // same source the model picker uses), since `self.provider` is a local
         // stand-in. Local sessions read the real provider. This keeps the cycle
-        // and the picker consistent (both expose swarm / swarm-deep).
+        // and the picker consistent (both expose swarm).
         let efforts = if self.is_remote {
             let (provider_name, provider_model) = self.remote_effort_identity();
             inferred_reasoning_efforts(provider_name.as_deref(), provider_model.as_deref())

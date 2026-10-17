@@ -285,12 +285,12 @@ async fn openai_available_efforts_follow_active_model_catalog_metadata() {
 
     assert_eq!(
         provider.available_efforts(),
-        vec!["minimal", "medium", "max", "swarm", "swarm-deep"]
+        vec!["minimal", "medium", "max", "swarm"]
     );
     *provider.model.write().await = "gpt-5.6[1m]".to_string();
     assert_eq!(
         provider.available_efforts(),
-        vec!["minimal", "medium", "max", "swarm", "swarm-deep"],
+        vec!["minimal", "medium", "max", "swarm"],
         "long-context aliases must use the canonical model's catalog metadata"
     );
     *provider.model.write().await = "gpt-5.6".to_string();

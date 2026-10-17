@@ -544,11 +544,7 @@ fn effort_display_label_with_root<'a>(effort: &'a str, root: Option<&str>) -> &'
         };
     }
     match effort {
-        "swarm" => swarm_label!("Swarm", "light fan-out"),
-        "swarm-deep" => swarm_label!(
-            "☢ Swarm Deep",
-            "task graph, WARNING: recursive agents / high token cost"
-        ),
+        "swarm" => swarm_label!("Swarm", "parallel agents"),
         "max" => "Max",
         "xhigh" => "xHigh",
         "high" => "High",

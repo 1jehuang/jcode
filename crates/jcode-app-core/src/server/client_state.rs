@@ -473,7 +473,10 @@ fn history_reload_recovery_snapshot_with(
     was_interrupted: Option<bool>,
     infer_interrupted: impl FnOnce() -> bool,
 ) -> Option<crate::protocol::ReloadRecoverySnapshot> {
-    match super::reload_recovery::pending_directive_for_session(session_id) {
+    let recovery_start = Instant::now();
+    let pending = super::reload_recovery::pending_directive_for_session(session_id);
+    let pending_ms = recovery_start.elapsed().as_millis();
+    match pending {
         Ok(Some(directive)) => {
             crate::logging::info(&format!(
                 "history_reload_recovery_snapshot: attaching server-owned recovery intent for session={} without marking delivered",
@@ -488,16 +491,26 @@ fn history_reload_recovery_snapshot_with(
         )),
     }
 
+    let t = Instant::now();
     let reload_ctx = crate::tool::selfdev::ReloadContext::peek_for_session(session_id)
         .ok()
         .flatten();
+    let peek_ms = t.elapsed().as_millis();
     let inferred_interrupted = was_interrupted.unwrap_or_else(infer_interrupted);
+    let t = Instant::now();
     let directive = crate::tool::selfdev::ReloadContext::recovery_directive_for_session(
         session_id,
         reload_ctx.as_ref(),
         inferred_interrupted,
         None,
     );
+    crate::logging::info(&format!(
+        "[TIMING] history_recovery: session={}, pending={}ms, peek={}ms, directive={}ms",
+        session_id,
+        pending_ms,
+        peek_ms,
+        t.elapsed().as_millis()
+    ));
     crate::logging::info(&format!(
         "history_reload_recovery_snapshot: session={} explicit_was_interrupted={:?} inferred_was_interrupted={} has_reload_ctx={} directive={}",
         session_id,

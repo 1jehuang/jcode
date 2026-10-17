@@ -210,7 +210,7 @@ pub type ReloadRecoverySnapshot = jcode_selfdev_types::ReloadRecoveryDirective;
 
 mod wire;
 pub use wire::{Request, ServerEvent};
-pub use wire::{SessionToolConfig, SessionToolDefinition, TaskGraphNodeSpec};
+pub use wire::{SessionToolConfig, SessionToolDefinition};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallSummary {
@@ -408,30 +408,6 @@ pub struct PlanGraphStatus {
     pub next_ready_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub newly_ready_ids: Vec<String>,
-    /// Completed (non-gate) items whose artifact self-reported LOW confidence.
-    /// Shaky coverage the coordinator should widen with follow-up nodes; deep
-    /// gates are also blocked from passing over these while unaddressed.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub low_confidence_ids: Vec<String>,
-    /// Engine mode for this plan: "deep" (comprehensive, gated, wide fan-out) or
-    /// "light" (cheap fan-out). Lets schedulers like `run_plan` pick a
-    /// mode-appropriate concurrency policy. Defaults to "light" for legacy plans.
-    #[serde(default = "default_plan_mode")]
-    pub mode: String,
-    /// Growth accounting: nodes from the initial seed (legacy/unknown origins
-    /// count as seeded).
-    #[serde(default)]
-    pub seeded_count: usize,
-    /// Growth accounting: machinery-generated nodes (expand children, gate-
-    /// injected gaps, and the gates themselves). `seeded_count + grown_count ==
-    /// item_count`. A deep plan with `grown_count == 0` never decomposed or
-    /// gated anything, which almost always means under-exploration.
-    #[serde(default)]
-    pub grown_count: usize,
-}
-
-fn default_plan_mode() -> String {
-    "light".to_string()
 }
 
 impl PlanGraphStatus {
@@ -450,10 +426,6 @@ impl PlanGraphStatus {
             unresolved_dependency_ids: Vec::new(),
             next_ready_ids: Vec::new(),
             newly_ready_ids: Vec::new(),
-            low_confidence_ids: Vec::new(),
-            mode: default_plan_mode(),
-            seeded_count: 0,
-            grown_count: 0,
         }
     }
 
@@ -464,7 +436,6 @@ impl PlanGraphStatus {
         newly_ready_ids: Vec<String>,
     ) -> Self {
         let graph = summarize_plan_graph(&plan.items);
-        let growth = jcode_plan::bridge::growth_stats(plan);
         let failed_reasons: BTreeMap<String, String> = graph
             .failed_ids
             .iter()
@@ -489,10 +460,6 @@ impl PlanGraphStatus {
             unresolved_dependency_ids: graph.unresolved_dependency_ids,
             next_ready_ids: next_runnable_item_ids(&plan.items, next_ready_limit),
             newly_ready_ids,
-            low_confidence_ids: jcode_plan::bridge::low_confidence_completed_ids(plan),
-            mode: plan.mode.clone(),
-            seeded_count: growth.seeded,
-            grown_count: growth.grown(),
         }
     }
 }
@@ -694,10 +661,6 @@ impl Request {
             Request::CommProposePlan { id, .. } => *id,
             Request::CommApprovePlan { id, .. } => *id,
             Request::CommRejectPlan { id, .. } => *id,
-            Request::CommSeedGraph { id, .. } => *id,
-            Request::CommExpandNode { id, .. } => *id,
-            Request::CommCompleteNode { id, .. } => *id,
-            Request::CommInjectGap { id, .. } => *id,
             Request::CommSpawn { id, .. } => *id,
             Request::CommListModels { id, .. } => *id,
             Request::CommStop { id, .. } => *id,
@@ -740,10 +703,6 @@ impl Request {
                 | Request::CommProposePlan { .. }
                 | Request::CommApprovePlan { .. }
                 | Request::CommRejectPlan { .. }
-                | Request::CommSeedGraph { .. }
-                | Request::CommExpandNode { .. }
-                | Request::CommCompleteNode { .. }
-                | Request::CommInjectGap { .. }
                 | Request::CommSpawn { .. }
                 | Request::CommListModels { .. }
                 | Request::CommStop { .. }

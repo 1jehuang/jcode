@@ -1737,8 +1737,7 @@ fn test_deepseek_direct_profile_supports_reasoning_effort_via_multi_provider() {
                     "medium",
                     "high",
                     "max",
-                    "swarm",
-                    "swarm-deep"
+                    "swarm"
                 ]
             );
             provider

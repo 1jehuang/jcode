@@ -367,7 +367,7 @@ async fn configured_swarm_root_effort_resolves_without_changing_stored_mode() {
         "gpt-5.6".to_string(),
         vec!["low".into(), "medium".into(), "high".into(), "xhigh".into()],
     );
-    for mode in ["swarm", "swarm-deep"] {
+    for mode in ["swarm"] {
         provider.set_reasoning_effort(mode).unwrap();
         for (configured, expected) in [
             ("low", "low"),
@@ -400,7 +400,7 @@ async fn configured_swarm_root_effort_resolves_without_changing_stored_mode() {
         "gpt-5.6".to_string(),
         vec!["none".into(), "low".into(), "max".into()],
     );
-    for mode in ["swarm", "swarm-deep"] {
+    for mode in ["swarm"] {
         let effort = provider.api_reasoning_effort_with_swarm_root(Some(mode), Some("none"));
         let request = OpenAIProvider::build_response_request(
             "gpt-5.6",
@@ -438,7 +438,6 @@ fn configured_swarm_root_effort_reads_real_config() {
             ])
             .env("JCODE_TEST_SWARM_ROOT_CHILD", "1")
             .env("JCODE_SWARM_ROOT_EFFORT", "low")
-            .env("JCODE_SWARM_DEEP_ROOT_EFFORT", "none")
             .output()
             .expect("run isolated config test");
         assert!(
@@ -461,7 +460,7 @@ fn configured_swarm_root_effort_reads_real_config() {
         "gpt-5.6".into(),
         vec!["none".into(), "low".into(), "max".into()],
     );
-    for (mode, expected) in [("swarm", "low"), ("swarm-deep", "none")] {
+    for (mode, expected) in [("swarm", "low")] {
         provider.set_reasoning_effort(mode).unwrap();
         let effort = provider.api_reasoning_effort(provider.reasoning_effort().as_deref());
         let request = OpenAIProvider::build_response_request(
