@@ -193,10 +193,9 @@ fn schedule_retry(socket: &Path, candidate: &Path) {
             }
         })
         .is_err()
+        && let Ok(mut pending) = PENDING.lock()
     {
-        if let Ok(mut pending) = PENDING.lock() {
-            pending.remove(&cleanup_key);
-        }
+        pending.remove(&cleanup_key);
     }
 }
 
