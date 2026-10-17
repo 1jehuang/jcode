@@ -63,24 +63,18 @@ fn render_single_line_system_notice(
     msg: &DisplayMessage,
     width: u16,
 ) -> Option<Vec<Line<'static>>> {
-    let is_launch_hotkey_notice = msg.title.as_deref() == Some("Launch hotkeys");
-    let is_update_divergence_notice = msg.content.starts_with("Update diverged. Press ")
-        || msg.content.starts_with("Local and upstream have diverged");
-    let is_cold_cache_notice = msg.content.starts_with("🧊 Prompt cache went cold");
-    let is_status_notice = msg.title.as_deref() == Some("Connection")
-        || msg.content.starts_with("📡 Network appears offline")
-        || msg
-            .content
-            .starts_with("⚡ Server reload in progress - waiting for handoff")
-        || msg.content.starts_with("⚡ Connection lost - retrying")
-        || msg.content.starts_with("[auto] ")
-        || (!msg.content.contains('\n') && !content_has_markdown_formatting(&msg.content));
-    if !is_cold_cache_notice
-        && !is_launch_hotkey_notice
-        && !is_update_divergence_notice
-        && !is_status_notice
+    // Ordinary notices are always compact, not just plain one-line strings.
+    // Keep deliberately requested reports, command output and login prompts
+    // readable. Markdown or a newline alone is not a reason to expand a notice.
+    if matches!(msg.title.as_deref(), Some("Skills" | "Context" | "Support"))
+        || msg.content.starts_with("Shell command · ")
+        || msg.content.starts_with("Authentication Status:")
+        || (msg.content.contains('\n') && msg.content.contains("/cancel"))
     {
         return None;
+    }
+    if width == 0 {
+        return Some(Vec::new());
     }
 
     let centered = markdown::center_code_blocks();
@@ -102,11 +96,29 @@ fn render_single_line_system_notice(
         &msg.content
     };
     let display_content = normalize_system_content_for_display(content);
-    let compact = display_content
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    let line = Line::from(Span::styled(compact, system_message_color()));
+    let plain = if content_has_markdown_formatting(&display_content) {
+        markdown::render_markdown_with_width(&display_content, None)
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    } else {
+        display_content.into_owned()
+    };
+    let compact = plain.split_whitespace().collect::<Vec<_>>().join(" ");
+    let color = if msg.content.starts_with("⚠ File activity:")
+        || msg.content.starts_with("⚠️ File activity:")
+    {
+        dim_color()
+    } else {
+        system_message_color()
+    };
+    let line = Line::from(Span::styled(compact, color));
     let mut lines = vec![super::truncate_line_with_ellipsis_to_width(
         &line, line_width,
     )];
@@ -114,7 +126,7 @@ fn render_single_line_system_notice(
         left_pad_lines_for_centered_mode(&mut lines, width);
     }
     for span in &mut lines[0].spans {
-        span.style.fg = Some(system_message_color());
+        span.style.fg = Some(color);
     }
     Some(lines)
 }
@@ -543,8 +555,8 @@ pub(crate) fn render_system_message(
     if let Some(lines) = render_scheduled_session_message(msg, width) {
         return lines;
     }
-    // Routine status messages occupy one row, including connection notices.
-    // Authored multiline help and structured reports keep their full layout.
+    // Routine notices occupy one row regardless of compact_notifications.
+    // Explicit reports and interactive prompts keep their full layout.
     if let Some(lines) = render_single_line_system_notice(msg, width) {
         return lines;
     }
@@ -3142,7 +3154,9 @@ fn compact_swarm_notification(title: &str) -> Option<CompactSwarmNotification<'_
         } else if let Some(sender) = title.strip_prefix("Shared context · ") {
             (sender, "🧠 ".to_string(), false, rgb(221, 247, 232), false)
         } else if let Some(sender) = title.strip_prefix("File activity · ") {
-            (sender, "✎ ".to_string(), false, rgb(255, 228, 214), true)
+            (sender, "✎ ".to_string(), false, dim_color(), true)
+        } else if title == "File activity" {
+            ("", "✎ ".to_string(), false, dim_color(), true)
         } else if let Some(sender) = title.strip_prefix("File conflict · ") {
             (sender, "⚠ ".to_string(), true, rgb(255, 190, 150), true)
         } else {
@@ -3150,7 +3164,7 @@ fn compact_swarm_notification(title: &str) -> Option<CompactSwarmNotification<'_
             (sender, String::new(), false, rgb(225, 225, 235), false)
         };
     let sender = sender.trim();
-    (!sender.is_empty()).then_some(CompactSwarmNotification {
+    (!sender.is_empty() || title == "File activity").then_some(CompactSwarmNotification {
         sender,
         marker,
         marker_before_icon,
@@ -3165,7 +3179,14 @@ fn render_compact_agent_notification(
     width: u16,
 ) -> Option<Vec<Line<'static>>> {
     let notification = compact_swarm_notification(title)?;
-    let icon = crate::id::session_icon(notification.sender);
+    if width == 0 {
+        return Some(Vec::new());
+    }
+    let icon = if notification.sender.is_empty() {
+        String::new()
+    } else {
+        format!("{} ", crate::id::session_icon(notification.sender))
+    };
     // Plain (legacy or unencoded) long content renders as a collapsed preview
     // too, so nothing agent-authored is ever dumped inline by default.
     let normalized = jcode_tui_messages::collapse_long_swarm_content(content);
@@ -3195,9 +3216,13 @@ fn render_compact_agent_notification(
         body
     };
     let text_color = notification.text_color;
-    let icon_style = Style::default().fg(rgb(255, 200, 100));
+    let icon_style = Style::default().fg(if title.starts_with("File activity") {
+        dim_color()
+    } else {
+        rgb(255, 200, 100)
+    });
     let body_style = Style::default().fg(text_color);
-    let max_width = width.max(1) as usize;
+    let max_width = centered_wrap_width(width, markdown::center_code_blocks(), 96);
 
     // Collapsed (or plain) content is always exactly one row: the preview is
     // truncated with an ellipsis so the badge stays the trailing token.
@@ -3206,17 +3231,21 @@ fn render_compact_agent_notification(
         let preview = jcode_tui_messages::swarm_preview_line(&body, usize::MAX);
         let mut prefix = if notification.marker_before_icon {
             vec![Span::styled(
-                format!("{}{} ", notification.marker, icon),
+                format!("{}{}", notification.marker, icon),
                 body_style,
             )]
         } else {
-            let mut spans = vec![Span::styled(format!("{} ", icon), icon_style)];
+            let mut spans = vec![Span::styled(icon.clone(), icon_style)];
             if !notification.marker.is_empty() {
                 spans.push(Span::styled(notification.marker.clone(), body_style));
             }
             spans
         };
-        let badge_text = badge.map(|badge| format!("  {badge}"));
+        // Keep the full click target only when it fits. At very narrow widths
+        // the preview wins rather than letting a badge force a second row.
+        let badge_text = badge
+            .map(|badge| format!("  {badge}"))
+            .filter(|badge| badge.width() < max_width);
         let badge_width = badge_text
             .as_deref()
             .map(UnicodeWidthStr::width)
@@ -3231,6 +3260,11 @@ fn render_compact_agent_notification(
                 badge_text,
                 Style::default().fg(text_color).dim(),
             ));
+        }
+        for span in &mut line.spans {
+            if span.style.fg.is_none() {
+                span.style.fg = Some(text_color);
+            }
         }
         let mut lines = vec![line];
         if markdown::center_code_blocks() {
@@ -3257,9 +3291,9 @@ fn render_compact_agent_notification(
             }
         }
         let mut spans = vec![if index == 0 && notification.marker_before_icon {
-            Span::styled(format!("{}{} ", notification.marker, icon), body_style)
+            Span::styled(format!("{}{}", notification.marker, icon), body_style)
         } else if index == 0 {
-            Span::styled(format!("{} ", icon), icon_style)
+            Span::styled(icon.clone(), icon_style)
         } else {
             Span::raw("   ")
         }];
