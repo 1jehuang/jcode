@@ -2536,6 +2536,7 @@ pub(in crate::tui::app) fn handle_server_event(
                     err
                 )));
             } else {
+                let tier_changed = app.remote_service_tier != service_tier;
                 app.remote_service_tier = service_tier.clone();
                 let enabled = app_mod::service_tier_is_fast(service_tier.as_deref());
                 let label = service_tier
@@ -2543,9 +2544,13 @@ pub(in crate::tui::app) fn handle_server_event(
                     .map(app_mod::service_tier_display_label)
                     .unwrap_or("Standard");
                 let applies_next_request = app.is_processing;
-                app.push_display_message(DisplayMessage::system(
-                    app_mod::fast_mode_success_message(enabled, label, applies_next_request),
-                ));
+                // Duplicate acknowledgements should not flood the transcript or
+                // discard a provider confirmation for the unchanged tier.
+                if tier_changed {
+                    app.push_display_message(DisplayMessage::system(
+                        app_mod::fast_mode_success_message(enabled, label, applies_next_request),
+                    ));
+                }
                 app.set_status_notice(app_mod::fast_mode_status_notice(
                     service_tier.as_deref(),
                     applies_next_request,
