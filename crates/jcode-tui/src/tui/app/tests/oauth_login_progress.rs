@@ -52,6 +52,7 @@ fn oauth_login_progress_cancel_removes_expanded_url_and_button() {
     );
     assert!(app.display_messages[index].title.is_none());
     assert!(app.pending_login.is_none());
+    assert_eq!(app.status_notice().as_deref(), Some("Login cancelled"));
     assert!(!app.toggle_swarm_message_expand(index));
 }
 

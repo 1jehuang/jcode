@@ -1936,6 +1936,7 @@ impl App {
             if !replaced {
                 self.push_display_message(DisplayMessage::system("Login cancelled.".to_string()));
             }
+            self.set_status_notice("Login cancelled");
             return;
         }
 
