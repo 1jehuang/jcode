@@ -3997,6 +3997,8 @@ impl App {
                     duration_secs: None,
                     title: None,
                     tool_data: None,
+                    timestamp: None,
+                    tool_duration_ms: None,
                 });
                 if let Some(prompt) = trailing_prompt {
                     input = prompt;
@@ -4028,6 +4030,8 @@ impl App {
                     duration_secs: None,
                     title: None,
                     tool_data: None,
+                    timestamp: None,
+                    tool_duration_ms: None,
                 });
                 return;
             }
@@ -4055,6 +4059,8 @@ impl App {
             duration_secs: None,
             title: None,
             tool_data: None,
+            timestamp: None,
+            tool_duration_ms: None,
         });
         // Send expanded content (with actual pasted text) to model
         let images = std::mem::take(&mut self.pending_images);
