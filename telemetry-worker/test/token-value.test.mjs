@@ -576,10 +576,10 @@ test("the authoritative dashboard reads the real v2 ledger trigger exactly once"
   insertPrice(db, { model: "m", input: 5, output: 30, cacheRead: 0.5,
     cacheWrite: 6.25, inputIncludesCacheRead: 1 });
   const insert = db.prepare(`INSERT OR IGNORE INTO usage_report_ledger
-    (telemetry_id, event_id, usage_contract_version, usage_date, source, provider,
+    (receipt_key, usage_contract_version, usage_date, source, provider,
      model, build_channel, is_ci, responses, input_tokens, output_tokens,
      cache_read_input_tokens, cache_creation_input_tokens, total_tokens)
-    VALUES ('install', ?, ?, date('now'), 'agent', 'test', 'm', 'stable', 0, 1,
+    VALUES (?, ?, date('now'), 'agent', 'test', 'm', 'stable', 0, 1,
       100000, 10000, 900000, 50000, 1060000)`);
   insert.run("response-v2", 2);
   insert.run("response-v2", 2);
