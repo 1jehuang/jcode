@@ -1655,7 +1655,7 @@ mod tests {
         std::fs::create_dir_all(&cache_dir).expect("create cache dir");
         let cache = jcode_provider_openrouter::DiskCache {
             cached_at: jcode_provider_openrouter::current_unix_secs().expect("current unix time"),
-            source_api_base: None,
+            source_api_base: Some(super::super::STANDARD_OPENROUTER_API_BASE.to_string()),
             models: model_ids
                 .iter()
                 .map(|id| jcode_provider_openrouter::ModelInfo {

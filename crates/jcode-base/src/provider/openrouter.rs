@@ -13,6 +13,7 @@
 //! - re-exports of the pure catalog/cache types from
 //!   `jcode-provider-openrouter`.
 
+use super::STANDARD_OPENROUTER_API_BASE as DEFAULT_API_BASE;
 use crate::provider_catalog::{
     OPENAI_COMPAT_PROFILE, is_safe_env_file_name, is_safe_env_key_name,
     load_api_key_from_env_or_config, normalize_api_base, openai_compatible_profiles,
@@ -27,17 +28,28 @@ pub use jcode_provider_openrouter::{
 
 /// Whether the standard OpenRouter public catalog (disk cache) lists a model.
 ///
-/// Returns `None` when no fresh catalog cache exists (unknown), so callers can
+/// Returns `None` when no usable catalog cache exists (unknown), so callers can
 /// stay optimistic. Returns `Some(false)` for models OpenRouter definitively
 /// does not serve (e.g. `openai/gpt-5.3-codex-spark`, a ChatGPT-subscription
 /// exclusive), letting the model picker skip fabricated OpenRouter fallback
 /// routes that would 400 with "not a valid model ID" at request time.
+///
+/// The cache is validated against the endpoint it was fetched from before it is
+/// trusted. The `openrouter` namespace is written by the standard OpenRouter
+/// refresh, but it is also the default namespace for a direct compatible runtime
+/// that never set `JCODE_OPENROUTER_CACHE_NAMESPACE`, so another endpoint's
+/// catalog can land there and silently decide the picker (issue #1824). Reading
+/// through the shared validated cache reader keeps one validation discipline
+/// instead of a second copy: a cache whose `source_api_base` does not match
+/// [`DEFAULT_API_BASE`] reads as "unknown" (`None`) rather than as an
+/// authoritative "OpenRouter does not serve this model".
 pub fn standard_catalog_lists_model(model_id: &str) -> Option<bool> {
-    let cache = jcode_provider_openrouter::load_disk_cache_entry_for_namespace("openrouter")?;
-    if cache.models.is_empty() {
-        return None;
-    }
-    Some(cache.models.iter().any(|model| model.id == model_id))
+    let (models, _cache_is_stale) =
+        crate::provider_declared_models::cached_live_models_for_namespace(
+            "openrouter",
+            DEFAULT_API_BASE,
+        )?;
+    Some(models.iter().any(|model| model == model_id))
 }
 
 /// Schedule a background catalog refresh for a direct OpenAI-compatible
@@ -84,8 +96,6 @@ pub fn get_api_key() -> Option<String> {
     load_api_key_from_env_or_config(&key_name, &env_file)
 }
 
-/// OpenRouter API base URL
-const DEFAULT_API_BASE: &str = "https://openrouter.ai/api/v1";
 const DEFAULT_API_KEY_NAME: &str = "OPENROUTER_API_KEY";
 const DEFAULT_ENV_FILE: &str = "openrouter.env";
 const OPENROUTER_TRANSPORT_STATE_ENV: &str = "JCODE_OPENROUTER_TRANSPORT_STATE";
