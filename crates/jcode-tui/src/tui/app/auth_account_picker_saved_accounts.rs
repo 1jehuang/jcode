@@ -1,7 +1,7 @@
 use super::*;
 
-/// Saved credentials are switch actions, not new OAuth logins. Keep the exact
-/// label in both the visible name and action, including single-account setups.
+/// The login picker re-authenticates saved credentials under their existing label.
+/// Account switching remains available through the separate `/account` picker.
 pub(super) fn saved_login_picker_entries(
     current_provider: &str,
     selected_label: Option<&str>,
@@ -118,16 +118,16 @@ fn saved_login_entry(
         ),
         options: vec![PickerOption {
             provider: provider_id.to_string(),
-            api_method: "saved account".to_string(),
+            api_method: "sign in again".to_string(),
             available: true,
             detail: format!(
-                "Switch to {label} · {account_use} · {}{}",
+                "Sign in again to {label} · {account_use} · {}{}",
                 if expired { "expired" } else { "valid" },
                 if active { " · active saved login" } else { "" }
             ),
             estimated_reference_cost_micros: None,
         }],
-        action: PickerAction::Account(AccountPickerAction::Switch {
+        action: PickerAction::Account(AccountPickerAction::Replace {
             provider_id: provider_id.to_string(),
             label: label.to_string(),
         }),
@@ -502,7 +502,7 @@ mod account_display_tests {
     use super::*;
 
     #[test]
-    fn saved_login_choices_preserve_all_named_account_switch_targets() {
+    fn saved_login_choices_preserve_all_named_reauthentication_targets() {
         for provider in ["claude", "openai"] {
             for label in ["work", "personal", "custom-named-account"] {
                 let entry = saved_login_entry(
@@ -517,8 +517,10 @@ mod account_display_tests {
                 assert!(entry.name.contains(label));
                 assert!(entry.name.contains("me@example.com"));
                 assert!(entry.is_current);
+                assert_eq!(entry.options[0].api_method, "sign in again");
+                assert!(entry.options[0].detail.contains("Sign in again"));
                 assert!(matches!(entry.action,
-                    crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Switch { provider_id, label: target })
+                    crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Replace { provider_id, label: target })
                     if provider_id == provider && target == label));
             }
         }
@@ -551,19 +553,21 @@ mod account_display_tests {
             assert!(entries[0].options[0].detail.contains("active saved login"));
             assert!(entries[1].name.contains("work@example.com"));
             assert!(matches!(&entries[1].action,
-                crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Switch { provider_id, label })
+                crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Replace { provider_id, label })
                 if provider_id == provider && label == "work"));
         }
     }
 
     #[test]
-    fn expired_saved_login_is_selectable_and_not_a_new_login() {
+    fn expired_saved_login_starts_reauthentication_for_the_same_account() {
         let entry = saved_login_entry("claude", "Claude", "work", None, "work", true, false);
         assert!(entry.options[0].available);
         assert!(entry.options[0].detail.contains("expired"));
         assert!(!entry.is_current);
         assert!(entry.name.contains("email unknown"));
-        assert!(matches!(entry.action, crate::tui::PickerAction::Account(_)));
+        assert!(matches!(entry.action,
+            crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Replace { provider_id, label })
+            if provider_id == "claude" && label == "work"));
     }
 
     #[test]
