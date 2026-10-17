@@ -1,4 +1,70 @@
 #[test]
+fn test_usage_card_reset_balances() {
+    let mut app = create_test_app();
+    for count in [0, 3] {
+        app.handle_usage_report(vec![crate::usage::ProviderUsage {
+            provider_name: "OpenAI (work)".into(),
+            openai_reset_credits: Some(crate::usage::OpenAiResetCredits {
+                available_count: count,
+                available_expirations: vec![],
+                account_label: Some("work".into()),
+                ordinary_usage_allowed: Some(true),
+            }),
+            ..Default::default()
+        }]);
+        let content = &app.display_messages().last().unwrap().content;
+        assert!(content.contains(&format!("Banked resets: {count} available")));
+        assert!(!content.contains("no usage data available"));
+    }
+    for available in [false, true] {
+        app.handle_usage_report(vec![crate::usage::ProviderUsage {
+            provider_name: "Claude (personal)".into(),
+            anthropic_limit_reset: Some(crate::usage::AnthropicLimitResetOffer {
+                account_label: Some("personal".into()),
+                available,
+                next_available_at: Some("2099-01-01T00:00:00Z".into()),
+                resets_per_week: 1,
+            }),
+            ..Default::default()
+        }]);
+        let content = &app.display_messages().last().unwrap().content;
+        assert!(content.contains(&format!(
+            "Session resets: {} available",
+            u64::from(available)
+        )));
+        assert_eq!(content.contains("next in"), !available);
+    }
+    app.handle_usage_report(vec![crate::usage::ProviderUsage {
+        provider_name: "OpenAI (failed)".into(),
+        error: Some("fetch failed".into()),
+        openai_reset_credits: Some(crate::usage::OpenAiResetCredits {
+            available_count: 7,
+            available_expirations: vec![],
+            account_label: Some("failed".into()),
+            ordinary_usage_allowed: None,
+        }),
+        ..Default::default()
+    }]);
+    assert!(
+        !app.display_messages()
+            .last()
+            .unwrap()
+            .content
+            .contains("Banked resets:")
+    );
+    for error in [None, Some("fetch failed".into())] {
+        app.handle_usage_report(vec![crate::usage::ProviderUsage {
+            provider_name: "Unknown".into(),
+            error,
+            ..Default::default()
+        }]);
+        let content = &app.display_messages().last().unwrap().content;
+        assert!(!content.contains("Banked resets:"));
+        assert!(!content.contains("Session resets:"));
+    }
+}
+
+#[test]
 fn test_usage_card_renders_when_loading() {
     let mut app = create_test_app();
     app.open_usage_inline_loading();
@@ -69,6 +135,7 @@ fn test_usage_report_updates_display_only_card_without_system_message() {
     assert!(msg.content.contains("5h"));
     assert!(msg.content.contains("82%"));
     assert!(msg.content.contains("plan: pro"));
+    assert!(!msg.content.contains("resets: "));
     let leaked = app.materialized_provider_messages();
     assert_eq!(
         leaked.len(),
@@ -939,16 +1006,18 @@ fn test_openai_account_usage_details_are_discoverable_and_keep_switching() {
         // New accounts receive canonical labels from the store, not the requested label.
         let labels: Vec<String> = ["openai-otter", "openai-fox"]
             .into_iter()
-            .map(|label| crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
-                label: label.to_string(),
-                access_token: "acc".into(),
-                refresh_token: "ref".into(),
-                id_token: None,
-                account_id: Some(format!("acct_{label}")),
-                expires_at: None,
-                email: None,
+            .map(|label| {
+                crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
+                    label: label.to_string(),
+                    access_token: "acc".into(),
+                    refresh_token: "ref".into(),
+                    id_token: None,
+                    account_id: Some(format!("acct_{label}")),
+                    expires_at: None,
+                    email: None,
+                })
+                .unwrap()
             })
-            .unwrap())
             .collect();
         crate::provider_activity::record_openai_oauth_usage(
             &labels[0],
@@ -960,7 +1029,10 @@ fn test_openai_account_usage_details_are_discoverable_and_keep_switching() {
         );
         let mut app = create_test_app();
         let settings = app.render_openai_accounts_markdown();
-        assert!(settings.contains("12,345 in · 678 out · 123 cached"), "recorded account usage: {settings}");
+        assert!(
+            settings.contains("12,345 in · 678 out · 123 cached"),
+            "recorded account usage: {settings}"
+        );
         assert!(settings.contains("No recorded usage"));
         assert!(settings.contains("local midnight"));
         assert!(settings.contains("not your subscription bill"));
