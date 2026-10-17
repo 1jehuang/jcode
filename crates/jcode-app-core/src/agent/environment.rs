@@ -79,9 +79,21 @@ impl Agent {
 
     /// Record a lightweight environment snapshot for post-mortem debugging
     pub(super) fn log_env_snapshot(&mut self, reason: &str) {
+        self.record_env_snapshot_inner(reason, true);
+    }
+
+    /// Record the snapshot without saving. For callers that persist the
+    /// session right afterwards anyway (resume), so one save covers both.
+    /// Each save of a session with a large compaction blob can force a full
+    /// snapshot rewrite, and resume used to pay for two.
+    pub(super) fn log_env_snapshot_unsaved(&mut self, reason: &str) {
+        self.record_env_snapshot_inner(reason, false);
+    }
+
+    fn record_env_snapshot_inner(&mut self, reason: &str, persist: bool) {
         let snapshot = self.build_env_snapshot(reason, self.env_snapshot_detail());
         self.session.record_env_snapshot(snapshot.clone());
-        if !self.session.messages.is_empty() {
+        if persist && !self.session.messages.is_empty() {
             self.persist_session_best_effort("environment snapshot");
         }
         if let Ok(json) = serde_json::to_string(&snapshot) {

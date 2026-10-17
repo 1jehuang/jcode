@@ -1195,7 +1195,8 @@ impl Agent {
         let compaction_ms = compaction_start.elapsed().as_millis();
 
         let env_snapshot_start = Instant::now();
-        self.log_env_snapshot("resume");
+        // The save just below persists this snapshot too.
+        self.log_env_snapshot_unsaved("resume");
         let env_snapshot_ms = env_snapshot_start.elapsed().as_millis();
         self.fire_session_lifecycle_hook("session_start", "resume");
 
