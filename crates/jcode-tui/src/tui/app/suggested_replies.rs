@@ -31,6 +31,8 @@ pub struct SuggestedRepliesRuntime {
     pub pending_remote_submit: Option<String>,
     pub force_enable_in_tests: bool,
     pub last_evaluated_messages_version: u64,
+    pub last_debug: Option<crate::suggested_replies::SuggestedRepliesDebugInfo>,
+    pub last_response: Option<SuggestedRepliesResponse>,
 }
 
 impl App {
@@ -84,24 +86,71 @@ impl App {
         if self.suggested_replies.focus.take().is_some() {
             changed = true;
         }
-        if clear_suggestions && self.suggested_replies.current.take().is_some() {
-            changed = true;
+        if clear_suggestions {
+            if self.suggested_replies.current.take().is_some() {
+                changed = true;
+            }
+            if self.suggested_replies.pending_rx.take().is_some() {
+                changed = true;
+            }
         }
         changed
+    }
+
+    /// Clear any active or in-flight Suggested Replies when a new turn begins
+    /// so stale suggestions from a previous turn never reappear on Esc/cancel
+    /// or overwrite the next turn's state.
+    pub fn clear_suggested_replies_for_new_turn(&mut self) {
+        self.cancel_suggested_replies_interaction(true);
     }
 
     /// Apply a freshly computed `SuggestedRepliesResponse`, arming the 500ms
     /// Full-Auto Explorer timer when `enable_full_auto_explorer` is enabled and
     /// a `default_action` cleared the confidence threshold.
+    /// If the user already focused a suggestion (`self.suggested_replies.focus.is_some()`),
+    /// preserve a valid focus target instead of resetting focus to `None`.
     pub fn apply_suggested_replies_response(&mut self, response: SuggestedRepliesResponse) {
+        if let Some(debug) = response.debug.clone() {
+            self.suggested_replies.last_debug = Some(debug);
+        }
         if response.is_empty() {
             self.suggested_replies.current = None;
             self.suggested_replies.focus = None;
             self.suggested_replies.explorer_deadline = None;
             return;
         }
+        self.suggested_replies.last_response = Some(response.clone());
+
+        let preserved_focus = if self.suggested_replies.current.is_some() {
+            match self.suggested_replies.focus {
+                Some(SuggestedReplyFocus::DefaultAction) => {
+                    if response.default_action.is_some() {
+                        Some(SuggestedReplyFocus::DefaultAction)
+                    } else if !response.secondary_suggestions.is_empty() {
+                        Some(SuggestedReplyFocus::Secondary(0))
+                    } else {
+                        None
+                    }
+                }
+                Some(SuggestedReplyFocus::Secondary(idx)) => {
+                    let count = response.secondary_suggestions.len().min(5);
+                    if count > 0 {
+                        Some(SuggestedReplyFocus::Secondary(idx.min(count - 1)))
+                    } else if response.default_action.is_some() {
+                        Some(SuggestedReplyFocus::DefaultAction)
+                    } else {
+                        None
+                    }
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+
         let cfg = &crate::config::config().suggested_replies;
         let can_arm_explorer = cfg.enable_full_auto_explorer
+            && preserved_focus.is_none()
             && response.default_action.is_some()
             && !self.is_processing
             && self.input.is_empty()
@@ -111,10 +160,7 @@ impl App {
             && !self.autojudge_enabled
             && !self.pending_split_request;
 
-        // Leave `focus` as `None` initially so the first `[Tab]` explicitly focuses
-        // `DefaultAction` (or `Secondary(0)`) and the next `[Tab]` or `[Enter]` activates it,
-        // while `[Ctrl+Enter]` always activates `DefaultAction` immediately.
-        self.suggested_replies.focus = None;
+        self.suggested_replies.focus = preserved_focus;
         self.suggested_replies.explorer_deadline =
             can_arm_explorer.then(|| Instant::now() + EXPLORER_AUTO_DELAY);
         self.suggested_replies.current = Some(response);
@@ -148,6 +194,9 @@ impl App {
             return;
         }
 
+        // Clear any leftover suggestions from a previous turn before evaluating.
+        self.clear_suggested_replies_for_new_turn();
+
         let cfg = crate::config::config().suggested_replies.clone();
         if !cfg.enabled
             || self.is_processing
@@ -166,18 +215,9 @@ impl App {
         self.suggested_replies.last_evaluated_messages_version = self.display_messages_version;
         let six_lens_findings = self.suggested_replies.pending_six_lens_findings.take();
 
-        // Populate immediate deterministic suggestions first so the UI responds
-        // on the very first idle frame after turn completion, then upgrade via
-        // the async OpenJev / OpenGF background task if a live route is configured.
-        let immediate = crate::suggested_replies::score_locally_from_context(
-            &transcript_tail,
-            None,
-            six_lens_findings.as_deref(),
-            cfg.clamped_confidence_threshold(),
-            cfg.clamped_max_secondary(),
-        );
-        self.apply_suggested_replies_response(immediate);
-
+        // When an async OpenGF / Jev (Laya) cascade route is active in a live session,
+        // wait for the real cascade result instead of flashing canned local English
+        // templates for 150ms and then replacing/demoting `default_action` under the user's cursor.
         if !cfg!(test)
             && !self.is_replay
             && self.runtime_mode != super::AppRuntimeMode::TestHarness
@@ -196,7 +236,17 @@ impl App {
                 .await;
                 let _ = tx.send(response);
             });
+            return;
         }
+
+        let immediate = crate::suggested_replies::score_locally_from_context(
+            &transcript_tail,
+            None,
+            six_lens_findings.as_deref(),
+            cfg.clamped_confidence_threshold(),
+            cfg.clamped_max_secondary(),
+        );
+        self.apply_suggested_replies_response(immediate);
     }
 
     /// Record findings from a 6-Lens Subagent Self-Review and immediately
@@ -434,6 +484,133 @@ impl App {
             self.submit_input();
         }
     }
+
+    /// Build a human-readable diagnostic summary of `[suggested_replies]` configuration,
+    /// live Jev / OpenGF routes, and the most recent cascade evaluation.
+    pub fn format_suggested_replies_debug_report(&self) -> String {
+        let cfg = &crate::config::config().suggested_replies;
+        let sidecar = crate::sidecar::Sidecar::new();
+        let jev_route = match crate::jev::JevClient::for_suggestions_with_selector(&cfg.jev_provider)
+        {
+            Ok(client) => format!(
+                "ready (selector=`{}`, supports_choice={})",
+                cfg.jev_provider,
+                client.supports_choice_questions()
+            ),
+            Err(err) => format!("unavailable (`{}`: {})", cfg.jev_provider, err),
+        };
+
+        let mut out = String::new();
+        out.push_str("### Suggested Replies Diagnostics\n\n");
+        out.push_str(&format!(
+            "- **Config**: `enabled={}`, `jev_provider=\"{}\"`, `use_open_gf={}`, `confidence_threshold={:.2}`, `max_secondary_suggestions={}` (clamped `{}`), `enable_full_auto_explorer={}`, `six_lens_auto_review={}`\n",
+            cfg.enabled,
+            cfg.jev_provider,
+            cfg.use_open_gf,
+            cfg.clamped_confidence_threshold(),
+            cfg.max_secondary_suggestions,
+            cfg.clamped_max_secondary(),
+            cfg.enable_full_auto_explorer,
+            cfg.six_lens_auto_review,
+        ));
+        out.push_str(&format!(
+            "- **OpenGF Primary Sidecar**: `backend={}`, `model={}` (plus fallback to active provider / configured `[providers.*]` profiles)\n",
+            sidecar.backend_name(),
+            sidecar.model_name(),
+        ));
+        out.push_str(&format!("- **Jev / SystemOne Route**: {}\n", jev_route));
+        out.push_str(&format!(
+            "- **UI State**: `visible={}`, `in_flight={}`, `focus={:?}`\n",
+            self.suggested_replies_visible(),
+            self.suggested_replies.pending_rx.is_some(),
+            self.suggested_replies.focus,
+        ));
+
+        if let Some(debug) = self.suggested_replies.last_debug.as_ref() {
+            out.push_str("\n#### Last Cascade Telemetry\n");
+            out.push_str(&format!(
+                "- **Source**: `{}` ({}ms)\n- **OpenGF**: {}\n- **Jev / Laya**: {}\n- **Top Confidence vs Threshold**: `{:?}` vs `{:.2}`\n",
+                debug.source,
+                debug.elapsed_ms,
+                debug.open_gf_status,
+                debug.jev_status,
+                debug.top_confidence,
+                debug.threshold,
+            ));
+        }
+
+        let resp_ref = self
+            .suggested_replies
+            .current
+            .as_ref()
+            .or(self.suggested_replies.last_response.as_ref());
+        if let Some(resp) = resp_ref {
+            out.push_str(&format!(
+                "\n#### Latest Suggestions (`branch = {}`)\n",
+                resp.branch
+            ));
+            out.push_str(&format!(
+                "- **Default Action (`★`)**: {}\n",
+                resp.default_action
+                    .as_deref()
+                    .map(|s| format!("`{s}`"))
+                    .unwrap_or_else(|| "_None (below threshold)_".to_string())
+            ));
+            if !resp.scored_candidates.is_empty() {
+                out.push_str("- **Scored Candidates**:\n");
+                for (i, cand) in resp.scored_candidates.iter().enumerate() {
+                    out.push_str(&format!(
+                        "  {}. `{:.2}` — {}\n",
+                        i + 1,
+                        cand.confidence,
+                        cand.text
+                    ));
+                }
+            }
+        } else {
+            out.push_str("\n_No cascade evaluation recorded yet in this session. Run `/suggestions test` to trigger one now._\n");
+        }
+        out
+    }
+
+    /// Handle `/suggestions` (`status` | `debug` | `test` | `refresh`) slash command.
+    pub fn handle_suggestions_command(&mut self, trimmed: &str) -> bool {
+        let rest = if let Some(r) = trimmed.strip_prefix("/suggestions") {
+            if !r.is_empty() && !r.starts_with(char::is_whitespace) {
+                return false;
+            }
+            r.trim()
+        } else if let Some(r) = trimmed.strip_prefix("/suggested-replies") {
+            if !r.is_empty() && !r.starts_with(char::is_whitespace) {
+                return false;
+            }
+            r.trim()
+        } else {
+            return false;
+        };
+
+        match rest {
+            "" | "status" | "debug" => {
+                let report = self.format_suggested_replies_debug_report();
+                self.push_display_message(super::DisplayMessage::system(report));
+                true
+            }
+            "test" | "refresh" => {
+                self.maybe_trigger_suggested_replies_at_turn_end();
+                self.set_status_notice("Re-evaluating Suggested Replies cascade...");
+                self.push_display_message(super::DisplayMessage::system(
+                    "Triggered Suggested Replies cascade evaluation. Run `/suggestions debug` once complete to inspect telemetry.".to_string(),
+                ));
+                true
+            }
+            _ => {
+                self.push_display_message(super::DisplayMessage::error(
+                    "Usage: `/suggestions [debug|status|test|refresh]`".to_string(),
+                ));
+                true
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -593,5 +770,74 @@ mod tests {
         let expected_rows =
             u16::from(view.response.default_action.is_some()) + view.response.secondary_suggestions.len() as u16;
         assert_eq!(expected_rows, 4);
+    }
+
+    #[test]
+    fn apply_response_preserves_existing_focus_and_new_turn_clears_pending_and_current() {
+        let mut app = crate::tui::app::tests::create_test_app();
+        app.suggested_replies.force_enable_in_tests = true;
+        app.push_display_message(super::super::DisplayMessage::assistant("Done."));
+
+        let initial = distribute_suggestions(
+            "implementation",
+            vec![
+                ScoredSuggestion {
+                    text: "Initial default".to_string(),
+                    confidence: 0.85,
+                },
+                ScoredSuggestion {
+                    text: "Initial secondary 1".to_string(),
+                    confidence: 0.65,
+                },
+            ],
+            0.55,
+            5,
+        );
+        app.apply_suggested_replies_response(initial);
+        app.step_suggested_replies_focus(1);
+        assert_eq!(
+            app.suggested_replies.focus,
+            Some(SuggestedReplyFocus::DefaultAction)
+        );
+
+        // An updated response while the panel is already visible preserves focus instead of resetting to None.
+        let updated = distribute_suggestions(
+            "verification",
+            vec![
+                ScoredSuggestion {
+                    text: "Updated default".to_string(),
+                    confidence: 0.88,
+                },
+                ScoredSuggestion {
+                    text: "Updated secondary 1".to_string(),
+                    confidence: 0.62,
+                },
+            ],
+            0.55,
+            5,
+        );
+        app.apply_suggested_replies_response(updated);
+        assert_eq!(
+            app.suggested_replies.focus,
+            Some(SuggestedReplyFocus::DefaultAction)
+        );
+
+        // /suggestions debug outputs diagnostic summary.
+        assert!(app.handle_suggestions_command("/suggestions debug"));
+        assert!(
+            app.display_messages
+                .last()
+                .unwrap()
+                .content
+                .contains("Suggested Replies Diagnostics")
+        );
+
+        // Starting a new turn clears both `current` and `pending_rx`.
+        let (_tx, rx) = mpsc::unbounded_channel();
+        app.suggested_replies.pending_rx = Some(rx);
+        app.clear_suggested_replies_for_new_turn();
+        assert!(app.suggested_replies.current.is_none());
+        assert!(app.suggested_replies.focus.is_none());
+        assert!(app.suggested_replies.pending_rx.is_none());
     }
 }

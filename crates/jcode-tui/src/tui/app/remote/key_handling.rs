@@ -1070,7 +1070,9 @@ async fn handle_remote_key_internal(
                     return Ok(());
                 }
 
-                if app_mod::commands::handle_dictation_command(app, trimmed) {
+                if app_mod::commands::handle_dictation_command(app, trimmed)
+                    || app.handle_suggestions_command(trimmed)
+                {
                     return Ok(());
                 }
 

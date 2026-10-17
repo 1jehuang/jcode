@@ -228,6 +228,7 @@ fn dispatch_single_local_command(app: &mut App, trimmed: &str) -> bool {
         || super::commands::handle_session_command(app, trimmed)
         || super::commands_desktop::handle_desktop_command(app, trimmed)
         || super::commands::handle_dictation_command(app, trimmed)
+        || app.handle_suggestions_command(trimmed)
         || super::commands::handle_config_command(app, trimmed)
         || super::commands_colors::handle_colors_command(app, trimmed)
         || super::commands::handle_log_command(app, trimmed)
