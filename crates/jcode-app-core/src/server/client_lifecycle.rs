@@ -504,11 +504,13 @@ pub(super) async fn handle_client(
     let t0 = std::time::Instant::now();
     let mut new_agent =
         crate::hooks::with_client_terminal_env(active_terminal_env.clone(), async {
-            Agent::new_provisional_with_initial_working_dir(
-                Arc::clone(&provider),
-                registry.clone(),
-                Some(&initial_working_dir),
-            )
+            super::run_blocking_io(|| {
+                Agent::new_provisional_with_initial_working_dir(
+                    Arc::clone(&provider),
+                    registry.clone(),
+                    Some(&initial_working_dir),
+                )
+            })
         })
         .await;
     let agent_new_ms = t0.elapsed().as_millis();
