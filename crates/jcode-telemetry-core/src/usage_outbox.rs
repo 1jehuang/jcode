@@ -12,6 +12,30 @@ use std::path::Path;
 #[cfg(not(test))]
 use std::path::PathBuf;
 
+const REPLAY_HORIZON_SECONDS: i64 = 7 * 24 * 60 * 60;
+
+fn expired(payload: &Value, now: DateTime<Utc>) -> bool {
+    payload["occurred_at"]
+        .as_str()
+        .and_then(|timestamp| DateTime::parse_from_rfc3339(timestamp).ok())
+        .is_some_and(|timestamp| {
+            now.signed_duration_since(timestamp) > chrono::Duration::seconds(REPLAY_HORIZON_SECONDS)
+        })
+}
+
+fn warn_expired() {
+    static LAST_WARNING: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+    let mut last = LAST_WARNING
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if last.is_none_or(|time| time.elapsed() >= Duration::from_secs(3600)) {
+        logging::warn(
+            "expired usage telemetry retained on disk but skipped beyond the 7-day replay horizon",
+        );
+        *last = Some(Instant::now());
+    }
+}
+
 #[cfg(not(test))]
 fn directory() -> io::Result<PathBuf> {
     storage::jcode_dir()
@@ -75,6 +99,14 @@ fn sync_directory(dir: &Path) -> io::Result<()> {
 }
 
 fn drain(dir: &Path, mut deliver: impl FnMut(Value) -> bool) -> io::Result<()> {
+    drain_at(dir, Utc::now(), &mut deliver)
+}
+
+fn drain_at(
+    dir: &Path,
+    now: DateTime<Utc>,
+    mut deliver: impl FnMut(Value) -> bool,
+) -> io::Result<()> {
     std::fs::create_dir_all(dir)?;
     // Separate from publishing: slow HTTP never holds up a newly recorded event.
     // OS locks release on process death, so another process can replay safely.
@@ -97,6 +129,12 @@ fn drain(dir: &Path, mut deliver: impl FnMut(Value) -> bool) -> io::Result<()> {
             }
         };
         if payload["event"] != "usage_report" {
+            continue;
+        }
+        // Preserve the original bytes for inspection, but do not spend network
+        // time retrying records the server can no longer accept.
+        if expired(&payload, now) {
+            warn_expired();
             continue;
         }
         if deliver(payload) {
@@ -211,6 +249,78 @@ mod tests {
     fn payload() -> Value {
         serde_json::json!({"event": "usage_report", "event_id": new_event_id(),
             "id": "install", "input_tokens": 10, "total_tokens": 10})
+    }
+
+    #[test]
+    fn all_usage_versions_use_only_v2_endpoint() {
+        for version in [
+            Value::Null,
+            serde_json::json!(1),
+            serde_json::json!(2),
+            serde_json::json!(99),
+        ] {
+            let mut event = payload();
+            event["usage_contract_version"] = version;
+            assert_eq!(
+                telemetry_endpoint(&event),
+                "https://telemetry.jcode.sh/v2/usage"
+            );
+        }
+        assert_eq!(
+            telemetry_endpoint(&serde_json::json!({"event":"session_start"})),
+            TELEMETRY_ENDPOINT
+        );
+    }
+
+    #[test]
+    fn replay_age_boundary_is_strict_and_unknown_dates_are_not_evicted() {
+        let now = DateTime::parse_from_rfc3339("2026-10-17T10:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        for (timestamp, expected) in [
+            ("2026-10-10T10:00:00Z", false),
+            ("2026-10-10T09:59:59.999Z", true),
+            ("2026-10-17T09:59:59Z", false),
+            ("2026-10-18T10:00:00Z", false),
+            ("not-a-date", false),
+        ] {
+            assert_eq!(
+                expired(&serde_json::json!({"occurred_at": timestamp}), now),
+                expected,
+                "{timestamp}"
+            );
+        }
+        assert!(!expired(&payload(), now));
+    }
+
+    #[test]
+    fn expired_reports_remain_byte_identical_while_fresh_reports_drain() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = DateTime::parse_from_rfc3339("2026-10-17T10:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut stale = payload();
+        stale["occurred_at"] = serde_json::json!("2026-10-01T10:00:00Z");
+        let mut fresh = payload();
+        fresh["occurred_at"] = serde_json::json!("2026-10-17T10:00:00Z");
+        persist(dir.path(), &stale).unwrap();
+        persist(dir.path(), &fresh).unwrap();
+        let path = dir
+            .path()
+            .join(format!("{}.json", stale["event_id"].as_str().unwrap()));
+        let bytes = std::fs::read(&path).unwrap();
+        let mut delivered = Vec::new();
+        drain_at(dir.path(), now, |event| {
+            delivered.push(event);
+            true
+        })
+        .unwrap();
+        assert_eq!(delivered, vec![fresh]);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        drain_at(dir.path(), now, |_| panic!("expired report retried")).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        clear(dir.path()).unwrap();
+        assert!(!path.exists());
     }
 
     #[test]
@@ -360,6 +470,22 @@ mod tests {
             response("503 Unavailable", &receipt.to_string()),
             &event
         ));
+        // An old server without /v2/usage must retain the disk record even
+        // when its response happens to contain a receipt-shaped body.
+        let dir = tempfile::tempdir().unwrap();
+        persist(dir.path(), &event).unwrap();
+        drain(dir.path(), |value| {
+            assert_eq!(telemetry_endpoint(&value), TELEMETRY_USAGE_ENDPOINT);
+            acknowledged(response("404 Not Found", &receipt.to_string()), &value)
+        })
+        .unwrap();
+        let mut retained = Vec::new();
+        drain(dir.path(), |value| {
+            retained.push(value);
+            true
+        })
+        .unwrap();
+        assert_eq!(retained, vec![event]);
     }
 
     #[test]

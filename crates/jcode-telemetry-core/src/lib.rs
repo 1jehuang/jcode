@@ -39,6 +39,17 @@ use std::sync::mpsc::{SyncSender, sync_channel};
 use std::time::{Duration, Instant};
 
 const TELEMETRY_ENDPOINT: &str = "https://telemetry.jcode.sh/v1/event";
+const TELEMETRY_USAGE_ENDPOINT: &str = "https://telemetry.jcode.sh/v2/usage";
+
+fn telemetry_endpoint(payload: &serde_json::Value) -> &'static str {
+    // An old worker must reject new retryable usage without mutating legacy
+    // aggregates. Never fall back to /v1/event when this endpoint is absent.
+    if payload["event"] == "usage_report" {
+        TELEMETRY_USAGE_ENDPOINT
+    } else {
+        TELEMETRY_ENDPOINT
+    }
+}
 const TRANSCRIPT_ENDPOINT: &str = "https://telemetry.jcode.sh/v1/transcript";
 #[cfg(not(test))]
 const ASYNC_SEND_TIMEOUT: Duration = Duration::from_secs(5);
@@ -1242,7 +1253,7 @@ fn post_payload(payload: serde_json::Value, timeout: Duration) -> bool {
             .expect("telemetry HTTP client should build")
     });
     match client
-        .post(TELEMETRY_ENDPOINT)
+        .post(telemetry_endpoint(&payload))
         .timeout(timeout)
         .json(&payload)
         .send()
