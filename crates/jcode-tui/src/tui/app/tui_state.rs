@@ -566,6 +566,17 @@ impl App {
 }
 
 impl crate::tui::TuiState for App {
+    fn hibernation_frame(&self) -> Option<&ratatui::buffer::Buffer> {
+        self.idle_hibernation.frame.as_ref()
+    }
+
+    fn hibernation_notice(&self) -> Option<&str> {
+        self.idle_hibernation
+            .frame
+            .as_ref()
+            .map(|_| self.idle_hibernation.notice.as_str())
+    }
+
     fn display_messages(&self) -> &[DisplayMessage] {
         &self.display_messages
     }
@@ -976,6 +987,9 @@ impl crate::tui::TuiState for App {
     }
 
     fn status_notice(&self) -> Option<String> {
+        if self.idle_hibernation.frame.is_some() {
+            return Some(self.idle_hibernation.notice.clone());
+        }
         // This priority notice is owned by the telemetry handshake, not the
         // expiring general status slot. Other notices cannot clobber it.
         if crate::telemetry::pending_oauth_account_notice().is_some()

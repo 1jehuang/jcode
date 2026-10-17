@@ -39,6 +39,7 @@ mod debug_swarm_write;
 mod debug_testers;
 mod durable_state;
 mod headless;
+mod idle_hibernation;
 mod jade_relay;
 mod lifecycle;
 mod live_turn;
@@ -1498,6 +1499,14 @@ impl Server {
         // This watches the same "running" member signal Waybar surfaces as
         // "N streaming" and toggles a best-effort OS power inhibitor accordingly.
         Self::spawn_power_inhibitor(Arc::clone(&self.swarm_state.members));
+
+        // Unlike the no-client shutdown timer this also reclaims derived
+        // transcript allocations while a connected TUI is idle. It never
+        // suspends the scheduler or replaces the live Agent/session.
+        idle_hibernation::spawn(
+            Arc::clone(&self.sessions),
+            Arc::clone(&self.swarm_state.members),
+        );
 
         // Initialize the memory agent early so it's ready for all sessions
         if crate::config::config().features.memory {

@@ -3088,6 +3088,7 @@ impl App {
     }
 
     pub(super) fn handle_key_press_event(&mut self, event: KeyEvent) -> Result<()> {
+        self.wake_idle_hibernation();
         // Pick up config.toml keybinding edits before this key is matched.
         // The idle tick refreshes too, but it can run as slowly as the 5s
         // deep-idle cadence, which would leave the first keystroke after an
@@ -3347,6 +3348,7 @@ impl App {
     }
 
     pub(super) fn should_redraw_after_resize(&mut self) -> bool {
+        self.wake_idle_hibernation();
         let now = std::time::Instant::now();
         match self.last_resize_redraw {
             Some(last) if now.duration_since(last) < Self::RESIZE_REDRAW_MIN_INTERVAL => {
@@ -3500,6 +3502,7 @@ impl App {
     /// Queue a message to be sent later
     /// Handle bracketed paste: store text content (image URLs are still detected inline)
     pub(super) fn handle_paste(&mut self, text: String) {
+        self.wake_idle_hibernation();
         handle_paste(self, text);
     }
 

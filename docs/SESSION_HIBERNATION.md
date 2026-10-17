@@ -40,6 +40,38 @@ daemon or all sessions. A flat or unavailable reading must not be displayed as a
 positive saving. Allocator behavior, shared pages, and other concurrent work can
 all affect RSS, so there is no fixed savings guarantee.
 
+The banner names **TUI RSS** explicitly and shows the before/after readings.
+Its final sample is taken after the first frozen frame has been rendered, so
+the retained screen buffers are included. A positive change is shown as an
+increase, not silently reported as a saving.
+
+The daemon measures its own process separately and records
+`server_idle_hibernation_before` and `server_idle_hibernation_after` samples in
+`server:memory-history`. One sweep purges retained heap once after releasing all
+session locks. The daemon's RSS change is not attributed to a particular TUI.
+
+### Released state
+
+- TUI: prepared transcript/body frames, rendered-message lines, syntax
+  highlighting, copy viewport, derived side-panel/diff/image state, incremental
+  markdown renderer, and the local session's provider-message cache.
+- Daemon: idle sessions' provider-message caches and reconstructible tool-output
+  indexes. Original tool definitions, captured instructions, undo state,
+  provider handles, and canonical messages stay resident.
+
+The terminal keeps a bounded copy of its last frame instead of repainting the
+transcript into new caches on every idle tick. The status is cleared on input,
+resize, or a meaningful state change. Presence traffic, acknowledgment replies,
+and read-only debug queries do not thaw the session.
+
+### Debugging
+
+- `client:hibernation` returns state, before/after RSS, signed RSS change,
+  hibernation/wake counts, and the last wake location.
+- `client:hibernate` requests immediate hibernation for testing. It bypasses
+  the elapsed-time requirement, not active-work guards or the disable setting.
+- `client:frame` includes the hibernation status without rebuilding caches.
+
 ### Safety invariants
 
 - Active work and pending input must not be discarded or cancelled.
@@ -57,3 +89,22 @@ transcript or serialize and destroy the whole agent. Those deeper reductions
 need a separate audited persistence/thaw boundary. RAM savings therefore depend
 on how much derived state was resident before hibernation, particularly rendered
 transcripts and decoded image caches.
+
+## Validation
+
+The implementation was checked with hosted Rust unit tests for config
+compatibility, cache ownership/reconstruction, pending-work guards, repeated
+server idle cycles, next-turn provider continuity, and TUI input preservation.
+
+An isolated real TUI with a two-second test deadline completed 20 automatic
+sleep/wake cycles. The first typed character was preserved at its original
+cursor position, local transcript messages survived, and read-only queries did
+not reset the idle clock. Its 20 dormant RSS readings stayed within 94,208 bytes.
+The visible banner and immediate debug-triggered hibernation were also checked.
+An isolated daemon independently ran its real idle monitor and recorded a
+single before/after reclamation pair.
+
+Savings depend on workload: a controlled 64 MiB daemon provider-cache fixture
+released 66,015,232 bytes of RSS (about 63 MiB), while the small real TUI fixture
+released only 278,528 bytes at the populated-cache checkpoint. These are
+observations for those fixtures, not promises for ordinary conversations.

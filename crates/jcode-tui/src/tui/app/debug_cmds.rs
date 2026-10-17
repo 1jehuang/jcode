@@ -92,6 +92,18 @@ impl App {
 
     pub(in crate::tui::app) fn handle_debug_command(&mut self, cmd: &str) -> String {
         let cmd = cmd.trim();
+        if cmd == "hibernate" {
+            return self.request_debug_hibernation();
+        }
+        if cmd == "hibernation" {
+            return self.debug_hibernation_state();
+        }
+        if cmd.starts_with("message:")
+            || cmd.starts_with("scroll:")
+            || cmd.starts_with("set_input:")
+        {
+            self.note_client_interaction();
+        }
         if cmd == "frame" {
             return self.handle_debug_command("screen-json");
         }

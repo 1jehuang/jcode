@@ -475,6 +475,7 @@ impl StatusSpinnerRenderer {
         app.refresh_terminal_title_metrics();
         app.sync_herdr_agent_state();
         app.poll_oauth_account_telemetry();
+        app.enter_idle_hibernation(self.last_frame.as_ref());
         let invalidation = full_frame_invalidation(app.force_full_redraw, app.force_full_repaint);
         let force_full_redraw = invalidation != FullFrameInvalidation::None;
         // Wrap the whole frame (optional clear + diff flush) in a synchronized update so the
@@ -539,6 +540,7 @@ impl StatusSpinnerRenderer {
             crate::tui::ui::note_idle_animation_full_repaint();
         }
         self.last_frame = Some(completed_buffer);
+        app.finish_idle_hibernation_frame();
         self.last_full_frame_at = Some(Instant::now());
         // A full frame rewrote the whole surface, so ratatui's working buffer no
         // longer matches `last_frame` outside the animated rows. Force the next

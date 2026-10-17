@@ -80,6 +80,7 @@ pub(crate) mod helpers;
 mod hotkey_feedback;
 pub(crate) mod idle_animation_repaint;
 mod idle_heap_release;
+mod idle_hibernation;
 mod inline_interactive;
 mod input;
 mod input_help;
@@ -1672,6 +1673,7 @@ pub struct App {
     runtime_memory_log: Option<RuntimeMemoryLogController>,
     // Once-per-idle-period retained-heap trim state (see idle_heap_release.rs).
     idle_heap_release: idle_heap_release::IdleHeapRelease,
+    idle_hibernation: idle_hibernation::IdleHibernation,
     // Binary modification time when client started (for smart reload detection)
     client_binary_mtime: Option<std::time::SystemTime>,
     // Rate limit state: when rate limit resets (if rate limited)

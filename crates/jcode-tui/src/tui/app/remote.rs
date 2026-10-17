@@ -138,6 +138,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     needs_redraw |= app.flush_pending_resize_redraw();
     app.maybe_capture_runtime_memory_heartbeat();
     app.maybe_release_idle_heap();
+    needs_redraw |= app.poll_idle_hibernation();
     // Surface the cold-cache transcript warning the moment the TTL expires
     // while idle, not only when the next request starts.
     needs_redraw |= app.maybe_push_idle_cold_cache_warning();
@@ -991,7 +992,9 @@ pub(super) async fn handle_remote_event<B: Backend>(
             let output = handle_debug_command(app, &command, remote).await;
             let _ = remote.send_client_debug_response(id, output).await;
             process_remote_followups(app, remote).await;
-            Ok((RemoteEventOutcome::Continue, false))
+            // A forced hibernation needs the regular completed-frame renderer,
+            // not a debug-only draw, and should not wait for a periodic tick.
+            Ok((RemoteEventOutcome::Continue, command.trim() == "hibernate"))
         }
         RemoteRead::Event(ServerEvent::Transcript { text, mode }) => {
             let mut needs_redraw = false;

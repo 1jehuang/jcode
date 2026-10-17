@@ -1333,6 +1333,45 @@ fn full_prep_cache() -> &'static Mutex<FullPrepCacheState> {
     FULL_PREP_CACHE.get_or_init(|| Mutex::new(FullPrepCacheState::default()))
 }
 
+/// Drop only reconstructible presentation data. Call after retaining a bounded
+/// terminal frame so idle repaints cannot immediately recreate these caches.
+pub(crate) fn release_idle_render_caches() {
+    jcode_tui_messages::clear_message_cache();
+    jcode_tui_markdown::clear_highlight_cache();
+    if let Ok(mut cache) = body_cache().lock() {
+        *cache = BodyCacheState::default();
+    }
+    if let Ok(mut cache) = full_prep_cache().lock() {
+        *cache = FullPrepCacheState::default();
+    }
+    if let Ok(mut cache) = file_diff_ui::file_diff_cache().lock() {
+        *cache = Default::default();
+    }
+    #[cfg(test)]
+    TEST_LAST_CHAT_FRAME.with(|slot| *slot.borrow_mut() = None);
+    #[cfg(not(test))]
+    if let Ok(mut frame) = last_chat_frame_state().lock() {
+        *frame = None;
+    }
+    clear_copy_viewport_snapshot();
+    clear_side_panel_render_caches();
+    inline_image_ui::clear_staged_payloads();
+    // Unlike clear_cache(), this retains on-disk image artifacts and registered
+    // diagrams. They are needed to reconstruct exactly the same view on wake.
+    crate::tui::mermaid::clear_image_state();
+}
+
+#[cfg(test)]
+pub(crate) fn idle_render_caches_empty() -> bool {
+    let body = body_cache().lock().unwrap();
+    let full = full_prep_cache().lock().unwrap();
+    body.entries.is_empty()
+        && body.oversized_entries.is_empty()
+        && full.entries.is_empty()
+        && full.oversized_entries.is_empty()
+        && last_chat_frame().is_none()
+}
+
 #[cfg(not(test))]
 static LAST_STATUS_AREA: OnceLock<Mutex<Option<Rect>>> = OnceLock::new();
 
@@ -2482,6 +2521,43 @@ pub(crate) fn debug_chat_image_regions_json() -> String {
 
 pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
     record_idle_animation_area(None);
+    if let Some(frozen) = app.hibernation_frame()
+        && frozen.area == frame.area()
+    {
+        frame.buffer_mut().clone_from(frozen);
+        if let Some(notice) = app.hibernation_notice() {
+            // Keep the transcript, draft and scroll exactly as last painted.
+            // Two bottom rows fit the measured RSS detail on normal terminals.
+            let area = frame.area();
+            let height = area.height.min(2);
+            let banner = Rect::new(area.x, area.bottom() - height, area.width, height);
+            clear_area(frame, banner);
+            frame.render_widget(
+                Paragraph::new(notice)
+                    .style(Style::default().fg(Color::Cyan))
+                    .wrap(ratatui::widgets::Wrap { trim: false }),
+                banner,
+            );
+        }
+        // In particular do not send deferred Kitty deletions while the frozen
+        // screen still shows those images. Normal rendering drains them on wake.
+        if visual_debug::is_enabled() {
+            let area = frame.area();
+            let mut capture = FrameCaptureBuilder::new(area.width, area.height);
+            capture.state.status = "hibernated".to_string();
+            capture.state.input_len = app.input().len();
+            capture.state.input_preview = app.input().chars().take(200).collect();
+            capture.state.cursor_pos = app.cursor_pos();
+            capture.state.scroll_offset = app.scroll_offset();
+            capture.state.message_count = app.display_messages().len();
+            capture.rendered_text.status_line = app.hibernation_notice().unwrap_or("").to_string();
+            capture
+                .render_order
+                .push("frozen_hibernation_frame".to_string());
+            visual_debug::record_frame(capture.build());
+        }
+        return;
+    }
     // Suggestions are read many times while composing one frame. Bump the
     // epoch here so the memo is scoped to exactly this frame.
     app.advance_command_suggestions_epoch();

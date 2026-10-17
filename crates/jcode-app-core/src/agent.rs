@@ -3,6 +3,7 @@
 mod compaction;
 mod conversation_reset;
 mod environment;
+mod idle_hibernation;
 mod inline_tail;
 mod interrupts;
 mod messages;

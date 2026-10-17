@@ -444,6 +444,30 @@ pub(in crate::tui::app) fn handle_server_event(
     event: ServerEvent,
     remote: &mut impl RemoteEventState,
 ) -> bool {
+    // Pure presence/catalog/telemetry traffic must not defeat a 30-minute idle
+    // period. Every other event may mutate the transcript or start active work.
+    if !matches!(
+        &event,
+        ServerEvent::Pong { .. }
+            | ServerEvent::Ack { .. }
+            | ServerEvent::SwarmStatus { .. }
+            | ServerEvent::SidePanelState { .. }
+            | ServerEvent::ModelUsageUpdated { .. }
+            | ServerEvent::AvailableModelsUpdated { .. }
+            | ServerEvent::MemoryActivity { .. }
+            | ServerEvent::McpStatus { .. }
+    ) {
+        let reason = match &event {
+            ServerEvent::History { .. } => "server_history",
+            ServerEvent::SidePaneImages { .. } => "server_images",
+            ServerEvent::SwarmPlan { .. } => "server_swarm_plan",
+            ServerEvent::Notification { .. } => "server_notification",
+            ServerEvent::ModelChanged { .. } => "server_model_changed",
+            ServerEvent::AgentModelsChanged { .. } => "server_agent_models_changed",
+            _ => "server_event",
+        };
+        app.wake_idle_hibernation_for(reason);
+    }
     if let ServerEvent::Done { id } = &event
         && app.usage_reset.invalidate_requests.remove(id).is_some()
     {

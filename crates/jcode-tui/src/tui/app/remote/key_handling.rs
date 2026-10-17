@@ -229,6 +229,7 @@ async fn handle_remote_key_internal(
     remote: &mut RemoteConnection,
     text_input: Option<String>,
 ) -> Result<()> {
+    app.wake_idle_hibernation();
     let mut code = code;
     let mut modifiers = modifiers;
     ctrl_bracket_fallback_to_esc(&mut code, &mut modifiers);
