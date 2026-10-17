@@ -496,6 +496,7 @@ impl App {
             remote_session_facts_provisional: false,
             remote_startup_phase: None,
             remote_startup_phase_started: None,
+            pending_startup_transcript: None,
             remote_reasoning_effort: None,
             remote_service_tier: None,
             remote_reported_service_tier: None,
@@ -970,6 +971,7 @@ impl App {
             remote_session_facts_provisional: false,
             remote_startup_phase: None,
             remote_startup_phase_started: None,
+            pending_startup_transcript: None,
             remote_reasoning_effort: None,
             remote_service_tier: None,
             remote_reported_service_tier: None,
@@ -1259,6 +1261,34 @@ impl App {
         self.pending_turn = true;
     }
 
+    /// Show the background-rendered local transcript once it is ready, unless
+    /// server History already superseded it. Returns true when it changed.
+    pub(super) fn poll_pending_startup_transcript(&mut self) -> bool {
+        let Some(rx) = self.pending_startup_transcript.as_ref() else {
+            return false;
+        };
+        match rx.try_recv() {
+            Ok((session_id, display, images)) => {
+                self.pending_startup_transcript = None;
+                if self.display_messages().is_empty() {
+                    self.replace_display_messages(display);
+                    self.remote_side_pane_images = images;
+                    self.invalidate_side_pane_images_signature();
+                    self.set_side_panel_snapshot(
+                        crate::side_panel::snapshot_for_session(&session_id).unwrap_or_default(),
+                    );
+                    return true;
+                }
+                false
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => false,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.pending_startup_transcript = None;
+                false
+            }
+        }
+    }
+
     fn restore_remote_startup_history(&mut self, session_id: &str) {
         let load_start = Instant::now();
         let Ok(mut session) = Session::load_for_remote_startup(session_id) else {
@@ -1382,9 +1412,38 @@ impl App {
         if let Some(ref session_id) = resume_session {
             if reload_fast_start {
                 crate::logging::info(&format!(
-                    "Remote reload fast start: deferring persisted transcript for {} until server history",
+                    "Remote reload fast start: rendering persisted transcript for {} in background",
                     session_id
                 ));
+                // The server can take seconds to answer History while dozens
+                // of clients reconnect after a reload. Parse and render the
+                // local copy off the UI thread and show it as soon as it is
+                // ready; server History still replaces it when it arrives.
+                let (tx, rx) = std::sync::mpsc::channel();
+                let id = session_id.clone();
+                let spawned = std::thread::Builder::new()
+                    .name("jcode-startup-transcript".to_string())
+                    .spawn(move || {
+                        let start = Instant::now();
+                        let Ok(session) = Session::load_for_remote_startup(&id) else {
+                            return;
+                        };
+                        let (rendered, images) =
+                            crate::session::render_messages_and_images(&session);
+                        drop(session);
+                        let display =
+                            jcode_tui_messages::display_messages_from_rendered_messages(rendered);
+                        crate::logging::info(&format!(
+                            "[TIMING] startup_transcript_background: session={}, messages={}, total={}ms",
+                            id,
+                            display.len(),
+                            start.elapsed().as_millis()
+                        ));
+                        let _ = tx.send((id, display, images));
+                    });
+                if spawned.is_ok() {
+                    app.pending_startup_transcript = Some(rx);
+                }
             } else {
                 app.restore_remote_startup_history(session_id);
             }

@@ -1260,6 +1260,15 @@ pub struct App {
     remote_session_facts_provisional: bool,
     remote_startup_phase: Option<RemoteStartupPhase>,
     remote_startup_phase_started: Option<Instant>,
+    /// Local transcript rendered off-thread during a reload fast start, so
+    /// the conversation appears without waiting for the server's History.
+    pending_startup_transcript: Option<
+        std::sync::mpsc::Receiver<(
+            String,
+            Vec<DisplayMessage>,
+            Vec<crate::session::RenderedImage>,
+        )>,
+    >,
     remote_reasoning_effort: Option<String>,
     remote_service_tier: Option<String>,
     remote_reported_service_tier: Option<(Option<String>, String)>,
