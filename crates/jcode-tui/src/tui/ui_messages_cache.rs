@@ -26,6 +26,7 @@ where
             show_agentgrep_output: crate::config::config().display.show_agentgrep_output,
             show_bash_output: crate::config::config().display.show_bash_output,
             tool_call_details: crate::config::config().display.tool_call_details,
+            show_tool_duration: crate::config::config().display.show_tool_duration,
         },
         render,
     )

@@ -1431,6 +1431,7 @@ impl EventMapper {
                 name,
                 output,
                 error,
+                duration_ms: _,
             } => vec![json!({
                 "sessionUpdate": "tool_call_update",
                 "toolCallId": id,
@@ -1900,6 +1901,7 @@ mod tests {
             name: "bash".to_string(),
             output: "ok".to_string(),
             error: None,
+            duration_ms: None,
         });
         assert_eq!(done[0]["status"], "completed");
         assert_eq!(done[0]["content"][0]["content"]["text"], "ok");

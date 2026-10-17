@@ -80,6 +80,7 @@ fn test_replace_latest_tool_display_message_updates_latest_match_and_bumps_versi
         duration_secs: None,
         title: Some("old title".to_string()),
         tool_data: Some(tool_call.clone()),
+        tool_duration_ms: None,
     });
     app.push_display_message(DisplayMessage {
         role: "tool".to_string(),
@@ -88,6 +89,7 @@ fn test_replace_latest_tool_display_message_updates_latest_match_and_bumps_versi
         duration_secs: None,
         title: None,
         tool_data: Some(tool_call),
+        tool_duration_ms: None,
     });
     let before = app.display_messages_version;
 
@@ -133,6 +135,7 @@ fn test_replace_latest_tool_display_message_removes_background_lifecycle_card() 
             intent: None,
             thought_signature: None,
         }),
+        tool_duration_ms: None,
     });
     let before = app.display_messages_version;
 
@@ -223,6 +226,7 @@ fn test_incremental_display_message_counts_match_full_recompute() {
                     intent: None,
                     thought_signature: None,
                 }),
+                tool_duration_ms: None,
             });
         }
     }
@@ -424,6 +428,7 @@ fn test_tool_done_preserves_sibling_streaming_tool_inputs_and_intents() {
             name: "webfetch".to_string(),
             output: "page A body".to_string(),
             error: None,
+            duration_ms: None,
         },
         &mut remote,
     );
@@ -444,6 +449,7 @@ fn test_tool_done_preserves_sibling_streaming_tool_inputs_and_intents() {
             name: "webfetch".to_string(),
             output: "page B body".to_string(),
             error: None,
+            duration_ms: None,
         },
         &mut remote,
     );
@@ -552,6 +558,7 @@ fn send_native_search_row(
             name: "web_search".to_string(),
             output: "1. Rust\n   https://www.rust-lang.org/".to_string(),
             error: None,
+            duration_ms: None,
         },
         remote,
     );
@@ -595,6 +602,7 @@ fn test_retry_rollback_discards_native_search_rows_from_aborted_attempt() {
             name: "bash".to_string(),
             output: "ok".to_string(),
             error: None,
+            duration_ms: None,
         },
         &mut remote,
     );
@@ -666,6 +674,7 @@ fn test_native_search_rows_from_completed_attempt_survive_later_rollback() {
             name: "bash".to_string(),
             output: "ok".to_string(),
             error: None,
+            duration_ms: None,
         },
         &mut remote,
     );

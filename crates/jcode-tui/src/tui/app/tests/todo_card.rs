@@ -351,6 +351,7 @@ fn pinned_todo_band_renders_below_sticky_prompt_without_separator() {
             duration_secs: None,
             title: None,
             tool_data: None,
+            tool_duration_ms: None,
         },
         DisplayMessage {
             role: "assistant".to_string(),
@@ -359,6 +360,7 @@ fn pinned_todo_band_renders_below_sticky_prompt_without_separator() {
             duration_secs: None,
             title: None,
             tool_data: None,
+            tool_duration_ms: None,
         },
     ];
     app.bump_display_messages_version();
