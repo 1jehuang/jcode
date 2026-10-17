@@ -1566,11 +1566,11 @@ impl App {
                     true,
                 );
                 if let Some(target) = pending.agent_target {
-                    // This load feeds an agent-model sub-picker (Ctrl+S in
-                    // /model). `open_model_picker_with_routes` rebuilt the
-                    // ordinary model picker; re-tag it so Enter still saves
-                    // the agent override instead of switching the session
-                    // model.
+                    // This load feeds an agent-model sub-picker (Alt+S /
+                    // Alt+M in /model). `open_model_picker_with_routes`
+                    // rebuilt the ordinary model picker; re-tag it so Enter
+                    // still saves the agent override instead of switching the
+                    // session model.
                     self.retag_picker_for_agent_model_target(target);
                 }
                 if self.inline_interactive_state.is_some() {
