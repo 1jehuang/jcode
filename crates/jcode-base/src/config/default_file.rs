@@ -474,6 +474,13 @@ cross_provider_failover = "countdown"
 # Env overrides: JCODE_MAX_RETRIES, JCODE_RETRY_BACKOFF_CAP_SECS.
 # max_retries = 8
 # retry_backoff_cap_secs = 30
+# Request-body compression. Every turn re-uploads the whole conversation; on a
+# slow uplink gzip cuts that upload 1.3-3x and lowers time-to-first-token.
+# "auto" measures your upload speed passively and compresses only when it is
+# predicted to be faster. "always" compresses every eligible request over 32 KB.
+# "off" never compresses. Only endpoints verified to accept gzip (Anthropic,
+# ChatGPT Codex) are affected. Env override: JCODE_REQUEST_COMPRESSION.
+# request_compression = "auto"
 
 [server]
 # Who executes autonomous wake requests from background completion/stall,

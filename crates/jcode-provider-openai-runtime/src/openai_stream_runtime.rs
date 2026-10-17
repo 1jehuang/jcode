@@ -225,8 +225,7 @@ pub(super) async fn stream_response(
 
     let mut builder = client
         .post(&url)
-        .header("Authorization", format!("Bearer {}", access_token))
-        .header("Content-Type", "application/json");
+        .header("Authorization", format!("Bearer {}", access_token));
 
     if is_chatgpt_mode {
         builder = builder.header("originator", ORIGINATOR);
@@ -238,13 +237,17 @@ pub(super) async fn stream_response(
     emit_connection_phase(&tx, ConnectionPhase::SendingRequest).await;
     let connect_start = std::time::Instant::now();
     let idle_timeout = effective_https_idle_timeout(&request);
+    let builder = jcode_provider_core::request_compression::json_body(
+        builder,
+        &url,
+        &request,
+        jcode_base::provider::request_compression_mode(),
+    )
+    .map_err(OpenAIStreamFailure::Other)?;
 
     let response = while_consumer_open(
         &tx,
-        jcode_provider_core::transport::send_with_initial_response_timeout(
-            builder.json(&request),
-            idle_timeout,
-        ),
+        jcode_provider_core::transport::send_with_initial_response_timeout(builder, idle_timeout),
     )
     .await;
     let Some(response) = response else {

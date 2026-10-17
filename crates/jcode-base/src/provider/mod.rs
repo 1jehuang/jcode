@@ -158,6 +158,14 @@ pub use stream_timeout::{
     stream_idle_timeout_for_effort, stream_idle_timeout_multiplier_for_effort,
 };
 
+/// Effective `[provider] request_compression` policy. Unknown values fall back
+/// to `Auto` (the shipped default) rather than silently disabling.
+pub fn request_compression_mode() -> jcode_provider_core::request_compression::CompressionMode {
+    use jcode_provider_core::request_compression::CompressionMode;
+    CompressionMode::parse(&crate::config::config().provider.request_compression)
+        .unwrap_or(CompressionMode::Auto)
+}
+
 /// Whether reasoning deltas should be persisted in session history for later
 /// provider context reconstruction.
 ///

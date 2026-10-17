@@ -905,6 +905,11 @@ impl Config {
         {
             self.provider.retry_backoff_cap_secs = parsed;
         }
+        if let Ok(v) = std::env::var("JCODE_REQUEST_COMPRESSION")
+            && !v.trim().is_empty()
+        {
+            self.provider.request_compression = v.trim().to_ascii_lowercase();
+        }
 
         // Copilot premium mode: env var overrides config
         // If set in config but not in env, propagate config -> env

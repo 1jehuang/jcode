@@ -1293,6 +1293,11 @@ pub struct ProviderConfig {
     /// Maximum exponential-backoff delay between transient-error retries.
     /// Default: 30 seconds. Overridable via `JCODE_RETRY_BACKOFF_CAP_SECS`.
     pub retry_backoff_cap_secs: u64,
+    /// Request-body compression policy: "auto" (gzip only when the measured
+    /// uplink makes it faster), "always", or "off". Only endpoints verified
+    /// to accept gzip (Anthropic, ChatGPT Codex) are ever compressed.
+    /// Overridable via `JCODE_REQUEST_COMPRESSION`.
+    pub request_compression: String,
 }
 
 impl Default for ProviderConfig {
@@ -1317,6 +1322,7 @@ impl Default for ProviderConfig {
             stream_idle_timeout_secs: 180,
             max_retries: 8,
             retry_backoff_cap_secs: 30,
+            request_compression: "auto".to_string(),
         }
     }
 }

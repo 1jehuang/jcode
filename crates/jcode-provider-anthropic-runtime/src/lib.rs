@@ -2297,17 +2297,14 @@ async fn stream_response(
                 .map_err(anyhow::Error::msg)?,
         );
     }
-    req = req
-        .header("anthropic-version", API_VERSION)
-        .header("content-type", "application/json")
-        .header(
-            "accept",
-            if is_oauth {
-                "application/json"
-            } else {
-                "text/event-stream"
-            },
-        );
+    req = req.header("anthropic-version", API_VERSION).header(
+        "accept",
+        if is_oauth {
+            "application/json"
+        } else {
+            "text/event-stream"
+        },
+    );
 
     if is_oauth {
         // OAuth tokens require:
@@ -2352,8 +2349,14 @@ async fn stream_response(
         req = req.header("anthropic-beta", beta_header);
     }
 
+    let req = jcode_provider_core::request_compression::json_body(
+        req,
+        url,
+        &request,
+        jcode_base::provider::request_compression_mode(),
+    )?;
     let response = jcode_provider_core::transport::send_with_initial_response_timeout(
-        req.json(&request),
+        req,
         stream_idle_timeout,
     )
     .await
