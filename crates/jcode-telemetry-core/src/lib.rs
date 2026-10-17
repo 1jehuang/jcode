@@ -2465,6 +2465,24 @@ pub fn record_simple_completion_usage(
     );
 }
 
+/// Record only usage actually observed before a simple completion failed.
+/// Untyped failures have no authoritative usage and must not be estimated.
+pub fn record_simple_completion_failure_usage(
+    session_id: Option<&str>,
+    source: UsageSource,
+    error: &anyhow::Error,
+) {
+    if let Some(failure) = error.downcast_ref::<jcode_provider_core::SimpleCompletionError>() {
+        record_simple_completion_usage(
+            session_id,
+            &failure.provider,
+            &failure.model,
+            source,
+            failure.usage,
+        );
+    }
+}
+
 pub fn record_token_usage(
     input_tokens: u64,
     output_tokens: u64,

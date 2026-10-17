@@ -4295,6 +4295,7 @@ dependencies = [
 name = "jcode-telemetry-core"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "chrono",
  "jcode-build-meta",
  "jcode-core",

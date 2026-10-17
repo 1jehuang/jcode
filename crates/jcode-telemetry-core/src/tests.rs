@@ -885,6 +885,67 @@ fn provider_usage_normalizes_cache_subsets_by_transport_not_model() {
 }
 
 #[test]
+fn simple_completion_failure_reports_only_observed_usage() {
+    let _guard = lock_telemetry_test_state();
+    TEST_EMITTED_PAYLOADS.lock().unwrap().clear();
+    let error = anyhow::Error::new(jcode_provider_core::SimpleCompletionError::new(
+        anyhow::anyhow!("private provider response content"),
+        jcode_provider_core::SimpleCompletionUsage {
+            input_tokens: Some(100),
+            output_tokens: None,
+            cache_read_input_tokens: Some(60),
+            cache_creation_input_tokens: None,
+        },
+        "openai".into(),
+        "served-model".into(),
+    ))
+    .context("completion failed");
+    record_simple_completion_failure_usage(Some("failed-side-call"), UsageSource::Sidecar, &error);
+    let emitted = TEST_EMITTED_PAYLOADS.lock().unwrap().clone();
+    assert_eq!(emitted.len(), 1);
+    let report = &emitted[0];
+    assert_eq!(report["event"], "usage_report");
+    assert_eq!(report["session_id"], "failed-side-call");
+    assert_eq!(report["provider"], "openai");
+    assert_eq!(report["model"], "served-model");
+    assert_eq!(report["source"], "sidecar");
+    assert_eq!(report["input_tokens"], 40);
+    assert_eq!(report["output_tokens"], 0);
+    assert_eq!(report["cache_read_input_tokens"], 60);
+    assert_eq!(report["total_tokens"], 100);
+    assert!(
+        !report
+            .to_string()
+            .contains("private provider response content")
+    );
+
+    TEST_EMITTED_PAYLOADS.lock().unwrap().clear();
+    record_simple_completion_failure_usage(
+        None,
+        UsageSource::Compaction,
+        &anyhow::anyhow!("untyped"),
+    );
+    for input_tokens in [None, Some(0)] {
+        let empty = jcode_provider_core::SimpleCompletionError::new(
+            anyhow::anyhow!("no spend observed"),
+            jcode_provider_core::SimpleCompletionUsage {
+                input_tokens,
+                ..Default::default()
+            },
+            "openai".into(),
+            "served-model".into(),
+        )
+        .into();
+        record_simple_completion_failure_usage(None, UsageSource::Compaction, &empty);
+    }
+    assert!(TEST_EMITTED_PAYLOADS.lock().unwrap().is_empty());
+    jcode_core::env::set_var("JCODE_NO_TELEMETRY", "1");
+    record_simple_completion_failure_usage(Some("failed-side-call"), UsageSource::Sidecar, &error);
+    jcode_core::env::remove_var("JCODE_NO_TELEMETRY");
+    assert!(TEST_EMITTED_PAYLOADS.lock().unwrap().is_empty());
+}
+
+#[test]
 fn usage_report_respects_opt_out() {
     let _guard = lock_telemetry_test_state();
     TEST_EMITTED_PAYLOADS.lock().unwrap().clear();
