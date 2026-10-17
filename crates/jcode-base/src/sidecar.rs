@@ -541,7 +541,7 @@ impl Sidecar {
                 .await
                 .context("Failed to parse OpenAI API response")
                 .map_err(OpenAiSidecarError::other)?;
-            record_openai_sidecar_usage(model, result.get("usage"));
+            record_openai_sidecar_usage(model, Some(&result));
             extract_openai_response_text(&result).map_err(OpenAiSidecarError::other)
         }
     }
@@ -677,7 +677,7 @@ impl Sidecar {
             crate::telemetry::record_provider_usage(
                 None,
                 "claude",
-                model,
+                reported_sidecar_model(model, result.model.as_deref()),
                 crate::telemetry::UsageSource::Sidecar,
                 crate::telemetry::ProviderUsage {
                     input_tokens: usage.input_tokens,
@@ -1012,10 +1012,7 @@ async fn collect_openai_sse_text(response: reqwest::Response, model: &str) -> Re
                             }
                         }
                         "response.completed" | "response.incomplete" => {
-                            record_openai_sidecar_usage(
-                                model,
-                                event.response.as_ref().and_then(|r| r.get("usage")),
-                            );
+                            record_openai_sidecar_usage(model, event.response.as_ref());
                             return Ok(text);
                         }
                         "response.failed" | "error" => {
@@ -1058,8 +1055,18 @@ fn parse_openai_usage(usage: &serde_json::Value) -> Option<crate::telemetry::Pro
     })
 }
 
-fn record_openai_sidecar_usage(model: &str, usage: Option<&serde_json::Value>) {
-    if let Some(parsed) = usage.and_then(parse_openai_usage) {
+fn reported_sidecar_model<'a>(requested: &'a str, reported: Option<&'a str>) -> &'a str {
+    reported
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .unwrap_or(requested)
+}
+
+fn record_openai_sidecar_usage(model: &str, response: Option<&serde_json::Value>) {
+    if let Some(response) = response
+        && let Some(parsed) = response.get("usage").and_then(parse_openai_usage)
+    {
+        let model = reported_sidecar_model(model, response.get("model").and_then(|v| v.as_str()));
         crate::telemetry::record_provider_usage(
             None,
             "openai",
@@ -1194,6 +1201,7 @@ fn is_anthropic_oauth_forbidden(err: &anyhow::Error) -> bool {
 
 #[derive(Deserialize)]
 struct ClaudeMessagesResponse {
+    model: Option<String>,
     content: Vec<ClaudeContentBlock>,
     usage: Option<ClaudeUsage>,
 }
@@ -1224,6 +1232,26 @@ mod tests {
     use super::*;
     use crate::auth::codex;
     use std::ffi::OsString;
+
+    #[test]
+    fn sidecar_model_prefers_reported_identity_with_requested_fallback() {
+        assert_eq!(
+            reported_sidecar_model("alias", Some("served-snapshot")),
+            "served-snapshot"
+        );
+        assert_eq!(
+            reported_sidecar_model("alias", Some(" served-snapshot ")),
+            "served-snapshot"
+        );
+        for reported in [None, Some(""), Some("  ")] {
+            assert_eq!(reported_sidecar_model("alias", reported), "alias");
+        }
+        let parsed: ClaudeMessagesResponse = serde_json::from_value(serde_json::json!({
+            "model": "claude-served-snapshot", "content": []
+        }))
+        .unwrap();
+        assert_eq!(parsed.model.as_deref(), Some("claude-served-snapshot"));
+    }
 
     #[test]
     fn parses_openai_responses_usage_with_cached_subset() {
