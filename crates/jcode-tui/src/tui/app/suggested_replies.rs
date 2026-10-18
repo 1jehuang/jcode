@@ -691,10 +691,12 @@ impl App {
             if !resp.scored_candidates.is_empty() {
                 out.push_str("- **Scored Candidates**:\n");
                 for (i, cand) in resp.scored_candidates.iter().enumerate() {
+                    let badge = resp.badge_for_text(&cand.text);
                     out.push_str(&format!(
-                        "  {}. `{:.2}` — {}\n",
+                        "  {}. `{:.2}` `{}` — {}\n",
                         i + 1,
                         cand.confidence,
+                        badge,
                         cand.text
                     ));
                 }

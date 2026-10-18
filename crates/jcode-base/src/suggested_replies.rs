@@ -16,8 +16,16 @@ use std::sync::OnceLock;
 /// keeping `1 (best_candidate choice) + 21 (cand_0..cand_20 noul) = 22 <= MAX_QUESTIONS (24)`.
 pub const MAX_MICRO_CANDIDATES: usize = 21;
 
-/// Macro conversation branches for Iteration 1 classification.
+/// Macro conversation branches for Iteration 1 classification toward reaching the user's goal.
 pub const MACRO_BRANCHES: &[(&str, &str)] = &[
+    (
+        "goal_delivery",
+        "Completing, shipping, committing, merging, or delivering the user's final goal and outcome",
+    ),
+    (
+        "planning",
+        "Decomposing the user's goal into actionable steps, todos, or milestones",
+    ),
     (
         "implementation",
         "Writing, editing, or completing code, features, or configuration changes",
@@ -43,6 +51,160 @@ pub const MACRO_BRANCHES: &[(&str, &str)] = &[
         "Cleaning up code, simplifying modules, or improving maintainability",
     ),
 ];
+
+/// Canonical goal-reaching classification categories (`category`) assigned to each suggested reply:
+/// - `"goal"`: Directly achieves/delivers the user's goal (commit, push, PR, final action).
+/// - `"plan"`: Advances the next todo, plan, or OpenSpec step toward the goal.
+/// - `"impl"`: Implements code, features, or builds/reloads toward the goal.
+/// - `"verify"`: Runs tests, compiler checks, or validation to close the feedback loop.
+/// - `"debug"`: Investigates or fixes errors, regressions, or blockers.
+/// - `"review"`: Audits code quality/security (6-lens review, git diff) before delivery.
+/// - `"refactor"`: Simplifies or cleans up code while preserving behavior.
+/// - `"custom"`: User-configured constant question (`custom_prompts`).
+pub const GOAL_CLASSIFICATION_CATEGORIES: &[(&str, &str, &str)] = &[
+    ("goal", "[цель]", "[goal]"),
+    ("plan", "[план]", "[plan]"),
+    ("impl", "[код]", "[impl]"),
+    ("verify", "[тест]", "[verify]"),
+    ("debug", "[баг]", "[debug]"),
+    ("review", "[ревью]", "[review]"),
+    ("refactor", "[рефактор]", "[refactor]"),
+    ("custom", "[свой]", "[custom]"),
+];
+
+/// Classify how a candidate suggestion advances the user toward reaching their goal.
+pub fn classify_suggestion_for_goal(
+    text: &str,
+    branch: &str,
+    custom_prompts: &[String],
+) -> &'static str {
+    let trimmed = text.trim();
+    if !trimmed.is_empty()
+        && custom_prompts
+            .iter()
+            .any(|c| c.trim().eq_ignore_ascii_case(trimmed))
+    {
+        return "custom";
+    }
+    let lower = trimmed.to_lowercase();
+
+    if lower.contains("/review")
+        || lower.contains("6-линз")
+        || lower.contains("6-lens")
+        || lower.contains("ревью")
+        || lower.contains("review")
+        || lower.contains("git diff")
+        || lower.contains("git status")
+        || lower.contains("аудит")
+    {
+        return "review";
+    }
+    if lower.contains("падающ")
+        || lower.contains("ошибк")
+        || lower.contains("сбой")
+        || lower.contains("регресс")
+        || lower.contains("root-cause")
+        || lower.contains("failing")
+        || lower.contains("backtrace")
+        || lower.contains("отлад")
+        || lower.contains("debug")
+    {
+        return "debug";
+    }
+    if lower.contains("рефактор")
+        || lower.contains("refactor")
+        || lower.contains("неиспользуем")
+        || lower.contains("dead code")
+        || lower.contains("unused import")
+        || lower.contains("лишние импорт")
+    {
+        return "refactor";
+    }
+    if lower.contains("следующую задачу")
+        || lower.contains("следующей запланированной")
+        || lower.contains("next todo")
+        || lower.contains("next pending task")
+        || lower.contains("next planned task")
+        || lower.contains("/opsx:")
+        || lower.contains("/openspec")
+        || lower.contains("openspec")
+        || lower.contains("чекбокс")
+        || lower.contains("checkbox")
+        || lower.contains("по плану")
+        || lower.contains("декомпоз")
+    {
+        return "plan";
+    }
+    if lower.contains("закоммит")
+        || lower.contains("коммит")
+        || lower.contains("commit")
+        || lower.contains("push")
+        || lower.contains("merge")
+        || lower.contains("влить")
+        || lower.contains("завершить цель")
+        || lower.contains("финализир")
+        || lower.contains("deliver")
+        || lower.contains("ship")
+    {
+        return "goal";
+    }
+    if lower.contains("тест")
+        || lower.contains("test")
+        || lower.contains("cargo check")
+        || lower.contains("clippy")
+        || lower.contains("assertions pass")
+        || lower.contains("проверки проходят")
+        || lower.contains("проверить сборку")
+        || lower.contains("verify runtime")
+        || lower.contains("compiles")
+    {
+        return "verify";
+    }
+    if lower.contains("реализ")
+        || lower.contains("implement")
+        || lower.contains("selfdev")
+        || lower.contains("build-reload")
+        || lower.contains("прототип")
+        || lower.contains("prototype")
+        || lower.contains("границы модулей")
+        || lower.contains("module boundaries")
+    {
+        return "impl";
+    }
+
+    match branch.trim().to_ascii_lowercase().as_str() {
+        "goal" | "goal_delivery" | "delivery" => "goal",
+        "plan" | "planning" | "architecture" => "plan",
+        "verify" | "verification" => "verify",
+        "debug" | "debugging" => "debug",
+        "review" => "review",
+        "refactor" | "refactoring" => "refactor",
+        "custom" => "custom",
+        _ => "impl",
+    }
+}
+
+/// Format a canonical goal classification category (`"goal"`, `"plan"`, `"impl"`, `"verify"`,
+/// `"debug"`, `"review"`, `"refactor"`, `"custom"`) as a localized compact UI badge.
+pub fn format_goal_category_badge(category: &str, cyrillic: bool) -> &'static str {
+    let key = category.trim().to_ascii_lowercase();
+    let idx = match key.as_str() {
+        "goal" | "goal_delivery" | "delivery" => 0,
+        "plan" | "planning" | "architecture" => 1,
+        "impl" | "implementation" => 2,
+        "verify" | "verification" => 3,
+        "debug" | "debugging" => 4,
+        "review" => 5,
+        "refactor" | "refactoring" => 6,
+        "custom" => 7,
+        _ => 2,
+    };
+    if cyrillic {
+        GOAL_CLASSIFICATION_CATEGORIES[idx].1
+    } else {
+        GOAL_CLASSIFICATION_CATEGORIES[idx].2
+    }
+}
 
 /// Structured conversation & workflow context passed to OpenGF and SystemOne.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -315,6 +477,8 @@ pub struct SuggestedRepliesResponse {
     pub branch: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scored_candidates: Vec<ScoredSuggestion>,
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub candidate_categories: std::collections::HashMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub debug: Option<SuggestedRepliesDebugInfo>,
 }
@@ -344,6 +508,52 @@ impl SuggestedRepliesResponse {
                     .find(|c| c.text.trim().to_lowercase() == lower)
             })
             .map(|c| c.confidence)
+    }
+
+    /// Populate `candidate_categories` for all candidates, tagging any match in `custom_prompts` as `"custom"`.
+    pub fn populate_goal_categories(&mut self, custom_prompts: &[String]) {
+        for cand in &self.scored_candidates {
+            let cat = classify_suggestion_for_goal(&cand.text, &self.branch, custom_prompts);
+            self.candidate_categories
+                .insert(cand.text.trim().to_lowercase(), cat.to_string());
+        }
+        if let Some(ref def) = self.default_action {
+            let cat = classify_suggestion_for_goal(def, &self.branch, custom_prompts);
+            self.candidate_categories
+                .insert(def.trim().to_lowercase(), cat.to_string());
+        }
+        for sec in &self.secondary_suggestions {
+            let cat = classify_suggestion_for_goal(sec, &self.branch, custom_prompts);
+            self.candidate_categories
+                .insert(sec.trim().to_lowercase(), cat.to_string());
+        }
+    }
+
+    /// Look up the canonical goal-reaching classification category (`"goal"`, `"plan"`, `"impl"`,
+    /// `"verify"`, `"debug"`, `"review"`, `"refactor"`, `"custom"`) for `text`.
+    pub fn category_for_text(&self, text: &str) -> &'static str {
+        let lower = text.trim().to_lowercase();
+        if let Some(cat) = self.candidate_categories.get(&lower) {
+            match cat.as_str() {
+                "goal" => return "goal",
+                "plan" => return "plan",
+                "impl" => return "impl",
+                "verify" => return "verify",
+                "debug" => return "debug",
+                "review" => return "review",
+                "refactor" => return "refactor",
+                "custom" => return "custom",
+                _ => {}
+            }
+        }
+        classify_suggestion_for_goal(text, &self.branch, &[])
+    }
+
+    /// Look up the localized goal-reaching classification badge (e.g. `"[тест]"` / `"[verify]"`,
+    /// `"[цель]"` / `"[goal]"`, `"[свой]"` / `"[custom]"`) for `text`.
+    pub fn badge_for_text(&self, text: &str) -> &'static str {
+        let cyrillic = detect_cyrillic_language(text);
+        format_goal_category_badge(self.category_for_text(text), cyrillic)
     }
 }
 
@@ -410,6 +620,7 @@ pub fn distribute_suggestions(
             secondary_suggestions: Vec::new(),
             branch,
             scored_candidates: Vec::new(),
+            candidate_categories: std::collections::HashMap::new(),
             debug: None,
         };
     }
@@ -433,13 +644,16 @@ pub fn distribute_suggestions(
         (None, secondary)
     };
 
-    SuggestedRepliesResponse {
+    let mut resp = SuggestedRepliesResponse {
         default_action,
         secondary_suggestions,
         branch,
         scored_candidates: deduplicated,
+        candidate_categories: std::collections::HashMap::new(),
         debug: None,
-    }
+    };
+    resp.populate_goal_categories(&[]);
+    resp
 }
 
 /// Fixed English Jev-native candidate pool for each macro branch.
@@ -451,6 +665,22 @@ fn localized_branch_candidates(branch: &str, cyrillic: bool) -> Vec<String> {
     let key = branch.trim().to_ascii_lowercase();
     if cyrillic {
         match key.as_str() {
+            "goal_delivery" => vec![
+                "Закоммитить проверенные изменения и завершить цель".to_string(),
+                "Прогнать финальные тесты перед отправкой изменений в PR".to_string(),
+                "Проверить git status и git diff перед финализацией".to_string(),
+                "Обновить чекбоксы задач в OpenSpec и закрыть план".to_string(),
+                "Выполнить 6-линзовое ревью (/review 6) перед сдачей результата".to_string(),
+                "Пересобрать и перезагрузить бинарник через selfdev build-reload".to_string(),
+            ],
+            "planning" => vec![
+                "Декомпозировать цель на конкретные шаги в списке задач (todo)".to_string(),
+                "Приступить к выполнению следующей задачи из плана (/opsx:apply)".to_string(),
+                "Изучить границы модулей и публичные интерфейсы целевых крейтов".to_string(),
+                "Проверить валидность артефактов OpenSpec (openspec validate --all --strict)".to_string(),
+                "Написать модульные тесты для ключевых инвариантов цели".to_string(),
+                "Закоммитить согласованный план и приступить к реализации".to_string(),
+            ],
             "verification" => vec![
                 "Запустить целевые тесты и убедиться, что все проверки проходят".to_string(),
                 "Выполнить cargo check и clippy для изменённых крейтов".to_string(),
@@ -502,6 +732,22 @@ fn localized_branch_candidates(branch: &str, cyrillic: bool) -> Vec<String> {
         }
     } else {
         match key.as_str() {
+            "goal_delivery" => vec![
+                "Commit the verified changes and deliver the final goal".to_string(),
+                "Run the final test suite before pushing to the PR".to_string(),
+                "Inspect git status and git diff before finalizing".to_string(),
+                "Update OpenSpec task checkboxes to mark the goal complete".to_string(),
+                "Run a 6-lens subagent self-review (/review 6) before delivery".to_string(),
+                "Rebuild and reload the binary via selfdev build-reload".to_string(),
+            ],
+            "planning" => vec![
+                "Decompose the goal into concrete actionable steps in the todo list".to_string(),
+                "Continue implementing the next pending task in the plan".to_string(),
+                "Inspect module boundaries and public interfaces in the target crates".to_string(),
+                "Validate OpenSpec artifacts and check task status".to_string(),
+                "Write unit tests for the core data structures and invariants".to_string(),
+                "Commit the agreed plan and start implementation".to_string(),
+            ],
             "verification" => vec![
                 "Run the targeted test suite and verify all assertions pass".to_string(),
                 "Run cargo check / clippy on the modified crates".to_string(),
@@ -743,12 +989,14 @@ pub fn score_locally_with_context(
                 ScoredSuggestion { text, confidence }
             })
             .collect();
-        return distribute_suggestions(
+        let mut resp = distribute_suggestions(
             "review",
             candidates,
             confidence_threshold,
             max_secondary,
         );
+        resp.populate_goal_categories(custom_prompts);
+        return resp;
     }
 
     let inferred_branch = infer_macro_branch_from_text(&ctx.transcript_tail);
@@ -788,7 +1036,9 @@ pub fn score_locally_with_context(
         })
         .collect();
 
-    distribute_suggestions(branch, scored, confidence_threshold, max_secondary)
+    let mut resp = distribute_suggestions(branch, scored, confidence_threshold, max_secondary);
+    resp.populate_goal_categories(custom_prompts);
+    resp
 }
 
 /// Deterministic local macro-branch and candidate scorer used when no Jev
@@ -853,11 +1103,20 @@ pub fn build_structured_systemone_state(
     );
 
     if !candidates.is_empty() {
+        let branch_ref = branch.unwrap_or("implementation");
         let mut cand_map = Map::new();
+        let mut goal_labels = Map::new();
         for (idx, text) in candidates.iter().take(MAX_MICRO_CANDIDATES).enumerate() {
-            cand_map.insert(format!("cand_{idx}"), Value::String(text.clone()));
+            let key = format!("cand_{idx}");
+            cand_map.insert(key.clone(), Value::String(text.clone()));
+            let cat = classify_suggestion_for_goal(text, branch_ref, &[]);
+            goal_labels.insert(key, Value::String(cat.to_string()));
         }
         state.insert("candidates".to_string(), Value::Object(cand_map));
+        state.insert(
+            "candidate_goal_labels".to_string(),
+            Value::Object(goal_labels),
+        );
     }
 
     Value::Object(state)
@@ -919,10 +1178,11 @@ pub fn build_micro_scoring_questions(
     if include_choice && capped.len() >= 2 {
         let mut choice_criteria = Map::new();
         for (idx, candidate) in capped.iter().enumerate() {
+            let cat = classify_suggestion_for_goal(candidate, branch, &[]);
             choice_criteria.insert(
                 format!("cand_{idx}"),
                 Value::String(format!(
-                    "Candidate cand_{idx} in state.candidates: {}",
+                    "Candidate cand_{idx} [goal_label={cat}] in state.candidates: {}",
                     crate::util::truncate_str(candidate, 140)
                 )),
             );
@@ -932,7 +1192,7 @@ pub fn build_micro_scoring_questions(
             json!({
                 "type": "choice",
                 "instructions": format!(
-                    "In the '{}' workflow branch, select which candidate reply in state.candidates is the single highest-value immediate next step for the user.",
+                    "In the '{}' workflow branch, select which candidate reply in state.candidates is the single highest-value immediate next step toward achieving the user's goal.",
                     branch
                 ),
                 "criteria": choice_criteria,
@@ -941,18 +1201,19 @@ pub fn build_micro_scoring_questions(
     }
 
     for (idx, candidate) in capped.iter().enumerate() {
+        let cat = classify_suggestion_for_goal(candidate, branch, &[]);
         questions.insert(
             format!("cand_{idx}"),
             json!({
                 "type": "noul",
                 "instructions": format!(
-                    "Evaluate candidate cand_{idx} in state.candidates for the '{}' workflow branch: is it a directly actionable, high-value immediate next reply for the user? ({})",
+                    "Evaluate candidate cand_{idx} [goal_label={cat}] in state.candidates for the '{}' workflow branch: is it a directly actionable, high-value immediate next reply toward reaching the user's goal? ({})",
                     branch,
                     crate::util::truncate_str(candidate, 140)
                 ),
                 "criteria": {
-                    "true": "Directly actionable, context-matching, high-value immediate next reply for the current conversation state",
-                    "false": "Premature, redundant, wrong language, or lower priority than other next steps"
+                    "true": "Directly actionable, context-matching, high-value immediate next reply that advances the user toward reaching their goal",
+                    "false": "Premature, redundant, wrong language, or lower priority than other next steps toward the goal"
                 }
             }),
         );
@@ -1354,7 +1615,6 @@ pub async fn evaluate_cascade_with_context(
 
     // Stage 1A: If use_open_gf is enabled, synthesize dynamic candidates via Sidecar / fallback routes.
     let mut open_gf_status = "disabled (use_open_gf=false)".to_string();
-    let mut open_gf_route = None;
     let open_gf_result = if config.use_open_gf {
         let gf_start = std::time::Instant::now();
         match generate_open_gf_candidates_for_context(ctx, desired_pool).await {
@@ -1368,7 +1628,6 @@ pub async fn evaluate_cascade_with_context(
                     "[suggested_replies] OpenGF synthesized {} candidates via {route} in {ms}ms (branch={branch})",
                     cands.len()
                 ));
-                open_gf_route = Some(route);
                 Some((branch, cands))
             }
             Err(err) => {
@@ -1386,203 +1645,26 @@ pub async fn evaluate_cascade_with_context(
 
     let mut jev_status = format!("unavailable (selector={})", config.jev_provider);
 
-    // Attempt OpenJev / Laya / SystemOne evaluation if a JevClient route is available.
+    // Build ordered list of JevClients to attempt:
+    // If `jev_provider == "auto"` and the primary cloud provider (e.g. OpenJev) fails at runtime
+    // (such as HTTP 402), automatically fall back to local `Laya` (`http://127.0.0.1:8080/v1/systemone`)
+    // when `laya.env` / `JCODE_LAYA_BASE_URL` / `LAYA_BASE_URL` / `LAYA_API_KEY` is configured.
+    let mut clients_to_try: Vec<(String, crate::jev::JevClient)> = Vec::new();
     match crate::jev::JevClient::for_suggestions_with_selector(&config.jev_provider) {
-        Ok(client) => {
-            let iter1_state = build_structured_systemone_state(None, ctx, &[]);
-
-            // Iteration 1: Determine macro branch (from OpenGF if present, else via SystemOne).
-            let branch = if let Some((ref gf_branch, _)) = open_gf_result {
-                gf_branch.clone()
-            } else if client.supports_choice_questions() {
-                let q = build_macro_branch_choice_question();
-                match client.evaluate(iter1_state, q).await {
-                    Ok(resp) => resp
-                        .pointer("/answers/macro_branch/choice")
-                        .and_then(Value::as_str)
-                        .unwrap_or("implementation")
-                        .to_string(),
-                    Err(err) => {
-                        jev_status = format!("iter1(choice) error: {err}");
-                        crate::logging::info(&format!(
-                            "[suggested_replies] Iteration 1 (choice) degraded to local scorer: {err}"
-                        ));
-                        let mut resp = score_locally_with_context(
-                            ctx,
-                            open_gf_result,
-                            &custom_prompts,
-                            six_lens_findings,
-                            threshold,
-                            max_secondary,
-                        );
-                        resp.debug = Some(SuggestedRepliesDebugInfo {
-                            source: if open_gf_route.is_some() {
-                                "opengf+local".to_string()
-                            } else {
-                                "fixed+local".to_string()
-                            },
-                            open_gf_status,
-                            jev_status,
-                            threshold,
-                            top_confidence: resp.top_confidence(),
-                            elapsed_ms: started.elapsed().as_millis() as u64,
-                        });
-                        return resp;
-                    }
-                }
-            } else {
-                let q = build_macro_branch_noul_questions();
-                match client.evaluate(iter1_state, q).await {
-                    Ok(resp) => MACRO_BRANCHES
-                        .iter()
-                        .max_by(|(a, _), (b, _)| {
-                            let pa = resp
-                                .pointer(&format!("/answers/branch_{a}/noul"))
-                                .and_then(Value::as_f64)
-                                .unwrap_or(0.0);
-                            let pb = resp
-                                .pointer(&format!("/answers/branch_{b}/noul"))
-                                .and_then(Value::as_f64)
-                                .unwrap_or(0.0);
-                            pa.total_cmp(&pb)
-                        })
-                        .map(|(id, _)| (*id).to_string())
-                        .unwrap_or_else(|| "implementation".to_string()),
-                    Err(err) => {
-                        jev_status = format!("iter1(noul) error: {err}");
-                        crate::logging::info(&format!(
-                            "[suggested_replies] Iteration 1 (noul) degraded to local scorer: {err}"
-                        ));
-                        let mut resp = score_locally_with_context(
-                            ctx,
-                            open_gf_result,
-                            &custom_prompts,
-                            six_lens_findings,
-                            threshold,
-                            max_secondary,
-                        );
-                        resp.debug = Some(SuggestedRepliesDebugInfo {
-                            source: if open_gf_route.is_some() {
-                                "opengf+local".to_string()
-                            } else {
-                                "fixed+local".to_string()
-                            },
-                            open_gf_status,
-                            jev_status,
-                            threshold,
-                            top_confidence: resp.top_confidence(),
-                            elapsed_ms: started.elapsed().as_millis() as u64,
-                        });
-                        return resp;
-                    }
-                }
-            };
-
-            // Iteration 2: Build candidate pool (OpenGF or contextual + custom_prompts)
-            // and evaluate via joint `choice + noul` SystemOne request.
-            let from_open_gf = open_gf_result
-                .as_ref()
-                .is_some_and(|(_, cands)| !cands.is_empty());
-            let contextual_pool = contextual_candidates_for_branch(&branch, ctx);
-            let base_candidates = match open_gf_result.as_ref() {
-                Some((_, cands)) if !cands.is_empty() => {
-                    let mut combined = cands.clone();
-                    for extra in contextual_pool {
-                        if combined.len() >= desired_pool {
-                            break;
-                        }
-                        push_unique_case_insensitive(&mut combined, extra);
-                    }
-                    combined
-                }
-                _ => contextual_pool,
-            };
-            let candidate_texts =
-                merge_custom_prompts(base_candidates, &custom_prompts, desired_pool);
-            let include_choice =
-                client.supports_choice_questions() && candidate_texts.len() >= 2;
-
-            if let Ok(micro_q) =
-                build_micro_scoring_questions(&branch, &candidate_texts, include_choice)
+        Ok(primary) => {
+            let is_auto = config.jev_provider.trim().eq_ignore_ascii_case("auto");
+            let primary_is_laya = primary.provider_name() == "laya";
+            clients_to_try.push((
+                format!("{}:{}", config.jev_provider, primary.provider_name()),
+                primary,
+            ));
+            if is_auto
+                && !primary_is_laya
+                && crate::jev::JevClient::has_configured_laya_route()
+                && let Ok(laya_client) =
+                    crate::jev::JevClient::for_suggestions_with_selector("laya")
             {
-                let iter2_state =
-                    build_structured_systemone_state(Some(&branch), ctx, &candidate_texts);
-                let iter2_start = std::time::Instant::now();
-                match client.evaluate(iter2_state, micro_q).await {
-                    Ok(resp) => {
-                        let iter2_ms = iter2_start.elapsed().as_millis();
-                        let choice_winner = resp
-                            .pointer("/answers/best_candidate/choice")
-                            .and_then(Value::as_str);
-                        let scored: Vec<ScoredSuggestion> = candidate_texts
-                            .into_iter()
-                            .enumerate()
-                            .map(|(idx, text)| {
-                                let cand_key = format!("cand_{idx}");
-                                let raw_prob = resp
-                                    .pointer(&format!("/answers/{cand_key}/noul"))
-                                    .and_then(Value::as_f64)
-                                    .unwrap_or(0.0)
-                                    as f32;
-                                let choice_prob = resp
-                                    .pointer(&format!(
-                                        "/answers/best_candidate/probabilities/{cand_key}"
-                                    ))
-                                    .and_then(Value::as_f64)
-                                    .map(|p| p as f32);
-                                let is_winner = choice_winner == Some(cand_key.as_str());
-                                let confidence = calibrate_micro_score_with_choice(
-                                    raw_prob,
-                                    choice_prob,
-                                    is_winner,
-                                    idx,
-                                    from_open_gf,
-                                );
-                                ScoredSuggestion { text, confidence }
-                            })
-                            .collect();
-                        let mut distributed = distribute_suggestions(
-                            branch.clone(),
-                            scored,
-                            threshold,
-                            max_secondary,
-                        );
-                        let top_conf = distributed.top_confidence();
-                        jev_status = format!(
-                            "ok (selector={}, mode={}, branch={branch}, iter2={}ms, top={:.2})",
-                            config.jev_provider,
-                            if include_choice { "choice+noul" } else { "noul" },
-                            iter2_ms,
-                            top_conf.unwrap_or(0.0)
-                        );
-                        crate::logging::info(&format!(
-                            "[suggested_replies] Cascade complete in {}ms: source={}, branch={branch}, top_conf={:?}, threshold={threshold:.2}, default_action={:?}",
-                            started.elapsed().as_millis(),
-                            if from_open_gf { "opengf+jev" } else { "fixed+jev" },
-                            top_conf,
-                            distributed.default_action
-                        ));
-                        distributed.debug = Some(SuggestedRepliesDebugInfo {
-                            source: if from_open_gf {
-                                "opengf+jev".to_string()
-                            } else {
-                                "fixed+jev".to_string()
-                            },
-                            open_gf_status,
-                            jev_status,
-                            threshold,
-                            top_confidence: top_conf,
-                            elapsed_ms: started.elapsed().as_millis() as u64,
-                        });
-                        return distributed;
-                    }
-                    Err(err) => {
-                        jev_status = format!("iter2 error: {err}");
-                        crate::logging::warn(&format!(
-                            "[suggested_replies] Iteration 2 degraded to local scorer: {err}"
-                        ));
-                    }
-                }
+                clients_to_try.push(("auto->laya".to_string(), laya_client));
             }
         }
         Err(err) => {
@@ -1591,6 +1673,163 @@ pub async fn evaluate_cascade_with_context(
                 "[suggested_replies] JevClient unavailable ({}), using local scorer",
                 err
             ));
+        }
+    }
+
+    for (selector_label, client) in clients_to_try {
+        let iter1_state = build_structured_systemone_state(None, ctx, &[]);
+
+        // Iteration 1: Determine macro branch (from OpenGF if present, else via SystemOne).
+        let branch_res: Result<String, String> = if let Some((ref gf_branch, _)) = open_gf_result {
+            Ok(gf_branch.clone())
+        } else if client.supports_choice_questions() {
+            let q = build_macro_branch_choice_question();
+            match client.evaluate(iter1_state, q).await {
+                Ok(resp) => Ok(resp
+                    .pointer("/answers/macro_branch/choice")
+                    .and_then(Value::as_str)
+                    .unwrap_or("implementation")
+                    .to_string()),
+                Err(err) => Err(format!("iter1(choice,{selector_label}) error: {err}")),
+            }
+        } else {
+            let q = build_macro_branch_noul_questions();
+            match client.evaluate(iter1_state, q).await {
+                Ok(resp) => Ok(MACRO_BRANCHES
+                    .iter()
+                    .max_by(|(a, _), (b, _)| {
+                        let pa = resp
+                            .pointer(&format!("/answers/branch_{a}/noul"))
+                            .and_then(Value::as_f64)
+                            .unwrap_or(0.0);
+                        let pb = resp
+                            .pointer(&format!("/answers/branch_{b}/noul"))
+                            .and_then(Value::as_f64)
+                            .unwrap_or(0.0);
+                        pa.total_cmp(&pb)
+                    })
+                    .map(|(id, _)| (*id).to_string())
+                    .unwrap_or_else(|| "implementation".to_string())),
+                Err(err) => Err(format!("iter1(noul,{selector_label}) error: {err}")),
+            }
+        };
+
+        let branch = match branch_res {
+            Ok(b) => b,
+            Err(err_msg) => {
+                jev_status = err_msg.clone();
+                crate::logging::info(&format!(
+                    "[suggested_replies] {err_msg}; trying next route or local scorer"
+                ));
+                continue;
+            }
+        };
+
+        // Iteration 2: Build candidate pool (OpenGF or contextual + custom_prompts)
+        // and evaluate via joint `choice + noul` SystemOne request.
+        let from_open_gf = open_gf_result
+            .as_ref()
+            .is_some_and(|(_, cands)| !cands.is_empty());
+        let contextual_pool = contextual_candidates_for_branch(&branch, ctx);
+        let base_candidates = match open_gf_result.as_ref() {
+            Some((_, cands)) if !cands.is_empty() => {
+                let mut combined = cands.clone();
+                for extra in contextual_pool {
+                    if combined.len() >= desired_pool {
+                        break;
+                    }
+                    push_unique_case_insensitive(&mut combined, extra);
+                }
+                combined
+            }
+            _ => contextual_pool,
+        };
+        let candidate_texts =
+            merge_custom_prompts(base_candidates, &custom_prompts, desired_pool);
+        let include_choice =
+            client.supports_choice_questions() && candidate_texts.len() >= 2;
+
+        if let Ok(micro_q) =
+            build_micro_scoring_questions(&branch, &candidate_texts, include_choice)
+        {
+            let iter2_state =
+                build_structured_systemone_state(Some(&branch), ctx, &candidate_texts);
+            let iter2_start = std::time::Instant::now();
+            match client.evaluate(iter2_state, micro_q).await {
+                Ok(resp) => {
+                    let iter2_ms = iter2_start.elapsed().as_millis();
+                    let choice_winner = resp
+                        .pointer("/answers/best_candidate/choice")
+                        .and_then(Value::as_str);
+                    let scored: Vec<ScoredSuggestion> = candidate_texts
+                        .into_iter()
+                        .enumerate()
+                        .map(|(idx, text)| {
+                            let cand_key = format!("cand_{idx}");
+                            let raw_prob = resp
+                                .pointer(&format!("/answers/{cand_key}/noul"))
+                                .and_then(Value::as_f64)
+                                .unwrap_or(0.0)
+                                as f32;
+                            let choice_prob = resp
+                                .pointer(&format!(
+                                    "/answers/best_candidate/probabilities/{cand_key}"
+                                ))
+                                .and_then(Value::as_f64)
+                                .map(|p| p as f32);
+                            let is_winner = choice_winner == Some(cand_key.as_str());
+                            let confidence = calibrate_micro_score_with_choice(
+                                raw_prob,
+                                choice_prob,
+                                is_winner,
+                                idx,
+                                from_open_gf,
+                            );
+                            ScoredSuggestion { text, confidence }
+                        })
+                        .collect();
+                    let mut distributed = distribute_suggestions(
+                        branch.clone(),
+                        scored,
+                        threshold,
+                        max_secondary,
+                    );
+                    distributed.populate_goal_categories(&custom_prompts);
+                    let top_conf = distributed.top_confidence();
+                    jev_status = format!(
+                        "ok (selector={selector_label}, mode={}, branch={branch}, iter2={}ms, top={:.2})",
+                        if include_choice { "choice+noul" } else { "noul" },
+                        iter2_ms,
+                        top_conf.unwrap_or(0.0)
+                    );
+                    crate::logging::info(&format!(
+                        "[suggested_replies] Cascade complete in {}ms: source={}, branch={branch}, top_conf={:?}, threshold={threshold:.2}, default_action={:?}",
+                        started.elapsed().as_millis(),
+                        if from_open_gf { "opengf+jev" } else { "fixed+jev" },
+                        top_conf,
+                        distributed.default_action
+                    ));
+                    distributed.debug = Some(SuggestedRepliesDebugInfo {
+                        source: if from_open_gf {
+                            "opengf+jev".to_string()
+                        } else {
+                            "fixed+jev".to_string()
+                        },
+                        open_gf_status,
+                        jev_status,
+                        threshold,
+                        top_confidence: top_conf,
+                        elapsed_ms: started.elapsed().as_millis() as u64,
+                    });
+                    return distributed;
+                }
+                Err(err) => {
+                    jev_status = format!("iter2({selector_label}) error: {err}");
+                    crate::logging::warn(&format!(
+                        "[suggested_replies] Iteration 2 ({selector_label}) failed: {err}"
+                    ));
+                }
+            }
         }
     }
 
@@ -2081,5 +2320,65 @@ mod tests {
             None => crate::env::remove_var("JCODE_LAYA_BASE_URL"),
         }
         let _ = server_thread.join();
+    }
+
+    #[test]
+    fn goal_classification_labels_and_badges_cover_all_categories_bilingually() {
+        let custom = vec!["Кастомный вопрос для цели".to_string()];
+        assert_eq!(
+            classify_suggestion_for_goal("Кастомный вопрос для цели", "implementation", &custom),
+            "custom"
+        );
+        assert_eq!(format_goal_category_badge("custom", true), "[свой]");
+        assert_eq!(format_goal_category_badge("custom", false), "[custom]");
+
+        assert_eq!(
+            classify_suggestion_for_goal("Закоммитить проверенные изменения и завершить цель", "goal_delivery", &[]),
+            "goal"
+        );
+        assert_eq!(format_goal_category_badge("goal", true), "[цель]");
+        assert_eq!(format_goal_category_badge("goal", false), "[goal]");
+
+        assert_eq!(
+            classify_suggestion_for_goal("Выполнить следующую задачу: обновить конфиг", "planning", &[]),
+            "plan"
+        );
+        assert_eq!(format_goal_category_badge("plan", true), "[план]");
+        assert_eq!(format_goal_category_badge("plan", false), "[plan]");
+
+        assert_eq!(
+            classify_suggestion_for_goal("Запустить целевые тесты и убедиться, что все проверки проходят", "verification", &[]),
+            "verify"
+        );
+        assert_eq!(format_goal_category_badge("verify", true), "[тест]");
+        assert_eq!(format_goal_category_badge("verify", false), "[verify]");
+
+        assert_eq!(
+            classify_suggestion_for_goal("Проанализировать вывод падающего теста и найти корневую причину ошибки", "debugging", &[]),
+            "debug"
+        );
+        assert_eq!(format_goal_category_badge("debug", true), "[баг]");
+        assert_eq!(format_goal_category_badge("debug", false), "[debug]");
+
+        assert_eq!(
+            classify_suggestion_for_goal("Запустить /review 6 для аудита", "review", &[]),
+            "review"
+        );
+        assert_eq!(format_goal_category_badge("review", true), "[ревью]");
+        assert_eq!(format_goal_category_badge("review", false), "[review]");
+
+        assert_eq!(
+            classify_suggestion_for_goal("Удалить неиспользуемый код и лишние импорты", "refactoring", &[]),
+            "refactor"
+        );
+        assert_eq!(format_goal_category_badge("refactor", true), "[рефактор]");
+        assert_eq!(format_goal_category_badge("refactor", false), "[refactor]");
+
+        assert_eq!(
+            classify_suggestion_for_goal("Пересобрать и перезагрузить бинарник через selfdev build-reload", "implementation", &[]),
+            "impl"
+        );
+        assert_eq!(format_goal_category_badge("impl", true), "[код]");
+        assert_eq!(format_goal_category_badge("impl", false), "[impl]");
     }
 }

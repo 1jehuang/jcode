@@ -245,6 +245,13 @@ impl JevClient {
         self.provider != JevProvider::Jcode || self.purpose == JevPurpose::Browser
     }
 
+    /// True when `JCODE_LAYA_BASE_URL`, `LAYA_BASE_URL`, or `LAYA_API_KEY` is configured in env or `laya.env`.
+    pub fn has_configured_laya_route() -> bool {
+        has_configured_laya(&mut |env, file| {
+            crate::provider_catalog::load_env_value_from_env_or_config(env, file)
+        })
+    }
+
     fn for_purpose(purpose: JevPurpose) -> Result<Self> {
         let (provider, api_key, endpoint, me_endpoint) = Self::resolve(purpose)?;
         let bypass_proxy = should_bypass_proxy(provider, &endpoint);
@@ -570,7 +577,28 @@ fn resolve_suggestions_with(
         "laya" => return resolve_laya_with(&mut load),
         _ => return resolve_with(selector, load),
     };
-    resolve_providers(providers, load)
+    match resolve_providers(providers, &mut load) {
+        Ok(found) => Ok(found),
+        Err(err) if selector.trim().eq_ignore_ascii_case("auto") => {
+            if has_configured_laya(&mut load) {
+                resolve_laya_with(&mut load)
+            } else {
+                Err(err)
+            }
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn has_configured_laya(load: &mut impl FnMut(&str, &str) -> Option<String>) -> bool {
+    for env_key in [LAYA_BASE_URL_ENV, "LAYA_BASE_URL", "LAYA_API_KEY"] {
+        if let Some(val) = load(env_key, "laya.env")
+            && !jcode_provider_env::sanitize_secret_value(&val).is_empty()
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn resolve_with(

@@ -196,10 +196,11 @@ pub(crate) fn draw_suggested_replies_panel(
             .map(|ms| format!(" · auto {}ms [Esc]", ms))
             .unwrap_or_default();
 
+        let badge = view.response.badge_for_text(default_action);
         let prefix = if is_focused {
-            " ★ [Enter ↵] ▸ ".to_string()
+            format!(" ★ [Enter ↵] ▸ {badge} ")
         } else {
-            " ★ [Tab / ↓] ▸ ".to_string()
+            format!(" ★ [Tab / ↓] ▸ {badge} ")
         };
         let suffix = if view.show_confidence {
             format!(" ({}%{}) ", conf_pct, explorer_tag)
@@ -260,7 +261,8 @@ pub(crate) fn draw_suggested_replies_panel(
             } else {
                 String::new()
             };
-            let prefix_num = format!("{}. ", idx + 1);
+            let badge = view.response.badge_for_text(text);
+            let prefix_num = format!("{}. {badge} ", idx + 1);
             let max_pill_cols = (area.width as usize)
                 .saturating_sub(
                     UnicodeWidthStr::width(prefix_num.as_str())
