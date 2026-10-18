@@ -4,6 +4,8 @@ pub(crate) enum PendingLogin {
     Exchanging { provider: String },
     /// SSH flow state and sensitive input are held separately, never in local auth.
     Remote,
+    /// Choose Jcode's OAuth flow or Claude Code's CLI-managed sign-in.
+    ClaudeMethodChoice,
     /// Waiting for user to paste Claude OAuth code for a specific stored account
     ClaudeAccount {
         verifier: String,
@@ -71,6 +73,7 @@ impl PendingLogin {
         match self {
             Self::Exchanging { provider } => Some((provider.clone(), "oauth".to_string())),
             Self::Remote => None,
+            Self::ClaudeMethodChoice => None,
             Self::ClaudeAccount { .. } => Some(("claude".to_string(), "oauth".to_string())),
             Self::OpenAiAccount { .. } => Some(("openai".to_string(), "oauth".to_string())),
             Self::Gemini { .. } => Some(("gemini".to_string(), "oauth".to_string())),
