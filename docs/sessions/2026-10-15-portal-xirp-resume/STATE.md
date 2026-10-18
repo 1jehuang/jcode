@@ -1119,7 +1119,9 @@ deletes DNS records.
 The 5 XJ-07 tests in `crates/jcode-base/tests/mcp_xj07_failure_modes.rs`
 were re-run against `master` (post-§24.2 cherry-pick, post-§24.3
 root-cause) to confirm the §24 chain of fixes did not regress the
-XJ-07 work shipped in §26.
+XJ-07 work shipped in §23 (the XJ-07 spec) and the test file
+landed in commit 530511a66 (`test(mcp): XJ-07 failure and rollback
+tests`).
 
 - Command: `cargo test --no-default-features --package jcode-base --test mcp_xj07_failure_modes`
   (--no-default-features skips the `aws-sdk` feature tree, which is
@@ -1130,7 +1132,7 @@ XJ-07 work shipped in §26.
   `malformed_events_fail_clearly`, `missing_cli_fails_clearly`,
   `network_loss_fails_clearly`, `unregister_restores_prior_configuration`.
 
-The §26 XJ-07 implementation is **still good** on master after §24.
+The §23 XJ-07 implementation is **still good** on master after §24.
 The §24.2 fix and the §24.3 root-cause are non-regressing for XJ-07
 because XJ-07 tests the stdio MCP path (which is the in-process
 jcode behavior), whereas §24.x targets the SEP-991 CIMD/mcp-remote
