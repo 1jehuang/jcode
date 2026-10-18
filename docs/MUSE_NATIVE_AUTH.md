@@ -103,7 +103,7 @@ The default is standard `muse-spark-1.3`, not a Contributor model. Contributor m
 | Native auth module unit tests | `cargo test -p jcode-base --lib muse` | 30 passed, 0 failed |
 | Catalog gate tests | `cargo test -p jcode-base --lib provider_catalog_muse` | 4 passed, 0 failed |
 | Provider-metadata suite | `cargo test -p jcode-provider-metadata` | 19 passed, 0 failed |
-| TUI auth module | `cargo test -p jcode-tui --lib auth::` | 29 passed, 0 failed |
+| TUI auth module | `cargo test -p jcode-tui --lib auth::` | 31 passed, 0 failed |
 | Compatible-runtime suite (parallel, repeated) | `cargo test -p jcode-provider-openrouter-runtime --lib` | 187 passed, 6 consecutive runs |
 | Initial provider and login suites | `cargo test -p jcode --lib provider_init` / `--lib login` | 24 and 49 passed |
 | Formatting | `cargo fmt --all --check` | clean for every file this change touches |

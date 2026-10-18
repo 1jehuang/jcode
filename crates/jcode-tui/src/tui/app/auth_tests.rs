@@ -743,3 +743,104 @@ fn muse_subscription_old_failure_does_not_clear_newer_pending_attempt() {
         _ => panic!("active attempt pending login must remain intact"),
     }
 }
+
+/// An approval that lands while the user is still typing or pasting the device
+/// code must not leave that text armed as the next model prompt. The generic
+/// same-provider cleanup in `handle_login_completed` is skipped for Muse
+/// because Muse pending state is attempt-owned, so the equivalent has to run
+/// when the matching attempt finishes.
+#[test]
+fn muse_subscription_approval_clears_leftover_login_input_for_the_finished_attempt()
+-> anyhow::Result<()> {
+    with_temp_jcode_home(|| {
+        let prev_opt_in = std::env::var(crate::auth::muse::EXPERIMENTAL_ENV_VAR).ok();
+        crate::env::set_var(crate::auth::muse::EXPERIMENTAL_ENV_VAR, "1");
+        struct RestoreOptIn(Option<String>);
+        impl Drop for RestoreOptIn {
+            fn drop(&mut self) {
+                if let Some(val) = &self.0 {
+                    crate::env::set_var(crate::auth::muse::EXPERIMENTAL_ENV_VAR, val);
+                } else {
+                    crate::env::remove_var(crate::auth::muse::EXPERIMENTAL_ENV_VAR);
+                }
+            }
+        }
+        let _restore = RestoreOptIn(prev_opt_in);
+
+        let mut app = App::new_for_remote(None);
+        let attempt = "attempt_input_clear_1";
+        let approved = std::sync::Arc::new(std::sync::Mutex::new(Some(
+            crate::auth::muse::MuseCredentials {
+                api_key: "input_clear_key".to_string(),
+                access_token: "input_clear_token".to_string(),
+                base_url: crate::auth::muse::EXPECTED_API_BASE_URL.to_string(),
+                user_email: None,
+                user_full_name: None,
+                is_subs_active: true,
+                minted_at_ms: 1000,
+                subs_usage: None,
+            },
+        )));
+        app.pending_login = Some(super::auth_types::PendingLogin::MuseSubscription {
+            attempt: attempt.to_string(),
+            cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            approved,
+        });
+        // Text the user typed or pasted while the browser step was pending.
+        app.input = "ABCD-1234".to_string();
+        app.cursor_pos = app.input.len();
+        app.pasted_contents = vec!["pasted device code blob".to_string()];
+
+        app.handle_login_completed(crate::bus::LoginCompleted {
+            provider: format!("muse-subscription#{attempt}"),
+            success: true,
+            message: "Muse subscription approved in the browser; finalizing...".to_string(),
+        });
+
+        assert!(
+            app.input.is_empty(),
+            "leftover login text must not stay armed, got {:?}",
+            app.input
+        );
+        assert_eq!(app.cursor_pos, 0);
+        assert!(
+            app.pasted_contents.is_empty(),
+            "pasted login contents must be released"
+        );
+        assert!(app.pending_login.is_none());
+        Ok(())
+    })
+}
+
+/// The complement of the test above: finishing an old attempt must not disturb
+/// text the user is typing for a newer login.
+#[test]
+fn muse_subscription_old_attempt_event_does_not_clear_newer_login_input() {
+    let _env_guard = crate::storage::lock_test_env();
+    let mut app = App::new_for_remote(None);
+    let newer_attempt = "attempt_newer_input_2";
+    app.pending_login = Some(super::auth_types::PendingLogin::MuseSubscription {
+        attempt: newer_attempt.to_string(),
+        cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        approved: std::sync::Arc::new(std::sync::Mutex::new(None)),
+    });
+    app.input = "code for the new attempt".to_string();
+    app.cursor_pos = app.input.len();
+    app.pasted_contents = vec!["new attempt paste".to_string()];
+
+    // Canonical (untagged) success from the previous attempt.
+    app.handle_login_completed(crate::bus::LoginCompleted {
+        provider: "muse-subscription".to_string(),
+        success: true,
+        message: "previous attempt finished".to_string(),
+    });
+
+    assert_eq!(app.input, "code for the new attempt");
+    assert_eq!(app.pasted_contents.len(), 1);
+    match &app.pending_login {
+        Some(super::auth_types::PendingLogin::MuseSubscription { attempt, .. }) => {
+            assert_eq!(attempt, newer_attempt);
+        }
+        _ => panic!("newer attempt's pending login must remain intact"),
+    }
+}

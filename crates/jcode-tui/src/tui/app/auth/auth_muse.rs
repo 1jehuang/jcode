@@ -386,6 +386,21 @@ impl App {
 }
 
 impl App {
+    /// Clear the login input that the generic same-provider cleanup in
+    /// `handle_login_completed` would have cleared.
+    ///
+    /// That cleanup is skipped for Muse because Muse pending state is
+    /// attempt-owned, so the equivalent must run here instead, and only for the
+    /// attempt that actually finished. Without it, an approval arriving while
+    /// the user is still typing or pasting the device code leaves that text
+    /// armed, and the next Enter submits it as a model prompt.
+    fn clear_muse_login_input(&mut self) {
+        self.input.clear();
+        self.cursor_pos = 0;
+        self.pasted_contents.clear();
+        self.clear_input_undo_history();
+    }
+
     fn clear_matching_muse_pending(&mut self, attempt: &str) {
         let is_match = match &self.pending_login {
             Some(PendingLogin::MuseSubscription {
@@ -396,6 +411,7 @@ impl App {
         };
         if is_match {
             self.pending_login = None;
+            self.clear_muse_login_input();
         }
     }
 
