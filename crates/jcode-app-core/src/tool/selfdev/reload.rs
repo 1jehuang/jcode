@@ -154,12 +154,16 @@ impl ReloadContext {
         was_interrupted: bool,
         restored_turns: Option<usize>,
     ) -> Option<ReloadRecoveryDirective> {
-        Self::recovery_directive(
-            reload_ctx,
-            was_interrupted,
-            &persisted_background_tasks_note(session_id),
-            restored_turns,
-        )
+        // Every resume History asks this, and building the background-task
+        // note scans the task and await state directories (up to ~200ms per
+        // client during a reconnect storm).
+        // Only the reload-context branch embeds the note.
+        let note = if reload_ctx.is_some() {
+            persisted_background_tasks_note(session_id)
+        } else {
+            String::new()
+        };
+        Self::recovery_directive(reload_ctx, was_interrupted, &note, restored_turns)
     }
 
     pub fn log_recovery_outcome(flow: &str, session_id: &str, outcome: &str, detail: &str) {
