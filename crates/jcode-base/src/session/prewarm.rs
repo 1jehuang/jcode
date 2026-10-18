@@ -18,10 +18,13 @@ use std::collections::HashMap;
 use std::sync::{Condvar, LazyLock, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
-/// Below this, a direct parse is cheap and a queue slot only adds contention
-/// (live: 2-3MB sessions parse in ~10-30ms).
-const MIN_PREWARM_BYTES: u64 = 8 * 1024 * 1024;
+/// Below this, a direct parse is a few ms. Above it, the parse is the bulk
+/// of resume (live: 6.4MB sessions took 98-116ms of a ~165ms resume). A
+/// resume that arrives before its turn claims the queued entry and parses
+/// itself, so queueing more sessions never makes one wait behind others.
+const MIN_PREWARM_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_PREWARM_SESSIONS: usize = 64;
+const PREWARM_WORKERS: usize = 2;
 /// Reconnects arrive within a few seconds of startup.
 const ENTRY_TTL: Duration = Duration::from_secs(30);
 /// Never block a resume for long on an in-flight prewarm.
@@ -137,15 +140,40 @@ fn spawn_prewarm_with_min_bytes(session_ids: Vec<String>, min_bytes: u64) {
             entries.insert(id.clone(), Entry::Queued);
         }
     }
-    let spawned = std::thread::Builder::new()
-        .name("jcode-session-prewarm".to_string())
+    // Two workers pull from one largest-first queue. Each parse is itself
+    // multi-threaded (see `parallel_messages`), so more workers would only
+    // compete with the reconnect handlers for CPU.
+    let queue = std::sync::Arc::new(Mutex::new(sized.into_iter()));
+    let start = Instant::now();
+    let workers: Vec<_> = (0..PREWARM_WORKERS)
+        .filter_map(|worker| {
+            let queue = std::sync::Arc::clone(&queue);
+            std::thread::Builder::new()
+                .name(format!("jcode-session-prewarm-{worker}"))
+                .spawn(move || {
+                    let mut loaded = 0usize;
+                    loop {
+                        let next = queue
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .next();
+                        let Some((_, id)) = next else { break };
+                        prewarm_one(&id);
+                        loaded += 1;
+                    }
+                    loaded
+                })
+                .ok()
+        })
+        .collect();
+    if workers.is_empty() {
+        lock_entries().clear();
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name("jcode-session-prewarm-expiry".to_string())
         .spawn(move || {
-            let start = Instant::now();
-            let mut loaded = 0usize;
-            for (_, id) in &sized {
-                prewarm_one(id);
-                loaded += 1;
-            }
+            let loaded: usize = workers.into_iter().filter_map(|w| w.join().ok()).sum();
             crate::logging::info(&format!(
                 "[TIMING] session_prewarm: sessions={loaded}, total={}ms",
                 start.elapsed().as_millis()
@@ -153,9 +181,6 @@ fn spawn_prewarm_with_min_bytes(session_ids: Vec<String>, min_bytes: u64) {
             std::thread::sleep(ENTRY_TTL);
             expire_stale();
         });
-    if spawned.is_err() {
-        lock_entries().clear();
-    }
 }
 
 fn prewarm_one(session_id: &str) {
@@ -352,6 +377,24 @@ mod tests {
         assert!(take("session_prewarm_stale").is_none());
         let loaded = Session::load_for_resume("session_prewarm_stale").unwrap();
         assert_eq!(loaded.messages.len(), 2, "fresh load sees the new message");
+    }
+
+    #[test]
+    fn several_sessions_are_all_prewarmed_by_the_worker_pool() {
+        let _home = Home::new();
+        let ids: Vec<String> = (0..5).map(|i| format!("session_prewarm_pool_{i}")).collect();
+        for id in &ids {
+            saved_session(id, id);
+        }
+        spawn_prewarm_with_min_bytes(ids.clone(), 0);
+        for id in &ids {
+            wait_ready(id);
+        }
+        for id in &ids {
+            let loaded = Session::load_for_resume(id).unwrap();
+            assert_eq!(&first_text(&loaded), id);
+        }
+        assert!(lock_entries().is_empty(), "every entry taken exactly once");
     }
 
     #[test]
