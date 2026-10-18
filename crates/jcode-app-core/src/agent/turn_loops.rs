@@ -647,6 +647,11 @@ impl Agent {
                         openai_reasoning_items.clear();
                         provider_native_items.clear();
                         openai_native_compaction = None;
+                        // Usage belongs to the discarded attempt, not its replacement.
+                        usage_input = None;
+                        usage_output = None;
+                        usage_cache_read = None;
+                        usage_cache_creation = None;
                         saw_message_end = false;
                         stop_reason = None;
                     }
@@ -1353,3 +1358,7 @@ impl Agent {
 #[cfg(test)]
 #[path = "turn_loops_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "retry_rollback_usage_tests.rs"]
+mod retry_rollback_usage_tests;
