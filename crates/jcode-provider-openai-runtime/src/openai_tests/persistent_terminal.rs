@@ -2,6 +2,15 @@
 // while previous_response_id also owns the response output appended after it.
 #[tokio::test]
 async fn persistent_delta_wire_excludes_saved_response_output() {
+    assert_delta_wire_excludes_saved_response_output(false).await;
+}
+
+#[tokio::test]
+async fn persistent_delta_wire_preserves_output_before_empty_completion() {
+    assert_delta_wire_excludes_saved_response_output(true).await;
+}
+
+async fn assert_delta_wire_excludes_saved_response_output(empty_completion: bool) {
     let _env_lock = jcode_base::storage::lock_test_env();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -35,7 +44,16 @@ async fn persistent_delta_wire_excludes_saved_response_output() {
             ))
             .await
             .unwrap();
-            ws.send(WsMessage::Text(serde_json::json!({"type":"response.completed", "response":{"id":id, "status":"completed", "output": if turn == 0 {output.clone()} else {vec![]}}}).to_string())).await.unwrap();
+            if turn == 0 {
+                for item in &output {
+                    ws.send(WsMessage::Text(
+                        serde_json::json!({"type":"response.output_item.done", "item":item}).to_string(),
+                    ))
+                    .await
+                    .unwrap();
+                }
+            }
+            ws.send(WsMessage::Text(serde_json::json!({"type":"response.completed", "response":{"id":id, "status":"completed", "output": if turn == 0 && !empty_completion {output.clone()} else {vec![]}}}).to_string())).await.unwrap();
         }
         while ws.next().await.is_some() {}
     });
