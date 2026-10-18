@@ -1189,22 +1189,32 @@ Re-verified at 2026-10-18T08:48Z by re-running
 `scripts/test-portal-bridge-live.sh` from the operator's home
 (`$JCODE_SCRATCH_DIR=/Users/kooshapari/.jcode/scratch/xj03-live-61063`).
 mcp-remote 0.15.1 was invoked with the same args that kcode will pass
-when the operator launches the bridge. Timeline (8 entries, all
-green):
+when the operator launches the bridge. Timeline is anchored to
+`Starting mcp-remote` at 2026-10-18T08:48:53.407Z (8 timestamped
+milestones, all green):
 
-| t+0.4s |  | `Using transport strategy: http-only` |
-| t+1.4s |  | `Using client metadata document: https://auth.kooshapari.com/oauth/client-metadata.json` |
-| t+2.0s |  | `Starting mcp-remote with server URL: https://phenotype.spotifyportal.com/api/mcp-actions/v1` |
-| t+2.0s |  | `Using callback port derived from the server URL: 47290` |
-| t+2.4s |  | `Received 401 with WWW-Authenticate header` (expected first-run) |
-| t+2.5s |  | `Fetched Protected Resource Metadata` (authz server: `https://phenotype.spotifyportal.com/api/auth`, scopes: `openid offline_access`) |
-| t+2.7s |  | `Redirecting to authorization URL https://phenotype.spotifyportal.com/api/auth/v1/authorize?...` (full PKCE+S256+state URL) |
-| t+3.0s |  | `Authentication required. Waiting for authorization...` |
+| t+0.000s |  | `Starting mcp-remote with server URL: https://phenotype.spotifyportal.com/api/mcp-actions/v1` |
+| t+0.008s |  | `Using callback port derived from the server URL: 47290` |
+| t+0.400s |  | `Received 401 with WWW-Authenticate header` (expected first-run) |
+| t+1.029s |  | `Successfully fetched Protected Resource Metadata` (authz server: `https://phenotype.spotifyportal.com/api/auth`, scopes: `openid offline_access`) |
+| t+1.693s |  | `Successfully fetched authorization server metadata` (scopes: `openid offline_access`) |
+| t+1.862s |  | `OAuth callback server running at http://127.0.0.1:47290` |
+| t+2.401s |  | `Redirecting to authorization URL https://phenotype.spotifyportal.com/api/auth/v1/authorize?...` (full PKCE+S256+state URL) |
+| t+2.740s |  | `Authentication required. Waiting for authorization...` |
+
+Total wall time from mcp-remote start to "Waiting for authorization"
+state: **2.740 s** (excluding the 2 s npx warmup that loads
+`mcp-remote@0.15.1` into the npx cache). The pre-timestamp events
+(`Using transport strategy: http-only`, `Using client metadata
+document: https://auth.kooshapari.com/oauth/client-metadata.json`)
+fire before mcp-remote's timestamp logger is initialized and
+therefore have no t+ offset recorded.
 
 The test script's exit code was 0 (`RESULT: PASS — bridge reached
 the OAuth authorize step`). Bridge log kept at
 `/Users/kooshapari/.jcode/scratch/xj03-live-61063/bridge.stderr.log`
-(14 160 bytes).
+(14 160 bytes, 55 timestamped events, total run wall time 7.3 s
+including the 4.5 s spin on the OAuth callback port).
 
 **What this proves end-to-end:**
 
