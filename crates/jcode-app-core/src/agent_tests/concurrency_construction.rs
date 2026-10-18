@@ -102,3 +102,27 @@ async fn provisional_agent_defers_session_context_until_committed() {
         "a committed session gets its context message"
     );
 }
+
+/// Provisional placeholders are replaced by the resumed session on almost every
+/// reload reconnect, so they must not write (and then delete) presence markers.
+#[tokio::test]
+async fn provisional_agent_defers_presence_markers_until_committed() {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedTelemetryEnv::new();
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new_provisional_with_initial_working_dir(provider, registry, None);
+    let marker = crate::storage::active_pids_dir()
+        .expect("active_pids dir")
+        .join(&agent.session.id);
+    assert!(agent.session.status == crate::session::SessionStatus::Active);
+    assert!(!marker.exists(), "placeholder must not write a presence marker");
+    agent.activate_concurrency_tracking();
+    assert_eq!(
+        std::fs::read_to_string(&marker).ok().as_deref(),
+        Some(std::process::id().to_string().as_str()),
+        "a committed session registers its owning PID"
+    );
+    agent.mark_closed();
+    assert!(!marker.exists());
+}

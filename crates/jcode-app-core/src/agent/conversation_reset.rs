@@ -13,7 +13,8 @@ impl Agent {
         self.persist_session_best_effort("pre-clear session close state");
 
         let mut new_session = Session::create(None, None);
-        new_session.mark_active();
+        // begin_concurrency_tracking below writes the presence markers.
+        new_session.mark_active_unregistered();
         new_session.model = Some(self.provider_model());
         new_session.provider_key = self.provider_key_for_new_session();
         new_session.is_canary = preserve_canary;

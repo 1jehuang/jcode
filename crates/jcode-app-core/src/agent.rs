@@ -601,7 +601,10 @@ impl Agent {
             tool_selection.disabled_tools,
         );
         mark("build_base", &mut lap);
-        agent.session.mark_active();
+        // activate_concurrency_tracking writes the presence markers when the
+        // session is committed. A provisional agent replaced by a resumed
+        // session never touches the marker files.
+        agent.session.mark_active_unregistered();
         mark("mark_active", &mut lap);
         agent.session.model = Some(agent.provider_model());
         agent.session.provider_key = agent.provider_key_for_new_session();
@@ -667,7 +670,8 @@ impl Agent {
             tool_selection.allowed_tools,
             tool_selection.disabled_tools,
         );
-        agent.session.mark_active();
+        // begin_concurrency_tracking below writes the presence markers.
+        agent.session.mark_active_unregistered();
         if agent.session.provider_key.is_none() {
             agent.session.provider_key = agent.provider_key_for_new_session();
         }
@@ -1215,7 +1219,11 @@ impl Agent {
         if self.concurrency_session.is_some() {
             return;
         }
-        // Provisional agents defer their context message until committed.
+        // Provisional agents defer their presence markers and context
+        // message until committed.
+        if self.session.status == crate::session::SessionStatus::Active {
+            self.session.register_presence_markers();
+        }
         if self.session.ensure_initial_session_context_message() {
             self.seed_compaction_from_session();
         }

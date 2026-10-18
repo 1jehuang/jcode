@@ -1217,7 +1217,8 @@ impl Agent {
         let model_ms = model_start.elapsed().as_millis();
 
         let mark_active_start = Instant::now();
-        self.session.mark_active();
+        // begin_concurrency_tracking writes the presence markers.
+        self.session.mark_active_unregistered();
         self.begin_concurrency_tracking();
         let mark_active_ms = mark_active_start.elapsed().as_millis();
         self.sync_memory_dedup_state_from_session();
