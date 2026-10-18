@@ -17,6 +17,8 @@ const ANTIGRAVITY_CLIENT_ID: &str =
 const ANTIGRAVITY_CLIENT_SECRET: &str = "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"; // gitleaks:allow
 const CLIENT_ID_ENV: &str = "JCODE_ANTIGRAVITY_CLIENT_ID";
 const CLIENT_SECRET_ENV: &str = "JCODE_ANTIGRAVITY_CLIENT_SECRET";
+const VERSION_ENV: &str = "JCODE_ANTIGRAVITY_VERSION";
+const ANTIGRAVITY_VERSION: &str = "1.18.3";
 const ANTIGRAVITY_SCOPES: &[&str] = &[
     "https://www.googleapis.com/auth/cloud-platform",
     "https://www.googleapis.com/auth/userinfo.email",
@@ -48,6 +50,14 @@ fn antigravity_client_secret() -> String {
         .unwrap_or_else(|| ANTIGRAVITY_CLIENT_SECRET.to_string())
 }
 
+fn antigravity_version() -> String {
+    std::env::var(VERSION_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| ANTIGRAVITY_VERSION.to_string())
+}
+
 fn metadata_platform() -> &'static str {
     // The Cloud Code backend currently rejects OS-specific string enum values
     // such as MACOS, WINDOWS, and LINUX for ClientMetadata.Platform. Use the
@@ -56,7 +66,13 @@ fn metadata_platform() -> &'static str {
 }
 
 fn user_agent() -> String {
-    jcode_provider_antigravity::antigravity_user_agent()
+    if cfg!(target_os = "windows") {
+        format!("antigravity/{} windows/amd64", antigravity_version())
+    } else if cfg!(target_arch = "aarch64") {
+        format!("antigravity/{} darwin/arm64", antigravity_version())
+    } else {
+        format!("antigravity/{} darwin/amd64", antigravity_version())
+    }
 }
 
 fn client_metadata_header() -> String {

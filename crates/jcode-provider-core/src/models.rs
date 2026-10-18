@@ -168,22 +168,6 @@ fn model_id_for_capability_lookup(model: &str, provider: Option<&str>) -> (Strin
     (lookup, is_1m)
 }
 
-fn is_gemini_long_context_model(model: &str) -> bool {
-    if model.starts_with("gemini-2.0-flash")
-        || model.starts_with("gemini-2.5")
-        || model == "gemini-pro-agent"
-    {
-        return true;
-    }
-    if let Some(rest) = model.strip_prefix("gemini-") {
-        let major_digits: String = rest.chars().take_while(|ch| ch.is_ascii_digit()).collect();
-        if let Ok(major) = major_digits.parse::<u32>() {
-            return major >= 3;
-        }
-    }
-    false
-}
-
 fn copilot_context_limit_for_model(model: &str) -> usize {
     match model {
         "claude-sonnet-4" | "claude-sonnet-4-6" | "claude-sonnet-4.6" => 128_000,
@@ -196,7 +180,9 @@ fn copilot_context_limit_for_model(model: &str) -> usize {
         m if m.starts_with("gpt-4.1") => 128_000,
         m if m.starts_with("gpt-5") => 128_000,
         "o3-mini" | "o4-mini" => 128_000,
-        m if is_gemini_long_context_model(m) => 1_000_000,
+        m if m.starts_with("gemini-2.0-flash") => 1_000_000,
+        m if m.starts_with("gemini-2.5") => 1_000_000,
+        m if m.starts_with("gemini-3") => 1_000_000,
         _ => 128_000,
     }
 }
@@ -283,33 +269,9 @@ pub fn context_limit_for_model_with_provider_and_cache(
     };
     let foreign_ids_on_custom_endpoint =
         raw_model_had_vendor_prefix && !endpoint_is_anthropic_or_gateway;
-    let prefix_stripped_hint = crate::selection::explicit_model_provider_prefix(
-        &model.trim().to_ascii_lowercase(),
-    )
-    .map(|(active, _, _)| match active {
-        crate::selection::ActiveProvider::Claude => "claude",
-        crate::selection::ActiveProvider::OpenAI => "openai",
-        crate::selection::ActiveProvider::Copilot => "copilot",
-        crate::selection::ActiveProvider::Antigravity => "antigravity",
-        crate::selection::ActiveProvider::Gemini => "gemini",
-        crate::selection::ActiveProvider::Cursor => "cursor",
-        crate::selection::ActiveProvider::Bedrock => "bedrock",
-        crate::selection::ActiveProvider::OpenRouter => "openrouter",
-    });
-    let provider = provider_key_from_hint(provider_hint)
-        .or(prefix_stripped_hint)
-        .or_else(|| provider_for_model(model));
-    let (raw_lookup, is_1m) = model_id_for_capability_lookup(model, provider);
-    let stripped_lookup =
-        crate::selection::explicit_model_provider_prefix(&raw_lookup).map(|(_, _, rest)| {
-            let rest = rest.trim();
-            if matches!(provider, Some("openrouter")) || rest.contains('/') {
-                crate::model_id::slash_base(rest).to_string()
-            } else {
-                rest.to_string()
-            }
-        });
-    let model = stripped_lookup.as_deref().unwrap_or(raw_lookup.as_str());
+    let provider = provider_key_from_hint(provider_hint).or_else(|| provider_for_model(model));
+    let (model, is_1m) = model_id_for_capability_lookup(model, provider);
+    let model = model.as_str();
 
     if matches!(provider, Some("copilot")) {
         return Some(copilot_context_limit_for_model(model));
@@ -339,12 +301,7 @@ pub fn context_limit_for_model_with_provider_and_cache(
     // Honor an explicitly configured/cached context limit before applying broad
     // model-family fallbacks (e.g. custom openai-compatible providers may serve
     // GPT-named models with different context windows). See issue #541.
-    if let Some(limit) = cached_context_limit(raw_lookup.as_str()) {
-        return Some(limit);
-    }
-    if model != raw_lookup.as_str()
-        && let Some(limit) = cached_context_limit(model)
-    {
+    if let Some(limit) = cached_context_limit(model) {
         return Some(limit);
     }
 
@@ -372,7 +329,10 @@ pub fn context_limit_for_model_with_provider_and_cache(
         return Some(272_000);
     }
 
-    if is_gemini_long_context_model(model) {
+    if model.starts_with("gemini-2.0-flash")
+        || model.starts_with("gemini-2.5")
+        || model.starts_with("gemini-3")
+    {
         return Some(1_000_000);
     }
 
@@ -930,35 +890,6 @@ mod tests {
             context_limit_for_model_with_provider("gemini-2.5-pro", Some("copilot")),
             Some(1_000_000)
         );
-        assert_eq!(
-            context_limit_for_model_with_provider("gemini-4-argon-medium", Some("copilot")),
-            Some(1_000_000)
-        );
-    }
-
-    #[test]
-    fn context_limit_handles_gemini_4_argon_and_future_gemini_generations() {
-        for model in [
-            "gemini-4-argon",
-            "gemini-4-argon-low",
-            "gemini-4-argon-medium",
-            "gemini-4-argon-high",
-            "antigravity:gemini-4-argon-medium",
-            "gemini:gemini-4-argon-high",
-            "gemini-pro-agent",
-            "gemini-5-pro",
-        ] {
-            assert_eq!(
-                context_limit_for_model(model),
-                Some(1_000_000),
-                "expected 1M context window for {model}"
-            );
-            assert_eq!(
-                context_limit_for_model_with_provider(model, Some("antigravity")),
-                Some(1_000_000),
-                "expected 1M context window for {model} on antigravity"
-            );
-        }
     }
 
     #[test]

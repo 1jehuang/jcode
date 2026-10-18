@@ -32,27 +32,6 @@ use uuid::Uuid;
 
 const DEFAULT_MODEL: &str = "default";
 
-fn deduped_catalog_with_unavailable_canonical_ids(
-    catalog: Vec<CatalogModel>,
-) -> (Vec<CatalogModel>, std::collections::HashSet<String>) {
-    let mut seen = std::collections::HashSet::new();
-    let mut deduped_catalog = Vec::with_capacity(catalog.len());
-    for mut model in catalog {
-        let id = model.id.trim().to_string();
-        if id.is_empty() || !seen.insert(id.clone()) {
-            continue;
-        }
-        model.id = id;
-        deduped_catalog.push(model);
-    }
-    let unavailable_canonical_ids = deduped_catalog
-        .iter()
-        .filter(|model| !model.available)
-        .map(|model| remap_unsupported_model(&model.id).to_string())
-        .collect();
-    (deduped_catalog, unavailable_canonical_ids)
-}
-
 pub struct AntigravityProvider {
     client: reqwest::Client,
     model: Arc<RwLock<String>>,
@@ -212,18 +191,12 @@ impl AntigravityProvider {
             return remap_unsupported_model(trimmed).to_string();
         }
 
-        let (catalog, unavailable_canonical_ids) =
-            deduped_catalog_with_unavailable_canonical_ids(self.fetched_catalog());
-
         if let Some(backend_default) = self
             .backend_default_model()
             .map(|id| id.trim().to_string())
             .filter(|id| !id.is_empty() && id != DEFAULT_MODEL)
         {
-            let canonical = remap_unsupported_model(&backend_default);
-            if !unavailable_canonical_ids.contains(canonical) {
-                return canonical.to_string();
-            }
+            return backend_default;
         }
 
         // No backend-advertised default: pick a usable catalog model. Prefer a
@@ -231,22 +204,23 @@ impl AntigravityProvider {
         // Claude models on the Cloud Code backend currently reject jcode's tool
         // schemas (they require JSON Schema draft 2020-12), so they are a poor
         // automatic default even when listed first in the catalog.
-        if let Some(gemini_model) = catalog.iter().find_map(|model| {
-            if !model.available || model.id == DEFAULT_MODEL || !model.id.starts_with("gemini-") {
-                return None;
-            }
-            let canonical = remap_unsupported_model(&model.id);
-            (!unavailable_canonical_ids.contains(canonical)).then(|| canonical.to_string())
-        }) {
+        let catalog = self.fetched_catalog();
+        if let Some(gemini_model) = catalog
+            .iter()
+            .find(|model| {
+                model.available
+                    && model.id.trim() != DEFAULT_MODEL
+                    && model.id.starts_with("gemini-")
+            })
+            .map(|model| model.id.clone())
+        {
             return gemini_model;
         }
-        if let Some(catalog_model) = catalog.iter().find_map(|model| {
-            if !model.available || model.id == DEFAULT_MODEL {
-                return None;
-            }
-            let canonical = remap_unsupported_model(&model.id);
-            (!unavailable_canonical_ids.contains(canonical)).then(|| canonical.to_string())
-        }) {
+        if let Some(catalog_model) = catalog
+            .iter()
+            .find(|model| model.available && model.id.trim() != DEFAULT_MODEL)
+            .map(|model| model.id.clone())
+        {
             return catalog_model;
         }
 
@@ -829,7 +803,6 @@ impl Provider for AntigravityProvider {
             catalog
                 .into_iter()
                 .map(|model| model.id)
-                .chain(AVAILABLE_MODELS.iter().map(|model| (*model).to_string()))
                 .chain(std::iter::once(self.model())),
         )
     }
@@ -841,51 +814,18 @@ impl Provider for AntigravityProvider {
     fn model_routes(&self) -> Vec<jcode_provider_core::ModelRoute> {
         let catalog = self.fetched_catalog();
         if !catalog.is_empty() {
-            let (deduped_catalog, unavailable_canonical_ids) =
-                deduped_catalog_with_unavailable_canonical_ids(catalog);
-            let mut seen: std::collections::HashSet<String> = deduped_catalog
-                .iter()
-                .map(|model| model.id.clone())
-                .collect();
-            let mut routes: Vec<jcode_provider_core::ModelRoute> =
-                Vec::with_capacity(deduped_catalog.len() + AVAILABLE_MODELS.len());
-            for model in deduped_catalog {
-                let canonical_id = remap_unsupported_model(&model.id);
-                let available =
-                    model.available && !unavailable_canonical_ids.contains(canonical_id);
-                let mut detail = catalog_model_detail(&model);
-                if model.available && !available {
-                    let note = format!("canonical target '{canonical_id}' unavailable");
-                    if detail.is_empty() {
-                        detail = note;
-                    } else {
-                        detail = format!("{detail} · {note}");
-                    }
-                }
-                routes.push(jcode_provider_core::ModelRoute {
-                    model: model.id,
+            return catalog
+                .into_iter()
+                .map(|model| jcode_provider_core::ModelRoute {
+                    model: model.id.clone(),
                     provider: "Antigravity".to_string(),
                     api_method: "https".to_string(),
-                    available,
-                    detail,
+                    available: model.available,
+                    detail: catalog_model_detail(&model),
                     usage: None,
                     cheapness: None,
-                });
-            }
-            for fallback in AVAILABLE_MODELS {
-                if seen.insert((*fallback).to_string()) {
-                    routes.push(jcode_provider_core::ModelRoute {
-                        model: (*fallback).to_string(),
-                        provider: "Antigravity".to_string(),
-                        api_method: "https".to_string(),
-                        available: false,
-                        detail: "fallback catalog (unverified)".to_string(),
-                        usage: None,
-                        cheapness: None,
-                    });
-                }
-            }
-            return routes;
+                })
+                .collect();
         }
 
         self.available_models_display()
@@ -954,29 +894,6 @@ impl Provider for AntigravityProvider {
         }
 
         Ok(())
-    }
-
-    fn context_window(&self) -> usize {
-        let raw_model = self.model();
-        let resolved = self.resolve_model_for_request(&raw_model);
-        if let Some(limit) = jcode_base::provider::context_limit_for_model_with_provider(
-            &resolved,
-            Some(self.name()),
-        ) {
-            return limit;
-        }
-        let raw_trimmed = raw_model.trim();
-        if let Some(limit) = self
-            .fetched_catalog()
-            .into_iter()
-            .find(|entry| entry.id.trim() == resolved || entry.id.trim() == raw_trimmed)
-            .and_then(|entry| entry.max_tokens)
-            .and_then(|tokens| usize::try_from(tokens).ok())
-            .filter(|tokens| *tokens > 0)
-        {
-            return limit;
-        }
-        jcode_provider_core::DEFAULT_CONTEXT_LIMIT
     }
 
     fn supports_compaction(&self) -> bool {

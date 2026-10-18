@@ -242,7 +242,9 @@ impl App {
         // In TestHarness / Replay mode, do not auto-populate inline suggestions
         // unless the test explicitly opted in via `force_enable_in_tests`, so
         // existing viewport-height / anchor-stability snapshot tests stay untouched.
-        if (self.is_replay || self.runtime_mode == super::AppRuntimeMode::TestHarness)
+        if (cfg!(test)
+            || self.is_replay
+            || self.runtime_mode == super::AppRuntimeMode::TestHarness)
             && !self.suggested_replies.force_enable_in_tests
         {
             return;
