@@ -1138,6 +1138,45 @@ bridge path (which is the OAuth-aware path).
 
 Full test log: `/tmp/xj07_final.log` on the build host.
 
+## 24.5 XJ-03 LIVE verification — PASS (2026-10-18T06:32Z)
+
+DNS record re-added via Cloudflare MCP at 2026-10-18T06:31:01.099Z
+(POST /zones/6c9edab581e9c7b8fdb6a83adc6878ea/dns_records, CNAME
+`auth -> jcode-cimd.kooshapari.workers.dev`, proxied, ttl:1; record
+id `49e5f266f8fd6f25aaa02e9df6c5e8ae`). Resolved within 5 s
+(A: `104.21.24.10`, `172.67.215.71` — Cloudflare proxy IPs).
+
+End-to-end test `scripts/test-portal-bridge-live.sh` ran with
+`BROWSER=/usr/bin/true npx -y mcp-remote@0.15.1 ... --client-metadata-url
+'https://auth.kooshapari.com/oauth/client-metadata.json' ...`. The
+bridge:
+
+1. Resolved the CIMD URL (200 application/json) ✓
+2. Connected to the Portal MCP URL ✓
+3. Received `Unauthorized` from Portal ✓ (expected — no auth cookie
+   yet, this is the first run)
+4. mcp-remote built the OAuth authorization URL and emitted it
+   verbatim to stderr:
+   `https://phenotype.spotifyportal.com/api/auth/v1/authorize?response_type=code&client_id=https%3A%2F%2Fauth.kooshapari.com%2Foauth%2Fclient-metadata.json&code_challenge=...&code_challenge_method=S256&redirect_uri=http%3A%2F%2Flocalhost%3A47290%2Foauth%2Fcallback&state=...&scope=openid+offline_access&prompt=consent&resource=https%3A%2F%2Fphenotype.spotifyportal.com%2Fapi%2Fmcp-actions%2Fv1`
+5. Script's `grep -qiE "accounts\\.spotify\\.com/authorize|authorize\\?"`
+   matched the URL → `RESULT: PASS — bridge reached the OAuth authorize step` → exit 0
+6. Bridge now in "Waiting for authorization..." state, ready for the
+   operator to click through the Spotify login once
+
+`scripts/portal-mcp-bridge.json` flags updated:
+- `ready_to_merge_into_mcp_json`: `false` → **`true`**
+- `blocked_on`: `[2 items]` → **`[]`**
+- `fully_unblocked_at`: `2026-10-18T06:32Z`
+- description updated: "Requires ... NXDOMAIN ... and Portal allow-list" → "Verified LIVE 2026-10-18T06:32Z: bridge reaches OAuth authorize step"
+
+Full test log: `/tmp/xj03_live_test.log` on the build host.
+
+**XJ-03 is unblocked end-to-end.** The bridge reaches the OAuth
+authorize step on the production portal, with the production CIMD.
+Remaining human step (operator): click the Spotify consent page once to
+provision the auth token; mcp-remote will receive the callback and the
+bridge becomes ready for tool calls.
+
 ## 25. Squash-merge to master (2026-10-17T07:48Z)
 
 Operator signal "go" at 2026-10-17T07:39Z triggered the squash-merge
