@@ -27,14 +27,13 @@ impl App {
                 description: s.description.clone(),
             })
             .collect();
-        let (mut split, context_info) = crate::prompt::build_system_prompt_split(
+        let (split, context_info) = crate::prompt::build_system_prompt_split(
             skill_prompt.as_deref(),
             &available_skills,
             self.session.is_canary,
             memory_prompt,
             None,
         );
-        self.append_current_turn_system_reminder(&mut split);
         self.context_info = context_info;
         split
     }

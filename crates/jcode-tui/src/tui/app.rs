@@ -996,7 +996,6 @@ pub struct App {
     /// a turn was running. They run as real commands once the turn ends.
     queued_commands: Vec<String>,
     hidden_queued_system_messages: Vec<String>,
-    current_turn_system_reminder: Option<String>,
     // Upstream provider (e.g., which provider OpenRouter routed to)
     upstream_provider: Option<String>,
     // Active stream connection type (websocket/https/etc.)
@@ -2752,8 +2751,16 @@ impl App {
         system_dynamic: &str,
     ) -> KvCacheRequestSignature {
         let dynamic_trimmed = system_dynamic.trim();
+        // The dynamic block precedes the transcript, so it is part of the
+        // cached prefix. Hash it with the static block so a change is
+        // attributed to the harness rather than reported as a plain low read.
+        let system_hash = if dynamic_trimmed.is_empty() {
+            stable_hash_str(system_static)
+        } else {
+            stable_hash_str(&format!("{system_static}\n\n{dynamic_trimmed}"))
+        };
         KvCacheRequestSignature {
-            system_static_hash: stable_hash_str(system_static),
+            system_static_hash: system_hash,
             tools_hash: stable_hash_json(tools),
             messages_hash: stable_hash_json(&cache_relevant_messages(messages)),
             message_hashes: message_hashes(messages),
