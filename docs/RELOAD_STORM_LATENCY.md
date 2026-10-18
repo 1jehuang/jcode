@@ -87,3 +87,18 @@ The frame that first paints the transcript still builds the whole body:
 stitch older messages via the existing suffix-reuse path) would cut this,
 but prompt numbering and the delta-History prefix both assume the full
 display list, so it needs care.
+
+## First full body build: where the time goes (19:39-19:42 storms)
+
+`[TIMING] prepare_body` (`20fbbe662`, `eddfe71ff`, `c2768948d`) splits the
+cold build: per-message rendering is 85-95% (130-750ms); wrapping 4-117ms;
+inline-image resolution 0-4ms. By role, tool messages dominate (60-90%), and
+by tool, edit/write/apply_patch inline diffs lead (3-13ms per edit; lizard
+60 edits = 280ms), then bash (612 messages = 177ms).
+
+Diff rows are syntax-highlighted line by line (`highlight_line`, ~160us per
+Rust line). On lizard's real diffs, 212 lines take ~30ms isolated, so it is a
+real but partial cost; a per-line memo does not help the first build (1661
+lines, 1122 unique) and was not kept. Remaining options, each a UX/design
+call: defer syntax highlighting of off-screen diffs, or the tail-first body
+build above.
