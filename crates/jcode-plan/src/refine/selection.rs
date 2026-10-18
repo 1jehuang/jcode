@@ -128,6 +128,7 @@ pub enum SelectorOutcome {
         error: String,
     },
     Fallback {
+        anon: String,
         label: String,
         error: String,
     },
@@ -159,11 +160,24 @@ pub fn resolve_choice(
         None => "no choice block in the reply".to_string(),
         Some(c) => format!("chose {c:?}, which is not one of the candidates"),
     };
+    // Mirror the source's `_fallback`: the fallback still resolves its
+    // anon id (empty when the label was never anonymized), so downstream
+    // records keep the same shape as a real choice.
+    let anon_of = |label: &str| {
+        id_map
+            .iter()
+            .find(|(_, l)| l.as_str() == label)
+            .map(|(a, _)| a.clone())
+            .unwrap_or_default()
+    };
     let mut bases: Vec<&String> = pool.keys().filter(|l| is_base(l.as_str())).collect();
     bases.sort();
     if let Some(first) = bases.first() {
+        let label = (*first).clone();
+        let anon = anon_of(&label);
         return SelectorOutcome::Fallback {
-            label: (*first).clone(),
+            anon,
+            label,
             error: err,
         };
     }
@@ -171,8 +185,11 @@ pub fn resolve_choice(
         let mut finals: Vec<&String> = pool.keys().collect();
         finals.sort();
         if let Some(first) = finals.first() {
+            let label = (*first).clone();
+            let anon = anon_of(&label);
             return SelectorOutcome::Fallback {
-                label: (*first).clone(),
+                anon,
+                label,
                 error: err,
             };
         }
@@ -297,19 +314,21 @@ mod tests {
                 label: "agg1".to_string()
             }
         );
-        // Bad choice with a delivered base -> neutral base fallback.
+        // Bad choice with a delivered base -> neutral base fallback,
+        // carrying its anon id like the source's chosen_id.
         assert_eq!(
             resolve_choice(Some("ZZZ"), &id_map, &pool, "mixed"),
             SelectorOutcome::Fallback {
+                anon: "B".to_string(),
                 label: "base1".to_string(),
                 error: "chose \"ZZZ\", which is not one of the candidates".to_string()
             }
         );
-        // Finals pool without base -> first final.
+        // Finals pool without base -> first final, anon carried.
         pool.remove("base1");
         assert!(matches!(
             resolve_choice(None, &id_map, &pool, "finals"),
-            SelectorOutcome::Fallback { label, .. } if label == "agg1"
+            SelectorOutcome::Fallback { anon, label, .. } if anon == "A" && label == "agg1"
         ));
         // Mixed pool without base and no valid choice -> no fallback.
         assert!(matches!(

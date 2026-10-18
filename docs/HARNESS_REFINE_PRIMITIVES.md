@@ -36,11 +36,12 @@ prompts name "no deliverable because the model exhausted its output budget on
 reasoning" as the most costly failure mode, which the always-on caps
 (24k OpenCode / 8k Codex) directly guard against.
 
-Tests: 11 unit tests (escape rejection, allowed-surface coverage,
-untriggered-skill rejection, triggered-skill census, cap + non-empty
-enforcement, autotrigger repair, diff + diversity, script-ref scanning,
-missing-script rejection, shipped/skill-local acceptance, Jinja-brace
-rejection).
+Tests: 15 unit tests (escape rejection, allowed-surface coverage, skill-name
+rule on both surfaces, untriggered-skill rejection, triggered-skill census,
+cap + non-empty enforcement, hooks-file schema validation, autotrigger
+repair, skill-helper editability + 600-char window, diff + diversity,
+script-ref scanning, missing-script rejection, shipped/skill-local
+acceptance, Jinja-brace rejection).
 
 ### 2. `recursion`: task-level budgets, stage labels, finals-only pool
 Source: `harness2/core/recursion.py` (`run_parallel`, `run_sequential`,
@@ -58,8 +59,8 @@ Evidence: harness2's experiment guide defines `--k`/`--mode` semantics and
 shows further gains from larger task-level budgets; the pool convention is
 called "the published convention and the only pool this release builds".
 
-Tests: 5 unit tests (label conventions, budget rejection, finals-only pool,
-kept-base detection, mode token roundtrip).
+Tests: 6 unit tests (label conventions, k=3 budget math, budget rejection,
+finals-only pool, kept-base detection, mode token roundtrip).
 
 ### 3. `selection`: anonymized choice with safe fallbacks
 Source: `harness2/core/selection.py` (`assign_ids`, `_render_pool`,
@@ -79,7 +80,8 @@ being counted as zero".
 
 Tests: 6 unit tests (anon-id counting, shuffle stability + coverage,
 non-answer drops with `label (cause)` entries, choice/base/final fallback
-chain, k=1 `trivial_selection` fast path, experience field gating).
+chain with carried anon ids, k=1 `trivial_selection` fast path, experience
+field gating).
 Note: seed uses FNV-1a + SplitMix64 instead of sha1 so the crate
 stays dependency-free; the stability property (same input, same shuffle) is
 what the tests pin, not the hash function.
@@ -99,9 +101,9 @@ Evidence: harness2's method section: "after adoption, reflection stores the
 adopted harness and evidence-supported lessons in a per-domain library";
 retrieval is by construction (a domain dir only holds same-domain entries).
 
-Tests: 5 unit tests (slugs, domain dirs, inventory census, experience-md
-with why + edits + lesson, index with per-entry inventory + empty state,
-root layout incl. tag override).
+Tests: 5 unit tests (slugs, domain dirs incl. whitespace-edge parity,
+inventory census, experience-md with why + edits + lesson, index with
+per-entry inventory + empty state, root layout incl. tag override).
 
 ### 5. `hygiene`: eval-hygiene guards
 Source: `harness2/core/context.py` (grader-verdict tripwire,
@@ -138,7 +140,7 @@ semantics verified against CPython, leak-assert hits, blocklist coverage).
 
 ## Validation
 
-- `cargo test -p jcode-plan`: 58 passed, 0 failed (27 pre-existing + 31 new).
+- `cargo test -p jcode-plan`: 63 passed, 0 failed (23 pre-existing: 13 plan + 10 mermaid; 40 new: surface 15, recursion 6, selection 6, library 5, hygiene 8).
 - `cargo clippy -p jcode-plan --all-targets`: no warnings from this change.
 - `cargo fmt -p jcode-plan`: clean.
 - `cargo check -p jcode-plan -p jcode-swarm-core -p jcode-protocol`: clean

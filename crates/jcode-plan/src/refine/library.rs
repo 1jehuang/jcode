@@ -60,16 +60,19 @@ impl LibraryEntry {
     }
 
     /// One directory name for a domain, never a path.
+    /// Mirrors the source exactly: collapse each separator plus the
+    /// whitespace around it, then strip, so leading/trailing whitespace
+    /// never leaves a dangling `__` edge.
     pub fn domain_dir(domain: &str) -> String {
         let mut out = String::new();
-        let mut chars = domain.chars().peekable();
+        let mut chars = domain.trim().chars().peekable();
         while let Some(c) = chars.next() {
             if c == '/' || c == '\\' {
                 // Collapse the separator plus surrounding whitespace.
-                while out.ends_with(' ') {
+                while out.ends_with([' ', '\t']) {
                     out.pop();
                 }
-                while chars.peek().is_some_and(|n| *n == ' ') {
+                while chars.peek().is_some_and(|n| *n == ' ' || *n == '\t') {
                     chars.next();
                 }
                 out.push_str("__");
@@ -92,27 +95,45 @@ impl LibraryEntry {
 }
 
 /// One-line census of the components actually in this harness.
+/// Mirrors the source's `_inventory`: only valid component names count
+/// (anchored like the surface regexes), the hooks file counts only when
+/// the surface declares one, and the always-on char count is comma-grouped.
 pub fn inventory(surface: &SurfaceSpec, tree: &Tree) -> String {
     let mut skills = 0;
     let mut sub_agents = 0;
     let mut scripts = 0;
-    let mut plugins = 0;
     let skill_prefix = format!("{}/", surface.skill_dir);
     let plugin_prefix = surface.plugin_dir.map(|d| format!("{d}/"));
+    let mut plugins = 0;
     let mut hooks = 0;
     for rel in tree.keys() {
         if rel.starts_with(&skill_prefix) && rel.ends_with("/SKILL.md") {
-            skills += 1;
-        } else if rel.starts_with("sub_agents/") && rel.ends_with("/AGENT.md") {
-            sub_agents += 1;
-        } else if rel.starts_with("scripts/") && rel.ends_with(".py") {
+            let middle = &rel[skill_prefix.len()..rel.len() - "/SKILL.md".len()];
+            if super::surface::valid_skill_name(middle) {
+                skills += 1;
+                continue;
+            }
+        }
+        if rel.starts_with("sub_agents/") && rel.ends_with("/AGENT.md") {
+            let middle = &rel["sub_agents/".len()..rel.len() - "/AGENT.md".len()];
+            if super::surface::valid_skill_name(middle) {
+                sub_agents += 1;
+                continue;
+            }
+        }
+        if super::surface::is_top_script(rel) {
             scripts += 1;
-        } else if let Some(prefix) = &plugin_prefix
+            continue;
+        }
+        if let Some(prefix) = &plugin_prefix
             && rel.starts_with(prefix)
             && rel.ends_with(".ts")
+            && super::surface::valid_skill_name(&rel[prefix.len()..rel.len() - ".ts".len()])
         {
             plugins += 1;
-        } else if Some(rel.as_str()) == surface.hooks_file {
+            continue;
+        }
+        if surface.hooks_file.is_some() && Some(rel.as_str()) == surface.hooks_file {
             hooks += 1;
         }
     }
@@ -139,8 +160,20 @@ pub fn inventory(surface: &SurfaceSpec, tree: &Tree) -> String {
     };
     format!(
         "{bits}; {} always-on chars",
-        always_on_text(surface, tree).len()
+        comma_group(always_on_text(surface, tree).len())
     )
+}
+
+fn comma_group(n: usize) -> String {
+    let digits: Vec<char> = n.to_string().chars().collect();
+    let mut out = String::new();
+    for (i, c) in digits.iter().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(*c);
+    }
+    out
 }
 
 /// Render `EXPERIENCE.md`: why this harness was chosen + transferable lesson.
@@ -270,6 +303,12 @@ mod tests {
         );
         assert_eq!(LibraryEntry::domain_dir("  "), "unknown");
         assert_eq!(LibraryEntry::domain_dir("finance"), "finance");
+        // Edge parity with the source regex `\\s*[/\\\\]\\s*` + strip:
+        // surrounding whitespace never leaves a dangling `__` edge.
+        assert_eq!(LibraryEntry::domain_dir("  pad  /  x  "), "pad__x");
+        assert_eq!(LibraryEntry::domain_dir("/ a"), "__a");
+        assert_eq!(LibraryEntry::domain_dir("a / "), "a__");
+        assert_eq!(LibraryEntry::domain_dir("a\tb"), "a\tb");
     }
 
     #[test]

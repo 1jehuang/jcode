@@ -36,6 +36,10 @@ pub struct SurfaceSpec {
     pub trigger_line_prefix: &'static str,
     pub subagent_requires_mode: bool,
     pub reject_empty_always_on: bool,
+    /// `must_match`: SKILL.md frontmatter `name:` must equal the directory
+    /// (dropped silently at load otherwise). `overrides_dir`: a `name:` line
+    /// overrides the directory, so a mismatch breaks every trigger line.
+    pub skill_name_rule: &'static str,
 }
 
 impl SurfaceSpec {
@@ -62,6 +66,7 @@ pub const OPENCODE_SURFACE: SurfaceSpec = SurfaceSpec {
     trigger_line_prefix: "- When ",
     subagent_requires_mode: true,
     reject_empty_always_on: false,
+    skill_name_rule: "must_match",
 };
 
 /// Codex surface: single always-on AGENTS.md, 8k cap (CLI truncates at 32k).
@@ -77,6 +82,7 @@ pub const CODEX_SURFACE: SurfaceSpec = SurfaceSpec {
     trigger_line_prefix: "- When ",
     subagent_requires_mode: false,
     reject_empty_always_on: true,
+    skill_name_rule: "overrides_dir",
 };
 
 /// Normalise a relative path, rejecting escapes before it is joined.
@@ -174,6 +180,93 @@ fn script_refs(src: &str) -> Vec<String> {
     out
 }
 
+/// Validate a `.codex/hooks.json` body against the dispatched schema.
+/// Mirrors the source's `check_hooks`: unknown events, non-list matchers,
+/// entries without a `hooks` list, non-command hooks, and empty commands
+/// are all rejected, because a malformed hooks file never fires at runtime
+/// rather than erroring.
+fn check_hooks_file(src: &str, errs: &mut Vec<String>) {
+    const REL: &str = ".codex/hooks.json";
+    const EVENTS: &[&str] = &[
+        "PreToolUse",
+        "PostToolUse",
+        "PermissionRequest",
+        "PreCompact",
+        "PostCompact",
+        "SessionStart",
+        "SubagentStart",
+        "SubagentStop",
+        "UserPromptSubmit",
+        "Stop",
+    ];
+    let doc: serde_json::Value = match serde_json::from_str(src) {
+        Ok(v) => v,
+        Err(e) => {
+            errs.push(format!("{REL} is not valid JSON: {e}"));
+            return;
+        }
+    };
+    let Some(hooks) = doc.get("hooks").and_then(|h| h.as_object()) else {
+        errs.push(format!(
+            "{REL} needs a top-level {{\"hooks\": {{...}}}} object"
+        ));
+        return;
+    };
+    if hooks.is_empty() {
+        errs.push(format!(
+            "{REL} needs a top-level {{\"hooks\": {{...}}}} object"
+        ));
+        return;
+    }
+    let mut events: Vec<&String> = hooks.keys().collect();
+    events.sort();
+    for event in events {
+        if !EVENTS.contains(&event.as_str()) {
+            errs.push(format!(
+                "{REL}: unknown event {event:?}; the framework dispatches {} (PascalCase)",
+                EVENTS.join(", ")
+            ));
+            continue;
+        }
+        let Some(entries) = hooks.get(event).and_then(|e| e.as_array()) else {
+            errs.push(format!(
+                "{REL}: {event} must map to a LIST of matcher entries"
+            ));
+            continue;
+        };
+        for (i, entry) in entries.iter().enumerate() {
+            let Some(sub) = entry.get("hooks").and_then(|h| h.as_array()) else {
+                errs.push(format!("{REL}: {event}[{i}] needs a `hooks` list"));
+                continue;
+            };
+            for h in sub {
+                match h.get("type").and_then(|t| t.as_str()) {
+                    Some("command") => {
+                        let cmd = h.get("command").and_then(|c| c.as_str()).unwrap_or("");
+                        if cmd.trim().is_empty() {
+                            errs.push(format!("{REL}: {event}[{i}] has an empty `command`"));
+                        }
+                    }
+                    _ => errs.push(format!(
+                        "{REL}: {event}[{i}] hook type must be \"command\" \u{2014} async/prompt/agent hooks are skipped as 'not supported yet'"
+                    )),
+                }
+            }
+        }
+    }
+}
+
+/// Valid component name: `[a-z0-9][a-z0-9_-]*` (the source's `_NAME`).
+pub fn valid_skill_name(name: &str) -> bool {
+    valid_name(name)
+}
+
+/// Top-level `scripts/*.py` with a snake_case stem (the source's `script`
+/// pattern). Skill-local helpers are counted separately by the caller.
+pub fn is_top_script(rel: &str) -> bool {
+    is_script(rel)
+}
+
 fn valid_name(name: &str) -> bool {
     if name.is_empty() {
         return false;
@@ -232,11 +325,11 @@ pub fn is_allowed(surface: &SurfaceSpec, rel: &str) -> bool {
     if Some(rel.as_str()) == surface.hooks_file {
         return true;
     }
-    if is_skill_script(surface, &rel) || is_subagent(&rel) || is_script(&rel) {
-        return true;
-    }
-    // Skill-local helper scripts travel with their skill.
-    if rel.contains("/scripts/") && rel.starts_with(&surface.skill_prefix()) {
+    if is_skill_script(surface, &rel)
+        || is_skill_helper_script(surface, &rel)
+        || is_subagent(&rel)
+        || is_script(&rel)
+    {
         return true;
     }
     is_plugin(surface, &rel)
@@ -354,11 +447,13 @@ pub fn validate(
         ));
     }
 
-    // Every skill: frontmatter description + trigger line.
+    // Every skill: frontmatter description + name rule + trigger line.
     let skills = skill_names(surface, tree);
     for name in &skills {
         let rel = format!("{}/{}/SKILL.md", surface.skill_dir, name);
         let fm = tree.get(&rel).map(|s| s.as_str()).unwrap_or("");
+        // Frontmatter window is 600 chars, exactly like the source: a
+        // `description:` buried deeper does not save the skill at load.
         let head: String = fm.chars().take(600).collect();
         if !head.lines().any(|l| {
             l.strip_prefix("description:")
@@ -366,6 +461,22 @@ pub fn validate(
         }) {
             errs.push(format!(
                 "{rel} needs a `description:` in its frontmatter, or the skill is dropped SILENTLY at load"
+            ));
+        }
+        let front_name = head
+            .lines()
+            .find_map(|l| l.strip_prefix("name:").map(|v| v.trim().to_string()));
+        if surface.skill_name_rule == "must_match" {
+            if front_name.as_deref() != Some(name.as_str()) {
+                errs.push(format!(
+                    "{rel} needs frontmatter `name: {name}` matching its directory (a mismatch is dropped SILENTLY at load)"
+                ));
+            }
+        } else if let Some(other) = front_name
+            && other != *name
+        {
+            errs.push(format!(
+                "{rel} frontmatter `name: {other}` OVERRIDES the directory name at load, so every trigger line naming `{name}` stops matching; drop the `name:` line or make it `name: {name}`"
             ));
         }
         if !body.contains(name) {
@@ -395,6 +506,16 @@ pub fn validate(
         }) {
             errs.push(format!("{rel} needs a `description:`"));
         }
+    }
+
+    // Hooks-file validation (Codex `.codex/hooks.json`, Claude-Code hook
+    // schema): unknown events, non-list matchers, non-command hooks, and
+    // empty commands are all rejected, because a malformed hooks file never
+    // fires at runtime rather than erroring.
+    if let Some(hooks_rel) = surface.hooks_file
+        && let Some(src) = tree.get(hooks_rel)
+    {
+        check_hooks_file(src, &mut errs);
     }
 
     // Reserved script shadowing.
@@ -638,7 +759,7 @@ mod tests {
             ),
             (
                 "skills/doc_review/SKILL.md",
-                "---\ndescription: review docs\n---\nbody",
+                "---\nname: doc_review\ndescription: review docs\n---\nbody",
             ),
         ]);
         let census = validate(&OPENCODE_SURFACE, &t, false).unwrap();
@@ -694,6 +815,116 @@ mod tests {
     }
 
     #[test]
+    fn skill_name_rule_must_match_on_opencode() {
+        // Missing `name:` fails under must_match.
+        let t = tree(&[
+            ("systemprompt.md", "When x, load the `doc_review` skill."),
+            (
+                "skills/doc_review/SKILL.md",
+                "---\ndescription: review docs\n---\nbody",
+            ),
+        ]);
+        let err = validate(&OPENCODE_SURFACE, &t, false).unwrap_err();
+        assert!(
+            err.contains("needs frontmatter `name: doc_review`"),
+            "{err}"
+        );
+        // Mismatched name fails too.
+        let t2 = tree(&[
+            ("systemprompt.md", "When x, load the `doc_review` skill."),
+            (
+                "skills/doc_review/SKILL.md",
+                "---\nname: other\ndescription: review docs\n---\nbody",
+            ),
+        ]);
+        assert!(
+            validate(&OPENCODE_SURFACE, &t2, false)
+                .unwrap_err()
+                .contains("needs frontmatter `name: doc_review`")
+        );
+    }
+
+    #[test]
+    fn skill_name_rule_overrides_dir_on_codex() {
+        // No `name:` line is fine on codex; a mismatched one breaks triggers.
+        let ok = tree(&[
+            (
+                "AGENTS.md",
+                "When x, read .agents/skills/s/SKILL.md and follow it.",
+            ),
+            (
+                ".agents/skills/s/SKILL.md",
+                "---\ndescription: s skill\n---\nbody",
+            ),
+        ]);
+        validate(&CODEX_SURFACE, &ok, false).expect("nameless codex skill passes");
+        let bad = tree(&[
+            (
+                "AGENTS.md",
+                "When x, read .agents/skills/s/SKILL.md and follow it.",
+            ),
+            (
+                ".agents/skills/s/SKILL.md",
+                "---\nname: other\ndescription: s skill\n---\nbody",
+            ),
+        ]);
+        let err = validate(&CODEX_SURFACE, &bad, false).unwrap_err();
+        assert!(err.contains("OVERRIDES the directory name"), "{err}");
+    }
+
+    #[test]
+    fn hooks_file_validated_on_codex() {
+        let good_hooks = "{\"hooks\": {\"PostToolUse\": [{\"matcher\": \"Bash\", \"hooks\": [{\"type\": \"command\", \"command\": \"echo hi\"}]}]}}";
+        let t = tree(&[
+            ("AGENTS.md", "base rules"),
+            (".codex/hooks.json", good_hooks),
+        ]);
+        validate(&CODEX_SURFACE, &t, false).expect("valid hooks pass");
+        let bad_event = tree(&[
+            ("AGENTS.md", "base rules"),
+            (".codex/hooks.json", "{\"hooks\": {\"Nope\": []}}"),
+        ]);
+        assert!(
+            validate(&CODEX_SURFACE, &bad_event, false)
+                .unwrap_err()
+                .contains("unknown event")
+        );
+        let not_json = tree(&[
+            ("AGENTS.md", "base rules"),
+            (".codex/hooks.json", "not json at all"),
+        ]);
+        assert!(
+            validate(&CODEX_SURFACE, &not_json, false)
+                .unwrap_err()
+                .contains("not valid JSON")
+        );
+    }
+
+    #[test]
+    fn skill_helper_scripts_are_editable_and_count() {
+        assert!(is_allowed(
+            &OPENCODE_SURFACE,
+            "skills/doc_review/scripts/helper.py"
+        ));
+        // Loose files directly in the skill dir are NOT on the surface.
+        assert!(!is_allowed(&OPENCODE_SURFACE, "skills/doc_review/stray.py"));
+        // Frontmatter window is 600 chars: a late description does not save it.
+        let late = format!(
+            "---\nname: doc_review\n{}\ndescription: late\n---\n",
+            "x".repeat(700)
+        );
+        let t = tree(&[
+            ("systemprompt.md", "When x, load the `doc_review` skill."),
+            ("skills/doc_review/SKILL.md", late.as_str()),
+        ]);
+        assert!(
+            validate(&OPENCODE_SURFACE, &t, false)
+                .unwrap_err()
+                .contains("needs a `description:`")
+        );
+    }
+
+    #[test]
     fn script_refs_scan_python_invocations() {
         assert_eq!(
             script_refs("run python scripts/check_totals.py now"),
@@ -718,7 +949,7 @@ mod tests {
             ),
             (
                 "skills/doc_review/SKILL.md",
-                "---\ndescription: review docs\n---\nrun python scripts/missing.py",
+                "---\nname: doc_review\ndescription: review docs\n---\nrun python scripts/missing.py",
             ),
         ]);
         let err = validate(&OPENCODE_SURFACE, &t, false).unwrap_err();
@@ -734,7 +965,7 @@ mod tests {
             ),
             (
                 "skills/doc_review/SKILL.md",
-                "---\ndescription: review docs\n---\nrun python scripts/helper.py and python scripts/shared.py",
+                "---\nname: doc_review\ndescription: review docs\n---\nrun python scripts/helper.py and python scripts/shared.py",
             ),
             ("scripts/shared.py", "print(1)"),
             ("skills/doc_review/scripts/helper.py", "print(2)"),

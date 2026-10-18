@@ -62,6 +62,9 @@ impl StagePlan {
         if k == 0 {
             return Err("recursion budget k must be >= 1".to_string());
         }
+        // Local guard only: harness2 budgets are small in practice (k=1..3
+        // in the published runs). The cap keeps label math and the 4k/3k
+        // rollout accounting bounded for a future runner.
         if k > 16 {
             return Err(format!("recursion budget k={k} exceeds cap of 16"));
         }
@@ -208,6 +211,15 @@ mod tests {
         let mut c = a.clone();
         c.insert("systemprompt.md".to_string(), "v2".to_string());
         assert!(!kept_base(&a, &c));
+    }
+
+    #[test]
+    fn stage_plan_k3_counts() {
+        let p = StagePlan::new(RecursionMode::Parallel, 3).unwrap();
+        assert_eq!(p.candidate_labels.len(), 6);
+        assert_eq!(p.final_labels.len(), 3);
+        assert_eq!(p.rollout_count(), 12);
+        assert_eq!(p.stage_count(), 9);
     }
 
     #[test]
