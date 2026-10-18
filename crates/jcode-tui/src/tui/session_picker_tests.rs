@@ -1982,7 +1982,7 @@ fn test_preview_sticky_prompt_header_appears_after_scrolling() {
     // confirm it carries the "N›" sticky-header marker.
     let preview_inner_x = (w as f32 * 0.40) as u16 + 1;
     let header_row: String = (preview_inner_x..w.saturating_sub(1))
-        .map(|x| buffer[(x, 1)].symbol())
+        .map(|x| buffer[(x, 2)].symbol()) // row 0: search bar, row 1: border
         .collect();
     assert!(
         header_row.contains('›'),
@@ -2060,7 +2060,7 @@ fn test_preview_sticky_prompt_header_survives_async_preview_load() {
 
     let preview_inner_x = (w as f32 * 0.40) as u16 + 1;
     let header_row: String = (preview_inner_x..w.saturating_sub(1))
-        .map(|x| buffer[(x, 1)].symbol())
+        .map(|x| buffer[(x, 2)].symbol()) // row 0: search bar, row 1: border
         .collect();
     assert!(
         header_row.contains('›'),
@@ -2713,3 +2713,6 @@ fn test_resume_project_scope_is_off_by_default() {
         assert_eq!(picker.visible_sessions.len(), 2);
     }
 }
+
+#[path = "session_picker_search_tests.rs"]
+mod search;
