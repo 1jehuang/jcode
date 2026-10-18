@@ -1175,7 +1175,7 @@ impl Agent {
         let restore_start = Instant::now();
         let restore_cpu_start = crate::server::thread_cpu_ms();
         let load_start = Instant::now();
-        let mut session = Session::load(session_id)?;
+        let mut session = Session::load_for_resume(session_id)?;
         if let Some(working_dir) = working_dir {
             session.working_dir = Some(working_dir.to_string());
             session.refresh_initial_session_context_message();

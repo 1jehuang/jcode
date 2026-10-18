@@ -2445,6 +2445,12 @@ impl Server {
             )),
         }
 
+        // Sessions the previous process image owned are about to reconnect.
+        // Parse the large ones in the background before their markers are
+        // pruned, so resume skips the parse on the critical path.
+        crate::session::prewarm::spawn_prewarm(crate::session::prewarm::sessions_owned_by(
+            std::process::id(),
+        ));
         let (pruned_active_pids, failed_active_pids) =
             crate::storage::prune_active_pids_owned_by(std::process::id());
         if pruned_active_pids + failed_active_pids > 0 {

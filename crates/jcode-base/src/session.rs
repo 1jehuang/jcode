@@ -44,6 +44,7 @@ mod memory_profile;
 mod model;
 mod parallel_messages;
 mod persistence;
+pub mod prewarm;
 mod render;
 mod storage_paths;
 pub use crash::{

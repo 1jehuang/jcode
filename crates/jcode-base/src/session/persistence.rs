@@ -497,6 +497,21 @@ impl Session {
         Ok(session)
     }
 
+    /// Like [`Self::load`], but uses the copy parsed in the background at
+    /// server startup when it still matches disk (see `session::prewarm`).
+    /// Only for resume, which consumes the copy exactly once.
+    pub fn load_for_resume(session_id: &str) -> Result<Self> {
+        if let Some(mut session) = super::prewarm::take(session_id) {
+            session.refresh_agent_model_overrides()?;
+            crate::logging::info(&format!(
+                "[TIMING] session_load: session={session_id}, source=prewarm, messages={}",
+                session.messages.len()
+            ));
+            return Ok(session);
+        }
+        Self::load(session_id)
+    }
+
     /// Load only the metadata needed for remote-client startup.
     ///
     /// This intentionally skips heavyweight transcript vectors so the remote
