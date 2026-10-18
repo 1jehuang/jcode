@@ -226,3 +226,39 @@ return an answer tied to a concrete interface or schema.
 >
 > *Expected response:* a sample fixture or a format spec; or
 > "JSONL only".
+
+## Status update (2026-10-18T06:32Z) — XJ-03 LIVE PASS
+
+The XJ-03 audit-correction loop closed at 2026-10-18T06:32Z with a
+live end-to-end verification. Concretely:
+
+1. **Root cause confirmed** (per `AUTH-DNS-FORENSICS-2026-10-17.md`,
+   §24.3): the `auth.kooshapari.com` CNAME was deleted manually from
+   the Cloudflare dashboard at 2026-10-17T20:46:50.734Z during a
+   multi-zone DNS cleanup, not by a Jcode-side script. The Worker
+   (`jcode-cimd`) and the route were never touched.
+
+2. **CNAME re-added** via Cloudflare API at 2026-10-18T06:31:01.099Z
+   (record id `49e5f266f8fd6f25aaa02e9df6c5e8ae`). Resolved in 5 s;
+   `curl -I https://auth.kooshapari.com/oauth/client-metadata.json`
+   returns 200 application/json.
+
+3. **End-to-end bridge PASS** (`scripts/test-portal-bridge-live.sh`):
+   mcp-remote 0.15.1 fetched the live CIMD, connected to the
+   production Portal MCP URL, and emitted a valid OAuth authorize
+   URL to stderr. Script grep matched → `RESULT: PASS` → exit 0.
+   Bridge now in "Waiting for authorization..." state.
+
+4. **XJ-03 is unblocked end-to-end.** `scripts/portal-mcp-bridge.json`
+   flipped from `ready_to_merge_into_mcp_json: false` to `true`; the
+   historical blockers are kept in `_historical_blockers_for_audit_trail`.
+
+5. **The only remaining step is operator-side** (one click): open
+   the Spotify consent page in a browser once so mcp-remote can
+   capture the auth token at `http://127.0.0.1:47290/oauth/callback`.
+   After that, the bridge is ready for tool calls.
+
+**XJ-02, XJ-04, XJ-05, XJ-06 are still blocked on the @chirp/squab
+answers above (Q4–Q6).** The XJ-03 closure is independent of those
+answers — it succeeded entirely with the existing @chirp/squab
+capabilities and a Cloudflare-managed CIMD.
