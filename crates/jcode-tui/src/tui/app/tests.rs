@@ -1,4 +1,5 @@
 #![cfg_attr(test, allow(clippy::clone_on_copy))]
+include!("tests/cache_diagnostics.rs");
 include!("tests/support_failover/part_01.rs");
 include!("tests/support_failover/part_02.rs");
 include!("tests/commands_accounts_01/part_01.rs");
@@ -554,6 +555,7 @@ fn kv_cache_notice_explicit_loss_matrix() {
         request.call_index = 3;
         if route == "expired" {
             request.provider = "anthropic".into();
+            request.started_at = Some(Instant::now());
         }
         request.upstream_provider = Some(
             if route == "upstream" {

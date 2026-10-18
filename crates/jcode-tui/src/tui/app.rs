@@ -58,6 +58,7 @@ mod auth;
 mod auth_account_picker_saved_accounts;
 mod auth_remote;
 mod catchup;
+mod cache_diagnostics;
 mod commands;
 mod commit_log;
 pub(crate) use commit_log::CommitLogOverlay;
@@ -242,6 +243,8 @@ struct KvCacheBaseline {
 
 #[derive(Debug, Clone)]
 struct PendingKvCacheRequest {
+    /// None when usage arrived without a matching request-start event.
+    started_at: Option<Instant>,
     cache_ttl_secs: Option<u64>,
     turn_number: usize,
     call_index: u16,
@@ -1955,6 +1958,7 @@ impl App {
         self.mark_stream_usage_call_boundary();
 
         self.kv_cache.pending_kv_cache_request = Some(PendingKvCacheRequest {
+            started_at: Some(Instant::now()),
             turn_number,
             call_index: self.kv_cache.kv_cache_turn_call_index,
             cache_ttl_secs: crate::tui::cache_ttl_for_provider_model(
@@ -2006,6 +2010,7 @@ impl App {
         self.kv_cache.current_api_usage_recorded = false;
         self.mark_stream_usage_call_boundary();
         self.kv_cache.pending_kv_cache_request = Some(PendingKvCacheRequest {
+            started_at: Some(Instant::now()),
             turn_number,
             call_index: self.kv_cache.kv_cache_turn_call_index,
             cache_ttl_secs: crate::tui::cache_ttl_for_provider_model(
@@ -2218,6 +2223,7 @@ impl App {
         let baseline_session_id = self.kv_cache_session_id();
 
         if !has_cache_telemetry {
+            self.log_kv_cache_usage_summary(&request, optimal_input_tokens, effective_prompt_tokens);
             self.kv_cache.kv_cache_baseline = Some(KvCacheBaseline {
                 session_id: baseline_session_id,
                 cache_generation: request.cache_generation,
@@ -2262,7 +2268,7 @@ impl App {
             self.streaming.streaming_cache_creation_tokens;
         self.token_accounting.last_cache_optimal_input_tokens = optimal_input_tokens;
 
-        self.log_kv_cache_usage_summary(&request, optimal_input_tokens);
+        self.log_kv_cache_usage_summary(&request, optimal_input_tokens, effective_prompt_tokens);
 
         self.kv_cache.kv_cache_baseline = Some(KvCacheBaseline {
             session_id: baseline_session_id,
@@ -2282,14 +2288,11 @@ impl App {
         &self,
         request: &PendingKvCacheRequest,
         optimal_input_tokens: Option<u64>,
+        prompt_tokens: u64,
     ) {
         let input_tokens = self.streaming.streaming_input_tokens;
         let read_tokens = self.streaming.streaming_cache_read_tokens.unwrap_or(0);
         let creation_tokens = self.streaming.streaming_cache_creation_tokens.unwrap_or(0);
-        let prompt_tokens = self
-            .token_accounting
-            .last_cache_prompt_tokens
-            .unwrap_or(input_tokens);
         let read_pct = ratio_pct(read_tokens, prompt_tokens);
         let creation_pct = ratio_pct(creation_tokens, prompt_tokens);
         let optimal_read_pct = optimal_input_tokens.map(|optimal| ratio_pct(read_tokens, optimal));
@@ -2412,7 +2415,7 @@ impl App {
              system_chars={:?} baseline_system_chars={:?} tools_json_chars={:?} baseline_tools_json_chars={:?} \
              messages_json_chars={:?} baseline_messages_json_chars={:?} ephemeral_chars={:?} baseline_ephemeral_chars={:?} \
              ephemeral_message_count={:?} baseline_ephemeral_message_count={:?} message_hashes_present={} baseline_message_hashes_present={} \
-             connection={:?} status_detail={:?}",
+             connection={:?} status_detail={:?} {}",
             request.turn_number,
             request.call_index,
             request.provider,
@@ -2468,11 +2471,13 @@ impl App {
             baseline_hashes_present,
             self.connection_type.as_deref(),
             self.status_detail.as_deref(),
+            self.kv_cache_diagnostic_fields(request, prompt_tokens),
         ));
     }
 
     fn fallback_pending_kv_cache_request(&self) -> PendingKvCacheRequest {
         PendingKvCacheRequest {
+            started_at: None,
             turn_number: self
                 .display_messages
                 .iter()
@@ -2653,7 +2658,10 @@ impl App {
 
         if let Some(ttl_secs) = baseline.cache_ttl_secs
             && !crate::provider::cache_ttl_is_estimate(&baseline.provider)
-            && baseline.completed_at.elapsed() >= Duration::from_secs(ttl_secs)
+            && request
+                .started_at
+                .and_then(|start| start.checked_duration_since(baseline.completed_at))
+                .is_some_and(|age| age >= Duration::from_secs(ttl_secs))
         {
             return KvCacheMissReason::Expired;
         }
