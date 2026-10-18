@@ -69,22 +69,28 @@ fn break_even_matches_measurements() {
 fn decide_respects_mode_size_and_endpoint() {
     let big = jsonish(400_000);
     assert_eq!(
-        decide(&big, CompressionMode::Off, true, 1e6).0,
+        decide(&big, CompressionMode::Off, Some(BodyEncoding::Gzip), 1e6).0,
         Decision::Raw("disabled")
     );
     assert_eq!(
-        decide(&big, CompressionMode::Auto, false, 1e6).0,
+        decide(&big, CompressionMode::Auto, None, 1e6).0,
         Decision::Raw("endpoint")
     );
     assert_eq!(
-        decide(&jsonish(8_000), CompressionMode::Always, true, 1e6).0,
+        decide(
+            &jsonish(8_000),
+            CompressionMode::Always,
+            Some(BodyEncoding::Gzip),
+            1e6
+        )
+        .0,
         Decision::Raw("small")
     );
     assert_eq!(
-        decide(&big, CompressionMode::Auto, true, 2e9).0,
+        decide(&big, CompressionMode::Auto, Some(BodyEncoding::Gzip), 2e9).0,
         Decision::Raw("fast-uplink")
     );
-    let (decision, bytes) = decide(&big, CompressionMode::Auto, true, 10e6);
+    let (decision, bytes) = decide(&big, CompressionMode::Auto, Some(BodyEncoding::Gzip), 10e6);
     assert!(matches!(decision, Decision::Gzip { .. }), "{decision:?}");
     let mut out = Vec::new();
     flate2::read::GzDecoder::new(bytes.unwrap().as_slice())
@@ -106,7 +112,13 @@ fn incompressible_body_stays_raw_in_auto() {
         })
         .collect();
     assert_eq!(
-        decide(&noise, CompressionMode::Auto, true, 10e6).0,
+        decide(
+            &noise,
+            CompressionMode::Auto,
+            Some(BodyEncoding::Gzip),
+            10e6
+        )
+        .0,
         Decision::Raw("low-ratio")
     );
 }
@@ -140,4 +152,95 @@ fn ewma_moves_toward_new_samples() {
     let est = uplink_estimate_bps().unwrap();
     assert!(est < 100e6 && est > 10e6);
     reset_uplink_for_tests(None);
+}
+
+#[test]
+fn endpoint_encodings_match_live_probes() {
+    assert_eq!(
+        endpoint_encoding("https://api.openai.com/v1/responses"),
+        Some(BodyEncoding::Zstd)
+    );
+    assert_eq!(
+        endpoint_encoding("https://api.anthropic.com/v1/messages?beta=true"),
+        Some(BodyEncoding::Gzip)
+    );
+    assert_eq!(
+        endpoint_encoding("https://chatgpt.com/backend-api/codex/responses"),
+        Some(BodyEncoding::Gzip)
+    );
+    // chat/completions rejected both gzip and zstd live.
+    assert_eq!(
+        endpoint_encoding("https://api.openai.com/v1/chat/completions"),
+        None
+    );
+    assert_eq!(
+        endpoint_encoding("https://api.openai.com.evil.example/v1/responses"),
+        None
+    );
+}
+
+#[test]
+fn zstd_roundtrips_and_beats_gzip_ratio() {
+    // Varied, conversation-like JSON: realistic 2-6x ratio, far below the cap.
+    let mut x = 0x2545F4914F6CDD1Du64;
+    let mut big = String::from("[");
+    while big.len() < 400_000 {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        big.push_str(&format!(
+            r#"{{"type":"function_call_output","call_id":"call_{x:016x}","output":"line {} of file_{}.rs: let v{} = {};"}},"#,
+            x % 977,
+            x % 53,
+            x % 31,
+            x % 100_003
+        ));
+    }
+    let big = big.into_bytes();
+    let (decision, bytes) = decide(
+        &big,
+        CompressionMode::Always,
+        Some(BodyEncoding::Zstd),
+        10e6,
+    );
+    let Decision::Zstd { compressed_len } = decision else {
+        panic!("{decision:?}");
+    };
+    let bytes = bytes.unwrap();
+    assert_eq!(bytes.len(), compressed_len);
+    assert!(big.len() / compressed_len < MAX_ZSTD_EXPANSION);
+    assert_eq!(zstd::bulk::decompress(&bytes, big.len()).unwrap(), big);
+    let gzip_len = gzip_fast(&big).unwrap().len();
+    assert!(
+        compressed_len < gzip_len,
+        "zstd-1 {compressed_len} vs gzip-1 {gzip_len}"
+    );
+}
+
+#[test]
+fn zstd_respects_openai_expansion_limit() {
+    // Pure repetition compresses far past OpenAI's ~100x expansion limit
+    // (live probe: 82x accepted, 142x rejected with HTTP 413).
+    let padding = vec![b'a'; 2_000_000];
+    assert_eq!(
+        decide(
+            &padding,
+            CompressionMode::Always,
+            Some(BodyEncoding::Zstd),
+            1e6
+        )
+        .0,
+        Decision::Raw("expansion-limit")
+    );
+    // gzip endpoints have no such limit.
+    assert!(matches!(
+        decide(
+            &padding,
+            CompressionMode::Always,
+            Some(BodyEncoding::Gzip),
+            1e6
+        )
+        .0,
+        Decision::Gzip { .. }
+    ));
 }

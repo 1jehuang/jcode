@@ -12,6 +12,9 @@ anyhow = "1"
 async-trait = "0.1"
 bytes = "1"
 flate2 = "1"
+# Request-body compression for api.openai.com, which accepts only identity or
+# zstd. Default features off: we only need the bulk encoder.
+zstd = { version = "0.14", default-features = false }
 futures = "0.3"
 httpdate = "1"
 jcode-logging = { path = "../jcode-logging" }

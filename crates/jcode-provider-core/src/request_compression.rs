@@ -111,20 +111,51 @@ fn reset_uplink_for_tests(value: Option<f64>) {
     }
 }
 
-/// Whether an endpoint is known to accept gzip-encoded request bodies.
-/// Verified live: api.anthropic.com (API key and OAuth) and the ChatGPT Codex
-/// backend. Everything else is assumed unsupported.
-pub fn endpoint_accepts_gzip(url: &str) -> bool {
-    let Some(rest) = url.strip_prefix("https://") else {
-        return false;
-    };
+/// A request-body content coding an endpoint is known to accept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BodyEncoding {
+    Gzip,
+    Zstd,
+}
+
+impl BodyEncoding {
+    fn header_value(self) -> &'static str {
+        match self {
+            Self::Gzip => "gzip",
+            Self::Zstd => "zstd",
+        }
+    }
+}
+
+/// Highest raw/compressed ratio sent zstd-encoded. api.openai.com rejects
+/// bodies past an "expansion limit" (HTTP 413): a live probe accepted 82x and
+/// rejected 142x. Real session JSON is 2-4x; anything this extreme is
+/// synthetic padding, which is sent raw rather than risk a hard failure.
+const MAX_ZSTD_EXPANSION: usize = 50;
+
+/// The content coding an endpoint is verified to accept, if any. Verified live
+/// (real request decoded, truncated body rejected):
+/// - gzip: api.anthropic.com `/v1/messages` (API key and OAuth), chatgpt.com
+///   Codex backend.
+/// - zstd: api.openai.com `/v1/responses` (gzip is rejected there).
+///
+/// OpenRouter, the jcode router, `/v1/chat/completions`, and any custom or
+/// proxied base URL are never assumed to support compressed bodies.
+pub fn endpoint_encoding(url: &str) -> Option<BodyEncoding> {
+    let rest = url.strip_prefix("https://")?;
     let host = rest.split(['/', '?', '#']).next().unwrap_or_default();
     let path = &rest[host.len()..];
     match host.to_ascii_lowercase().as_str() {
-        "api.anthropic.com" => path.starts_with("/v1/messages"),
-        "chatgpt.com" => path.starts_with("/backend-api/codex/"),
-        _ => false,
+        "api.anthropic.com" if path.starts_with("/v1/messages") => Some(BodyEncoding::Gzip),
+        "chatgpt.com" if path.starts_with("/backend-api/codex/") => Some(BodyEncoding::Gzip),
+        "api.openai.com" if path.starts_with("/v1/responses") => Some(BodyEncoding::Zstd),
+        _ => None,
     }
+}
+
+/// Whether an endpoint is known to accept gzip-encoded request bodies.
+pub fn endpoint_accepts_gzip(url: &str) -> bool {
+    endpoint_encoding(url) == Some(BodyEncoding::Gzip)
 }
 
 /// Predicted wall-clock saving from sending `compressed` bytes instead of `raw`
@@ -140,6 +171,7 @@ pub fn predicted_saving_secs(raw: usize, compressed: usize, uplink_bps: f64) -> 
 pub enum Decision {
     Raw(&'static str),
     Gzip { compressed_len: usize },
+    Zstd { compressed_len: usize },
 }
 
 /// Decide how to send a body. Compresses lazily: skips encode work entirely
@@ -147,15 +179,15 @@ pub enum Decision {
 fn decide(
     raw: &[u8],
     mode: CompressionMode,
-    eligible: bool,
+    encoding: Option<BodyEncoding>,
     uplink_bps: f64,
 ) -> (Decision, Option<Vec<u8>>) {
     if mode == CompressionMode::Off {
         return (Decision::Raw("disabled"), None);
     }
-    if !eligible {
+    let Some(encoding) = encoding else {
         return (Decision::Raw("endpoint"), None);
-    }
+    };
     if raw.len() < MIN_COMPRESS_BYTES {
         return (Decision::Raw("small"), None);
     }
@@ -164,19 +196,34 @@ fn decide(
     {
         return (Decision::Raw("fast-uplink"), None);
     }
-    let Some(compressed) = gzip_fast(raw) else {
+    let compressed = match encoding {
+        BodyEncoding::Gzip => gzip_fast(raw),
+        BodyEncoding::Zstd => zstd_fast(raw),
+    };
+    let Some(compressed) = compressed else {
         return (Decision::Raw("encode-error"), None);
     };
+    if encoding == BodyEncoding::Zstd && raw.len() > compressed.len() * MAX_ZSTD_EXPANSION {
+        return (Decision::Raw("expansion-limit"), None);
+    }
     let worth_it = match mode {
         CompressionMode::Always => compressed.len() < raw.len(),
         _ => predicted_saving_secs(raw.len(), compressed.len(), uplink_bps) >= min_saving,
     };
-    if worth_it {
-        let compressed_len = compressed.len();
-        (Decision::Gzip { compressed_len }, Some(compressed))
-    } else {
-        (Decision::Raw("low-ratio"), None)
+    if !worth_it {
+        return (Decision::Raw("low-ratio"), None);
     }
+    let compressed_len = compressed.len();
+    let decision = match encoding {
+        BodyEncoding::Gzip => Decision::Gzip { compressed_len },
+        BodyEncoding::Zstd => Decision::Zstd { compressed_len },
+    };
+    (decision, Some(compressed))
+}
+
+fn zstd_fast(raw: &[u8]) -> Option<Vec<u8>> {
+    // Level 1 is zstd's fastest standard level and still beats gzip-1's ratio.
+    zstd::bulk::compress(raw, 1).ok()
 }
 
 fn gzip_fast(raw: &[u8]) -> Option<Vec<u8>> {
@@ -240,18 +287,19 @@ pub fn json_body<T: serde::Serialize + ?Sized>(
     mode: CompressionMode,
 ) -> anyhow::Result<reqwest::RequestBuilder> {
     let raw = serde_json::to_vec(body)?;
-    let eligible = endpoint_accepts_gzip(url);
+    let encoding = endpoint_encoding(url);
+    let eligible = encoding.is_some();
     let uplink = uplink_estimate_bps();
     let started = Instant::now();
-    let (decision, compressed) = decide(&raw, mode, eligible, uplink.unwrap_or(DEFAULT_UPLINK_BPS));
+    let (decision, compressed) = decide(&raw, mode, encoding, uplink.unwrap_or(DEFAULT_UPLINK_BPS));
     let builder = builder.header(reqwest::header::CONTENT_TYPE, "application/json");
     let raw_len = raw.len();
-    let (builder, wire) = match compressed {
-        Some(bytes) => (
-            builder.header(reqwest::header::CONTENT_ENCODING, "gzip"),
+    let (builder, wire) = match (compressed, encoding) {
+        (Some(bytes), Some(encoding)) => (
+            builder.header(reqwest::header::CONTENT_ENCODING, encoding.header_value()),
             bytes,
         ),
-        None => (builder, raw),
+        _ => (builder, raw),
     };
     if raw_len >= MIN_COMPRESS_BYTES {
         jcode_logging::info(&format!(
