@@ -130,9 +130,11 @@ use file_diff_ui::{
 };
 pub(crate) use header::capitalize;
 use inline_ui::{clear_suggested_reply_hit_regions, draw_inline_ui};
+#[cfg(test)]
+pub(crate) use inline_ui::draw_suggested_replies_panel;
 pub(crate) use inline_ui::{
-    draw_suggested_replies_panel, inline_ui_height,
-    suggested_reply_target_at as suggested_reply_target_from_screen, truncate_to_display_width,
+    inline_ui_height, suggested_reply_target_at as suggested_reply_target_from_screen,
+    truncate_to_display_width,
 };
 pub(crate) use layout_support::{draw_side_panel_markdown, side_panel_dismiss_area};
 pub(crate) use memory_estimates::{debug_memory_profile, debug_side_panel_memory_profile};
