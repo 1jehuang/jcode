@@ -45,7 +45,22 @@ pub(super) async fn fetch_models_from_api(
     models_cache: Arc<RwLock<ModelsCache>>,
     cache_namespace: Option<String>,
 ) -> Result<Vec<ModelInfo>> {
-    let url = format!("{}/models", api_base);
+    // Native Muse subscription lives on the official api.meta.ai base but its
+    // catalog is GET /muse-code/models (not /v1/models). Only this namespace
+    // and only when the api base matches the pinned official base is eligible,
+    // so no other profile infers a non-/models entitlement from catalog alone.
+    let url = if cache_namespace.as_deref() == Some("muse-subscription")
+        && api_base.trim_end_matches('/') == "https://api.meta.ai/v1"
+    {
+        // Drop the trailing /v1: https://api.meta.ai + /muse-code/models
+        let base_no_v1 = api_base
+            .trim_end_matches('/')
+            .strip_suffix("/v1")
+            .unwrap_or(api_base.trim_end_matches('/'));
+        format!("{}/muse-code/models", base_no_v1)
+    } else {
+        format!("{}/models", api_base)
+    };
     let request = auth.apply_catalog(client.get(&url), &api_base).await?;
     let response = apply_kimi_coding_agent_headers(request, &api_base, None)
             .send()
