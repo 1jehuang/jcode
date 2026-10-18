@@ -5,7 +5,11 @@ pub(super) fn auto_scriptable_flow_reason(
     options: &LoginOptions,
     stdin_is_terminal: bool,
 ) -> Option<&'static str> {
-    if options.print_auth_url || options.complete || options.has_provided_input() {
+    if options.claude_code
+        || options.print_auth_url
+        || options.complete
+        || options.has_provided_input()
+    {
         return None;
     }
 

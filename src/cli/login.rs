@@ -15,6 +15,8 @@ use crate::provider_catalog::save_named_api_key;
 mod existing_key_notice;
 mod google;
 mod jcode_device;
+mod native_reuse;
+use native_reuse::reuse_claude_code_native_snapshot;
 mod next_step;
 mod scriptable;
 use google::*;
@@ -23,6 +25,7 @@ use scriptable::*;
 #[derive(Debug, Clone, Default)]
 pub struct LoginOptions {
     pub no_browser: bool,
+    pub claude_code: bool,
     pub print_auth_url: bool,
     pub callback_url: Option<String>,
     pub auth_code: Option<String>,
@@ -208,6 +211,9 @@ pub async fn run_login(
     options: LoginOptions,
 ) -> Result<()> {
     options.validate()?;
+    if options.claude_code && login_provider_for_choice(choice).is_none() {
+        anyhow::bail!("--claude-code requires --provider claude.");
+    }
     if let Some(provider) = login_provider_for_choice(choice) {
         return run_login_provider(provider, account_label, options).await;
     }
@@ -253,6 +259,7 @@ pub async fn run_login_provider(
     options: LoginOptions,
 ) -> Result<()> {
     options.validate()?;
+    validate_claude_code_method(provider, account_label, &options)?;
     if options.cancel {
         return cancel_scriptable_login(provider, &options);
     }
@@ -341,6 +348,9 @@ pub async fn run_login_provider(
             LoginProviderTarget::Jcode => login_jcode_flow(options.no_browser)
                 .await
                 .map(|_| LoginFlowOutcome::Completed),
+            LoginProviderTarget::Claude if options.claude_code => {
+                login_claude_code_flow().map(|_| LoginFlowOutcome::Completed)
+            }
             LoginProviderTarget::Claude => login_claude_flow(account_label, options.no_browser)
                 .await
                 .map(|_| LoginFlowOutcome::Completed),
@@ -621,6 +631,198 @@ async fn login_claude_flow(requested_label: Option<&str>, no_browser: bool) -> R
         eprintln!("Profile email: {}", email);
     }
     crate::telemetry::record_auth_success("claude", "oauth");
+    Ok(())
+}
+
+fn validate_claude_code_method(
+    provider: LoginProviderDescriptor,
+    account_label: Option<&str>,
+    options: &LoginOptions,
+) -> Result<()> {
+    if !options.claude_code {
+        return Ok(());
+    }
+    anyhow::ensure!(
+        provider.target == LoginProviderTarget::Claude,
+        "--claude-code is only available with --provider claude."
+    );
+    anyhow::ensure!(
+        account_label.is_none(),
+        "--claude-code cannot select a Jcode account label; Claude Code chooses its own account."
+    );
+    anyhow::ensure!(
+        !options.no_browser && !options.json && !options.uses_scriptable_flow()?,
+        "--claude-code requires an interactive terminal and cannot use scriptable or --no-browser login flags."
+    );
+    anyhow::ensure!(
+        crate::external_auth::can_prompt_for_external_auth(),
+        "--claude-code requires an interactive terminal on this machine. For SSH, run the command on the remote host."
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only answer for the Claude Code reuse prompt.
+    static CLAUDE_CODE_REUSE_TEST_APPROVAL: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn confirm_claude_code_reuse(native: bool) -> Result<()> {
+    #[cfg(test)]
+    if let Some(approved) = CLAUDE_CODE_REUSE_TEST_APPROVAL.with(std::cell::Cell::get) {
+        anyhow::ensure!(
+            approved,
+            "Claude Code signed in, but Jcode was not granted access to its credentials."
+        );
+        return Ok(());
+    }
+    eprintln!(
+        "\nClaude Code signed in. Jcode makes direct Anthropic requests, so it needs permission to reuse the CLI's OAuth credentials."
+    );
+    if native {
+        eprintln!(
+            "Jcode copies macOS Keychain credentials into its own store. Both tools may refresh the same token, so either login may need renewal."
+        );
+    } else {
+        eprintln!("Jcode will read Claude Code's credentials file for future requests.");
+    }
+    eprint!("Allow Jcode to use this Claude Code login? [y/N]: ");
+    io::stderr().flush()?;
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer)?;
+    anyhow::ensure!(
+        matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes"),
+        "Claude Code signed in, but Jcode was not granted access to its credentials."
+    );
+    Ok(())
+}
+
+fn usable_claude_code_credentials(credentials: &auth::claude::ClaudeCredentials) -> bool {
+    !credentials.refresh_token.trim().is_empty()
+        || (!credentials.access_token.trim().is_empty()
+            && credentials.expires_at > chrono::Utc::now().timestamp_millis())
+}
+
+fn ensure_claude_code_credentials_selected(
+    expected: &auth::claude::ClaudeCredentials,
+) -> Result<()> {
+    let selected = auth::claude::load_credentials()?;
+    anyhow::ensure!(
+        selected.access_token == expected.access_token
+            && selected.refresh_token == expected.refresh_token,
+        "Another trusted Claude credential source is taking precedence over this login. Review Jcode's trusted external auth sources before retrying."
+    );
+    Ok(())
+}
+
+fn reuse_claude_code_file(
+    source: auth::claude::ExternalClaudeAuthSource,
+    path: &Path,
+) -> Result<bool> {
+    let already_trusted =
+        crate::config::Config::external_auth_source_allowed_for_path(source.source_id(), path);
+    if !already_trusted {
+        confirm_claude_code_reuse(false)?;
+    }
+    let credentials = match auth::claude::load_claude_code_credentials() {
+        Ok(credentials) if usable_claude_code_credentials(&credentials) => credentials,
+        _ => return Ok(false),
+    };
+    if !already_trusted {
+        auth::claude::trust_external_auth_source(source)?;
+    }
+    if let Err(err) = ensure_claude_code_credentials_selected(&credentials) {
+        // Do not leave a file trusted by a login that did not take effect: a
+        // later update could otherwise make Jcode select it without approval.
+        if !already_trusted {
+            crate::config::Config::revoke_external_auth_source_for_path(source.source_id(), path)?;
+            auth::AuthStatus::invalidate_cache();
+        }
+        return Err(err);
+    }
+    Ok(true)
+}
+
+fn reuse_claude_code_native(file_path: &Path) -> Result<bool> {
+    if !auth::claude::native_credentials_present() {
+        return Ok(false);
+    }
+    if !auth::claude::native_source_allowed() {
+        confirm_claude_code_reuse(true)?;
+    }
+    // Reading Keychain secrets is permitted only after approval. The item may
+    // exist but be locked, in which case the file source can still be tried.
+    let credentials = match auth::claude::load_native_credentials() {
+        Ok(credentials) if usable_claude_code_credentials(&credentials) => credentials,
+        _ => return Ok(false),
+    };
+
+    reuse_claude_code_native_snapshot(file_path, credentials, || {})
+}
+
+fn configured_claude_file_is_unambiguous(
+    path: &Path,
+    existed_before_login: bool,
+    modified_before_login: Option<std::time::SystemTime>,
+    native_present: bool,
+) -> Result<()> {
+    if existed_before_login && native_present {
+        let modified_after_login = std::fs::metadata(path)
+            .and_then(|file| file.modified())
+            .ok();
+        anyhow::ensure!(
+            modified_before_login
+                .zip(modified_after_login)
+                .is_some_and(|(before, after)| before != after),
+            "Claude Code did not update the configured credentials file, while native credentials also exist. Jcode cannot tell which account just signed in. Refresh or remove the stale file, or use Jcode's OAuth login."
+        );
+    }
+    Ok(())
+}
+
+fn login_claude_code_flow() -> Result<()> {
+    let source = auth::claude::ExternalClaudeAuthSource::ClaudeCode;
+    let file_path = source.path()?;
+    let configured_file = std::env::var_os("CLAUDE_CONFIG_DIR").is_some_and(|dir| !dir.is_empty());
+    let file_existed_before_login = file_path.exists();
+    let file_modified_before_login = std::fs::metadata(&file_path)
+        .and_then(|file| file.modified())
+        .ok();
+    eprintln!("Signing in with Claude Code on this machine (`claude auth login`)…");
+    let status = std::process::Command::new("claude")
+        .args(["auth", "login"])
+        .status()
+        .context("Failed to start command: claude auth login")?;
+    anyhow::ensure!(
+        status.success(),
+        "Command exited with non-zero status: claude auth login ({status})"
+    );
+
+    // Jcode makes direct Anthropic requests, so a CLI login by itself is not a
+    // Jcode login. Keep the existing external-source consent boundary intact.
+    let mut reused = false;
+    if configured_file && file_path.exists() {
+        configured_claude_file_is_unambiguous(
+            &file_path,
+            file_existed_before_login,
+            file_modified_before_login,
+            auth::claude::native_credentials_present(),
+        )?;
+        reused = reuse_claude_code_file(source, &file_path)?;
+    }
+    if !reused {
+        reused = reuse_claude_code_native(&file_path)?;
+    }
+    if !reused && !configured_file && file_path.exists() {
+        reused = reuse_claude_code_file(source, &file_path)?;
+    }
+    anyhow::ensure!(
+        reused,
+        "Claude Code signed in, but no reusable OAuth credentials were found. Check `claude auth status`, or use `jcode login --provider claude` for Jcode's OAuth flow."
+    );
+    eprintln!("Claude Code login is now available to Jcode.");
+    crate::telemetry::record_auth_success("claude", "claude_code_cli");
     Ok(())
 }
 
@@ -1226,3 +1428,7 @@ fn maybe_open_browser(target: &str, no_browser: bool) -> bool {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "login/native_stage_tests.rs"]
+mod native_stage_tests;
