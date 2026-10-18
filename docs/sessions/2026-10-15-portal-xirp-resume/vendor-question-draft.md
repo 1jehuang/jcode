@@ -136,3 +136,93 @@ contact channel exists for Xirp.** The product is Spotify-internal:
 the section above. Do not edit the questions — they were tuned against
 the XJ-01 negative result and the 5-line proof in
 `docs/XIRP_CUSTOM_HARNESS.md`.**
+
+---
+
+## Status update (2026-10-17)
+
+§24 — all 3 unblock conditions for XJ-03 were marked resolved on
+2026-10-17T07:14Z. The orchestrator's `scripts/portal-mcp-bridge.json`
+was re-verified live (2026-10-17T22:46Z) against the production CIMD
+URL. The verification **contradicted the prior unblock claim** —
+`auth.kooshapari.com` is NXDOMAIN at the Cloudflare authoritative NS
+and at 1.1.1.1 / 8.8.8.8; `https://kooshapari.com/oauth/client-metadata.json`
+returns 404. The bridge mechanism itself passes (`mcp-remote@0.15.1`
+correctly derives loopback port 47290 and emits a valid authorize URL).
+Arg-order defect in the bridge config was fixed in commit
+`39f2ea76f` (2026-10-18T01:25Z). The DNS / Cloudflare Worker
+re-deploy is the operator's only remaining step for XJ-03; XJ-07
+is shipped to master. XJ-02, XJ-04, XJ-05 are still blocked on
+the @chirp/squab answers below.
+
+## Status update (2026-10-18T01:25Z)
+
+XJ-07 (failure and rollback verification) shipped to master at
+`530511a66` + `c79951b05` on 2026-10-17. §24.2 captures the bridge
+arg-order fix at `39f2ea76f` on 2026-10-18T01:25Z. The §24
+"all 3 unblocked" claim is now superseded by §24.1 + §24.2 — the
+defect was real (NXDOMAIN) and is being addressed (mock CIMD in
+flight on `feat/xj03-mock-cimd-as-20261017`).
+
+A targeted audit (`XJ-AUDIT-2026-10-17.md`, 77 lines) recommends
+**three new vendor questions (Q4–Q6)** that close the
+Q2/Q3-specificity gap. They are listed in the "Short version"
+supplement below. If the operator chooses to send, paste both the
+Short version (Q1–Q3) and the Q4–Q6 supplement as a single thread.
+
+## Supplement: Q4–Q6 (per-item mapping)
+
+These three additions close the Q2/Q3-specificity gap noted in
+`XJ-AUDIT-2026-10-17.md` §"Vendor question quality check". Each
+question is mapped 1:1 to a bounded work item so the vendor can
+return an answer tied to a concrete interface or schema.
+
+### Q4 — `AgentSessionAdapter` interface for a sixth harness (XJ-02, XJ-04, XJ-05)
+
+> For the five harnesses that ship with `@chirp/squab` 0.11.11
+> (`claude`, `codex`, `gemini`, `pi`, `cursor`), can you share the
+> TypeScript interface (or schema) that each harness implements?
+> Specifically, I would like to know the shape of
+> `sessionRoot(cwd)`, `locateLatest`, `findBySessionId`,
+> `readNative` / `writeNative`, `resumeArgs`, the turn-state
+> detector, and the launchable-spec. Jcode will implement against
+> this and upstream the patch.
+>
+> *Why:* XJ-02 (register Jcode as a sixth harness), XJ-04 (map
+> working / waiting / idle / failed / completed states), and
+> XJ-05 (transcript round-trip) are blocked solely on this
+> unmeasured interface.
+>
+> *Expected response:* pasted interface/schema, or a named doc
+> path; or "spec is internal, cannot share".
+
+### Q5 — Usage / cost extraction contract (XJ-06)
+
+> Which usage fields must an adapter expose for `@chirp/squab` to
+> accept it? At minimum, input/output token counts and the model
+> id. If cost must be reported, how should an unknown price be
+> represented so records are not fabricated?
+>
+> *Why:* XJ-06 is the only bounded item where Jcode can produce
+> data today (`jcode usage --json` with explicit `price: null` on
+> unknown prices) but has no consumer in the absence of a
+> registered adapter.
+>
+> *Expected response:* a field list, or an explicit
+> "usage is not part of the adapter contract" ruling.
+
+### Q6 — Transcript round-trip / import format (XJ-05)
+
+> What format does `readNative` consume for transcript import?
+> Specifically, does it require JSONL (the shape the Claude / Pi
+> adapters read) or will it accept a native JSON store
+> (Jcode's current shape at
+> `~/.jcode/sessions/session_*_<ms>_<hash>.json`)? Is a
+> fixture-based acceptance test required for an import path?
+>
+> *Why:* Jcode persists JSON, not JSONL; the answer decides
+> whether XJ-05 needs a parser or a line-reader, and whether the
+> fixture work can be skipped.
+>
+> *Expected response:* a sample fixture or a format spec; or
+> "JSONL only".
