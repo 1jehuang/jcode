@@ -4,7 +4,7 @@
 //! so they can be resumed within jcode.
 
 use crate::message::{ContentBlock, Role};
-use crate::session::{Session, SessionStatus, StoredMessage};
+use crate::session::{Session, StoredMessage};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 pub use jcode_import_core::repo_ranking;
@@ -722,6 +722,14 @@ pub fn import_external_resume_id(resume_id: &str) -> Result<Option<String>> {
         return Ok(Some(session.id));
     }
 
+    // An unreadable opencode.db must not hide a match in the other stores, so
+    // its error is only returned when nothing else matched.
+    let opencode_db = opencode_db_with_session(resume_id);
+    if let Ok(Some(db)) = &opencode_db {
+        let session = import_opencode_db_session(db, resume_id)?;
+        return Ok(Some(session.id));
+    }
+
     if let Ok(path) = find_opencode_session_file(resume_id) {
         let session = import_opencode_session_from_path(&path, Some(resume_id))?;
         return Ok(Some(session.id));
@@ -738,7 +746,7 @@ pub fn import_external_resume_id(resume_id: &str) -> Result<Option<String>> {
         return Ok(Some(session.id));
     }
 
-    Ok(None)
+    opencode_db.map(|_| None)
 }
 
 /// Import a Claude Code session from a file path
@@ -1005,36 +1013,8 @@ fn append_text_message(
     });
 }
 
-fn finalize_imported_session(
-    mut session: Session,
-    created_at: DateTime<Utc>,
-    updated_at: Option<DateTime<Utc>>,
-) -> Result<Session> {
-    // Never overwrite a jcode-side continuation with a shorter external
-    // transcript. This protection applies to every importer, not only Claude.
-    if crate::session::session_exists(&session.id)
-        && let Ok(mut existing) = Session::load(&session.id)
-        && existing.messages.len() > session.messages.len()
-    {
-        if normalize_imported_history(&mut existing, false) {
-            existing.save()?;
-        }
-        return Ok(existing);
-    }
-
-    let original_messages = session.messages.len();
-    session.created_at = created_at;
-    session.updated_at = updated_at.unwrap_or(created_at);
-    session.last_active_at = updated_at.or(Some(created_at));
-    session.status = SessionStatus::Closed;
-    normalize_imported_history(&mut session, true);
-    session.save()?;
-    crate::logging::info(&format!(
-        "Imported session prepared: source_messages={original_messages} kept_messages={}",
-        session.messages.len()
-    ));
-    Ok(session)
-}
+mod finalize;
+use finalize::{finalize_imported_session, finalize_imported_session_with_omissions};
 
 fn find_codex_session_file(session_id: &str) -> Result<PathBuf> {
     let root = crate::storage::user_home_path(".codex/sessions")?;
@@ -1302,14 +1282,88 @@ fn find_opencode_session_file(session_id: &str) -> Result<PathBuf> {
 }
 
 pub fn import_opencode_session(session_id: &str) -> Result<Session> {
-    let session_path = find_opencode_session_file(session_id)?;
-    import_opencode_session_from_path(&session_path, Some(session_id))
+    let db = opencode_db_with_session(session_id);
+    if let Ok(Some(db)) = &db {
+        return import_opencode_db_session(db, session_id);
+    }
+    // A legacy session still imports when opencode.db is unreadable.
+    match find_opencode_session_file(session_id) {
+        Ok(path) => import_opencode_session_from_path(&path, Some(session_id)),
+        Err(not_found) => Err(db.err().unwrap_or(not_found)),
+    }
+}
+
+/// The OpenCode database path, if it exists and contains `session_id`.
+fn opencode_db_with_session(session_id: &str) -> Result<Option<PathBuf>> {
+    let Some(db) = crate::opencode_db::existing_db_path() else {
+        return Ok(None);
+    };
+    Ok(crate::opencode_db::load_session(&db, session_id)?.map(|_| db))
+}
+
+/// Import one session from OpenCode's SQLite store (OpenCode 1.17+).
+pub fn import_opencode_db_session(db_path: &Path, session_id: &str) -> Result<Session> {
+    let meta = crate::opencode_db::load_session(db_path, session_id)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "OpenCode session {} not found in {}",
+            session_id,
+            db_path.display()
+        )
+    })?;
+    let mut session = Session::create_with_id(imported_opencode_session_id(session_id), None, None);
+    session.provider_session_id = Some(session_id.to_string());
+    session.working_dir = meta.directory.clone();
+    session.title = Some(
+        meta.title
+            .as_deref()
+            .map(truncate_title)
+            .unwrap_or_else(|| format!("OpenCode session {}", session_id)),
+    );
+    let extracted = crate::opencode_db::load_import_messages(
+        db_path,
+        session_id,
+        IMPORT_HISTORY_MAX_MESSAGES,
+        IMPORT_HISTORY_MAX_TEXT_BYTES,
+        IMPORT_BLOCK_MAX_TEXT_BYTES,
+    )?;
+    let mut provider_key = meta.provider_id.clone().or(extracted.provider_id);
+    let mut model = meta.model_id.clone().or(extracted.model_id);
+    for msg in extracted.messages {
+        let role = if msg.role == "user" {
+            Role::User
+        } else {
+            Role::Assistant
+        };
+        if provider_key.is_none() {
+            provider_key = msg.provider_id.clone();
+        }
+        if model.is_none() {
+            model = msg.model_id.clone();
+        }
+        if msg.text.trim().is_empty() {
+            continue;
+        }
+        append_text_message(&mut session, role, msg.text, msg.created_at);
+    }
+    session.provider_key = provider_key.or_else(|| Some("opencode".to_string()));
+    session.model = model;
+    finalize_imported_session_with_omissions(
+        session,
+        meta.created_at,
+        Some(meta.updated_at),
+        extracted.omitted,
+    )
 }
 
 pub fn import_opencode_session_from_path(
     session_path: &Path,
     session_id_hint: Option<&str>,
 ) -> Result<Session> {
+    if crate::opencode_db::is_db_path(session_path) {
+        let session_id = session_id_hint
+            .ok_or_else(|| anyhow::anyhow!("OpenCode database import needs a session id"))?;
+        return import_opencode_db_session(session_path, session_id);
+    }
     let value: serde_json::Value = serde_json::from_reader(File::open(session_path)?)?;
     let session_id = value
         .get("id")
@@ -1500,3 +1554,7 @@ pub fn import_cursor_session_from_path(
 #[cfg(test)]
 #[path = "import_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "import_sqlite_budget_tests.rs"]
+mod sqlite_budget_tests;
