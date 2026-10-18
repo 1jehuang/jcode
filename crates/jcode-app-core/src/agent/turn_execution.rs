@@ -1194,17 +1194,31 @@ impl Agent {
         // A failed load must leave the current Agent and its concurrency lease
         // alive. Close it only after the replacement is ready to install.
         self.mark_closed();
+        let close_ms = assign_start.elapsed().as_millis();
         // Restore provider_session_id for Claude CLI session resume
         self.provider_session_id = session.provider_session_id.clone();
-        self.session = session;
+        let replaced_session = std::mem::replace(&mut self.session, session);
+        drop(replaced_session);
+        let swap_ms = assign_start.elapsed().as_millis() - close_ms;
+        let lap = Instant::now();
         self.provider.set_session_id(&self.session.id);
+        let provider_ms = lap.elapsed().as_millis();
+        let lap = Instant::now();
         self.refresh_agents_md_snapshot();
+        let agents_md_ms = lap.elapsed().as_millis();
+        let lap = Instant::now();
         self._tool_policy_registration = crate::tool::register_session_tool_policy(
             &self.session.id,
             self.allowed_tools.clone(),
             self.disabled_tools.clone(),
         );
+        let policy_ms = lap.elapsed().as_millis();
         let assign_ms = assign_start.elapsed().as_millis();
+        if assign_ms >= 50 {
+            logging::info(&format!(
+                "[TIMING] restore_session assign parts: session={session_id}, close={close_ms}ms, swap={swap_ms}ms, provider={provider_ms}ms, agents_md={agents_md_ms}ms, policy={policy_ms}ms"
+            ));
+        }
 
         let reset_start = Instant::now();
         self.reset_runtime_state_for_session_change();
