@@ -535,6 +535,8 @@ struct StashedDraft {
     pasted_contents: Vec<String>,
     pending_images: Vec<(String, String)>,
     undo: Vec<(String, usize)>,
+    undo_image_counts: Vec<usize>,
+    cleared_draft_images: Vec<(usize, Vec<(String, String)>)>,
 }
 
 fn stash_draft_for_voice(app: &mut App, transcript: &str) -> StashedDraft {
@@ -544,6 +546,8 @@ fn stash_draft_for_voice(app: &mut App, transcript: &str) -> StashedDraft {
         pasted_contents: std::mem::take(&mut app.pasted_contents),
         pending_images: std::mem::take(&mut app.pending_images),
         undo: std::mem::take(&mut app.input_undo_stack),
+        undo_image_counts: std::mem::take(&mut app.input_undo_image_counts),
+        cleared_draft_images: std::mem::take(&mut app.cleared_draft_images),
     };
     app.input = jcode_session_types::wrap_transcription(transcript);
     app.cursor_pos = app.input.len();
@@ -560,7 +564,11 @@ fn restore_draft_after_voice(app: &mut App, stash: StashedDraft) {
     app.cursor_pos = stash.cursor_pos.min(app.input.len());
     app.pasted_contents = stash.pasted_contents;
     app.pending_images = stash.pending_images;
+    // Text and image undo history travel together so undo never leaves an
+    // attachment that the restored draft does not show.
     app.input_undo_stack = stash.undo;
+    app.input_undo_image_counts = stash.undo_image_counts;
+    app.cleared_draft_images = stash.cleared_draft_images;
     app.reset_tab_completion();
     app.sync_model_picker_preview_from_input();
 }
