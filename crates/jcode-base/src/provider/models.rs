@@ -1086,8 +1086,9 @@ pub fn clear_model_unavailable_for_scope(scope: &str, model: &str) {
     if model.is_empty() {
         return;
     }
-    OPENAI_MODEL_CATALOG_SERVICE.clear_runtime_model_unavailable(scope, &model);
-    super::bump_catalog_generation();
+    if OPENAI_MODEL_CATALOG_SERVICE.clear_runtime_model_unavailable(scope, &model) {
+        super::bump_catalog_generation();
+    }
 }
 
 #[path = "model_provider_availability.rs"]
