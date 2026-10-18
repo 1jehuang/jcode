@@ -141,11 +141,10 @@ impl Agent {
             };
         }
 
-        let skills = self.current_skills_snapshot();
-        let skill_prompt = self
-            .active_skill
-            .as_ref()
-            .and_then(|name| skills.get(name).map(|skill| skill.get_prompt().to_string()));
+        // The active skill prompt is announced once in the transcript when the
+        // skill is activated (see `announce_active_skill`). Keeping it out of
+        // the system prompt means switching skills never invalidates the cache.
+        let skill_prompt: Option<String> = None;
 
         // Frozen per session so skill installs never rewrite the cached
         // system prefix. Later installs are announced in the transcript.

@@ -1437,6 +1437,7 @@ impl Agent {
                     println!("Activating skill: {}", skill.name);
                     println!("{}\n", skill.description);
                     self.active_skill = Some(invocation.name.to_string());
+                    self.announce_active_skill();
                     if let Some(prompt) = invocation.prompt {
                         if let Err(e) = self.run_once(prompt).await {
                             eprintln!("\nError: {}\n", e);

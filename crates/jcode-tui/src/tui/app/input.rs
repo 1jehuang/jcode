@@ -4007,6 +4007,12 @@ impl App {
 
             if let Some(skill) = skill {
                 self.active_skill = Some(skill_name.clone());
+                if !self.is_remote {
+                    self.append_turn_system_reminder(Some(format!(
+                        "# Active Skill\n\n{}",
+                        skill.get_prompt().trim()
+                    )));
+                }
                 self.push_display_message(DisplayMessage {
                     role: "system".to_string(),
                     content: format!("Activated skill: {} - {}", skill.name, skill.description),

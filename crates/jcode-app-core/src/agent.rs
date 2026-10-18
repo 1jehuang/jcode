@@ -830,8 +830,37 @@ impl Agent {
         let recognized = active_skill
             .as_ref()
             .is_none_or(|name| skills.get(name).is_some());
-        self.active_skill = active_skill.filter(|name| skills.get(name).is_some());
+        let next = active_skill.filter(|name| skills.get(name).is_some());
+        if next != self.active_skill {
+            self.active_skill = next;
+            self.announce_active_skill();
+        }
         recognized
+    }
+
+    /// Record the newly active skill's instructions as a hidden transcript
+    /// message. The system prompt stays byte-identical across skill changes.
+    pub(crate) fn announce_active_skill(&mut self) {
+        let Some(name) = self.active_skill.clone() else {
+            return;
+        };
+        let skills = self.current_skills_snapshot();
+        let Some(skill) = skills.get(&name) else {
+            return;
+        };
+        let text = format!(
+            "<system-reminder>\n# Active Skill\n\n{}\n</system-reminder>",
+            skill.get_prompt().trim()
+        );
+        self.add_message_with_display_role(
+            Role::User,
+            vec![ContentBlock::Text {
+                text,
+                cache_control: None,
+            }],
+            Some(StoredDisplayRole::System),
+        );
+        self.persist_session_best_effort("active skill announcement");
     }
 
     fn sync_session_compaction_state_from_manager(

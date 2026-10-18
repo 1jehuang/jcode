@@ -15,10 +15,9 @@ impl App {
         }
 
         let skills = self.current_skills_snapshot();
-        let skill_prompt = self
-            .active_skill
-            .as_ref()
-            .and_then(|name| skills.get(name).map(|s| s.get_prompt().to_string()));
+        // Announced once in the transcript on activation; never in the
+        // system prompt, so skill changes cannot invalidate the cache.
+        let skill_prompt: Option<String> = None;
         let available_skills: Vec<crate::prompt::SkillInfo> = skills
             .list()
             .iter()
