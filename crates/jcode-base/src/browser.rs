@@ -1160,8 +1160,8 @@ pub fn is_browser_running(kind: BrowserKind) -> bool {
             if name.is_empty() || !name.bytes().all(|b| b.is_ascii_digit()) {
                 continue;
             }
-            if let Ok(comm) = std::fs::read_to_string(entry.path().join("comm"))
-                && names.contains(&comm.trim())
+            if let Ok(pid) = name.parse::<u32>()
+                && linux_browser_process_matches(kind, pid)
             {
                 return true;
             }
@@ -1199,6 +1199,15 @@ pub fn is_browser_running(kind: BrowserKind) -> bool {
     {
         false
     }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_browser_process_matches(kind: BrowserKind, pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/comm"))
+        .is_ok_and(|comm| kind.process_names().contains(&comm.trim()))
+        // Exited browsers can remain in /proc until their parent reaps them.
+        // Counting one as running skips normal launch and falls into repair.
+        && platform::is_process_running(pid)
 }
 
 /// Launch a browser detached, optionally opening `url`. Returns whether a
@@ -1349,45 +1358,13 @@ async fn install_extension() -> Result<String> {
         .map_err(|_| anyhow::anyhow!("Could not convert XPI path to file URL: {}", xpi.display()))?
         .to_string();
 
-    #[cfg(target_os = "linux")]
-    {
-        let _ = tokio::process::Command::new("xdg-open")
-            .arg(&xpi_url)
-            .spawn();
-    }
-    #[cfg(target_os = "macos")]
-    {
-        // macOS has no default handler for `.xpi` files, so a plain `open <url>`
-        // fails with kLSApplicationNotFoundErr. Open the XPI directly with
-        // Firefox, which knows how to install extensions. Try the app name first,
-        // then fall back to the bundle id (covers Firefox installed under a
-        // non-default name or when it is not the default browser).
-        let opened = tokio::process::Command::new("open")
-            .args(["-a", "Firefox", &xpi_url])
-            .status()
-            .await
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if !opened {
-            let opened_by_id = tokio::process::Command::new("open")
-                .args(["-b", "org.mozilla.firefox", &xpi_url])
-                .status()
-                .await
-                .map(|s| s.success())
-                .unwrap_or(false);
-            if !opened_by_id {
-                // Last resort: let Launch Services pick a handler. This likely
-                // fails for `.xpi`, but keeps the previous behavior as a fallback.
-                let _ = tokio::process::Command::new("open").arg(&xpi_url).spawn();
-            }
-        }
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let _ = tokio::process::Command::new("cmd")
-            .args(["/C", "start", "", &xpi_url])
-            .spawn();
-    }
+    // A generic file opener may reveal the XPI in a file manager (or open it
+    // with another browser). Use the same Firefox-specific launcher as normal
+    // cold startup, including its ESR/Flatpak and platform-specific fallbacks.
+    anyhow::ensure!(
+        launch_browser_detached(BrowserKind::Firefox, Some(&xpi_url)),
+        "Could not launch Firefox to install the extension"
+    );
 
     msg.push_str("       Opened Firefox with extension install prompt.\n");
     msg.push_str("       Click \"Add\" when prompted to install the extension.\n");
