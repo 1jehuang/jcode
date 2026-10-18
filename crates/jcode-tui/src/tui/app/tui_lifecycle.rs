@@ -1572,8 +1572,10 @@ impl App {
                         app.pending_history_base = Some(base_rx);
                     }
                 }
+                mark("transcript_spawn", &mut laps);
             } else {
                 app.restore_remote_startup_history(session_id);
+                mark("transcript_sync", &mut laps);
             }
             if fresh_spawn && !reload_fast_start {
                 crate::logging::info(&format!(
@@ -1581,10 +1583,12 @@ impl App {
                     session_id
                 ));
             }
-            if let Some(restored) = Self::restore_input_for_reload(session_id) {
+            let restored_input = Self::restore_input_for_reload(session_id);
+            mark("input_read", &mut laps);
+            if let Some(restored) = restored_input {
                 app.apply_restored_reload_input(restored);
             }
-            mark("transcript_input", &mut laps);
+            mark("input_apply", &mut laps);
         }
 
         app.resume_session_id = resume_session;

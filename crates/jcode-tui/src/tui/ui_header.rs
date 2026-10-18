@@ -964,18 +964,28 @@ pub(in crate::tui) fn build_header_sections(
     app: &dyn TuiState,
     width: u16,
 ) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
+    let start = std::time::Instant::now();
     let auth = app.auth_status();
+    let auth_ms = start.elapsed().as_millis();
     let active = ActiveCredentialOverrides::from_app(app);
-    (
-        fit_header_lines(
-            build_persistent_header_with_auth(app, width, &auth, active),
-            width,
-        ),
-        fit_header_lines(
-            build_header_lines_with_auth(app, width, &auth, active),
-            width,
-        ),
-    )
+    let active_ms = start.elapsed().as_millis() - auth_ms;
+    let persistent = fit_header_lines(
+        build_persistent_header_with_auth(app, width, &auth, active),
+        width,
+    );
+    let persistent_ms = start.elapsed().as_millis() - auth_ms - active_ms;
+    let secondary = fit_header_lines(
+        build_header_lines_with_auth(app, width, &auth, active),
+        width,
+    );
+    let total_ms = start.elapsed().as_millis();
+    if total_ms >= 20 {
+        crate::logging::info(&format!(
+            "[TIMING] header_sections: total={total_ms}ms auth={auth_ms}ms active={active_ms}ms persistent={persistent_ms}ms secondary={}ms",
+            total_ms - auth_ms - active_ms - persistent_ms
+        ));
+    }
+    (persistent, secondary)
 }
 
 #[cfg(test)]
