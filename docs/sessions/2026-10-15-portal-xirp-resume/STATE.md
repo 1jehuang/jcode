@@ -1059,6 +1059,61 @@ should reach the OAuth authorize step with no further code changes.
   jcode-side blockers; recommend 2-3 new vendor questions. Dispatched to
   `session_calf`.
 
+## 24.3 ROOT CAUSE — `auth.kooshapari.com` DNS was deleted manually (2026-10-18T01:38Z)
+
+`session_macaque` DNS-forensics investigation (report:
+`AUTH-DNS-FORENSICS-2026-10-17.md`, 54 lines) pinpoints the
+operator-side root cause of the §24.1 NXDOMAIN.
+
+**Timeline:**
+
+- 2026-10-15T22:14–22:17Z — Worker `jcode-cimd` created; CNAME
+  `auth -> jcode-cimd.kooshapari.workers.dev` (proxied) created in
+  zone `kooshapari.com`. Live-verified HTTP 200.
+- 2026-10-17T08:04Z — re-probe (commit `3f4746eb5`): HTTP 200,
+  application/json, 356 B.
+- 2026-10-17T20:46:50.734Z — **`dns.record` delete** in zone
+  `kooshapari.com` (the `auth` CNAME, record id
+  `6241e2fc6850ef45807340add5caa9e3`). The **only** DNS delete in the
+  zone in the entire window. Actor: `kooshapari@gmail.com`, interface
+  `UI` (Cloudflare Dashboard), IP `66.253.120.107`. Same session
+  20:46–21:52Z: a burst of deletes/creates across `phenotype.space` and
+  `pheno.studio` — a multi-zone DNS cleanup run. The `auth` record was
+  **collaterally removed**.
+- 2026-10-17T22:46Z — NXDOMAIN observed by `session_orangutan` from
+  Cloudflare authoritative NS, 1.1.1.1, 8.8.8.8. Documented in commit
+  `19e3bcb38` (§24.1).
+
+**State of the underlying Worker:**
+
+- Worker `jcode-cimd` still exists (created 2026-10-15T22:14:13Z).
+- Route `auth.kooshapari.com/oauth/client-metadata.json -> jcode-cimd`
+  still exists in the dashboard.
+- `https://jcode-cimd.kooshapari.workers.dev/oauth/client-metadata.json`
+  returns 200 application/json right now (2026-10-18T01:37Z).
+
+**Operator re-deploy (1 click):** re-add the CNAME in the Cloudflare
+dashboard. Worker and route are already in place; the DNS record is the
+only thing missing.
+
+- Dashboard: https://dash.cloudflare.com/49dce512822987e0522f0faeffbcc0c8/kooshapari.com/dns/records
+- Record: Type `CNAME`, Name `auth`, Target `jcode-cimd.kooshapari.workers.dev`,
+  Proxy **ON** (orange cloud, non-negotiable for the Worker route), TTL Auto.
+- API equivalent (if preferred):
+  `POST /zones/6c9edab581e9c7b8fdb6a83adc6878ea/dns_records` with
+  `{type:"CNAME",name:"auth",content:"jcode-cimd.kooshapari.workers.dev",proxied:true,ttl:1}`.
+- Verify: `curl -sS -I https://auth.kooshapari.com/oauth/client-metadata.json`
+  -> `200`, `content-type: application/json`. Then `scripts/test-portal-bridge-live.sh`
+  should reach the OAuth authorize step with no further code changes.
+
+**Root-cause disposition (for future audits):** the §24 "all 3
+unblocked" claim was correct at 2026-10-17T08:04Z (HTTP 200) and stale
+by 2026-10-17T22:46Z (NXDOMAIN). The fix (§24.2) shipped ahead of the
+root-cause investigation, so the bridge is ready the moment the DNS
+record is recreated. The collateral DNS delete was self-inflicted via
+the dashboard during a multi-zone cleanup run; no script in the repo
+deletes DNS records.
+
 ## 25. Squash-merge to master (2026-10-17T07:48Z)
 
 Operator signal "go" at 2026-10-17T07:39Z triggered the squash-merge
