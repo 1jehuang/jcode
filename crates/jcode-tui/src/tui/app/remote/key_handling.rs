@@ -72,9 +72,13 @@ async fn apply_remote_speed_direction(
     remote: &mut RemoteConnection,
     direction: i8,
 ) -> Result<()> {
-    use jcode_provider_core::service_tier::{speed_tier_ladder, step_speed_tier};
+    use jcode_provider_core::service_tier::{speed_tier_ladder_with_capabilities, step_speed_tier};
     let (provider_name, provider_model) = app.remote_effort_identity();
-    let ladder = speed_tier_ladder(provider_name.as_deref(), provider_model.as_deref());
+    let ladder = speed_tier_ladder_with_capabilities(
+        provider_name.as_deref(),
+        provider_model.as_deref(),
+        app.remote_available_service_tiers.as_deref(),
+    );
     let Some((index, next, at_end)) =
         step_speed_tier(&ladder, app.remote_service_tier.as_deref(), direction)
     else {

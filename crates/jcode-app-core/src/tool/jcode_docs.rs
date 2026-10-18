@@ -272,8 +272,8 @@ mod tests {
 
     #[test]
     fn search_finds_relevant_version_matched_documentation() {
-        let output = search("How does swarm task graph work?", Some(3));
-        assert!(output.contains("docs/SWARM_TASK_GRAPH.md"), "{output}");
+        let output = search("How does swarm coordination work?", Some(3));
+        assert!(output.contains("docs/SWARM_ARCHITECTURE.md"), "{output}");
         assert!(output.contains("bundled with this Jcode build"));
     }
 

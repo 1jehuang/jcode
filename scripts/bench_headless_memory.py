@@ -80,7 +80,7 @@ def debug_cmd(sock_path: str, cmd: str, session_id: str | None = None, timeout: 
 
 
 def run_jcode(sessions: int, turns: int, cwd: str, model: str, memory: bool) -> dict:
-    jcode = shutil.which("jcode") or str(Path.home() / ".local/bin/jcode")
+    jcode = os.environ.get("JCODE_BENCH_BIN") or shutil.which("jcode") or str(Path.home() / ".local/bin/jcode")
     temp_root = tempfile.mkdtemp(prefix="jcode-headless-bench-")
     home = Path(temp_root) / "home"
     run = Path(temp_root) / "run"
@@ -157,6 +157,14 @@ def run_jcode(sessions: int, turns: int, cwd: str, model: str, memory: bool) -> 
             log(f"jcode sessions={sessions} turn {t + 1} pss={samples[-1][1]} MB")
         version = subprocess.run([jcode, "--version"], capture_output=True, text=True).stdout.strip()
         checks = {"embeddings": embeddings_status}
+        dump_dir = os.environ.get("JCODE_BENCH_MEMORY_DUMP")
+        if dump_dir:
+            try:
+                Path(dump_dir).mkdir(parents=True, exist_ok=True)
+                (Path(dump_dir) / f"server-memory-{sessions}.json").write_text(
+                    debug_cmd(dbg_sock, "server:memory", timeout=60))
+            except Exception as exc:  # noqa: BLE001
+                checks["memory_dump_error"] = str(exc)[:200]
         try:
             hist = json.loads(debug_cmd(dbg_sock, "history", ids[0], timeout=30))
             checks["history_messages"] = len(hist) if isinstance(hist, list) else None
@@ -268,6 +276,20 @@ def resolve_bin(name: str, override: str | None) -> str:
 
 
 def provision_openai_homes(root: Path, account: str | None) -> dict[str, dict[str, str]]:
+    homes = {
+        "codex": {"CODEX_HOME": str(root / "codex")},
+        "opencode": {"XDG_DATA_HOME": str(root / "opencode"),
+                     "XDG_CONFIG_HOME": str(root / "opencode-config"),
+                     "XDG_STATE_HOME": str(root / "opencode-state")},
+        "pi": {"PI_CODING_AGENT_DIR": str(root / "pi")},
+    }
+    if os.environ.get("OPENAI_API_KEY"):
+        # API-key mode: every tool reads OPENAI_API_KEY from the environment.
+        (root / "codex").mkdir(parents=True, exist_ok=True)
+        key_auth = root / "codex" / "auth.json"
+        key_auth.write_text(json.dumps({"auth_mode": "apikey", "OPENAI_API_KEY": os.environ["OPENAI_API_KEY"]}))
+        key_auth.chmod(0o600)
+        return homes
     data = json.loads((Path.home() / ".jcode" / "openai-auth.json").read_text())
     label = account or data.get("active_openai_account")
     acct = next(a for a in data["openai_accounts"] if a["label"] == label)
@@ -399,7 +421,8 @@ class PiSession(JsonLineProc):
     """`pi --mode rpc`: one process per session."""
 
     def __init__(self, pi: str, cwd: str, env: dict[str, str], model: str):
-        argv = [pi, "--mode", "rpc", "--no-session", "--provider", "openai-codex"]
+        provider = "openai" if os.environ.get("OPENAI_API_KEY") else "openai-codex"
+        argv = [pi, "--mode", "rpc", "--no-session", "--provider", provider]
         if model:
             argv += ["--model", model]
         super().__init__(argv, cwd, env)
@@ -538,12 +561,16 @@ def run_opencode(sessions: int, turns: int, cwd: str, model: str, env: dict[str,
                 th.join()
             first = replies.get(ids[0], {})
             parts = first.get("parts") or []
-            tool_uses += sum(1 for p in parts if p.get("type") == "tool")
             texts = [p.get("text", "") for p in parts if p.get("type") == "text"]
             last = (texts[-1] if texts else last)[:200]
             time.sleep(1.0)
             samples.append((f"turn{t + 1}", *sum_tree_pss([server.pid], [pgid])))
             log(f"opencode sessions={sessions} turn {t + 1} pss={samples[-1][1]} MB")
+        try:
+            history = http_json("GET", f"{base}/session/{ids[0]}/message", timeout=30) or []
+            tool_uses = sum(1 for m in history for p in (m.get("parts") or []) if p.get("type") == "tool")
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"history: {exc}")
         version = subprocess.run([binary, "--version"], capture_output=True, text=True, env=env).stdout.strip()
         return {"tool": "OpenCode", "sessions": sessions, "samples": samples, "errors": errors,
                 "version": version, "checks": {"tool_uses": tool_uses, "last_response": last}}

@@ -78,10 +78,6 @@ fn comm_request_session_id(request: &Request) -> Option<&str> {
         | Request::CommProposePlan { session_id, .. }
         | Request::CommApprovePlan { session_id, .. }
         | Request::CommRejectPlan { session_id, .. }
-        | Request::CommSeedGraph { session_id, .. }
-        | Request::CommExpandNode { session_id, .. }
-        | Request::CommCompleteNode { session_id, .. }
-        | Request::CommInjectGap { session_id, .. }
         | Request::CommSpawn { session_id, .. }
         | Request::CommListModels { session_id, .. }
         | Request::CommStop { session_id, .. }
@@ -319,6 +315,9 @@ pub(super) async fn handle_lightweight_control_request(
     match request {
         // Scheduled delivery opens a one-shot connection and names the target
         // session explicitly. Reuse its live agent, not a new subscribed agent.
+        Request::AccountUsage { id } => {
+            super::account_usage::request(id, client_event_tx.clone());
+        }
         Request::InvalidateOpenAiUsage { id, account_label } => {
             super::provider_control::handle_invalidate_openai_usage(
                 id,
@@ -615,94 +614,6 @@ pub(super) async fn handle_lightweight_control_request(
             )
             .await;
         }
-        Request::CommSeedGraph {
-            id,
-            session_id: req_session_id,
-            mode,
-            nodes,
-        } => {
-            super::comm_graph::handle_comm_seed_graph(
-                id,
-                req_session_id,
-                mode,
-                nodes,
-                &client_event_tx,
-                swarm_members,
-                swarms_by_id,
-                swarm_plans,
-                swarm_coordinators,
-                event_history,
-                event_counter,
-                swarm_event_tx,
-            )
-            .await;
-        }
-        Request::CommExpandNode {
-            id,
-            session_id: req_session_id,
-            node_id,
-            children,
-        } => {
-            super::comm_graph::handle_comm_expand_node(
-                id,
-                req_session_id,
-                node_id,
-                children,
-                &client_event_tx,
-                swarm_members,
-                swarms_by_id,
-                swarm_plans,
-                swarm_coordinators,
-                event_history,
-                event_counter,
-                swarm_event_tx,
-            )
-            .await;
-        }
-        Request::CommCompleteNode {
-            id,
-            session_id: req_session_id,
-            node_id,
-            artifact_json,
-        } => {
-            super::comm_graph::handle_comm_complete_node(
-                id,
-                req_session_id,
-                node_id,
-                artifact_json,
-                &client_event_tx,
-                swarm_members,
-                swarms_by_id,
-                swarm_plans,
-                swarm_coordinators,
-                event_history,
-                event_counter,
-                swarm_event_tx,
-            )
-            .await;
-        }
-        Request::CommInjectGap {
-            id,
-            session_id: req_session_id,
-            gate_id,
-            nodes,
-        } => {
-            super::comm_graph::handle_comm_inject_gap(
-                id,
-                req_session_id,
-                gate_id,
-                nodes,
-                &client_event_tx,
-                swarm_members,
-                swarms_by_id,
-                swarm_plans,
-                swarm_coordinators,
-                event_history,
-                event_counter,
-                swarm_event_tx,
-            )
-            .await;
-        }
         Request::CommSpawn {
             id,
             session_id: req_session_id,
@@ -869,6 +780,15 @@ pub(super) async fn handle_lightweight_control_request(
                 Some(event_history),
                 Some(event_counter),
                 Some(swarm_event_tx),
+            )
+            .await;
+            super::comm_control::close_reporter_task_on_terminal_report(
+                &req_session_id,
+                &status,
+                swarm_members,
+                swarms_by_id,
+                swarm_plans,
+                swarm_coordinators,
             )
             .await;
             let _ = client_event_tx.send(ServerEvent::CommReportResponse {

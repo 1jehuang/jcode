@@ -768,6 +768,7 @@ impl AcpRuntime {
                 system_prompt: None,
                 supports_pdf_panels: false,
                 supports_user_response: false,
+                supports_server_failover: false,
                 crash_on_disconnect: false,
                 continue_on_disconnect: false,
                 id: subscribe_id,
@@ -776,6 +777,7 @@ impl AcpRuntime {
                 target_session_id: None,
                 client_instance_id: Some("acp".to_string()),
                 client_has_local_history: false,
+                history_base: None,
                 allow_session_takeover: false,
                 terminal_env: crate::terminal_launch::snapshot_client_terminal_env(),
             })
@@ -824,6 +826,7 @@ impl AcpRuntime {
                 system_prompt: None,
                 supports_pdf_panels: false,
                 supports_user_response: false,
+                supports_server_failover: false,
                 crash_on_disconnect: false,
                 continue_on_disconnect: false,
                 id: resume_id,
@@ -832,6 +835,7 @@ impl AcpRuntime {
                 target_session_id: Some(target_session_id.clone()),
                 client_instance_id: Some("acp".to_string()),
                 client_has_local_history: false,
+                history_base: None,
                 allow_session_takeover: false,
                 terminal_env: crate::terminal_launch::snapshot_client_terminal_env(),
             })

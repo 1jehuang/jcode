@@ -743,9 +743,7 @@ impl AnthropicProvider {
             "off" | "disabled" => Some("none".to_string()),
             // `swarm` is a UI sentinel meaning "configured root effort + use the swarm tool".
             // Stored verbatim; resolved to a real effort in `actual_effort_for_model`.
-            "none" | "low" | "medium" | "high" | "xhigh" | "max" | "swarm" | "swarm-deep" => {
-                Some(value)
-            }
+            "none" | "low" | "medium" | "high" | "xhigh" | "max" | "swarm" => Some(value),
             other => {
                 jcode_base::logging::info(&format!(
                     "Warning: Ignoring unsupported Anthropic reasoning effort '{}'; expected none|low|medium|high|xhigh|max.",
@@ -777,14 +775,12 @@ impl AnthropicProvider {
         }
     }
 
-    /// Like [`Self::actual_effort_for_model`], but preserves the swarm sentinels
-    /// (light `swarm` and `swarm-deep`) so the stored/UI value keeps reflecting
-    /// the chosen swarm mode. Used when persisting the user's choice; request
-    /// building resolves swarm to a real effort.
+    /// Like [`Self::actual_effort_for_model`], but preserves the `swarm`
+    /// sentinel so the stored/UI value keeps reflecting swarm mode. Used when
+    /// persisting the user's choice; request building resolves swarm to a real
+    /// effort.
     fn store_effort_for_model(model: &str, effort: &str) -> String {
-        if jcode_base::prompt::is_deep_swarm_effort(effort) {
-            jcode_base::prompt::SWARM_DEEP_EFFORT.to_string()
-        } else if jcode_base::prompt::is_swarm_effort(effort) {
+        if jcode_base::prompt::is_swarm_effort(effort) {
             jcode_base::prompt::SWARM_EFFORT.to_string()
         } else {
             Self::actual_effort_for_model(model, effort)
@@ -1592,11 +1588,10 @@ impl Provider for AnthropicProvider {
                     | "xhigh"
                     | "max"
                     | "swarm"
-                    | "swarm-deep"
             )
         {
             anyhow::bail!(
-                "Unsupported Anthropic reasoning effort '{}'; expected none|low|medium|high|xhigh|max|swarm|swarm-deep",
+                "Unsupported Anthropic reasoning effort '{}'; expected none|low|medium|high|xhigh|max|swarm",
                 effort
             );
         }
@@ -1637,7 +1632,7 @@ impl Provider for AnthropicProvider {
         if Self::model_supports_max_effort(&model) {
             efforts.push("max");
         }
-        efforts.extend(["swarm", "swarm-deep"]);
+        efforts.push("swarm");
         efforts
     }
 
@@ -2302,17 +2297,14 @@ async fn stream_response(
                 .map_err(anyhow::Error::msg)?,
         );
     }
-    req = req
-        .header("anthropic-version", API_VERSION)
-        .header("content-type", "application/json")
-        .header(
-            "accept",
-            if is_oauth {
-                "application/json"
-            } else {
-                "text/event-stream"
-            },
-        );
+    req = req.header("anthropic-version", API_VERSION).header(
+        "accept",
+        if is_oauth {
+            "application/json"
+        } else {
+            "text/event-stream"
+        },
+    );
 
     if is_oauth {
         // OAuth tokens require:
@@ -2357,8 +2349,14 @@ async fn stream_response(
         req = req.header("anthropic-beta", beta_header);
     }
 
+    let req = jcode_provider_core::request_compression::json_body(
+        req,
+        url,
+        &request,
+        jcode_base::provider::request_compression_mode(),
+    )?;
     let response = jcode_provider_core::transport::send_with_initial_response_timeout(
-        req.json(&request),
+        req,
         stream_idle_timeout,
     )
     .await

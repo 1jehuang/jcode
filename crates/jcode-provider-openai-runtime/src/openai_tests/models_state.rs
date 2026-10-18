@@ -499,6 +499,7 @@ fn test_ultrafast_service_tier_round_trips_into_request_payload() {
     let _guard = jcode_base::storage::lock_test_env();
     for credentials in [api_key_creds("sk-ultrafast-test"), oauth_creds()] {
         let provider = OpenAIProvider::new(credentials);
+        provider.model_service_tiers.write().unwrap().clear();
         for model in ["gpt-6-astra", "gpt-6.1-sol", "gpt-5.6-sol"] {
             // Avoid depending on the machine's cached account catalog.
             *provider.model.try_write().unwrap() = model.to_string();
@@ -511,7 +512,8 @@ fn test_ultrafast_service_tier_round_trips_into_request_payload() {
                 assert_eq!(provider.service_tier().as_deref(), Some("ultrafast"));
             }
             for is_chatgpt_mode in [false, true] {
-                let request = provider.response_request_for_model(model, &[], &[], "sys", is_chatgpt_mode);
+                let request =
+                    provider.response_request_for_model(model, &[], &[], "sys", is_chatgpt_mode);
                 assert_eq!(request["service_tier"], serde_json::json!("ultrafast"));
             }
             let fork = provider.fork();
@@ -532,6 +534,7 @@ fn test_ultrafast_rejects_unsupported_models_and_filters_saved_or_retained_tiers
     let _guard = jcode_base::storage::lock_test_env();
     for credentials in [api_key_creds("sk-ultrafast-test"), oauth_creds()] {
         let provider = OpenAIProvider::new(credentials);
+        provider.model_service_tiers.write().unwrap().clear();
         *provider.model.try_write().unwrap() = "gpt-5.5".to_string();
         provider.set_service_tier("priority").unwrap();
         for alias in ["ultrafast", "ultra", "ultra-fast"] {
@@ -543,7 +546,8 @@ fn test_ultrafast_rejects_unsupported_models_and_filters_saved_or_retained_tiers
         *provider.service_tier.write().unwrap() = OpenAIProvider::load_service_tier(Some("ultra"));
         assert_eq!(provider.service_tier(), None);
         for is_chatgpt_mode in [false, true] {
-            let request = provider.response_request_for_model("gpt-5.5", &[], &[], "sys", is_chatgpt_mode);
+            let request =
+                provider.response_request_for_model("gpt-5.5", &[], &[], "sys", is_chatgpt_mode);
             assert!(request.get("service_tier").is_none());
         }
 
@@ -560,6 +564,133 @@ fn test_ultrafast_rejects_unsupported_models_and_filters_saved_or_retained_tiers
         assert_eq!(request["service_tier"], "ultrafast");
         provider.set_service_tier("off").unwrap();
         assert_eq!(provider.service_tier(), None);
+    }
+}
+
+#[test]
+fn advertised_service_tiers_filter_selection_badge_and_actual_request_model() {
+    let _guard = jcode_base::storage::lock_test_env();
+    for credentials in [api_key_creds("sk-tier-metadata"), oauth_creds()] {
+        let provider = OpenAIProvider::new(credentials);
+        *provider.model.try_write().unwrap() = "gpt-6-astra".into();
+        *provider.model_service_tiers.write().unwrap() = HashMap::from([
+            ("gpt-6-astra".into(), vec!["priority".into()]),
+            ("future-ultra".into(), vec!["ultrafast".into()]),
+            ("empty-model".into(), vec![]),
+        ]);
+        *provider.service_tier.write().unwrap() = Some("ultrafast".into());
+        assert_eq!(provider.service_tier(), None);
+        assert_eq!(provider.available_service_tiers(), vec!["priority", "flex"]);
+        assert!(provider.set_service_tier("ultra").is_err());
+        for model in [
+            "gpt-6-astra[1m]",
+            "openai/gpt-6-astra",
+            " OPENAI/GPT-6-ASTRA[1m] ",
+        ] {
+            *provider.model.try_write().unwrap() = model.into();
+            assert_eq!(provider.service_tier(), None);
+            assert_eq!(provider.available_service_tiers(), vec!["priority", "flex"]);
+            assert!(provider.set_service_tier("ultra").is_err());
+            assert!(
+                provider
+                    .response_request_for_model(model, &[], &[], "sys", true)
+                    .get("service_tier")
+                    .is_none()
+            );
+        }
+        *provider.model.try_write().unwrap() = "gpt-6-astra".into();
+        for chatgpt in [false, true] {
+            let request =
+                provider.response_request_for_model("gpt-6-astra", &[], &[], "sys", chatgpt);
+            assert!(request.get("service_tier").is_none());
+            let routing = openai_websocket_prewarm::routing_header(
+                chatgpt,
+                request.get("model").and_then(Value::as_str),
+                request.get("service_tier").and_then(Value::as_str),
+            );
+            if chatgpt {
+                assert_eq!(routing.unwrap().1, "model=gpt-6-astra");
+            } else {
+                assert!(routing.is_none());
+            }
+            // Explicit support overrides the legacy model-name allowlist.
+            let request =
+                provider.response_request_for_model("future-ultra", &[], &[], "sys", chatgpt);
+            assert_eq!(request["service_tier"], "ultrafast");
+        }
+        *provider.model.try_write().unwrap() = "future-ultra".into();
+        provider.set_service_tier("ultra").unwrap();
+        assert_eq!(provider.service_tier().as_deref(), Some("ultrafast"));
+        assert_eq!(
+            provider.available_service_tiers(),
+            vec!["ultrafast", "flex"]
+        );
+        assert!(provider.set_service_tier("priority").is_err());
+        let fork = provider.fork();
+        provider.model_service_tiers.write().unwrap().clear();
+        assert_eq!(fork.service_tier().as_deref(), Some("ultrafast"));
+        assert_eq!(provider.service_tier(), None);
+        // Restore explicit empty metadata and verify flex is always exempt.
+        provider
+            .model_service_tiers
+            .write()
+            .unwrap()
+            .insert("empty-model".into(), vec![]);
+        *provider.model.try_write().unwrap() = "empty-model".into();
+        assert_eq!(provider.available_service_tiers(), vec!["flex"]);
+        assert!(provider.set_service_tier("priority").is_err());
+        provider.set_service_tier("flex").unwrap();
+        assert_eq!(provider.service_tier().as_deref(), Some("flex"));
+        assert_eq!(
+            provider.response_request_for_model("empty-model", &[], &[], "sys", true)["service_tier"],
+            "flex"
+        );
+        // Missing/legacy metadata keeps priority and the old ultra allowlist.
+        *provider.model.try_write().unwrap() = "gpt-6.1-sol".into();
+        provider.set_service_tier("ultra").unwrap();
+        assert_eq!(provider.service_tier().as_deref(), Some("ultrafast"));
+        assert_eq!(
+            provider.available_service_tiers(),
+            vec!["priority", "ultrafast", "flex"]
+        );
+        assert_eq!(fork.service_tier().as_deref(), Some("ultrafast"));
+    }
+}
+
+#[test]
+fn service_tier_capability_refresh_only_for_unknown_oauth_metadata() {
+    let _guard = jcode_base::storage::lock_test_env();
+    for (credentials, expected) in [
+        (oauth_creds(), true),
+        (api_key_creds("sk-refresh-probe"), false),
+    ] {
+        let provider = OpenAIProvider::new(credentials);
+        provider.model_service_tiers.write().unwrap().clear();
+        *provider.model.try_write().unwrap() = "gpt-6-astra[1m]".into();
+        assert_eq!(provider.model_capabilities_need_refresh(), expected);
+        {
+            let _credentials = provider.credentials.try_write().unwrap();
+            assert!(
+                !provider.model_capabilities_need_refresh(),
+                "sync probe must not wait for credentials"
+            );
+        }
+        provider
+            .model_service_tiers
+            .write()
+            .unwrap()
+            .insert("gpt-6-astra".into(), vec![]);
+        for model in ["gpt-6-astra", "gpt-6-astra[1m]", "openai/gpt-6-astra"] {
+            *provider.model.try_write().unwrap() = model.into();
+            assert!(
+                !provider.model_capabilities_need_refresh(),
+                "known empty metadata is not missing"
+            );
+        }
+        *provider.model.try_write().unwrap() = "gpt-6.1-sol".into();
+        assert_eq!(provider.model_capabilities_need_refresh(), expected);
+        provider.browser_only.store(true, AtomicOrdering::Release);
+        assert!(!provider.model_capabilities_need_refresh());
     }
 }
 
@@ -599,7 +730,10 @@ fn oauth_catalog_refresh_does_not_clobber_api_key_catalog() {
     let api_scope = api.catalog_scope();
     let oauth_scope = oauth.catalog_scope();
     assert_ne!(api_scope, oauth_scope);
-    assert!(!api_scope.contains("sk-split-scope-test"), "raw key leaked into scope");
+    assert!(
+        !api_scope.contains("sk-split-scope-test"),
+        "raw key leaked into scope"
+    );
 
     // API-key refresh lists an API-only model, then an OAuth refresh lands.
     jcode_base::provider::populate_account_models_for_scope(
@@ -613,13 +747,19 @@ fn oauth_catalog_refresh_does_not_clobber_api_key_catalog() {
 
     api.set_model("gpt-split-api-only")
         .expect("API-key runtime must validate against its own catalog");
-    let err = api.set_model("gpt-split-oauth-only").unwrap_err().to_string();
+    let err = api
+        .set_model("gpt-split-oauth-only")
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("Unsupported OpenAI model"), "{err}");
 
     oauth
         .set_model("gpt-split-oauth-only")
         .expect("OAuth runtime must validate against its own catalog");
-    let err = oauth.set_model("gpt-split-api-only").unwrap_err().to_string();
+    let err = oauth
+        .set_model("gpt-split-api-only")
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("Unsupported OpenAI model"), "{err}");
 
     // A runtime unavailability marker on one route must not hide the model on
@@ -635,5 +775,8 @@ fn openai_api_key_scope_is_per_key() {
     let a = OpenAIProvider::catalog_scope_for(&api_key_creds("sk-key-a"));
     let b = OpenAIProvider::catalog_scope_for(&api_key_creds("sk-key-b"));
     assert_ne!(a, b);
-    assert_eq!(a, OpenAIProvider::catalog_scope_for(&api_key_creds(" sk-key-a ")));
+    assert_eq!(
+        a,
+        OpenAIProvider::catalog_scope_for(&api_key_creds(" sk-key-a "))
+    );
 }

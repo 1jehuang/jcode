@@ -1,5 +1,7 @@
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 
+#[cfg(test)]
+mod cache_monitor_tests;
 mod compaction;
 mod conversation_reset;
 mod environment;
@@ -14,6 +16,8 @@ mod provider;
 mod response_recovery;
 mod status;
 mod streaming;
+#[cfg(test)]
+mod swarm_reminder_tests;
 mod tool_markup_recovery;
 mod tools;
 mod turn_execution;
@@ -187,12 +191,21 @@ impl Agent {
         cache_read: Option<u64>,
         cache_creation: Option<u64>,
     ) -> Option<ServerEvent> {
-        let effective = self.effective_context_tokens_from_usage(input, cache_read, cache_creation);
-        let miss = self
-            .kv_cache_monitor
-            .finish_request(effective, cache_read)?;
-        logging::warn(&format!(
-            "KV_CACHE_MISS session={} reason={} harness_caused={} missed={} expected={} read={} documented={:?}",
+        let reusable = crate::compaction::reusable_cache_tokens_from_usage(
+            self.provider.name(),
+            input,
+            cache_read,
+            cache_creation,
+        );
+        let miss = self.kv_cache_monitor.finish_request(reusable, cache_read)?;
+        let expected_refresh = miss.reason == crate::kv_cache_monitor::MissReason::Compaction;
+        let label = if expected_refresh {
+            "KV_CACHE_REFRESH"
+        } else {
+            "KV_CACHE_MISS"
+        };
+        let diagnostic = format!(
+            "{label} session={} reason={} harness_caused={} missed={} expected={} read={} documented={:?}",
             self.session.id,
             miss.reason.id(),
             miss.reason.harness_caused(),
@@ -200,7 +213,12 @@ impl Agent {
             miss.expected_tokens,
             miss.read_tokens,
             miss.documented_cause,
-        ));
+        );
+        if expected_refresh {
+            logging::info(&diagnostic);
+        } else {
+            logging::warn(&diagnostic);
+        }
         Some(ServerEvent::KvCacheMiss {
             reason: miss.reason.id().to_string(),
             harness_caused: miss.reason.harness_caused(),
@@ -371,6 +389,11 @@ pub struct Agent {
     /// Prevent duplicate content uploads when shutdown/finalization is invoked
     /// more than once for the same in-memory agent.
     transcript_telemetry_sent: bool,
+    /// A provisional Agent defers the process-level telemetry session until it
+    /// commits. Reload reconnects replace it with the resumed session first, so
+    /// it never begins or ends one (that was a phantom zero-turn session plus
+    /// sync file I/O on every reconnect's accept path).
+    telemetry_session_deferred: bool,
     /// One logical runtime session, independent of the process-global legacy
     /// telemetry slot and of any TUI clients viewing this agent.
     concurrency_session: Option<crate::telemetry::ConcurrencySession>,
@@ -427,10 +450,15 @@ impl Agent {
         allowed_tools: Option<HashSet<String>>,
         disabled_tools: HashSet<String>,
     ) -> Self {
+        let t = Instant::now();
+        provider.set_session_id(&session.id);
         let skills = SkillRegistry::shared_snapshot();
+        let skills_ms = t.elapsed().as_millis();
         let tool_config = &crate::config::config().tools;
         let working_dir = session.working_dir.as_deref().map(std::path::Path::new);
+        let t = Instant::now();
         let agents_md_snapshot = crate::prompt::load_agents_md_files_from_dir(working_dir);
+        let agents_md_ms = t.elapsed().as_millis();
         let initial_provider_model = provider.model();
         let tool_policy_registration = crate::tool::register_session_tool_policy(
             &session.id,
@@ -478,9 +506,15 @@ impl Agent {
             inline_output_tap: false,
             inline_tail: inline_tail::InlineTailBuffer::default(),
             transcript_telemetry_sent: false,
+            telemetry_session_deferred: false,
             concurrency_session: None,
         };
+        let t = Instant::now();
         agent.refresh_prompt_skills_snapshot();
+        logging::info(&format!(
+            "[TIMING] agent build_base: skills={skills_ms}ms, agents_md={agents_md_ms}ms, prompt_skills={}ms",
+            t.elapsed().as_millis()
+        ));
         agent
     }
 
@@ -553,11 +587,18 @@ impl Agent {
         track_concurrency: bool,
     ) -> Self {
         let start = Instant::now();
+        let mut marks: Vec<(&'static str, u128)> = Vec::with_capacity(10);
+        let mut lap = Instant::now();
+        let mut mark = |name: &'static str, lap: &mut Instant| {
+            marks.push((name, lap.elapsed().as_millis()));
+            *lap = Instant::now();
+        };
         let tool_selection = crate::config::config().tools.selection();
         let mut session = Session::create(parent_id, None);
         if let Some(working_dir) = working_dir {
             session.working_dir = Some(working_dir.to_string());
         }
+        mark("session", &mut lap);
         let mut agent = Self::build_base(
             provider,
             registry,
@@ -565,25 +606,45 @@ impl Agent {
             tool_selection.allowed_tools,
             tool_selection.disabled_tools,
         );
-        agent.session.mark_active();
+        mark("build_base", &mut lap);
+        // activate_concurrency_tracking writes the presence markers when the
+        // session is committed. A provisional agent replaced by a resumed
+        // session never touches the marker files.
+        agent.session.mark_active_unregistered();
+        mark("mark_active", &mut lap);
         agent.session.model = Some(agent.provider_model());
         agent.session.provider_key = agent.provider_key_for_new_session();
         agent.reconcile_explicit_provider_pin_route();
-        agent.session.ensure_initial_session_context_message();
+        mark("provider", &mut lap);
+        // A provisional Agent is usually replaced by a resumed session (every
+        // reconnect after a reload), so do not fork the git/hardware probes
+        // for its context message until it actually becomes the session.
+        if track_concurrency {
+            agent.session.ensure_initial_session_context_message();
+        }
+        mark("context_msg", &mut lap);
         agent.seed_compaction_from_session();
+        mark("compaction", &mut lap);
         agent.log_env_snapshot("create");
+        mark("env_snapshot", &mut lap);
         agent.fire_session_lifecycle_hook("session_start", "create");
         if track_concurrency {
             agent.activate_concurrency_tracking();
         }
+        mark("hooks_concurrency", &mut lap);
+        let breakdown = marks
+            .iter()
+            .map(|(name, ms)| format!("{name}={ms}ms"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        logging::info(&format!("[TIMING] agent_new breakdown: {breakdown}"));
         let setup_ms = start.elapsed().as_millis();
         let telemetry_start = Instant::now();
-        crate::telemetry::begin_session_with_parent(
-            agent.provider.name(),
-            &agent.provider.model(),
-            agent.session.parent_id.clone(),
-            false,
-        );
+        if track_concurrency {
+            agent.begin_telemetry_session();
+        } else {
+            agent.telemetry_session_deferred = true;
+        }
         logging::info(&format!(
             "[TIMING] agent_new: setup={}ms, telemetry={}ms, total={}ms",
             setup_ms,
@@ -614,7 +675,8 @@ impl Agent {
             tool_selection.allowed_tools,
             tool_selection.disabled_tools,
         );
-        agent.session.mark_active();
+        // begin_concurrency_tracking below writes the presence markers.
+        agent.session.mark_active_unregistered();
         if agent.session.provider_key.is_none() {
             agent.session.provider_key = agent.provider_key_for_new_session();
         }
@@ -1104,18 +1166,50 @@ impl Agent {
 
     /// Mark this agent session as closed and persist it.
     pub fn mark_closed(&mut self) {
+        self.mark_closed_with_reason(crate::telemetry::SessionEndReason::NormalExit);
+    }
+
+    /// Close the current session because this Agent is about to adopt another
+    /// one in-process (resume after reconnect). Nothing is exiting, so lifecycle
+    /// telemetry goes to the ordered background worker instead of two bounded
+    /// blocking flushes (up to ~800ms each), which stalled every reload
+    /// reconnect's restore by 0.4-2s.
+    pub(crate) fn mark_closed_for_replacement(&mut self) {
+        if let Some(mut guard) = self.concurrency_session.take() {
+            guard.finish_background();
+        }
+        self.mark_closed_with_reason(crate::telemetry::SessionEndReason::Superseded);
+        // The adopted session continues under whatever telemetry state this
+        // Agent had. An uncommitted placeholder's never-begun session is moot.
+        self.telemetry_session_deferred = false;
+    }
+
+    fn begin_telemetry_session(&self) {
+        crate::telemetry::begin_session_with_parent(
+            self.provider.name(),
+            &self.provider.model(),
+            self.session.parent_id.clone(),
+            false,
+        );
+    }
+
+    fn mark_closed_with_reason(&mut self, end_reason: crate::telemetry::SessionEndReason) {
         self.finish_concurrency_tracking();
         self.persist_soft_interrupt_snapshot();
         self.session.mark_closed();
         if !self.session.messages.is_empty() {
             self.persist_session_best_effort("session close state");
         }
-        self.upload_transcript_telemetry(crate::telemetry::SessionEndReason::NormalExit);
-        crate::telemetry::end_session_with_reason(
-            self.provider.name(),
-            &self.provider.model(),
-            crate::telemetry::SessionEndReason::NormalExit,
-        );
+        self.upload_transcript_telemetry(end_reason);
+        // A deferred (never begun) session has nothing to end. Ending anyway
+        // would close whichever session currently owns the process slot.
+        if !self.telemetry_session_deferred {
+            crate::telemetry::end_session_with_reason(
+                self.provider.name(),
+                &self.provider.model(),
+                end_reason,
+            );
+        }
         self.fire_session_lifecycle_hook("session_end", "close");
     }
 
@@ -1161,6 +1255,18 @@ impl Agent {
     pub(crate) fn activate_concurrency_tracking(&mut self) {
         if self.concurrency_session.is_some() {
             return;
+        }
+        // Provisional agents defer their presence markers, telemetry session,
+        // and context message until committed.
+        if self.session.status == crate::session::SessionStatus::Active {
+            self.session.register_presence_markers();
+        }
+        if self.telemetry_session_deferred {
+            self.telemetry_session_deferred = false;
+            self.begin_telemetry_session();
+        }
+        if self.session.ensure_initial_session_context_message() {
+            self.seed_compaction_from_session();
         }
         self.concurrency_session = Some(crate::telemetry::begin_concurrency_session(
             &self.session.id,

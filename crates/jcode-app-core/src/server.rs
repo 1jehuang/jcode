@@ -1,3 +1,4 @@
+mod account_usage;
 mod available_models_cache;
 mod available_models_dedup;
 mod await_members_state;
@@ -20,7 +21,6 @@ pub(crate) use client_state::provider_oauth_email;
 mod client_writer;
 mod comm_await;
 mod comm_control;
-mod comm_graph;
 mod comm_plan;
 mod comm_session;
 mod comm_sync;
@@ -59,6 +59,7 @@ mod swarm_labels;
 mod swarm_mutation_state;
 mod swarm_persistence;
 mod swarm_watchdog;
+mod turn_failover;
 mod util;
 
 pub(super) use self::await_members_state::AwaitMembersRuntime;
@@ -1277,6 +1278,13 @@ impl Server {
         tokio::task::JoinHandle<()>,
     ) {
         self.spawn_registry_prewarm();
+        // Every resume History asks whether the session has persisted
+        // background tasks. The first ask after a reload scans the whole task
+        // directory (~250ms) while clients are reconnecting; build the index
+        // now, off the async workers, so the storm only sees cache hits.
+        std::thread::spawn(|| {
+            let _ = crate::background::global().persisted_detached_running_tasks_for_session("");
+        });
         let registry_info = self.build_registry_info();
 
         let runtime = self.runtime();
@@ -2437,6 +2445,12 @@ impl Server {
             )),
         }
 
+        // Sessions the previous process image owned are about to reconnect.
+        // Parse the large ones in the background before their markers are
+        // pruned, so resume skips the parse on the critical path.
+        crate::session::prewarm::spawn_prewarm(crate::session::prewarm::sessions_owned_by(
+            std::process::id(),
+        ));
         let (pruned_active_pids, failed_active_pids) =
             crate::storage::prune_active_pids_owned_by(std::process::id());
         if pruned_active_pids + failed_active_pids > 0 {
@@ -2448,6 +2462,9 @@ impl Server {
         // Restrict socket files to owner-only so other local users cannot connect.
         let _ = crate::platform::set_permissions_owner_only(&self.socket_path);
         let _ = crate::platform::set_permissions_owner_only(&self.debug_socket_path);
+        // chmod changes the socket's ctime, which is part of the startup hint
+        // generation guard. Capture only after the listener is finalized.
+        account_usage::initialize_startup_snapshot(&self.socket_path, &self.identity.id);
 
         // Set logging context for this server
         crate::logging::set_server(&self.identity.name);
@@ -2558,4 +2575,22 @@ pub(crate) fn run_blocking_io<R>(f: impl FnOnce() -> R) -> R {
         }
         _ => f(),
     }
+}
+
+/// CPU time consumed by the calling thread, in milliseconds. Comparing it with
+/// wall time separates real work from waiting (scheduler, disk, locks).
+pub(crate) fn thread_cpu_ms() -> f64 {
+    #[cfg(unix)]
+    {
+        let mut ts = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: valid pointer to a timespec; CLOCK_THREAD_CPUTIME_ID is
+        // supported on Linux and macOS.
+        if unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) } == 0 {
+            return ts.tv_sec as f64 * 1000.0 + ts.tv_nsec as f64 / 1_000_000.0;
+        }
+    }
+    0.0
 }

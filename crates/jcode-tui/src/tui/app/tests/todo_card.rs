@@ -570,6 +570,30 @@ fn clicking_pinned_todo_more_row_expands_the_band() {
     });
 
     assert!(app.pinned_todos_expanded);
+    let _pin = PinTodosEnvGuard::enable();
+    app.pinned_todos_payload = Some(
+        serde_json::json!({"todos": [
+            pinned_band_todo("active", "Current task", "in_progress")
+        ]})
+        .to_string(),
+    );
+    let (lines, control) = crate::tui::ui::viewport::pinned_todo_band_lines(&app, 80, 30);
+    let control = control.expect("expanded band needs a collapse control");
+    assert!(lines[control].to_string().contains("Collapse todos"));
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 8,
+        row: 4,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert!(!app.pinned_todos_expanded);
+    let (lines, control) = crate::tui::ui::viewport::pinned_todo_band_lines(&app, 80, 30);
+    assert!(control.is_none());
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.to_string().contains("Collapse todos"))
+    );
     crate::tui::ui::viewport::set_pinned_todo_more_area_for_test(None);
 }
 

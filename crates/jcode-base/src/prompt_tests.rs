@@ -503,8 +503,8 @@ fn test_default_swarm_prompt_mentions_model_and_list_models() {
     assert!(DEFAULT_SWARM_PROMPT.contains("list_models"));
     assert!(DEFAULT_SWARM_PROMPT.contains("model"));
     assert!(DEFAULT_SWARM_PROMPT.contains("effort"));
-    assert!(DEFAULT_SWARM_PROMPT.contains("only the root session may spawn agents"));
-    assert!(DEFAULT_SWARM_PROMPT.contains("swarm-deep"));
+    assert!(DEFAULT_SWARM_PROMPT.contains("Only the root session may spawn agents"));
+    assert!(!DEFAULT_SWARM_PROMPT.contains("swarm-deep"));
 }
 
 #[test]
@@ -581,69 +581,45 @@ fn split_prompt_estimated_tokens_is_positive_when_populated() {
 }
 
 #[test]
-fn swarm_effort_directive_is_appended_only_for_swarm_sentinel() {
+fn swarm_reminder_is_appended_to_user_message_only_in_swarm_mode() {
+    use crate::prompt::{SWARM_USER_MESSAGE_REMINDER, with_swarm_user_message_reminder};
+
     assert!(is_swarm_effort("swarm"));
     assert!(is_swarm_effort("  Swarm "));
     assert!(!is_swarm_effort("xhigh"));
+    assert!(!is_swarm_effort("swarm-deep"));
 
-    let mut split = SplitSystemPrompt {
-        static_part: "base".to_string(),
-        dynamic_part: String::new(),
-    };
-    append_swarm_effort_directive(&mut split, Some("xhigh"));
-    assert!(!split.dynamic_part.contains("Swarm Effort"));
+    assert_eq!(
+        with_swarm_user_message_reminder("fix it", Some("high")),
+        "fix it"
+    );
+    assert_eq!(with_swarm_user_message_reminder("fix it", None), "fix it");
 
-    append_swarm_effort_directive(&mut split, Some("swarm"));
-    assert!(split.dynamic_part.contains("# Swarm Effort"));
-    assert!(split.dynamic_part.contains("swarm` tool"));
-
-    // None / empty effort should not inject.
-    let mut other = SplitSystemPrompt::default();
-    append_swarm_effort_directive(&mut other, None);
-    assert!(other.dynamic_part.is_empty());
+    let with = with_swarm_user_message_reminder("fix it  ", Some("swarm"));
+    assert_eq!(with, format!("fix it\n\n{SWARM_USER_MESSAGE_REMINDER}"));
+    // Idempotent.
+    assert_eq!(with_swarm_user_message_reminder(&with, Some("swarm")), with);
+    assert_eq!(
+        SWARM_USER_MESSAGE_REMINDER,
+        "Use swarms to get things done in parallel."
+    );
 }
 
 #[test]
-fn swarm_deep_effort_injects_task_graph_directive() {
-    use crate::prompt::is_deep_swarm_effort;
-
-    assert!(is_swarm_effort("swarm-deep"));
-    assert!(is_deep_swarm_effort("swarm-deep"));
-    assert!(is_deep_swarm_effort("  Swarm-Deep "));
-    assert!(!is_deep_swarm_effort("swarm"));
-    assert!(!is_deep_swarm_effort("xhigh"));
-
-    // Deep sentinel injects the DAG-first task-graph directive, not the light one.
-    let mut split = SplitSystemPrompt::default();
-    append_swarm_effort_directive(&mut split, Some("swarm-deep"));
-    assert!(split.dynamic_part.contains("# Deep Task Graph"));
-    assert!(split.dynamic_part.contains("swarm task_graph"));
+fn swarm_mode_does_not_change_system_prompt() {
+    let (split, _) = build_system_prompt_split(None, &[], false, None, None);
+    assert!(!split.static_part.contains("Deep Task Graph"));
+    assert!(!split.dynamic_part.contains("Deep Task Graph"));
     assert!(!split.dynamic_part.contains("# Swarm Effort"));
-
-    // Light sentinel still injects the fan-out directive, not the deep one.
-    let mut light = SplitSystemPrompt::default();
-    append_swarm_effort_directive(&mut light, Some("swarm"));
-    assert!(light.dynamic_part.contains("# Swarm Effort"));
-    assert!(!light.dynamic_part.contains("# Deep Task Graph"));
 }
 
 #[test]
-fn classify_effort_distinguishes_reasoning_from_swarm_modes() {
-    use crate::prompt::{EffortKind, classify_effort, is_swarm_mode_effort};
-
-    // Plain reasoning levels are not swarm modes.
+fn swarm_mode_effort_classification() {
+    use crate::prompt::is_swarm_mode_effort;
     for level in ["none", "minimal", "low", "medium", "high", "xhigh", "max"] {
-        assert_eq!(classify_effort(level), EffortKind::Reasoning, "{level}");
         assert!(!is_swarm_mode_effort(level), "{level}");
     }
-
-    assert_eq!(classify_effort("swarm"), EffortKind::SwarmLight);
-    assert_eq!(classify_effort("swarm-deep"), EffortKind::SwarmDeep);
     assert!(is_swarm_mode_effort("swarm"));
-    assert!(is_swarm_mode_effort("  Swarm-Deep "));
-    assert!(EffortKind::SwarmLight.is_swarm_mode());
-    assert!(EffortKind::SwarmDeep.is_swarm_mode());
-    assert!(!EffortKind::Reasoning.is_swarm_mode());
 }
 
 #[test]

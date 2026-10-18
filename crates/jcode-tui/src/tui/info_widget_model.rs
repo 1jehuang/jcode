@@ -73,6 +73,12 @@ struct RuntimeRow {
 
 impl RuntimeRow {
     fn into_line(self, max_len: usize) -> Line<'static> {
+        if self.icon.is_empty() {
+            return Line::from(Span::styled(
+                super::text::truncate_with_ellipsis(&self.text, max_len),
+                Style::default().fg(self.text_color),
+            ));
+        }
         Line::from(vec![
             Span::styled(
                 format!("{} ", self.icon),
@@ -148,6 +154,24 @@ fn runtime_rows(data: &InfoWidgetData) -> Vec<RuntimeRow> {
             text: session_parts.join(" · "),
             text_color: muted,
         });
+    }
+
+    // The initial remote snapshot normally supplies the tier and session rows.
+    // Keep two transient slots so applying it does not push Changes down. Never
+    // guess either value, and never retain slots after the owner clears pending.
+    if data.startup_runtime_pending {
+        while rows.len() < 2 {
+            rows.push(RuntimeRow {
+                icon: "",
+                icon_color: muted,
+                text: if rows.is_empty() {
+                    "Loading…".into()
+                } else {
+                    String::new()
+                },
+                text_color: muted,
+            });
+        }
     }
 
     rows

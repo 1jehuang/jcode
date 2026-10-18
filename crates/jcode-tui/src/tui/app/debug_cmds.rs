@@ -275,6 +275,15 @@ impl App {
                 "OK: mouse {kind} at {col},{row} (status: {:?})",
                 self.status_notice.as_ref().map(|(text, _)| text.as_str())
             )
+        } else if cmd == "quota-limit-fixture" {
+            self.is_remote = true;
+            self.remote_provider_name = Some("OpenAI".into());
+            self.remote_provider_model = Some("gpt-5.4".into());
+            self.remote_resolved_credential = Some(jcode_provider_core::ResolvedCredential::Oauth);
+            self.remote_provider_oauth_email = None;
+            self.remote_provider_oauth_account_label = None;
+            self.refresh_openai_usage_after_quota_error("usage_limit_reached");
+            serde_json::json!({"ok": true, "fixture": "quota-limit"}).to_string()
         } else if cmd.starts_with("image-click-target:") {
             // Probe the inline-image expand badge hit-test at screen coords.
             let raw = cmd.strip_prefix("image-click-target:").unwrap_or("");
@@ -300,6 +309,36 @@ impl App {
             // Dump the current chat snapshot's inline-image regions and label
             // lines so a driver can compute real badge click coordinates.
             crate::tui::ui::debug_chat_image_regions_json()
+        } else if cmd == "login-progress-fixture" {
+            self.show_openai_login_progress(
+                "fixture",
+                "https://example.invalid/oauth/authorize?client_id=jcode-fixture&state=fixture-not-a-secret&code_challenge=fixture",
+                true,
+                true,
+                "Fixture only. No real browser, listener, or credentials. Full URL is available for copying here.",
+            );
+            self.pending_login = Some(PendingLogin::OpenAiAccount {
+                verifier: "fixture".to_string(),
+                label: "fixture".to_string(),
+                expected_state: "fixture".to_string(),
+                redirect_uri: "http://localhost:1455/auth/callback".to_string(),
+            });
+            self.follow_chat_bottom();
+            serde_json::json!({"ok": true, "fixture": "login-progress"}).to_string()
+        } else if cmd == "login-progress-success-fixture" {
+            let replaced =
+                self.finish_openai_login_progress("✓ OpenAI login complete.".to_string());
+            self.pending_login = None;
+            self.input.clear();
+            self.cursor_pos = 0;
+            self.set_status_notice("Login: openai ready (fixture)");
+            serde_json::json!({"ok": replaced, "fixture": "login-progress-success"}).to_string()
+        } else if cmd == "login-progress-exchange-fixture" {
+            self.update_openai_login_exchange("fixture");
+            self.pending_login = Some(PendingLogin::Exchanging {
+                provider: "openai".to_string(),
+            });
+            serde_json::json!({"ok": true, "fixture": "login-progress-exchange"}).to_string()
         } else if cmd == "expand-badge-fixture" {
             let old_string = (0..24)
                 .map(|idx| format!("old fixture line {idx}\n"))

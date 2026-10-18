@@ -29,10 +29,6 @@ fn test_swarm_plan_event_roundtrip_with_summary() -> Result<()> {
             unresolved_dependency_ids: Vec::new(),
             next_ready_ids: vec!["task-1".to_string()],
             newly_ready_ids: Vec::new(),
-            low_confidence_ids: Vec::new(),
-            mode: "light".to_string(),
-            seeded_count: 1,
-            grown_count: 0,
         }),
     };
     let json = encode_event(&event);
@@ -83,10 +79,6 @@ fn test_comm_task_control_response_roundtrip() -> Result<()> {
             unresolved_dependency_ids: Vec::new(),
             next_ready_ids: vec!["task-2".to_string()],
             newly_ready_ids: vec!["task-2".to_string()],
-            low_confidence_ids: Vec::new(),
-            mode: "deep".to_string(),
-            seeded_count: 2,
-            grown_count: 0,
         },
     };
     let json = encode_event(&event);

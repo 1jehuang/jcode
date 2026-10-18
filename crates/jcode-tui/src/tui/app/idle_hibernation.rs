@@ -23,6 +23,9 @@ pub(super) struct IdleHibernation {
     rss_after: Option<u64>,
     measure_after_frame: bool,
     notice_dirty: bool,
+    /// Transcript mode released the transcript; it must be refetched on wake.
+    transcript_dropped: bool,
+    pub(super) history_reload_needed: bool,
     wake_count: u64,
     hibernation_count: u64,
     last_wake_reason: Option<String>,
@@ -39,6 +42,8 @@ impl Default for IdleHibernation {
             rss_after: None,
             measure_after_frame: false,
             notice_dirty: false,
+            transcript_dropped: false,
+            history_reload_needed: false,
             wake_count: 0,
             hibernation_count: 0,
             last_wake_reason: None,
@@ -151,7 +156,34 @@ impl App {
             self.idle_hibernation.last_busy = Instant::now();
             return;
         };
-        let before = crate::process_memory::snapshot().rss_bytes;
+        let before = private_memory_bytes();
+        let mode = crate::config::config().session.hibernation_mode;
+        if mode == jcode_config_types::HibernationMode::Exit
+            && self.is_remote
+            && !crate::tui::is_ssh_remote()
+            && let Some(session_id) = self.remote_session_id.clone()
+        {
+            // The daemon owns the session, so the client can exit and a tiny
+            // waiter process resumes it on the next key press.
+            crate::logging::info("TUI hibernation: exiting client process");
+            self.save_input_for_reload(&session_id);
+            self.hibernate_exit_requested = Some(session_id);
+            self.should_quit = true;
+            return;
+        }
+        if mode == jcode_config_types::HibernationMode::Transcript
+            && self.is_remote
+            && self.remote_session_id.is_some()
+            && !self.display_messages.is_empty()
+        {
+            // Must run before the frame is frozen: clearing bumps the
+            // display version, which is itself a wake signal.
+            self.clear_display_messages();
+            self.display_messages.shrink_to_fit();
+            self.remote_side_pane_images = Vec::new();
+            self.invalidate_side_pane_images_signature();
+            self.idle_hibernation.transcript_dropped = true;
+        }
         self.idle_hibernation.frame = Some(frame.clone());
         self.idle_hibernation.hibernation_count += 1;
         self.session.release_provider_messages_cache();
@@ -161,7 +193,7 @@ impl App {
         self.command_suggestions_cache.replace(None);
         crate::tui::ui::release_idle_render_caches();
         crate::process_memory::release_retained_heap("tui_hibernation");
-        let after = crate::process_memory::snapshot().rss_bytes;
+        let after = private_memory_bytes();
         self.idle_hibernation.rss_before = before;
         self.idle_hibernation.rss_after = after;
         self.idle_hibernation.notice = hibernation_notice(before, after);
@@ -174,7 +206,7 @@ impl App {
         if self.idle_hibernation.frame.is_some()
             && std::mem::take(&mut self.idle_hibernation.measure_after_frame)
         {
-            let after = crate::process_memory::snapshot().rss_bytes;
+            let after = private_memory_bytes();
             self.idle_hibernation.rss_after = after;
             self.idle_hibernation.notice =
                 hibernation_notice(self.idle_hibernation.rss_before, after);
@@ -202,6 +234,9 @@ impl App {
         }
         if self.idle_hibernation.frame.take().is_some() {
             self.idle_hibernation.wake_count += 1;
+            if std::mem::take(&mut self.idle_hibernation.transcript_dropped) {
+                self.idle_hibernation.history_reload_needed = true;
+            }
             crate::logging::info(&format!("TUI hibernation wake: {reason}"));
             self.idle_hibernation.notice.clear();
             // Images and prepared frames were discarded, so repaint all cells
@@ -232,8 +267,13 @@ impl App {
         serde_json::json!({
             "state": if self.idle_hibernation.frame.is_some() { "hibernated" }
                 else if self.idle_hibernation.pending { "pending" } else { "awake" },
-            "scope": "tui_derived_caches",
-            "source_transcripts_retained": true,
+            "scope": match crate::config::config().session.hibernation_mode {
+                jcode_config_types::HibernationMode::Caches => "tui_derived_caches",
+                jcode_config_types::HibernationMode::Transcript => "tui_transcript",
+                jcode_config_types::HibernationMode::Exit => "tui_process",
+            },
+            "source_transcripts_retained": !self.idle_hibernation.transcript_dropped,
+            "memory_metric": "pss_anon",
             "busy": self.hibernation_has_work(),
             "wake_count": self.idle_hibernation.wake_count,
             "hibernation_count": self.idle_hibernation.hibernation_count,
@@ -261,6 +301,18 @@ fn frame_can_be_frozen(frame: &Buffer) -> bool {
             .is_some_and(|bytes| bytes <= MAX_FROZEN_SYMBOL_BYTES)
 }
 
+/// Memory owned by this process alone. RSS also counts the executable and
+/// shared libraries, which every jcode client maps once and shares, so RSS
+/// changes overstate (and hide) what hibernation actually frees.
+fn private_memory_bytes() -> Option<u64> {
+    let snapshot = crate::process_memory::snapshot();
+    snapshot
+        .os
+        .as_ref()
+        .and_then(|os| os.pss_anon_bytes)
+        .or(snapshot.rss_bytes)
+}
+
 fn hibernation_notice(before: Option<u64>, after: Option<u64>) -> String {
     match (before, after) {
         (Some(before), Some(after)) => {
@@ -272,7 +324,7 @@ fn hibernation_notice(before: Option<u64>, after: Option<u64>) -> String {
                 "unchanged".to_string()
             };
             format!(
-                "💤 Hibernated · TUI RSS {change} ({:.0} MiB) · type to resume",
+                "💤 Hibernated · private mem {change} ({:.0} MiB) · type to resume",
                 after as f64 / 1_048_576.0,
             )
         }
@@ -452,7 +504,7 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect();
         assert!(screen.contains("Hibernated"));
-        assert!(screen.contains("TUI RSS"));
+        assert!(screen.contains("private mem"));
         let snapshot = app.hibernation_frame().unwrap().clone();
         app.enter_idle_hibernation(Some(&Buffer::empty(Rect::new(0, 0, 5, 5))));
         assert_eq!(app.hibernation_frame().unwrap(), &snapshot);
@@ -475,6 +527,30 @@ mod tests {
         frame.content[0].set_symbol(&"x".repeat(MAX_FROZEN_SYMBOL_BYTES + 1));
         assert!(!frame_can_be_frozen(&frame));
         assert!(!frame_can_be_frozen(&Buffer::empty(Rect::new(0, 0, 0, 0))));
+    }
+
+    #[test]
+    fn private_memory_metric_prefers_pss_anon() {
+        if let Some(os) = crate::process_memory::snapshot().os
+            && let Some(anon) = os.pss_anon_bytes
+        {
+            let measured = private_memory_bytes().unwrap();
+            // Same metric, sampled moments apart.
+            assert!(measured.abs_diff(anon) < 64 << 20);
+        }
+    }
+
+    #[test]
+    fn transcript_drop_marks_history_reload_on_wake_only_when_dropped() {
+        let mut app = app();
+        freeze(&mut app);
+        app.wake_idle_hibernation();
+        assert!(!app.idle_hibernation.history_reload_needed);
+        freeze(&mut app);
+        app.idle_hibernation.transcript_dropped = true;
+        app.wake_idle_hibernation();
+        assert!(app.idle_hibernation.history_reload_needed);
+        assert!(!app.idle_hibernation.transcript_dropped);
     }
 
     #[test]
@@ -551,7 +627,7 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect();
         assert!(text.contains("Hibernated"));
-        assert!(text.contains("TUI RSS -30.0 MiB"));
+        assert!(text.contains("private mem -30.0 MiB"));
         assert!(text.contains("resume"));
     }
 }

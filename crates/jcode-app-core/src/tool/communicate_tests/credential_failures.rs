@@ -161,10 +161,6 @@ fn run_plan_terminal_summary_includes_recorded_failure_reasons() {
         unresolved_dependency_ids: Vec::new(),
         next_ready_ids: Vec::new(),
         newly_ready_ids: Vec::new(),
-        low_confidence_ids: Vec::new(),
-        mode: "light".to_string(),
-        seeded_count: 0,
-        grown_count: 0,
     };
     let output = super::super::format_run_plan_terminal_summary(3, &summary, 2);
     assert!(output.contains("Failed nodes: c"));

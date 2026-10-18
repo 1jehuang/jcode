@@ -7,27 +7,6 @@ fn default_true() -> bool {
     true
 }
 
-/// Wire spec for a task-DAG node submitted by an agent (seed/expand/inject).
-/// Mirrors `jcode_plan::dag::NodeSpec` but kept as an explicit wire type so the
-/// protocol stays self-describing and serde-stable.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct TaskGraphNodeSpec {
-    pub id: String,
-    pub content: String,
-    /// "explore" | "implement" | "verify" | "fix" | "synthesize". Defaults to
-    /// "explore" when absent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kind: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub depends_on: Vec<String>,
-    #[serde(default, skip_serializing_if = "is_zero_u8")]
-    pub priority: u8,
-}
-
-fn is_zero_u8(value: &u8) -> bool {
-    *value == 0
-}
-
 fn is_false(value: &bool) -> bool {
     !*value
 }
@@ -172,6 +151,11 @@ pub enum Request {
         /// Desktop can render user_response tool calls as inline answers.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         supports_user_response: bool,
+        /// The client has no account-router countdown of its own (Desktop,
+        /// SDK). On a usage/rate-limit failure the server switches to the next
+        /// pool-approved account and retries the turn itself.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        supports_server_failover: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         working_dir: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -182,6 +166,11 @@ pub enum Request {
         client_instance_id: Option<String>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         client_has_local_history: bool,
+        /// Prefix of the transcript the client already rendered locally. When
+        /// it matches the server's view, History carries only the messages
+        /// after it (`messages_base_count`), instead of the full transcript.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        history_base: Option<crate::HistoryBase>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         allow_session_takeover: bool,
         /// Legacy ownership hint, retained for wire compatibility. Disconnects
@@ -483,6 +472,10 @@ pub enum Request {
         prefer_strongest: bool,
     },
 
+    /// Fetch daemon-owned OAuth account usage without acquiring the agent lock.
+    #[serde(rename = "account_usage")]
+    AccountUsage { id: u64 },
+
     /// Switch active Anthropic account label on the server session.
     /// This keeps account overrides and provider credential caches in sync.
     #[serde(rename = "switch_anthropic_account")]
@@ -652,49 +645,6 @@ pub enum Request {
         proposer_session: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
-    },
-
-    /// Seed the swarm task DAG in one call (the first agent's draft). Replaces or
-    /// initializes the shared plan with a validated graph of nodes + edges.
-    #[serde(rename = "comm_seed_graph")]
-    CommSeedGraph {
-        id: u64,
-        session_id: String,
-        /// "deep" (comprehensive, gated) or "light" (fan-out).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        mode: Option<String>,
-        nodes: Vec<TaskGraphNodeSpec>,
-    },
-
-    /// Decompose a node the caller owns into a child sub-DAG (composite path). In
-    /// deep mode a critique/verify gate is auto-inserted.
-    #[serde(rename = "comm_expand_node")]
-    CommExpandNode {
-        id: u64,
-        session_id: String,
-        node_id: String,
-        children: Vec<TaskGraphNodeSpec>,
-    },
-
-    /// Complete a node the caller owns with a typed handoff artifact. In deep mode
-    /// the artifact is validated for thinness.
-    #[serde(rename = "comm_complete_node")]
-    CommCompleteNode {
-        id: u64,
-        session_id: String,
-        node_id: String,
-        /// Handoff artifact as a JSON object string.
-        artifact_json: String,
-    },
-
-    /// Inject gap/fix nodes from a gate that found a problem, re-blocking the gate
-    /// (and its composite parent) until the new nodes drain.
-    #[serde(rename = "comm_inject_gap")]
-    CommInjectGap {
-        id: u64,
-        session_id: String,
-        gate_id: String,
-        nodes: Vec<TaskGraphNodeSpec>,
     },
 
     /// Spawn a new agent session (coordinator only)
@@ -904,4 +854,4 @@ pub enum Request {
 }
 
 mod events;
-pub use events::ServerEvent;
+pub use events::{AccountUsageSnapshot, ServerEvent};

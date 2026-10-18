@@ -179,6 +179,36 @@ fn salvage_glued_journal_entries(line: &str, mut apply: impl FnMut(SessionJourna
 /// line preserves the rest of the transcript; per-entry `meta` snapshots make
 /// later entries self-sufficient for metadata, and appended messages after a
 /// gap are far better than losing the whole tail.
+/// Snapshot files at or above this size journal metadata-only changes
+/// instead of rewriting the whole transcript.
+const METADATA_SNAPSHOT_MAX_BYTES: u64 = 1024 * 1024;
+
+/// Apply the metadata from the newest journal entry without deserializing
+/// any appended messages.
+fn apply_latest_journal_meta(session: &mut Session, journal_path: &Path) {
+    #[derive(serde::Deserialize)]
+    struct MetaOnly {
+        meta: super::journal::SessionJournalMeta,
+    }
+    let Ok(file) = std::fs::File::open(journal_path) else {
+        return;
+    };
+    let mut latest = None;
+    for line in BufReader::new(file).lines() {
+        let Ok(line) = line else { break };
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(entry) = serde_json::from_str::<MetaOnly>(trimmed) {
+            latest = Some(entry.meta);
+        }
+    }
+    if let Some(meta) = latest {
+        session.apply_journal_meta(meta);
+    }
+}
+
 fn replay_journal_lines(
     journal_path: &Path,
     mut apply: impl FnMut(SessionJournalEntry),
@@ -467,6 +497,21 @@ impl Session {
         Ok(session)
     }
 
+    /// Like [`Self::load`], but uses the copy parsed in the background at
+    /// server startup when it still matches disk (see `session::prewarm`).
+    /// Only for resume, which consumes the copy exactly once.
+    pub fn load_for_resume(session_id: &str) -> Result<Self> {
+        if let Some(mut session) = super::prewarm::take(session_id) {
+            session.refresh_agent_model_overrides()?;
+            crate::logging::info(&format!(
+                "[TIMING] session_load: session={session_id}, source=prewarm, messages={}",
+                session.messages.len()
+            ));
+            return Ok(session);
+        }
+        Self::load(session_id)
+    }
+
     /// Load only the metadata needed for remote-client startup.
     ///
     /// This intentionally skips heavyweight transcript vectors so the remote
@@ -480,6 +525,10 @@ impl Session {
         let bytes = std::fs::read(&path)?;
         let stub: SessionStartupStub = serde_json::from_slice(&bytes)?;
         let mut session = Self::session_from_startup_stub(stub);
+        // Metadata changes on large sessions are journaled instead of forcing
+        // a full snapshot rewrite, so the journal holds the latest metadata.
+        apply_latest_journal_meta(&mut session, &session_journal_path_from_snapshot(&path));
+        session.reset_persist_state(true);
         session.refresh_agent_model_overrides()?;
         Ok(session)
     }
@@ -564,14 +613,28 @@ impl Session {
 
     fn save_inner(&mut self, force: bool) -> Result<()> {
         // Shutdown waits for this guard so it cannot exit mid-checkpoint.
+        let pre_start = Instant::now();
         let _save_guard = SAVES_IN_FLIGHT
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let guard_ms = pre_start.elapsed().as_millis();
         self.refresh_agent_model_overrides()?;
+        let overrides_ms = pre_start.elapsed().as_millis() - guard_ms;
         // A session that migrated to another machine (or whose on-disk copy was
         // replaced by a newer returned transcript) must not be overwritten by
         // this stale in-memory copy.
-        if let Some(block) = self.migration_lease_block() {
+        let lease = self.migration_lease_block();
+        let pre_ms = pre_start.elapsed().as_millis();
+        if pre_ms >= 50 {
+            crate::logging::info(&format!(
+                "[TIMING] session save preamble: session={}, guard={}ms, overrides={}ms, lease={}ms",
+                self.id,
+                guard_ms,
+                overrides_ms,
+                pre_ms - guard_ms - overrides_ms
+            ));
+        }
+        if let Some(block) = lease {
             crate::logging::warn(&format!("Session {} not persisted: {}", self.id, block));
             return Ok(());
         }
@@ -615,11 +678,16 @@ impl Session {
         let snapshot_bytes_before = file_len_or_zero(&path);
         let journal_bytes_before = file_len_or_zero(&journal_path);
         let current_meta = self.journal_meta();
-        let metadata_needs_snapshot = self
-            .persist_state
-            .last_meta
-            .as_ref()
-            .is_some_and(|prev| metadata_requires_snapshot(prev, &current_meta));
+        // Every journal entry carries the full metadata and replay (and the
+        // startup stub) applies it, so a metadata change only needs a snapshot
+        // to keep small files self-contained. For large transcripts the full
+        // rewrite cost ~0.6s per resume of a 40MB session, so journal it.
+        let metadata_needs_snapshot = snapshot_bytes_before < METADATA_SNAPSHOT_MAX_BYTES
+            && self
+                .persist_state
+                .last_meta
+                .as_ref()
+                .is_some_and(|prev| metadata_requires_snapshot(prev, &current_meta));
         let vectors_need_snapshot = !self.persist_state.snapshot_exists
             || self.persist_state.messages_mode == PersistVectorMode::Full
             || self.persist_state.env_snapshots_mode == PersistVectorMode::Full
@@ -670,8 +738,19 @@ impl Session {
             )
         } else {
             let entry_build_start = Instant::now();
+            let mut entry_meta = current_meta.clone();
+            if entry_meta.compaction.is_some()
+                && self
+                    .persist_state
+                    .last_meta
+                    .as_ref()
+                    .is_some_and(|prev| prev.compaction == entry_meta.compaction)
+            {
+                entry_meta.compaction = None;
+                entry_meta.compaction_unchanged = true;
+            }
             let entry = SessionJournalEntry {
-                meta: current_meta.clone(),
+                meta: entry_meta,
                 append_messages: self.messages[self.persist_state.messages_len..].to_vec(),
                 append_env_snapshots: self.env_snapshots[self.persist_state.env_snapshots_len..]
                     .to_vec(),

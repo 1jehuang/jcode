@@ -11,10 +11,12 @@ pub mod models;
 pub mod openai_schema;
 pub mod pricing;
 pub mod reasoning;
+pub mod request_compression;
 pub mod retry_after;
 pub mod selection;
 pub mod service_tier;
 pub mod transport;
+pub mod ws_deflate;
 
 pub use jcode_usage_types::{ModelUsage, compare_model_usage};
 pub use transport::is_transient_transport_error;
@@ -37,7 +39,8 @@ pub use failover::{
 };
 pub use fallback_pick::{
     FallbackPickOptions, error_looks_like_credential_failure, model_generation_rank,
-    pick_next_fallback_route, pick_next_fallback_route_with_options,
+    pick_next_fallback_route, pick_next_fallback_route_with_options, rank_fallback_routes,
+    route_pool_key,
 };
 pub use fingerprint::{log_provider_canonical_input, stable_hash_json, stable_hash_str};
 pub use models::{
@@ -77,6 +80,11 @@ pub type EventStream = Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>;
 /// Provider trait for LLM backends.
 #[async_trait]
 pub trait Provider: Send + Sync {
+    /// Bind requests to a stable application session for provider-side affinity.
+    /// This is distinct from a provider response id used to resume a stream.
+    /// Backends without session-affinity support can retain the default no-op.
+    fn set_session_id(&self, _session_id: &str) {}
+
     /// Prepare provider-specific request state before the foreground completion.
     ///
     /// The default is intentionally a no-op. Implementations must not send user
@@ -277,6 +285,14 @@ pub trait Provider: Send + Sync {
     /// Prefetch any dynamic model lists (default: no-op).
     async fn prefetch_models(&self) -> Result<()> {
         Ok(())
+    }
+
+    /// Whether cached model names lack capabilities needed by this provider.
+    /// Allows startup to refresh legacy snapshots without fetching every
+    /// provider's catalog unconditionally. Implementations must not block on
+    /// async locks from this synchronous UI-facing probe.
+    fn model_capabilities_need_refresh(&self) -> bool {
+        false
     }
 
     /// Force-refresh model catalog data and return a before/after summary.
@@ -547,6 +563,8 @@ pub async fn collect_simple_completion<P: Provider + ?Sized>(
         tool_duration_ms: None,
     }];
 
+    let mut provider_name = provider.name().to_string();
+    let mut model = provider.model();
     let response = provider.complete(&messages, &[], system, None).await?;
     let mut result = String::new();
     let mut usage = SimpleCompletionUsage::default();
@@ -563,18 +581,78 @@ pub async fn collect_simple_completion<P: Provider + ?Sized>(
                 output_tokens,
                 cache_read_input_tokens,
                 cache_creation_input_tokens,
-            }) => usage.observe(
-                input_tokens,
-                output_tokens,
-                cache_read_input_tokens,
-                cache_creation_input_tokens,
-            ),
+            }) => {
+                model = provider.model();
+                usage.observe(
+                    input_tokens,
+                    output_tokens,
+                    cache_read_input_tokens,
+                    cache_creation_input_tokens,
+                );
+            }
+            Ok(StreamEvent::UpstreamProvider { provider }) => provider_name = provider,
+            Ok(StreamEvent::Error { message, .. }) => {
+                return Err(SimpleCompletionError {
+                    usage,
+                    provider: provider_name,
+                    model,
+                    source: anyhow::anyhow!(message),
+                }
+                .into());
+            }
             Ok(_) => {}
-            Err(err) => return Err(err),
+            Err(source) => {
+                return Err(SimpleCompletionError {
+                    usage,
+                    provider: provider_name,
+                    model,
+                    source,
+                }
+                .into());
+            }
         }
     }
 
     Ok((result, usage))
+}
+
+/// Failed simple completion with the usage already observed before failure.
+/// Dropping the completion future (for example on timeout) cannot return this
+/// snapshot. Cancellation accounting requires a separate observer lifecycle.
+#[derive(Debug)]
+pub struct SimpleCompletionError {
+    pub usage: SimpleCompletionUsage,
+    pub provider: String,
+    pub model: String,
+    source: anyhow::Error,
+}
+
+impl SimpleCompletionError {
+    pub fn new(
+        source: anyhow::Error,
+        usage: SimpleCompletionUsage,
+        provider: String,
+        model: String,
+    ) -> Self {
+        Self {
+            usage,
+            provider,
+            model,
+            source,
+        }
+    }
+}
+
+impl std::fmt::Display for SimpleCompletionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.source, f)
+    }
+}
+
+impl std::error::Error for SimpleCompletionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
 }
 
 /// Provider-reported usage for a non-agent completion.
@@ -804,6 +882,8 @@ pub fn fresh_transport_client() -> reqwest::Client {
 pub struct NativeCompactionResult {
     pub summary_text: Option<String>,
     pub openai_encrypted_content: Option<String>,
+    /// Provider counters for this separately billed compaction request.
+    pub usage: Option<SimpleCompletionUsage>,
 }
 
 /// A single route to access a model: model + provider + API method

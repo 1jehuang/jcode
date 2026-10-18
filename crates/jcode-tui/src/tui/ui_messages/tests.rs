@@ -1,5 +1,46 @@
 use super::*;
 
+#[test]
+fn oauth_login_progress_renderer_keeps_short_link_and_hides_full_details() {
+    let url =
+        "https://example.invalid/authorize?state=private-state&code_challenge=private-challenge";
+    let summary = format!(
+        "✓ Sign-in link ready\n◌ Waiting for browser approval\n[Open OpenAI sign-in]({url})\nPaste callback URL here · /cancel"
+    );
+    let mut msg = DisplayMessage::system(jcode_tui_messages::encode_collapsible_swarm_content(
+        "Sign-in details",
+        &format!(
+            "{summary}\n\n<!-- oauth-details -->\n\nFull sign-in URL:\n{url}\n\nManual fallback details"
+        ),
+    ));
+    msg.title = Some("OpenAI login".to_string());
+    for width in [40, 80, 120] {
+        let lines = render_system_message(&msg, width, crate::config::DiffDisplayMode::Off);
+        let text = lines
+            .iter()
+            .map(extract_line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Sign-in link ready"));
+        assert!(text.contains("Waiting for browser approval"));
+        assert!(text.contains("Open OpenAI sign-in"));
+        assert!(text.contains(SWARM_EXPAND_BADGE));
+        assert!(!text.contains("private-state"));
+        assert!(!text.contains("Manual fallback details"));
+        assert!(lines.iter().all(|line| line.width() <= width as usize));
+    }
+    msg.content = jcode_tui_messages::toggle_collapsible_swarm_content(&msg.content).unwrap();
+    let lines = render_system_message(&msg, 120, crate::config::DiffDisplayMode::Off);
+    let text = lines
+        .iter()
+        .map(extract_line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("private-state"));
+    assert!(text.contains("Manual fallback details"));
+    assert!(text.contains(SWARM_COLLAPSE_BADGE));
+}
+
 fn extract_line_text(line: &Line<'_>) -> String {
     line.spans
         .iter()
@@ -288,6 +329,127 @@ fn transient_system_notices_are_single_line_without_changing_content() {
 }
 
 #[test]
+fn ordinary_multiline_and_markdown_notices_are_one_terminal_row() {
+    let saved = markdown::center_code_blocks();
+    for centered in [false, true] {
+        markdown::set_center_code_blocks(centered);
+        for content in [
+            "Header line\n  indented detail\n\nNext block",
+            "**Status updated**\n- 工作账户 e\u{301} reconnected\n- More detail that must not wrap",
+            "Using `some/very/long/path.rs` with **formatting** and a long status message",
+            "\u{1b}[35mUpdated\u{1b}[0m\n\tMore details",
+        ] {
+            let msg = DisplayMessage::system(content);
+            for width in 0..=120 {
+                let lines = render_system_message(&msg, width, crate::config::DiffDisplayMode::Off);
+                assert_eq!(
+                    lines.len(),
+                    usize::from(width != 0),
+                    "{content:?} at {width}"
+                );
+                for line in &lines {
+                    assert!(line.width() <= width as usize, "{line:?} at {width}");
+                    assert!(!extract_line_text(line).contains(['\n', '\t', '\u{1b}']));
+                }
+                assert_eq!(
+                    msg.content, content,
+                    "display must not rewrite stored content"
+                );
+            }
+        }
+    }
+    markdown::set_center_code_blocks(saved);
+}
+
+#[test]
+fn file_activity_is_neutral_and_one_row_including_legacy_titles() {
+    let saved = markdown::center_code_blocks();
+    let content = jcode_tui_messages::encode_collapsible_swarm_content(
+        "…/src/工作账户/e\u{301}.rs · Edited lines 323-348 (1 occurrence)",
+        "Intent: fix the parser\n\n```text\n323- old line\n323+ new line\n```",
+    );
+    for centered in [false, true] {
+        markdown::set_center_code_blocks(centered);
+        for title in ["File activity · moss", "File activity"] {
+            let msg = DisplayMessage::swarm(title, &content);
+            for width in 0..=120 {
+                let lines = render_swarm_message(&msg, width, crate::config::DiffDisplayMode::Off);
+                assert_eq!(lines.len(), usize::from(width != 0), "{title} at {width}");
+                for line in &lines {
+                    assert!(line.width() <= width as usize, "{line:?} at {width}");
+                    let text = extract_line_text(line);
+                    assert!(!text.contains("Intent:"));
+                    assert!(!text.contains("old line"));
+                    for span in &line.spans {
+                        if !span.content.trim().is_empty() {
+                            assert_eq!(span.style.fg, Some(dim_color()), "{span:?}");
+                        }
+                    }
+                    if width >= 80 {
+                        assert!(text.contains(SWARM_DIFF_EXPAND_BADGE));
+                        assert!(text.trim_end().ends_with(SWARM_DIFF_EXPAND_BADGE));
+                    }
+                }
+            }
+        }
+    }
+    markdown::set_center_code_blocks(saved);
+}
+
+#[test]
+fn file_activity_explicit_expansion_preserves_diff_details() {
+    let content = jcode_tui_messages::encode_collapsible_swarm_content(
+        "src/parser.rs · Edited lines 323-348",
+        "Intent: fix the parser\n\n```text\n323- old line\n323+ new line\n```",
+    );
+    let expanded = jcode_tui_messages::toggle_collapsible_swarm_content(&content).unwrap();
+    let msg = DisplayMessage::swarm("File activity · moss", expanded);
+    let lines = render_swarm_message(&msg, 120, crate::config::DiffDisplayMode::Off);
+    let text = lines
+        .iter()
+        .map(extract_line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(lines.len() > 1);
+    assert!(text.contains(SWARM_DIFF_COLLAPSE_BADGE));
+    assert!(text.contains("Intent: fix the parser"));
+    assert!(text.contains("323- old line"));
+    assert!(text.contains("323+ new line"));
+}
+
+#[test]
+fn raw_file_activity_system_notice_is_neutral_without_rewriting_content() {
+    let content = "⚠️ File activity: /home/jeremy/jcode/src/parser.rs - moss previously read this file: read lines 1-1000\nMore details";
+    let msg = DisplayMessage::system(content);
+    let lines = render_system_message(&msg, 60, crate::config::DiffDisplayMode::Off);
+    assert_eq!(lines.len(), 1);
+    assert!(lines[0].width() <= 60);
+    assert!(
+        lines[0]
+            .spans
+            .iter()
+            .all(|span| span.style.fg == Some(dim_color()))
+    );
+    assert_eq!(msg.content, content);
+}
+
+#[test]
+fn interactive_login_prompt_keeps_instructions_visible() {
+    let msg = DisplayMessage::system(
+        "Azure OpenAI Login\n\nEnter your endpoint below.\nType /cancel to abort.",
+    );
+    let lines = render_system_message(&msg, 80, crate::config::DiffDisplayMode::Off);
+    let text = lines
+        .iter()
+        .map(extract_line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(lines.len() > 1);
+    assert!(text.contains("Enter your endpoint below."));
+    assert!(text.contains("/cancel"));
+}
+
+#[test]
 fn render_system_message_forces_system_color_on_all_spans() {
     let msg = DisplayMessage::system("**Reload complete** - continuing.");
 
@@ -428,14 +590,19 @@ fn render_system_message_renders_markdown_formatting() {
         "**bold** and `code` and # heading\n- bullet item\n[link](http://example.com)",
     );
 
-    let lines = render_system_message(&msg, 80, crate::config::DiffDisplayMode::Off);
+    let lines = render_system_message(&msg, 200, crate::config::DiffDisplayMode::Off);
     let plain = lines
         .iter()
         .map(extract_line_text)
         .collect::<Vec<_>>()
         .join("\n");
 
-    // System messages now render markdown: the inline markers are consumed and
+    assert_eq!(
+        lines.len(),
+        1,
+        "ordinary markdown notices must stay compact"
+    );
+    // System messages render markdown: the inline markers are consumed and
     // the underlying text survives. Bold/code markers should no longer appear
     // literally, while the text content and a bullet glyph remain.
     assert!(plain.contains("bold"), "keeps bold text: {plain:?}");
@@ -465,8 +632,9 @@ fn render_system_message_renders_markdown_formatting() {
 }
 
 #[test]
-fn render_system_message_preserves_indentation_and_newlines() {
-    let msg = DisplayMessage::system("Header line\n  indented detail\n\nNext block");
+fn explicit_system_report_preserves_indentation_and_newlines() {
+    let msg = DisplayMessage::system("Header line\n  indented detail\n\nNext block")
+        .with_title("Context");
 
     let lines = render_system_message(&msg, 80, crate::config::DiffDisplayMode::Off);
     let rendered = lines.iter().map(extract_line_text).collect::<Vec<_>>();
@@ -794,9 +962,23 @@ fn render_todos_message_shows_grouped_card_with_status_glyphs() {
         todo("2", "Render the card", "in_progress", Some("todo card")),
         todo("3", "Unrelated cleanup", "pending", None),
     ];
-    let msg = DisplayMessage::todos(serde_json::to_string(&todos).unwrap());
+    let msg = DisplayMessage::todos(
+        serde_json::json!({
+            "todos": todos,
+            "plan": {
+                "user_intention": "Keep overall progress visible",
+                "understands_user_intent": "clear"
+            }
+        })
+        .to_string(),
+    );
 
     let lines = render_todos_message(&msg, 100, crate::config::DiffDisplayMode::Off);
+    let intent_row = lines
+        .iter()
+        .position(|line| extract_line_text(line).contains("Keep overall progress visible"))
+        .unwrap();
+    assert_eq!(extract_line_text(&lines[intent_row + 1]).trim(), "●●○");
     let plain = lines
         .iter()
         .map(extract_line_text)
@@ -1817,6 +1999,7 @@ fn render_background_task_messages_prefer_display_name() {
 
 #[test]
 fn render_system_message_uses_scheduled_task_card() {
+    let _guard = system_glyph_env_lock();
     let msg = DisplayMessage::system(
         "[Scheduled task]\nA scheduled task for this session is now due.\n\nTask: Follow up on the scheduler test\nWorking directory: /home/jeremy/jcode\nRelevant files: src/tui/ui_messages.rs\nBranch: master\n\nBackground: Verify the scheduled task card styling\nSuccess criteria: The due task renders clearly\nScheduled by session: session_test",
     );
@@ -1841,6 +2024,7 @@ fn render_system_message_uses_scheduled_task_card() {
 
 #[test]
 fn render_tool_message_uses_scheduled_card() {
+    let _guard = system_glyph_env_lock();
     let msg = DisplayMessage {
         role: "tool".to_string(),
         content: "Scheduled task 'Follow up on the scheduler test' for in 1m (id: sched_abc123)\nWorking directory: /home/jeremy/jcode\nRelevant files: src/tui/ui_messages.rs\nTarget: resume session session_test".to_string(),

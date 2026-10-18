@@ -101,6 +101,7 @@ async fn handle_resume_session_allows_reconnect_takeover_with_local_history() ->
         None,
         None,
         true,
+        None,
         true,
         &mut client_selfdev,
         &mut client_session_id,

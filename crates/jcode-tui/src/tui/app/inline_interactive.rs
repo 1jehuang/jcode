@@ -700,6 +700,7 @@ impl App {
         if let Some(name) = snapshot.provider_name
             && self.remote_provider_name.as_deref() != Some(name.as_str())
         {
+            self.remote_available_service_tiers = None;
             self.remote_provider_name = Some(name);
             provider_meta_changed = true;
             provider_name_changed = true;
@@ -708,6 +709,7 @@ impl App {
             && self.remote_provider_model.as_deref() != Some(model.as_str())
         {
             self.update_context_limit_for_model(&model, None);
+            self.remote_available_service_tiers = None;
             self.remote_provider_model = Some(model);
             provider_meta_changed = true;
         }
@@ -1313,7 +1315,12 @@ impl App {
 
         let routes_started = std::time::Instant::now();
         let routes: Vec<crate::provider::ModelRoute> = if self.is_remote {
-            if !self.remote_model_options.is_empty() {
+            // Small catalogs build in well under a frame, so keep them
+            // synchronous: the first paint already has the real rows.
+            const SYNC_REMOTE_ROUTES_MAX: usize = 256;
+            if !self.remote_model_options.is_empty()
+                && self.remote_model_options.len() <= SYNC_REMOTE_ROUTES_MAX
+            {
                 let mut routes = std::mem::take(&mut self.remote_model_options);
                 self.extend_remote_routes_for_uncovered_models(&mut routes);
                 let routes_ms = routes_started.elapsed().as_millis();
@@ -1325,10 +1332,6 @@ impl App {
                     preserve_input,
                     true,
                 );
-                // `remote_model_options` was just replaced by the deduped,
-                // extended route list, which changes the routes markers in the
-                // signature. Re-sign the cache so the next `/model` open hits
-                // it instead of rebuilding ~10k entries every time.
                 let fresh_signature = self.model_picker_cache_signature(
                     &current_model,
                     config_default_model,
@@ -1339,6 +1342,44 @@ impl App {
                 if let Some(cache) = self.model_picker_cache.as_mut() {
                     cache.signature = fresh_signature;
                 }
+                return;
+            }
+            if !self.remote_model_options.is_empty() {
+                // Normalizing ~2k routes and expanding them into ~10k effort
+                // rows takes hundreds of ms. Never do that on the UI thread:
+                // show the picker immediately and build in the background.
+                // `poll_model_picker_load` stores the normalized routes back
+                // and re-signs the cache so the next open is instant.
+                let refreshing_open_picker = self
+                    .inline_interactive_state
+                    .as_ref()
+                    .is_some_and(picker_is_runtime_model_picker);
+                if refreshing_open_picker {
+                    self.set_status_notice("Updating model list…");
+                } else {
+                    self.open_loading_model_picker(&current_model);
+                    if !preserve_input {
+                        self.input.clear();
+                        self.cursor_pos = 0;
+                    }
+                }
+                let routes = self.remote_model_options.clone();
+                let remote_provider_name = self.remote_provider_name.clone();
+                let remote_available_entries = self.remote_available_entries.clone();
+                self.start_model_picker_route_load_inner(
+                    cache_signature,
+                    picker_started,
+                    true,
+                    move || {
+                        let mut routes = routes;
+                        Self::extend_remote_routes_for_uncovered_models_static(
+                            remote_provider_name.as_deref(),
+                            &remote_available_entries,
+                            &mut routes,
+                        );
+                        routes
+                    },
+                );
                 return;
             }
             // Names-only remote catalog: synthesize properly classified
@@ -1463,14 +1504,28 @@ impl App {
         picker_started: std::time::Instant,
         build_routes: impl FnOnce() -> Vec<crate::provider::ModelRoute> + Send + 'static,
     ) {
+        self.start_model_picker_route_load_inner(signature, picker_started, false, build_routes);
+    }
+
+    /// Build routes AND the full picker entry list off the UI thread. Only
+    /// cheap state application happens on the UI thread when it lands.
+    fn start_model_picker_route_load_inner(
+        &mut self,
+        signature: ModelPickerCacheSignature,
+        picker_started: std::time::Instant,
+        store_remote_routes: bool,
+        build_routes: impl FnOnce() -> Vec<crate::provider::ModelRoute> + Send + 'static,
+    ) {
         self.model_picker_load_request_id = self.model_picker_load_request_id.wrapping_add(1);
         let request_id = self.model_picker_load_request_id;
+        let ctx = self.model_picker_build_context();
         let (tx, rx) = std::sync::mpsc::channel();
         let build = move || {
             let routes_started = std::time::Instant::now();
             let routes = build_routes();
             let routes_ms = routes_started.elapsed().as_millis();
-            let _ = tx.send(Ok(ModelPickerRoutesResult { routes, routes_ms }));
+            let outcome = Self::build_model_picker_entries(ctx, routes, routes_ms, picker_started);
+            let _ = tx.send(Ok(ModelPickerRoutesResult { outcome }));
         };
 
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -1484,6 +1539,7 @@ impl App {
             signature,
             picker_started,
             receiver: rx,
+            store_remote_routes,
         });
     }
 
@@ -1538,6 +1594,9 @@ impl App {
         } else {
             self.provider.available_efforts()
         };
+        let config_default_model_for_resign = config_default_model.clone();
+        let config_default_provider_for_resign = config_default_provider.clone();
+        let current_effort_for_resign = current_effort.clone();
         let current_signature = self.model_picker_cache_signature(
             &current_model,
             config_default_model,
@@ -1551,15 +1610,51 @@ impl App {
 
         match received {
             Ok(result) => {
-                self.open_model_picker_with_routes(
-                    pending.signature,
-                    pending.picker_started,
-                    result.routes,
-                    result.routes_ms,
-                    true,
-                    true,
-                );
-                if self.inline_interactive_state.is_some() {
+                let picker_open = self
+                    .inline_interactive_state
+                    .as_ref()
+                    .is_some_and(|picker| picker.kind == PickerKind::Model);
+                let routes = if picker_open {
+                    self.apply_built_model_picker(pending.signature, result.outcome, true, true)
+                } else {
+                    // User dismissed the picker while it loaded. Keep the work
+                    // as a warm cache, but do not pop the picker back open.
+                    match result.outcome {
+                        ModelPickerBuildOutcome::Built {
+                            entries,
+                            model_count,
+                            routes,
+                        } => {
+                            if Self::should_cache_model_picker_entries(model_count, routes.len()) {
+                                self.model_picker_cache = Some(ModelPickerCache {
+                                    signature: pending.signature,
+                                    entries,
+                                    route_count: routes.len(),
+                                    model_count,
+                                });
+                            }
+                            routes
+                        }
+                        ModelPickerBuildOutcome::Empty => Vec::new(),
+                    }
+                };
+                if pending.store_remote_routes && !routes.is_empty() {
+                    // Keep the normalized routes so the signature (which
+                    // samples remote_model_options) stays stable, then
+                    // re-sign the cache so the next open is a cache hit.
+                    self.remote_model_options = routes;
+                    let fresh_signature = self.model_picker_cache_signature(
+                        &current_model,
+                        config_default_model_for_resign,
+                        config_default_provider_for_resign,
+                        current_effort_for_resign,
+                        &available_efforts,
+                    );
+                    if let Some(cache) = self.model_picker_cache.as_mut() {
+                        cache.signature = fresh_signature;
+                    }
+                }
+                if picker_open && self.inline_interactive_state.is_some() {
                     self.set_status_notice("Model list updated");
                 }
                 true
@@ -1580,23 +1675,61 @@ impl App {
         preserve_input: bool,
         cache_entries: bool,
     ) -> Vec<crate::provider::ModelRoute> {
+        let ctx = self.model_picker_build_context();
+        let outcome = Self::build_model_picker_entries(ctx, routes, routes_ms, picker_started);
+        self.apply_built_model_picker(cache_signature, outcome, preserve_input, cache_entries)
+    }
+
+    /// Snapshot of the App state the picker entry builder needs, so the
+    /// expensive build can run off the UI thread.
+    fn model_picker_build_context(&self) -> ModelPickerBuildContext {
+        ModelPickerBuildContext {
+            is_remote: self.is_remote,
+            current_model: if self.is_remote {
+                self.remote_provider_model
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string())
+            } else {
+                self.provider.model().to_string()
+            },
+            current_provider: if self.is_remote {
+                self.remote_provider_name
+                    .clone()
+                    .unwrap_or_else(|| "remote".to_string())
+            } else {
+                self.provider.display_name()
+            },
+            remote_provider_name: self.remote_provider_name.clone(),
+            current_api_method: self.current_route_api_method(),
+            current_effort: if self.is_remote {
+                self.remote_reasoning_effort.clone()
+            } else {
+                self.provider.reasoning_effort()
+            },
+            recent_authenticated_provider: self
+                .recent_authenticated_provider
+                .as_ref()
+                .map(|(provider, _)| provider.clone()),
+        }
+    }
+
+    fn build_model_picker_entries(
+        ctx: ModelPickerBuildContext,
+        routes: Vec<crate::provider::ModelRoute>,
+        routes_ms: u128,
+        picker_started: std::time::Instant,
+    ) -> ModelPickerBuildOutcome {
         use std::collections::BTreeMap;
 
-        let current_model = if self.is_remote {
-            self.remote_provider_model
-                .clone()
-                .unwrap_or_else(|| "unknown".to_string())
-        } else {
-            self.provider.model().to_string()
-        };
-        let current_provider = if self.is_remote {
-            self.remote_provider_name
-                .clone()
-                .unwrap_or_else(|| "remote".to_string())
-        } else {
-            self.provider.display_name()
-        };
-        let current_api_method = self.current_route_api_method();
+        let ModelPickerBuildContext {
+            is_remote,
+            current_model,
+            current_provider,
+            remote_provider_name,
+            current_api_method,
+            current_effort,
+            recent_authenticated_provider,
+        } = ctx;
         // UI preferences may be local, but provider defaults must not be.
         let remote_defaults = crate::config::Config::default();
         let config = if crate::tui::is_ssh_remote() {
@@ -1608,11 +1741,6 @@ impl App {
         let config_default_provider = config.provider.default_provider.clone();
         let config_anthropic_effort = config.provider.anthropic_reasoning_effort.clone();
         let config_openai_effort = config.provider.openai_reasoning_effort.clone();
-        let current_effort = if self.is_remote {
-            self.remote_reasoning_effort.clone()
-        } else {
-            self.provider.reasoning_effort()
-        };
 
         let is_config_default = |name: &str, route: &PickerOption, effort: Option<&str>| -> bool {
             if !model_picker_route_is_default(
@@ -1636,11 +1764,10 @@ impl App {
             )
         };
 
-        let routes = if routes.is_empty() && self.is_remote && current_model != "unknown" {
+        let routes = if routes.is_empty() && is_remote && current_model != "unknown" {
             vec![crate::provider::ModelRoute {
                 model: current_model.clone(),
-                provider: self
-                    .remote_provider_name
+                provider: remote_provider_name
                     .clone()
                     .unwrap_or_else(|| "current".to_string()),
                 api_method: "current".to_string(),
@@ -1653,7 +1780,7 @@ impl App {
             routes
         };
         let mut routes = crate::provider::dedupe_model_routes(routes);
-        if !self.is_remote {
+        if !is_remote {
             crate::model_usage::enrich_routes(&mut routes);
         }
         let shared_usage: HashMap<_, _> = routes
@@ -1680,12 +1807,7 @@ impl App {
         );
 
         if routes.is_empty() {
-            self.inline_interactive_state = None;
-            self.push_display_message(DisplayMessage::system(
-                crate::tui::app::model_context::no_models_available_message(self.is_remote),
-            ));
-            self.set_status_notice("No models available");
-            return routes;
+            return ModelPickerBuildOutcome::Empty;
         }
 
         let grouping_started = std::time::Instant::now();
@@ -1757,10 +1879,7 @@ impl App {
             }
         }
 
-        let recent_auth_provider = self
-            .recent_authenticated_provider
-            .as_ref()
-            .map(|(provider, _)| provider.as_str());
+        let recent_auth_provider = recent_authenticated_provider.as_deref();
 
         let entries_started = std::time::Instant::now();
         let usage_store = load_model_picker_usage_store();
@@ -1819,9 +1938,9 @@ impl App {
 
             if !effort_routes.is_empty() {
                 for effort in &model_efforts {
-                    // Swarm modes (swarm / swarm-deep) are orchestration rungs on
-                    // the effort ladder, not per-model reasoning variants. They
-                    // must not generate `model (swarm)` picker rows.
+                    // Swarm mode is an orchestration rung on the effort
+                    // ladder, not a per-model reasoning variant. It must not
+                    // generate `model (swarm)` picker rows.
                     if crate::prompt::is_swarm_mode_effort(effort) {
                         continue;
                     }
@@ -1984,7 +2103,7 @@ impl App {
         });
         drop(sort_keys);
         let mut slots: Vec<Option<PickerEntry>> = entries.into_iter().map(Some).collect();
-        let mut entries: Vec<PickerEntry> = order
+        let entries: Vec<PickerEntry> = order
             .into_iter()
             .filter_map(|index| slots[index].take())
             .collect();
@@ -1994,7 +2113,7 @@ impl App {
         if total_ms >= 250 || std::env::var("JCODE_LOG_MODEL_PICKER_TIMING").is_ok() {
             crate::logging::info(&format!(
                 "[TIMING] model_picker_open: remote={}, simplified={}, routes={}, models={}, entries={}, routes={}ms, grouping={}ms, timestamps={}ms, entries_sort={}ms, total={}ms",
-                self.is_remote,
+                is_remote,
                 crate::perf::tui_policy().simplified_model_picker,
                 routes.len(),
                 model_order.len(),
@@ -2038,7 +2157,7 @@ impl App {
             crate::logging::event_info(
                 "model_picker_open",
                 vec![
-                    ("remote", self.is_remote.to_string()),
+                    ("remote", is_remote.to_string()),
                     (
                         "simplified",
                         crate::perf::tui_policy()
@@ -2060,6 +2179,36 @@ impl App {
                 ],
             );
         }
+
+        ModelPickerBuildOutcome::Built {
+            entries,
+            model_count: model_order.len(),
+            routes,
+        }
+    }
+
+    fn apply_built_model_picker(
+        &mut self,
+        cache_signature: ModelPickerCacheSignature,
+        outcome: ModelPickerBuildOutcome,
+        preserve_input: bool,
+        cache_entries: bool,
+    ) -> Vec<crate::provider::ModelRoute> {
+        let (entries, model_count, routes) = match outcome {
+            ModelPickerBuildOutcome::Empty => {
+                self.inline_interactive_state = None;
+                self.push_display_message(DisplayMessage::system(
+                    crate::tui::app::model_context::no_models_available_message(self.is_remote),
+                ));
+                self.set_status_notice("No models available");
+                return Vec::new();
+            }
+            ModelPickerBuildOutcome::Built {
+                entries,
+                model_count,
+                routes,
+            } => (entries, model_count, routes),
+        };
 
         let previous_picker = self.inline_interactive_state.as_ref().and_then(|picker| {
             if picker.kind == PickerKind::Model {
@@ -2083,13 +2232,12 @@ impl App {
         };
 
         self.inline_view_state = None;
-        if cache_entries && Self::should_cache_model_picker_entries(model_order.len(), routes.len())
-        {
+        if cache_entries && Self::should_cache_model_picker_entries(model_count, routes.len()) {
             self.model_picker_cache = Some(ModelPickerCache {
                 signature: cache_signature,
                 entries: entries.clone(),
                 route_count: routes.len(),
-                model_count: model_order.len(),
+                model_count,
             });
         } else {
             self.model_picker_cache = None;

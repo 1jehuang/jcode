@@ -16,6 +16,13 @@ pub(super) struct SessionJournalMeta {
     pub(super) system_prompt: Option<String>,
     pub(super) updated_at: DateTime<Utc>,
     pub(super) compaction: Option<StoredCompactionState>,
+    /// Compaction state can be several MB (OpenAI encrypted context). When it
+    /// is unchanged since the previously persisted state, an entry omits it
+    /// (`compaction: null`) and sets this flag so replay keeps the prior value.
+    /// Repeating it in every entry overflowed the journal cap on each save and
+    /// forced a full snapshot rewrite of large sessions every time.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(super) compaction_unchanged: bool,
     pub(super) provider_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) model_usage_turn_id: Option<String>,

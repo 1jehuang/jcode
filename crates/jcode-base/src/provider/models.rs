@@ -42,6 +42,8 @@ struct PersistedModelCatalogScope {
     context_limits: HashMap<String, usize>,
     #[serde(default)]
     reasoning_efforts: HashMap<String, Vec<String>>,
+    #[serde(default)]
+    service_tiers: HashMap<String, Vec<String>>,
     observed_at_unix_secs: u64,
 }
 
@@ -428,6 +430,7 @@ fn persist_scoped_model_catalog(
     models: &[String],
     context_limits: &HashMap<String, usize>,
     reasoning_efforts: &HashMap<String, Vec<String>>,
+    service_tiers: &HashMap<String, Vec<String>>,
     observed_at: SystemTime,
 ) {
     if models.is_empty() {
@@ -447,6 +450,7 @@ fn persist_scoped_model_catalog(
             models: models.to_vec(),
             context_limits: context_limits.clone(),
             reasoning_efforts: reasoning_efforts.clone(),
+            service_tiers: service_tiers.clone(),
             observed_at_unix_secs: observed_at_unix_secs(observed_at),
         },
     );
@@ -524,6 +528,13 @@ pub fn cached_openai_reasoning_efforts_for_scope(
     (!efforts.is_empty()).then_some(efforts)
 }
 
+/// Return the account-scoped service tier snapshot. Missing model entries are
+/// unknown, but present empty vectors are authoritative capability denials.
+pub fn cached_openai_service_tiers_for_scope(scope: &str) -> Option<HashMap<String, Vec<String>>> {
+    let store = load_persisted_model_catalog_store(OPENAI_MODEL_CATALOG_CACHE_FILE)?;
+    Some(store.scopes.get(scope)?.service_tiers.clone())
+}
+
 /// Test-only: clear the process-global in-memory model catalogs. The catalog
 /// services are statics shared by every test in the process; a test that
 /// hydrates a scope (directly or via `persist_*` + `cached_*`) otherwise leaks
@@ -545,6 +556,7 @@ pub fn persist_openai_model_catalog_for_scope(scope: &str, catalog: &OpenAIModel
         &catalog.available_models,
         &catalog.context_limits,
         &catalog.reasoning_efforts,
+        &catalog.service_tiers,
         SystemTime::now(),
     );
 }
@@ -559,6 +571,7 @@ pub fn persist_anthropic_model_catalog_for_scope(scope: &str, catalog: &Anthropi
         scope,
         &catalog.available_models,
         &catalog.context_limits,
+        &HashMap::new(),
         &HashMap::new(),
         SystemTime::now(),
     );
@@ -1073,8 +1086,9 @@ pub fn clear_model_unavailable_for_scope(scope: &str, model: &str) {
     if model.is_empty() {
         return;
     }
-    OPENAI_MODEL_CATALOG_SERVICE.clear_runtime_model_unavailable(scope, &model);
-    super::bump_catalog_generation();
+    if OPENAI_MODEL_CATALOG_SERVICE.clear_runtime_model_unavailable(scope, &model) {
+        super::bump_catalog_generation();
+    }
 }
 
 #[path = "model_provider_availability.rs"]

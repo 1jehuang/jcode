@@ -71,19 +71,25 @@ pub(super) async fn test_persistent_ws_state() -> (PersistentWsState, tokio::tas
         }
     });
 
-    let (client_ws, _) = connect_async(format!("ws://{}", addr))
+    let (client_ws, _) = connect_ws(format!("ws://{}", addr))
         .await
         .expect("connect websocket client");
     (
         PersistentWsState {
             ws_stream: client_ws,
-            identity: openai_websocket_prewarm::prewarm_identity(&prewarm_test_credentials()),
+            identity: openai_websocket_prewarm::prewarm_identity(
+                &prewarm_test_credentials(),
+                None,
+                None,
+            ),
+            cache_key: None,
             last_response_id: "resp_test".to_string(),
             connected_at: Instant::now(),
             last_activity_at: Instant::now(),
             last_response_completed_at: Instant::now(),
             message_count: 1,
             last_input_item_count: 1,
+            last_response_output: Vec::new(),
             last_input_item_hashes: persistent_ws_input_item_hashes(&[
                 serde_json::json!({"role":"user","content":"previous"}),
             ]),
@@ -128,19 +134,25 @@ async fn test_persistent_ws_state_with_ping_notify() -> (
         }
     });
 
-    let (client_ws, _) = connect_async(format!("ws://{}", addr))
+    let (client_ws, _) = connect_ws(format!("ws://{}", addr))
         .await
         .expect("connect websocket client");
     (
         PersistentWsState {
             ws_stream: client_ws,
-            identity: openai_websocket_prewarm::prewarm_identity(&prewarm_test_credentials()),
+            identity: openai_websocket_prewarm::prewarm_identity(
+                &prewarm_test_credentials(),
+                None,
+                None,
+            ),
+            cache_key: None,
             last_response_id: "resp_test".to_string(),
             connected_at: Instant::now(),
             last_activity_at: Instant::now(),
             last_response_completed_at: Instant::now(),
             message_count: 1,
             last_input_item_count: 1,
+            last_response_output: Vec::new(),
             last_input_item_hashes: persistent_ws_input_item_hashes(&[
                 serde_json::json!({"role":"user","content":"previous"}),
             ]),
@@ -285,12 +297,12 @@ async fn openai_available_efforts_follow_active_model_catalog_metadata() {
 
     assert_eq!(
         provider.available_efforts(),
-        vec!["minimal", "medium", "max", "swarm", "swarm-deep"]
+        vec!["minimal", "medium", "max", "swarm"]
     );
     *provider.model.write().await = "gpt-5.6[1m]".to_string();
     assert_eq!(
         provider.available_efforts(),
-        vec!["minimal", "medium", "max", "swarm", "swarm-deep"],
+        vec!["minimal", "medium", "max", "swarm"],
         "long-context aliases must use the canonical model's catalog metadata"
     );
     *provider.model.write().await = "gpt-5.6".to_string();
@@ -363,5 +375,6 @@ fn catalog_credential_identity_survives_token_refresh_but_changes_accounts() {
 include!("openai_tests/persistent_terminal.rs");
 
 include!("openai_tests/persistent_prefix.rs");
+include!("openai_tests/cache_affinity.rs");
 
 include!("openai_tests/persistent_cancellation.rs");

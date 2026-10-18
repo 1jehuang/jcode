@@ -73,35 +73,27 @@ curl -fsSL https://jcode.sh/install | bash
 
 Swarm workers run headless, so this is the number that matters when you fan out agents.
 
-<div align="center">
+| Tool | First session | Each additional session | Comparison (additional) |
+|---|---|---|---|
+| **jcode** | **32.9 MB** | **~6.4 MB** | baseline |
+| **OpenCode** | 637.1 MB | ~5.9 MB | about the same |
+| **pi** | 84.0 MB | ~79.6 MB | **12.4× more RAM** |
+| **Claude Code** | 272.9 MB | ~169.3 MB | **26.5× more RAM** |
+| **Codex CLI** | 398.6 MB | ~194.1 MB | **30.3× more RAM** |
 
-| Tool | Extra RAM per session | Comparison |
-|---|---:|---:|
-| **jcode** | **~3.1 MB** | baseline |
-| **Claude Code** | ~164 MB | **~54× more RAM** |
-| **Codex CLI** | pending | |
-| **OpenCode** | pending | |
-| **pi** | pending | |
-
-</div>
-
-Each session completes 5 real model turns with tool calls, then total PSS of every process is measured. Reproduce with `python3 scripts/bench_headless_memory.py --tools jcode claude codex opencode pi`.
+Each session completes 5 real model turns with tool calls, then total PSS of every process is measured at 1, 5, and 10 concurrent sessions, averaged over two runs. jcode, OpenCode, pi, and Codex CLI used `gpt-5.4`; Claude Code used Claude Sonnet. [Reproduce](scripts/bench_headless_memory.py).
 
 ### Time to first input
 
 Time until typed text appears on screen, across 10 interactive launches.
 
-<div align="center">
-
 | Tool | Time to first input | Comparison |
-|---|---:|---:|
+|---|---|---|
 | **jcode** | **48.7 ms** | baseline |
 | **pi** | 596.4 ms | **12.2× slower** |
 | **Codex CLI** | 905.8 ms | **18.6× slower** |
 | **OpenCode** | 1047.9 ms | **21.5× slower** |
 | **Claude Code** | 3512.8 ms | **72.2× slower** |
-
-</div>
 
 Full numbers on [jcode.sh](https://jcode.sh).
 
@@ -131,20 +123,6 @@ Spawn two or more agents in the same repo, and they will automatically be manage
 
 Agents are also able to spawn their own swarms autonomously. They have a swarm tool which allows them to spawn in their own teamates to accomplish tasks in parallel. Doing so turns the main agent into a coordinator and the spawned agents into workers. Groups of agents, their messaging channels, their completion statuses, etc are all automatically managed. This can be done headlessly or headed.
 
-Swarm modes keep root reasoning separate from worker effort. Configure each mode
-in `~/.jcode/config.toml`:
-
-```toml
-[agents]
-swarm_root_effort = "low"        # /effort swarm
-swarm_deep_root_effort = "high"  # /effort swarm-deep
-```
-
-Both default to `max`. Accepted levels are `none`, `minimal`, `low`, `medium`,
-`high`, `xhigh`, and `max`, mapped to the provider's supported range. The effort
-switcher shows the configured root level. These settings do not change worker
-`swarm_effort`. Environment overrides are `JCODE_SWARM_ROOT_EFFORT` and
-`JCODE_SWARM_DEEP_ROOT_EFFORT`.
 
 ## Token optimization
 
@@ -160,6 +138,5 @@ Supports a [wide range of providers](https://jcode.sh/docs#providers), including
 
 Jcode is inventing a new form of customizability. One that doesn't limit you to what a plugin or extension can do. Tell your jcode agent to enter self dev mode, and it will start modifying its own source code. Jcode is optimized to iterate on itself. There is significant infrastructure around self development, which allows it to edit, build, and test its own source code, then reload its own binary and continue work in your (potentially many) sessions, fully automatically.
 
-It is recommended that you use a frontier model for this. The jcode codebase is not a simple one, and weaker models can make subtle, breaking changes. GPT 5.5 or the latest available frontier model works well.
 
 <!-- Add self-dev demo thumbnail/video and fuller writeup here. -->

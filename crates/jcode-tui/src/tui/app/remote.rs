@@ -100,6 +100,19 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     });
     let mut needs_redraw = crate::tui::periodic_redraw_required(app);
     needs_redraw |= app.poll_pending_startup_transcript();
+    if remote.has_loaded_history()
+        && let Err(error) = remote.poll_account_usage().await
+    {
+        crate::logging::warn(&format!("Failed to request daemon account usage: {error}"));
+    }
+    if app.model_catalog_after_history && remote.has_loaded_history() {
+        app.model_catalog_after_history = false;
+        if let Err(error) = remote.request_model_catalog().await {
+            crate::logging::warn(&format!(
+                "Failed to hydrate model routes after History: {error}"
+            ));
+        }
+    }
     needs_redraw |= app.retire_expired_status_notice();
     needs_redraw |= app.poll_usage_reset();
     if let Some((provider, account)) = app.usage_reset.invalidate_account.take() {
@@ -140,6 +153,16 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     app.maybe_capture_runtime_memory_heartbeat();
     app.maybe_release_idle_heap();
     needs_redraw |= app.poll_idle_hibernation();
+    if std::mem::take(&mut app.idle_hibernation.history_reload_needed) {
+        // Transcript-mode hibernation released the transcript; refetch it.
+        match remote.request_history().await {
+            Ok(_) => app.set_status_notice("Reloading transcript after hibernation…"),
+            Err(err) => {
+                crate::logging::warn(&format!("hibernation wake: history request failed: {err}"))
+            }
+        }
+        needs_redraw = true;
+    }
     // Surface the cold-cache transcript warning the moment the TTL expires
     // while idle, not only when the next request starts.
     needs_redraw |= app.maybe_push_idle_cold_cache_warning();
@@ -1127,6 +1150,7 @@ pub(super) fn handle_disconnect(
 /// normal (slow) bootstrap completes on its own, short enough that a genuinely
 /// stuck session recovers in seconds instead of requiring a manual `/restart`.
 const REMOTE_HISTORY_RECOVERY_FIRST_DELAY: Duration = Duration::from_secs(6);
+const REMOTE_HISTORY_DELTA_RECOVERY_DELAY: Duration = Duration::from_secs(30);
 /// Spacing between subsequent re-requests after the first one.
 const REMOTE_HISTORY_RECOVERY_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 /// How many times we re-request history before giving up and telling the user
@@ -1184,6 +1208,15 @@ async fn recover_stuck_remote_history(app: &mut App, remote: &mut RemoteConnecti
     };
 
     if waited < REMOTE_HISTORY_RECOVERY_FIRST_DELAY {
+        return false;
+    }
+
+    // A Subscribe carrying a history base is still queued server-side (during
+    // a reconnect storm setup alone can take >10s). Requests are processed in
+    // order, so a GetHistory now would only arrive after that History anyway,
+    // and it would make the server send the full multi-MB transcript instead
+    // of the delta. Give the pending bootstrap much longer before re-requesting.
+    if app.advertised_history_base.is_some() && waited < REMOTE_HISTORY_DELTA_RECOVERY_DELAY {
         return false;
     }
 

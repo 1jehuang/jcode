@@ -39,6 +39,7 @@ impl App {
     /// explicit provider prefix like `openrouter:`); for provider-level
     /// switches without a model request, pass the active model name.
     pub(super) fn finalize_model_switch(&mut self, model_request: &str) -> String {
+        self.usage_reset.openai_quota_rejected = false;
         self.provider_session_id = None;
         self.session.provider_session_id = None;
         self.upstream_provider = None;
@@ -181,11 +182,30 @@ impl App {
         if let Some(payload) = pending.remote_resend {
             self.restore_failover_payload(payload);
         }
+        self.remove_failover_countdown_message(&pending.prompt.to_label);
         self.push_display_message(DisplayMessage::system(format!(
             "Auto-switch canceled. Kept {} active. Use /model to switch manually.",
             pending.prompt.from_label,
         )));
         self.set_status_notice(notice);
+    }
+
+    fn failover_countdown_message(to_label: &str) -> String {
+        format!("↪ Switching to {to_label} in 3s. Esc to cancel.")
+    }
+
+    /// The countdown line is only meaningful while the countdown runs. Once the
+    /// switch happens (or is canceled), drop it so the transcript keeps just the
+    /// outcome rather than how long we waited.
+    fn remove_failover_countdown_message(&mut self, to_label: &str) {
+        let countdown = Self::failover_countdown_message(to_label);
+        if let Some(idx) = self
+            .display_messages
+            .iter()
+            .rposition(|message| message.role == "system" && message.content == countdown)
+        {
+            self.remove_display_message(idx);
+        }
     }
 
     pub(super) fn maybe_progress_provider_failover_countdown(&mut self) -> bool {
@@ -219,6 +239,7 @@ impl App {
         }
 
         self.pending_provider_failover = None;
+        self.remove_failover_countdown_message(&pending.prompt.to_label);
         if self.is_remote {
             let selection = pending.prompt.target_route.as_deref().and_then(|target| {
                 self.fallback_candidate_routes()
@@ -343,10 +364,9 @@ impl App {
                         prompt.from_label, reason
                     )));
                 }
-                self.push_display_message(DisplayMessage::system(format!(
-                    "↪ Switching to {} in 3s. Esc to cancel.",
-                    prompt.to_label,
-                )));
+                self.push_display_message(DisplayMessage::system(
+                    Self::failover_countdown_message(&prompt.to_label),
+                ));
                 self.set_status_notice(format!(
                     "Provider auto-switch → {} in 3s (Esc to cancel)",
                     prompt.to_label
@@ -601,31 +621,25 @@ impl App {
                 .provider
                 .cross_provider_failover
                 == crate::config::CrossProviderFailoverMode::Countdown;
+        // One shared ranking for both the automatic and manual paths: pool
+        // order, then newest generation, then affinity.
+        let ranked = jcode_provider_core::rank_fallback_routes(
+            &routes,
+            &current_model,
+            &current_provider,
+            &current_api_method,
+            options,
+            &pool.members,
+        );
         if automatic {
             // Never let an excluded preferred route hide an approved later one.
-            // The pool's explicit account order wins over catalog/model ranking.
-            let mut approved: Vec<_> = routes
-                .iter()
-                .filter(|route| {
-                    let selection = crate::provider::RouteSelection::from_model_route(route);
-                    let identity = Self::fallback_pool_identity(&route.api_method);
-                    route.available
-                        && crate::provider::MultiProvider::is_failover_route_pool_approved(
-                            &selection.routed_model_spec(),
-                        )
-                        && identity != source_identity
-                })
-                .collect();
-            // Within one account, always prefer the newest-generation model.
-            approved.sort_by_key(|route| {
-                (
-                    Self::fallback_pool_identity(&route.api_method)
-                        .and_then(|(key, _)| pool.members.iter().position(|member| member == &key))
-                        .unwrap_or(usize::MAX),
-                    jcode_provider_core::model_generation_rank(&route.model),
-                )
+            let approved = ranked.iter().map(|index| &routes[*index]).find(|route| {
+                let selection = crate::provider::RouteSelection::from_model_route(route);
+                crate::provider::MultiProvider::is_failover_route_pool_approved(
+                    &selection.routed_model_spec(),
+                ) && Self::fallback_pool_identity(&route.api_method) != source_identity
             });
-            if let Some(route) = approved.first() {
+            if let Some(route) = approved {
                 let target_route =
                     crate::provider::RouteSelection::from_model_route(route).routed_model_spec();
                 self.handle_provider_failover_prompt_with_payload(
@@ -644,14 +658,9 @@ impl App {
                 return true;
             }
         }
-        // No approved automatic target: preserve unrestricted manual choice.
-        let Some(index) = crate::provider::pick_next_fallback_route_with_options(
-            &routes,
-            &current_model,
-            &current_provider,
-            &current_api_method,
-            options,
-        ) else {
+        // No approved automatic target: preserve unrestricted manual choice,
+        // still ordered by the shared ranking.
+        let Some(&index) = ranked.first() else {
             return false;
         };
         let route = routes[index].clone();
@@ -883,11 +892,10 @@ impl App {
         match self.provider.set_model(&next_model) {
             Ok(()) => {
                 self.finalize_model_switch(&next_model);
-                let auth_suffix = self
-                    .provider
-                    .active_auth_method_label()
-                    .map(|method| format!(" (via {})", method))
-                    .unwrap_or_default();
+                let auth_suffix = switched_model_account_suffix(
+                    self.provider.active_auth_method_label(),
+                    self.provider.active_oauth_account_email().as_deref(),
+                );
                 self.push_display_message(DisplayMessage::system(format!(
                     "✓ Switched to model: {}{}",
                     next_model, auth_suffix
@@ -908,7 +916,7 @@ impl App {
         // Remote/self-dev sessions infer the level list from provider+model (the
         // same source the model picker uses), since `self.provider` is a local
         // stand-in. Local sessions read the real provider. This keeps the cycle
-        // and the picker consistent (both expose swarm / swarm-deep).
+        // and the picker consistent (both expose swarm).
         let efforts = if self.is_remote {
             let (provider_name, provider_model) = self.remote_effort_identity();
             inferred_reasoning_efforts(provider_name.as_deref(), provider_model.as_deref())
@@ -970,9 +978,11 @@ impl App {
     pub(super) fn cycle_speed_tier(&mut self, direction: i8) {
         let provider_name = self.provider.name().to_string();
         let model = self.provider.model();
-        let ladder = jcode_provider_core::service_tier::speed_tier_ladder(
+        let available = self.provider.available_service_tiers();
+        let ladder = jcode_provider_core::service_tier::speed_tier_ladder_with_capabilities(
             Some(&provider_name),
             Some(&model),
+            Some(&available),
         );
         let current = self.provider.service_tier();
         let Some((index, next, at_end)) = jcode_provider_core::service_tier::step_speed_tier(

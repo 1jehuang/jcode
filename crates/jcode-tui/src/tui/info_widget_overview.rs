@@ -1,6 +1,6 @@
 use super::info_widget::{
-    InfoWidgetData, UsageProvider, changes_section_height, is_traceworthy_memory_event,
-    model_info_height,
+    AuthMethod, InfoWidgetData, changes_section_height, compact_usage_rows,
+    is_traceworthy_memory_event, model_info_height,
 };
 
 pub(crate) const MAX_TODO_LINES: usize = 12;
@@ -118,26 +118,52 @@ fn compact_background_height(data: &InfoWidgetData) -> u16 {
     0
 }
 
-fn compact_usage_height(data: &InfoWidgetData) -> u16 {
-    if let Some(info) = &data.usage_info
-        && info.available
-    {
-        // Must mirror render_usage_compact exactly, otherwise the compact
-        // overview page either clips its last lines or reserves blank rows.
-        if matches!(info.provider, UsageProvider::CostBased) {
-            // Single "$cost · tokens" line.
-            return 1;
-        }
-        // Subscription-style providers render an optional provider label plus
-        // whichever primary, secondary, and Spark windows are actually present.
-        let label = info.provider.label();
-        let label_line = u16::from(!label.is_empty());
-        let primary_line = u16::from(info.primary_limit_label.is_some());
-        let secondary_line = u16::from(info.secondary_limit_label.is_some());
-        let spark_line = u16::from(info.spark.is_some());
-        return label_line + primary_line + secondary_line + spark_line;
+/// Only a genuine pending first snapshot reserves space. An absent snapshot
+/// after initialization is not evidence that this account supports quota data.
+pub(super) fn startup_usage_pending(data: &InfoWidgetData) -> bool {
+    data.startup_usage_pending
+        && matches!(data.auth_method, AuthMethod::OpenAIOAuth)
+        && !data
+            .usage_info
+            .as_ref()
+            .is_some_and(|info| info.available || info.limit_reached)
+}
+
+pub(super) fn render_overview_usage(
+    data: &InfoWidgetData,
+    width: u16,
+) -> Vec<ratatui::text::Line<'static>> {
+    if startup_usage_pending(data) {
+        return super::info_widget::startup_usage_lines(width);
     }
-    0
+    data.usage_info
+        .as_ref()
+        .filter(|info| info.available || info.limit_reached)
+        .map(|info| compact_usage_rows(info, width, data.usage_display_used))
+        .unwrap_or_default()
+}
+
+fn compact_usage_height(data: &InfoWidgetData) -> u16 {
+    if startup_usage_pending(data) {
+        return 2;
+    }
+    let Some(info) = data.usage_info.as_ref() else {
+        return 0;
+    };
+    if info.limit_reached {
+        return 1;
+    }
+    if !info.available {
+        return 0;
+    }
+    if matches!(info.provider, super::info_widget::UsageProvider::CostBased) {
+        return 1;
+    }
+    // Mirror render_usage_compact without formatting bars during measurement.
+    u16::from(!info.provider.label().is_empty())
+        + u16::from(info.primary_limit_label.is_some())
+        + u16::from(info.secondary_limit_label.is_some())
+        + u16::from(info.spark.is_some())
 }
 
 fn compact_kv_cache_height(data: &InfoWidgetData) -> u16 {

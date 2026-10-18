@@ -584,6 +584,9 @@ impl App {
                                 }
                                 match event {
                                     StreamEvent::TextDelta(text) => {
+                                        if !text.is_empty() {
+                                            self.usage_reset.openai_quota_rejected = false;
+                                        }
                                         self.status = ProcessingStatus::Streaming;
                                         text_content.push_str(&text);
                                         self.resume_streaming_tps();
@@ -629,6 +632,7 @@ impl App {
                                         }
                                     }
                                     StreamEvent::ToolUseStart { id, name } => {
+                                        self.usage_reset.openai_quota_rejected = false;
                                         // Tool input JSON is still provider-generated output and is
                                         // included in provider output-token usage. Keep the TPS timer
                                         // running until the tool call has finished streaming; actual

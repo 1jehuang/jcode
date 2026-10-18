@@ -12,15 +12,7 @@ fn test_anthropic_reasoning_effort_request_parts() {
 
     assert_eq!(
         provider.available_efforts(),
-        vec![
-            "none",
-            "low",
-            "medium",
-            "high",
-            "max",
-            "swarm",
-            "swarm-deep"
-        ]
+        vec!["none", "low", "medium", "high", "max", "swarm"]
     );
     assert_eq!(provider.reasoning_effort().as_deref(), Some("none"));
 
@@ -50,25 +42,17 @@ fn test_anthropic_reasoning_effort_request_parts() {
 }
 
 #[test]
-fn test_anthropic_preserves_swarm_sentinels_for_cycling() {
-    // Regression: storing a swarm effort must preserve which swarm mode was
-    // chosen. Previously both `swarm` and `swarm-deep` collapsed to `swarm`,
-    // which capped Alt+Right effort cycling at swarm-light (it could never
-    // reach swarm-deep because the readback always reported `swarm`).
+fn test_anthropic_preserves_swarm_sentinel_for_cycling() {
+    // Storing the swarm effort must preserve the sentinel so the UI keeps
+    // showing swarm mode, and the removed `swarm-deep` is rejected.
     let provider = AnthropicProvider::new();
     provider.set_model("claude-sonnet-4-6").unwrap();
 
     provider.set_reasoning_effort("swarm").unwrap();
     assert_eq!(provider.reasoning_effort().as_deref(), Some("swarm"));
 
-    provider.set_reasoning_effort("swarm-deep").unwrap();
-    assert_eq!(
-        provider.reasoning_effort().as_deref(),
-        Some("swarm-deep"),
-        "swarm-deep must survive the round-trip so cycling can reach it"
-    );
-
-    // And cycling back down to swarm-light still works.
+    assert!(provider.set_reasoning_effort("swarm-deep").is_err());
+    provider.set_reasoning_effort("high").unwrap();
     provider.set_reasoning_effort("swarm").unwrap();
     assert_eq!(provider.reasoning_effort().as_deref(), Some("swarm"));
 }
@@ -245,16 +229,7 @@ fn test_anthropic_sonnet_5_supports_full_effort_ladder() {
 
     assert_eq!(
         provider.available_efforts(),
-        vec![
-            "none",
-            "low",
-            "medium",
-            "high",
-            "xhigh",
-            "max",
-            "swarm",
-            "swarm-deep"
-        ],
+        vec!["none", "low", "medium", "high", "xhigh", "max", "swarm"],
     );
 }
 

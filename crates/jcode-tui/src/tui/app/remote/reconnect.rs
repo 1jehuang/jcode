@@ -397,12 +397,15 @@ pub(in crate::tui::app) async fn connect_with_retry(
     let client_has_local_history = !crate::tui::is_ssh_remote()
         && session_to_resume.is_some()
         && !app.display_messages().is_empty();
+    let history_base =
+        session_to_resume.and_then(|session_id| app.take_history_base_for_subscribe(session_id));
     let client_instance_id = app.remote_client_instance_id.clone();
     let allow_session_takeover = should_allow_reconnect_takeover(app, state, session_to_resume);
     let connect = RemoteConnection::connect_with_session(
         session_to_resume,
         Some(client_instance_id.as_str()),
         client_has_local_history,
+        history_base,
         allow_session_takeover,
         remote_working_dir,
     );
@@ -756,10 +759,18 @@ pub(in crate::tui::app) async fn handle_post_connect<B: ratatui::backend::Backen
     // this follow-up the public picker exposes generic `remote-catalog` rows.
     // Request ordering keeps the authoritative History snapshot ahead of this
     // expanded catalog response on a newly connected transport.
-    if let Err(error) = remote.request_model_catalog().await {
-        crate::logging::warn(&format!(
-            "Failed to hydrate model routes during remote bootstrap: {error}"
-        ));
+    //
+    // The catalog is ~1MB. Requesting it alongside the bootstrap made every
+    // reconnecting client compete with every other client's History during a
+    // reload storm. Wait for History first; the tick sends it once loaded.
+    if remote.has_loaded_history() {
+        if let Err(error) = remote.request_model_catalog().await {
+            crate::logging::warn(&format!(
+                "Failed to hydrate model routes during remote bootstrap: {error}"
+            ));
+        }
+    } else {
+        app.model_catalog_after_history = true;
     }
 
     // Dispatch restored work once the server history is in place. This must

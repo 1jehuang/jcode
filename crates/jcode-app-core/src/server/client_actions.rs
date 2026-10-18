@@ -423,12 +423,14 @@ pub(super) fn handle_run_subagent(
         let tool_name_for_exec = tool_name.clone();
         let result = match crate::runtime_activity::spawn(async move {
             registry.execute(&tool_name_for_exec, tool_input, ctx).await
-        })
-        .expect("subagent task inherits its admitted parent activity")
-        .await
-        {
-            Ok(result) => result,
-            Err(error) => Err(anyhow::anyhow!("Tool task panicked: {}", error)),
+        }) {
+            Some(handle) => match handle.await {
+                Ok(result) => result,
+                Err(error) => Err(anyhow::anyhow!("Tool task panicked: {}", error)),
+            },
+            None => Err(anyhow::anyhow!(
+                "Tool task was not admitted because the runtime is shutting down"
+            )),
         };
         let duration_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
 

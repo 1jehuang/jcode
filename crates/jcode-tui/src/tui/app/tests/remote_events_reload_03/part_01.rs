@@ -199,6 +199,8 @@ fn test_handle_server_event_history_with_interruption_queues_continuation() {
 
     app.handle_server_event(
         crate::protocol::ServerEvent::History {
+            messages_base_count: None,
+            images_unchanged: false,
             id: 1,
             session_id: "ses_test_123".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
@@ -234,9 +236,11 @@ fn test_handle_server_event_history_with_interruption_queues_continuation() {
             status_detail: None,
             upstream_provider: None,
             provider_oauth_email: None,
+            provider_oauth_account_label: None,
             resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,
+            available_service_tiers: None,
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
@@ -276,6 +280,8 @@ fn test_handle_server_event_history_uses_server_owned_reload_recovery_directive(
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
 
     let event = crate::protocol::ServerEvent::History {
+        messages_base_count: None,
+        images_unchanged: false,
         id: 1,
         session_id: "ses_server_owned_reload".to_string(),
         messages: vec![crate::protocol::HistoryMessage {
@@ -314,9 +320,11 @@ fn test_handle_server_event_history_uses_server_owned_reload_recovery_directive(
         status_detail: None,
         upstream_provider: None,
         provider_oauth_email: None,
+        provider_oauth_account_label: None,
         resolved_credential: None,
         reasoning_effort: None,
         service_tier: None,
+        available_service_tiers: None,
         compaction_mode: crate::config::CompactionMode::Reactive,
         activity: None,
         side_panel: crate::side_panel::SidePanelSnapshot::default(),
@@ -361,6 +369,8 @@ fn test_handle_server_event_history_without_interruption_does_not_queue() {
 
     app.handle_server_event(
         crate::protocol::ServerEvent::History {
+            messages_base_count: None,
+            images_unchanged: false,
             id: 1,
             session_id: "ses_test_456".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
@@ -396,9 +406,11 @@ fn test_handle_server_event_history_without_interruption_does_not_queue() {
             status_detail: None,
             upstream_provider: None,
             provider_oauth_email: None,
+            provider_oauth_account_label: None,
             resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,
+            available_service_tiers: None,
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
@@ -428,6 +440,8 @@ fn test_handle_server_event_history_after_reload_reports_no_continuation_needed(
 
     app.handle_server_event(
         crate::protocol::ServerEvent::History {
+            messages_base_count: None,
+            images_unchanged: false,
             id: 1,
             session_id: "ses_reload_done".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
@@ -463,9 +477,11 @@ fn test_handle_server_event_history_after_reload_reports_no_continuation_needed(
             status_detail: None,
             upstream_provider: None,
             provider_oauth_email: None,
+            provider_oauth_account_label: None,
             resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,
+            available_service_tiers: None,
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
@@ -743,6 +759,8 @@ fn test_handle_server_event_history_restores_side_panel_snapshot() {
             id: 1,
             session_id: "ses_side_panel_history".to_string(),
             messages: vec![],
+            messages_base_count: None,
+            images_unchanged: false,
             images: vec![],
             provider_name: Some("claude".to_string()),
             provider_model: Some("claude-sonnet-4-20250514".to_string()),
@@ -769,9 +787,11 @@ fn test_handle_server_event_history_restores_side_panel_snapshot() {
             status_detail: None,
             upstream_provider: None,
             provider_oauth_email: None,
+            provider_oauth_account_label: None,
             resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,
+            available_service_tiers: None,
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
             side_panel: side_panel.clone(),
@@ -803,6 +823,8 @@ fn test_handle_server_event_history_restores_active_resume_processing_state() {
             id: 1,
             session_id: "ses_resume_active".to_string(),
             messages: vec![],
+            messages_base_count: None,
+            images_unchanged: false,
             images: vec![],
             provider_name: Some("openai".to_string()),
             provider_model: Some("gpt-5.4".to_string()),
@@ -829,9 +851,11 @@ fn test_handle_server_event_history_restores_active_resume_processing_state() {
             status_detail: None,
             upstream_provider: None,
             provider_oauth_email: None,
+            provider_oauth_account_label: None,
             resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,
+            available_service_tiers: None,
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: Some(crate::protocol::SessionActivitySnapshot {
                 is_processing: true,

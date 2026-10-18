@@ -592,7 +592,13 @@ fn resolve_imported_snapshot_id(provider_id: &str) -> Option<String> {
 pub fn find_session_by_name_or_id(name_or_id: &str) -> Result<String> {
     // Try loading directly first so stable imported IDs like `imported_codex_*`
     // or other explicit session ids can be resumed without going through the
-    // short-name matcher.
+    // short-name matcher. Every `--resume` (including each client re-exec in a
+    // reload storm) runs this, so validate with the metadata-only startup stub:
+    // a full load deserializes the whole transcript (0.4-0.6s for a 35MB
+    // session) just to discard it. Fall back to the full load for its error.
+    if Session::load_startup_stub(name_or_id).is_ok() {
+        return Ok(name_or_id.to_string());
+    }
     match Session::load(name_or_id) {
         Ok(_) => return Ok(name_or_id.to_string()),
         Err(e) => {

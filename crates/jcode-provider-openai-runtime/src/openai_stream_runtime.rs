@@ -171,6 +171,64 @@ fn ws_stall_diagnostics(
 }
 
 /// Stream the response from OpenAI API
+#[allow(clippy::too_many_arguments)]
+fn response_http_request(
+    client: &Client,
+    url: &str,
+    access_token: &str,
+    is_chatgpt_mode: bool,
+    account_id: Option<&str>,
+    cache_key: Option<&str>,
+    model: Option<&str>,
+    service_tier: Option<&str>,
+) -> reqwest::RequestBuilder {
+    let mut builder = client
+        .post(url)
+        .header("Authorization", format!("Bearer {access_token}"));
+    if let Some((name, value)) =
+        openai_websocket_prewarm::routing_header(is_chatgpt_mode, model, service_tier)
+    {
+        builder = builder.header(name, value);
+    }
+    if is_chatgpt_mode {
+        builder = builder.header("originator", ORIGINATOR);
+        if let Some(key) = cache_key {
+            builder = builder.header("session-id", key);
+        }
+        if let Some(account_id) = account_id {
+            builder = builder.header("chatgpt-account-id", account_id);
+        }
+    }
+    if let Some(built) = builder.try_clone().and_then(|builder| builder.build().ok()) {
+        log_openai_stream_lifecycle(
+            jcode_base::logging::LogLevel::Info,
+            "https_request_routing_headers",
+            routing_header_log_fields(built.headers()),
+        );
+    }
+    builder
+}
+
+fn routing_header_log_fields(headers: &reqwest::header::HeaderMap) -> Vec<(&'static str, String)> {
+    [
+        ("service_tier_header", "OpenAI-Service-Tier"),
+        ("codex_routing_hint", "x-codex-routing-hint"),
+    ]
+    .into_iter()
+    .map(|(field, header)| {
+        (
+            field,
+            headers
+                .get(header)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("none")
+                .to_owned(),
+        )
+    })
+    .collect()
+}
+
+/// Stream the response from OpenAI API
 pub(super) async fn stream_response(
     client: Client,
     credentials: Arc<RwLock<CodexCredentials>>,
@@ -223,28 +281,31 @@ pub(super) async fn stream_response(
     let account_id = creds.account_id.clone();
     drop(creds);
 
-    let mut builder = client
-        .post(&url)
-        .header("Authorization", format!("Bearer {}", access_token))
-        .header("Content-Type", "application/json");
-
-    if is_chatgpt_mode {
-        builder = builder.header("originator", ORIGINATOR);
-        if let Some(account_id) = account_id.as_ref() {
-            builder = builder.header("chatgpt-account-id", account_id);
-        }
-    }
+    let builder = response_http_request(
+        &client,
+        &url,
+        &access_token,
+        is_chatgpt_mode,
+        account_id.as_deref(),
+        request.get("prompt_cache_key").and_then(Value::as_str),
+        request.get("model").and_then(Value::as_str),
+        request.get("service_tier").and_then(Value::as_str),
+    );
 
     emit_connection_phase(&tx, ConnectionPhase::SendingRequest).await;
     let connect_start = std::time::Instant::now();
     let idle_timeout = effective_https_idle_timeout(&request);
+    let builder = jcode_provider_core::request_compression::json_body(
+        builder,
+        &url,
+        &request,
+        jcode_base::provider::request_compression_mode(),
+    )
+    .map_err(OpenAIStreamFailure::Other)?;
 
     let response = while_consumer_open(
         &tx,
-        jcode_provider_core::transport::send_with_initial_response_timeout(
-            builder.json(&request),
-            idle_timeout,
-        ),
+        jcode_provider_core::transport::send_with_initial_response_timeout(builder, idle_timeout),
     )
     .await;
     let Some(response) = response else {
@@ -624,7 +685,13 @@ async fn continue_persistent_ws_locked(
         }
     };
 
-    if state.identity != openai_websocket_prewarm::prewarm_identity(&*credentials.read().await) {
+    if state.identity
+        != openai_websocket_prewarm::prewarm_identity(
+            &*credentials.read().await,
+            request.get("model").and_then(Value::as_str),
+            request.get("service_tier").and_then(Value::as_str),
+        )
+    {
         *guard = None;
         log_openai_stream_lifecycle(
             jcode_base::logging::LogLevel::Info,
@@ -632,6 +699,19 @@ async fn continue_persistent_ws_locked(
             vec![
                 ("model", request_model.clone()),
                 ("reason", "handshake_identity_changed".to_string()),
+            ],
+        );
+        return PersistentWsResult::NotAvailable;
+    }
+
+    if state.cache_key.as_deref() != request.get("prompt_cache_key").and_then(Value::as_str) {
+        *guard = None;
+        log_openai_stream_lifecycle(
+            jcode_base::logging::LogLevel::Info,
+            "persistent_state_reset",
+            vec![
+                ("model", request_model.clone()),
+                ("reason", "cache_session_changed".to_string()),
             ],
         );
         return PersistentWsResult::NotAvailable;
@@ -759,17 +839,21 @@ async fn continue_persistent_ws_locked(
     // rs_...". The full input still needs reasoning items for fresh requests,
     // but deltas must only contain genuinely new client-side input/tool
     // callbacks.
-    let (incremental_items, skipped_reasoning_items) = if state.message_count == 0 {
+    let (incremental_items, skipped_output_items) = if state.message_count == 0 {
         // A generate:false warmup has no model output in its context. Preserve
         // all history (including encrypted reasoning) for its first generation.
         (input.to_vec(), 0)
     } else {
-        persistent_ws_incremental_items(input, state.last_input_item_count)
+        persistent_ws_incremental_items(
+            input,
+            state.last_input_item_count,
+            &state.last_response_output,
+        )
     };
-    if skipped_reasoning_items > 0 {
+    if skipped_output_items > 0 {
         jcode_base::logging::info(&format!(
-            "Skipped {} reasoning item(s) in persistent WS continuation delta to avoid duplicate rs_* replay",
-            skipped_reasoning_items
+            "Skipped {} prior response output item(s) in persistent WS continuation delta",
+            skipped_output_items
         ));
     }
     if incremental_items.is_empty() {
@@ -791,6 +875,9 @@ async fn continue_persistent_ws_locked(
         .and_then(Value::as_str)
         .map(str::to_owned);
     let incremental_stats = summarize_ws_input(&incremental_items);
+    if state.message_count > 0 && incremental_stats.function_call_items > 0 {
+        log_ws_replayed_calls(&incremental_items, &state.last_response_output);
+    }
     let previous_response_id = state.last_response_id.clone();
     let request_prompt_cache_key_hash = request
         .get("prompt_cache_key")
@@ -1008,7 +1095,13 @@ async fn continue_persistent_ws_locked(
     // change in another fork. Revalidate at the send boundary and keep the
     // read guard until the frame is flushed, not throughout generation.
     let send_credentials = credentials.read().await;
-    if state.identity != openai_websocket_prewarm::prewarm_identity(&send_credentials) {
+    if state.identity
+        != openai_websocket_prewarm::prewarm_identity(
+            &send_credentials,
+            request.get("model").and_then(Value::as_str),
+            request.get("service_tier").and_then(Value::as_str),
+        )
+    {
         *guard = None;
         return PersistentWsResult::NotAvailable;
     }
@@ -1041,6 +1134,7 @@ async fn continue_persistent_ws_locked(
     let mut consumer_dropped = false;
     let mut pending: VecDeque<StreamEvent> = VecDeque::new();
     let mut new_response_id: Option<String> = None;
+    let mut response_output = Vec::new();
     let stream_started = Instant::now();
     let mut last_api_activity_at = stream_started;
     let mut saw_api_activity = false;
@@ -1125,6 +1219,8 @@ async fn continue_persistent_ws_locked(
                 } else {
                     is_websocket_first_activity_payload(&text)
                 };
+
+                observe_ws_response_output(&text, &mut response_output);
 
                 // Extract response_id from response.created event
                 if new_response_id.is_none()
@@ -1286,6 +1382,7 @@ async fn continue_persistent_ws_locked(
         state.last_response_id = resp_id;
         state.last_input_item_count = input_item_count;
         state.last_input_item_hashes = input_item_hashes;
+        state.last_response_output = response_output;
         state.message_count += 1;
         state.last_activity_at = Instant::now();
         state.last_response_completed_at = Instant::now();
@@ -1405,9 +1502,24 @@ async fn stream_response_websocket_authenticated(
     }
     let mut usage_recorder = OAuthUsageRecorder::capture(&creds, &request);
     let catalog_scope = OpenAIProvider::catalog_scope_for(&creds);
-    let ws_request = openai_websocket_prewarm::websocket_request(&creds, &access_token)
-        .map_err(OpenAIStreamFailure::Other)?;
-    let mut identity = openai_websocket_prewarm::prewarm_identity(&creds);
+    let ws_request = openai_websocket_prewarm::websocket_request(
+        &creds,
+        &access_token,
+        request.get("prompt_cache_key").and_then(Value::as_str),
+        request.get("model").and_then(Value::as_str),
+        request.get("service_tier").and_then(Value::as_str),
+    )
+    .map_err(OpenAIStreamFailure::Other)?;
+    let mut identity = openai_websocket_prewarm::prewarm_identity(
+        &creds,
+        request.get("model").and_then(Value::as_str),
+        request.get("service_tier").and_then(Value::as_str),
+    );
+    log_openai_stream_lifecycle(
+        jcode_base::logging::LogLevel::Info,
+        "fresh_ws_request_routing_headers",
+        routing_header_log_fields(ws_request.headers()),
+    );
     identity.0 = access_token;
     drop(creds);
 
@@ -1416,7 +1528,7 @@ async fn stream_response_websocket_authenticated(
 
     let connect_result = tokio::time::timeout(
         Duration::from_secs(WEBSOCKET_CONNECT_TIMEOUT_SECS),
-        connect_async(ws_request),
+        connect_ws(ws_request),
     )
     .await
     .map_err(|_| {
@@ -1472,6 +1584,10 @@ async fn stream_response_websocket_authenticated(
             .map(Vec::as_slice)
             .unwrap_or(&[]),
     );
+    let cache_key = request
+        .get("prompt_cache_key")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     let mut request_event = request;
     if !request_event.is_object() {
         return Err(OpenAIStreamFailure::Other(anyhow::anyhow!(
@@ -1531,6 +1647,7 @@ async fn stream_response_websocket_authenticated(
     let mut last_api_activity_at = ws_started_at;
     let mut pending: VecDeque<StreamEvent> = VecDeque::new();
     let mut response_id: Option<String> = None;
+    let mut response_output = Vec::new();
     let connected_at = Instant::now();
     let mut logged_first_server_event = false;
     let ws_completion_timeout_secs = effective_ws_completion_timeout_secs(&request_event);
@@ -1608,6 +1725,8 @@ async fn stream_response_websocket_authenticated(
                             WEBSOCKET_FALLBACK_NOTICE
                         )));
                     }
+
+                    observe_ws_response_output(&text, &mut response_output);
 
                     // Extract response_id from response.created event
                     if response_id.is_none()
@@ -1797,6 +1916,7 @@ async fn stream_response_websocket_authenticated(
             ],
         );
         *guard = Some(PersistentWsState {
+            cache_key,
             ws_stream,
             identity,
             last_response_id: resp_id,
@@ -1806,6 +1926,7 @@ async fn stream_response_websocket_authenticated(
             message_count: 1,
             last_input_item_count: input_item_count,
             last_input_item_hashes: input_item_hashes,
+            last_response_output: response_output,
         });
         drop(guard);
         spawn_persistent_ws_keepalive(

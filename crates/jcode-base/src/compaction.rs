@@ -36,8 +36,9 @@ pub use jcode_compaction_core::{
     compacted_summary_text_block, content_char_count, effective_context_tokens_from_usage,
     emergency_strip_large_images, emergency_truncate_large_payloads, estimate_compaction_tokens,
     is_image_rejection_error, is_request_payload_too_large_error, mean_embedding,
-    message_char_count, safe_compaction_cutoff, semantic_cache_key, semantic_goal_text,
-    semantic_message_text, strip_large_images_in_contents, summary_payload_char_count,
+    message_char_count, reusable_cache_tokens_from_usage, safe_compaction_cutoff,
+    semantic_cache_key, semantic_goal_text, semantic_message_text, strip_large_images_in_contents,
+    summary_payload_char_count,
 };
 
 const HARD_THRESHOLD_PENDING_WAIT_MS: u64 = 15_000;
@@ -1731,6 +1732,15 @@ async fn generate_compaction_artifact(
         )
         .await
     {
+        if let Some(usage) = native.usage {
+            crate::telemetry::record_simple_completion_usage(
+                None,
+                provider.name(),
+                &provider.model(),
+                crate::telemetry::UsageSource::Compaction,
+                usage,
+            );
+        }
         if let Some(encrypted_content) = native.openai_encrypted_content.as_ref()
             && !openai_encrypted_content_is_sendable(encrypted_content)
         {
@@ -1738,7 +1748,7 @@ async fn generate_compaction_artifact(
                 "[compaction] OpenAI native compaction returned oversized encrypted_content ({} chars); falling back to text summary",
                 encrypted_content.len(),
             ));
-        } else {
+        } else if native.openai_encrypted_content.is_some() || native.summary_text.is_some() {
             return Ok(CompactionResult {
                 summary_text: native.summary_text.unwrap_or_default(),
                 openai_encrypted_content: native.openai_encrypted_content,
@@ -1758,7 +1768,14 @@ async fn generate_compaction_artifact(
             &prompt,
             "You are a helpful assistant that summarizes conversations.",
         )
-        .await?;
+        .await
+        .inspect_err(|error| {
+            crate::telemetry::record_simple_completion_failure_usage(
+                None,
+                crate::telemetry::UsageSource::Compaction,
+                error,
+            );
+        })?;
     crate::telemetry::record_simple_completion_usage(
         None,
         provider.name(),

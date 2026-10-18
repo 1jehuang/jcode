@@ -1,5 +1,136 @@
 use super::*;
 
+#[derive(Clone, Default)]
+struct SimpleFailureProvider {
+    error_event: bool,
+    fail: bool,
+    model_reads: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait]
+impl Provider for SimpleFailureProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        let mut events = vec![
+            Ok(StreamEvent::UpstreamProvider {
+                provider: "upstream".into(),
+            }),
+            Ok(StreamEvent::TextDelta("partial".into())),
+            Ok(StreamEvent::TokenUsage {
+                input_tokens: Some(42),
+                output_tokens: None,
+                cache_read_input_tokens: Some(12),
+                cache_creation_input_tokens: None,
+            }),
+        ];
+        if self.fail {
+            events.push(if self.error_event {
+                Ok(StreamEvent::Error {
+                    message: "stream failed".into(),
+                    retry_after_secs: None,
+                })
+            } else {
+                Err(anyhow::Error::new(std::io::Error::other("stream failed")))
+            });
+        } else {
+            events.push(Ok(StreamEvent::TokenUsage {
+                input_tokens: None,
+                output_tokens: Some(7),
+                cache_read_input_tokens: None,
+                cache_creation_input_tokens: None,
+            }));
+        }
+        Ok(Box::pin(futures::stream::iter(events)))
+    }
+
+    fn name(&self) -> &str {
+        "route"
+    }
+    fn model(&self) -> String {
+        if self
+            .model_reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            == 0
+        {
+            "requested-alias".into()
+        } else {
+            "test-model".into()
+        }
+    }
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+#[tokio::test]
+async fn simple_completion_failure_preserves_partial_usage_and_source() {
+    let provider = SimpleFailureProvider {
+        error_event: false,
+        fail: true,
+        ..Default::default()
+    };
+    let error = provider
+        .complete_simple_with_usage("prompt", "system")
+        .await
+        .unwrap_err()
+        .context("caller context");
+    let failure = error.downcast_ref::<SimpleCompletionError>().unwrap();
+    assert_eq!(failure.usage.input_tokens, Some(42));
+    assert_eq!(failure.usage.output_tokens, None);
+    assert_eq!(failure.usage.cache_read_input_tokens, Some(12));
+    assert_eq!(failure.provider, "upstream");
+    assert_eq!(failure.model, "test-model");
+    assert!(
+        error
+            .chain()
+            .any(|source| source.downcast_ref::<std::io::Error>().is_some())
+    );
+}
+
+#[tokio::test]
+async fn simple_completion_error_event_is_not_success() {
+    let provider = SimpleFailureProvider {
+        error_event: true,
+        fail: true,
+        ..Default::default()
+    };
+    let error = provider
+        .complete_simple_with_usage("prompt", "system")
+        .await
+        .unwrap_err();
+    assert_eq!(error.to_string(), "stream failed");
+    assert_eq!(
+        error
+            .downcast_ref::<SimpleCompletionError>()
+            .unwrap()
+            .usage
+            .input_tokens,
+        Some(42)
+    );
+    assert!(provider.complete_simple("prompt", "system").await.is_err());
+}
+
+#[tokio::test]
+async fn simple_completion_success_returns_usage_once() {
+    let provider = SimpleFailureProvider {
+        error_event: false,
+        fail: false,
+        ..Default::default()
+    };
+    let (text, usage) = provider
+        .complete_simple_with_usage("prompt", "system")
+        .await
+        .unwrap();
+    assert_eq!(text, "partial");
+    assert_eq!(usage.input_tokens, Some(42));
+    assert_eq!(usage.output_tokens, Some(7));
+}
+
 #[test]
 fn simple_completion_usage_keeps_latest_reported_values() {
     let mut usage = SimpleCompletionUsage::default();

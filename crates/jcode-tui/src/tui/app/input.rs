@@ -1435,6 +1435,9 @@ pub(super) fn retrieve_pending_message_for_edit(app: &mut App) -> bool {
 }
 
 pub(super) fn send_action(app: &App, alternate_shortcut: bool) -> SendAction {
+    if app.pending_login.is_some() {
+        return SendAction::Submit;
+    }
     if !app.is_processing {
         return SendAction::Submit;
     }
@@ -1990,6 +1993,9 @@ pub(super) fn is_next_prompt_new_session_hotkey(code: KeyCode, modifiers: KeyMod
 }
 
 fn input_routes_to_new_session(app: &App) -> bool {
+    if app.pending_login.is_some() {
+        return false;
+    }
     if !app.route_next_prompt_to_new_session || app.input.is_empty() {
         return false;
     }
@@ -2026,6 +2032,10 @@ fn route_prompt_to_new_session_local(app: &mut App) -> bool {
 }
 
 pub(super) fn handle_alternate_enter(app: &mut App) {
+    if app.pending_login.is_some() {
+        app.submit_input();
+        return;
+    }
     if try_queue_command(app) {
         return;
     }
@@ -2844,6 +2854,10 @@ pub(super) fn handle_global_control_shortcuts(
 }
 
 pub(super) fn handle_enter(app: &mut App) -> bool {
+    if app.pending_login.is_some() {
+        app.submit_input();
+        return true;
+    }
     promote_dropped_images(app);
     if app.activate_picker_from_preview() {
         return true;
@@ -4072,25 +4086,29 @@ impl App {
                     .join(", ")
             ));
         }
+        let model_input = crate::prompt::with_swarm_user_message_reminder(
+            &input,
+            self.provider.reasoning_effort().as_deref(),
+        );
         if images.is_empty() {
             self.current_turn_system_reminder = mission_turn_reminder(&self.session.id);
-            self.add_provider_message(Message::user(&input));
+            self.add_provider_message(Message::user(&model_input));
             self.session.add_message(
                 Role::User,
                 vec![ContentBlock::Text {
-                    text: input.clone(),
+                    text: model_input.clone(),
                     cache_control: None,
                 }],
             );
         } else {
             self.current_turn_system_reminder = mission_turn_reminder(&self.session.id);
-            self.add_provider_message(Message::user_with_images(&input, images.clone()));
+            self.add_provider_message(Message::user_with_images(&model_input, images.clone()));
             let mut blocks: Vec<ContentBlock> = images
                 .into_iter()
                 .map(|(media_type, data)| ContentBlock::Image { media_type, data })
                 .collect();
             blocks.push(ContentBlock::Text {
-                text: input.clone(),
+                text: model_input.clone(),
                 cache_control: None,
             });
             self.session.add_message(Role::User, blocks);
@@ -4168,6 +4186,10 @@ impl App {
                 merge_turn_reminders(reminder, mission_turn_reminder(&self.session.id));
 
             if has_combined {
+                let combined = crate::prompt::with_swarm_user_message_reminder(
+                    &combined,
+                    self.provider.reasoning_effort().as_deref(),
+                );
                 self.add_provider_message(Message::user(&combined));
                 self.session.add_message(
                     Role::User,

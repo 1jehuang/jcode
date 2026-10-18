@@ -1084,7 +1084,7 @@ impl OpenRouterProvider {
             return None;
         }
         match value.as_str() {
-            "none" | "low" | "medium" | "high" | "max" | "swarm" | "swarm-deep" => Some(value),
+            "none" | "low" | "medium" | "high" | "max" | "swarm" => Some(value),
             // Match the existing OpenAI UX: accept unknown non-empty effort values
             // by snapping to the strongest setting instead of rejecting the command.
             other => {
@@ -1103,8 +1103,9 @@ impl OpenRouterProvider {
             return None;
         }
         match value.as_str() {
-            "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "swarm"
-            | "swarm-deep" => Some(value),
+            "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "swarm" => {
+                Some(value)
+            }
             other => {
                 jcode_base::logging::info(&format!(
                     "Warning: Ignoring unsupported OpenAI-compatible reasoning effort '{}'.",
@@ -1121,9 +1122,7 @@ impl OpenRouterProvider {
             return None;
         }
         match value.as_str() {
-            "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "swarm" | "swarm-deep" => {
-                Some(value)
-            }
+            "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "swarm" => Some(value),
             "max" => Some("xhigh".to_string()),
             other => {
                 jcode_base::logging::info(&format!(
@@ -1575,13 +1574,22 @@ impl OpenRouterProvider {
     }
 
     pub fn new() -> Result<Self> {
+        let new_start = std::time::Instant::now();
         let autodetected_profile = autodetected_openai_compatible_profile();
+        let autodetect_ms = new_start.elapsed().as_millis();
         let api_base = configured_api_base();
         let supports_provider_features = provider_features_enabled(&api_base);
         let supports_model_catalog = model_catalog_enabled();
         let send_openrouter_headers = supports_provider_features;
         let auth: AuthResolver = Arc::new(Self::resolve_auth);
+        let auth_start = std::time::Instant::now();
         auth()?;
+        jcode_base::logging::info(&format!(
+            "[TIMING] openrouter_new: autodetect={}ms, auth={}ms, before_auth={}ms",
+            autodetect_ms,
+            auth_start.elapsed().as_millis(),
+            auth_start.duration_since(new_start).as_millis()
+        ));
         let profile_id = std::env::var("JCODE_OPENROUTER_CACHE_NAMESPACE")
             .ok()
             .map(|value| value.trim().to_ascii_lowercase())
@@ -1657,6 +1665,10 @@ impl OpenRouterProvider {
         };
         let max_tokens = Self::configured_max_tokens(profile_id.as_deref());
         let extra_body = Self::resolve_extra_body(None, &configured_env_file_name());
+        jcode_base::logging::info(&format!(
+            "[TIMING] openrouter_new: pre_struct={}ms",
+            new_start.elapsed().as_millis()
+        ));
 
         Ok(Self {
             client: jcode_provider_core::shared_http_client(),

@@ -615,6 +615,12 @@ fn test_handle_turn_error_failover_prompt_countdown_can_switch_and_retry() {
         let last = app.display_messages.last().expect("display message");
         assert!(!last.content.contains("cross_provider_failover"));
         assert!(last.content.lines().count() <= 2);
+        assert!(
+            !app.display_messages
+                .iter()
+                .any(|message| message.content.starts_with("↪ Switching to")),
+            "countdown line should be dropped once the switch happens"
+        );
     });
 }
 

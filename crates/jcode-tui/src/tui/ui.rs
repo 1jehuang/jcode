@@ -2375,6 +2375,26 @@ pub(crate) fn link_target_from_screen(column: u16, row: u16) -> Option<String> {
     link_target_from_snapshot(&snapshot, point)
 }
 
+/// Short OAuth link labels resolve against the source card, not a printed URL.
+pub(crate) fn oauth_login_link_message_from_screen(column: u16, row: u16) -> Option<usize> {
+    let point = copy_point_from_screen(column, row)?;
+    if point.pane != crate::tui::CopySelectionPane::Chat {
+        return None;
+    }
+    let snapshot = copy_snapshot_for_pane(point.pane)?;
+    let text = snapshot.wrapped_plain_line(point.abs_line)?;
+    let label = "Open OpenAI sign-in";
+    let start = text.find(label)?;
+    let start = line_display_width(&text[..start]);
+    if point.column < start || point.column >= start + label.len() {
+        return None;
+    }
+    match &snapshot.data {
+        CopyViewportData::ChatFrame { prepared } => prepared.message_index_at_line(point.abs_line),
+        CopyViewportData::Dense { .. } => None,
+    }
+}
+
 /// If a screen click landed on an inline-image label line, return the image
 /// id so the caller can cycle that image's size. The label line is short and
 /// single purpose (there is no visible expand badge anymore), so the whole
@@ -3285,6 +3305,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     }
     record_layout_snapshot(messages_area, diagram_area, diff_pane_area, Some(chunks[7]));
 
+    let mut chat_scrollbar: Option<NativeScrollbar> = None;
     let margins = if onboarding_welcome {
         onboarding::draw_onboarding_welcome(frame, app, messages_area);
         info_widget::Margins {
@@ -3328,13 +3349,15 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
             ..Default::default()
         }
     } else {
-        draw_messages(
+        let (margins, scrollbar) = draw_messages(
             frame,
             app,
             messages_area,
             prepared.clone(),
             chat_scrollbar_visible,
-        )
+        );
+        chat_scrollbar = scrollbar;
+        margins
     };
 
     crate::tui::reset_pinned_diagram_debug_snapshot();
@@ -3504,6 +3527,15 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
 
         let widget_start = Instant::now();
         info_widget::render_all(frame, &placements, &widget_data);
+        // Keep the chat scrollbar thumb in front of info widget borders that
+        // dock against the right edge of the messages area.
+        if let Some(scrollbar) = chat_scrollbar
+            && placements
+                .iter()
+                .any(|placement| rects_overlap(placement.rect, scrollbar.area))
+        {
+            scrollbar.render_thumb_overlay(frame);
+        }
         widget_render_ms = Some(widget_start.elapsed().as_secs_f32() * 1000.0);
 
         // Optional visual overlay for placements
@@ -3621,6 +3653,109 @@ pub(crate) fn native_scrollbar_visible(
     enabled && visible_height > 0 && total_lines > visible_height
 }
 
+/// Geometry of a native scrollbar drawn this frame, kept so the thumb can be
+/// re-stamped on top of overlays (info widgets) that render afterwards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct NativeScrollbar {
+    pub area: Rect,
+    pub scroll: usize,
+    pub total_lines: usize,
+    pub visible_height: usize,
+    pub focused: bool,
+}
+
+impl NativeScrollbar {
+    pub(crate) fn render(&self, frame: &mut Frame) {
+        render_native_scrollbar(
+            frame,
+            self.area,
+            self.scroll,
+            self.total_lines,
+            self.visible_height,
+            self.focused,
+        );
+    }
+
+    /// Draw only the thumb cells, leaving the rest of the track untouched so an
+    /// overlapping widget border stays visible while the thumb sits in front.
+    pub(crate) fn render_thumb_overlay(&self, frame: &mut Frame) {
+        let Some(thumb) = native_scrollbar_thumb(
+            self.area,
+            self.scroll,
+            self.total_lines,
+            self.visible_height,
+        ) else {
+            return;
+        };
+        let color = native_scrollbar_thumb_color(self.focused);
+        let buf = frame.buffer_mut();
+        let x = self.area.x;
+        for row in thumb.offset..thumb.offset + thumb.height {
+            let y = self.area.y + row as u16;
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_symbol(thumb.glyph(row)).set_fg(color);
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct NativeScrollbarThumb {
+    offset: usize,
+    height: usize,
+}
+
+impl NativeScrollbarThumb {
+    fn contains(&self, row: usize) -> bool {
+        row >= self.offset && row < self.offset + self.height
+    }
+
+    fn glyph(&self, row: usize) -> &'static str {
+        if self.height == 1 {
+            "•"
+        } else if row == self.offset {
+            "╷"
+        } else if row + 1 == self.offset + self.height {
+            "╵"
+        } else {
+            "│"
+        }
+    }
+}
+
+fn native_scrollbar_thumb(
+    area: Rect,
+    scroll: usize,
+    total_lines: usize,
+    visible_height: usize,
+) -> Option<NativeScrollbarThumb> {
+    if area.width == 0
+        || area.height == 0
+        || !native_scrollbar_visible(true, total_lines, visible_height)
+    {
+        return None;
+    }
+
+    let track_height = area.height as usize;
+    let height = ((visible_height * track_height).div_ceil(total_lines)).clamp(1, track_height);
+    let max_thumb_offset = track_height.saturating_sub(height);
+    let max_scroll = total_lines.saturating_sub(visible_height);
+    let offset = if max_scroll == 0 {
+        0
+    } else {
+        scroll.min(max_scroll) * max_thumb_offset / max_scroll
+    };
+    Some(NativeScrollbarThumb { offset, height })
+}
+
+fn native_scrollbar_thumb_color(focused: bool) -> Color {
+    if focused {
+        rgb(188, 208, 240)
+    } else {
+        rgb(136, 148, 172)
+    }
+}
+
 pub(crate) fn render_native_scrollbar(
     frame: &mut Frame,
     area: Rect,
@@ -3629,53 +3764,20 @@ pub(crate) fn render_native_scrollbar(
     visible_height: usize,
     focused: bool,
 ) {
-    if area.width == 0
-        || area.height == 0
-        || !native_scrollbar_visible(true, total_lines, visible_height)
-    {
+    let Some(thumb) = native_scrollbar_thumb(area, scroll, total_lines, visible_height) else {
         return;
-    }
-
-    let track_height = area.height as usize;
-    let thumb_height = if visible_height == 0 || total_lines == 0 {
-        1
-    } else if total_lines <= visible_height {
-        track_height
-    } else {
-        ((visible_height * track_height).div_ceil(total_lines)).clamp(1, track_height)
     };
-    let max_thumb_offset = track_height.saturating_sub(thumb_height);
-    let max_scroll = total_lines.saturating_sub(visible_height);
-    let thumb_offset = if max_scroll == 0 {
-        0
-    } else {
-        scroll.min(max_scroll) * max_thumb_offset / max_scroll
-    };
-
-    let thumb_color = if focused {
-        rgb(188, 208, 240)
-    } else {
-        rgb(136, 148, 172)
-    };
-
-    let mut lines = Vec::with_capacity(track_height);
-    for row in 0..track_height {
-        let (glyph, color) = if row >= thumb_offset && row < thumb_offset + thumb_height {
-            let glyph = if thumb_height == 1 {
-                "•"
-            } else if row == thumb_offset {
-                "╷"
-            } else if row + 1 == thumb_offset + thumb_height {
-                "╵"
+    let thumb_color = native_scrollbar_thumb_color(focused);
+    let lines: Vec<Line> = (0..area.height as usize)
+        .map(|row| {
+            let (glyph, color) = if thumb.contains(row) {
+                (thumb.glyph(row), thumb_color)
             } else {
-                "│"
+                (" ", Color::Reset)
             };
-            (glyph, thumb_color)
-        } else {
-            (" ", Color::Reset)
-        };
-        lines.push(Line::from(Span::styled(glyph, Style::default().fg(color))));
-    }
+            Line::from(Span::styled(glyph, Style::default().fg(color)))
+        })
+        .collect();
 
     frame.render_widget(Paragraph::new(lines), area);
 }

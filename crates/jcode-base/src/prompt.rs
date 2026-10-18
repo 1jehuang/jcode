@@ -93,114 +93,45 @@ pub fn load_swarm_prompt(working_dir: Option<&Path>) -> String {
     DEFAULT_SWARM_PROMPT.trim().to_string()
 }
 
-/// Reasoning-effort sentinel that enables swarm orchestration. Providers
-/// translate this to the configured root effort (low by default) when
-/// building API requests, while the UI/session keep the literal `swarm` marker
-/// so the agent knows to
-/// inject [`SWARM_EFFORT_DIRECTIVE`].
+/// Reasoning-effort sentinel that enables swarm mode. Providers translate this
+/// to the configured root effort (low by default) when building API requests,
+/// while the UI/session keep the literal `swarm` marker so the agent knows to
+/// append [`SWARM_USER_MESSAGE_REMINDER`] to the user's message.
 pub const SWARM_EFFORT: &str = "swarm";
 
-/// Reasoning-effort sentinel for the **deep task graph** mode: configured root
-/// reasoning AND the comprehensive DAG-first swarm workflow (decompose into a
-/// validated task graph, critique/verify gates, typed artifact handoffs). Sits
-/// one rung above [`SWARM_EFFORT`] on the effort ladder: `... xhigh`, `swarm`
-/// (light fan-out), `swarm-deep` (deep task graph). Providers translate this to
-/// the configured root effort, while the UI/session keep the literal marker so
-/// the agent knows to inject [`SWARM_DEEP_EFFORT_DIRECTIVE`].
-pub const SWARM_DEEP_EFFORT: &str = "swarm-deep";
+/// Appended to each user message while swarm mode is active.
+pub const SWARM_USER_MESSAGE_REMINDER: &str = "Use swarms to get things done in parallel.";
 
-/// System-prompt directive injected when the active reasoning effort is
-/// [`SWARM_EFFORT`]. Instructs the agent to lean on the swarm tooling.
-pub const SWARM_EFFORT_DIRECTIVE: &str = "# Swarm Effort\n\nSwarm orchestration is enabled. Your root reasoning effort is configured independently from worker effort. For any non-trivial task, decompose the work and use the `swarm` tool to spawn and coordinate parallel agents (spawn workers with concrete prompts, assign tasks, and collect their reports) instead of doing everything yourself in one thread. Prefer parallelizing independent subtasks across swarm members, and use a coordinator/plan when the work has multiple stages. Only skip the swarm for trivial, single-step requests.";
-
-/// System-prompt directive injected when the active reasoning effort is
-/// [`SWARM_DEEP_EFFORT`]. Instructs the agent to run the comprehensive DAG-first
-/// task-graph workflow.
-pub const SWARM_DEEP_EFFORT_DIRECTIVE: &str = "# Deep Task Graph\n\nThe deep task-graph swarm workflow is enabled. Your root reasoning effort is configured independently from worker effort. Treat the task DAG as the primary object, not ad hoc agent chat. Workflow:\n\n1. Seed a graph with `swarm task_graph` using `mode: \"deep\"`: lay out nodes (kind explore|implement|verify|fix|synthesize) and `depends_on` edges instead of answering directly. (At this effort the server already defaults the plan to deep, but pass `mode: \"deep\"` explicitly anyway.) The engine auto-inserts a plan-wide root gate over your seed: the plan cannot finish until a final adversarial audit passes, and that audit can inject new top-level work.\n2. For any node that is too big, `swarm expand_node` to decompose it into a child sub-DAG (you become its planner/integrator). In deep mode a critique/verify gate is auto-inserted before a composite node can close. The graph is EXPECTED to outgrow its seed, often by several times: growth (expansions and gate-injected gaps) is the system working, not scope creep. plan_status reports seeded-vs-grown counts.\n3. Finish each node with `swarm complete_node` and a typed artifact: `findings`, `evidence` (file:line / commit refs), `validation`, `open_questions`, a required `confidence` (low|medium|high; report low honestly, it routes follow-up work to shore up that scope), and an honest `what_i_did_not_check`. Downstream nodes are hydrated with these artifacts automatically. There is no other way to close a deep node: a turn ending without expand_node/complete_node re-queues the node to a fresh worker and fails it on repeat.\n4. When a critique/verify gate finds gaps or failures, use `swarm inject_gap` to add new nodes; the parent cannot close until they drain. A passing gate artifact must account for EVERY node it audited by id (the server rejects rubber stamps), and cannot pass over a low-confidence sibling without addressing it explicitly, so treat low-confidence siblings as priority probe targets.\n5. Use `swarm run_plan` to drive the graph to completion. It returns immediately and drives the plan as a background task (progress card + wake on completion), so keep working or answer the user while it runs; check `swarm plan_status` or `bg` for progress. Deep mode fans out wide automatically (many workers run in parallel, bounded only by the swarm member cap), so prefer decomposing into MANY independent sibling nodes rather than a few serial ones: keep the ready set wide so run_plan can dispatch lots of agents at once. Only add `depends_on` edges for real data dependencies.\n\nComprehensiveness is structural: prefer decomposition + gates over a single thorough answer, so it is very unlikely any nook or cranny is missed.";
-
-/// Returns true when `effort` is either swarm sentinel (light or deep),
-/// case-insensitive. Providers resolve their configured root reasoning level.
+/// Returns true when `effort` is the swarm sentinel, case-insensitive.
 pub fn is_swarm_effort(effort: &str) -> bool {
-    let trimmed = effort.trim();
-    trimmed.eq_ignore_ascii_case(SWARM_EFFORT) || trimmed.eq_ignore_ascii_case(SWARM_DEEP_EFFORT)
+    effort.trim().eq_ignore_ascii_case(SWARM_EFFORT)
 }
 
-/// Returns true when `effort` is specifically the deep task-graph sentinel.
-pub fn is_deep_swarm_effort(effort: &str) -> bool {
-    effort.trim().eq_ignore_ascii_case(SWARM_DEEP_EFFORT)
-}
-
-/// Configured root reasoning level for an orchestration sentinel. Providers
-/// translate this real level to their supported range while retaining the
-/// sentinel in session state. Ordinary reasoning efforts are left untouched.
+/// Configured root reasoning level for the swarm sentinel. Providers translate
+/// this real level to their supported range while retaining the sentinel in
+/// session state. Ordinary reasoning efforts are left untouched.
 pub fn swarm_root_reasoning_effort(effort: &str) -> Option<&'static str> {
-    if !is_swarm_effort(effort) {
-        return None;
-    }
-    Some(
-        crate::config::config()
-            .agents
-            .root_effort_for_swarm(is_deep_swarm_effort(effort)),
-    )
+    is_swarm_effort(effort).then(|| crate::config::config().agents.root_effort_for_swarm())
 }
 
-/// The user-facing "general effort" ladder is one list, but each rung is one of
-/// two internal kinds: a plain reasoning level (mapped straight to the provider
-/// wire effort) or a swarm orchestration mode (with independently configured
-/// root reasoning). [`EffortKind`] is the single classifier all consumers use so the
-/// UI, providers, and scheduler never disagree about what a rung means.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EffortKind {
-    /// A plain reasoning level (none/low/medium/high/xhigh/max).
-    Reasoning,
-    /// Light swarm mode: configured root reasoning + parallel fan-out.
-    SwarmLight,
-    /// Deep swarm mode: configured root reasoning + DAG-first task graph.
-    SwarmDeep,
-}
-
-impl EffortKind {
-    /// True when this rung is a swarm orchestration mode rather than a plain
-    /// reasoning level. Such rungs must not be treated as per-model effort
-    /// variants (e.g. they should not generate `model (effort)` picker rows).
-    pub fn is_swarm_mode(self) -> bool {
-        matches!(self, EffortKind::SwarmLight | EffortKind::SwarmDeep)
-    }
-}
-
-/// Classify a general-effort rung string into its [`EffortKind`].
-pub fn classify_effort(effort: &str) -> EffortKind {
-    let trimmed = effort.trim();
-    if trimmed.eq_ignore_ascii_case(SWARM_DEEP_EFFORT) {
-        EffortKind::SwarmDeep
-    } else if trimmed.eq_ignore_ascii_case(SWARM_EFFORT) {
-        EffortKind::SwarmLight
-    } else {
-        EffortKind::Reasoning
-    }
-}
-
-/// True when an effort rung is a swarm orchestration mode (light or deep) rather
-/// than a plain reasoning level. Convenience wrapper over [`classify_effort`].
+/// True when an effort rung is swarm mode rather than a plain reasoning level.
+/// Swarm mode must not be treated as a per-model effort variant.
 pub fn is_swarm_mode_effort(effort: &str) -> bool {
-    classify_effort(effort).is_swarm_mode()
+    is_swarm_effort(effort)
 }
 
-/// Append the appropriate swarm directive to a split prompt's dynamic part when
-/// the active reasoning effort is a swarm sentinel. The deep sentinel injects the
-/// DAG-first task-graph directive; the light sentinel injects the fan-out
-/// directive. No-op otherwise.
-pub fn append_swarm_effort_directive(split: &mut SplitSystemPrompt, effort: Option<&str>) {
-    let directive = match effort {
-        Some(effort) if is_deep_swarm_effort(effort) => SWARM_DEEP_EFFORT_DIRECTIVE,
-        Some(effort) if is_swarm_effort(effort) => SWARM_EFFORT_DIRECTIVE,
-        _ => return,
-    };
-    if !split.dynamic_part.is_empty() {
-        split.dynamic_part.push_str("\n\n");
+/// Append the swarm reminder to a user message when swarm mode is active.
+/// No-op otherwise, and idempotent.
+pub fn with_swarm_user_message_reminder(message: &str, effort: Option<&str>) -> String {
+    if !effort.is_some_and(is_swarm_effort) || message.contains(SWARM_USER_MESSAGE_REMINDER) {
+        return message.to_string();
     }
-    split.dynamic_part.push_str(directive);
+    if message.trim().is_empty() {
+        return SWARM_USER_MESSAGE_REMINDER.to_string();
+    }
+    format!("{}\n\n{}", message.trim_end(), SWARM_USER_MESSAGE_REMINDER)
 }
+
 /// Mission-continuation template (embedded at compile time). Consumed by the
 /// `mission` module in the upper `jcode-app-core` layer; the asset lives here
 /// alongside the other prompt templates.
@@ -772,7 +703,44 @@ where
 }
 
 /// Get git branch and status summary
+///
+/// Every connecting client builds a session context, and a reload reconnects
+/// dozens at once, each forking three `git` processes for usually the same
+/// repo (avg 0.8s, up to 2.4s under that storm). Share one probe per
+/// directory across concurrent callers and reuse it briefly. The TTL is short
+/// enough that a genuinely new session still sees current status.
 fn get_git_info(working_dir: Option<&Path>) -> Option<String> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, LazyLock, Mutex};
+    use std::time::{Duration, Instant};
+
+    const TTL: Duration = Duration::from_secs(3);
+    type Slot = Arc<Mutex<Option<(Instant, Option<String>)>>>;
+    static CACHE: LazyLock<Mutex<HashMap<Option<std::path::PathBuf>, Slot>>> =
+        LazyLock::new(Default::default);
+
+    let key = working_dir.map(Path::to_path_buf);
+    let slot = CACHE
+        .lock()
+        .map(|mut cache| cache.entry(key).or_default().clone())
+        .ok();
+    let Some(slot) = slot else {
+        return get_git_info_uncached(working_dir);
+    };
+    // Holding the per-directory lock while probing makes concurrent callers
+    // for the same repo wait for one result instead of forking their own.
+    let mut entry = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some((at, info)) = entry.as_ref()
+        && at.elapsed() < TTL
+    {
+        return info.clone();
+    }
+    let info = get_git_info_uncached(working_dir);
+    *entry = Some((Instant::now(), info.clone()));
+    info
+}
+
+fn get_git_info_uncached(working_dir: Option<&Path>) -> Option<String> {
     let mut command = Command::new("git");
     if let Some(dir) = working_dir {
         command.current_dir(dir);

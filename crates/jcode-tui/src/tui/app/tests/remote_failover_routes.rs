@@ -254,13 +254,16 @@ fn test_generic_auto_fallback_skips_excluded_preferred_and_checks_source_pool() 
         pool.save().unwrap();
         assert!(app.offer_fallback_after_error_with_payload("401 invalid API key", payload));
         assert!(app.pending_provider_failover.is_none());
+        // Unified router: pooled accounts outrank excluded ones even for
+        // the manual offer; the excluded route stays reachable only when no
+        // pooled alternative exists.
         assert_eq!(
             app.pending_fallback_offer
                 .as_ref()
                 .unwrap()
                 .selection
                 .api_method,
-            "claude-oauth@claude-otter"
+            "openai-oauth@openai-fox"
         );
     });
 }
@@ -362,6 +365,7 @@ fn test_rejected_remote_automatic_route_retains_old_identity_and_drops_payload()
                 provider_name: Some("Other".into()),
                 error: None,
                 provider_oauth_email: None,
+                provider_oauth_account_label: None,
                 resolved_credential: None,
                 reasoning_effort: None,
                 context_window: None,
@@ -379,6 +383,7 @@ fn test_rejected_remote_automatic_route_retains_old_identity_and_drops_payload()
                 provider_name: None,
                 error: Some("Target is no longer in the auto-switch pool".into()),
                 provider_oauth_email: None,
+                provider_oauth_account_label: None,
                 resolved_credential: None,
                 reasoning_effort: None,
                 context_window: None,
@@ -646,6 +651,7 @@ fn test_remote_fallback_offer_accept_stages_switch_and_resends() {
             provider_name: Some("Anthropic".to_string()),
             error: None,
             provider_oauth_email: None,
+            provider_oauth_account_label: None,
             resolved_credential: None,
             reasoning_effort: None,
         },
@@ -694,6 +700,7 @@ fn test_remote_fallback_resend_dropped_when_switch_fails() {
             provider_name: None,
             error: Some("switch failed".to_string()),
             provider_oauth_email: None,
+            provider_oauth_account_label: None,
             resolved_credential: None,
             reasoning_effort: None,
         },

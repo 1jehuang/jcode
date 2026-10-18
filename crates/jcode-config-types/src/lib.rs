@@ -4,7 +4,7 @@ mod display;
 mod menubar;
 mod power;
 mod session;
-pub use session::SessionConfig;
+pub use session::{HibernationMode, SessionConfig};
 pub use {display::DisplayConfig, menubar::MenubarConfig, power::PowerConfig};
 pub mod keybindings;
 mod serde_lenient;
@@ -574,11 +574,9 @@ pub struct AgentsConfig {
     /// call does not pass an explicit `effort`. Leave unset to let workers
     /// inherit the provider-wide reasoning effort.
     pub swarm_effort: Option<String>,
-    /// Root reasoning effort in light swarm mode. Unset or invalid means `low`.
+    /// Root reasoning effort in swarm mode. Unset or invalid means `low`.
     /// This does not change worker effort (`swarm_effort`).
     pub swarm_root_effort: Option<String>,
-    /// Root reasoning effort in deep swarm mode. Unset or invalid means `low`.
-    pub swarm_deep_root_effort: Option<String>,
     /// Default terminal mode for swarm-created agents.
     pub swarm_spawn_mode: SwarmSpawnMode,
     /// Maximum percentage (1-90) of the chat column height the inline swarm
@@ -631,9 +629,8 @@ pub struct AgentsConfig {
     #[serde(default)]
     pub memory_embedding_dim: Option<usize>,
     /// Maximum number of live swarm worker agents in one swarm. This is the RAM
-    /// safety budget for both recursive ad hoc spawning and deep-mode `run_plan`
-    /// parallelism. Completed/stopped workers do not consume slots. Light mode
-    /// still uses a smaller fixed fan-out. `0` disables this configurable guard,
+    /// safety budget for spawning. Completed/stopped workers do not consume
+    /// slots. `0` disables this configurable guard,
     /// leaving only the absolute `MAX_SWARM_MEMBERS` hard cap.
     /// Env override: `JCODE_SWARM_MAX_CONCURRENT_AGENTS`.
     #[serde(default = "default_swarm_max_concurrent_agents")]
@@ -694,7 +691,6 @@ impl Default for AgentsConfig {
             swarm_model: None,
             swarm_effort: None,
             swarm_root_effort: None,
-            swarm_deep_root_effort: None,
             swarm_spawn_mode: SwarmSpawnMode::default(),
             swarm_gallery_max_pct: None,
             swarm_strip_layout: SwarmStripLayout::default(),
@@ -717,16 +713,11 @@ impl Default for AgentsConfig {
 }
 
 impl AgentsConfig {
-    /// Resolve a swarm mode's root effort without allowing orchestration
-    /// sentinels to recurse into another mode. Unknown values use the low-effort
+    /// Resolve swarm mode's root effort without allowing the orchestration
+    /// sentinel to recurse into itself. Unknown values use the low-effort
     /// default without invalidating other settings.
-    pub fn root_effort_for_swarm(&self, deep: bool) -> &'static str {
-        let configured = if deep {
-            self.swarm_deep_root_effort.as_deref()
-        } else {
-            self.swarm_root_effort.as_deref()
-        };
-        let value = configured.unwrap_or("low").trim();
+    pub fn root_effort_for_swarm(&self) -> &'static str {
+        let value = self.swarm_root_effort.as_deref().unwrap_or("low").trim();
         ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
             .into_iter()
             .find(|level| level.eq_ignore_ascii_case(value))
@@ -1214,12 +1205,11 @@ pub struct FeatureConfig {
     /// Persist auto-recalled memory injections into normal session history instead of sending
     /// them as request-only ephemeral suffix messages (default: false)
     pub persist_memory_injections: bool,
-    /// Surface an in-chat system message whenever a request misses the KV cache
-    /// for a harness-caused (avoidable) reason: the system prompt, tool set, or
-    /// message prefix changed without the conversation legitimately growing.
-    /// These should essentially never happen, so the notice acts as a loud alarm
-    /// that something in the harness silently invalidated the prefix cache
-    /// (default: true).
+    /// Surface an in-chat system message for each meaningful observed KV cache
+    /// miss, including low/zero reads, route changes, expiry, and harness prefix
+    /// changes. Missing telemetry and ordinary first-request cache fills are not
+    /// classified as misses. Harness changes without a documented cause raise a
+    /// warning, while explained misses are informational (default: true).
     pub kv_cache_miss_notices: bool,
     /// Update channel: "stable" (releases only) or "main" (latest commits)
     pub update_channel: UpdateChannel,
@@ -1302,6 +1292,12 @@ pub struct ProviderConfig {
     /// Maximum exponential-backoff delay between transient-error retries.
     /// Default: 30 seconds. Overridable via `JCODE_RETRY_BACKOFF_CAP_SECS`.
     pub retry_backoff_cap_secs: u64,
+    /// Request-body compression policy: "auto" (compress only when the
+    /// measured uplink makes it faster), "always", or "off". Applies only to
+    /// endpoints verified to accept it: gzip (Anthropic, ChatGPT HTTPS), zstd
+    /// (OpenAI API), and WebSocket permessage-deflate (Responses sockets).
+    /// Overridable via `JCODE_REQUEST_COMPRESSION`.
+    pub request_compression: String,
 }
 
 impl Default for ProviderConfig {
@@ -1326,6 +1322,7 @@ impl Default for ProviderConfig {
             stream_idle_timeout_secs: 180,
             max_retries: 8,
             retry_backoff_cap_secs: 30,
+            request_compression: "auto".to_string(),
         }
     }
 }
