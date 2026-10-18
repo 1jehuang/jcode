@@ -102,19 +102,29 @@ Tests: 5 unit tests (slugs, domain dirs, inventory census, experience-md
 content, index empty/populated, root layout incl. tag override).
 
 ### 5. `hygiene`: eval-hygiene guards
-Source: `harness2/core/context.py` (grader-verdict asserts) +
-`EXPERIMENTS.md` web-access section + `BenchSpec.obs_trunc` floor.
+Source: `harness2/core/context.py` (grader-verdict tripwire,
+`assert_no_leak_paths`) + `harness2/core/spec.py` (`BenchPrompts`
+validation) + `EXPERIMENTS.md` web-access section + `BenchSpec.obs_trunc`
+floor.
 
-Why: three rules, each from a real published failure. (a) No grader verdicts
-(benchmark/evaluation/grader/rubric/score) in improver evidence: a harness
-that tells the agent what the grader wants is leakage, not improvement.
-(b) Egress blocklist for evaluation (`huggingface.co`, `github.com`, ...):
-in a validation run a Codex rollout downloaded its own task's `RUBRICS.json`
-unprompted. (c) `obs_trunc` floor 10_000: below that the renderer
-*fabricates* defects; default 50_000.
+Why: four rules, each from a real published failure. (a) Prompt slots must
+describe the WORK, not its measurement (benchmark/evaluation/grader/rubric/
+score rejected): a prompt that tells the agent what the grader wants is
+leakage, not improvement. (b) Grader-verdict tripwire on evidence trees:
+the grader's own output markers (`deterministic_eval_summary`,
+`"pass_rate"`, judge findings, ...) are refused by file name AND by content
+(scanned suffixes only), with the match offset quoted so the read path can
+be found. If it fires, find the leak; do not widen around it. (c) Leak-path
+rejection with true Python-fnmatch semantics (verified: `*`/`?`/`[...]`
+span separators): answer-key paths are rejected before a context reaches a
+model; plus the egress blocklist (`huggingface.co`, `github.com`, ...) for
+eval runs, after the published incident where a Codex rollout downloaded its
+own task's `RUBRICS.json` unprompted. (d) `obs_trunc` floor 10_000: below
+that the renderer *fabricates* defects; default 50_000.
 
-Tests: 5 unit tests (case-insensitive verdict detection, offender listing,
-floor rejection, glob matching incl. `**`, blocklist coverage).
+Tests: 8 unit tests (prompt-slot words + alias, marker-content tripwire,
+marker-in-name, unscanned-suffix skip, floor rejection, fnmatch glob
+semantics verified against CPython, leak-assert hits, blocklist coverage).
 
 ## What was deliberately NOT ported
 
@@ -126,7 +136,7 @@ floor rejection, glob matching incl. `**`, blocklist coverage).
 
 ## Validation
 
-- `cargo test -p jcode-plan`: 54 passed, 0 failed (27 pre-existing + 27 new).
+- `cargo test -p jcode-plan`: 57 passed, 0 failed (27 pre-existing + 30 new).
 - `cargo clippy -p jcode-plan --all-targets`: no warnings from this change.
 - `cargo fmt -p jcode-plan`: clean.
 - `cargo check -p jcode-plan -p jcode-swarm-core -p jcode-protocol`: clean

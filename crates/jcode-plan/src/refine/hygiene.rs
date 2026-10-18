@@ -1,57 +1,119 @@
 //! Eval-hygiene guards: keep grading honest.
 //!
-//! Ported from harness2's `harness2/core/context.py` + `EXPERIMENTS.md`
+//! Ported from harness2's `harness2/core/context.py` +
+//! `harness2/core/spec.py` (`BenchPrompts` validation) + `EXPERIMENTS.md`
 //! web-access section + `BenchSpec.obs_trunc` floor (Apache-2.0, Google LLC).
-//! Three rules, each learned from a real published failure:
+//! Four rules, each learned from a real published failure:
 //!
-//! 1. **No grader verdicts in the improver's evidence.** Rubrics stay outside
-//!    the improver's evidence; criteria are stripped from material passed to
-//!    the improver. A harness that tells the agent what the grader wants is
-//!    not an improvement, it is leakage.
-//! 2. **No leak paths.** Public benchmark rubrics are reachable online: in a
+//! 1. **Prompt slots describe the WORK, not its measurement** (`spec.py`).
+//!    Benchmark-shaped prompt text must never contain benchmark, evaluation,
+//!    grader, rubric, or score: say what the practitioner needs.
+//! 2. **Grader-verdict tripwire on evidence trees** (`context.py`). The
+//!    grader's own output markers (`deterministic_eval_summary`,
+//!    `"pass_rate"`, judge findings, ...) must never enter model context, by
+//!    file NAME or by content. If the tripwire fires, find the read path
+//!    that produced the match: it is a leak, not a false positive to widen
+//!    around.
+//! 3. **No leak paths.** Public benchmark rubrics are reachable online: in a
 //!    validation run a Codex rollout downloaded its own task's `RUBRICS.json`
-//!    unprompted. Restrict egress (`huggingface.co`, `github.com`, ...) at the
-//!    network level during evaluation and report the restrictions used.
-//! 3. **Observation truncation floor.** `obs_trunc < 10_000` is rejected: below
+//!    unprompted. Answer-key paths are rejected before a context reaches a
+//!    model (fnmatch semantics, `./`-prefix tolerant); egress
+//!    (`huggingface.co`, `github.com`, ...) is restricted at the network
+//!    level during evaluation and the restrictions are reported.
+//! 4. **Observation truncation floor.** `obs_trunc < 10_000` is rejected: below
 //!    that range the renderer *fabricates* defects that were never there.
 //!    Default is 50_000.
 
-/// Words that must never appear in material handed to the improver.
-/// Mirrors harness2's `BenchPrompts` validation: prompt slots must describe
+/// Words that must never appear in benchmark-shaped prompt slots.
+/// Mirrors harness2's `BenchPrompts.__post_init__`: prompt text must describe
 /// the WORK, not its measurement.
-pub const FORBIDDEN_EVIDENCE_WORDS: &[&str] =
+pub const FORBIDDEN_PROMPT_WORDS: &[&str] =
     &["benchmark", "evaluation", "grader", "rubric", "score"];
 
 /// Returns the offending word, if any, found case-insensitively.
-pub fn find_grader_verdict(text: &str) -> Option<&'static str> {
+pub fn find_prompt_measurement_word(text: &str) -> Option<&'static str> {
     let low = text.to_lowercase();
-    FORBIDDEN_EVIDENCE_WORDS
+    FORBIDDEN_PROMPT_WORDS
         .iter()
         .find(|w| low.contains(**w))
         .copied()
 }
 
-/// Assert no tree file carries a grader verdict. The returned `Err` is fed
-/// back verbatim as retry feedback upstream.
+/// The grader's own output markers. If any appears in a file NAME or in the
+/// body of a scanned file, the context is refused. Mirrors harness2's
+/// `GRADER_VERDICT_MARKERS`: a tripwire on the read boundary, not the
+/// defence itself.
+pub const GRADER_VERDICT_MARKERS: &[&str] = &[
+    "deterministic_eval_summary",
+    "deterministic_eval_result",
+    "judge_scope_and_deterministic_status",
+    "Judge findings on the rendered result",
+    "\"passed_count\"",
+    "\"pass_rate\"",
+    "\"test_pass_rate\"",
+];
+
+/// Suffixes scanned for marker content. Other files are name-checked only.
+/// Mirrors harness2's `_MARKER_SCAN_SUFFIXES`.
+pub const MARKER_SCAN_SUFFIXES: &[&str] = &[
+    ".md", ".txt", ".json", ".csv", ".tsv", ".yaml", ".yml", ".html", ".htm", ".log", ".py", ".js",
+    ".sh", ".xml", ".ini", ".toml", ".patch", ".diff", "",
+];
+
+fn suffix_scanned(rel: &str) -> bool {
+    let lower = rel.to_lowercase();
+    let file = lower.rsplit('/').next().unwrap_or(&lower);
+    match file.rfind('.') {
+        Some(dot) => MARKER_SCAN_SUFFIXES.contains(&&file[dot..]),
+        None => MARKER_SCAN_SUFFIXES.contains(&""),
+    }
+}
+
+/// Check one tree file against the tripwire. Returns the refusal message.
+fn check_tree_file(rel: &str, body: &str) -> Option<String> {
+    for marker in GRADER_VERDICT_MARKERS {
+        if rel.contains(marker) {
+            return Some(format!(
+                "harness file {rel:?} has grader-verdict marker {marker:?} in its NAME; rename it: files carrying these strings cannot be served as evidence to later tasks"
+            ));
+        }
+    }
+    if !suffix_scanned(rel) {
+        return None;
+    }
+    for marker in GRADER_VERDICT_MARKERS {
+        if let Some(at) = body.find(marker) {
+            let start = at.saturating_sub(60);
+            let end = (at + 120).min(body.len());
+            let window = body
+                .get(start..end)
+                .unwrap_or(&body[at..body.len().min(at + 1)]);
+            return Some(format!(
+                "harness file {rel:?} contains grader-verdict marker {marker:?} at offset {at} ({window:?}); remove or rename that string: files carrying it cannot be served as evidence to later tasks"
+            ));
+        }
+    }
+    None
+}
+
+/// Assert no tree file carries the grader's own output. The returned `Err`
+/// is fed back verbatim as retry feedback upstream.
 pub fn assert_tree_has_no_grader_verdicts(
     tree: &std::collections::HashMap<String, String>,
 ) -> Result<(), String> {
-    let mut offenders = Vec::new();
     let mut rels: Vec<&String> = tree.keys().collect();
     rels.sort();
     for rel in rels {
-        if let Some(word) = find_grader_verdict(&tree[rel]) {
-            offenders.push(format!("{rel} mentions {word:?}"));
+        if let Some(msg) = check_tree_file(rel, &tree[rel]) {
+            return Err(msg);
         }
     }
-    if offenders.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
-            "grader verdicts in harness (describe the WORK, not its measurement): {}",
-            offenders.join("; ")
-        ))
-    }
+    Ok(())
+}
+
+/// Back-compat alias: the prompt-slot word check.
+pub fn find_grader_verdict(text: &str) -> Option<&'static str> {
+    find_prompt_measurement_word(text)
 }
 
 /// Hosts to block at the network level during evaluation runs.
@@ -79,43 +141,125 @@ pub fn check_obs_trunc(obs_trunc: usize) -> Result<usize, String> {
     Ok(obs_trunc)
 }
 
-/// Returns true when `path` matches one of the benchmark's leak globs
-/// (`*` matches any run of chars except `/`; `**` spans separators).
+/// Returns true when `path` matches a benchmark answer-key glob.
+/// Mirrors harness2's `assert_no_leak_paths`: the pattern is tried as-is and
+/// as `*/<pattern>` (after stripping a leading `./`), with Python `fnmatch`
+/// semantics: `*` spans any run INCLUDING separators, `?` any single char
+/// including the separator, `[...]` a class including the separator, and
+/// `**` any run including separators (so `**/` also matches zero dirs).
 pub fn path_matches_leak_glob(path: &str, glob: &str) -> bool {
-    fn go(p: &[u8], g: &[u8]) -> bool {
-        if g.is_empty() {
-            return p.is_empty();
+    let pat = glob.replace('\\', "/").trim_start_matches("./").to_string();
+    fnmatch_match(&pat, path) || fnmatch_match(&format!("*/{pat}"), path)
+}
+
+fn fnmatch_match(pattern: &str, name: &str) -> bool {
+    fn go(p: &[u8], n: &[u8]) -> bool {
+        if p.is_empty() {
+            return n.is_empty();
         }
-        if g.len() >= 2 && g[0] == b'*' && g[1] == b'*' {
-            let rest = if g.len() > 2 && g[2] == b'/' {
-                &g[3..]
-            } else {
-                &g[2..]
+        // `**/` spans separators (incl. zero dirs); lone `**` spans all.
+        if p.len() >= 2 && p[0] == b'*' && p[1] == b'*' {
+            if p.len() > 2 && p[2] == b'/' {
+                for i in 0..=n.len() {
+                    if go(&p[3..], &n[i..]) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+            for i in 0..=n.len() {
+                if go(&p[2..], &n[i..]) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        // fnmatch `*`: any run, separators included.
+        if p[0] == b'*' {
+            for i in 0..=n.len() {
+                if go(&p[1..], &n[i..]) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        // fnmatch `?`: any single char, separator included.
+        if p[0] == b'?' {
+            if n.is_empty() {
+                return false;
+            }
+            return go(&p[1..], &n[1..]);
+        }
+        if p[0] == b'[' {
+            let Some(close) = p.iter().position(|&c| c == b']') else {
+                // No closing bracket: literal `[`.
+                if n.is_empty() || n[0] != b'[' {
+                    return false;
+                }
+                return go(&p[1..], &n[1..]);
             };
-            for i in 0..=p.len() {
-                if go(&p[i..], rest) {
-                    return true;
+            if n.is_empty() {
+                return false;
+            }
+            let (mut class, rest) = (&p[1..close], &p[close + 1..]);
+            let mut negate = false;
+            if !class.is_empty() && (class[0] == b'!' || class[0] == b'^') {
+                negate = true;
+                class = &class[1..];
+            }
+            let mut hit = false;
+            let mut ci = 0;
+            while ci < class.len() {
+                if ci + 2 < class.len() && class[ci + 1] == b'-' {
+                    if class[ci] <= n[0] && n[0] <= class[ci + 2] {
+                        hit = true;
+                    }
+                    ci += 3;
+                } else {
+                    if class[ci] == n[0] {
+                        hit = true;
+                    }
+                    ci += 1;
                 }
             }
-            return false;
-        }
-        if g[0] == b'*' {
-            for i in 0..=p.len() {
-                if i > 0 && p[i - 1] == b'/' {
-                    break;
-                }
-                if go(&p[i..], &g[1..]) {
-                    return true;
-                }
+            if hit == negate {
+                return false;
             }
+            return go(rest, &n[1..]);
+        }
+        if n.is_empty() || p[0] != n[0] {
             return false;
         }
-        if p.is_empty() || p[0] != g[0] {
-            return false;
-        }
-        go(&p[1..], &g[1..])
+        go(&p[1..], &n[1..])
     }
-    go(path.as_bytes(), glob.as_bytes())
+    go(pattern.as_bytes(), name.as_bytes())
+}
+
+/// Reject answer-key paths before a context reaches a model.
+/// Mirrors harness2's `assert_no_leak_paths`.
+pub fn assert_no_leak_paths(paths: &[&str], patterns: &[&str]) -> Result<(), String> {
+    if patterns.is_empty() {
+        return Ok(());
+    }
+    let mut hits = Vec::new();
+    for path in paths {
+        for pattern in patterns {
+            if path_matches_leak_glob(path, pattern) {
+                hits.push((*path).to_string());
+                break;
+            }
+        }
+    }
+    if hits.is_empty() {
+        Ok(())
+    } else {
+        hits.sort();
+        let shown: Vec<String> = hits.into_iter().take(8).collect();
+        Err(format!(
+            "answer-key path(s) would enter model context: {}",
+            shown.join(", ")
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -123,22 +267,53 @@ mod tests {
     use super::*;
 
     #[test]
-    fn verdict_words_detected_case_insensitively() {
-        assert_eq!(find_grader_verdict("The GRADER expects X"), Some("grader"));
-        assert!(find_grader_verdict("reconcile figures before writing").is_none());
+    fn prompt_slots_reject_measurement_words() {
+        assert_eq!(
+            find_prompt_measurement_word("The GRADER expects X"),
+            Some("grader")
+        );
+        assert!(find_prompt_measurement_word("reconcile figures before writing").is_none());
+        // Alias keeps working.
+        assert_eq!(find_grader_verdict("maximise the score"), Some("score"));
     }
 
     #[test]
-    fn tree_assert_lists_offenders() {
+    fn tripwire_fires_on_marker_content_not_ordinary_words() {
         let mut t = std::collections::HashMap::new();
+        // Ordinary measurement words are NOT the tripwire: they describe
+        // prompts, not grader output. Content markers are.
         t.insert(
             "systemprompt.md".to_string(),
             "maximise the score".to_string(),
         );
-        t.insert("guardrails.md".to_string(), "do good work".to_string());
+        assert_tree_has_no_grader_verdicts(&t).expect("ordinary words pass the tripwire");
+        t.insert(
+            "guardrails.md".to_string(),
+            "result: \"pass_rate\": 0.9".to_string(),
+        );
         let err = assert_tree_has_no_grader_verdicts(&t).unwrap_err();
-        assert!(err.contains("systemprompt.md"), "{err}");
-        assert!(!err.contains("guardrails.md"), "{err}");
+        assert!(err.contains("guardrails.md"), "{err}");
+        // Marker is debug-formatted in the message, so match the bare name.
+        assert!(err.contains("pass_rate"), "{err}");
+    }
+
+    #[test]
+    fn tripwire_fires_on_marker_in_name() {
+        let mut t = std::collections::HashMap::new();
+        t.insert(
+            "deterministic_eval_summary.md".to_string(),
+            "innocent body".to_string(),
+        );
+        let err = assert_tree_has_no_grader_verdicts(&t).unwrap_err();
+        assert!(err.contains("in its NAME"), "{err}");
+    }
+
+    #[test]
+    fn tripwire_skips_unscanned_suffixes_for_content() {
+        let mut t = std::collections::HashMap::new();
+        // A binary-ish suffix is name-checked only.
+        t.insert("artifact.png".to_string(), "\"pass_rate\": 0.9".to_string());
+        assert_tree_has_no_grader_verdicts(&t).expect("unscanned suffix skips content check");
     }
 
     #[test]
@@ -148,14 +323,37 @@ mod tests {
     }
 
     #[test]
-    fn leak_globs_match() {
+    fn leak_globs_match_fnmatch_semantics() {
         assert!(path_matches_leak_glob("RUBRICS.json", "*.json"));
         assert!(path_matches_leak_glob(
             "data/RUBRICS.json",
             "**/RUBRICS.json"
         ));
         assert!(!path_matches_leak_glob("data/report.md", "**/RUBRICS.json"));
-        assert!(!path_matches_leak_glob("a/b.json", "*.json"));
+        // Python fnmatch `*` spans separators (unlike glob): verified with
+        // `fnmatch.fnmatch('a/b.json', '*.json') is True` on 2026-10-18.
+        assert!(path_matches_leak_glob("a/b.json", "*.json"));
+        // `./`-prefix tolerant, bare name matches at any depth.
+        assert!(path_matches_leak_glob(
+            "data/RUBRICS.json",
+            "./RUBRICS.json"
+        ));
+        assert!(path_matches_leak_glob("RUBRICS.json", "RUBRICS.json"));
+        // `?` and classes behave (also separator-crossing, per fnmatch).
+        assert!(path_matches_leak_glob("a1.json", "a?.json"));
+        assert!(path_matches_leak_glob("a1.json", "a[0-9].json"));
+        // `?` is exactly one char: `ab` (two) does not fit `a?`.
+        assert!(!path_matches_leak_glob("abc.json", "a?.json"));
+        assert!(path_matches_leak_glob("a/b", "a?b"));
+    }
+
+    #[test]
+    fn leak_assert_lists_hits() {
+        let err = assert_no_leak_paths(&["src/main.rs", "data/RUBRICS.json"], &["**/RUBRICS.json"])
+            .unwrap_err();
+        assert!(err.contains("data/RUBRICS.json"), "{err}");
+        assert!(assert_no_leak_paths(&["src/main.rs"], &["**/RUBRICS.json"]).is_ok());
+        assert!(assert_no_leak_paths(&["anything"], &[]).is_ok());
     }
 
     #[test]
