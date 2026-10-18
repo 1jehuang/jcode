@@ -700,6 +700,7 @@ impl App {
         if let Some(name) = snapshot.provider_name
             && self.remote_provider_name.as_deref() != Some(name.as_str())
         {
+            self.remote_available_service_tiers = None;
             self.remote_provider_name = Some(name);
             provider_meta_changed = true;
             provider_name_changed = true;
@@ -708,6 +709,7 @@ impl App {
             && self.remote_provider_model.as_deref() != Some(model.as_str())
         {
             self.update_context_limit_for_model(&model, None);
+            self.remote_available_service_tiers = None;
             self.remote_provider_model = Some(model);
             provider_meta_changed = true;
         }

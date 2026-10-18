@@ -848,6 +848,36 @@ fn test_available_models_updated_event_surfaces_authed_provider_in_remote_model_
 }
 
 #[test]
+fn test_catalog_snapshot_invalidates_service_tiers_only_when_identity_changes() {
+    for (provider, model, should_clear) in [
+        ("openai", "gpt-6-astra", false),
+        ("openai", "gpt-6.1-sol", true),
+        ("jcode", "gpt-6-astra", true),
+    ] {
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.remote_provider_name = Some("openai".into());
+        app.remote_provider_model = Some("gpt-6-astra".into());
+        app.remote_available_service_tiers = Some(vec!["priority".into()]);
+
+        app.replace_remote_model_catalog_snapshot(
+            jcode_provider_core::ModelCatalogSnapshot::new(
+                Some(provider.into()),
+                Some(model.into()),
+                vec![],
+                vec![],
+            ),
+        );
+
+        assert_eq!(
+            app.remote_available_service_tiers.is_none(),
+            should_clear,
+            "provider={provider}, model={model}"
+        );
+    }
+}
+
+#[test]
 fn test_duplicate_available_models_updated_event_is_a_no_op() {
     // Temp home: handling the event persists the remote catalog cache, which
     // must not leak into other tests that hydrate from a shared test home.
