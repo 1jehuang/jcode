@@ -1114,6 +1114,30 @@ record is recreated. The collateral DNS delete was self-inflicted via
 the dashboard during a multi-zone cleanup run; no script in the repo
 deletes DNS records.
 
+## 24.4 XJ-07 cargo test re-verified on master (2026-10-18T02:18Z)
+
+The 5 XJ-07 tests in `crates/jcode-base/tests/mcp_xj07_failure_modes.rs`
+were re-run against `master` (post-§24.2 cherry-pick, post-§24.3
+root-cause) to confirm the §24 chain of fixes did not regress the
+XJ-07 work shipped in §26.
+
+- Command: `cargo test --no-default-features --package jcode-base --test mcp_xj07_failure_modes`
+  (--no-default-features skips the `aws-sdk` feature tree, which is
+  not exercised by the test and was the cold-compile bottleneck).
+- Compile: 17m 13s (cold). Test binary:
+  `target/debug/deps/mcp_xj07_failure_modes-5653c599b0c1a19b`.
+- Run: 0.73s, **5/5 PASSED** — `expired_auth_fails_clearly`,
+  `malformed_events_fail_clearly`, `missing_cli_fails_clearly`,
+  `network_loss_fails_clearly`, `unregister_restores_prior_configuration`.
+
+The §26 XJ-07 implementation is **still good** on master after §24.
+The §24.2 fix and the §24.3 root-cause are non-regressing for XJ-07
+because XJ-07 tests the stdio MCP path (which is the in-process
+jcode behavior), whereas §24.x targets the SEP-991 CIMD/mcp-remote
+bridge path (which is the OAuth-aware path).
+
+Full test log: `/tmp/xj07_final.log` on the build host.
+
 ## 25. Squash-merge to master (2026-10-17T07:48Z)
 
 Operator signal "go" at 2026-10-17T07:39Z triggered the squash-merge
