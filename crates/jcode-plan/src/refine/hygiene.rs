@@ -309,6 +309,22 @@ mod tests {
     }
 
     #[test]
+    fn tripwire_suffix_scan_is_case_insensitive() {
+        let mut t = std::collections::HashMap::new();
+        t.insert("A.MD".to_string(), "\"pass_rate\":1".to_string());
+        assert!(assert_tree_has_no_grader_verdicts(&t).is_err());
+        // Unlisted suffix: content passes, name still trips.
+        let mut u = std::collections::HashMap::new();
+        u.insert("artifact.png".to_string(), "\"pass_rate\":1".to_string());
+        assert!(assert_tree_has_no_grader_verdicts(&u).is_ok());
+        u.insert(
+            "deterministic_eval_summary.png".to_string(),
+            "innocent".to_string(),
+        );
+        assert!(assert_tree_has_no_grader_verdicts(&u).is_err());
+    }
+
+    #[test]
     fn tripwire_skips_unscanned_suffixes_for_content() {
         let mut t = std::collections::HashMap::new();
         // A binary-ish suffix is name-checked only.
@@ -345,6 +361,17 @@ mod tests {
         // `?` is exactly one char: `ab` (two) does not fit `a?`.
         assert!(!path_matches_leak_glob("abc.json", "a?.json"));
         assert!(path_matches_leak_glob("a/b", "a?b"));
+        // Classes, negation, `**`, and empties under true fnmatch.
+        assert!(path_matches_leak_glob("a", "[a-z]"));
+        assert!(!path_matches_leak_glob("A", "[a-z]"));
+        assert!(path_matches_leak_glob("A", "[!a-z]"));
+        assert!(path_matches_leak_glob("[", "[[]"));
+        assert!(!path_matches_leak_glob("x", "["));
+        assert!(path_matches_leak_glob("anything", "**"));
+        assert!(path_matches_leak_glob("", "**"));
+        assert!(path_matches_leak_glob("", "*"));
+        assert!(path_matches_leak_glob("a/b", "a*b"));
+        assert!(!path_matches_leak_glob("AXB", "a*b"));
     }
 
     #[test]

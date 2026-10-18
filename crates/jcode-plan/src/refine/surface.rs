@@ -724,6 +724,27 @@ mod tests {
         assert!(normalize_rel("/abs.md").is_err());
         assert_eq!(normalize_rel("./a.md").unwrap(), "a.md");
         assert_eq!(normalize_rel("a//b.md").unwrap(), "a//b.md");
+        // Adversarial sweep: empties, bare separators, and any `..`
+        // segment are rejected; dots normalize verbatim (source parity)
+        // but are never on the editable surface.
+        for bad in [
+            "",
+            " ",
+            "/",
+            "//",
+            "./",
+            "../x",
+            "a/../../b",
+            "a/..",
+            "..",
+            "a\\..\\b",
+        ] {
+            assert!(normalize_rel(bad).is_err(), "should reject {bad:?}");
+        }
+        assert_eq!(normalize_rel(".").unwrap(), ".");
+        assert!(!is_allowed(&OPENCODE_SURFACE, "."));
+        assert_eq!(normalize_rel("...md").unwrap(), "...md");
+        assert_eq!(normalize_rel("a b/c.md").unwrap(), "a b/c.md");
     }
 
     #[test]

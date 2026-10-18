@@ -256,6 +256,14 @@ mod tests {
         assert_eq!(anon_id(25), "Z");
         assert_eq!(anon_id(26), "AA");
         assert_eq!(anon_id(27), "AB");
+        // No collisions across a wide range; edge maps are stable.
+        let mut seen = HashSet::new();
+        for i in 0..2000 {
+            assert!(seen.insert(anon_id(i)), "collision at {i}");
+        }
+        assert_eq!(assign_ids(&[], "t", 1, "agg").len(), 0);
+        let one = assign_ids(&["x".to_string()], "t", 1, "agg");
+        assert_eq!(one.get("A"), Some(&"x".to_string()));
     }
 
     #[test]
@@ -335,6 +343,13 @@ mod tests {
             resolve_choice(None, &id_map, &pool, "mixed"),
             SelectorOutcome::NoFallback { .. }
         ));
+    }
+
+    #[test]
+    fn trivial_selection_rejects_empty_pool() {
+        let empty_c: HashMap<String, Rollout> = HashMap::new();
+        let empty_a: HashMap<String, String> = HashMap::new();
+        assert!(trivial_selection(&empty_c, &empty_a).is_err());
     }
 
     #[test]

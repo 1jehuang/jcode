@@ -78,10 +78,11 @@ purpose" and "picking an output from an unmodified harness is a completely
 valid and expected outcome"; failed evaluations "remain unscored rather than
 being counted as zero".
 
-Tests: 6 unit tests (anon-id counting, shuffle stability + coverage,
-non-answer drops with `label (cause)` entries, choice/base/final fallback
-chain with carried anon ids, k=1 `trivial_selection` fast path, experience
-field gating).
+Tests: 7 unit tests (anon-id counting + 2000-id collision sweep, shuffle
+stability + coverage, non-answer drops with `label (cause)` entries,
+choice/base/final fallback chain with carried anon ids, k=1
+`trivial_selection` fast path + empty-pool rejection, experience field
+gating, adversarial normalize sweep).
 Note: seed uses FNV-1a + SplitMix64 instead of sha1 so the crate
 stays dependency-free; the stability property (same input, same shuffle) is
 what the tests pin, not the hash function.
@@ -126,9 +127,10 @@ eval runs, after the published incident where a Codex rollout downloaded its
 own task's `RUBRICS.json` unprompted. (d) `obs_trunc` floor 10_000: below
 that the renderer *fabricates* defects; default 50_000.
 
-Tests: 8 unit tests (prompt-slot words + alias, marker-content tripwire,
-marker-in-name, unscanned-suffix skip, floor rejection, fnmatch glob
-semantics verified against CPython, leak-assert hits, blocklist coverage).
+Tests: 9 unit tests (prompt-slot words + alias, marker-content tripwire,
+marker-in-name, suffix case-insensitivity + name-tripwire, unscanned-suffix
+skip, floor rejection, fnmatch glob semantics verified against CPython +
+class/negation/empty edge cases, leak-assert hits, blocklist coverage).
 
 ## What was deliberately NOT ported
 
@@ -140,7 +142,7 @@ semantics verified against CPython, leak-assert hits, blocklist coverage).
 
 ## Validation
 
-- `cargo test -p jcode-plan`: 63 passed, 0 failed (23 pre-existing: 13 plan + 10 mermaid; 40 new: surface 15, recursion 6, selection 6, library 5, hygiene 8).
+- `cargo test -p jcode-plan`: 65 passed, 0 failed (23 pre-existing: 13 plan + 10 mermaid; 42 new: surface 15, recursion 6, selection 7, library 5, hygiene 9).
 - `cargo clippy -p jcode-plan --all-targets`: no warnings from this change.
 - `cargo fmt -p jcode-plan`: clean.
 - `cargo check -p jcode-plan -p jcode-swarm-core -p jcode-protocol`: clean
