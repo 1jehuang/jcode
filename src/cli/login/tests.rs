@@ -487,6 +487,184 @@ async fn complete_saved_muse_subscription_login_uses_code_only_path() {
 }
 
 #[tokio::test]
+async fn cancelling_muse_subscription_login_during_polling_prevents_credential_persistence() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let prev_opt_in = std::env::var_os(auth::muse::EXPERIMENTAL_ENV_VAR);
+    crate::env::set_var("JCODE_HOME", temp.path());
+    crate::env::set_var(auth::muse::EXPERIMENTAL_ENV_VAR, "1");
+
+    let flow_id = "flow-muse-cancel-race";
+    let path = pending_login_path("muse-subscription", Some(flow_id)).expect("pending path");
+    let record = PendingScriptableLoginRecord {
+        expires_at_ms: current_time_ms() + 60_000,
+        login: PendingScriptableLogin::MuseSubscription {
+            device_code: "muse-device-code-cancel-race".to_string(),
+            user_code: String::new(),
+            verification_uri: String::new(),
+            interval: 1,
+        },
+    };
+    persist_pending_login(&path, &record, true).expect("persist pending login");
+
+    let path_clone = path.clone();
+    let _poll_guard = device_login::set_test_poll_override(move |_code, _interval| {
+        // Simulate a concurrent cancellation during polling.
+        cancel_scoped_pending_login(&path_clone).expect("cancel scoped pending login must succeed");
+        Ok(auth::muse::PollOutcome::Approved(
+            auth::muse::MuseCredentials {
+                api_key: "muse_test_api_key".to_string(),
+                access_token: "muse_test_access_token".to_string(),
+                base_url: "https://api.meta.ai/v1".to_string(),
+                user_email: Some("user@example.com".to_string()),
+                user_full_name: Some("Test User".to_string()),
+                is_subs_active: true,
+                minted_at_ms: 1000,
+                subs_usage: None,
+            },
+        ))
+    });
+
+    let options = LoginOptions {
+        flow_id: Some(flow_id.to_string()),
+        complete: true,
+        json: true,
+        ..LoginOptions::default()
+    };
+    let outcome = complete_scriptable_muse_subscription_login("muse-subscription", &options).await;
+    let error = outcome.expect_err("cancelled completion must return an error");
+    assert!(
+        error.to_string().contains("cancelled"),
+        "error must indicate cancellation: {error}"
+    );
+
+    let creds_path = auth::muse::credentials_path().expect("credentials path");
+    assert!(
+        !creds_path.exists(),
+        "credentials file must not be created when flow was cancelled"
+    );
+    assert!(
+        auth::muse::load_credentials().is_err(),
+        "credentials must not be loadable"
+    );
+
+    set_or_clear_env(auth::muse::EXPERIMENTAL_ENV_VAR, prev_opt_in);
+    set_or_clear_env("JCODE_HOME", prev_home);
+}
+
+#[tokio::test]
+async fn replacing_muse_subscription_login_during_polling_prevents_credential_persistence() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let prev_opt_in = std::env::var_os(auth::muse::EXPERIMENTAL_ENV_VAR);
+    crate::env::set_var("JCODE_HOME", temp.path());
+    crate::env::set_var(auth::muse::EXPERIMENTAL_ENV_VAR, "1");
+
+    let flow_id = "flow-muse-replace-race";
+    let path = pending_login_path("muse-subscription", Some(flow_id)).expect("pending path");
+    let record = PendingScriptableLoginRecord {
+        expires_at_ms: current_time_ms() + 60_000,
+        login: PendingScriptableLogin::MuseSubscription {
+            device_code: "muse-device-code-old".to_string(),
+            user_code: String::new(),
+            verification_uri: String::new(),
+            interval: 1,
+        },
+    };
+    persist_pending_login(&path, &record, true).expect("persist pending login");
+
+    let path_clone = path.clone();
+    let _poll_guard = device_login::set_test_poll_override(move |_code, _interval| {
+        let new_record = PendingScriptableLoginRecord {
+            expires_at_ms: current_time_ms() + 60_000,
+            login: PendingScriptableLogin::MuseSubscription {
+                device_code: "muse-device-code-new".to_string(),
+                user_code: String::new(),
+                verification_uri: String::new(),
+                interval: 1,
+            },
+        };
+        persist_pending_login(&path_clone, &new_record, true).expect("persist replacement login");
+        Ok(auth::muse::PollOutcome::Approved(
+            auth::muse::MuseCredentials {
+                api_key: "muse_test_api_key".to_string(),
+                access_token: "muse_test_access_token".to_string(),
+                base_url: "https://api.meta.ai/v1".to_string(),
+                user_email: Some("user@example.com".to_string()),
+                user_full_name: Some("Test User".to_string()),
+                is_subs_active: true,
+                minted_at_ms: 1000,
+                subs_usage: None,
+            },
+        ))
+    });
+
+    let options = LoginOptions {
+        flow_id: Some(flow_id.to_string()),
+        complete: true,
+        json: true,
+        ..LoginOptions::default()
+    };
+    let outcome = complete_scriptable_muse_subscription_login("muse-subscription", &options).await;
+    let error = outcome.expect_err("replaced completion must return an error");
+    assert!(
+        error.to_string().contains("cancelled"),
+        "error must indicate flow invalidation: {error}"
+    );
+
+    let creds_path = auth::muse::credentials_path().expect("credentials path");
+    assert!(
+        !creds_path.exists(),
+        "credentials file must not be created when flow was replaced"
+    );
+
+    set_or_clear_env(auth::muse::EXPERIMENTAL_ENV_VAR, prev_opt_in);
+    set_or_clear_env("JCODE_HOME", prev_home);
+}
+
+#[tokio::test]
+async fn complete_scriptable_muse_subscription_login_fails_if_already_cancelled() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let prev_opt_in = std::env::var_os(auth::muse::EXPERIMENTAL_ENV_VAR);
+    crate::env::set_var("JCODE_HOME", temp.path());
+    crate::env::set_var(auth::muse::EXPERIMENTAL_ENV_VAR, "1");
+
+    let flow_id = "flow-muse-pre-cancelled";
+    let path = pending_login_path("muse-subscription", Some(flow_id)).expect("pending path");
+    let record = PendingScriptableLoginRecord {
+        expires_at_ms: current_time_ms() + 60_000,
+        login: PendingScriptableLogin::MuseSubscription {
+            device_code: "muse-device-code-pre".to_string(),
+            user_code: String::new(),
+            verification_uri: String::new(),
+            interval: 1,
+        },
+    };
+    persist_pending_login(&path, &record, true).expect("persist pending login");
+    cancel_scoped_pending_login(&path).expect("cancel scoped pending login must succeed");
+
+    let options = LoginOptions {
+        flow_id: Some(flow_id.to_string()),
+        complete: true,
+        json: true,
+        ..LoginOptions::default()
+    };
+    let outcome = complete_scriptable_muse_subscription_login("muse-subscription", &options).await;
+    let error = outcome.expect_err("completing an already cancelled flow must fail");
+    assert!(
+        error.to_string().contains("cancelled"),
+        "error must indicate cancellation: {error}"
+    );
+
+    set_or_clear_env(auth::muse::EXPERIMENTAL_ENV_VAR, prev_opt_in);
+    set_or_clear_env("JCODE_HOME", prev_home);
+}
+
+#[tokio::test]
 async fn muse_device_login_slow_down_accumulates_delay_code_only() {
     let _guard = crate::storage::lock_test_env();
     let prev_opt_in = std::env::var_os(auth::muse::EXPERIMENTAL_ENV_VAR);

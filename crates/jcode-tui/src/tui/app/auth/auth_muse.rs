@@ -386,6 +386,19 @@ impl App {
 }
 
 impl App {
+    fn clear_matching_muse_pending(&mut self, attempt: &str) {
+        let is_match = match &self.pending_login {
+            Some(PendingLogin::MuseSubscription {
+                attempt: pending_attempt,
+                ..
+            }) => pending_attempt_matches(pending_attempt, attempt),
+            _ => false,
+        };
+        if is_match {
+            self.pending_login = None;
+        }
+    }
+
     /// Attempt-scoped Muse approval handoff.
     ///
     /// The background task places approved credentials in the pending slot and
@@ -427,6 +440,7 @@ impl App {
                 success: false,
                 message: login.message.clone(),
             });
+            self.clear_matching_muse_pending(&attempt);
             return true;
         }
 
@@ -445,6 +459,8 @@ impl App {
         }
         match crate::auth::muse::save_credentials(&credentials) {
             Ok(()) => {
+                crate::telemetry::record_auth_success("muse-subscription", "device_code");
+                self.clear_matching_muse_pending(&attempt);
                 Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
                     provider: "muse-subscription".to_string(),
                     success: true,
@@ -459,6 +475,7 @@ impl App {
                     success: false,
                     message: format!("Muse subscription was approved but saving failed: {}", err),
                 });
+                self.clear_matching_muse_pending(&attempt);
             }
         }
         true

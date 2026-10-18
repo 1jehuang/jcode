@@ -3123,7 +3123,10 @@ impl App {
         }
         // A callback may complete while the user is still typing a URL/code.
         // Never leave that authentication input armed as the next AI prompt.
-        if self
+        if !matches!(
+            self.pending_login,
+            Some(PendingLogin::MuseSubscription { .. })
+        ) && self
             .pending_login
             .as_ref()
             .and_then(PendingLogin::telemetry_context)
@@ -3187,7 +3190,12 @@ impl App {
             .and_then(PendingLogin::telemetry_context)
         {
             if login.success {
-                crate::telemetry::record_auth_success(&provider, &method);
+                if !matches!(
+                    self.pending_login,
+                    Some(PendingLogin::MuseSubscription { .. })
+                ) {
+                    crate::telemetry::record_auth_success(&provider, &method);
+                }
             } else {
                 let reason =
                     crate::auth::login_diagnostics::classify_auth_failure_message(&login.message);
@@ -3265,7 +3273,10 @@ impl App {
                 self.onboarding_handle_login_failed(None);
             }
         }
-        if self
+        if !matches!(
+            self.pending_login,
+            Some(PendingLogin::MuseSubscription { .. })
+        ) && self
             .pending_login
             .as_ref()
             .and_then(PendingLogin::telemetry_context)

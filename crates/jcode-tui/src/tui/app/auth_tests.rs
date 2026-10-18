@@ -588,3 +588,158 @@ fn muse_subscription_accumulating_backoff_increases_interval() {
     assert!(interval_4 >= 25);
     assert_eq!(interval_4, 25);
 }
+
+#[test]
+fn muse_subscription_old_success_arriving_after_new_attempt_leaves_new_pending_intact()
+-> anyhow::Result<()> {
+    with_temp_jcode_home(|| {
+        let prev_opt_in = std::env::var(crate::auth::muse::EXPERIMENTAL_ENV_VAR).ok();
+        crate::env::set_var(crate::auth::muse::EXPERIMENTAL_ENV_VAR, "1");
+        struct RestoreOptIn(Option<String>);
+        impl Drop for RestoreOptIn {
+            fn drop(&mut self) {
+                if let Some(val) = &self.0 {
+                    crate::env::set_var(crate::auth::muse::EXPERIMENTAL_ENV_VAR, val);
+                } else {
+                    crate::env::remove_var(crate::auth::muse::EXPERIMENTAL_ENV_VAR);
+                }
+            }
+        }
+        let _restore = RestoreOptIn(prev_opt_in);
+
+        let mut app = App::new_for_remote(None);
+        let attempt_1 = "attempt_old_111";
+        let cancelled_1 = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let approved_1 = std::sync::Arc::new(std::sync::Mutex::new(None));
+
+        let mut bus_rx = crate::bus::Bus::global().subscribe();
+
+        app.pending_login = Some(super::auth_types::PendingLogin::MuseSubscription {
+            attempt: attempt_1.to_string(),
+            cancelled: std::sync::Arc::clone(&cancelled_1),
+            approved: std::sync::Arc::clone(&approved_1),
+        });
+
+        // Place approved credentials in the slot for attempt 1
+        *approved_1.lock().unwrap() = Some(crate::auth::muse::MuseCredentials {
+            api_key: "old_key_111".to_string(),
+            access_token: "old_token_111".to_string(),
+            base_url: crate::auth::muse::EXPECTED_API_BASE_URL.to_string(),
+            user_email: Some("old_user@example.com".to_string()),
+            user_full_name: Some("Old User".to_string()),
+            is_subs_active: true,
+            minted_at_ms: 1000,
+            subs_usage: None,
+        });
+
+        // Process attempt 1 approval: saves credentials, clears attempt 1, publishes canonical event
+        app.handle_login_completed(crate::bus::LoginCompleted {
+            provider: format!("muse-subscription#{attempt_1}"),
+            success: true,
+            message: "Muse subscription approved in the browser; finalizing...".to_string(),
+        });
+
+        // Credentials must be saved
+        assert!(crate::auth::muse::load_credentials().is_ok());
+
+        // Canonical untagged event must be published for the daemon
+        let mut canonical_event = None;
+        while let Ok(event) = bus_rx.try_recv() {
+            if let crate::bus::BusEvent::LoginCompleted(login) = event {
+                if login.provider == "muse-subscription" {
+                    canonical_event = Some(login);
+                    break;
+                }
+            }
+        }
+        let canonical = canonical_event.expect("canonical untagged event must be published");
+        assert!(canonical.success);
+        assert_eq!(canonical.provider, "muse-subscription");
+
+        // Now user starts a new attempt 2 while canonical event is queued
+        let attempt_2 = "attempt_new_222";
+        let cancelled_2 = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let approved_2 = std::sync::Arc::new(std::sync::Mutex::new(None));
+        app.pending_login = Some(super::auth_types::PendingLogin::MuseSubscription {
+            attempt: attempt_2.to_string(),
+            cancelled: std::sync::Arc::clone(&cancelled_2),
+            approved: std::sync::Arc::clone(&approved_2),
+        });
+
+        // Stale attempt-scoped approval from an old attempt arriving while attempt 2 is pending
+        // must also be ignored and leave attempt 2 intact
+        app.handle_login_completed(crate::bus::LoginCompleted {
+            provider: "muse-subscription#attempt_stale_999".to_string(),
+            success: true,
+            message: "Stale attempt approval".to_string(),
+        });
+        match &app.pending_login {
+            Some(super::auth_types::PendingLogin::MuseSubscription { attempt, .. }) => {
+                assert_eq!(attempt, attempt_2);
+            }
+            _ => panic!("attempt 2 pending login must remain intact"),
+        }
+
+        // Canonical event from attempt 1 arrives and is handled
+        app.handle_login_completed(canonical);
+
+        // Attempt 2's pending login must remain intact
+        match &app.pending_login {
+            Some(super::auth_types::PendingLogin::MuseSubscription { attempt, .. }) => {
+                assert_eq!(attempt, attempt_2);
+            }
+            _ => panic!("attempt 2 pending login must remain intact"),
+        }
+
+        Ok(())
+    })
+}
+
+#[test]
+fn muse_subscription_old_failure_does_not_clear_newer_pending_attempt() {
+    let _env_guard = crate::storage::lock_test_env();
+    let mut app = App::new_for_remote(None);
+
+    let active_attempt = "attempt_active_333";
+    let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let approved = std::sync::Arc::new(std::sync::Mutex::new(None));
+    app.pending_login = Some(super::auth_types::PendingLogin::MuseSubscription {
+        attempt: active_attempt.to_string(),
+        cancelled,
+        approved,
+    });
+    app.set_status_notice("Login: active waiting");
+
+    // 1. Old attempt's attempt-scoped failure event arrives
+    app.handle_login_completed(crate::bus::LoginCompleted {
+        provider: "muse-subscription#attempt_old_000".to_string(),
+        success: false,
+        message: "Old attempt failed".to_string(),
+    });
+
+    // Active attempt pending login must remain intact
+    match &app.pending_login {
+        Some(super::auth_types::PendingLogin::MuseSubscription { attempt, .. }) => {
+            assert_eq!(attempt, active_attempt);
+        }
+        _ => panic!("active attempt pending login must remain intact"),
+    }
+    assert_eq!(
+        app.status_notice.as_ref().map(|(n, _)| n.as_str()),
+        Some("Login: active waiting")
+    );
+
+    // 2. An untagged failure event must also not clear the active attempt
+    app.handle_login_completed(crate::bus::LoginCompleted {
+        provider: "muse-subscription".to_string(),
+        success: false,
+        message: "Generic failure".to_string(),
+    });
+
+    match &app.pending_login {
+        Some(super::auth_types::PendingLogin::MuseSubscription { attempt, .. }) => {
+            assert_eq!(attempt, active_attempt);
+        }
+        _ => panic!("active attempt pending login must remain intact"),
+    }
+}

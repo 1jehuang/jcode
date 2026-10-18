@@ -678,8 +678,13 @@ pub(super) async fn complete_scriptable_muse_subscription_login(
         interval,
     )
     .await?;
+
+    let _lock = lock_pending_login(&pending_path)?;
+    confirm_live_muse_subscription_flow(&pending_path, &device_code)?;
     auth::muse::save_credentials(&credentials)?;
     clear_pending_login(&pending_path);
+    drop(_lock);
+
     crate::telemetry::record_auth_success(provider_id, "oauth_device_code");
     emit_scriptable_auth_success(
         options.json,
@@ -817,7 +822,7 @@ pub(super) fn cancel_pending_login(path: &Path) -> Result<()> {
 
 const CANCELLED_FLOW_TTL_MS: i64 = 30 * 60 * 1000;
 
-fn lock_pending_login(path: &Path) -> Result<std::fs::File> {
+pub(super) fn lock_pending_login(path: &Path) -> Result<std::fs::File> {
     let parent = path.parent().context("Pending login path has no parent")?;
     crate::storage::ensure_dir(parent)?;
     let lock_path = path.with_extension("lock");
@@ -837,6 +842,43 @@ fn lock_pending_login(path: &Path) -> Result<std::fs::File> {
     Ok(file)
 }
 
+pub(super) fn check_cancellation_marker(path: &Path) -> Result<()> {
+    let marker = path.with_extension("cancelled");
+    match std::fs::read_to_string(&marker) {
+        Ok(data) => {
+            let expires_at_ms: i64 =
+                serde_json::from_str(&data).context("Invalid pending login cancellation marker")?;
+            if expires_at_ms > current_time_ms() {
+                anyhow::bail!("This login flow was cancelled. Start a new login.");
+            }
+            std::fs::remove_file(&marker).context("Failed to expire login cancellation marker")?;
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).context("Failed to read login cancellation marker"),
+    }
+}
+
+pub(super) fn confirm_live_muse_subscription_flow(
+    path: &Path,
+    expected_device_code: &str,
+) -> Result<()> {
+    check_cancellation_marker(path)?;
+    if !path.exists() {
+        anyhow::bail!("This login flow was cancelled. Start a new login.");
+    }
+    let login = load_pending_login(path, "muse-subscription")
+        .map_err(|_| anyhow::anyhow!("This login flow was cancelled. Start a new login."))?;
+    match login {
+        PendingScriptableLogin::MuseSubscription { device_code, .. }
+            if device_code == expected_device_code =>
+        {
+            Ok(())
+        }
+        _ => anyhow::bail!("This login flow was cancelled. Start a new login."),
+    }
+}
+
 pub(super) fn persist_pending_login(
     path: &Path,
     record: &PendingScriptableLoginRecord,
@@ -846,20 +888,7 @@ pub(super) fn persist_pending_login(
         return crate::storage::write_json_secret(path, record);
     }
     let _lock = lock_pending_login(path)?;
-    let marker = path.with_extension("cancelled");
-    match std::fs::read_to_string(&marker) {
-        Ok(data) => {
-            let expires_at_ms: i64 =
-                serde_json::from_str(&data).context("Invalid pending login cancellation marker")?;
-            anyhow::ensure!(
-                expires_at_ms <= current_time_ms(),
-                "This login flow was cancelled. Start again with a fresh --flow-id."
-            );
-            std::fs::remove_file(&marker).context("Failed to expire login cancellation marker")?;
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error).context("Failed to read login cancellation marker"),
-    }
+    check_cancellation_marker(path)?;
     anyhow::ensure!(
         record.expires_at_ms > current_time_ms(),
         "Pending login flow expired before it could be saved."
@@ -888,7 +917,8 @@ pub(super) fn require_scriptable_input(
     input.ok_or_else(|| anyhow::anyhow!("No scriptable auth input was provided."))
 }
 
-pub(super) fn load_pending_login(path: &PathBuf, provider: &str) -> Result<PendingScriptableLogin> {
+pub(super) fn load_pending_login(path: &Path, provider: &str) -> Result<PendingScriptableLogin> {
+    check_cancellation_marker(path)?;
     if !path.exists() {
         anyhow::bail!(
             "No pending {} login state found. Run `jcode login --provider {} --print-auth-url` first.",
@@ -927,7 +957,7 @@ pub(super) fn load_pending_login(path: &PathBuf, provider: &str) -> Result<Pendi
     Ok(login)
 }
 
-pub(super) fn clear_pending_login(path: &PathBuf) {
+pub(super) fn clear_pending_login(path: &Path) {
     let _ = std::fs::remove_file(path);
 }
 

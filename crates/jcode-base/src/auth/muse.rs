@@ -729,26 +729,27 @@ fn run_refresh_critical_section_hook() {
     }
 }
 
-#[cfg(unix)]
+/// Cross-process advisory lock on the credentials lock file.
+///
+/// Uses the standard library's portable `File::lock`, so the guarantee holds on
+/// Windows as well as Unix. The same idiom already guards pending scriptable
+/// logins, and it avoids a platform-specific downgrade that would leave the
+/// refresh-versus-logout race open on non-Unix hosts.
 #[derive(Debug)]
 pub(crate) struct FileLockGuard {
     file: std::fs::File,
 }
 
-#[cfg(unix)]
 impl Drop for FileLockGuard {
     fn drop(&mut self) {
-        use std::os::fd::AsRawFd;
-        unsafe {
-            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
-        }
+        // Releasing explicitly the lock, then dropping the handle. `lock()` is
+        // blocking and retries on interruption, so no manual retry loop is
+        // needed here.
+        let _ = self.file.unlock();
     }
 }
 
-#[cfg(unix)]
 fn acquire_file_lock(lock_path: &Path) -> Result<FileLockGuard> {
-    use std::os::fd::AsRawFd;
-
     if let Some(parent) = lock_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -760,35 +761,14 @@ fn acquire_file_lock(lock_path: &Path) -> Result<FileLockGuard> {
         .open(lock_path)
         .with_context(|| format!("Failed to open lock file {}", lock_path.display()))?;
     crate::storage::harden_secret_file_permissions(lock_path);
-
-    loop {
-        let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
-        if ret == 0 {
-            break;
-        }
-        let err = std::io::Error::last_os_error();
-        if err.kind() != std::io::ErrorKind::Interrupted {
-            return Err(err)
-                .with_context(|| format!("Failed to acquire lock on {}", lock_path.display()));
-        }
-    }
+    file.lock()
+        .with_context(|| format!("Failed to acquire lock on {}", lock_path.display()))?;
     Ok(FileLockGuard { file })
 }
 
-#[cfg(not(unix))]
-#[derive(Debug)]
-pub(crate) struct FileLockGuard;
-
-#[cfg(not(unix))]
-fn acquire_file_lock(_lock_path: &Path) -> Result<FileLockGuard> {
-    // Cross-process file locking via libc::flock is only supported on Unix.
-    // On non-Unix platforms, cross-process locking degrades gracefully to a no-op;
-    // in-process synchronization is still provided by the process-wide mutex.
-    Ok(FileLockGuard)
-}
-
 /// Advisory lock guard protecting credential read-compare-write, save, and clear
-/// operations against concurrent threads in the same process and concurrent processes.
+/// operations against concurrent threads in the same process and against other
+/// processes, on every supported platform.
 pub(crate) struct CredentialsLockGuard {
     _file_guard: FileLockGuard,
     _process_guard: std::sync::MutexGuard<'static, ()>,

@@ -862,35 +862,28 @@ async fn credentials_lock_provides_mutual_exclusion() {
     save_credentials(&credentials).expect("save credentials");
 
     let guard = lock_credentials().expect("acquire credentials lock");
+    let lock_path = credentials_lock_path().expect("lock path");
+    assert!(lock_path.exists(), "lock file should exist on disk");
 
-    #[cfg(unix)]
-    {
-        use std::os::fd::AsRawFd;
-        let lock_path = credentials_lock_path().expect("lock path");
-        assert!(lock_path.exists(), "lock file should exist on disk");
+    // A second handle must not be able to take the lock while the guard is held.
+    // `try_lock` is the standard library's portable primitive, so this holds on
+    // Windows as well as Unix, which is exactly why the credential lock no
+    // longer uses a Unix-only flock.
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .expect("open lock file");
+    assert!(
+        file.try_lock().is_err(),
+        "try_lock must fail while the credential lock guard is held"
+    );
 
-        // Another open handle to the same lock file should fail non-blocking flock.
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&lock_path)
-            .expect("open lock file");
-        let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        assert_eq!(ret, -1, "flock should fail while lock guard is held");
-        let err = std::io::Error::last_os_error();
-        assert_eq!(err.raw_os_error(), Some(libc::EWOULDBLOCK));
-
-        // Dropping guard allows locking.
-        drop(guard);
-        let ret_after = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        assert_eq!(ret_after, 0, "flock should succeed after guard is dropped");
-        unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
-    }
-
-    #[cfg(not(unix))]
-    {
-        drop(guard);
-    }
+    // Dropping the guard releases it for another thread or process.
+    drop(guard);
+    file.try_lock()
+        .expect("try_lock must succeed once the guard is dropped");
+    let _ = file.unlock();
 
     restore_opt_in(previous);
 }
