@@ -456,6 +456,16 @@ impl Config {
         if let Ok(v) = std::env::var("JCODE_MEMORY_JEV_PROVIDER") {
             self.agents.memory_jev_provider = v.trim().to_ascii_lowercase();
         }
+        for (key, target) in [
+            ("JCODE_MEMORY_JEV_MODEL", &mut self.agents.memory_jev_model),
+            ("JCODE_BROWSER_JEV_MODEL", &mut self.agents.browser_jev_model),
+            ("JCODE_VOICE_JEV_MODEL", &mut self.agents.voice_jev_model),
+        ] {
+            if let Ok(value) = std::env::var(key) {
+                let value = value.trim();
+                *target = (!value.is_empty()).then(|| value.to_string());
+            }
+        }
         if let Ok(v) = std::env::var("JCODE_MEMORY_MODEL") {
             let trimmed = v.trim();
             self.agents.memory_model = if trimmed.is_empty() {
