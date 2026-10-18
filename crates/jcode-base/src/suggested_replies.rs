@@ -445,6 +445,97 @@ pub fn parse_open_gf_response(raw: &str) -> Option<(String, Vec<String>)> {
     None
 }
 
+async fn complete_via_named_openai_compatible(
+    name: &str,
+    profile: &crate::config::NamedProviderConfig,
+    system: &str,
+    user_msg: &str,
+) -> Result<(String, String)> {
+    let base = profile.base_url.trim().trim_end_matches('/');
+    ensure!(!base.is_empty(), "profile '{name}' has empty base_url");
+    let url = if base.ends_with("/chat/completions") {
+        base.to_string()
+    } else if base.ends_with("/v1") {
+        format!("{base}/chat/completions")
+    } else {
+        format!("{base}/v1/chat/completions")
+    };
+
+    let key = profile
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| {
+            let env_key = profile.api_key_env.as_deref()?.trim();
+            if env_key.is_empty() {
+                return None;
+            }
+            if env_key.starts_with("sk-") {
+                return Some(env_key.to_string());
+            }
+            if let Some(env_file) = profile.env_file.as_deref().map(str::trim).filter(|s| !s.is_empty())
+                && let Some(v) = crate::provider_catalog::load_env_value_from_env_or_config(env_key, env_file)
+            {
+                let sanitized = jcode_provider_env::sanitize_secret_value(&v);
+                if !sanitized.is_empty() {
+                    return Some(sanitized.to_string());
+                }
+            }
+            std::env::var(env_key).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
+        });
+
+    let model = profile
+        .default_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| profile.models.first().map(|m| m.id.trim()).filter(|s| !s.is_empty()))
+        .unwrap_or("gpt-5.6-luna");
+
+    let mut builder = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(4))
+        .timeout(std::time::Duration::from_secs(12));
+    if url.starts_with("http://") {
+        builder = builder.no_proxy();
+    }
+    let client = builder.build().context("failed to build OpenGF HTTP client")?;
+    let mut req = client.post(&url).json(&json!({
+        "model": model,
+        "messages": [
+            { "role": "system", "content": system },
+            { "role": "user", "content": user_msg }
+        ],
+        "max_tokens": 300,
+        "temperature": 0.2,
+        "stream": false
+    }));
+    if let Some(token) = key {
+        req = req.bearer_auth(token);
+    }
+    for (hk, hv) in &profile.headers {
+        req = req.header(hk, hv);
+    }
+    let resp = req.send().await.with_context(|| format!("POST {url} failed"))?;
+    let status = resp.status();
+    let body: Value = resp
+        .json()
+        .await
+        .with_context(|| format!("invalid JSON from {url} (status {status})"))?;
+    if !status.is_success() {
+        anyhow::bail!("HTTP {status} from {name} ({model}): {body}");
+    }
+    let content = body
+        .pointer("/choices/0/message/content")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    ensure!(!content.is_empty(), "empty choices[0].message.content from {name} ({model})");
+    Ok((content, format!("profile:{name}:{model}")))
+}
+
 async fn complete_open_gf_prompt(system: &str, user_msg: &str) -> Result<(String, String)> {
     let mut errors = Vec::new();
 
@@ -484,18 +575,9 @@ async fn complete_open_gf_prompt(system: &str, user_msg: &str) -> Result<(String
         }
     }
     for (name, profile_cfg) in named_candidates {
-        if let Ok(provider) = crate::provider::external::instantiate_openrouter_runtime(
-            crate::provider::external::OpenRouterRuntimeSpec::NamedProfile {
-                name: name.clone(),
-                config: profile_cfg,
-            },
-        ) {
-            let label = format!("profile:{name}:{}", provider.model());
-            match provider.complete_simple_with_usage(user_msg, system).await {
-                Ok((raw, _)) if !raw.trim().is_empty() => return Ok((raw, label)),
-                Ok(_) => errors.push(format!("{label} returned empty output")),
-                Err(err) => errors.push(format!("{label}: {err}")),
-            }
+        match complete_via_named_openai_compatible(&name, &profile_cfg, system, user_msg).await {
+            Ok(res) => return Ok(res),
+            Err(err) => errors.push(format!("profile:{name}: {err}")),
         }
     }
 
@@ -930,5 +1012,46 @@ mod tests {
         assert!(top > second);
         // Rejected candidate (< 0.50) is never boosted.
         assert_eq!(calibrate_micro_score(0.42, 0, true), 0.42);
+    }
+
+    #[tokio::test]
+    async fn complete_via_named_openai_compatible_accepts_literal_sk_in_api_key_env() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+                assert!(
+                    req.to_ascii_lowercase()
+                        .contains("authorization: bearer sk-test-inline-secret"),
+                    "missing bearer header in {req}"
+                );
+                let body = r#"{"choices":[{"message":{"content":"{\"branch\":\"debugging\",\"candidates\":[\"Проверить отладку через /suggestions debug\",\"Запустить тесты\"]}"}}]}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+
+        let profile = crate::config::NamedProviderConfig {
+            base_url: format!("http://{addr}/v1"),
+            api_key_env: Some("sk-test-inline-secret".to_string()),
+            default_model: Some("gpt-5.6-luna".to_string()),
+            ..Default::default()
+        };
+        let (raw, label) =
+            complete_via_named_openai_compatible("clipapi", &profile, "sys", "usr")
+                .await
+                .unwrap();
+        assert_eq!(label, "profile:clipapi:gpt-5.6-luna");
+        let (branch, cands) = parse_open_gf_response(&raw).unwrap();
+        assert_eq!(branch, "debugging");
+        assert_eq!(cands[0], "Проверить отладку через /suggestions debug");
     }
 }
