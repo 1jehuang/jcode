@@ -1362,6 +1362,12 @@ impl App {
                         Some((session_id.clone(), display.clone(), images.clone()));
                 }
                 if self.display_messages().is_empty() {
+                    crate::logging::info(&format!(
+                        "[TIMING] startup_transcript_applied: session={}, messages={}, since_app_start={}ms",
+                        session_id,
+                        display.len(),
+                        self.app_started.elapsed().as_millis()
+                    ));
                     self.replace_display_messages(display);
                     self.remote_side_pane_images = images;
                     self.invalidate_side_pane_images_signature();
@@ -1370,6 +1376,12 @@ impl App {
                     );
                     return true;
                 }
+                crate::logging::info(&format!(
+                    "[TIMING] startup_transcript_skipped: session={}, display_already={}, since_app_start={}ms",
+                    session_id,
+                    self.display_messages().len(),
+                    self.app_started.elapsed().as_millis()
+                ));
                 false
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => false,
