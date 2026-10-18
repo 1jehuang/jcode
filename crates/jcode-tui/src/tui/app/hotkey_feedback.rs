@@ -334,6 +334,13 @@ pub(super) fn build_registry(inputs: &RegistryInputs<'_>) -> Vec<KnownHotkey> {
         "scroll_bookmark",
         "toggle the scroll bookmark",
     );
+    for binding in &inputs.scroll.to_bottom {
+        push(
+            Some(binding.clone()),
+            "scroll_to_bottom",
+            "jump to the bottom of the chat",
+        );
+    }
     out.push(KnownHotkey::new(
         ctrl('l'),
         "clear_screen",
@@ -913,6 +920,7 @@ mod tests {
             prompt_up: ctrl('k'),
             prompt_down: ctrl('j'),
             bookmark: ctrl('g'),
+            to_bottom: vec![key(KeyCode::End, KeyModifiers::CONTROL)],
         };
         let centered = CenteredToggleKeys {
             toggle: Some(alt('c')),
@@ -1114,6 +1122,7 @@ mod tests {
             ("scroll_prompt_up", Some(&["prompt_jump_up"])),
             ("scroll_prompt_down", Some(&["prompt_jump_down"])),
             ("scroll_bookmark", Some(&["scroll_bookmark"])),
+            ("scroll_to_bottom", Some(&["scroll_to_bottom"])),
             ("scroll_up_fallback", Some(&["scroll_up"])),
             ("scroll_down_fallback", Some(&["scroll_down"])),
             ("workspace_left", Some(&["workspace_left"])),

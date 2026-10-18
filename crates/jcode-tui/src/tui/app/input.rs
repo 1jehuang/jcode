@@ -2309,6 +2309,11 @@ pub(super) fn handle_navigation_shortcuts(
         return true;
     }
 
+    if app.scroll_keys.is_to_bottom(code, modifiers) {
+        app.jump_to_chat_bottom();
+        return true;
+    }
+
     if app.scroll_keys.is_bookmark(code, modifiers) {
         app.toggle_scroll_bookmark();
         return true;
@@ -2346,6 +2351,7 @@ pub(super) fn is_scroll_only_key(app: &App, code: KeyCode, modifiers: KeyModifie
         || App::ctrl_side_panel_ratio_preset(&code, modifiers).is_some()
         || App::ctrl_prompt_rank(&code, modifiers).is_some()
         || app.scroll_keys.is_bookmark(code, modifiers)
+        || app.scroll_keys.is_to_bottom(code, modifiers)
         || app.toggle_keys.diff_mode_cycle.matches(code, modifiers)
     {
         return true;
