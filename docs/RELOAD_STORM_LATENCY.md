@@ -51,3 +51,17 @@ overstate server latency by up to ~1s. Use `send_history write` instead.
   and how long; it has not recurred in four storms since.
 - Client-side: background transcript render racing History apply, and
   `app_new_for_remote` / first frame on exec.
+
+## Hypotheses tested and rejected (client)
+
+- Redundant full transcript re-wrap after an identical delta History
+  (`e6aaa600e`, reverted in `5e7f9fda7`): live, each client still did exactly one
+  full body build before and after. That build is the first render of the
+  transcript (CPU-bound, e.g. 5469 wrapped lines = 562ms under storm load,
+  106ms idle), not a re-render. Faster first render needs viewport-first or
+  incremental wrapping.
+- `app_new_for_remote` (`[TIMING] app_new_for_remote`, `8893eff8f`/`4be384241`):
+  5-171ms in the 19:17 storm, spread across startup-input apply and the
+  startup-stub read under high load; no single structural cost.
+- First-frame header build (`[TIMING] header_sections`): 31-251ms at 19:15 but
+  nothing over 20ms at 19:17, so load-dependent.
