@@ -158,6 +158,34 @@ fn test_usage_card_does_not_capture_typing() {
 }
 
 #[test]
+fn test_usage_card_limit_shows_elapsed_window_in_elapsed_mode() {
+    let resets_at = (chrono::Utc::now() + chrono::Duration::minutes(30)).to_rfc3339();
+    let limit = |name: &str, window_seconds| crate::usage::UsageLimit {
+        name: name.to_string(),
+        usage_percent: 40.0,
+        resets_at: Some(resets_at.clone()),
+        window_seconds,
+    };
+
+    let inferred = App::format_usage_limit_window(&limit("5-hour", None), true);
+    assert!(
+        inferred == " · 90% elapsed" || inferred == " · 89% elapsed",
+        "got {inferred}"
+    );
+    let reported = App::format_usage_limit_window(&limit("Codex", Some(60 * 60)), true);
+    assert!(
+        reported == " · 50% elapsed" || reported == " · 49% elapsed",
+        "got {reported}"
+    );
+    assert!(
+        App::format_usage_limit_window(&limit("Spark", None), true).starts_with(" · resets in ")
+    );
+    assert!(
+        App::format_usage_limit_window(&limit("5-hour", None), false).starts_with(" · resets in ")
+    );
+}
+
+#[test]
 fn test_usage_report_updates_display_only_card_without_system_message() {
     let mut app = create_test_app();
     app.usage_report_refreshing = true;
@@ -171,6 +199,7 @@ fn test_usage_report_updates_display_only_card_without_system_message() {
             name: "5h".to_string(),
             usage_percent: 82.0,
             resets_at: None,
+            window_seconds: None,
         }],
         extra_info: vec![("plan".to_string(), "pro".to_string())],
         hard_limit_reached: false,
@@ -210,6 +239,7 @@ fn test_usage_progress_updates_card_incrementally() {
                 name: "5-hour window".to_string(),
                 usage_percent: 41.0,
                 resets_at: None,
+                window_seconds: None,
             }],
             extra_info: Vec::new(),
             hard_limit_reached: false,

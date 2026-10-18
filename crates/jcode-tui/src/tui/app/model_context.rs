@@ -1557,6 +1557,7 @@ impl App {
             results.len(),
             results.len(),
             false,
+            crate::config::config().display.usage_display_elapsed(),
         ));
         if results.is_empty() {
             self.set_status_notice("Usage → no connected providers");
@@ -1577,6 +1578,7 @@ impl App {
             progress.completed,
             progress.total,
             progress.from_cache,
+            crate::config::config().display.usage_display_elapsed(),
         ));
 
         if progress.done {
@@ -1606,6 +1608,7 @@ impl App {
             0,
             0,
             false,
+            crate::config::config().display.usage_display_elapsed(),
         )));
     }
 
@@ -1639,6 +1642,7 @@ impl App {
         completed: usize,
         total: usize,
         from_cache: bool,
+        usage_display_elapsed: bool,
     ) -> String {
         let mut lines = Vec::new();
 
@@ -1724,12 +1728,7 @@ impl App {
             }
 
             for limit in &provider.limits {
-                let reset = limit
-                    .resets_at
-                    .as_deref()
-                    .map(crate::usage::format_reset_time)
-                    .map(|value| format!(" · resets in {}", value))
-                    .unwrap_or_default();
+                let reset = Self::format_usage_limit_window(limit, usage_display_elapsed);
                 lines.push(format!(
                     "  {:<width$}: {}{}",
                     limit.name,
@@ -1745,6 +1744,27 @@ impl App {
         }
 
         lines.join("\n")
+    }
+
+    pub(super) fn format_usage_limit_window(
+        limit: &crate::usage::UsageLimit,
+        usage_display_elapsed: bool,
+    ) -> String {
+        let Some(resets_at) = limit.resets_at.as_deref() else {
+            return String::new();
+        };
+        if usage_display_elapsed
+            && let Some(window_seconds) = limit
+                .window_seconds
+                .or_else(|| crate::usage::window_seconds_for_label(&limit.name))
+            && let Some(elapsed) = crate::usage::window_elapsed_percent(resets_at, window_seconds)
+        {
+            return format!(" · {}% elapsed", elapsed);
+        }
+        format!(
+            " · resets in {}",
+            crate::usage::format_reset_time(resets_at)
+        )
     }
 
     fn format_usage_provider_summary(provider: &crate::usage::ProviderUsage) -> String {

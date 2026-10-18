@@ -37,7 +37,9 @@ use provider_fetch::*;
 pub use remote_accounts::set_remote_account_usage;
 
 use anyhow::{Context, Result};
-pub use display::{format_reset_time, format_usage_bar};
+pub use display::{
+    format_reset_time, format_usage_bar, window_elapsed_percent, window_seconds_for_label,
+};
 use display::{format_token_count, humanize_key, provider_usage_cache_is_fresh};
 use openai_helpers::{parse_openai_usage_payload, usage_percent_to_ratio};
 use std::collections::HashMap;

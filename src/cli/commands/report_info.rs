@@ -752,6 +752,7 @@ mod tests {
             name: "5-hour window".into(),
             usage_percent: 100.0,
             resets_at: None,
+            window_seconds: None,
         });
         assert!(banked_reset_report(&at_wall).unwrap().limit_reached);
         at_wall.limits[0].name = "7-day window".into();
