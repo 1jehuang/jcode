@@ -598,14 +598,28 @@ impl Session {
 
     fn save_inner(&mut self, force: bool) -> Result<()> {
         // Shutdown waits for this guard so it cannot exit mid-checkpoint.
+        let pre_start = Instant::now();
         let _save_guard = SAVES_IN_FLIGHT
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let guard_ms = pre_start.elapsed().as_millis();
         self.refresh_agent_model_overrides()?;
+        let overrides_ms = pre_start.elapsed().as_millis() - guard_ms;
         // A session that migrated to another machine (or whose on-disk copy was
         // replaced by a newer returned transcript) must not be overwritten by
         // this stale in-memory copy.
-        if let Some(block) = self.migration_lease_block() {
+        let lease = self.migration_lease_block();
+        let pre_ms = pre_start.elapsed().as_millis();
+        if pre_ms >= 50 {
+            crate::logging::info(&format!(
+                "[TIMING] session save preamble: session={}, guard={}ms, overrides={}ms, lease={}ms",
+                self.id,
+                guard_ms,
+                overrides_ms,
+                pre_ms - guard_ms - overrides_ms
+            ));
+        }
+        if let Some(block) = lease {
             crate::logging::warn(&format!("Session {} not persisted: {}", self.id, block));
             return Ok(());
         }
