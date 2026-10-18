@@ -64,7 +64,7 @@ pub(crate) mod inline_image_ui;
 #[path = "ui_inline_interactive.rs"]
 mod inline_interactive_ui;
 #[path = "ui_inline.rs"]
-mod inline_ui;
+pub(crate) mod inline_ui;
 #[path = "ui_input.rs"]
 pub(crate) mod input_ui;
 #[path = "ui_memory_estimates.rs"]
@@ -129,13 +129,7 @@ use file_diff_ui::{
     FileDiffCacheKey, FileDiffViewCacheEntry, file_content_signature, file_diff_cache,
 };
 pub(crate) use header::capitalize;
-use inline_ui::{clear_suggested_reply_hit_regions, draw_inline_ui};
-#[cfg(test)]
-pub(crate) use inline_ui::draw_suggested_replies_panel;
-pub(crate) use inline_ui::{
-    inline_ui_height, suggested_reply_target_at as suggested_reply_target_from_screen,
-    truncate_to_display_width,
-};
+use inline_ui::{draw_inline_ui, inline_ui_height};
 pub(crate) use layout_support::{draw_side_panel_markdown, side_panel_dismiss_area};
 pub(crate) use memory_estimates::{debug_memory_profile, debug_side_panel_memory_profile};
 use memory_estimates::{estimate_prepared_chat_frame_bytes, estimate_prepared_messages_bytes};
@@ -3448,8 +3442,6 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     // Draw inline UI if active
     if inline_block_height > 0 {
         draw_inline_ui(frame, app, chunks[5]);
-    } else {
-        clear_suggested_reply_hit_regions();
     }
 
     let _input_cursor = input_ui::draw_input(

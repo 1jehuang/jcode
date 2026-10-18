@@ -897,12 +897,7 @@ async fn handle_remote_key_internal(
             return Ok(());
         }
 
-        if app.input.is_empty()
-            && let Some(prompt) = app.take_focused_or_default_suggested_reply(true)
-        {
-            app.input = prompt;
-            app.cursor_pos = app.input.len();
-        }
+        app.try_stage_suggested_reply_for_remote_enter(true);
 
         if !app.input.is_empty() {
             let prepared = input::take_prepared_input(app);
@@ -970,12 +965,12 @@ async fn handle_remote_key_internal(
     // to anything; tell the user instead of silently swallowing it.
     app.note_unrecognized_hotkey(code, modifiers, true);
 
+    app.cancel_suggested_replies_for_cursor_key(code);
     match code {
         KeyCode::Char(c) => {
             handle_remote_char_input(app, c);
         }
         KeyCode::Backspace => {
-            app.cancel_suggested_replies_interaction(false);
             if app.cursor_pos > 0 {
                 let prev = core::prev_char_boundary(&app.input, app.cursor_pos);
                 app.remember_input_undo_state();
@@ -986,7 +981,6 @@ async fn handle_remote_key_internal(
             }
         }
         KeyCode::Delete => {
-            app.cancel_suggested_replies_interaction(false);
             if app.cursor_pos < app.input.len() {
                 let next = core::next_char_boundary(&app.input, app.cursor_pos);
                 app.remember_input_undo_state();
@@ -996,7 +990,6 @@ async fn handle_remote_key_internal(
             }
         }
         KeyCode::Left => {
-            app.cancel_suggested_replies_interaction(false);
             if app.cursor_pos > 0 {
                 app.cursor_pos = core::prev_char_boundary(&app.input, app.cursor_pos);
             } else {
@@ -1006,17 +999,14 @@ async fn handle_remote_key_internal(
             }
         }
         KeyCode::Right => {
-            app.cancel_suggested_replies_interaction(false);
             if app.cursor_pos < app.input.len() {
                 app.cursor_pos = core::next_char_boundary(&app.input, app.cursor_pos);
             }
         }
         KeyCode::Home => {
-            app.cancel_suggested_replies_interaction(false);
             app.cursor_pos = 0;
         }
         KeyCode::End => {
-            app.cancel_suggested_replies_interaction(false);
             app.cursor_pos = app.input.len();
         }
         KeyCode::Tab => {
@@ -1097,12 +1087,7 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
     if app.activate_picker_from_preview() {
         return Ok(());
     }
-    if app.input.is_empty()
-        && let Some(prompt) = app.take_focused_or_default_suggested_reply(false)
-    {
-        app.input = prompt;
-        app.cursor_pos = app.input.len();
-    }
+    app.try_stage_suggested_reply_for_remote_enter(false);
     if !app.input.is_empty() {
         let prepared = input::take_prepared_input(app);
         let trimmed = prepared.expanded.trim();
@@ -1689,46 +1674,21 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
                 begin_remote_split_launch(app, "Autojudge");
                 if let Err(error) = remote.split().await {
                     finish_remote_split_launch(app);
-                    app.pending_split_startup_message = None;
-                    app.pending_split_parent_session_id = None;
-                    app.pending_split_prompt = None;
-                    app.pending_split_model_override = None;
-                    app.pending_split_provider_key_override = None;
-                    app.pending_split_label = None;
-                    app.push_display_message(DisplayMessage::error(format!(
-                        "Failed to launch autojudge session: {}",
-                        error
-                    )));
-                    app.set_status_notice("Autojudge launch failed");
+                    app.clear_failed_remote_split_launch("autojudge", "Autojudge", &error);
                 }
             }
             return Ok(());
         }
 
-        if trimmed == "/review"
-            || matches!(
-                trimmed,
-                "/review 6" | "/review 6lenses" | "/review lenses" | "/autoreview 6"
-            )
-        {
-            let is_six_lens = trimmed != "/review";
+        if matches!(
+            trimmed,
+            "/review" | "/review 6" | "/review 6lenses" | "/review lenses" | "/autoreview 6"
+        ) {
             let (model_override, provider_key_override) =
                 app_mod::commands::current_review_model_override(app);
             let parent_session_id = app_mod::commands::current_feedback_target_session_id(app);
-            let (label, startup_msg) = if is_six_lens {
-                app.record_six_lens_review_findings(
-                    "Verify 6-lens review findings across Correctness, Architecture, Security, TUI/UX, Perf/Async, and Tests".to_string(),
-                );
-                (
-                    "6-Lens Review",
-                    app_mod::commands::build_six_lens_review_startup_message(&parent_session_id),
-                )
-            } else {
-                (
-                    "Review",
-                    app_mod::commands::build_review_startup_message(&parent_session_id),
-                )
-            };
+            let (label, startup_msg) =
+                app.build_remote_review_label_and_startup(trimmed, &parent_session_id);
             app_mod::commands::queue_review_spawn_remote(
                 app,
                 label,
@@ -1744,17 +1704,7 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
                 begin_remote_split_launch(app, label);
                 if let Err(error) = remote.split().await {
                     finish_remote_split_launch(app);
-                    app.pending_split_startup_message = None;
-                    app.pending_split_parent_session_id = None;
-                    app.pending_split_prompt = None;
-                    app.pending_split_model_override = None;
-                    app.pending_split_provider_key_override = None;
-                    app.pending_split_label = None;
-                    app.push_display_message(DisplayMessage::error(format!(
-                        "Failed to launch review session: {}",
-                        error
-                    )));
-                    app.set_status_notice("Review launch failed");
+                    app.clear_failed_remote_split_launch("review", "Review", &error);
                 }
             }
             return Ok(());
@@ -1779,17 +1729,7 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
                 begin_remote_split_launch(app, "Judge");
                 if let Err(error) = remote.split().await {
                     finish_remote_split_launch(app);
-                    app.pending_split_startup_message = None;
-                    app.pending_split_parent_session_id = None;
-                    app.pending_split_prompt = None;
-                    app.pending_split_model_override = None;
-                    app.pending_split_provider_key_override = None;
-                    app.pending_split_label = None;
-                    app.push_display_message(DisplayMessage::error(format!(
-                        "Failed to launch judge session: {}",
-                        error
-                    )));
-                    app.set_status_notice("Judge launch failed");
+                    app.clear_failed_remote_split_launch("judge", "Judge", &error);
                 }
             }
             return Ok(());

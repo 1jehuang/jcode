@@ -5,7 +5,7 @@ use crate::message::{ContentBlock, Role, ToolCall};
 use crate::session::{Session, StoredMessage};
 use std::time::Instant;
 
-fn review_session_read_only_guardrails() -> &'static str {
+pub(super) fn review_session_read_only_guardrails() -> &'static str {
     "Important constraints for this session:\n\
 - This session is analysis-only. Do not do the work yourself.\n\
 - Do not modify files or repo state. Do not call `edit`, `write`, `multiedit`, `patch`, `apply_patch`, or destructive `bash`/`git` commands.\n\
@@ -590,62 +590,6 @@ Do not ask the user anything unless absolutely necessary. Keep your own session 
     )
 }
 
-/// The 6 orthogonal review lenses used by the 6-Lens Subagent Self-Review.
-pub(crate) const SIX_REVIEW_LENSES: &[(&str, &str)] = &[
-    (
-        "Lens 1: Correctness & Edge Cases",
-        "Logic bugs, NaN/Inf/UTF-8 boundary handling, error propagation, and off-by-one defects",
-    ),
-    (
-        "Lens 2: Architecture & Module Boundaries",
-        "Crate separation, config/state coupling, public trait contracts, and cache invalidation",
-    ),
-    (
-        "Lens 3: Security & Safety Invariants",
-        "Credential isolation, untrusted input sanitization, HTTP error handling, and read-only safety",
-    ),
-    (
-        "Lens 4: TUI / UX & Keybindings",
-        "Layout chunk stability, terminal compatibility, Tab/Ctrl+Enter/Esc parity in local & remote modes, and mouse hit-testing",
-    ),
-    (
-        "Lens 5: Performance, Async & KV-Cache",
-        "Non-blocking background tasks, zero KV-cache prefix pollution (store=false), and redraw cadence",
-    ),
-    (
-        "Lens 6: Tests & Go/No-Go Closure",
-        "Unit test coverage over main and edge paths, OpenSpec task completion, and concrete Go/No-Go verdict",
-    ),
-];
-
-pub(super) fn build_six_lens_review_startup_message(parent_session_id: &str) -> String {
-    let mut lenses_block = String::new();
-    for (idx, (title, focus)) in SIX_REVIEW_LENSES.iter().enumerate() {
-        lenses_block.push_str(&format!("{}. **{}** — {}\n", idx + 1, title, focus));
-    }
-    format!(
-        "You are the 6-Lens Subagent Self-Review coordinator for parent session `{}`.\n\
-Your job is to audit the recent changes across all 6 orthogonal engineering lenses and report a consolidated Go / Conditional-Go / No-Go verdict back to the parent session.\n\
-\n\
-First read the recent context:\n\
-1. Use `conversation_search` with `stats=true` and `turns` (last 6-12 turns) to understand what was implemented.\n\
-2. Inspect `git status --short` and `git diff --stat`.\n\
-\n\
-{}\
-Evaluate the work systematically across these 6 lenses (spawning parallel read-only swarm subagents if `swarm` is available, or evaluating each lens directly):\n\
-{}\n\
-When finished, send exactly one DM to session `{}` using `swarm` (or `communicate`) with action `dm` containing:\n\
-- Overall Verdict: `GO`, `CONDITIONAL GO`, or `NO-GO`\n\
-- Per-lens findings with exact `file:line` references\n\
-- If any lens is `CONDITIONAL GO` or `NO-GO`, a single concise action line prefixed with `DEFAULT_ACTION:` describing the exact fix to run next.\n\
-- After sending the DM, stop.",
-        parent_session_id,
-        review_session_read_only_guardrails(),
-        lenses_block,
-        parent_session_id
-    )
-}
-
 pub(super) fn build_judge_startup_message(parent_session_id: &str) -> String {
     format!(
         "You are the one-shot judge for parent session `{}`.\n\
@@ -855,7 +799,7 @@ pub(super) fn launch_forked_session_local(
     Ok(opened)
 }
 
-fn launch_review_window_local(
+pub(super) fn launch_review_window_local(
     app: &mut App,
     session_title: &str,
     label: &str,
@@ -928,22 +872,6 @@ fn launch_review_once_local(app: &mut App) -> anyhow::Result<bool> {
     )
 }
 
-fn launch_six_lens_review_local(app: &mut App) -> anyhow::Result<bool> {
-    let (model_override, provider_key_override) = current_review_model_override(app);
-    let parent_session_id = current_feedback_target_session_id(app);
-    app.record_six_lens_review_findings(
-        "Verify 6-lens review findings across Correctness, Architecture, Security, TUI/UX, Perf/Async, and Tests".to_string(),
-    );
-    launch_review_window_local(
-        app,
-        "review-6lenses",
-        "6-Lens Review",
-        build_six_lens_review_startup_message(&parent_session_id),
-        model_override,
-        provider_key_override,
-    )
-}
-
 fn launch_autojudge_window_local(app: &mut App) -> anyhow::Result<bool> {
     let parent_session_id = current_feedback_target_session_id(app);
     launch_review_window_local(
@@ -1007,19 +935,7 @@ pub(super) fn queue_autojudge_remote(app: &mut App) {
 }
 
 pub(super) fn maybe_trigger_autoreview_local(app: &mut App) {
-    if app.is_remote || app.is_replay {
-        return;
-    }
-    if crate::config::config().suggested_replies.six_lens_auto_review
-        && app.display_edit_tool_message_count > 0
-    {
-        if let Err(error) = launch_six_lens_review_local(app) {
-            app.push_display_message(DisplayMessage::error(format!(
-                "Failed to launch 6-lens autoreview: {}",
-                error
-            )));
-            app.set_status_notice("6-Lens Autoreview launch failed");
-        }
+    if app.is_remote || app.is_replay || app.maybe_trigger_six_lens_autoreview_local() {
         return;
     }
     if !app.autoreview_enabled {
@@ -1066,14 +982,7 @@ pub(super) fn handle_review_command_local(app: &mut App, trimmed: &str) -> bool 
     }
 
     if matches!(rest, "6" | "6lenses" | "lenses" | "six") {
-        if let Err(error) = launch_six_lens_review_local(app) {
-            app.push_display_message(DisplayMessage::error(format!(
-                "Failed to launch 6-lens review: {}",
-                error
-            )));
-            app.set_status_notice("6-Lens Review launch failed");
-        }
-        return true;
+        return app.run_six_lens_review_command_local("6-Lens Review");
     }
 
     app.push_display_message(DisplayMessage::error(
@@ -1126,16 +1035,7 @@ pub(super) fn handle_autoreview_command_local(app: &mut App, trimmed: &str) -> b
             }
             true
         }
-        "6" | "6lenses" | "lenses" => {
-            if let Err(error) = launch_six_lens_review_local(app) {
-                app.push_display_message(DisplayMessage::error(format!(
-                    "Failed to launch 6-lens autoreview: {}",
-                    error
-                )));
-                app.set_status_notice("6-Lens Autoreview launch failed");
-            }
-            true
-        }
+        "6" | "6lenses" | "lenses" => app.run_six_lens_review_command_local("6-Lens Autoreview"),
         _ => {
             app.push_display_message(DisplayMessage::error(
                 "Usage: /autoreview [on|off|status|now|6]".to_string(),

@@ -18,8 +18,7 @@ pub(super) use super::commands_review::queue_autojudge_remote;
 pub(super) use super::commands_review::{
     ImproveCommand, ManualSubagentSpec, RefactorCommand, autojudge_status_message,
     autoreview_status_message, build_autojudge_startup_message, build_autoreview_startup_message,
-    build_judge_startup_message, build_review_startup_message,
-    build_six_lens_review_startup_message, current_autojudge_model_override,
+    build_judge_startup_message, build_review_startup_message, current_autojudge_model_override,
     current_autoreview_model_override, current_feedback_target_session_id,
     current_judge_model_override, current_review_model_override, handle_autojudge_command_local,
     handle_autoreview_command_local, handle_judge_command_local, handle_observe_command,

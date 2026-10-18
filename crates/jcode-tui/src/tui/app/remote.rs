@@ -202,12 +202,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     needs_redraw |= app.poll_session_picker_presence();
     needs_redraw |= app.onboarding_tick();
     needs_redraw |= app.progress_update_simulator();
-    let (sr_redraw, sr_auto_prompt) = app.poll_suggested_replies_tick();
-    needs_redraw |= sr_redraw;
-    if let Some(prompt) = sr_auto_prompt {
-        app.submit_suggested_reply_prompt(prompt);
-        needs_redraw = true;
-    }
+    needs_redraw |= app.poll_and_queue_suggested_replies_tick();
     needs_redraw |= app.refresh_keybindings_if_config_reloaded();
 
     let _ = check_debug_command(app, remote).await;
@@ -1514,10 +1509,7 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
     }
 
     let synthetic_startup_dispatch = app.is_processing
-        // Only a locally staged send is synthetic. A resumed/external turn
-        // has no request id either, and its resume marker is cleared as soon
-        // as live stream events arrive. Never demote that running turn just
-        // because a follow-up is queued.
+        // Only a locally staged send is synthetic; never demote a running resumed/external turn.
         && matches!(app.status, ProcessingStatus::Sending)
         && app.current_message_id.is_none()
         && app.remote_resume_activity.is_none()
@@ -1526,27 +1518,14 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
             || !app.hidden_queued_system_messages.is_empty());
 
     if synthetic_startup_dispatch {
-        crate::logging::info(
-            "Dispatching restored startup/queued followup without active remote message id",
-        );
-        app.is_processing = false;
-        app.status = ProcessingStatus::Idle;
-        app.processing_started = None;
-        app.clear_visible_turn_started();
-        app.replay_processing_started_ms = None;
-        app.replay_elapsed_override = None;
+        app.reset_synthetic_startup_dispatch();
     }
 
-    if !app.is_processing
-        && let Some(prompt) = app.suggested_replies.pending_remote_submit.take()
-    {
-        app.input = prompt;
-        app.cursor_pos = app.input.len();
+    if app.take_pending_remote_suggested_reply().is_some() {
         let prepared = input::take_prepared_input(app);
         if let Err(error) = submit_prepared_remote_input(app, remote, prepared).await {
             app.push_display_message(DisplayMessage::error(format!(
-                "Failed to submit suggested reply: {}",
-                error
+                "Failed to submit suggested reply: {error}"
             )));
             app.set_status_notice("Suggested reply failed");
         }
@@ -1566,16 +1545,13 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
             if let Err(error) = submit_prepared_remote_input(app, remote, prepared).await {
                 crate::logging::warn(&format!("Startup auto-submit failed: {error}"));
                 app.push_display_message(DisplayMessage::error(format!(
-                    "Failed to submit startup prompt: {}",
-                    error
+                    "Failed to submit startup prompt: {error}"
                 )));
                 app.set_status_notice("Startup prompt failed");
             }
             return;
         } else {
-            crate::logging::warn(
-                "Startup auto-submit skipped: submit flag was set but input and pending images are both empty",
-            );
+            crate::logging::warn("Startup auto-submit skipped: input and pending images are empty");
         }
     } else if app.submit_input_on_startup && app.is_processing {
         note_startup_submit_deferred(app, "session still processing (is_processing=true)");

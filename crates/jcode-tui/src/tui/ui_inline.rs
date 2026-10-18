@@ -93,6 +93,7 @@ pub(crate) fn inline_ui_height(app: &dyn TuiState) -> u16 {
         Some(crate::tui::InlineUiStateRef::Interactive(picker)) => {
             // Model choices replace the command suggestions, without reflowing chat.
             if picker.kind == crate::tui::PickerKind::Model {
+                clear_suggested_reply_hit_regions();
                 return 0;
             }
             let visible_rows = picker.filtered.len() as u16;
@@ -108,8 +109,13 @@ pub(crate) fn inline_ui_height(app: &dyn TuiState) -> u16 {
             if let Some(view) = app.suggested_replies_view() {
                 let default_rows = u16::from(view.response.default_action.is_some());
                 let secondary_rows = view.response.secondary_suggestions.len() as u16;
-                default_rows + secondary_rows
+                let total = default_rows + secondary_rows;
+                if total == 0 {
+                    clear_suggested_reply_hit_regions();
+                }
+                total
             } else {
+                clear_suggested_reply_hit_regions();
                 0
             }
         }
@@ -194,7 +200,7 @@ pub(crate) fn draw_suggested_replies_panel(
         let explorer_tag = view
             .explorer_remaining_ms
             .map(|ms| format!(" · auto {}ms [Esc]", ms))
-            .unwrap_or_default();
+            .unwrap_or_else(String::new);
 
         let badge = view.response.badge_for_text(default_action);
         let prefix = if is_focused {
@@ -233,7 +239,7 @@ pub(crate) fn draw_suggested_replies_panel(
             + UnicodeWidthStr::width(label.as_str())
             + UnicodeWidthStr::width(suffix.as_str())
             + 2)
-            .min(area.width as usize) as u16;
+        .min(area.width as usize) as u16;
         hit_regions.push(SuggestedReplyHitRegion {
             rect: Rect {
                 x: area.x,
@@ -257,7 +263,7 @@ pub(crate) fn draw_suggested_replies_panel(
                 view.response
                     .confidence_for_text(text)
                     .map(|c| format!(" ({}%)", (c * 100.0).round() as u32))
-                    .unwrap_or_default()
+                    .unwrap_or_else(String::new)
             } else {
                 String::new()
             };
@@ -272,8 +278,8 @@ pub(crate) fn draw_suggested_replies_panel(
                 .max(8);
             let short = truncate_to_display_width(text, max_pill_cols);
             let pill_label = format!("{prefix_num}{short}{conf_suffix}");
-            let pill_width = (UnicodeWidthStr::width(pill_label.as_str()) + 4)
-                .min(area.width as usize) as u16;
+            let pill_width =
+                (UnicodeWidthStr::width(pill_label.as_str()) + 4).min(area.width as usize) as u16;
             let is_focused =
                 matches!(view.focus, Some(SuggestedReplyFocus::Secondary(i)) if i == idx);
             let (fill, text_fg) = if is_focused {

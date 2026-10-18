@@ -91,7 +91,10 @@ where
     let parsed = match LenientNumberInput::deserialize(deserializer) {
         Ok(LenientNumberInput::Int(v)) => Some(v),
         Ok(LenientNumberInput::Float(v)) if v.is_finite() => Some(v.round() as i64),
-        Ok(LenientNumberInput::Str(s)) => s.trim().parse::<i64>().ok(),
+        Ok(LenientNumberInput::Str(s)) => match s.trim().parse::<i64>() {
+            Ok(v) => Some(v),
+            Err(_) => None,
+        },
         _ => None,
     };
     Ok(match parsed {
@@ -114,10 +117,9 @@ where
 {
     let raw_items = match LenientStringListInput::deserialize(deserializer) {
         Ok(LenientStringListInput::List(items)) => items,
-        Ok(LenientStringListInput::Single(s)) => s
-            .split(['|', ';', '\n'])
-            .map(ToString::to_string)
-            .collect(),
+        Ok(LenientStringListInput::Single(s)) => {
+            s.split(['|', ';', '\n']).map(ToString::to_string).collect()
+        }
         _ => Vec::new(),
     };
     let mut out = Vec::new();
@@ -141,11 +143,10 @@ where
     let parsed = match LenientNumberInput::deserialize(deserializer) {
         Ok(LenientNumberInput::Float(v)) if v.is_finite() => Some(v as f32),
         Ok(LenientNumberInput::Int(v)) => Some(v as f32),
-        Ok(LenientNumberInput::Str(s)) => s
-            .trim()
-            .parse::<f32>()
-            .ok()
-            .filter(|v| v.is_finite()),
+        Ok(LenientNumberInput::Str(s)) => match s.trim().parse::<f32>() {
+            Ok(v) if v.is_finite() => Some(v),
+            _ => None,
+        },
         _ => None,
     };
     Ok(match parsed {

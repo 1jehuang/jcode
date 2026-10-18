@@ -978,42 +978,8 @@ pub(super) fn handle_text_input(app: &mut App, text: &str) -> bool {
         return false;
     }
 
-    if app.input.is_empty() && !app.is_processing && app.suggested_replies_visible() {
-        let mut chars = text.chars();
-        if let (Some(c), None) = (chars.next(), chars.next())
-            && app.stage_suggested_reply_by_digit(c)
-        {
-            app.follow_chat_bottom_for_typing();
-            return true;
-        }
-    }
-
-    let onboarding_suggestions = matches!(
-        app.onboarding_phase(),
-        Some(crate::tui::app::onboarding_flow::OnboardingPhase::Suggestions)
-    );
-    if app.input.is_empty()
-        && !app.is_processing
-        && (app.display_messages.is_empty() || onboarding_suggestions)
-    {
-        let mut chars = text.chars();
-        if let (Some(c), None) = (chars.next(), chars.next())
-            && let Some(digit) = c.to_digit(10)
-        {
-            let suggestions = app.suggestion_prompts();
-            let idx = digit as usize;
-            if idx >= 1 && idx <= suggestions.len() {
-                let (_label, prompt) = &suggestions[idx - 1];
-                if !prompt.starts_with('/') {
-                    app.remember_input_undo_state();
-                    app.input = prompt.clone();
-                    app.cursor_pos = app.input.len();
-                    app.follow_chat_bottom_for_typing();
-                    app.submit_input();
-                    return true;
-                }
-            }
-        }
+    if app.try_stage_suggested_reply_text(text) {
+        return true;
     }
 
     insert_input_text_with_undo(app, text, true);
@@ -1277,10 +1243,7 @@ fn shifted_printable_fallback(c: char, modifiers: KeyModifiers) -> char {
 }
 
 pub(super) fn clear_input_for_escape(app: &mut App) {
-    let had_explorer_timer = app.suggested_replies.explorer_deadline.is_some();
-    if app.cancel_suggested_replies_interaction(true) && had_explorer_timer {
-        app.set_status_notice("Full-auto Explorer cancelled");
-    }
+    app.cancel_suggested_replies_on_escape();
     let had_input = !app.input.is_empty();
     if had_input {
         app.remember_input_undo_state();
@@ -2060,9 +2023,7 @@ pub(super) fn handle_alternate_enter(app: &mut App) {
     }
 
     if app.input.is_empty() {
-        if let Some(prompt) = app.take_focused_or_default_suggested_reply(true) {
-            app.submit_suggested_reply_prompt(prompt);
-        }
+        app.try_submit_suggested_reply_on_empty_input(true);
         return;
     }
 
@@ -2880,10 +2841,7 @@ pub(super) fn handle_enter(app: &mut App) -> bool {
     if app.activate_picker_from_preview() {
         return true;
     }
-    if app.input.is_empty()
-        && let Some(prompt) = app.take_focused_or_default_suggested_reply(false)
-    {
-        app.submit_suggested_reply_prompt(prompt);
+    if app.try_submit_suggested_reply_on_empty_input(false) {
         return true;
     }
     if !app.input.is_empty() {
@@ -2903,10 +2861,12 @@ pub(super) fn handle_enter(app: &mut App) -> bool {
 }
 
 pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
+    if app.pre_handle_basic_key_for_suggested_replies(code) {
+        return true;
+    }
     match code {
         KeyCode::Char(c) => handle_text_input(app, &c.to_string()),
         KeyCode::Backspace => {
-            app.cancel_suggested_replies_interaction(false);
             if app.cursor_pos > 0 {
                 let prev = crate::tui::core::prev_char_boundary(&app.input, app.cursor_pos);
                 app.remember_input_undo_state();
@@ -2918,7 +2878,6 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
             true
         }
         KeyCode::Delete => {
-            app.cancel_suggested_replies_interaction(false);
             if app.cursor_pos < app.input.len() {
                 let next = crate::tui::core::next_char_boundary(&app.input, app.cursor_pos);
                 app.remember_input_undo_state();
@@ -2929,7 +2888,6 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
             true
         }
         KeyCode::Left => {
-            app.cancel_suggested_replies_interaction(false);
             if app.cursor_pos > 0 {
                 app.cursor_pos = crate::tui::core::prev_char_boundary(&app.input, app.cursor_pos);
             } else {
@@ -2940,30 +2898,21 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
             true
         }
         KeyCode::Right => {
-            app.cancel_suggested_replies_interaction(false);
             if app.cursor_pos < app.input.len() {
                 app.cursor_pos = crate::tui::core::next_char_boundary(&app.input, app.cursor_pos);
             }
             true
         }
         KeyCode::Home => {
-            app.cancel_suggested_replies_interaction(false);
             app.cursor_pos = 0;
             true
         }
         KeyCode::End => {
-            app.cancel_suggested_replies_interaction(false);
             app.cursor_pos = app.input.len();
             true
         }
         KeyCode::Tab => {
-            if let Some(maybe_prompt) = app.handle_suggested_replies_tab() {
-                if let Some(prompt) = maybe_prompt {
-                    app.submit_suggested_reply_prompt(prompt);
-                }
-            } else {
-                app.autocomplete();
-            }
+            app.autocomplete();
             true
         }
         KeyCode::Up | KeyCode::PageUp => {
