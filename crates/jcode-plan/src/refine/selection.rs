@@ -6,8 +6,9 @@
 //! more elaborate candidate and no "final candidate to defer to". Picking an
 //! output from an unmodified harness is a completely valid outcome.
 //!
-//! Non-answers (missing run, no deliverable, empty artifact) are dropped
-//! before anonymising, each drop recorded with its cause. A selector failure
+//! Non-answers (failed run, no deliverable, empty/missing artifact) are
+//! dropped before anonymising, each drop recorded as `label (cause)`.
+//! A selector failure
 //! falls back to a delivered base, else the first final; it never raises.
 
 use std::collections::HashMap;
@@ -88,7 +89,18 @@ pub fn render_pool(
     for lbl in labels {
         let rv = &candidates[lbl];
         if !(rv.ok && rv.delivered) {
-            dropped.push(lbl.clone());
+            let why = if !rv.ok {
+                if rv.error.trim().is_empty() {
+                    "run failed"
+                } else {
+                    rv.error.trim()
+                }
+            } else {
+                "no deliverable"
+            };
+            // Truncate long errors like the source's [:200] cap.
+            let why: String = why.chars().take(200).collect();
+            dropped.push(format!("{lbl} ({why})"));
             continue;
         }
         match artifacts.get(lbl) {
@@ -96,7 +108,8 @@ pub fn render_pool(
                 pool.insert(lbl.clone(), rv.clone());
                 texts.insert(lbl.clone(), t.clone());
             }
-            _ => dropped.push(lbl.clone()),
+            Some(_) => dropped.push(format!("{lbl} (empty artifact)")),
+            None => dropped.push(format!("{lbl} (missing artifact)")),
         }
     }
     dropped.sort();
@@ -165,6 +178,31 @@ pub fn resolve_choice(
         }
     }
     SelectorOutcome::NoFallback { error: err }
+}
+
+/// Deliver the single k=1 final without a selector session. The same
+/// non-answer drop rules apply; an empty pool is an error with no base
+/// fallback (a finals-only pool has no base by construction). The chosen id
+/// is always `A`, mirroring the source's `trivial_selection`.
+pub fn trivial_selection(
+    candidates: &HashMap<String, Rollout>,
+    artifacts: &HashMap<String, String>,
+) -> Result<(String, String), String> {
+    if candidates.len() > 1 {
+        let mut labels: Vec<&String> = candidates.keys().collect();
+        labels.sort();
+        return Err(format!(
+            "trivial_selection expects at most one candidate (the k=1 final), got {labels:?}"
+        ));
+    }
+    let (pool, _, dropped) = render_pool(candidates, artifacts);
+    if pool.is_empty() {
+        return Err(format!(
+            "no candidate produced an artifact (finals-only pool has no base fallback; dropped: {dropped:?})"
+        ));
+    }
+    let label = pool.keys().next().cloned().unwrap_or_default();
+    Ok(("A".to_string(), label))
 }
 
 /// Supported lesson distilled after adoption. All three fields required;
@@ -239,7 +277,8 @@ mod tests {
         arts.insert("agg1".to_string(), "report body".to_string());
         let (pool, texts, dropped) = render_pool(&cands, &arts);
         assert!(pool.contains_key("agg1"));
-        assert_eq!(dropped, vec!["agg2".to_string()]);
+        // Each drop carries its cause, mirroring `_render_pool`.
+        assert_eq!(dropped, vec!["agg2 (crashed)".to_string()]);
         assert_eq!(texts["agg1"], "report body");
     }
 
@@ -277,6 +316,25 @@ mod tests {
             resolve_choice(None, &id_map, &pool, "mixed"),
             SelectorOutcome::NoFallback { .. }
         ));
+    }
+
+    #[test]
+    fn trivial_selection_delivers_single_final() {
+        let mut cands = HashMap::new();
+        cands.insert("c1".to_string(), Rollout::delivered_ok("c1"));
+        let mut arts = HashMap::new();
+        arts.insert("c1".to_string(), "report".to_string());
+        assert_eq!(
+            trivial_selection(&cands, &arts).unwrap(),
+            ("A".to_string(), "c1".to_string())
+        );
+        // Empty pool: no base fallback in a finals-only pool.
+        let empty_arts: HashMap<String, String> = HashMap::new();
+        assert!(trivial_selection(&cands, &empty_arts).is_err());
+        // More than one candidate is a caller bug.
+        cands.insert("c2".to_string(), Rollout::delivered_ok("c2"));
+        arts.insert("c2".to_string(), "other".to_string());
+        assert!(trivial_selection(&cands, &arts).is_err());
     }
 
     #[test]

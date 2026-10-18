@@ -63,7 +63,7 @@ kept-base detection, mode token roundtrip).
 
 ### 3. `selection`: anonymized choice with safe fallbacks
 Source: `harness2/core/selection.py` (`assign_ids`, `_render_pool`,
-`run_selection`, `trivial_selection`, `has_experience`).
+`run_selection`, `trivial_selection`, `has_experience` as `Experience::new`).
 
 Why: anonymized outputs (A..Z via seeded shuffle, stable across reruns) mean
 no credit for picking a more elaborate candidate and no privileged "final"
@@ -77,9 +77,10 @@ purpose" and "picking an output from an unmodified harness is a completely
 valid and expected outcome"; failed evaluations "remain unscored rather than
 being counted as zero".
 
-Tests: 5 unit tests (anon-id counting, shuffle stability + coverage,
-non-answer drops, choice/base/final fallback chain, experience field
-gating). Note: seed uses FNV-1a + SplitMix64 instead of sha1 so the crate
+Tests: 6 unit tests (anon-id counting, shuffle stability + coverage,
+non-answer drops with `label (cause)` entries, choice/base/final fallback
+chain, k=1 `trivial_selection` fast path, experience field gating).
+Note: seed uses FNV-1a + SplitMix64 instead of sha1 so the crate
 stays dependency-free; the stability property (same input, same shuffle) is
 what the tests pin, not the hash function.
 
@@ -99,7 +100,8 @@ adopted harness and evidence-supported lessons in a per-domain library";
 retrieval is by construction (a domain dir only holds same-domain entries).
 
 Tests: 5 unit tests (slugs, domain dirs, inventory census, experience-md
-content, index empty/populated, root layout incl. tag override).
+with why + edits + lesson, index with per-entry inventory + empty state,
+root layout incl. tag override).
 
 ### 5. `hygiene`: eval-hygiene guards
 Source: `harness2/core/context.py` (grader-verdict tripwire,
@@ -136,7 +138,7 @@ semantics verified against CPython, leak-assert hits, blocklist coverage).
 
 ## Validation
 
-- `cargo test -p jcode-plan`: 57 passed, 0 failed (27 pre-existing + 30 new).
+- `cargo test -p jcode-plan`: 58 passed, 0 failed (27 pre-existing + 31 new).
 - `cargo clippy -p jcode-plan --all-targets`: no warnings from this change.
 - `cargo fmt -p jcode-plan`: clean.
 - `cargo check -p jcode-plan -p jcode-swarm-core -p jcode-protocol`: clean

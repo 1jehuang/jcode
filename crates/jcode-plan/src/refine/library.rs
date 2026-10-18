@@ -26,6 +26,31 @@ pub struct LibraryEntry {
     pub run_id: String,
     pub why: String,
     pub experience: Experience,
+    /// Optional per-edit notes from the reflection reply (`<edits>` block).
+    /// Rendered as "## What each edit did" when non-empty.
+    #[allow(clippy::struct_field_names)]
+    pub edits: Option<String>,
+}
+
+impl LibraryEntry {
+    pub fn new(
+        task_id: &str,
+        domain: &str,
+        label: &str,
+        run_id: &str,
+        why: &str,
+        experience: Experience,
+    ) -> Self {
+        Self {
+            task_id: task_id.to_string(),
+            domain: domain.to_string(),
+            label: label.to_string(),
+            run_id: run_id.to_string(),
+            why: why.to_string(),
+            experience,
+            edits: None,
+        }
+    }
 }
 
 impl LibraryEntry {
@@ -140,6 +165,11 @@ pub fn render_experience_md(surface: &SurfaceSpec, tree: &Tree, entry: &LibraryE
         lines.push(entry.why.trim().to_string());
         lines.push(String::new());
     }
+    if let Some(edits) = entry.edits.as_deref().filter(|e| !e.trim().is_empty()) {
+        lines.push("## What each edit did".to_string());
+        lines.push(edits.trim().to_string());
+        lines.push(String::new());
+    }
     lines.push("## Transferable lesson".to_string());
     lines.push(format!("- **cue**: {}", entry.experience.cue));
     lines.push(format!("- **lesson**: {}", entry.experience.lesson));
@@ -153,8 +183,19 @@ pub fn render_experience_md(surface: &SurfaceSpec, tree: &Tree, entry: &LibraryE
     lines.join("\n")
 }
 
-/// Render the domain `INDEX.md` from the entries on disk (slugs + cues).
-pub fn render_index_md(domain: &str, entries: &[(&str, Option<&str>)]) -> String {
+/// One row of the domain index: entry slug, optional cue, and the
+/// component inventory of the adopted harness at that entry.
+#[derive(Debug, Clone)]
+pub struct IndexRow<'a> {
+    pub slug: &'a str,
+    pub cue: Option<&'a str>,
+    pub inventory: Option<&'a str>,
+}
+
+/// Render the domain `INDEX.md` from the entries on disk. Mirrors the
+/// source's `rebuild_index`: each row names the harness dir, the why-file,
+/// the component inventory, and the cue.
+pub fn render_index_md(domain: &str, entries: &[IndexRow<'_>]) -> String {
     let mut rows = vec![
         format!("# Library — {domain}"),
         String::new(),
@@ -167,13 +208,21 @@ pub fn render_index_md(domain: &str, entries: &[(&str, Option<&str>)]) -> String
     if entries.is_empty() {
         rows.push("_(empty — this is the first task in this domain)_".to_string());
     }
-    let mut sorted: Vec<(&str, Option<&str>)> = entries.to_vec();
-    sorted.sort_by_key(|(slug, _)| slug.to_string());
-    for (slug, cue) in sorted {
-        rows.push(format!("## `harnesses/{slug}/`"));
-        rows.push(format!("- harness: `harnesses/{slug}/harness/`"));
-        rows.push(format!("- why:     `harnesses/{slug}/EXPERIENCE.md`"));
-        if let Some(c) = cue
+    let mut sorted: Vec<IndexRow<'_>> = entries.to_vec();
+    sorted.sort_by_key(|row| row.slug.to_string());
+    for row in sorted {
+        rows.push(format!("## `harnesses/{}/`", row.slug));
+        let inv = row.inventory.unwrap_or("").trim();
+        if inv.is_empty() {
+            rows.push(format!("- harness: `harnesses/{}/harness/`", row.slug));
+        } else {
+            rows.push(format!(
+                "- harness: `harnesses/{}/harness/` — {}",
+                row.slug, inv
+            ));
+        }
+        rows.push(format!("- why:     `harnesses/{}/EXPERIENCE.md`", row.slug));
+        if let Some(c) = row.cue
             && !c.trim().is_empty()
         {
             rows.push(format!("- cue:     {}", c.trim()));
@@ -231,17 +280,18 @@ mod tests {
     }
 
     #[test]
-    fn experience_md_carries_why_and_lesson() {
+    fn experience_md_carries_why_edits_and_lesson() {
         let exp =
             Experience::new("reconcile figures", "join before writing", "agg1 vs base").unwrap();
-        let entry = LibraryEntry {
-            task_id: "t/1".to_string(),
-            domain: "finance".to_string(),
-            label: "agg1".to_string(),
-            run_id: "r1".to_string(),
-            why: "chosen for cleaner join".to_string(),
-            experience: exp,
-        };
+        let mut entry = LibraryEntry::new(
+            "t/1",
+            "finance",
+            "agg1",
+            "r1",
+            "chosen for cleaner join",
+            exp,
+        );
+        entry.edits = Some("added the doc_review skill".to_string());
         let md = render_experience_md(
             &super::super::surface::OPENCODE_SURFACE,
             &test_tree(),
@@ -251,15 +301,32 @@ mod tests {
         assert!(md.contains("agg1"), "{md}");
         assert!(md.contains("**cue**"), "{md}");
         assert!(md.contains("chosen for cleaner join"), "{md}");
+        assert!(md.contains("## What each edit did"), "{md}");
+        assert!(md.contains("added the doc_review skill"), "{md}");
     }
 
     #[test]
-    fn index_lists_entries_and_empty_state() {
+    fn index_lists_entries_with_inventory_and_empty_state() {
         let empty = render_index_md("finance", &[]);
         assert!(empty.contains("first task in this domain"), "{empty}");
-        let full = render_index_md("finance", &[("t__1", Some("reconcile")), ("t__2", None)]);
+        let full = render_index_md(
+            "finance",
+            &[
+                IndexRow {
+                    slug: "t__1",
+                    cue: Some("reconcile"),
+                    inventory: Some("1 skills; 4 always-on chars"),
+                },
+                IndexRow {
+                    slug: "t__2",
+                    cue: None,
+                    inventory: None,
+                },
+            ],
+        );
         assert!(full.contains("harnesses/t__1/"), "{full}");
         assert!(full.contains("cue:     reconcile"), "{full}");
+        assert!(full.contains("1 skills; 4 always-on chars"), "{full}");
     }
 
     #[test]
