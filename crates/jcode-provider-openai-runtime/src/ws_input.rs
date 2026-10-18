@@ -75,20 +75,68 @@ fn replay_identity(item: &Value) -> Value {
                 .collect();
             serde_json::json!({"type":"message", "role":"assistant", "text":text})
         }
-        Some("function_call") => {
+        Some("function_call" | "custom_tool_call") => {
             let arguments = item
                 .get("arguments")
-                .and_then(Value::as_str)
-                .and_then(|s| serde_json::from_str::<Value>(s).ok())
-                .unwrap_or_else(|| item["arguments"].clone());
+                .or_else(|| item.get("input"))
+                .map(|value| match value.as_str() {
+                    Some(raw) if raw.trim().is_empty() || raw.trim() == "null" => {
+                        serde_json::json!({})
+                    }
+                    Some(raw) => {
+                        serde_json::from_str::<Value>(raw).unwrap_or_else(|_| value.clone())
+                    }
+                    None => value.clone(),
+                })
+                .unwrap_or_else(|| serde_json::json!({}));
+            // The stream parser accepts both wire types, but the transcript
+            // reconstructs every tool use as a function_call. Compare their
+            // semantic payload, not the provider's transport representation.
             serde_json::json!({"type":"function_call", "call_id":item["call_id"], "name":item["name"], "arguments":arguments})
         }
         _ => item.clone(),
     }
 }
 
-/// Keep completed output even when response.completed omits its output array.
-/// When it is supplied, it is authoritative and replaces output_item.done data.
+/// Explain replay failures without logging tool names, arguments or content.
+pub(super) fn log_ws_replayed_calls(items: &[Value], previous_output: &[Value]) {
+    for item in items
+        .iter()
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("function_call"))
+    {
+        let previous = previous_output.iter().find(|output| {
+            item.get("call_id").is_some() && output.get("call_id") == item.get("call_id")
+        });
+        let identity = replay_identity(item);
+        let previous_identity = previous.map(replay_identity);
+        jcode_base::logging::info(&format!(
+            "WS_REPLAY_CALL: previous_output_items={} previous_call_present={} previous_type={} name_matches={} arguments_match={}",
+            previous_output.len(),
+            previous.is_some(),
+            match previous
+                .and_then(|output| output.get("type"))
+                .and_then(Value::as_str)
+            {
+                Some("function_call") => "function_call",
+                Some("custom_tool_call") => "custom_tool_call",
+                Some(_) => "other",
+                None => "missing",
+            },
+            previous_identity
+                .as_ref()
+                .is_some_and(|previous| previous["name"] == identity["name"]),
+            previous_identity
+                .as_ref()
+                .is_some_and(|previous| previous["arguments"] == identity["arguments"]),
+        ));
+    }
+}
+
+/// Keep completed output when response.completed omits it or sends an empty
+/// array. ChatGPT can send output_item.done followed by output:[] even for a
+/// successful tool response. Erasing those items replays the assistant's calls
+/// on the next previous_response_id continuation and disrupts cache reuse.
+/// A nonempty final array remains authoritative.
 pub(super) fn observe_ws_response_output(text: &str, output: &mut Vec<Value>) {
     // Token deltas dominate the stream. Only completed output events need a
     // second parse for response-chain bookkeeping.
@@ -105,7 +153,23 @@ pub(super) fn observe_ws_response_output(text: &str, output: &mut Vec<Value>) {
             }
         }
         Some("response.completed") => {
-            if let Some(items) = event.pointer("/response/output").and_then(Value::as_array) {
+            let completed_output = event.pointer("/response/output").and_then(Value::as_array);
+            if completed_output.is_none_or(|items| items.is_empty()) && !output.is_empty() {
+                jcode_base::logging::info(&format!(
+                    "WS_RESPONSE_OUTPUT: preserving streamed output; completed_output_present={} completed_output_items={} streamed_output_items={} streamed_tool_calls={}",
+                    completed_output.is_some(),
+                    completed_output.map_or(0, Vec::len),
+                    output.len(),
+                    output
+                        .iter()
+                        .filter(|item| matches!(
+                            item.get("type").and_then(Value::as_str),
+                            Some("function_call" | "custom_tool_call")
+                        ))
+                        .count(),
+                ));
+            }
+            if let Some(items) = completed_output.filter(|items| !items.is_empty()) {
                 *output = items.clone();
             }
         }

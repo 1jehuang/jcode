@@ -253,6 +253,70 @@ fn websocket_delta_preserves_unmatched_nontext_assistant_content() {
 }
 
 #[test]
+fn websocket_delta_does_not_replay_custom_tool_calls_as_functions() {
+    for input in [
+        serde_json::json!("{ \"action\": \"spawn\" }"),
+        serde_json::json!({"action":"spawn"}),
+    ] {
+        let output = serde_json::json!({
+            "type":"custom_tool_call", "id":"ctc_1", "status":"completed",
+            "call_id":"call_1", "name":"swarm", "input":input,
+        });
+        let replay = serde_json::json!({
+            "type":"function_call", "call_id":"call_1", "name":"swarm",
+            "arguments":"{\"action\":\"spawn\"}",
+        });
+        let callback = serde_json::json!({
+            "type":"function_call_output", "call_id":"call_1", "output":"done",
+        });
+        let (delta, skipped) = persistent_ws_incremental_items(
+            &[replay, callback.clone()], 0, &[output],
+        );
+        assert_eq!(delta, vec![callback]);
+        assert_eq!(skipped, 1);
+    }
+}
+
+#[test]
+fn websocket_delta_matches_normalized_empty_tool_arguments() {
+    for arguments in ["", " ", "null", " null "] {
+        let output = serde_json::json!({
+            "type":"function_call", "call_id":"call_1", "name":"read",
+            "arguments":arguments,
+        });
+        let replay = serde_json::json!({
+            "type":"function_call", "call_id":"call_1", "name":"read",
+            "arguments":"{}",
+        });
+        let (delta, skipped) = persistent_ws_incremental_items(&[replay], 0, &[output]);
+        assert!(delta.is_empty());
+        assert_eq!(skipped, 1);
+    }
+}
+
+#[test]
+fn websocket_delta_preserves_modified_custom_tool_calls() {
+    let output = serde_json::json!({
+        "type":"custom_tool_call", "call_id":"call_1", "name":"read",
+        "input":"{\"path\":\"old\"}",
+    });
+    for (id, name, arguments) in [
+        ("call_2", "read", "{\"path\":\"old\"}"),
+        ("call_1", "write", "{\"path\":\"old\"}"),
+        ("call_1", "read", "{\"path\":\"new\"}"),
+    ] {
+        let replay = serde_json::json!({
+            "type":"function_call", "call_id":id, "name":name, "arguments":arguments,
+        });
+        let (delta, skipped) = persistent_ws_incremental_items(
+            &[replay.clone()], 0, std::slice::from_ref(&output),
+        );
+        assert_eq!(delta, vec![replay]);
+        assert_eq!(skipped, 0);
+    }
+}
+
+#[test]
 fn websocket_output_bookkeeping_uses_completed_output_without_duplicates() {
     let item = serde_json::json!({"type":"function_call", "call_id":"call_1", "name":"read", "arguments":"{}"});
     let mut output = Vec::new();
@@ -271,12 +335,52 @@ fn websocket_output_bookkeeping_uses_completed_output_without_duplicates() {
             .to_string(),
         &mut output,
     );
-    assert_eq!(output, vec![item]);
+    assert_eq!(output, vec![item.clone()]);
     observe_ws_response_output(
         r#"{"type":"response.completed","response":{"output":[]}}"#,
         &mut output,
     );
-    assert!(output.is_empty());
+    assert_eq!(output, vec![item]);
+}
+
+#[test]
+fn websocket_empty_terminal_output_preserves_calls_for_next_delta() {
+    let call = serde_json::json!({
+        "type":"function_call", "id":"fc_1", "status":"completed",
+        "call_id":"call_1", "name":"swarm", "arguments":"{\"action\":\"spawn\"}",
+    });
+    let mut output = Vec::new();
+    observe_ws_response_output(
+        &serde_json::json!({"type":"response.output_item.done", "item":call.clone()}).to_string(),
+        &mut output,
+    );
+    observe_ws_response_output(
+        r#"{"type":"response.completed","response":{"output":[]}}"#,
+        &mut output,
+    );
+    let callback = serde_json::json!({
+        "type":"function_call_output", "call_id":"call_1", "output":"spawned",
+    });
+    let (delta, skipped) = persistent_ws_incremental_items(&[call, callback.clone()], 0, &output);
+    assert_eq!(delta, vec![callback], "only the tool result is new to the provider");
+    assert_eq!(skipped, 1);
+}
+
+#[test]
+fn websocket_nonempty_terminal_output_remains_authoritative() {
+    let mut output = vec![serde_json::json!({"type":"message", "id":"old"})];
+    let final_item = serde_json::json!({"type":"message", "id":"final"});
+    observe_ws_response_output(
+        &serde_json::json!({"type":"response.completed", "response":{"output":[final_item.clone()]}}).to_string(),
+        &mut output,
+    );
+    assert_eq!(output, vec![final_item]);
+    output.clear();
+    observe_ws_response_output(
+        r#"{"type":"response.completed","response":{"output":[]}}"#,
+        &mut output,
+    );
+    assert!(output.is_empty(), "no output must not fabricate a prior response");
 }
 
 #[test]

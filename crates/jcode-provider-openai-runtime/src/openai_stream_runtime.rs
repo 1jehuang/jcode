@@ -874,6 +874,9 @@ async fn continue_persistent_ws_locked(
         .and_then(Value::as_str)
         .map(str::to_owned);
     let incremental_stats = summarize_ws_input(&incremental_items);
+    if state.message_count > 0 && incremental_stats.function_call_items > 0 {
+        log_ws_replayed_calls(&incremental_items, &state.last_response_output);
+    }
     let previous_response_id = state.last_response_id.clone();
     let request_prompt_cache_key_hash = request
         .get("prompt_cache_key")
