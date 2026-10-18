@@ -109,6 +109,71 @@ fn is_skill_script(surface: &SurfaceSpec, rel: &str) -> bool {
     }
 }
 
+/// A skill-local helper: `<skill_dir>/<name>/scripts/<file>`.
+fn is_skill_helper_script(surface: &SurfaceSpec, rel: &str) -> bool {
+    let prefix = surface.skill_prefix();
+    if !rel.starts_with(&prefix) {
+        return false;
+    }
+    let rest = &rel[prefix.len()..];
+    let Some(slash) = rest.find('/') else {
+        return false;
+    };
+    let (name, tail) = rest.split_at(slash);
+    if !valid_name(name) || !tail.starts_with("/scripts/") {
+        return false;
+    }
+    let file = &tail["/scripts/".len()..];
+    // Mirror harness2's skill_script pattern: word chars, dots, dashes.
+    !file.is_empty()
+        && !file.contains('/')
+        && file
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-')
+}
+
+/// Scan prose for `python <path>` / `python3 <path>` invocations of
+/// `scripts/*.py` (harness2's `script_ref` pattern). Returns the referenced
+/// rels in order of first appearance.
+fn script_refs(src: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cursor = 0;
+    while cursor < src.len() {
+        let Some(rel_p) = src[cursor..].find("python") else {
+            break;
+        };
+        let base = cursor + rel_p;
+        let mut after = &src[base + "python".len()..];
+        after = after.strip_prefix('3').unwrap_or(after);
+        let Some(raw_tail) = after.strip_prefix(' ').or_else(|| after.strip_prefix('\t')) else {
+            // Not a `python <path>` invocation; skip past this occurrence.
+            cursor = base + "python".len();
+            continue;
+        };
+        // Runs of whitespace between the interpreter and the path are fine.
+        let tail: &str = raw_tail.trim_start_matches([' ', '\t']);
+        let token: String = tail
+            .chars()
+            .take_while(|c| !c.is_whitespace() && *c != '"' && *c != '\'' && *c != '`')
+            .collect();
+        let token = token.trim_matches(|c| c == '(' || c == ')' || c == ',' || c == ';');
+        if token.contains("scripts/") && token.ends_with(".py") {
+            let t = token
+                .trim_start_matches("./")
+                .trim_start_matches('/')
+                .to_string();
+            if !out.contains(&t) {
+                out.push(t);
+            }
+        }
+        // `tail` extends to the end of `src` (only front-trimmed), so its
+        // start index is `src.len() - tail.len()`; advance past the token.
+        // The start is always ahead of `base`, so progress is guaranteed.
+        cursor = (src.len() - tail.len() + token.len()).max(base + 1);
+    }
+    out
+}
+
 fn valid_name(name: &str) -> bool {
     if name.is_empty() {
         return false;
@@ -344,6 +409,65 @@ pub fn validate(
         }
     }
 
+    // Every script a skill or always-on file invokes must ship in the same
+    // proposal (harness2's `_check_script_refs`): a skill invoking a missing
+    // file fails validation and the whole proposal is thrown away. Runtime
+    // helpers (read_doc.py / pack.py / unpack.py) are exempt, as is a skill
+    // calling its own carried helper at `<skill>/scripts/<file>`.
+    {
+        let mut have: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for rel in tree.keys() {
+            if is_script(rel) || is_skill_helper_script(surface, rel) {
+                have.insert(rel.as_str());
+            }
+        }
+        let skill_prefix = surface.skill_prefix();
+        let mut check_files: Vec<&String> = tree
+            .keys()
+            .filter(|rel| {
+                is_skill_script(surface, rel)
+                    || surface.always_on.contains(&rel.as_str())
+                    || Some(rel.as_str()) == surface.hooks_file
+            })
+            .collect();
+        check_files.sort();
+        for rel in check_files {
+            let src = &tree[rel];
+            // Jinja guard (harness2's NO TEMPLATE BRACES rule): always-on
+            // files render through Jinja with StrictUndefined, so a doubled
+            // `{{` placeholder or `{%` / `{#` tag kills the job pre-trial.
+            if surface.always_on.contains(&rel.as_str())
+                && (src.contains("{{") || src.contains("{%") || src.contains("{#"))
+            {
+                errs.push(format!(
+                    "{rel} contains a Jinja brace pair (`{{{{`, `{{%`, or `{{#`); always-on text renders with StrictUndefined, so any such braces kill the job pre-trial. Use a single brace, or words"
+                ));
+            }
+            for reference in script_refs(src) {
+                let base = reference.rsplit('/').next().unwrap_or(&reference);
+                if RESERVED_SCRIPTS.contains(&base) {
+                    continue;
+                }
+                // A skill-local ref (`skills/<name>/scripts/f.py`) resolves
+                // against the skill's own helper; anything else must ship
+                // at exactly the referenced rel.
+                let mut resolved = reference.clone();
+                if !have.contains(resolved.as_str()) && rel.starts_with(&skill_prefix) {
+                    let skill_name = rel[skill_prefix.len()..].split('/').next().unwrap_or("");
+                    let candidate = format!("{skill_prefix}{skill_name}/scripts/{base}");
+                    if have.contains(candidate.as_str()) {
+                        resolved = candidate;
+                    }
+                }
+                if !have.contains(resolved.as_str()) {
+                    errs.push(format!(
+                        "{rel} invokes `{reference}` but that file is not in the harness"
+                    ));
+                }
+            }
+        }
+    }
+
     if errs.is_empty() {
         Ok(TreeCensus {
             always_on_chars: body.len(),
@@ -567,5 +691,73 @@ mod tests {
         let div = diversity(&m);
         assert_eq!(div.n, 2);
         assert!(div.mean_line_jaccard < 1.0, "{div:?}");
+    }
+
+    #[test]
+    fn script_refs_scan_python_invocations() {
+        assert_eq!(
+            script_refs("run python scripts/check_totals.py now"),
+            vec!["scripts/check_totals.py".to_string()]
+        );
+        assert_eq!(
+            script_refs("run python3  skills/x/scripts/h.py end"),
+            vec!["skills/x/scripts/h.py".to_string()]
+        );
+        // `python` without a following path is not an invocation.
+        assert!(script_refs("i love python programming").is_empty());
+        // Non-script paths are ignored.
+        assert!(script_refs("run python notes/readme.txt").is_empty());
+    }
+
+    #[test]
+    fn validate_rejects_missing_invoked_script() {
+        let t = tree(&[
+            (
+                "systemprompt.md",
+                "When reviewing docs, load the `doc_review` skill.",
+            ),
+            (
+                "skills/doc_review/SKILL.md",
+                "---\ndescription: review docs\n---\nrun python scripts/missing.py",
+            ),
+        ]);
+        let err = validate(&OPENCODE_SURFACE, &t, false).unwrap_err();
+        assert!(err.contains("invokes `scripts/missing.py`"), "{err}");
+    }
+
+    #[test]
+    fn validate_accepts_shipped_and_skill_local_scripts() {
+        let t = tree(&[
+            (
+                "systemprompt.md",
+                "When reviewing docs, load the `doc_review` skill. Run python scripts/shared.py.",
+            ),
+            (
+                "skills/doc_review/SKILL.md",
+                "---\ndescription: review docs\n---\nrun python scripts/helper.py and python scripts/shared.py",
+            ),
+            ("scripts/shared.py", "print(1)"),
+            ("skills/doc_review/scripts/helper.py", "print(2)"),
+        ]);
+        validate(&OPENCODE_SURFACE, &t, false).expect("shipped scripts pass");
+    }
+
+    #[test]
+    fn validate_rejects_jinja_braces_in_always_on() {
+        let t = tree(&[("systemprompt.md", "use {{ instruction }} here")]);
+        let err = validate(&OPENCODE_SURFACE, &t, false).unwrap_err();
+        assert!(err.contains("Jinja brace pair"), "{err}");
+        // Braces inside a skill body are fine: only always-on renders via Jinja.
+        let ok = tree(&[
+            ("systemprompt.md", "plain text"),
+            (
+                "skills/s/SKILL.md",
+                "---\ndescription: s skill\n---\ntemplate {{ x }} lives here",
+            ),
+        ]);
+        // Still fails on the missing trigger, not on braces: prove braces
+        // in skills are not the reported problem.
+        let err = validate(&OPENCODE_SURFACE, &ok, false).unwrap_err();
+        assert!(!err.contains("Jinja brace pair"), "{err}");
     }
 }

@@ -36,9 +36,11 @@ prompts name "no deliverable because the model exhausted its output budget on
 reasoning" as the most costly failure mode, which the always-on caps
 (24k OpenCode / 8k Codex) directly guard against.
 
-Tests: 7 unit tests (escape rejection, allowed-surface coverage,
+Tests: 11 unit tests (escape rejection, allowed-surface coverage,
 untriggered-skill rejection, triggered-skill census, cap + non-empty
-enforcement, autotrigger repair, diff + diversity).
+enforcement, autotrigger repair, diff + diversity, script-ref scanning,
+missing-script rejection, shipped/skill-local acceptance, Jinja-brace
+rejection).
 
 ### 2. `recursion`: task-level budgets, stage labels, finals-only pool
 Source: `harness2/core/recursion.py` (`run_parallel`, `run_sequential`,
@@ -124,7 +126,7 @@ floor rejection, glob matching incl. `**`, blocklist coverage).
 
 ## Validation
 
-- `cargo test -p jcode-plan`: 50 passed, 0 failed (27 pre-existing + 23 new).
+- `cargo test -p jcode-plan`: 54 passed, 0 failed (27 pre-existing + 27 new).
 - `cargo clippy -p jcode-plan --all-targets`: no warnings from this change.
 - `cargo fmt -p jcode-plan`: clean.
 - `cargo check -p jcode-plan -p jcode-swarm-core -p jcode-protocol`: clean
