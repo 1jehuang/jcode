@@ -18,8 +18,9 @@ use std::collections::HashMap;
 use std::sync::{Condvar, LazyLock, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
-/// Small sessions parse in a few ms; only prewarm ones where it matters.
-const MIN_PREWARM_BYTES: u64 = 1024 * 1024;
+/// Below this, a direct parse is cheap and a queue slot only adds contention
+/// (live: 2-3MB sessions parse in ~10-30ms).
+const MIN_PREWARM_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_PREWARM_SESSIONS: usize = 64;
 /// Reconnects arrive within a few seconds of startup.
 const ENTRY_TTL: Duration = Duration::from_secs(30);
@@ -62,7 +63,11 @@ fn fingerprint(session_id: &str) -> Option<Fingerprint> {
 }
 
 enum Entry {
-    InFlight,
+    /// Waiting for the prewarm thread. A resume that finds this claims the
+    /// session and loads it itself instead of waiting behind larger ones.
+    Queued,
+    /// Being parsed right now. A resume waits briefly for it.
+    Parsing,
     Ready {
         session: Box<Session>,
         fingerprint: Fingerprint,
@@ -129,7 +134,7 @@ fn spawn_prewarm_with_min_bytes(session_ids: Vec<String>, min_bytes: u64) {
     {
         let mut entries = lock_entries();
         for (_, id) in &sized {
-            entries.insert(id.clone(), Entry::InFlight);
+            entries.insert(id.clone(), Entry::Queued);
         }
     }
     let spawned = std::thread::Builder::new()
@@ -154,6 +159,16 @@ fn spawn_prewarm_with_min_bytes(session_ids: Vec<String>, min_bytes: u64) {
 }
 
 fn prewarm_one(session_id: &str) {
+    {
+        let mut entries = lock_entries();
+        match entries.get(session_id) {
+            Some(Entry::Queued) => {
+                entries.insert(session_id.to_string(), Entry::Parsing);
+            }
+            // Claimed by a resume that loaded it directly.
+            _ => return,
+        }
+    }
     let before = fingerprint(session_id);
     let result = session_path(session_id).and_then(|path| Session::load_from_path(&path));
     let after = fingerprint(session_id);
@@ -181,21 +196,26 @@ fn prewarm_one(session_id: &str) {
 fn expire_stale() {
     let mut entries = lock_entries();
     entries.retain(|_, entry| match entry {
-        Entry::InFlight => true,
+        Entry::Queued | Entry::Parsing => true,
         Entry::Ready { ready_at, .. } => ready_at.elapsed() < ENTRY_TTL,
     });
 }
 
 /// Take the prewarmed copy of `session_id` if it is still identical to disk.
-/// Waits briefly when that session's parse is in flight, since a fresh parse
-/// would only race it for the same CPU.
+/// Waits briefly when that session is being parsed right now, since a fresh
+/// parse would only race it for the same CPU. A still-queued session is
+/// claimed and left to the caller's own load.
 pub(super) fn take(session_id: &str) -> Option<Session> {
     let deadline = Instant::now() + MAX_WAIT_FOR_IN_FLIGHT;
     let mut entries = lock_entries();
     loop {
         match entries.get(session_id) {
             None => return None,
-            Some(Entry::InFlight) => {
+            Some(Entry::Queued) => {
+                entries.remove(session_id);
+                return None;
+            }
+            Some(Entry::Parsing) => {
                 let now = Instant::now();
                 if now >= deadline {
                     return None;
@@ -332,6 +352,20 @@ mod tests {
         assert!(take("session_prewarm_stale").is_none());
         let loaded = Session::load_for_resume("session_prewarm_stale").unwrap();
         assert_eq!(loaded.messages.len(), 2, "fresh load sees the new message");
+    }
+
+    #[test]
+    fn a_queued_session_is_claimed_not_waited_on() {
+        let _home = Home::new();
+        saved_session("session_prewarm_queued", "queued");
+        lock_entries().insert("session_prewarm_queued".into(), Entry::Queued);
+        let start = Instant::now();
+        assert!(take("session_prewarm_queued").is_none());
+        assert!(start.elapsed() < Duration::from_millis(100), "must not wait");
+        assert!(lock_entries().get("session_prewarm_queued").is_none());
+        // The prewarm thread then skips it instead of parsing a claimed session.
+        prewarm_one("session_prewarm_queued");
+        assert!(lock_entries().get("session_prewarm_queued").is_none());
     }
 
     #[test]
