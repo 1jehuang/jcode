@@ -1,4 +1,124 @@
 #[test]
+fn test_usage_card_reset_balances() {
+    let mut app = create_test_app();
+    for count in [0, 3] {
+        app.handle_usage_report(vec![crate::usage::ProviderUsage {
+            provider_name: "OpenAI (work)".into(),
+            openai_reset_credits: Some(crate::usage::OpenAiResetCredits {
+                available_count: count,
+                available_expirations: vec![],
+                account_label: Some("work".into()),
+                ordinary_usage_allowed: Some(true),
+            }),
+            ..Default::default()
+        }]);
+        let content = &app.display_messages().last().unwrap().content;
+        assert!(content.contains(&format!("Banked resets: {count} available")));
+        assert!(!content.contains("no usage data available"));
+    }
+    for available in [false, true] {
+        app.handle_usage_report(vec![crate::usage::ProviderUsage {
+            provider_name: "Claude (personal)".into(),
+            anthropic_limit_reset: Some(crate::usage::AnthropicLimitResetOffer {
+                account_label: Some("personal".into()),
+                available,
+                next_available_at: Some("2099-01-01T00:00:00Z".into()),
+                resets_per_week: 1,
+            }),
+            ..Default::default()
+        }]);
+        let content = &app.display_messages().last().unwrap().content;
+        assert!(content.contains(&format!(
+            "Session resets: {} available",
+            u64::from(available)
+        )));
+        assert_eq!(content.contains("next in"), !available);
+    }
+    app.handle_usage_report(vec![crate::usage::ProviderUsage {
+        provider_name: "OpenAI (failed)".into(),
+        error: Some("fetch failed".into()),
+        openai_reset_credits: Some(crate::usage::OpenAiResetCredits {
+            available_count: 7,
+            available_expirations: vec![],
+            account_label: Some("failed".into()),
+            ordinary_usage_allowed: None,
+        }),
+        ..Default::default()
+    }]);
+    assert!(
+        !app.display_messages()
+            .last()
+            .unwrap()
+            .content
+            .contains("Banked resets:")
+    );
+    for error in [None, Some("fetch failed".into())] {
+        app.handle_usage_report(vec![crate::usage::ProviderUsage {
+            provider_name: "Unknown".into(),
+            error,
+            ..Default::default()
+        }]);
+        let content = &app.display_messages().last().unwrap().content;
+        assert!(!content.contains("Banked resets:"));
+        assert!(!content.contains("Session resets:"));
+    }
+}
+
+#[test]
+fn test_usage_card_responsive_terminal_layout() {
+    let mut app = create_test_app();
+    app.handle_usage_report(vec![crate::usage::ProviderUsage {
+        provider_name: "OpenAI (personal)".into(),
+        limits: vec![crate::usage::UsageLimit {
+            name: "5-hour window".into(),
+            usage_percent: 42.0,
+            resets_at: None,
+        }],
+        openai_reset_credits: Some(crate::usage::OpenAiResetCredits {
+            available_count: 3,
+            available_expirations: vec![],
+            account_label: Some("personal".into()),
+            ordinary_usage_allowed: Some(true),
+        }),
+        ..Default::default()
+    }]);
+    let mut card_widths = Vec::new();
+    for width in [40, 60, 100, 180] {
+        let backend = ratatui::backend::TestBackend::new(width, 60);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| crate::tui::ui::draw(frame, &app))
+            .unwrap();
+        let text = buffer_to_text(&terminal);
+        let normalized: String = text
+            .chars()
+            .filter(|ch| !ch.is_whitespace() && *ch != '│')
+            .collect();
+        assert!(
+            normalized.contains("Bankedresets:3available"),
+            "{width} cols:\n{text}"
+        );
+        assert!(text.contains("OpenAI (personal)"), "{width} cols:\n{text}");
+        assert!(text.contains("42%"), "{width} cols:\n{text}");
+        let border = text
+            .lines()
+            .find(|line| line.contains('╭') && line.contains("Usage"))
+            .unwrap_or_else(|| panic!("missing usage border at {width}:\n{text}"));
+        let start = border.find('╭').unwrap();
+        let end = border.find('╮').unwrap();
+        let card_width =
+            unicode_width::UnicodeWidthStr::width(&border[start..end + '╮'.len_utf8()]);
+        assert!(card_width <= usize::from(width));
+        card_widths.push(card_width);
+    }
+    assert_eq!(
+        card_widths[2], card_widths[3],
+        "wide terminals should fit the content, not expand the card"
+    );
+    assert!(card_widths[0] < card_widths[2]);
+}
+
+#[test]
 fn test_usage_card_renders_when_loading() {
     let mut app = create_test_app();
     app.open_usage_inline_loading();
@@ -69,6 +189,7 @@ fn test_usage_report_updates_display_only_card_without_system_message() {
     assert!(msg.content.contains("5h"));
     assert!(msg.content.contains("82%"));
     assert!(msg.content.contains("plan: pro"));
+    assert!(!msg.content.contains("resets: "));
     let leaked = app.materialized_provider_messages();
     assert_eq!(
         leaked.len(),
@@ -220,11 +341,173 @@ fn test_account_openai_command_opens_account_picker() {
                 .any(|entry| entry.name == "replace account")
         );
         assert!(
-            picker
+            !picker
                 .entries
                 .iter()
                 .any(|entry| entry.name == "account center")
         );
+        assert!(picker.entries.iter().any(|entry| matches!(
+            &entry.action,
+            crate::tui::PickerAction::Usage { id, detail_lines, .. }
+                if id == "openai-oauth-accounts" && !detail_lines.is_empty()
+        )));
+    });
+}
+
+#[test]
+fn test_account_picker_includes_all_configured_credentials_even_excluded_and_manual() {
+    with_temp_jcode_home(|| {
+        let _env_guard = EnvRestoreGuard::capture([
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "OPENROUTER_API_KEY",
+            "COPILOT_GITHUB_TOKEN",
+            "GROQ_API_KEY",
+        ]);
+        for key in ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY"] {
+            crate::env::set_var(key, "picker-test-secret-api-key");
+        }
+        crate::env::set_var("COPILOT_GITHUB_TOKEN", "picker-test-secret-device-token");
+        crate::env::set_var("GROQ_API_KEY", "picker-test-secret-compatible-key");
+        crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
+            label: "work".into(),
+            access_token: "picker-test-secret-oauth-access".into(),
+            refresh_token: "picker-test-secret-oauth-refresh".into(),
+            id_token: None,
+            account_id: None,
+            expires_at: Some(chrono::Utc::now().timestamp_millis() + 3_600_000),
+            email: None,
+        })
+        .unwrap();
+        crate::auth::google::save_tokens(&crate::auth::google::GoogleTokens {
+            access_token: "picker-test-secret-google-access".into(),
+            refresh_token: "picker-test-secret-google-refresh".into(),
+            expires_at: chrono::Utc::now().timestamp_millis() + 3_600_000,
+            tier: crate::auth::google::GmailAccessTier::Full,
+            email: None,
+            services: vec![crate::auth::google::GoogleService::Gmail],
+        })
+        .unwrap();
+        crate::auth::account_pool::AccountPool {
+            members: vec![],
+            excluded: vec![
+                "openai-api".into(),
+                "copilot".into(),
+                "google".into(),
+                "groq".into(),
+            ],
+        }
+        .save()
+        .unwrap();
+        crate::auth::AuthStatus::invalidate_cache();
+
+        let mut app = create_test_app();
+        app.input = "/account".to_string();
+        app.submit_input();
+        let picker = app.inline_interactive_state.as_ref().unwrap();
+        for provider_id in [
+            "openai-api",
+            "anthropic-api",
+            "openrouter",
+            "copilot",
+            "google",
+            "groq",
+        ] {
+            let entry = picker
+                .entries
+                .iter()
+                .find(|entry| {
+                    matches!(
+                        entry.action,
+                        crate::tui::PickerAction::Login(provider) if provider.id == provider_id
+                    )
+                })
+                .unwrap_or_else(|| panic!("missing configured {provider_id}"));
+            assert_eq!(entry.options[0].api_method, "configured");
+        }
+        assert!(
+            !picker
+                .entries
+                .iter()
+                .any(|entry| entry.name == "account center")
+        );
+        assert!(!picker.entries.iter().any(|entry| matches!(entry.action,
+            crate::tui::PickerAction::Login(provider) if provider.id == "auto-import"
+        )));
+        assert!(!format!("{:?}", picker.entries).contains("picker-test-secret"));
+        let status = crate::auth::AuthStatus::check_fast();
+        for entry in &picker.entries {
+            if let crate::tui::PickerAction::Login(provider) = entry.action {
+                assert!(
+                    status.assessment_for_provider(provider).is_configured(),
+                    "unconfigured provider {} should not be offered",
+                    provider.id
+                );
+            }
+        }
+        let api_row = picker
+            .entries
+            .iter()
+            .position(|entry| {
+                matches!(entry.action,
+                    crate::tui::PickerAction::Login(provider) if provider.id == "openai-api"
+                )
+            })
+            .unwrap();
+        let new_row = picker
+            .entries
+            .iter()
+            .position(|entry| entry.name == "new Claude account")
+            .unwrap();
+        assert!(
+            api_row < new_row,
+            "credentials must precede management actions"
+        );
+
+        // The daemon's actual resolved credential, not the presence of saved
+        // OAuth accounts, determines which row is initially selected.
+        app.is_remote = true;
+        for (name, credential, expected) in [
+            (
+                "OpenAI",
+                Some(jcode_provider_core::ResolvedCredential::ApiKey),
+                "openai-api",
+            ),
+            ("Groq", None, "groq"),
+        ] {
+            app.remote_provider_name = Some(name.into());
+            app.remote_resolved_credential = credential;
+            app.open_account_picker(None);
+            let picker = app.inline_interactive_state.as_ref().unwrap();
+            let selected = &picker.entries[picker.selected];
+            assert!(selected.is_current);
+            assert!(matches!(selected.action,
+                crate::tui::PickerAction::Login(provider) if provider.id == expected
+            ));
+            assert!(!picker.entries.iter().any(|entry| entry.is_current
+                && matches!(
+                    entry.action,
+                    crate::tui::PickerAction::Account(
+                        crate::tui::AccountPickerAction::Switch { .. }
+                    )
+                )));
+        }
+        app.is_remote = false;
+
+        for (scope, expected, unexpected) in [
+            ("claude", "anthropic-api", "openai-api"),
+            ("openai", "openai-api", "anthropic-api"),
+        ] {
+            app.open_account_picker(Some(scope));
+            let entries = &app.inline_interactive_state.as_ref().unwrap().entries;
+            assert!(entries.iter().any(|entry| matches!(entry.action,
+                crate::tui::PickerAction::Login(provider) if provider.id == expected
+            )));
+            assert!(!entries.iter().any(|entry| matches!(entry.action,
+                crate::tui::PickerAction::Login(provider) if provider.id == unexpected
+            )));
+            assert!(!entries.iter().any(|entry| entry.name == "account center"));
+        }
     });
 }
 
@@ -273,8 +556,18 @@ fn test_account_command_opens_account_picker() {
                 }) if provider_id == "claude" && label == "claude-otter"
             )
         }));
-        assert!(picker.entries.iter().any(|entry| entry.name == "Claude"));
-        assert!(picker.entries.iter().any(|entry| entry.name == "OpenAI"));
+        assert!(
+            picker
+                .entries
+                .iter()
+                .any(|entry| entry.name == "Claude · claude@example.com")
+        );
+        assert!(
+            picker
+                .entries
+                .iter()
+                .any(|entry| entry.name == "OpenAI · user@example.com")
+        );
         assert!(picker.entries.iter().any(|entry| {
             matches!(
                 entry.action,
@@ -297,7 +590,7 @@ fn test_account_command_opens_account_picker() {
                 .any(|entry| entry.name == "new OpenAI account")
         );
         assert!(
-            picker
+            !picker
                 .entries
                 .iter()
                 .any(|entry| entry.name == "account center")
@@ -345,13 +638,13 @@ fn test_account_picker_supports_arrow_and_vim_navigation() {
             picker
                 .entries
                 .iter()
-                .any(|entry| entry.name == "OpenAI Otter")
+                .any(|entry| entry.name == "OpenAI Otter · first@example.com")
         );
         assert!(
             picker
                 .entries
                 .iter()
-                .any(|entry| entry.name == "OpenAI Fox")
+                .any(|entry| entry.name == "OpenAI Fox · second@example.com")
         );
 
         app.handle_key(KeyCode::Down, KeyModifiers::empty())
@@ -483,11 +776,66 @@ fn test_account_command_combines_claude_and_openai_accounts() {
             )
         }));
         assert!(
-            picker
+            !picker
                 .entries
                 .iter()
                 .any(|entry| entry.name == "account center")
         );
+    });
+}
+
+#[test]
+fn test_account_picker_renders_each_oauth_email_in_combined_and_scoped_views() {
+    use ratatui::{Terminal, backend::TestBackend};
+
+    with_temp_jcode_home(|| {
+        let expires = chrono::Utc::now().timestamp_millis() + 60_000;
+        let claude_emails = ["claude.personal@example.com", "claude.work@example.com"];
+        let openai_emails = ["openai.personal@example.com", "openai.work@example.com"];
+        for (index, email) in claude_emails.iter().enumerate() {
+            crate::auth::claude::upsert_account(crate::auth::claude::AnthropicAccount {
+                label: format!("claude-{}", index + 1),
+                access: "access".to_string(),
+                refresh: "refresh".to_string(),
+                expires,
+                email: Some((*email).to_string()),
+                scopes: Vec::new(),
+                subscription_type: Some("pro".to_string()),
+            })
+            .unwrap();
+        }
+        for (index, email) in openai_emails.iter().enumerate() {
+            crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
+                label: format!("openai-{}", index + 1),
+                access_token: "access".to_string(),
+                refresh_token: "refresh".to_string(),
+                id_token: None,
+                account_id: Some(format!("acct_{index}")),
+                expires_at: Some(expires),
+                email: Some((*email).to_string()),
+            })
+            .unwrap();
+        }
+        let mut app = create_test_app();
+        for scope in [None, Some("claude"), Some("openai")] {
+            app.open_account_picker(scope);
+            for preview in [false, true] {
+                app.inline_interactive_state.as_mut().unwrap().preview = preview;
+                let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+                terminal
+                    .draw(|frame| crate::tui::ui::draw(frame, &app))
+                    .unwrap();
+                let rendered = buffer_to_text(&terminal);
+                for email in claude_emails.iter().chain(openai_emails.iter()) {
+                    let expected = scope.is_none() || email.starts_with(scope.unwrap());
+                    assert_eq!(
+                        rendered.contains(email),
+                        expected,
+                        "scope {scope:?}, preview {preview}: {rendered}"
+                    );
+                }
+            }
+        }
     });
 }
 
@@ -558,8 +906,9 @@ fn test_account_switch_shorthand_switches_openai_account_by_label() {
         // switching to the account that is already active would pass even if the
         // `/account switch` command did nothing. The first insert stays active
         // and the switch below has to move it to the second.
-        let first = crate::auth::codex::upsert_account(open_account("acct_first", "first@example.com"))
-            .unwrap();
+        let first =
+            crate::auth::codex::upsert_account(open_account("acct_first", "first@example.com"))
+                .unwrap();
         let second =
             crate::auth::codex::upsert_account(open_account("acct_second", "second@example.com"))
                 .unwrap();
@@ -570,12 +919,18 @@ fn test_account_switch_shorthand_switches_openai_account_by_label() {
             "the first inserted account is the active one before the switch"
         );
 
-        let mut app = create_test_app();
+        // Account switching now requires a provider that accepts exact route selections.
+        let (mut app, applied_route) = create_dual_method_test_app();
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             app.input = format!("/account switch {second}");
             app.submit_input();
 
+            assert_eq!(
+                applied_route.lock().unwrap().as_deref(),
+                Some(format!("openai-oauth@{second}").as_str()),
+                "the shorthand must select the requested account-qualified runtime route"
+            );
             assert_eq!(
                 crate::auth::codex::active_account_label().as_deref(),
                 Some(second.as_str()),
@@ -864,20 +1219,24 @@ fn test_improve_resume_uses_saved_mode_and_current_todos() {
 #[test]
 fn test_openai_account_usage_details_are_discoverable_and_keep_switching() {
     with_temp_jcode_home(|| {
-        for label in ["openai-otter", "openai-fox"] {
-            crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
-                label: label.to_string(),
-                access_token: "acc".into(),
-                refresh_token: "ref".into(),
-                id_token: None,
-                account_id: Some(format!("acct_{label}")),
-                expires_at: None,
-                email: None,
+        // New accounts receive canonical labels from the store, not the requested label.
+        let labels: Vec<String> = ["openai-otter", "openai-fox"]
+            .into_iter()
+            .map(|label| {
+                crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
+                    label: label.to_string(),
+                    access_token: "acc".into(),
+                    refresh_token: "ref".into(),
+                    id_token: None,
+                    account_id: Some(format!("acct_{label}")),
+                    expires_at: None,
+                    email: None,
+                })
+                .unwrap()
             })
-            .unwrap();
-        }
+            .collect();
         crate::provider_activity::record_openai_oauth_usage(
-            "openai-otter",
+            &labels[0],
             "gpt-5.4",
             None,
             Some(12345),
@@ -886,11 +1245,14 @@ fn test_openai_account_usage_details_are_discoverable_and_keep_switching() {
         );
         let mut app = create_test_app();
         let settings = app.render_openai_accounts_markdown();
-        assert!(settings.contains("12345 input"));
+        assert!(
+            settings.contains("12,345 in · 678 out · 123 cached"),
+            "recorded account usage: {settings}"
+        );
         assert!(settings.contains("No recorded usage"));
         assert!(settings.contains("local midnight"));
         assert!(settings.contains("not your subscription bill"));
-        for label in ["openai-otter", "openai-fox"] {
+        for label in &labels {
             assert!(settings.contains(&format!("(`{label}`)")));
             for (key, value) in crate::provider_activity::openai_oauth_usage_summary(label) {
                 assert!(settings.contains(&format!("- **{key}:** {value}")));
@@ -899,7 +1261,7 @@ fn test_openai_account_usage_details_are_discoverable_and_keep_switching() {
         for filter in [None, Some("openai")] {
             app.open_account_picker(filter);
             let state = app.inline_interactive_state.as_ref().unwrap();
-            for label in ["openai-otter", "openai-fox"] {
+            for label in &labels {
                 assert!(state.entries.iter().any(|entry| matches!(&entry.action,
                     crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Switch { provider_id, label: actual })
                         if provider_id == "openai" && actual == label)));
@@ -937,7 +1299,7 @@ fn test_openai_account_usage_details_are_discoverable_and_keep_switching() {
             .unwrap();
         let mut items = Vec::new();
         app.append_openai_account_picker_items(&mut items, provider);
-        for label in ["openai-otter", "openai-fox"] {
+        for label in &labels {
             let command = format!("/account openai switch {label}");
             let item = items.iter().find(|item| matches!(&item.command,
                 crate::tui::account_picker::AccountPickerCommand::SubmitInput(input) if input == &command)).unwrap();

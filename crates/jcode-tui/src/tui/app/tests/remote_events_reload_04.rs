@@ -191,10 +191,11 @@ fn test_remote_error_with_retryable_pending_schedules_retry() {
         .expect("retry should surface a connection status message");
     assert_eq!(retry_notice.role, "system");
     assert!(retry_notice.content.contains("Connection lost - retrying"));
-    assert!(retry_notice.content.contains(&format!(
-        "attempt 1/{}",
-        App::AUTO_RETRY_MAX_ATTEMPTS
-    )));
+    assert!(
+        retry_notice
+            .content
+            .contains(&format!("attempt 1/{}", App::AUTO_RETRY_MAX_ATTEMPTS))
+    );
     assert!(retry_notice.content.contains("Remote request failed"));
 }
 
@@ -366,7 +367,7 @@ fn test_remote_fatal_model_endpoint_error_fails_fast_without_retry_budget() {
 }
 
 #[test]
-fn test_remote_connectivity_error_waits_for_network_without_retry_budget() {
+fn test_remote_connectivity_error_waits_for_network_with_bounded_retry_budget() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
@@ -402,8 +403,8 @@ fn test_remote_connectivity_error_waits_for_network_without_retry_budget() {
     let pending = app
         .rate_limit_pending_message
         .as_ref()
-        .expect("offline auto-poke should be held for network recovery");
-    assert_eq!(pending.retry_attempts, 0);
+        .expect("provider failure should be held for bounded network recovery");
+    assert_eq!(pending.retry_attempts, 1);
     assert!(app.rate_limit_reset.is_some());
     assert!(matches!(
         app.status,
@@ -466,9 +467,10 @@ fn test_remote_connectivity_error_without_auto_retry_still_waits_for_network() {
         .rate_limit_pending_message
         .as_ref()
         .expect("offline turn should be held for network recovery");
-    // Promoted to auto_retry so the tick-based resume re-sends it.
+    // Promoted to auto_retry so the tick-based resume re-sends it, with the
+    // provider failure consuming one attempt rather than looping forever.
     assert!(pending.auto_retry);
-    assert_eq!(pending.retry_attempts, 0);
+    assert_eq!(pending.retry_attempts, 1);
     assert!(app.rate_limit_reset.is_some());
     assert!(matches!(
         app.status,
@@ -481,216 +483,37 @@ fn test_remote_connectivity_error_without_auto_retry_still_waits_for_network() {
     );
 }
 
-fn openai_oauth_route(model: &str) -> crate::provider::ModelRoute {
-    crate::provider::ModelRoute {
-        model: model.to_string(),
-        provider: "OpenAI".to_string(),
-        api_method: "openai-oauth".to_string(),
-        available: true,
-        detail: String::new(),
-        usage: None,
-        cheapness: None,
-    }
-}
+include!("remote_failover_routes.rs");
 
-fn claude_oauth_route(model: &str) -> crate::provider::ModelRoute {
-    crate::provider::ModelRoute {
-        model: model.to_string(),
-        provider: "Anthropic".to_string(),
-        api_method: "claude-oauth".to_string(),
-        available: true,
-        detail: String::new(),
-        usage: None,
-        cheapness: None,
-    }
-}
 
-/// The motivating scenario: a remote session's OpenAI OAuth session expires
-/// (token refresh fails, non-retryable), and a working Claude OAuth route
-/// exists. The terminal error should arm a one-keypress fallback offer that
-/// carries the failed payload for resend.
-#[test]
-fn test_remote_auth_error_arms_fallback_offer_with_resend_payload() {
-    let mut app = create_test_app();
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let _guard = rt.enter();
-    let mut remote = crate::tui::backend::RemoteConnection::dummy();
 
-    app.is_remote = true;
-    app.remote_provider_name = Some("OpenAI".to_string());
-    app.remote_provider_model = Some("gpt-5.5".to_string());
-    app.remote_model_options = vec![
-        openai_oauth_route("gpt-5.5"),
-        openai_oauth_route("gpt-5.4"),
-        claude_oauth_route("claude-sonnet-4"),
-    ];
-    app.rate_limit_pending_message = Some(PendingRemoteMessage {
-        content: "hi".to_string(),
-        images: vec![],
-        is_system: false,
-        system_reminder: None,
-        auto_retry: false,
-        retry_attempts: 0,
-        retry_at: None,
-    });
-    app.last_submitted_input = Some("hi".to_string());
-    app.is_processing = true;
-    app.status = ProcessingStatus::Streaming;
 
-    app.handle_server_event(
-        crate::protocol::ServerEvent::Error {
-            id: 21,
-            message: "OpenAI token refresh failed; run /login to re-authenticate: {\"error\":{\"message\":\"Your session has ended. Please log in again.\",\"type\":\"invalid_request_error\",\"code\":\"refresh_token_invalidated\"}}".to_string(),
-            retry_after_secs: None,
-        },
-        &mut remote,
-    );
 
-    let offer = app
-        .pending_fallback_offer
-        .as_ref()
-        .expect("terminal auth error should arm a fallback offer");
-    // A credential failure must not offer a sibling model behind the same
-    // broken OpenAI login; it must hop to the working Anthropic route.
-    assert_eq!(offer.selection.provider_label, "Anthropic");
-    let resend = offer
-        .remote_resend
-        .as_ref()
-        .expect("remote offer should capture the failed payload");
-    assert_eq!(resend.content, "hi");
-    assert_eq!(resend.raw_input.as_deref(), Some("hi"));
-    assert!(
-        app.display_messages()
-            .iter()
-            .any(|m| m.role == "system" && m.content.contains("Fallback available")),
-        "offer message should be shown"
-    );
-}
 
-/// Accepting a remote fallback offer stages the route switch (SetRoute via the
-/// dispatcher) and the payload resend; the ModelChanged confirmation then
-/// dispatches the resend through process_remote_followups.
-#[test]
-fn test_remote_fallback_offer_accept_stages_switch_and_resends() {
-    let mut app = create_test_app();
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let _guard = rt.enter();
-    let mut remote = crate::tui::backend::RemoteConnection::dummy();
-    remote.mark_history_loaded();
 
-    app.is_remote = true;
-    app.remote_provider_name = Some("OpenAI".to_string());
-    app.remote_provider_model = Some("gpt-5.5".to_string());
-    app.remote_model_options = vec![
-        openai_oauth_route("gpt-5.5"),
-        claude_oauth_route("claude-sonnet-4"),
-    ];
-    app.rate_limit_pending_message = Some(PendingRemoteMessage {
-        content: "hi".to_string(),
-        images: vec![],
-        is_system: false,
-        system_reminder: None,
-        auto_retry: false,
-        retry_attempts: 0,
-        retry_at: None,
-    });
-    app.last_submitted_input = Some("hi".to_string());
-    app.is_processing = true;
-    app.status = ProcessingStatus::Streaming;
 
-    app.handle_server_event(
-        crate::protocol::ServerEvent::Error {
-            id: 22,
-            message: "OpenAI token refresh failed; run /login to re-authenticate: refresh_token_invalidated".to_string(),
-            retry_after_secs: None,
-        },
-        &mut remote,
-    );
-    assert!(app.pending_fallback_offer.is_some());
 
-    assert!(app.apply_pending_fallback_offer());
-    assert!(
-        app.pending_route_selection.is_some(),
-        "accept should stage a SetRoute request for the remote dispatcher"
-    );
-    let staged = app
-        .pending_fallback_resend
-        .as_ref()
-        .expect("accept should stage the failed payload for resend");
-    assert_eq!(staged.content, "hi");
 
-    // Server confirms the switch.
-    app.pending_route_selection = None;
-    app.remote_model_switch_in_flight = true;
-    app.handle_server_event(
-        crate::protocol::ServerEvent::ModelChanged {
-            context_window: None,
-            id: 0,
-            model: "claude-sonnet-4".to_string(),
-            provider_name: Some("Anthropic".to_string()),
-            error: None,
-            resolved_credential: None,
-            reasoning_effort: None,
-        },
-        &mut remote,
-    );
-    assert!(!app.remote_model_switch_in_flight);
 
-    // The followup dispatcher resends the failed payload on the new route.
-    rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
-    assert!(app.pending_fallback_resend.is_none());
-    assert!(app.is_processing, "resend should start a new turn");
-    assert!(matches!(app.status, ProcessingStatus::Sending));
-    let pending = app
-        .rate_limit_pending_message
-        .as_ref()
-        .expect("resend should repopulate the pending retry slot");
-    assert_eq!(pending.content, "hi");
-}
 
-/// A failed route switch must drop the staged resend instead of firing it on
-/// the old (broken) route.
-#[test]
-fn test_remote_fallback_resend_dropped_when_switch_fails() {
-    let mut app = create_test_app();
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let _guard = rt.enter();
-    let mut remote = crate::tui::backend::RemoteConnection::dummy();
-    remote.mark_history_loaded();
 
-    app.is_remote = true;
-    app.pending_fallback_resend = Some(crate::tui::app::FallbackResendPayload {
-        content: "hi".to_string(),
-        images: vec![],
-        is_system: false,
-        auto_retry: false,
-        system_reminder: None,
-        raw_input: Some("hi".to_string()),
-    });
-    app.remote_model_switch_in_flight = true;
 
-    app.handle_server_event(
-        crate::protocol::ServerEvent::ModelChanged {
-            context_window: None,
-            id: 0,
-            model: "claude-sonnet-4".to_string(),
-            provider_name: None,
-            error: Some("switch failed".to_string()),
-            resolved_credential: None,
-            reasoning_effort: None,
-        },
-        &mut remote,
-    );
 
-    assert!(app.pending_fallback_resend.is_none());
-    assert_eq!(
-        app.input, "hi",
-        "prompt should be restored to the input box"
-    );
 
-    rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
-    assert!(!app.is_processing, "no resend should fire");
-}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 #[test]
 fn test_schedule_pending_remote_retry_respects_retry_limit() {
@@ -1273,10 +1096,7 @@ fn test_tui_grok_build_login_starts_managed_oauth_flow() {
 
     app.start_login_provider(crate::provider_catalog::GROK_BUILD_LOGIN_PROVIDER);
 
-    assert!(matches!(
-        app.pending_login,
-        Some(PendingLogin::GrokBuild)
-    ));
+    assert!(matches!(app.pending_login, Some(PendingLogin::GrokBuild)));
     let rendered = app
         .display_messages()
         .iter()
@@ -1327,7 +1147,10 @@ fn test_remote_context_limit_survives_a_later_local_re_derivation() {
     app.remote_provider_model = Some("stealth/space-bunny-alpha@Stealth".to_string());
 
     app.update_context_limit_for_model("stealth/space-bunny-alpha@Stealth", Some(1_000_000));
-    assert_eq!(app.context_limit, 1_000_000, "server window must be adopted");
+    assert_eq!(
+        app.context_limit, 1_000_000,
+        "server window must be adopted"
+    );
 
     // A later local re-derivation must not undo it.
     app.update_context_limit_for_model("stealth/space-bunny-alpha@Stealth", None);
@@ -2023,7 +1846,9 @@ fn test_debug_command_side_panel_latency_bench_reports_immediate_redraw() {
     // against 16.0ms purely from machine load, while passing in isolation. The
     // behavioral assertions above are the real subject, so gate only the timing
     // (refs #592).
-    let p95 = value["summary"]["latency_ms"]["p95"].as_f64().unwrap_or(0.0);
+    let p95 = value["summary"]["latency_ms"]["p95"]
+        .as_f64()
+        .unwrap_or(0.0);
     assert_perf_budget(p95 < 16.0, || {
         format!("side-panel p95 should stay within a 60fps frame budget: {result}")
     });
@@ -2310,7 +2135,10 @@ fn test_externally_started_turn_adopts_processing_state_and_settles_on_done() {
         app.status
     );
 
-    app.handle_server_event(crate::protocol::ServerEvent::MessageEnd { stop_reason: None }, &mut remote);
+    app.handle_server_event(
+        crate::protocol::ServerEvent::MessageEnd { stop_reason: None },
+        &mut remote,
+    );
     app.handle_server_event(crate::protocol::ServerEvent::Done { id: 0 }, &mut remote);
 
     // Streaming text is revealed at a paced rate, so a `Done` that arrives with
@@ -2509,6 +2337,95 @@ fn test_credential_failure_breaker_trips_after_consecutive_auth_errors() {
 }
 
 #[test]
+fn test_rejected_refresh_token_stops_all_automatic_resends_immediately() {
+    with_temp_jcode_home(|| {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        for auto_poke in [false, true] {
+            for (auto_retry, retry_after_secs) in [(false, None), (true, None), (true, Some(1))] {
+                let mut app = create_test_app();
+                let mut remote = crate::tui::backend::RemoteConnection::dummy();
+                remote.mark_history_loaded();
+                app.is_remote = true;
+                app.remote_provider_name = Some("Claude".to_string());
+                app.remote_provider_model = Some("claude-sonnet-4".to_string());
+                app.remote_resolved_credential =
+                    Some(jcode_provider_core::ResolvedCredential::Oauth);
+                app.remote_model_options = vec![
+                    claude_oauth_route("claude-sonnet-4"),
+                    claude_oauth_route("claude-opus-4"),
+                    openai_oauth_route("gpt-5.5"),
+                ];
+                app.auto_poke_incomplete_todos = auto_poke;
+                // Even an inactive default-on scheduler must not re-arm after
+                // a terminal credential failure.
+                app.auto_poke_default_on = true;
+                crate::todo::save_todos(
+                    &app.session.id,
+                    &[crate::todo::TodoItem {
+                        id: "todo-1".to_string(),
+                        content: "Finish work".to_string(),
+                        status: "in_progress".to_string(),
+                        ..Default::default()
+                    }],
+                )
+                .unwrap();
+                app.queued_messages
+                    .push(crate::todo::TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE.to_string());
+                app.queued_messages
+                    .push("Keep my queued prompt".to_string());
+                app.rate_limit_pending_message = Some(PendingRemoteMessage {
+                    content: "keep going".to_string(),
+                    images: vec![],
+                    is_system: false,
+                    system_reminder: Some("preserve reminder".to_string()),
+                    auto_retry,
+                    retry_attempts: 0,
+                    retry_at: None,
+                });
+                app.last_submitted_input = Some("keep going".to_string());
+                app.is_processing = true;
+                app.status = ProcessingStatus::Streaming;
+                app.current_message_id = Some(30);
+
+                assert!(!app.handle_server_event(
+                    crate::protocol::ServerEvent::Error {
+                        id: 30,
+                        message: "Claude OAuth refresh token was previously rejected by Anthropic and cannot be refreshed. Run `jcode login --provider claude` to mint a fresh token.".to_string(),
+                        retry_after_secs,
+                    },
+                    &mut remote,
+                ));
+                assert!(app.rate_limit_pending_message.is_none());
+                assert!(app.rate_limit_reset.is_none());
+                assert!(!app.auto_poke_incomplete_todos);
+                assert!(!app.auto_poke_default_on);
+                assert!(app.overnight_auto_poke.is_none());
+                assert!(!app.is_processing);
+                assert_eq!(app.input, "keep going");
+                assert_eq!(app.queued_messages, vec!["Keep my queued prompt"]);
+                let offer = app
+                    .pending_fallback_offer
+                    .as_ref()
+                    .expect("manual fallback");
+                assert_eq!(offer.selection.provider_label, "OpenAI");
+                let resend = offer.remote_resend.as_ref().expect("saved payload");
+                assert_eq!(resend.content, "keep going");
+                assert_eq!(resend.system_reminder.as_deref(), Some("preserve reminder"));
+                assert_eq!(resend.raw_input.as_deref(), Some("keep going"));
+
+                app.queued_messages.clear();
+                app.pending_queued_dispatch = false;
+                assert!(!app.schedule_turn_end_followups());
+                // A late Done must not restart auto-poke either.
+                app.handle_server_event(crate::protocol::ServerEvent::Done { id: 30 }, &mut remote);
+                assert!(app.queued_messages.is_empty());
+            }
+        }
+    });
+}
+
+#[test]
 fn test_credential_failure_breaker_streak_resets_on_other_errors() {
     let mut app = create_test_app();
 
@@ -2521,6 +2438,42 @@ fn test_credential_failure_breaker_streak_resets_on_other_errors() {
     assert!(!app.note_error_for_credential_breaker("401 unauthorized"));
     assert!(!app.note_error_for_credential_breaker("token expired"));
     assert!(app.note_error_for_credential_breaker("unauthorized"));
+}
+
+#[test]
+fn test_local_rejected_refresh_token_stops_pokes_and_preserves_input() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.auto_poke_incomplete_todos = true;
+        app.auto_poke_default_on = true;
+        app.last_submitted_input = Some("keep going".to_string());
+        crate::todo::save_todos(
+            &app.session.id,
+            &[crate::todo::TodoItem {
+                id: "todo-1".to_string(),
+                content: "Finish work".to_string(),
+                status: "in_progress".to_string(),
+                ..Default::default()
+            }],
+        )
+        .unwrap();
+        app.handle_turn_error(
+            "Claude OAuth refresh token was previously rejected by Anthropic and cannot be refreshed. Run `jcode login --provider claude` to mint a fresh token.",
+        );
+        assert!(!app.auto_poke_incomplete_todos);
+        assert!(!app.auto_poke_default_on);
+        assert_eq!(app.input, "keep going");
+        assert!(!app.schedule_turn_end_followups());
+        assert!(app.queued_messages.is_empty());
+        // After repairing auth, /poke still allows the user to resume work.
+        assert!(matches!(
+            commands::activate_auto_poke(&mut app),
+            commands::PokeActivation::SendNow { .. }
+        ));
+        assert!(app.auto_poke_incomplete_todos);
+        assert!(app.schedule_auto_poke_followup_if_needed());
+        assert!(!app.queued_messages.is_empty());
+    });
 }
 
 #[test]
@@ -2565,6 +2518,8 @@ fn test_remote_model_changed_updates_resolved_credential() {
             model: "claude-opus-5-5".to_string(),
             provider_name: Some("Claude".to_string()),
             error: None,
+            provider_oauth_email: None,
+            provider_oauth_account_label: None,
             resolved_credential: Some(jcode_provider_core::ResolvedCredential::ApiKey),
             reasoning_effort: None,
         },
@@ -2592,6 +2547,8 @@ fn model_changed_event(
         model: "gpt-5.6-terra".to_string(),
         provider_name: Some("OpenAI".to_string()),
         error: error.map(str::to_string),
+        provider_oauth_email: None,
+        provider_oauth_account_label: None,
         resolved_credential: None,
         reasoning_effort: reasoning_effort.map(str::to_string),
     }
@@ -2607,8 +2564,16 @@ fn test_setting_context_limit_also_syncs_the_compaction_budget() {
 
     app.set_context_limit_and_sync_budget(1_000_000);
 
-    assert_eq!(app.context_limit, 1_000_000, "panel must show the new window");
-    let budget = app.registry.compaction().try_read().expect("compaction lock").token_budget();
+    assert_eq!(
+        app.context_limit, 1_000_000,
+        "panel must show the new window"
+    );
+    let budget = app
+        .registry
+        .compaction()
+        .try_read()
+        .expect("compaction lock")
+        .token_budget();
     assert_eq!(
         budget, 1_000_000,
         "compaction budget must follow the panel limit, or the session compacts early"
@@ -2649,6 +2614,8 @@ fn test_remote_model_changed_for_same_model_adopts_window_silently() {
             context_window: Some(1_000_000),
             error,
             resolved_credential,
+            provider_oauth_email: None,
+            provider_oauth_account_label: None,
             reasoning_effort,
         },
         &mut remote,

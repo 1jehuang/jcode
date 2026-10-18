@@ -185,11 +185,10 @@ impl App {
                     event = event_stream.next() => {
                         match event {
                             Some(Ok(Event::Key(key))) => {
+                                let key = jcode_tui_core::korean_input::normalize_key_event(key);
                                 self.update_copy_badge_key_event(key);
                                 self.observe_voice_key_release(&key);
-                                if self.handle_voice_key_event(&key) {
-                                    // Voice keys work from every screen and never type.
-                                } else if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                                if !self.handle_voice_key_event(&key) && matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
                                     let scroll_only = super::input::is_scroll_only_key(self, key.code, key.modifiers);
                                     let _ = self.handle_key_press_event(key);
                                     if self.cancel_requested {
@@ -381,11 +380,10 @@ impl App {
                     event = event_stream.next() => {
                         match event {
                             Some(Ok(Event::Key(key))) => {
+                                let key = jcode_tui_core::korean_input::normalize_key_event(key);
                                 self.update_copy_badge_key_event(key);
                                 self.observe_voice_key_release(&key);
-                                if self.handle_voice_key_event(&key) {
-                                    // Voice keys work from every screen and never type.
-                                } else if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                                if !self.handle_voice_key_event(&key) && matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
                                     let scroll_only = super::input::is_scroll_only_key(self, key.code, key.modifiers);
                                     let _ = self.handle_key_press_event(key);
                                     // Check for cancel request
@@ -586,6 +584,9 @@ impl App {
                                 }
                                 match event {
                                     StreamEvent::TextDelta(text) => {
+                                        if !text.is_empty() {
+                                            self.usage_reset.openai_quota_rejected = false;
+                                        }
                                         self.status = ProcessingStatus::Streaming;
                                         text_content.push_str(&text);
                                         self.resume_streaming_tps();
@@ -613,7 +614,25 @@ impl App {
                                             }
                                         }
                                     }
+                                    StreamEvent::TextSuffixReplace { old_text, new_text } => {
+                                        if provider_native_items.replace_text_suffix(
+                                            &mut text_content, &old_text, &new_text,
+                                        ) {
+                                            let ops = self.stream_buffer.flush();
+                                            self.apply_stream_ops(ops);
+                                            let mut corrected = self.streaming.streaming_text.clone();
+                                            if crate::message::replace_text_suffix(
+                                                &mut corrected, &old_text, &new_text,
+                                            ).is_some() {
+                                                self.replace_streaming_text(corrected);
+                                            }
+                                            if eager_stream_redraw {
+                                                status_spinner_renderer.draw_full(self, terminal)?;
+                                            }
+                                        }
+                                    }
                                     StreamEvent::ToolUseStart { id, name } => {
+                                        self.usage_reset.openai_quota_rejected = false;
                                         // Tool input JSON is still provider-generated output and is
                                         // included in provider output-token usage. Keep the TPS timer
                                         // running until the tool call has finished streaming; actual
@@ -800,6 +819,10 @@ impl App {
                                         if eager_stream_redraw {
                                             status_spinner_renderer.draw_full(self, terminal)?;
                                         }
+                                    }
+                                    StreamEvent::ServiceTier { tier, requested } => {
+                                        self.remote_reported_service_tier = Some((requested, tier.clone()));
+                                        self.status_detail = Some(format!("Provider tier: {tier}"));
                                     }
                                     StreamEvent::TextDone => {}
                     StreamEvent::MessageEnd { .. } => {
@@ -1456,11 +1479,10 @@ impl App {
                         event = event_stream.next() => {
                             match event {
                                 Some(Ok(Event::Key(key))) => {
+                                    let key = jcode_tui_core::korean_input::normalize_key_event(key);
                                     self.update_copy_badge_key_event(key);
                                     self.observe_voice_key_release(&key);
-                                    if self.handle_voice_key_event(&key) {
-                                        // Voice keys work from every screen and never type.
-                                    } else if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                                    if !self.handle_voice_key_event(&key) && matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
                                         let scroll_only = super::input::is_scroll_only_key(self, key.code, key.modifiers);
                                         let _ = self.handle_key_press_event(key);
                                         if self.cancel_requested {
@@ -1671,68 +1693,5 @@ impl App {
 }
 
 #[cfg(test)]
-mod keyed_tool_tests {
-    use super::*;
-
-    fn tool(id: &str) -> ToolCall {
-        ToolCall {
-            id: id.into(),
-            name: "read".into(),
-            input: serde_json::Value::Null,
-            intent: None,
-            thought_signature: None,
-        }
-    }
-
-    #[test]
-    fn keyed_tool_inputs_interleave_and_finish_out_of_order() {
-        let mut pending = PendingStreamingTools::default();
-        pending.start(tool("a"));
-        pending.input(Some("a"), r#"{"file_path":"a","intent":"Read "#);
-        pending.start(tool("b"));
-        pending.input(Some("b"), r#"{"file_path":"b","intent":"Read B"}"#);
-        pending.input(Some("a"), r#"A"}"#);
-        pending.signature("a", "signature-a");
-        let b = pending.finish(Some("b")).unwrap();
-        assert_eq!(b.input["file_path"], "b");
-        assert_eq!(b.intent.as_deref(), Some("Read B"));
-        assert_eq!(b.thought_signature, None);
-        let a = pending.finish(Some("a")).unwrap();
-        assert_eq!(a.input["file_path"], "a");
-        assert_eq!(a.intent.as_deref(), Some("Read A"));
-        assert_eq!(a.thought_signature.as_deref(), Some("signature-a"));
-        assert!(pending.is_empty());
-    }
-
-    #[test]
-    fn keyed_tool_inputs_preserve_unkeyed_fallback_and_ignore_unknown_ids() {
-        let mut pending = PendingStreamingTools::default();
-        pending.start(tool("legacy"));
-        pending.input(None, r#"{"file_path":"legacy"}"#);
-        pending.input(Some("unknown"), "corruption");
-        assert!(pending.finish(Some("unknown")).is_none());
-        assert_eq!(pending.finish(None).unwrap().input["file_path"], "legacy");
-        assert!(pending.finish(None).is_none());
-    }
-
-    #[test]
-    fn keyed_tool_inputs_rollback_and_interruption_cover_all_pending_calls() {
-        let mut pending = PendingStreamingTools::default();
-        pending.start(tool("a"));
-        pending.input(None, r#"{"file_path":"a"}"#);
-        pending.start(tool("b"));
-        pending.input(None, r#"{"file_path":"b"}"#);
-        let calls: Vec<_> = pending.drain().collect();
-        assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0].input["file_path"], "a");
-        assert_eq!(calls[1].input["file_path"], "b");
-        assert!(pending.is_empty());
-        pending.start(tool("old"));
-        pending.clear();
-        pending.start(tool("new"));
-        pending.input(Some("old"), "stale");
-        pending.input(None, r#"{"file_path":"new"}"#);
-        assert!(pending.finish(Some("old")).is_none());
-        assert_eq!(pending.finish(None).unwrap().input["file_path"], "new");
-    }
-}
+#[path = "keyed_tool_tests.rs"]
+mod keyed_tool_tests;

@@ -9,6 +9,7 @@ pub(super) struct RestoredReloadInput {
     pub pending_images: Vec<(String, String)>,
     pub submit_on_restore: bool,
     pub queued_messages: Vec<String>,
+    pub queued_commands: Vec<String>,
     pub hidden_queued_system_messages: Vec<String>,
     pub startup_status_notice: Option<String>,
     pub startup_display_message: Option<(String, String)>,
@@ -123,13 +124,14 @@ impl App {
             return;
         }
 
-        if crate::dictation::remember_last_focused_session(&session_id).is_ok() {
+        if crate::client_focus::remember_last_focused_session(&session_id).is_ok() {
             self.last_client_focus_recorded_at = Some(Instant::now());
             self.last_client_focus_session_id = Some(session_id);
         }
     }
 
     pub(super) fn note_client_interaction(&mut self) {
+        self.wake_idle_hibernation();
         // Every key/mouse/paste event routes through here, which makes this the
         // one place that reliably knows the user is actively driving the UI.
         self.last_user_interaction = Some(std::time::Instant::now());
@@ -219,6 +221,7 @@ impl App {
     /// recompute counters. Callers that have already maintained the cached
     /// counters incrementally (e.g. a single append) use this to stay O(1).
     pub(super) fn bump_display_messages_version_no_stats(&mut self) {
+        self.wake_idle_hibernation();
         self.display_messages_version = self.display_messages_version.wrapping_add(1);
         self.bump_context_revision();
         self.refresh_split_view_if_needed();
@@ -248,6 +251,7 @@ impl App {
         if self.input.is_empty()
             && self.pending_images.is_empty()
             && self.queued_messages.is_empty()
+            && self.queued_commands.is_empty()
             && self.hidden_queued_system_messages.is_empty()
             && self.interleave_message.is_none()
             && self.pending_soft_interrupts.is_empty()
@@ -338,6 +342,7 @@ impl App {
                 })).collect::<Vec<_>>(),
                 "submit_on_restore": resume_prompt.is_some(),
                 "queued_messages": queued_messages,
+                "queued_commands": self.queued_commands,
                 "hidden_queued_system_messages": hidden_queued_system_messages,
                 "interleave_message": self.interleave_message,
                 "pending_soft_interrupts": self.pending_soft_interrupts,
@@ -434,6 +439,16 @@ impl App {
                 .unwrap_or(false);
             let queued_messages = value
                 .get("queued_messages")
+                .and_then(|v| v.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let queued_commands = value
+                .get("queued_commands")
                 .and_then(|v| v.as_array())
                 .map(|items| {
                     items
@@ -579,6 +594,7 @@ impl App {
                 pending_images,
                 submit_on_restore,
                 queued_messages,
+                queued_commands,
                 hidden_queued_system_messages,
                 startup_status_notice,
                 startup_display_message,
@@ -613,6 +629,7 @@ impl App {
             pending_images: Vec::new(),
             submit_on_restore: false,
             queued_messages: Vec::new(),
+            queued_commands: Vec::new(),
             hidden_queued_system_messages: Vec::new(),
             startup_status_notice: None,
             startup_display_message: None,
@@ -693,6 +710,9 @@ impl App {
         &mut self,
         snapshot: crate::side_panel::SidePanelSnapshot,
     ) {
+        if snapshot != self.side_panel {
+            self.wake_idle_hibernation();
+        }
         let focused_before = self.side_panel.focused_page_id.clone();
         let focused_after = snapshot.focused_page_id.clone();
         let focused_changed = focused_before != focused_after;
@@ -826,6 +846,9 @@ impl App {
     }
 
     fn prewarm_focused_side_panel(&self) {
+        if self.idle_hibernation.frame.is_some() {
+            return;
+        }
         let Ok((terminal_width, terminal_height)) = crossterm::terminal::size() else {
             return;
         };

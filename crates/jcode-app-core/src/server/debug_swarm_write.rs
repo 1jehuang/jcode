@@ -164,7 +164,12 @@ pub(super) async fn maybe_handle_swarm_write_command(
             if let Some(member_ids) = swarms.get(&swarm_id) {
                 let mut sent_count = 0;
                 for member_id in member_ids {
-                    if let Some(member) = members.get(member_id) {
+                    // Only deliver to sessions whose own record names this
+                    // swarm, never to a stale index entry (issue #1650).
+                    if let Some(member) = members
+                        .get(member_id)
+                        .filter(|member| member.swarm_id.as_deref() == Some(swarm_id.as_str()))
+                    {
                         let notification = ServerEvent::Notification {
                             from_session: current_session.clone(),
                             from_name: from_name.clone(),
@@ -519,193 +524,7 @@ pub(super) async fn maybe_handle_swarm_write_command(
         return Err(anyhow::anyhow!("Not in a swarm."));
     }
 
-    // Task-DAG ops over the debug socket, for testing/operability without a live
-    // model session. Arg is a JSON object:
-    //   {"op":"seed","swarm_id":"..","mode":"deep","nodes":[{id,content,kind,depends_on}]}
-    //   {"op":"expand","swarm_id":"..","actor":"sess","node_id":"..","children":[..]}
-    //   {"op":"complete","swarm_id":"..","actor":"sess","node_id":"..","artifact":{..}}
-    //   {"op":"inject","swarm_id":"..","actor":"sess","gate_id":"..","nodes":[..]}
-    if let Some(rest) = cmd.strip_prefix("swarm:graph:") {
-        return Ok(Some(handle_debug_graph_op(rest.trim(), ctx).await));
-    }
-
     Ok(None)
-}
-
-#[derive(serde::Deserialize)]
-struct DebugGraphArg {
-    op: String,
-    swarm_id: String,
-    #[serde(default)]
-    mode: Option<String>,
-    #[serde(default)]
-    actor: Option<String>,
-    #[serde(default)]
-    node_id: Option<String>,
-    #[serde(default)]
-    gate_id: Option<String>,
-    #[serde(default)]
-    nodes: Vec<DebugNodeSpec>,
-    #[serde(default)]
-    children: Vec<DebugNodeSpec>,
-    #[serde(default)]
-    artifact: Option<serde_json::Value>,
-}
-
-#[derive(serde::Deserialize)]
-struct DebugNodeSpec {
-    id: String,
-    content: String,
-    #[serde(default)]
-    kind: Option<String>,
-    #[serde(default)]
-    depends_on: Vec<String>,
-    #[serde(default)]
-    priority: u8,
-}
-
-fn debug_specs(specs: Vec<DebugNodeSpec>) -> Vec<jcode_plan::dag::NodeSpec> {
-    specs
-        .into_iter()
-        .map(|s| jcode_plan::dag::NodeSpec {
-            id: Some(s.id),
-            content: s.content,
-            kind: jcode_plan::bridge::parse_kind(s.kind.as_deref()),
-            depends_on: s.depends_on,
-            priority: s.priority,
-        })
-        .collect()
-}
-
-async fn handle_debug_graph_op(arg: &str, ctx: &DebugSwarmWriteContext<'_>) -> String {
-    use jcode_plan::bridge::{apply_task_graph, to_task_graph};
-    use jcode_plan::dag;
-
-    fn fail(msg: impl std::fmt::Display) -> String {
-        serde_json::json!({"ok": false, "error": msg.to_string()}).to_string()
-    }
-
-    let parsed: DebugGraphArg = match serde_json::from_str(arg) {
-        Ok(parsed) => parsed,
-        Err(e) => return fail(format!("invalid swarm:graph JSON: {e}")),
-    };
-    let swarm_id = parsed.swarm_id.clone();
-
-    let result: Result<(usize, &'static str), String> = {
-        let mut plans = ctx.swarm_plans.write().await;
-        let plan = plans
-            .entry(swarm_id.clone())
-            .or_insert_with(VersionedPlan::new);
-        match parsed.op.as_str() {
-            "seed" => {
-                if let Some(mode) = parsed.mode {
-                    plan.mode = mode;
-                }
-                let count = parsed.nodes.len();
-                let mut graph = to_task_graph(plan);
-                let before = graph.clone();
-                match dag::seed(&mut graph, debug_specs(parsed.nodes)) {
-                    Ok(()) => {
-                        if graph != before {
-                            apply_task_graph(plan, &graph);
-                            plan.version += 1;
-                        }
-                        Ok((count, "seed"))
-                    }
-                    Err(e) => Err(e.to_string()),
-                }
-            }
-            "expand" => {
-                let Some(actor) = parsed.actor.clone() else {
-                    return fail("'actor' required");
-                };
-                let Some(node_id) = parsed.node_id.clone() else {
-                    return fail("'node_id' required");
-                };
-                let count = parsed.children.len();
-                // Dispatch the node to the actor so engine ownership checks pass.
-                if let Some(item) = plan.items.iter_mut().find(|i| i.id == node_id) {
-                    item.assigned_to = Some(actor.clone());
-                    item.status = "running".to_string();
-                }
-                let mut graph = to_task_graph(plan);
-                match dag::expand_node(&mut graph, &node_id, &actor, debug_specs(parsed.children)) {
-                    Ok(_) => {
-                        apply_task_graph(plan, &graph);
-                        plan.version += 1;
-                        Ok((count, "expand"))
-                    }
-                    Err(e) => Err(e.to_string()),
-                }
-            }
-            "complete" => {
-                let Some(actor) = parsed.actor.clone() else {
-                    return fail("'actor' required");
-                };
-                let Some(node_id) = parsed.node_id.clone() else {
-                    return fail("'node_id' required");
-                };
-                let artifact: dag::HandoffArtifact = match serde_json::from_value(
-                    parsed.artifact.clone().unwrap_or(serde_json::json!({})),
-                ) {
-                    Ok(artifact) => artifact,
-                    Err(e) => return fail(format!("invalid artifact: {e}")),
-                };
-                if let Some(item) = plan.items.iter_mut().find(|i| i.id == node_id) {
-                    item.assigned_to = Some(actor.clone());
-                    item.status = "running".to_string();
-                }
-                let mut graph = to_task_graph(plan);
-                match dag::complete_node(&mut graph, &node_id, &actor, artifact) {
-                    Ok(()) => {
-                        apply_task_graph(plan, &graph);
-                        plan.version += 1;
-                        Ok((1, "complete"))
-                    }
-                    Err(e) => Err(e.to_string()),
-                }
-            }
-            "inject" => {
-                let Some(actor) = parsed.actor.clone() else {
-                    return fail("'actor' required");
-                };
-                let Some(gate_id) = parsed.gate_id.clone() else {
-                    return fail("'gate_id' required");
-                };
-                let count = parsed.nodes.len();
-                if let Some(item) = plan.items.iter_mut().find(|i| i.id == gate_id) {
-                    item.assigned_to = Some(actor.clone());
-                    item.status = "running".to_string();
-                }
-                let mut graph = to_task_graph(plan);
-                match dag::inject_from_gate(&mut graph, &gate_id, &actor, debug_specs(parsed.nodes))
-                {
-                    Ok(_) => {
-                        apply_task_graph(plan, &graph);
-                        plan.version += 1;
-                        Ok((count, "inject"))
-                    }
-                    Err(e) => Err(e.to_string()),
-                }
-            }
-            other => Err(format!("unknown op '{other}'")),
-        }
-    };
-
-    match result {
-        Ok((count, op)) => {
-            let swarm_state = SwarmState {
-                members: Arc::clone(ctx.swarm_members),
-                swarms_by_id: Arc::clone(ctx.swarms_by_id),
-                plans: Arc::clone(ctx.swarm_plans),
-                coordinators: Arc::clone(ctx.swarm_coordinators),
-            };
-            persist_swarm_state_for(&swarm_id, &swarm_state).await;
-            serde_json::json!({"ok": true, "op": op, "count": count, "swarm_id": swarm_id})
-                .to_string()
-        }
-        Err(e) => fail(format!("graph op rejected: {e}")),
-    }
 }
 
 #[cfg(test)]

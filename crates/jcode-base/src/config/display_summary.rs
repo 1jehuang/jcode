@@ -101,7 +101,6 @@ impl Config {
 - Swarm / subagent: {}
 - Swarm spawn mode: {}
 - Swarm root effort: {}
-- Deep swarm root effort: {}
 - Spawn hook: {}
 - Review: {}
 - Judge: {}
@@ -297,8 +296,7 @@ impl Config {
                 .as_deref()
                 .unwrap_or("(inherit current session)"),
             self.agents.swarm_spawn_mode.as_str(),
-            self.agents.root_effort_for_swarm(false),
-            self.agents.root_effort_for_swarm(true),
+            self.agents.root_effort_for_swarm(),
             self.terminal
                 .spawn_hook
                 .as_deref()

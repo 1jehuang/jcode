@@ -10,7 +10,7 @@ pub use anchor::{
     resolve_content_pos,
 };
 pub use cache::{
-    MessageCacheContext, centered_wrap_width, get_cached_message_lines,
+    MessageCacheContext, centered_wrap_width, clear_message_cache, get_cached_message_lines,
     left_pad_lines_for_centered_mode,
 };
 pub use message::{
@@ -23,7 +23,8 @@ pub use prepared::{
     PreparedMessages, PreparedSection, PreparedSectionKind,
 };
 pub use swarm_collapse::{
-    CollapsibleSwarmContent, encode_collapsible_swarm_content, parse_collapsible_swarm_content,
+    CollapsibleSwarmContent, SWARM_INLINE_BODY_MAX_CHARS, collapse_long_swarm_content,
+    encode_collapsible_swarm_content, parse_collapsible_swarm_content, swarm_preview_line,
     toggle_collapsible_swarm_content,
 };
 pub use wrapped_line_map::WrappedLineMap;

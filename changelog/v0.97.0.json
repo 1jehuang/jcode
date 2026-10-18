@@ -1,0 +1,18 @@
+{
+  "version": "0.97.0",
+  "date": "2026-10-14",
+  "highlights": [
+    "Use custom HTTP JSON search providers with configurable authentication, result mapping, and fallback engines",
+    "Rust and TypeScript SDK clients can invoke native runtime commands and transfer sessions without turning commands into agent prompts"
+  ],
+  "improvements": [
+    "Dismiss side panels directly from the TUI, and keep routine system notices on a compact single line",
+    "Default opt-out usage telemetry can now include the active Anthropic or OpenAI OAuth account email when the matching server rollout is available, with a conditional one-time TUI notice, 90-day retention, and collection controls in /telemetry"
+  ],
+  "fixes": [
+    "Azure agent turns use the Responses API with correct route selection, explicit reasoning settings, and more reliable tool-call and retry handling",
+    "Anthropic model catalog requests include the required authentication headers",
+    "Browser handoff failures preserve reconnect timeout diagnostics",
+    "Empty math no longer triggers LaTeX rendering, and repeated fallback failures avoid duplicate logging"
+  ]
+}

@@ -101,6 +101,7 @@ async fn handle_resume_session_allows_attach_without_local_history() -> Result<(
         None,
         None,
         false,
+        None,
         true,
         &mut client_selfdev,
         &mut client_session_id,

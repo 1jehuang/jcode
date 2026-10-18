@@ -25,7 +25,7 @@ fn browser_tool_description_text() -> &'static str {
     if browser_handoff_disabled() {
         return "Control the browser using direct actions. Check action='status' first; run setup only if not ready. Browser handoff is disabled for this process. Complete browser tasks with direct actions in the requested tab.";
     }
-    "Control the browser. Check action='status' first; run setup only if not ready. Use action='handoff' by default for browser tasks: the fast Jev browser agent owns the entire task in an explicit tab through an iterative observation/action/results loop until done or genuinely blocked. Supply a goal, tab_id, and optional trusted context with background and completion criteria. A hand_back with requested_help=script/text asks the main agent to supply exact executable script candidates or exact text_values and resume the same task. Navigation alone is not completion unless it satisfies the entire goal. Reserve direct actions for setup, tab discovery/creation, or when handoff cannot complete the task."
+    "Control the browser. Check action='status' first; run setup only if not ready. Use action='handoff' by default for browser tasks: the fast Jev browser agent owns the entire task in an explicit tab through an iterative observation/action/results loop until done or genuinely blocked. Supply a goal, tab_id, and optional trusted context with background and completion criteria. A hand_back with requested_help=script/text asks the main agent to supply exact executable script candidates or exact text_values and resume the same task. Navigation alone is not completion unless it satisfies the entire goal. Reserve direct actions for setup, tab discovery/creation, or when handoff cannot complete the task. list_tabs shows every window, including the user's already signed-in tabs; pass tab_id to work in one. requested_help=user_login means ask the user to sign in or finish 2FA in that tab, wait for them, then re-run the same handoff."
 }
 
 /// Opt-in process-local control for direct-only benchmark arms. Normal sessions
@@ -547,11 +547,15 @@ async fn firefox_status(
         metadata["browser_running"] = json!(running);
         metadata["firefox_running"] = json!(crate::browser::is_firefox_running());
         let body = if running {
+            let diagnosis = crate::browser::diagnose_silent_chromium_bridge(target.kind)
+                .map(|d| format!(" {d}"))
+                .unwrap_or_default();
             format!(
-                "Browser bridge binaries are installed and {} is running, but the live bridge is not responding. Check that the Browser Agent Bridge extension is enabled in {} ({}). Use action='setup' only if you want to repair the existing install. You do not need to run setup before every browser task.",
+                "Browser bridge binaries are installed and {} is running, but the live bridge is not responding. Check that the Browser Agent Bridge extension is enabled in {} ({}).{} Use action='setup' only if you want to repair the existing install. You do not need to run setup before every browser task.",
                 name,
                 name,
-                target.kind.extensions_page()
+                target.kind.extensions_page(),
+                diagnosis
             )
         } else {
             format!(
@@ -592,6 +596,12 @@ async fn firefox_setup(
         .with_metadata(metadata))
 }
 
+async fn companion_updates_bridge() -> bool {
+    tokio::task::spawn_blocking(crate::companion_client::is_running)
+        .await
+        .unwrap_or(false)
+}
+
 async fn ensure_firefox_ready(
     target: &crate::browser_detect::BrowserDetection,
     explicit: bool,
@@ -600,8 +610,14 @@ async fn ensure_firefox_ready(
     // verify the live bridge before launching an action because the browser or
     // the extension may have stopped or become incompatible since then.
     let name = target.kind.display_name();
-    // Throttled (every few hours) check for a newer bridge release.
-    let update_note = crate::browser::auto_update_before_action(target.kind).await;
+    // Bridge updates are installer work that `jcode companion` does in the
+    // background. Only without a companion (headless/standalone) check here,
+    // still throttled to every few hours.
+    let update_note = if companion_updates_bridge().await {
+        None
+    } else {
+        crate::browser::auto_update_before_action(target.kind).await
+    };
     let mut status = crate::browser::ensure_browser_ready_noninteractive_for(target).await?;
     if status.ready {
         return ready_in_requested_browser(&status, target.kind, explicit)
@@ -647,6 +663,10 @@ async fn ensure_firefox_ready(
         message.push_str(&format!("{} was not running, so it was launched automatically, but the browser bridge is still not responding. The Browser Agent Bridge extension may be disabled or missing in this {} profile. This is not fixed by re-running setup unless the extension is actually missing.\n", name, name));
     } else if crate::browser::is_browser_running(target.kind) {
         message.push_str(&format!("{} is running, but the browser bridge extension is not responding. Check that the Browser Agent Bridge extension is installed and enabled ({}). Do not re-run setup just because the bridge is silent.\n", name, target.kind.extensions_page()));
+        if let Some(diagnosis) = crate::browser::diagnose_silent_chromium_bridge(target.kind) {
+            message.push_str(&diagnosis);
+            message.push('\n');
+        }
     } else {
         message.push_str(&format!("{} is not running, so the browser bridge is not responding. Start {}, then retry the browser action. Setup is one-time and is not needed again.\n", name, name));
     }
@@ -701,308 +721,84 @@ async fn execute_firefox_action(
         return screenshot_via_bridge(&bridge_params, title, browser, ctx).await;
     }
 
-    let result = firefox_run_bridge_command(&bridge_action, bridge_params, browser, ctx).await?;
+    let result =
+        match firefox_run_bridge_command(&bridge_action, bridge_params.clone(), browser, ctx).await
+        {
+            Ok(result) => result,
+            Err(error)
+                if bridge_action == "navigate"
+                    && format!("{error:#}").contains("Timed out waiting for page load") =>
+            {
+                recover_slow_navigation(&bridge_params, browser, ctx)
+                    .await
+                    .ok_or(error)?
+            }
+            Err(error) => return Err(error),
+        };
     Ok(render_browser_output(action, title, result))
 }
 
-fn bridge_request(action: &str, input: &BrowserInput) -> Result<(String, Value, String)> {
-    let mut bridge_action = match action {
-        "list_tabs" => "listTabs",
-        "new_tab" => "newSession",
-        "select_tab" => "setActiveTab",
-        "get_active_tab" => "getActiveTab",
-        "list_frames" => "listFrames",
-        "open" => "navigate",
-        "snapshot" => "getContent",
-        "get_content" => "getContent",
-        "interactables" => "getInteractables",
-        "click" => "click",
-        "type" => "type",
-        "fill_form" => "fillForm",
-        "select" => "fillForm",
-        "wait" => "waitFor",
-        "screenshot" => "screenshot",
-        "eval" => "evaluate",
-        "scroll" => "scroll",
-        "upload" => "uploadFile",
-        "press" => "evaluate",
-        "provider_command" => input.provider_action.as_deref().ok_or_else(|| {
-            anyhow::anyhow!("provider_action is required when action='provider_command'")
-        })?,
-        other => anyhow::bail!("Unsupported browser action: {}", other),
+/// SaaS dashboards often keep a request open forever, so the tab never reports
+/// "complete" and navigate fails after 15s even though the page rendered
+/// (#1743, Zoom Marketplace). Read the page instead: if it has the requested
+/// URL and content, report success with a note.
+async fn recover_slow_navigation(
+    params: &Value,
+    browser: Option<&str>,
+    ctx: &ToolContext,
+) -> Option<Value> {
+    let mut read = Map::new();
+    read.insert("format".into(), json!("annotated"));
+    if let Some(tab) = params.get("tabId") {
+        read.insert("tabId".into(), tab.clone());
     }
-    .to_string();
-
-    let mut params = Map::new();
-    apply_common_targeting(&mut params, input);
-
-    match action {
-        "new_tab" => {
-            if let Some(url) = &input.url {
-                params.insert("url".into(), json!(url));
-            }
-            if let Some(timeout_ms) = input.timeout_ms {
-                params.insert("timeoutMs".into(), json!(timeout_ms));
-            }
-        }
-        "select_tab" => {
-            let tab_id = input
-                .tab_id
-                .ok_or_else(|| anyhow::anyhow!("tab_id is required for select_tab"))?;
-            params.insert("tabId".into(), json!(tab_id));
-            if let Some(focus) = input.focus {
-                params.insert("focus".into(), json!(focus));
-            }
-        }
-        "open" => {
-            let url = input
-                .url
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("url is required for open"))?;
-            params.insert("url".into(), json!(url));
-            params.insert("wait".into(), json!(input.wait.unwrap_or(true)));
-            if let Some(new_tab) = input.new_tab {
-                params.insert("newTab".into(), json!(new_tab));
-            }
-            if let Some(timeout_ms) = input.timeout_ms {
-                params.insert("timeoutMs".into(), json!(timeout_ms));
-            }
-        }
-        "snapshot" => {
-            params.insert("format".into(), json!("annotated"));
-        }
-        "get_content" => {
-            params.insert(
-                "format".into(),
-                json!(input.format.as_deref().unwrap_or("text")),
-            );
-        }
-        "interactables" => {}
-        "click" => {
-            // Handoff must never double-activate a selected action. Preserve existing
-            // direct-click event sequences for callers that rely on mouse down/up.
-            if input.handoff_single_click {
-                params.insert("dispatchEvents".into(), json!(false));
-            }
-            if input.selector.is_none()
-                && input.text.is_none()
-                && input.x.is_none()
-                && input.y.is_none()
-            {
-                anyhow::bail!("click requires selector, text, or x/y coordinates");
-            }
-            if let Some(x) = input.x {
-                params.insert("x".into(), json!(x));
-            }
-            if let Some(y) = input.y {
-                params.insert("y".into(), json!(y));
-            }
-        }
-        "type" => {
-            let text = input
-                .text
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("text is required for type"))?;
-            params.insert("text".into(), json!(text));
-            if let Some(clear) = input.clear {
-                params.insert("clear".into(), json!(clear));
-            }
-            if let Some(submit) = input.submit {
-                params.insert("submit".into(), json!(submit));
-            }
-        }
-        "fill_form" => {
-            let fields = input
-                .fields
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("fields are required for fill_form"))?;
-            let mapped: Vec<Value> = fields
-                .iter()
-                .map(|field| {
-                    let mut obj = Map::new();
-                    obj.insert("selector".into(), json!(field.selector));
-                    if let Some(value) = &field.value {
-                        obj.insert("value".into(), json!(value));
-                    }
-                    if let Some(checked) = field.checked {
-                        obj.insert("checked".into(), json!(checked));
-                    }
-                    Value::Object(obj)
-                })
-                .collect();
-            params.insert("fields".into(), Value::Array(mapped));
-        }
-        "select" => {
-            let selector = input
-                .selector
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("selector is required for select"))?;
-            let value = input.text.as_deref().ok_or_else(|| {
-                anyhow::anyhow!("text is required for select and is used as the option value")
-            })?;
-            params.insert(
-                "fields".into(),
-                json!([{ "selector": selector, "value": value }]),
-            );
-        }
-        "wait" => {
-            if input.selector.is_none() && input.text.is_none() && input.contains.is_none() {
-                anyhow::bail!("wait requires selector, text, or contains");
-            }
-            if let Some(timeout_ms) = input.timeout_ms {
-                params.insert("timeout".into(), json!(timeout_ms));
-            }
-            if let Some(contains) = &input.contains {
-                params.insert("contains".into(), json!(contains));
-            }
-        }
-        "screenshot" => {}
-        "eval" => {
-            let script = input
-                .script
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("script is required for eval"))?;
-            params.insert("script".into(), json!(script));
-            if let Some(page_world) = input.page_world {
-                params.insert("pageWorld".into(), json!(page_world));
-            }
-        }
-        "scroll" => {
-            // The bridge's selector scroll means scrollIntoView, not scrolling
-            // the selected container. Implement explicit container deltas here.
-            if let Some(selector) = &input.selector
-                && (input.x.is_some() || input.y.is_some())
-                && input.scroll_to.is_none()
-                && input.position.is_none()
-            {
-                let selector = serde_json::to_string(selector)?;
-                let x = input.x.unwrap_or(0.0);
-                let y = input.y.unwrap_or(0.0);
-                let behavior =
-                    serde_json::to_string(input.behavior.as_deref().unwrap_or("instant"))?;
-                params.insert("script".into(), json!(format!(
-                    "const element=document.querySelector({selector}); if(!element) throw new Error('Scroll container not found'); element.scrollBy({{left:{x},top:{y},behavior:{behavior}}}); return {{scrolled:true,x:element.scrollLeft,y:element.scrollTop}};"
-                )));
-                bridge_action = "evaluate".into();
-                return Ok((
-                    bridge_action,
-                    Value::Object(params),
-                    "browser scroll".into(),
+    // This is recovery for an already failed navigation, so retain that original
+    // error if the read-only fallback also fails.
+    let content =
+        match firefox_run_bridge_command("getContent", Value::Object(read), browser, ctx).await {
+            Ok(content) => content,
+            Err(error) => {
+                crate::logging::debug(&format!(
+                    "Slow-navigation content recovery failed: {}",
+                    browser_error_diagnostic(&error)
                 ));
+                return None;
             }
-            if let Some(x) = input.x {
-                params.insert("x".into(), json!(x));
-            }
-            if let Some(y) = input.y {
-                params.insert("y".into(), json!(y));
-            }
-            if let Some(position) = &input.position {
-                params.insert("position".into(), json!(position));
-            }
-            if let Some(behavior) = &input.behavior {
-                params.insert("behavior".into(), json!(behavior));
-            }
-            if let Some(scroll_to) = &input.scroll_to {
-                let mut target = Map::new();
-                if let Some(x) = scroll_to.x {
-                    target.insert("x".into(), json!(x));
-                }
-                if let Some(y) = scroll_to.y {
-                    target.insert("y".into(), json!(y));
-                }
-                params.insert("scrollTo".into(), Value::Object(target));
-            }
-            if !params.contains_key("x")
-                && !params.contains_key("y")
-                && !params.contains_key("selector")
-                && !params.contains_key("position")
-                && !params.contains_key("scrollTo")
-            {
-                anyhow::bail!("scroll requires x/y, selector, position, or scroll_to");
-            }
-        }
-        "upload" => {
-            let path = input
-                .path
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("path is required for upload"))?;
-            // The native messaging host reads the file from `filePath`, base64-encodes
-            // it, and forwards it to the content script. It also accepts an optional
-            // `fileName` override. (Previously this sent `path`, which the host ignored,
-            // producing a "Missing filePath" error.)
-            params.insert("filePath".into(), json!(path));
-            if let Some(file_name) = std::path::Path::new(path)
-                .file_name()
-                .and_then(|name| name.to_str())
-            {
-                params.insert("fileName".into(), json!(file_name));
-            }
-        }
-        "press" => {
-            let script = build_press_script(input.key.as_deref(), input.selector.as_deref())?;
-            params.insert("script".into(), json!(script));
-            params.insert("pageWorld".into(), json!(true));
-        }
-        "provider_command" => {
-            if let Some(raw) = &input.params {
-                return Ok((bridge_action, raw.clone(), format!("browser {}", action)));
-            }
-        }
-        _ => {}
+        };
+    let text = content
+        .get("content")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    if text.trim().is_empty() {
+        return None;
     }
-
-    Ok((
-        bridge_action,
-        Value::Object(params),
-        format!("browser {}", action),
-    ))
+    // Never report the previous page as the navigation result.
+    let host = |u: &str| match url::Url::parse(u) {
+        Ok(url) => url.host_str().map(str::to_owned),
+        Err(error) => {
+            // Do not log the URL, which may contain credentials.
+            crate::logging::debug(&format!(
+                "Cannot verify slow-navigation destination: {error}"
+            ));
+            None
+        }
+    };
+    let landed = content.get("url").and_then(|v| v.as_str()).and_then(host);
+    if landed.is_none() || landed != params["url"].as_str().and_then(host) {
+        return None;
+    }
+    Some(json!({
+        "url": content.get("url").cloned().unwrap_or_else(|| params["url"].clone()),
+        "content": content,
+        "loadWarning": "The page did not finish loading within the timeout (it may keep network requests open), but it has rendered content, shown here. Verify the expected elements are present before acting.",
+    }))
 }
 
-fn apply_common_targeting(params: &mut Map<String, Value>, input: &BrowserInput) {
-    if let Some(tab_id) = input.tab_id {
-        params.insert("tabId".into(), json!(tab_id));
-    }
-    if let Some(window_id) = input.window_id {
-        params.insert("windowId".into(), json!(window_id));
-    }
-    if let Some(frame_id) = input.frame_id {
-        params.insert("frameId".into(), json!(frame_id));
-    }
-    if let Some(all_frames) = input.all_frames {
-        params.insert("allFrames".into(), json!(all_frames));
-    }
-    if let Some(selector) = &input.selector {
-        params.insert("selector".into(), json!(selector));
-    }
-    if let Some(text) = &input.text {
-        params.insert("text".into(), json!(text));
-    }
-}
-
-fn build_press_script(key: Option<&str>, selector: Option<&str>) -> Result<String> {
-    let key = key.ok_or_else(|| anyhow::anyhow!("key is required for press"))?;
-    let selector_literal = selector.map(serde_json::to_string).transpose()?;
-    let selector_expr = selector_literal
-        .map(|s| format!("document.querySelector({})", s))
-        .unwrap_or_else(|| "null".to_string());
-    let key_literal = serde_json::to_string(key)?;
-    Ok(format!(
-        r#"return (() => {{
-  const target = {selector_expr} || document.activeElement || document.body;
-  if (!target) throw new Error('No target available for key press');
-  if (typeof target.focus === 'function') target.focus();
-  const key = {key_literal};
-  const eventInit = {{ key, bubbles: true, cancelable: true }};
-  target.dispatchEvent(new KeyboardEvent('keydown', eventInit));
-  target.dispatchEvent(new KeyboardEvent('keypress', eventInit));
-  if (key === 'Enter' && target.form && typeof target.form.submit === 'function') {{
-    target.form.submit();
-  }}
-  target.dispatchEvent(new KeyboardEvent('keyup', eventInit));
-  return {{ pressed: true, key, tag: target.tagName || null }};
-}})();"#
-    ))
-}
+#[path = "browser_request.rs"]
+mod request;
+use request::bridge_request;
+#[cfg(test)]
+use request::build_press_script;
 
 async fn firefox_run_bridge_command(
     action: &str,
@@ -1018,8 +814,162 @@ async fn firefox_run_bridge_command(
     }
 
     let params_json = serde_json::to_string(&params)?;
-    let mut command = tokio::process::Command::new(&bin);
-    command.arg(action).arg(&params_json);
+    // jcode manages the session daemon unless the user pinned BROWSER_SESSION.
+    let managed_session = cfg!(not(windows)) && std::env::var("BROWSER_SESSION").is_err();
+    // A session bound to its own window scopes untargeted listings to that
+    // window, which hid every tab the user already had open (and logged in)
+    // from the agent (#1743). List all windows instead. Explicit tab_id
+    // targets still go through the session afterwards.
+    let unscoped_listing = action == "listTabs" && params.get("windowId").is_none();
+    let use_session = managed_session && !unscoped_listing;
+
+    let first = run_bridge_cli(&bin, action, &params_json, browser, use_session, _ctx).await?;
+    let result = match first {
+        Err(details)
+            if use_session
+                && params.get("tabId").is_none()
+                && crate::browser::is_stale_session_target_error(&details) =>
+        {
+            // The user closed the agent's window or tab. The daemon would keep
+            // targeting it forever, so start a fresh one and retry once.
+            reset_session_off_worker(&_ctx.session_id, browser).await;
+            run_bridge_cli(&bin, action, &params_json, browser, use_session, _ctx).await?
+        }
+        other => other,
+    };
+    let stdout = match result {
+        Ok(stdout) => stdout,
+        Err(details) => {
+            if details.contains("Unknown action:") {
+                anyhow::bail!(
+                    "The connected browser bridge extension is missing required support for action '{}'. This usually means the installed extension is older than the browser CLI expected by jcode. Use browser action='status' to confirm, then action='setup' to repair or update the extension.\n\nOriginal bridge error: {}",
+                    action,
+                    details
+                );
+            }
+            anyhow::bail!(explain_bridge_error(action, &details));
+        }
+    };
+
+    if stdout.is_empty() {
+        return Ok(json!({ "ok": true }));
+    }
+
+    let mut value: Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|_| json!({ "raw": stdout }));
+    if unscoped_listing
+        && managed_session
+        && let Some(window) = agent_window_id(&bin, browser, _ctx).await
+        && let Some(map) = value.as_object_mut()
+    {
+        map.insert("agentWindowId".into(), json!(window));
+        map.insert(
+            "note".into(),
+            json!("All browser windows are listed, including tabs the user already has open and signed in. agentWindowId is the agent's own window. Pass tab_id to act on one of the user's tabs."),
+        );
+    }
+    Ok(value)
+}
+
+async fn reset_session_off_worker(session_id: &str, browser: Option<&str>) {
+    let session_id = session_id.to_owned();
+    let browser = browser.map(str::to_owned);
+    // Reset is best-effort after a bridge failure, but a worker panic matters.
+    if let Err(error) = tokio::task::spawn_blocking(move || {
+        crate::browser::reset_browser_session_for(&session_id, browser.as_deref())
+    })
+    .await
+    {
+        crate::logging::warn(&format!("Browser session reset worker failed: {error}"));
+    }
+}
+
+/// Window the agent's session daemon is bound to. Never starts a daemon (that
+/// would open a window just to list tabs).
+async fn agent_window_id(
+    bin: &std::path::Path,
+    browser: Option<&str>,
+    ctx: &ToolContext,
+) -> Option<i64> {
+    let (session_id, owned_browser) = (ctx.session_id.clone(), browser.map(str::to_owned));
+    let running = tokio::task::spawn_blocking(move || {
+        crate::browser::browser_session_running(&session_id, owned_browser.as_deref())
+    })
+    .await
+    .unwrap_or(false);
+    if !running {
+        return None;
+    }
+    // Window attribution is optional. A failed lookup must not prevent listing
+    // tabs, but retain diagnostics for both transport and bridge failures.
+    let out = match run_bridge_cli(bin, "getActiveTab", "{}", browser, true, ctx).await {
+        Ok(Ok(out)) => out,
+        Ok(Err(error)) => {
+            crate::logging::debug(&format!(
+                "Browser window lookup failed: {}",
+                browser_error_diagnostic(&anyhow::Error::msg(error))
+            ));
+            return None;
+        }
+        Err(error) => {
+            crate::logging::debug(&format!(
+                "Browser window lookup transport failed: {}",
+                browser_error_diagnostic(&error)
+            ));
+            return None;
+        }
+    };
+    match serde_json::from_str::<Value>(&out) {
+        Ok(value) => value["windowId"].as_i64(),
+        Err(error) => {
+            crate::logging::debug(&format!(
+                "Browser window lookup returned invalid JSON: {error}"
+            ));
+            None
+        }
+    }
+}
+
+/// Turn bare bridge failures into errors the agent can act on.
+fn explain_bridge_error(action: &str, details: &str) -> String {
+    let lower = details.to_ascii_lowercase();
+    if lower.contains("timed out waiting for page load") {
+        return format!(
+            "{details}\nThe page started loading but never reported complete, which is common on dashboards that keep network requests open. It is usually usable already: read it with action='snapshot' or action='get_content' before retrying, or pass wait=false to open."
+        );
+    }
+    if lower.contains("websocket error") || lower.contains("connection refused") {
+        return format!(
+            "Could not reach the browser bridge for action '{action}': {details}\nThe browser may have closed or the extension may be disabled. Check action='status'."
+        );
+    }
+    if lower.contains("cannot access a chrome://")
+        || lower.contains("cannot access contents of")
+        || lower.contains("extensions gallery cannot be scripted")
+    {
+        return format!(
+            "{details}\nBrowsers do not let extensions script their own internal pages (chrome://, about:, the extension store). Open a normal web page or target another tab_id."
+        );
+    }
+    if lower.contains("receiving end does not exist") {
+        return format!(
+            "{details}\nThe page's content script is not loaded yet (the tab may still be loading, or it was open before the extension started). Wait briefly and retry, or reload the tab with action='open'."
+        );
+    }
+    details.to_string()
+}
+
+/// Run one bridge CLI call. `Ok(Err(details))` is a bridge-reported failure.
+async fn run_bridge_cli(
+    bin: &std::path::Path,
+    action: &str,
+    params_json: &str,
+    browser: Option<&str>,
+    use_session: bool,
+    ctx: &ToolContext,
+) -> Result<std::result::Result<String, String>> {
+    let mut command = tokio::process::Command::new(bin);
+    command.arg(action).arg(params_json);
     command.kill_on_drop(true);
     command.stdin(std::process::Stdio::null());
     command.stdout(std::process::Stdio::piped());
@@ -1027,12 +977,14 @@ async fn firefox_run_bridge_command(
     crate::browser::apply_bridge_browser_env(&mut command, browser);
 
     #[cfg(not(windows))]
-    if std::env::var("BROWSER_SESSION").is_err()
+    if use_session
         && let Some(session_name) =
-            crate::browser::ensure_browser_session_for(&_ctx.session_id, browser)
+            crate::browser::ensure_browser_session_for_async(&ctx.session_id, browser).await
     {
         command.env("BROWSER_SESSION", session_name);
     }
+    #[cfg(windows)]
+    let _ = (use_session, ctx);
 
     let output = command
         .output()
@@ -1050,21 +1002,12 @@ async fn firefox_run_bridge_command(
         } else {
             format!("{}\n{}", stderr, stdout)
         };
-        if details.contains("Unknown action:") {
-            anyhow::bail!(
-                "The connected Firefox browser bridge is missing required support for action '{}'. This usually means the installed extension is older than the browser CLI expected by jcode. Use browser action='status' to confirm, then action='setup' to repair or update the extension.\n\nOriginal bridge error: {}",
-                action,
-                details
-            );
-        }
-        anyhow::bail!(details);
+        return Ok(Err(details
+            .strip_prefix("Error: ")
+            .unwrap_or(&details)
+            .to_string()));
     }
-
-    if stdout.is_empty() {
-        return Ok(json!({ "ok": true }));
-    }
-
-    serde_json::from_str(&stdout).or_else(|_| Ok(json!({ "raw": stdout })))
+    Ok(Ok(stdout))
 }
 
 async fn screenshot_via_bridge(
@@ -1102,7 +1045,12 @@ async fn screenshot_via_bridge(
             STANDARD.encode(&bytes),
             format!("browser screenshot: {}", saved.display()),
         );
-        let _ = tokio::fs::remove_file(&saved).await;
+        // The image is already attached. Cleanup failure must not discard it.
+        if let Err(error) = tokio::fs::remove_file(&saved).await {
+            crate::logging::debug(&format!(
+                "Could not remove attached browser screenshot: {error}"
+            ));
+        }
     }
 
     Ok(output)
@@ -1116,13 +1064,42 @@ fn temp_screenshot_path() -> PathBuf {
     std::env::temp_dir().join(format!("jcode-browser-{}.png", ts))
 }
 
+/// Bridge errors can contain URLs, page text and scripts. Persist only typed
+/// failure categories, never arbitrary stdout/stderr or an anyhow error chain.
+fn browser_error_diagnostic(error: &anyhow::Error) -> String {
+    if let Some(error) = error.downcast_ref::<std::io::Error>() {
+        return format!(
+            "I/O failure ({:?}, OS code {:?})",
+            error.kind(),
+            error.raw_os_error()
+        );
+    }
+    if let Some(error) = error.downcast_ref::<serde_json::Error>() {
+        return format!(
+            "JSON failure ({:?}, line {}, column {})",
+            error.classify(),
+            error.line(),
+            error.column()
+        );
+    }
+    "bridge command failed (page-provided details omitted for privacy)".to_string()
+}
+
+fn render_result_json(result: &Value) -> String {
+    serde_json::to_string_pretty(result).unwrap_or_else(|error| {
+        crate::logging::warn(&format!("Could not format browser JSON result: {error}"));
+        // Preserve the result in compact form rather than returning empty output.
+        result.to_string()
+    })
+}
+
 fn render_browser_output(action: &str, title: String, result: Value) -> ToolOutput {
     let body = match action {
         "snapshot" => result
             .get("content")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
-            .unwrap_or_else(|| serde_json::to_string_pretty(&result).unwrap_or_default()),
+            .unwrap_or_else(|| render_result_json(&result)),
         "get_content" => format_content_result(&result),
         "interactables" => format_interactables_result(&result),
         "eval" => format_eval_result(&result),
@@ -1150,7 +1127,7 @@ fn format_content_result(result: &Value) -> String {
         }
         return title.to_string();
     }
-    serde_json::to_string_pretty(result).unwrap_or_default()
+    render_result_json(result)
 }
 
 fn format_eval_result(result: &Value) -> String {
@@ -1169,7 +1146,7 @@ fn format_eval_result(result: &Value) -> String {
 
 fn format_interactables_result(result: &Value) -> String {
     let Some(elements) = result.get("elements").and_then(|v| v.as_array()) else {
-        return serde_json::to_string_pretty(result).unwrap_or_default();
+        return render_result_json(result);
     };
 
     if elements.is_empty() {

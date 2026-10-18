@@ -230,6 +230,17 @@ async fn wait_for_reload_handoff_before_reconnect(
         return Ok(None);
     }
 
+    // The marker stays `SocketReady` for up to RELOAD_MARKER_MAX_AGE after a
+    // reload completes. Any client launched in that window would otherwise
+    // flash "Waiting for reload handoff..." (an extra notice row that shoved
+    // the layout) even though the replacement server is already serving.
+    if !state.server_reload_in_progress
+        && crate::server::recent_reload_state(RELOAD_MARKER_MAX_AGE)
+            .is_some_and(|marker| marker.phase == crate::server::ReloadPhase::SocketReady)
+    {
+        return Ok(None);
+    }
+
     state.disconnect_start.get_or_insert_with(Instant::now);
     app.set_remote_startup_phase(super::super::RemoteStartupPhase::WaitingForReload);
     app.set_status_notice("Waiting for reload handoff...");
@@ -386,12 +397,15 @@ pub(in crate::tui::app) async fn connect_with_retry(
     let client_has_local_history = !crate::tui::is_ssh_remote()
         && session_to_resume.is_some()
         && !app.display_messages().is_empty();
+    let history_base =
+        session_to_resume.and_then(|session_id| app.take_history_base_for_subscribe(session_id));
     let client_instance_id = app.remote_client_instance_id.clone();
     let allow_session_takeover = should_allow_reconnect_takeover(app, state, session_to_resume);
     let connect = RemoteConnection::connect_with_session(
         session_to_resume,
         Some(client_instance_id.as_str()),
         client_has_local_history,
+        history_base,
         allow_session_takeover,
         remote_working_dir,
     );
@@ -745,10 +759,18 @@ pub(in crate::tui::app) async fn handle_post_connect<B: ratatui::backend::Backen
     // this follow-up the public picker exposes generic `remote-catalog` rows.
     // Request ordering keeps the authoritative History snapshot ahead of this
     // expanded catalog response on a newly connected transport.
-    if let Err(error) = remote.request_model_catalog().await {
-        crate::logging::warn(&format!(
-            "Failed to hydrate model routes during remote bootstrap: {error}"
-        ));
+    //
+    // The catalog is ~1MB. Requesting it alongside the bootstrap made every
+    // reconnecting client compete with every other client's History during a
+    // reload storm. Wait for History first; the tick sends it once loaded.
+    if remote.has_loaded_history() {
+        if let Err(error) = remote.request_model_catalog().await {
+            crate::logging::warn(&format!(
+                "Failed to hydrate model routes during remote bootstrap: {error}"
+            ));
+        }
+    } else {
+        app.model_catalog_after_history = true;
     }
 
     // Dispatch restored work once the server history is in place. This must

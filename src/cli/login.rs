@@ -1006,16 +1006,11 @@ fn login_openai_compatible_flow(
     Ok(())
 }
 
-pub use crate::secret_input::read_secret_line;
+pub use jcode_terminal_prompt::read_secret_line;
 
-fn read_line_trimmed(prompt: &str) -> Result<String> {
-    print!("{}", prompt);
-    io::stdout().flush()?;
-
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    Ok(input.trim().to_string())
-}
+mod presenter;
+pub use presenter::install_terminal_login_presenter;
+use presenter::read_line_trimmed;
 
 fn save_named_env_vars(env_file: &str, vars: &[(&str, String)]) -> Result<()> {
     if !crate::provider_catalog::is_safe_env_file_name(env_file) {
@@ -1090,7 +1085,7 @@ async fn login_copilot_device_flow(no_browser: bool) -> Result<()> {
     eprintln!("  Open this URL in your browser:");
     eprintln!("    {}", device_resp.verification_uri);
     eprintln!();
-    if let Some(qr) = crate::login_qr::indented_section(
+    if let Some(qr) = jcode_terminal_prompt::qr::indented_section(
         &device_resp.verification_uri,
         "  Or scan this QR on another device to open the verification page:",
         "    ",

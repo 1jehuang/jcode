@@ -53,8 +53,6 @@ async fn assign_task_without_target_picks_ready_agent() {
                 running_worker.to_string(),
             ]),
             task_progress: HashMap::new(),
-            mode: "light".to_string(),
-            node_meta: HashMap::new(),
         },
     )])));
     let swarm_coordinators = Arc::new(RwLock::new(HashMap::from([(

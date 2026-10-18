@@ -1,0 +1,33 @@
+{
+  "version": "0.99.0",
+  "date": "2026-10-18",
+  "title": "Account failover, hibernation, and faster reloads",
+  "highlights": [
+    "Automatically retry turns on the next pool account when one hits a usage limit, including for Desktop and SDK clients",
+    "Hibernate idle sessions to free memory, with measured RAM status and transparent wake on the next interaction",
+    "Reload and resume large sessions much faster by showing the local transcript immediately and sending only new history"
+  ],
+  "improvements": [
+    "Support OpenAI Ultrafast speed tiers for GPT-6.1 Sol, with Fast commands and hotkeys that apply promptly",
+    "Show saved accounts, cached quotas, and available resets in the startup account router and usage cards",
+    "Polish usage cards with responsive gauges and compact Mil and Bil token totals",
+    "Offer additional OAuth accounts in the login picker and reauthenticate saved accounts from it",
+    "Show cache misses inline with more accurate cache reuse diagnostics",
+    "Show Jcode inference spending balance",
+    "Compress OpenAI and Anthropic request bodies to reduce upload time",
+    "Build the /model picker off the UI thread for large remote catalogs",
+    "Reconnect only changed MCP servers instead of restarting all of them",
+    "Simplify swarm mode by removing the task graph and defaulting swarm root effort to low"
+  ],
+  "fixes": [
+    "Keep startup headers and account rows on a single line at narrow widths",
+    "Show usage-limit rejections clearly instead of stale quota bars",
+    "Fix forked sessions failing on replayed Anthropic web search blocks",
+    "Count Gemini thinking and tool-use tokens correctly in usage",
+    "Keep streamed OpenAI output when the completion payload arrives empty",
+    "Preserve token usage when requests are cancelled or fail",
+    "Fix Windows named-pipe connections hanging or failing on startup probes",
+    "Fix Firefox cold starts blocked by stale zombie processes",
+    "Collapse expanded pinned todos and restore overall progress display"
+  ]
+}

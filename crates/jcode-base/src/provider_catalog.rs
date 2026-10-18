@@ -34,6 +34,27 @@ pub fn resolve_openai_compatible_profile_with_api_key_hint(
     profile: OpenAiCompatibleProfile,
     api_key_hint: Option<&str>,
 ) -> ResolvedOpenAiCompatibleProfile {
+    let mut resolved = resolve_openai_compatible_profile_endpoint(profile, api_key_hint);
+    if profile.id != OPENAI_COMPAT_PROFILE.id
+        && let Some(newest_model) =
+            newest_released_model_for_resolved_openai_compatible_profile(profile.id, &resolved)
+    {
+        resolved.default_model = Some(newest_model);
+    }
+    resolved
+}
+
+/// Resolve a profile's endpoint and credential bindings (api base, key env,
+/// env file, `requires_api_key`) without picking a default model.
+///
+/// Choosing the default model reads the profile's cached model catalog from
+/// disk and ranks it, which costs milliseconds per profile. Credential checks
+/// (auth status, which runs on the TUI's first frame across every profile)
+/// never look at the model, so they use this cheaper path.
+fn resolve_openai_compatible_profile_endpoint(
+    profile: OpenAiCompatibleProfile,
+    api_key_hint: Option<&str>,
+) -> ResolvedOpenAiCompatibleProfile {
     let mut resolved = ResolvedOpenAiCompatibleProfile {
         id: profile.id.to_string(),
         display_name: profile.display_name.to_string(),
@@ -58,11 +79,6 @@ pub fn resolve_openai_compatible_profile_with_api_key_hint(
     apply_profile_key_based_endpoint_overrides(profile, &mut resolved, api_key_hint);
 
     if profile.id != OPENAI_COMPAT_PROFILE.id {
-        if let Some(newest_model) =
-            newest_released_model_for_resolved_openai_compatible_profile(profile.id, &resolved)
-        {
-            resolved.default_model = Some(newest_model);
-        }
         return resolved;
     }
 
@@ -126,7 +142,51 @@ fn newest_released_model_for_resolved_openai_compatible_profile(
 ) -> Option<String> {
     openai_compatible_profile_by_id(profile_id)?;
     let cache = jcode_provider_openrouter::load_disk_cache_entry_for_namespace(&resolved.id)?;
+    // Ranking is a pure function of the profile, its API base, and the cached
+    // catalog, but costs ~8ms for OpenRouter's catalog. Every provider fork
+    // (each client reconnect) resolves it, so remember the answer for this
+    // exact catalog content. The key hashes the ranked inputs (ids and release
+    // times), so two different catalogs never share an entry even if written
+    // within the same second; the hash is ~100x cheaper than the ranking.
+    type Key = (String, String, Option<String>, u64);
+    static MEMO: std::sync::LazyLock<std::sync::Mutex<HashMap<Key, Option<String>>>> =
+        std::sync::LazyLock::new(Default::default);
+    let content_hash = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for model in &cache.models {
+            model.id.hash(&mut hasher);
+            model.created.hash(&mut hasher);
+        }
+        hasher.finish()
+    };
+    let key: Key = (
+        profile_id.to_string(),
+        resolved.api_base.clone(),
+        cache.source_api_base.clone(),
+        content_hash,
+    );
+    if let Some(hit) = MEMO
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&key)
+    {
+        return hit.clone();
+    }
+    let ranked = rank_newest_released_model(profile_id, resolved, cache);
+    let mut memo = MEMO.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if memo.len() > 64 {
+        memo.clear();
+    }
+    memo.insert(key, ranked.clone());
+    ranked
+}
 
+fn rank_newest_released_model(
+    profile_id: &str,
+    resolved: &ResolvedOpenAiCompatibleProfile,
+    cache: jcode_provider_openrouter::DiskCache,
+) -> Option<String> {
     let source_matches = cache
         .source_api_base
         .as_deref()
@@ -1168,7 +1228,7 @@ pub fn openai_compatible_profile_is_configured(profile: OpenAiCompatibleProfile)
         return configured;
     }
 
-    let resolved = resolve_openai_compatible_profile(profile);
+    let resolved = resolve_openai_compatible_profile_endpoint(profile, None);
     if load_api_key_from_env_or_config(&resolved.api_key_env, &resolved.env_file).is_some() {
         return true;
     }
