@@ -119,6 +119,8 @@ impl Config {
 - OpenGF mode (`use_open_gf`): {}
 - Max secondary suggestions: {}
 - Confidence threshold: {:.2}
+- Show confidence: {}
+- Custom prompts: {}
 - Full-auto Explorer: {}
 - 6-Lens Auto-Review: {}
 
@@ -327,6 +329,8 @@ impl Config {
             self.suggested_replies.use_open_gf,
             self.suggested_replies.clamped_max_secondary(),
             self.suggested_replies.clamped_confidence_threshold(),
+            self.suggested_replies.show_confidence,
+            self.suggested_replies.sanitized_custom_prompts().len(),
             self.suggested_replies.enable_full_auto_explorer,
             self.suggested_replies.six_lens_auto_review,
             self.ambient.enabled,

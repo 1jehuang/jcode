@@ -685,10 +685,14 @@ enabled = true
 jev_provider = "auto"
 # Switch between Jev-native fixed macro/micro pool (false) and OpenGF Sidecar generation (true)
 use_open_gf = false
-# Maximum number of secondary suggestion badges displayed (1..=5, default: 5)
-max_secondary_suggestions = 5
+# Maximum number of secondary suggestion badges displayed (1..=20, default: 3)
+max_secondary_suggestions = 3
 # Confidence threshold (0.0..=1.0, default: 0.55) to promote the top action to Default Action
 confidence_threshold = 0.55
+# Show model confidence percentage on every suggestion row (default: true)
+show_confidence = true
+# User-defined constant questions/prompts scored alongside dynamic candidates
+custom_prompts = []
 # Full-auto Explorer mode (default: false): auto-submits Default Action after 500ms delay
 enable_full_auto_explorer = false
 # Automatic 6-lens subagent self-review at turn completion (default: false)

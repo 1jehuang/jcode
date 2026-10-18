@@ -88,7 +88,7 @@ fn inline_view_display_width(text: &str) -> usize {
     UnicodeWidthStr::width(text)
 }
 
-pub(super) fn inline_ui_height(app: &dyn TuiState) -> u16 {
+pub(crate) fn inline_ui_height(app: &dyn TuiState) -> u16 {
     match app.inline_ui_state() {
         Some(crate::tui::InlineUiStateRef::Interactive(picker)) => {
             // Model choices replace the command suggestions, without reflowing chat.
@@ -107,7 +107,7 @@ pub(super) fn inline_ui_height(app: &dyn TuiState) -> u16 {
         None => {
             if let Some(view) = app.suggested_replies_view() {
                 let default_rows = u16::from(view.response.default_action.is_some());
-                let secondary_rows = view.response.secondary_suggestions.len().min(5) as u16;
+                let secondary_rows = view.response.secondary_suggestions.len() as u16;
                 default_rows + secondary_rows
             } else {
                 0
@@ -157,7 +157,11 @@ fn pill_caps() -> (&'static str, &'static str) {
     ("\u{25D6}", "\u{25D7}")
 }
 
-fn draw_suggested_replies_panel(frame: &mut Frame, view: &SuggestedRepliesView, area: Rect) {
+pub(crate) fn draw_suggested_replies_panel(
+    frame: &mut Frame,
+    view: &SuggestedRepliesView,
+    area: Rect,
+) {
     if area.width < 12 || area.height == 0 {
         clear_suggested_reply_hit_regions();
         return;
@@ -183,7 +187,8 @@ fn draw_suggested_replies_panel(frame: &mut Frame, view: &SuggestedRepliesView, 
         let key_fg = rgb(255, 213, 128);
         let conf_pct = view
             .response
-            .top_confidence()
+            .confidence_for_text(default_action)
+            .or_else(|| view.response.top_confidence())
             .map(|c| (c * 100.0).round() as u32)
             .unwrap_or(75);
         let explorer_tag = view
@@ -196,7 +201,13 @@ fn draw_suggested_replies_panel(frame: &mut Frame, view: &SuggestedRepliesView, 
         } else {
             " ★ [Tab / ↓] ▸ ".to_string()
         };
-        let suffix = format!(" ({}%{}) ", conf_pct, explorer_tag);
+        let suffix = if view.show_confidence {
+            format!(" ({}%{}) ", conf_pct, explorer_tag)
+        } else if !explorer_tag.is_empty() {
+            format!(" ({}) ", explorer_tag.trim_start_matches(" · "))
+        } else {
+            " ".to_string()
+        };
         let budget = (area.width as usize)
             .saturating_sub(
                 UnicodeWidthStr::width(prefix.as_str())
@@ -237,19 +248,28 @@ fn draw_suggested_replies_panel(frame: &mut Frame, view: &SuggestedRepliesView, 
 
     if !view.response.secondary_suggestions.is_empty() {
         let max_y = area.y.saturating_add(area.height);
-        for (idx, text) in view
-            .response
-            .secondary_suggestions
-            .iter()
-            .take(5)
-            .enumerate()
-        {
+        for (idx, text) in view.response.secondary_suggestions.iter().enumerate() {
             if current_row >= max_y {
                 break;
             }
-            let max_pill_cols = (area.width as usize).saturating_sub(7).max(8);
+            let conf_suffix = if view.show_confidence {
+                view.response
+                    .confidence_for_text(text)
+                    .map(|c| format!(" ({}%)", (c * 100.0).round() as u32))
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
+            let prefix_num = format!("{}. ", idx + 1);
+            let max_pill_cols = (area.width as usize)
+                .saturating_sub(
+                    UnicodeWidthStr::width(prefix_num.as_str())
+                        + UnicodeWidthStr::width(conf_suffix.as_str())
+                        + 4,
+                )
+                .max(8);
             let short = truncate_to_display_width(text, max_pill_cols);
-            let pill_label = format!("{}. {}", idx + 1, short);
+            let pill_label = format!("{prefix_num}{short}{conf_suffix}");
             let pill_width = (UnicodeWidthStr::width(pill_label.as_str()) + 4)
                 .min(area.width as usize) as u16;
             let is_focused =

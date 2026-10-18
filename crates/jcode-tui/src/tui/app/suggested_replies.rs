@@ -1,5 +1,5 @@
 use super::App;
-use crate::suggested_replies::SuggestedRepliesResponse;
+use crate::suggested_replies::{SuggestedRepliesContext, SuggestedRepliesResponse};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
@@ -18,6 +18,7 @@ pub struct SuggestedRepliesView {
     pub response: SuggestedRepliesResponse,
     pub focus: Option<SuggestedReplyFocus>,
     pub explorer_remaining_ms: Option<u64>,
+    pub show_confidence: bool,
 }
 
 /// Runtime state owned by `App` for two-stage Suggested Replies and Explorer mode.
@@ -34,6 +35,7 @@ pub struct SuggestedRepliesRuntime {
     pub last_evaluated_messages_version: u64,
     pub last_debug: Option<crate::suggested_replies::SuggestedRepliesDebugInfo>,
     pub last_response: Option<SuggestedRepliesResponse>,
+    pub cached_response: Option<(String, u64, SuggestedRepliesResponse)>,
 }
 
 impl App {
@@ -83,10 +85,12 @@ impl App {
                 .saturating_duration_since(Instant::now())
                 .as_millis() as u64
         });
+        let show_confidence = crate::config::config().suggested_replies.show_confidence;
         Some(SuggestedRepliesView {
             response,
             focus: self.suggested_replies.focus,
             explorer_remaining_ms,
+            show_confidence,
         })
     }
 
@@ -137,6 +141,9 @@ impl App {
             return;
         }
         self.suggested_replies.last_response = Some(response.clone());
+        let session_id = super::commands::active_session_id(self);
+        self.suggested_replies.cached_response =
+            Some((session_id, self.display_messages_version, response.clone()));
 
         let preserved_focus = if self.suggested_replies.current.is_some() {
             match self.suggested_replies.focus {
@@ -150,7 +157,7 @@ impl App {
                     }
                 }
                 Some(SuggestedReplyFocus::Secondary(idx)) => {
-                    let count = response.secondary_suggestions.len().min(5);
+                    let count = response.secondary_suggestions.len();
                     if count > 0 {
                         Some(SuggestedReplyFocus::Secondary(idx.min(count - 1)))
                     } else if response.default_action.is_some() {
@@ -213,8 +220,25 @@ impl App {
         buf
     }
 
+    /// Build the structured `SuggestedRepliesContext` from `display_messages` and active session `todos`.
+    pub fn build_suggested_replies_context(&self) -> SuggestedRepliesContext {
+        let transcript_tail = self.recent_transcript_for_suggestions();
+        let pending_todos: Vec<String> = super::commands::incomplete_poke_todos(self)
+            .into_iter()
+            .map(|t| t.content)
+            .collect();
+        SuggestedRepliesContext::from_transcript(&transcript_tail)
+            .with_pending_todos(pending_todos)
+    }
+
     /// Trigger the two-stage Suggested Replies cascade at the end of a turn.
     pub fn maybe_trigger_suggested_replies_at_turn_end(&mut self) {
+        self.trigger_suggested_replies_evaluation(false);
+    }
+
+    /// Trigger the two-stage Suggested Replies cascade, optionally bypassing the
+    /// `(session_id, display_messages_version)` response cache (`force_refresh = true`).
+    pub fn trigger_suggested_replies_evaluation(&mut self, force_refresh: bool) {
         // In TestHarness / Replay mode, do not auto-populate inline suggestions
         // unless the test explicitly opted in via `force_enable_in_tests`, so
         // existing viewport-height / anchor-stability snapshot tests stay untouched.
@@ -238,8 +262,25 @@ impl App {
             return;
         }
 
-        let transcript_tail = self.recent_transcript_for_suggestions();
-        if transcript_tail.trim().is_empty() {
+        if force_refresh {
+            self.suggested_replies.cached_response = None;
+        }
+
+        let session_id = super::commands::active_session_id(self);
+        if !force_refresh
+            && self.suggested_replies.pending_six_lens_findings.is_none()
+            && let Some((ref cached_sid, cached_ver, ref cached_resp)) =
+                self.suggested_replies.cached_response
+            && *cached_sid == session_id
+            && cached_ver == self.display_messages_version
+        {
+            let restored = cached_resp.clone();
+            self.apply_suggested_replies_response(restored);
+            return;
+        }
+
+        let ctx = self.build_suggested_replies_context();
+        if ctx.transcript_tail.trim().is_empty() {
             return;
         }
         self.suggested_replies.last_evaluated_messages_version = self.display_messages_version;
@@ -258,8 +299,8 @@ impl App {
             let (tx, rx) = mpsc::unbounded_channel();
             self.suggested_replies.pending_rx = Some(rx);
             handle.spawn(async move {
-                let response = crate::suggested_replies::evaluate_cascade(
-                    &transcript_tail,
+                let response = crate::suggested_replies::evaluate_cascade_with_context(
+                    &ctx,
                     &cfg,
                     six_lens_findings.as_deref(),
                 )
@@ -269,9 +310,10 @@ impl App {
             return;
         }
 
-        let immediate = crate::suggested_replies::score_locally_from_context(
-            &transcript_tail,
+        let immediate = crate::suggested_replies::score_locally_with_context(
+            &ctx,
             None,
+            &cfg.sanitized_custom_prompts(),
             six_lens_findings.as_deref(),
             cfg.clamped_confidence_threshold(),
             cfg.clamped_max_secondary(),
@@ -286,11 +328,14 @@ impl App {
         if trimmed.is_empty() {
             return;
         }
+        self.suggested_replies.cached_response = None;
         self.suggested_replies.pending_six_lens_findings = Some(trimmed.clone());
         let cfg = &crate::config::config().suggested_replies;
-        let response = crate::suggested_replies::score_locally_from_context(
-            &self.recent_transcript_for_suggestions(),
+        let ctx = self.build_suggested_replies_context();
+        let response = crate::suggested_replies::score_locally_with_context(
+            &ctx,
             None,
+            &cfg.sanitized_custom_prompts(),
             Some(&trimmed),
             cfg.clamped_confidence_threshold(),
             cfg.clamped_max_secondary(),
@@ -360,7 +405,7 @@ impl App {
         if response.default_action.is_some() {
             targets.push(SuggestedReplyFocus::DefaultAction);
         }
-        for idx in 0..response.secondary_suggestions.len().min(5) {
+        for idx in 0..response.secondary_suggestions.len() {
             targets.push(SuggestedReplyFocus::Secondary(idx));
         }
         targets
@@ -459,7 +504,7 @@ impl App {
         }
     }
 
-    /// Handle pressing digit `'1'..='5'` (or `'0'` for Default Action) on an empty input
+    /// Handle pressing digit `'1'..='9'` (or `'0'` for Default Action) on an empty input
     /// when Suggested Replies are visible: focuses that suggestion and populates `self.input`
     /// so the user can edit it or press `Enter` to send.
     pub fn stage_suggested_reply_by_digit(&mut self, ch: char) -> bool {
@@ -468,13 +513,13 @@ impl App {
         }
         let target = match ch {
             '0' => SuggestedReplyFocus::DefaultAction,
-            '1'..='5' => SuggestedReplyFocus::Secondary((ch as usize) - ('1' as usize)),
+            '1'..='9' => SuggestedReplyFocus::Secondary((ch as usize) - ('1' as usize)),
             _ => return false,
         };
         self.stage_suggested_reply_target(target)
     }
 
-    /// Handle pressing digit `'1'..='5'` (or `'0'` for Default Action) to consume and return
+    /// Handle pressing digit `'1'..='9'` (or `'0'` for Default Action) to consume and return
     /// the suggestion text directly.
     pub fn take_suggested_reply_by_digit(&mut self, ch: char) -> Option<String> {
         if !self.suggested_replies_visible() {
@@ -482,7 +527,7 @@ impl App {
         }
         let target = match ch {
             '0' => SuggestedReplyFocus::DefaultAction,
-            '1'..='5' => SuggestedReplyFocus::Secondary((ch as usize) - ('1' as usize)),
+            '1'..='9' => SuggestedReplyFocus::Secondary((ch as usize) - ('1' as usize)),
             _ => return None,
         };
         self.take_suggested_reply_target(target)
@@ -574,17 +619,20 @@ impl App {
             ),
             Err(err) => format!("unavailable (`{}`: {})", cfg.jev_provider, err),
         };
+        let ctx = self.build_suggested_replies_context();
 
         let mut out = String::new();
         out.push_str("### Suggested Replies Diagnostics\n\n");
         out.push_str(&format!(
-            "- **Config**: `enabled={}`, `jev_provider=\"{}\"`, `use_open_gf={}`, `confidence_threshold={:.2}`, `max_secondary_suggestions={}` (clamped `{}`), `enable_full_auto_explorer={}`, `six_lens_auto_review={}`\n",
+            "- **Config**: `enabled={}`, `jev_provider=\"{}\"`, `use_open_gf={}`, `confidence_threshold={:.2}`, `max_secondary_suggestions={}` (clamped `{}`), `show_confidence={}`, `custom_prompts={}`, `enable_full_auto_explorer={}`, `six_lens_auto_review={}`\n",
             cfg.enabled,
             cfg.jev_provider,
             cfg.use_open_gf,
             cfg.clamped_confidence_threshold(),
             cfg.max_secondary_suggestions,
             cfg.clamped_max_secondary(),
+            cfg.show_confidence,
+            cfg.sanitized_custom_prompts().len(),
             cfg.enable_full_auto_explorer,
             cfg.six_lens_auto_review,
         ));
@@ -595,10 +643,17 @@ impl App {
         ));
         out.push_str(&format!("- **Jev / SystemOne Route**: {}\n", jev_route));
         out.push_str(&format!(
-            "- **UI State**: `visible={}`, `in_flight={}`, `focus={:?}`\n",
+            "- **Structured Context**: `language={}`, `assistant_options={}`, `pending_todos={}`\n",
+            if ctx.language_is_cyrillic { "ru" } else { "en" },
+            ctx.assistant_options.len(),
+            ctx.pending_todos.len(),
+        ));
+        out.push_str(&format!(
+            "- **UI State**: `visible={}`, `in_flight={}`, `focus={:?}`, `cached={}`\n",
             self.suggested_replies_visible(),
             self.suggested_replies.pending_rx.is_some(),
             self.suggested_replies.focus,
+            self.suggested_replies.cached_response.is_some(),
         ));
 
         if let Some(debug) = self.suggested_replies.last_debug.as_ref() {
@@ -671,7 +726,7 @@ impl App {
                 true
             }
             "test" | "refresh" => {
-                self.maybe_trigger_suggested_replies_at_turn_end();
+                self.trigger_suggested_replies_evaluation(true);
                 self.set_status_notice("Re-evaluating Suggested Replies cascade...");
                 self.push_display_message(super::DisplayMessage::system(
                     "Triggered Suggested Replies cascade evaluation. Run `/suggestions debug` once complete to inspect telemetry.".to_string(),
@@ -691,7 +746,34 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::suggested_replies::{ScoredSuggestion, distribute_suggestions};
+    use crate::suggested_replies::{
+        ScoredSuggestion, SuggestedRepliesContext, distribute_suggestions,
+        score_locally_with_context,
+    };
+
+    fn render_panel_lines(view: &SuggestedRepliesView, width: u16, height: u16) -> Vec<String> {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| {
+                let area = ratatui::layout::Rect::new(0, 0, width, height);
+                crate::tui::ui::draw_suggested_replies_panel(frame, view, area);
+            })
+            .expect("draw suggested replies panel");
+        let buf = terminal.backend().buffer();
+        let mut rows = Vec::new();
+        for y in 0..height {
+            let mut line = String::new();
+            for x in 0..width {
+                line.push_str(buf[(x, y)].symbol());
+            }
+            let trimmed = line.trim_end().to_string();
+            if !trimmed.is_empty() {
+                rows.push(trimmed);
+            }
+        }
+        rows
+    }
 
     #[test]
     fn distribution_and_focus_state_transitions_work_cleanly() {
@@ -708,7 +790,7 @@ mod tests {
                 },
             ],
             0.55,
-            5,
+            3,
         );
         assert_eq!(resp.default_action.as_deref(), Some("Run cargo test"));
         assert_eq!(resp.secondary_suggestions, vec!["Inspect git diff"]);
@@ -735,7 +817,7 @@ mod tests {
                 },
             ],
             0.55,
-            5,
+            3,
         );
         app.apply_suggested_replies_response(resp.clone());
         assert!(app.suggested_replies_visible());
@@ -778,7 +860,7 @@ mod tests {
         );
         assert!(!app.suggested_replies_visible());
 
-        // Re-apply and test 1..5 digit selection populating app.input for editing.
+        // Re-apply and test digit selection populating app.input for editing.
         app.input.clear();
         app.cursor_pos = 0;
         app.apply_suggested_replies_response(resp.clone());
@@ -830,44 +912,100 @@ mod tests {
     }
 
     #[test]
-    fn suggested_replies_panel_renders_vertically_one_row_per_item() {
+    fn tui_renders_and_navigates_exact_suggestion_counts_for_1_3_and_20() {
         let mut app = crate::tui::app::tests::create_test_app();
         app.suggested_replies.force_enable_in_tests = true;
-        app.push_display_message(super::super::DisplayMessage::assistant(
-            "Implemented the feature.",
+        app.push_display_message(super::super::DisplayMessage::user(
+            "Проверь работу подсказок при 1, 3 и 20 элементах",
         ));
-        let resp = distribute_suggestions(
-            "implementation",
-            vec![
-                ScoredSuggestion {
-                    text: "Default action top".to_string(),
-                    confidence: 0.90,
-                },
-                ScoredSuggestion {
-                    text: "Secondary option 1".to_string(),
-                    confidence: 0.70,
-                },
-                ScoredSuggestion {
-                    text: "Secondary option 2".to_string(),
-                    confidence: 0.65,
-                },
-                ScoredSuggestion {
-                    text: "Secondary option 3".to_string(),
-                    confidence: 0.60,
-                },
-            ],
-            0.55,
-            5,
+        app.push_display_message(super::super::DisplayMessage::assistant(
+            "Готово! Выберите действие:\n1. Запустить тесты\n2. Проверить рендеринг",
+        ));
+
+        let ctx = SuggestedRepliesContext::from_transcript(
+            "[user]: Проверь работу подсказок при 1, 3 и 20 элементах\n\n[assistant]: Готово! Выберите действие:\n1. Запустить тесты\n2. Проверить рендеринг",
         );
-        app.apply_suggested_replies_response(resp);
-        let view = crate::tui::TuiState::suggested_replies_view(&app).expect("view present");
-        let expected_rows =
-            u16::from(view.response.default_action.is_some()) + view.response.secondary_suggestions.len() as u16;
-        assert_eq!(expected_rows, 4);
+
+        for count in [1usize, 3usize, 20usize] {
+            app.input.clear();
+            app.cursor_pos = 0;
+            app.cancel_suggested_replies_interaction(true);
+
+            let resp = score_locally_with_context(
+                &ctx,
+                None,
+                &["Постоянный вопрос пользователя".to_string()],
+                None,
+                0.55,
+                count,
+            );
+            assert!(resp.default_action.is_some());
+            assert_eq!(
+                resp.secondary_suggestions.len(),
+                count,
+                "cascade must return {count} secondary suggestions"
+            );
+
+            app.apply_suggested_replies_response(resp);
+            let mut view =
+                crate::tui::TuiState::suggested_replies_view(&app).expect("view present");
+            view.show_confidence = true;
+
+            let expected_total_rows = 1 + count;
+            let height = crate::tui::ui::inline_ui_height(&app) as usize;
+            assert_eq!(
+                height, expected_total_rows,
+                "inline_ui_height must equal 1 (Default Action) + {count} secondary rows"
+            );
+
+            let rendered_rows = render_panel_lines(&view, 120, height as u16 + 2);
+            assert_eq!(
+                rendered_rows.len(),
+                expected_total_rows,
+                "TUI panel must render {expected_total_rows} rows for count={count}"
+            );
+            assert!(
+                rendered_rows[0].contains('★') && rendered_rows[0].contains("%)"),
+                "row 0 must be Default Action with confidence badge: {}",
+                rendered_rows[0]
+            );
+            for i in 1..=count {
+                let row = &rendered_rows[i];
+                let expected_prefix = format!("{i}. ");
+                assert!(
+                    row.contains(&expected_prefix),
+                    "row {i} must contain prefix '{expected_prefix}', got: {row}"
+                );
+                assert!(
+                    row.contains("%)"),
+                    "row {i} must display model confidence percentage when show_confidence=true, got: {row}"
+                );
+            }
+
+            // When show_confidence = false, confidence percentages are omitted from all rows.
+            view.show_confidence = false;
+            let rows_no_conf = render_panel_lines(&view, 120, height as u16 + 2);
+            assert_eq!(rows_no_conf.len(), expected_total_rows);
+            for row in &rows_no_conf {
+                assert!(
+                    !row.contains("%)"),
+                    "confidence badge must be hidden when show_confidence=false: {row}"
+                );
+            }
+
+            // Verify Tab cycling visits all 1 + count items (DefaultAction + Secondary(0..count-1)).
+            let targets = app.ordered_suggested_reply_targets();
+            assert_eq!(targets.len(), expected_total_rows);
+            for expected_target in targets {
+                assert!(app.step_suggested_replies_focus(1));
+                assert_eq!(app.suggested_replies.focus, Some(expected_target));
+                assert!(!app.input.is_empty());
+            }
+        }
     }
 
     #[test]
-    fn apply_response_preserves_existing_focus_and_new_turn_clears_pending_and_current() {
+    fn apply_response_preserves_existing_focus_and_version_cache_restores_or_refreshes() {
         let mut app = crate::tui::app::tests::create_test_app();
         app.suggested_replies.force_enable_in_tests = true;
         app.push_display_message(super::super::DisplayMessage::assistant("Done."));
@@ -885,9 +1023,9 @@ mod tests {
                 },
             ],
             0.55,
-            5,
+            3,
         );
-        app.apply_suggested_replies_response(initial);
+        app.apply_suggested_replies_response(initial.clone());
         app.step_suggested_replies_focus(1);
         assert_eq!(
             app.suggested_replies.focus,
@@ -908,12 +1046,25 @@ mod tests {
                 },
             ],
             0.55,
-            5,
+            3,
         );
-        app.apply_suggested_replies_response(updated);
+        app.apply_suggested_replies_response(updated.clone());
         assert_eq!(
             app.suggested_replies.focus,
             Some(SuggestedReplyFocus::DefaultAction)
+        );
+
+        // Re-triggering on the same display_messages_version restores the cached response.
+        app.clear_suggested_replies_for_new_turn();
+        app.input.clear();
+        app.cursor_pos = 0;
+        app.maybe_trigger_suggested_replies_at_turn_end();
+        assert_eq!(
+            app.suggested_replies
+                .current
+                .as_ref()
+                .and_then(|r| r.default_action.as_deref()),
+            Some("Updated default")
         );
 
         // /suggestions debug outputs diagnostic summary.
@@ -939,11 +1090,12 @@ mod tests {
     fn cyrillic_suggestion_uses_display_columns_instead_of_byte_truncation() {
         let ru = "Проверить отладку подсказок через команду /suggestions debug и запустить тесты";
         let display_cols = unicode_width::UnicodeWidthStr::width(ru);
-        assert!(ru.len() > display_cols, "Cyrillic UTF-8 byte length exceeds column width");
-        // When column budget >= display_cols, the full Russian string must be preserved intact.
+        assert!(
+            ru.len() > display_cols,
+            "Cyrillic UTF-8 byte length exceeds column width"
+        );
         let rendered = crate::tui::ui::truncate_to_display_width(ru, display_cols + 4);
         assert_eq!(rendered, ru);
-        // When column budget is narrower, it truncates to exact display columns + ellipsis.
         let clipped = crate::tui::ui::truncate_to_display_width(ru, 30);
         assert_eq!(unicode_width::UnicodeWidthStr::width(clipped.as_str()), 30);
         assert!(clipped.ends_with('…'));

@@ -1022,10 +1022,13 @@ pub struct SuggestedRepliesConfig {
         deserialize_with = "crate::serde_lenient::lenient_bool_false"
     )]
     pub use_open_gf: bool,
-    /// Maximum number of secondary suggestion badges displayed (clamped `1..=5`, default `5`).
+    /// Maximum number of secondary suggestion badges displayed (clamped `1..=20`, default `3`).
     #[serde(
         default = "default_max_secondary_suggestions",
         alias = "maxSecondarySuggestions",
+        alias = "max_suggestions",
+        alias = "maxSuggestions",
+        alias = "count",
         deserialize_with = "crate::serde_lenient::lenient_max_secondary_suggestions"
     )]
     pub max_secondary_suggestions: usize,
@@ -1037,6 +1040,26 @@ pub struct SuggestedRepliesConfig {
         deserialize_with = "crate::serde_lenient::lenient_confidence_threshold"
     )]
     pub confidence_threshold: f32,
+    /// Display calibrated model confidence percentage (`(XX%)`) on every suggestion row
+    /// (`Default Action` and each secondary suggestion `1..=N`, default `true`).
+    #[serde(
+        default = "default_suggested_replies_show_confidence",
+        alias = "showConfidence",
+        deserialize_with = "crate::serde_lenient::lenient_bool_true"
+    )]
+    pub show_confidence: bool,
+    /// User-defined constant list of questions/prompts that are merged into the
+    /// candidate pool and scored on every turn alongside dynamic candidates.
+    #[serde(
+        default,
+        alias = "customPrompts",
+        alias = "custom_questions",
+        alias = "customQuestions",
+        alias = "custom_candidates",
+        alias = "pinned_prompts",
+        deserialize_with = "crate::serde_lenient::lenient_string_list"
+    )]
+    pub custom_prompts: Vec<String>,
     /// Full-auto Explorer mode (`default: false`). When enabled and a Default Action
     /// reaches `confidence >= confidence_threshold`, automatically triggers a 500ms
     /// cancelable visual delay and dispatches the Default Action.
@@ -1066,11 +1089,15 @@ fn default_suggestions_jev_provider() -> String {
 }
 
 fn default_max_secondary_suggestions() -> usize {
-    5
+    3
 }
 
 fn default_suggested_replies_confidence_threshold() -> f32 {
     0.55
+}
+
+fn default_suggested_replies_show_confidence() -> bool {
+    true
 }
 
 impl Default for SuggestedRepliesConfig {
@@ -1081,6 +1108,8 @@ impl Default for SuggestedRepliesConfig {
             use_open_gf: false,
             max_secondary_suggestions: default_max_secondary_suggestions(),
             confidence_threshold: default_suggested_replies_confidence_threshold(),
+            show_confidence: default_suggested_replies_show_confidence(),
+            custom_prompts: Vec::new(),
             enable_full_auto_explorer: false,
             six_lens_auto_review: false,
         }
@@ -1089,7 +1118,7 @@ impl Default for SuggestedRepliesConfig {
 
 impl SuggestedRepliesConfig {
     pub fn clamped_max_secondary(&self) -> usize {
-        self.max_secondary_suggestions.clamp(1, 5)
+        self.max_secondary_suggestions.clamp(1, 20)
     }
 
     pub fn clamped_confidence_threshold(&self) -> f32 {
@@ -1098,6 +1127,20 @@ impl SuggestedRepliesConfig {
         } else {
             0.55
         }
+    }
+
+    pub fn sanitized_custom_prompts(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for item in &self.custom_prompts {
+            let trimmed = item.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if !out.iter().any(|existing| existing.eq_ignore_ascii_case(trimmed)) {
+                out.push(trimmed.to_string());
+            }
+        }
+        out
     }
 }
 

@@ -1,12 +1,20 @@
 //! Two-stage cascading Suggested Replies with Default Action Focus.
 //!
-//! Combines OpenJev SystemOne (`https://api.openjev.sh/v1/systemone`, calibrated
-//! logit decisions via `choice` and `noul`) with OpenGF (`Sidecar` generative
-//! candidate synthesis with `"store": false`) and a deterministic local fallback.
+//! Combines OpenJev / Laya SystemOne (`/v1/systemone`, calibrated logit decisions
+//! via joint `choice` and `noul` over a structured JSON `state`) with OpenGF
+//! (`Sidecar` / named profile generative candidate synthesis with `"store": false`),
+//! assistant question/option extraction, user-defined constant questions (`custom_prompts`),
+//! and a language-aware deterministic local fallback.
 
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
+use std::sync::OnceLock;
+
+/// Maximum number of candidates evaluated in a single Iteration 2 micro-scoring batch.
+/// Allows 1 Default Action + up to 20 secondary suggestions (`21` candidates total),
+/// keeping `1 (best_candidate choice) + 21 (cand_0..cand_20 noul) = 22 <= MAX_QUESTIONS (24)`.
+pub const MAX_MICRO_CANDIDATES: usize = 21;
 
 /// Macro conversation branches for Iteration 1 classification.
 pub const MACRO_BRANCHES: &[(&str, &str)] = &[
@@ -35,6 +43,247 @@ pub const MACRO_BRANCHES: &[(&str, &str)] = &[
         "Cleaning up code, simplifying modules, or improving maintainability",
     ),
 ];
+
+/// Structured conversation & workflow context passed to OpenGF and SystemOne.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SuggestedRepliesContext {
+    pub transcript_tail: String,
+    pub last_user_message: Option<String>,
+    pub last_assistant_message: Option<String>,
+    pub assistant_options: Vec<String>,
+    pub pending_todos: Vec<String>,
+    pub language_is_cyrillic: bool,
+}
+
+impl SuggestedRepliesContext {
+    /// Parse a recent transcript string (formatted with `[user]: ...` / `[assistant]: ...`
+    /// blocks or raw text) into a structured `SuggestedRepliesContext`.
+    pub fn from_transcript(transcript_tail: &str) -> Self {
+        let mut last_user_message: Option<String> = None;
+        let mut last_assistant_message: Option<String> = None;
+
+        let mut current_role: Option<&str> = None;
+        let mut current_buf = String::new();
+        let flush = |role: Option<&str>,
+                     buf: &mut String,
+                     last_user: &mut Option<String>,
+                     last_assistant: &mut Option<String>| {
+            let trimmed = buf.trim();
+            if !trimmed.is_empty() {
+                match role {
+                    Some("user") => *last_user = Some(trimmed.to_string()),
+                    Some("assistant") => *last_assistant = Some(trimmed.to_string()),
+                    _ => {}
+                }
+            }
+            buf.clear();
+        };
+
+        for line in transcript_tail.lines() {
+            if let Some(rest) = line.strip_prefix("[user]:") {
+                flush(
+                    current_role,
+                    &mut current_buf,
+                    &mut last_user_message,
+                    &mut last_assistant_message,
+                );
+                current_role = Some("user");
+                current_buf.push_str(rest.trim_start());
+                current_buf.push('\n');
+            } else if let Some(rest) = line.strip_prefix("[assistant]:") {
+                flush(
+                    current_role,
+                    &mut current_buf,
+                    &mut last_user_message,
+                    &mut last_assistant_message,
+                );
+                current_role = Some("assistant");
+                current_buf.push_str(rest.trim_start());
+                current_buf.push('\n');
+            } else if let Some(rest) = line.strip_prefix("[swarm]:") {
+                flush(
+                    current_role,
+                    &mut current_buf,
+                    &mut last_user_message,
+                    &mut last_assistant_message,
+                );
+                current_role = Some("swarm");
+                current_buf.push_str(rest.trim_start());
+                current_buf.push('\n');
+            } else {
+                current_buf.push_str(line);
+                current_buf.push('\n');
+            }
+        }
+        flush(
+            current_role,
+            &mut current_buf,
+            &mut last_user_message,
+            &mut last_assistant_message,
+        );
+
+        let assistant_source = last_assistant_message
+            .as_deref()
+            .unwrap_or(transcript_tail);
+        let assistant_options = extract_assistant_options(assistant_source);
+
+        let language_probe = last_user_message
+            .as_deref()
+            .or(last_assistant_message.as_deref())
+            .unwrap_or(transcript_tail);
+        let language_is_cyrillic = detect_cyrillic_language(language_probe);
+
+        Self {
+            transcript_tail: transcript_tail.to_string(),
+            last_user_message,
+            last_assistant_message,
+            assistant_options,
+            pending_todos: Vec::new(),
+            language_is_cyrillic,
+        }
+    }
+
+    /// Attach active session `todo` items (`pending` / `in_progress`).
+    pub fn with_pending_todos(mut self, pending_todos: Vec<String>) -> Self {
+        self.pending_todos = pending_todos
+            .into_iter()
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .take(8)
+            .collect();
+        self
+    }
+}
+
+/// Detect whether `text` is primarily written in Cyrillic (e.g. Russian).
+pub fn detect_cyrillic_language(text: &str) -> bool {
+    let mut cyrillic = 0usize;
+    let mut latin = 0usize;
+    for ch in text.chars() {
+        if ('\u{0400}'..='\u{04FF}').contains(&ch) {
+            cyrillic += 1;
+        } else if ch.is_ascii_alphabetic() {
+            latin += 1;
+        }
+    }
+    cyrillic >= 3 && (cyrillic * 2 >= latin || cyrillic >= 8)
+}
+
+/// Extract actionable options, numbered/bulleted items, or slash commands from the
+/// closing lines of `last_assistant_message`.
+pub fn extract_assistant_options(last_assistant_message: &str) -> Vec<String> {
+    let trimmed = last_assistant_message.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    let mut options: Vec<String> = Vec::new();
+    let mut in_code_block = false;
+    let tail_lines: Vec<&str> = trimmed.lines().rev().take(28).collect();
+
+    for raw_line in tail_lines.into_iter().rev() {
+        let line = raw_line.trim();
+        if line.starts_with("```") {
+            in_code_block = !in_code_block;
+            continue;
+        }
+        if in_code_block || line.is_empty() {
+            continue;
+        }
+
+        // 1. Check for numbered list items: "1. Foo" or "1) Foo"
+        let numbered = line
+            .strip_prefix(|c: char| c.is_ascii_digit())
+            .and_then(|rest| {
+                let rest = rest.trim_start_matches(|c: char| c.is_ascii_digit());
+                rest.strip_prefix(". ").or_else(|| rest.strip_prefix(") "))
+            });
+        if let Some(item) = numbered {
+            let cleaned = clean_extracted_option(item);
+            if is_viable_option_candidate(&cleaned) {
+                push_unique_case_insensitive(&mut options, cleaned);
+                continue;
+            }
+        }
+
+        // 2. Check for bullet items ("- ...", "* ...", "• ...") that look like actionable choices
+        let bulleted = line
+            .strip_prefix("- ")
+            .or_else(|| line.strip_prefix("* "))
+            .or_else(|| line.strip_prefix("• "));
+        if let Some(item) = bulleted {
+            let cleaned = clean_extracted_option(item);
+            if is_viable_option_candidate(&cleaned) && cleaned.chars().count() <= 96 {
+                push_unique_case_insensitive(&mut options, cleaned);
+                continue;
+            }
+        }
+
+        // 3. Extract explicit backticked slash commands (e.g. `/opsx:apply`, `/review 6`, `/suggestions debug`)
+        let mut rest = line;
+        while let Some(start) = rest.find('`') {
+            let after_start = &rest[start + 1..];
+            if let Some(end) = after_start.find('`') {
+                let code_span = after_start[..end].trim();
+                if code_span.starts_with('/')
+                    && code_span.len() >= 3
+                    && code_span.len() <= 48
+                    && !code_span.contains("//")
+                    && !code_span[1..].contains('/')
+                {
+                    push_unique_case_insensitive(&mut options, code_span.to_string());
+                }
+                rest = &after_start[end + 1..];
+            } else {
+                break;
+            }
+        }
+    }
+
+    options.into_iter().take(6).collect()
+}
+
+fn clean_extracted_option(raw: &str) -> String {
+    let without_bold = raw.replace("**", "");
+    let trimmed = without_bold
+        .trim()
+        .trim_matches(|c: char| c == '`' || c == '"' || c == '«' || c == '»')
+        .trim_end_matches([';', ',']);
+    let head = if let Some((left, _)) = trimmed.split_once(" — ") {
+        left.trim()
+    } else if let Some((left, right)) = trimmed.split_once(": ") {
+        if left.chars().count() >= 10 && left.chars().count() <= 80 {
+            left.trim()
+        } else {
+            right.trim()
+        }
+    } else {
+        trimmed
+    };
+    head.chars().take(110).collect::<String>().trim().to_string()
+}
+
+fn is_viable_option_candidate(text: &str) -> bool {
+    let char_count = text.chars().count();
+    (4..=110).contains(&char_count)
+        && !text.starts_with("http://")
+        && !text.starts_with("https://")
+        && !text.starts_with('[')
+}
+
+fn push_unique_case_insensitive(list: &mut Vec<String>, candidate: String) {
+    let trimmed = candidate.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    if !list
+        .iter()
+        .any(|existing| existing.to_lowercase() == trimmed.to_lowercase())
+    {
+        list.push(trimmed.to_string());
+    }
+}
 
 /// Scored suggestion candidate produced by Iteration 2.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -78,6 +327,24 @@ impl SuggestedRepliesResponse {
     pub fn top_confidence(&self) -> Option<f32> {
         self.scored_candidates.first().map(|c| c.confidence)
     }
+
+    /// Look up the calibrated model confidence (`0.0..=1.0`) for a suggestion text.
+    pub fn confidence_for_text(&self, text: &str) -> Option<f32> {
+        let target = text.trim();
+        if target.is_empty() {
+            return None;
+        }
+        self.scored_candidates
+            .iter()
+            .find(|c| c.text.trim() == target)
+            .or_else(|| {
+                let lower = target.to_lowercase();
+                self.scored_candidates
+                    .iter()
+                    .find(|c| c.text.trim().to_lowercase() == lower)
+            })
+            .map(|c| c.confidence)
+    }
 }
 
 /// Pure distribution logic for Suggested Replies:
@@ -85,7 +352,7 @@ impl SuggestedRepliesResponse {
 /// - Clamps confidences to `0.0..=1.0` and deduplicates case-insensitively (keeping highest score).
 /// - Sorts candidates by `confidence` descending (`total_cmp`).
 /// - If the top candidate has `confidence >= confidence_threshold`, promotes it to
-///   `default_action` and places up to `max_secondary_suggestions` (`1..=5`) remaining
+///   `default_action` and places up to `max_secondary_suggestions` (`1..=20`) remaining
 ///   candidates into `secondary_suggestions`.
 /// - Otherwise leaves `default_action = None` and places up to `max_secondary_suggestions`
 ///   candidates into `secondary_suggestions`.
@@ -109,7 +376,7 @@ pub fn distribute_suggestions(
     } else {
         0.55
     };
-    let max_secondary = max_secondary_suggestions.clamp(1, 5);
+    let max_secondary = max_secondary_suggestions.clamp(1, 20);
 
     let mut deduplicated: Vec<ScoredSuggestion> = Vec::new();
     for item in candidates {
@@ -118,9 +385,10 @@ pub fn distribute_suggestions(
             continue;
         }
         let confidence = item.confidence.clamp(0.0, 1.0);
+        let text_lower = text.to_lowercase();
         if let Some(existing) = deduplicated
             .iter_mut()
-            .find(|c| c.text.eq_ignore_ascii_case(text))
+            .find(|c| c.text.to_lowercase() == text_lower)
         {
             if confidence > existing.confidence {
                 existing.confidence = confidence;
@@ -174,59 +442,353 @@ pub fn distribute_suggestions(
     }
 }
 
-/// Fixed Jev-native candidate pool for each macro branch when `use_open_gf = false`.
+/// Fixed English Jev-native candidate pool for each macro branch.
 pub fn fixed_candidates_for_branch(branch: &str) -> Vec<String> {
-    match branch.trim().to_ascii_lowercase().as_str() {
-        "verification" => vec![
-            "Run the targeted test suite and verify all assertions pass".to_string(),
-            "Run cargo check / clippy on the modified crates".to_string(),
-            "Run a 6-lens subagent self-review (/review 6) on the changes".to_string(),
-            "Inspect git diff to verify no unintended edits".to_string(),
-            "Commit the verified changes with a clear message".to_string(),
-            "Update OpenSpec task checkboxes to reflect completed verification".to_string(),
-        ],
-        "debugging" => vec![
-            "Inspect the failing test output and root-cause the error".to_string(),
-            "Add a minimal regression test reproducing the failure".to_string(),
-            "Check recent git diff for regressions in the affected module".to_string(),
-            "Run the isolated failing test with backtrace enabled".to_string(),
-            "Verify the fix across edge cases and rerun the test suite".to_string(),
-            "Run a 6-lens subagent review (/review 6) to catch hidden edge cases".to_string(),
-        ],
-        "review" => vec![
-            "Fix the actionable findings from the 6-lens review and rerun tests".to_string(),
-            "Run /review 6 to audit correctness, architecture, security, UX, perf, and tests"
-                .to_string(),
-            "Run the test suite to confirm all review conditions hold".to_string(),
-            "Inspect git status and git diff before committing".to_string(),
-            "Update documentation or OpenSpec artifacts to match the implementation".to_string(),
-            "Commit the reviewed changes".to_string(),
-        ],
-        "architecture" => vec![
-            "Apply the OpenSpec tasks step-by-step (/openspec-apply-change)".to_string(),
-            "Run a 6-lens Go/No-Go subagent review on the proposed design".to_string(),
-            "Validate OpenSpec artifacts and check task status".to_string(),
-            "Inspect module boundaries and public interfaces in the target crates".to_string(),
-            "Write unit tests for the core data structures and invariants".to_string(),
-            "Prototype the core module and verify it compiles cleanly".to_string(),
-        ],
-        "refactoring" => vec![
-            "Run tests to confirm the refactoring preserves existing behavior".to_string(),
-            "Inspect git diff --stat to verify the refactoring scope is clean".to_string(),
-            "Run a 6-lens subagent review (/review 6) on the refactored code".to_string(),
-            "Remove dead code or unused imports uncovered by the refactor".to_string(),
-            "Commit the refactored changes".to_string(),
-            "Continue to the next planned task".to_string(),
-        ],
-        _ => vec![
-            "Run unit tests for the modified module and verify everything compiles".to_string(),
-            "Run a 6-lens subagent self-review (/review 6) on the new implementation".to_string(),
-            "Continue implementing the next pending task in the plan".to_string(),
-            "Inspect git diff and commit the completed changes".to_string(),
-            "Check edge cases and add targeted unit tests".to_string(),
-            "Verify runtime behavior and update OpenSpec task status".to_string(),
-        ],
+    localized_branch_candidates(branch, false)
+}
+
+fn localized_branch_candidates(branch: &str, cyrillic: bool) -> Vec<String> {
+    let key = branch.trim().to_ascii_lowercase();
+    if cyrillic {
+        match key.as_str() {
+            "verification" => vec![
+                "Запустить целевые тесты и убедиться, что все проверки проходят".to_string(),
+                "Выполнить cargo check и clippy для изменённых крейтов".to_string(),
+                "Запустить 6-линзовое само-ревью (/review 6) по внесённым изменениям".to_string(),
+                "Проверить git diff на отсутствие лишних правок".to_string(),
+                "Закоммитить проверенные изменения с понятным сообщением".to_string(),
+                "Обновить чекбоксы задач в OpenSpec после успешной проверки".to_string(),
+            ],
+            "debugging" => vec![
+                "Проанализировать вывод падающего теста и найти корневую причину ошибки".to_string(),
+                "Добавить минимальный регрессионный тест, воспроизводящий сбой".to_string(),
+                "Проверить недавний git diff на регрессии в затронутом модуле".to_string(),
+                "Запустить проблемный тест изолированно с подробным логом".to_string(),
+                "Проверить исправление на граничных случаях и перезапустить тесты".to_string(),
+                "Выполнить 6-линзовое ревью (/review 6) для поиска скрытых проблем".to_string(),
+            ],
+            "review" => vec![
+                "Исправить замечания из 6-линзового ревью и перезапустить тесты".to_string(),
+                "Запустить /review 6 для аудита корректности, архитектуры, безопасности и тестов".to_string(),
+                "Прогнать тестовый набор для подтверждения всех условий ревью".to_string(),
+                "Проверить git status и git diff перед коммитом".to_string(),
+                "Обновить документацию и артефакты OpenSpec в соответствии с кодом".to_string(),
+                "Закоммитить проверенные изменения".to_string(),
+            ],
+            "architecture" => vec![
+                "Приступить к выполнению задач по плану (/opsx:apply)".to_string(),
+                "Провести 6-линзовое Go/No-Go ревью предложенной архитектуры".to_string(),
+                "Проверить валидность артефактов OpenSpec (openspec validate --all --strict)".to_string(),
+                "Изучить границы модулей и публичные интерфейсы целевых крейтов".to_string(),
+                "Написать модульные тесты для ключевых структур данных и инвариантов".to_string(),
+                "Реализовать прототип основного модуля и проверить сборку".to_string(),
+            ],
+            "refactoring" => vec![
+                "Запустить тесты и убедиться, что рефакторинг сохраняет поведение".to_string(),
+                "Проверить git diff --stat, чтобы убедиться в чистоте изменений".to_string(),
+                "Запустить 6-линзовое ревью (/review 6) по отрефакторенному коду".to_string(),
+                "Удалить неиспользуемый код и лишние импорты".to_string(),
+                "Закоммитить результаты рефакторинга".to_string(),
+                "Перейти к следующей запланированной задаче".to_string(),
+            ],
+            _ => vec![
+                "Запустить модульные тесты для изменённого модуля и проверить сборку".to_string(),
+                "Запустить 6-линзовое ревью (/review 6) для новой реализации".to_string(),
+                "Продолжить реализацию следующей задачи из плана".to_string(),
+                "Проверить git diff и закоммитить готовые изменения".to_string(),
+                "Проверить граничные случаи и добавить модульные тесты".to_string(),
+                "Пересобрать и перезагрузить бинарник через selfdev build-reload".to_string(),
+            ],
+        }
+    } else {
+        match key.as_str() {
+            "verification" => vec![
+                "Run the targeted test suite and verify all assertions pass".to_string(),
+                "Run cargo check / clippy on the modified crates".to_string(),
+                "Run a 6-lens subagent self-review (/review 6) on the changes".to_string(),
+                "Inspect git diff to verify no unintended edits".to_string(),
+                "Commit the verified changes with a clear message".to_string(),
+                "Update OpenSpec task checkboxes to reflect completed verification".to_string(),
+            ],
+            "debugging" => vec![
+                "Inspect the failing test output and root-cause the error".to_string(),
+                "Add a minimal regression test reproducing the failure".to_string(),
+                "Check recent git diff for regressions in the affected module".to_string(),
+                "Run the isolated failing test with backtrace enabled".to_string(),
+                "Verify the fix across edge cases and rerun the test suite".to_string(),
+                "Run a 6-lens subagent review (/review 6) to catch hidden edge cases".to_string(),
+            ],
+            "review" => vec![
+                "Fix the actionable findings from the 6-lens review and rerun tests".to_string(),
+                "Run /review 6 to audit correctness, architecture, security, UX, perf, and tests"
+                    .to_string(),
+                "Run the test suite to confirm all review conditions hold".to_string(),
+                "Inspect git status and git diff before committing".to_string(),
+                "Update documentation or OpenSpec artifacts to match the implementation".to_string(),
+                "Commit the reviewed changes".to_string(),
+            ],
+            "architecture" => vec![
+                "Apply the OpenSpec tasks step-by-step (/openspec-apply-change)".to_string(),
+                "Run a 6-lens Go/No-Go subagent review on the proposed design".to_string(),
+                "Validate OpenSpec artifacts and check task status".to_string(),
+                "Inspect module boundaries and public interfaces in the target crates".to_string(),
+                "Write unit tests for the core data structures and invariants".to_string(),
+                "Prototype the core module and verify it compiles cleanly".to_string(),
+            ],
+            "refactoring" => vec![
+                "Run tests to confirm the refactoring preserves existing behavior".to_string(),
+                "Inspect git diff --stat to verify the refactoring scope is clean".to_string(),
+                "Run a 6-lens subagent review (/review 6) on the refactored code".to_string(),
+                "Remove dead code or unused imports uncovered by the refactor".to_string(),
+                "Commit the refactored changes".to_string(),
+                "Continue to the next planned task".to_string(),
+            ],
+            _ => vec![
+                "Run unit tests for the modified module and verify everything compiles".to_string(),
+                "Run a 6-lens subagent self-review (/review 6) on the new implementation".to_string(),
+                "Continue implementing the next pending task in the plan".to_string(),
+                "Inspect git diff and commit the completed changes".to_string(),
+                "Check edge cases and add targeted unit tests".to_string(),
+                "Verify runtime behavior and update OpenSpec task status".to_string(),
+            ],
+        }
     }
+}
+
+/// Build a dynamic, language-matched candidate pool from `SuggestedRepliesContext`:
+/// 1. Extracted assistant options / explicit questions / slash commands.
+/// 2. Active pending `todo` items framed in the user's language.
+/// 3. Localized primary branch candidates.
+/// 4. Localized cross-branch workflow candidates so up to `MAX_MICRO_CANDIDATES` (`21`)
+///    unique candidates are available when `max_secondary_suggestions` is up to `20`.
+pub fn contextual_candidates_for_branch(
+    branch: &str,
+    ctx: &SuggestedRepliesContext,
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+
+    for opt in &ctx.assistant_options {
+        push_unique_case_insensitive(&mut out, opt.clone());
+    }
+
+    for todo in ctx.pending_todos.iter().take(2) {
+        let cleaned = todo.trim();
+        if !cleaned.is_empty() {
+            let prompt = if ctx.language_is_cyrillic {
+                format!("Выполнить следующую задачу: {cleaned}")
+            } else {
+                format!("Work on next todo: {cleaned}")
+            };
+            push_unique_case_insensitive(&mut out, prompt);
+        }
+    }
+
+    for item in localized_branch_candidates(branch, ctx.language_is_cyrillic) {
+        push_unique_case_insensitive(&mut out, item);
+    }
+
+    // Top up from the remaining macro branches so that configurations up to
+    // `max_secondary_suggestions = 20` (requiring 21 total candidates) have a full pool.
+    for &(other_branch, _) in MACRO_BRANCHES {
+        if out.len() >= MAX_MICRO_CANDIDATES {
+            break;
+        }
+        if !other_branch.eq_ignore_ascii_case(branch.trim()) {
+            for item in localized_branch_candidates(other_branch, ctx.language_is_cyrillic) {
+                push_unique_case_insensitive(&mut out, item);
+                if out.len() >= MAX_MICRO_CANDIDATES {
+                    break;
+                }
+            }
+        }
+    }
+
+    out.truncate(MAX_MICRO_CANDIDATES);
+    out
+}
+
+/// Merge user-configured constant `custom_prompts` with dynamic `base_candidates`,
+/// deduplicating case-insensitively and capping at `max_candidates` (`<= MAX_MICRO_CANDIDATES`).
+/// User `custom_prompts` are inserted ahead of generic overflow candidates so they are
+/// guaranteed to be evaluated by SystemOne (`Laya`/`OpenJev`) or the local scorer.
+pub fn merge_custom_prompts(
+    base_candidates: Vec<String>,
+    custom_prompts: &[String],
+    max_candidates: usize,
+) -> Vec<String> {
+    let cap = max_candidates.clamp(1, MAX_MICRO_CANDIDATES);
+    let sanitized_custom: Vec<String> = custom_prompts
+        .iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if sanitized_custom.is_empty() {
+        return base_candidates.into_iter().take(cap).collect();
+    }
+
+    let mut out: Vec<String> = Vec::new();
+    // Keep top primary dynamic candidates first (up to cap - custom_count, at least 2),
+    // then insert all user custom_prompts, then fill any remaining slots from base_candidates.
+    let reserve_for_custom = sanitized_custom.len().min(cap);
+    let primary_dynamic_slots = cap.saturating_sub(reserve_for_custom).max(1.min(cap));
+
+    for item in base_candidates.iter().take(primary_dynamic_slots) {
+        if out.len() >= cap {
+            break;
+        }
+        push_unique_case_insensitive(&mut out, item.clone());
+    }
+    for custom in &sanitized_custom {
+        if out.len() >= cap {
+            break;
+        }
+        push_unique_case_insensitive(&mut out, custom.clone());
+    }
+    for item in base_candidates {
+        if out.len() >= cap {
+            break;
+        }
+        push_unique_case_insensitive(&mut out, item);
+    }
+
+    out
+}
+
+fn infer_macro_branch_from_text(text: &str) -> &'static str {
+    let lower = text.to_lowercase();
+    if lower.contains("no-go")
+        || lower.contains("conditional go")
+        || lower.contains("6-lens")
+        || lower.contains("review")
+        || lower.contains("ревью")
+    {
+        "review"
+    } else if lower.contains("error[")
+        || lower.contains("panicked at")
+        || lower.contains("test result: failed")
+        || lower.contains("failed")
+        || lower.contains("ошибк")
+        || lower.contains("упал")
+    {
+        "debugging"
+    } else if lower.contains("openspec")
+        || lower.contains("proposal.md")
+        || lower.contains("design.md")
+        || lower.contains("architecture")
+        || lower.contains("спецификац")
+        || lower.contains("архитектур")
+    {
+        "architecture"
+    } else if lower.contains("test result: ok")
+        || lower.contains("cargo test")
+        || lower.contains("compiled")
+        || lower.contains("тест")
+    {
+        "verification"
+    } else if lower.contains("refactor")
+        || lower.contains("cleanup")
+        || lower.contains("рефактор")
+    {
+        "refactoring"
+    } else {
+        "implementation"
+    }
+}
+
+/// Deterministic local macro-branch and candidate scorer using structured `SuggestedRepliesContext`
+/// and optional user `custom_prompts`.
+pub fn score_locally_with_context(
+    ctx: &SuggestedRepliesContext,
+    use_open_gf_candidates: Option<(String, Vec<String>)>,
+    custom_prompts: &[String],
+    six_lens_findings: Option<&str>,
+    confidence_threshold: f32,
+    max_secondary_suggestions: usize,
+) -> SuggestedRepliesResponse {
+    let max_secondary = max_secondary_suggestions.clamp(1, 20);
+    let desired_pool = (max_secondary + 1).clamp(6, MAX_MICRO_CANDIDATES);
+
+    if let Some(findings) = six_lens_findings.map(str::trim).filter(|s| !s.is_empty()) {
+        let mut raw_list = if ctx.language_is_cyrillic {
+            vec![
+                format!("Исправить замечания 6-линзового ревью: {findings}"),
+                "Запустить модульные тесты для проверки исправлений по ревью".to_string(),
+                "Повторно запустить /review 6 и убедиться в статусе GO".to_string(),
+                "Проверить git diff и закоммитить исправления".to_string(),
+            ]
+        } else {
+            vec![
+                format!("Address 6-lens review findings: {findings}"),
+                "Run unit tests to verify the 6-lens review fixes".to_string(),
+                "Re-run /review 6 to confirm all 6 lenses pass with GO".to_string(),
+                "Inspect git diff and commit the verified fixes".to_string(),
+            ]
+        };
+        for extra in contextual_candidates_for_branch("review", ctx) {
+            push_unique_case_insensitive(&mut raw_list, extra);
+        }
+        let merged = merge_custom_prompts(raw_list, custom_prompts, desired_pool);
+        let candidates: Vec<ScoredSuggestion> = merged
+            .into_iter()
+            .enumerate()
+            .map(|(idx, text)| {
+                let confidence = match idx {
+                    0 => 0.89,
+                    1 => 0.76,
+                    2 => 0.68,
+                    3 => 0.54,
+                    _ => (0.48 - (idx.saturating_sub(4) as f32) * 0.015).max(0.18),
+                };
+                ScoredSuggestion { text, confidence }
+            })
+            .collect();
+        return distribute_suggestions(
+            "review",
+            candidates,
+            confidence_threshold,
+            max_secondary,
+        );
+    }
+
+    let inferred_branch = infer_macro_branch_from_text(&ctx.transcript_tail);
+    let contextual_pool = contextual_candidates_for_branch(inferred_branch, ctx);
+
+    let (branch, base_candidates) = match use_open_gf_candidates {
+        Some((b, mut c)) if !c.is_empty() => {
+            for extra in contextual_pool {
+                if c.len() >= desired_pool {
+                    break;
+                }
+                push_unique_case_insensitive(&mut c, extra);
+            }
+            (b, c)
+        }
+        _ => (inferred_branch.to_string(), contextual_pool),
+    };
+
+    let merged = merge_custom_prompts(base_candidates, custom_prompts, desired_pool);
+
+    let scored: Vec<ScoredSuggestion> = merged
+        .into_iter()
+        .enumerate()
+        .map(|(idx, text)| {
+            let base: f32 = match idx {
+                0 => 0.78,
+                1 => 0.64,
+                2 => 0.51,
+                3 => 0.43,
+                4 => 0.36,
+                _ => (0.32 - (idx.saturating_sub(5) as f32) * 0.01).max(0.15),
+            };
+            ScoredSuggestion {
+                text,
+                confidence: base,
+            }
+        })
+        .collect();
+
+    distribute_suggestions(branch, scored, confidence_threshold, max_secondary)
 }
 
 /// Deterministic local macro-branch and candidate scorer used when no Jev
@@ -238,103 +800,67 @@ pub fn score_locally_from_context(
     confidence_threshold: f32,
     max_secondary_suggestions: usize,
 ) -> SuggestedRepliesResponse {
-    if let Some(findings) = six_lens_findings.map(str::trim).filter(|s| !s.is_empty()) {
-        let mut candidates = vec![
-            ScoredSuggestion {
-                text: format!("Address 6-lens review findings: {findings}"),
-                confidence: 0.89,
-            },
-            ScoredSuggestion {
-                text: "Run unit tests to verify the 6-lens review fixes".to_string(),
-                confidence: 0.76,
-            },
-            ScoredSuggestion {
-                text: "Re-run /review 6 to confirm all 6 lenses pass with GO".to_string(),
-                confidence: 0.68,
-            },
-            ScoredSuggestion {
-                text: "Inspect git diff and commit the verified fixes".to_string(),
-                confidence: 0.54,
-            },
-        ];
-        for extra in fixed_candidates_for_branch("review").into_iter().take(2) {
-            candidates.push(ScoredSuggestion {
-                text: extra,
-                confidence: 0.42,
-            });
-        }
-        return distribute_suggestions(
-            "review",
-            candidates,
-            confidence_threshold,
-            max_secondary_suggestions,
-        );
-    }
-
-    let lower = transcript_tail.to_ascii_lowercase();
-    let inferred_branch = if lower.contains("no-go")
-        || lower.contains("conditional go")
-        || lower.contains("6-lens")
-        || lower.contains("review")
-    {
-        "review"
-    } else if lower.contains("error[")
-        || lower.contains("panicked at")
-        || lower.contains("test result: failed")
-        || lower.contains("failed")
-    {
-        "debugging"
-    } else if lower.contains("openspec")
-        || lower.contains("proposal.md")
-        || lower.contains("design.md")
-        || lower.contains("architecture")
-    {
-        "architecture"
-    } else if lower.contains("test result: ok")
-        || lower.contains("cargo test")
-        || lower.contains("compiled")
-    {
-        "verification"
-    } else if lower.contains("refactor") || lower.contains("cleanup") {
-        "refactoring"
-    } else {
-        "implementation"
-    };
-
-    let (branch, raw_candidates) = match use_open_gf_candidates {
-        Some((b, c)) if !c.is_empty() => (b, c),
-        _ => (
-            inferred_branch.to_string(),
-            fixed_candidates_for_branch(inferred_branch),
-        ),
-    };
-
-    let scored: Vec<ScoredSuggestion> = raw_candidates
-        .into_iter()
-        .enumerate()
-        .map(|(idx, text)| {
-            // Calibrated decaying confidence so top contextual item clears 0.55 by default.
-            let base: f32 = match idx {
-                0 => 0.78,
-                1 => 0.64,
-                2 => 0.51,
-                3 => 0.43,
-                4 => 0.36,
-                _ => 0.28,
-            };
-            ScoredSuggestion {
-                text,
-                confidence: base,
-            }
-        })
-        .collect();
-
-    distribute_suggestions(
-        branch,
-        scored,
+    let ctx = SuggestedRepliesContext::from_transcript(transcript_tail);
+    score_locally_with_context(
+        &ctx,
+        use_open_gf_candidates,
+        &[],
+        six_lens_findings,
         confidence_threshold,
         max_secondary_suggestions,
     )
+}
+
+/// Build the structured JSON `state` passed to SystemOne (`/v1/systemone`) in both
+/// Iteration 1 (`candidates` empty) and Iteration 2 (`candidates` populated as `cand_0..cand_N`).
+pub fn build_structured_systemone_state(
+    branch: Option<&str>,
+    ctx: &SuggestedRepliesContext,
+    candidates: &[String],
+) -> Value {
+    let mut state = Map::new();
+    if let Some(b) = branch.map(str::trim).filter(|s| !s.is_empty()) {
+        state.insert("workflow_branch".to_string(), Value::String(b.to_string()));
+    }
+    state.insert(
+        "language".to_string(),
+        Value::String(if ctx.language_is_cyrillic { "ru" } else { "en" }.to_string()),
+    );
+    if let Some(ref user_msg) = ctx.last_user_message {
+        state.insert(
+            "last_user_message".to_string(),
+            Value::String(crate::util::truncate_str(user_msg, 1200).to_string()),
+        );
+    }
+    if let Some(ref assistant_msg) = ctx.last_assistant_message {
+        state.insert(
+            "last_assistant_message".to_string(),
+            Value::String(crate::util::truncate_str(assistant_msg, 1800).to_string()),
+        );
+    }
+    if !ctx.assistant_options.is_empty() {
+        state.insert(
+            "assistant_options".to_string(),
+            json!(ctx.assistant_options),
+        );
+    }
+    if !ctx.pending_todos.is_empty() {
+        state.insert("pending_todos".to_string(), json!(ctx.pending_todos));
+    }
+    state.insert(
+        "recent_transcript".to_string(),
+        Value::String(crate::util::truncate_str(&ctx.transcript_tail, 3200).to_string()),
+    );
+
+    if !candidates.is_empty() {
+        let mut cand_map = Map::new();
+        for (idx, text) in candidates.iter().take(MAX_MICRO_CANDIDATES).enumerate() {
+            cand_map.insert(format!("cand_{idx}"), Value::String(text.clone()));
+        }
+        state.insert("candidates".to_string(), Value::Object(cand_map));
+    }
+
+    Value::Object(state)
 }
 
 /// Build the SystemOne `choice` question for Iteration 1 (Macro-branching).
@@ -348,7 +874,7 @@ pub fn build_macro_branch_choice_question() -> Map<String, Value> {
         "macro_branch".to_string(),
         json!({
             "type": "choice",
-            "instructions": "Select the macro conversation branch that best describes the developer's next logical workflow stage based on the recent chat state.",
+            "instructions": "Select the macro conversation branch that best describes the developer's next logical workflow stage based on the structured chat state.",
             "criteria": criteria,
         }),
     );
@@ -375,33 +901,71 @@ pub fn build_macro_branch_noul_questions() -> Map<String, Value> {
     questions
 }
 
-/// Build batched SystemOne `noul` questions for Iteration 2 (Micro-branch candidate scoring).
-pub fn build_micro_scoring_noul_questions(
+/// Build Iteration 2 SystemOne micro-scoring questions over `state.candidates.cand_0..cand_N`.
+/// When `include_choice && candidates.len() >= 2`, includes a comparative `"best_candidate"`
+/// (`type: "choice"`) alongside `"cand_0..cand_N"` (`type: "noul"`) in a single batch.
+pub fn build_micro_scoring_questions(
     branch: &str,
     candidates: &[String],
+    include_choice: bool,
 ) -> Result<Map<String, Value>> {
     ensure!(
         !candidates.is_empty(),
         "Micro-branch scoring requires at least one candidate"
     );
+    let capped: Vec<&String> = candidates.iter().take(MAX_MICRO_CANDIDATES).collect();
     let mut questions = Map::new();
-    for (idx, candidate) in candidates.iter().take(12).enumerate() {
+
+    if include_choice && capped.len() >= 2 {
+        let mut choice_criteria = Map::new();
+        for (idx, candidate) in capped.iter().enumerate() {
+            choice_criteria.insert(
+                format!("cand_{idx}"),
+                Value::String(format!(
+                    "Candidate cand_{idx} in state.candidates: {}",
+                    crate::util::truncate_str(candidate, 140)
+                )),
+            );
+        }
+        questions.insert(
+            "best_candidate".to_string(),
+            json!({
+                "type": "choice",
+                "instructions": format!(
+                    "In the '{}' workflow branch, select which candidate reply in state.candidates is the single highest-value immediate next step for the user.",
+                    branch
+                ),
+                "criteria": choice_criteria,
+            }),
+        );
+    }
+
+    for (idx, candidate) in capped.iter().enumerate() {
         questions.insert(
             format!("cand_{idx}"),
             json!({
                 "type": "noul",
                 "instructions": format!(
-                    "In the '{}' workflow branch, is the following action the highest-value immediate next step for the developer? Action: {}",
-                    branch, candidate
+                    "Evaluate candidate cand_{idx} in state.candidates for the '{}' workflow branch: is it a directly actionable, high-value immediate next reply for the user? ({})",
+                    branch,
+                    crate::util::truncate_str(candidate, 140)
                 ),
                 "criteria": {
-                    "true": "Directly actionable, high-value immediate next step for the current conversation state",
-                    "false": "Premature, redundant, or lower priority than other next steps"
+                    "true": "Directly actionable, context-matching, high-value immediate next reply for the current conversation state",
+                    "false": "Premature, redundant, wrong language, or lower priority than other next steps"
                 }
             }),
         );
     }
     Ok(questions)
+}
+
+/// Build batched SystemOne `noul` questions for Iteration 2 (backward-compatible wrapper).
+pub fn build_micro_scoring_noul_questions(
+    branch: &str,
+    candidates: &[String],
+) -> Result<Map<String, Value>> {
+    build_micro_scoring_questions(branch, candidates, false)
 }
 
 #[derive(Debug, Deserialize)]
@@ -431,7 +995,7 @@ pub fn parse_open_gf_response(raw: &str) -> Option<(String, Vec<String>)> {
             .into_iter()
             .map(|c| c.trim().to_string())
             .filter(|c| !c.is_empty())
-            .take(6)
+            .take(MAX_MICRO_CANDIDATES)
             .collect();
         if !candidates.is_empty() {
             let branch = if parsed.branch.trim().is_empty() {
@@ -443,6 +1007,36 @@ pub fn parse_open_gf_response(raw: &str) -> Option<(String, Vec<String>)> {
         }
     }
     None
+}
+
+fn open_gf_http_client(is_plain_http: bool) -> Result<&'static reqwest::Client> {
+    static HTTP_NO_PROXY_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    static HTTPS_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+
+    if is_plain_http {
+        if let Some(c) = HTTP_NO_PROXY_CLIENT.get() {
+            return Ok(c);
+        }
+        let built = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(4))
+            .timeout(std::time::Duration::from_secs(12))
+            .no_proxy()
+            .build()
+            .context("failed to build OpenGF HTTP no_proxy client")?;
+        let _ = HTTP_NO_PROXY_CLIENT.set(built);
+        Ok(HTTP_NO_PROXY_CLIENT.get().expect("client initialized"))
+    } else {
+        if let Some(c) = HTTPS_CLIENT.get() {
+            return Ok(c);
+        }
+        let built = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(4))
+            .timeout(std::time::Duration::from_secs(12))
+            .build()
+            .context("failed to build OpenGF HTTPS client")?;
+        let _ = HTTPS_CLIENT.set(built);
+        Ok(HTTPS_CLIENT.get().expect("client initialized"))
+    }
 }
 
 async fn complete_via_named_openai_compatible(
@@ -475,15 +1069,23 @@ async fn complete_via_named_openai_compatible(
             if env_key.starts_with("sk-") {
                 return Some(env_key.to_string());
             }
-            if let Some(env_file) = profile.env_file.as_deref().map(str::trim).filter(|s| !s.is_empty())
-                && let Some(v) = crate::provider_catalog::load_env_value_from_env_or_config(env_key, env_file)
+            if let Some(env_file) = profile
+                .env_file
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                && let Some(v) =
+                    crate::provider_catalog::load_env_value_from_env_or_config(env_key, env_file)
             {
                 let sanitized = jcode_provider_env::sanitize_secret_value(&v);
                 if !sanitized.is_empty() {
                     return Some(sanitized.to_string());
                 }
             }
-            std::env::var(env_key).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
+            std::env::var(env_key)
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
         });
 
     let model = profile
@@ -491,23 +1093,23 @@ async fn complete_via_named_openai_compatible(
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .or_else(|| profile.models.first().map(|m| m.id.trim()).filter(|s| !s.is_empty()))
+        .or_else(|| {
+            profile
+                .models
+                .first()
+                .map(|m| m.id.trim())
+                .filter(|s| !s.is_empty())
+        })
         .unwrap_or("gpt-5.6-luna");
 
-    let mut builder = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(4))
-        .timeout(std::time::Duration::from_secs(12));
-    if url.starts_with("http://") {
-        builder = builder.no_proxy();
-    }
-    let client = builder.build().context("failed to build OpenGF HTTP client")?;
+    let client = open_gf_http_client(url.starts_with("http://"))?;
     let mut req = client.post(&url).json(&json!({
         "model": model,
         "messages": [
             { "role": "system", "content": system },
             { "role": "user", "content": user_msg }
         ],
-        "max_tokens": 600,
+        "max_tokens": 900,
         "temperature": 0.2,
         "stream": false
     }));
@@ -517,7 +1119,10 @@ async fn complete_via_named_openai_compatible(
     for (hk, hv) in &profile.headers {
         req = req.header(hk, hv);
     }
-    let resp = req.send().await.with_context(|| format!("POST {url} failed"))?;
+    let resp = req
+        .send()
+        .await
+        .with_context(|| format!("POST {url} failed"))?;
     let status = resp.status();
     let body: Value = resp
         .json()
@@ -532,7 +1137,10 @@ async fn complete_via_named_openai_compatible(
         .unwrap_or("")
         .trim()
         .to_string();
-    ensure!(!content.is_empty(), "empty choices[0].message.content from {name} ({model})");
+    ensure!(
+        !content.is_empty(),
+        "empty choices[0].message.content from {name} ({model})"
+    );
     Ok((content, format!("profile:{name}:{model}")))
 }
 
@@ -586,7 +1194,8 @@ async fn complete_open_gf_prompt(system: &str, user_msg: &str) -> Result<(String
         crate::provider::external::ANTIGRAVITY_RUNTIME,
         crate::provider::external::GEMINI_RUNTIME,
     ] {
-        if let Some(provider) = crate::provider::external::instantiate_external_provider(runtime_key)
+        if let Some(provider) =
+            crate::provider::external::instantiate_external_provider(runtime_key)
         {
             let label = format!("external:{runtime_key}:{}", provider.model());
             match provider.complete_simple_with_usage(user_msg, system).await {
@@ -600,20 +1209,58 @@ async fn complete_open_gf_prompt(system: &str, user_msg: &str) -> Result<(String
     anyhow::bail!("All OpenGF routes failed: {}", errors.join(" | "))
 }
 
+/// Synthesize context-specific next-step candidates via OpenGF using structured `SuggestedRepliesContext`.
+pub async fn generate_open_gf_candidates_for_context(
+    ctx: &SuggestedRepliesContext,
+    desired_count: usize,
+) -> Result<(String, Vec<String>, String)> {
+    let target_count = desired_count.clamp(4, MAX_MICRO_CANDIDATES);
+    let system = "You are OpenGF, the generative candidate synthesizer for Jcode's two-stage SystemOne Suggested Replies cascade. Return ONLY valid JSON with the shape: {\"branch\": \"implementation|verification|debugging|review|architecture|refactoring\", \"candidates\": [\"short actionable reply 1\", \"short actionable reply 2\", ...]}. Generate concise, complete, self-contained next-step user replies (up to 120 chars each, never cut mid-sentence) tailored to the conversation state, extracted assistant options, and pending todos. CRITICAL: Write every candidate in the EXACT SAME natural language used by the user in their most recent message (e.g. Russian if the user wrote in Russian, English if in English). Order candidates from the most likely immediate next user reply (#1) to lower-priority alternatives.";
+
+    let mut prompt_sections = Vec::new();
+    prompt_sections.push(format!(
+        "Detected user language: {}",
+        if ctx.language_is_cyrillic {
+            "Russian (Cyrillic)"
+        } else {
+            "English"
+        }
+    ));
+    if !ctx.assistant_options.is_empty() {
+        prompt_sections.push(format!(
+            "Assistant options / questions to answer directly:\n- {}",
+            ctx.assistant_options.join("\n- ")
+        ));
+    }
+    if !ctx.pending_todos.is_empty() {
+        prompt_sections.push(format!(
+            "Active pending todos:\n- {}",
+            ctx.pending_todos.join("\n- ")
+        ));
+    }
+    prompt_sections.push(format!(
+        "Recent conversation state:\n{}",
+        crate::util::truncate_str(&ctx.transcript_tail, 3200)
+    ));
+    prompt_sections.push(format!(
+        "Produce the JSON with macro branch and 4..{target_count} concrete next-step user replies in the user's language:"
+    ));
+    let user_msg = prompt_sections.join("\n\n");
+
+    let (raw, route_label) = complete_open_gf_prompt(system, &user_msg).await?;
+    let (branch, candidates) = parse_open_gf_response(&raw).with_context(|| {
+        format!("OpenGF response from {route_label} did not contain valid JSON candidates")
+    })?;
+    Ok((branch, candidates, route_label))
+}
+
 /// Synthesize context-specific next-step candidates via OpenGF (`Sidecar` + fallback routes),
 /// returning `(branch, candidates, route_label)`.
 pub async fn generate_open_gf_candidates_with_route(
     transcript_tail: &str,
 ) -> Result<(String, Vec<String>, String)> {
-    let system = "You are OpenGF, the generative candidate synthesizer for Jcode's two-stage SystemOne Suggested Replies cascade. Return ONLY valid JSON with the shape: {\"branch\": \"implementation|verification|debugging|review|architecture|refactoring\", \"candidates\": [\"short actionable reply 1\", \"short actionable reply 2\", ...]}. Generate between 3 and 6 concise, complete, self-contained next-step user replies (up to 120 chars each, never cut mid-sentence) tailored to the conversation state. CRITICAL: Write every candidate in the EXACT SAME natural language used by the user in their most recent message (e.g. Russian if the user wrote in Russian, English if in English). Order candidates from the most likely immediate next user reply (#1) to lower-priority alternatives.";
-    let user_msg = format!(
-        "Recent conversation state:\n{}\n\nProduce the JSON with macro branch and 3..6 concrete next-step user replies in the user's language:",
-        crate::util::truncate_str(transcript_tail, 3500)
-    );
-    let (raw, route_label) = complete_open_gf_prompt(system, &user_msg).await?;
-    let (branch, candidates) = parse_open_gf_response(&raw)
-        .with_context(|| format!("OpenGF response from {route_label} did not contain valid JSON candidates"))?;
-    Ok((branch, candidates, route_label))
+    let ctx = SuggestedRepliesContext::from_transcript(transcript_tail);
+    generate_open_gf_candidates_for_context(&ctx, 6).await
 }
 
 /// Synthesize context-specific next-step candidates via OpenGF (`Sidecar`).
@@ -622,19 +1269,21 @@ pub async fn generate_open_gf_candidates(transcript_tail: &str) -> Result<(Strin
     Ok((branch, candidates))
 }
 
-/// Calibrate SystemOne `noul` probability with candidate rank prior when the model
-/// positively endorses the candidate (`raw_noul >= 0.50`). SystemOne's binary `noul`
-/// head evaluates each candidate independently via a sigmoid (typically peaking around
-/// `0.55..0.68` on multi-option next-step prompts); blending with the ordered rank prior
-/// preserves SystemOne's relative logit re-ranking while mapping positive endorsements
-/// onto the `0.55..0.85` Default Action threshold scale. Candidates below `0.50` stay unboosted.
-pub fn calibrate_micro_score(raw_noul: f32, idx: usize, from_open_gf: bool) -> f32 {
+/// Calibrate SystemOne `noul` probability and optional comparative `choice` softmax
+/// probability with candidate rank prior when the model positively endorses the candidate.
+pub fn calibrate_micro_score_with_choice(
+    raw_noul: f32,
+    choice_prob: Option<f32>,
+    is_choice_winner: bool,
+    idx: usize,
+    from_open_gf: bool,
+) -> f32 {
     let raw = if raw_noul.is_finite() {
         raw_noul.clamp(0.0, 1.0)
     } else {
         0.0
     };
-    if raw < 0.50 {
+    if raw < 0.50 && !is_choice_winner {
         return raw;
     }
     let rank_prior: f32 = match idx {
@@ -643,7 +1292,7 @@ pub fn calibrate_micro_score(raw_noul: f32, idx: usize, from_open_gf: bool) -> f
         2 => 0.64,
         3 => 0.56,
         4 => 0.48,
-        _ => 0.42,
+        _ => (0.42 - (idx.saturating_sub(5) as f32) * 0.015).max(0.20),
     };
     let bonus = if from_open_gf && raw >= 0.55 && idx == 0 {
         0.06
@@ -652,20 +1301,31 @@ pub fn calibrate_micro_score(raw_noul: f32, idx: usize, from_open_gf: bool) -> f
     } else {
         0.0
     };
-    (0.60 * raw + 0.40 * rank_prior + bonus).clamp(0.0, 1.0)
+    let choice_boost = choice_prob
+        .filter(|p| p.is_finite() && *p > 0.0)
+        .map(|p| (p.clamp(0.0, 1.0) * 0.14) + if is_choice_winner { 0.04 } else { 0.0 })
+        .unwrap_or(if is_choice_winner { 0.05 } else { 0.0 });
+
+    (0.60 * raw + 0.40 * rank_prior + bonus + choice_boost).clamp(0.0, 1.0)
 }
 
-/// Execute the full two-stage cascade (Macro-Branching -> Micro-Scoring -> Distribution).
-/// Gracefully falls back to deterministic local scoring if credentials are unconfigured
-/// or if the configured provider returns an error (such as HTTP 402 Insufficient credits).
-pub async fn evaluate_cascade(
-    transcript_tail: &str,
+/// Backward-compatible calibration helper when only `noul` is present.
+pub fn calibrate_micro_score(raw_noul: f32, idx: usize, from_open_gf: bool) -> f32 {
+    calibrate_micro_score_with_choice(raw_noul, None, false, idx, from_open_gf)
+}
+
+/// Execute the full two-stage cascade using a structured `SuggestedRepliesContext`
+/// (Macro-Branching -> Candidate Merging -> Joint `choice + noul` Micro-Scoring -> Distribution).
+pub async fn evaluate_cascade_with_context(
+    ctx: &SuggestedRepliesContext,
     config: &crate::config::SuggestedRepliesConfig,
     six_lens_findings: Option<&str>,
 ) -> SuggestedRepliesResponse {
     let started = std::time::Instant::now();
     let threshold = config.clamped_confidence_threshold();
     let max_secondary = config.clamped_max_secondary();
+    let custom_prompts = config.sanitized_custom_prompts();
+    let desired_pool = (max_secondary + 1).clamp(6, MAX_MICRO_CANDIDATES);
 
     if !config.enabled {
         return SuggestedRepliesResponse::default();
@@ -673,9 +1333,10 @@ pub async fn evaluate_cascade(
 
     // If 6-lens review findings were just reported, prioritize surfacing them.
     if six_lens_findings.is_some_and(|s| !s.trim().is_empty()) {
-        let mut resp = score_locally_from_context(
-            transcript_tail,
+        let mut resp = score_locally_with_context(
+            ctx,
             None,
+            &custom_prompts,
             six_lens_findings,
             threshold,
             max_secondary,
@@ -696,7 +1357,7 @@ pub async fn evaluate_cascade(
     let mut open_gf_route = None;
     let open_gf_result = if config.use_open_gf {
         let gf_start = std::time::Instant::now();
-        match generate_open_gf_candidates_with_route(transcript_tail).await {
+        match generate_open_gf_candidates_for_context(ctx, desired_pool).await {
             Ok((branch, cands, route)) => {
                 let ms = gf_start.elapsed().as_millis();
                 open_gf_status = format!(
@@ -728,14 +1389,14 @@ pub async fn evaluate_cascade(
     // Attempt OpenJev / Laya / SystemOne evaluation if a JevClient route is available.
     match crate::jev::JevClient::for_suggestions_with_selector(&config.jev_provider) {
         Ok(client) => {
-            let state = json!(crate::util::truncate_str(transcript_tail, 6000));
+            let iter1_state = build_structured_systemone_state(None, ctx, &[]);
 
             // Iteration 1: Determine macro branch (from OpenGF if present, else via SystemOne).
             let branch = if let Some((ref gf_branch, _)) = open_gf_result {
                 gf_branch.clone()
             } else if client.supports_choice_questions() {
                 let q = build_macro_branch_choice_question();
-                match client.evaluate(state.clone(), q).await {
+                match client.evaluate(iter1_state, q).await {
                     Ok(resp) => resp
                         .pointer("/answers/macro_branch/choice")
                         .and_then(Value::as_str)
@@ -746,9 +1407,10 @@ pub async fn evaluate_cascade(
                         crate::logging::info(&format!(
                             "[suggested_replies] Iteration 1 (choice) degraded to local scorer: {err}"
                         ));
-                        let mut resp = score_locally_from_context(
-                            transcript_tail,
+                        let mut resp = score_locally_with_context(
+                            ctx,
                             open_gf_result,
+                            &custom_prompts,
                             six_lens_findings,
                             threshold,
                             max_secondary,
@@ -770,7 +1432,7 @@ pub async fn evaluate_cascade(
                 }
             } else {
                 let q = build_macro_branch_noul_questions();
-                match client.evaluate(state.clone(), q).await {
+                match client.evaluate(iter1_state, q).await {
                     Ok(resp) => MACRO_BRANCHES
                         .iter()
                         .max_by(|(a, _), (b, _)| {
@@ -791,9 +1453,10 @@ pub async fn evaluate_cascade(
                         crate::logging::info(&format!(
                             "[suggested_replies] Iteration 1 (noul) degraded to local scorer: {err}"
                         ));
-                        let mut resp = score_locally_from_context(
-                            transcript_tail,
+                        let mut resp = score_locally_with_context(
+                            ctx,
                             open_gf_result,
+                            &custom_prompts,
                             six_lens_findings,
                             threshold,
                             max_secondary,
@@ -815,38 +1478,80 @@ pub async fn evaluate_cascade(
                 }
             };
 
-            // Iteration 2: Candidate pool & SystemOne logit scoring via `noul`.
+            // Iteration 2: Build candidate pool (OpenGF or contextual + custom_prompts)
+            // and evaluate via joint `choice + noul` SystemOne request.
             let from_open_gf = open_gf_result
                 .as_ref()
                 .is_some_and(|(_, cands)| !cands.is_empty());
-            let candidate_texts = match open_gf_result.as_ref() {
-                Some((_, cands)) if !cands.is_empty() => cands.clone(),
-                _ => fixed_candidates_for_branch(&branch),
+            let contextual_pool = contextual_candidates_for_branch(&branch, ctx);
+            let base_candidates = match open_gf_result.as_ref() {
+                Some((_, cands)) if !cands.is_empty() => {
+                    let mut combined = cands.clone();
+                    for extra in contextual_pool {
+                        if combined.len() >= desired_pool {
+                            break;
+                        }
+                        push_unique_case_insensitive(&mut combined, extra);
+                    }
+                    combined
+                }
+                _ => contextual_pool,
             };
+            let candidate_texts =
+                merge_custom_prompts(base_candidates, &custom_prompts, desired_pool);
+            let include_choice =
+                client.supports_choice_questions() && candidate_texts.len() >= 2;
 
-            if let Ok(micro_q) = build_micro_scoring_noul_questions(&branch, &candidate_texts) {
+            if let Ok(micro_q) =
+                build_micro_scoring_questions(&branch, &candidate_texts, include_choice)
+            {
+                let iter2_state =
+                    build_structured_systemone_state(Some(&branch), ctx, &candidate_texts);
                 let iter2_start = std::time::Instant::now();
-                match client.evaluate(state, micro_q).await {
+                match client.evaluate(iter2_state, micro_q).await {
                     Ok(resp) => {
                         let iter2_ms = iter2_start.elapsed().as_millis();
+                        let choice_winner = resp
+                            .pointer("/answers/best_candidate/choice")
+                            .and_then(Value::as_str);
                         let scored: Vec<ScoredSuggestion> = candidate_texts
                             .into_iter()
                             .enumerate()
                             .map(|(idx, text)| {
+                                let cand_key = format!("cand_{idx}");
                                 let raw_prob = resp
-                                    .pointer(&format!("/answers/cand_{idx}/noul"))
+                                    .pointer(&format!("/answers/{cand_key}/noul"))
                                     .and_then(Value::as_f64)
-                                    .unwrap_or(0.0) as f32;
-                                let confidence = calibrate_micro_score(raw_prob, idx, from_open_gf);
+                                    .unwrap_or(0.0)
+                                    as f32;
+                                let choice_prob = resp
+                                    .pointer(&format!(
+                                        "/answers/best_candidate/probabilities/{cand_key}"
+                                    ))
+                                    .and_then(Value::as_f64)
+                                    .map(|p| p as f32);
+                                let is_winner = choice_winner == Some(cand_key.as_str());
+                                let confidence = calibrate_micro_score_with_choice(
+                                    raw_prob,
+                                    choice_prob,
+                                    is_winner,
+                                    idx,
+                                    from_open_gf,
+                                );
                                 ScoredSuggestion { text, confidence }
                             })
                             .collect();
-                        let mut distributed =
-                            distribute_suggestions(branch.clone(), scored, threshold, max_secondary);
+                        let mut distributed = distribute_suggestions(
+                            branch.clone(),
+                            scored,
+                            threshold,
+                            max_secondary,
+                        );
                         let top_conf = distributed.top_confidence();
                         jev_status = format!(
-                            "ok (selector={}, branch={branch}, iter2={}ms, top={:.2})",
+                            "ok (selector={}, mode={}, branch={branch}, iter2={}ms, top={:.2})",
                             config.jev_provider,
+                            if include_choice { "choice+noul" } else { "noul" },
                             iter2_ms,
                             top_conf.unwrap_or(0.0)
                         );
@@ -872,9 +1577,9 @@ pub async fn evaluate_cascade(
                         return distributed;
                     }
                     Err(err) => {
-                        jev_status = format!("iter2(noul) error: {err}");
+                        jev_status = format!("iter2 error: {err}");
                         crate::logging::warn(&format!(
-                            "[suggested_replies] Iteration 2 (noul) degraded to local scorer: {err}"
+                            "[suggested_replies] Iteration 2 degraded to local scorer: {err}"
                         ));
                     }
                 }
@@ -892,9 +1597,10 @@ pub async fn evaluate_cascade(
     let from_open_gf = open_gf_result
         .as_ref()
         .is_some_and(|(_, cands)| !cands.is_empty());
-    let mut fallback = score_locally_from_context(
-        transcript_tail,
+    let mut fallback = score_locally_with_context(
+        ctx,
         open_gf_result,
+        &custom_prompts,
         six_lens_findings,
         threshold,
         max_secondary,
@@ -912,6 +1618,16 @@ pub async fn evaluate_cascade(
         elapsed_ms: started.elapsed().as_millis() as u64,
     });
     fallback
+}
+
+/// Execute the full two-stage cascade (backward-compatible entry point taking `transcript_tail`).
+pub async fn evaluate_cascade(
+    transcript_tail: &str,
+    config: &crate::config::SuggestedRepliesConfig,
+    six_lens_findings: Option<&str>,
+) -> SuggestedRepliesResponse {
+    let ctx = SuggestedRepliesContext::from_transcript(transcript_tail);
+    evaluate_cascade_with_context(&ctx, config, six_lens_findings).await
 }
 
 #[cfg(test)]
@@ -941,6 +1657,8 @@ mod tests {
             result.secondary_suggestions,
             vec!["Inspect git diff".to_string(), "Run cargo test".to_string()]
         );
+        assert_eq!(result.confidence_for_text("Fix HTTP 402 fallback"), Some(0.81));
+        assert_eq!(result.confidence_for_text("Inspect git diff"), Some(0.63));
 
         let json = serde_json::to_value(&result).unwrap();
         assert_eq!(json["defaultAction"], "Fix HTTP 402 fallback");
@@ -996,6 +1714,69 @@ mod tests {
     }
 
     #[test]
+    fn cascade_outputs_exact_configured_suggestion_counts_for_1_3_and_20() {
+        let transcript = "[user]: Проверь тестами, что при настройках 1, 3 и 20 каскад выдаёт нужное число подсказок.\n\n[assistant]: Готово! Что проверим дальше?\n1. Запустить тесты каскада\n2. Проверить TUI рендеринг";
+        let ctx = SuggestedRepliesContext::from_transcript(transcript)
+            .with_pending_todos(vec!["Проверить лимиты 1, 3 и 20".to_string()]);
+        assert!(ctx.language_is_cyrillic);
+        assert!(ctx.assistant_options.len() >= 2);
+
+        for expected_count in [1usize, 3usize, 20usize] {
+            let resp = score_locally_with_context(
+                &ctx,
+                None,
+                &["Мой постоянный вопрос: проверь статус git".to_string()],
+                None,
+                0.55,
+                expected_count,
+            );
+            assert!(
+                resp.default_action.is_some(),
+                "expected default_action for count={expected_count}"
+            );
+            assert_eq!(
+                resp.secondary_suggestions.len(),
+                expected_count,
+                "cascade must emit exactly {expected_count} secondary suggestions"
+            );
+            // Every emitted row (default_action and all secondary_suggestions) must have a valid confidence score.
+            let def_text = resp.default_action.as_deref().unwrap();
+            assert!(resp.confidence_for_text(def_text).is_some());
+            for sec in &resp.secondary_suggestions {
+                assert!(
+                    resp.confidence_for_text(sec).is_some(),
+                    "missing confidence for secondary suggestion '{sec}'"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn joint_choice_and_noul_questions_and_structured_state_respect_invariants() {
+        let ctx = SuggestedRepliesContext::from_transcript(
+            "[user]: Добавь две опции в настройки\n\n[assistant]: Выберите вариант:\n1. Показывать уверенность модели\n2. Добавить список постоянных вопросов",
+        );
+        let cands = contextual_candidates_for_branch("implementation", &ctx);
+        assert!(cands.len() >= 20);
+
+        let state = build_structured_systemone_state(Some("implementation"), &ctx, &cands[..4]);
+        assert_eq!(state["workflow_branch"], "implementation");
+        assert_eq!(state["language"], "ru");
+        assert_eq!(state["candidates"]["cand_0"], cands[0]);
+
+        // With >= 2 candidates and include_choice = true, best_candidate (choice) + cand_0..3 (noul) are present.
+        let joint_q = build_micro_scoring_questions("implementation", &cands[..4], true).unwrap();
+        assert_eq!(joint_q["best_candidate"]["type"], "choice");
+        assert_eq!(joint_q["cand_0"]["type"], "noul");
+        assert_eq!(joint_q.len(), 5);
+
+        // With 1 candidate, best_candidate is omitted so jev.rs choice validation (2..=255) never fails.
+        let single_q = build_micro_scoring_questions("implementation", &cands[..1], true).unwrap();
+        assert!(!single_q.contains_key("best_candidate"));
+        assert_eq!(single_q.len(), 1);
+    }
+
+    #[test]
     fn parse_open_gf_extracts_json_from_fenced_response() {
         let raw = "```json\n{\"branch\": \"Verification\", \"candidates\": [\"cargo test\", \"git status\"]}\n```";
         let (branch, cands) = parse_open_gf_response(raw).unwrap();
@@ -1005,12 +1786,12 @@ mod tests {
 
     #[test]
     fn calibrate_micro_score_maps_positive_laya_noul_to_threshold_scale_and_keeps_low_scores_unboosted() {
-        // Positive Laya noul (~0.61) on top candidate clears 0.75 threshold after calibration.
         let top = calibrate_micro_score(0.6089, 0, true);
         assert!(top >= 0.75, "expected calibrated top score >= 0.75, got {top}");
+        let top_with_choice = calibrate_micro_score_with_choice(0.8339, Some(0.35), true, 0, true);
+        assert!(top_with_choice > top);
         let second = calibrate_micro_score(0.5864, 1, true);
         assert!(top > second);
-        // Rejected candidate (< 0.50) is never boosted.
         assert_eq!(calibrate_micro_score(0.42, 0, true), 0.42);
     }
 

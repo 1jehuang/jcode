@@ -95,9 +95,43 @@ where
         _ => None,
     };
     Ok(match parsed {
-        Some(v) => v.clamp(1, 5) as usize,
-        None => 5,
+        Some(v) => v.clamp(1, 20) as usize,
+        None => 3,
     })
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum LenientStringListInput {
+    List(Vec<String>),
+    Single(String),
+    Other(serde::de::IgnoredAny),
+}
+
+pub(crate) fn lenient_string_list<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw_items = match LenientStringListInput::deserialize(deserializer) {
+        Ok(LenientStringListInput::List(items)) => items,
+        Ok(LenientStringListInput::Single(s)) => s
+            .split(['|', ';', '\n'])
+            .map(ToString::to_string)
+            .collect(),
+        _ => Vec::new(),
+    };
+    let mut out = Vec::new();
+    for item in raw_items {
+        let trimmed = item.trim();
+        if !trimmed.is_empty()
+            && !out
+                .iter()
+                .any(|existing: &String| existing.eq_ignore_ascii_case(trimmed))
+        {
+            out.push(trimmed.to_string());
+        }
+    }
+    Ok(out)
 }
 
 pub(crate) fn lenient_confidence_threshold<'de, D>(deserializer: D) -> Result<f32, D::Error>
@@ -200,11 +234,18 @@ mod tests {
 
     #[test]
     fn suggested_replies_config_lenient_clamping_and_defaults() {
+        let default_cfg = crate::SuggestedRepliesConfig::default();
+        assert_eq!(default_cfg.max_secondary_suggestions, 3);
+        assert!(default_cfg.show_confidence);
+        assert!(default_cfg.custom_prompts.is_empty());
+
         let cfg: crate::SuggestedRepliesConfig = serde_json::from_str(
             r#"{
                 "useOpenGf": "yes",
                 "maxSecondarySuggestions": 99,
                 "confidenceThreshold": 1.8,
+                "showConfidence": "no",
+                "custom_questions": ["Проверь тесты", "Запусти clippy", ""],
                 "enableFullAutoExplorer": 1,
                 "sixLensAutoReview": "on"
             }"#,
@@ -212,8 +253,10 @@ mod tests {
         .expect("must parse leniently");
         assert!(cfg.enabled);
         assert!(cfg.use_open_gf);
-        assert_eq!(cfg.max_secondary_suggestions, 5);
+        assert_eq!(cfg.max_secondary_suggestions, 20);
         assert_eq!(cfg.confidence_threshold, 1.0);
+        assert!(!cfg.show_confidence);
+        assert_eq!(cfg.custom_prompts, vec!["Проверь тесты", "Запусти clippy"]);
         assert!(cfg.enable_full_auto_explorer);
         assert!(cfg.six_lens_auto_review);
 
@@ -228,5 +271,6 @@ mod tests {
         assert_eq!(low_cfg.max_secondary_suggestions, 1);
         assert_eq!(low_cfg.confidence_threshold, 0.0);
         assert!(!low_cfg.use_open_gf);
+        assert!(low_cfg.show_confidence);
     }
 }

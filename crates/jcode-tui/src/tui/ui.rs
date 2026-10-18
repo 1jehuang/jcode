@@ -125,8 +125,9 @@ use file_diff_ui::{
     FileDiffCacheKey, FileDiffViewCacheEntry, file_content_signature, file_diff_cache,
 };
 pub(crate) use header::capitalize;
-use inline_ui::{clear_suggested_reply_hit_regions, draw_inline_ui, inline_ui_height};
+use inline_ui::{clear_suggested_reply_hit_regions, draw_inline_ui};
 pub(crate) use inline_ui::{
+    draw_suggested_replies_panel, inline_ui_height,
     suggested_reply_target_at as suggested_reply_target_from_screen, truncate_to_display_width,
 };
 pub(crate) use memory_estimates::{debug_memory_profile, debug_side_panel_memory_profile};
