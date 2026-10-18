@@ -42,6 +42,7 @@ mod load_telemetry;
 mod maintenance;
 mod memory_profile;
 mod model;
+mod parallel_messages;
 mod persistence;
 mod render;
 mod storage_paths;
@@ -123,6 +124,7 @@ pub struct Session {
     pub custom_title: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    #[serde(deserialize_with = "parallel_messages::deserialize")]
     pub messages: Vec<StoredMessage>,
     /// Full assembled system prompt replacement, including an intentionally empty prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1773,7 +1775,7 @@ struct RemoteStartupSessionSnapshot {
     system_prompt: Option<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "parallel_messages::deserialize")]
     messages: Vec<StoredMessage>,
     #[serde(default)]
     compaction: Option<StoredCompactionState>,
