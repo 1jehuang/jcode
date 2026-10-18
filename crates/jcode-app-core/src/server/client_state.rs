@@ -484,11 +484,6 @@ pub(super) fn apply_history_base(
     let Some(base) = history_base else {
         return (messages, None);
     };
-    crate::logging::info(&format!(
-        "History base offered: count={}, server_messages={}",
-        base.count,
-        messages.len()
-    ));
     if base.count == 0 || base.count > messages.len() {
         return (messages, None);
     }

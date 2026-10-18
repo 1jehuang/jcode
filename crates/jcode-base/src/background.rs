@@ -1634,7 +1634,11 @@ impl BackgroundTaskManager {
         }
         static INDEX: std::sync::LazyLock<std::sync::Mutex<Option<Index>>> =
             std::sync::LazyLock::new(Default::default);
-        const TTL: std::time::Duration = std::time::Duration::from_secs(2);
+        // New tasks create a status file (moving the dir mtime), and tasks that
+        // finished are dropped below by the pid liveness filter, so the TTL
+        // only bounds exotic in-place edits. Keep it long enough that the index
+        // prewarmed at server start covers a whole reconnect storm.
+        const TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
         let dir_mtime = std::fs::metadata(&self.output_dir)
             .and_then(|meta| meta.modified())

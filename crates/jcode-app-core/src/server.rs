@@ -1278,6 +1278,13 @@ impl Server {
         tokio::task::JoinHandle<()>,
     ) {
         self.spawn_registry_prewarm();
+        // Every resume History asks whether the session has persisted
+        // background tasks. The first ask after a reload scans the whole task
+        // directory (~250ms) while clients are reconnecting; build the index
+        // now, off the async workers, so the storm only sees cache hits.
+        std::thread::spawn(|| {
+            let _ = crate::background::global().persisted_detached_running_tasks_for_session("");
+        });
         let registry_info = self.build_registry_info();
 
         let runtime = self.runtime();
