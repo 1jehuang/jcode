@@ -55,6 +55,9 @@ const OPENAI_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 /// Cache duration (refresh every 5 minutes - usage data is slow-changing)
 const CACHE_DURATION: Duration = Duration::from_secs(300);
 
+/// Conservative Anthropic polling policy, not a provider-guaranteed allowance.
+const ANTHROPIC_CACHE_DURATION: Duration = Duration::from_secs(900);
+
 /// Error backoff duration (wait 5 minutes before retrying after auth/credential errors)
 const ERROR_BACKOFF: Duration = Duration::from_secs(300);
 
@@ -123,7 +126,14 @@ async fn fetch_anthropic_usage_data_uncached(
         // Cache the status immediately: a stalled error body must not discard
         // a received 429 when an outer timeout cancels the request.
         let message = format!("Usage API error ({})", status);
-        return cache_anthropic_usage_failure(cache_key, message);
+        return cache_anthropic_usage_failure_with_hint(
+            cache_key,
+            message,
+            response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+        );
     }
 
     let data: UsageResponse = match response.json().await {
@@ -185,6 +195,8 @@ async fn fetch_anthropic_usage_data_uncached(
             .and_then(|e| e.is_enabled)
             .unwrap_or(false),
         fetched_at: Some(Instant::now()),
+        last_success_at: Some(Instant::now()),
+        refresh_after: None,
         last_error: None,
     };
 
@@ -203,7 +215,7 @@ async fn fetch_anthropic_usage_data_uncached(
             probe_started,
         );
     }
-    disk_cache::store_success(&cache_key, &usage);
+    let usage = disk_cache::store_success(&cache_key, &usage);
     store_anthropic_usage(cache_key, usage.clone());
     Ok(usage)
 }
@@ -211,17 +223,22 @@ async fn fetch_anthropic_usage_data_uncached(
 /// A failed request keeps any last-known limits, but marks them as stale and
 /// shares the error timestamp for cross-process endpoint backoff.
 fn cache_anthropic_usage_failure(cache_key: String, message: String) -> Result<UsageData> {
-    disk_cache::store_error(&cache_key, &message);
-    if let Some(mut last_good) = disk_cache::last_good(&cache_key) {
-        last_good.fetched_at = Some(Instant::now());
-        last_good.last_error = Some(message);
-        store_anthropic_usage(cache_key, last_good.clone());
-        return Ok(last_good);
+    cache_anthropic_usage_failure_with_hint(cache_key, message, None)
+}
+
+fn cache_anthropic_usage_failure_with_hint(
+    cache_key: String,
+    message: String,
+    retry_after: Option<&str>,
+) -> Result<UsageData> {
+    let data = disk_cache::store_error_with_hint(&cache_key, &message, retry_after);
+    let has_good = data.last_success_at.is_some();
+    store_anthropic_usage(cache_key, data.clone());
+    if has_good {
+        Ok(data)
+    } else {
+        Err(anyhow::anyhow!(message))
     }
-    let mut err = anthropic_usage_error(message.clone());
-    err.fetched_at = Some(Instant::now());
-    store_anthropic_usage(cache_key, err);
-    Err(anyhow::anyhow!(message))
 }
 
 /// Fetch usage from all connected providers with OAuth credentials.
@@ -667,12 +684,13 @@ async fn sync_active_anthropic_usage_from_reports(results: &[ProviderUsage]) {
 
     match report {
         Some(report) => {
-            let usage_data = usage_data_from_provider_report(report);
+            let mut usage_data = usage_data_from_provider_report(report);
             if let Ok(creds) = auth::claude::load_credentials() {
                 let cache_key = anthropic_usage_cache_key(
                     &creds.access_token,
                     auth::claude::active_account_label().as_deref(),
                 );
+                usage_data = cached_or_shared_anthropic_usage(&cache_key).unwrap_or(usage_data);
                 store_anthropic_usage(cache_key, usage_data.clone());
             }
             *cached = usage_data;

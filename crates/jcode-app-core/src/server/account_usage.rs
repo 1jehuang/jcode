@@ -74,12 +74,21 @@ async fn fetch() -> Snapshot {
         crate::usage::fetch_oauth_account_usage(MultiAccountProviderKind::OpenAI),
     );
     Snapshot {
-        anthropic: anthropic.into_iter().map(wire_snapshot).collect(),
-        openai: openai.into_iter().map(wire_snapshot).collect(),
+        anthropic: anthropic
+            .into_iter()
+            .map(|value| wire_snapshot(value, true))
+            .collect(),
+        openai: openai
+            .into_iter()
+            .map(|value| wire_snapshot(value, false))
+            .collect(),
     }
 }
 
-fn wire_snapshot(value: crate::usage::AccountUsageSnapshot) -> AccountUsageSnapshot {
+fn wire_snapshot(
+    value: crate::usage::AccountUsageSnapshot,
+    preserve_last_known: bool,
+) -> AccountUsageSnapshot {
     let error = value.error.map(|error| {
         let lower = error.to_ascii_lowercase();
         if lower.contains("429")
@@ -99,9 +108,15 @@ fn wire_snapshot(value: crate::usage::AccountUsageSnapshot) -> AccountUsageSnaps
         email: value.email,
         exhausted: !failed && value.exhausted,
         primary_label: value.primary_label,
-        five_hour_ratio: (!failed).then_some(value.five_hour_ratio).flatten(),
+        // Failed snapshots may carry vetted last-known limits for display only.
+        // The error remains authoritative for routing and exhaustion.
+        five_hour_ratio: (!failed || preserve_last_known)
+            .then_some(value.five_hour_ratio)
+            .flatten(),
         secondary_label: value.secondary_label,
-        seven_day_ratio: (!failed).then_some(value.seven_day_ratio).flatten(),
+        seven_day_ratio: (!failed || preserve_last_known)
+            .then_some(value.seven_day_ratio)
+            .flatten(),
         resets_at: value.resets_at,
         // Raw endpoint failures can contain request diagnostics. Only send a safe status.
         error,
@@ -146,12 +161,40 @@ mod tests {
             ),
             ("secret transport diagnostic", "Usage unavailable"),
         ] {
-            let account = wire_snapshot(account(Some(raw)));
+            let account = wire_snapshot(account(Some(raw)), true);
             assert_eq!(account.error.as_deref(), Some(safe));
             assert!(!account.exhausted);
-            assert!(account.five_hour_ratio.is_none());
+            assert_eq!(account.five_hour_ratio, Some(1.0));
         }
-        assert_eq!(wire_snapshot(account(None)).five_hour_ratio, Some(1.0));
+        assert_eq!(
+            wire_snapshot(account(None), true).five_hour_ratio,
+            Some(1.0)
+        );
+    }
+
+    #[test]
+    fn stale_wire_values_remain_display_only_and_unknown_stays_unknown() {
+        let mut known = account(Some("HTTP 429 secret diagnostics"));
+        known.seven_day_ratio = Some(0.42);
+        let stale = wire_snapshot(known.clone(), true);
+        assert_eq!(stale.five_hour_ratio, Some(1.0));
+        assert_eq!(stale.seven_day_ratio, Some(0.42));
+        assert!(stale.error.is_some());
+        assert!(!stale.exhausted);
+
+        // OpenAI has no equivalent provenance gate yet, so keep its failed
+        // wire snapshots unknown rather than broadening this Anthropic fix.
+        let unsupported = wire_snapshot(known.clone(), false);
+        assert!(unsupported.five_hour_ratio.is_none());
+        assert!(unsupported.seven_day_ratio.is_none());
+
+        known.five_hour_ratio = None;
+        known.seven_day_ratio = None;
+        let unknown = wire_snapshot(known, true);
+        assert!(unknown.five_hour_ratio.is_none());
+        assert!(unknown.seven_day_ratio.is_none());
+        assert!(unknown.error.is_some());
+        assert!(!unknown.exhausted);
     }
 
     #[tokio::test]
@@ -162,7 +205,7 @@ mod tests {
             calls.fetch_add(1, Ordering::SeqCst);
             tokio::task::yield_now().await;
             Snapshot {
-                openai: vec![wire_snapshot(account(None))],
+                openai: vec![wire_snapshot(account(None), true)],
                 ..Default::default()
             }
         };

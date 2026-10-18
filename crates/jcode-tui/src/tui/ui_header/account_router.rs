@@ -276,9 +276,6 @@ fn remaining_bar(
     usage: &crate::usage::AccountUsageSnapshot,
     display_used: bool,
 ) -> Option<Line<'static>> {
-    if usage.error.is_some() {
-        return None;
-    }
     let (used, window) = match usage.five_hour_ratio {
         Some(used) => (used, usage.primary_label.as_deref().unwrap_or("5h")),
         None => (
@@ -305,7 +302,18 @@ fn remaining_bar(
     );
     // Inline quotas do not need the info widget's fixed-width label column.
     if let Some(label) = bar.spans.first_mut() {
-        label.content = format!("{} ", label.content.trim_end()).into();
+        label.content = format!(
+            "{}{} ",
+            label.content.trim_end(),
+            if usage.error.is_some() { " stale" } else { "" },
+        )
+        .into();
+    }
+    if usage.error.is_some() {
+        bar.spans.push(Span::styled(
+            format!(" · {}", usage_status_label(Some(usage))),
+            Style::default().fg(dim_color()),
+        ));
     }
     Some(bar)
 }
@@ -772,7 +780,10 @@ mod tests {
         }
         usage.seven_day_ratio = Some(0.0);
         usage.error = Some("Usage unavailable".into());
-        assert!(remaining_bar(&usage, false).is_none());
+        let stale = text(vec![remaining_bar(&usage, false).unwrap()]);
+        assert!(stale.contains("100% left"));
+        assert!(stale.contains("7d stale"));
+        assert!(stale.contains("usage fetch failed"));
     }
 
     #[test]
@@ -802,7 +813,14 @@ mod tests {
             assert!(remaining_bar(&usage, false).is_none());
         }
         usage.five_hour_ratio = Some(0.0);
-        usage.error = Some("unavailable".into());
-        assert!(remaining_bar(&usage, false).is_none());
+        usage.error = Some("HTTP 429".into());
+        let stale = text(vec![remaining_bar(&usage, false).unwrap()]);
+        assert!(stale.contains("100% left"));
+        assert!(stale.contains("5h stale"));
+        assert!(stale.contains("usage fetch failed (429)"));
+        assert_eq!(
+            oauth_credential_status(false, Some(&usage)),
+            CredentialStatus::Unknown
+        );
     }
 }

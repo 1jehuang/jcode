@@ -59,8 +59,7 @@ fn concurrent_callers_make_one_probe() {
                 fetch(key.into(), || async {
                     probes.fetch_add(1, Ordering::SeqCst);
                     tokio::time::sleep(Duration::from_millis(20)).await;
-                    let data = sample();
-                    disk_cache::store_success(key, &data);
+                    let data = disk_cache::store_success(key, &sample());
                     store_anthropic_usage(key.into(), data.clone());
                     Ok(data)
                 })
@@ -82,8 +81,7 @@ fn different_accounts_can_probe_concurrently() {
                 let key = format!("label:flight-parallel-{index}");
                 fetch(key.clone(), move || async move {
                     barrier.wait().await;
-                    let data = sample();
-                    disk_cache::store_success(&key, &data);
+                    let data = disk_cache::store_success(&key, &sample());
                     store_anthropic_usage(key, data.clone());
                     Ok(data)
                 })
@@ -190,13 +188,15 @@ fn received_429_is_cached_without_waiting_for_error_body() {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut bytes = [0; 4096];
             stream.read(&mut bytes).await.unwrap();
-            stream.write_all(b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 10000\r\nConnection: close\r\n\r\n").await.unwrap();
+            stream.write_all(b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 62\r\nContent-Length: 10000\r\nConnection: close\r\n\r\n").await.unwrap();
             std::future::pending::<()>().await;
         });
         let key = "label:flight-http-429";
         let result = tokio::time::timeout(Duration::from_secs(2), fetch(key.into(), || super::super::fetch_anthropic_usage_data_uncached("fixture-only".into(), key.into(), &url))).await.unwrap();
         assert!(result.unwrap_err().to_string().contains("429"));
-        assert!(disk_cache::fresh(key).unwrap().last_error.unwrap().contains("429"));
+        let cached = disk_cache::fresh(key).unwrap();
+        assert!(cached.last_error.unwrap().contains("429"));
+        assert!(cached.refresh_after.unwrap().duration_since(Instant::now()) > Duration::from_secs(1798));
         fetch(key.into(), || async { panic!("429 must prevent a second HTTP request") }).await.unwrap();
         server.abort();
     })

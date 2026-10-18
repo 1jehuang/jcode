@@ -1,5 +1,5 @@
 use super::display::{format_reset_time, usage_reset_passed};
-use super::{CACHE_DURATION, ERROR_BACKOFF, RATE_LIMIT_BACKOFF};
+use super::{ANTHROPIC_CACHE_DURATION, CACHE_DURATION, ERROR_BACKOFF, RATE_LIMIT_BACKOFF};
 use serde::Deserialize;
 use std::time::Instant;
 
@@ -87,6 +87,10 @@ pub struct UsageData {
     pub extra_usage_enabled: bool,
     /// Last fetch time
     pub fetched_at: Option<Instant>,
+    /// Last successful provider fetch, retained when a later fetch fails.
+    pub last_success_at: Option<Instant>,
+    /// Earliest next Anthropic probe, independent of quota window resets.
+    pub refresh_after: Option<Instant>,
     /// Last error (if any)
     pub last_error: Option<String>,
 }
@@ -97,10 +101,14 @@ impl UsageData {
     /// callers use catalog ids such as `claude-fable-5`, so compare normalized
     /// model families rather than requiring the strings to be identical.
     pub fn model_scoped_exhausted(&self, model: &str) -> bool {
+        if self.last_error.is_some() {
+            return false;
+        }
         let model = model.to_ascii_lowercase();
         self.model_scoped.iter().any(|window| {
             let scope = window.model_name.to_ascii_lowercase();
             window.utilization >= 0.99
+                && !usage_reset_passed([window.resets_at.as_deref()])
                 && ((model.contains("fable") && scope.contains("fable"))
                     || (model.contains("opus") && scope.contains("opus"))
                     || (model.contains("sonnet") && scope.contains("sonnet"))
@@ -110,6 +118,9 @@ impl UsageData {
 
     /// Check if data is stale and should be refreshed
     pub fn is_stale(&self) -> bool {
+        if let Some(deadline) = self.refresh_after {
+            return Instant::now() >= deadline;
+        }
         // A last-good window can roll over while a failed probe is backing
         // off. Its old reset must not schedule another refresh every frame.
         // display_snapshot still clears rolled-over limits independently.
@@ -133,7 +144,7 @@ impl UsageData {
         }
 
         self.fetched_at
-            .is_none_or(|at| at.elapsed() > CACHE_DURATION)
+            .is_none_or(|at| at.elapsed() > ANTHROPIC_CACHE_DURATION)
     }
 
     /// Check if the last error was a rate limit (429)

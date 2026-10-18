@@ -852,17 +852,25 @@ fn anthropic_usage_response_deserializes_structured_fable_limit() {
 
 #[test]
 fn anthropic_model_scoped_exhaustion_matches_display_name_to_catalog_id() {
-    let usage = UsageData {
+    let mut usage = UsageData {
         model_scoped: vec![ModelScopedUsageWindow {
             model_name: "Fable".to_string(),
             utilization: 1.0,
-            resets_at: Some("2026-08-11T00:00:00Z".to_string()),
+            resets_at: Some("2999-08-11T00:00:00Z".to_string()),
         }],
         ..Default::default()
     };
 
     assert!(usage.model_scoped_exhausted("claude-fable-5"));
     assert!(!usage.model_scoped_exhausted("claude-opus-5"));
+    usage.last_error = Some("Usage API error (429)".into());
+    assert!(!usage.model_scoped_exhausted("claude-fable-5"));
+    usage.last_error = None;
+
+    usage.model_scoped[0].resets_at = Some("2020-01-01T00:00:00Z".into());
+    usage.refresh_after = Some(Instant::now() + Duration::from_secs(3600));
+    assert!(!usage.is_stale());
+    assert!(!usage.model_scoped_exhausted("claude-fable-5"));
 
     let below_limit = UsageData {
         model_scoped: vec![ModelScopedUsageWindow {
