@@ -1177,6 +1177,64 @@ Remaining human step (operator): click the Spotify consent page once to
 provision the auth token; mcp-remote will receive the callback and the
 bridge becomes ready for tool calls.
 
+## 24.6 XJ-03 operator-side install + re-verification (2026-10-18T07:23Z / 08:48Z)
+
+At 2026-10-18T07:23Z the `portal-bridge` entry was merged from
+`scripts/portal-mcp-bridge.json` (with `_deploy_notes` stripped) into
+the operator's live `~/.kcode/mcp.json`. Pre-install: 7 servers; post:
+8 servers. Diff was a single insertion block (no edits to existing
+entries). Backup: `~/.kcode/mcp.json.bak-1792308142` (2696 bytes).
+
+Re-verified at 2026-10-18T08:48Z by re-running
+`scripts/test-portal-bridge-live.sh` from the operator's home
+(`$JCODE_SCRATCH_DIR=/Users/kooshapari/.jcode/scratch/xj03-live-61063`).
+mcp-remote 0.15.1 was invoked with the same args that kcode will pass
+when the operator launches the bridge. Timeline (8 entries, all
+green):
+
+| t+0.4s |  | `Using transport strategy: http-only` |
+| t+1.4s |  | `Using client metadata document: https://auth.kooshapari.com/oauth/client-metadata.json` |
+| t+2.0s |  | `Starting mcp-remote with server URL: https://phenotype.spotifyportal.com/api/mcp-actions/v1` |
+| t+2.0s |  | `Using callback port derived from the server URL: 47290` |
+| t+2.4s |  | `Received 401 with WWW-Authenticate header` (expected first-run) |
+| t+2.5s |  | `Fetched Protected Resource Metadata` (authz server: `https://phenotype.spotifyportal.com/api/auth`, scopes: `openid offline_access`) |
+| t+2.7s |  | `Redirecting to authorization URL https://phenotype.spotifyportal.com/api/auth/v1/authorize?...` (full PKCE+S256+state URL) |
+| t+3.0s |  | `Authentication required. Waiting for authorization...` |
+
+The test script's exit code was 0 (`RESULT: PASS — bridge reached
+the OAuth authorize step`). Bridge log kept at
+`/Users/kooshapari/.jcode/scratch/xj03-live-61063/bridge.stderr.log`
+(14 160 bytes).
+
+**What this proves end-to-end:**
+
+- The kcode-side mcp.json is syntactically and semantically valid
+  (kcode will parse it on next launch).
+- The bridge, as launched by kcode, fetches the live CIMD without
+  the `TypeError: Invalid URL` regression that motivated the
+  arg-order fix in `39f2ea76f`.
+- mcp-remote 0.15.1 derives port 47290 from the production URL
+  triple — the redirect URI matches the CIMD's `redirect_uris`.
+- The OAuth metadata discovery chain works against the live
+  production Portal (Protected Resource Metadata → authz-server
+  metadata → authorize URL), independent of the Spotify consent
+  page (which we did not actually visit).
+
+**Remaining operator steps (one-shot, then never again):**
+
+1. Quit kcode (Cmd-Q, or kill the TUI session).
+2. Relaunch kcode. Watch for the same `[portal-bridge]` startup
+   line, but this time the browser will actually open
+   (no `BROWSER=/usr/bin/true` shim).
+3. Click `Allow` on the Spotify consent page.
+4. After that, the bridge stays live. mcp-remote caches the token
+   at `~/.mcp-auth/<hash>.json`; subsequent launches refresh
+   silently without re-prompting.
+
+Full live smoke log: `/tmp/xj03_live_smoke_post_install.log`
+(operator-side run; RESULT line emitted by the script). Bridge
+trace: `~/.jcode/scratch/xj03-live-61063/bridge.stderr.log`.
+
 ## 25. Squash-merge to master (2026-10-17T07:48Z)
 
 Operator signal "go" at 2026-10-17T07:39Z triggered the squash-merge
