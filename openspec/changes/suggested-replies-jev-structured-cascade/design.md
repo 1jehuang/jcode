@@ -4,7 +4,7 @@
 1. `Memory` (`memory_jev.rs`): passes structured JSON `state = { query, candidates: { candidate_0..N } }` and evaluates up to 24 `noul` questions per batch.
 2. `Browser` (`browser_jev.rs`): passes structured JSON `state` (`page`, `task_context`, `action_history`) and evaluates a single `choice` question over `2..=255` actions.
 3. `Voice` (`voice_intent.rs`): passes structured JSON `state = { policy, transcript, candidates }` and evaluates up to 26 `noul` questions in one batch.
-4. `Suggestions` (`suggested_replies.rs`): previously passed a flat concatenated string as `state`, repeated candidate strings inside each `noul` question's `instructions`, and evaluated Iteration 2 using only isolated `noul` questions without comparative `choice` probabilities, `todo` awareness, assistant-question option extraction, or localized fallback candidates.
+4. `Suggestions` (`suggested_replies.rs`): previously passed a flat concatenated string as `state`, repeated candidate strings inside each `noul` question's `instructions`, and evaluated Iteration 2 using only isolated `noul` questions without comparative `choice` probabilities, `todo` awareness, assistant-question option extraction, user-defined constant questions, per-row confidence badges on secondary items, or localized fallback candidates.
 
 ## Goals / Non-Goals
 
@@ -13,6 +13,8 @@
 - Replace the flat transcript string in both Iteration 1 and Iteration 2 with a structured `SuggestedRepliesContext` (`last_user_message`, `last_assistant_message`, `assistant_options`, `pending_todos`, `recent_turns`, `language_is_cyrillic`) and structured SystemOne JSON `state` (`build_structured_systemone_state`).
 - Extract explicit questions and numbered/bulleted options from the tail of `last_assistant_message` and feed them into both OpenGF and the local candidate builder.
 - Generate language-matched (Russian/Cyrillic vs English) and context-aware (`pending_todos` + assistant options) fallback candidates when `use_open_gf = false` or when OpenGF routes are unavailable.
+- Add `custom_prompts: Vec<String>` (aliases `custom_questions`, `custom_candidates`, `pinned_prompts`, env `JCODE_SUGGESTED_REPLIES_CUSTOM_PROMPTS`) to `SuggestedRepliesConfig` so user-configured constant questions are merged into the candidate pool and scored by SystemOne (`Laya`/`OpenJev`) or the local scorer on every turn.
+- Add `show_confidence: bool` (default `true`, env `JCODE_SUGGESTED_REPLIES_SHOW_CONFIDENCE`) to `SuggestedRepliesConfig` and render the calibrated model confidence percentage (`(XX%)`) on **every** suggestion row (`Default Action` and each secondary capsule `1..=5`) when enabled.
 - Reuse a process-wide keep-alive `reqwest::Client` for OpenGF named-profile HTTP requests and cache `SuggestedRepliesResponse` by `(session_id, display_messages_version)` (with automatic cache bypass/invalidation on 6-lens findings or manual `/suggestions test`).
 - Populate `app.input` (`staged_input`) whenever a suggestion is focused/selected (`Tab`, `↑`/`↓`, `1`–`5`/`0`, or mouse click) so the user can edit the prompt before sending, while rendering pills with Unicode display-column truncation (`truncate_to_display_width`).
 
@@ -36,20 +38,20 @@
   - `assistant_options: Vec<String>`
   - `pending_todos: Vec<String>`
   - `language_is_cyrillic: bool`
-   Provide `SuggestedRepliesContext::from_transcript(transcript_tail)` so legacy callers of `evaluate_cascade(transcript_tail, ...)` and `score_locally_from_context(transcript_tail, ...)` automatically derive `last_user_message`, `last_assistant_message`, `assistant_options`, and `language_is_cyrillic` even when TUI `pending_todos` are not passed explicitly.
-- **Rationale**: Preserves 100% backward compatibility with existing callers and tests while giving the TUI (`evaluate_cascade_with_context`) full structured state including active `todos`.
+  Provide `SuggestedRepliesContext::from_transcript(transcript_tail)` so legacy callers of `evaluate_cascade(transcript_tail, ...)` and `score_locally_from_context(transcript_tail, ...)` automatically derive `last_user_message`, `last_assistant_message`, `assistant_options`, and `language_is_cyrillic` even when TUI `pending_todos` are not passed explicitly.
 
-### 3. Assistant Question/Option Extraction & Bilingual Dynamic Fallback (Trajectories 3 & 4)
-- **Decision**: Add `extract_assistant_options(last_assistant_message: &str) -> Vec<String>` and `detect_cyrillic_language(text: &str) -> bool`.
-  - `extract_assistant_options` inspects the closing lines of `last_assistant_message` for numbered items (`1. ...`, `1) ...`), bulleted options under a question, or explicit backticked slash commands (`/opsx:apply`, `/review 6`, etc.) and converts them into concise user reply candidates.
-  - `contextual_candidates_for_branch(branch: &str, ctx: &SuggestedRepliesContext) -> Vec<String>` prepends extracted assistant options and a prompt for the top pending `todo` item, followed by Russian-localized branch candidates when `ctx.language_is_cyrillic` is true (or English candidates otherwise).
-
-### 4. Pooled OpenGF Client & Session-Version Cache (Trajectory 5)
+### 3. Assistant Question/Option Extraction, Bilingual Dynamic Fallback & User `custom_prompts` (Trajectories 3 & 4)
 - **Decision**:
-  - Store two `OnceLock<reqwest::Client>` instances in `suggested_replies.rs` (one with `.no_proxy()` for `http://` local/private endpoints and one standard client for `https://`), avoiding per-turn connection pool recreation.
+  - Add `extract_assistant_options(last_assistant_message: &str) -> Vec<String>` and `detect_cyrillic_language(text: &str) -> bool`.
+  - Add `merge_custom_prompts(base_candidates: Vec<String>, custom_prompts: &[String]) -> Vec<String>` which appends non-empty, case-insensitively deduplicated `custom_prompts` (up to the 12-candidate micro-scoring cap) so user-configured constant questions are always evaluated by SystemOne (`Laya`/`OpenJev`) or the local scorer alongside dynamic candidates.
+
+### 4. Per-Row Confidence Display (`show_confidence`), Pooled OpenGF Client & Session-Version Cache (Trajectory 5)
+- **Decision**:
+  - Add `SuggestedRepliesResponse::confidence_for_text(&self, text: &str) -> Option<f32>` (looking up `text` in `scored_candidates`). In `draw_suggested_replies_panel` (`ui_inline.rs`), when `show_confidence` is `true`, render `({conf_pct}%)` on both the `Default Action` row and each secondary suggestion pill (`1. {short} ({conf_pct}%)`); when `show_confidence` is `false`, omit the percentage on both.
+  - Store two `OnceLock<reqwest::Client>` instances in `suggested_replies.rs` (one with `.no_proxy()` for `http://` local/private endpoints and one standard client for `https://`).
   - Cache `(String, u64, SuggestedRepliesResponse)` (`(session_id, display_messages_version, response)`) in `SuggestedRepliesRuntime`, bypassing/invalidating the cache when `pending_six_lens_findings.is_some()` or when `/suggestions test` (`force_refresh = true`) is invoked.
 
 ## Risks / Trade-offs
 
 - **[Risk] `choice` requires at least 2 options in `jev.rs` (`validate_questions`)** → **Mitigation**: Only include `"best_candidate"` (`type: "choice"`) when `candidates.len() >= 2` and `client.supports_choice_questions()` is true.
-- **[Risk] Stale cache hit when 6-lens findings arrive or user runs `/suggestions test`** → **Mitigation**: Bypass and overwrite the `(session_id, display_messages_version)` cache whenever `six_lens_findings` is present or a manual refresh is requested.
+- **[Risk] User configures many `custom_prompts`** → **Mitigation**: Deduplicate case-insensitively and cap the combined candidate pool to 12 items so `1 + 12 = 13 <= MAX_QUESTIONS (24)`.

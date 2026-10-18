@@ -1,11 +1,11 @@
 ## MODIFIED Requirements
 
 ### Requirement: Inline TUI Suggested Replies Panel & Keybindings
-The TUI SHALL render the Suggested Replies panel in `chunks[5]` (`ui_inline.rs`) when the session is idle and the composer input is empty or holds an unedited staged suggestion (`staged_input`), displaying a prominent `Default Action` control above a vertical stack of rounded secondary suggestion capsules (`1..=5`, one row per item) truncated by Unicode display column width (`truncate_to_display_width`).
+The TUI SHALL render the Suggested Replies panel in `chunks[5]` (`ui_inline.rs`) when the session is idle and the composer input is empty or holds an unedited staged suggestion (`staged_input`), displaying a prominent `Default Action` control above a vertical stack of rounded secondary suggestion capsules (`1..=5`, one row per item) truncated by Unicode display column width (`truncate_to_display_width`). When `suggested_replies.show_confidence` is `true` (default), the TUI SHALL display the calibrated model confidence percentage (`(XX%)`) on every suggestion row (both `Default Action` and each secondary suggestion row `1..=5`); when `show_confidence` is `false`, confidence percentages SHALL be omitted.
 
-#### Scenario: Vertical layout, prompt input staging for editing, and Tab, Arrow, Number, Enter, Ctrl+Enter, and mouse activation
+#### Scenario: Vertical layout, per-row confidence badges, prompt input staging for editing, and Tab, Arrow, Number, Enter, Ctrl+Enter, and mouse activation
 - **WHEN** Suggested Replies are visible on an empty or staged composer input
-- **THEN** secondary suggestions (`1..=5`) are stacked vertically one per row below `Default Action`, pressing `[Tab]` or `↑`/`↓` cycles focus across `Default Action` and secondary suggestions `1..=5` while immediately populating `app.input` with the focused suggestion's text for user editing, pressing keys `1`–`5` (or `0` for `Default Action`) on an empty input or clicking an unfocused capsule focuses and populates `app.input` with that suggestion, editing `app.input` (`Backspace`, `Delete`, `←`/`→`, `Home`/`End`, or typing) detaches suggestion cycling and keeps the text as a normal draft, pressing `[Enter]` (or clicking an already-focused capsule) submits the prompt, and pressing `[Ctrl+Enter]` immediately submits the focused suggestion or `Default Action`.
+- **THEN** secondary suggestions (`1..=5`) are stacked vertically one per row below `Default Action`, each row displays its model confidence percentage (`(XX%)`) when `show_confidence = true`, pressing `[Tab]` or `↑`/`↓` cycles focus across `Default Action` and secondary suggestions `1..=5` while immediately populating `app.input` with the focused suggestion's text for user editing, pressing keys `1`–`5` (or `0` for `Default Action`) on an empty input or clicking an unfocused capsule focuses and populates `app.input` with that suggestion, editing `app.input` (`Backspace`, `Delete`, `←`/`→`, `Home`/`End`, or typing) detaches suggestion cycling and keeps the text as a normal draft, pressing `[Enter]` (or clicking an already-focused capsule) submits the prompt, and pressing `[Ctrl+Enter]` immediately submits the focused suggestion or `Default Action`.
 
 ## ADDED Requirements
 
@@ -14,4 +14,4 @@ The TUI SHALL cache the latest `SuggestedRepliesResponse` per `(session_id, disp
 
 #### Scenario: Inspecting and re-evaluating Suggested Replies via `/suggestions`
 - **WHEN** the user runs `/suggestions debug` (or `/suggestions`) or `/suggestions test`
-- **THEN** `/suggestions debug` displays the active `[suggested_replies]` configuration, OpenGF and Jev/Laya route status, elapsed latency, and scored candidates vs threshold, while `/suggestions test` bypasses the version cache and triggers an immediate fresh cascade evaluation.
+- **THEN** `/suggestions debug` displays the active `[suggested_replies]` configuration (including `show_confidence` and `custom_prompts` count), OpenGF and Jev/Laya route status, elapsed latency, and scored candidates vs threshold, while `/suggestions test` bypasses the version cache and triggers an immediate fresh cascade evaluation.
