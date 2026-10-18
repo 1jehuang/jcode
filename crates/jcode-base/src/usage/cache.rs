@@ -332,6 +332,30 @@ pub(super) fn cached_openai_usage(cache_key: &str) -> Option<OpenAIUsageData> {
     (!cached.is_stale()).then_some(cached)
 }
 
+/// A recent successful snapshot that may stand in for a failed transport
+/// probe. Rolled-over windows and old data are never reused.
+pub(super) fn recent_good_openai_usage(cache_key: &str) -> Option<OpenAIUsageData> {
+    let cache = openai_usage_cache();
+    let map = cache.lock().ok()?;
+    let cached = map.get(cache_key)?;
+    let recent = cached
+        .fetched_at
+        .is_some_and(|at| at.elapsed() <= super::TRANSPORT_LAST_GOOD_MAX_AGE);
+    let rolled_over = super::display::usage_reset_passed([
+        cached
+            .five_hour
+            .as_ref()
+            .and_then(|w| w.resets_at.as_deref()),
+        cached
+            .seven_day
+            .as_ref()
+            .and_then(|w| w.resets_at.as_deref()),
+        cached.spark.as_ref().and_then(|w| w.resets_at.as_deref()),
+    ]);
+    (recent && !rolled_over && cached.last_error.is_none() && cached.has_limits())
+        .then(|| cached.clone())
+}
+
 #[cfg(test)]
 pub(super) fn store_openai_usage(cache_key: String, data: OpenAIUsageData) {
     store_openai_usage_for_generation(openai_usage_generation(), cache_key, data);

@@ -65,6 +65,19 @@ const ANTHROPIC_CACHE_DURATION: Duration = Duration::from_secs(900);
 /// Error backoff duration (wait 5 minutes before retrying after auth/credential errors)
 const ERROR_BACKOFF: Duration = Duration::from_secs(300);
 
+/// Network/transport failures (no HTTP response) are usually momentary, so
+/// retry them much sooner than auth or API errors.
+const TRANSPORT_ERROR_BACKOFF: Duration = Duration::from_secs(30);
+
+/// How long a last-good OpenAI snapshot may stand in for a failed transport probe.
+const TRANSPORT_LAST_GOOD_MAX_AGE: Duration = Duration::from_secs(900);
+
+/// Prefix of OpenAI usage errors where the request never got an HTTP response.
+const TRANSPORT_ERROR_PREFIX: &str = "Failed to fetch: ";
+
+/// In-request retry delays for transport failures before giving up.
+const TRANSIENT_RETRY_DELAYS_MS: [u64; 2] = [500, 1500];
+
 /// Rate limit backoff duration (wait 15 minutes before retrying after 429 errors)
 const RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(900);
 
