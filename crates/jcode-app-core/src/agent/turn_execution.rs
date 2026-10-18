@@ -1193,7 +1193,7 @@ impl Agent {
         let assign_start = Instant::now();
         // A failed load must leave the current Agent and its concurrency lease
         // alive. Close it only after the replacement is ready to install.
-        self.mark_closed();
+        self.mark_closed_for_replacement();
         let close_ms = assign_start.elapsed().as_millis();
         // Restore provider_session_id for Claude CLI session resume
         self.provider_session_id = session.provider_session_id.clone();

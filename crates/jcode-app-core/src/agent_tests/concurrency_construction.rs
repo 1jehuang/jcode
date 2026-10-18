@@ -126,3 +126,24 @@ async fn provisional_agent_defers_presence_markers_until_committed() {
     agent.mark_closed();
     assert!(!marker.exists());
 }
+
+/// A reload placeholder neither begins nor ends a process telemetry session.
+/// Only a commit begins it, and replacement by a resumed session drops it.
+#[tokio::test]
+async fn provisional_agent_defers_telemetry_session_until_committed() {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedTelemetryEnv::new();
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut committed =
+        Agent::new_provisional_with_initial_working_dir(provider.clone(), registry, None);
+    assert!(committed.telemetry_session_deferred);
+    committed.activate_concurrency_tracking();
+    assert!(!committed.telemetry_session_deferred);
+
+    let registry = Registry::new(provider.clone()).await;
+    let mut replaced = Agent::new_provisional_with_initial_working_dir(provider, registry, None);
+    replaced.mark_closed_for_replacement();
+    assert!(!replaced.telemetry_session_deferred);
+    assert!(!replaced.has_concurrency_tracking());
+}

@@ -453,6 +453,13 @@ impl ConcurrencySession {
         self.finish_with_mode(DeliveryMode::Blocking(BLOCKING_LIFECYCLE_TIMEOUT));
     }
 
+    /// End once on the ordered background worker. For in-process session
+    /// replacement (resume, reconnect), where nothing is about to exit and a
+    /// bounded blocking flush would only stall the caller.
+    pub fn finish_background(&mut self) {
+        self.finish_with_mode(DeliveryMode::Background);
+    }
+
     fn finish_with_mode(&mut self, mode: DeliveryMode) {
         if !self.active {
             return;
