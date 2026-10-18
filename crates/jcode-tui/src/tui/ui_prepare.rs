@@ -2351,10 +2351,18 @@ pub(super) fn prepare_body(
     let mut acc = BodyAcc::default();
     let mut role_ms: std::collections::BTreeMap<&str, (u128, usize)> = Default::default();
     let mut slowest: (u128, usize, &str) = (0, 0, "");
+    let mut tool_ms: std::collections::BTreeMap<String, (u128, usize)> = Default::default();
     for (msg_idx, msg) in messages.iter().enumerate() {
         let msg_start = Instant::now();
         render_message_into(&ctx, &mut acc, msg, msg_idx);
         let us = msg_start.elapsed().as_micros();
+        if let Some(tool) = msg.tool_data.as_ref() {
+            let entry = tool_ms
+                .entry(tools_ui::canonical_tool_name(&tool.name).to_string())
+                .or_default();
+            entry.0 += us;
+            entry.1 += 1;
+        }
         let entry = role_ms.entry(msg.effective_role()).or_default();
         entry.0 += us;
         entry.1 += 1;
@@ -2407,7 +2415,7 @@ pub(super) fn prepare_body(
     let wrap_ms = wrap_start.elapsed().as_millis();
     if images_ms + ctx_ms + render_ms + wrap_ms >= 100 {
         crate::logging::info(&format!(
-            "[TIMING] prepare_body: messages={}, images={images_ms}ms, ctx={ctx_ms}ms, render={render_ms}ms, wrap={wrap_ms}ms, wrapped_lines={}, by_role=[{}], slowest={}us@{}({})",
+            "[TIMING] prepare_body: messages={}, images={images_ms}ms, ctx={ctx_ms}ms, render={render_ms}ms, wrap={wrap_ms}ms, wrapped_lines={}, by_role=[{}], by_tool=[{}], slowest={}us@{}({})",
             messages.len(),
             prepared.wrapped_lines.len(),
             role_ms
@@ -2415,6 +2423,16 @@ pub(super) fn prepare_body(
                 .map(|(role, (us, n))| format!("{role}:{}ms/{n}", us / 1000))
                 .collect::<Vec<_>>()
                 .join(" "),
+            {
+                let mut tools: Vec<_> = tool_ms.iter().collect();
+                tools.sort_by(|a, b| b.1.0.cmp(&a.1.0));
+                tools
+                    .iter()
+                    .take(6)
+                    .map(|(tool, (us, n))| format!("{tool}:{}ms/{n}", us / 1000))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            },
             slowest.0,
             slowest.1,
             slowest.2
