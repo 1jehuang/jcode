@@ -105,9 +105,10 @@ fn record_uplink_sample(bps: f64) {
     }
 }
 
-#[cfg(test)]
 fn reset_uplink_for_tests(value: Option<f64>) {
-    *UPLINK.lock().unwrap() = value.map(|bps| UplinkEstimate { bps, samples: 1 });
+    if let Ok(mut guard) = UPLINK.lock() {
+        *guard = value.map(|bps| UplinkEstimate { bps, samples: 1 });
+    }
 }
 
 /// Whether an endpoint is known to accept gzip-encoded request bodies.
@@ -185,6 +186,48 @@ fn gzip_fast(raw: &[u8]) -> Option<Vec<u8>> {
     );
     encoder.write_all(raw).ok()?;
     encoder.finish().ok()
+}
+
+/// Conservative compression ratio assumed when a decision must be made before
+/// compressing (streaming transports with a shared deflate context cannot
+/// compress speculatively and then discard). Measured session JSON ranges
+/// 1.3-3.6x at gzip-1.
+const ASSUMED_STREAM_RATIO: f64 = 1.5;
+
+/// Whether a single outbound message on a compressed stream (WebSocket
+/// permessage-deflate) should be compressed. Mirrors [`json_body`]'s policy:
+/// never below [`MIN_COMPRESS_BYTES`]; in `Auto`, only when the uplink model
+/// predicts a saving at a conservative assumed ratio.
+pub fn should_compress_stream_message(raw_len: usize, mode: CompressionMode) -> bool {
+    if mode == CompressionMode::Off || raw_len < MIN_COMPRESS_BYTES {
+        return false;
+    }
+    if mode == CompressionMode::Always {
+        return true;
+    }
+    let assumed = (raw_len as f64 / ASSUMED_STREAM_RATIO) as usize;
+    let uplink = uplink_estimate_bps().unwrap_or(DEFAULT_UPLINK_BPS);
+    predicted_saving_secs(raw_len, assumed, uplink) >= MIN_SAVING.as_secs_f64()
+}
+
+/// Feed an externally measured upload (for example a WebSocket writer that
+/// timed `bytes` draining over `elapsed`) into the shared uplink estimate.
+pub fn record_external_uplink_sample(bytes: usize, elapsed: Duration) {
+    if bytes >= SAMPLE_CHUNK_BYTES * 2 && !elapsed.is_zero() {
+        record_uplink_sample(bytes as f64 * 8.0 / elapsed.as_secs_f64().max(0.001));
+    }
+}
+
+/// Bytes a stream writer should skip before timing an upload sample: these
+/// land in the kernel send buffer at memory speed.
+pub const STREAM_SAMPLE_SKIP_BYTES: usize = SAMPLE_SKIP_BYTES;
+/// Minimum wire size of a message worth timing for uplink bandwidth.
+pub const STREAM_MIN_SAMPLE_BYTES: usize = MIN_SAMPLE_BYTES;
+
+/// Test hook for downstream crates: pin the uplink estimate.
+#[doc(hidden)]
+pub fn set_uplink_estimate_for_tests(value: Option<f64>) {
+    reset_uplink_for_tests(value);
 }
 
 /// Attach `body` as JSON to `builder`, gzip-compressing it when the endpoint

@@ -36,13 +36,13 @@ use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
-use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Error as WsError;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 mod model_selection;
+mod openai_ws_connect;
+use openai_ws_connect::connect_ws;
 mod native_compaction;
 mod openai_stream_cancellation;
 mod openai_stream_diagnostics;
@@ -301,7 +301,7 @@ fn openai_request_model(request: &Value) -> String {
 /// Keeps the connection alive across turns so we can use `previous_response_id`
 /// to send only new items instead of the full conversation each turn.
 struct PersistentWsState {
-    ws_stream: WebSocketStream<MaybeTlsStream<TcpStream>>,
+    ws_stream: openai_ws_connect::OpenAIWs,
     /// Actual handshake identity. Never logged. Forks can update shared
     /// credentials without directly clearing this provider's private socket.
     identity: (String, Option<String>, String, Option<String>),

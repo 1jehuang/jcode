@@ -16,6 +16,7 @@ pub mod retry_after;
 pub mod selection;
 pub mod service_tier;
 pub mod transport;
+pub mod ws_deflate;
 
 pub use jcode_usage_types::{ModelUsage, compare_model_usage};
 pub use transport::is_transient_transport_error;

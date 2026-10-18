@@ -531,7 +531,7 @@ async fn persistent_ws_does_not_reuse_response_cancelled_before_completion() {
         .expect("send partial response event");
     });
 
-    let (client_ws, _) = connect_async(format!("ws://{}", addr))
+    let (client_ws, _) = connect_ws(format!("ws://{}", addr))
         .await
         .expect("connect websocket client");
     let persistent_ws = Arc::new(Mutex::new(Some(PersistentWsState {

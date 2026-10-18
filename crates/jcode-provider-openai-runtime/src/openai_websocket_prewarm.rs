@@ -187,7 +187,7 @@ impl PrewarmSlot {
                     payload.get("service_tier").and_then(Value::as_str),
                 );
                 drop(creds);
-                let (socket, _) = connect_async(handshake).await?;
+                let (socket, _) = connect_ws(handshake).await?;
                 warm_socket(socket, &payload, identity).await
             })
             .await;
@@ -272,7 +272,7 @@ impl PrewarmSlot {
 }
 
 async fn warm_socket(
-    mut socket: WebSocketStream<MaybeTlsStream<TcpStream>>,
+    mut socket: openai_ws_connect::OpenAIWs,
     request: &Value,
     identity: (String, Option<String>, String, Option<String>),
 ) -> Result<PersistentWsState> {

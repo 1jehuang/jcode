@@ -3973,6 +3973,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tokio",
+ "tokio-tungstenite",
 ]
 
 [[package]]
@@ -4124,9 +4125,11 @@ dependencies = [
  "jcode-schema-dialect",
  "reqwest 0.12.28",
  "rustls",
+ "rustls-native-certs",
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tokio-tungstenite",
 ]

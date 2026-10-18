@@ -1524,7 +1524,7 @@ async fn stream_response_websocket_authenticated(
 
     let connect_result = tokio::time::timeout(
         Duration::from_secs(WEBSOCKET_CONNECT_TIMEOUT_SECS),
-        connect_async(ws_request),
+        connect_ws(ws_request),
     )
     .await
     .map_err(|_| {

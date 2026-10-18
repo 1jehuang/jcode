@@ -71,13 +71,17 @@ pub(super) async fn test_persistent_ws_state() -> (PersistentWsState, tokio::tas
         }
     });
 
-    let (client_ws, _) = connect_async(format!("ws://{}", addr))
+    let (client_ws, _) = connect_ws(format!("ws://{}", addr))
         .await
         .expect("connect websocket client");
     (
         PersistentWsState {
             ws_stream: client_ws,
-            identity: openai_websocket_prewarm::prewarm_identity(&prewarm_test_credentials(), None, None),
+            identity: openai_websocket_prewarm::prewarm_identity(
+                &prewarm_test_credentials(),
+                None,
+                None,
+            ),
             cache_key: None,
             last_response_id: "resp_test".to_string(),
             connected_at: Instant::now(),
@@ -130,13 +134,17 @@ async fn test_persistent_ws_state_with_ping_notify() -> (
         }
     });
 
-    let (client_ws, _) = connect_async(format!("ws://{}", addr))
+    let (client_ws, _) = connect_ws(format!("ws://{}", addr))
         .await
         .expect("connect websocket client");
     (
         PersistentWsState {
             ws_stream: client_ws,
-            identity: openai_websocket_prewarm::prewarm_identity(&prewarm_test_credentials(), None, None),
+            identity: openai_websocket_prewarm::prewarm_identity(
+                &prewarm_test_credentials(),
+                None,
+                None,
+            ),
             cache_key: None,
             last_response_id: "resp_test".to_string(),
             connected_at: Instant::now(),

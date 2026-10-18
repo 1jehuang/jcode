@@ -39,7 +39,7 @@ async fn persistent_delta_wire_excludes_saved_response_output() {
         }
         while ws.next().await.is_some() {}
     });
-    let (ws_stream, _) = connect_async(format!("ws://{addr}")).await.unwrap();
+    let (ws_stream, _) = connect_ws(format!("ws://{addr}")).await.unwrap();
     let credentials = Arc::new(RwLock::new(prewarm_test_credentials()));
     let state = Arc::new(Mutex::new(Some(PersistentWsState {
         ws_stream,
@@ -169,7 +169,7 @@ async fn persistent_terminal_public_case(
         // Retain a healthy connection until the test tears down the provider.
         while ws.next().await.is_some() {}
     });
-    let (ws_stream, _) = connect_async(format!("ws://{addr}/v1/responses"))
+    let (ws_stream, _) = connect_ws(format!("ws://{addr}/v1/responses"))
         .await
         .unwrap();
     let provider = OpenAIProvider::new(prewarm_test_credentials());
@@ -288,7 +288,7 @@ async fn persistent_terminal_failure_invalidates_before_mutex_handoff() {
         .unwrap();
         while ws.next().await.is_some_and(|frame| frame.is_ok()) {}
     });
-    let (ws_stream, _) = connect_async(format!("ws://{addr}")).await.unwrap();
+    let (ws_stream, _) = connect_ws(format!("ws://{addr}")).await.unwrap();
     let credentials = Arc::new(RwLock::new(prewarm_test_credentials()));
     let persistent_ws = Arc::new(Mutex::new(Some(PersistentWsState {
         ws_stream,
