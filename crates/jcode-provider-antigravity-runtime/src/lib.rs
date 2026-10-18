@@ -971,8 +971,10 @@ impl Provider for AntigravityProvider {
             .into_iter()
             .find(|entry| entry.id.trim() == resolved || entry.id.trim() == raw_trimmed)
             .and_then(|entry| entry.max_tokens)
-            .and_then(|tokens| usize::try_from(tokens).ok())
-            .filter(|tokens| *tokens > 0)
+            .and_then(|tokens| match usize::try_from(tokens) {
+                Ok(n) if n > 0 => Some(n),
+                _ => None,
+            })
         {
             return limit;
         }
