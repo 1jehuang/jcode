@@ -1574,13 +1574,22 @@ impl OpenRouterProvider {
     }
 
     pub fn new() -> Result<Self> {
+        let new_start = std::time::Instant::now();
         let autodetected_profile = autodetected_openai_compatible_profile();
+        let autodetect_ms = new_start.elapsed().as_millis();
         let api_base = configured_api_base();
         let supports_provider_features = provider_features_enabled(&api_base);
         let supports_model_catalog = model_catalog_enabled();
         let send_openrouter_headers = supports_provider_features;
         let auth: AuthResolver = Arc::new(Self::resolve_auth);
+        let auth_start = std::time::Instant::now();
         auth()?;
+        jcode_base::logging::info(&format!(
+            "[TIMING] openrouter_new: autodetect={}ms, auth={}ms, before_auth={}ms",
+            autodetect_ms,
+            auth_start.elapsed().as_millis(),
+            auth_start.duration_since(new_start).as_millis()
+        ));
         let profile_id = std::env::var("JCODE_OPENROUTER_CACHE_NAMESPACE")
             .ok()
             .map(|value| value.trim().to_ascii_lowercase())
