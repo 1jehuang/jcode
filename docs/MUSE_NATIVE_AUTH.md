@@ -135,18 +135,19 @@ These were run against Meta with a real subscription. The automated suite still 
 | Native model discovery | `GET https://api.meta.ai/muse-code/models` with the minted key | `200` with 7 models, including `muse-spark-1.3`, `muse-wonder-1.0`, `muse-image-1.0` and their contributor variants |
 | Credential choice for discovery | same endpoint with the device access token instead | `401`, so the minted key is the correct credential |
 | Account status | `jcode auth status` | `muse-subscription` available; usage shown as `quota unknown` (the mint returned no window or weekly percentages, so nothing was fabricated) |
+| Real inference turn | `jcode run "Reply with exactly: OK" -p muse-subscription -m muse-spark-1.3` | Replied exactly `OK`; token report `upload: 15849 download: 14` |
+| Real tool round-trip | `jcode run "Use the bash tool to run exactly: echo hello-from-muse…"` | Model called `bash`, `echo hello-from-muse` executed, result returned to the model (upload grew 15866 → 16024), final answer `hello-from-muse` |
 
 A required header that the published schema does not mention: the device-authorization endpoint answers a request with **no `User-Agent`** with `302 → https://www.facebook.com/unsupportedbrowser` instead of the challenge JSON, and rejects browser-like user-agents with `400`. Because this client deliberately refuses redirects, the missing header made login impossible. `http_client()` now sends `jcode/<version>`. The token endpoint is unaffected. This is the kind of fact only a live call surfaces.
 
 ### Still not verified
 
-- **A real inference turn.** No Muse model has been asked to generate anything yet, so request shape, streaming and tool behaviour against the live Responses surface are unproven.
-- **Billing reconciliation.** Even a successful turn would not prove the turn is settled as subscription usage rather than pay-as-you-go. An active subscription and a successful mint (both observed above) are not a billing receipt.
+- **Billing reconciliation.** An active subscription, a successful mint and successful turns are not a billing receipt. Nothing here shows a turn is settled as subscription usage rather than pay-as-you-go; only Meta can confirm that. Both live turns above are consistent with the subscription covering them, but that is an inference, not evidence.
 
-Do not read `available` in auth status as proof of either.
+Do not read `available` in auth status, or a passing turn, as proof of billing treatment.
 
 ### Superseded statement
 
-An earlier revision of this ledger said that browser approval, the account key mint and the live account catalog had "not been exercised". As of the 2026-10-18 live run above, all three have been exercised successfully with a real subscription, so that statement no longer applies. The remaining unverified items are the two listed under "Still not verified": a real inference turn, and any billing reconciliation.
+An earlier revision of this ledger said that browser approval, the account key mint and the live account catalog had "not been exercised". As of the 2026-10-18 live runs above, all of those have been exercised successfully with a real subscription, along with a real inference turn and a real tool round-trip. The only remaining unverified item is billing reconciliation.
 
 Do not read `available` in auth status as a live model or billing test.
