@@ -6,6 +6,16 @@ use std::time::Duration;
 
 const REMOTE_STARTUP_HEADER_DEBOUNCE: Duration = Duration::from_millis(400);
 
+fn startup_usage_slot_pending(
+    is_remote: bool,
+    runtime_pending: bool,
+    usage_received: bool,
+) -> bool {
+    // Cached account rows can arrive before History binds this session to an
+    // account. Keep the sidebar slot until both pieces are authoritative.
+    is_remote && (runtime_pending || !usage_received)
+}
+
 /// How long a routine `LoadingSession` phase may keep showing the known model
 /// hint before the header falls back to the "loading session…" label. History
 /// bootstrap normally lands in ~1s, so the common spawn path never flashes a
@@ -1813,8 +1823,11 @@ impl crate::tui::TuiState for App {
 
         crate::tui::info_widget::InfoWidgetData {
             startup_runtime_pending: self.is_remote && self.remote_startup_phase.is_some(),
-            startup_usage_pending: self.is_remote
-                && !crate::usage::remote_account_usage_received(),
+            startup_usage_pending: startup_usage_slot_pending(
+                self.is_remote,
+                self.remote_startup_phase.is_some(),
+                crate::usage::remote_account_usage_received(),
+            ),
             todos,
             todo_goals,
             todos_are_swarm_plan,
@@ -2544,6 +2557,23 @@ mod sidebar_usage_tests {
     };
     use crate::tui::info_widget::{AuthMethod, UsageProvider};
     use crate::usage::AccountUsageSnapshot;
+
+    #[test]
+    fn startup_usage_slot_waits_for_account_binding_even_with_cached_quotas() {
+        for runtime_pending in [false, true] {
+            for usage_received in [false, true] {
+                assert!(!super::startup_usage_slot_pending(
+                    false,
+                    runtime_pending,
+                    usage_received
+                ));
+                assert_eq!(
+                    super::startup_usage_slot_pending(true, runtime_pending, usage_received),
+                    runtime_pending || !usage_received,
+                );
+            }
+        }
+    }
 
     fn snapshot() -> AccountUsageSnapshot {
         AccountUsageSnapshot {
