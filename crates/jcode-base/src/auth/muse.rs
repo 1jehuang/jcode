@@ -127,6 +127,13 @@ pub fn ensure_enabled() -> Result<()> {
 /// redirects; prefer this constructor.
 pub fn http_client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
+        // Meta's device-authorization endpoint answers a request with no
+        // `User-Agent` with `302 -> facebook.com/unsupportedbrowser` instead of
+        // the challenge JSON. Since this client deliberately does not follow
+        // redirects, omitting the header made the login impossible. A plain
+        // application user-agent is accepted; browser-like ones are rejected
+        // with HTTP 400. Verified against the live endpoint.
+        .user_agent(jcode_provider_core::JCODE_USER_AGENT)
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(CONNECT_TIMEOUT)
         .timeout(REQUEST_TIMEOUT)

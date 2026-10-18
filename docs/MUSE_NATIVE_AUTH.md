@@ -103,9 +103,9 @@ The default is standard `muse-spark-1.3`, not a Contributor model. Contributor m
 | Native auth module unit tests | `cargo test -p jcode-base --lib muse` | 30 passed, 0 failed |
 | Catalog gate tests | `cargo test -p jcode-base --lib provider_catalog_muse` | 4 passed, 0 failed |
 | Provider-metadata suite | `cargo test -p jcode-provider-metadata` | 19 passed, 0 failed |
-| TUI auth module | `cargo test -p jcode-tui --lib auth::` | 27 passed, 0 failed |
+| TUI auth module | `cargo test -p jcode-tui --lib auth::` | 29 passed, 0 failed |
 | Compatible-runtime suite (parallel, repeated) | `cargo test -p jcode-provider-openrouter-runtime --lib` | 187 passed, 6 consecutive runs |
-| Initial provider and login suites | `cargo test -p jcode --lib provider_init` / `--lib login` | 24 and 46 passed |
+| Initial provider and login suites | `cargo test -p jcode --lib provider_init` / `--lib login` | 24 and 49 passed |
 | Formatting | `cargo fmt --all --check` | clean for every file this change touches |
 
 The parallel repeat matters: this suite is flaky at the parent commit **without any of these changes** (2 of 6 pristine runs failed; 4 of 6 with the new native tests added). Every failure was a global env race, not native-auth logic: `OPENROUTER_API_KEY not found`, autodetected base mismatches, and a lost per-profile cache namespace. The trigger is a pre-existing test in `catalog_fetch.rs` that mutated the process-global `JCODE_HOME` without the shared test env lock, so it raced the autodetect and provider tests. It now takes that lock, and the suite has passed every repeated parallel run since.
@@ -123,8 +123,30 @@ These fail in this environment on the parent commit as well, and are not caused 
 - `cargo fmt --all --check` reports five pre-existing offenders on the parent commit that this change does not touch (`jcode-app-core/src/tool/tests/mcp_collision.rs`, `jcode-base/src/provider/tests.rs`, `jcode-provider-openai-runtime/src/openai_tests.rs`, `jcode-provider-openrouter/src/stream_tests.rs`, `jcode-tui/src/tui/info_widget.rs`). This change adds none of its own.
 - The wider `jcode-tui` lib test binary is broadly flaky in this environment. The failing set changes between runs (14, 16 and 18 failures on three consecutive runs, different test names each time) and covers areas this change does not touch: clipboard helpers, git line cache, swarm buffer rendering, model picker and session picker. `tui::app::remote::tests::history_speed_capabilities_are_authoritative_and_identity_scoped` reproduces on pristine upstream master, so it is not caused by this change. The suite is also affected by the same class of unlocked global env mutation as the runtime crate: its failures concentrate in tests that read process env while other tests mutate it.
 
-### Not verified (requires the account holder)
+### Verified against the live service (manual, 2026-10-18)
 
-A completed browser approval, a successful account key mint, a live account catalog, model inference, and billing reconciliation have **not** been exercised. They require account-holder participation and, for inference, can consume allowance or incur charges. Synthetic protocol tests cannot replace those steps, and none of the green rows above is evidence that a subscription turn is billed as subscription usage rather than pay-as-you-go.
+These were run against Meta with a real subscription. The automated suite still makes no Meta traffic; these are manual observations, and the credential values are deliberately not reproduced here.
+
+| Step | Command | Observed |
+| --- | --- | --- |
+| Device authorization | `jcode login muse-subscription --print-auth-url --json` | Challenge returned: `verification_uri` `https://auth.meta.com/oauth/device/`, `verification_uri_complete`, `user_code`, `expires_in` 600, `interval` 5 |
+| Browser approval, then exchange and mint | `jcode login muse-subscription --complete --flow-id …` | `authenticated`; credentials written to `~/.jcode/muse_subscription.json` with mode `0600` |
+| Mint response | (same run) | `base_url` `https://api.meta.ai/v1`, `is_subs_active` true, `require_payment` false, account email and name returned, tier `Muse Code High Usage` |
+| Native model discovery | `GET https://api.meta.ai/muse-code/models` with the minted key | `200` with 7 models, including `muse-spark-1.3`, `muse-wonder-1.0`, `muse-image-1.0` and their contributor variants |
+| Credential choice for discovery | same endpoint with the device access token instead | `401`, so the minted key is the correct credential |
+| Account status | `jcode auth status` | `muse-subscription` available; usage shown as `quota unknown` (the mint returned no window or weekly percentages, so nothing was fabricated) |
+
+A required header that the published schema does not mention: the device-authorization endpoint answers a request with **no `User-Agent`** with `302 → https://www.facebook.com/unsupportedbrowser` instead of the challenge JSON, and rejects browser-like user-agents with `400`. Because this client deliberately refuses redirects, the missing header made login impossible. `http_client()` now sends `jcode/<version>`. The token endpoint is unaffected. This is the kind of fact only a live call surfaces.
+
+### Still not verified
+
+- **A real inference turn.** No Muse model has been asked to generate anything yet, so request shape, streaming and tool behaviour against the live Responses surface are unproven.
+- **Billing reconciliation.** Even a successful turn would not prove the turn is settled as subscription usage rather than pay-as-you-go. An active subscription and a successful mint (both observed above) are not a billing receipt.
+
+Do not read `available` in auth status as proof of either.
+
+### Superseded statement
+
+An earlier revision of this ledger said that browser approval, the account key mint and the live account catalog had "not been exercised". As of the 2026-10-18 live run above, all three have been exercised successfully with a real subscription, so that statement no longer applies. The remaining unverified items are the two listed under "Still not verified": a real inference turn, and any billing reconciliation.
 
 Do not read `available` in auth status as a live model or billing test.
