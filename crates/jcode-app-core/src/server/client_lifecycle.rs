@@ -494,7 +494,22 @@ pub(super) async fn handle_client(
 
     let client_start = std::time::Instant::now();
 
-    let provider = provider_template.fork_for_new_session();
+    // A target-aware Subscribe for an existing session restores that
+    // session's own model onto this placeholder. Choosing a fresh pool route
+    // for it is wasted work, and in a reload storm the forks serialize on that
+    // choice (seconds when an account's quota state changes mid-storm).
+    let resumes_persisted_session = match &initial_request {
+        Request::Subscribe {
+            target_session_id: Some(target),
+            ..
+        } => crate::session::session_exists(target),
+        _ => false,
+    };
+    let provider = if resumes_persisted_session {
+        provider_template.fork()
+    } else {
+        provider_template.fork_for_new_session()
+    };
     let provider_fork_ms = client_start.elapsed().as_millis();
     let t0 = std::time::Instant::now();
     let registry = Registry::new(provider.clone()).await;
