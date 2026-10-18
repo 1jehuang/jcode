@@ -1791,6 +1791,13 @@ pub(in crate::tui::app) fn handle_server_event(
                 // sent only the messages after it. Rebuild the full list so the
                 // rest of this handler (fingerprints, replace) is unchanged.
                 let Some(prefix) = app.take_history_base_prefix(&session_id, base_count) else {
+                    if remote.has_loaded_history()
+                        && app.remote_session_id.as_deref() == Some(session_id.as_str())
+                    {
+                        // A full History (e.g. a watchdog re-request) already
+                        // won the race; this late delta carries nothing new.
+                        return false;
+                    }
                     crate::logging::warn(&format!(
                         "Delta History for {} (base={}) without a matching local prefix; requesting full history",
                         session_id, base_count

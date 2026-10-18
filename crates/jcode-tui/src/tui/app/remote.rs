@@ -1150,6 +1150,7 @@ pub(super) fn handle_disconnect(
 /// normal (slow) bootstrap completes on its own, short enough that a genuinely
 /// stuck session recovers in seconds instead of requiring a manual `/restart`.
 const REMOTE_HISTORY_RECOVERY_FIRST_DELAY: Duration = Duration::from_secs(6);
+const REMOTE_HISTORY_DELTA_RECOVERY_DELAY: Duration = Duration::from_secs(30);
 /// Spacing between subsequent re-requests after the first one.
 const REMOTE_HISTORY_RECOVERY_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 /// How many times we re-request history before giving up and telling the user
@@ -1207,6 +1208,15 @@ async fn recover_stuck_remote_history(app: &mut App, remote: &mut RemoteConnecti
     };
 
     if waited < REMOTE_HISTORY_RECOVERY_FIRST_DELAY {
+        return false;
+    }
+
+    // A Subscribe carrying a history base is still queued server-side (during
+    // a reconnect storm setup alone can take >10s). Requests are processed in
+    // order, so a GetHistory now would only arrive after that History anyway,
+    // and it would make the server send the full multi-MB transcript instead
+    // of the delta. Give the pending bootstrap much longer before re-requesting.
+    if app.advertised_history_base.is_some() && waited < REMOTE_HISTORY_DELTA_RECOVERY_DELAY {
         return false;
     }
 
