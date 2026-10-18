@@ -400,7 +400,10 @@ async fn connected_server_refresh_skips_identical_catalog_but_applies_changes() 
     let mut before_sorted = before.clone();
     before_sorted.sort();
     after.sort();
-    assert_eq!(after, before_sorted, "identical reconnect must not change aliases");
+    assert_eq!(
+        after, before_sorted,
+        "identical reconnect must not change aliases"
+    );
 
     // Changed schema for server-a: the proxy must be replaced.
     catalog[0].1.input_schema =

@@ -279,9 +279,13 @@ fn model_capabilities_refresh_forwards_only_active_present_openai() {
 
         assert!(Provider::model_capabilities_need_refresh(&provider));
 
-        underlying.0.store(false, std::sync::atomic::Ordering::SeqCst);
+        underlying
+            .0
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         assert!(!Provider::model_capabilities_need_refresh(&provider));
-        underlying.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        underlying
+            .0
+            .store(true, std::sync::atomic::Ordering::SeqCst);
 
         *provider.active.write().unwrap() = ActiveProvider::Claude;
         assert!(!Provider::model_capabilities_need_refresh(&provider));

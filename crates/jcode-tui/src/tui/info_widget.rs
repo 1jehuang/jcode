@@ -70,8 +70,8 @@ pub(crate) use tips::occasional_status_tip;
 use tips::render_tips_widget;
 pub(crate) use todos_render::swarm_plan_todos;
 use todos_render::{render_todos_compact, render_todos_expanded, render_todos_widget};
-use usage_render::{render_usage_compact, render_usage_widget};
 pub(crate) use usage_render::render_labeled_bar as render_usage_limit_bar;
+use usage_render::{render_usage_compact, render_usage_widget};
 
 /// Overview rows used by the Changes section, mirroring [`render_sections`].
 pub(super) fn changes_section_height(data: &InfoWidgetData) -> u16 {

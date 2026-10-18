@@ -25,9 +25,8 @@ fn test_stream() -> OpenRouterStream {
 fn cache_creation_only_usage_is_not_dropped() {
     for tokens in [0, 3000] {
         let mut stream = test_stream();
-        stream.buffer = format!(
-            "data: {{\"usage\":{{\"cache_creation_input_tokens\":{tokens}}}}}\n\n"
-        );
+        stream.buffer =
+            format!("data: {{\"usage\":{{\"cache_creation_input_tokens\":{tokens}}}}}\n\n");
         assert!(matches!(
             stream.parse_next_event(),
             Some(StreamEvent::TokenUsage {
