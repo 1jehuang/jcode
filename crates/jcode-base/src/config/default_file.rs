@@ -475,11 +475,13 @@ cross_provider_failover = "countdown"
 # max_retries = 8
 # retry_backoff_cap_secs = 30
 # Request-body compression. Every turn re-uploads the whole conversation; on a
-# slow uplink gzip cuts that upload 1.3-3x and lowers time-to-first-token.
+# slow uplink compression cuts that upload 2-4x and lowers time-to-first-token.
 # "auto" measures your upload speed passively and compresses only when it is
 # predicted to be faster. "always" compresses every eligible request over 32 KB.
-# "off" never compresses. Only endpoints verified to accept gzip (Anthropic,
-# ChatGPT Codex) are affected. Env override: JCODE_REQUEST_COMPRESSION.
+# "off" never compresses. Only endpoints verified to accept it are affected:
+# gzip for Anthropic and ChatGPT (HTTPS), zstd for the OpenAI API, and
+# WebSocket permessage-deflate for ChatGPT/OpenAI Responses sockets.
+# Env override: JCODE_REQUEST_COMPRESSION.
 # request_compression = "auto"
 
 [server]

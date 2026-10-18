@@ -1292,9 +1292,10 @@ pub struct ProviderConfig {
     /// Maximum exponential-backoff delay between transient-error retries.
     /// Default: 30 seconds. Overridable via `JCODE_RETRY_BACKOFF_CAP_SECS`.
     pub retry_backoff_cap_secs: u64,
-    /// Request-body compression policy: "auto" (gzip only when the measured
-    /// uplink makes it faster), "always", or "off". Only endpoints verified
-    /// to accept gzip (Anthropic, ChatGPT Codex) are ever compressed.
+    /// Request-body compression policy: "auto" (compress only when the
+    /// measured uplink makes it faster), "always", or "off". Applies only to
+    /// endpoints verified to accept it: gzip (Anthropic, ChatGPT HTTPS), zstd
+    /// (OpenAI API), and WebSocket permessage-deflate (Responses sockets).
     /// Overridable via `JCODE_REQUEST_COMPRESSION`.
     pub request_compression: String,
 }
