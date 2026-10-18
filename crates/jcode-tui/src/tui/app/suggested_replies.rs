@@ -25,6 +25,7 @@ pub struct SuggestedRepliesView {
 pub struct SuggestedRepliesRuntime {
     pub current: Option<SuggestedRepliesResponse>,
     pub focus: Option<SuggestedReplyFocus>,
+    pub staged_input: Option<String>,
     pub explorer_deadline: Option<Instant>,
     pub pending_rx: Option<mpsc::UnboundedReceiver<SuggestedRepliesResponse>>,
     pub pending_six_lens_findings: Option<String>,
@@ -36,19 +37,32 @@ pub struct SuggestedRepliesRuntime {
 }
 
 impl App {
+    /// True when `self.input` currently holds an unedited suggestion staged by selecting
+    /// a Suggested Reply item.
+    pub fn suggested_replies_has_staged_input(&self) -> bool {
+        !self.input.is_empty()
+            && self.suggested_replies.staged_input.as_deref() == Some(self.input.as_str())
+    }
+
+    /// True when `self.input` is either empty or holds an unedited staged suggestion.
+    pub fn suggested_replies_input_is_empty_or_staged(&self) -> bool {
+        self.input.is_empty() || self.suggested_replies_has_staged_input()
+    }
+
     /// Whether the Suggested Replies panel should be visible above the input box.
     pub fn suggested_replies_visible(&self) -> bool {
         if !crate::config::config().suggested_replies.enabled {
             return false;
         }
+        let is_staged = self.suggested_replies_has_staged_input();
         if self.is_processing
-            || !self.input.is_empty()
+            || (!self.input.is_empty() && !is_staged)
             || !self.pending_images.is_empty()
             || self.onboarding_welcome_active()
             || self.inline_interactive_state.is_some()
             || self.inline_view_state.is_some()
             || self.prompt_history_search.is_some()
-            || !self.command_suggestions().is_empty()
+            || (!is_staged && !self.command_suggestions().is_empty())
         {
             return false;
         }
@@ -84,6 +98,9 @@ impl App {
             changed = true;
         }
         if self.suggested_replies.focus.take().is_some() {
+            changed = true;
+        }
+        if self.suggested_replies.staged_input.take().is_some() {
             changed = true;
         }
         if clear_suggestions {
@@ -148,6 +165,7 @@ impl App {
             None
         };
 
+        let had_staged_or_empty = self.suggested_replies_input_is_empty_or_staged();
         let cfg = &crate::config::config().suggested_replies;
         let can_arm_explorer = cfg.enable_full_auto_explorer
             && preserved_focus.is_none()
@@ -164,6 +182,18 @@ impl App {
         self.suggested_replies.explorer_deadline =
             can_arm_explorer.then(|| Instant::now() + EXPLORER_AUTO_DELAY);
         self.suggested_replies.current = Some(response);
+        if had_staged_or_empty {
+            if let Some(target) = preserved_focus
+                && let Some(text) = self.suggested_reply_text_for_target(target)
+            {
+                self.input = text.clone();
+                self.cursor_pos = self.input.len();
+                self.suggested_replies.staged_input = Some(text);
+            } else if self.suggested_replies.staged_input.take().is_some() {
+                self.input.clear();
+                self.cursor_pos = 0;
+            }
+        }
     }
 
     /// Build a compact recent-conversation snapshot for the two-stage cascade.
@@ -277,7 +307,7 @@ impl App {
             match rx.try_recv() {
                 Ok(response) => {
                     self.suggested_replies.pending_rx = None;
-                    if !self.is_processing && self.input.is_empty() {
+                    if !self.is_processing && self.suggested_replies_input_is_empty_or_staged() {
                         self.apply_suggested_replies_response(response);
                         needs_redraw = true;
                     }
@@ -309,6 +339,7 @@ impl App {
                 {
                     self.suggested_replies.current = None;
                     self.suggested_replies.focus = None;
+                    self.suggested_replies.staged_input = None;
                     return (true, Some(action));
                 }
                 needs_redraw = true;
@@ -335,8 +366,53 @@ impl App {
         targets
     }
 
+    /// Look up the suggestion text for `target` in the current response.
+    pub fn suggested_reply_text_for_target(&self, target: SuggestedReplyFocus) -> Option<String> {
+        let response = self.suggested_replies.current.as_ref()?;
+        match target {
+            SuggestedReplyFocus::DefaultAction => response.default_action.clone(),
+            SuggestedReplyFocus::Secondary(idx) => {
+                response.secondary_suggestions.get(idx).cloned()
+            }
+        }
+    }
+
+    /// Focus `target` and populate `self.input` (composer) with its text so the user
+    /// can immediately edit it, press `Enter` to send, or keep cycling with `Tab`/`↑`/`↓`.
+    pub fn stage_suggested_reply_target(&mut self, target: SuggestedReplyFocus) -> bool {
+        if !self.suggested_replies_visible() {
+            return false;
+        }
+        let Some(text) = self.suggested_reply_text_for_target(target) else {
+            return false;
+        };
+        self.suggested_replies.explorer_deadline = None;
+        self.suggested_replies.focus = Some(target);
+        if self.input != text {
+            self.remember_input_undo_state();
+            self.input = text.clone();
+            self.cursor_pos = self.input.len();
+        }
+        self.suggested_replies.staged_input = Some(text);
+        match target {
+            SuggestedReplyFocus::DefaultAction => {
+                self.set_status_notice(
+                    "Default Action in input (edit or Enter to send · ↑/↓/Tab to switch · Esc to clear)",
+                );
+            }
+            SuggestedReplyFocus::Secondary(idx) => {
+                self.set_status_notice(format!(
+                    "Suggestion #{} in input (edit or Enter to send · ↑/↓/Tab to switch · Esc to clear)",
+                    idx + 1
+                ));
+            }
+        }
+        true
+    }
+
     /// Move focus forward (`delta = 1`) or backward (`delta = -1`) across
-    /// `DefaultAction` and `Secondary(0..N)`.
+    /// `DefaultAction` and `Secondary(0..N)` and populate `self.input` with the
+    /// selected suggestion text for editing.
     pub fn step_suggested_replies_focus(&mut self, delta: isize) -> bool {
         if !self.suggested_replies_visible() {
             return false;
@@ -345,7 +421,6 @@ impl App {
         if targets.is_empty() {
             return false;
         }
-        self.suggested_replies.explorer_deadline = None;
         let next_pos = match self
             .suggested_replies
             .focus
@@ -361,24 +436,10 @@ impl App {
             }
         };
         let next_focus = targets[next_pos];
-        self.suggested_replies.focus = Some(next_focus);
-        match next_focus {
-            SuggestedReplyFocus::DefaultAction => {
-                self.set_status_notice(
-                    "Default Action selected (Enter to send · ↑/↓/Tab to choose · 1-5 quick pick)",
-                );
-            }
-            SuggestedReplyFocus::Secondary(idx) => {
-                self.set_status_notice(format!(
-                    "Suggestion #{} selected (Enter to send · ↑/↓/Tab to choose)",
-                    idx + 1
-                ));
-            }
-        }
-        true
+        self.stage_suggested_reply_target(next_focus)
     }
 
-    /// Handle `Up` / `Down` arrow keys when Suggested Replies are visible on an empty input.
+    /// Handle `Up` / `Down` arrow keys when Suggested Replies are visible.
     /// - `Down` always steps down through the vertical suggestion list (focusing the first item if unfocused).
     /// - `Up` steps up when focus is already inside the suggestion panel (leaving plain `Up` for prompt history when unfocused).
     pub fn handle_suggested_replies_arrow_key(
@@ -399,7 +460,22 @@ impl App {
     }
 
     /// Handle pressing digit `'1'..='5'` (or `'0'` for Default Action) on an empty input
-    /// when Suggested Replies are visible. Returns `Some(prompt)` to submit immediately.
+    /// when Suggested Replies are visible: focuses that suggestion and populates `self.input`
+    /// so the user can edit it or press `Enter` to send.
+    pub fn stage_suggested_reply_by_digit(&mut self, ch: char) -> bool {
+        if !self.input.is_empty() || !self.suggested_replies_visible() {
+            return false;
+        }
+        let target = match ch {
+            '0' => SuggestedReplyFocus::DefaultAction,
+            '1'..='5' => SuggestedReplyFocus::Secondary((ch as usize) - ('1' as usize)),
+            _ => return false,
+        };
+        self.stage_suggested_reply_target(target)
+    }
+
+    /// Handle pressing digit `'1'..='5'` (or `'0'` for Default Action) to consume and return
+    /// the suggestion text directly.
     pub fn take_suggested_reply_by_digit(&mut self, ch: char) -> Option<String> {
         if !self.suggested_replies_visible() {
             return None;
@@ -412,9 +488,9 @@ impl App {
         self.take_suggested_reply_target(target)
     }
 
-    /// Handle `[Tab]` when `self.autocomplete()` returned `false` and input is empty.
-    /// Cycles focus across `DefaultAction` and `Secondary(0..N)` so the user can pick any
-    /// vertical suggestion with `[Tab]` and press `[Enter]` to send it.
+    /// Handle `[Tab]` when Suggested Replies are visible.
+    /// Cycles focus across `DefaultAction` and `Secondary(0..N)` and fills `self.input`
+    /// with the selected suggestion so the user can edit it or press `[Enter]` to send.
     pub fn handle_suggested_replies_tab(&mut self) -> Option<Option<String>> {
         if self.step_suggested_replies_focus(1) {
             Some(None)
@@ -446,6 +522,7 @@ impl App {
         }?;
         self.suggested_replies.current = None;
         self.suggested_replies.focus = None;
+        self.suggested_replies.staged_input = None;
         self.suggested_replies.explorer_deadline = None;
         Some(selected)
     }
@@ -455,15 +532,10 @@ impl App {
         if !self.suggested_replies_visible() {
             return None;
         }
-        let response = self.suggested_replies.current.as_ref()?;
-        let text = match target {
-            SuggestedReplyFocus::DefaultAction => response.default_action.clone(),
-            SuggestedReplyFocus::Secondary(idx) => {
-                response.secondary_suggestions.get(idx).cloned()
-            }
-        }?;
+        let text = self.suggested_reply_text_for_target(target)?;
         self.suggested_replies.current = None;
         self.suggested_replies.focus = None;
+        self.suggested_replies.staged_input = None;
         self.suggested_replies.explorer_deadline = None;
         Some(text)
     }
@@ -669,21 +741,26 @@ mod tests {
         assert!(app.suggested_replies_visible());
         assert_eq!(app.suggested_replies.focus, None);
 
-        // First Tab focuses DefaultAction.
+        // First Tab focuses DefaultAction and populates app.input for editing.
         let tab1 = app.handle_suggested_replies_tab();
         assert_eq!(tab1, Some(None));
         assert_eq!(
             app.suggested_replies.focus,
             Some(SuggestedReplyFocus::DefaultAction)
         );
+        assert_eq!(app.input, "Run unit tests");
+        assert_eq!(app.cursor_pos, app.input.len());
+        assert!(app.suggested_replies_visible());
 
-        // Second Tab steps focus to Secondary(0), and Up arrow returns to DefaultAction.
+        // Second Tab steps focus to Secondary(0) and updates app.input; Up arrow returns to DefaultAction.
         let tab2 = app.handle_suggested_replies_tab();
         assert_eq!(tab2, Some(None));
         assert_eq!(
             app.suggested_replies.focus,
             Some(SuggestedReplyFocus::Secondary(0))
         );
+        assert_eq!(app.input, "Inspect git diff");
+        assert!(app.suggested_replies_visible());
         assert!(app.handle_suggested_replies_arrow_key(
             crossterm::event::KeyCode::Up,
             crossterm::event::KeyModifiers::NONE
@@ -692,6 +769,7 @@ mod tests {
             app.suggested_replies.focus,
             Some(SuggestedReplyFocus::DefaultAction)
         );
+        assert_eq!(app.input, "Run unit tests");
 
         // Enter (take_focused_or_default_suggested_reply(false)) submits the focused item.
         assert_eq!(
@@ -700,15 +778,26 @@ mod tests {
         );
         assert!(!app.suggested_replies_visible());
 
-        // Re-apply and test 1..5 digit quick selection.
+        // Re-apply and test 1..5 digit selection populating app.input for editing.
+        app.input.clear();
+        app.cursor_pos = 0;
         app.apply_suggested_replies_response(resp.clone());
+        assert!(app.stage_suggested_reply_by_digit('1'));
+        assert_eq!(app.input, "Inspect git diff");
         assert_eq!(
-            app.take_suggested_reply_by_digit('1'),
+            app.suggested_replies.focus,
+            Some(SuggestedReplyFocus::Secondary(0))
+        );
+        assert!(app.suggested_replies_visible());
+        assert_eq!(
+            app.take_focused_or_default_suggested_reply(false),
             Some("Inspect git diff".to_string())
         );
         assert!(!app.suggested_replies_visible());
 
         // Re-apply and test Ctrl+Enter (unfocused immediate DefaultAction activation).
+        app.input.clear();
+        app.cursor_pos = 0;
         app.apply_suggested_replies_response(resp.clone());
         assert_eq!(
             app.take_focused_or_default_suggested_reply(true),
@@ -717,6 +806,8 @@ mod tests {
         assert!(!app.suggested_replies_visible());
 
         // Re-apply with simulated explorer deadline and test Esc cancellation.
+        app.input.clear();
+        app.cursor_pos = 0;
         app.apply_suggested_replies_response(resp);
         app.suggested_replies.explorer_deadline =
             Some(Instant::now() - Duration::from_millis(10));

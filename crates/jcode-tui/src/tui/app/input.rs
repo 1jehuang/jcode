@@ -1070,10 +1070,9 @@ pub(super) fn handle_text_input(app: &mut App, text: &str) -> bool {
     if app.input.is_empty() && !app.is_processing && app.suggested_replies_visible() {
         let mut chars = text.chars();
         if let (Some(c), None) = (chars.next(), chars.next())
-            && let Some(prompt) = app.take_suggested_reply_by_digit(c)
+            && app.stage_suggested_reply_by_digit(c)
         {
             app.follow_chat_bottom_for_typing();
-            app.submit_suggested_reply_prompt(prompt);
             return true;
         }
     }
@@ -2816,6 +2815,7 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
     match code {
         KeyCode::Char(c) => handle_text_input(app, &c.to_string()),
         KeyCode::Backspace => {
+            app.cancel_suggested_replies_interaction(false);
             if app.cursor_pos > 0 {
                 let prev = crate::tui::core::prev_char_boundary(&app.input, app.cursor_pos);
                 app.remember_input_undo_state();
@@ -2827,6 +2827,7 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
             true
         }
         KeyCode::Delete => {
+            app.cancel_suggested_replies_interaction(false);
             if app.cursor_pos < app.input.len() {
                 let next = crate::tui::core::next_char_boundary(&app.input, app.cursor_pos);
                 app.remember_input_undo_state();
@@ -2837,6 +2838,7 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
             true
         }
         KeyCode::Left => {
+            app.cancel_suggested_replies_interaction(false);
             if app.cursor_pos > 0 {
                 app.cursor_pos = crate::tui::core::prev_char_boundary(&app.input, app.cursor_pos);
             } else {
@@ -2847,24 +2849,29 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
             true
         }
         KeyCode::Right => {
+            app.cancel_suggested_replies_interaction(false);
             if app.cursor_pos < app.input.len() {
                 app.cursor_pos = crate::tui::core::next_char_boundary(&app.input, app.cursor_pos);
             }
             true
         }
         KeyCode::Home => {
+            app.cancel_suggested_replies_interaction(false);
             app.cursor_pos = 0;
             true
         }
         KeyCode::End => {
+            app.cancel_suggested_replies_interaction(false);
             app.cursor_pos = app.input.len();
             true
         }
         KeyCode::Tab => {
-            if !app.autocomplete()
-                && let Some(Some(prompt)) = app.handle_suggested_replies_tab()
-            {
-                app.submit_suggested_reply_prompt(prompt);
+            if let Some(maybe_prompt) = app.handle_suggested_replies_tab() {
+                if let Some(prompt) = maybe_prompt {
+                    app.submit_suggested_reply_prompt(prompt);
+                }
+            } else {
+                app.autocomplete();
             }
             true
         }
@@ -2955,6 +2962,7 @@ pub(super) fn take_prepared_input(app: &mut App) -> PreparedInput {
     let images = std::mem::take(&mut app.pending_images);
     app.cursor_pos = 0;
     app.clear_input_undo_history();
+    app.clear_suggested_replies_for_new_turn();
     PreparedInput {
         raw_input,
         expanded,

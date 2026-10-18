@@ -965,6 +965,7 @@ async fn handle_remote_key_internal(
             handle_remote_char_input(app, c);
         }
         KeyCode::Backspace => {
+            app.cancel_suggested_replies_interaction(false);
             if app.cursor_pos > 0 {
                 let prev = core::prev_char_boundary(&app.input, app.cursor_pos);
                 app.remember_input_undo_state();
@@ -975,6 +976,7 @@ async fn handle_remote_key_internal(
             }
         }
         KeyCode::Delete => {
+            app.cancel_suggested_replies_interaction(false);
             if app.cursor_pos < app.input.len() {
                 let next = core::next_char_boundary(&app.input, app.cursor_pos);
                 app.remember_input_undo_state();
@@ -984,6 +986,7 @@ async fn handle_remote_key_internal(
             }
         }
         KeyCode::Left => {
+            app.cancel_suggested_replies_interaction(false);
             if app.cursor_pos > 0 {
                 app.cursor_pos = core::prev_char_boundary(&app.input, app.cursor_pos);
             } else {
@@ -993,24 +996,29 @@ async fn handle_remote_key_internal(
             }
         }
         KeyCode::Right => {
+            app.cancel_suggested_replies_interaction(false);
             if app.cursor_pos < app.input.len() {
                 app.cursor_pos = core::next_char_boundary(&app.input, app.cursor_pos);
             }
         }
         KeyCode::Home => {
+            app.cancel_suggested_replies_interaction(false);
             app.cursor_pos = 0;
         }
         KeyCode::End => {
+            app.cancel_suggested_replies_interaction(false);
             app.cursor_pos = app.input.len();
         }
         KeyCode::Tab => {
-            if !app.autocomplete()
-                && let Some(Some(prompt)) = app.handle_suggested_replies_tab()
-            {
-                app.input = prompt;
-                app.cursor_pos = app.input.len();
-                let prepared = input::take_prepared_input(app);
-                submit_prepared_remote_input(app, remote, prepared).await?;
+            if let Some(maybe_prompt) = app.handle_suggested_replies_tab() {
+                if let Some(prompt) = maybe_prompt {
+                    app.input = prompt;
+                    app.cursor_pos = app.input.len();
+                    let prepared = input::take_prepared_input(app);
+                    submit_prepared_remote_input(app, remote, prepared).await?;
+                }
+            } else {
+                app.autocomplete();
             }
         }
         KeyCode::Enter => {

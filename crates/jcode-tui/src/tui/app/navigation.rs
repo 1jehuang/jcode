@@ -1588,10 +1588,16 @@ impl App {
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             && let Some(target) =
                 crate::tui::ui::suggested_reply_target_from_screen(mouse.column, mouse.row)
-            && let Some(prompt) = self.take_suggested_reply_target(target)
         {
-            self.submit_suggested_reply_prompt(prompt);
-            finish_mouse_event!(false, "suggested_reply_click");
+            if self.suggested_replies.focus == Some(target)
+                && self.suggested_replies_has_staged_input()
+                && let Some(prompt) = self.take_suggested_reply_target(target)
+            {
+                self.submit_suggested_reply_prompt(prompt);
+                finish_mouse_event!(false, "suggested_reply_click_submit");
+            } else if self.stage_suggested_reply_target(target) {
+                finish_mouse_event!(false, "suggested_reply_click_stage");
+            }
         }
 
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
