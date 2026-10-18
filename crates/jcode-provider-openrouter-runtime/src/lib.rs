@@ -1665,6 +1665,10 @@ impl OpenRouterProvider {
         };
         let max_tokens = Self::configured_max_tokens(profile_id.as_deref());
         let extra_body = Self::resolve_extra_body(None, &configured_env_file_name());
+        jcode_base::logging::info(&format!(
+            "[TIMING] openrouter_new: pre_struct={}ms",
+            new_start.elapsed().as_millis()
+        ));
 
         Ok(Self {
             client: jcode_provider_core::shared_http_client(),

@@ -402,6 +402,12 @@ pub(super) async fn handle_client(
 
         match decode_request(&line) {
             Ok(request) => {
+                if !request.is_lightweight_control_request() {
+                    crate::logging::info(&format!(
+                        "[TIMING] handle_client initial request read: bytes={}",
+                        line.len()
+                    ));
+                }
                 if request.is_lightweight_control_request() {
                     let keep_connection_open = matches!(request, Request::Ping { .. });
                     handle_lightweight_control_request(
