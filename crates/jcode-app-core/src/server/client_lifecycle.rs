@@ -376,6 +376,7 @@ pub(super) async fn handle_client(
     await_members_runtime: AwaitMembersRuntime,
     swarm_mutation_runtime: SwarmMutationRuntime,
 ) -> Result<()> {
+    let handler_start = Instant::now();
     let (reader, writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
     let writer = Arc::new(Mutex::new(writer));
@@ -404,8 +405,9 @@ pub(super) async fn handle_client(
             Ok(request) => {
                 if !request.is_lightweight_control_request() {
                     crate::logging::info(&format!(
-                        "[TIMING] handle_client initial request read: bytes={}",
-                        line.len()
+                        "[TIMING] handle_client initial request read: bytes={}, handler_to_read={}ms",
+                        line.len(),
+                        handler_start.elapsed().as_millis()
                     ));
                 }
                 if request.is_lightweight_control_request() {
