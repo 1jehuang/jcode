@@ -2328,6 +2328,11 @@ pub(super) fn prepare_body(
     let display_width = width.saturating_sub(4) as usize;
 
     let messages = app.display_messages();
+    let images_start = Instant::now();
+    // Images anchored to transcript messages render inline right after the
+    // message that produced them (tool result or user prompt).
+    let anchored_images = super::inline_image_ui::resolve_anchored_items_cached(app);
+    let images_ms = images_start.elapsed().as_millis();
     let ctx = BodyRenderCtx {
         app,
         width,
@@ -2335,14 +2340,14 @@ pub(super) fn prepare_body(
         prompt_number_offset: app.compacted_hidden_user_prompts(),
         total_prompts: app.display_user_message_count(),
         pending_count: input_ui::pending_prompt_count(app),
-        // Images anchored to transcript messages render inline right after the
-        // message that produced them (tool result or user prompt).
-        anchored_images: super::inline_image_ui::resolve_anchored_items_cached(app),
+        anchored_images,
         inline_images_visible: app.inline_images_visible(),
         messages,
         swarm_members: app.swarm_members_for_transcript(),
     };
+    let ctx_ms = images_start.elapsed().as_millis() - images_ms;
 
+    let render_start = Instant::now();
     let mut acc = BodyAcc::default();
     for (msg_idx, msg) in messages.iter().enumerate() {
         render_message_into(&ctx, &mut acc, msg, msg_idx);
@@ -2375,6 +2380,8 @@ pub(super) fn prepare_body(
         }
     }
 
+    let render_ms = render_start.elapsed().as_millis();
+    let wrap_start = Instant::now();
     let mut prepared = wrap_lines_with_map(
         acc.lines,
         &acc.raw_plain_lines,
@@ -2387,6 +2394,14 @@ pub(super) fn prepare_body(
         &acc.copy_targets,
         &acc.segments,
     );
+    let wrap_ms = wrap_start.elapsed().as_millis();
+    if images_ms + ctx_ms + render_ms + wrap_ms >= 100 {
+        crate::logging::info(&format!(
+            "[TIMING] prepare_body: messages={}, images={images_ms}ms, ctx={ctx_ms}ms, render={render_ms}ms, wrap={wrap_ms}ms, wrapped_lines={}",
+            messages.len(),
+            prepared.wrapped_lines.len()
+        ));
+    }
     stamp_mermaid_pending(&mut prepared, mermaid_epoch_before);
     prepared
 }
