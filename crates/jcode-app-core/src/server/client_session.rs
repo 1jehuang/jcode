@@ -1729,12 +1729,20 @@ pub(super) async fn handle_resume_session(
         Ok(_prev_status) => {
             let old_session_id = client_session_id.clone();
             *client_session_id = session_id.clone();
+            let attach_start = Instant::now();
+            let mut attach_laps: Vec<(&'static str, u128)> = Vec::new();
+            let mut attach_lap = Instant::now();
+            let mut lap = |name: &'static str| {
+                attach_laps.push((name, attach_lap.elapsed().as_millis()));
+                attach_lap = Instant::now();
+            };
 
             {
                 let mut sessions_guard = sessions.write().await;
                 sessions_guard.remove(&old_session_id);
                 sessions_guard.insert(session_id.clone(), Arc::clone(agent));
             }
+            lap("sessions");
             crate::runtime_memory_log::emit_event(
                 crate::runtime_memory_log::RuntimeMemoryLogEvent::new(
                     "session_resumed",
@@ -1746,6 +1754,7 @@ pub(super) async fn handle_resume_session(
             rename_shutdown_signal(shutdown_signals, &old_session_id, &session_id).await;
             rename_session_interrupt_queue(soft_interrupt_queues, &old_session_id, &session_id)
                 .await;
+            lap("signals");
             {
                 let mut connections = client_connections.write().await;
                 if let Some(info) = connections.get_mut(client_connection_id) {
@@ -1762,6 +1771,7 @@ pub(super) async fn handle_resume_session(
                 swarms_by_id,
             )
             .await;
+            lap("swarm_rename");
             remove_session_channel_subscriptions(
                 &old_session_id,
                 channel_subscriptions,
@@ -1813,6 +1823,7 @@ pub(super) async fn handle_resume_session(
                 persist_swarm_state_for(stale_swarm_id, &swarm_state).await;
                 broadcast_swarm_status(stale_swarm_id, swarm_members, swarms_by_id).await;
             }
+            lap("swarm_cleanup");
             update_member_status(
                 &session_id,
                 "ready",
@@ -1824,6 +1835,7 @@ pub(super) async fn handle_resume_session(
                 Some(swarm_event_tx),
             )
             .await;
+            lap("member_status");
             if let Some(swarm_id) = {
                 let members = swarm_members.read().await;
                 members
@@ -1839,6 +1851,7 @@ pub(super) async fn handle_resume_session(
                 };
                 persist_swarm_state_for(&swarm_id, &swarm_state).await;
             }
+            lap("swarm_persist");
 
             register_session_event_sender(
                 swarm_members,
@@ -1847,6 +1860,7 @@ pub(super) async fn handle_resume_session(
                 client_event_tx.clone(),
             )
             .await;
+            lap("event_sender");
 
             // Captured before the history call, which takes the agent, so the restored
             // route can still be reported to a client that has never been told.
@@ -1869,6 +1883,18 @@ pub(super) async fn handle_resume_session(
                 )
             };
 
+            lap("agent_route");
+            let attach_ms = attach_start.elapsed().as_millis();
+            if attach_ms >= 100 {
+                crate::logging::info(&format!(
+                    "[TIMING] resume attach laps: session={session_id}, total={attach_ms}ms, {}",
+                    attach_laps
+                        .iter()
+                        .map(|(name, ms)| format!("{name}={ms}ms"))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                ));
+            }
             let pre_history_ms = resume_start.elapsed().as_millis();
             let history_result = handle_get_history(
                 id,
