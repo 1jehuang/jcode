@@ -37,6 +37,7 @@ fn test_metadata_only_history_preserves_fast_restored_startup_state() {
             session_id: session_id.to_string(),
             messages: vec![],
             messages_base_count: None,
+            images_unchanged: false,
             images: vec![],
             provider_name: Some("openai".to_string()),
             provider_model: Some("gpt-5.4".to_string()),
@@ -112,6 +113,7 @@ fn test_duplicate_history_for_same_session_is_ignored_after_fast_path_restore() 
     app.handle_server_event(
         crate::protocol::ServerEvent::History {
             messages_base_count: None,
+            images_unchanged: false,
             id: 1,
             session_id: "ses_fast_path".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
@@ -547,6 +549,7 @@ fn delta_history_event(
 ) -> crate::protocol::ServerEvent {
     crate::protocol::ServerEvent::History {
         messages_base_count,
+        images_unchanged: false,
         id: 1,
         session_id: session_id.to_string(),
         messages,
@@ -603,8 +606,17 @@ fn test_delta_history_rebuilds_transcript_from_advertised_prefix() {
         base: crate::protocol::HistoryBase {
             count: 2,
             fingerprint: 0,
+            images_fingerprint: None,
         },
         prefix: Some(prefix),
+        images: Some(vec![crate::session::RenderedImage {
+            media_type: "image/png".to_string(),
+            data: "local-image".to_string(),
+            label: None,
+            source: crate::session::RenderedImageSource::UserInput,
+            anchor: None,
+            history_message_index: None,
+        }]),
     });
     let tail = vec![crate::protocol::HistoryMessage {
         response_stats: None,
@@ -613,7 +625,16 @@ fn test_delta_history_rebuilds_transcript_from_advertised_prefix() {
         tool_calls: None,
         tool_data: None,
     }];
-    app.handle_server_event(delta_history_event("ses_delta", tail, Some(2)), &mut remote);
+    let mut event = delta_history_event("ses_delta", tail, Some(2));
+    if let crate::protocol::ServerEvent::History {
+        images_unchanged, ..
+    } = &mut event
+    {
+        *images_unchanged = true;
+    }
+    app.handle_server_event(event, &mut remote);
+    assert_eq!(app.remote_side_pane_images.len(), 1);
+    assert_eq!(app.remote_side_pane_images[0].data, "local-image");
     let contents: Vec<_> = app
         .display_messages()
         .iter()

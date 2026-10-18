@@ -928,6 +928,9 @@ pub(crate) struct AdvertisedHistoryBase {
     pub(crate) session_id: String,
     pub(crate) base: crate::protocol::HistoryBase,
     pub(crate) prefix: Option<Vec<DisplayMessage>>,
+    /// Images rendered with `prefix`, reused when History says
+    /// `images_unchanged`.
+    pub(crate) images: Option<Vec<crate::session::RenderedImage>>,
 }
 
 pub struct App {
@@ -1319,7 +1322,11 @@ pub struct App {
     /// be reconstructed even if the visible transcript changed meanwhile.
     advertised_history_base: Option<AdvertisedHistoryBase>,
     /// Unmodified startup transcript, kept only while a base is pending.
-    startup_display_snapshot: Option<(String, Vec<DisplayMessage>)>,
+    startup_display_snapshot: Option<(
+        String,
+        Vec<DisplayMessage>,
+        Vec<crate::session::RenderedImage>,
+    )>,
     remote_reasoning_effort: Option<String>,
     remote_service_tier: Option<String>,
     remote_available_service_tiers: Option<Vec<String>>,

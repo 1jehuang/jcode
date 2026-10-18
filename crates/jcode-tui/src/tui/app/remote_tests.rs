@@ -440,6 +440,7 @@ fn startup_history(session_id: &str) -> ServerEvent {
         session_id: session_id.to_string(),
         messages: vec![],
         messages_base_count: None,
+        images_unchanged: false,
         images: vec![],
         provider_name: None,
         provider_model: None,

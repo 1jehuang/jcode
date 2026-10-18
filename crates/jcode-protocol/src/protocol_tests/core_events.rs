@@ -707,6 +707,7 @@ fn test_history_provider_oauth_email_roundtrip_redacts_debug() -> Result<()> {
 fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
     let event = ServerEvent::History {
         messages_base_count: None,
+        images_unchanged: false,
         id: 101,
         session_id: "ses_test_456".to_string(),
         messages: vec![HistoryMessage {

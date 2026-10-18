@@ -86,6 +86,27 @@ pub struct HistoryBase {
     pub count: usize,
     /// [`history_prefix_fingerprint`] of those messages.
     pub fingerprint: u64,
+    /// [`history_images_fingerprint`] of the rendered images the client holds.
+    /// When it matches, History omits `images` and sets `images_unchanged`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub images_fingerprint: Option<u64>,
+}
+
+/// Stable fingerprint of a History image set (order, metadata and data).
+pub fn history_images_fingerprint(images: &[jcode_session_types::RenderedImage]) -> u64 {
+    let mut fingerprinter = HistoryFingerprinter::default();
+    for image in images {
+        fingerprinter.feed(image.media_type.as_bytes());
+        fingerprinter.feed(image.data.as_bytes());
+        fingerprinter.feed(image.label.as_deref().unwrap_or("\u{0}").as_bytes());
+        fingerprinter.feed(
+            serde_json::to_string(&(&image.source, &image.anchor, &image.history_message_index))
+                .unwrap_or_default()
+                .as_bytes(),
+        );
+        fingerprinter.count += 1;
+    }
+    fingerprinter.finish()
 }
 
 /// Stable, process-independent fingerprint of History messages, shared by the
@@ -173,6 +194,7 @@ impl HistoryFingerprinter {
         HistoryBase {
             count: self.count,
             fingerprint: self.finish(),
+            images_fingerprint: None,
         }
     }
 }

@@ -341,6 +341,7 @@ pub(super) async fn handle_get_model_catalog(
         session_id: session_id.to_string(),
         messages: Vec::new(),
         messages_base_count: None,
+        images_unchanged: false,
         images: Vec::new(),
         provider_name,
         provider_model,
@@ -507,6 +508,20 @@ pub(super) fn apply_history_base(
     let mut messages = messages;
     let tail = messages.split_off(base.count);
     (tail, Some(base.count))
+}
+
+/// Omit History images the client already holds (matching fingerprint).
+pub(super) fn apply_history_images_base(
+    images: Vec<crate::session::RenderedImage>,
+    history_base: Option<crate::protocol::HistoryBase>,
+) -> (Vec<crate::session::RenderedImage>, bool) {
+    let Some(expected) = history_base.and_then(|base| base.images_fingerprint) else {
+        return (images, false);
+    };
+    if images.is_empty() || crate::protocol::history_images_fingerprint(&images) != expected {
+        return (images, false);
+    }
+    (Vec::new(), true)
 }
 
 fn rendered_to_history_message(msg: crate::session::RenderedMessage) -> HistoryMessage {
@@ -716,6 +731,10 @@ async fn send_history_from_persisted_session(
         .map(rendered_to_history_message)
         .collect();
     let (messages, messages_base_count) = apply_history_base(messages, history_base);
+    let (images, images_unchanged) = apply_history_images_base(
+        images,
+        history_base.filter(|_| messages_base_count.is_some()),
+    );
     let side_panel = super::client_writer::side_panel_for_client(
         crate::side_panel::snapshot_for_session(session_id).unwrap_or_default(),
         supports_pdf_panels,
@@ -734,6 +753,7 @@ async fn send_history_from_persisted_session(
         session_id: session_id.to_string(),
         messages,
         messages_base_count,
+        images_unchanged,
         images,
         provider_name,
         provider_model,
@@ -1035,11 +1055,16 @@ async fn send_history_with_guard(
             )
         });
     let (messages, messages_base_count) = apply_history_base(messages, history_base);
+    let (images, images_unchanged) = apply_history_images_base(
+        images,
+        history_base.filter(|_| messages_base_count.is_some()),
+    );
     let history_event = ServerEvent::History {
         id,
         session_id: session_id.to_string(),
         messages,
         messages_base_count,
+        images_unchanged,
         images,
         provider_name: Some(provider_name),
         provider_model: Some(provider_model),

@@ -1302,15 +1302,19 @@ impl App {
         if id != session_id {
             return None;
         }
-        let prefix = self
+        let (prefix, images) = match self
             .startup_display_snapshot
             .take()
-            .filter(|(snapshot_id, display)| snapshot_id == &id && display.len() == base.count)
-            .map(|(_, display)| display);
+            .filter(|(snapshot_id, display, _)| snapshot_id == &id && display.len() == base.count)
+        {
+            Some((_, display, images)) => (Some(display), Some(images)),
+            None => (None, None),
+        };
         self.advertised_history_base = Some(AdvertisedHistoryBase {
             session_id: id,
             base,
             prefix,
+            images,
         });
         Some(base)
     }
@@ -1321,7 +1325,10 @@ impl App {
         &mut self,
         session_id: &str,
         count: usize,
-    ) -> Option<Vec<DisplayMessage>> {
+    ) -> Option<(
+        Vec<DisplayMessage>,
+        Option<Vec<crate::session::RenderedImage>>,
+    )> {
         let advertised = self.advertised_history_base.as_ref()?;
         if advertised.session_id != session_id || advertised.base.count != count {
             self.advertised_history_base = None;
@@ -1339,8 +1346,9 @@ impl App {
                 self.poll_pending_startup_transcript();
             }
         }
-        let prefix = self.advertised_history_base.take()?.prefix?;
-        (prefix.len() == count).then_some(prefix)
+        let advertised = self.advertised_history_base.take()?;
+        let prefix = advertised.prefix?;
+        (prefix.len() == count).then_some((prefix, advertised.images))
     }
 
     pub(super) fn poll_pending_startup_transcript(&mut self) -> bool {
@@ -1356,9 +1364,11 @@ impl App {
                         && advertised.base.count == display.len()
                     {
                         advertised.prefix = Some(display.clone());
+                        advertised.images = Some(images.clone());
                     }
                 } else if self.pending_history_base.is_some() {
-                    self.startup_display_snapshot = Some((session_id.clone(), display.clone()));
+                    self.startup_display_snapshot =
+                        Some((session_id.clone(), display.clone(), images.clone()));
                 }
                 if self.display_messages().is_empty() {
                     self.replace_display_messages(display);
@@ -1538,7 +1548,10 @@ impl App {
                             });
                         }
                         if fingerprinter.count() > 0 {
-                            let _ = base_tx.send((id.clone(), fingerprinter.base()));
+                            let mut base = fingerprinter.base();
+                            base.images_fingerprint =
+                                Some(crate::protocol::history_images_fingerprint(&images));
+                            let _ = base_tx.send((id.clone(), base));
                         }
                         drop(base_tx);
                         let display =

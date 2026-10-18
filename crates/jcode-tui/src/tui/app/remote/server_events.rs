@@ -1749,7 +1749,8 @@ pub(in crate::tui::app) fn handle_server_event(
         ServerEvent::History {
             mut messages,
             messages_base_count,
-            images,
+            images_unchanged,
+            mut images,
             session_id,
             provider_name,
             provider_model,
@@ -1790,7 +1791,9 @@ pub(in crate::tui::app) fn handle_server_event(
                 // Delta History: the server verified our advertised prefix and
                 // sent only the messages after it. Rebuild the full list so the
                 // rest of this handler (fingerprints, replace) is unchanged.
-                let Some(prefix) = app.take_history_base_prefix(&session_id, base_count) else {
+                let Some((prefix, prefix_images)) =
+                    app.take_history_base_prefix(&session_id, base_count)
+                else {
                     if remote.has_loaded_history()
                         && app.remote_session_id.as_deref() == Some(session_id.as_str())
                     {
@@ -1805,6 +1808,15 @@ pub(in crate::tui::app) fn handle_server_event(
                     app.idle_hibernation.history_reload_needed = true;
                     return true;
                 };
+                if images_unchanged {
+                    match prefix_images {
+                        Some(local) => images = local,
+                        None => {
+                            app.idle_hibernation.history_reload_needed = true;
+                            return true;
+                        }
+                    }
+                }
                 let tail = std::mem::take(&mut messages);
                 messages.reserve(prefix.len() + tail.len());
                 messages.extend(

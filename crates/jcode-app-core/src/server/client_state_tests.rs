@@ -1039,6 +1039,7 @@ fn delta_test_base(
                 .iter()
                 .map(crate::protocol::HistoryMessageRef::from),
         ),
+        images_fingerprint: None,
     }
 }
 
@@ -1078,4 +1079,30 @@ fn history_base_mismatch_or_overlong_sends_full_transcript() {
 
     let (full, base_count) = super::apply_history_base(messages, None);
     assert_eq!((full.len(), base_count), (4, None));
+}
+
+#[test]
+fn history_images_base_omits_only_matching_image_sets() {
+    let image = |data: &str| crate::session::RenderedImage {
+        media_type: "image/png".to_string(),
+        data: data.to_string(),
+        label: None,
+        source: crate::session::RenderedImageSource::UserInput,
+        anchor: None,
+        history_message_index: None,
+    };
+    let images = vec![image("a"), image("b")];
+    let base = |fingerprint| crate::protocol::HistoryBase {
+        count: 1,
+        fingerprint: 0,
+        images_fingerprint: Some(fingerprint),
+    };
+    let matching = crate::protocol::history_images_fingerprint(&images);
+    let (sent, unchanged) = super::apply_history_images_base(images.clone(), Some(base(matching)));
+    assert!(unchanged && sent.is_empty());
+    let other = crate::protocol::history_images_fingerprint(&[image("a")]);
+    let (sent, unchanged) = super::apply_history_images_base(images.clone(), Some(base(other)));
+    assert!(!unchanged && sent.len() == 2);
+    let (sent, unchanged) = super::apply_history_images_base(images, None);
+    assert!(!unchanged && sent.len() == 2);
 }

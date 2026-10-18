@@ -164,6 +164,7 @@ fn ssh_remote_history_is_authoritative_even_when_empty_or_server_version_differs
             session_id: "remote-only-session".into(),
             messages: vec![],
             messages_base_count: None,
+            images_unchanged: false,
             images: vec![],
             provider_name: Some("remote-provider".into()),
             provider_model: Some("remote-model".into()),

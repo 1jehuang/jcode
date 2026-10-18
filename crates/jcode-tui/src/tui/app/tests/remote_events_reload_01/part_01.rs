@@ -189,6 +189,7 @@ fn test_handle_server_event_history_clears_connection_type_on_session_change_whe
             session_id: "session_new".to_string(),
             messages: vec![],
             messages_base_count: None,
+            images_unchanged: false,
             images: vec![],
             provider_name: Some("claude".to_string()),
             provider_model: Some("claude-sonnet-4-20250514".to_string()),
@@ -248,6 +249,7 @@ fn test_handle_server_event_history_preserves_connection_type_for_same_session_w
             session_id: "session_same".to_string(),
             messages: vec![],
             messages_base_count: None,
+            images_unchanged: false,
             images: vec![],
             provider_name: Some("claude".to_string()),
             provider_model: Some("claude-sonnet-4-20250514".to_string()),
@@ -307,6 +309,7 @@ fn test_handle_server_event_history_preserves_reasoning_effort_for_same_session_
             session_id: "session_same".to_string(),
             messages: vec![],
             messages_base_count: None,
+            images_unchanged: false,
             images: vec![],
             provider_name: Some("anthropic".to_string()),
             provider_model: Some("claude-opus-4-1".to_string()),
@@ -393,6 +396,7 @@ fn test_handle_server_event_history_session_change_clears_streaming_preview_diag
             session_id: "session_new".to_string(),
             messages: vec![],
             messages_base_count: None,
+            images_unchanged: false,
             images: vec![],
             provider_name: Some("claude".to_string()),
             provider_model: Some("claude-sonnet-4-20250514".to_string()),
@@ -492,6 +496,7 @@ fn test_handle_server_event_history_same_session_rewind_reapply_clears_streaming
     app.handle_server_event(
         crate::protocol::ServerEvent::History {
             messages_base_count: None,
+            images_unchanged: false,
             id: 2,
             session_id: "session_rewind_preview".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
@@ -608,6 +613,7 @@ fn test_handle_server_event_history_same_session_midstream_duplicate_is_dropped_
     app.handle_server_event(
         crate::protocol::ServerEvent::History {
             messages_base_count: None,
+            images_unchanged: false,
             id: 3,
             session_id: "session_midstream_dup".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
@@ -696,6 +702,7 @@ fn test_handle_server_event_history_same_session_midstream_duplicate_is_dropped_
         app.handle_server_event(
             crate::protocol::ServerEvent::History {
                 messages_base_count: None,
+                images_unchanged: false,
                 id: 3,
                 session_id: "session_midstream_dup".to_string(),
                 messages: vec![crate::protocol::HistoryMessage {
@@ -804,6 +811,7 @@ fn test_handle_server_event_history_same_session_rewind_then_late_done_does_not_
     app.handle_server_event(
         crate::protocol::ServerEvent::History {
             messages_base_count: None,
+            images_unchanged: false,
             id: 2,
             session_id: "session_rewind_done_race".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
@@ -904,6 +912,7 @@ fn test_handle_server_event_history_session_change_clears_pending_interleaves() 
             session_id: "session_new".to_string(),
             messages: vec![],
             messages_base_count: None,
+            images_unchanged: false,
             images: vec![],
             provider_name: Some("claude".to_string()),
             provider_model: Some("claude-sonnet-4-20250514".to_string()),
@@ -1648,6 +1657,7 @@ fn test_pending_startup_notice_survives_history_bootstrap_for_fresh_session() {
             session_id: "session_new".to_string(),
             messages: vec![],
             messages_base_count: None,
+            images_unchanged: false,
             images: vec![],
             provider_name: Some("claude".to_string()),
             provider_model: Some("claude-sonnet-4-20250514".to_string()),

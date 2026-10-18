@@ -564,6 +564,10 @@ pub enum ServerEvent {
         /// sent a matching `history_base`). Absent means a full transcript.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         messages_base_count: Option<usize>,
+        /// `images` was omitted because it matches the client's advertised
+        /// `history_base.images_fingerprint`; keep the local image set.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        images_unchanged: bool,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<jcode_session_types::RenderedImage>,
         /// Provider name (e.g. "anthropic", "openai")
