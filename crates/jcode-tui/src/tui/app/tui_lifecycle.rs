@@ -1452,10 +1452,18 @@ impl App {
     }
 
     pub fn new_for_remote_with_options(resume_session: Option<String>, fresh_spawn: bool) -> Self {
+        let new_start = Instant::now();
+        let mut lap = Instant::now();
+        let mut laps: Vec<(&'static str, u128)> = Vec::new();
+        let mut mark = |name: &'static str, laps: &mut Vec<(&'static str, u128)>| {
+            laps.push((name, lap.elapsed().as_millis()));
+            lap = Instant::now();
+        };
         // Kick the background git probe first so its ~20ms of subprocess work
         // overlaps with the rest of client setup. `run_remote` gives it a short
         // bounded wait before the first paint.
         let _ = super::helpers::gather_git_info();
+        mark("git_kick", &mut laps);
         let provider: Arc<dyn Provider> =
             Arc::new(InertRuntimeProvider::new(AppRuntimeMode::RemoteClient));
         let registry = Registry::empty();
@@ -1464,7 +1472,9 @@ impl App {
             .filter(|_| !crate::tui::is_ssh_remote())
             .and_then(|session_id| Session::load_startup_stub(session_id).ok())
             .unwrap_or_else(|| Session::create(None, None));
+        mark("stub", &mut laps);
         let mut app = Self::new_minimal_with_session(provider, registry, session);
+        mark("minimal", &mut laps);
         app.is_remote = true;
         app.runtime_mode = AppRuntimeMode::RemoteClient;
         app.remote_startup_phase = Some(super::RemoteStartupPhase::Connecting);
@@ -1494,6 +1504,7 @@ impl App {
         // metadata once so autocomplete works before the first History event.
         // SSH clients above must use only the remote server's skill metadata.
         app.refresh_skills_snapshot();
+        mark("skills", &mut laps);
 
         let reload_fast_start = std::env::var("JCODE_RELOAD_FAST_START")
             .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
@@ -1573,12 +1584,22 @@ impl App {
             if let Some(restored) = Self::restore_input_for_reload(session_id) {
                 app.apply_restored_reload_input(restored);
             }
+            mark("transcript_input", &mut laps);
         }
 
         app.resume_session_id = resume_session;
         // After `resume_session_id`: the hint needs to know whether this is a
         // new session (configured effort applies) or a resumed one.
         app.apply_remote_header_hint();
+        mark("header_hint", &mut laps);
+        crate::logging::info(&format!(
+            "[TIMING] app_new_for_remote: total={}ms, {}",
+            new_start.elapsed().as_millis(),
+            laps.iter()
+                .map(|(name, ms)| format!("{name}={ms}ms"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ));
         app
     }
 
