@@ -9,14 +9,18 @@
       "--client-metadata-url", "https://auth.kooshapari.com/oauth/client-metadata.json",
       "--resource", "https://phenotype.spotifyportal.com/api/mcp-actions/v1"
     ],
-    "description": "Spotify Portal MCP via mcp-remote bridge with CIMD (SEP-991). Requires: (1) auth.kooshapari.com DNS + Cloudflare Worker deployed (currently NXDOMAIN, see STATE.md §24.1) and (2) URL added to Portal allow-list. Arg order fixed 2026-10-17: server URL is first positional arg (mcp-remote 0.15.1 contract). See docs/sessions/2026-10-15-portal-xirp-resume/XJ-03-DEPLOY.md.",
+    "description": "Spotify Portal MCP via mcp-remote bridge with CIMD (SEP-991). Verified LIVE 2026-10-18T06:32Z: bridge reaches OAuth authorize step (see STATE.md §24.5). Arg order fixed 2026-10-17: server URL is first positional arg (mcp-remote 0.15.1 contract). See docs/sessions/2026-10-15-portal-xirp-resume/XJ-03-DEPLOY.md.",
     "timeout_secs": 120,
     "env": {
       "PORTAL_CIMD_URL": "https://auth.kooshapari.com/oauth/client-metadata.json"
     },
     "_deploy_notes": {
-      "ready_to_merge_into_mcp_json": false,
-      "blocked_on": [
+      "ready_to_merge_into_mcp_json": true,
+      "ready_to_merge_set_at": "2026-10-18T06:32Z",
+      "ready_to_merge_set_by": "XJ-03 LIVE verification — see STATE.md §24.5",
+      "blocked_on": [],
+      "fully_unblocked_at": "2026-10-18T06:32Z",
+      "_historical_blockers_for_audit_trail": [
         "Cloudflare Worker deployed at auth.kooshapari.com serving application/json at /oauth/client-metadata.json",
         "Portal App Settings -> Allowed client ID patterns includes https://auth.kooshapari.com/*"
       ],
