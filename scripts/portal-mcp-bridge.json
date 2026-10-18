@@ -4,12 +4,12 @@
     "args": [
       "-y",
       "mcp-remote@0.15.1",
-      "--transport", "http-only",
       "https://phenotype.spotifyportal.com/api/mcp-actions/v1",
-      "--client-metadata-url", "PLACEHOLDER_CIMD_URL",
+      "--transport", "http-only",
+      "--client-metadata-url", "https://auth.kooshapari.com/oauth/client-metadata.json",
       "--resource", "https://phenotype.spotifyportal.com/api/mcp-actions/v1"
     ],
-    "description": "Spotify Portal MCP via mcp-remote bridge with CIMD (SEP-991). Requires: (1) CIMD URL deployed and (2) URL added to Portal allow-list. See docs/sessions/2026-10-15-portal-xirp-resume/XJ-03-DEPLOY.md.",
+    "description": "Spotify Portal MCP via mcp-remote bridge with CIMD (SEP-991). Requires: (1) auth.kooshapari.com DNS + Cloudflare Worker deployed (currently NXDOMAIN, see STATE.md §24.1) and (2) URL added to Portal allow-list. Arg order fixed 2026-10-17: server URL is first positional arg (mcp-remote 0.15.1 contract). See docs/sessions/2026-10-15-portal-xirp-resume/XJ-03-DEPLOY.md.",
     "timeout_secs": 120,
     "env": {
       "PORTAL_CIMD_URL": "https://auth.kooshapari.com/oauth/client-metadata.json"
@@ -20,13 +20,7 @@
         "Cloudflare Worker deployed at auth.kooshapari.com serving application/json at /oauth/client-metadata.json",
         "Portal App Settings -> Allowed client ID patterns includes https://auth.kooshapari.com/*"
       ],
-      "unblocked_args": [
-        "-y", "mcp-remote@0.15.1",
-        "--transport", "http-only",
-        "https://phenotype.spotifyportal.com/api/mcp-actions/v1",
-        "--client-metadata-url", "https://auth.kooshapari.com/oauth/client-metadata.json",
-        "--resource", "https://phenotype.spotifyportal.com/api/mcp-actions/v1"
-      ],
+      "arg_order_fixed": "2026-10-17 — server URL is first positional arg, mcp-remote 0.15.1 contract. Prior order (--transport before URL) caused 'TypeError: Invalid URL ... input: --transport'.",
       "derived_callback_port": 47290,
       "redirect_uri": "http://127.0.0.1:47290/oauth/callback",
       "cimd_document": "docs/sessions/2026-10-15-portal-xirp-resume/jcode-cimd.worker.js",

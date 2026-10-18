@@ -1022,6 +1022,43 @@ record (currently absent) and the Cloudflare Worker, fix the arg order, then
 re-run `scripts/test-portal-bridge-live.sh`. Human consent in the browser is
 the only remaining step after the CIMD resolves.
 
+## 24.2 Bridge arg-order FIXED in `scripts/portal-mcp-bridge.json` (2026-10-18T01:24Z)
+
+Operator signal "go" at 2026-10-18T01:23Z. Orchestrator fixed the arg-order
+defect from §24.1. Branch: `fix/xj03-bridge-arg-order-20261017`.
+
+**Diff vs prior `scripts/portal-mcp-bridge.json`:**
+
+- `args[3..]`: server URL moved to position 3 (first positional after `-y` and
+  `mcp-remote@0.15.1`). Order is now: `URL`, `--transport http-only`,
+  `--client-metadata-url <CIMD>`, `--resource <URL>`.
+- `--client-metadata-url`: placeholder `PLACEHOLDER_CIMD_URL` replaced with the
+  real URL `https://auth.kooshapari.com/oauth/client-metadata.json` (the env
+  var `PORTAL_CIMD_URL` already had it; the args now match).
+- `description`: notes the NXDOMAIN blocker and references §24.1.
+- `_deploy_notes.unblocked_args`: removed (now redundant with the live `args`).
+- `_deploy_notes.arg_order_fixed`: new field with the date and the prior error
+  message for forensic reference.
+
+**Result: PARTIAL → PARTIAL (defect removed, DNS still NXDOMAIN).**
+
+The arg-order defect is gone — the bridge will now parse the URL correctly
+on launch. The DNS blocker remains. Once `auth.kooshapari.com` resolves and
+the Cloudflare Worker serves the SEP-991 CIMD, `scripts/test-portal-bridge-live.sh`
+should reach the OAuth authorize step with no further code changes.
+
+**Parallel subagents in flight (2026-10-18T01:25Z):**
+
+- `feat/xj03-mock-cimd-as-20261017` — local mock CIMD + mock AS Python
+  server (stdlib only) so the bridge can be verified end-to-end without
+  `auth.kooshapari.com` resolving. Dispatched to `session_hatchling`.
+- `cargo test --package jcode-base --test mcp_xj07_failure_modes` — confirm
+  the 5 XJ-07 tests still pass on master after the cherry-pick chain. Dispatched
+  to `session_wyvern`.
+- `XJ-AUDIT-2026-10-17.md` — audit XJ-01..XJ-06 to map vendor-side vs
+  jcode-side blockers; recommend 2-3 new vendor questions. Dispatched to
+  `session_calf`.
+
 ## 25. Squash-merge to master (2026-10-17T07:48Z)
 
 Operator signal "go" at 2026-10-17T07:39Z triggered the squash-merge
