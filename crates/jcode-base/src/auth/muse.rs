@@ -49,7 +49,7 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Builtin compatible-profile id for the Muse subscription route.
@@ -174,8 +174,8 @@ pub enum PollOutcome {
     Pending,
     /// Server asked us to back off; poll again after `retry_after` seconds.
     SlowDown { retry_after: u64 },
-    /// Approved. The minted credentials have already been persisted via
-    /// [`save_credentials`]; the value is returned for convenience.
+    /// Approved. The minted credentials are not persisted by polling, and the caller
+    /// must call [`save_credentials`] explicitly after its own cancellation checks.
     Approved(MuseCredentials),
     /// The user denied the request.
     Denied,
@@ -671,11 +671,153 @@ pub fn credentials_path() -> Result<PathBuf> {
     Ok(crate::storage::jcode_dir()?.join(CREDENTIALS_FILE_NAME))
 }
 
+/// Sibling lock file path used for cross-process advisory synchronization.
+pub fn credentials_lock_path() -> Result<PathBuf> {
+    Ok(credentials_path()?.with_extension("lock"))
+}
+
+/// Process-wide lock synchronizing credential modifications and read-compare-write cycles.
+static CREDENTIALS_MUTEX: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+
+fn credentials_mutex() -> &'static std::sync::Mutex<()> {
+    CREDENTIALS_MUTEX.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+/// Test-only hook invoked inside [`refresh_credentials`]' locked critical
+/// section, after the final reload/compare and before the credential write.
+///
+/// It exists so a test can prove that a concurrent logout cannot interleave
+/// between the comparison and the write. Bound to `Send` rather than
+/// `Send + Sync` because the hook holds a channel receiver.
+#[cfg(test)]
+static REFRESH_CRITICAL_SECTION_HOOK: std::sync::Mutex<Option<Box<dyn Fn() + Send>>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) struct RefreshCriticalSectionHookGuard;
+
+#[cfg(test)]
+impl Drop for RefreshCriticalSectionHookGuard {
+    fn drop(&mut self) {
+        *REFRESH_CRITICAL_SECTION_HOOK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn set_refresh_critical_section_hook<F>(hook: F) -> RefreshCriticalSectionHookGuard
+where
+    F: Fn() + Send + 'static,
+{
+    *REFRESH_CRITICAL_SECTION_HOOK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Box::new(hook));
+    RefreshCriticalSectionHookGuard
+}
+
+#[cfg(test)]
+fn run_refresh_critical_section_hook() {
+    // Take the hook so it runs at most once, and so the slot mutex is not held
+    // while the hook body runs: a panicking hook must not poison the slot.
+    let hook = REFRESH_CRITICAL_SECTION_HOOK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take();
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+pub(crate) struct FileLockGuard {
+    file: std::fs::File,
+}
+
+#[cfg(unix)]
+impl Drop for FileLockGuard {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        unsafe {
+            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn acquire_file_lock(lock_path: &Path) -> Result<FileLockGuard> {
+    use std::os::fd::AsRawFd;
+
+    if let Some(parent) = lock_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(lock_path)
+        .with_context(|| format!("Failed to open lock file {}", lock_path.display()))?;
+    crate::storage::harden_secret_file_permissions(lock_path);
+
+    loop {
+        let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+        if ret == 0 {
+            break;
+        }
+        let err = std::io::Error::last_os_error();
+        if err.kind() != std::io::ErrorKind::Interrupted {
+            return Err(err)
+                .with_context(|| format!("Failed to acquire lock on {}", lock_path.display()));
+        }
+    }
+    Ok(FileLockGuard { file })
+}
+
+#[cfg(not(unix))]
+#[derive(Debug)]
+pub(crate) struct FileLockGuard;
+
+#[cfg(not(unix))]
+fn acquire_file_lock(_lock_path: &Path) -> Result<FileLockGuard> {
+    // Cross-process file locking via libc::flock is only supported on Unix.
+    // On non-Unix platforms, cross-process locking degrades gracefully to a no-op;
+    // in-process synchronization is still provided by the process-wide mutex.
+    Ok(FileLockGuard)
+}
+
+/// Advisory lock guard protecting credential read-compare-write, save, and clear
+/// operations against concurrent threads in the same process and concurrent processes.
+pub(crate) struct CredentialsLockGuard {
+    _file_guard: FileLockGuard,
+    _process_guard: std::sync::MutexGuard<'static, ()>,
+}
+
+pub(crate) fn lock_credentials() -> Result<CredentialsLockGuard> {
+    let process_guard = credentials_mutex()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let lock_path = credentials_lock_path()?;
+    let file_guard = acquire_file_lock(&lock_path)?;
+    Ok(CredentialsLockGuard {
+        _file_guard: file_guard,
+        _process_guard: process_guard,
+    })
+}
+
 /// Persist credentials to Jcode's own file with owner-only permissions. The
 /// subscription gates are re-checked fail-closed so a key can never be stored
 /// for an inactive subscription, a payment requirement, or an unexpected API
 /// base URL.
 pub fn save_credentials(credentials: &MuseCredentials) -> Result<()> {
+    let _guard = lock_credentials()?;
+    save_credentials_locked(credentials)
+}
+
+/// Internal helper that persists credentials assuming [`lock_credentials`] is
+/// already held by the caller.
+fn save_credentials_locked(credentials: &MuseCredentials) -> Result<()> {
     ensure_enabled()?;
     validate_stored_credentials(credentials)
         .map_err(|err| anyhow::anyhow!("Refusing to store Muse credentials: {err:#}"))?;
@@ -737,6 +879,13 @@ pub fn has_cached_auth() -> bool {
 
 /// Delete the stored credentials. Missing file is success.
 pub fn clear_credentials() -> Result<()> {
+    let _guard = lock_credentials()?;
+    clear_credentials_locked()
+}
+
+/// Internal helper that deletes credentials assuming [`lock_credentials`] is
+/// already held by the caller.
+fn clear_credentials_locked() -> Result<()> {
     let path = credentials_path()?;
     if path.exists() {
         std::fs::remove_file(&path)
@@ -757,12 +906,15 @@ pub async fn refresh_credentials(client: &reqwest::Client) -> Result<MuseCredent
     ensure_enabled()?;
     let stored = load_credentials()?;
     let credentials = mint_credentials(client, &stored.access_token).await?;
+    let _guard = lock_credentials()?;
     let current = load_credentials();
     match current {
         Ok(current) if current.access_token == stored.access_token => {}
         _ => anyhow::bail!("Muse credentials changed during refresh; refusing to overwrite"),
     }
-    save_credentials(&credentials)?;
+    #[cfg(test)]
+    run_refresh_critical_section_hook();
+    save_credentials_locked(&credentials)?;
     Ok(credentials)
 }
 

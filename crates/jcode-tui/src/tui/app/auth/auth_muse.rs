@@ -25,6 +25,28 @@ pub(crate) fn is_muse_subscription_attempt_event(provider: &str) -> bool {
     provider.starts_with("muse-subscription#")
 }
 
+/// Match an attempt identifier against a pending Muse attempt.
+///
+/// Both attempt IDs can be optionally prefixed with "muse-subscription#"
+/// (from provider string stripping or test setups).
+pub(crate) fn pending_attempt_matches(pending: &str, incoming: &str) -> bool {
+    let p = pending
+        .strip_prefix("muse-subscription#")
+        .unwrap_or(pending);
+    let i = incoming
+        .strip_prefix("muse-subscription#")
+        .unwrap_or(incoming);
+    p == i
+}
+
+/// Compute the next polling interval after a `SlowDown` outcome.
+///
+/// RFC 8628 §3.5 requires that each slow_down response adds at least 5 seconds
+/// to the interval and is carried forward into subsequent polling requests.
+pub(crate) fn next_slow_down_interval(current_interval: u64, retry_after: u64) -> u64 {
+    retry_after.max(current_interval.saturating_add(5))
+}
+
 /// Whether a bus login event counts as a completed login for success-gating
 /// (remote forwarding, onboarding noise). Device-code progress displays and
 /// attempt-scoped Muse approval events are pending approval or slot-handoff
@@ -187,7 +209,7 @@ impl App {
         // provider string so stale or cross-session events never match a
         // different pending attempt.
         let attempt = format!(
-            "muse-subscription#{:016x}",
+            "{:016x}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|elapsed| elapsed.subsec_nanos() as u64 ^ elapsed.as_secs())
@@ -276,7 +298,7 @@ impl App {
             }
             let _ = Self::open_auth_browser(&url);
 
-            let interval_secs = u64::try_from(challenge.interval).unwrap_or(5).max(1);
+            let mut interval_secs = u64::try_from(challenge.interval).unwrap_or(5).max(1);
             let expires_secs = u64::try_from(challenge.expires_in).unwrap_or(1800).max(60);
             let mut wait = std::time::Duration::from_secs(interval_secs);
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(expires_secs);
@@ -286,7 +308,13 @@ impl App {
                     // message keeps `fail` from publishing.
                     break Err(String::new());
                 }
-                match crate::auth::muse::poll_login(&client, &challenge).await {
+                match crate::auth::muse::poll_login_by_code(
+                    &client,
+                    &challenge.device_code,
+                    interval_secs,
+                )
+                .await
+                {
                     Ok(crate::auth::muse::PollOutcome::Approved(credentials)) => {
                         break Ok(credentials);
                     }
@@ -301,7 +329,8 @@ impl App {
                     }
                     Ok(crate::auth::muse::PollOutcome::Pending) => {}
                     Ok(crate::auth::muse::PollOutcome::SlowDown { retry_after }) => {
-                        wait = std::time::Duration::from_secs(retry_after.max(wait.as_secs()));
+                        interval_secs = next_slow_down_interval(interval_secs, retry_after);
+                        wait = std::time::Duration::from_secs(interval_secs);
                     }
                     Err(err) => break Err(format!("Muse subscription login failed: {}", err)),
                 }
@@ -379,7 +408,7 @@ impl App {
                 attempt: pending_attempt,
                 cancelled,
                 approved,
-            }) if *pending_attempt == attempt => {
+            }) if pending_attempt_matches(pending_attempt, &attempt) => {
                 if cancelled.load(std::sync::atomic::Ordering::Acquire) {
                     return true;
                 }
@@ -390,11 +419,21 @@ impl App {
             }
             _ => return true,
         };
+
+        if !login.success {
+            let _ = slot.lock().map(|mut guard| guard.take());
+            self.handle_login_completed(LoginCompleted {
+                provider: "muse-subscription".to_string(),
+                success: false,
+                message: login.message.clone(),
+            });
+            return true;
+        }
+
         let credentials = match slot.lock().map(|mut guard| guard.take()) {
             Ok(credentials) => credentials,
             Err(_) => return true,
         };
-        self.pending_login = None;
         let Some(credentials) = credentials else {
             // Approved event without slot credentials: never a login.
             return true;
@@ -406,13 +445,13 @@ impl App {
         }
         match crate::auth::muse::save_credentials(&credentials) {
             Ok(()) => {
-                self.handle_login_completed(LoginCompleted {
+                Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
                     provider: "muse-subscription".to_string(),
                     success: true,
                     message: "Muse subscription login complete.\n\n\
                               Muse models are now available in /model."
                         .to_string(),
-                });
+                }));
             }
             Err(err) => {
                 self.handle_login_completed(LoginCompleted {

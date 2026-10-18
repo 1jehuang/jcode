@@ -672,16 +672,12 @@ pub(super) async fn complete_scriptable_muse_subscription_login(
     };
 
     let client = crate::auth::muse::http_client()?;
-    let challenge = auth::muse::DeviceChallenge {
-        device_code,
-        user_code: String::new(),
-        verification_uri: String::new(),
-        verification_uri_complete: None,
-        expires_in: 1800,
+    let credentials = super::device_login::poll_muse_subscription_until_decided_by_code(
+        &client,
+        &device_code,
         interval,
-    };
-    let credentials =
-        super::device_login::poll_muse_subscription_until_decided(&client, &challenge).await?;
+    )
+    .await?;
     auth::muse::save_credentials(&credentials)?;
     clear_pending_login(&pending_path);
     crate::telemetry::record_auth_success(provider_id, "oauth_device_code");

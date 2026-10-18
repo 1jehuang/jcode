@@ -3137,14 +3137,20 @@ impl App {
         // Native Muse subscription progress (device code display): render only,
         // like copilot_code. This is pending approval, never a completed login.
         // Progress events carry the attempt id (`muse_subscription_code#<id>`)
-        // and are accepted only while the same attempt is still pending.
+        // and are accepted only while the same attempt is still pending and active.
         // (copilot_code keeps its dedicated handler above.)
-        if let Some(_attempt) = login.provider.strip_prefix("muse_subscription_code#") {
-            let pending_matches = matches!(
-                self.pending_login,
-                Some(PendingLogin::MuseSubscription { .. })
-            );
-            if !pending_matches {
+        if let Some(attempt) = login.provider.strip_prefix("muse_subscription_code#") {
+            let (is_match, is_cancelled) = match &self.pending_login {
+                Some(PendingLogin::MuseSubscription {
+                    attempt: pending_attempt,
+                    cancelled,
+                    ..
+                }) if auth_muse_helpers::pending_attempt_matches(pending_attempt, attempt) => {
+                    (true, cancelled.load(std::sync::atomic::Ordering::Acquire))
+                }
+                _ => (false, false),
+            };
+            if !is_match || is_cancelled {
                 return;
             }
             self.push_display_message(DisplayMessage::system(login.message.clone()));

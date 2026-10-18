@@ -100,15 +100,17 @@ The default is standard `muse-spark-1.3`, not a Contributor model. Contributor m
 
 | Check | Command | Observed |
 | --- | --- | --- |
-| Native auth module unit tests | `cargo test -p jcode-base --lib muse` | 26 passed, 0 failed |
+| Native auth module unit tests | `cargo test -p jcode-base --lib muse` | 30 passed, 0 failed |
 | Catalog gate tests | `cargo test -p jcode-base --lib provider_catalog_muse` | 4 passed, 0 failed |
 | Provider-metadata suite | `cargo test -p jcode-provider-metadata` | 19 passed, 0 failed |
-| TUI auth module | `cargo test -p jcode-tui --lib auth::` | 23 passed, 0 failed |
+| TUI auth module | `cargo test -p jcode-tui --lib auth::` | 27 passed, 0 failed |
 | Compatible-runtime suite (parallel, repeated) | `cargo test -p jcode-provider-openrouter-runtime --lib` | 187 passed, 6 consecutive runs |
-| Initial provider and login suites | `cargo test -p jcode --lib provider_init` / `--lib login` | 24 and 43 passed |
+| Initial provider and login suites | `cargo test -p jcode --lib provider_init` / `--lib login` | 24 and 46 passed |
 | Formatting | `cargo fmt --all --check` | clean for every file this change touches |
 
 The parallel repeat matters: this suite is flaky at the parent commit **without any of these changes** (2 of 6 pristine runs failed; 4 of 6 with the new native tests added). Every failure was a global env race, not native-auth logic: `OPENROUTER_API_KEY not found`, autodetected base mismatches, and a lost per-profile cache namespace. The trigger is a pre-existing test in `catalog_fetch.rs` that mutated the process-global `JCODE_HOME` without the shared test env lock, so it raced the autodetect and provider tests. It now takes that lock, and the suite has passed every repeated parallel run since.
+
+One test is worth calling out because it is the only one that actually pins the credential concurrency guarantee: `refresh_holds_lock_so_logout_cannot_interleave_between_compare_and_write` runs a logout from inside `refresh_credentials`' locked critical section and asserts it cannot complete there. It was verified to **fail** when the lock acquisition is removed, which the earlier interleaving tests did not do (they inject the delete before the comparison, where the old code also refused).
 
 ### Pre-existing failures observed here, unrelated to this change
 

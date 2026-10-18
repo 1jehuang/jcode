@@ -708,3 +708,269 @@ async fn refresh_if_needed_remints_when_stale() {
     server.shutdown().await;
     restore_opt_in(previous);
 }
+
+/// Serve `responses` in order on loopback, invoking `on_request` synchronously
+/// when each request is received before sending the response.
+async fn start_stub_with_hook<F>(responses: Vec<(u16, String)>, on_request: F) -> StubServer
+where
+    F: Fn(&str) + Send + Sync + 'static,
+{
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let bodies = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = bodies.clone();
+    let on_request = std::sync::Arc::new(on_request);
+    let handle = tokio::spawn(async move {
+        for (status, body) in responses {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let request_body = read_http_body(&mut stream).await;
+            captured.lock().unwrap().push(request_body.clone());
+            on_request(&request_body);
+            let response = format!(
+                "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+        }
+    });
+    StubServer {
+        base_url,
+        bodies,
+        handle,
+    }
+}
+
+#[tokio::test]
+async fn refresh_credentials_fails_and_does_not_resurrect_when_deleted_concurrently() {
+    let (_sandbox, previous) = sandbox_with_opt_in();
+    let credentials = MuseCredentials {
+        api_key: "LLM_INITIAL_KEY".to_string(),
+        access_token: "dca-account-to-delete".to_string(),
+        base_url: EXPECTED_API_BASE_URL.to_string(),
+        user_email: None,
+        user_full_name: None,
+        is_subs_active: true,
+        minted_at_ms: chrono::Utc::now().timestamp_millis(),
+        subs_usage: None,
+    };
+    save_credentials(&credentials).expect("save initial credentials");
+
+    // The server hook unlinks credentials between the mint request and the response/write.
+    let server = start_stub_with_hook(
+        vec![(200, mint_json("LLM_MINTED_KEY", Some(true), Some(false)))],
+        |_| {
+            clear_credentials().expect("clear credentials during mint");
+        },
+    )
+    .await;
+    let _endpoints = use_stub(&server);
+    let client = http_client().unwrap();
+
+    let err = refresh_credentials(&client)
+        .await
+        .expect_err("refresh must fail when credentials disappeared");
+    assert!(
+        err.to_string().contains("refusing to overwrite"),
+        "unexpected error: {err:#}"
+    );
+
+    // Verify credentials file is NOT resurrected.
+    assert!(
+        load_credentials().is_err(),
+        "credentials must not be resurrected after logout"
+    );
+    let path = credentials_path().expect("credentials path");
+    assert!(!path.exists(), "credentials file must not exist on disk");
+
+    server.shutdown().await;
+    restore_opt_in(previous);
+}
+
+#[tokio::test]
+async fn refresh_credentials_refuses_to_overwrite_different_account_saved_concurrently() {
+    let (_sandbox, previous) = sandbox_with_opt_in();
+    let credentials = MuseCredentials {
+        api_key: "LLM_ORIGINAL_KEY".to_string(),
+        access_token: "dca-account-original".to_string(),
+        base_url: EXPECTED_API_BASE_URL.to_string(),
+        user_email: Some("account1@example.com".to_string()),
+        user_full_name: None,
+        is_subs_active: true,
+        minted_at_ms: chrono::Utc::now().timestamp_millis(),
+        subs_usage: None,
+    };
+    save_credentials(&credentials).expect("save original credentials");
+
+    // The server hook saves a different account between the mint request and the response/write.
+    let different_account = MuseCredentials {
+        api_key: "LLM_NEW_ACCOUNT_KEY".to_string(),
+        access_token: "dca-account-different".to_string(),
+        base_url: EXPECTED_API_BASE_URL.to_string(),
+        user_email: Some("account2@example.com".to_string()),
+        user_full_name: None,
+        is_subs_active: true,
+        minted_at_ms: chrono::Utc::now().timestamp_millis(),
+        subs_usage: None,
+    };
+    let diff_clone = different_account.clone();
+    let server = start_stub_with_hook(
+        vec![(
+            200,
+            mint_json("LLM_OLD_ACCOUNT_NEW_MINT", Some(true), Some(false)),
+        )],
+        move |_| {
+            save_credentials(&diff_clone).expect("save different account");
+        },
+    )
+    .await;
+    let _endpoints = use_stub(&server);
+    let client = http_client().unwrap();
+
+    let err = refresh_credentials(&client)
+        .await
+        .expect_err("refresh must fail when account token changed");
+    assert!(
+        err.to_string().contains("refusing to overwrite"),
+        "unexpected error: {err:#}"
+    );
+
+    // Verify the new account credentials were NOT overwritten.
+    let current = load_credentials().expect("load credentials");
+    assert_eq!(current.access_token, "dca-account-different");
+    assert_eq!(current.api_key, "LLM_NEW_ACCOUNT_KEY");
+    assert_eq!(current.user_email.as_deref(), Some("account2@example.com"));
+
+    server.shutdown().await;
+    restore_opt_in(previous);
+}
+
+#[tokio::test]
+async fn credentials_lock_provides_mutual_exclusion() {
+    let (_sandbox, previous) = sandbox_with_opt_in();
+    let credentials = MuseCredentials {
+        api_key: "LLM_MUTEX_KEY".to_string(),
+        access_token: "dca-mutex".to_string(),
+        base_url: EXPECTED_API_BASE_URL.to_string(),
+        user_email: None,
+        user_full_name: None,
+        is_subs_active: true,
+        minted_at_ms: chrono::Utc::now().timestamp_millis(),
+        subs_usage: None,
+    };
+    save_credentials(&credentials).expect("save credentials");
+
+    let guard = lock_credentials().expect("acquire credentials lock");
+
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        let lock_path = credentials_lock_path().expect("lock path");
+        assert!(lock_path.exists(), "lock file should exist on disk");
+
+        // Another open handle to the same lock file should fail non-blocking flock.
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .expect("open lock file");
+        let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        assert_eq!(ret, -1, "flock should fail while lock guard is held");
+        let err = std::io::Error::last_os_error();
+        assert_eq!(err.raw_os_error(), Some(libc::EWOULDBLOCK));
+
+        // Dropping guard allows locking.
+        drop(guard);
+        let ret_after = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        assert_eq!(ret_after, 0, "flock should succeed after guard is dropped");
+        unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+    }
+
+    #[cfg(not(unix))]
+    {
+        drop(guard);
+    }
+
+    restore_opt_in(previous);
+}
+
+/// Regression test for the refresh-vs-logout race.
+///
+/// `refresh_credentials` must hold the shared credential lock across the final
+/// reload, comparison and write. The test hook runs inside that critical
+/// section, and a concurrent logout must be unable to complete while it runs.
+/// Without the lock, the logout lands between the comparison and the write and
+/// the write then resurrects the cleared credentials.
+///
+/// The final-state assertion is the second half of the same guarantee: because
+/// the logout is forced to wait, it lands strictly after the refresh write, so
+/// the account must end up logged out rather than restored.
+#[tokio::test]
+async fn refresh_holds_lock_so_logout_cannot_interleave_between_compare_and_write() {
+    let (_sandbox, previous) = sandbox_with_opt_in();
+    let credentials = MuseCredentials {
+        api_key: "LLM_RACE_KEY".to_string(),
+        access_token: "dca-race".to_string(),
+        base_url: EXPECTED_API_BASE_URL.to_string(),
+        user_email: None,
+        user_full_name: None,
+        is_subs_active: true,
+        minted_at_ms: 1,
+        subs_usage: None,
+    };
+    save_credentials(&credentials).expect("save initial credentials");
+
+    let server = start_stub(vec![(
+        200,
+        mint_json("LLM_RACE_MINTED_KEY", Some(true), Some(false)),
+    )])
+    .await;
+    let _endpoints = use_stub(&server);
+    let client = http_client().unwrap();
+
+    // The logout thread waits for the hook's signal, so it is guaranteed to
+    // attempt the delete only while refresh is inside the critical section.
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel::<()>();
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<bool>();
+    let logout = std::thread::spawn(move || {
+        entered_rx
+            .recv()
+            .expect("critical section must be entered before logout runs");
+        let cleared = clear_credentials().is_ok();
+        let _ = done_tx.send(cleared);
+    });
+
+    let _hook = set_refresh_critical_section_hook(move || {
+        let _ = entered_tx.send(());
+        match done_rx.recv_timeout(std::time::Duration::from_millis(500)) {
+            // Correct: the logout is blocked on the credential lock.
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Ok(cleared) => panic!(
+                "logout completed inside the refresh critical section (cleared={cleared}); \
+                 the compare-and-write window is not protected"
+            ),
+            Err(err) => panic!("unexpected logout channel state: {err:?}"),
+        }
+    });
+
+    let refreshed = refresh_credentials(&client).await;
+    drop(_hook);
+    assert!(
+        refreshed.is_ok(),
+        "refresh must succeed while it holds the lock: {refreshed:?}"
+    );
+
+    logout.join().expect("logout thread must finish");
+    assert!(
+        load_credentials().is_err(),
+        "logout must win: the refresh must not resurrect credentials"
+    );
+    assert!(
+        !credentials_path().expect("credentials path").exists(),
+        "credentials file must be gone after the logout"
+    );
+
+    server.shutdown().await;
+    restore_opt_in(previous);
+}
