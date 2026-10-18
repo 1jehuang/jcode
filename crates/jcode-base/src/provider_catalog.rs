@@ -142,7 +142,51 @@ fn newest_released_model_for_resolved_openai_compatible_profile(
 ) -> Option<String> {
     openai_compatible_profile_by_id(profile_id)?;
     let cache = jcode_provider_openrouter::load_disk_cache_entry_for_namespace(&resolved.id)?;
+    // Ranking is a pure function of the profile, its API base, and the cached
+    // catalog, but costs ~8ms for OpenRouter's catalog. Every provider fork
+    // (each client reconnect) resolves it, so remember the answer for this
+    // exact catalog content. The key hashes the ranked inputs (ids and release
+    // times), so two different catalogs never share an entry even if written
+    // within the same second; the hash is ~100x cheaper than the ranking.
+    type Key = (String, String, Option<String>, u64);
+    static MEMO: std::sync::LazyLock<std::sync::Mutex<HashMap<Key, Option<String>>>> =
+        std::sync::LazyLock::new(Default::default);
+    let content_hash = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for model in &cache.models {
+            model.id.hash(&mut hasher);
+            model.created.hash(&mut hasher);
+        }
+        hasher.finish()
+    };
+    let key: Key = (
+        profile_id.to_string(),
+        resolved.api_base.clone(),
+        cache.source_api_base.clone(),
+        content_hash,
+    );
+    if let Some(hit) = MEMO
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&key)
+    {
+        return hit.clone();
+    }
+    let ranked = rank_newest_released_model(profile_id, resolved, cache);
+    let mut memo = MEMO.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if memo.len() > 64 {
+        memo.clear();
+    }
+    memo.insert(key, ranked.clone());
+    ranked
+}
 
+fn rank_newest_released_model(
+    profile_id: &str,
+    resolved: &ResolvedOpenAiCompatibleProfile,
+    cache: jcode_provider_openrouter::DiskCache,
+) -> Option<String> {
     let source_matches = cache
         .source_api_base
         .as_deref()
