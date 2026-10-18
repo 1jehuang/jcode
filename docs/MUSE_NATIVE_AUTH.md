@@ -135,6 +135,7 @@ These were run against Meta with a real subscription. The automated suite still 
 | Native model discovery | `GET https://api.meta.ai/muse-code/models` with the minted key | `200` with 7 models, including `muse-spark-1.3`, `muse-wonder-1.0`, `muse-image-1.0` and their contributor variants |
 | Credential choice for discovery | same endpoint with the device access token instead | `401`, so the minted key is the correct credential |
 | Account status | `jcode auth status` | `muse-subscription` available; usage shown as `quota unknown` (the mint returned no window or weekly percentages, so nothing was fabricated) |
+| Account usage view | `jcode usage -p muse-subscription` | `Plan: Muse Code High Usage` and `Quota: unknown (the account mint reports no usage windows)`. Before this change the entry showed only `Last used`, because the credential lives in Jcode's own store rather than an env file and so failed the env-based configured check. |
 | Real inference turn | `jcode run "Reply with exactly: OK" -p muse-subscription -m muse-spark-1.3` | Replied exactly `OK`; token report `upload: 15849 download: 14` |
 | Real tool round-trip | `jcode run "Use the bash tool to run exactly: echo hello-from-muse…"` | Model called `bash`, `echo hello-from-muse` executed, result returned to the model (upload grew 15866 → 16024), final answer `hello-from-muse` |
 
