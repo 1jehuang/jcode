@@ -137,7 +137,9 @@ async fn reclaim_idle_caches(
         // Agent and roster lock. RSS is process-wide, not a per-session metric.
         crate::process_memory::release_retained_heap("server_idle_hibernation");
         let after = crate::process_memory::snapshot_with_source("server_idle_hibernation_after");
-        let before = before.expect("a release always captures the pre-eviction sample");
+        let before = before.unwrap_or_else(|| {
+            crate::process_memory::snapshot_with_source("server_idle_hibernation_before")
+        });
         let session_ids = releases
             .iter()
             .map(|(id, _)| id.as_str())

@@ -331,6 +331,7 @@ fn auth_dot_color(state: AuthState) -> Color {
     }
 }
 
+#[cfg(test)]
 fn auth_dot_char(state: AuthState) -> &'static str {
     match state {
         AuthState::Available => "●",

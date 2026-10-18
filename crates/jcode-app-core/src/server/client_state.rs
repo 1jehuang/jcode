@@ -533,6 +533,7 @@ fn rendered_to_history_message(msg: crate::session::RenderedMessage) -> HistoryM
     }
 }
 
+#[cfg(test)]
 fn history_reload_recovery_snapshot(
     session_id: &str,
     was_interrupted: Option<bool>,
@@ -617,6 +618,7 @@ fn persisted_session_has_reload_interruption_marker(session: &Session) -> bool {
     })
 }
 
+#[cfg(test)]
 fn infer_persisted_session_interrupted_by_reload(session_id: &str) -> bool {
     let session = match Session::load_for_remote_startup(session_id)
         .or_else(|_| Session::load_startup_stub(session_id))

@@ -1931,7 +1931,8 @@ pub(in crate::tui::app) fn handle_server_event(
 
             remote.set_session_id(session_id.clone());
             app.remote_session_id = Some(session_id.clone());
-            history_laps.push(("pre_set_session", history_lap.elapsed().as_millis())); history_lap = Instant::now();
+            history_laps.push(("pre_set_session", history_lap.elapsed().as_millis()));
+            history_lap = Instant::now();
             crate::set_current_session(&session_id);
             app.note_client_focus(true);
             let session_changed = prev_session_id.as_deref() != Some(session_id.as_str());
@@ -2032,7 +2033,8 @@ pub(in crate::tui::app) fn handle_server_event(
                 available_models,
                 available_model_routes,
             );
-            history_laps.push(("pre_catalog_replace", history_lap.elapsed().as_millis())); history_lap = Instant::now();
+            history_laps.push(("pre_catalog_replace", history_lap.elapsed().as_millis()));
+            history_lap = Instant::now();
             let catalog_outcome = app.replace_remote_model_catalog_snapshot(model_catalog_snapshot);
             if let Some(tiers) = available_service_tiers {
                 app.remote_available_service_tiers = Some(tiers);
@@ -2066,7 +2068,8 @@ pub(in crate::tui::app) fn handle_server_event(
             }
             app.remote_service_tier = service_tier;
             app.remote_compaction_mode = Some(compaction_mode);
-            history_laps.push(("pre_header_hint", history_lap.elapsed().as_millis())); history_lap = Instant::now();
+            history_laps.push(("pre_header_hint", history_lap.elapsed().as_millis()));
+            history_lap = Instant::now();
             app.persist_remote_header_hint();
             app.set_side_panel_snapshot(side_panel);
             if history_images_match_retained(&images, &app.remote_side_pane_images) {
@@ -2085,7 +2088,8 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.invalidate_side_pane_images_signature();
             }
             if catalog_outcome.catalog_changed {
-                history_laps.push(("pre_catalog_persist", history_lap.elapsed().as_millis())); history_lap = Instant::now();
+                history_laps.push(("pre_catalog_persist", history_lap.elapsed().as_millis()));
+                history_lap = Instant::now();
                 app.persist_remote_model_catalog_cache();
             }
             // `/model` may have been opened while the initial session catalog
@@ -2208,7 +2212,7 @@ pub(in crate::tui::app) fn handle_server_event(
                     app.remote_resume_activity = None;
                 }
             }
-            history_laps.push(("pre_bootstrap_log", history_lap.elapsed().as_millis())); history_lap = Instant::now();
+            history_laps.push(("pre_bootstrap_log", history_lap.elapsed().as_millis()));
             if should_apply_history_payload {
                 crate::logging::info(&format!(
                     "[TIMING] remote bootstrap: history after {}ms (session={}, resumed={}, messages={}, mcp_servers={}, model={})",

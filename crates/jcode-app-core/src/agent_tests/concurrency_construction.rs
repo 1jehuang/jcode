@@ -116,7 +116,10 @@ async fn provisional_agent_defers_presence_markers_until_committed() {
         .expect("active_pids dir")
         .join(&agent.session.id);
     assert!(agent.session.status == crate::session::SessionStatus::Active);
-    assert!(!marker.exists(), "placeholder must not write a presence marker");
+    assert!(
+        !marker.exists(),
+        "placeholder must not write a presence marker"
+    );
     agent.activate_concurrency_tracking();
     assert_eq!(
         std::fs::read_to_string(&marker).ok().as_deref(),

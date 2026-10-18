@@ -493,8 +493,8 @@ fn legitimate_model_switch_miss_pushes_informational_notice() {
         cache_generation: app.kv_cache.cache_generation,
         input_tokens: 50_000,
         completed_at: Instant::now(),
-        provider: "anthropic".to_string(),
-        // Different model than the current request -> ModelSwitch.
+        // Same provider, different model than the current request -> ModelSwitch.
+        provider: app.kv_cache_provider_name(),
         model: "claude-opus-4-5".to_string(),
         upstream_provider: None,
         signature: Some(baseline_signature),

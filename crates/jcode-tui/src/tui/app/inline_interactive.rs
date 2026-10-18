@@ -2103,7 +2103,7 @@ impl App {
         });
         drop(sort_keys);
         let mut slots: Vec<Option<PickerEntry>> = entries.into_iter().map(Some).collect();
-        let mut entries: Vec<PickerEntry> = order
+        let entries: Vec<PickerEntry> = order
             .into_iter()
             .filter_map(|index| slots[index].take())
             .collect();

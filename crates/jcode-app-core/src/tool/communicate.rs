@@ -1105,7 +1105,8 @@ async fn run_swarm_plan_loop(
     params: &CommunicateInput,
     reporter: &RunPlanReporter,
 ) -> Result<ToolOutput> {
-    let initial_summary = fetch_plan_status(&ctx.session_id).await?;
+    // Fail fast when the plan cannot be read before spawning any workers.
+    fetch_plan_status(&ctx.session_id).await?;
     let concurrency_limit = resolve_run_plan_concurrency(params.concurrency_limit);
     let timeout_minutes = params.timeout_minutes.unwrap_or(60).max(1);
     let retain_agents = params.retain_agents.unwrap_or(false);

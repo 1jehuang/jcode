@@ -33,7 +33,6 @@ use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, LazyLock, RwLock as StdRwLock, Weak};
 use std::time::{Duration, Instant};
-use tokio::net::TcpStream;
 use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_tungstenite::tungstenite::Error as WsError;
