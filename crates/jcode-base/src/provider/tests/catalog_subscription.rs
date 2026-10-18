@@ -371,12 +371,46 @@ fn test_subscription_model_guard_allows_only_curated_models_when_enabled() {
     crate::subscription_catalog::clear_runtime_env();
     crate::subscription_catalog::apply_runtime_env();
 
-    assert!(ensure_model_allowed_for_subscription("claude-opus-4-8").is_ok());
-    assert!(ensure_model_allowed_for_subscription("opus 4.8").is_ok());
-    assert!(ensure_model_allowed_for_subscription("claude-sonnet-4-6").is_ok());
-    assert!(ensure_model_allowed_for_subscription("sonnet 4.6").is_ok());
-    assert!(ensure_model_allowed_for_subscription("gpt-5.5").is_ok());
-    assert!(ensure_model_allowed_for_subscription("gpt-5.4").is_err());
+    assert!(ensure_model_allowed_for_subscription("claude-opus-5-5").is_ok());
+    assert!(ensure_model_allowed_for_subscription("opus 5.5").is_ok());
+    assert!(ensure_model_allowed_for_subscription("claude-sonnet-5-5").is_ok());
+    assert!(ensure_model_allowed_for_subscription("sonnet 5.5").is_ok());
+    assert!(ensure_model_allowed_for_subscription("gpt-6.1-sol").is_ok());
+    assert!(ensure_model_allowed_for_subscription("claude-haiku-5-5").is_ok());
+    for model in [
+        "claude-opus-4-8",
+        "opus 4.8",
+        "claude-opus-5",
+        "claude-sonnet-4-6",
+        "sonnet 4.6",
+        "claude-fable-5",
+        "gpt-5.4",
+        "gpt-5.5",
+        "gpt-5.6-sol",
+        "gpt-6-sol",
+        "gpt-6-astra",
+        "gpt-6-luna",
+        "gpt-6.1-sol-pro",
+        "qwen3-coder-next",
+        "devstral-2-123b",
+        "deepseek-v3.2",
+        "nova-2-lite",
+        "minimax-m2.5",
+        "mistral-large-3",
+        "kimi-k2.5",
+        "kimi-k2-thinking",
+        "nemotron-nano-3-30b",
+        "gpt-oss-120b",
+        "gpt-oss-20b",
+        "qwen3-next-80b",
+        "glm-5",
+        "glm-4.7-flash",
+    ] {
+        assert!(
+            ensure_model_allowed_for_subscription(model).is_err(),
+            "{model}"
+        );
+    }
 
     crate::subscription_catalog::clear_runtime_env();
 }
@@ -392,12 +426,12 @@ fn test_hosted_model_guard_does_not_gate_models_by_legacy_tier() {
 
     // Every curated model is available to metered accounts. The router owns
     // spending-limit and model-policy enforcement.
-    assert!(ensure_model_allowed_for_subscription("gpt-5.6-sol").is_ok());
-    assert!(ensure_model_allowed_for_subscription("claude-fable-5").is_ok());
+    assert!(ensure_model_allowed_for_subscription("gpt-6.1-sol").is_ok());
+    assert!(ensure_model_allowed_for_subscription("claude-haiku-5-5").is_ok());
 
     // Legacy cached tier metadata cannot change client-side availability.
     crate::env::set_var(crate::subscription_catalog::JCODE_TIER_ENV, "ultra");
-    assert!(ensure_model_allowed_for_subscription("claude-fable-5").is_ok());
+    assert!(ensure_model_allowed_for_subscription("claude-haiku-5-5").is_ok());
     assert!(ensure_model_allowed_for_subscription("sol").is_ok());
 
     crate::env::remove_var(crate::subscription_catalog::JCODE_TIER_ENV);
@@ -415,35 +449,42 @@ fn test_filtered_display_models_respects_curated_subscription_catalog() {
     crate::subscription_catalog::apply_runtime_env();
 
     let filtered = filtered_display_models(vec![
-        "gpt-5.4".to_string(),
         "claude-opus-4-8".to_string(),
-        "claude-sonnet-4-6".to_string(),
+        "claude-fable-5".to_string(),
         "gpt-5.5".to_string(),
         "gpt-5.6-sol".to_string(),
-        "claude-fable-5".to_string(),
+        "gpt-6-sol".to_string(),
+        "gpt-6-astra".to_string(),
+        "gpt-6-luna".to_string(),
+        "gpt-6.1-sol-pro".to_string(),
+        "minimax-m2.5".to_string(),
+        "gpt-5.4".to_string(),
+        "claude-opus-5-5".to_string(),
+        "claude-sonnet-5-5".to_string(),
+        "gpt-6.1-sol".to_string(),
+        "claude-haiku-5-5".to_string(),
     ]);
 
     // Every curated hosted model is shown, while unknown router models remain hidden.
     assert_eq!(
         filtered,
         vec![
-            "claude-opus-4-8".to_string(),
-            "claude-sonnet-4-6".to_string(),
-            "gpt-5.5".to_string(),
-            "gpt-5.6-sol".to_string(),
-            "claude-fable-5".to_string(),
+            "claude-opus-5-5".to_string(),
+            "claude-sonnet-5-5".to_string(),
+            "gpt-6.1-sol".to_string(),
+            "claude-haiku-5-5".to_string(),
         ]
     );
 
     crate::env::set_var(crate::subscription_catalog::JCODE_TIER_ENV, "ultra");
     let filtered = filtered_display_models(vec![
-        "claude-fable-5".to_string(),
-        "gpt-5.6-sol".to_string(),
+        "claude-haiku-5-5".to_string(),
+        "gpt-6.1-sol".to_string(),
         "gpt-5.4".to_string(),
     ]);
     assert_eq!(
         filtered,
-        vec!["claude-fable-5".to_string(), "gpt-5.6-sol".to_string()]
+        vec!["claude-haiku-5-5".to_string(), "gpt-6.1-sol".to_string()]
     );
 
     crate::env::remove_var(crate::subscription_catalog::JCODE_TIER_ENV);
@@ -454,10 +495,10 @@ fn test_filtered_display_models_respects_curated_subscription_catalog() {
 #[test]
 fn test_remote_jcode_subscription_fallback_keeps_managed_route_identity() {
     let models = vec![
-        "claude-opus-4-8".to_string(),
-        "claude-sonnet-4-6".to_string(),
-        "gpt-5.5".to_string(),
-        "gpt-5.6-sol".to_string(),
+        "claude-opus-5-5".to_string(),
+        "claude-sonnet-5-5".to_string(),
+        "claude-haiku-5-5".to_string(),
+        "gpt-6.1-sol".to_string(),
     ];
     let routes = remote_model_routes_fallback(
         Some(crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME),
@@ -470,10 +511,10 @@ fn test_remote_jcode_subscription_fallback_keeps_managed_route_identity() {
             .map(|route| route.model.as_str())
             .collect::<Vec<_>>(),
         vec![
-            "claude-opus-4-8",
-            "claude-sonnet-4-6",
-            "gpt-5.5",
-            "gpt-5.6-sol",
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
+            "claude-haiku-5-5",
+            "gpt-6.1-sol",
         ]
     );
     assert!(routes.iter().all(|route| {
