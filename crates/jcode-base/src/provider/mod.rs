@@ -2883,16 +2883,25 @@ impl Provider for MultiProvider {
         let current_model = self.model();
         let active = self.active_provider();
 
+        let mut lap = std::time::Instant::now();
+        let mut laps: Vec<(&str, u128)> = Vec::new();
+        let mut mark = |name: &'static str, laps: &mut Vec<(&str, u128)>| {
+            laps.push((name, lap.elapsed().as_millis()));
+            lap = std::time::Instant::now();
+        };
+        mark("model_active", &mut laps);
         let anthropic = if self.anthropic_provider().is_some() {
             external::instantiate_expected_external_provider(external::ANTHROPIC_RUNTIME)
         } else {
             None
         };
+        mark("anthropic", &mut laps);
         let openai = if self.openai_provider().is_some() {
             external::instantiate_expected_external_provider(external::OPENAI_RUNTIME)
         } else {
             None
         };
+        mark("openai", &mut laps);
         let copilot_api = self
             .copilot_api
             .read()
@@ -2908,6 +2917,7 @@ impl Provider for MultiProvider {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
+        mark("copy", &mut laps);
         let cursor_provider = if self
             .cursor
             .read()
@@ -2918,11 +2928,13 @@ impl Provider for MultiProvider {
         } else {
             None
         };
+        mark("cursor", &mut laps);
         let bedrock_provider = if self.bedrock_provider().is_some() {
             Some(Arc::new(new_bedrock_provider()))
         } else {
             None
         };
+        mark("bedrock", &mut laps);
         let openrouter = if self
             .openrouter
             .read()
@@ -2934,6 +2946,7 @@ impl Provider for MultiProvider {
             None
         };
 
+        mark("openrouter", &mut laps);
         let provider = Self {
             anthropic: RwLock::new(anthropic),
             openai: RwLock::new(openai),
@@ -2963,8 +2976,12 @@ impl Provider for MultiProvider {
         let switch_request = self.fork_model_switch_request(active, &current_model);
         let _ = provider.set_model(&switch_request);
         crate::logging::info(&format!(
-            "[TIMING] provider fork: runtimes={}ms, catalog_spawn={}ms, set_model={}ms, total={}ms",
+            "[TIMING] provider fork: runtimes={}ms ({}), catalog_spawn={}ms, set_model={}ms, total={}ms",
             runtimes_ms,
+            laps.iter()
+                .map(|(name, ms)| format!("{name}={ms}"))
+                .collect::<Vec<_>>()
+                .join(" "),
             catalog_ms,
             set_model_start.elapsed().as_millis(),
             fork_start.elapsed().as_millis()
