@@ -644,6 +644,21 @@ fn test_link_strike_and_image_render() {
 }
 
 #[test]
+fn native_search_source_links_render_in_full_and_lazy_paths() {
+    let markdown = "许可 🦀. [macOS license](<https://www.apple.com/legal/sla/docs/macOSTahoe.pdf>)";
+    let expected = "许可 🦀. macOS license (https://www.apple.com/legal/sla/docs/macOSTahoe.pdf)";
+    for lines in [
+        render_markdown_with_width(markdown, Some(120)),
+        render_markdown_lazy(markdown, Some(120), 0..100),
+    ] {
+        let text = lines_to_string(&lines);
+        assert_eq!(text.trim(), expected);
+        assert!(!text.contains('\u{e200}'));
+        assert!(!text.contains("turn0search"));
+    }
+}
+
+#[test]
 fn test_ordered_and_task_list_render() {
     let md = "1. first\n2. second\n\n- [x] done\n- [ ] todo";
     let lines = render_markdown(md);
@@ -1169,92 +1184,4 @@ fn test_multiline_reasoning_renders_one_visual_line_per_thought() {
     }
 }
 
-#[test]
-fn test_reasoning_emphasis_does_not_leak_into_following_text() {
-    // After the reasoning emphasis closes, normal paragraph text must not be
-    // styled as reasoning (dim/italic).
-    let md = format!(
-        "{}\n{}",
-        crate::reasoning_line_markup("it's **thinking** with `code`."),
-        "Normal answer text."
-    );
-    let lines = render_markdown(&md);
-
-    let dim = md_dim_color();
-    let answer_line = lines
-        .iter()
-        .find(|l| line_to_string(l).contains("Normal answer text."))
-        .expect("answer line present");
-    for span in &answer_line.spans {
-        if span.content.trim().is_empty() {
-            continue;
-        }
-        assert_ne!(
-            span.style.fg,
-            Some(dim),
-            "answer span must not be dim: {:?}",
-            span.content
-        );
-        assert!(
-            !span.style.add_modifier.contains(Modifier::ITALIC),
-            "answer span must not be italic: {:?}",
-            span.content
-        );
-    }
-}
-
-#[test]
-fn test_reasoning_summary_line_markup_folds_to_single_dim_italic_trace() {
-    let sentinel = crate::REASONING_SENTINEL;
-
-    // Pluralized count for multi-line blocks.
-    let many = crate::reasoning_summary_line_markup(3);
-    assert!(
-        many.contains(&format!("*{0}▸ thought (3 lines){0}*", sentinel)),
-        "expected pluralized summary markup, got: {many:?}"
-    );
-
-    // Single/zero-line blocks omit the count.
-    let one = crate::reasoning_summary_line_markup(1);
-    assert!(
-        one.contains(&format!("*{0}▸ thought{0}*", sentinel)) && !one.contains("lines"),
-        "expected bare summary markup, got: {one:?}"
-    );
-    let none = crate::reasoning_summary_line_markup(0);
-    assert!(
-        none.contains(&format!("*{0}▸ thought{0}*", sentinel)),
-        "{none:?}"
-    );
-
-    // The summary line renders dim + italic with no sentinel leaking into text.
-    let lines = render_markdown(&many);
-    let dim = md_dim_color();
-    let mut saw_marker = false;
-    for rendered in &lines {
-        for span in &rendered.spans {
-            assert!(
-                !span.content.contains(sentinel),
-                "sentinel leaked into visible summary: {:?}",
-                span.content
-            );
-            if span.content.trim().is_empty() {
-                continue;
-            }
-            if span.content.contains('▸') {
-                saw_marker = true;
-            }
-            assert_eq!(
-                span.style.fg,
-                Some(dim),
-                "summary span not dim: {:?}",
-                span.content
-            );
-            assert!(
-                span.style.add_modifier.contains(Modifier::ITALIC),
-                "summary span not italic: {:?}",
-                span.content
-            );
-        }
-    }
-    assert!(saw_marker, "summary marker '▸' must be visible: {lines:?}");
-}
+include!("rendering_reasoning_tests.rs");

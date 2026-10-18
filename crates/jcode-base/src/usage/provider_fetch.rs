@@ -21,8 +21,13 @@ pub(super) async fn fetch_anthropic_usage_for_token(
     account_label: String,
     expires_at: i64,
 ) -> ProviderUsage {
+    let initial_key = anthropic_usage_cache_key(&access_token, Some(&account_label));
+    let cached = cached_or_shared_anthropic_usage(&initial_key);
     let now_ms = chrono::Utc::now().timestamp_millis();
-    let access_token = if expires_at < now_ms + 300_000 && !refresh_token.is_empty() {
+    let access_token = if cached.is_none()
+        && expires_at < now_ms + 300_000
+        && !refresh_token.is_empty()
+    {
         match crate::auth::oauth::refresh_claude_tokens_for_account(&refresh_token, &account_label)
             .await
         {
@@ -46,7 +51,11 @@ pub(super) async fn fetch_anthropic_usage_for_token(
     };
 
     let cache_key = anthropic_usage_cache_key(&access_token, Some(&account_label));
-    match fetch_anthropic_usage_data(access_token.clone(), cache_key).await {
+    let usage = match cached {
+        Some(data) => Ok(data),
+        None => fetch_anthropic_usage_data(access_token.clone(), cache_key).await,
+    };
+    match usage {
         Ok(data) => {
             let mut report = provider_report_from_usage_data(display_name, &data);
             // Availability can be inspected before reaching the five-hour wall.
@@ -209,6 +218,7 @@ pub(super) async fn fetch_openai_usage_for_account(
         return provider_report_from_openai_usage_data(display_name, &cached);
     }
 
+    let probe_started = Instant::now();
     let client = crate::provider::shared_http_client();
     let mut builder = client
         .get(OPENAI_USAGE_URL)
@@ -287,6 +297,24 @@ pub(super) async fn fetch_openai_usage_for_account(
     };
 
     let parsed = parse_openai_usage_payload(&json);
+
+    if let Some(label) = account_label
+        && generation == openai_usage_generation()
+        && !parsed.hard_limit_reached
+        && !parsed.limits.is_empty()
+        && !super::display::usage_reset_passed(
+            parsed.limits.iter().map(|limit| limit.resets_at.as_deref()),
+        )
+        && parsed.limits.iter().all(|limit| {
+            limit.usage_percent.is_finite() && (0.0..99.0).contains(&limit.usage_percent)
+        })
+    {
+        crate::provider::models::clear_quota_unavailability_after_probe(
+            "openai",
+            label,
+            probe_started,
+        );
+    }
 
     // Read-only detail lookup. Failure must not hide otherwise valid usage.
     let available_expirations = if parsed.available_reset_count.is_some_and(|count| count > 0) {
@@ -859,7 +887,7 @@ pub(super) async fn fetch_copilot_usage_report() -> Option<ProviderUsage> {
     })
 }
 
-/// Jcode subscription: included daily feature allowances plus an upgrade hint
+/// Jcode subscription: monthly inference spending and included daily feature allowances, plus an upgrade hint
 /// when an allowance is running low, so users see the limit before a feature
 /// stops working rather than after.
 pub(super) async fn fetch_jcode_usage_report() -> Option<ProviderUsage> {
@@ -885,6 +913,26 @@ pub(crate) fn jcode_usage_report(me: &crate::subscription_api::SubscriptionMe) -
             .unwrap_or_else(|| me.tier.clone()),
     )];
     let mut hard_limit_reached = false;
+    let usage = &me.usage;
+    if usage.budget_usd.is_finite() && usage.budget_usd > 0.0 {
+        limits.push(UsageLimit {
+            name: "Inference spending limit (monthly)".to_string(),
+            usage_percent: usage_percent_from_used_limit(usage.used_usd, usage.budget_usd),
+            resets_at: usage.resets_at.clone(),
+        });
+        if usage.used_usd.is_finite() {
+            let used = usage.used_usd.max(0.0);
+            hard_limit_reached = used >= usage.budget_usd;
+            extra_info.push((
+                "Inference spending limit remaining".to_string(),
+                format!("${:.2}", (usage.budget_usd - used).max(0.0)),
+            ));
+            extra_info.push((
+                "Inference spending".to_string(),
+                format!("${:.2} / ${:.2}", used, usage.budget_usd),
+            ));
+        }
+    }
     if let Some(jev) = &me.jev_usage {
         let mut worst = 0.0f32;
         for (label, feature) in [

@@ -31,15 +31,20 @@ impl StreamingGuard {
 }
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
+
+mod agent_models;
 mod crash;
+pub use agent_models::AgentModelOverrides;
 mod journal;
 mod load_telemetry;
 mod maintenance;
 mod memory_profile;
 mod model;
+mod parallel_messages;
 mod persistence;
+pub mod prewarm;
 mod render;
 mod storage_paths;
 pub use crash::{
@@ -73,6 +78,15 @@ pub use {jcode_session_types::prompt_title, persistence::drain_saves_for_shutdow
 
 fn stored_messages_to_messages(messages: &[StoredMessage]) -> Vec<Message> {
     messages.iter().map(StoredMessage::to_message).collect()
+}
+
+fn message_has_tool_image(content: &[ContentBlock]) -> bool {
+    content
+        .iter()
+        .any(|block| matches!(block, ContentBlock::Image { .. }))
+        && content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
 }
 
 fn is_internal_system_reminder_message(message: &StoredMessage) -> bool {
@@ -111,6 +125,7 @@ pub struct Session {
     pub custom_title: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    #[serde(deserialize_with = "parallel_messages::deserialize")]
     pub messages: Vec<StoredMessage>,
     /// Full assembled system prompt replacement, including an intentionally empty prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -142,6 +157,9 @@ pub struct Session {
     /// Optional fixed model to use for subagents launched from this session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_model: Option<String>,
+    /// Session worker routing. Missing keys follow saved global defaults.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub agent_model_overrides: AgentModelOverrides,
     /// Last requested `/improve` mode for this session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub improve_mode: Option<SessionImproveMode>,
@@ -237,6 +255,8 @@ struct SessionStartupStub {
     reasoning_effort: Option<String>,
     #[serde(default)]
     subagent_model: Option<String>,
+    #[serde(default)]
+    agent_model_overrides: AgentModelOverrides,
     #[serde(default)]
     improve_mode: Option<SessionImproveMode>,
     #[serde(default)]
@@ -351,6 +371,7 @@ impl Session {
         session.route_api_method = stub.route_api_method;
         session.reasoning_effort = stub.reasoning_effort;
         session.subagent_model = stub.subagent_model;
+        session.agent_model_overrides = stub.agent_model_overrides;
         session.improve_mode = stub.improve_mode;
         session.autoreview_enabled = stub.autoreview_enabled;
         session.autojudge_enabled = stub.autojudge_enabled;
@@ -389,6 +410,7 @@ impl Session {
         session.route_api_method = snapshot.route_api_method;
         session.reasoning_effort = snapshot.reasoning_effort;
         session.subagent_model = snapshot.subagent_model;
+        session.agent_model_overrides = snapshot.agent_model_overrides;
         session.improve_mode = snapshot.improve_mode;
         session.autoreview_enabled = snapshot.autoreview_enabled;
         session.autojudge_enabled = snapshot.autojudge_enabled;
@@ -522,12 +544,14 @@ impl Session {
             system_prompt: self.system_prompt.clone(),
             updated_at: self.updated_at,
             compaction: self.compaction.clone(),
+            compaction_unchanged: false,
             provider_session_id: self.provider_session_id.clone(),
             model_usage_turn_id: self.model_usage_turn_id.clone(),
             provider_key: self.provider_key.clone(),
             model: self.model.clone(),
             reasoning_effort: self.reasoning_effort.clone(),
             subagent_model: self.subagent_model.clone(),
+            agent_model_overrides: self.agent_model_overrides.clone(),
             improve_mode: self.improve_mode,
             autoreview_enabled: self.autoreview_enabled,
             autojudge_enabled: self.autojudge_enabled,
@@ -703,10 +727,6 @@ impl Session {
         }
     }
 
-    fn mark_env_snapshots_full_dirty(&mut self) {
-        self.persist_state.env_snapshots_mode = PersistVectorMode::Full;
-    }
-
     fn mark_memory_injections_append_dirty(&mut self) {
         if self.persist_state.memory_injections_mode != PersistVectorMode::Full {
             self.persist_state.memory_injections_mode = PersistVectorMode::Append;
@@ -725,13 +745,16 @@ impl Session {
         self.custom_title = meta.custom_title;
         self.system_prompt = meta.system_prompt;
         self.updated_at = meta.updated_at;
-        self.compaction = meta.compaction;
+        if !meta.compaction_unchanged {
+            self.compaction = meta.compaction;
+        }
         self.provider_session_id = meta.provider_session_id;
         self.model_usage_turn_id = meta.model_usage_turn_id;
         self.provider_key = meta.provider_key;
         self.model = meta.model;
         self.reasoning_effort = meta.reasoning_effort;
         self.subagent_model = meta.subagent_model;
+        self.agent_model_overrides = meta.agent_model_overrides;
         self.improve_mode = meta.improve_mode;
         self.autoreview_enabled = meta.autoreview_enabled;
         self.autojudge_enabled = meta.autojudge_enabled;
@@ -774,6 +797,7 @@ impl Session {
             route_api_method: None,
             reasoning_effort: None,
             subagent_model: None,
+            agent_model_overrides: AgentModelOverrides::new(),
             improve_mode: None,
             autoreview_enabled: None,
             autojudge_enabled: None,
@@ -831,6 +855,7 @@ impl Session {
             route_api_method: None,
             reasoning_effort: None,
             subagent_model: None,
+            agent_model_overrides: AgentModelOverrides::new(),
             improve_mode: None,
             autoreview_enabled: None,
             autojudge_enabled: None,
@@ -933,13 +958,19 @@ impl Session {
         self.memory_profile_cache.env_snapshots_count += 1;
         self.memory_profile_cache.env_snapshots_json_bytes += estimate_json_bytes(&snapshot);
         self.env_snapshots.push(snapshot);
+        // Trimming here would force a full snapshot rewrite (seconds on large
+        // transcripts) on every resume. Append instead and trim only when a
+        // checkpoint rewrites the snapshot anyway (see `trim_env_snapshots`).
+        self.mark_env_snapshots_append_dirty();
+    }
+
+    /// Drop all but the newest `MAX_ENV_SNAPSHOTS`. Only call right before a
+    /// full snapshot write, because it shrinks an append-tracked vector.
+    pub(crate) fn trim_env_snapshots(&mut self) {
         if self.env_snapshots.len() > MAX_ENV_SNAPSHOTS {
             let excess = self.env_snapshots.len() - MAX_ENV_SNAPSHOTS;
             self.env_snapshots.drain(0..excess);
             self.mark_memory_profile_dirty();
-            self.mark_env_snapshots_full_dirty();
-        } else {
-            self.mark_env_snapshots_append_dirty();
         }
     }
 
@@ -1098,10 +1129,26 @@ request in this new forked session, using the inherited conversation only as con
 
     /// Mark session as active (e.g., when resuming)
     pub fn mark_active(&mut self) {
+        self.mark_active_unregistered();
+        self.register_presence_markers();
+    }
+
+    /// Mark active in memory only, without writing presence markers.
+    ///
+    /// Reload reconnects build a provisional session that is replaced by the
+    /// resumed one almost immediately. Writing and then deleting its
+    /// `active_pids`/`internal_pids` markers costs filesystem work on every
+    /// reconnect of a storm, so callers defer that to
+    /// [`Self::register_presence_markers`] once the session is committed.
+    pub fn mark_active_unregistered(&mut self) {
         self.status = SessionStatus::Active;
-        let pid = std::process::id();
-        self.last_pid = Some(pid);
+        self.last_pid = Some(std::process::id());
         self.last_active_at = Some(Utc::now());
+    }
+
+    /// Write this session's on-disk presence markers for its owning PID.
+    pub fn register_presence_markers(&self) {
+        let pid = self.last_pid.unwrap_or_else(std::process::id);
         register_active_pid(&self.id, pid);
         self.sync_internal_presence_flag();
     }
@@ -1329,8 +1376,28 @@ request in this new forked session, using the inherited conversation only as con
             .message_stats
             .merge_from(&summarize_blocks(&message.content));
         self.adopt_prompt_title(&message);
+        let adds_tool_image = message_has_tool_image(&message.content);
         self.messages.push(message);
         self.mark_messages_append_dirty();
+        if adds_tool_image {
+            self.decay_old_tool_images();
+        }
+    }
+
+    /// Replace inline screenshots from older tool results with short text
+    /// markers once they exceed the tool image budget, so computer-use and
+    /// browser sessions do not grow the transcript without bound (#1680). The
+    /// newest screenshots keep their data and are still sent to the provider.
+    /// Returns the number of images replaced.
+    pub fn decay_old_tool_images(&mut self) -> usize {
+        let mut contents: Vec<&mut Vec<ContentBlock>> =
+            self.messages.iter_mut().map(|m| &mut m.content).collect();
+        let stripped = jcode_compaction_core::decay_old_tool_images_in_contents(&mut contents);
+        if stripped > 0 {
+            self.mark_memory_profile_dirty();
+            self.mark_messages_full_dirty();
+        }
+        stripped
     }
 
     /// Name an untitled session after its first real user prompt so lists show
@@ -1705,7 +1772,7 @@ struct RemoteStartupSessionSnapshot {
     system_prompt: Option<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "parallel_messages::deserialize")]
     messages: Vec<StoredMessage>,
     #[serde(default)]
     compaction: Option<StoredCompactionState>,
@@ -1721,6 +1788,8 @@ struct RemoteStartupSessionSnapshot {
     reasoning_effort: Option<String>,
     #[serde(default)]
     subagent_model: Option<String>,
+    #[serde(default)]
+    agent_model_overrides: AgentModelOverrides,
     #[serde(default)]
     improve_mode: Option<SessionImproveMode>,
     #[serde(default)]

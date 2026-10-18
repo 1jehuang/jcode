@@ -26,9 +26,5 @@ Structure guidance for spawned swarm agents:
 - Always pass `label` when spawning (e.g. `label: "api reviewer"`) so the swarm
   UI shows what each agent is for. The explicit `spawn` action rejects missing or
   blank labels.
-- In normal and light-swarm mode, only the root session may spawn agents. Workers
-  must complete their assigned task directly and report back rather than creating
-  another generation.
-- Recursive spawning is reserved for a root running in `swarm-deep` mode. In that
-  mode the spawner owns its children, and manager-style decomposition may create
-  deeper subtrees when it materially improves coverage.
+- Only the root session may spawn agents. Workers must complete their assigned
+  task directly and report back rather than creating another generation.

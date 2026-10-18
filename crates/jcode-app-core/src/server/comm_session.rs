@@ -366,6 +366,24 @@ fn selection_for_concrete_model(
     }
 }
 
+async fn session_swarm_model(
+    req_session_id: &str,
+    sessions: &SessionAgents,
+    global: Option<String>,
+) -> Option<String> {
+    let agent = sessions.read().await.get(req_session_id).cloned();
+    if let Some(agent) = agent
+        && let Ok(guard) = agent.try_lock()
+    {
+        return guard
+            .session_for_split()
+            .effective_agent_model("swarm", global);
+    }
+    Session::load_startup_stub(req_session_id)
+        .map(|session| session.effective_agent_model("swarm", global.clone()))
+        .unwrap_or(global)
+}
+
 fn resolve_swarm_spawn_selection(
     requested_model: Option<String>,
     configured_swarm_model: Option<String>,
@@ -623,7 +641,8 @@ pub(super) async fn spawn_swarm_agent(
     let client_terminal_env =
         client_terminal_env_for_session(req_session_id, client_connections).await;
     let agents_config = &crate::config::config().agents;
-    let configured_swarm_model = agents_config.swarm_model.clone();
+    let configured_swarm_model =
+        session_swarm_model(req_session_id, sessions, agents_config.swarm_model.clone()).await;
     let resolved_spawn_mode = resolve_swarm_spawn_mode(spawn_mode, agents_config.swarm_spawn_mode);
     let selection = resolve_swarm_spawn_selection(
         requested_model.clone(),
@@ -805,7 +824,7 @@ pub(super) async fn spawn_swarm_agent(
             let event_history2 = Arc::clone(event_history);
             let event_counter2 = Arc::clone(event_counter);
             let swarm_event_tx2 = swarm_event_tx.clone();
-            tokio::spawn(async move {
+            crate::runtime_activity::spawn(async move {
                 update_member_status(
                     &sid_clone,
                     "running",
@@ -1014,7 +1033,12 @@ pub(super) async fn handle_comm_list_models(
     send_event(ServerEvent::CommListModelsResponse {
         id,
         current_model: coordinator.model,
-        configured_swarm_model: crate::config::config().agents.swarm_model.clone(),
+        configured_swarm_model: session_swarm_model(
+            req_session_id,
+            sessions,
+            crate::config::Config::load().agents.swarm_model,
+        )
+        .await,
         model_routes,
     });
 }
@@ -1363,24 +1387,17 @@ async fn ensure_spawn_coordinator_swarm(
         return None;
     };
 
-    // Light and ad hoc swarms are deliberately one-level fan-out: only the root
-    // session may create workers. Recursive spawning is an explicit deep-swarm
-    // capability, keyed from the root's effort rather than the requesting
-    // child's effort so a worker cannot opt itself into unbounded growth.
+    // Swarms are deliberately one-level fan-out: only the root session may
+    // create workers.
     if !is_root {
-        let root_is_deep = crate::session_effort::session_effort(&root_session_id)
-            .as_deref()
-            .is_some_and(crate::prompt::is_deep_swarm_effort);
-        if !root_is_deep {
-            let _ = client_event_tx.send(ServerEvent::Error {
-                id,
-                message: format!(
-                    "Recursive swarm spawning is disabled for light and ad hoc swarms. Only the root session ({root_session_id}) may spawn agents unless that root is running in swarm-deep mode."
-                ),
-                retry_after_secs: None,
-            });
-            return None;
-        }
+        let _ = client_event_tx.send(ServerEvent::Error {
+            id,
+            message: format!(
+                "Recursive swarm spawning is disabled. Only the root session ({root_session_id}) may spawn agents."
+            ),
+            retry_after_secs: None,
+        });
+        return None;
     }
 
     // Keep an absolute hard ceiling even when the configurable limit is disabled.
@@ -1416,8 +1433,6 @@ async fn ensure_spawn_coordinator_swarm(
     // Coordinator-slot election is now only about the swarm-level coordinator used
     // for shared plan operations (propose/approve/assign). Only a root session
     // (depth 0, no spawner) claims it, and only when the slot is empty or stale.
-    // Authorized deep-swarm descendants coordinate their own subtree via
-    // report-back ownership and never disturb the swarm-level coordinator slot.
     if is_root && coordinator_id.as_deref() != Some(req_session_id) {
         let should_claim = coordinator_id.is_none() || coordinator_is_stale;
         if should_claim {

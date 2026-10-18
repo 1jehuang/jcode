@@ -154,12 +154,16 @@ impl ReloadContext {
         was_interrupted: bool,
         restored_turns: Option<usize>,
     ) -> Option<ReloadRecoveryDirective> {
-        Self::recovery_directive(
-            reload_ctx,
-            was_interrupted,
-            &persisted_background_tasks_note(session_id),
-            restored_turns,
-        )
+        // Every resume History asks this, and building the background-task
+        // note scans the task and await state directories (up to ~200ms per
+        // client during a reconnect storm).
+        // Only the reload-context branch embeds the note.
+        let note = if reload_ctx.is_some() {
+            persisted_background_tasks_note(session_id)
+        } else {
+            String::new()
+        };
+        Self::recovery_directive(reload_ctx, was_interrupted, &note, restored_turns)
     }
 
     pub fn log_recovery_outcome(flow: &str, session_id: &str, outcome: &str, detail: &str) {
@@ -230,11 +234,17 @@ pub(super) fn resolve_selfdev_reload_repo_dir(
     resolve_selfdev_reload_repo_dir_from(build::get_repo_dir(), working_dir)
 }
 
+/// The session's own checkout wins, matching how `selfdev build` resolves it.
+/// `primary` is derived from where the *running binary* was compiled, which
+/// can be a different worktree. Preferring it made `build-reload` build in the
+/// session repo and then publish another worktree's stale binary.
 pub(super) fn resolve_selfdev_reload_repo_dir_from(
     primary: Option<std::path::PathBuf>,
     working_dir: Option<&std::path::Path>,
 ) -> Option<std::path::PathBuf> {
-    primary.or_else(|| working_dir.and_then(build::find_repo_in_ancestors))
+    working_dir
+        .and_then(build::find_repo_in_ancestors)
+        .or(primary)
 }
 
 impl SelfDevTool {

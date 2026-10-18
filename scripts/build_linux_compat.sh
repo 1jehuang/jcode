@@ -74,6 +74,8 @@ echo "Embedding git metadata: hash=${git_hash:-<none>} tag=${git_tag:-<none>} di
 
 docker run --rm \
   -e CARGO_TERM_COLOR=always \
+  -e CARGO_PROFILE_RELEASE_OPT_LEVEL \
+  -e JCODE_CI_BUILD \
   -e JCODE_RELEASE_BUILD="${JCODE_RELEASE_BUILD:-1}" \
   -e JCODE_BUILD_SEMVER="${JCODE_BUILD_SEMVER:-}" \
   -e JCODE_BUILD_METADATA_FILE=/jcode-build-meta \
@@ -145,7 +147,17 @@ docker run --rm \
 	    export CARGO_TARGET_DIR=/work/target/linux-compat
 	    export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-1}"
 	    export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS:--C link-arg=-static-libgcc}"
-	    cargo build --profile "$JCODE_COMPAT_PROFILE" --target "$JCODE_COMPAT_TARGET" \
+	    build_command=(cargo build)
+	    if [[ "${JCODE_CI_BUILD:-0}" == 1 ]]; then
+	      # Hosted Ubuntu cannot produce our glibc 2.17 baseline yet. Run the
+	      # static justrust client inside the existing manylinux2014 container.
+	      export JUSTRUST_TOOLCHAIN=system JUSTRUST_SLOTS=0 JUSTRUST_NO_TELEMETRY=1
+	      export JUSTRUST_INSTALL_DIR=/root/.local/bin
+	      bash scripts/install_justrust_ci.sh
+	      export PATH="$JUSTRUST_INSTALL_DIR:$PATH"
+	      build_command=(justrust build --local)
+	    fi
+	    "${build_command[@]}" --locked --profile "$JCODE_COMPAT_PROFILE" --target "$JCODE_COMPAT_TARGET" \
 	      -p jcode --bin jcode --features linux-compat-vendored-openssl
 
 	    cp "$CARGO_TARGET_DIR/$JCODE_COMPAT_TARGET/$JCODE_COMPAT_PROFILE/jcode" "/out/'"$artifact"'.bin"

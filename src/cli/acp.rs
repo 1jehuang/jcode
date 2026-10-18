@@ -767,6 +767,8 @@ impl AcpRuntime {
             .send(&Request::Subscribe {
                 system_prompt: None,
                 supports_pdf_panels: false,
+                supports_user_response: false,
+                supports_server_failover: false,
                 crash_on_disconnect: false,
                 continue_on_disconnect: false,
                 id: subscribe_id,
@@ -775,6 +777,7 @@ impl AcpRuntime {
                 target_session_id: None,
                 client_instance_id: Some("acp".to_string()),
                 client_has_local_history: false,
+                history_base: None,
                 allow_session_takeover: false,
                 terminal_env: crate::terminal_launch::snapshot_client_terminal_env(),
             })
@@ -822,6 +825,8 @@ impl AcpRuntime {
             .send(&Request::Subscribe {
                 system_prompt: None,
                 supports_pdf_panels: false,
+                supports_user_response: false,
+                supports_server_failover: false,
                 crash_on_disconnect: false,
                 continue_on_disconnect: false,
                 id: resume_id,
@@ -830,6 +835,7 @@ impl AcpRuntime {
                 target_session_id: Some(target_session_id.clone()),
                 client_instance_id: Some("acp".to_string()),
                 client_has_local_history: false,
+                history_base: None,
                 allow_session_takeover: false,
                 terminal_env: crate::terminal_launch::snapshot_client_terminal_env(),
             })
@@ -1299,121 +1305,8 @@ async fn request_model_catalog(session: &DaemonSession) -> Result<ServerEvent> {
     }
 }
 
-const CONFIG_ID_MODEL: &str = "model";
-const CONFIG_ID_EFFORT: &str = "reasoning_effort";
-
-fn acp_available_commands() -> Vec<Value> {
-    vec![
-        json!({
-            "name": "model",
-            "description": "Switch the model for this session, or show the current model",
-            "input": { "hint": "model id (optional)" },
-        }),
-        json!({
-            "name": "models",
-            "description": "List models available from the active provider",
-        }),
-        json!({
-            "name": "effort",
-            "description": "Set reasoning effort, or show the current effort",
-            "input": { "hint": "none|minimal|low|medium|high|xhigh|max (optional)" },
-        }),
-    ]
-}
-
-fn insert_session_configuration(result: &mut Value, state: &SessionUiState) {
-    let Some(object) = result.as_object_mut() else {
-        return;
-    };
-    let config_options = session_config_options(state);
-    if !config_options.is_empty() {
-        object.insert("configOptions".to_string(), Value::Array(config_options));
-    }
-    if let Some(models) = session_models(state) {
-        object.insert("models".to_string(), models);
-    }
-}
-
-fn session_models(state: &SessionUiState) -> Option<Value> {
-    let current = state.model.as_deref()?;
-    let mut models = state.available_models.clone();
-    if !models.iter().any(|candidate| candidate == current) {
-        models.insert(0, current.to_string());
-    }
-    Some(json!({
-        "availableModels": models
-            .into_iter()
-            .map(|model| json!({ "modelId": model, "name": model }))
-            .collect::<Vec<_>>(),
-        "currentModelId": current,
-    }))
-}
-
-fn available_efforts(state: &SessionUiState) -> Vec<&'static str> {
-    crate::provider::inferred_reasoning_efforts(
-        state.provider_name.as_deref(),
-        state.model.as_deref(),
-    )
-    .into_iter()
-    // `swarm`/`swarm-deep` are TUI sentinels, not provider effort levels.
-    .filter(|effort| !effort.starts_with("swarm"))
-    .collect()
-}
-
-/// Build the ACP `configOptions` array (model selector plus reasoning effort)
-/// from the current session provider state. Empty when the daemon reported no
-/// usable model state.
-fn session_config_options(state: &SessionUiState) -> Vec<Value> {
-    let mut options = Vec::new();
-
-    if let Some(model) = state.model.as_deref() {
-        let mut models = state.available_models.clone();
-        if !models.iter().any(|candidate| candidate == model) {
-            models.insert(0, model.to_string());
-        }
-        let select_options: Vec<Value> = models
-            .iter()
-            .map(|name| json!({ "value": name, "name": name }))
-            .collect();
-        options.push(json!({
-            "type": "select",
-            "id": CONFIG_ID_MODEL,
-            "name": "Model",
-            "category": "model",
-            "currentValue": model,
-            "options": select_options,
-        }));
-    }
-
-    let efforts = available_efforts(state);
-    if !efforts.is_empty() {
-        let current = state
-            .reasoning_effort
-            .as_deref()
-            .filter(|effort| efforts.contains(effort))
-            .unwrap_or_else(|| {
-                if efforts.contains(&"medium") {
-                    "medium"
-                } else {
-                    efforts[0]
-                }
-            });
-        let select_options: Vec<Value> = efforts
-            .iter()
-            .map(|name| json!({ "value": name, "name": name }))
-            .collect();
-        options.push(json!({
-            "type": "select",
-            "id": CONFIG_ID_EFFORT,
-            "name": "Reasoning effort",
-            "category": "thought_level",
-            "currentValue": current,
-            "options": select_options,
-        }));
-    }
-
-    options
-}
+mod session_configuration;
+use session_configuration::*;
 
 async fn wait_for_model_changed(session: &DaemonSession, request_id: u64) -> Result<()> {
     loop {
@@ -1485,6 +1378,11 @@ impl EventMapper {
         match event {
             ServerEvent::TextDelta { text } => vec![agent_message_chunk(text)],
             ServerEvent::TextReplace { text } => vec![agent_message_chunk(text)],
+            // ACP chunks cannot retract prior output. Surface the corrected
+            // source links rather than silently discarding provider metadata.
+            ServerEvent::TextSuffixReplace { new_text, .. } => {
+                vec![agent_message_chunk(format!("\n{new_text}"))]
+            }
             ServerEvent::ToolStart { id, name } => {
                 self.current_tool_id = Some(id.clone());
                 self.tool_inputs.entry(id.clone()).or_default();

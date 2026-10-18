@@ -8,6 +8,9 @@ use async_trait::async_trait;
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
+#[path = "agent_tests/cache_session_affinity.rs"]
+mod cache_session_affinity;
+
 #[path = "agent_tests/tool_streaming.rs"]
 mod tool_streaming;
 
@@ -23,12 +26,177 @@ mod desktop_selfdev;
 #[path = "agent_tests/compile_remote.rs"]
 mod compile_remote;
 
+#[path = "agent_tests/mcp_remote_cache.rs"]
+mod mcp_remote_cache;
+
 struct DelayedProvider {
     open_delay: Duration,
     first_event_delay: Duration,
 }
 
 struct NativeAutoCompactionProvider;
+
+struct BoundSavedAccountProvider;
+
+#[tokio::test]
+async fn user_response_capability_updates_locked_tool_surface() {
+    let mut agent = Agent::new(Arc::new(BoundSavedAccountProvider), Registry::empty());
+    assert!(
+        !agent
+            .tool_definitions()
+            .await
+            .iter()
+            .any(|d| d.name == "user_response")
+    );
+    assert!(agent.locked_tools.is_some());
+    assert!(!agent.tool_names().await.iter().any(|n| n == "applet"));
+    agent.set_desktop_response_capability(true).await;
+    assert!(agent.locked_tools.is_none());
+    assert!(agent.tool_names().await.iter().any(|n| n == "applet"));
+    assert!(
+        agent
+            .tool_definitions()
+            .await
+            .iter()
+            .any(|d| d.name == "user_response")
+    );
+    agent.set_desktop_response_capability(true).await;
+    assert!(
+        agent.locked_tools.is_some(),
+        "unchanged capability preserves the cache"
+    );
+    agent.set_desktop_response_capability(false).await;
+    assert!(agent.locked_tools.is_none());
+    assert!(!agent.tool_names().await.iter().any(|n| n == "applet"));
+    assert!(
+        !agent
+            .tool_definitions()
+            .await
+            .iter()
+            .any(|d| d.name == "user_response")
+    );
+}
+
+#[async_trait]
+impl Provider for BoundSavedAccountProvider {
+    async fn complete(
+        &self,
+        _: &[Message],
+        _: &[ToolDefinition],
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<EventStream> {
+        panic!("metadata test must not send a request")
+    }
+    fn name(&self) -> &str {
+        "OpenAI"
+    }
+    fn oauth_account_label(&self) -> Option<String> {
+        Some("work".to_string())
+    }
+    fn active_resolved_credential(&self) -> Option<jcode_provider_core::ResolvedCredential> {
+        Some(jcode_provider_core::ResolvedCredential::Oauth)
+    }
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self)
+    }
+}
+
+#[tokio::test]
+async fn saved_account_observed_binding_is_persisted() {
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    struct RestoreHome(Option<std::ffi::OsString>);
+    impl Drop for RestoreHome {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(home) => crate::env::set_var("JCODE_HOME", home),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+            crate::config::Config::invalidate_cache();
+        }
+    }
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::config::Config::invalidate_cache();
+    let provider: Arc<dyn Provider> = Arc::new(BoundSavedAccountProvider);
+    let mut agent = Agent::new(provider, Registry::empty());
+    agent.session.route_api_method = None;
+    agent.session.save_prepared().unwrap();
+    agent.sync_bound_account_route();
+    assert_eq!(
+        agent.session.route_api_method.as_deref(),
+        Some("openai-oauth@work")
+    );
+    let saved = crate::session::Session::load(&agent.session.id).unwrap();
+    assert_eq!(saved.route_api_method.as_deref(), Some("openai-oauth@work"));
+    assert_eq!(saved.provider_key.as_deref(), Some("openai-oauth"));
+    agent.sync_bound_account_route();
+    assert_eq!(agent.session.route_api_method, saved.route_api_method);
+    crate::provider::clear_openai_provider_unavailability_for_account_label(Some("work"));
+    crate::provider::clear_openai_provider_unavailability_for_account_label(Some("personal"));
+    agent.record_failed_account_route("429 rate limit reached");
+    assert!(
+        crate::provider::provider_unavailability_detail_for_account_label("openai", Some("work"))
+            .is_some()
+    );
+    assert!(
+        crate::provider::provider_unavailability_detail_for_account_label(
+            "openai",
+            Some("personal")
+        )
+        .is_none()
+    );
+    crate::provider::clear_openai_provider_unavailability_for_account_label(Some("work"));
+    agent.session.route_api_method = Some("openai-oauth@personal".to_string());
+    agent.sync_bound_account_route();
+    assert_eq!(
+        agent.session.route_api_method.as_deref(),
+        Some("openai-oauth@personal")
+    );
+    assert!(
+        agent
+            .ensure_session_lease()
+            .unwrap_err()
+            .to_string()
+            .contains("personal")
+    );
+}
+
+#[tokio::test]
+async fn saved_account_restore_mismatch_blocks_model_turn() {
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    struct RestoreHome(Option<std::ffi::OsString>);
+    impl Drop for RestoreHome {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(home) => crate::env::set_var("JCODE_HOME", home),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+            crate::config::Config::invalidate_cache();
+        }
+    }
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::config::Config::invalidate_cache();
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let mut agent = Agent::new(provider, Registry::empty());
+    agent.session.route_api_method = Some("openai-oauth@work".into());
+    let error = agent.ensure_session_lease().unwrap_err().to_string();
+    assert!(error.contains("Saved account 'work' could not be restored"));
+    agent.session.route_api_method = None;
+    agent.session.provider_key = Some("openai-oauth@personal".into());
+    assert!(
+        agent
+            .ensure_session_lease()
+            .unwrap_err()
+            .to_string()
+            .contains("personal")
+    );
+    agent.session.provider_key = Some("openai-oauth".into());
+    assert!(agent.ensure_session_lease().is_ok());
+}
 
 struct NativeCompactionStreamProvider;
 
@@ -532,6 +700,51 @@ async fn queued_soft_interrupt_images_are_injected_as_image_blocks() {
 }
 
 #[tokio::test]
+async fn injected_soft_interrupts_report_client_ids_per_group_in_queue_order() {
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let _guard = crate::storage::lock_test_env();
+    let mut agent = Agent::new(provider, registry);
+
+    let user = SoftInterruptSource::User;
+    agent.queue_soft_interrupt_with_id("one".into(), vec![], false, user, Some("f1".into()));
+    agent.queue_soft_interrupt_with_id("anon".into(), vec![], false, user, None);
+    agent.queue_soft_interrupt_with_id("two".into(), vec![], false, user, Some("f2".into()));
+    agent.queue_soft_interrupt(
+        "[Background Task Completed]".into(),
+        vec![],
+        false,
+        SoftInterruptSource::BackgroundTask,
+    );
+    agent.queue_soft_interrupt_with_id("three".into(), vec![], false, user, Some("f3".into()));
+
+    let injected = agent.inject_soft_interrupts();
+    let events = Agent::build_soft_interrupt_events(injected, "D", None);
+    let summary: Vec<(String, Vec<String>)> = events
+        .into_iter()
+        .map(|event| match event {
+            ServerEvent::SoftInterruptInjected {
+                content,
+                client_ids,
+                ..
+            } => (content, client_ids),
+            other => panic!("unexpected event {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        vec![
+            (
+                "one\n\nanon\n\ntwo".to_string(),
+                vec!["f1".into(), "f2".into()]
+            ),
+            ("[Background Task Completed]".to_string(), vec![]),
+            ("three".to_string(), vec!["f3".into()]),
+        ]
+    );
+}
+
+#[tokio::test]
 async fn run_turn_streaming_mpsc_emits_keepalive_while_provider_is_quiet() {
     let _guard = crate::storage::lock_test_env();
     let provider: Arc<dyn Provider> = Arc::new(DelayedProvider {
@@ -740,6 +953,93 @@ async fn run_turn_streaming_mpsc_emits_model_changed_on_midstream_switch() {
         Some("claude-opus-4-8"),
         "expected a ModelChanged event resyncing to the served model"
     );
+}
+
+struct MidStreamAccountSwitchProvider {
+    switched: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait]
+impl Provider for MidStreamAccountSwitchProvider {
+    async fn complete(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        system: &str,
+        resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        self.switched
+            .store(true, std::sync::atomic::Ordering::Release);
+        MidStreamModelSwitchProvider {
+            model: std::sync::Mutex::new(self.model()),
+            switch_to: self.model(),
+        }
+        .complete(messages, tools, system, resume_session_id)
+        .await
+    }
+
+    fn name(&self) -> &str {
+        "claude"
+    }
+
+    fn model(&self) -> String {
+        "same-model".to_string()
+    }
+
+    fn oauth_account_label(&self) -> Option<String> {
+        Some(
+            if self.switched.load(std::sync::atomic::Ordering::Acquire) {
+                "personal"
+            } else {
+                "work"
+            }
+            .to_string(),
+        )
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self {
+            switched: std::sync::atomic::AtomicBool::new(
+                self.switched.load(std::sync::atomic::Ordering::Acquire),
+            ),
+        })
+    }
+}
+
+#[tokio::test]
+async fn run_turn_streaming_mpsc_emits_account_only_change_without_email() {
+    let _guard = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(MidStreamAccountSwitchProvider {
+        switched: std::sync::atomic::AtomicBool::new(false),
+    });
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    agent.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "test".to_string(),
+            cache_control: None,
+        }],
+    );
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    agent.run_turn_streaming_mpsc(tx).await.unwrap();
+    let mut labels = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let ServerEvent::ModelChanged {
+            model,
+            provider_oauth_account_label,
+            provider_oauth_email,
+            error,
+            ..
+        } = event
+        {
+            assert_eq!(model, "same-model");
+            assert!(provider_oauth_email.is_none());
+            assert!(error.is_none());
+            labels.push(provider_oauth_account_label);
+        }
+    }
+    assert_eq!(labels, vec![Some("personal".to_string())]);
 }
 
 #[tokio::test]
@@ -2517,143 +2817,6 @@ fn system_prompt_override_restores_and_does_not_leak_across_sessions() {
 }
 
 /// Test provider advertising provider-native deferred tool loading.
-struct NativeDeferredToolsProvider;
-
-#[async_trait]
-impl Provider for NativeDeferredToolsProvider {
-    async fn complete(
-        &self,
-        _messages: &[Message],
-        _tools: &[ToolDefinition],
-        _system: &str,
-        _resume_session_id: Option<&str>,
-    ) -> Result<EventStream> {
-        let (_tx, rx) = tokio_mpsc::channel::<Result<StreamEvent>>(1);
-        Ok(Box::pin(ReceiverStream::new(rx)))
-    }
-
-    fn name(&self) -> &str {
-        "claude"
-    }
-
-    fn supports_deferred_tools(&self) -> bool {
-        true
-    }
-
-    fn fork(&self) -> Arc<dyn Provider> {
-        Arc::new(Self)
-    }
-}
-
-async fn native_deferred_agent(mode: crate::config::McpToolsMode) -> Agent {
-    let provider: Arc<dyn Provider> = Arc::new(NativeDeferredToolsProvider);
-    let registry = Registry::new(provider.clone()).await;
-    register_fake_deferred_mcp_surface(&registry).await;
-    let mut agent = Agent::new(provider, registry);
-    agent.mcp_tools_mode = mode;
-    agent
-}
-
-fn eager_names(tools: &[ToolDefinition]) -> Vec<String> {
-    tools
-        .iter()
-        .filter(|t| !t.defer_loading)
-        .map(|t| t.name.clone())
-        .collect()
-}
-
-/// With provider-native deferred loading, MCP tools registering after the
-/// first turn (async connect, `mcp connect`, reconnect) only extend the
-/// deferred set. The eager, cached prefix must be byte-identical and the
-/// cache tracker must not be reset.
-#[tokio::test]
-async fn native_deferred_mcp_late_registration_keeps_eager_prefix() {
-    let _guard = crate::storage::lock_test_env();
-    for mode in [
-        crate::config::McpToolsMode::Auto,
-        crate::config::McpToolsMode::Deferred,
-    ] {
-        let mut agent = native_deferred_agent(mode).await;
-        let before = agent.tool_definitions().await;
-        assert!(agent.native_deferred_mcp());
-        assert!(
-            before
-                .iter()
-                .any(|t| t.name == "mcp_search" && !t.defer_loading),
-            "mcp_search stays eager for discovery"
-        );
-        assert!(
-            before
-                .iter()
-                .any(|t| t.name == "mcp_call" && t.defer_loading),
-            "mcp_call is a stable deferred placeholder"
-        );
-
-        agent
-            .registry
-            .register(
-                "mcp__late__tool".to_string(),
-                Arc::new(FakeMcpTool {
-                    name: "late".to_string(),
-                }) as Arc<dyn crate::tool::Tool>,
-            )
-            .await;
-        agent.unlock_tools_if_needed("mcp");
-        let after = agent.tool_definitions().await;
-
-        assert_eq!(eager_names(&before), eager_names(&after), "mode={mode:?}");
-        let serialized = |tools: &[ToolDefinition]| {
-            serde_json::to_string(&ToolDefinition::eager(tools)).unwrap()
-        };
-        assert_eq!(serialized(&before), serialized(&after));
-        let late = after
-            .iter()
-            .find(|t| t.name == "mcp__late__tool")
-            .expect("late MCP tool is offered to the provider");
-        assert!(late.defer_loading, "late MCP tools are deferred");
-        assert!(agent.locked_tools.is_some(), "eager snapshot stays locked");
-    }
-}
-
-#[tokio::test]
-async fn eager_mode_ignores_native_deferred_support() {
-    let _guard = crate::storage::lock_test_env();
-    let mut agent = native_deferred_agent(crate::config::McpToolsMode::Eager).await;
-    agent
-        .registry
-        .register(
-            "mcp__srv__tool".to_string(),
-            Arc::new(FakeMcpTool {
-                name: "tool".to_string(),
-            }) as Arc<dyn crate::tool::Tool>,
-        )
-        .await;
-    let tools = agent.tool_definitions().await;
-    assert!(!agent.native_deferred_mcp());
-    assert!(tools.iter().all(|t| !t.defer_loading));
-    assert!(tools.iter().any(|t| t.name == "mcp__srv__tool"));
-}
-
-#[test]
-fn tool_reference_metadata_becomes_reference_blocks() {
-    let output = ToolOutput::new("found").with_metadata(serde_json::json!({
-        "tool_references": ["mcp__a__x", "mcp__b__y"],
-    }));
-    let blocks = tool_output_to_content_blocks("call_9".to_string(), output);
-    assert!(matches!(blocks[0], ContentBlock::ToolResult { .. }));
-    let refs: Vec<(&str, &str)> = blocks
-        .iter()
-        .filter_map(|b| match b {
-            ContentBlock::ToolReference {
-                tool_use_id,
-                tool_name,
-            } => Some((tool_use_id.as_str(), tool_name.as_str())),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(refs, vec![("call_9", "mcp__a__x"), ("call_9", "mcp__b__y")]);
-}
-
 /// Provider whose deferred-loading capability can flip, like a mid-session
 /// switch between Claude and a non-native route.
 struct SwitchableDeferredProvider(Arc<std::sync::atomic::AtomicBool>);
@@ -2684,38 +2847,6 @@ impl Provider for SwitchableDeferredProvider {
     }
 }
 
-#[tokio::test]
-async fn switching_away_from_native_deferred_restores_mcp_fallback_surface() {
-    let _guard = crate::storage::lock_test_env();
-    let native = Arc::new(std::sync::atomic::AtomicBool::new(true));
-    let provider: Arc<dyn Provider> = Arc::new(SwitchableDeferredProvider(Arc::clone(&native)));
-    let registry = Registry::new(provider.clone()).await;
-    register_fake_deferred_mcp_surface(&registry).await;
-    let mut agent = Agent::new(provider, registry);
-    agent.mcp_tools_mode = crate::config::McpToolsMode::Deferred;
-
-    let on_native = agent.tool_definitions().await;
-    assert!(
-        on_native
-            .iter()
-            .any(|t| t.name == "mcp_call" && t.defer_loading)
-    );
-
-    native.store(false, std::sync::atomic::Ordering::SeqCst);
-    let fallback = agent.tool_definitions().await;
-    assert!(
-        fallback
-            .iter()
-            .any(|t| t.name == "mcp_call" && !t.defer_loading),
-        "non-native provider must get an eager mcp_call"
-    );
-    assert!(fallback.iter().all(|t| !t.defer_loading));
-
-    native.store(true, std::sync::atomic::Ordering::SeqCst);
-    let back = agent.tool_definitions().await;
-    assert!(back.iter().any(|t| t.name == "mcp_call" && t.defer_loading));
-}
-
 fn transcript_texts(agent: &Agent) -> Vec<String> {
     agent
         .session
@@ -2729,198 +2860,8 @@ fn transcript_texts(agent: &Agent) -> Vec<String> {
         .collect()
 }
 
-/// On providers without native deferred loading, MCP tools that register
-/// after the tool list locked are described once in the transcript (with
-/// their schema) instead of changing the cached tool list.
-#[tokio::test]
-async fn late_mcp_tools_are_announced_once_in_the_transcript() {
-    let _guard = crate::storage::lock_test_env();
-    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
-    let registry = Registry::new(provider.clone()).await;
-    register_fake_deferred_mcp_surface(&registry).await;
-    let mut agent = Agent::new(provider, registry);
-    agent.mcp_tools_mode = crate::config::McpToolsMode::Auto;
-
-    let before = agent.tool_definitions().await;
-    agent
-        .registry
-        .register(
-            "mcp__late__tool".to_string(),
-            Arc::new(FakeMcpTool {
-                name: "tool".to_string(),
-            }) as Arc<dyn crate::tool::Tool>,
-        )
-        .await;
-
-    agent.announce_late_mcp_tools().await;
-    let texts = transcript_texts(&agent);
-    let announcements: Vec<&String> = texts
-        .iter()
-        .filter(|t| t.contains("New MCP tools are available."))
-        .collect();
-    assert_eq!(announcements.len(), 1);
-    let text = announcements[0];
-    assert!(text.contains("mcp__late__tool"));
-    assert!(text.contains("server: late"));
-    assert!(text.contains("tool: tool"));
-    assert!(
-        text.contains("input_schema: {"),
-        "schema must be included: {text}"
-    );
-    assert!(text.contains("mcp_call"));
-
-    // Second pass: nothing new, no second announcement, and the cached
-    // tool list is unchanged.
-    agent.announce_late_mcp_tools().await;
-    let again = transcript_texts(&agent)
-        .into_iter()
-        .filter(|t| t.contains("New MCP tools are available."))
-        .count();
-    assert_eq!(again, 1);
-    let after = agent.tool_definitions().await;
-    assert_eq!(
-        serde_json::to_string(&before).unwrap(),
-        serde_json::to_string(&after).unwrap()
-    );
-}
-
-/// Tools already described by an `mcp connect`/`mcp_search` result (tool
-/// references in the transcript) must not be announced again, and nothing
-/// is announced on the native deferred path or in eager mode.
-#[tokio::test]
-async fn late_mcp_announcement_skips_referenced_native_and_eager() {
-    let _guard = crate::storage::lock_test_env();
-    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
-    let registry = Registry::new(provider.clone()).await;
-    register_fake_deferred_mcp_surface(&registry).await;
-    registry
-        .register(
-            "mcp__srv__known".to_string(),
-            Arc::new(FakeMcpTool {
-                name: "known".to_string(),
-            }) as Arc<dyn crate::tool::Tool>,
-        )
-        .await;
-    let mut agent = Agent::new(provider, registry);
-    agent.mcp_tools_mode = crate::config::McpToolsMode::Auto;
-    agent.add_message(
-        Role::User,
-        vec![
-            ContentBlock::ToolResult {
-                tool_use_id: "call_1".into(),
-                content: "Connected".into(),
-                is_error: None,
-            },
-            ContentBlock::ToolReference {
-                tool_use_id: "call_1".into(),
-                tool_name: "mcp__srv__known".into(),
-            },
-        ],
-    );
-    agent.announce_late_mcp_tools().await;
-    assert!(
-        !transcript_texts(&agent)
-            .iter()
-            .any(|t| t.contains("New MCP tools are available."))
-    );
-
-    for mode in [
-        crate::config::McpToolsMode::Eager,
-        crate::config::McpToolsMode::Auto,
-    ] {
-        let mut agent = if mode == crate::config::McpToolsMode::Eager {
-            let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
-            let registry = Registry::new(provider.clone()).await;
-            let mut agent = Agent::new(provider, registry);
-            agent.mcp_tools_mode = mode;
-            agent
-        } else {
-            native_deferred_agent(mode).await
-        };
-        agent
-            .registry
-            .register(
-                "mcp__x__y".to_string(),
-                Arc::new(FakeMcpTool {
-                    name: "y".to_string(),
-                }) as Arc<dyn crate::tool::Tool>,
-            )
-            .await;
-        agent.announce_late_mcp_tools().await;
-        assert!(
-            !transcript_texts(&agent)
-                .iter()
-                .any(|t| t.contains("New MCP tools are available.")),
-            "mode={mode:?}"
-        );
-    }
-}
-
-struct IdentifiedFakeMcpTool {
-    server: String,
-    raw: String,
-}
-
-#[async_trait]
-impl crate::tool::Tool for IdentifiedFakeMcpTool {
-    fn name(&self) -> &str {
-        &self.raw
-    }
-    fn mcp_identity(&self) -> Option<(&str, &str)> {
-        Some((&self.server, &self.raw))
-    }
-    fn description(&self) -> &str {
-        "fake identified mcp tool"
-    }
-    fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({"type": "object"})
-    }
-    async fn execute(
-        &self,
-        _input: serde_json::Value,
-        _ctx: crate::tool::ToolContext,
-    ) -> anyhow::Result<ToolOutput> {
-        Ok(ToolOutput::new("ok"))
-    }
-}
-
-/// Dotted MCP names (YC's `hiring.create_job`) are sanitized for providers,
-/// but the late announcement must tell the model the real server/tool pair
-/// that `mcp_call` needs, not a guess split out of the sanitized alias.
-#[tokio::test]
-async fn late_mcp_announcement_uses_original_names_for_sanitized_aliases() {
-    let _guard = crate::storage::lock_test_env();
-    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
-    let registry = Registry::new(provider.clone()).await;
-    register_fake_deferred_mcp_surface(&registry).await;
-    let mut agent = Agent::new(provider, registry);
-    agent.mcp_tools_mode = crate::config::McpToolsMode::Auto;
-    let _ = agent.tool_definitions().await;
-
-    let alias = crate::mcp::dispatch_name("yc", "hiring.create_job");
-    assert_eq!(alias, "mcp__yc__hiring_create_job");
-    agent
-        .registry
-        .register(
-            alias.clone(),
-            Arc::new(IdentifiedFakeMcpTool {
-                server: "yc".to_string(),
-                raw: "hiring.create_job".to_string(),
-            }) as Arc<dyn crate::tool::Tool>,
-        )
-        .await;
-
-    agent.announce_late_mcp_tools().await;
-    let text = transcript_texts(&agent)
-        .into_iter()
-        .find(|t| t.contains("New MCP tools are available."))
-        .expect("announcement");
-    assert!(text.contains(&alias), "{text}");
-    assert!(
-        text.contains("server: yc  tool: hiring.create_job"),
-        "{text}"
-    );
-}
+#[path = "agent_tests/deferred_tools.rs"]
+mod deferred_tools;
 
 #[test]
 fn skill_installed_mid_session_keeps_system_prompt_stable_and_is_announced_once() {
@@ -3018,4 +2959,136 @@ async fn cancelled_turn_leaves_soft_interrupt_queued() {
     agent.graceful_shutdown_signal().reset();
     assert_eq!(agent.inject_soft_interrupts().len(), 1);
     assert_eq!(agent.soft_interrupt_count(), 0);
+}
+
+/// Provider that only has the Claude OAuth credential: any request pinned to
+/// the API-key route fails exactly like the real runtime does.
+#[derive(Clone, Default)]
+struct OAuthOnlyClaudeProvider {
+    model: Arc<std::sync::Mutex<String>>,
+    set_model_requests: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl Provider for OAuthOnlyClaudeProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        unreachable!("OAuthOnlyClaudeProvider does not complete requests")
+    }
+
+    fn name(&self) -> &str {
+        "Claude"
+    }
+
+    fn model(&self) -> String {
+        self.model.lock().unwrap().clone()
+    }
+
+    fn set_model(&self, request: &str) -> Result<()> {
+        self.set_model_requests
+            .lock()
+            .unwrap()
+            .push(request.to_string());
+        if request.starts_with("claude-api:") {
+            anyhow::bail!("No Anthropic API key found");
+        }
+        let model = request
+            .split_once(':')
+            .map(|(_, model)| model)
+            .unwrap_or(request);
+        *self.model.lock().unwrap() = model.to_string();
+        Ok(())
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+/// A session created while the deployment used an Anthropic API key, resumed
+/// after it moved to Claude OAuth, must come back on OAuth and persist that
+/// route. Before the fix the restore failed, the stale `provider_key` stayed
+/// on disk, and every swarm worker inheriting it died with
+/// "No Anthropic API key found".
+#[tokio::test]
+async fn resume_heals_stale_credential_route_after_credential_type_change() {
+    let _guard = crate::storage::lock_test_env();
+    struct RestoreEnv(Vec<(&'static str, Option<std::ffi::OsString>)>);
+    impl Drop for RestoreEnv {
+        fn drop(&mut self) {
+            for (key, value) in &self.0 {
+                match value {
+                    Some(value) => crate::env::set_var(key, value),
+                    None => crate::env::remove_var(key),
+                }
+            }
+            crate::config::Config::invalidate_cache();
+        }
+    }
+    let _restore = RestoreEnv(
+        ["JCODE_HOME", "JCODE_RUNTIME_PROVIDER"]
+            .into_iter()
+            .map(|key| (key, std::env::var_os(key)))
+            .collect(),
+    );
+    let home = tempfile::tempdir().unwrap();
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::env::set_var("JCODE_RUNTIME_PROVIDER", "claude");
+    crate::config::Config::invalidate_cache();
+
+    let mut stale = crate::session::Session::create_with_id(
+        "session_stale_api_key_route".to_string(),
+        None,
+        None,
+    );
+    stale.model = Some("claude-sonnet-5".to_string());
+    stale.provider_key = Some("anthropic-api".to_string());
+    stale.route_api_method = None;
+    stale.save_prepared().expect("persist stale session");
+
+    let provider = Arc::new(OAuthOnlyClaudeProvider::default());
+    let provider_dyn: Arc<dyn Provider> = provider.clone();
+    let registry = Registry::new(provider_dyn.clone()).await;
+    let mut agent = Agent::new(provider_dyn, registry);
+    agent
+        .restore_session("session_stale_api_key_route")
+        .expect("restore stale session");
+
+    assert_eq!(
+        provider.set_model_requests.lock().unwrap().as_slice(),
+        [
+            "claude-api:claude-sonnet-5",
+            "claude-api:claude-sonnet-5",
+            "claude-oauth:claude-sonnet-5"
+        ],
+        "restore tries the persisted route (plus the auth-refresh retry), then the runtime's"
+    );
+    assert_eq!(agent.provider_model(), "claude-sonnet-5");
+    assert_eq!(
+        agent.session_provider_key().as_deref(),
+        Some("claude-oauth")
+    );
+    assert_eq!(
+        agent.session_route_api_method().as_deref(),
+        Some("claude-oauth")
+    );
+
+    // What a swarm spawn reads when the coordinator is mid-turn.
+    let persisted = crate::session::Session::load("session_stale_api_key_route").unwrap();
+    assert_eq!(persisted.provider_key.as_deref(), Some("claude-oauth"));
+    assert_eq!(persisted.route_api_method.as_deref(), Some("claude-oauth"));
+    assert_eq!(
+        crate::provider::MultiProvider::model_switch_request_for_session_route(
+            "claude-sonnet-5",
+            persisted.provider_key.as_deref(),
+            persisted.route_api_method.as_deref(),
+        ),
+        "claude-oauth:claude-sonnet-5",
+        "workers inheriting the healed session must target the live credential"
+    );
 }

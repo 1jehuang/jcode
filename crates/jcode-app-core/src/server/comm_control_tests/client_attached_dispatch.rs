@@ -6,8 +6,8 @@
 // item stays `queued`. Critically, there is NO server-side turn-end hook for
 // this path: when the client-driven turn finishes, `handle_client` /
 // `CommReport` only update *member* status (`ready`/`failed`), never the plan
-// item. Terminalizing the node is the assignee's own job (`complete_node`,
-// which `claim_queued_node_for_actor` allows from `queued`), or the
+// item. Terminalizing the task is the assignee's job (a `completed`/`failed`
+// `swarm report`, see `close_reporter_task_on_terminal_report`), or the
 // coordinator's via task control / reassignment. These tests document that
 // contract so an accidental removal of the live-client skip (double-driving a
 // session) or a silent behavior change in the no-auto-flip gap is caught.
@@ -70,8 +70,6 @@ async fn assign_task_to_client_attached_session_skips_server_side_run() {
             version: 1,
             participants: HashSet::from([requester.to_string(), worker.to_string()]),
             task_progress: HashMap::new(),
-            mode: "light".to_string(),
-            node_meta: HashMap::new(),
         },
     )])));
     let swarm_coordinators = Arc::new(RwLock::new(HashMap::from([(
@@ -139,8 +137,8 @@ async fn assign_task_to_client_attached_session_skips_server_side_run() {
     // Now simulate the client-driven turn finishing: handle_client's done path
     // only calls update_member_status_with_report(..., "ready", ...). Pin that
     // this does NOT terminalize the plan item — there is no turn-end hook for
-    // client-attached assignees; the node must be closed by the assignee
-    // (complete_node) or the coordinator.
+    // client-attached assignees; the task must be closed by the assignee's
+    // terminal report or the coordinator.
     crate::server::swarm::update_member_status_with_report(
         worker,
         "ready",
@@ -183,4 +181,27 @@ async fn assign_task_to_client_attached_session_skips_server_side_run() {
         let members = swarm_members.read().await;
         assert_eq!(members[worker].status, "ready");
     }
+
+    // A non-terminal report leaves the task open; a `completed` report from the
+    // assignee closes it.
+    super::close_reporter_task_on_terminal_report(
+        worker,
+        "ready",
+        &swarm_members,
+        &swarms_by_id,
+        &swarm_plans,
+        &swarm_coordinators,
+    )
+    .await;
+    assert_eq!(swarm_plans.read().await[swarm_id].items[0].status, "queued");
+    super::close_reporter_task_on_terminal_report(
+        worker,
+        "completed",
+        &swarm_members,
+        &swarms_by_id,
+        &swarm_plans,
+        &swarm_coordinators,
+    )
+    .await;
+    assert_eq!(swarm_plans.read().await[swarm_id].items[0].status, "done");
 }

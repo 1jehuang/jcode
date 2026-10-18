@@ -407,6 +407,33 @@ fn pinned_todo_band_renders_below_sticky_prompt_without_separator() {
 }
 
 #[test]
+fn pinned_todo_band_uses_full_width_on_wide_terminals() {
+    let _env_lock = crate::storage::lock_test_env();
+    let _render_lock = crate::tui::ui::render_state_test_lock();
+    let _pin = PinTodosEnvGuard::enable();
+    let mut app = create_test_app();
+    let session_id = app.session.id.clone();
+    let long_item = format!("wide pinned item {} END", "x".repeat(140));
+    crate::todo::save_todos(&session_id, &[pinned_band_todo("t1", &long_item, "in_progress")])
+        .unwrap();
+    app.refresh_pinned_todos_now();
+
+    let width = 200u16;
+    let (lines, _) = crate::tui::ui::viewport::pinned_todo_band_lines(&app, width, 40);
+    let row = lines
+        .iter()
+        .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+        .find(|row| row.contains("wide pinned item"))
+        .expect("pinned todo item row");
+    assert!(
+        row.contains("END"),
+        "pinned todo should use the full terminal width instead of the 100-column cap, got: {row:?}"
+    );
+
+    let _ = crate::todo::save_todos(&session_id, &[]);
+}
+
+#[test]
 fn background_tasks_render_in_widget_data_not_the_pinned_band() {
     let _env_lock = crate::storage::lock_test_env();
     let _render_lock = crate::tui::ui::render_state_test_lock();
@@ -543,6 +570,30 @@ fn clicking_pinned_todo_more_row_expands_the_band() {
     });
 
     assert!(app.pinned_todos_expanded);
+    let _pin = PinTodosEnvGuard::enable();
+    app.pinned_todos_payload = Some(
+        serde_json::json!({"todos": [
+            pinned_band_todo("active", "Current task", "in_progress")
+        ]})
+        .to_string(),
+    );
+    let (lines, control) = crate::tui::ui::viewport::pinned_todo_band_lines(&app, 80, 30);
+    let control = control.expect("expanded band needs a collapse control");
+    assert!(lines[control].to_string().contains("Collapse todos"));
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 8,
+        row: 4,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert!(!app.pinned_todos_expanded);
+    let (lines, control) = crate::tui::ui::viewport::pinned_todo_band_lines(&app, 80, 30);
+    assert!(control.is_none());
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.to_string().contains("Collapse todos"))
+    );
     crate::tui::ui::viewport::set_pinned_todo_more_area_for_test(None);
 }
 

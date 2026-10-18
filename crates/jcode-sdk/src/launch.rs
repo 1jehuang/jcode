@@ -17,6 +17,10 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
+#[path = "launch_upgrade.rs"]
+mod shared_upgrade;
+
 const CREDENTIAL_FILES: &[&str] = &[
     "auth.json",
     "openai-auth.json",
@@ -167,6 +171,7 @@ impl Drop for LaunchedInstance {
 }
 
 /// Start an isolated daemon and API bridge and return once its socket accepts.
+/// The instance runs the launching binary and never auto-updates, so it stays on that jcode version.
 pub fn launch_instance(options: &LaunchOptions) -> Result<LaunchedInstance> {
     let ephemeral = options.jcode_home.is_none();
     let jcode_home = match &options.jcode_home {
@@ -207,13 +212,24 @@ pub fn launch_instance(options: &LaunchOptions) -> Result<LaunchedInstance> {
         return Err(error);
     }
 
+    // A caller-supplied home may already register a daemon for this runtime
+    // directory. Record it so a failed launch never stops a daemon it did not start.
+    let registered_before = registered_daemon_pid(&jcode_home, &runtime_dir);
+
     let binary = options
         .binary
         .clone()
         .unwrap_or_else(|| PathBuf::from("jcode"));
     let mut command = Command::new(&binary);
+    crate::process::no_console_window(&mut command);
     command
-        .args([OsStr::new("api-bridge"), OsStr::new("--api-socket")])
+        // `--no-update` turns off the bridge's own background update check, which
+        // also runs for source builds.
+        .args([
+            OsStr::new("--no-update"),
+            OsStr::new("api-bridge"),
+            OsStr::new("--api-socket"),
+        ])
         .arg(&socket_path)
         .current_dir(
             options
@@ -225,6 +241,12 @@ pub fn launch_instance(options: &LaunchOptions) -> Result<LaunchedInstance> {
         .env("JCODE_RUNTIME_DIR", &runtime_dir)
         .env("JCODE_API_SOCKET", &socket_path)
         .env("JCODE_SOCKET", runtime_dir.join("jcode.sock"))
+        // An empty private home always looks out of date, so the release updater
+        // would replace and restart the runtime mid-session: the client's turn fails
+        // and the restarted server is orphaned. The variable is inherited by every
+        // jcode process the instance spawns (argv is not), so it keeps the release
+        // auto-installer off in those too. The shared runtime still updates.
+        .env("JCODE_NO_AUTO_UPDATE", "1")
         .envs(options.env.iter())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -293,6 +315,10 @@ pub fn launch_instance(options: &LaunchOptions) -> Result<LaunchedInstance> {
         }
         match child.try_wait() {
             Ok(Some(status)) => {
+                // The daemon is a separate process the bridge spawned, so the bridge
+                // exiting does not stop it. Stop it before joining stderr: a daemon
+                // that inherited the pipe would keep the reader blocked.
+                stop_daemon_started_by_failed_launch(&jcode_home, &runtime_dir, registered_before);
                 if let Some(reader) = stderr_reader.take() {
                     let _ = reader.join();
                 }
@@ -308,6 +334,7 @@ pub fn launch_instance(options: &LaunchOptions) -> Result<LaunchedInstance> {
             }
             Ok(None) => {}
             Err(cause) => {
+                stop_daemon_started_by_failed_launch(&jcode_home, &runtime_dir, registered_before);
                 terminate_child(&mut child);
                 cleanup_on_error();
                 return Err(Error::new(ErrorKind::StartupFailed, cause.to_string()));
@@ -316,6 +343,7 @@ pub fn launch_instance(options: &LaunchOptions) -> Result<LaunchedInstance> {
         std::thread::sleep(Duration::from_millis(50));
     }
 
+    stop_daemon_started_by_failed_launch(&jcode_home, &runtime_dir, registered_before);
     terminate_child(&mut child);
     if let Some(reader) = stderr_reader.take() {
         let _ = reader.join();
@@ -494,9 +522,13 @@ pub fn socket_accepts(path: &Path) -> bool {
 
 /// Locate a sibling executable next to our own, falling back to `$PATH`.
 fn sibling_exe(name: &str) -> PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.join(name)))
+    sibling_exe_next_to(std::env::current_exe().ok().as_deref(), name)
+}
+
+fn sibling_exe_next_to(current: Option<&Path>, name: &str) -> PathBuf {
+    let name = format!("{name}{}", std::env::consts::EXE_SUFFIX);
+    current
+        .and_then(|exe| exe.parent().map(|dir| dir.join(&name)))
         .filter(|path| path.is_file())
         .unwrap_or_else(|| PathBuf::from(name))
 }
@@ -507,14 +539,21 @@ pub fn ensure_runtime(options: &LaunchOptions, progress: &Progress<'_>) -> Resul
         .api_socket
         .clone()
         .unwrap_or_else(jcode_harness_api::api_socket_path);
-    if socket_accepts(&api) {
-        return Ok(());
-    }
-    let legacy = jcode_harness_api::legacy_socket_path();
     let jcode = options
         .binary
         .clone()
         .unwrap_or_else(|| sibling_exe("jcode"));
+    let legacy = jcode_harness_api::legacy_socket_path();
+    // A custom API socket may be a forwarded remote endpoint. Only the normal
+    // local shared runtime can be offered our explicit packaged companion. A
+    // PATH fallback is intentionally not an upgrade candidate.
+    #[cfg(unix)]
+    if shared_upgrade::is_local_shared(&api, &legacy, &jcode) && socket_accepts(&legacy) {
+        shared_upgrade::offer(&legacy, &jcode, options.start_timeout, progress);
+    }
+    if socket_accepts(&api) {
+        return Ok(());
+    }
     if !socket_accepts(&legacy) {
         progress("starting jcode runtime...");
         spawn_detached(&jcode, &["serve"]).map_err(|error| {
@@ -545,13 +584,23 @@ pub fn ensure_runtime(options: &LaunchOptions, progress: &Progress<'_>) -> Resul
 }
 
 fn spawn_detached(program: &Path, args: &[&str]) -> std::io::Result<()> {
-    Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map(drop)
+        .stderr(Stdio::null());
+    // A GUI host (Jcode Desktop) has no console to share, so each
+    // console-subsystem child would open its own window. CREATE_NO_WINDOW
+    // gives the daemon a hidden console its own children inherit, and a new
+    // process group keeps the host's Ctrl+C or exit from reaching it.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        command.creation_flags(CREATE_NEW_PROCESS_GROUP | crate::process::CREATE_NO_WINDOW);
+    }
+    command.spawn().map(drop)
 }
 
 /// Block until `path` accepts connections, or the timeout expires.
@@ -594,9 +643,35 @@ fn read_daemon_pid(home: &Path, runtime_dir: &Path) -> Option<i32> {
 
 #[cfg(unix)]
 fn stop_instance_daemon(home: &Path, runtime_dir: &Path) {
-    let Some(pid) = read_daemon_pid(home, runtime_dir) else {
-        return;
-    };
+    if let Some(pid) = read_daemon_pid(home, runtime_dir) {
+        stop_daemon_pid(pid);
+    }
+}
+
+/// Pid of a daemon already registered for this runtime directory before the
+/// launch started. A failed launch must not stop that daemon.
+#[cfg(unix)]
+fn registered_daemon_pid(home: &Path, runtime_dir: &Path) -> Option<i32> {
+    read_daemon_pid(home, runtime_dir)
+}
+
+/// Stop the daemon a failed launch registered. A daemon that was already
+/// registered before the launch belongs to someone else and is left alone.
+#[cfg(unix)]
+fn stop_daemon_started_by_failed_launch(
+    home: &Path,
+    runtime_dir: &Path,
+    registered_before: Option<i32>,
+) {
+    if let Some(pid) = read_daemon_pid(home, runtime_dir)
+        && Some(pid) != registered_before
+    {
+        stop_daemon_pid(pid);
+    }
+}
+
+#[cfg(unix)]
+fn stop_daemon_pid(pid: i32) {
     signal_process_group(pid, libc::SIGTERM);
     let deadline = Instant::now() + Duration::from_secs(2);
     while Instant::now() < deadline {
@@ -610,6 +685,19 @@ fn stop_instance_daemon(home: &Path, runtime_dir: &Path) {
     while Instant::now() < deadline && process_exists(pid) {
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+#[cfg(not(unix))]
+fn registered_daemon_pid(_home: &Path, _runtime_dir: &Path) -> Option<i32> {
+    None
+}
+
+#[cfg(not(unix))]
+fn stop_daemon_started_by_failed_launch(
+    _home: &Path,
+    _runtime_dir: &Path,
+    _registered_before: Option<i32>,
+) {
 }
 
 #[cfg(not(unix))]
@@ -746,6 +834,37 @@ fn launch_io(error: std::io::Error) -> Error {
     Error::new(ErrorKind::LaunchFailed, error.to_string())
 }
 
+#[cfg(test)]
+mod executable_tests {
+    use super::*;
+
+    #[test]
+    fn sibling_executable_uses_platform_suffix_in_bundle_with_spaces() {
+        let root = tempfile::tempdir().unwrap();
+        let bundle = root.path().join("Jcode package with spaces 雪");
+        fs::create_dir(&bundle).unwrap();
+        let current = bundle.join(format!("jcode-desktop{}", std::env::consts::EXE_SUFFIX));
+        for name in ["jcode", "jcode-harness-api-bridge"] {
+            let companion = bundle.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+            fs::write(&companion, b"test executable").unwrap();
+            assert_eq!(sibling_exe_next_to(Some(&current), name), companion);
+        }
+    }
+
+    #[test]
+    fn sibling_executable_fallback_uses_platform_suffix() {
+        let root = tempfile::tempdir().unwrap();
+        let current = root.path().join("jcode-desktop");
+        for name in ["jcode", "jcode-harness-api-bridge"] {
+            let expected = PathBuf::from(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+            assert_eq!(sibling_exe_next_to(None, name), expected);
+            assert_eq!(sibling_exe_next_to(Some(&current), name), expected);
+            fs::create_dir(root.path().join(&expected)).unwrap();
+            assert_eq!(sibling_exe_next_to(Some(&current), name), expected);
+        }
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -825,6 +944,47 @@ mod tests {
         assert_eq!(fs::read_to_string(captured).unwrap(), "external");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn private_instances_disable_auto_update() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let sandbox = tempfile::tempdir().expect("sandbox");
+        let binary = sandbox.path().join("capture-env");
+        let captured = sandbox.path().join("auto-update.txt");
+        fs::write(
+            &binary,
+            "#!/bin/sh\nprintf '%s|%s' \"${JCODE_NO_AUTO_UPDATE-unset}\" \"$*\" > \"$CAPTURE_PATH\"\nexit 1\n",
+        )
+        .expect("write fake runtime");
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700))
+            .expect("make fake runtime executable");
+
+        let mut options = LaunchOptions {
+            jcode_home: Some(sandbox.path().join("instance")),
+            inherit_logins: false,
+            binary: Some(binary),
+            startup_timeout: Duration::from_secs(2),
+            ..LaunchOptions::default()
+        };
+        options.env.insert(
+            OsString::from("CAPTURE_PATH"),
+            captured.as_os_str().to_owned(),
+        );
+
+        assert!(
+            launch_instance(&options).is_err(),
+            "fake runtime should fail startup"
+        );
+        assert_eq!(
+            fs::read_to_string(captured).expect("captured bridge invocation"),
+            format!(
+                "1|--no-update api-bridge --api-socket {}",
+                sandbox.path().join("instance/run/jcode-api.sock").display()
+            )
+        );
+    }
+
     #[test]
     fn dropping_an_ephemeral_instance_stops_its_bridge_and_removes_its_home() {
         let home = tempfile::Builder::new()
@@ -853,5 +1013,171 @@ mod tests {
 
         assert!(!process_exists(pid), "owned bridge process survived Drop");
         assert!(!home.exists(), "ephemeral instance home survived Drop");
+    }
+
+    /// A daemon owned by the test. Its reaper thread reaps the child as soon as it
+    /// exits, so a stopped daemon is never left as a zombie that still answers
+    /// `kill(pid, 0)`. The reaper runs on its own thread because `launch_instance`
+    /// stops daemons synchronously, before it returns to the test.
+    struct StandInDaemon {
+        pid: i32,
+        exited: std::sync::mpsc::Receiver<()>,
+    }
+
+    impl StandInDaemon {
+        fn spawn() -> Self {
+            let mut child = Command::new("sleep")
+                .arg("30")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("stand-in daemon");
+            let pid = child.id() as i32;
+            let (exited_tx, exited) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                loop {
+                    match child.try_wait() {
+                        Ok(None) if Instant::now() < deadline => {
+                            std::thread::sleep(Duration::from_millis(25));
+                        }
+                        Ok(Some(_)) => break,
+                        // Never leak the stand-in, even when nothing stopped it.
+                        _ => {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            break;
+                        }
+                    }
+                }
+                let _ = exited_tx.send(());
+            });
+            Self { pid, exited }
+        }
+
+        fn is_running(&self) -> bool {
+            matches!(
+                self.exited.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            )
+        }
+
+        fn wait_for_exit(&self, timeout: Duration) -> bool {
+            self.exited.recv_timeout(timeout).is_ok()
+        }
+    }
+
+    impl Drop for StandInDaemon {
+        fn drop(&mut self) {
+            if self.is_running() {
+                // SAFETY: the reaper has not reaped the child yet, so this pid still names it.
+                unsafe {
+                    libc::kill(self.pid, libc::SIGKILL);
+                }
+            }
+        }
+    }
+
+    /// Registers the stand-in daemon for this runtime, as a real bridge's daemon would.
+    const REGISTER_DAEMON: &str = r#"printf '{"x":{"socket":"%s","pid":%s}}' "$JCODE_RUNTIME_DIR/jcode.sock" "$DAEMON_PID" > "$JCODE_HOME/servers.json""#;
+
+    /// Launch a fake `jcode` whose body is `script`; `DAEMON_PID` names `daemon`.
+    fn launch_with_fake_runtime(
+        sandbox: &Path,
+        script: &str,
+        daemon: &StandInDaemon,
+        jcode_home: Option<PathBuf>,
+        startup_timeout: Duration,
+    ) -> Result<LaunchedInstance> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let binary = sandbox.join("fake-jcode");
+        fs::write(&binary, format!("#!/bin/sh\n{script}\n")).expect("write fake runtime");
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700))
+            .expect("make fake runtime executable");
+        let mut options = LaunchOptions {
+            jcode_home,
+            inherit_logins: false,
+            binary: Some(binary),
+            startup_timeout,
+            ..LaunchOptions::default()
+        };
+        options.env.insert(
+            OsString::from("DAEMON_PID"),
+            OsString::from(daemon.pid.to_string()),
+        );
+        launch_instance(&options)
+    }
+
+    #[test]
+    fn failed_startup_stops_daemon_when_jcode_exits() {
+        let sandbox = tempfile::tempdir().expect("sandbox");
+        let daemon = StandInDaemon::spawn();
+        let error = launch_with_fake_runtime(
+            sandbox.path(),
+            &format!("{REGISTER_DAEMON}\nexit 1"),
+            &daemon,
+            None,
+            Duration::from_secs(5),
+        )
+        .err()
+        .expect("a runtime that exits should fail startup");
+        assert_eq!(error.kind, ErrorKind::StartupFailed);
+        assert!(
+            daemon.wait_for_exit(Duration::from_secs(2)),
+            "daemon registered by the failed runtime survived startup failure"
+        );
+    }
+
+    #[test]
+    fn failed_startup_stops_daemon_when_socket_never_appears() {
+        let sandbox = tempfile::tempdir().expect("sandbox");
+        let daemon = StandInDaemon::spawn();
+        let error = launch_with_fake_runtime(
+            sandbox.path(),
+            &format!("{REGISTER_DAEMON}\nexec sleep 30"),
+            &daemon,
+            None,
+            Duration::from_secs(2),
+        )
+        .err()
+        .expect("a runtime without an API socket should time out");
+        assert_eq!(error.kind, ErrorKind::StartupTimeout);
+        assert!(
+            daemon.wait_for_exit(Duration::from_secs(2)),
+            "daemon registered by the timed-out runtime survived startup failure"
+        );
+    }
+
+    #[test]
+    fn failed_startup_leaves_a_daemon_registered_before_the_launch_running() {
+        let sandbox = tempfile::tempdir().expect("sandbox");
+        let home = sandbox.path().join("instance");
+        let runtime_dir = home.join("run");
+        fs::create_dir_all(&runtime_dir).expect("runtime dir");
+        let daemon = StandInDaemon::spawn();
+        // A caller-supplied home can already register a daemon from an earlier run.
+        let registry = serde_json::json!({
+            "x": {
+                "socket": runtime_dir.join("jcode.sock").display().to_string(),
+                "pid": daemon.pid,
+            }
+        });
+        fs::write(home.join("servers.json"), registry.to_string()).expect("registry");
+        let error = launch_with_fake_runtime(
+            sandbox.path(),
+            "exit 1",
+            &daemon,
+            Some(home),
+            Duration::from_secs(5),
+        )
+        .err()
+        .expect("a runtime that exits should fail startup");
+        assert_eq!(error.kind, ErrorKind::StartupFailed);
+        assert!(
+            daemon.is_running(),
+            "failed launch stopped a daemon it did not start"
+        );
     }
 }

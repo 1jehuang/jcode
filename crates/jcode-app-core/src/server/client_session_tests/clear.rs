@@ -81,8 +81,6 @@ async fn handle_clear_session_replaces_runtime_handles_and_updates_shutdown_regi
             version: 1,
             participants: HashSet::from([old_session_id.to_string()]),
             task_progress: HashMap::new(),
-            mode: "deep".to_string(),
-            node_meta: HashMap::new(),
         },
     )])));
     let event_history = Arc::new(RwLock::new(VecDeque::<SwarmEvent>::new()));
@@ -155,6 +153,7 @@ async fn handle_clear_session_replaces_runtime_handles_and_updates_shutdown_regi
             images: Vec::new(),
             urgent: false,
             source: jcode_agent_runtime::SoftInterruptSource::User,
+            client_id: None,
         });
     old_background_signal.fire();
     old_cancel_signal.fire();

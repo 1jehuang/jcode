@@ -1,4 +1,84 @@
 use super::*;
+
+#[tokio::test]
+async fn catalog_request_headers_follow_provider_auth_rules() {
+    for base in [
+        "https://api.anthropic.com/v1",
+        "https://API.ANTHROPIC.COM/v1",
+    ] {
+        for auth in [
+            ProviderAuth::AuthorizationBearer {
+                token: "test-key".into(),
+                label: "test".into(),
+            },
+            ProviderAuth::HeaderValue {
+                header_name: HeaderName::from_static("x-api-key"),
+                value: "test-key".into(),
+                label: "test".into(),
+            },
+        ] {
+            let request = auth
+                .apply_catalog(Client::new().get(format!("{base}/models")), base)
+                .await
+                .unwrap()
+                .build()
+                .unwrap();
+            assert_eq!(request.method(), reqwest::Method::GET);
+            assert_eq!(request.url().path(), "/v1/models");
+            assert_eq!(request.headers()["anthropic-version"], "2023-06-01");
+            assert_eq!(request.headers()["x-api-key"], "test-key");
+            assert!(request.headers().get("authorization").is_none());
+            assert_eq!(request.headers().get_all("x-api-key").iter().count(), 1);
+        }
+    }
+
+    for base in [
+        "https://openrouter.ai/api/v1",
+        "https://api.openai.com/v1",
+        "http://localhost:11434/v1",
+    ] {
+        for (auth, expected_header, expected_value) in [
+            (
+                ProviderAuth::AuthorizationBearer {
+                    token: "test-key".into(),
+                    label: "test".into(),
+                },
+                Some("authorization"),
+                "Bearer test-key",
+            ),
+            (
+                ProviderAuth::HeaderValue {
+                    header_name: HeaderName::from_static("api-key"),
+                    value: "test-key".into(),
+                    label: "test".into(),
+                },
+                Some("api-key"),
+                "test-key",
+            ),
+            (
+                ProviderAuth::None {
+                    label: "test".into(),
+                },
+                None,
+                "",
+            ),
+        ] {
+            let request = auth
+                .apply_catalog(Client::new().get(format!("{base}/models")), base)
+                .await
+                .unwrap()
+                .build()
+                .unwrap();
+            assert!(request.headers().get("anthropic-version").is_none());
+            assert!(request.headers().get("x-api-key").is_none());
+            if let Some(header) = expected_header {
+                assert_eq!(request.headers()[header], expected_value);
+            } else {
+                assert!(request.headers().is_empty());
+            }
+        }
+    }
+}
 use bytes::Bytes;
 use futures::StreamExt;
 use jcode_provider_openrouter::stream::OpenRouterStream;
@@ -118,136 +198,8 @@ fn test_has_credentials() {
     let _has_creds = OpenRouterProvider::has_credentials();
 }
 
-#[test]
-fn openai_compatible_models_endpoint_allows_minimal_model_objects() {
-    let parsed = parse_openai_compatible_models_response(
-        r#"{
-            "object": "list",
-            "data": [
-                {"id": "glm-51-nvfp4", "object": "model", "created": null, "owned_by": null},
-                {"id": "gte-qwen2-7b", "object": "model"}
-            ]
-        }"#,
-    )
-    .expect("minimal OpenAI-compatible /models response should parse");
-
-    assert_eq!(parsed.len(), 2);
-    assert_eq!(parsed[0].id, "glm-51-nvfp4");
-    assert_eq!(parsed[0].name, "");
-}
-
-#[test]
-fn openai_compatible_models_endpoint_allows_chutes_numeric_pricing() {
-    let parsed = parse_openai_compatible_models_response(
-        r#"{
-            "object": "list",
-            "data": [{
-                "id": "Qwen/Qwen3-32B-TEE",
-                "root": "Qwen/Qwen3-32B-FP8",
-                "price": {
-                    "input": {"tao": 0.0002439746644509701, "usd": 0.08},
-                    "output": {"tao": 0.0007319239933529102, "usd": 0.24}
-                },
-                "object": "model",
-                "parent": null,
-                "created": 1778439139,
-                "pricing": {
-                    "prompt": 0.08,
-                    "completion": 0.24,
-                    "input_cache_read": 0.04
-                },
-                "owned_by": "sglang",
-                "context_length": 40960,
-                "supported_features": ["json_mode", "tools"]
-            }]
-        }"#,
-    )
-    .expect("Chutes /models response with numeric pricing should parse");
-
-    assert_eq!(parsed.len(), 1);
-    assert_eq!(parsed[0].id, "Qwen/Qwen3-32B-TEE");
-    assert_eq!(parsed[0].pricing.prompt.as_deref(), Some("0.08"));
-    assert_eq!(parsed[0].pricing.completion.as_deref(), Some("0.24"));
-    assert_eq!(parsed[0].pricing.input_cache_read.as_deref(), Some("0.04"));
-}
-
-#[test]
-fn openai_compatible_models_endpoint_allows_together_top_level_array() {
-    let parsed = parse_openai_compatible_models_response(
-        r#"[
-            {
-                "id": "Austism/chronos-hermes-13b",
-                "object": "model",
-                "created": 1692896905,
-                "type": "chat",
-                "display_name": "Chronos Hermes (13B)",
-                "context_length": 2048,
-                "pricing": {
-                    "input": 0.3,
-                    "output": 0.3,
-                    "cached_input": 0.2
-                }
-            }
-        ]"#,
-    )
-    .expect("Together /models top-level array should parse");
-
-    assert_eq!(parsed.len(), 1);
-    assert_eq!(parsed[0].id, "Austism/chronos-hermes-13b");
-    assert_eq!(parsed[0].name, "Chronos Hermes (13B)");
-    assert_eq!(parsed[0].context_length, Some(2048));
-    assert_eq!(parsed[0].pricing.prompt.as_deref(), Some("0.3"));
-    assert_eq!(parsed[0].pricing.completion.as_deref(), Some("0.3"));
-    assert_eq!(parsed[0].pricing.input_cache_read.as_deref(), Some("0.2"));
-}
-
-#[test]
-fn openai_compatible_models_endpoint_allows_models_array_with_name_ids() {
-    let parsed = parse_openai_compatible_models_response(
-        r#"{
-            "models": [{
-                "name": "accounts/fireworks/models/example",
-                "displayName": "Example Fireworks Model",
-                "contextLength": 8192
-            }]
-        }"#,
-    )
-    .expect("models array with name-based identifiers should parse");
-
-    assert_eq!(parsed.len(), 1);
-    assert_eq!(parsed[0].id, "accounts/fireworks/models/example");
-    assert_eq!(parsed[0].name, "accounts/fireworks/models/example");
-    assert_eq!(parsed[0].context_length, Some(8192));
-}
-
-#[test]
-fn openai_compatible_models_endpoint_reads_llamacpp_meta_n_ctx() {
-    // llama.cpp's /v1/models only exposes the context window inside `meta`
-    // (issue #447). The `data` entry mirrors llama.cpp's response shape.
-    let parsed = parse_openai_compatible_models_response(
-        r#"{
-            "object": "list",
-            "data": [{
-                "id": "unsloth/gemma-4-31B-it-UD-Q8_K_XL",
-                "object": "model",
-                "created": 1783253170,
-                "owned_by": "llamacpp",
-                "meta": {
-                    "vocab_type": 2,
-                    "n_vocab": 262144,
-                    "n_ctx": 262144,
-                    "n_ctx_train": 262144,
-                    "n_embd": 5376
-                }
-            }]
-        }"#,
-    )
-    .expect("llama.cpp /v1/models response should parse");
-
-    assert_eq!(parsed.len(), 1);
-    assert_eq!(parsed[0].id, "unsloth/gemma-4-31B-it-UD-Q8_K_XL");
-    assert_eq!(parsed[0].context_length, Some(262144));
-}
+#[path = "openrouter_tests/catalog_shape_tests.rs"]
+mod catalog_shape_tests;
 
 #[test]
 fn named_openai_compatible_provider_sets_catalog_cache_namespace() {
@@ -1436,6 +1388,7 @@ fn make_provider() -> OpenRouterProvider {
         supports_provider_features: true,
         supports_model_catalog: true,
         profile_id: None,
+        builtin_azure: false,
         reasoning_effort_support: None,
         disable_reasoning_heuristics: false,
         static_reasoning_config: HashMap::new(),
@@ -1470,6 +1423,7 @@ fn make_custom_compatible_provider() -> OpenRouterProvider {
         supports_provider_features: false,
         supports_model_catalog: true,
         profile_id: None,
+        builtin_azure: false,
         reasoning_effort_support: None,
         disable_reasoning_heuristics: false,
         static_reasoning_config: HashMap::new(),
@@ -1556,15 +1510,7 @@ fn direct_deepseek_profile_exposes_max_reasoning_effort() {
 
     assert_eq!(
         provider.available_efforts(),
-        vec![
-            "none",
-            "low",
-            "medium",
-            "high",
-            "max",
-            "swarm",
-            "swarm-deep"
-        ]
+        vec!["none", "low", "medium", "high", "max", "swarm"]
     );
     provider
         .set_reasoning_effort("max")
@@ -1618,16 +1564,7 @@ fn openrouter_profile_exposes_unified_reasoning_effort() {
 
     assert_eq!(
         provider.available_efforts(),
-        vec![
-            "none",
-            "minimal",
-            "low",
-            "medium",
-            "high",
-            "xhigh",
-            "swarm",
-            "swarm-deep"
-        ]
+        vec!["none", "minimal", "low", "medium", "high", "xhigh", "swarm"]
     );
     provider
         .set_reasoning_effort("minimal")
@@ -1652,16 +1589,7 @@ fn openrouter_with_openrouter_profile_id_exposes_unified_reasoning_effort() {
 
     assert_eq!(
         provider.available_efforts(),
-        vec![
-            "none",
-            "minimal",
-            "low",
-            "medium",
-            "high",
-            "xhigh",
-            "swarm",
-            "swarm-deep"
-        ]
+        vec!["none", "minimal", "low", "medium", "high", "xhigh", "swarm"]
     );
     provider
         .set_reasoning_effort("high")
@@ -3223,9 +3151,11 @@ fn midstream_transport_fault_emits_retry_rollback_before_replay() {
             false,
             new_conversation_id(),
             request,
+            false,
             tx,
             Arc::new(Mutex::new(None)),
             "test-model".to_string(),
+            false,
         )
         .await;
 
@@ -3302,15 +3232,7 @@ fn compat_profile_serving_deepseek_model_supports_reasoning_effort() {
     provider.set_model("deepseek-v4-flash").unwrap();
     assert_eq!(
         provider.available_efforts(),
-        vec![
-            "none",
-            "low",
-            "medium",
-            "high",
-            "max",
-            "swarm",
-            "swarm-deep"
-        ]
+        vec!["none", "low", "medium", "high", "max", "swarm"]
     );
     provider
         .set_reasoning_effort("high")
@@ -3336,15 +3258,7 @@ fn compat_profile_serving_gpt_family_model_supports_reasoning_effort() {
         assert_eq!(
             provider.available_efforts(),
             vec![
-                "none",
-                "minimal",
-                "low",
-                "medium",
-                "high",
-                "xhigh",
-                "max",
-                "swarm",
-                "swarm-deep"
+                "none", "minimal", "low", "medium", "high", "xhigh", "max", "swarm"
             ],
             "{model} should expose OpenAI effort vocabulary"
         );
@@ -3391,15 +3305,7 @@ fn named_profile_supports_reasoning_effort_config_override() {
     force_on.set_model("not-a-deepseek-model").unwrap();
     assert_eq!(
         force_on.available_efforts(),
-        vec![
-            "none",
-            "low",
-            "medium",
-            "high",
-            "max",
-            "swarm",
-            "swarm-deep"
-        ]
+        vec!["none", "low", "medium", "high", "max", "swarm"]
     );
     force_on
         .set_reasoning_effort("medium")

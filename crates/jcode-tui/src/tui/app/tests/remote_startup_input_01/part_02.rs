@@ -303,6 +303,8 @@ fn test_remote_auth_model_change_does_not_add_a_third_visible_line() {
             model: "gpt-5.6-sol".to_string(),
             provider_name: Some("OpenAI".to_string()),
             error: None,
+            provider_oauth_email: None,
+            provider_oauth_account_label: None,
             resolved_credential: None,
             reasoning_effort: None,
         },

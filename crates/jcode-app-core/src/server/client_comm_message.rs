@@ -317,7 +317,7 @@ pub(super) async fn handle_comm_message(
         // agents it (transitively) spawned, via the report-back ancestry chain.
         // The swarm coordinator keeps whole-swarm reach as an escape hatch.
         // This prevents one agent from producing a member-cap-sized
-        // notification storm (see docs/SWARM_TASK_GRAPH.md section 8a).
+        // notification storm.
         let subtree_broadcast_targets: Vec<String> = {
             let members = swarm_members.read().await;
             let sender_is_coordinator = members

@@ -227,6 +227,7 @@ function makeDb(plan = {}) {
                 "milestone_elapsed_ms", "event_id", "session_id",
                 "schema_version", "build_channel", "is_git_checkout", "is_ci",
                 "ran_from_cargo", "account_id", "tier", "model_start",
+                "from_version",
               ].map((name) => ({ name })),
             };
           }
@@ -1303,7 +1304,7 @@ test("usage_report upserts daily_model_usage and writes no raw events row", asyn
     { waitUntil() {} },
   );
   assert.equal(response.status, 200);
-  const rollup = db.executed.filter(({ sql }) => /INSERT INTO daily_model_usage/.test(sql));
+  const rollup = db.executed.filter(({ sql }) => /INSERT INTO usage_report_ledger/.test(sql));
   assert.equal(rollup.length, 1);
   const [date, source, provider, model, channel, isCi, responses, input, output, cacheRead, cacheWrite, total] = rollup[0].values;
   assert.match(date, /^\d{4}-\d{2}-\d{2}$/);
@@ -1311,7 +1312,7 @@ test("usage_report upserts daily_model_usage and writes no raw events row", asyn
     [source, provider, model, channel, isCi, responses, input, output, cacheRead, cacheWrite, total],
     ["agent", "OpenAI", "gpt-6-astra", "release", 0, 1, 1000, 200, 800, 0, 2000],
   );
-  assert.ok(/ON CONFLICT\(usage_date, source, provider, model, build_channel, is_ci\)/.test(rollup[0].sql));
+  assert.ok(rollup[0].sql.includes("ON CONFLICT(receipt_key) DO NOTHING"));
   assert.equal(
     db.executed.filter(({ sql }) => /INSERT[\s\S]*INTO events\b/.test(sql)).length,
     0,
@@ -1345,7 +1346,7 @@ test("usage_report maps provider/model/source onto firehose blobs", async () => 
   const env = {
     DB: makeDb(),
     ALLOWED_ORIGIN: "*",
-    FIREHOSE: { writeDataPoint(point) { points.push(point); } },
+    FIREHOSE_USAGE: { writeDataPoint(point) { points.push(point); } },
   };
   const response = await worker.fetch(
     new Request(EVENT_URL, { method: "POST", body: JSON.stringify(makeUsageReportBody({ source: "compaction" })) }),
@@ -1359,4 +1360,46 @@ test("usage_report maps provider/model/source onto firehose blobs", async () => 
   assert.ok(point.blobs.includes("OpenAI"));
   assert.ok(point.blobs.includes("compaction"));
   assert.ok(point.doubles.includes(1000) && point.doubles.includes(2000));
+});
+
+test("desktop fleet events land in events with sanitized update fields", async () => {
+  const db = makeDb();
+  const base = { step: undefined, auth_provider: undefined, auth_method: undefined, auth_failure_reason: undefined, is_ci: true };
+  for (const body of [
+    makeBody({ ...base, event: "desktop_active", event_id: "d-active", version: "0.6.0" }),
+    makeBody({ ...base, event: "desktop_upgrade", event_id: "d-upgrade", version: "0.6.0", from_version: "0.5.0" }),
+    makeBody({
+      ...base,
+      event: "desktop_update",
+      event_id: "d-update",
+      version: "0.6.0",
+      from_version: "0.5.0",
+      install_kind: "Linux Managed",
+      update_outcome: "failure",
+      update_failure_stage: "verify: /home/u/secret " + "x".repeat(100),
+    }),
+  ]) {
+    const response = await worker.fetch(postRequest(body), { DB: db }, makeCtx());
+    assert.equal(response.status, 200, body.event);
+  }
+  const inserts = db.executed.filter(({ sql }) => /INSERT OR IGNORE INTO events /.test(sql));
+  assert.equal(inserts.length, 3);
+  const details = db.executed.filter(({ sql }) => /INSERT OR IGNORE INTO desktop_update_details/.test(sql));
+  assert.equal(details.length, 1, "only desktop_update writes details");
+  const row = (insert) => {
+    const cols = insert.sql.match(/\(([^)]*)\)/)[1].split(",").map((c) => c.trim());
+    return Object.fromEntries(cols.map((c, i) => [c, insert.values[i]]));
+  };
+  const [active, upgrade, update] = inserts.map(row);
+  const detail = row(details[0]);
+  assert.equal(detail.event_id, "d-update");
+  assert.equal(active.event, "desktop_active");
+  assert.equal(active.from_version, null);
+  assert.equal(upgrade.from_version, "0.5.0");
+  assert.equal(update.version, "0.6.0");
+  assert.equal(detail.install_kind, "linux_managed");
+  assert.equal(detail.update_outcome, "failure");
+  assert.ok(detail.update_failure_stage.startsWith("verify_home_u_secret_"));
+  assert.ok(detail.update_failure_stage.length <= 64);
+  assert.equal(update.is_ci, 1);
 });

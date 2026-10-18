@@ -8,6 +8,9 @@ pub struct ProviderFailoverPrompt {
     pub from_label: String,
     pub to_provider: String,
     pub to_label: String,
+    /// Exact pool-approved model request. Old prompts without a route require manual consent.
+    #[serde(default)]
+    pub target_route: Option<String>,
     pub reason: String,
     pub estimated_input_chars: usize,
     pub estimated_input_tokens: usize,
@@ -101,6 +104,9 @@ pub fn classify_failover_error_message(message: &str) -> FailoverDecision {
         "billing",
         "payment required",
         "usage tier",
+        // Plan/usage-window exhaustion, e.g. OpenAI OAuth `usage_limit_reached`.
+        "usage_limit",
+        "usage limit",
     ]
     .iter()
     .any(|needle| lower.contains(needle))
@@ -121,6 +127,9 @@ pub fn classify_failover_error_message(message: &str) -> FailoverDecision {
         "credentials are not configured",
         "no credentials",
         "token exchange failed",
+        // Cached permanent refresh rejection no longer carries the original
+        // OAuth error code or HTTP status, but still needs account failover.
+        "refresh token was previously rejected",
         "authentication failed",
         "unauthorized",
         "forbidden",
@@ -147,6 +156,7 @@ mod tests {
             from_label: "Anthropic".to_string(),
             to_provider: "openai".to_string(),
             to_label: "OpenAI".to_string(),
+            target_route: Some("openai-oauth@work:gpt-5.4".into()),
             reason: "rate limit".to_string(),
             estimated_input_chars: 1200,
             estimated_input_tokens: 300,
@@ -157,11 +167,55 @@ mod tests {
     }
 
     #[test]
+    fn legacy_prompt_without_target_route_requires_manual_selection() {
+        let wire = r#"[jcode-provider-failover]{"from_provider":"claude","from_label":"Anthropic","to_provider":"openai","to_label":"OpenAI","reason":"rate limit","estimated_input_chars":1200,"estimated_input_tokens":300}"#;
+        let prompt = parse_failover_prompt_message(wire).expect("legacy prompt");
+        assert_eq!(prompt.target_route, None);
+    }
+
+    #[test]
     fn classifier_marks_rate_limits_unavailable() {
         assert_eq!(
             classify_failover_error_message("429 Too Many Requests"),
             FailoverDecision::RetryAndMarkUnavailable
         );
+    }
+
+    #[test]
+    fn classifier_marks_usage_limit_unavailable() {
+        assert_eq!(
+            classify_failover_error_message(
+                "usage_limit_reached: The usage limit has been reached"
+            ),
+            FailoverDecision::RetryAndMarkUnavailable
+        );
+    }
+
+    #[test]
+    fn classifier_marks_cached_refresh_rejection_unavailable() {
+        for message in [
+            "Claude OAuth refresh token was previously rejected by Anthropic and cannot be refreshed. Run `jcode login --provider claude` to mint a fresh token.",
+            "claude refresh token was previously rejected by the provider and cannot be refreshed. Run `jcode login`.",
+            "Failed to load credentials: REFRESH TOKEN WAS PREVIOUSLY REJECTED by the provider",
+        ] {
+            assert_eq!(
+                classify_failover_error_message(message),
+                FailoverDecision::RetryAndMarkUnavailable,
+                "cached permanent refresh rejection must permit account failover: {message}",
+            );
+        }
+        // Generic refresh failures are not evidence of invalid credentials.
+        for message in [
+            "Claude token refresh failed: 503 Service Unavailable",
+            "Claude token refresh failed: connection reset by peer",
+            "Claude token refresh failed: request timed out",
+        ] {
+            assert_eq!(
+                classify_failover_error_message(message),
+                FailoverDecision::None,
+                "transient refresh failure must not poison an account: {message}",
+            );
+        }
     }
 
     #[test]

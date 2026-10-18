@@ -82,7 +82,10 @@ copy_selection_toggle = "alt+y"
 diagram_pane_toggle = "alt+t"
 diagram_pane_visibility_toggle = "alt+shift+m"
 typing_scroll_lock_toggle = "alt+s"
-diff_mode_cycle = "alt+g"
+# Cycle the diff display mode (unbound by default; /diff does the same).
+diff_mode_cycle = ""
+# Show the git commit log of the project you are in.
+commit_log = "alt+g"
 info_widget_toggle = "alt+i"
 # Focus the inline swarm panel (list of agents this session manages). Press
 # again to cycle agents. While focused: alt+↑/↓ select, alt+o pops the agent
@@ -142,6 +145,12 @@ timeout_secs = 90
 # Empty auto-detects pw-record, parecord, arecord, rec (SoX), or ffmpeg.
 # A custom command must print raw mono 16 kHz signed 16-bit little-endian PCM.
 # recorder = "arecord -q -t raw -f S16_LE -r 16000 -c 1 -"
+
+# Copilot-key push-to-talk in `jcode companion` (Linux). List keyboard evdev
+# nodes to watch, e.g. ["/dev/input/by-id/usb-Foo-event-kbd"]. Holding the key
+# while a Jcode terminal is focused sends the transcript to that session, even
+# without Jcode Desktop. Empty disables it.
+# global_devices = []
 
 [display]
 # Diff display mode: "off", "inline" (default), "full-inline", or "file"
@@ -236,6 +245,11 @@ prompt_entry_animation = true
 # (default: true). Set false to list only jcode's own sessions.
 # external_sessions = true
 
+# Open /resume filtered to sessions from the current project (same directory,
+# subdirectories, and sibling git worktrees) when that project has sessions
+# (default: false). Resume is global by default. Press `s` to cycle filters.
+# resume_project_scope = false
+
 # Disable specific animation variants by name.
 # Examples: ["donut"] or ["donut", "orbit_rings"]
 # Legacy aliases such as "three_rings" and "gyroscope" are still accepted.
@@ -313,7 +327,7 @@ update_channel = "stable"
 # key. Providers without native search use the local engines below.
 # Anthropic API keys are billed about $10 per 1,000 searches.
 prefer_native = true
-# Local websearch engine: "duckduckgo", "bing", "searxng", or "native"
+# Local websearch engine: "duckduckgo", "bing", "searxng", "custom", or "native"
 # ("native" forces prefer_native on and otherwise runs fallback_engines).
 engine = "duckduckgo"
 # Keyless HTML engines to try if the preferred engine fails. Default falls back to Bing HTML.
@@ -341,6 +355,22 @@ bing_market = "en-US"
 # Anthropic tool version. "web_search_20260209" and newer are sent with
 # allowed_callers = ["direct"].
 # native_anthropic_tool_version = "web_search_20250305"
+
+# Custom HTTP JSON search: set engine = "custom" and prefer_native = false above.
+# Set fallback_engines = [] above if private queries must not reach Bing on failure.
+# See docs/custom-web-search.md for GET/POST, authentication and JSON pointers.
+# [websearch.custom]
+# endpoint = "https://search.example.org/api"
+# method = "GET"
+# query_param = "q"
+# count_param = "count" # optional; omit to send no count parameter
+# params = { format = "json" }
+# headers = { Accept = "application/json" }
+# header_env = { Authorization = "SEARCH_AUTH" } # complete value, e.g. Bearer ...
+# results_pointer = "/results"
+# title_pointer = "/title"
+# url_pointer = "/url"
+# snippet_pointer = "/snippet"
 
 [tools]
 # Controls which built-in tools are sent to the model.
@@ -405,7 +435,9 @@ openai_reasoning_effort = "low"
 # anthropic_reasoning_effort = "medium"
 # OpenAI transport mode (auto|websocket|https)
 # openai_transport = "auto"
-# OpenAI service tier override (priority|flex|off)
+# OpenAI service tier override (priority|ultrafast|flex|off)
+# Ultrafast is opt-in, costs more, and requires a supported model/account.
+# See docs/OPENAI_ULTRAFAST.md for API and Codex restrictions.
 # Defaults to `priority` to match Codex /fast behavior for OpenAI OAuth
 # (higher speed, higher usage). Set to "off" (or "standard") to disable.
 openai_service_tier = "priority"
@@ -442,6 +474,15 @@ cross_provider_failover = "countdown"
 # Env overrides: JCODE_MAX_RETRIES, JCODE_RETRY_BACKOFF_CAP_SECS.
 # max_retries = 8
 # retry_backoff_cap_secs = 30
+# Request-body compression. Every turn re-uploads the whole conversation; on a
+# slow uplink compression cuts that upload 2-4x and lowers time-to-first-token.
+# "auto" measures your upload speed passively and compresses only when it is
+# predicted to be faster. "always" compresses every eligible request over 32 KB.
+# "off" never compresses. Only endpoints verified to accept it are affected:
+# gzip for Anthropic and ChatGPT (HTTPS), zstd for the OpenAI API, and
+# WebSocket permessage-deflate for ChatGPT/OpenAI Responses sockets.
+# Env override: JCODE_REQUEST_COMPRESSION.
+# request_compression = "auto"
 
 [server]
 # Who executes autonomous wake requests from background completion/stall,
@@ -469,13 +510,11 @@ wake_mode = "internal"
 # Env override: JCODE_SWARM_EFFORT
 # swarm_effort = "medium"
 #
-# Root model reasoning while /effort swarm or /effort swarm-deep is selected.
-# These are independent of worker swarm_effort. Supported levels:
-# none|minimal|low|medium|high|xhigh|max. Unset/invalid = max (model maximum).
-# Providers map unsupported levels to their supported range.
-# Env overrides: JCODE_SWARM_ROOT_EFFORT, JCODE_SWARM_DEEP_ROOT_EFFORT
-swarm_root_effort = "max"
-swarm_deep_root_effort = "max"
+# Root model reasoning while /effort swarm is selected. Independent of worker
+# swarm_effort. Supported levels: none|minimal|low|medium|high|xhigh|max.
+# Unset/invalid = low. Providers map unsupported levels to their supported range.
+# Env override: JCODE_SWARM_ROOT_EFFORT
+swarm_root_effort = "low"
 #
 # How swarm-created agents are spawned:
 #   "inline"   - in-process (no window), shown as a live gallery viewport in the coordinator (default)
@@ -486,12 +525,20 @@ swarm_deep_root_effort = "max"
 # Env override: JCODE_SWARM_SPAWN_MODE
 swarm_spawn_mode = "inline"
 #
-# Max live swarm worker agents in one swarm. This RAM-safety budget applies to
-# recursive ad hoc spawning and deep-mode run_plan parallelism. Completed/stopped
-# workers free their slots. 0 disables this guard and leaves only the absolute
-# per-swarm hard cap of 1000. Light mode uses a smaller fixed fan-out.
+# Max live swarm worker agents in one swarm (RAM-safety budget for spawning).
+# Completed/stopped workers free their slots. 0 disables this guard and leaves
+# only the absolute per-swarm hard cap of 1000.
 # Env override: JCODE_SWARM_MAX_CONCURRENT_AGENTS
 swarm_max_concurrent_agents = 32
+#
+# Stalled-worker watchdog. A running worker with no streamed tokens, tool
+# events, or task heartbeats for this many seconds (and no tool currently
+# executing) is flagged as stalled in swarm status and its coordinator is
+# notified once. 0 disables it. Set swarm_stall_nudge = true to also send the
+# worker a short nudge message.
+# Env overrides: JCODE_SWARM_STALL_AFTER_SECS, JCODE_SWARM_STALL_NUDGE
+swarm_stall_after_secs = 600
+# swarm_stall_nudge = false
 #
 # Max percentage (1-90) of the chat height the inline swarm gallery band may use.
 # Unset = built-in default (40%). Lower values keep more transcript visible; set
@@ -641,9 +688,17 @@ swarm_max_concurrent_agents = 32
 # pre_tool_timeout_ms = 5000
 #
 # Runs after each tool call. Extra fields: JCODE_HOOK_TOOL_NAME,
+# JCODE_HOOK_TOOL_CALL_ID, JCODE_HOOK_TOOL_INPUT (tool input JSON, 16 KB cap),
+# JCODE_HOOK_TOUCHED_PATHS (newline-separated absolute paths),
 # JCODE_HOOK_STATUS, JCODE_HOOK_DURATION_MS, JCODE_HOOK_OUTPUT_BYTES,
 # JCODE_HOOK_ERROR.
 # post_tool = ""
+#
+# Synchronous hook after each successful tool call. Same fields as post_tool,
+# full tool input JSON on stdin. Anything it prints to stdout is appended to
+# the tool result the model sees, so linters can report findings inline.
+# post_tool_feedback = "~/bin/jcode-vale"
+# post_tool_feedback_timeout_ms = 10000
 
 [ambient]
 # Ambient mode: background agent that maintains your codebase
@@ -678,6 +733,20 @@ port = 7643
 # Bind address (0.0.0.0 for LAN/Tailscale reachability)
 bind_addr = "0.0.0.0"
 
+[session]
+# Release reloadable session memory after 30 minutes idle. Active work is never
+# interrupted. Type in the terminal to wake. Set to 0 to disable hibernation.
+# Environment override: JCODE_HIBERNATION_IDLE_SECS
+hibernation_idle_secs = 1800
+# What an idle terminal client releases when it hibernates:
+#   "caches"     - render caches only. Instant, lossless wake. (default)
+#   "transcript" - also drop the transcript and reload it from the server on
+#                  wake. Loses local-only notices and the exact scroll spot.
+#   "exit"       - exit the client, leaving a tiny waiter that resumes the
+#                  session on the next key press. Largest savings, ~1s wake.
+# Environment override: JCODE_HIBERNATION_MODE
+hibernation_mode = "caches"
+
 [power]
 # Prevent automatic system sleep while any jcode session is actively working.
 # Linux also blocks lid-switch suspend. On Windows and macOS see block_lid_close.
@@ -691,6 +760,12 @@ prevent_sleep_while_streaming = true
 # sudoers rule for /usr/bin/pmset (skipped otherwise). Original settings are
 # saved to ~/.jcode/lid_override.json and restored afterwards, even after a crash.
 block_lid_close = true
+
+[menubar]
+# macOS only: show the jcode session count in the menu bar. Set to false to
+# stop the menu bar helper (a running helper exits within a second).
+# JCODE_NO_MENUBAR=1 also disables it.
+enabled = true
 
 [safety]
 # Notification settings for ambient mode events
@@ -775,6 +850,7 @@ mod tests {
             toml::from_str::<Config>(&template).expect("the shipped config template must parse");
         assert_eq!(config.tools.mcp_tools, McpToolsMode::Auto);
         assert_eq!(config.tools.mcp_tools_token_threshold, 8_000);
+        assert_eq!(config.session.hibernation_idle_secs, 1800);
         assert!(
             config.display.show_thinking,
             "the shipped user config must request model reasoning"
@@ -783,6 +859,22 @@ mod tests {
             config.display.reasoning_display(),
             ReasoningDisplayMode::Full,
             "the shipped user config must keep the full reasoning trace visible"
+        );
+    }
+
+    #[test]
+    fn session_hibernation_config_defaults_and_roundtrips() {
+        let legacy: Config = toml::from_str("").unwrap();
+        assert_eq!(legacy.session.hibernation_idle_secs, 1800);
+        let disabled: Config = toml::from_str("[session]\nhibernation_idle_secs = 0\n").unwrap();
+        assert_eq!(disabled.session.hibernation_idle_secs, 0);
+        let encoded = toml::to_string(&disabled).unwrap();
+        let restored: Config = toml::from_str(&encoded).unwrap();
+        assert_eq!(restored.session.hibernation_idle_secs, 0);
+        let exit: Config = toml::from_str("[session]\nhibernation_mode = \"exit\"\n").unwrap();
+        assert_eq!(
+            exit.session.hibernation_mode,
+            jcode_config_types::HibernationMode::Exit
         );
     }
 

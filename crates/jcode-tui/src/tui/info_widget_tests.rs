@@ -102,6 +102,29 @@ fn kv_cache_widget_shows_session_hit_ratio() {
 }
 
 #[test]
+fn kv_cache_without_reuse_baseline_shows_observed_hit_rate() {
+    let cache = CacheHitInfo {
+        prompt_tokens: Some(100_000),
+        read_tokens: 4_000,
+        last_prompt_tokens: Some(100_000),
+        last_read_tokens: Some(4_000),
+        ..Default::default()
+    };
+    let data = InfoWidgetData {
+        cache_hit_info: Some(cache.clone()),
+        ..Default::default()
+    };
+    let framed = render_kv_cache_widget(&data, Rect::new(0, 0, 50, 5));
+    let text = lines_text_concat(&framed.all_lines());
+    assert!(text.contains("4% hit"), "{text}");
+    assert!(!text.contains("priming"), "{text}");
+    let compact = lines_text_concat(&[super::render_kv_cache_summary_line(&cache)]);
+    assert!(compact.contains("hit 4%"), "{compact}");
+    assert!(compact.contains("last 4%"), "{compact}");
+    assert!(!compact.contains("priming"), "{compact}");
+}
+
+#[test]
 fn todos_widgets_show_item_and_aggregate_confidence() {
     let data = InfoWidgetData {
         todos: vec![
@@ -310,102 +333,7 @@ fn plan_item(id: &str, status: &str) -> crate::plan::PlanItem {
     }
 }
 
-#[test]
-fn swarm_plan_todos_normalizes_scheduler_statuses() {
-    let items = vec![
-        plan_item("a", "running"),
-        plan_item("b", "running_stale"),
-        plan_item("c", "done"),
-        plan_item("d", "completed"),
-        plan_item("e", "failed"),
-        plan_item("f", "stopped"),
-        plan_item("g", "crashed"),
-        plan_item("h", "queued"),
-        plan_item("i", "ready"),
-        plan_item("j", "blocked"),
-        plan_item("k", "pending"),
-        plan_item("l", "in_progress"),
-        plan_item("m", "weird_custom_status"),
-    ];
-    let todos = swarm_plan_todos(&items);
-    let status_of = |id: &str| {
-        todos
-            .iter()
-            .find(|t| t.id == id)
-            .map(|t| t.status.clone())
-            .unwrap()
-    };
-    // Active scheduler states surface as in_progress (▶ amber, sorts first).
-    assert_eq!(status_of("a"), "in_progress");
-    assert_eq!(status_of("b"), "in_progress");
-    // Terminal success maps onto completed (✓).
-    assert_eq!(status_of("c"), "completed");
-    assert_eq!(status_of("d"), "completed");
-    // Terminal failure maps onto cancelled (✗) instead of an open circle.
-    assert_eq!(status_of("e"), "cancelled");
-    assert_eq!(status_of("f"), "cancelled");
-    assert_eq!(status_of("g"), "cancelled");
-    // Runnable / blocked states render as pending (○).
-    assert_eq!(status_of("h"), "pending");
-    assert_eq!(status_of("i"), "pending");
-    assert_eq!(status_of("j"), "pending");
-    // Statuses the todo renderer already understands pass through.
-    assert_eq!(status_of("k"), "pending");
-    assert_eq!(status_of("l"), "in_progress");
-    // Arbitrary strings pass through unchanged (rendered as open ○).
-    assert_eq!(status_of("m"), "weird_custom_status");
-}
-
-#[test]
-fn swarm_plan_todos_preserve_blockers_and_assignee_and_flow_to_renderer() {
-    let mut blocked = plan_item("audit-x", "queued");
-    blocked.blocked_by = vec!["audit-y".to_string()];
-    let mut running = plan_item("audit-y", "running");
-    running.assigned_to = Some("worker-1".to_string());
-    let items = vec![blocked, running];
-
-    let todos = swarm_plan_todos(&items);
-    assert_eq!(todos[0].blocked_by, vec!["audit-y".to_string()]);
-    assert_eq!(todos[1].assigned_to.as_deref(), Some("worker-1"));
-
-    let data = InfoWidgetData {
-        todos,
-        ..Default::default()
-    };
-    let text = lines_text(&render_todos_expanded(&data, Rect::new(0, 0, 80, 14)));
-    // Blocked items get the dependency marker and suffix.
-    assert!(text.contains("⊳"), "blocked glyph missing: {text}");
-    assert!(text.contains("(blocked)"), "blocked suffix missing: {text}");
-    // The running item sorts first as in_progress.
-    let running_idx = text.find("task audit-y").unwrap();
-    let blocked_idx = text.find("task audit-x").unwrap();
-    assert!(running_idx < blocked_idx, "active-first order: {text}");
-}
-
-#[test]
-fn swarm_plan_running_items_render_before_completed_in_large_plans() {
-    // 120-item deep plan: 100 completed, 1 running near the end, rest queued.
-    // The running item must be visible in the small line budget instead of
-    // hiding behind the "+N more" footer.
-    let mut items: Vec<crate::plan::PlanItem> = (0..100)
-        .map(|i| plan_item(&format!("done-{i}"), "completed"))
-        .collect();
-    items.push(plan_item("hot-task", "running"));
-    for i in 0..19 {
-        items.push(plan_item(&format!("queued-{i}"), "queued"));
-    }
-
-    let data = InfoWidgetData {
-        todos: swarm_plan_todos(&items),
-        ..Default::default()
-    };
-    let text = lines_text(&render_todos_widget(&data, Rect::new(0, 0, 60, 8)).all_lines());
-    assert!(
-        text.contains("task hot-task"),
-        "running plan item should be visible in the budgeted list: {text}"
-    );
-    assert!(text.contains("+"), "footer summarizes the rest: {text}");
-}
+include!("info_widget_tests/swarm_plan_todos.rs");
 
 #[test]
 fn todo_widget_header_says_plan_when_showing_swarm_plan_projection() {
@@ -562,7 +490,7 @@ fn loop_suffix_renders_safely_at_tiny_sizes() {
 
 #[test]
 fn swarm_plan_gate_items_render_like_normal_items() {
-    // Deep-mode critique gates share the plan item shape; only the id differs.
+    // Gate-style ids from older plans share the plan item shape.
     let mut gate = plan_item("explore-root::gate", "queued");
     gate.content = "Critique the work of 'explore-root' adversarially.".to_string();
     gate.blocked_by = vec!["explore-root".to_string()];
@@ -608,6 +536,65 @@ fn swarm_plan_todos_render_safely_at_extreme_sizes() {
         let _ = render_todos_widget(&data, rect);
         let _ = render_todos_expanded(&data, rect);
         let _ = render_todos_compact(&data, rect);
+    }
+}
+
+#[test]
+fn openai_limit_reached_overrides_nonexhausted_usage_windows() {
+    let usage = UsageInfo {
+        provider: UsageProvider::OpenAI,
+        primary_limit_label: Some("5-hour".to_string()),
+        five_hour: 0.18,
+        secondary_limit_label: Some("Weekly".to_string()),
+        seven_day: 0.03,
+        available: true,
+        limit_reached: true,
+        ..Default::default()
+    };
+    assert_usage_limit_warning(usage);
+}
+
+#[test]
+fn openai_limit_reached_without_snapshot_or_windows_is_visible() {
+    let usage = UsageInfo {
+        provider: UsageProvider::OpenAI,
+        limit_reached: true,
+        ..Default::default()
+    };
+    assert!(!usage.available);
+    assert_usage_limit_warning(usage);
+}
+
+#[test]
+fn usage_limit_reached_defaults_to_false() {
+    assert!(!UsageInfo::default().limit_reached);
+}
+
+fn assert_usage_limit_warning(usage: UsageInfo) {
+    assert_eq!(usage.max_usage_pct(), 100);
+    let data = InfoWidgetData {
+        usage_info: Some(usage.clone()),
+        ..Default::default()
+    };
+    assert!(data.has_data_for(WidgetKind::UsageLimits));
+    for display_used in [false, true] {
+        let data = InfoWidgetData {
+            usage_display_used: display_used,
+            ..data.clone()
+        };
+        let expanded = render_usage_widget(&data, Rect::new(0, 0, 40, 4));
+        let compact = render_usage_compact(&usage, 40, display_used);
+        let overview = super::render_sections(&data, Rect::new(0, 0, 40, 10), None);
+        for text in [
+            lines_text(&expanded.all_lines()),
+            lines_text(&compact),
+            lines_text(&overview),
+        ] {
+            assert!(text.contains("Usage limit reached"), "{text}");
+            assert!(!text.contains('%'), "{text}");
+            assert!(!text.contains('▰') && !text.contains('▱'), "{text}");
+            assert!(!text.contains("Usage unavailable"), "{text}");
+        }
     }
 }
 
@@ -1321,6 +1308,57 @@ fn swarm_dock_surfaces_attention_and_collapses_overflow() {
             assert!(line.width() <= usize::from(w), "w={w}");
         }
     }
+}
+
+#[test]
+fn swarm_dock_shows_current_todo_and_fills_width() {
+    let mut worker = managed_member("blowfish", "running", None);
+    worker.detail = Some("You work across the toolchain".to_string());
+    worker.todo_items = vec![
+        crate::protocol::SwarmTodoItem {
+            content: "Measure baseline".to_string(),
+            status: "completed".to_string(),
+            tool_intents: Vec::new(),
+        },
+        crate::protocol::SwarmTodoItem {
+            content: "Build the per-step ranking script for rustc passes".to_string(),
+            status: "in_progress".to_string(),
+            tool_intents: Vec::new(),
+        },
+    ];
+    let data = InfoWidgetData {
+        swarm_info: Some(SwarmInfo {
+            managed_members: vec![worker],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let width = 40u16;
+    let framed = super::render_swarm_widget(&data, Rect::new(0, 0, width, 10));
+    let title = lines_text_concat(framed.title.as_slice());
+    assert!(title.starts_with("🐝 1/1 active"), "icon only: {title}");
+    assert!(!title.contains("Swarm"), "no spelled-out label: {title}");
+    let row: String = framed.lines[0]
+        .spans
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect();
+    assert!(
+        row.contains(crate::id::session_icon("blowfish")),
+        "agent icon: {row}"
+    );
+    assert!(
+        !row.contains("blowfish"),
+        "no spelled-out agent name: {row}"
+    );
+    assert!(row.contains("Build the per-step"), "current todo: {row}");
+    assert!(!row.contains("..."), "single-char ellipsis: {row}");
+    // Truncated text fills the row instead of backing off to a word boundary.
+    assert_eq!(
+        unicode_width::UnicodeWidthStr::width(row.as_str()),
+        usize::from(width),
+        "{row}"
+    );
 }
 
 /// Without managed members the legacy session-list rendering is preserved and

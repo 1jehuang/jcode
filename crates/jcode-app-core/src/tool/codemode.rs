@@ -88,7 +88,7 @@ impl Host for RegistryHost {
 
 /// Whether the opt-in codemode tool is enabled in config.
 pub(crate) fn enabled() -> bool {
-    crate::config::config().tools.codemode
+    jcode_codemode::AVAILABLE && crate::config::config().tools.codemode
 }
 
 fn store_path(session_id: &str) -> Option<PathBuf> {

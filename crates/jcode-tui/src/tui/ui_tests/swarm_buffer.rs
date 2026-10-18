@@ -544,8 +544,13 @@ fn overscroll_line_row(state: &TestState, width: u16) -> String {
         .draw(|frame| crate::tui::ui::draw(frame, state))
         .expect("overscroll frame");
     let rows = buffer_rows(&terminal);
-    // The overscroll line is the last row of the frame.
-    rows.last().cloned().unwrap_or_default()
+    // The status line is pinned directly below the input, so it is the last
+    // non-blank row of the frame (rows below it are unused viewport).
+    rows.iter()
+        .rev()
+        .find(|row| !row.trim().is_empty())
+        .cloned()
+        .unwrap_or_default()
 }
 
 #[test]
@@ -618,10 +623,16 @@ fn overscroll_model_is_pink() {
         .draw(|frame| crate::tui::ui::draw(frame, &state))
         .expect("overscroll frame");
     let buf = terminal.backend().buffer();
-    let y = buf.area.height - 1;
-    let row: String = (0..buf.area.width)
-        .map(|x| buf[(x, y)].symbol().to_string())
-        .collect();
+    let row_at = |y: u16| -> String {
+        (0..buf.area.width)
+            .map(|x| buf[(x, y)].symbol().to_string())
+            .collect()
+    };
+    let y = (0..buf.area.height)
+        .rev()
+        .find(|&y| !row_at(y).trim().is_empty())
+        .expect("status line rendered");
+    let row = row_at(y);
     let col = row
         .find("GPT-5.6 Sol")
         .map(|byte| row[..byte].chars().count() as u16)

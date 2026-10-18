@@ -5,8 +5,8 @@ use crate::background::TaskResult;
 use crate::plan::PlanItem;
 use crate::protocol::{
     AgentInfo, AgentStatusSnapshot, AwaitedMemberStatus, CommDeliveryMode, ContextEntry,
-    HistoryMessage, PlanGraphStatus, Request, ServerEvent, SwarmChannelInfo, TaskGraphNodeSpec,
-    ToolCallSummary, comm_cleanup_candidate_session_ids, default_comm_await_target_statuses,
+    HistoryMessage, PlanGraphStatus, Request, ServerEvent, SwarmChannelInfo, ToolCallSummary,
+    comm_cleanup_candidate_session_ids, default_comm_await_target_statuses,
     default_comm_cleanup_target_statuses, default_comm_run_await_statuses,
     format_comm_awaited_members_with_reports, format_comm_channels, format_comm_context_entries,
     format_comm_context_history, format_comm_members, format_comm_plan_followup,
@@ -18,16 +18,13 @@ use async_trait::async_trait;
 use jcode_swarm_core::validate_swarm_tldr;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
+use std::collections::HashMap;
 
 const REQUEST_ID: u64 = 1;
 
-/// Default number of workers `run_plan` keeps active at once for a **light**-mode
-/// plan. Light mode is the cheap fan-out preset, so this stays small. Deep mode
-/// instead uses `agents.swarm_max_concurrent_agents` (configurable and shared
-/// with the server's recursive-spawn RAM safety guard).
-const LIGHT_MODE_DEFAULT_CONCURRENCY: usize = 4;
+/// Default number of workers `run_plan` keeps active at once when the caller
+/// does not pass `concurrency_limit`.
+const DEFAULT_RUN_PLAN_CONCURRENCY: usize = 4;
 
 mod transport;
 use transport::{send_request, send_request_with_timeout};
@@ -54,95 +51,6 @@ fn ensure_success(response: &ServerEvent) -> Result<()> {
     } else {
         Ok(())
     }
-}
-
-fn seed_node_id_collision(response: &ServerEvent) -> Option<&str> {
-    let message = check_error(response)?;
-    let (_, tail) = message.split_once("duplicate node id '")?;
-    let (id, _) = tail.split_once('\'')?;
-    (!id.is_empty()).then_some(id)
-}
-
-fn plan_graph_node_ids(summary: &PlanGraphStatus) -> HashSet<String> {
-    summary
-        .ready_ids
-        .iter()
-        .chain(&summary.blocked_ids)
-        .chain(&summary.active_ids)
-        .chain(&summary.completed_ids)
-        .chain(&summary.failed_ids)
-        .chain(&summary.cycle_ids)
-        .chain(&summary.unresolved_dependency_ids)
-        .cloned()
-        .collect()
-}
-
-fn seed_retry_scope(ctx: &ToolContext) -> String {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    ctx.session_id.hash(&mut hasher);
-    ctx.message_id.hash(&mut hasher);
-    format!("seed-{:08x}", hasher.finish() as u32)
-}
-
-/// Rename only seed ids that collide with the existing durable plan, then rewrite
-/// intra-batch dependency edges to follow them. The scope is stable for a tool
-/// turn, so retrying the same call produces the same ids and is itself idempotent.
-fn remap_conflicting_seed_nodes(
-    nodes: &[TaskGraphNodeSpec],
-    occupied: &HashSet<String>,
-    conflicting_id: &str,
-    scope: &str,
-) -> (Vec<TaskGraphNodeSpec>, Vec<(String, String)>) {
-    let original_ids: HashSet<&str> = nodes.iter().map(|node| node.id.as_str()).collect();
-    let mut reserved = occupied.clone();
-    reserved.extend(original_ids.iter().map(|id| (*id).to_string()));
-    let mut mapping = HashMap::<String, String>::new();
-
-    if occupied.contains(conflicting_id) && nodes.iter().any(|node| node.id == conflicting_id) {
-        let node_id = conflicting_id.to_string();
-        let base = format!("{conflicting_id}::{scope}");
-        let mut candidate = base.clone();
-        let mut discriminator = 2usize;
-        while reserved.contains(&candidate) {
-            candidate = format!("{base}-{discriminator}");
-            discriminator += 1;
-        }
-        reserved.insert(candidate.clone());
-        mapping.insert(node_id, candidate);
-    }
-
-    let remapped = nodes
-        .iter()
-        .cloned()
-        .map(|mut node| {
-            if let Some(id) = mapping.get(&node.id) {
-                node.id = id.clone();
-            }
-            for dependency in &mut node.depends_on {
-                if let Some(id) = mapping.get(dependency) {
-                    *dependency = id.clone();
-                }
-            }
-            node
-        })
-        .collect();
-    let changes = nodes
-        .iter()
-        .filter_map(|node| {
-            mapping
-                .get(&node.id)
-                .map(|mapped| (node.id.clone(), mapped.clone()))
-        })
-        .collect();
-    (remapped, changes)
-}
-
-fn format_seed_remaps(changes: &[(String, String)]) -> String {
-    changes
-        .iter()
-        .map(|(from, to)| format!("{from} -> {to}"))
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 async fn fetch_plan_status(session_id: &str) -> Result<PlanGraphStatus> {
@@ -513,39 +421,16 @@ async fn await_swarm_progress(
     }
 }
 
-/// Decide how many swarm workers `run_plan` keeps active at once.
-///
-/// Policy:
-///   * an explicit `requested` limit always wins (clamped to >= 1);
-///   * deep mode with no explicit limit fans out wide: use `deep_cap`, where
-///     `0` means "no extra cap" (`usize::MAX`) so the whole ready set is
-///     dispatched, bounded only by the swarm member cap;
-///   * light mode with no explicit limit keeps the small, cheap fan-out default.
-///
-/// Pure and side-effect free so the concurrency contract is unit-testable
-/// without a live swarm.
-fn resolve_run_plan_concurrency(requested: Option<usize>, is_deep: bool, deep_cap: usize) -> usize {
-    match requested {
-        Some(explicit) => explicit.max(1),
-        None if is_deep => {
-            if deep_cap == 0 {
-                usize::MAX
-            } else {
-                deep_cap
-            }
-        }
-        None => LIGHT_MODE_DEFAULT_CONCURRENCY,
-    }
+/// Decide how many swarm workers `run_plan` keeps active at once: an explicit
+/// limit wins (clamped to >= 1), otherwise the small default.
+fn resolve_run_plan_concurrency(requested: Option<usize>) -> usize {
+    requested.map_or(DEFAULT_RUN_PLAN_CONCURRENCY, |explicit| explicit.max(1))
 }
 
 /// Running tally of how well a `run_plan` drive used its concurrency budget.
 ///
-/// Deep mode's promise is comprehensiveness through parallel fan-out, so a run
-/// that finishes with peak parallelism ~1 despite a 32+ slot budget means the
-/// graph was decomposed serially and the budget was wasted. Tracking this per
-/// loop (max in-flight, plus how often open slots sat idle with no ready work)
-/// turns "did we actually use the budget?" into a measured, reportable number
-/// instead of a hope.
+/// Tracks peak parallelism and how often open slots sat idle with no ready
+/// work, so the terminal report shows whether the budget was used.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct RunPlanUtilization {
     /// Highest number of simultaneously in-flight tasks observed.
@@ -572,29 +457,17 @@ impl RunPlanUtilization {
         }
     }
 
-    /// Render the utilization line for the terminal report. In deep mode a
-    /// starved run also gets an actionable hint, because the fix (wider
-    /// decomposition) belongs to the model reading this output.
-    fn report(&self, concurrency_limit: usize, is_deep: bool) -> String {
+    /// Render the utilization line for the terminal report.
+    fn report(&self, concurrency_limit: usize) -> String {
         let limit_label = if concurrency_limit == usize::MAX {
             "unbounded".to_string()
         } else {
             concurrency_limit.to_string()
         };
-        let mut line = format!(
+        format!(
             "Budget utilization: peak {} of {} concurrent worker slot(s); {} of {} loop(s) had idle capacity with nothing ready.",
             self.peak_in_flight, limit_label, self.starved_loops, self.loops
-        );
-        let mostly_starved = self.loops > 0 && self.starved_loops * 2 >= self.loops;
-        let ran_narrow = self.loops >= 3 && self.peak_in_flight <= 2;
-        if is_deep && (mostly_starved || ran_narrow) {
-            line.push_str(
-                "\nDeep-mode hint: the graph ran much narrower than the agent budget. If coverage \
-                 matters, expand remaining or follow-up work into MANY independent sibling nodes \
-                 (depends_on only for real data dependencies) so the ready set fills the budget.",
-            );
-        }
-        line
+        )
     }
 }
 
@@ -863,10 +736,7 @@ async fn run_swarm_plan_in_background(
     let wake = params.wake.unwrap_or(true);
     // Keep the display name free of the "·" separator used by the background
     // notification markdown header, or downstream parsing mis-splits the label.
-    let display_name = format!(
-        "run_plan ({} nodes, {} mode)",
-        initial_summary.item_count, initial_summary.mode
-    );
+    let display_name = format!("run_plan ({} tasks)", initial_summary.item_count);
 
     let bg_ctx = ctx.clone();
     let info = crate::background::global()
@@ -904,14 +774,13 @@ async fn run_swarm_plan_in_background(
     let output = format!(
         "🐝 Swarm plan running in background.\n\n\
          Task ID: {}\n\
-         Plan: {} node(s), {} mode\n\
+         Plan: {} task(s)\n\
          Output file: {}\n\n\
          {}\n\
          Check progress: use the `bg` tool with action=\"status\" and task_id=\"{}\", or `swarm plan_status`.\n\
          Note: a server reload stops this driver (workers keep running); rerun `swarm run_plan` to resume driving the same plan.",
         info.task_id,
         initial_summary.item_count,
-        initial_summary.mode,
         info.output_file.display(),
         delivery_note,
         info.task_id,
@@ -1055,12 +924,6 @@ fn format_run_plan_terminal_summary(
         summary.active_ids.len(),
         assignment_count
     );
-    if summary.mode.eq_ignore_ascii_case("deep") {
-        output.push_str(&format!(
-            "\nGrowth: {} seeded -> {} nodes ({} machinery-grown: expansions, gate-injected gaps, gates).",
-            summary.seeded_count, summary.item_count, summary.grown_count
-        ));
-    }
     if !summary.failed_ids.is_empty() {
         output.push_str(&format!(
             "\nFailed nodes: {}. This run did NOT finish cleanly; inspect them with `swarm plan_status` and retry or salvage before trusting the result.",
@@ -1242,21 +1105,16 @@ async fn run_swarm_plan_loop(
     params: &CommunicateInput,
     reporter: &RunPlanReporter,
 ) -> Result<ToolOutput> {
-    let initial_summary = fetch_plan_status(&ctx.session_id).await?;
-    let is_deep = initial_summary.mode.eq_ignore_ascii_case("deep");
-
-    let configured_deep_cap = crate::config::config().agents.swarm_max_concurrent_agents;
-    let concurrency_limit =
-        resolve_run_plan_concurrency(params.concurrency_limit, is_deep, configured_deep_cap);
+    // Fail fast when the plan cannot be read before spawning any workers.
+    fetch_plan_status(&ctx.session_id).await?;
+    let concurrency_limit = resolve_run_plan_concurrency(params.concurrency_limit);
     let timeout_minutes = params.timeout_minutes.unwrap_or(60).max(1);
     let retain_agents = params.retain_agents.unwrap_or(false);
     let spawn_if_needed = params.spawn_if_needed.or(Some(true));
-    // Default to a fresh worker per task-graph node. Reusing a worker that already
-    // completed a *different* node carries that node's conversation into the next
-    // assignment, and the model often just re-reports its prior result instead of
-    // doing the new work (observed leaving gap/synthesis nodes stuck). The task-DAG
-    // model assumes clean, isolated workers, so unless the caller explicitly opts
-    // into reuse (`prefer_spawn=false`), prefer spawning a fresh worker per node.
+    // Default to a fresh worker per task. Reusing a worker that already completed
+    // a *different* task carries that conversation into the next assignment, and
+    // the model often just re-reports its prior result instead of doing the new
+    // work. Callers can opt into reuse with `prefer_spawn=false`.
     let prefer_spawn = params.prefer_spawn.or(Some(true));
     let mut assignment_count = 0usize;
     let mut loop_count = 0usize;
@@ -1323,18 +1181,7 @@ async fn run_swarm_plan_loop(
         if no_more_runnable || terminal_count >= summary.item_count {
             let mut output =
                 format_run_plan_terminal_summary(loop_count, &summary, assignment_count);
-            output.push_str(&format!(
-                "\n{}",
-                utilization.report(concurrency_limit, is_deep)
-            ));
-            if !summary.low_confidence_ids.is_empty() {
-                output.push_str(&format!(
-                    "\nConfidence coverage: {} completed node(s) self-reported LOW confidence: {}. \
-                     Consider seeding follow-up nodes to shore these up before trusting the result.",
-                    summary.low_confidence_ids.len(),
-                    summary.low_confidence_ids.join(", ")
-                ));
-            }
+            output.push_str(&format!("\n{}", utilization.report(concurrency_limit)));
             if retain_agents {
                 output.push_str("\nRetained spawned workers because retain_agents=true.");
             } else {
@@ -1608,57 +1455,7 @@ fn format_status_snapshot(snapshot: &AgentStatusSnapshot) -> ToolOutput {
 }
 
 fn format_plan_status(summary: &PlanGraphStatus) -> ToolOutput {
-    let mut output = format_comm_plan_status(summary);
-    if let Some(budget_line) = plan_status_budget_line(
-        summary,
-        crate::config::config().agents.swarm_max_concurrent_agents,
-    ) {
-        output.push_str(&budget_line);
-    }
-    ToolOutput::new(output)
-}
-
-/// Deep-mode budget line for `plan_status`: how wide the ready frontier is
-/// versus the concurrency budget, with a widen-the-graph nudge when the ready
-/// set cannot fill the slots. This makes under-utilization visible at plan
-/// time, before `run_plan` even starts, so the coordinator can restructure the
-/// graph instead of discovering the waste after the run. Pure over its inputs
-/// for unit testing; returns `None` for light plans.
-fn plan_status_budget_line(summary: &PlanGraphStatus, deep_cap: usize) -> Option<String> {
-    if !summary.mode.eq_ignore_ascii_case("deep") {
-        return None;
-    }
-    let budget = resolve_run_plan_concurrency(None, true, deep_cap);
-    let budget_label = if budget == usize::MAX {
-        format!("{} (member cap)", jcode_swarm_core::MAX_SWARM_MEMBERS)
-    } else {
-        budget.to_string()
-    };
-    let ready_width = summary.ready_ids.len();
-    let active_width = summary.active_ids.len();
-    let mut line = format!(
-        "  Parallel budget: {} concurrent worker slot(s); ready set is {} wide ({} active).\n",
-        budget_label, ready_width, active_width
-    );
-    let effective_budget = if budget == usize::MAX {
-        jcode_swarm_core::MAX_SWARM_MEMBERS
-    } else {
-        budget
-    };
-    // Nudge only when narrowness is structural: the frontier cannot fill the
-    // budget while other non-terminal work exists but is serialized behind
-    // depends_on edges. A small plan that is simply almost done gets no nudge.
-    let frontier = ready_width + active_width;
-    let terminal = summary.completed_ids.len() + summary.cycle_ids.len();
-    let serialized_remaining = summary.item_count > terminal + frontier;
-    if frontier < effective_budget && serialized_remaining {
-        line.push_str(
-            "  The ready frontier is narrower than the budget while more work waits behind \
-             depends_on edges: prefer expand_node with MANY independent siblings (depends_on \
-             only for real data dependencies) to widen it.\n",
-        );
-    }
-    Some(line)
+    ToolOutput::new(format_comm_plan_status(summary))
 }
 
 fn format_context_history(target: &str, messages: &[HistoryMessage]) -> ToolOutput {
@@ -1884,16 +1681,6 @@ struct CommunicateInput {
     #[serde(default)]
     plan_items: Option<Vec<PlanItem>>,
     #[serde(default)]
-    node_id: Option<String>,
-    #[serde(default)]
-    gate_id: Option<String>,
-    /// Task-DAG node specs for task_graph/expand_node/inject_gap actions.
-    #[serde(default)]
-    nodes: Option<Vec<crate::protocol::TaskGraphNodeSpec>>,
-    /// Handoff artifact (object) for complete_node.
-    #[serde(default)]
-    artifact: Option<serde_json::Value>,
-    #[serde(default)]
     target_status: Option<Vec<String>>,
     #[serde(default)]
     session_ids: Option<Vec<String>>,
@@ -2012,14 +1799,13 @@ impl Tool for CommunicateTool {
                     "enum": ["share", "share_append", "read", "message", "broadcast", "dm", "channel", "list", "list_channels", "channel_members", "list_swarms", "set_swarm_label",
                              "propose_plan", "approve_plan", "reject_plan", "spawn", "stop", "assign_role",
                              "status", "report", "plan_status", "summary", "read_context", "resync_plan", "assign_task", "assign_next", "fill_slots", "run_plan", "cleanup",
-                             "task_graph", "expand_node", "complete_node", "inject_gap",
                              "start", "start_task", "wake", "resume", "retry", "reassign", "replace", "salvage",
                              "subscribe_channel", "unsubscribe_channel", "await_members", "list_models"],
                     "description": "Action. spawn requires label and should include prompt. list_models shows available models/routes."
                 },
                 "key": {
                     "type": "string",
-                    "description": "Shared-context key for share/share_append/read. Discouraged: prefer the repo and node artifacts."
+                    "description": "Shared-context key for share/share_append/read. Discouraged: prefer the repo and DMs."
                 },
                 "value": {
                     "type": "string"
@@ -2054,7 +1840,7 @@ impl Tool for CommunicateTool {
                 },
                 "channel": {
                     "type": "string",
-                    "description": "Channel name for channel actions. Discouraged: prefer DMs and task-graph artifacts."
+                    "description": "Channel name for channel actions. Discouraged: prefer DMs."
                 },
                 "proposer_session": { "type": "string" },
                 "reason": { "type": "string" },
@@ -2120,8 +1906,8 @@ impl Tool for CommunicateTool {
                 },
                 "mode": {
                     "type": "string",
-                    "enum": ["all", "any", "deep", "light"],
-                    "description": "task_graph: deep (gated) or light (fan-out). await_members: all or any."
+                    "enum": ["all", "any"],
+                    "description": "await_members: all or any."
                 },
                 "target_status": {
                     "type": "array",
@@ -2172,44 +1958,6 @@ impl Tool for CommunicateTool {
                 }
             }
         });
-
-        // Task-DAG properties are added after the macro to keep `json!` nesting
-        // depth under the macro recursion limit.
-        if let Some(props) = schema
-            .get_mut("properties")
-            .and_then(|value| value.as_object_mut())
-        {
-            props.insert(
-                "node_id".to_string(),
-                json!({
-                    "type": "string",
-                    "description": "Task-DAG node id for expand_node/complete_node."
-                }),
-            );
-            props.insert(
-                "gate_id".to_string(),
-                json!({
-                    "type": "string",
-                    "description": "Gate node id for inject_gap (a critique/verify gate the caller owns)."
-                }),
-            );
-            props.insert(
-                "nodes".to_string(),
-                json!({
-                    "type": "array",
-                    "description": "Node specs for task_graph/expand_node/inject_gap. Each: {id, content, kind?, depends_on?, priority?}.",
-                    "items": { "type": "object", "additionalProperties": true }
-                }),
-            );
-            props.insert(
-                "artifact".to_string(),
-                json!({
-                    "type": "object",
-                    "description": "Handoff artifact for complete_node: findings, evidence[], validation, open_questions[], confidence.",
-                    "additionalProperties": true
-                }),
-            );
-        }
 
         // `swarm` is a multi-action tool, so putting `label` in the top-level
         // `required` array would incorrectly require it for read/list/message and
@@ -2376,7 +2124,7 @@ impl Tool for CommunicateTool {
                 // coordinator reaches the whole swarm). Any `to_session`/
                 // `channel` is intentionally ignored so the action stays an
                 // unambiguous group send; use `message`/`dm`/`channel` to target.
-                // Prefer DMs or task-graph artifacts; group sends are for rare
+                // Prefer DMs; group sends are for rare
                 // coordination moments, not routine status updates.
                 let message = params
                     .message
@@ -2693,169 +2441,6 @@ impl Tool for CommunicateTool {
                 }
             }
 
-            "task_graph" | "seed_graph" => {
-                let nodes = params
-                    .nodes
-                    .clone()
-                    .ok_or_else(|| anyhow::anyhow!("'nodes' is required for task_graph action"))?;
-                if nodes.is_empty() {
-                    return Err(anyhow::anyhow!("'nodes' must include at least one node"));
-                }
-                let count = nodes.len();
-                let mut seed_nodes = nodes.clone();
-                let request = Request::CommSeedGraph {
-                    id: REQUEST_ID,
-                    session_id: ctx.session_id.clone(),
-                    mode: params.mode.clone(),
-                    nodes: seed_nodes.clone(),
-                };
-                let mut response = send_request(request)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to seed task graph: {}", e))?;
-                let mut changes = Vec::new();
-                let mut occupied = None;
-                // At most one durable collision can be resolved per request. The
-                // extra iteration consumes the final success response after all
-                // colliding ids have been remapped.
-                for _ in 0..=nodes.len() {
-                    let Some(conflicting_id) = seed_node_id_collision(&response) else {
-                        ensure_success(&response)?;
-                        let suffix = if changes.is_empty() {
-                            String::new()
-                        } else {
-                            format!(
-                                " Renamed conflicting ids: {}.",
-                                format_seed_remaps(&changes)
-                            )
-                        };
-                        return Ok(ToolOutput::new(format!(
-                            "Seeded task graph ({} nodes).{}",
-                            count, suffix
-                        )));
-                    };
-                    if occupied.is_none() {
-                        let summary = fetch_plan_status(&ctx.session_id).await?;
-                        occupied = Some(plan_graph_node_ids(&summary));
-                    }
-                    let occupied = occupied
-                        .as_ref()
-                        .expect("occupied ids were initialized above");
-                    let (remapped, mut remaps) = remap_conflicting_seed_nodes(
-                        &seed_nodes,
-                        occupied,
-                        conflicting_id,
-                        &seed_retry_scope(&ctx),
-                    );
-                    if remaps.is_empty() {
-                        ensure_success(&response)?;
-                        unreachable!("a duplicate seed error should have returned above")
-                    }
-                    seed_nodes = remapped;
-                    changes.append(&mut remaps);
-                    response = send_request(Request::CommSeedGraph {
-                        id: REQUEST_ID,
-                        session_id: ctx.session_id.clone(),
-                        mode: params.mode.clone(),
-                        nodes: seed_nodes.clone(),
-                    })
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to retry task graph seed: {}", e))?;
-                }
-                ensure_success(&response)?;
-                unreachable!("seed retry loop only exhausts while the server returns collisions")
-            }
-
-            "expand_node" => {
-                let node_id = params.node_id.clone().ok_or_else(|| {
-                    anyhow::anyhow!("'node_id' is required for expand_node action")
-                })?;
-                let children = params.nodes.clone().ok_or_else(|| {
-                    anyhow::anyhow!("'nodes' (children) is required for expand_node action")
-                })?;
-                if children.is_empty() {
-                    return Err(anyhow::anyhow!("expand_node requires at least one child"));
-                }
-                let count = children.len();
-                let request = Request::CommExpandNode {
-                    id: REQUEST_ID,
-                    session_id: ctx.session_id.clone(),
-                    node_id: node_id.clone(),
-                    children,
-                };
-                match send_request(request).await {
-                    Ok(response) => {
-                        ensure_success(&response)?;
-                        Ok(ToolOutput::new(format!(
-                            "Decomposed '{}' into {} children.",
-                            node_id, count
-                        )))
-                    }
-                    Err(e) => Err(anyhow::anyhow!("Failed to expand node: {}", e)),
-                }
-            }
-
-            "complete_node" => {
-                let node_id = params.node_id.clone().ok_or_else(|| {
-                    anyhow::anyhow!("'node_id' is required for complete_node action")
-                })?;
-                let artifact_json = match params.artifact.clone() {
-                    Some(value) => serde_json::to_string(&value)
-                        .map_err(|e| anyhow::anyhow!("invalid artifact: {}", e))?,
-                    None => {
-                        return Err(anyhow::anyhow!(
-                            "'artifact' object is required for complete_node action"
-                        ));
-                    }
-                };
-                let request = Request::CommCompleteNode {
-                    id: REQUEST_ID,
-                    session_id: ctx.session_id.clone(),
-                    node_id: node_id.clone(),
-                    artifact_json,
-                };
-                match send_request(request).await {
-                    Ok(response) => {
-                        ensure_success(&response)?;
-                        Ok(ToolOutput::new(format!("Completed node '{}'.", node_id)))
-                    }
-                    Err(e) => Err(anyhow::anyhow!("Failed to complete node: {}", e)),
-                }
-            }
-
-            "inject_gap" => {
-                let gate_id = params
-                    .gate_id
-                    .clone()
-                    .or_else(|| params.node_id.clone())
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("'gate_id' is required for inject_gap action")
-                    })?;
-                let nodes = params
-                    .nodes
-                    .clone()
-                    .ok_or_else(|| anyhow::anyhow!("'nodes' is required for inject_gap action"))?;
-                if nodes.is_empty() {
-                    return Err(anyhow::anyhow!("inject_gap requires at least one node"));
-                }
-                let count = nodes.len();
-                let request = Request::CommInjectGap {
-                    id: REQUEST_ID,
-                    session_id: ctx.session_id.clone(),
-                    gate_id: gate_id.clone(),
-                    nodes,
-                };
-                match send_request(request).await {
-                    Ok(response) => {
-                        ensure_success(&response)?;
-                        Ok(ToolOutput::new(format!(
-                            "Injected {} gap node(s) from gate '{}'.",
-                            count, gate_id
-                        )))
-                    }
-                    Err(e) => Err(anyhow::anyhow!("Failed to inject gap nodes: {}", e)),
-                }
-            }
-
             "spawn" => {
                 let label = params.required_spawn_label()?;
                 let request = Request::CommSpawn {
@@ -2874,10 +2459,10 @@ impl Tool for CommunicateTool {
                     Ok(ServerEvent::CommSpawnResponse { new_session_id, .. })
                         if !new_session_id.is_empty() =>
                     {
-                        Ok(ToolOutput::new(format!(
-                            "Spawned new agent: {}",
-                            new_session_id
-                        )))
+                        Ok(
+                            ToolOutput::new(format!("Spawned new agent: {}", new_session_id))
+                                .with_metadata(serde_json::json!({"session_id": new_session_id})),
+                        )
                     }
                     Ok(response) => {
                         ensure_success(&response)?;

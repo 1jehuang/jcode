@@ -33,14 +33,18 @@ use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, LazyLock, RwLock as StdRwLock, Weak};
 use std::time::{Duration, Instant};
-use tokio::net::TcpStream;
 use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
-use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Error as WsError;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
+
+mod model_selection;
+mod openai_ws_connect;
+use openai_ws_connect::connect_ws;
+mod native_compaction;
+mod openai_stream_cancellation;
+mod openai_stream_diagnostics;
 
 const CHATGPT_API_BASE: &str = "https://chatgpt.com/backend-api/codex";
 const RESPONSES_PATH: &str = "responses";
@@ -296,10 +300,12 @@ fn openai_request_model(request: &Value) -> String {
 /// Keeps the connection alive across turns so we can use `previous_response_id`
 /// to send only new items instead of the full conversation each turn.
 struct PersistentWsState {
-    ws_stream: WebSocketStream<MaybeTlsStream<TcpStream>>,
+    ws_stream: openai_ws_connect::OpenAIWs,
     /// Actual handshake identity. Never logged. Forks can update shared
     /// credentials without directly clearing this provider's private socket.
-    identity: (String, Option<String>, String),
+    identity: (String, Option<String>, String, Option<String>),
+    /// Cache affinity used by the handshake. A session rebind must reconnect.
+    cache_key: Option<String>,
     last_response_id: String,
     connected_at: Instant,
     last_activity_at: Instant,
@@ -315,6 +321,8 @@ struct PersistentWsState {
     /// rewrite earlier items (for example, when tool outputs are reordered).
     /// A count alone is not a safe continuation cursor in that case.
     last_input_item_hashes: Vec<u64>,
+    /// Actual output of the previous response, used to remove only server-owned replay.
+    last_response_output: Vec<Value>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -394,68 +402,8 @@ impl PersistentWsState {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct WsInputStats {
-    total_items: usize,
-    message_items: usize,
-    function_call_items: usize,
-    function_call_output_items: usize,
-    other_items: usize,
-}
-
-impl WsInputStats {
-    fn tool_callback_count(self) -> usize {
-        self.function_call_output_items
-    }
-
-    fn log_fields(self) -> String {
-        format!(
-            "items={} messages={} function_calls={} tool_outputs={} other={}",
-            self.total_items,
-            self.message_items,
-            self.function_call_items,
-            self.function_call_output_items,
-            self.other_items
-        )
-    }
-}
-
-fn summarize_ws_input(items: &[Value]) -> WsInputStats {
-    let mut stats = WsInputStats::default();
-    for item in items {
-        stats.total_items += 1;
-        match item.get("type").and_then(|value| value.as_str()) {
-            Some("message") => stats.message_items += 1,
-            Some("function_call") => stats.function_call_items += 1,
-            Some("function_call_output") => stats.function_call_output_items += 1,
-            _ => stats.other_items += 1,
-        }
-    }
-    stats
-}
-
-fn persistent_ws_input_item_hashes(input: &[Value]) -> Vec<u64> {
-    input
-        .iter()
-        .map(jcode_provider_core::fingerprint::stable_hash_json)
-        .collect()
-}
-
-fn persistent_ws_incremental_items(input: &[Value], start_index: usize) -> (Vec<Value>, usize) {
-    let mut skipped_reasoning_items = 0usize;
-    let incremental_items = input[start_index..]
-        .iter()
-        .filter_map(|item| {
-            if item.get("type").and_then(|value| value.as_str()) == Some("reasoning") {
-                skipped_reasoning_items += 1;
-                None
-            } else {
-                Some(item.clone())
-            }
-        })
-        .collect();
-    (incremental_items, skipped_reasoning_items)
-}
+mod ws_input;
+use ws_input::*;
 
 fn persistent_ws_idle_needs_healthcheck(idle_for: Duration) -> bool {
     idle_for >= Duration::from_secs(WEBSOCKET_PERSISTENT_HEALTHCHECK_IDLE_SECS)
@@ -503,6 +451,25 @@ fn format_status_duration(duration: Duration) -> String {
 }
 
 async fn ensure_persistent_ws_is_healthy(
+    state: &mut PersistentWsState,
+    verbose: bool,
+) -> Result<PersistentWsHealth, String> {
+    // Include ping readiness/flush and server-ping replies in the same budget.
+    // Otherwise a background keepalive can hold the state mutex indefinitely.
+    tokio::time::timeout(
+        Duration::from_millis(WEBSOCKET_PERSISTENT_HEALTHCHECK_TIMEOUT_MS),
+        persistent_ws_healthcheck(state, verbose),
+    )
+    .await
+    .map_err(|_| {
+        format!(
+            "healthcheck timeout after {}ms",
+            WEBSOCKET_PERSISTENT_HEALTHCHECK_TIMEOUT_MS
+        )
+    })?
+}
+
+async fn persistent_ws_healthcheck(
     state: &mut PersistentWsState,
     verbose: bool,
 ) -> Result<PersistentWsHealth, String> {
@@ -639,10 +606,11 @@ fn spawn_persistent_ws_keepalive_with_interval(
                 return;
             };
             let mut guard = persistent_ws.lock().await;
-            let Some(state) = guard.as_mut() else {
+            let Some(mut state) = guard.take() else {
                 return;
             };
             if state.connected_at != connection_started_at {
+                *guard = Some(state);
                 return;
             }
 
@@ -688,8 +656,8 @@ fn spawn_persistent_ws_keepalive_with_interval(
             // used before foreground reuse while holding the state mutex. This
             // keeps one reader at a time and gives server control frames a
             // bounded opportunity to be processed.
-            match ensure_persistent_ws_is_healthy(state, false).await {
-                Ok(PersistentWsHealth::Healthy) => {}
+            match ensure_persistent_ws_is_healthy(&mut state, false).await {
+                Ok(PersistentWsHealth::Healthy) => *guard = Some(state),
                 Ok(PersistentWsHealth::Reconnect {
                     reset_reason,
                     detail,
@@ -738,12 +706,15 @@ pub struct OpenAIProvider {
     client: Client,
     credentials: Arc<RwLock<CodexCredentials>>,
     credential_mode: Arc<RwLock<OpenAICredentialMode>>,
+    oauth_account: StdRwLock<Option<String>>,
     model: Arc<RwLock<String>>,
     prompt_cache_key: Option<String>,
+    cache_session_id: StdRwLock<String>,
     prompt_cache_retention: Option<String>,
     max_output_tokens: Option<u32>,
     reasoning_effort: Arc<StdRwLock<Option<String>>>,
     model_reasoning_efforts: Arc<StdRwLock<HashMap<String, Vec<String>>>>,
+    model_service_tiers: Arc<StdRwLock<HashMap<String, Vec<String>>>>,
     service_tier: Arc<StdRwLock<Option<String>>>,
     native_compaction_mode: OpenAINativeCompactionMode,
     native_compaction_threshold_tokens: usize,
@@ -761,6 +732,25 @@ pub struct OpenAIProvider {
 }
 
 impl OpenAIProvider {
+    fn new_cache_session_id() -> String {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+        format!(
+            "jcode-{}-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_micros(),
+            NEXT_ID.fetch_add(1, AtomicOrdering::Relaxed)
+        )
+    }
+
+    fn cache_routing_key(&self) -> String {
+        self.prompt_cache_key.clone().unwrap_or_else(|| {
+            self.cache_session_id
+                .read()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone()
+        })
+    }
+
     fn effective_prompt_cache_retention<'a>(
         model_id: &str,
         configured: Option<&'a str>,
@@ -877,12 +867,18 @@ impl OpenAIProvider {
             client: jcode_provider_core::shared_http_client(),
             credentials: Arc::new(RwLock::new(credentials)),
             credential_mode: Arc::new(RwLock::new(credential_mode)),
+            oauth_account: StdRwLock::new(None),
             model: Arc::new(RwLock::new(model)),
             prompt_cache_key,
+            cache_session_id: StdRwLock::new(Self::new_cache_session_id()),
             prompt_cache_retention,
             max_output_tokens,
             reasoning_effort: Arc::new(StdRwLock::new(reasoning_effort)),
             model_reasoning_efforts: Arc::new(StdRwLock::new(model_reasoning_efforts)),
+            model_service_tiers: Arc::new(StdRwLock::new(
+                jcode_base::provider::cached_openai_service_tiers_for_scope(&catalog_scope)
+                    .unwrap_or_default(),
+            )),
             service_tier: Arc::new(StdRwLock::new(service_tier)),
             native_compaction_mode,
             native_compaction_threshold_tokens,
@@ -895,11 +891,26 @@ impl OpenAIProvider {
             browser_only: Arc::new(AtomicBool::new(browser_only)),
         };
         provider.revalidate_reasoning_effort();
+        provider.warn_unsupported_service_tier();
         provider
     }
 
     fn is_browser_only(&self) -> bool {
         self.browser_only.load(AtomicOrdering::Acquire)
+    }
+
+    fn load_selected_credentials(&self, mode: OpenAICredentialMode) -> Result<CodexCredentials> {
+        match (mode, self.oauth_account_label()) {
+            (OpenAICredentialMode::Auto | OpenAICredentialMode::OAuth, Some(label)) => {
+                jcode_base::auth::codex::load_credentials_for_account(&label)
+            }
+            _ => load_credentials_for_mode(mode),
+        }
+    }
+
+    fn refresh_account_label(&self) -> Option<String> {
+        self.oauth_account_label()
+            .or_else(jcode_base::auth::codex::active_account_label)
     }
 
     pub(crate) fn reload_credentials_now(&self) {
@@ -908,11 +919,12 @@ impl OpenAIProvider {
             .try_read()
             .map(|mode| *mode)
             .unwrap_or(OpenAICredentialMode::Auto);
-        if let Ok(credentials) = load_credentials_for_mode(mode) {
+        if let Ok(credentials) = self.load_selected_credentials(mode) {
             match self.credentials.try_write() {
                 Ok(mut guard) => {
                     *guard = credentials;
                     self.browser_only.store(false, AtomicOrdering::Release);
+                    drop(guard);
                     self.reload_cached_reasoning_efforts();
                 }
                 Err(_) => {
@@ -927,11 +939,12 @@ impl OpenAIProvider {
     }
 
     pub(crate) fn set_credential_mode(&self, mode: OpenAICredentialMode) -> Result<()> {
-        let credentials = load_credentials_for_mode(mode)?;
+        let credentials = self.load_selected_credentials(mode)?;
         match self.credentials.try_write() {
             Ok(mut guard) => {
                 *guard = credentials;
                 self.browser_only.store(false, AtomicOrdering::Release);
+                drop(guard);
                 self.reload_cached_reasoning_efforts();
             }
             Err(_) => {
@@ -966,15 +979,63 @@ impl OpenAIProvider {
     }
 
     fn reload_cached_reasoning_efforts(&self) {
-        let cached = jcode_base::provider::cached_openai_reasoning_efforts_for_scope(
-            &self.catalog_scope(),
-        )
-        .unwrap_or_default();
+        let tiers =
+            jcode_base::provider::cached_openai_service_tiers_for_scope(&self.catalog_scope())
+                .unwrap_or_default();
+        *self
+            .model_service_tiers
+            .write()
+            .unwrap_or_else(|p| p.into_inner()) = tiers;
+        self.warn_unsupported_service_tier();
+        let cached =
+            jcode_base::provider::cached_openai_reasoning_efforts_for_scope(&self.catalog_scope())
+                .unwrap_or_default();
         match self.model_reasoning_efforts.write() {
             Ok(mut efforts) => *efforts = cached,
             Err(poisoned) => *poisoned.into_inner() = cached,
         }
         self.revalidate_reasoning_effort();
+    }
+
+    fn supports_service_tier(&self, model: &str, tier: &str) -> bool {
+        if tier == "flex" {
+            return true;
+        }
+        let model = jcode_provider_core::model_id::canonical(model);
+        let tiers = self
+            .model_service_tiers
+            .read()
+            .unwrap_or_else(|p| p.into_inner());
+        if let Some(advertised) = tiers
+            .get(&model)
+            .or_else(|| tiers.get(jcode_provider_core::model_id::slash_base(&model)))
+        {
+            return advertised.iter().any(|id| id == tier);
+        }
+        tier != "ultrafast"
+            || jcode_provider_core::service_tier::openai_model_supports_ultrafast(&model)
+    }
+
+    fn effective_service_tier(&self, model: &str) -> Option<String> {
+        self.service_tier
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+            .filter(|tier| self.supports_service_tier(model, tier))
+    }
+
+    fn warn_unsupported_service_tier(&self) {
+        let model = self.model();
+        let stored = self
+            .service_tier
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        if let Some(tier) = stored.filter(|tier| !self.supports_service_tier(&model, tier)) {
+            jcode_base::logging::warn(&format!(
+                "OpenAI model '{model}' does not advertise configured service tier '{tier}'; omitting it from requests (configuration unchanged)"
+            ));
+        }
     }
 
     pub(crate) fn credential_mode_snapshot(&self) -> OpenAICredentialMode {
@@ -1021,17 +1082,29 @@ impl OpenAIProvider {
         )
     }
 
+    fn selected_catalog_scope_for(&self, credentials: &CodexCredentials) -> String {
+        if Self::is_chatgpt_mode(credentials)
+            && let Some(label) = self.oauth_account_label()
+        {
+            label
+        } else {
+            Self::catalog_scope_for(credentials)
+        }
+    }
+
     pub(crate) fn catalog_scope(&self) -> String {
         match self.credentials.try_read() {
-            Ok(credentials) => Self::catalog_scope_for(&credentials),
+            Ok(credentials) => self.selected_catalog_scope_for(&credentials),
             // Writers hold this lock only briefly (token refresh / mode swap).
             // Fall back to the account scope rather than blocking.
-            Err(_) => jcode_base::provider::openai_catalog_scope_for_credential(true, ""),
+            Err(_) => self.oauth_account_label().unwrap_or_else(|| {
+                jcode_base::provider::openai_catalog_scope_for_credential(true, "")
+            }),
         }
     }
 
     async fn catalog_scope_async(&self) -> String {
-        Self::catalog_scope_for(&*self.credentials.read().await)
+        self.selected_catalog_scope_for(&*self.credentials.read().await)
     }
 
     fn catalog_credential_identity(credentials: &CodexCredentials) -> String {
@@ -1057,11 +1130,12 @@ impl OpenAIProvider {
         }
         match value.as_str() {
             // `swarm` is a UI sentinel meaning "configured root effort + use the swarm tool".
-            // We keep it stored so the UI/session reflect it and the agent injects
-            // the swarm directive; it is translated to a real effort at request time
-            // by `api_reasoning_effort`.
-            "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "swarm"
-            | "swarm-deep" => Some(value),
+            // We keep it stored so the UI/session reflect it and the agent appends
+            // the swarm reminder to user messages; it is translated to a real
+            // effort at request time by `api_reasoning_effort`.
+            "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "swarm" => {
+                Some(value)
+            }
             other => {
                 jcode_base::logging::info(&format!(
                     "Warning: Ignoring unsupported OpenAI reasoning effort '{}'; expected none|minimal|low|medium|high|xhigh|max.",
@@ -1304,11 +1378,7 @@ impl OpenAIProvider {
         // Map the `swarm` sentinel (and any future aliases) to the real effort
         // value the API understands.
         let api_reasoning_effort = self.api_reasoning_effort(reasoning_effort.as_deref());
-        let service_tier = self
-            .service_tier
-            .read()
-            .map(|guard| guard.clone())
-            .unwrap_or_else(|poisoned| poisoned.into_inner().clone());
+        let service_tier = self.effective_service_tier(model_id);
         let native_compaction_threshold =
             self.native_compaction_threshold_for_context_window(self.context_window());
         Self::build_response_request(
@@ -1320,7 +1390,7 @@ impl OpenAIProvider {
             self.max_output_tokens,
             api_reasoning_effort.as_deref(),
             service_tier.as_deref(),
-            self.prompt_cache_key.as_deref(),
+            Some(&self.cache_routing_key()),
             self.prompt_cache_retention.as_deref(),
             native_compaction_threshold,
         )
@@ -1371,6 +1441,7 @@ impl OpenAIProvider {
             request["reasoning"] = openai_stream_runtime::reasoning_payload(effort);
         }
 
+        // The provider filters against the actual request model before building.
         if let Some(service_tier) = service_tier {
             request["service_tier"] = serde_json::json!(service_tier);
         }
@@ -1384,15 +1455,16 @@ impl OpenAIProvider {
             ]);
         }
 
-        if !is_chatgpt_mode {
-            if let Some(key) = prompt_cache_key {
-                request["prompt_cache_key"] = serde_json::json!(key);
-            }
-            if let Some(retention) =
+        // Codex sends this for OAuth too. ChatGPT additionally derives cache
+        // affinity from the matching session-id transport header.
+        if let Some(key) = prompt_cache_key {
+            request["prompt_cache_key"] = serde_json::json!(key);
+        }
+        if !is_chatgpt_mode
+            && let Some(retention) =
                 Self::effective_prompt_cache_retention(model_id, prompt_cache_retention)
-            {
-                request["prompt_cache_retention"] = serde_json::json!(retention);
-            }
+        {
+            request["prompt_cache_retention"] = serde_json::json!(retention);
         }
 
         request
@@ -1443,14 +1515,19 @@ impl OpenAIProvider {
                     // the catalog request instead of guaranteeing a 401. Fall
                     // back to the raw snapshot if refresh fails; the fetch
                     // will then fail and finish the in-flight marker.
-                    let token = match openai_access_token(&self.credentials).await {
-                        Ok(token) => token,
-                        Err(_) => self.credentials.read().await.access_token.clone(),
-                    };
-                    jcode_base::provider::refresh_openai_model_catalog_in_background(
+                    let token =
+                        match openai_access_token(self.refresh_account_label(), &self.credentials)
+                            .await
+                        {
+                            Ok(token) => token,
+                            Err(_) if self.oauth_account_label().is_some() => String::new(),
+                            Err(_) => self.credentials.read().await.access_token.clone(),
+                        };
+                    jcode_base::provider::refresh_openai_model_catalog_in_background_for_scope(
                         token,
                         is_chatgpt_mode,
                         "openai-request-setup",
+                        scope.clone(),
                     );
                 }
             }
@@ -1524,3 +1601,6 @@ use self::websocket_health::{
 #[cfg(test)]
 #[path = "openai_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod account_binding_tests;

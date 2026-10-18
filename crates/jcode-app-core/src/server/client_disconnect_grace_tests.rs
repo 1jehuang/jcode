@@ -244,6 +244,25 @@ async fn unsaved_idle_session_expires_without_persisting_or_leaking() {
 }
 
 #[tokio::test]
+async fn unsaved_idle_session_without_swarm_member_still_expires() {
+    // A client that disconnects before subscribe registers a swarm member
+    // (window closed mid-subscribe) must not be mistaken for a replaced
+    // attachment. Previously this leaked the Agent for the server lifetime.
+    let _lock = crate::storage::lock_test_env();
+    let _home = Home::new();
+    let fixture = Fixture::new(false).await;
+    fixture.members.write().await.clear();
+    timeout(
+        Duration::from_secs(1),
+        fixture.cleanup(false, Duration::from_millis(60)),
+    )
+    .await
+    .unwrap();
+    assert!(!fixture.sessions.read().await.contains_key(&fixture.id));
+    assert!(fixture.connections.read().await.is_empty());
+}
+
+#[tokio::test]
 async fn old_grace_cannot_remove_successor_that_already_detached_again() {
     let _lock = crate::storage::lock_test_env();
     let _home = Home::new();

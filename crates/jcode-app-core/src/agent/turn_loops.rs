@@ -1,4 +1,5 @@
 use super::response_recovery::MalformedToolCallInfo;
+use super::streaming::StreamUsageRecorder;
 use super::*;
 use crate::{terminal_eprintln as eprintln, terminal_print as print, terminal_println as println};
 
@@ -10,6 +11,7 @@ impl Agent {
     /// customization can therefore still change the foreground tool snapshot;
     /// the provider is responsible for discarding an incompatible warmup.
     pub(crate) async fn prewarm_provider_idle(&self) {
+        self.provider.set_session_id(&self.session.id);
         let tools = self.tool_definitions_for_debug().await;
         let split_prompt = self.build_system_prompt_split(None);
         self.provider
@@ -52,6 +54,7 @@ impl Agent {
     }
 
     pub(super) async fn run_turn(&mut self, print_output: bool) -> Result<String> {
+        let _runtime_activity = crate::runtime_activity::global().try_enter()?;
         self.ensure_session_lease()?;
         self.set_log_context();
         let usage_turn_id = self.model_usage_turn_id();
@@ -74,6 +77,7 @@ impl Agent {
         let mut sequential_single_tool_rounds = 0u32;
         let mut batch_nudge_pending = false;
         let mut consecutive_malformed_tool_rounds = 0u32;
+        let mut unparsed_tool_markup_nudges = 0u32;
 
         loop {
             // Do not start another provider request once a cancel has been
@@ -200,7 +204,8 @@ impl Agent {
             let send_messages = stamped.as_deref().unwrap_or(&messages_with_memory);
             let prompt_has_recent_tool_result = Self::messages_end_with_tool_result(send_messages);
             self.last_status_detail = None;
-            let mut stream = match self
+            self.provider.set_session_id(&self.session.id);
+            let completion = self
                 .provider
                 .complete_split(
                     send_messages,
@@ -209,10 +214,12 @@ impl Agent {
                     &split_prompt.dynamic_part,
                     self.provider_session_id.as_deref(),
                 )
-                .await
-            {
+                .await;
+            self.sync_bound_account_route();
+            let mut stream = match completion {
                 Ok(stream) => stream,
                 Err(e) => {
+                    self.record_failed_account_route(&e.to_string());
                     if self.try_auto_compact_after_context_limit(&e.to_string()) {
                         context_limit_retries += 1;
                         if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
@@ -268,6 +275,7 @@ impl Agent {
             let mut usage_output: Option<u64> = None;
             let mut usage_cache_read: Option<u64> = None;
             let mut usage_cache_creation: Option<u64> = None;
+            let mut usage_recorder = StreamUsageRecorder::new(&self.session.id);
             let mut saw_message_end = false;
             let mut stop_reason: Option<String> = None;
             let mut _thinking_start: Option<Instant> = None;
@@ -292,6 +300,8 @@ impl Agent {
                     Ok(event) => event,
                     Err(e) => {
                         let err_str = e.to_string();
+                        self.record_failed_account_route(&err_str);
+                        usage_recorder.finish();
                         if self.try_auto_compact_after_context_limit(&err_str) {
                             log_agent_provider_stream_lifecycle(
                                 logging::LogLevel::Warn,
@@ -371,6 +381,19 @@ impl Agent {
                             io::stdout().flush()?;
                         }
                         text_content.push_str(&text);
+                    }
+                    StreamEvent::TextSuffixReplace { old_text, new_text } => {
+                        if provider_native_items.replace_text_suffix(
+                            &mut text_content,
+                            &old_text,
+                            &new_text,
+                        ) && print_output
+                        {
+                            // Plain stdout cannot retract already printed deltas.
+                            // Still surface the real source links to CLI users.
+                            crate::terminal_print!("\n{}", new_text);
+                            io::stdout().flush()?;
+                        }
                     }
                     StreamEvent::ToolUseStart { id, name } => {
                         if streaming_tools.contains_key(&id)
@@ -546,6 +569,16 @@ impl Agent {
                         if cache_creation_input_tokens.is_some() {
                             usage_cache_creation = cache_creation_input_tokens;
                         }
+                        usage_recorder.observe(
+                            self.provider.name(),
+                            &self.provider.model(),
+                            [
+                                usage_input,
+                                usage_output,
+                                usage_cache_read,
+                                usage_cache_creation,
+                            ],
+                        );
                         if let Some(input) = usage_input {
                             self.update_compaction_usage_from_stream(
                                 input,
@@ -580,6 +613,11 @@ impl Agent {
                             eprintln!("[trace] status_detail={}", detail);
                         }
                         self.last_status_detail = Some(detail);
+                    }
+                    StreamEvent::ServiceTier { tier, .. } => {
+                        if trace {
+                            eprintln!("[trace] provider_service_tier={tier}");
+                        }
                     }
                     StreamEvent::RetryRollback { attempt, max } => {
                         // Transient transport fault mid-stream; the provider is
@@ -740,6 +778,7 @@ impl Agent {
                         if trace {
                             eprintln!("[trace] stream_error {}", message);
                         }
+                        usage_recorder.finish();
                         if self.try_auto_compact_after_context_limit(&message) {
                             log_agent_provider_stream_lifecycle(
                                 logging::LogLevel::Warn,
@@ -789,6 +828,7 @@ impl Agent {
                 }
             }
 
+            usage_recorder.finish();
             if retry_after_compaction {
                 log_agent_provider_stream_lifecycle(
                     logging::LogLevel::Info,
@@ -835,18 +875,6 @@ impl Agent {
                     usage_cache_read,
                     usage_cache_creation,
                 );
-                crate::telemetry::record_provider_usage(
-                    Some(&self.session.id),
-                    self.provider.name(),
-                    &self.provider.model(),
-                    crate::telemetry::UsageSource::Agent,
-                    crate::telemetry::ProviderUsage {
-                        input_tokens: usage_input.unwrap_or(0),
-                        output_tokens: usage_output.unwrap_or(0),
-                        cache_read_input_tokens: usage_cache_read,
-                        cache_creation_input_tokens: usage_cache_creation,
-                    },
-                );
             }
 
             if print_output
@@ -882,7 +910,8 @@ impl Agent {
                 cache_creation_input_tokens: usage_cache_creation,
             };
 
-            self.recover_text_wrapped_tool_call(&mut text_content, &mut tool_calls);
+            let text_tool_recovery =
+                self.recover_text_wrapped_tool_call(&mut text_content, &mut tool_calls);
 
             let visible_text_is_empty = text_content.trim().is_empty();
 
@@ -962,6 +991,18 @@ impl Agent {
 
             // If no tool calls, we're done
             if tool_calls.is_empty() {
+                // Unparseable tool-call markup in the text (issue #1702):
+                // surface it and ask the model to re-issue the call natively.
+                if let Some(notice) = self.maybe_nudge_unparsed_tool_markup(
+                    &text_tool_recovery,
+                    stop_reason.as_deref(),
+                    &mut unparsed_tool_markup_nudges,
+                )? {
+                    if print_output {
+                        println!("\n{}", notice);
+                    }
+                    continue;
+                }
                 if self.maybe_reconsider_fable_guardrail(
                     stop_reason.as_deref(),
                     &mut fable_guardrail_reconsiderations,
@@ -1306,37 +1347,6 @@ impl Agent {
         }
 
         Ok(final_text)
-    }
-
-    pub(super) fn messages_end_with_tool_result(messages: &[Message]) -> bool {
-        messages.iter().rev().any(|message| {
-            if !matches!(message.role, Role::User) {
-                return false;
-            }
-            if message
-                .content
-                .iter()
-                .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
-            {
-                return true;
-            }
-            message.content.iter().any(|block| match block {
-                ContentBlock::Text { text, .. } => {
-                    let trimmed = text.trim();
-                    trimmed.starts_with("<system-reminder>")
-                        // The empty-post-tool continuation is itself a
-                        // User-role `<system-reminder>`. Counting it would let the
-                        // injected instruction keep this predicate true on its own,
-                        // so every later whitespace-only response appends another
-                        // continuation and spends another call, with no tool result
-                        // anywhere near.
-                        && !trimmed.starts_with(
-                            Self::EMPTY_POST_TOOL_CONTINUATION_PREFIX
-                        )
-                }
-                _ => false,
-            })
-        })
     }
 }
 
