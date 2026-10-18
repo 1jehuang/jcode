@@ -65,3 +65,25 @@ overstate server latency by up to ~1s. Use `send_history write` instead.
   startup-stub read under high load; no single structural cost.
 - First-frame header build (`[TIMING] header_sections`): 31-251ms at 19:15 but
   nothing over 20ms at 19:17, so load-dependent.
+
+## Local transcript shown late (fixed)
+
+The reload fast-start transcript is rendered off-thread, but it was only
+polled from the remote `handle_tick`, and during remote startup the tick is
+1s. Ready transcripts sat unapplied for 0.5-0.6s until server History
+arrived anyway. `d1f221cf3` polls at the top of every event-loop iteration and
+`bd5cdd457` ticks every 10ms while the transcript is pending.
+
+| Storm | `startup_transcript_applied` since app start |
+|---|---|
+| 19:23 (before) | p50 681ms, max 782ms |
+| 19:26 (after) | p50 143ms, max 295ms (all before History) |
+
+## Next: first full body wrap
+
+The frame that first paints the transcript still builds the whole body:
+19:26 storm clover 201ms, giraffe 264ms, mosquito 160ms, lizard 669ms
+(5469 wrapped lines). A tail-first build (paint the last screenful, then
+stitch older messages via the existing suffix-reuse path) would cut this,
+but prompt numbering and the delta-History prefix both assume the full
+display list, so it needs care.
