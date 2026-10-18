@@ -2349,8 +2349,18 @@ pub(super) fn prepare_body(
 
     let render_start = Instant::now();
     let mut acc = BodyAcc::default();
+    let mut role_ms: std::collections::BTreeMap<&str, (u128, usize)> = Default::default();
+    let mut slowest: (u128, usize, &str) = (0, 0, "");
     for (msg_idx, msg) in messages.iter().enumerate() {
+        let msg_start = Instant::now();
         render_message_into(&ctx, &mut acc, msg, msg_idx);
+        let us = msg_start.elapsed().as_micros();
+        let entry = role_ms.entry(msg.effective_role()).or_default();
+        entry.0 += us;
+        entry.1 += 1;
+        if us > slowest.0 {
+            slowest = (us, msg_idx, msg.effective_role());
+        }
     }
 
     // Streaming output is appended after the message boundaries are recorded so
@@ -2397,9 +2407,17 @@ pub(super) fn prepare_body(
     let wrap_ms = wrap_start.elapsed().as_millis();
     if images_ms + ctx_ms + render_ms + wrap_ms >= 100 {
         crate::logging::info(&format!(
-            "[TIMING] prepare_body: messages={}, images={images_ms}ms, ctx={ctx_ms}ms, render={render_ms}ms, wrap={wrap_ms}ms, wrapped_lines={}",
+            "[TIMING] prepare_body: messages={}, images={images_ms}ms, ctx={ctx_ms}ms, render={render_ms}ms, wrap={wrap_ms}ms, wrapped_lines={}, by_role=[{}], slowest={}us@{}({})",
             messages.len(),
-            prepared.wrapped_lines.len()
+            prepared.wrapped_lines.len(),
+            role_ms
+                .iter()
+                .map(|(role, (us, n))| format!("{role}:{}ms/{n}", us / 1000))
+                .collect::<Vec<_>>()
+                .join(" "),
+            slowest.0,
+            slowest.1,
+            slowest.2
         ));
     }
     stamp_mermaid_pending(&mut prepared, mermaid_epoch_before);
