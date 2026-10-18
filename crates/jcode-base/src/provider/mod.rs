@@ -2879,6 +2879,7 @@ impl Provider for MultiProvider {
     }
 
     fn fork(&self) -> Arc<dyn Provider> {
+        let fork_start = std::time::Instant::now();
         let current_model = self.model();
         let active = self.active_provider();
 
@@ -2953,10 +2954,21 @@ impl Provider for MultiProvider {
             post_auth_refreshes_pending: Arc::clone(&self.post_auth_refreshes_pending),
         };
 
+        let runtimes_ms = fork_start.elapsed().as_millis();
+        let catalog_start = std::time::Instant::now();
         provider.spawn_anthropic_catalog_refresh_if_needed();
         provider.spawn_openai_catalog_refresh_if_needed();
+        let catalog_ms = catalog_start.elapsed().as_millis();
+        let set_model_start = std::time::Instant::now();
         let switch_request = self.fork_model_switch_request(active, &current_model);
         let _ = provider.set_model(&switch_request);
+        crate::logging::info(&format!(
+            "[TIMING] provider fork: runtimes={}ms, catalog_spawn={}ms, set_model={}ms, total={}ms",
+            runtimes_ms,
+            catalog_ms,
+            set_model_start.elapsed().as_millis(),
+            fork_start.elapsed().as_millis()
+        ));
         Arc::new(provider)
     }
 
