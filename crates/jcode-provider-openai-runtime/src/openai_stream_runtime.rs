@@ -171,6 +171,7 @@ fn ws_stall_diagnostics(
 }
 
 /// Stream the response from OpenAI API
+#[allow(clippy::too_many_arguments)]
 fn response_http_request(
     client: &Client,
     url: &str,

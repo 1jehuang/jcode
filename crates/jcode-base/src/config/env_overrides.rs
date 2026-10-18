@@ -411,14 +411,9 @@ impl Config {
                 Some(trimmed.to_string())
             };
         }
-        for (key, target) in [(
-            "JCODE_SWARM_ROOT_EFFORT",
-            &mut self.agents.swarm_root_effort,
-        )] {
-            if let Ok(value) = std::env::var(key) {
-                let value = value.trim();
-                *target = (!value.is_empty()).then(|| value.to_string());
-            }
+        if let Ok(value) = std::env::var("JCODE_SWARM_ROOT_EFFORT") {
+            let value = value.trim();
+            self.agents.swarm_root_effort = (!value.is_empty()).then(|| value.to_string());
         }
         if let Ok(v) = std::env::var("JCODE_SWARM_SPAWN_MODE") {
             if let Some(parsed) = SwarmSpawnMode::parse(&v) {

@@ -375,14 +375,6 @@ pub(super) fn store_openai_usage_for_generation(
     }
 }
 
-pub(super) fn anthropic_usage_error(err_msg: String) -> UsageData {
-    UsageData {
-        fetched_at: Some(Instant::now()),
-        last_error: Some(err_msg),
-        ..Default::default()
-    }
-}
-
 pub(super) fn provider_report_from_usage_data(
     display_name: String,
     data: &UsageData,

@@ -2616,12 +2616,12 @@ pub async fn run_single_message_command(
     // Older model caches contain names but no account-scoped speed capabilities.
     // Hydrate those before the first headless request so an unsupported saved
     // tier cannot slip through the backward-compatible unknown-catalog path.
-    if provider.model_capabilities_need_refresh() {
-        if let Err(error) = provider.prefetch_models().await {
-            crate::logging::warn(&format!(
-                "Could not refresh model capabilities before headless run: {error}"
-            ));
-        }
+    if provider.model_capabilities_need_refresh()
+        && let Err(error) = provider.prefetch_models().await
+    {
+        crate::logging::warn(&format!(
+            "Could not refresh model capabilities before headless run: {error}"
+        ));
     }
     let registry = crate::tool::Registry::new(provider.clone()).await;
     // Load MCP servers from ~/.jcode/mcp.json so headless `jcode run` has the

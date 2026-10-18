@@ -110,6 +110,7 @@ fn tls_config() -> Result<Arc<rustls::ClientConfig>> {
 ///
 /// Errors are tungstenite's own [`WsError`] so callers keep classifying
 /// upgrade failures (for example HTTP 426) exactly as with `connect_async`.
+#[allow(clippy::result_large_err)] // tungstenite's WsError, matched by callers
 pub(crate) async fn connect_ws_with_mode<R>(
     request: R,
     mode: CompressionMode,
@@ -159,6 +160,7 @@ where
 }
 
 /// Connect a WebSocket using the configured `[provider] request_compression`.
+#[allow(clippy::result_large_err)] // tungstenite's WsError, matched by callers
 pub(crate) async fn connect_ws<R>(request: R) -> Result<(OpenAIWs, Response), WsError>
 where
     R: IntoClientRequest + Unpin,

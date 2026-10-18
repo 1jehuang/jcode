@@ -57,8 +57,8 @@ pub enum AppRuntimeMode {
 mod auth;
 mod auth_account_picker_saved_accounts;
 mod auth_remote;
-mod catchup;
 mod cache_diagnostics;
+mod catchup;
 mod commands;
 mod commit_log;
 pub(crate) use commit_log::CommitLogOverlay;
@@ -307,9 +307,17 @@ struct PendingSessionPickerLoad {
     >,
 }
 
+/// Session id, display messages, and rendered images from the fast-start thread.
+type StartupTranscript = (
+    String,
+    Vec<DisplayMessage>,
+    Vec<crate::session::RenderedImage>,
+);
+
 struct PendingModelPickerLoad {
     request_id: u64,
     signature: ModelPickerCacheSignature,
+    #[allow(dead_code)] // kept for picker load timing diagnostics
     picker_started: Instant,
     receiver: mpsc::Receiver<anyhow::Result<ModelPickerRoutesResult>>,
     /// Write the normalized routes back into `remote_model_options` when the
@@ -1309,13 +1317,7 @@ pub struct App {
     /// the conversation appears without waiting for the server's History.
     /// Send GetModelCatalog once bootstrap History has arrived.
     model_catalog_after_history: bool,
-    pending_startup_transcript: Option<
-        std::sync::mpsc::Receiver<(
-            String,
-            Vec<DisplayMessage>,
-            Vec<crate::session::RenderedImage>,
-        )>,
-    >,
+    pending_startup_transcript: Option<std::sync::mpsc::Receiver<StartupTranscript>>,
     /// Fingerprint of the locally rendered startup transcript, delivered by
     /// the startup transcript thread before display conversion so the
     /// reconnect can advertise it as `history_base` in Subscribe.
@@ -2223,7 +2225,11 @@ impl App {
         let baseline_session_id = self.kv_cache_session_id();
 
         if !has_cache_telemetry {
-            self.log_kv_cache_usage_summary(&request, optimal_input_tokens, effective_prompt_tokens);
+            self.log_kv_cache_usage_summary(
+                &request,
+                optimal_input_tokens,
+                effective_prompt_tokens,
+            );
             self.kv_cache.kv_cache_baseline = Some(KvCacheBaseline {
                 session_id: baseline_session_id,
                 cache_generation: request.cache_generation,

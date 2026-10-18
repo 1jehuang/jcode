@@ -125,7 +125,10 @@ fn spawn_prewarm_with_min_bytes(session_ids: Vec<String>, min_bytes: u64) {
     let mut sized: Vec<(u64, String)> = session_ids
         .into_iter()
         .filter_map(|id| {
-            let len = session_path(&id).ok().and_then(|p| std::fs::metadata(p).ok())?.len();
+            let len = session_path(&id)
+                .ok()
+                .and_then(|p| std::fs::metadata(p).ok())?
+                .len();
             (len >= min_bytes).then_some((len, id))
         })
         .collect();
@@ -288,7 +291,11 @@ mod tests {
             let prev = std::env::var_os("JCODE_HOME");
             crate::env::set_var("JCODE_HOME", dir.path());
             lock_entries().clear();
-            Self { _dir: dir, prev, _lock: lock }
+            Self {
+                _dir: dir,
+                prev,
+                _lock: lock,
+            }
         }
     }
 
@@ -382,7 +389,9 @@ mod tests {
     #[test]
     fn several_sessions_are_all_prewarmed_by_the_worker_pool() {
         let _home = Home::new();
-        let ids: Vec<String> = (0..5).map(|i| format!("session_prewarm_pool_{i}")).collect();
+        let ids: Vec<String> = (0..5)
+            .map(|i| format!("session_prewarm_pool_{i}"))
+            .collect();
         for id in &ids {
             saved_session(id, id);
         }
@@ -404,7 +413,10 @@ mod tests {
         lock_entries().insert("session_prewarm_queued".into(), Entry::Queued);
         let start = Instant::now();
         assert!(take("session_prewarm_queued").is_none());
-        assert!(start.elapsed() < Duration::from_millis(100), "must not wait");
+        assert!(
+            start.elapsed() < Duration::from_millis(100),
+            "must not wait"
+        );
         assert!(lock_entries().get("session_prewarm_queued").is_none());
         // The prewarm thread then skips it instead of parsing a claimed session.
         prewarm_one("session_prewarm_queued");

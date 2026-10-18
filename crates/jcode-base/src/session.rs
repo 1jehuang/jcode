@@ -727,10 +727,6 @@ impl Session {
         }
     }
 
-    fn mark_env_snapshots_full_dirty(&mut self) {
-        self.persist_state.env_snapshots_mode = PersistVectorMode::Full;
-    }
-
     fn mark_memory_injections_append_dirty(&mut self) {
         if self.persist_state.memory_injections_mode != PersistVectorMode::Full {
             self.persist_state.memory_injections_mode = PersistVectorMode::Append;
