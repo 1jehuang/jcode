@@ -1102,4 +1102,91 @@ mod tests {
         assert_eq!(unicode_width::UnicodeWidthStr::width(clipped.as_str()), 30);
         assert!(clipped.ends_with('…'));
     }
+
+    #[test]
+    fn mouse_hit_regions_digit_6_to_9_staged_input_editing_and_six_lens_cache_invalidation() {
+        let mut app = crate::tui::app::tests::create_test_app();
+        app.suggested_replies.force_enable_in_tests = true;
+        app.push_display_message(super::super::DisplayMessage::user(
+            "Проверим клики мышью, цифры 6..9 и редактирование черновика",
+        ));
+        app.push_display_message(super::super::DisplayMessage::assistant("Готово."));
+
+        let ctx = SuggestedRepliesContext::from_transcript(
+            "[user]: Проверим клики мышью, цифры 6..9 и редактирование черновика\n\n[assistant]: Готово.",
+        );
+        let resp = score_locally_with_context(&ctx, None, &[], None, 0.55, 8);
+        assert_eq!(resp.secondary_suggestions.len(), 8);
+        app.apply_suggested_replies_response(resp.clone());
+
+        let view = crate::tui::TuiState::suggested_replies_view(&app).expect("view present");
+        let _rows = render_panel_lines(&view, 120, 12);
+
+        // 1. Mouse hit-testing on rendered panel: row 0 = DefaultAction, row 7 = Secondary(6).
+        assert_eq!(
+            crate::tui::ui::suggested_reply_target_from_screen(4, 0),
+            Some(SuggestedReplyFocus::DefaultAction)
+        );
+        let hit_row_7 = crate::tui::ui::suggested_reply_target_from_screen(4, 7)
+            .expect("hit region on row 7");
+        assert_eq!(hit_row_7, SuggestedReplyFocus::Secondary(6));
+
+        // First click stages Secondary(6) into app.input; second click on focused target consumes it.
+        assert!(app.stage_suggested_reply_target(hit_row_7));
+        assert_eq!(
+            app.suggested_replies.focus,
+            Some(SuggestedReplyFocus::Secondary(6))
+        );
+        assert_eq!(app.input, resp.secondary_suggestions[6]);
+        let consumed = app
+            .take_suggested_reply_target(hit_row_7)
+            .expect("second click consumes focused target");
+        assert_eq!(consumed, resp.secondary_suggestions[6]);
+        assert!(!app.suggested_replies_visible());
+
+        // 2. Digit '8' ('6'..='9' range) stages Secondary(7) into app.input, and editing detaches focus.
+        app.input.clear();
+        app.cursor_pos = 0;
+        app.apply_suggested_replies_response(resp);
+        assert!(app.stage_suggested_reply_by_digit('8'));
+        assert_eq!(
+            app.suggested_replies.focus,
+            Some(SuggestedReplyFocus::Secondary(7))
+        );
+        let staged_text = app.input.clone();
+        assert!(!staged_text.is_empty());
+        assert!(app.suggested_replies_has_staged_input());
+
+        // Pressing Backspace edits the draft in app.input and detaches suggestion focus/staged_input.
+        assert!(super::super::input::handle_basic_key(
+            &mut app,
+            crossterm::event::KeyCode::Backspace
+        ));
+        assert!(app.suggested_replies.focus.is_none());
+        assert!(app.suggested_replies.staged_input.is_none());
+        assert!(!app.input.is_empty());
+        assert!(app.input.len() < staged_text.len());
+
+        // 3. record_six_lens_review_findings invalidates cache and promotes review finding.
+        app.input.clear();
+        app.cursor_pos = 0;
+        app.record_six_lens_review_findings("Исправить проверку границ в парсере".to_string());
+        let review_resp = app
+            .suggested_replies
+            .current
+            .as_ref()
+            .expect("review suggestions present");
+        assert_eq!(review_resp.branch, "review");
+        assert!(
+            review_resp
+                .default_action
+                .as_deref()
+                .unwrap()
+                .contains("Исправить проверку границ в парсере")
+        );
+
+        // /suggestions refresh forces a fresh evaluation bypassing cached_response.
+        assert!(app.handle_suggestions_command("/suggestions refresh"));
+        assert!(app.suggested_replies.current.is_some());
+    }
 }
