@@ -333,7 +333,10 @@ impl RemoteConnection {
         let (reader, writer) = stream.into_split();
         // Quotas for headed clients belong to this daemon connection. Clear
         // previous/local snapshots before any startup account rows are drawn.
-        crate::usage::set_remote_account_usage(Vec::new(), Vec::new());
+        crate::usage::clear_remote_account_usage();
+        if !super::is_ssh_remote() {
+            crate::usage::hydrate_remote_account_usage(&server::socket_path());
+        }
 
         let mut conn = Self {
             reader: BufReader::new(reader),

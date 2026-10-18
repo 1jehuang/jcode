@@ -17,6 +17,7 @@ mod openai_helpers;
 mod openai_reset;
 mod provider_fetch;
 mod remote_accounts;
+mod startup_snapshot;
 pub use accessors::*;
 pub use anthropic_reset::{
     AnthropicLimitResetOffer, AnthropicLimitResetOutcome, AnthropicLimitResetUnavailable,
@@ -34,7 +35,10 @@ pub use openai_reset::{
     prepare_openai_usage_reset_for_account,
 };
 use provider_fetch::*;
-pub use remote_accounts::set_remote_account_usage;
+pub use remote_accounts::{
+    clear_remote_account_usage, remote_account_usage_received, set_remote_account_usage,
+};
+pub use startup_snapshot::{AccountUsageStartupPublisher, hydrate_remote_account_usage};
 
 use anyhow::{Context, Result};
 pub use display::{format_reset_time, format_usage_bar};

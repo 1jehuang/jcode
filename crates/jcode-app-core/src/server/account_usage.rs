@@ -30,6 +30,28 @@ impl State {
 }
 
 static STATE: OnceLock<Mutex<State>> = OnceLock::new();
+static STARTUP_PUBLISHER: OnceLock<crate::usage::AccountUsageStartupPublisher> = OnceLock::new();
+
+/// Bind publication to the real listener generation. This only captures local
+/// socket metadata; it neither probes endpoints nor waits for the usage worker.
+pub(super) fn initialize_startup_snapshot(socket: &std::path::Path, instance_id: &str) {
+    if let Some(publisher) = crate::usage::AccountUsageStartupPublisher::new(socket, instance_id) {
+        let _ = STARTUP_PUBLISHER.set(publisher);
+    }
+}
+
+async fn publish_startup_snapshot(snapshot: &Snapshot) {
+    let Some(publisher) = STARTUP_PUBLISHER.get().cloned() else {
+        return;
+    };
+    let snapshot = snapshot.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        if let Err(error) = publisher.publish(&snapshot.anthropic, &snapshot.openai) {
+            crate::logging::warn(&format!("Could not publish startup account usage: {error}"));
+        }
+    })
+    .await;
+}
 
 /// Queue an asynchronous response. The shared mutex covers the entire worker,
 /// so simultaneous clients coalesce into one fetch and errors get a retry floor.
@@ -63,6 +85,7 @@ where
                 state.snapshot = Snapshot::default();
             }
         }
+        publish_startup_snapshot(&state.snapshot).await;
     }
     state.snapshot.clone()
 }

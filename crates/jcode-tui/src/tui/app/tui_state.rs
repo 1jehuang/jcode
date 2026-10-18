@@ -1812,6 +1812,9 @@ impl crate::tui::TuiState for App {
         };
 
         crate::tui::info_widget::InfoWidgetData {
+            startup_runtime_pending: self.is_remote && self.remote_startup_phase.is_some(),
+            startup_usage_pending: self.is_remote
+                && !crate::usage::remote_account_usage_received(),
             todos,
             todo_goals,
             todos_are_swarm_plan,

@@ -74,9 +74,13 @@ impl App {
     /// Seed header state before the first frame so it matches the layout the
     /// History event will settle on.
     pub(super) fn apply_remote_header_hint(&mut self) {
+        // Before the first paint, never borrow local endpoint caches for a
+        // daemon-owned connection. A local, generation-checked hint is optional.
+        crate::usage::clear_remote_account_usage();
         if crate::tui::is_ssh_remote() {
             return;
         }
+        crate::usage::hydrate_remote_account_usage(&crate::server::socket_path());
         // The subscribe request carries `selfdev` exactly when this resolves
         // true, and the server marks such sessions canary.
         if self.remote_is_canary.is_none() && crate::tui::subscribe_metadata(None).1 == Some(true) {

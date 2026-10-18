@@ -12,15 +12,39 @@ struct RemoteAccounts {
 
 static REMOTE: OnceLock<Mutex<RemoteAccounts>> = OnceLock::new();
 
+/// Enter daemon-only mode without claiming that a response has arrived.
+pub fn clear_remote_account_usage() {
+    if let Ok(mut state) = REMOTE.get_or_init(Mutex::default).lock() {
+        *state = RemoteAccounts::default();
+    }
+}
+
+/// An empty authoritative response is received; an initial reset is not.
+pub fn remote_account_usage_received() -> bool {
+    REMOTE
+        .get()
+        .and_then(|state| state.try_lock().ok())
+        .is_some_and(|state| state.received.is_some())
+}
+
 /// Enable daemon-only usage reads, even when the daemon reports no accounts.
-/// Call with empty vectors on connection changes to discard another host's data.
+/// Empty vectors here are an authoritative response. Use `clear_remote_account_usage`
+/// on connection changes so pending startup data remains distinguishable.
 pub fn set_remote_account_usage(
     anthropic: Vec<jcode_protocol::AccountUsageSnapshot>,
     openai: Vec<jcode_protocol::AccountUsageSnapshot>,
 ) {
+    set_remote_account_usage_with_age(anthropic, openai, std::time::Duration::ZERO);
+}
+
+pub(super) fn set_remote_account_usage_with_age(
+    anthropic: Vec<jcode_protocol::AccountUsageSnapshot>,
+    openai: Vec<jcode_protocol::AccountUsageSnapshot>,
+    age: std::time::Duration,
+) {
     if let Ok(mut state) = REMOTE.get_or_init(Mutex::default).lock() {
         *state = RemoteAccounts {
-            received: Some(Instant::now()),
+            received: Instant::now().checked_sub(age),
             anthropic,
             openai,
         };
@@ -73,6 +97,20 @@ impl RemoteAccounts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connection_reset_is_not_an_empty_authoritative_response() {
+        clear_remote_account_usage();
+        assert!(!remote_account_usage_received());
+        assert!(matches!(
+            cached(MultiAccountProviderKind::OpenAI, "local"),
+            Some(None)
+        ));
+        set_remote_account_usage(Vec::new(), Vec::new());
+        assert!(remote_account_usage_received());
+        clear_remote_account_usage();
+        assert!(!remote_account_usage_received());
+    }
 
     #[test]
     fn empty_remote_and_expired_remote_are_unknown() {
