@@ -42,6 +42,11 @@ impl Provider for OpenRouterProvider {
         system: &str,
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
+        if self.profile_id.as_deref() == Some("muse-subscription") {
+            jcode_base::auth::muse::ensure_enabled()?;
+            let client = jcode_base::auth::muse::http_client()?;
+            jcode_base::auth::muse::refresh_if_needed(&client).await?;
+        }
         if self.builtin_azure {
             return self.complete_azure_responses(messages, tools, system).await;
         }

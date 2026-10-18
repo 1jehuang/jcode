@@ -122,7 +122,10 @@ pub(crate) fn muse_catalog_url(api_base: &str, cache_namespace: Option<&str>) ->
 /// exactly matches the pinned official Meta base is eligible for the native
 /// `GET /muse-code/models` path. Never send the native credential to an
 /// arbitrary/custom base.
-pub(crate) fn is_native_muse_catalog_request(api_base: &str, cache_namespace: Option<&str>) -> bool {
+pub(crate) fn is_native_muse_catalog_request(
+    api_base: &str,
+    cache_namespace: Option<&str>,
+) -> bool {
     cache_namespace == Some("muse-subscription")
         && api_base.trim_end_matches('/') == "https://api.meta.ai/v1"
 }
@@ -192,8 +195,10 @@ mod tests {
             "https://api.meta.ai/v1/models"
         );
         // Official binary strings evidence: the literal must exist.
-        assert!(muse_catalog_url("https://api.meta.ai/v1", Some("muse-subscription"))
-            .contains("/muse-code/models"));
+        assert!(
+            muse_catalog_url("https://api.meta.ai/v1", Some("muse-subscription"))
+                .contains("/muse-code/models")
+        );
     }
 
     #[tokio::test]
@@ -207,6 +212,11 @@ mod tests {
         // credential to arbitrary base). The path capture is on loopback.
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
         let addr = listener.local_addr().expect("addr");
+        // This test mutates the process-global `JCODE_HOME`. The default test
+        // runner is multi-threaded, so it must hold the shared env lock like
+        // every sibling test; otherwise it races the autodetect/provider tests
+        // and makes the whole suite flaky.
+        let _lock = crate::tests::ENV_LOCK.lock();
         let (path_tx, path_rx) = std::sync::mpsc::channel::<String>();
         let (auth_tx, auth_rx) = std::sync::mpsc::channel::<String>();
 
@@ -265,12 +275,18 @@ mod tests {
         .await
         .expect("loopback fetch");
         match prev_home {
-            Some(value) => unsafe { std::env::set_var("JCODE_HOME", value); },
-            None => unsafe { std::env::remove_var("JCODE_HOME"); },
+            Some(value) => unsafe {
+                std::env::set_var("JCODE_HOME", value);
+            },
+            None => unsafe {
+                std::env::remove_var("JCODE_HOME");
+            },
         }
         assert_eq!(models[0].id, "muse-spark-1.3");
         // Loopback base is not the pinned official base, so it must not use the native route.
-        let path = path_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        let path = path_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
         assert!(
             path.ends_with("/v1/models") || path.ends_with("/models"),
             "unexpected path {path}"
@@ -279,7 +295,9 @@ mod tests {
             !path.contains("/muse-code/models"),
             "loopback must not hit native route {path}"
         );
-        let auth = auth_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        let auth = auth_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
         assert!(auth.to_ascii_lowercase().contains("bearer loopback-token"));
     }
 
@@ -291,8 +309,9 @@ mod tests {
         // just the URL helper contract).
         let url = muse_catalog_url("https://api.meta.ai/v1", Some("muse-subscription"));
         assert_eq!(url, "https://api.meta.ai/muse-code/models");
-        assert!(!muse_catalog_url("https://custom.example.test/v1", Some("muse-subscription"))
-            .contains("/muse-code/models"));
+        assert!(
+            !muse_catalog_url("https://custom.example.test/v1", Some("muse-subscription"))
+                .contains("/muse-code/models")
+        );
     }
 }
-

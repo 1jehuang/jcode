@@ -50,6 +50,21 @@ pub(crate) enum PendingLogin {
     CursorApiKey,
     /// GitHub Copilot device flow in progress (polling in background)
     Copilot,
+    /// Native Muse subscription device flow in progress (polling in background).
+    ///
+    /// The background task never persists credentials itself. It places
+    /// approved credentials into `approved` only while `cancelled` is unset,
+    /// then publishes a completion event. The main-thread
+    /// `handle_login_completed` takes the credentials from the slot and saves
+    /// them synchronously, so `/cancel` (which sets `cancelled` and drops the
+    /// slot) can never be followed by a credential write. `attempt` is an
+    /// opaque per-attempt id that scopes progress/completion events to the
+    /// exact pending attempt across sessions sharing the global bus.
+    MuseSubscription {
+        attempt: String,
+        cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        approved: std::sync::Arc<std::sync::Mutex<Option<crate::auth::muse::MuseCredentials>>>,
+    },
     /// Grok Build device/browser flow in progress via Jcode's managed backend.
     GrokBuild,
     /// Waiting for the user to choose which external auth sources to import.
@@ -93,6 +108,9 @@ impl PendingLogin {
             }
             Self::CursorApiKey => Some(("cursor".to_string(), "api_key".to_string())),
             Self::Copilot => Some(("copilot".to_string(), "device_code".to_string())),
+            Self::MuseSubscription { .. } => {
+                Some(("muse-subscription".to_string(), "device_code".to_string()))
+            }
             Self::GrokBuild => Some(("grok-build".to_string(), "oauth".to_string())),
             Self::AutoImportSelection { .. } => None,
             Self::AzureEndpoint | Self::AzureModel { .. } | Self::AzureAuthChoice { .. } => {

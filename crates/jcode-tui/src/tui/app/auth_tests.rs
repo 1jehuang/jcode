@@ -233,3 +233,106 @@ fn tui_openai_compatible_local_key_save_allows_empty_key() -> anyhow::Result<()>
         Ok(())
     })
 }
+
+#[test]
+fn muse_subscription_pending_holds_attempt_cancel_slot() {
+    use super::auth_types::PendingLogin;
+
+    let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let approved = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let pending = PendingLogin::MuseSubscription {
+        attempt: "muse-subscription#abc123".to_string(),
+        cancelled: std::sync::Arc::clone(&cancelled),
+        approved: std::sync::Arc::clone(&approved),
+    };
+    // Telemetry still attributes the device-code method.
+    assert_eq!(
+        pending.telemetry_context(),
+        Some(("muse-subscription".to_string(), "device_code".to_string()))
+    );
+    // /cancel flips the shared flag and drops the slot: the background task
+    // observes the flag before every poll and before handoff, and the handler
+    // takes credentials from the slot only for a matching attempt.
+    if let PendingLogin::MuseSubscription {
+        cancelled,
+        approved,
+        ..
+    } = &pending
+    {
+        cancelled.store(true, std::sync::atomic::Ordering::Release);
+        if let Ok(mut slot) = approved.lock() {
+            *slot = None;
+        }
+    }
+    assert!(cancelled.load(std::sync::atomic::Ordering::Acquire));
+    assert!(approved.lock().map(|slot| slot.is_none()).unwrap_or(false));
+}
+
+#[test]
+fn muse_subscription_code_progress_renders_without_success_side_effects() {
+    let _env_guard = crate::storage::lock_test_env();
+    let mut app = App::new_for_remote(None);
+    app.pending_login = Some(super::auth_types::PendingLogin::MuseSubscription {
+        attempt: "muse-subscription#abc123".to_string(),
+        cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        approved: std::sync::Arc::new(std::sync::Mutex::new(None)),
+    });
+    assert!(app.recent_authenticated_provider.is_none());
+
+    app.handle_login_completed(crate::bus::LoginCompleted {
+        provider: "muse_subscription_code#abc123".to_string(),
+        success: true,
+        message: "Muse Subscription Login\n\nYour code: ABCD-1234\n\nWaiting...".to_string(),
+    });
+
+    // Pending approval must not mark a completed login, trigger catalog
+    // refresh, or record auth success.
+    assert!(app.recent_authenticated_provider.is_none());
+    assert!(!app.auth_catalog_refresh_pending);
+    assert_eq!(
+        app.status_notice
+            .as_ref()
+            .map(|(notice, _)| notice.as_str()),
+        Some("Login: enter ABCD-1234 at Meta")
+    );
+}
+
+#[test]
+fn muse_subscription_stale_events_after_cancel_are_ignored() {
+    let _env_guard = crate::storage::lock_test_env();
+    let mut app = App::new_for_remote(None);
+
+    // A stale progress event for a superseded attempt renders nothing.
+    app.handle_login_completed(crate::bus::LoginCompleted {
+        provider: "muse_subscription_code#old999".to_string(),
+        success: true,
+        message: "Muse Subscription Login\n\nYour code: STALE-0000\n\nWaiting...".to_string(),
+    });
+    assert!(app.recent_authenticated_provider.is_none());
+    assert!(app.status_notice.is_none());
+
+    // A stale approval event with no matching pending attempt saves nothing
+    // and switches no provider.
+    app.handle_login_completed(crate::bus::LoginCompleted {
+        provider: "muse-subscription#old999".to_string(),
+        success: true,
+        message: "Muse subscription approved in the browser; finalizing...".to_string(),
+    });
+    assert!(app.recent_authenticated_provider.is_none());
+    assert!(!app.auth_catalog_refresh_pending);
+
+    // A cancelled pending attempt rejects even its own approval event.
+    let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    app.pending_login = Some(super::auth_types::PendingLogin::MuseSubscription {
+        attempt: "muse-subscription#cancelled1".to_string(),
+        cancelled,
+        approved: std::sync::Arc::new(std::sync::Mutex::new(None)),
+    });
+    app.handle_login_completed(crate::bus::LoginCompleted {
+        provider: "muse-subscription#cancelled1".to_string(),
+        success: true,
+        message: "Muse subscription approved in the browser; finalizing...".to_string(),
+    });
+    assert!(app.recent_authenticated_provider.is_none());
+    assert!(!app.auth_catalog_refresh_pending);
+}

@@ -67,6 +67,10 @@ fn scriptable_resume_command_matches_input_kind() {
         scriptable_resume_command("copilot", "complete", None),
         "jcode login --provider copilot --complete"
     );
+    assert_eq!(
+        scriptable_resume_command("muse-subscription", "complete", None),
+        "jcode login --provider muse-subscription --complete"
+    );
 }
 
 #[test]
@@ -195,6 +199,10 @@ fn scoped_pending_paths_validate_ids_and_preserve_legacy_layout() {
         pending_login_path_in(dir, "openai", Some("flow_A-1")).unwrap(),
         dir.join("flows/flow_A-1/openai.json")
     );
+    assert_eq!(
+        pending_login_path_in(dir, "muse-subscription", None).unwrap(),
+        dir.join("muse-subscription.json")
+    );
     for id in [
         "",
         "..",
@@ -215,6 +223,7 @@ fn scoped_pending_paths_validate_ids_and_preserve_legacy_layout() {
         ("openai", "callback_url"),
         ("gemini", "auth_code"),
         ("copilot", "complete"),
+        ("muse-subscription", "complete"),
         ("claude", "auth_code_or_callback_url"),
     ] {
         let command = scriptable_resume_command(provider, kind, Some("flow_A-1"));
