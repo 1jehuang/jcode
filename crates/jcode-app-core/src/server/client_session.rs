@@ -974,7 +974,14 @@ async fn rename_swarm_member_session(
     // opposite order, so retaining the member write guard while waiting for the
     // swarm map can permanently deadlock reconnects and every later subscribe.
     let rename = {
+        let wait = Instant::now();
         let mut members = swarm_members.write().await;
+        let members_wait_ms = wait.elapsed().as_millis();
+        if members_wait_ms >= 50 {
+            crate::logging::info(&format!(
+                "[TIMING] swarm_rename members write wait={members_wait_ms}ms session={new_session_id}"
+            ));
+        }
         let mut rename = SwarmMemberRename::default();
         if let Some(mut temporary) = members.remove(old_session_id) {
             rename.old_swarm_id = temporary.swarm_id.clone();
@@ -1037,7 +1044,14 @@ async fn rename_swarm_member_session(
         rename
     };
 
+    let wait = Instant::now();
     let mut swarms = swarms_by_id.write().await;
+    let swarms_wait_ms = wait.elapsed().as_millis();
+    if swarms_wait_ms >= 50 {
+        crate::logging::info(&format!(
+            "[TIMING] swarm_rename swarms_by_id write wait={swarms_wait_ms}ms session={new_session_id}"
+        ));
+    }
     if let Some(old_swarm_id) = rename.old_swarm_id.as_ref()
         && let Some(swarm) = swarms.get_mut(old_swarm_id)
     {
