@@ -885,6 +885,11 @@ impl App {
             // Main event loop
             loop {
                 self.sync_sleep_guard();
+                // The reload fast-start transcript is rendered off-thread. Show
+                // it as soon as it is ready instead of on the next tick: during
+                // remote startup ticks are 1s apart, which held a ready
+                // transcript back 0.5-0.7s until server History landed anyway.
+                needs_redraw |= self.poll_pending_startup_transcript();
                 let desired_redraw = crate::tui::redraw_interval(&self);
                 if desired_redraw != redraw_period {
                     redraw_period = desired_redraw;
