@@ -165,34 +165,6 @@ mod tests {
         assert_eq!(app.display_edit_line_counts, (0, 0));
     }
 
-    /// After a reload, server History often equals the locally rendered
-    /// transcript already on screen. Re-applying it must not bump the display
-    /// version (that forces a full re-wrap), but any real difference must.
-    #[test]
-    fn replacing_with_identical_messages_keeps_display_version() {
-        let mut app = super::super::tests::create_test_app();
-        let transcript = vec![
-            DisplayMessage::user("hello"),
-            DisplayMessage::assistant("hi there"),
-        ];
-        app.replace_display_messages(transcript.clone());
-        let version = app.display_messages_version;
-        app.replace_display_messages(transcript.clone());
-        assert_eq!(app.display_messages_version, version, "identical replace");
-
-        let mut changed = transcript.clone();
-        changed[1].content.push('!');
-        app.replace_display_messages(changed);
-        assert_ne!(app.display_messages_version, version, "content change");
-        let version = app.display_messages_version;
-
-        let mut longer = transcript;
-        longer.push(DisplayMessage::user("more"));
-        app.replace_display_messages(longer);
-        assert_ne!(app.display_messages_version, version, "length change");
-        assert_eq!(app.display_messages().len(), 3);
-    }
-
     #[test]
     fn terminal_title_work_freezes_and_resets_on_session_switch() {
         let mut app = super::super::tests::create_test_app();

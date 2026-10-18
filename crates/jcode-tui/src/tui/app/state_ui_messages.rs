@@ -59,21 +59,6 @@ fn is_background_task_lifecycle_message(content: &str) -> bool {
         || content.starts_with("**Background task stalled**")
 }
 
-/// Field-by-field equality for display lists. `DisplayMessage` has no
-/// `PartialEq` (`duration_secs` is a float), so compare explicitly. Cheap
-/// relative to a re-wrap: lengths and roles short-circuit before content.
-fn display_messages_equal(current: &[DisplayMessage], next: &[DisplayMessage]) -> bool {
-    current.len() == next.len()
-        && current.iter().zip(next).all(|(a, b)| {
-            a.role == b.role
-                && a.content == b.content
-                && a.tool_calls == b.tool_calls
-                && a.title == b.title
-                && a.duration_secs.map(f32::to_bits) == b.duration_secs.map(f32::to_bits)
-                && a.tool_data == b.tool_data
-        })
-}
-
 /// A tool row for a provider-executed tool (hosted web search), which streams
 /// mid-response as part of the current attempt rather than after it.
 pub(super) fn is_attempt_provider_native_row(message: &DisplayMessage) -> bool {
@@ -153,15 +138,6 @@ impl App {
     pub(super) fn replace_display_messages(&mut self, mut messages: Vec<DisplayMessage>) {
         messages.retain(|message| !is_background_task_lifecycle_message(&message.content));
         compact_display_messages_for_storage(&mut messages);
-        // After a reload the locally rendered transcript is shown first and
-        // server History (often a delta over that same prefix) is applied
-        // right after. When it is identical, keep the display version: a bump
-        // misses the prepared-body cache and re-wraps the whole transcript
-        // (165-760ms on 100-800 message sessions) for zero visible change.
-        if display_messages_equal(&self.display_messages, &messages) {
-            self.attempt_committed_assistant_messages = 0;
-            return;
-        }
         self.display_messages = messages;
         self.attempt_committed_assistant_messages = 0;
         self.sync_compacted_history_lazy_from_display_messages();
