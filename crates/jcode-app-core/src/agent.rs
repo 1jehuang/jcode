@@ -309,9 +309,6 @@ pub struct Agent {
     last_status_detail: Option<String>,
     /// Pending swarm alerts to inject into the next turn
     pending_alerts: Vec<String>,
-    /// Transient reminder injected into provider requests for the current turn only.
-    /// Not persisted to session history.
-    current_turn_system_reminder: Option<String>,
     /// Tool call ids observed in the current session transcript.
     tool_call_ids: HashSet<String>,
     /// Tool result ids observed in the current session transcript.
@@ -480,7 +477,6 @@ impl Agent {
             last_connection_type: None,
             last_status_detail: None,
             pending_alerts: Vec::new(),
-            current_turn_system_reminder: None,
             tool_call_ids: HashSet::new(),
             tool_result_ids: HashSet::new(),
             tool_output_scan_index: 0,
@@ -813,7 +809,6 @@ impl Agent {
         self.last_connection_type = None;
         self.last_status_detail = None;
         self.pending_alerts.clear();
-        self.current_turn_system_reminder = None;
         self.reset_tool_output_tracking();
         if let Ok(mut queue) = self.soft_interrupt_queue.lock() {
             queue.clear();

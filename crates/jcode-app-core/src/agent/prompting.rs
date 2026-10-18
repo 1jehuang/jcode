@@ -128,23 +128,6 @@ impl Agent {
         pending
     }
 
-    fn append_current_turn_system_reminder(&self, split: &mut crate::prompt::SplitSystemPrompt) {
-        let Some(reminder) = self
-            .current_turn_system_reminder
-            .as_ref()
-            .map(|value| value.trim())
-            .filter(|value| !value.is_empty())
-        else {
-            return;
-        };
-
-        if !split.dynamic_part.is_empty() {
-            split.dynamic_part.push_str("\n\n");
-        }
-        split.dynamic_part.push_str("# System Reminder\n\n");
-        split.dynamic_part.push_str(reminder);
-    }
-
     /// Build split system prompt for better caching
     /// Returns static (cacheable) and dynamic (not cached) parts separately
     pub(super) fn build_system_prompt_split(
@@ -174,7 +157,7 @@ impl Agent {
             .as_ref()
             .map(std::path::PathBuf::from);
 
-        let (mut split, _context_info) = crate::prompt::build_system_prompt_split_with_agents_md(
+        let (split, _context_info) = crate::prompt::build_system_prompt_split_with_agents_md(
             skill_prompt.as_deref(),
             available_skills,
             self.session.is_canary,
@@ -182,8 +165,6 @@ impl Agent {
             working_dir.as_deref(),
             self.agents_md_snapshot.clone(),
         );
-
-        self.append_current_turn_system_reminder(&mut split);
 
         split
     }
