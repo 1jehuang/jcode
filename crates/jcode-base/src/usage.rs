@@ -472,6 +472,12 @@ fn activity_source_has_dedicated_report(source_key: &str) -> bool {
         "cursor" => auth::cursor::has_cursor_native_auth(),
         "jcode" => crate::subscription_catalog::configured_api_key().is_some(),
         _ => {
+            // The native Muse subscription stores its credential outside the env
+            // files, so it needs its own check; without it the subscription is
+            // reported twice and the generic entry wins with an empty snapshot.
+            if source_key == format!("openai-compatible:{}", crate::auth::muse::PROFILE_ID) {
+                return crate::auth::muse::has_cached_auth();
+            }
             // Direct OpenAI-compatible profiles are reported by the API-key
             // module whenever their key is configured.
             source_key
