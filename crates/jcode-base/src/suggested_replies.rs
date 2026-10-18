@@ -507,7 +507,7 @@ async fn complete_via_named_openai_compatible(
             { "role": "system", "content": system },
             { "role": "user", "content": user_msg }
         ],
-        "max_tokens": 300,
+        "max_tokens": 600,
         "temperature": 0.2,
         "stream": false
     }));
@@ -605,7 +605,7 @@ async fn complete_open_gf_prompt(system: &str, user_msg: &str) -> Result<(String
 pub async fn generate_open_gf_candidates_with_route(
     transcript_tail: &str,
 ) -> Result<(String, Vec<String>, String)> {
-    let system = "You are OpenGF, the generative candidate synthesizer for Jcode's two-stage SystemOne Suggested Replies cascade. Return ONLY valid JSON with the shape: {\"branch\": \"implementation|verification|debugging|review|architecture|refactoring\", \"candidates\": [\"short actionable reply 1\", \"short actionable reply 2\", ...]}. Generate between 3 and 6 concise, concrete next-step user replies (under 90 chars each) tailored to the conversation state. CRITICAL: Write every candidate in the EXACT SAME natural language used by the user in their most recent message (e.g. Russian if the user wrote in Russian, English if in English). Order candidates from the most likely immediate next user reply (#1) to lower-priority alternatives.";
+    let system = "You are OpenGF, the generative candidate synthesizer for Jcode's two-stage SystemOne Suggested Replies cascade. Return ONLY valid JSON with the shape: {\"branch\": \"implementation|verification|debugging|review|architecture|refactoring\", \"candidates\": [\"short actionable reply 1\", \"short actionable reply 2\", ...]}. Generate between 3 and 6 concise, complete, self-contained next-step user replies (up to 120 chars each, never cut mid-sentence) tailored to the conversation state. CRITICAL: Write every candidate in the EXACT SAME natural language used by the user in their most recent message (e.g. Russian if the user wrote in Russian, English if in English). Order candidates from the most likely immediate next user reply (#1) to lower-priority alternatives.";
     let user_msg = format!(
         "Recent conversation state:\n{}\n\nProduce the JSON with macro branch and 3..6 concrete next-step user replies in the user's language:",
         crate::util::truncate_str(transcript_tail, 3500)

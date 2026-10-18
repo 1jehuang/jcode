@@ -479,7 +479,10 @@ impl App {
         if self.is_remote {
             self.suggested_replies.pending_remote_submit = Some(trimmed.clone());
             self.pending_queued_dispatch = true;
-            self.set_status_notice(format!("▸ {}", crate::util::truncate_str(&trimmed, 48)));
+            self.set_status_notice(format!(
+                "▸ {}",
+                crate::tui::ui::truncate_to_display_width(&trimmed, 72)
+            ));
         } else {
             self.submit_input();
         }
@@ -839,5 +842,19 @@ mod tests {
         assert!(app.suggested_replies.current.is_none());
         assert!(app.suggested_replies.focus.is_none());
         assert!(app.suggested_replies.pending_rx.is_none());
+    }
+
+    #[test]
+    fn cyrillic_suggestion_uses_display_columns_instead_of_byte_truncation() {
+        let ru = "Проверить отладку подсказок через команду /suggestions debug и запустить тесты";
+        let display_cols = unicode_width::UnicodeWidthStr::width(ru);
+        assert!(ru.len() > display_cols, "Cyrillic UTF-8 byte length exceeds column width");
+        // When column budget >= display_cols, the full Russian string must be preserved intact.
+        let rendered = crate::tui::ui::truncate_to_display_width(ru, display_cols + 4);
+        assert_eq!(rendered, ru);
+        // When column budget is narrower, it truncates to exact display columns + ellipsis.
+        let clipped = crate::tui::ui::truncate_to_display_width(ru, 30);
+        assert_eq!(unicode_width::UnicodeWidthStr::width(clipped.as_str()), 30);
+        assert!(clipped.ends_with('…'));
     }
 }

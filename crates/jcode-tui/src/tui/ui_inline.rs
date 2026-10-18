@@ -4,7 +4,33 @@ use ratatui::style::Modifier;
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 #[cfg(not(test))]
 use std::sync::{Mutex, OnceLock};
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+/// Truncate `text` to at most `max_cols` terminal display columns (`UnicodeWidthStr`),
+/// appending `…` only when the string actually exceeds `max_cols`.
+/// Prevents multi-byte UTF-8 strings (such as Russian/Cyrillic, where 1 char = 2 bytes)
+/// from being cut at half the available terminal width.
+pub(crate) fn truncate_to_display_width(text: &str, max_cols: usize) -> String {
+    if max_cols == 0 {
+        return String::new();
+    }
+    if UnicodeWidthStr::width(text) <= max_cols {
+        return text.to_string();
+    }
+    let target = max_cols.saturating_sub(1);
+    let mut out = String::new();
+    let mut used = 0usize;
+    for ch in text.chars() {
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + w > target {
+            break;
+        }
+        out.push(ch);
+        used += w;
+    }
+    out.push('…');
+    out
+}
 
 #[derive(Clone, Debug)]
 struct SuggestedReplyHitRegion {
@@ -166,15 +192,19 @@ fn draw_suggested_replies_panel(frame: &mut Frame, view: &SuggestedRepliesView, 
             .unwrap_or_default();
 
         let prefix = if is_focused {
-            " ★ [Enter ↵ · Tab/↓] ▸ ".to_string()
+            " ★ [Enter ↵] ▸ ".to_string()
         } else {
             " ★ [Tab / ↓] ▸ ".to_string()
         };
-        let suffix = format!(" ({}% · {}{}) ", conf_pct, view.response.branch, explorer_tag);
+        let suffix = format!(" ({}%{}) ", conf_pct, explorer_tag);
         let budget = (area.width as usize)
-            .saturating_sub(UnicodeWidthStr::width(prefix.as_str()) + UnicodeWidthStr::width(suffix.as_str()) + 2)
+            .saturating_sub(
+                UnicodeWidthStr::width(prefix.as_str())
+                    + UnicodeWidthStr::width(suffix.as_str())
+                    + 2,
+            )
             .max(8);
-        let label = crate::util::truncate_str(default_action, budget).to_string();
+        let label = truncate_to_display_width(default_action, budget);
 
         let mut body_style = Style::default().fg(fg).bg(bg);
         if is_focused {
@@ -217,8 +247,8 @@ fn draw_suggested_replies_panel(frame: &mut Frame, view: &SuggestedRepliesView, 
             if current_row >= max_y {
                 break;
             }
-            let max_pill_chars = (area.width as usize).saturating_sub(10).max(8);
-            let short = crate::util::truncate_str(text, max_pill_chars);
+            let max_pill_cols = (area.width as usize).saturating_sub(7).max(8);
+            let short = truncate_to_display_width(text, max_pill_cols);
             let pill_label = format!("{}. {}", idx + 1, short);
             let pill_width = (UnicodeWidthStr::width(pill_label.as_str()) + 4)
                 .min(area.width as usize) as u16;
