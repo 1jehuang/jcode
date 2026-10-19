@@ -2123,7 +2123,36 @@ struct NdjsonRunState {
     connection_type: Option<String>,
     connection_phase: Option<String>,
     status_detail: Option<String>,
+    requested_service_tier: Option<String>,
+    served_service_tier: Option<String>,
     usage: crate::agent::TokenUsage,
+}
+
+impl NdjsonRunState {
+    /// Compare wire metadata only. A match is not independent confirmation of
+    /// backend routing or billing, especially on subscription-backed endpoints.
+    fn service_tier_report_status(&self) -> &'static str {
+        let Some(reported) = self.served_service_tier.as_deref() else {
+            return "not_reported";
+        };
+        if reported == "auto" {
+            return "unresolved";
+        }
+        fn canonical(tier: &str) -> &str {
+            match tier {
+                "off" | "standard" | "default" | "auto" => "default",
+                "fast" | "priority" => "priority",
+                _ => tier,
+            }
+        }
+        if canonical(self.requested_service_tier.as_deref().unwrap_or("default"))
+            == canonical(reported)
+        {
+            "reported_match"
+        } else {
+            "reported_mismatch"
+        }
+    }
 }
 
 pub fn run_auth_status_command(emit_json: bool) -> Result<()> {
@@ -2584,6 +2613,16 @@ pub async fn run_single_message_command(
     let provider =
         super::provider_init::init_provider_for_run(choice, model, emit_json || emit_ndjson)
             .await?;
+    // Older model caches contain names but no account-scoped speed capabilities.
+    // Hydrate those before the first headless request so an unsupported saved
+    // tier cannot slip through the backward-compatible unknown-catalog path.
+    if provider.model_capabilities_need_refresh()
+        && let Err(error) = provider.prefetch_models().await
+    {
+        crate::logging::warn(&format!(
+            "Could not refresh model capabilities before headless run: {error}"
+        ));
+    }
     let registry = crate::tool::Registry::new(provider.clone()).await;
     // Load MCP servers from ~/.jcode/mcp.json so headless `jcode run` has the
     // same `mcp__*` tools as interactive/server sessions. This is non-blocking:
@@ -3271,6 +3310,12 @@ async fn run_single_message_command_ndjson(
                     "connection_type": state.connection_type,
                     "connection_phase": state.connection_phase,
                     "status_detail": state.status_detail,
+                    "requested_service_tier": state.requested_service_tier,
+                    "reported_service_tier": state.served_service_tier,
+                    "service_tier_report_status": state.service_tier_report_status(),
+                    // Retained for compatibility; this is provider-reported
+                    // metadata, not independently verified serving evidence.
+                    "served_service_tier": state.served_service_tier,
                 }),
             )?;
             Ok(())
@@ -3369,6 +3414,19 @@ fn emit_ndjson_event(
                     "output": output,
                     "cache_read_input": cache_read_input,
                     "cache_creation_input": cache_creation_input,
+                }),
+            )
+        }
+        ServerEvent::ServiceTierReported { requested, tier } => {
+            state.requested_service_tier = requested.clone();
+            state.served_service_tier = Some(tier.clone());
+            write_json_line(
+                stdout,
+                &serde_json::json!({
+                    "type": "service_tier",
+                    "requested": requested,
+                    "tier": tier,
+                    "report_status": state.service_tier_report_status(),
                 }),
             )
         }

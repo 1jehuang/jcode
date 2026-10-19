@@ -259,7 +259,7 @@ fn release_payload(id: u64) {
     }
 }
 
-fn clear_staged_payloads() {
+pub(super) fn clear_staged_payloads() {
     let mut cleared = false;
     if let Ok(mut reg) = PAYLOAD_REGISTRY.lock() {
         cleared |= !reg.map.is_empty();

@@ -524,6 +524,7 @@ fn run_result_will_exec(run_result: &crate::tui::RunResult, extra_exec: bool) ->
         || run_result.rebuild_session.is_some()
         || run_result.update_session.is_some()
         || run_result.restart_session.is_some()
+        || run_result.hibernate_session.is_some()
 }
 
 fn export_tui_exec_handoff(state: &TuiRuntimeState) {
