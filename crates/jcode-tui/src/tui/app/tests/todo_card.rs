@@ -629,3 +629,68 @@ fn pinned_todo_card_shows_tasks_without_expanding() {
         );
     }
 }
+
+#[test]
+fn pinned_band_shows_wave_rails_and_live_swarm_agents_end_to_end() {
+    let _env_lock = crate::storage::lock_test_env();
+    let _render_lock = crate::tui::ui::render_state_test_lock();
+    let _pin = PinTodosEnvGuard::enable();
+    let mut app = create_test_app();
+    let session_id = app.session.id.clone();
+    let mut a = pinned_band_todo("a", "wave one alpha", "in_progress");
+    a.wave = Some(1);
+    a.assigned_to = Some("session_skunk_1792409785894_1068c05fb6cec63b".into());
+    let mut b = pinned_band_todo("b", "wave one beta", "completed");
+    b.wave = Some(1);
+    b.assigned_to = Some("session_raccoon_1792409785942_de9eb8af240e42b7".into());
+    let mut c = pinned_band_todo("c", "wave two gamma", "pending");
+    c.wave = Some(2);
+    crate::todo::save_todos(&session_id, &[a, b, c]).unwrap();
+
+    // Live member status exactly as the server sends it.
+    app.remote_swarm_members = vec![
+        serde_json::from_value(serde_json::json!({
+            "session_id": "session_skunk_1792409785894_1068c05fb6cec63b",
+            "friendly_name": "skunk", "status": "running", "status_age_secs": 7,
+            "todo_items": [{"content": "count", "status": "in_progress",
+                "tool_intents": [{"tool_name": "bash", "intent": "counting to 40", "status": "running"}]}]
+        }))
+        .unwrap(),
+        serde_json::from_value(serde_json::json!({
+            "session_id": "session_raccoon_1792409785942_de9eb8af240e42b7",
+            "friendly_name": "raccoon", "status": "completed"
+        }))
+        .unwrap(),
+    ];
+    app.refresh_pinned_todos_now();
+    app.display_messages = vec![DisplayMessage {
+        role: "user".to_string(),
+        content: "run the plan".to_string(),
+        tool_calls: vec![],
+        duration_secs: None,
+        title: None,
+        tool_data: None,
+    }];
+    app.bump_display_messages_version();
+    app.status = ProcessingStatus::Idle;
+
+    for width in [100u16, 60] {
+        let backend = ratatui::backend::TestBackend::new(width, 20);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let text = render_and_snap(&app, &mut terminal);
+        let band: Vec<&str> = text.lines().take(6).collect();
+        let joined = band.join("\n");
+        assert!(joined.contains("┏ ● wave one alpha"), "rail at {width}:\n{text}");
+        assert!(joined.contains("┗ ✓ wave one beta"), "rail end at {width}:\n{text}");
+        assert!(joined.contains("🦨") && joined.contains("🦝"), "agent emoji at {width}:\n{text}");
+        if width == 100 {
+            assert!(joined.contains("counting to 40 · 7s"), "live activity:\n{text}");
+        }
+    }
+
+    // Activity changes trigger a redraw of the band.
+    app.remote_swarm_members[0].status = "failed".into();
+    app.refresh_pinned_todos_now();
+    assert!(app.pinned_todos_payload_ref().unwrap().contains("\"failed\""));
+    let _ = crate::todo::save_todos(&session_id, &[]);
+}
