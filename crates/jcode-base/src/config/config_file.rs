@@ -812,6 +812,18 @@ impl Config {
         }
         Ok(())
     }
+
+    /// Update the persisted theme preference and invalidate the config cache
+    /// so the new value is picked up immediately.
+    pub fn set_display_theme(theme: &str) -> anyhow::Result<()> {
+        let mut cfg = Self::load_for_update()?;
+        cfg.display.theme = theme.to_string();
+        cfg.save()?;
+        crate::logging::info(&format!("Saved display.theme to config: {}", theme));
+        // Invalidate the config cache so the new theme is read on next access.
+        crate::config::invalidate_config_cache();
+        Ok(())
+    }
 }
 
 #[cfg(test)]

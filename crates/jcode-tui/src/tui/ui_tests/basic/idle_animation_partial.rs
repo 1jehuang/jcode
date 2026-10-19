@@ -153,6 +153,100 @@ fn partial_repaint_matches_a_full_frame_at_the_same_animation_time() {
 }
 
 #[test]
+fn partial_repaint_keeps_a_custom_light_theme_background_and_foreground() {
+    let _idle_animation = IdleAnimationEnvGuard::enable();
+    let _lock = viewport_snapshot_test_lock();
+    clear_flicker_frame_history_for_tests();
+
+    // A custom theme opts out of terminal adaptation: a full frame fills its
+    // explicit background and leaves its hand-picked colors alone. The partial
+    // path used to skip both rules, so animation ticks repainted those rows
+    // onto the terminal-default background and, in light mode, luminance-
+    // flipped foregrounds the theme never asked to flip.
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        temp.path().join("paper.toml"),
+        "[colors]\nbackground = \"#E8E8E2\"\nuser = \"#30343A\"\n",
+    )
+    .expect("write theme");
+    jcode_tui_style::theme::set_theme("paper", Some(temp.path())).expect("load custom theme");
+    jcode_tui_style::set_theme_mode(jcode_tui_style::ThemeMode::Light);
+    assert_ne!(
+        jcode_tui_style::theme::background_color(),
+        ratatui::style::Color::Reset,
+        "the fixture must define an explicit background for the fill rule to matter"
+    );
+    // The active theme and mode are process-global; always restore them, even
+    // on panic, so sibling renders keep their assumptions.
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let _ = jcode_tui_style::theme::set_theme("system", None);
+            jcode_tui_style::set_theme_mode(jcode_tui_style::ThemeMode::Dark);
+        }
+    }
+    let _restore = Restore;
+
+    // The partial repaint at t1 must reproduce the full frame at t1 cell for
+    // cell, including the theme background and unflipped foregrounds.
+    let first = render_full(&idle_animation_state(1.0), 100, 40);
+    let area = crate::tui::ui::last_idle_animation_area().expect("animated rectangle");
+    let mut patched = first.backend().buffer().clone();
+    crate::tui::ui::render_idle_animation_into(&mut patched, area, 1.5);
+
+    let second = render_full(&idle_animation_state(1.5), 100, 40);
+    let expected = second.backend().buffer();
+
+    // TEMP DIAGNOSTIC
+    eprintln!("DIAG area={area:?}");
+    let first_buf = first.backend().buffer();
+    for y in [18u16, 19, 20, 25, 26, 30, 39] {
+        for (label, b) in [("first", first_buf), ("patched", &patched), ("expected", expected)] {
+            let row: Vec<String> = (0..12u16)
+                .map(|x| {
+                    let c = &b[(x, y)];
+                    format!("{:?}|{:?}|{:?}", c.symbol(), c.fg, c.bg)
+                })
+                .collect();
+            eprintln!("DIAG y={y} {label}: {}", row.join(" "));
+        }
+    }
+    eprintln!(
+        "DIAG total-mismatch={}",
+        patched
+            .content
+            .iter()
+            .zip(expected.content.iter())
+            .filter(|(l, r)| l != r)
+            .count()
+    );
+
+    let mismatches: Vec<_> = patched
+        .content
+        .iter()
+        .zip(expected.content.iter())
+        .enumerate()
+        .filter(|(_, (left, right))| left != right)
+        .map(|(idx, (l, r))| {
+            (
+                idx as u16 % patched.area.width,
+                idx as u16 / patched.area.width,
+                l.fg,
+                l.bg,
+                r.fg,
+                r.bg,
+            )
+        })
+        .collect();
+    assert!(
+        mismatches.is_empty(),
+        "partial repaint lost the custom theme's colors at {} cells: {:?}",
+        mismatches.len(),
+        &mismatches[..mismatches.len().min(8)]
+    );
+}
+
+#[test]
 fn advancing_the_animation_actually_changes_the_animated_rows() {
     let _idle_animation = IdleAnimationEnvGuard::enable();
     // Guards against the partial-repaint test passing vacuously: if the

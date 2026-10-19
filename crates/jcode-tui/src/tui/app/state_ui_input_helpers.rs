@@ -106,6 +106,7 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/fast", "Toggle fast mode"),
     RegisteredCommand::public("/transport", "Show/change connection transport"),
     RegisteredCommand::public("/alignment", "Show/change default text alignment"),
+    RegisteredCommand::public("/theme", "Show/change color theme (light/dark/system)"),
     RegisteredCommand::public(
         "/compact-notifications",
         "Show/toggle single-line swarm/file-activity notifications",
@@ -1080,6 +1081,21 @@ impl App {
                     (
                         "/alignment left".into(),
                         "Save left-aligned layout and apply it now",
+                    ),
+                ],
+            );
+        }
+
+        if prefix.starts_with("/theme ") {
+            return self.rank_suggestions(
+                input,
+                vec![
+                    ("/theme status".into(), "Show current and saved theme"),
+                    ("/theme light".into(), "Force light theme"),
+                    ("/theme dark".into(), "Force dark theme"),
+                    (
+                        "/theme system".into(),
+                        "Auto-detect from terminal background",
                     ),
                 ],
             );

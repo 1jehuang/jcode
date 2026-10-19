@@ -2537,7 +2537,7 @@ pub(crate) fn wrap_input_text<'a>(
             let style = if image_ranges.iter().any(|range| range.contains(&position)) {
                 Style::default().fg(rgb(102, 204, 221)).bold()
             } else {
-                Style::default()
+                Style::default().fg(jcode_tui_style::theme::input_text())
             };
             if style != previous_style && !text.is_empty() {
                 spans.push(Span::styled(std::mem::take(&mut text), previous_style));

@@ -4340,6 +4340,7 @@ dependencies = [
  "image",
  "jcode-render-core",
  "jcode-tui-mermaid",
+ "jcode-tui-style",
  "jcode-tui-workspace",
  "mdwright-latex",
  "pulldown-cmark",
@@ -4423,8 +4424,12 @@ dependencies = [
 name = "jcode-tui-style"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "jcode-logging",
  "ratatui",
+ "serde",
+ "tempfile",
+ "toml",
 ]
 
 [[package]]

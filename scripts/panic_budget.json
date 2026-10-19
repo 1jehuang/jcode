@@ -1,5 +1,5 @@
 {
-  "total": 174,
+  "total": 176,
   "tracked_files": {
     "crates/jcode-app-core/build.rs": 4,
     "crates/jcode-app-core/src/agent/provider.rs": 1,
@@ -45,6 +45,7 @@
     "crates/jcode-tui-core/src/stream_buffer.rs": 3,
     "crates/jcode-tui-mermaid/src/mermaid_kitty_classic.rs": 1,
     "crates/jcode-tui-style/examples/light_bench.rs": 1,
+    "crates/jcode-tui-style/src/theme.rs": 2,
     "crates/jcode-tui-style/src/theme_mode.rs": 1,
     "crates/jcode-tui/src/tui/app/auth.rs": 3,
     "crates/jcode-tui/src/tui/app/auth_remote.rs": 12,
