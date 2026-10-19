@@ -309,7 +309,9 @@ pub fn score_locally_with_context(
     let max_secondary = max_secondary_suggestions.clamp(1, 20);
     let desired_pool = (max_secondary + 1).clamp(6, MAX_MICRO_CANDIDATES);
 
-    if let Some(findings) = six_lens_findings.map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(raw_findings) = six_lens_findings.map(str::trim).filter(|s| !s.is_empty()) {
+        let extracted = super::extract_six_lens_review_findings(raw_findings);
+        let findings = extracted.as_deref().unwrap_or(raw_findings);
         let mut raw_list = if ctx.language_is_cyrillic {
             vec![
                 format!("Исправить замечания 6-линзового ревью: {findings}"),

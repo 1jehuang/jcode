@@ -1540,8 +1540,12 @@ impl App {
         if self.has_pending_user_followup() {
             return false;
         }
-        self.schedule_auto_poke_followup_if_needed()
-            || self.schedule_overnight_poke_followup_if_needed()
+        let scheduled = self.schedule_auto_poke_followup_if_needed()
+            || self.schedule_overnight_poke_followup_if_needed();
+        if !scheduled && self.is_remote {
+            self.maybe_trigger_six_lens_autoreview_remote();
+        }
+        scheduled
     }
 
     /// Deliver this turn's deferred quality-check reminder, if anything is

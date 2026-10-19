@@ -11,8 +11,8 @@ use std::time::Duration;
 
 mod laya;
 use laya::{
-    configured_laya_base, has_configured_laya, laya_endpoint, resolve_laya_with,
-    resolve_suggestions_with, should_bypass_proxy,
+    configured_laya_base, laya_endpoint, resolve_laya_with, resolve_suggestions_with,
+    should_bypass_proxy, validate_choice_answer,
 };
 
 const PROVIDER_ENV: &str = "JCODE_MEMORY_JEV_PROVIDER";
@@ -257,61 +257,6 @@ impl JevClient {
     /// explicitly select typesafe or jcode. Evaluation never changes accounts.
     pub fn for_voice() -> Result<Self> {
         Self::for_purpose(JevPurpose::Voice)
-    }
-
-    /// Suggestions routing prefers explicit OpenJev SystemOne (`OPENJEV_API_KEY`),
-    /// then Jcode / TypeSafe / OpenRouter / AIMLAPI when `auto` is selected.
-    /// Evaluation never changes accounts after an auth/billing failure.
-    pub fn for_suggestions() -> Result<Self> {
-        Self::for_purpose(JevPurpose::Suggestions)
-    }
-
-    pub fn for_suggestions_with_selector(config_selector: &str) -> Result<Self> {
-        let (provider, api_key, endpoint, me_endpoint) =
-            Self::resolve_with_suggestions_default(config_selector)?;
-        Self::build_suggestions_client(provider, api_key, endpoint, me_endpoint)
-    }
-
-    pub fn for_suggestions_fixed_selector(selector: &str) -> Result<Self> {
-        let (provider, api_key, endpoint, me_endpoint) =
-            Self::resolve_for_selector(JevPurpose::Suggestions, selector)?;
-        Self::build_suggestions_client(provider, api_key, endpoint, me_endpoint)
-    }
-
-    fn build_suggestions_client(
-        provider: JevProvider,
-        api_key: String,
-        endpoint: String,
-        me_endpoint: Option<String>,
-    ) -> Result<Self> {
-        let bypass_proxy = should_bypass_proxy(provider, &endpoint);
-        let client = client_builder_for(bypass_proxy)
-            .build()
-            .map_err(|_| anyhow!("Could not initialize the Jev decision client"))?;
-        Ok(Self {
-            client,
-            hedge_clients: Vec::new(),
-            purpose: JevPurpose::Suggestions,
-            provider,
-            model_id: resolve_jev_model(JevPurpose::Suggestions, provider),
-            api_key,
-            endpoint,
-            me_endpoint,
-        })
-    }
-
-    /// True when the active route supports direct SystemOne `choice` questions
-    /// (`OpenJev`, `TypeSafe`, `OpenRouter`, `Aimlapi`). `Jcode` subscription
-    /// decisions only accept `noul` outside of Browser mode.
-    pub fn supports_choice_questions(&self) -> bool {
-        self.provider != JevProvider::Jcode || self.purpose == JevPurpose::Browser
-    }
-
-    /// True when `JCODE_LAYA_BASE_URL`, `LAYA_BASE_URL`, or `LAYA_API_KEY` is configured in env or `laya.env`.
-    pub fn has_configured_laya_route() -> bool {
-        has_configured_laya(&mut |env, file| {
-            crate::provider_catalog::load_env_value_from_env_or_config(env, file)
-        })
     }
 
     fn for_purpose(purpose: JevPurpose) -> Result<Self> {
@@ -730,6 +675,7 @@ fn request_body(
     request_body_for(JevPurpose::Memory, provider, state, questions)
 }
 
+#[cfg(test)]
 fn request_body_for(
     purpose: JevPurpose,
     provider: JevProvider,
@@ -933,35 +879,7 @@ fn validate_answers(value: &Value, questions: &Map<String, Value>) -> Result<()>
                 "Jev returned an invalid noul probability"
             );
         } else if question["type"] == "choice" {
-            let criteria = question["criteria"]
-                .as_object()
-                .ok_or_else(|| anyhow!("Jev choice question is missing criteria"))?;
-            let choice = answer["choice"]
-                .as_str()
-                .ok_or_else(|| anyhow!("Jev choice answer omitted selected choice"))?;
-            ensure!(
-                criteria.contains_key(choice),
-                "Jev choice answer selected an unknown option"
-            );
-            if let Some(conf) = answer.get("confidence").and_then(Value::as_f64) {
-                ensure!(
-                    conf.is_finite() && (0.0..=1.0).contains(&conf),
-                    "Jev returned an invalid choice confidence"
-                );
-            }
-            if let Some(probs) = answer.get("probabilities").and_then(Value::as_object) {
-                for (opt, prob) in probs {
-                    ensure!(
-                        criteria.contains_key(opt),
-                        "Jev returned probability for an unknown choice option"
-                    );
-                    ensure!(
-                        prob.as_f64()
-                            .is_some_and(|v| v.is_finite() && (0.0..=1.0).contains(&v)),
-                        "Jev returned an invalid choice probability"
-                    );
-                }
-            }
+            validate_choice_answer(question, answer)?;
         }
     }
     Ok(())

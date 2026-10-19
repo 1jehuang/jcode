@@ -893,6 +893,13 @@ async fn handle_remote_key_internal(
 
         app.try_stage_suggested_reply_for_remote_enter(true);
 
+        if app.input.trim().starts_with('/') {
+            if input::try_queue_command(app) {
+                return Ok(());
+            }
+            return submit_remote_enter_input(app, remote).await;
+        }
+
         if !app.input.is_empty() {
             let prepared = input::take_prepared_input(app);
 
@@ -1004,14 +1011,7 @@ async fn handle_remote_key_internal(
             app.cursor_pos = app.input.len();
         }
         KeyCode::Tab => {
-            if let Some(maybe_prompt) = app.handle_suggested_replies_tab() {
-                if let Some(prompt) = maybe_prompt {
-                    app.input = prompt;
-                    app.cursor_pos = app.input.len();
-                    let prepared = input::take_prepared_input(app);
-                    submit_prepared_remote_input(app, remote, prepared).await?;
-                }
-            } else {
+            if app.handle_suggested_replies_tab().is_none() {
                 app.autocomplete();
             }
         }
@@ -1611,17 +1611,7 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
                 begin_remote_split_launch(app, "Autoreview");
                 if let Err(error) = remote.split().await {
                     finish_remote_split_launch(app);
-                    app.pending_split_startup_message = None;
-                    app.pending_split_parent_session_id = None;
-                    app.pending_split_prompt = None;
-                    app.pending_split_model_override = None;
-                    app.pending_split_provider_key_override = None;
-                    app.pending_split_label = None;
-                    app.push_display_message(DisplayMessage::error(format!(
-                        "Failed to launch autoreview session: {}",
-                        error
-                    )));
-                    app.set_status_notice("Autoreview launch failed");
+                    app.clear_failed_remote_split_launch("autoreview", "Autoreview", &error);
                 }
             }
             return Ok(());

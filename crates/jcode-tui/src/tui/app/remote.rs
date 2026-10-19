@@ -1523,8 +1523,7 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
     }
 
     if app.take_pending_remote_suggested_reply().is_some() {
-        let prepared = input::take_prepared_input(app);
-        if let Err(error) = submit_prepared_remote_input(app, remote, prepared).await {
+        if let Err(error) = key_handling::submit_remote_enter_input(app, remote).await {
             app.push_display_message(DisplayMessage::error(format!(
                 "Failed to submit suggested reply: {error}"
             )));

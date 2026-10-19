@@ -436,3 +436,148 @@ fn mouse_hit_regions_digit_6_to_9_staged_input_editing_and_six_lens_cache_invali
     assert!(app.handle_suggestions_command("/suggestions refresh"));
     assert!(app.suggested_replies.current.is_some());
 }
+
+#[test]
+fn session_switch_invalidates_suggestions_and_rejects_stale_pending_results() {
+    let mut app = crate::tui::app::tests::create_test_app();
+    app.is_remote = true;
+    app.remote_session_id = Some("ses_one".to_string());
+    app.suggested_replies.force_enable_in_tests = true;
+    app.push_display_message(super::super::DisplayMessage::user("Привет"));
+    app.push_display_message(super::super::DisplayMessage::assistant("Ответ"));
+
+    let (tx, rx) = mpsc::unbounded_channel();
+    app.suggested_replies.pending_request_target =
+        Some(("ses_one".to_string(), app.display_messages_version));
+    app.suggested_replies.pending_rx = Some(rx);
+    app.suggested_replies.active_session_id = Some("ses_one".to_string());
+
+    let stale_resp = distribute_suggestions(
+        "implementation",
+        vec![ScoredSuggestion {
+            text: "Stale action from ses_one".to_string(),
+            confidence: 0.90,
+        }],
+        0.55,
+        3,
+    );
+    tx.send(stale_resp).unwrap();
+
+    // Switch session to ses_two before polling tick.
+    app.remote_session_id = Some("ses_two".to_string());
+    let (_redraw, auto_submit) = app.poll_suggested_replies_tick();
+    assert_eq!(auto_submit, None);
+    assert!(
+        app.suggested_replies.current.is_none(),
+        "stale suggestion from previous session must be rejected"
+    );
+}
+
+#[test]
+fn review_findings_ingest_on_delivery_and_remote_autoreview_tracks_per_turn_edits() {
+    let mut app = crate::tui::app::tests::create_test_app();
+    app.is_remote = true;
+    app.remote_session_id = Some("ses_review_test".to_string());
+    app.suggested_replies.force_enable_in_tests = true;
+    app.push_display_message(super::super::DisplayMessage::user(
+        "Исправь парсер и проверь тестами",
+    ));
+    app.push_display_message(super::super::DisplayMessage::assistant("Сделано."));
+
+    // 1. Launching /review 6 must NOT record a fake launch placeholder finding.
+    let (label, _startup) =
+        app.build_remote_review_label_and_startup("/review 6", "ses_review_test");
+    assert_eq!(label, "6-Lens Review");
+    assert!(app.suggested_replies.pending_six_lens_findings.is_none());
+
+    // 2. Delivering a review message with DEFAULT_ACTION ingests the concrete fix and survives refresh.
+    app.push_display_message(super::super::DisplayMessage::swarm(
+        "6-Lens Review".to_string(),
+        "Overall Verdict: CONDITIONAL GO\nDEFAULT_ACTION: Исправить проверку UTF-8 границ в recent_transcript".to_string(),
+    ));
+    assert_eq!(
+        app.suggested_replies.pending_six_lens_findings.as_deref(),
+        Some("Исправить проверку UTF-8 границ в recent_transcript")
+    );
+    app.trigger_suggested_replies_evaluation(true);
+    let default_act = app
+        .suggested_replies
+        .current
+        .as_ref()
+        .and_then(|r| r.default_action.as_deref())
+        .expect("default action from review finding");
+    assert!(
+        default_act.contains("Исправить проверку UTF-8 границ в recent_transcript"),
+        "expected concrete DEFAULT_ACTION in default_action, got: {default_act}"
+    );
+
+    // 3. Edit-count tracking only triggers automatic 6-lens review once per new edit.
+    app.display_edit_tool_message_count = 1;
+    assert_eq!(app.suggested_replies.last_reviewed_edit_count, 0);
+    if crate::config::config()
+        .suggested_replies
+        .six_lens_auto_review
+    {
+        assert!(app.maybe_trigger_six_lens_autoreview_remote());
+        assert!(!app.maybe_trigger_six_lens_autoreview_remote());
+    } else {
+        app.suggested_replies.last_reviewed_edit_count = app.display_edit_tool_message_count;
+        assert_eq!(app.suggested_replies.last_reviewed_edit_count, 1);
+    }
+}
+
+#[test]
+fn context_retains_user_language_across_tool_rows_preserves_closing_choices_and_scrolls_panel() {
+    let mut app = crate::tui::app::tests::create_test_app();
+    app.suggested_replies.force_enable_in_tests = true;
+    app.push_display_message(super::super::DisplayMessage::user(
+        "Пожалуйста, проверь все модули и предложи следующие шаги на русском языке",
+    ));
+    for i in 0..6 {
+        app.push_display_message(super::super::DisplayMessage::tool(
+            format!("tool output {i}"),
+            crate::message::ToolCall {
+                id: format!("t_{i}"),
+                name: "read".to_string(),
+                input: serde_json::Value::Null,
+                intent: None,
+                thought_signature: None,
+            },
+        ));
+    }
+    let long_prefix = "Подробный технический отчёт о проверке модулей. ".repeat(30);
+    let reply_with_closing = format!(
+        "{long_prefix}\nВыберите следующий шаг:\n1. Запустить полный набор тестов\n2. Сделать коммит и пуш"
+    );
+    assert!(reply_with_closing.len() > 1200);
+    app.push_display_message(super::super::DisplayMessage::assistant(reply_with_closing));
+
+    let ctx = app.build_suggested_replies_context();
+    assert!(
+        ctx.language_is_cyrillic,
+        "Russian user request must be retained across 6 tool rows"
+    );
+    assert!(
+        ctx.assistant_options
+            .iter()
+            .any(|o| o.contains("Запустить полный набор тестов")),
+        "closing options must be preserved on >900-byte assistant replies: {:?}",
+        ctx.assistant_options
+    );
+
+    // Viewport scrolling: focusing option 20 (Secondary(19)) in an 8-row panel keeps row 20 visible.
+    let resp = score_locally_with_context(&ctx, None, &[], None, 0.55, 20);
+    assert_eq!(resp.secondary_suggestions.len(), 20);
+    app.apply_suggested_replies_response(resp);
+    assert!(app.stage_suggested_reply_target(SuggestedReplyFocus::Secondary(19)));
+
+    let budgeted = crate::tui::ui::inline_ui::budgeted_inline_ui_height(&app, 16, 4);
+    assert_eq!(budgeted, 8);
+    let view = crate::tui::TuiState::suggested_replies_view(&app).expect("view present");
+    let rows = render_panel_lines(&view, 100, budgeted);
+    assert_eq!(rows.len(), 8);
+    assert!(
+        rows.last().unwrap().contains("20. "),
+        "focused option 20 must scroll into the visible panel viewport: {rows:?}"
+    );
+}

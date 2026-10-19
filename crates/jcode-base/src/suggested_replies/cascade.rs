@@ -94,6 +94,35 @@ pub(super) async fn complete_via_named_openai_compatible(
     system: &str,
     user_msg: &str,
 ) -> Result<(String, String)> {
+    ensure!(
+        matches!(
+            profile.provider_type,
+            crate::config::NamedProviderType::OpenAiCompatible
+                | crate::config::NamedProviderType::OpenRouter
+        ),
+        "profile '{name}' uses unsupported provider type {:?} for OpenAI-compatible chat completions",
+        profile.provider_type
+    );
+    if let Some(api) = profile
+        .api
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let api_lower = api.to_ascii_lowercase();
+        ensure!(
+            matches!(
+                api_lower.as_str(),
+                "openai"
+                    | "openai-completions"
+                    | "openai-compatible"
+                    | "chat-completions"
+                    | "openrouter"
+            ),
+            "profile '{name}' uses unsupported api '{api}'"
+        );
+    }
+
     let base = profile.base_url.trim().trim_end_matches('/');
     ensure!(!base.is_empty(), "profile '{name}' has empty base_url");
     let url = if base.ends_with("/chat/completions") {
@@ -151,8 +180,7 @@ pub(super) async fn complete_via_named_openai_compatible(
         })
         .unwrap_or("gpt-5.6-luna");
 
-    let client = open_gf_http_client(url.starts_with("http://"))?;
-    let mut req = client.post(&url).json(&json!({
+    let mut payload = json!({
         "model": model,
         "messages": [
             { "role": "system", "content": system },
@@ -161,9 +189,42 @@ pub(super) async fn complete_via_named_openai_compatible(
         "max_tokens": 900,
         "temperature": 0.2,
         "stream": false
-    }));
-    if let Some(token) = key {
-        req = req.bearer_auth(token);
+    });
+    if let Some(extra) = &profile.extra_body {
+        let extra_obj = extra
+            .as_object()
+            .with_context(|| format!("profile '{name}' extra_body must be a JSON object"))?;
+        if let Some(obj) = payload.as_object_mut() {
+            for (k, v) in extra_obj {
+                obj.insert(k.clone(), v.clone());
+            }
+        }
+    }
+
+    let client = open_gf_http_client(url.starts_with("http://"))?;
+    let mut req = client.post(&url).json(&payload);
+    match profile.auth {
+        crate::config::NamedProviderAuth::None => {}
+        crate::config::NamedProviderAuth::Bearer => {
+            if let Some(token) = key {
+                req = req.bearer_auth(token);
+            } else if profile.requires_api_key != Some(false) {
+                anyhow::bail!("profile '{name}' requires a bearer API key");
+            }
+        }
+        crate::config::NamedProviderAuth::Header => {
+            let header_name = profile
+                .auth_header
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("api-key");
+            if let Some(token) = key {
+                req = req.header(header_name, token);
+            } else if profile.requires_api_key != Some(false) {
+                anyhow::bail!("profile '{name}' requires an API key for header '{header_name}'");
+            }
+        }
     }
     for (hk, hv) in &profile.headers {
         req = req.header(hk, hv);
@@ -444,17 +505,21 @@ pub async fn evaluate_cascade_with_context(
     let mut clients_to_try: Vec<(String, crate::jev::JevClient)> = Vec::new();
     match crate::jev::JevClient::for_suggestions_with_selector(&config.jev_provider) {
         Ok(primary) => {
-            let is_auto = config.jev_provider.trim().eq_ignore_ascii_case("auto");
+            let effective_selector = match std::env::var("JCODE_SUGGESTIONS_JEV_PROVIDER") {
+                Ok(v) if !v.trim().is_empty() => v,
+                _ => config.jev_provider.clone(),
+            };
+            let is_auto = effective_selector.trim().eq_ignore_ascii_case("auto");
             let primary_is_laya = primary.provider_name() == "laya";
             clients_to_try.push((
-                format!("{}:{}", config.jev_provider, primary.provider_name()),
+                format!("{}:{}", effective_selector.trim(), primary.provider_name()),
                 primary,
             ));
             if is_auto
                 && !primary_is_laya
                 && crate::jev::JevClient::has_configured_laya_route()
                 && let Ok(laya_client) =
-                    crate::jev::JevClient::for_suggestions_with_selector("laya")
+                    crate::jev::JevClient::for_suggestions_fixed_selector("laya")
             {
                 clients_to_try.push(("auto->laya".to_string(), laya_client));
             }

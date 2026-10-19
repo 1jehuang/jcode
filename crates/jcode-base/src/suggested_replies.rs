@@ -327,6 +327,72 @@ pub fn detect_cyrillic_language(text: &str) -> bool {
     cyrillic >= 3 && (cyrillic * 2 >= latin || cyrillic >= 8)
 }
 
+/// Extract actionable findings or a `DEFAULT_ACTION:` directive from a 6-Lens Review reply.
+pub fn extract_six_lens_review_findings(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty()
+        || trimmed.contains("You are the 6-Lens Subagent Self-Review coordinator")
+        || trimmed.contains("prefixed with DEFAULT_ACTION: describing the exact fix")
+    {
+        return None;
+    }
+
+    for raw_line in trimmed.lines() {
+        let line = raw_line
+            .trim()
+            .trim_start_matches(|c: char| matches!(c, '-' | '*' | '•' | '>' | ' '))
+            .trim_start_matches(['*', '`', ' ']);
+        let prefix = "default_action:";
+        if line
+            .get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+        {
+            let action = line[prefix.len()..]
+                .trim()
+                .trim_matches(|c: char| matches!(c, '*' | '`' | '"' | '\''))
+                .trim();
+            if !action.is_empty()
+                && !matches!(
+                    action.to_ascii_lowercase().as_str(),
+                    "none" | "n/a" | "no action needed"
+                )
+            {
+                return Some(action.to_string());
+            }
+        }
+    }
+
+    let lower = trimmed.to_lowercase();
+    let is_review_report = (lower.contains("overall verdict")
+        || lower.contains("6-lens")
+        || lower.contains("6-линз")
+        || lower.contains("lens 1"))
+        && (lower.contains("no-go")
+            || lower.contains("conditional go")
+            || lower.contains("conditional-go"));
+    if is_review_report {
+        for raw_line in trimmed.lines() {
+            let line = raw_line.trim();
+            let item = line
+                .strip_prefix("- ")
+                .or_else(|| line.strip_prefix("* "))
+                .or_else(|| line.strip_prefix("• "));
+            if let Some(item) = item {
+                let cleaned = clean_extracted_option(item);
+                let item_lower = cleaned.to_lowercase();
+                if !cleaned.is_empty()
+                    && !item_lower.starts_with("overall verdict")
+                    && !item_lower.starts_with("lens ")
+                {
+                    return Some(cleaned);
+                }
+            }
+        }
+    }
+
+    None
+}
+
 /// Extract actionable options, numbered/bulleted items, or slash commands from the
 /// closing lines of `last_assistant_message`.
 pub fn extract_assistant_options(last_assistant_message: &str) -> Vec<String> {
@@ -337,15 +403,16 @@ pub fn extract_assistant_options(last_assistant_message: &str) -> Vec<String> {
 
     let mut options: Vec<String> = Vec::new();
     let mut in_code_block = false;
-    let tail_lines: Vec<&str> = trimmed.lines().rev().take(28).collect();
+    let all_lines: Vec<&str> = trimmed.lines().collect();
+    let tail_start = all_lines.len().saturating_sub(28);
 
-    for raw_line in tail_lines.into_iter().rev() {
+    for (idx, raw_line) in all_lines.into_iter().enumerate() {
         let line = raw_line.trim();
         if line.starts_with("```") {
             in_code_block = !in_code_block;
             continue;
         }
-        if in_code_block || line.is_empty() {
+        if idx < tail_start || in_code_block || line.is_empty() {
             continue;
         }
 

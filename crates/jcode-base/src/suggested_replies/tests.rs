@@ -540,3 +540,103 @@ fn goal_classification_labels_and_badges_cover_all_categories_bilingually() {
     assert_eq!(format_goal_category_badge("impl", true), "[код]");
     assert_eq!(format_goal_category_badge("impl", false), "[impl]");
 }
+
+#[test]
+fn extract_assistant_options_tracks_code_fences_across_prefix_and_extracts_review_default_action() {
+    let mut lines = vec![
+        "Вот длинный пример в блоке кода:".to_string(),
+        "```rust".to_string(),
+    ];
+    for i in 1..=30 {
+        lines.push(format!("{i}. Fake code option inside long fence {i}"));
+    }
+    lines.push("`/fake-command`".to_string());
+    lines.push("```".to_string());
+    lines.push("Выберите реальное следующее действие:".to_string());
+    lines.push("1. Запустить реальные интеграционные тесты".to_string());
+    lines.push("2. Проверить сборку и отправить PR".to_string());
+    let msg = lines.join("\n");
+
+    let opts = extract_assistant_options(&msg);
+    assert!(
+        !opts.iter().any(|o| o.contains("Fake")),
+        "must not extract numbered lines inside a code block that started >28 lines ago: {opts:?}"
+    );
+    assert_eq!(
+        opts,
+        vec![
+            "Запустить реальные интеграционные тесты".to_string(),
+            "Проверить сборку и отправить PR".to_string()
+        ]
+    );
+
+    assert_eq!(
+        extract_six_lens_review_findings(
+            "Overall Verdict: CONDITIONAL GO\n- DEFAULT_ACTION: `Fix session boundary check in poll_suggested_replies_tick`"
+        ),
+        Some("Fix session boundary check in poll_suggested_replies_tick".to_string())
+    );
+    assert_eq!(
+        extract_six_lens_review_findings(
+            "You are the 6-Lens Subagent Self-Review coordinator... prefixed with DEFAULT_ACTION: describing the exact fix"
+        ),
+        None
+    );
+}
+
+#[tokio::test]
+async fn named_profile_honors_custom_auth_header_extra_body_and_laya_fixed_selector() {
+    use std::io::{Read, Write};
+    let _lock = crate::storage::lock_test_env();
+
+    let saved_prov = std::env::var_os("JCODE_SUGGESTIONS_JEV_PROVIDER");
+    crate::env::set_var("JCODE_SUGGESTIONS_JEV_PROVIDER", "auto");
+    let fixed_laya = crate::jev::JevClient::for_suggestions_fixed_selector("laya")
+        .expect("fixed laya selector must succeed even when JCODE_SUGGESTIONS_JEV_PROVIDER=auto");
+    assert_eq!(fixed_laya.provider_name(), "laya");
+    match saved_prov {
+        Some(v) => crate::env::set_var("JCODE_SUGGESTIONS_JEV_PROVIDER", v),
+        None => crate::env::remove_var("JCODE_SUGGESTIONS_JEV_PROVIDER"),
+    }
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut buf = [0u8; 4096];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            let req = String::from_utf8_lossy(&buf[..n]);
+            assert!(
+                req.to_ascii_lowercase()
+                    .contains("x-custom-key: sk-custom-header-token"),
+                "expected custom auth header in request: {req}"
+            );
+            assert!(
+                req.contains("\"custom_flag\":true"),
+                "expected extra_body field in request: {req}"
+            );
+            let body = r#"{"choices":[{"message":{"content":"{\"branch\":\"verification\",\"candidates\":[\"Run cargo test\"]}"}}]}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(resp.as_bytes());
+        }
+    });
+
+    let profile = crate::config::NamedProviderConfig {
+        base_url: format!("http://{addr}/v1"),
+        auth: crate::config::NamedProviderAuth::Header,
+        auth_header: Some("X-Custom-Key".to_string()),
+        api_key: Some("sk-custom-header-token".to_string()),
+        extra_body: Some(json!({ "custom_flag": true })),
+        ..Default::default()
+    };
+    let (raw, _) = complete_via_named_openai_compatible("custom-prof", &profile, "sys", "usr")
+        .await
+        .unwrap();
+    let (branch, cands) = parse_open_gf_response(&raw).unwrap();
+    assert_eq!(branch, "verification");
+    assert_eq!(cands, vec!["Run cargo test"]);
+}

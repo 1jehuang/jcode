@@ -113,13 +113,28 @@ pub(crate) fn inline_ui_height(app: &dyn TuiState) -> u16 {
                 if total == 0 {
                     clear_suggested_reply_hit_regions();
                 }
-                total
+                total.min(21)
             } else {
                 clear_suggested_reply_hit_regions();
                 0
             }
         }
     }
+}
+
+pub(crate) fn budgeted_inline_ui_height(
+    app: &dyn TuiState,
+    available_height: u16,
+    reserved_non_inline_height: u16,
+) -> u16 {
+    let requested = inline_ui_height(app);
+    if requested == 0 {
+        return 0;
+    }
+    let max_rows = available_height
+        .saturating_sub(reserved_non_inline_height.saturating_add(4))
+        .max(1);
+    requested.min(max_rows)
 }
 
 pub(super) fn draw_inline_ui(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
@@ -178,7 +193,12 @@ pub(crate) fn draw_suggested_replies_panel(
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut current_row = area.y;
 
-    if let Some(default_action) = view.response.default_action.as_ref() {
+    let show_default_row = view.response.default_action.is_some()
+        && (area.height > 1
+            || !matches!(view.focus, Some(SuggestedReplyFocus::Secondary(_)))
+            || view.response.secondary_suggestions.is_empty());
+
+    if show_default_row && let Some(default_action) = view.response.default_action.as_ref() {
         let is_focused = matches!(view.focus, Some(SuggestedReplyFocus::DefaultAction));
         let bg = if is_focused {
             rgb(44, 66, 98)
@@ -255,7 +275,25 @@ pub(crate) fn draw_suggested_replies_panel(
 
     if !view.response.secondary_suggestions.is_empty() {
         let max_y = area.y.saturating_add(area.height);
-        for (idx, text) in view.response.secondary_suggestions.iter().enumerate() {
+        let avail_secondary = max_y.saturating_sub(current_row) as usize;
+        let total_secondary = view.response.secondary_suggestions.len();
+        let scroll_offset = match view.focus {
+            Some(SuggestedReplyFocus::Secondary(focused_idx))
+                if avail_secondary > 0 && focused_idx >= avail_secondary =>
+            {
+                (focused_idx + 1)
+                    .saturating_sub(avail_secondary)
+                    .min(total_secondary.saturating_sub(avail_secondary))
+            }
+            _ => 0,
+        };
+        for (idx, text) in view
+            .response
+            .secondary_suggestions
+            .iter()
+            .enumerate()
+            .skip(scroll_offset)
+        {
             if current_row >= max_y {
                 break;
             }

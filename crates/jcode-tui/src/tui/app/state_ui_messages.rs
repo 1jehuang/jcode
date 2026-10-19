@@ -128,8 +128,9 @@ impl App {
         // Appending is the hot path; rescanning every append was O(M^2) over a
         // long session.
         self.adjust_display_message_stats(&message, true);
-        self.display_messages.push(message);
+        self.display_messages.push(message.clone());
         self.bump_display_messages_version_no_stats();
+        self.maybe_ingest_six_lens_review_message(&message);
         if is_tool && self.diff_mode.has_side_pane() && self.diff_pane_auto_scroll {
             self.diff_pane_scroll = usize::MAX;
         }
@@ -142,6 +143,8 @@ impl App {
         self.attempt_committed_assistant_messages = 0;
         self.sync_compacted_history_lazy_from_display_messages();
         self.bump_display_messages_version();
+        self.suggested_replies.last_reviewed_edit_count = self.display_edit_tool_message_count;
+        self.maybe_ingest_latest_six_lens_review_from_history();
         self.note_runtime_memory_event_force("display_messages_replaced", "display_history_reset");
     }
 
@@ -514,6 +517,7 @@ impl App {
 
     pub(super) fn clear_display_messages(&mut self) {
         self.compacted_history_lazy = CompactedHistoryLazyState::default();
+        self.invalidate_suggested_replies_on_session_switch();
         // The transcript is about to be discarded; forget where the live reasoning
         // block started so a stale offset can't slice the new stream.
         self.reasoning_block_start = None;

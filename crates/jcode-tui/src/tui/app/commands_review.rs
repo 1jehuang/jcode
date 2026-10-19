@@ -935,7 +935,14 @@ pub(super) fn queue_autojudge_remote(app: &mut App) {
 }
 
 pub(super) fn maybe_trigger_autoreview_local(app: &mut App) {
-    if app.is_remote || app.is_replay || app.maybe_trigger_six_lens_autoreview_local() {
+    if app.is_replay {
+        return;
+    }
+    if app.is_remote {
+        app.maybe_trigger_six_lens_autoreview_remote();
+        return;
+    }
+    if app.maybe_trigger_six_lens_autoreview_local() {
         return;
     }
     if !app.autoreview_enabled {
