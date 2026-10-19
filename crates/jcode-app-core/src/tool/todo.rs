@@ -63,6 +63,12 @@ fn merge_confidence_history(previous: &[TodoItem], incoming: &mut [TodoItem]) {
             history.push(value);
         }
         todo.confidence_history = history;
+        // `assigned_to` links a todo to the swarm worker running it. It is set
+        // by swarm dispatch, not the model (the schema does not expose it), so
+        // a model rewrite of the list must not silently unassign the worker.
+        if todo.assigned_to.is_none() {
+            todo.assigned_to = previous_todo.and_then(|prev| prev.assigned_to.clone());
+        }
     }
 }
 
@@ -769,6 +775,11 @@ impl Tool for TodoTool {
                             "group": {
                                 "type": "string",
                                 "description": "Optional group label; one group per coherent goal, new direction = new group. Omit for flat list."
+                            },
+                            "wave": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "description": "Optional parallel wave (1, 2, 3...). Todos with the same wave are independent and can run at the same time; wave 2 starts after wave 1 is done. Omit when steps must happen in list order."
                             },
                             "confidence": {
                                 "type": "string",

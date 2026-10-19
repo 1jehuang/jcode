@@ -460,6 +460,47 @@ pub struct TodoItem {
     pub blocked_by: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assigned_to: Option<String>,
+    /// Optional execution wave. Todos that share a wave are independent and
+    /// may run in parallel; a later wave starts only after earlier waves
+    /// finish. `None` means "sequential in list order". Deliberately a plain
+    /// number instead of id-based dependencies so a model cannot create
+    /// cycles or dangling references.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_wave",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub wave: Option<u32>,
+}
+
+/// Accept `2`, `2.0`, `"2"`, `"wave 2"`, `""`, or `null` for a todo wave.
+/// Zero and unparseable values read as absent rather than failing the whole
+/// todo write, so a sloppy wave can never cost the model its plan.
+fn deserialize_optional_wave<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| parse_wave_value(&value)))
+}
+
+pub fn parse_wave_value(value: &serde_json::Value) -> Option<u32> {
+    let wave = match value {
+        serde_json::Value::Number(n) => n
+            .as_u64()
+            .or_else(|| n.as_f64().filter(|f| *f >= 0.0).map(|f| f.round() as u64)),
+        serde_json::Value::String(s) => {
+            let digits: String = s
+                .trim()
+                .trim_start_matches(|c: char| !c.is_ascii_digit())
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            digits.parse::<u64>().ok()
+        }
+        _ => None,
+    }?;
+    u32::try_from(wave).ok().filter(|wave| *wave > 0)
 }
 
 /// Plan-level understanding of what the user actually wants, covering the

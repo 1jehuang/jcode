@@ -570,6 +570,7 @@ fn load_sessions_prefers_todo_group_over_generated_title() {
             confidence_history: vec![crate::todo::ConfidenceState::from_legacy_score(90)],
             blocked_by: Vec::new(),
             assigned_to: None,
+            wave: None,
         }],
     )
     .expect("save todos");
@@ -623,6 +624,7 @@ fn load_sessions_keeps_custom_title_over_todo_group() {
             confidence_history: vec![crate::todo::ConfidenceState::from_legacy_score(90)],
             blocked_by: Vec::new(),
             assigned_to: None,
+            wave: None,
         }],
     )
     .expect("save todos");
