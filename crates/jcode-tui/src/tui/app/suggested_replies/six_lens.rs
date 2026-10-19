@@ -87,11 +87,13 @@ impl App {
                 out.push_str("- **Scored Candidates**:\n");
                 for (i, cand) in resp.scored_candidates.iter().enumerate() {
                     let badge = resp.badge_for_text(&cand.text);
+                    let fin = resp.advances_feature_completion_for_text(&cand.text);
                     out.push_str(&format!(
-                        "  {}. `{:.2}` `{}` — {}\n",
+                        "  {}. `{:.2}` `{}` `fin={}` — {}\n",
                         i + 1,
                         cand.confidence,
                         badge,
+                        fin,
                         cand.text
                     ));
                 }

@@ -539,6 +539,38 @@ fn goal_classification_labels_and_badges_cover_all_categories_bilingually() {
     );
     assert_eq!(format_goal_category_badge("impl", true), "[код]");
     assert_eq!(format_goal_category_badge("impl", false), "[impl]");
+
+    assert_eq!(
+        classify_suggestion_for_goal(
+            "Довести фичу до конца и выполнить финальное завершение",
+            "implementation",
+            &[]
+        ),
+        "finish"
+    );
+    assert_eq!(
+        classify_suggestion_for_goal(
+            "Complete the feature and verify final completion",
+            "implementation",
+            &[]
+        ),
+        "finish"
+    );
+    assert_eq!(format_goal_category_badge("finish", true), "[финал]");
+    assert_eq!(format_goal_category_badge("finish", false), "[finish]");
+
+    assert!(advances_toward_feature_completion(
+        "Довести фичу до конца и выполнить финальное завершение",
+        "implementation"
+    ));
+    assert!(advances_toward_feature_completion(
+        "Запустить целевые тесты и убедиться, что все проверки проходят",
+        "verification"
+    ));
+    assert!(!advances_toward_feature_completion(
+        "Изучить границы модулей и публичные интерфейсы целевых крейтов",
+        "architecture"
+    ));
 }
 
 #[test]

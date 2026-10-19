@@ -1,7 +1,7 @@
 use super::{
     MACRO_BRANCHES, MAX_MICRO_CANDIDATES, ScoredSuggestion, SuggestedRepliesContext,
-    SuggestedRepliesResponse, classify_suggestion_for_goal, distribute_suggestions,
-    push_unique_case_insensitive,
+    SuggestedRepliesResponse, advances_toward_feature_completion, classify_suggestion_for_goal,
+    distribute_suggestions, push_unique_case_insensitive,
 };
 use anyhow::{Result, ensure};
 use serde_json::{Map, Value, json};
@@ -458,16 +458,23 @@ pub fn build_structured_systemone_state(
         let branch_ref = branch.unwrap_or("implementation");
         let mut cand_map = Map::new();
         let mut goal_labels = Map::new();
+        let mut completion_map = Map::new();
         for (idx, text) in candidates.iter().take(MAX_MICRO_CANDIDATES).enumerate() {
             let key = format!("cand_{idx}");
             cand_map.insert(key.clone(), Value::String(text.clone()));
             let cat = classify_suggestion_for_goal(text, branch_ref, &[]);
-            goal_labels.insert(key, Value::String(cat.to_string()));
+            let advances = advances_toward_feature_completion(text, branch_ref);
+            goal_labels.insert(key.clone(), Value::String(cat.to_string()));
+            completion_map.insert(key, Value::Bool(advances));
         }
         state.insert("candidates".to_string(), Value::Object(cand_map));
         state.insert(
             "candidate_goal_labels".to_string(),
             Value::Object(goal_labels),
+        );
+        state.insert(
+            "candidate_advances_feature_completion".to_string(),
+            Value::Object(completion_map),
         );
     }
 
@@ -531,10 +538,11 @@ pub fn build_micro_scoring_questions(
         let mut choice_criteria = Map::new();
         for (idx, candidate) in capped.iter().enumerate() {
             let cat = classify_suggestion_for_goal(candidate, branch, &[]);
+            let advances = advances_toward_feature_completion(candidate, branch);
             choice_criteria.insert(
                 format!("cand_{idx}"),
                 Value::String(format!(
-                    "Candidate cand_{idx} [goal_label={cat}] in state.candidates: {}",
+                    "Candidate cand_{idx} [goal_label={cat}, advances_feature_completion={advances}] in state.candidates: {}",
                     crate::util::truncate_str(candidate, 140)
                 )),
             );
@@ -544,7 +552,7 @@ pub fn build_micro_scoring_questions(
             json!({
                 "type": "choice",
                 "instructions": format!(
-                    "In the '{}' workflow branch, select which candidate reply in state.candidates is the single highest-value immediate next step toward achieving the user's goal.",
+                    "In the '{}' workflow branch, select which candidate reply in state.candidates is the single highest-value immediate next step that moves toward achieving the successful final completion of the feature and user goal.",
                     branch
                 ),
                 "criteria": choice_criteria,
@@ -554,18 +562,19 @@ pub fn build_micro_scoring_questions(
 
     for (idx, candidate) in capped.iter().enumerate() {
         let cat = classify_suggestion_for_goal(candidate, branch, &[]);
+        let advances = advances_toward_feature_completion(candidate, branch);
         questions.insert(
             format!("cand_{idx}"),
             json!({
                 "type": "noul",
                 "instructions": format!(
-                    "Evaluate candidate cand_{idx} [goal_label={cat}] in state.candidates for the '{}' workflow branch: is it a directly actionable, high-value immediate next reply toward reaching the user's goal? ({})",
+                    "Evaluate candidate cand_{idx} [goal_label={cat}, advances_feature_completion={advances}] in state.candidates for the '{}' workflow branch: does this event/action directly move toward achieving the successful final completion of the feature and user goal? ({})",
                     branch,
                     crate::util::truncate_str(candidate, 140)
                 ),
                 "criteria": {
-                    "true": "Directly actionable, context-matching, high-value immediate next reply that advances the user toward reaching their goal",
-                    "false": "Premature, redundant, wrong language, or lower priority than other next steps toward the goal"
+                    "true": "Directly actionable, context-matching next step that moves toward achieving the successful final completion of the feature and user goal",
+                    "false": "Premature, redundant, purely exploratory without advancing feature completion, wrong language, or lower priority than other next steps"
                 }
             }),
         );

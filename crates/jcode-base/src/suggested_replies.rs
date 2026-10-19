@@ -51,6 +51,7 @@ pub const MACRO_BRANCHES: &[(&str, &str)] = &[
 
 /// Canonical goal-reaching classification categories (`category`) assigned to each suggested reply:
 /// - `"goal"`: Directly achieves/delivers the user's goal (commit, push, PR, final action).
+/// - `"finish"`: Moves directly toward the successful final completion of the feature (`[финал]` / `[finish]`).
 /// - `"plan"`: Advances the next todo, plan, or OpenSpec step toward the goal.
 /// - `"impl"`: Implements code, features, or builds/reloads toward the goal.
 /// - `"verify"`: Runs tests, compiler checks, or validation to close the feedback loop.
@@ -67,9 +68,11 @@ pub const GOAL_CLASSIFICATION_CATEGORIES: &[(&str, &str, &str)] = &[
     ("review", "[ревью]", "[review]"),
     ("refactor", "[рефактор]", "[refactor]"),
     ("custom", "[свой]", "[custom]"),
+    ("finish", "[финал]", "[finish]"),
 ];
 
-/// Classify how a candidate suggestion advances the user toward reaching their goal.
+/// Classify how a candidate suggestion advances the user toward reaching their goal
+/// or achieving the successful final completion of the feature.
 pub fn classify_suggestion_for_goal(
     text: &str,
     branch: &str,
@@ -84,6 +87,25 @@ pub fn classify_suggestion_for_goal(
         return "custom";
     }
     let lower = trimmed.to_lowercase();
+
+    if lower.contains("завершить фичу")
+        || lower.contains("завершение фичи")
+        || lower.contains("финальное завершение")
+        || lower.contains("финального завершения фичи")
+        || lower.contains("успешного финального завершения")
+        || lower.contains("закрыть фичу")
+        || lower.contains("довести фичу до конца")
+        || lower.contains("финализировать фичу")
+        || lower.contains("сдать фичу")
+        || lower.contains("complete the feature")
+        || lower.contains("feature completion")
+        || lower.contains("final completion of the feature")
+        || lower.contains("successful final completion")
+        || lower.contains("finalize the feature")
+        || lower.contains("finish the feature")
+    {
+        return "finish";
+    }
 
     if lower.contains("/review")
         || lower.contains("6-линз")
@@ -170,6 +192,7 @@ pub fn classify_suggestion_for_goal(
     }
 
     match branch.trim().to_ascii_lowercase().as_str() {
+        "finish" | "feature_completion" | "final_completion" => "finish",
         "goal" | "goal_delivery" | "delivery" => "goal",
         "plan" | "planning" | "architecture" => "plan",
         "verify" | "verification" => "verify",
@@ -181,8 +204,57 @@ pub fn classify_suggestion_for_goal(
     }
 }
 
-/// Format a canonical goal classification category (`"goal"`, `"plan"`, `"impl"`, `"verify"`,
-/// `"debug"`, `"review"`, `"refactor"`, `"custom"`) as a localized compact UI badge.
+/// Classify whether a candidate event/action directly moves toward achieving the
+/// successful final completion of the feature (`true`) versus exploratory/informational
+/// inspection (`false`).
+pub fn advances_toward_feature_completion(text: &str, branch: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let lower = trimmed.to_lowercase();
+    if lower.starts_with("/suggestions debug")
+        || lower.starts_with("/suggestions status")
+        || lower.starts_with("/help")
+        || lower.contains("изучить границы модулей")
+        || lower.contains("inspect module boundaries")
+    {
+        return false;
+    }
+    let category = classify_suggestion_for_goal(trimmed, branch, &[]);
+    if matches!(category, "finish" | "goal" | "verify" | "review") {
+        return true;
+    }
+    lower.contains("исправ")
+        || lower.contains("устран")
+        || lower.contains("fix")
+        || lower.contains("resolve")
+        || lower.contains("выполнить следующую задачу")
+        || lower.contains("продолжить реализацию")
+        || lower.contains("приступить к выполнению")
+        || lower.contains("обновить чекбоксы")
+        || lower.contains("закоммит")
+        || lower.contains("коммит")
+        || lower.contains("реализ")
+        || lower.contains("пересобрать")
+        || lower.contains("build-reload")
+        || lower.contains("work on next todo")
+        || lower.contains("continue implementing")
+        || lower.contains("apply the openspec")
+        || lower.contains("update openspec")
+        || lower.contains("implement")
+        || lower.contains("commit")
+        || lower.contains("deliver")
+        || lower.contains("complete")
+        || lower.contains("finalize")
+        || matches!(
+            branch.trim().to_ascii_lowercase().as_str(),
+            "finish" | "feature_completion" | "final_completion" | "goal_delivery" | "verification"
+        )
+}
+
+/// Format a canonical goal classification category (`"goal"`, `"finish"`, `"plan"`, `"impl"`,
+/// `"verify"`, `"debug"`, `"review"`, `"refactor"`, `"custom"`) as a localized compact UI badge.
 pub fn format_goal_category_badge(category: &str, cyrillic: bool) -> &'static str {
     let key = category.trim().to_ascii_lowercase();
     let idx = match key.as_str() {
@@ -194,6 +266,7 @@ pub fn format_goal_category_badge(category: &str, cyrillic: bool) -> &'static st
         "review" => 5,
         "refactor" | "refactoring" => 6,
         "custom" => 7,
+        "finish" | "feature_completion" | "final_completion" => 8,
         _ => 2,
     };
     if cyrillic {
@@ -545,6 +618,8 @@ pub struct SuggestedRepliesResponse {
     pub scored_candidates: Vec<ScoredSuggestion>,
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub candidate_categories: std::collections::HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub candidate_feature_completion: std::collections::HashMap<String, bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub debug: Option<SuggestedRepliesDebugInfo>,
 }
@@ -576,31 +651,42 @@ impl SuggestedRepliesResponse {
             .map(|c| c.confidence)
     }
 
-    /// Populate `candidate_categories` for all candidates, tagging any match in `custom_prompts` as `"custom"`.
+    /// Populate `candidate_categories` and `candidate_feature_completion` for all candidates,
+    /// tagging any match in `custom_prompts` as `"custom"`.
     pub fn populate_goal_categories(&mut self, custom_prompts: &[String]) {
         for cand in &self.scored_candidates {
+            let key = cand.text.trim().to_lowercase();
             let cat = classify_suggestion_for_goal(&cand.text, &self.branch, custom_prompts);
+            let fin = advances_toward_feature_completion(&cand.text, &self.branch);
             self.candidate_categories
-                .insert(cand.text.trim().to_lowercase(), cat.to_string());
+                .insert(key.clone(), cat.to_string());
+            self.candidate_feature_completion.insert(key, fin);
         }
         if let Some(ref def) = self.default_action {
+            let key = def.trim().to_lowercase();
             let cat = classify_suggestion_for_goal(def, &self.branch, custom_prompts);
+            let fin = advances_toward_feature_completion(def, &self.branch);
             self.candidate_categories
-                .insert(def.trim().to_lowercase(), cat.to_string());
+                .insert(key.clone(), cat.to_string());
+            self.candidate_feature_completion.insert(key, fin);
         }
         for sec in &self.secondary_suggestions {
+            let key = sec.trim().to_lowercase();
             let cat = classify_suggestion_for_goal(sec, &self.branch, custom_prompts);
+            let fin = advances_toward_feature_completion(sec, &self.branch);
             self.candidate_categories
-                .insert(sec.trim().to_lowercase(), cat.to_string());
+                .insert(key.clone(), cat.to_string());
+            self.candidate_feature_completion.insert(key, fin);
         }
     }
 
-    /// Look up the canonical goal-reaching classification category (`"goal"`, `"plan"`, `"impl"`,
-    /// `"verify"`, `"debug"`, `"review"`, `"refactor"`, `"custom"`) for `text`.
+    /// Look up the canonical goal-reaching classification category (`"goal"`, `"finish"`, `"plan"`,
+    /// `"impl"`, `"verify"`, `"debug"`, `"review"`, `"refactor"`, `"custom"`) for `text`.
     pub fn category_for_text(&self, text: &str) -> &'static str {
         let lower = text.trim().to_lowercase();
         if let Some(cat) = self.candidate_categories.get(&lower) {
             match cat.as_str() {
+                "finish" | "feature_completion" | "final_completion" => return "finish",
                 "goal" => return "goal",
                 "plan" => return "plan",
                 "impl" => return "impl",
@@ -613,6 +699,15 @@ impl SuggestedRepliesResponse {
             }
         }
         classify_suggestion_for_goal(text, &self.branch, &[])
+    }
+
+    /// True when `text` is classified as advancing toward the successful final completion of the feature.
+    pub fn advances_feature_completion_for_text(&self, text: &str) -> bool {
+        let lower = text.trim().to_lowercase();
+        if let Some(&advances) = self.candidate_feature_completion.get(&lower) {
+            return advances;
+        }
+        advances_toward_feature_completion(text, &self.branch)
     }
 
     /// Look up the localized goal-reaching classification badge (e.g. `"[тест]"` / `"[verify]"`,
@@ -687,6 +782,7 @@ pub fn distribute_suggestions(
             branch,
             scored_candidates: Vec::new(),
             candidate_categories: std::collections::HashMap::new(),
+            candidate_feature_completion: std::collections::HashMap::new(),
             debug: None,
         };
     }
@@ -716,6 +812,7 @@ pub fn distribute_suggestions(
         branch,
         scored_candidates: deduplicated,
         candidate_categories: std::collections::HashMap::new(),
+        candidate_feature_completion: std::collections::HashMap::new(),
         debug: None,
     };
     resp.populate_goal_categories(&[]);
