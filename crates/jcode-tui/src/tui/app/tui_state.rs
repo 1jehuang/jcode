@@ -106,6 +106,10 @@ fn remote_oauth_widget_usage(
     };
     UsageInfo {
         provider,
+        account_hint: snapshot
+            .email
+            .as_deref()
+            .map(crate::tui::app::helpers::mask_email),
         primary_limit_label: snapshot.five_hour_ratio.and(snapshot.primary_label.clone()),
         five_hour: snapshot.five_hour_ratio.unwrap_or_default(),
         // The wire snapshot has one reset timestamp, belonging to the primary
@@ -475,7 +479,45 @@ impl App {
         }
     }
 
+    /// Masked email of the OAuth account this session's requests use. Comes
+    /// from the session's own credential, never the global active login.
+    fn widget_account_hint(&self, provider: WidgetProviderKind) -> Option<String> {
+        if crate::tui::is_ssh_remote() {
+            return None;
+        }
+        let email = if self.is_remote {
+            self.remote_provider_oauth_email
+                .as_ref()
+                .map(|email| email.as_str().to_string())
+        } else if provider == WidgetProviderKind::OpenAI {
+            // Same lookup the local OpenAI usage path already performs.
+            self.openai_widget_account_email()
+        } else {
+            None
+        };
+        email
+            .filter(|email| !email.trim().is_empty())
+            .map(|email| crate::tui::app::helpers::mask_email(&email))
+    }
+
     fn widget_usage_info(
+        &self,
+        route: WidgetRouteInfo,
+        auth_method: crate::tui::info_widget::AuthMethod,
+    ) -> Option<crate::tui::info_widget::UsageInfo> {
+        let mut info = self.widget_usage_info_inner(route, auth_method)?;
+        if matches!(
+            info.provider,
+            crate::tui::info_widget::UsageProvider::OpenAI
+                | crate::tui::info_widget::UsageProvider::Anthropic
+        ) && let Some(hint) = self.widget_account_hint(route.provider)
+        {
+            info.account_hint = Some(hint);
+        }
+        Some(info)
+    }
+
+    fn widget_usage_info_inner(
         &self,
         route: WidgetRouteInfo,
         auth_method: crate::tui::info_widget::AuthMethod,
@@ -521,6 +563,7 @@ impl App {
             output_tps,
             limit_reached: false,
             available: true,
+            account_hint: None,
         };
 
         match route.provider {
@@ -542,6 +585,7 @@ impl App {
                 output_tps,
                 limit_reached: false,
                 available: display_input_tokens > 0 || display_output_tokens > 0,
+                account_hint: None,
             }),
             WidgetProviderKind::Anthropic => {
                 match auth_method {
@@ -590,6 +634,7 @@ impl App {
                     output_tps,
                     limit_reached: false,
                     available: usage.last_error.is_none(),
+                    account_hint: None,
                 })
             }
             WidgetProviderKind::OpenAI => {
@@ -668,6 +713,7 @@ impl App {
                     limit_reached: openai_usage.hard_limit_reached
                         || self.usage_reset.openai_quota_rejected,
                     available: openai_usage.has_limits() && openai_usage.last_error.is_none(),
+                    account_hint: None,
                 })
             }
             WidgetProviderKind::Gemini => None,
