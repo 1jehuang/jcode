@@ -92,6 +92,7 @@ async fn handle_resume_session_allows_live_attach_when_existing_agent_is_busy() 
     let swarm_coordinators = Arc::new(RwLock::new(HashMap::<String, String>::new()));
     let client_count = Arc::new(RwLock::new(2usize));
     let (writer, peer_stream) = test_writer()?;
+    let mut peer_frames = drain_peer(peer_stream);
     let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
     let event_history = Arc::new(RwLock::new(VecDeque::<SwarmEvent>::new()));
     let event_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -208,14 +209,10 @@ async fn handle_resume_session_allows_live_attach_when_existing_agent_is_busy() 
         "subscribe must report the bound session id so clients can reattach: {events:?}"
     );
 
-    let mut peer_reader = tokio::io::BufReader::new(peer_stream);
-    let mut line = String::new();
-    tokio::time::timeout(
-        std::time::Duration::from_secs(1),
-        tokio::io::AsyncBufReadExt::read_line(&mut peer_reader, &mut line),
-    )
-    .await
-    .expect("history should be written promptly")?;
+    let line = tokio::time::timeout(std::time::Duration::from_secs(5), peer_frames.recv())
+        .await
+        .map_err(|_| anyhow!("peer never received a history frame"))?
+        .ok_or_else(|| anyhow!("peer stream closed before the history frame"))?;
     let event: ServerEvent = serde_json::from_str(line.trim())?;
     match event {
         ServerEvent::Todos {
