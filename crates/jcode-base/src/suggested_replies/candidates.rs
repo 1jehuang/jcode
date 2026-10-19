@@ -15,13 +15,21 @@ fn localized_branch_candidates(branch: &str, cyrillic: bool) -> Vec<String> {
     let key = branch.trim().to_ascii_lowercase();
     if cyrillic {
         match key.as_str() {
+            "finish" | "feature_completion" | "final_completion" => vec![
+                "Довести фичу до конца и выполнить финальное завершение".to_string(),
+                "Прогнать финальные тесты и закрыть фичу перед отправкой в PR".to_string(),
+                "Выполнить 6-линзовое ревью (/review 6) перед финальной сдачей фичи".to_string(),
+                "Обновить чекбоксы задач в OpenSpec и зафиксировать завершение фичи".to_string(),
+                "Проверить git status и git diff и закоммитить готовую фичу".to_string(),
+                "Пересобрать и перезагрузить бинарник через selfdev build-reload".to_string(),
+            ],
             "goal_delivery" => vec![
                 "Закоммитить проверенные изменения и завершить цель".to_string(),
+                "Довести фичу до конца и выполнить финальное завершение".to_string(),
                 "Прогнать финальные тесты перед отправкой изменений в PR".to_string(),
                 "Проверить git status и git diff перед финализацией".to_string(),
                 "Обновить чекбоксы задач в OpenSpec и закрыть план".to_string(),
                 "Выполнить 6-линзовое ревью (/review 6) перед сдачей результата".to_string(),
-                "Пересобрать и перезагрузить бинарник через selfdev build-reload".to_string(),
             ],
             "planning" => vec![
                 "Декомпозировать цель на конкретные шаги в списке задач (todo)".to_string(),
@@ -86,13 +94,22 @@ fn localized_branch_candidates(branch: &str, cyrillic: bool) -> Vec<String> {
         }
     } else {
         match key.as_str() {
+            "finish" | "feature_completion" | "final_completion" => vec![
+                "Complete the feature and verify successful final completion".to_string(),
+                "Run the final test suite and finalize the feature for the PR".to_string(),
+                "Run a 6-lens subagent self-review (/review 6) before feature completion"
+                    .to_string(),
+                "Update OpenSpec task checkboxes to mark feature completion".to_string(),
+                "Inspect git status and git diff and commit the finished feature".to_string(),
+                "Rebuild and reload the binary via selfdev build-reload".to_string(),
+            ],
             "goal_delivery" => vec![
                 "Commit the verified changes and deliver the final goal".to_string(),
+                "Complete the feature and verify successful final completion".to_string(),
                 "Run the final test suite before pushing to the PR".to_string(),
                 "Inspect git status and git diff before finalizing".to_string(),
                 "Update OpenSpec task checkboxes to mark the goal complete".to_string(),
                 "Run a 6-lens subagent self-review (/review 6) before delivery".to_string(),
-                "Rebuild and reload the binary via selfdev build-reload".to_string(),
             ],
             "planning" => vec![
                 "Decompose the goal into concrete actionable steps in the todo list".to_string(),
@@ -259,7 +276,15 @@ pub fn merge_custom_prompts(
 
 pub(super) fn infer_macro_branch_from_text(text: &str) -> &'static str {
     let lower = text.to_lowercase();
-    if lower.contains("no-go")
+    if lower.contains("завершить фичу")
+        || lower.contains("финальное завершение")
+        || lower.contains("feature completion")
+        || lower.contains("complete the feature")
+        || lower.contains("all todos completed")
+        || lower.contains("все задачи выполнены")
+    {
+        "feature_completion"
+    } else if lower.contains("no-go")
         || lower.contains("conditional go")
         || lower.contains("6-lens")
         || lower.contains("review")

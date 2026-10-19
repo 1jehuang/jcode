@@ -16,6 +16,10 @@ pub const MAX_MICRO_CANDIDATES: usize = 21;
 /// Macro conversation branches for Iteration 1 classification toward reaching the user's goal.
 pub const MACRO_BRANCHES: &[(&str, &str)] = &[
     (
+        "feature_completion",
+        "Moving the feature to its successful final completion, acceptance verification, and closure",
+    ),
+    (
         "goal_delivery",
         "Completing, shipping, committing, merging, or delivering the user's final goal and outcome",
     ),
