@@ -432,8 +432,14 @@ fn mouse_hit_regions_digit_6_to_9_staged_input_editing_and_six_lens_cache_invali
             .contains("Исправить проверку границ в парсере")
     );
 
-    // /suggestions refresh forces a fresh evaluation bypassing cached_response.
+    // /suggestions refresh forces a fresh evaluation bypassing cached_response, and
+    // records last_evaluated_messages_version AFTER appending the refresh system notice
+    // so an async pending_rx result is not rejected as stale.
     assert!(app.handle_suggestions_command("/suggestions refresh"));
+    assert_eq!(
+        app.suggested_replies.last_evaluated_messages_version,
+        app.display_messages_version
+    );
     assert!(app.suggested_replies.current.is_some());
 }
 

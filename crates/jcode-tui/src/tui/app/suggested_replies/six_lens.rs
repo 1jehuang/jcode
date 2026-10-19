@@ -125,11 +125,11 @@ impl App {
                 true
             }
             "test" | "refresh" => {
-                self.trigger_suggested_replies_evaluation(true);
                 self.set_status_notice("Re-evaluating Suggested Replies cascade...");
                 self.push_display_message(super::super::DisplayMessage::system(
                     "Triggered Suggested Replies cascade evaluation. Run `/suggestions debug` once complete to inspect telemetry.".to_string(),
                 ));
+                self.trigger_suggested_replies_evaluation(true);
                 true
             }
             _ => {
