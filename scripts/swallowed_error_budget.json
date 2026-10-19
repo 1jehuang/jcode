@@ -1,9 +1,9 @@
 {
-  "total": 3820,
+  "total": 3835,
   "totals_by_pattern": {
-    "dot_ok": 1497,
-    "let_underscore": 1377,
-    "unwrap_or_default": 946
+    "dot_ok": 1504,
+    "let_underscore": 1378,
+    "unwrap_or_default": 953
   },
   "tracked_files": {
     "crates/jcode-app-core/src/agent.rs": {
@@ -62,7 +62,7 @@
       "unwrap_or_default": 2
     },
     "crates/jcode-app-core/src/agent/turn_streaming_mpsc.rs": {
-      "dot_ok": 0,
+      "dot_ok": 1,
       "let_underscore": 64,
       "unwrap_or_default": 3
     },
@@ -817,14 +817,19 @@
       "unwrap_or_default": 0
     },
     "crates/jcode-base/src/config/config_file.rs": {
-      "dot_ok": 4,
+      "dot_ok": 6,
       "let_underscore": 4,
-      "unwrap_or_default": 3
+      "unwrap_or_default": 5
     },
     "crates/jcode-base/src/config/env_overrides.rs": {
       "dot_ok": 1,
       "let_underscore": 0,
       "unwrap_or_default": 0
+    },
+    "crates/jcode-base/src/config/pricing.rs": {
+      "dot_ok": 0,
+      "let_underscore": 0,
+      "unwrap_or_default": 1
     },
     "crates/jcode-base/src/copilot_usage.rs": {
       "dot_ok": 0,
@@ -981,10 +986,25 @@
       "let_underscore": 0,
       "unwrap_or_default": 0
     },
-    "crates/jcode-base/src/model_pricing.rs": {
+    "crates/jcode-base/src/model_pricing/catalog.rs": {
       "dot_ok": 2,
       "let_underscore": 1,
       "unwrap_or_default": 0
+    },
+    "crates/jcode-base/src/model_pricing/entry.rs": {
+      "dot_ok": 0,
+      "let_underscore": 0,
+      "unwrap_or_default": 1
+    },
+    "crates/jcode-base/src/model_pricing/generation.rs": {
+      "dot_ok": 0,
+      "let_underscore": 1,
+      "unwrap_or_default": 0
+    },
+    "crates/jcode-base/src/model_pricing/vendor_files.rs": {
+      "dot_ok": 4,
+      "let_underscore": 0,
+      "unwrap_or_default": 3
     },
     "crates/jcode-base/src/model_usage.rs": {
       "dot_ok": 1,
