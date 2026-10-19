@@ -2785,5 +2785,8 @@ fn preview_renders_pinned_todos_global_prompt_numbers_and_hides_todo_tool_cards(
         .iter()
         .position(|row| row.contains("PINNED_PREVIEW_TASK"))
         .expect("todo row");
-    assert!(todo_row <= 4, "todo band should be pinned at top, row {todo_row}:\n{text}");
+    assert!(
+        todo_row <= 4,
+        "todo band should be pinned at top, row {todo_row}:\n{text}"
+    );
 }

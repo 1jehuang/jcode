@@ -63,6 +63,7 @@ fn tracked_env_vars() -> Vec<String> {
         "GITHUB_TOKEN",
         "CURSOR_API_KEY",
         "GEMINI_API_KEY",
+        "JCODE_EXPERIMENTAL_MUSE_SUBSCRIPTION",
     ]
     .into_iter()
     .map(ToString::to_string)
@@ -260,6 +261,21 @@ fn write_profile_login_material(
     label: &str,
 ) -> Result<()> {
     let resolved = resolve_openai_compatible_profile(profile);
+    if profile.id == "muse-subscription" {
+        jcode::env::set_var(jcode::auth::muse::EXPERIMENTAL_ENV_VAR, "1");
+        jcode::auth::muse::save_credentials(&jcode::auth::muse::MuseCredentials {
+            api_key: format!("sk-{label}-{}", resolved.id),
+            access_token: format!("dca:{label}"),
+            base_url: resolved.api_base.clone(),
+            user_email: None,
+            user_full_name: None,
+            is_subs_active: true,
+            minted_at_ms: 1_700_000_000_000,
+            subs_usage: None,
+        })?;
+        AuthStatus::invalidate_cache();
+        return Ok(());
+    }
     if resolved.requires_api_key {
         write_profile_api_key_file(env, profile, &format!("sk-{label}-{}", resolved.id))?;
     }
@@ -270,7 +286,7 @@ fn competing_remote_profiles(selected: OpenAiCompatibleProfile) -> Vec<OpenAiCom
     openai_compatible_profiles()
         .iter()
         .copied()
-        .filter(|profile| profile.id != selected.id)
+        .filter(|profile| profile.id != selected.id && profile.id != "muse-subscription")
         .filter(|profile| resolve_openai_compatible_profile(*profile).requires_api_key)
         .take(2)
         .collect()
