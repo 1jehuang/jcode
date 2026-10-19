@@ -22,6 +22,25 @@ fn test_stream() -> OpenRouterStream {
 }
 
 #[test]
+fn cache_creation_only_usage_is_not_dropped() {
+    for tokens in [0, 3000] {
+        let mut stream = test_stream();
+        stream.buffer =
+            format!("data: {{\"usage\":{{\"cache_creation_input_tokens\":{tokens}}}}}\n\n");
+        assert!(matches!(
+            stream.parse_next_event(),
+            Some(StreamEvent::TokenUsage {
+                input_tokens: None,
+                output_tokens: None,
+                cache_read_input_tokens: None,
+                cache_creation_input_tokens: Some(actual),
+            }) if actual == tokens
+        ));
+        assert!(stream.parse_next_event().is_none());
+    }
+}
+
+#[test]
 fn take_sse_event_splits_crlf_delimited_events() {
     let mut buffer = "data: a\r\n\r\ndata: b\r\n\r\n".to_string();
     assert_eq!(take_sse_event(&mut buffer).as_deref(), Some("data: a"));

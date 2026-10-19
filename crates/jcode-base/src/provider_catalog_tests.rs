@@ -1174,6 +1174,55 @@ fn newest_release_picker_prefers_strongest_tier_over_newest_cheap() {
     );
 }
 
+/// The default-model ranking is memoized per catalog content (each provider
+/// fork resolves it). A rewritten catalog must take effect immediately, even
+/// within the same second, and repeated calls must keep returning the answer.
+#[test]
+fn newest_release_picker_memo_follows_catalog_changes() {
+    use jcode_provider_openrouter::ModelInfo;
+    let _lock = crate::storage::lock_test_env();
+    let _env = EnvGuard::save(&["JCODE_HOME"]);
+    let temp = tempfile::tempdir().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    let mk = |id: &str, created: u64| ModelInfo {
+        id: id.to_string(),
+        name: String::new(),
+        context_length: None,
+        pricing: Default::default(),
+        created: Some(created),
+        ..Default::default()
+    };
+    let save = |models: &[ModelInfo]| {
+        jcode_provider_openrouter::save_disk_cache_with_source_for_namespace(
+            "deepseek",
+            models,
+            Some("https://api.deepseek.com"),
+        )
+    };
+
+    save(&[
+        mk("deepseek-v3", 1_700_000_000),
+        mk("deepseek-v4", 1_900_000_000),
+    ]);
+    for _ in 0..3 {
+        assert_eq!(
+            newest_released_model_for_openai_compatible_profile("deepseek").as_deref(),
+            Some("deepseek-v4")
+        );
+    }
+
+    save(&[
+        mk("deepseek-v4", 1_900_000_000),
+        mk("deepseek-v5", 1_950_000_000),
+    ]);
+    assert_eq!(
+        newest_released_model_for_openai_compatible_profile("deepseek").as_deref(),
+        Some("deepseek-v5"),
+        "a newer catalog must not be answered from the old memo entry"
+    );
+}
+
 #[test]
 fn newest_release_picker_uses_recency_within_a_tier() {
     use jcode_provider_openrouter::ModelInfo;

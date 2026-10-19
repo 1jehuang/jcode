@@ -60,6 +60,41 @@ fn test_usage_data_becomes_stale_when_reset_time_has_passed() {
 }
 
 #[test]
+fn test_anthropic_error_backoff_survives_expired_last_good_windows() {
+    for (error, ttl) in [
+        (
+            "Usage API error (429 Too Many Requests)",
+            RATE_LIMIT_BACKOFF,
+        ),
+        ("Usage probe timed out", ERROR_BACKOFF),
+    ] {
+        let mut data = UsageData {
+            five_hour: 0.7,
+            five_hour_resets_at: Some("2020-01-01T00:00:00Z".into()),
+            model_scoped: vec![ModelScopedUsageWindow {
+                model_name: "Fable".into(),
+                utilization: 0.9,
+                resets_at: Some("2020-01-01T00:00:00Z".into()),
+            }],
+            fetched_at: Some(Instant::now()),
+            last_error: Some(error.into()),
+            ..Default::default()
+        };
+        assert!(
+            !data.is_stale(),
+            "expired last-good data must not bypass error backoff"
+        );
+        let display = data.display_snapshot();
+        assert_eq!(display.five_hour, 0.0);
+        assert!(display.last_error.is_some());
+        data.fetched_at = Some(Instant::now() - ttl - Duration::from_secs(1));
+        assert!(data.is_stale(), "expired error backoff must allow retry");
+        data.fetched_at = None;
+        assert!(data.is_stale());
+    }
+}
+
+#[test]
 fn test_openai_usage_data_becomes_stale_when_reset_time_has_passed() {
     let data = OpenAIUsageData {
         five_hour: Some(OpenAIUsageWindow {
@@ -817,17 +852,25 @@ fn anthropic_usage_response_deserializes_structured_fable_limit() {
 
 #[test]
 fn anthropic_model_scoped_exhaustion_matches_display_name_to_catalog_id() {
-    let usage = UsageData {
+    let mut usage = UsageData {
         model_scoped: vec![ModelScopedUsageWindow {
             model_name: "Fable".to_string(),
             utilization: 1.0,
-            resets_at: Some("2026-08-11T00:00:00Z".to_string()),
+            resets_at: Some("2999-08-11T00:00:00Z".to_string()),
         }],
         ..Default::default()
     };
 
     assert!(usage.model_scoped_exhausted("claude-fable-5"));
     assert!(!usage.model_scoped_exhausted("claude-opus-5"));
+    usage.last_error = Some("Usage API error (429)".into());
+    assert!(!usage.model_scoped_exhausted("claude-fable-5"));
+    usage.last_error = None;
+
+    usage.model_scoped[0].resets_at = Some("2020-01-01T00:00:00Z".into());
+    usage.refresh_after = Some(Instant::now() + Duration::from_secs(3600));
+    assert!(!usage.is_stale());
+    assert!(!usage.model_scoped_exhausted("claude-fable-5"));
 
     let below_limit = UsageData {
         model_scoped: vec![ModelScopedUsageWindow {
@@ -899,6 +942,70 @@ fn jcode_me(memory_used: u64, upgrade: bool) -> crate::subscription_api::Subscri
         }
     }))
     .unwrap()
+}
+
+#[test]
+fn jcode_usage_shows_monthly_inference_spending_and_remaining() {
+    let mut me = jcode_me(100, true);
+    me.usage.used_usd = 12.5;
+    me.usage.budget_usd = 50.0;
+    me.usage.resets_at = Some("2026-11-01T00:00:00Z".into());
+    let report = jcode_usage_report(&me);
+    assert_eq!(report.limits.len(), 3);
+    let inference = &report.limits[0];
+    assert_eq!(inference.name, "Inference spending limit (monthly)");
+    assert_eq!(inference.usage_percent, 25.0);
+    assert_eq!(inference.resets_at, me.usage.resets_at);
+    assert!(
+        report
+            .extra_info
+            .contains(&("Inference spending limit remaining".into(), "$37.50".into()))
+    );
+    assert!(
+        report
+            .extra_info
+            .contains(&("Inference spending".into(), "$12.50 / $50.00".into()))
+    );
+    assert_eq!(report.limits[1].name, "Memory recall (daily)");
+    assert!(!report.hard_limit_reached);
+    assert!(report.extra_info.iter().all(|(key, _)| key != "Upgrade"));
+}
+
+#[test]
+fn jcode_usage_monthly_limit_exhaustion_clamps_remaining() {
+    for used in [50.0, 60.0] {
+        let mut me = jcode_me(100, false);
+        me.usage.used_usd = used;
+        me.usage.budget_usd = 50.0;
+        let report = jcode_usage_report(&me);
+        assert!(report.hard_limit_reached);
+        assert_eq!(report.limits[0].usage_percent, (used * 2.0) as f32);
+        assert!(
+            report
+                .extra_info
+                .contains(&("Inference spending limit remaining".into(), "$0.00".into()))
+        );
+    }
+}
+
+#[test]
+fn jcode_usage_unknown_monthly_budget_is_not_exhausted() {
+    for budget in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        let mut me = jcode_me(100, false);
+        me.usage.used_usd = 10.0;
+        me.usage.budget_usd = budget;
+        let report = jcode_usage_report(&me);
+        assert_eq!(report.limits.len(), 2);
+        assert!(!report.hard_limit_reached);
+        assert!(
+            report
+                .extra_info
+                .iter()
+                .all(|(key, _)| key != "Inference spending limit remaining")
+        );
+        me.jev_usage.as_mut().unwrap().memory.used = 1000;
+        assert!(jcode_usage_report(&me).hard_limit_reached);
+    }
 }
 
 #[test]
@@ -1148,4 +1255,63 @@ fn zai_quota_url_follows_profile_region() {
         api_keys::zai_quota_url("not a url"),
         "https://api.z.ai/api/monitor/usage/quota/limit"
     );
+}
+
+#[test]
+fn test_openai_transport_error_retries_sooner_than_api_errors() {
+    let at = Instant::now() - Duration::from_secs(60);
+    let transport = OpenAIUsageData {
+        fetched_at: Some(at),
+        last_error: Some(format!("{TRANSPORT_ERROR_PREFIX}error sending request")),
+        ..Default::default()
+    };
+    assert!(transport.is_transport_error());
+    assert!(transport.is_stale());
+
+    let api = OpenAIUsageData {
+        fetched_at: Some(at),
+        last_error: Some("API error (500): oops".into()),
+        ..Default::default()
+    };
+    assert!(!api.is_transport_error());
+    assert!(!api.is_stale());
+}
+
+#[test]
+fn test_openai_transport_failure_keeps_recent_last_good_only() {
+    let key = "label:transport-last-good-test".to_string();
+    let window = OpenAIUsageWindow {
+        name: "5-hour window".into(),
+        usage_ratio: 0.2,
+        resets_at: None,
+    };
+    store_openai_usage(
+        key.clone(),
+        OpenAIUsageData {
+            five_hour: Some(window.clone()),
+            fetched_at: Some(Instant::now()),
+            ..Default::default()
+        },
+    );
+    assert!(recent_good_openai_usage(&key).is_some());
+
+    store_openai_usage(
+        key.clone(),
+        OpenAIUsageData {
+            five_hour: Some(window),
+            fetched_at: Some(Instant::now() - TRANSPORT_LAST_GOOD_MAX_AGE - Duration::from_secs(1)),
+            ..Default::default()
+        },
+    );
+    assert!(recent_good_openai_usage(&key).is_none());
+
+    store_openai_usage(
+        key.clone(),
+        OpenAIUsageData {
+            fetched_at: Some(Instant::now()),
+            last_error: Some("API error (500)".into()),
+            ..Default::default()
+        },
+    );
+    assert!(recent_good_openai_usage(&key).is_none());
 }

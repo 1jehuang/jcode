@@ -17,6 +17,10 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
+#[path = "launch_upgrade.rs"]
+mod shared_upgrade;
+
 const CREDENTIAL_FILES: &[&str] = &[
     "auth.json",
     "openai-auth.json",
@@ -518,9 +522,13 @@ pub fn socket_accepts(path: &Path) -> bool {
 
 /// Locate a sibling executable next to our own, falling back to `$PATH`.
 fn sibling_exe(name: &str) -> PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.join(name)))
+    sibling_exe_next_to(std::env::current_exe().ok().as_deref(), name)
+}
+
+fn sibling_exe_next_to(current: Option<&Path>, name: &str) -> PathBuf {
+    let name = format!("{name}{}", std::env::consts::EXE_SUFFIX);
+    current
+        .and_then(|exe| exe.parent().map(|dir| dir.join(&name)))
         .filter(|path| path.is_file())
         .unwrap_or_else(|| PathBuf::from(name))
 }
@@ -531,14 +539,21 @@ pub fn ensure_runtime(options: &LaunchOptions, progress: &Progress<'_>) -> Resul
         .api_socket
         .clone()
         .unwrap_or_else(jcode_harness_api::api_socket_path);
-    if socket_accepts(&api) {
-        return Ok(());
-    }
-    let legacy = jcode_harness_api::legacy_socket_path();
     let jcode = options
         .binary
         .clone()
         .unwrap_or_else(|| sibling_exe("jcode"));
+    let legacy = jcode_harness_api::legacy_socket_path();
+    // A custom API socket may be a forwarded remote endpoint. Only the normal
+    // local shared runtime can be offered our explicit packaged companion. A
+    // PATH fallback is intentionally not an upgrade candidate.
+    #[cfg(unix)]
+    if shared_upgrade::is_local_shared(&api, &legacy, &jcode) && socket_accepts(&legacy) {
+        shared_upgrade::offer(&legacy, &jcode, options.start_timeout, progress);
+    }
+    if socket_accepts(&api) {
+        return Ok(());
+    }
     if !socket_accepts(&legacy) {
         progress("starting jcode runtime...");
         spawn_detached(&jcode, &["serve"]).map_err(|error| {
@@ -817,6 +832,37 @@ fn set_owner_only_file(_path: &Path) -> Result<()> {
 
 fn launch_io(error: std::io::Error) -> Error {
     Error::new(ErrorKind::LaunchFailed, error.to_string())
+}
+
+#[cfg(test)]
+mod executable_tests {
+    use super::*;
+
+    #[test]
+    fn sibling_executable_uses_platform_suffix_in_bundle_with_spaces() {
+        let root = tempfile::tempdir().unwrap();
+        let bundle = root.path().join("Jcode package with spaces 雪");
+        fs::create_dir(&bundle).unwrap();
+        let current = bundle.join(format!("jcode-desktop{}", std::env::consts::EXE_SUFFIX));
+        for name in ["jcode", "jcode-harness-api-bridge"] {
+            let companion = bundle.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+            fs::write(&companion, b"test executable").unwrap();
+            assert_eq!(sibling_exe_next_to(Some(&current), name), companion);
+        }
+    }
+
+    #[test]
+    fn sibling_executable_fallback_uses_platform_suffix() {
+        let root = tempfile::tempdir().unwrap();
+        let current = root.path().join("jcode-desktop");
+        for name in ["jcode", "jcode-harness-api-bridge"] {
+            let expected = PathBuf::from(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+            assert_eq!(sibling_exe_next_to(None, name), expected);
+            assert_eq!(sibling_exe_next_to(Some(&current), name), expected);
+            fs::create_dir(root.path().join(&expected)).unwrap();
+            assert_eq!(sibling_exe_next_to(Some(&current), name), expected);
+        }
+    }
 }
 
 #[cfg(all(test, unix))]
