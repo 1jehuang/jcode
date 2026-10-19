@@ -973,6 +973,11 @@ pub(crate) fn invalidate_header_prep_cache() {
     if let Ok(mut cache) = header_prep_cache().lock() {
         *cache = None;
     }
+    // Prepared frames embed the header. Clearing only the header sub-cache
+    // leaves an exact full-frame hit displaying old account dots and quotas.
+    if let Ok(mut cache) = full_prep_cache().lock() {
+        *cache = FullPrepCacheState::default();
+    }
 }
 
 /// Hash of the header inputs that are cheap to read every frame. Anything
@@ -1007,6 +1012,8 @@ fn header_prep_signature(app: &dyn TuiState, width: u16) -> u64 {
     // the header on the very next frame instead of waiting out the TTL, which
     // is what lets the TTL itself be sized for slow background drift.
     crate::auth::auth_status_generation().hash(&mut hasher);
+    header::account_router_generation().hash(&mut hasher);
+    app.startup_oauth_account_label().hash(&mut hasher);
     // The goal badge renders the focused side-panel page title when a goal
     // page is focused; keying on it keeps focus changes instant.
     if let Some(page) = app.side_panel().focused_page() {
@@ -2321,6 +2328,11 @@ pub(super) fn prepare_body(
     let display_width = width.saturating_sub(4) as usize;
 
     let messages = app.display_messages();
+    let images_start = Instant::now();
+    // Images anchored to transcript messages render inline right after the
+    // message that produced them (tool result or user prompt).
+    let anchored_images = super::inline_image_ui::resolve_anchored_items_cached(app);
+    let images_ms = images_start.elapsed().as_millis();
     let ctx = BodyRenderCtx {
         app,
         width,
@@ -2328,17 +2340,35 @@ pub(super) fn prepare_body(
         prompt_number_offset: app.compacted_hidden_user_prompts(),
         total_prompts: app.display_user_message_count(),
         pending_count: input_ui::pending_prompt_count(app),
-        // Images anchored to transcript messages render inline right after the
-        // message that produced them (tool result or user prompt).
-        anchored_images: super::inline_image_ui::resolve_anchored_items_cached(app),
+        anchored_images,
         inline_images_visible: app.inline_images_visible(),
         messages,
         swarm_members: app.swarm_members_for_transcript(),
     };
+    let ctx_ms = images_start.elapsed().as_millis() - images_ms;
 
+    let render_start = Instant::now();
     let mut acc = BodyAcc::default();
+    let mut role_ms: std::collections::BTreeMap<&str, (u128, usize)> = Default::default();
+    let mut slowest: (u128, usize, &str) = (0, 0, "");
+    let mut tool_ms: std::collections::BTreeMap<String, (u128, usize)> = Default::default();
     for (msg_idx, msg) in messages.iter().enumerate() {
+        let msg_start = Instant::now();
         render_message_into(&ctx, &mut acc, msg, msg_idx);
+        let us = msg_start.elapsed().as_micros();
+        if let Some(tool) = msg.tool_data.as_ref() {
+            let entry = tool_ms
+                .entry(tools_ui::canonical_tool_name(&tool.name).to_string())
+                .or_default();
+            entry.0 += us;
+            entry.1 += 1;
+        }
+        let entry = role_ms.entry(msg.effective_role()).or_default();
+        entry.0 += us;
+        entry.1 += 1;
+        if us > slowest.0 {
+            slowest = (us, msg_idx, msg.effective_role());
+        }
     }
 
     // Streaming output is appended after the message boundaries are recorded so
@@ -2368,6 +2398,8 @@ pub(super) fn prepare_body(
         }
     }
 
+    let render_ms = render_start.elapsed().as_millis();
+    let wrap_start = Instant::now();
     let mut prepared = wrap_lines_with_map(
         acc.lines,
         &acc.raw_plain_lines,
@@ -2380,6 +2412,32 @@ pub(super) fn prepare_body(
         &acc.copy_targets,
         &acc.segments,
     );
+    let wrap_ms = wrap_start.elapsed().as_millis();
+    if images_ms + ctx_ms + render_ms + wrap_ms >= 100 {
+        crate::logging::info(&format!(
+            "[TIMING] prepare_body: messages={}, images={images_ms}ms, ctx={ctx_ms}ms, render={render_ms}ms, wrap={wrap_ms}ms, wrapped_lines={}, by_role=[{}], by_tool=[{}], slowest={}us@{}({})",
+            messages.len(),
+            prepared.wrapped_lines.len(),
+            role_ms
+                .iter()
+                .map(|(role, (us, n))| format!("{role}:{}ms/{n}", us / 1000))
+                .collect::<Vec<_>>()
+                .join(" "),
+            {
+                let mut tools: Vec<_> = tool_ms.iter().collect();
+                tools.sort_by(|a, b| b.1.0.cmp(&a.1.0));
+                tools
+                    .iter()
+                    .take(6)
+                    .map(|(tool, (us, n))| format!("{tool}:{}ms/{n}", us / 1000))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            },
+            slowest.0,
+            slowest.1,
+            slowest.2
+        ));
+    }
     stamp_mermaid_pending(&mut prepared, mermaid_epoch_before);
     prepared
 }

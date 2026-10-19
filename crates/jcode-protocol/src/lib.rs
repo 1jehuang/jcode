@@ -78,6 +78,148 @@ pub enum CommDeliveryMode {
     Wake,
 }
 
+/// A client's claim about the transcript prefix it already holds, used to
+/// request only the remaining History messages.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HistoryBase {
+    /// Number of leading History messages the client holds.
+    pub count: usize,
+    /// [`history_prefix_fingerprint`] of those messages.
+    pub fingerprint: u64,
+    /// [`history_images_fingerprint`] of the rendered images the client holds.
+    /// When it matches, History omits `images` and sets `images_unchanged`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub images_fingerprint: Option<u64>,
+}
+
+/// Stable fingerprint of a History image set (order, metadata and data).
+pub fn history_images_fingerprint(images: &[jcode_session_types::RenderedImage]) -> u64 {
+    let mut fingerprinter = HistoryFingerprinter::default();
+    for image in images {
+        fingerprinter.feed(image.media_type.as_bytes());
+        fingerprinter.feed(image.data.as_bytes());
+        fingerprinter.feed(image.label.as_deref().unwrap_or("\u{0}").as_bytes());
+        fingerprinter.feed(
+            serde_json::to_string(&(&image.source, &image.anchor, &image.history_message_index))
+                .unwrap_or_default()
+                .as_bytes(),
+        );
+        fingerprinter.count += 1;
+    }
+    fingerprinter.finish()
+}
+
+/// Stable, process-independent fingerprint of History messages, shared by the
+/// client (to describe what it has) and the server (to verify the claim).
+/// Covers every field the client renders, so any divergence falls back to a
+/// full transcript.
+pub fn history_prefix_fingerprint<'a>(
+    messages: impl IntoIterator<Item = HistoryMessageRef<'a>>,
+) -> u64 {
+    let mut fingerprinter = HistoryFingerprinter::default();
+    for message in messages {
+        fingerprinter.push(message);
+    }
+    fingerprinter.finish()
+}
+
+/// Streaming form of [`history_prefix_fingerprint`], so a client can extend
+/// the fingerprint of an applied transcript with a delta tail without
+/// re-hashing (or retaining) the prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HistoryFingerprinter {
+    hash: u64,
+    count: usize,
+}
+
+impl Default for HistoryFingerprinter {
+    fn default() -> Self {
+        // FNV-1a 64: deterministic across processes and builds, unlike
+        // std's randomized DefaultHasher.
+        Self {
+            hash: 0xcbf2_9ce4_8422_2325,
+            count: 0,
+        }
+    }
+}
+
+impl HistoryFingerprinter {
+    fn feed(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.hash ^= u64::from(*byte);
+            self.hash = self.hash.wrapping_mul(0x0100_0000_01b3);
+        }
+        // Separator so field boundaries cannot alias.
+        self.hash ^= 0xff;
+        self.hash = self.hash.wrapping_mul(0x0100_0000_01b3);
+    }
+
+    pub fn push(&mut self, message: HistoryMessageRef<'_>) {
+        self.count += 1;
+        self.feed(message.role.as_bytes());
+        self.feed(message.content.as_bytes());
+        for call in message.tool_calls {
+            self.feed(call.as_bytes());
+        }
+        self.feed(&(message.tool_calls.len() as u64).to_le_bytes());
+        match message.tool_data {
+            Some(tool) => {
+                self.feed(b"tool");
+                self.feed(tool.id.as_bytes());
+                self.feed(tool.name.as_bytes());
+                self.feed(
+                    serde_json::to_string(&tool.input)
+                        .unwrap_or_default()
+                        .as_bytes(),
+                );
+            }
+            None => self.feed(b"-"),
+        }
+    }
+
+    /// Number of messages pushed so far.
+    pub fn count(&self) -> usize {
+        self.count
+    }
+
+    /// Fingerprint of everything pushed so far. Does not consume, so more
+    /// messages can be pushed afterwards.
+    pub fn finish(&self) -> u64 {
+        let mut done = *self;
+        done.feed(&(self.count as u64).to_le_bytes());
+        done.hash
+    }
+
+    pub fn base(&self) -> HistoryBase {
+        HistoryBase {
+            count: self.count,
+            fingerprint: self.finish(),
+            images_fingerprint: None,
+        }
+    }
+}
+
+/// Borrowed view of the fields [`history_prefix_fingerprint`] covers, so the
+/// client can fingerprint its rendered transcript without converting it.
+#[derive(Debug, Clone, Copy)]
+pub struct HistoryMessageRef<'a> {
+    pub role: &'a str,
+    pub content: &'a str,
+    pub tool_calls: &'a [String],
+    pub tool_data: Option<&'a ToolCall>,
+}
+
+impl<'a> From<&'a HistoryMessage> for HistoryMessageRef<'a> {
+    fn from(message: &'a HistoryMessage) -> Self {
+        Self {
+            role: &message.role,
+            content: &message.content,
+            tool_calls: message.tool_calls.as_deref().unwrap_or(&[]),
+            tool_data: message.tool_data.as_ref(),
+        }
+    }
+}
+
 /// A message in conversation history (for sync)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryMessage {
@@ -209,8 +351,8 @@ impl AuthChanged {
 pub type ReloadRecoverySnapshot = jcode_selfdev_types::ReloadRecoveryDirective;
 
 mod wire;
-pub use wire::{Request, ServerEvent};
-pub use wire::{SessionToolConfig, SessionToolDefinition, TaskGraphNodeSpec};
+pub use wire::{AccountUsageSnapshot, Request, ServerEvent};
+pub use wire::{SessionToolConfig, SessionToolDefinition};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallSummary {
@@ -408,30 +550,6 @@ pub struct PlanGraphStatus {
     pub next_ready_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub newly_ready_ids: Vec<String>,
-    /// Completed (non-gate) items whose artifact self-reported LOW confidence.
-    /// Shaky coverage the coordinator should widen with follow-up nodes; deep
-    /// gates are also blocked from passing over these while unaddressed.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub low_confidence_ids: Vec<String>,
-    /// Engine mode for this plan: "deep" (comprehensive, gated, wide fan-out) or
-    /// "light" (cheap fan-out). Lets schedulers like `run_plan` pick a
-    /// mode-appropriate concurrency policy. Defaults to "light" for legacy plans.
-    #[serde(default = "default_plan_mode")]
-    pub mode: String,
-    /// Growth accounting: nodes from the initial seed (legacy/unknown origins
-    /// count as seeded).
-    #[serde(default)]
-    pub seeded_count: usize,
-    /// Growth accounting: machinery-generated nodes (expand children, gate-
-    /// injected gaps, and the gates themselves). `seeded_count + grown_count ==
-    /// item_count`. A deep plan with `grown_count == 0` never decomposed or
-    /// gated anything, which almost always means under-exploration.
-    #[serde(default)]
-    pub grown_count: usize,
-}
-
-fn default_plan_mode() -> String {
-    "light".to_string()
 }
 
 impl PlanGraphStatus {
@@ -450,10 +568,6 @@ impl PlanGraphStatus {
             unresolved_dependency_ids: Vec::new(),
             next_ready_ids: Vec::new(),
             newly_ready_ids: Vec::new(),
-            low_confidence_ids: Vec::new(),
-            mode: default_plan_mode(),
-            seeded_count: 0,
-            grown_count: 0,
         }
     }
 
@@ -464,7 +578,6 @@ impl PlanGraphStatus {
         newly_ready_ids: Vec<String>,
     ) -> Self {
         let graph = summarize_plan_graph(&plan.items);
-        let growth = jcode_plan::bridge::growth_stats(plan);
         let failed_reasons: BTreeMap<String, String> = graph
             .failed_ids
             .iter()
@@ -489,10 +602,6 @@ impl PlanGraphStatus {
             unresolved_dependency_ids: graph.unresolved_dependency_ids,
             next_ready_ids: next_runnable_item_ids(&plan.items, next_ready_limit),
             newly_ready_ids,
-            low_confidence_ids: jcode_plan::bridge::low_confidence_completed_ids(plan),
-            mode: plan.mode.clone(),
-            seeded_count: growth.seeded,
-            grown_count: growth.grown(),
         }
     }
 }
@@ -676,6 +785,7 @@ impl Request {
             Request::NotifyAuthChanged { id, .. } => *id,
             Request::SwitchAnthropicAccount { id, .. } => *id,
             Request::SwitchOpenAiAccount { id, .. } => *id,
+            Request::AccountUsage { id } => *id,
             Request::InvalidateOpenAiUsage { id, .. } => *id,
             Request::InvalidateAnthropicUsage { id, .. } => *id,
             Request::StdinResponse { id, .. } => *id,
@@ -694,10 +804,6 @@ impl Request {
             Request::CommProposePlan { id, .. } => *id,
             Request::CommApprovePlan { id, .. } => *id,
             Request::CommRejectPlan { id, .. } => *id,
-            Request::CommSeedGraph { id, .. } => *id,
-            Request::CommExpandNode { id, .. } => *id,
-            Request::CommCompleteNode { id, .. } => *id,
-            Request::CommInjectGap { id, .. } => *id,
             Request::CommSpawn { id, .. } => *id,
             Request::CommListModels { id, .. } => *id,
             Request::CommStop { id, .. } => *id,
@@ -724,6 +830,7 @@ impl Request {
                 | Request::UpgradeRuntime { .. }
                 // Usage invalidation only touches process-wide caches, so a
                 // one-shot client can send it without subscribing to a session.
+                | Request::AccountUsage { .. }
                 | Request::InvalidateOpenAiUsage { .. }
                 | Request::InvalidateAnthropicUsage { .. }
                 | Request::NotifySession { .. }
@@ -740,10 +847,6 @@ impl Request {
                 | Request::CommProposePlan { .. }
                 | Request::CommApprovePlan { .. }
                 | Request::CommRejectPlan { .. }
-                | Request::CommSeedGraph { .. }
-                | Request::CommExpandNode { .. }
-                | Request::CommCompleteNode { .. }
-                | Request::CommInjectGap { .. }
                 | Request::CommSpawn { .. }
                 | Request::CommListModels { .. }
                 | Request::CommStop { .. }

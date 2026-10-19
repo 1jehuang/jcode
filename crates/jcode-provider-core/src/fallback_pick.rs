@@ -24,6 +24,23 @@ fn api_method_is_oauth(api_method: &ModelRouteApiMethod) -> bool {
     )
 }
 
+/// Rank a model by generation/quality using the curated best-first catalogs.
+/// Lower is better. Unknown models sort after every curated model so the
+/// newest known flagship always wins a tie between otherwise equal routes.
+pub fn model_generation_rank(model: &str) -> usize {
+    let normalized =
+        crate::model_id::strip_date_suffix(&crate::model_id::canonical(model)).to_ascii_lowercase();
+    let position = |catalog: &[&str]| {
+        catalog.iter().position(|candidate| {
+            crate::model_id::strip_date_suffix(&crate::model_id::canonical(candidate))
+                .eq_ignore_ascii_case(&normalized)
+        })
+    };
+    position(crate::ALL_CLAUDE_MODELS)
+        .or_else(|| position(crate::ALL_OPENAI_MODELS))
+        .unwrap_or(usize::MAX)
+}
+
 fn models_match(a: &str, b: &str) -> bool {
     a.trim().eq_ignore_ascii_case(b.trim())
 }
@@ -157,10 +174,15 @@ pub fn pick_next_fallback_route_with_options(
                 &route.api_method,
             )));
 
-            Some((tier, prefers_oauth, index))
+            Some((
+                tier,
+                model_generation_rank(&route.model),
+                prefers_oauth,
+                index,
+            ))
         })
         .min()
-        .map(|(_, _, index)| index)
+        .map(|(_, _, _, index)| index)
 }
 
 #[cfg(test)]
@@ -364,5 +386,191 @@ mod tests {
         assert!(!error_looks_like_credential_failure(
             "500 internal server error"
         ));
+    }
+}
+
+#[cfg(test)]
+mod generation_tests {
+    use super::*;
+
+    fn route(model: &str, provider: &str, api_method: &str) -> ModelRoute {
+        ModelRoute {
+            model: model.to_string(),
+            provider: provider.to_string(),
+            api_method: api_method.to_string(),
+            available: true,
+            detail: String::new(),
+            usage: None,
+            cheapness: None,
+        }
+    }
+
+    #[test]
+    fn prefers_latest_generation_over_catalog_order() {
+        let routes = vec![
+            route("claude-fable-5", "Anthropic", "claude-oauth"),
+            route("claude-opus-5-5", "Anthropic", "claude-oauth"),
+        ];
+        let pick = pick_next_fallback_route(&routes, "gpt-6-astra", "OpenAI", "openai-oauth")
+            .expect("fallback");
+        assert_eq!(routes[pick].model, "claude-opus-5-5");
+    }
+}
+
+/// Pool key for a route's billing identity, matching the account pool's keys
+/// (`claude:<label>`, `openai:<label>`, `anthropic-api`, `openai-api`, ...).
+/// Unlabeled OAuth routes return `None` because they name no account.
+pub fn route_pool_key(api_method: &str) -> Option<String> {
+    if let Some((method, label)) = api_method.split_once('@') {
+        let provider = match method {
+            "claude-oauth" => "claude",
+            "openai-oauth" => "openai",
+            _ => return None,
+        };
+        return Some(format!("{provider}:{label}"));
+    }
+    match api_method {
+        "claude-oauth" | "openai-oauth" | "" => None,
+        "claude-api" | "anthropic-api" | "anthropic-api-key" => Some("anthropic-api".into()),
+        "openai-api" | "openai-api-key" => Some("openai-api".into()),
+        other => Some(other.into()),
+    }
+}
+
+/// The single account-router ranking shared by every fallback path
+/// (automatic countdown, manual Ctrl+Y offer, and server-side failover):
+/// the user's pool order first, then the newest-generation model, then the
+/// legacy affinity tiers, OAuth before API key, and catalog order.
+///
+/// Routes whose pool key is absent from `pool_members` rank after every
+/// pooled route but are still eligible.
+pub fn rank_fallback_routes(
+    routes: &[ModelRoute],
+    current_model: &str,
+    current_provider: &str,
+    current_api_method: &str,
+    options: FallbackPickOptions,
+    pool_members: &[String],
+) -> Vec<usize> {
+    let unknown_method = current_api_method.trim().is_empty();
+    let mut ranked: Vec<_> = routes
+        .iter()
+        .enumerate()
+        .filter(|(_, route)| route.available)
+        .filter_map(|(index, route)| {
+            let same_model = models_match(&route.model, current_model);
+            // Different saved accounts are different credentials: a spent
+            // `claude-oauth@fox` must not exclude `claude-oauth@otter`.
+            let same_method = api_methods_match(&route.api_method, current_api_method)
+                && crate::oauth_account_label(&route.api_method)
+                    .zip(crate::oauth_account_label(current_api_method))
+                    .is_none_or(|(a, b)| a == b);
+            let same_provider =
+                model_route_provider_labels_match(&route.provider, current_provider)
+                    || models_match(&route.provider, current_provider);
+            if same_model && same_provider && (same_method || unknown_method) {
+                return None;
+            }
+            if options.credential_failure && same_provider && (same_method || unknown_method) {
+                return None;
+            }
+            let pool_position = route_pool_key(&route.api_method)
+                .and_then(|key| pool_members.iter().position(|member| *member == key))
+                .unwrap_or(usize::MAX);
+            let tier = if same_model && !same_method {
+                0
+            } else if same_provider {
+                1
+            } else {
+                2
+            };
+            let prefers_oauth = u8::from(!api_method_is_oauth(&ModelRouteApiMethod::parse(
+                &route.api_method,
+            )));
+            Some((
+                (
+                    pool_position,
+                    model_generation_rank(&route.model),
+                    tier,
+                    prefers_oauth,
+                ),
+                index,
+            ))
+        })
+        .collect();
+    ranked.sort();
+    ranked.into_iter().map(|(_, index)| index).collect()
+}
+
+#[cfg(test)]
+mod unified_rank_tests {
+    use super::*;
+
+    fn route(model: &str, api_method: &str) -> ModelRoute {
+        let provider = if model.starts_with("claude") {
+            "Anthropic"
+        } else {
+            "OpenAI"
+        };
+        ModelRoute {
+            model: model.into(),
+            provider: provider.into(),
+            api_method: api_method.into(),
+            available: true,
+            detail: String::new(),
+            usage: None,
+            cheapness: None,
+        }
+    }
+
+    #[test]
+    fn pool_order_then_newest_generation() {
+        let routes = vec![
+            route("gpt-6.1-sol", "openai-api"),
+            route("claude-fable-5", "claude-oauth@claude-fox"),
+            route("claude-opus-5-5", "claude-oauth@claude-fox"),
+            route("claude-opus-5-5", "claude-oauth@claude-otter"),
+        ];
+        let pool: Vec<String> = ["claude:claude-fox", "claude:claude-otter", "openai-api"]
+            .map(String::from)
+            .into();
+        let ranked = rank_fallback_routes(
+            &routes,
+            "gpt-6.1-sol",
+            "OpenAI",
+            "openai-oauth@openai-fox",
+            FallbackPickOptions::default(),
+            &pool,
+        );
+        assert_eq!(ranked, vec![2, 1, 3, 0]);
+    }
+}
+
+#[cfg(test)]
+mod unified_rank_account_tests {
+    use super::*;
+
+    #[test]
+    fn spent_account_does_not_exclude_sibling_account() {
+        let routes = vec![ModelRoute {
+            model: "claude-opus-5-5".into(),
+            provider: "Anthropic".into(),
+            api_method: "claude-oauth@claude-otter".into(),
+            available: true,
+            detail: String::new(),
+            usage: None,
+            cheapness: None,
+        }];
+        let ranked = rank_fallback_routes(
+            &routes,
+            "claude-opus-5-5",
+            "Anthropic",
+            "claude-oauth@claude-fox",
+            FallbackPickOptions {
+                credential_failure: true,
+            },
+            &["claude:claude-fox".into(), "claude:claude-otter".into()],
+        );
+        assert_eq!(ranked, vec![0]);
     }
 }

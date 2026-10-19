@@ -16,8 +16,47 @@ use std::time::{Duration, Instant};
 
 /// Misses smaller than this are noise (provider cache block granularity).
 pub const MIN_MISSED_TOKENS: u64 = 1_024;
-/// Reads at or above this share of the expected prefix count as healthy.
-pub const OPTIMAL_OK_PCT: u8 = 85;
+
+/// OpenAI reports cache reads in 128-token blocks and routinely leaves the
+/// last ~1024 tokens of the previous request uncached, so a byte-identical
+/// append still shows a 1024-1300 token shortfall. Across ~34k verified
+/// prefix-matching websocket continuations, shortfalls cluster just above
+/// 1024; treating them as misses produced constant false alarms.
+pub const OPENAI_MIN_MISSED_TOKENS: u64 = 2_048;
+
+/// Noise floor for a provider identity (`openai`, `openai-api`, `OpenAI`, ...).
+pub fn min_missed_tokens_for_provider(provider: &str) -> u64 {
+    if provider.trim().to_ascii_lowercase().starts_with("openai") {
+        OPENAI_MIN_MISSED_TOKENS
+    } else {
+        MIN_MISSED_TOKENS
+    }
+}
+
+/// Whether a provider drops its conversation prompt cache when the UTC date
+/// changes. Observed on Anthropic: every session whose consecutive requests
+/// straddle 00:00 UTC reads back only the tools/system prefix, even seconds
+/// apart with a byte-identical prefix. (15 of 15 such straddles missed across
+/// four days of logs, versus ~2% of same-day requests.) The harness cannot
+/// avoid it, so such misses are attributed instead of reported as unexplained.
+pub fn provider_rolls_cache_daily(provider: &str) -> bool {
+    matches!(
+        provider.trim().to_ascii_lowercase().as_str(),
+        "anthropic" | "claude"
+    )
+}
+
+/// UTC calendar day number, used to detect the provider's daily cache rollover.
+pub fn utc_day_now() -> i64 {
+    utc_day_of(std::time::SystemTime::now())
+}
+
+pub fn utc_day_of(time: std::time::SystemTime) -> i64 {
+    match time.duration_since(std::time::UNIX_EPOCH) {
+        Ok(elapsed) => (elapsed.as_secs() / 86_400) as i64,
+        Err(before) => -((before.duration().as_secs() / 86_400) as i64) - 1,
+    }
+}
 
 /// Prompt-shape signature for one provider request.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -63,9 +102,11 @@ pub enum MissReason {
     ModelSwitch,
     UpstreamSwitch,
     Expired,
+    DailyRollover,
     SystemChanged,
     ToolsChanged,
     PrefixChanged,
+    Compaction,
     ZeroRead,
     LowRead,
 }
@@ -78,9 +119,11 @@ impl MissReason {
             Self::ModelSwitch => "model_switch",
             Self::UpstreamSwitch => "upstream_switch",
             Self::Expired => "expired",
+            Self::DailyRollover => "daily_rollover",
             Self::SystemChanged => "system_changed",
             Self::ToolsChanged => "tools_changed",
             Self::PrefixChanged => "prefix_changed",
+            Self::Compaction => "compaction",
             Self::ZeroRead => "zero_read",
             Self::LowRead => "low_read",
         }
@@ -93,9 +136,13 @@ impl MissReason {
             Self::ModelSwitch => "model changed",
             Self::UpstreamSwitch => "upstream provider changed",
             Self::Expired => "cache expired",
+            Self::DailyRollover => {
+                "provider resets its prompt cache at 00:00 UTC; not avoidable by the harness"
+            }
             Self::SystemChanged => "system prompt changed mid-session",
             Self::ToolsChanged => "tool set changed mid-session",
             Self::PrefixChanged => "an earlier message was modified",
+            Self::Compaction => "provider automatically compacted the context",
             Self::ZeroRead => "provider reported no cache read",
             Self::LowRead => "provider read only part of the cache",
         }
@@ -109,22 +156,18 @@ impl MissReason {
             Self::SystemChanged | Self::ToolsChanged | Self::PrefixChanged
         )
     }
-
-    /// Reasons that explain a miss even when the read ratio looks acceptable.
-    fn is_hard(self) -> bool {
-        !matches!(self, Self::ZeroRead | Self::LowRead)
-    }
 }
 
 /// A classified cache miss for one completed request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KvCacheMiss {
     pub reason: MissReason,
-    /// Tokens expected to be served from cache (previous effective prompt).
+    /// Tokens expected to be served from cache (previous reusable boundary).
     pub expected_tokens: u64,
     /// Tokens the provider reported as read from cache.
     pub read_tokens: u64,
-    /// Estimated tokens that had to be resent.
+    /// Estimated shortfall against the previous reusable prefix. A compaction
+    /// changes that prefix, so this is not measured resent or avoidable input.
     pub missed_tokens: u64,
     /// Documented intentional invalidation that explains a harness-caused miss.
     pub documented_cause: Option<String>,
@@ -133,6 +176,13 @@ pub struct KvCacheMiss {
 impl KvCacheMiss {
     /// One-line summary suitable for any client to display.
     pub fn message(&self) -> String {
+        if self.reason == MissReason::Compaction {
+            return format!(
+                "KV cache refresh [provider_auto_compaction]: provider compacted the context; rebuilding cache is expected (previous reusable prefix ~{} tokens, cache read {}).",
+                compact_tokens(self.expected_tokens),
+                self.read_tokens
+            );
+        }
         let tokens = compact_tokens(self.missed_tokens);
         match (&self.documented_cause, self.reason.harness_caused()) {
             (Some(cause), _) => format!(
@@ -165,14 +215,18 @@ fn compact_tokens(value: u64) -> String {
 struct Baseline {
     route: RequestRoute,
     signature: RequestSignature,
-    effective_prompt_tokens: u64,
+    reusable_cache_tokens: u64,
     completed_at: Instant,
+    /// UTC day on which the baseline request was sent (its cache was written).
+    utc_day: i64,
 }
 
 #[derive(Debug, Clone)]
 struct Pending {
     route: RequestRoute,
     signature: RequestSignature,
+    provider_compaction: bool,
+    utc_day: i64,
 }
 
 /// Per-session miss detector. Reset whenever the provider-facing transcript is
@@ -194,16 +248,39 @@ impl KvCacheMonitor {
     }
 
     pub fn begin_request(&mut self, route: RequestRoute, signature: RequestSignature) {
-        self.pending = Some(Pending { route, signature });
+        self.begin_request_on_day(route, signature, utc_day_now());
     }
 
-    /// Record completed usage. `effective_prompt_tokens` is the full prompt
-    /// size (input plus cache read/write for split-accounting providers).
+    /// [`Self::begin_request`] with an explicit UTC day (for tests).
+    pub fn begin_request_on_day(
+        &mut self,
+        route: RequestRoute,
+        signature: RequestSignature,
+        utc_day: i64,
+    ) {
+        self.pending = Some(Pending {
+            route,
+            signature,
+            provider_compaction: false,
+            utc_day,
+        });
+    }
+
+    /// Mark compaction evidenced by the completed provider stream, not by a
+    /// guessed token-count drop. This applies only to the current request.
+    pub fn note_provider_compaction(&mut self) {
+        if let Some(pending) = self.pending.as_mut() {
+            pending.provider_compaction = true;
+        }
+    }
+
+    /// Record completed usage. `reusable_cache_tokens` is the reusable cache
+    /// boundary (read plus write, excluding uncached input for split accounting).
     /// `read_tokens` is `None` when the provider did not report cache reads,
     /// which is never treated as a miss.
     pub fn finish_request(
         &mut self,
-        effective_prompt_tokens: u64,
+        reusable_cache_tokens: u64,
         read_tokens: Option<u64>,
     ) -> Option<KvCacheMiss> {
         let pending = self.pending.take()?;
@@ -211,12 +288,13 @@ impl KvCacheMonitor {
             .baseline
             .as_ref()
             .and_then(|baseline| classify(baseline, &pending, read_tokens));
-        if effective_prompt_tokens > 0 {
+        if reusable_cache_tokens > 0 {
             self.baseline = Some(Baseline {
                 route: pending.route,
                 signature: pending.signature,
-                effective_prompt_tokens,
+                reusable_cache_tokens,
                 completed_at: Instant::now(),
+                utc_day: pending.utc_day,
             });
         }
         miss
@@ -229,26 +307,26 @@ fn classify(
     read_tokens: Option<u64>,
 ) -> Option<KvCacheMiss> {
     let read_tokens = read_tokens?;
-    let expected = baseline.effective_prompt_tokens;
+    let expected = baseline.reusable_cache_tokens;
     if expected == 0 {
         return None;
     }
     let missed = expected.saturating_sub(read_tokens);
-    if missed < MIN_MISSED_TOKENS {
+    if missed < min_missed_tokens_for_provider(&pending.route.provider) {
         return None;
     }
-    let pct = ((read_tokens as f64 / expected as f64) * 100.0)
-        .round()
-        .clamp(0.0, 100.0) as u8;
-    let reason = reason(baseline, pending, read_tokens, pct)?;
-    if pct >= OPTIMAL_OK_PCT && !reason.is_hard() {
-        return None;
-    }
-    let documented_cause = reason
-        .harness_caused()
-        .then(|| crate::cache_invalidation::most_recent_since(baseline.completed_at))
-        .flatten()
-        .map(|cause| cause.source.to_string());
+    let reason = reason(baseline, pending, read_tokens)?;
+    let documented_cause = if reason == MissReason::Compaction {
+        Some("provider_auto_compaction".to_string())
+    } else if reason == MissReason::DailyRollover {
+        Some("provider_daily_rollover".to_string())
+    } else {
+        reason
+            .harness_caused()
+            .then(|| crate::cache_invalidation::most_recent_since(baseline.completed_at))
+            .flatten()
+            .map(|cause| cause.source.to_string())
+    };
     Some(KvCacheMiss {
         reason,
         expected_tokens: expected,
@@ -258,7 +336,7 @@ fn classify(
     })
 }
 
-fn reason(baseline: &Baseline, pending: &Pending, read: u64, pct: u8) -> Option<MissReason> {
+fn reason(baseline: &Baseline, pending: &Pending, read: u64) -> Option<MissReason> {
     let (old, new) = (&baseline.route, &pending.route);
     if old.provider != new.provider {
         return Some(MissReason::ProviderSwitch);
@@ -285,13 +363,25 @@ fn reason(baseline: &Baseline, pending: &Pending, read: u64, pct: u8) -> Option<
     if prev.tools_hash != cur.tools_hash || prev.tool_count != cur.tool_count {
         return Some(MissReason::ToolsChanged);
     }
+    // Route, expiry, system and tools changes remain independently actionable.
+    // Native compaction explains a transcript-prefix or cache-read loss only.
+    if pending.provider_compaction {
+        return Some(MissReason::Compaction);
+    }
     if !cur.extends(prev) {
         return Some(MissReason::PrefixChanged);
+    }
+    // Harness-caused changes above stay visible as bugs. Only an otherwise
+    // clean append that straddles 00:00 UTC is attributed to the provider.
+    if baseline.utc_day != pending.utc_day && provider_rolls_cache_daily(&new.provider) {
+        return Some(MissReason::DailyRollover);
     }
     if read == 0 {
         return Some(MissReason::ZeroRead);
     }
-    (pct < OPTIMAL_OK_PCT).then_some(MissReason::LowRead)
+    // The absolute tolerance was already checked against the reusable boundary.
+    // A large warm prefix must not hide a real small cache loss.
+    Some(MissReason::LowRead)
 }
 
 #[cfg(test)]
@@ -334,6 +424,79 @@ mod tests {
         warm(&mut monitor);
         monitor.begin_request(route(), sig(&[10, 11, 12]));
         assert_eq!(monitor.finish_request(52_000, Some(49_800)), None);
+    }
+
+    #[test]
+    fn small_real_loss_on_large_warm_prefix_is_not_hidden_by_percent() {
+        let mut monitor = KvCacheMonitor::new();
+        monitor.begin_request(route(), sig(&[10]));
+        assert_eq!(monitor.finish_request(617_004, Some(615_629)), None);
+        monitor.begin_request(route(), sig(&[10, 11]));
+        let miss = monitor
+            .finish_request(620_252, Some(615_222))
+            .expect("real 1782-token loss");
+        assert_eq!(miss.reason, MissReason::LowRead);
+        assert_eq!(miss.missed_tokens, 1_782);
+    }
+
+    fn openai_route() -> RequestRoute {
+        RequestRoute {
+            provider: "openai-api".into(),
+            model: "gpt-5.4".into(),
+            upstream_provider: None,
+            cache_ttl_secs: Some(1800),
+            ttl_is_estimate: true,
+        }
+    }
+
+    #[test]
+    fn openai_tail_block_rounding_is_not_a_miss() {
+        // Observed: byte-identical append, 1024-token-block cache read shortfall.
+        let mut monitor = KvCacheMonitor::new();
+        monitor.begin_request(openai_route(), sig(&[10]));
+        assert_eq!(monitor.finish_request(74_368, Some(73_344)), None);
+        monitor.begin_request(openai_route(), sig(&[10, 11]));
+        assert_eq!(monitor.finish_request(75_267, Some(73_344)), None);
+        monitor.begin_request(openai_route(), sig(&[10, 11, 12]));
+        assert_eq!(monitor.finish_request(76_900, Some(73_344)), None);
+    }
+
+    #[test]
+    fn openai_real_loss_is_still_reported() {
+        let mut monitor = KvCacheMonitor::new();
+        monitor.begin_request(openai_route(), sig(&[10]));
+        monitor.finish_request(127_199, Some(127_000));
+        monitor.begin_request(openai_route(), sig(&[10, 11]));
+        let miss = monitor
+            .finish_request(128_870, Some(110_208))
+            .expect("16991-token loss");
+        assert_eq!(miss.reason, MissReason::LowRead);
+    }
+
+    #[test]
+    fn noise_floor_is_provider_specific() {
+        assert_eq!(
+            min_missed_tokens_for_provider("openai"),
+            OPENAI_MIN_MISSED_TOKENS
+        );
+        assert_eq!(
+            min_missed_tokens_for_provider("OpenAI"),
+            OPENAI_MIN_MISSED_TOKENS
+        );
+        assert_eq!(
+            min_missed_tokens_for_provider("openai-oauth"),
+            OPENAI_MIN_MISSED_TOKENS
+        );
+        assert_eq!(min_missed_tokens_for_provider("claude"), MIN_MISSED_TOKENS);
+    }
+
+    #[test]
+    fn previous_cache_creation_is_reusable_but_uncached_tail_is_not() {
+        let mut monitor = KvCacheMonitor::new();
+        monitor.begin_request(route(), sig(&[10]));
+        assert_eq!(monitor.finish_request(615_629 + 1_375, Some(615_629)), None);
+        monitor.begin_request(route(), sig(&[10, 11]));
+        assert_eq!(monitor.finish_request(617_004 + 3_248, Some(617_004)), None);
     }
 
     #[test]
@@ -380,11 +543,164 @@ mod tests {
     }
 
     #[test]
+    fn native_compaction_zero_read_is_an_expected_refresh() {
+        let mut monitor = KvCacheMonitor::new();
+        monitor.begin_request(route(), sig(&[10, 11]));
+        monitor.finish_request(216_517, Some(216_064));
+        monitor.begin_request(route(), sig(&[10, 11, 12]));
+        monitor.note_provider_compaction();
+        let miss = monitor.finish_request(204_393, Some(0)).expect("refresh");
+        assert_eq!(miss.reason, MissReason::Compaction);
+        assert_eq!(miss.expected_tokens, 216_517);
+        assert_eq!(miss.read_tokens, 0);
+        assert_eq!(
+            miss.documented_cause.as_deref(),
+            Some("provider_auto_compaction")
+        );
+        assert!(!miss.reason.harness_caused());
+        assert!(
+            miss.message()
+                .starts_with("KV cache refresh [provider_auto_compaction]")
+        );
+        assert!(!miss.message().contains("likely a harness bug"));
+        assert!(miss.message().contains("rebuilding cache is expected"));
+        assert!(
+            miss.message()
+                .contains("previous reusable prefix ~216K tokens")
+        );
+        assert!(!miss.message().contains("tokens resent"));
+
+        // Evidence belongs to this response only. A subsequent unexplained
+        // zero read must still be reported, even after a compacted response.
+        monitor.begin_request(route(), sig(&[10, 11, 12, 13]));
+        let miss = monitor.finish_request(205_000, Some(0)).expect("real miss");
+        assert_eq!(miss.reason, MissReason::ZeroRead);
+        assert_eq!(miss.documented_cause, None);
+    }
+
+    #[test]
+    fn compaction_does_not_hide_independent_changes() {
+        for expected in [
+            MissReason::ModelSwitch,
+            MissReason::SystemChanged,
+            MissReason::ToolsChanged,
+        ] {
+            let mut monitor = KvCacheMonitor::new();
+            warm(&mut monitor);
+            let mut next_route = route();
+            let mut next_sig = sig(&[99]);
+            match expected {
+                MissReason::ModelSwitch => next_route.model = "other".into(),
+                MissReason::SystemChanged => next_sig.system_static_hash += 1,
+                MissReason::ToolsChanged => next_sig.tools_hash += 1,
+                _ => unreachable!(),
+            }
+            monitor.begin_request(next_route, next_sig);
+            monitor.note_provider_compaction();
+            let miss = monitor.finish_request(20_000, Some(0)).expect("miss");
+            assert_eq!(miss.reason, expected);
+        }
+    }
+
+    #[test]
+    fn compaction_evidence_does_not_survive_retry_or_reset() {
+        let mut monitor = KvCacheMonitor::new();
+        warm(&mut monitor);
+        monitor.begin_request(route(), sig(&[10, 11, 12]));
+        monitor.note_provider_compaction();
+        monitor.begin_request(route(), sig(&[10, 11, 12]));
+        assert_eq!(
+            monitor.finish_request(52_000, Some(0)).unwrap().reason,
+            MissReason::ZeroRead
+        );
+        monitor.note_provider_compaction(); // No pending request: no effect.
+        monitor.reset();
+        warm(&mut monitor);
+        monitor.begin_request(route(), sig(&[10, 11, 12]));
+        assert_eq!(
+            monitor.finish_request(52_000, Some(0)).unwrap().reason,
+            MissReason::ZeroRead
+        );
+    }
+
+    #[test]
+    fn compaction_without_reported_loss_is_not_a_miss() {
+        let mut monitor = KvCacheMonitor::new();
+        warm(&mut monitor);
+        monitor.begin_request(route(), sig(&[10, 11, 12]));
+        monitor.note_provider_compaction();
+        assert_eq!(monitor.finish_request(52_000, Some(50_000)), None);
+        monitor.begin_request(route(), sig(&[99]));
+        monitor.note_provider_compaction();
+        assert_eq!(monitor.finish_request(20_000, None), None);
+    }
+
+    #[test]
     fn reset_drops_baseline() {
         let mut monitor = KvCacheMonitor::new();
         warm(&mut monitor);
         monitor.reset();
         monitor.begin_request(route(), sig(&[99]));
         assert_eq!(monitor.finish_request(52_000, Some(0)), None);
+    }
+
+    #[test]
+    fn utc_midnight_straddle_is_a_provider_daily_rollover() {
+        // Real incident: 621K-token prefix, 31K read after crossing 00:00 UTC.
+        let mut monitor = KvCacheMonitor::new();
+        monitor.begin_request_on_day(route(), sig(&[10, 11]), 20_744);
+        monitor.finish_request(621_788, Some(620_865));
+        monitor.begin_request_on_day(route(), sig(&[10, 11, 12]), 20_745);
+        let miss = monitor.finish_request(622_773, Some(31_075)).expect("miss");
+        assert_eq!(miss.reason, MissReason::DailyRollover);
+        assert!(!miss.reason.harness_caused());
+        assert_eq!(
+            miss.documented_cause.as_deref(),
+            Some("provider_daily_rollover")
+        );
+        assert!(
+            miss.message()
+                .starts_with("KV cache refresh [provider_daily_rollover]")
+        );
+    }
+
+    #[test]
+    fn harness_changes_still_win_over_daily_rollover() {
+        let mut monitor = KvCacheMonitor::new();
+        monitor.begin_request_on_day(route(), sig(&[10, 11]), 1);
+        monitor.finish_request(50_000, Some(50_000));
+        monitor.begin_request_on_day(route(), sig(&[10, 99, 12]), 2);
+        let miss = monitor.finish_request(52_000, Some(2_000)).expect("miss");
+        assert_eq!(miss.reason, MissReason::PrefixChanged);
+    }
+
+    #[test]
+    fn same_utc_day_low_read_is_not_attributed_to_rollover() {
+        let mut monitor = KvCacheMonitor::new();
+        monitor.begin_request_on_day(route(), sig(&[10, 11]), 5);
+        monitor.finish_request(50_000, Some(50_000));
+        monitor.begin_request_on_day(route(), sig(&[10, 11, 12]), 5);
+        let miss = monitor.finish_request(52_000, Some(2_000)).expect("miss");
+        assert_eq!(miss.reason, MissReason::LowRead);
+    }
+
+    #[test]
+    fn non_anthropic_day_change_is_not_attributed_to_rollover() {
+        let mut openai = route();
+        openai.provider = "openrouter".into();
+        let mut monitor = KvCacheMonitor::new();
+        monitor.begin_request_on_day(openai.clone(), sig(&[10, 11]), 5);
+        monitor.finish_request(50_000, Some(50_000));
+        monitor.begin_request_on_day(openai, sig(&[10, 11, 12]), 6);
+        let miss = monitor.finish_request(52_000, Some(2_000)).expect("miss");
+        assert_eq!(miss.reason, MissReason::LowRead);
+    }
+
+    #[test]
+    fn utc_day_boundaries() {
+        use std::time::{Duration, UNIX_EPOCH};
+        assert_eq!(utc_day_of(UNIX_EPOCH + Duration::from_secs(86_399)), 0);
+        assert_eq!(utc_day_of(UNIX_EPOCH + Duration::from_secs(86_400)), 1);
+        assert_eq!(utc_day_of(UNIX_EPOCH - Duration::from_secs(1)), -1);
     }
 }

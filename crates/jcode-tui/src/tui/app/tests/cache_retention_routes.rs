@@ -27,7 +27,7 @@ fn cache_timer_snapshots_retention_at_request_start() {
     // request that already selected its cache-control policy.
     crate::provider::anthropic::set_cache_ttl_1h(false);
     app.streaming.streaming_input_tokens = 42_000;
-    assert!(app.record_completed_stream_cache_usage());
+    assert!(record_reported_test_cache_usage(&mut app));
     let timer = <App as TuiState>::cache_ttl_status(&app).unwrap();
     assert_eq!(timer.ttl_secs, 3600);
     assert!(!timer.is_estimate);
@@ -78,7 +78,7 @@ fn cache_timer_openai_routes_distinguish_api_oauth_and_unknown() {
         assert_eq!(app.kv_cache_provider_name(), identity);
         app.begin_kv_cache_request(&[Message::user("first")], &[], "system", "");
         app.streaming.streaming_input_tokens = 42_000;
-        assert!(app.record_completed_stream_cache_usage());
+        assert!(record_reported_test_cache_usage(&mut app));
         let timer = <App as TuiState>::cache_ttl_status(&app);
         assert_eq!(timer.is_some(), has_timer, "{identity}");
         if let Some(timer) = timer {
@@ -89,7 +89,7 @@ fn cache_timer_openai_routes_distinguish_api_oauth_and_unknown() {
     app.remote_provider_name = Some("openai-api".to_string());
     app.begin_kv_cache_request(&[Message::user("first")], &[], "system", "");
     app.streaming.streaming_input_tokens = 42_000;
-    assert!(app.record_completed_stream_cache_usage());
+    assert!(record_reported_test_cache_usage(&mut app));
     assert!(
         <App as TuiState>::cache_ttl_status(&app)
             .unwrap()
@@ -111,7 +111,7 @@ fn cache_timer_estimate_never_claims_definite_expiry() {
     app.begin_kv_cache_request(&[Message::user("first")], &[], "system", "");
     app.streaming.streaming_input_tokens = 42_000;
     app.streaming.streaming_cache_read_tokens = Some(0);
-    assert!(app.record_completed_stream_cache_usage());
+    assert!(record_reported_test_cache_usage(&mut app));
     let baseline = app.kv_cache.kv_cache_baseline.as_mut().unwrap();
     baseline.completed_at =
         Instant::now() - Duration::from_secs(baseline.cache_ttl_secs.unwrap() + 10);
@@ -194,6 +194,7 @@ fn cache_warning_does_not_leak_anthropic_expiry_into_openai_route() {
         cache_generation: app.kv_cache.cache_generation,
         input_tokens: 42_000,
         completed_at: Instant::now() - Duration::from_secs(3700),
+        utc_day: 0,
         cache_ttl_secs: Some(3600),
         provider: "anthropic".into(),
         model: "claude-opus-4-6".into(),
@@ -221,6 +222,7 @@ fn cache_miss_requires_explicit_read_telemetry_even_with_writes() {
         cache_generation: app.kv_cache.cache_generation,
         input_tokens: 42_000,
         completed_at: Instant::now(),
+        utc_day: 0,
         cache_ttl_secs: Some(1800),
         provider: "openai-api".into(),
         model: "gpt-6-astra".into(),
@@ -238,7 +240,7 @@ fn cache_miss_requires_explicit_read_telemetry_even_with_writes() {
         app.streaming.streaming_input_tokens = 42_000;
         app.streaming.streaming_cache_read_tokens = None;
         app.streaming.streaming_cache_creation_tokens = writes;
-        assert!(app.record_completed_stream_cache_usage());
+        assert!(record_reported_test_cache_usage(&mut app));
         assert!(app.kv_cache.kv_cache_miss_samples.is_empty());
         assert!(
             !app.display_messages
@@ -251,6 +253,6 @@ fn cache_miss_requires_explicit_read_telemetry_even_with_writes() {
     app.begin_kv_cache_request(&messages, &[], "changed system", "");
     app.streaming.streaming_input_tokens = 42_000;
     app.streaming.streaming_cache_read_tokens = Some(0);
-    assert!(app.record_completed_stream_cache_usage());
+    assert!(record_reported_test_cache_usage(&mut app));
     assert_eq!(app.kv_cache.kv_cache_miss_samples.len(), 1);
 }

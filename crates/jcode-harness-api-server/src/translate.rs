@@ -605,6 +605,10 @@ impl BridgeState {
                     "id": id,
                     "supports_pdf_panels": true,
                     "supports_user_response": self.supports_user_response,
+                    // API clients have no account-router countdown of their
+                    // own, so the daemon switches pool accounts and retries
+                    // usage-limited turns for them, like the TUI does.
+                    "supports_server_failover": true,
                 });
                 if self.crash_on_disconnect {
                     subscribe["crash_on_disconnect"] = json!(true);

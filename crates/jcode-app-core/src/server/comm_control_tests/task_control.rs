@@ -33,8 +33,6 @@ async fn task_control_wake_returns_structured_response_with_plan_summary() {
             version: 1,
             participants: HashSet::from([requester.to_string(), worker.to_string()]),
             task_progress: HashMap::new(),
-            mode: "light".to_string(),
-            node_meta: HashMap::new(),
         },
     )])));
     let swarm_coordinators = Arc::new(RwLock::new(HashMap::from([(
@@ -124,8 +122,6 @@ async fn task_control_resume_without_task_id_uses_unique_target_assignment() {
             version: 1,
             participants: HashSet::from([requester.to_string(), worker.to_string()]),
             task_progress: HashMap::new(),
-            mode: "light".to_string(),
-            node_meta: HashMap::new(),
         },
     )])));
     let swarm_coordinators = Arc::new(RwLock::new(HashMap::from([(
@@ -211,8 +207,6 @@ async fn task_control_without_task_id_rejects_ambiguous_target_assignments() {
             version: 1,
             participants: HashSet::from([requester.to_string(), worker.to_string()]),
             task_progress: HashMap::new(),
-            mode: "light".to_string(),
-            node_meta: HashMap::new(),
         },
     )])));
     let swarm_coordinators = Arc::new(RwLock::new(HashMap::from([(
@@ -308,8 +302,6 @@ async fn task_control_resume_busy_agent_rejects_without_mutating_plan() {
             version: 1,
             participants: HashSet::from([requester.to_string(), worker.to_string()]),
             task_progress: HashMap::from([("busy-task".to_string(), prior_progress.clone())]),
-            mode: "light".to_string(),
-            node_meta: HashMap::new(),
         },
     )])));
     let swarm_coordinators = Arc::new(RwLock::new(HashMap::from([(
@@ -406,12 +398,9 @@ async fn requeue_existing_assignment_preserves_prior_progress_history() {
                     checkpoint_count: Some(2),
                     stale_since_unix_ms: Some(4_000),
                     completed_at_unix_ms: None,
-                    no_artifact_requeues: None,
                     dead_assignee_reclaims: None,
                 },
             )]),
-            mode: "light".to_string(),
-            node_meta: HashMap::new(),
         },
     )])));
 
@@ -504,8 +493,6 @@ async fn task_control_retry_re_dispatches_after_recent_identical_retry() {
             version: 1,
             participants: HashSet::from([requester.to_string(), worker.to_string()]),
             task_progress: HashMap::new(),
-            mode: "light".to_string(),
-            node_meta: HashMap::new(),
         },
     )])));
     let swarm_coordinators = Arc::new(RwLock::new(HashMap::from([(

@@ -87,6 +87,8 @@ struct ProcessingMessage {
     images: Vec<(String, String)>,
     system_reminder: Option<String>,
     active_skill: Option<String>,
+    /// Retry on the next pool account after a usage limit (API clients).
+    server_failover: bool,
 }
 
 struct ProcessingState<'a> {
@@ -374,6 +376,7 @@ pub(super) async fn handle_client(
     await_members_runtime: AwaitMembersRuntime,
     swarm_mutation_runtime: SwarmMutationRuntime,
 ) -> Result<()> {
+    let handler_start = Instant::now();
     let (reader, writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
     let writer = Arc::new(Mutex::new(writer));
@@ -400,6 +403,13 @@ pub(super) async fn handle_client(
 
         match decode_request(&line) {
             Ok(request) => {
+                if !request.is_lightweight_control_request() {
+                    crate::logging::info(&format!(
+                        "[TIMING] handle_client initial request read: bytes={}, handler_to_read={}ms",
+                        line.len(),
+                        handler_start.elapsed().as_millis()
+                    ));
+                }
                 if request.is_lightweight_control_request() {
                     let keep_connection_open = matches!(request, Request::Ping { .. });
                     handle_lightweight_control_request(
@@ -486,12 +496,28 @@ pub(super) async fn handle_client(
     let mut model_usage_updates_enabled = false;
     let mut supports_pdf_panels = false;
     let mut supports_user_response = false;
+    let mut supports_server_failover = false;
     // Client selfdev status is determined by Subscribe request, not server's env
     let mut client_selfdev = false;
 
     let client_start = std::time::Instant::now();
 
-    let provider = provider_template.fork_for_new_session();
+    // A target-aware Subscribe for an existing session restores that
+    // session's own model onto this placeholder. Choosing a fresh pool route
+    // for it is wasted work, and in a reload storm the forks serialize on that
+    // choice (seconds when an account's quota state changes mid-storm).
+    let resumes_persisted_session = match &initial_request {
+        Request::Subscribe {
+            target_session_id: Some(target),
+            ..
+        } => crate::session::session_exists(target),
+        _ => false,
+    };
+    let provider = if resumes_persisted_session {
+        provider_template.fork()
+    } else {
+        provider_template.fork_for_new_session()
+    };
     let provider_fork_ms = client_start.elapsed().as_millis();
     let t0 = std::time::Instant::now();
     let registry = Registry::new(provider.clone()).await;
@@ -504,18 +530,32 @@ pub(super) async fn handle_client(
     let t0 = std::time::Instant::now();
     let mut new_agent =
         crate::hooks::with_client_terminal_env(active_terminal_env.clone(), async {
-            Agent::new_provisional_with_initial_working_dir(
-                Arc::clone(&provider),
-                registry.clone(),
-                Some(&initial_working_dir),
-            )
+            super::run_blocking_io(|| {
+                Agent::new_provisional_with_initial_working_dir(
+                    Arc::clone(&provider),
+                    registry.clone(),
+                    Some(&initial_working_dir),
+                )
+            })
         })
         .await;
     let agent_new_ms = t0.elapsed().as_millis();
 
     new_agent.set_memory_enabled(crate::config::config().features.memory);
     let prewarm_start = std::time::Instant::now();
-    new_agent.prewarm_provider_idle().await;
+    // A target-aware Subscribe replaces this placeholder with the restored
+    // session right away, so warming its provider is wasted work on the
+    // resume critical path (p50 ~200ms per reconnect in a reload storm).
+    let resuming_existing_session = matches!(
+        &initial_request,
+        Request::Subscribe {
+            target_session_id: Some(_),
+            ..
+        }
+    );
+    if !resuming_existing_session {
+        new_agent.prewarm_provider_idle().await;
+    }
     let prewarm_ms = prewarm_start.elapsed().as_millis();
 
     crate::logging::info(&format!(
@@ -1171,6 +1211,7 @@ pub(super) async fn handle_client(
                         images,
                         system_reminder,
                         active_skill,
+                        server_failover: supports_server_failover,
                     },
                     &client_session_id,
                     &mut ProcessingState {
@@ -1290,6 +1331,7 @@ pub(super) async fn handle_client(
                             images,
                             system_reminder: None,
                             active_skill: None,
+                            server_failover: supports_server_failover,
                         },
                         &client_session_id,
                         &mut ProcessingState {
@@ -1429,7 +1471,8 @@ pub(super) async fn handle_client(
                             &server_icon,
                             None,
                             supports_pdf_panels,
-                        )
+                            None,
+                    )
                         .await
                         .is_err()
                         {
@@ -1490,7 +1533,8 @@ pub(super) async fn handle_client(
                             &server_icon,
                             None,
                             supports_pdf_panels,
-                        )
+                            None,
+                    )
                         .await
                         .is_err()
                         {
@@ -1554,11 +1598,13 @@ pub(super) async fn handle_client(
                 system_prompt,
                 supports_pdf_panels: requested_pdf_panels,
                 supports_user_response: requested_user_response,
+                supports_server_failover: requested_server_failover,
                 working_dir: subscribe_working_dir,
                 selfdev,
                 target_session_id,
                 client_instance_id,
                 client_has_local_history,
+                history_base,
                 allow_session_takeover,
                 crash_on_disconnect: _,
                 continue_on_disconnect: requested_continuation,
@@ -1591,6 +1637,7 @@ pub(super) async fn handle_client(
                 continue_on_disconnect = requested_continuation;
                 supports_pdf_panels = requested_pdf_panels;
                 supports_user_response = requested_user_response;
+                supports_server_failover = requested_server_failover;
                 active_terminal_env = terminal_env;
                 current_client_instance_id = client_instance_id.clone();
                 {
@@ -1620,6 +1667,7 @@ pub(super) async fn handle_client(
                                 subscribe_working_dir.as_deref(),
                                 client_instance_id.as_deref(),
                                 client_has_local_history,
+                                history_base,
                                 allow_session_takeover,
                                 &mut client_selfdev,
                                 &mut client_session_id,
@@ -1785,7 +1833,8 @@ pub(super) async fn handle_client(
                     &server_icon,
                     None,
                     supports_pdf_panels,
-                )
+                    None,
+            )
                 .await
                 .is_err()
                 {
@@ -1884,6 +1933,7 @@ pub(super) async fn handle_client(
                         resume_working_dir.as_deref(),
                         client_instance_id.as_deref(),
                         client_has_local_history,
+                        None,
                         allow_session_takeover,
                         &mut client_selfdev,
                         &mut client_session_id,
@@ -2125,6 +2175,10 @@ pub(super) async fn handle_client(
 
             Request::SwitchOpenAiAccount { id, label } => {
                 handle_switch_openai_account(id, label, &agent, &client_event_tx).await;
+            }
+
+            Request::AccountUsage { id } => {
+                super::account_usage::request(id, client_event_tx.clone());
             }
 
             Request::InvalidateOpenAiUsage { id, account_label } => {
@@ -2645,98 +2699,6 @@ pub(super) async fn handle_client(
                 .await;
             }
 
-            Request::CommSeedGraph {
-                id,
-                session_id: req_session_id,
-                mode,
-                nodes,
-            } => {
-                super::comm_graph::handle_comm_seed_graph(
-                    id,
-                    req_session_id,
-                    mode,
-                    nodes,
-                    &client_event_tx,
-                    &swarm_members,
-                    &swarms_by_id,
-                    &swarm_plans,
-                    &swarm_coordinators,
-                    &event_history,
-                    &event_counter,
-                    &swarm_event_tx,
-                )
-                .await;
-            }
-
-            Request::CommExpandNode {
-                id,
-                session_id: req_session_id,
-                node_id,
-                children,
-            } => {
-                super::comm_graph::handle_comm_expand_node(
-                    id,
-                    req_session_id,
-                    node_id,
-                    children,
-                    &client_event_tx,
-                    &swarm_members,
-                    &swarms_by_id,
-                    &swarm_plans,
-                    &swarm_coordinators,
-                    &event_history,
-                    &event_counter,
-                    &swarm_event_tx,
-                )
-                .await;
-            }
-
-            Request::CommCompleteNode {
-                id,
-                session_id: req_session_id,
-                node_id,
-                artifact_json,
-            } => {
-                super::comm_graph::handle_comm_complete_node(
-                    id,
-                    req_session_id,
-                    node_id,
-                    artifact_json,
-                    &client_event_tx,
-                    &swarm_members,
-                    &swarms_by_id,
-                    &swarm_plans,
-                    &swarm_coordinators,
-                    &event_history,
-                    &event_counter,
-                    &swarm_event_tx,
-                )
-                .await;
-            }
-
-            Request::CommInjectGap {
-                id,
-                session_id: req_session_id,
-                gate_id,
-                nodes,
-            } => {
-                super::comm_graph::handle_comm_inject_gap(
-                    id,
-                    req_session_id,
-                    gate_id,
-                    nodes,
-                    &client_event_tx,
-                    &swarm_members,
-                    &swarms_by_id,
-                    &swarm_plans,
-                    &swarm_coordinators,
-                    &event_history,
-                    &event_counter,
-                    &swarm_event_tx,
-                )
-                .await;
-            }
-
             Request::CommSpawn {
                 id,
                 session_id: req_session_id,
@@ -2915,6 +2877,15 @@ pub(super) async fn handle_client(
                     Some(&event_history),
                     Some(&event_counter),
                     Some(&swarm_event_tx),
+                )
+                .await;
+                super::comm_control::close_reporter_task_on_terminal_report(
+                    &req_session_id,
+                    &status,
+                    &swarm_members,
+                    &swarms_by_id,
+                    &swarm_plans,
+                    &swarm_coordinators,
                 )
                 .await;
                 let _ = client_event_tx.send(ServerEvent::CommReportResponse {
@@ -3428,6 +3399,7 @@ async fn start_processing_message(
         images,
         system_reminder,
         active_skill,
+        server_failover,
     } = message;
     if server_reload_starting() {
         crate::logging::info(&format!(
@@ -3511,7 +3483,14 @@ async fn start_processing_message(
         let mut stop_reason = crate::protocol::TurnStopReason::Failure;
         let result = match std::panic::AssertUnwindSafe(crate::hooks::with_client_terminal_env(
             client_terminal_env,
-            process_message_streaming_mpsc(agent, &content, images, system_reminder, event_tx),
+            super::turn_failover::process_message_with_server_failover(
+                agent,
+                &content,
+                images,
+                system_reminder,
+                event_tx,
+                server_failover,
+            ),
         ))
         .catch_unwind()
         .await

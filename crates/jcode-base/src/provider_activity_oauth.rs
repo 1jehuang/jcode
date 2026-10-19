@@ -17,6 +17,21 @@ struct Totals {
     incomplete_requests: u64,
 }
 
+fn format_usage_tokens(tokens: u64) -> String {
+    for (unit, suffix) in [
+        (1_000_000_000_000_000_000_u64, "Quint"),
+        (1_000_000_000_000_000, "Quad"),
+        (1_000_000_000_000, "Tril"),
+        (1_000_000_000, "Bil"),
+        (1_000_000, "Mil"),
+    ] {
+        if tokens >= unit {
+            return format!("{:.3} {}", tokens as f64 / unit as f64, suffix);
+        }
+    }
+    format_number_u64(tokens)
+}
+
 impl Totals {
     fn add(&mut self, other: &Self) {
         self.requests = self.requests.saturating_add(other.requests);
@@ -58,14 +73,14 @@ impl Totals {
             ""
         };
         let cached = if self.cached > 0 {
-            format!(" · {} cached", format_number_u64(self.cached))
+            format!(" · {} cached", format_usage_tokens(self.cached))
         } else {
             String::new()
         };
         format!(
             "{} in · {} out{} · {}{}",
-            format_number_u64(self.input),
-            format_number_u64(self.output),
+            format_usage_tokens(self.input),
+            format_usage_tokens(self.output),
             cached,
             cost,
             partial
@@ -256,7 +271,7 @@ mod tests {
     use chrono::TimeZone;
 
     #[test]
-    fn display_groups_large_usage_counts_without_rounding() {
+    fn display_compacts_large_usage_counts() {
         let totals = Totals {
             requests: 12_346,
             input: 12_345_678,
@@ -268,17 +283,27 @@ mod tests {
         };
         assert_eq!(
             totals.display(),
-            "12,345,678 in · 999 out · 1,234,567 cached · $12.35 est. + unknown cost (12,345 unpriced) · partial tokens"
+            "12.346 Mil in · 999 out · 1.235 Mil cached · $12.35 est. + unknown cost (12,345 unpriced) · partial tokens"
         );
         let max = Totals {
             requests: 1,
             input: u64::MAX,
             ..Totals::default()
         };
-        assert!(
-            max.display()
-                .starts_with("18,446,744,073,709,551,615 in · 0 out")
-        );
+        assert!(max.display().starts_with("18.447 Quint in · 0 out"));
+    }
+
+    #[test]
+    fn compact_token_units_keep_small_counts_exact() {
+        for (tokens, expected) in [
+            (0, "0"),
+            (999_999, "999,999"),
+            (1_000_000, "1.000 Mil"),
+            (2_456_000_000, "2.456 Bil"),
+            (1_000_000_000_000, "1.000 Tril"),
+        ] {
+            assert_eq!(format_usage_tokens(tokens), expected);
+        }
     }
 
     #[test]

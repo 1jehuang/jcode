@@ -101,6 +101,7 @@ async fn handle_resume_session_allows_attach_from_different_client_instance() ->
         None,
         Some("client_instance_new"),
         true,
+        None,
         true,
         &mut client_selfdev,
         &mut client_session_id,

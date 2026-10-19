@@ -111,6 +111,26 @@ pub fn speed_tier_ladder(
     Vec::new()
 }
 
+/// Filter the static UI order by an authoritative provider capability list.
+/// `None` preserves compatibility with servers predating capability reporting.
+/// Standard is always retained, while Flex is never a speed hotkey rung.
+pub fn speed_tier_ladder_with_capabilities(
+    provider_name: Option<&str>,
+    model_name: Option<&str>,
+    available: Option<&[impl AsRef<str>]>,
+) -> Vec<&'static str> {
+    let mut ladder = speed_tier_ladder(provider_name, model_name);
+    if let Some(available) = available {
+        ladder.retain(|tier| {
+            *tier == SPEED_TIER_STANDARD
+                || available
+                    .iter()
+                    .any(|supported| supported.as_ref() == *tier)
+        });
+    }
+    ladder
+}
+
 /// Step along `ladder` from `current` in `direction`, clamping at both ends.
 ///
 /// Returns `None` when the ladder is empty. The returned flag is `true` when
@@ -148,6 +168,35 @@ pub fn step_speed_tier(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authoritative_capabilities_filter_without_adding_flex() {
+        let ladder = |available| {
+            speed_tier_ladder_with_capabilities(Some("openai"), Some("gpt-6-astra"), available)
+        };
+        assert_eq!(
+            ladder(None::<&[&str]>),
+            vec!["off", "priority", "ultrafast"]
+        );
+        assert_eq!(ladder(Some(&["priority", "flex"])), vec!["off", "priority"]);
+        assert_eq!(ladder(Some(&[])), vec!["off"]);
+        assert_eq!(
+            ladder(Some(&["flex", "ultrafast", "priority"])),
+            vec!["off", "priority", "ultrafast"]
+        );
+        assert_eq!(
+            speed_tier_ladder_with_capabilities(Some("cursor"), None, Some(&["priority", "off"])),
+            vec!["off", "priority"]
+        );
+        assert_eq!(
+            speed_tier_ladder_with_capabilities(
+                Some("anthropic"),
+                Some("claude-opus-4-8"),
+                Some(&["off", "priority"])
+            ),
+            vec!["off", "priority"]
+        );
+    }
 
     #[test]
     fn openai_ladder_includes_ultrafast_only_for_supported_models() {

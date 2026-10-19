@@ -1,6 +1,45 @@
 use super::*;
 
 #[test]
+fn header_invalidation_discards_composed_account_quota_frames() {
+    let prepared = Arc::new(PreparedChatFrame::from_single(Arc::new(
+        empty_prepared_messages(),
+    )));
+    let key = FullPrepCacheKey {
+        width: 120,
+        height: 40,
+        diff_mode: crate::config::DiffDisplayMode::Off,
+        messages_version: 0,
+        diagram_mode: crate::config::DiagramDisplayMode::Pinned,
+        centered: false,
+        mermaid_aspect_bucket: None,
+        is_processing: false,
+        streaming_text_len: 0,
+        streaming_text_hash: 0,
+        batch_progress_hash: 0,
+        inline_images_signature: (0, 0),
+        inline_images_visible: true,
+        expanded_images_version: 0,
+        swarm_members_signature: 0,
+    };
+    {
+        let mut cache = full_prep_cache().lock().unwrap();
+        cache.insert(key.clone(), prepared);
+        assert!(cache.get_exact(&key).is_some());
+    }
+    *header_prep_cache().lock().unwrap() = Some(HeaderPrepCacheState {
+        signature: 42,
+        built_at: Instant::now(),
+        prepared: Arc::new(empty_prepared_messages()),
+    });
+    invalidate_header_prep_cache();
+    assert!(header_prep_cache().lock().unwrap().is_none());
+    let mut cache = full_prep_cache().lock().unwrap();
+    assert!(cache.get_exact(&key).is_none());
+    assert!(cache.oversized_entries.is_empty());
+}
+
+#[test]
 fn centered_mode_centers_unstructured_messages_and_preserves_structured_left_blocks() {
     for role in ["user", "assistant", "meta", "usage", "error", "memory"] {
         assert_eq!(

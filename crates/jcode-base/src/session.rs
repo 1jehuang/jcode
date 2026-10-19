@@ -42,7 +42,9 @@ mod load_telemetry;
 mod maintenance;
 mod memory_profile;
 mod model;
+mod parallel_messages;
 mod persistence;
+pub mod prewarm;
 mod render;
 mod storage_paths;
 pub use crash::{
@@ -123,6 +125,7 @@ pub struct Session {
     pub custom_title: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    #[serde(deserialize_with = "parallel_messages::deserialize")]
     pub messages: Vec<StoredMessage>,
     /// Full assembled system prompt replacement, including an intentionally empty prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -541,6 +544,7 @@ impl Session {
             system_prompt: self.system_prompt.clone(),
             updated_at: self.updated_at,
             compaction: self.compaction.clone(),
+            compaction_unchanged: false,
             provider_session_id: self.provider_session_id.clone(),
             model_usage_turn_id: self.model_usage_turn_id.clone(),
             provider_key: self.provider_key.clone(),
@@ -723,10 +727,6 @@ impl Session {
         }
     }
 
-    fn mark_env_snapshots_full_dirty(&mut self) {
-        self.persist_state.env_snapshots_mode = PersistVectorMode::Full;
-    }
-
     fn mark_memory_injections_append_dirty(&mut self) {
         if self.persist_state.memory_injections_mode != PersistVectorMode::Full {
             self.persist_state.memory_injections_mode = PersistVectorMode::Append;
@@ -745,7 +745,9 @@ impl Session {
         self.custom_title = meta.custom_title;
         self.system_prompt = meta.system_prompt;
         self.updated_at = meta.updated_at;
-        self.compaction = meta.compaction;
+        if !meta.compaction_unchanged {
+            self.compaction = meta.compaction;
+        }
         self.provider_session_id = meta.provider_session_id;
         self.model_usage_turn_id = meta.model_usage_turn_id;
         self.provider_key = meta.provider_key;
@@ -956,13 +958,19 @@ impl Session {
         self.memory_profile_cache.env_snapshots_count += 1;
         self.memory_profile_cache.env_snapshots_json_bytes += estimate_json_bytes(&snapshot);
         self.env_snapshots.push(snapshot);
+        // Trimming here would force a full snapshot rewrite (seconds on large
+        // transcripts) on every resume. Append instead and trim only when a
+        // checkpoint rewrites the snapshot anyway (see `trim_env_snapshots`).
+        self.mark_env_snapshots_append_dirty();
+    }
+
+    /// Drop all but the newest `MAX_ENV_SNAPSHOTS`. Only call right before a
+    /// full snapshot write, because it shrinks an append-tracked vector.
+    pub(crate) fn trim_env_snapshots(&mut self) {
         if self.env_snapshots.len() > MAX_ENV_SNAPSHOTS {
             let excess = self.env_snapshots.len() - MAX_ENV_SNAPSHOTS;
             self.env_snapshots.drain(0..excess);
             self.mark_memory_profile_dirty();
-            self.mark_env_snapshots_full_dirty();
-        } else {
-            self.mark_env_snapshots_append_dirty();
         }
     }
 
@@ -1121,10 +1129,26 @@ request in this new forked session, using the inherited conversation only as con
 
     /// Mark session as active (e.g., when resuming)
     pub fn mark_active(&mut self) {
+        self.mark_active_unregistered();
+        self.register_presence_markers();
+    }
+
+    /// Mark active in memory only, without writing presence markers.
+    ///
+    /// Reload reconnects build a provisional session that is replaced by the
+    /// resumed one almost immediately. Writing and then deleting its
+    /// `active_pids`/`internal_pids` markers costs filesystem work on every
+    /// reconnect of a storm, so callers defer that to
+    /// [`Self::register_presence_markers`] once the session is committed.
+    pub fn mark_active_unregistered(&mut self) {
         self.status = SessionStatus::Active;
-        let pid = std::process::id();
-        self.last_pid = Some(pid);
+        self.last_pid = Some(std::process::id());
         self.last_active_at = Some(Utc::now());
+    }
+
+    /// Write this session's on-disk presence markers for its owning PID.
+    pub fn register_presence_markers(&self) {
+        let pid = self.last_pid.unwrap_or_else(std::process::id);
         register_active_pid(&self.id, pid);
         self.sync_internal_presence_flag();
     }
@@ -1748,7 +1772,7 @@ struct RemoteStartupSessionSnapshot {
     system_prompt: Option<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "parallel_messages::deserialize")]
     messages: Vec<StoredMessage>,
     #[serde(default)]
     compaction: Option<StoredCompactionState>,

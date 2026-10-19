@@ -135,7 +135,7 @@ fn configured_swarm_root_effort_covers_all_wire_formats() {
         profile_id: Some("zai".into()),
         ..make_custom_compatible_provider()
     };
-    for mode in ["swarm", "swarm-deep"] {
+    for mode in ["swarm"] {
         for (provider, strict, field, max) in [
             (&unified, false, "reasoning", "xhigh"),
             (&deepseek, false, "reasoning_effort", "max"),
@@ -547,7 +547,6 @@ fn configured_swarm_root_effort_reads_real_config() {
             ])
             .env("JCODE_TEST_SWARM_ROOT_CHILD", "1")
             .env("JCODE_SWARM_ROOT_EFFORT", "low")
-            .env("JCODE_SWARM_DEEP_ROOT_EFFORT", "none")
             .output()
             .expect("run isolated config test");
         assert!(
@@ -558,7 +557,7 @@ fn configured_swarm_root_effort_reads_real_config() {
         );
         return;
     }
-    for (mode, expected) in [("swarm", "low"), ("swarm-deep", "none")] {
+    for (mode, expected) in [("swarm", "low")] {
         let (api_base, request_rx) = spawn_single_response_chat_server();
         let provider = OpenRouterProvider {
             api_base,

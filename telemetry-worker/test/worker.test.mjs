@@ -1304,7 +1304,7 @@ test("usage_report upserts daily_model_usage and writes no raw events row", asyn
     { waitUntil() {} },
   );
   assert.equal(response.status, 200);
-  const rollup = db.executed.filter(({ sql }) => /INSERT INTO daily_model_usage/.test(sql));
+  const rollup = db.executed.filter(({ sql }) => /INSERT INTO usage_report_ledger/.test(sql));
   assert.equal(rollup.length, 1);
   const [date, source, provider, model, channel, isCi, responses, input, output, cacheRead, cacheWrite, total] = rollup[0].values;
   assert.match(date, /^\d{4}-\d{2}-\d{2}$/);
@@ -1312,7 +1312,7 @@ test("usage_report upserts daily_model_usage and writes no raw events row", asyn
     [source, provider, model, channel, isCi, responses, input, output, cacheRead, cacheWrite, total],
     ["agent", "OpenAI", "gpt-6-astra", "release", 0, 1, 1000, 200, 800, 0, 2000],
   );
-  assert.ok(/ON CONFLICT\(usage_date, source, provider, model, build_channel, is_ci\)/.test(rollup[0].sql));
+  assert.ok(rollup[0].sql.includes("ON CONFLICT(receipt_key) DO NOTHING"));
   assert.equal(
     db.executed.filter(({ sql }) => /INSERT[\s\S]*INTO events\b/.test(sql)).length,
     0,
@@ -1346,7 +1346,7 @@ test("usage_report maps provider/model/source onto firehose blobs", async () => 
   const env = {
     DB: makeDb(),
     ALLOWED_ORIGIN: "*",
-    FIREHOSE: { writeDataPoint(point) { points.push(point); } },
+    FIREHOSE_USAGE: { writeDataPoint(point) { points.push(point); } },
   };
   const response = await worker.fetch(
     new Request(EVENT_URL, { method: "POST", body: JSON.stringify(makeUsageReportBody({ source: "compaction" })) }),

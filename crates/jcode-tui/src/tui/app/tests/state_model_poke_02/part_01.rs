@@ -680,18 +680,17 @@ fn test_fuzzy_command_suggestions() {
 fn test_swarm_effort_autocomplete_and_help() {
     let app = create_test_app();
     let suggestions = app.get_suggestions_for("/effort swarm");
-    for mode in ["swarm", "swarm-deep"] {
-        let command = format!("/effort {mode}");
-        let (_, label) = suggestions
-            .iter()
-            .find(|(cmd, _)| cmd == &command)
-            .expect("both swarm modes should be suggested");
-        assert_eq!(*label, super::effort_display_label(mode));
-        assert!(label.contains("[Beta]"));
-    }
+    let (_, label) = suggestions
+        .iter()
+        .find(|(cmd, _)| cmd == "/effort swarm")
+        .expect("swarm mode should be suggested");
+    assert_eq!(*label, super::effort_display_label("swarm"));
+    assert!(label.contains("[Beta]"));
+    assert!(!suggestions.iter().any(|(cmd, _)| cmd == "/effort swarm-deep"));
     let help = app.command_help("effort").expect("effort help");
     assert!(help.contains("swarm_root_effort"));
-    assert!(help.contains("swarm_deep_root_effort"));
+    assert!(!help.contains("swarm_deep_root_effort"));
+    assert!(help.contains("Use swarms to get things done in parallel."));
     assert!(!help.contains("run at max reasoning"));
 }
 

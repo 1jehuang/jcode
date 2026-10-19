@@ -1,5 +1,40 @@
 // First-frame session facts seeded from the last launch (`remote_header_hint`).
 
+#[test]
+fn remote_oauth_identity_is_hydrated_without_a_saved_route_or_shared_email() {
+    with_temp_jcode_home(|| {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        for kind in ["history", "model_changed"] {
+            let mut app = create_test_app();
+            app.is_remote = true;
+            app.session.route_api_method = None;
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            for label in [Some("solosystems"), Some("personal"), None] {
+                let event = serde_json::from_value(serde_json::json!({
+                    "type": kind,
+                    "id": 0,
+                    "session_id": "quota-identity-test",
+                    "messages": [],
+                    "model": "gpt-6.1-sol",
+                    "provider_model": "gpt-6.1-sol",
+                    "provider_name": "OpenAI",
+                    "provider_oauth_account_label": label
+                }))
+                .unwrap();
+                app.handle_server_event(event, &mut remote);
+                assert_eq!(app.remote_provider_oauth_account_label.as_deref(), label);
+                assert_eq!(
+                    crate::tui::TuiState::startup_oauth_account_label(&app).as_deref(),
+                    label
+                );
+                assert!(app.remote_provider_oauth_email.is_none());
+                assert!(app.session.route_api_method.is_none());
+            }
+        }
+    });
+}
+
 fn provisional_facts_app(model: &str) -> App {
     let mut app = create_test_app();
     app.is_remote = true;
@@ -42,6 +77,7 @@ fn resume_model_changed_over_provisional_facts_is_not_announced() {
             provider_name: Some("Claude".to_string()),
             error: None,
             provider_oauth_email: None,
+            provider_oauth_account_label: None,
             resolved_credential: Some(jcode_provider_core::ResolvedCredential::Oauth),
             reasoning_effort: Some("medium".to_string()),
         },
@@ -74,6 +110,7 @@ fn model_changed_after_facts_are_confirmed_is_announced() {
             provider_name: Some("Claude".to_string()),
             error: None,
             provider_oauth_email: None,
+            provider_oauth_account_label: None,
             resolved_credential: None,
             reasoning_effort: None,
         },
@@ -103,7 +140,10 @@ fn configured_route_seeds_first_frame_facts_without_a_hint() {
         None => crate::env::remove_var("JCODE_MODEL"),
     }
 
-    assert_eq!(app.remote_provider_model.as_deref(), Some("claude-opus-5-5"));
+    assert_eq!(
+        app.remote_provider_model.as_deref(),
+        Some("claude-opus-5-5")
+    );
     assert_eq!(app.remote_provider_name.as_deref(), Some("claude"));
     assert_eq!(app.context_limit, 1_000_000);
     assert_eq!(

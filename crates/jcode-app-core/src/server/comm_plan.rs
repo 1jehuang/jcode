@@ -20,9 +20,8 @@ type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
 
 /// Reject plans whose dependency graph contains a cycle. Cyclic items can never
 /// become runnable (`summarize_plan_graph` parks them in `blocked_ids` forever),
-/// so letting one into a live plan silently wedges all dependent work. This
-/// mirrors the acyclicity validation `jcode_plan::dag::seed`/`expand` already
-/// enforce on the task-graph paths. Returns a user-facing error naming the
+/// so letting one into a live plan silently wedges all dependent work. Returns
+/// a user-facing error naming the
 /// cyclic item ids, or `None` when the graph is a valid DAG.
 fn plan_cycle_error(items: &[PlanItem]) -> Option<String> {
     let cycle_ids = crate::plan::cycle_item_ids(items);

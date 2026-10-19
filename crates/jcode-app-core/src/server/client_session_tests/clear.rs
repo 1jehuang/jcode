@@ -81,8 +81,6 @@ async fn handle_clear_session_replaces_runtime_handles_and_updates_shutdown_regi
             version: 1,
             participants: HashSet::from([old_session_id.to_string()]),
             task_progress: HashMap::new(),
-            mode: "deep".to_string(),
-            node_meta: HashMap::new(),
         },
     )])));
     let event_history = Arc::new(RwLock::new(VecDeque::<SwarmEvent>::new()));

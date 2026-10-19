@@ -41,14 +41,52 @@ fn ids_are_slugs_with_hex() {
 }
 
 #[tokio::test]
+async fn applet_requires_desktop_capability() {
+    let registry = crate::tool::Registry::empty();
+    for enabled in [false, true, false] {
+        registry.set_desktop_ui_enabled(enabled).await;
+        assert_eq!(
+            registry
+                .definitions(None)
+                .await
+                .iter()
+                .any(|d| d.name == "applet"),
+            enabled
+        );
+        assert_eq!(
+            registry
+                .definitions_for_session("applet-capability-test")
+                .await
+                .iter()
+                .any(|d| d.name == "applet"),
+            enabled,
+            "codemode must honor the same capability"
+        );
+        if !enabled {
+            assert!(
+                registry
+                    .execute(
+                        "functions.applet",
+                        json!({"action":"list"}),
+                        context("applet-capability-test", "applet-denied"),
+                    )
+                    .await
+                    .is_err(),
+                "terminal clients must not execute applets"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn mount_patch_wait_and_close() {
     let _guard = crate::storage::lock_test_env();
     let _home = temp_home();
     let tool = AppletTool::new();
     let registry = crate::tool::Registry::empty();
     assert!(
-        crate::tool::Registry::base_tools(&registry.skills).contains_key("applet"),
-        "applet must be registered"
+        !crate::tool::Registry::base_tools(&registry.skills).contains_key("applet"),
+        "applet must not be registered for terminal/headless clients"
     );
 
     let out = tool

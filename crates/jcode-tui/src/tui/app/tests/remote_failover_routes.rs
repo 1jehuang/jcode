@@ -254,13 +254,16 @@ fn test_generic_auto_fallback_skips_excluded_preferred_and_checks_source_pool() 
         pool.save().unwrap();
         assert!(app.offer_fallback_after_error_with_payload("401 invalid API key", payload));
         assert!(app.pending_provider_failover.is_none());
+        // Unified router: pooled accounts outrank excluded ones even for
+        // the manual offer; the excluded route stays reachable only when no
+        // pooled alternative exists.
         assert_eq!(
             app.pending_fallback_offer
                 .as_ref()
                 .unwrap()
                 .selection
                 .api_method,
-            "claude-oauth@claude-otter"
+            "openai-oauth@openai-fox"
         );
     });
 }
@@ -362,6 +365,7 @@ fn test_rejected_remote_automatic_route_retains_old_identity_and_drops_payload()
                 provider_name: Some("Other".into()),
                 error: None,
                 provider_oauth_email: None,
+                provider_oauth_account_label: None,
                 resolved_credential: None,
                 reasoning_effort: None,
                 context_window: None,
@@ -379,6 +383,7 @@ fn test_rejected_remote_automatic_route_retains_old_identity_and_drops_payload()
                 provider_name: None,
                 error: Some("Target is no longer in the auto-switch pool".into()),
                 provider_oauth_email: None,
+                provider_oauth_account_label: None,
                 resolved_credential: None,
                 reasoning_effort: None,
                 context_window: None,
@@ -527,9 +532,60 @@ fn test_remote_auth_error_arms_fallback_offer_with_resend_payload() {
     assert!(
         app.display_messages()
             .iter()
-            .any(|m| m.role == "system" && m.content.contains("Fallback available")),
+            .any(|m| m.role == "system" && m.content.contains("to switch to")),
         "offer message should be shown"
     );
+}
+
+/// A spent OAuth account shows exactly one error line and one switch line:
+/// no retry notice, no stopped-poking message, no usage card.
+#[test]
+fn test_remote_usage_limit_shows_error_and_single_switch_line() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.is_remote = true;
+    app.auto_poke_incomplete_todos = true;
+    app.remote_provider_name = Some("OpenAI".to_string());
+    app.remote_provider_model = Some("gpt-5.5".to_string());
+    app.remote_model_options = vec![
+        openai_oauth_route("gpt-5.5"),
+        claude_oauth_route("claude-sonnet-4"),
+    ];
+    app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        content: "hi".to_string(),
+        images: vec![],
+        is_system: false,
+        system_reminder: None,
+        auto_retry: true,
+        retry_attempts: 0,
+        retry_at: None,
+    });
+    app.last_submitted_input = Some("hi".to_string());
+    app.is_processing = true;
+    app.status = ProcessingStatus::Streaming;
+    let before = app.display_messages().len();
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Error {
+            id: 22,
+            message: "usage_limit_reached: The usage limit has been reached".to_string(),
+            retry_after_secs: None,
+        },
+        &mut remote,
+    );
+
+    let added: Vec<_> = app.display_messages()[before..].to_vec();
+    assert_eq!(added.len(), 2, "{added:?}");
+    assert_eq!(added[0].role, "error");
+    assert!(added[0].content.contains("usage limit"));
+    assert_eq!(added[1].role, "system");
+    assert!(added[1].content.starts_with('↪'), "{}", added[1].content);
+    assert!(!added[1].content.contains('\n'));
+    assert!(app.rate_limit_pending_message.is_none());
+    assert!(!app.usage_reset.refresh_usage);
 }
 
 /// Accepting a remote fallback offer stages the route switch (SetRoute via the
@@ -595,6 +651,7 @@ fn test_remote_fallback_offer_accept_stages_switch_and_resends() {
             provider_name: Some("Anthropic".to_string()),
             error: None,
             provider_oauth_email: None,
+            provider_oauth_account_label: None,
             resolved_credential: None,
             reasoning_effort: None,
         },
@@ -643,6 +700,7 @@ fn test_remote_fallback_resend_dropped_when_switch_fails() {
             provider_name: None,
             error: Some("switch failed".to_string()),
             provider_oauth_email: None,
+            provider_oauth_account_label: None,
             resolved_credential: None,
             reasoning_effort: None,
         },

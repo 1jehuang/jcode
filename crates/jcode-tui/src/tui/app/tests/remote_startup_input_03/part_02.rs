@@ -130,6 +130,8 @@ fn test_initial_history_bootstrap_preserves_restored_interleave_state() {
                 id: 1,
                 session_id: session_id.to_string(),
                 messages: vec![],
+                messages_base_count: None,
+                images_unchanged: false,
                 images: vec![],
                 provider_name: Some("claude".to_string()),
                 provider_model: Some("claude-sonnet-4-20250514".to_string()),
@@ -156,9 +158,11 @@ fn test_initial_history_bootstrap_preserves_restored_interleave_state() {
                 status_detail: None,
                 upstream_provider: None,
                 provider_oauth_email: None,
+                provider_oauth_account_label: None,
                 resolved_credential: None,
                 reasoning_effort: None,
                 service_tier: None,
+                available_service_tiers: None,
                 compaction_mode: crate::config::CompactionMode::Reactive,
                 activity: None,
                 side_panel: crate::side_panel::SidePanelSnapshot::default(),
@@ -216,6 +220,8 @@ fn test_initial_history_bootstrap_skips_resubmit_when_prompt_already_in_history(
 
         restored.handle_server_event(
             crate::protocol::ServerEvent::History {
+                messages_base_count: None,
+                images_unchanged: false,
                 id: 1,
                 session_id: session_id.to_string(),
                 messages: vec![crate::protocol::HistoryMessage {
@@ -251,9 +257,11 @@ fn test_initial_history_bootstrap_skips_resubmit_when_prompt_already_in_history(
                 status_detail: None,
                 upstream_provider: None,
                 provider_oauth_email: None,
+                provider_oauth_account_label: None,
                 resolved_credential: None,
                 reasoning_effort: None,
                 service_tier: None,
+                available_service_tiers: None,
                 compaction_mode: crate::config::CompactionMode::Reactive,
                 activity: None,
                 side_panel: crate::side_panel::SidePanelSnapshot::default(),

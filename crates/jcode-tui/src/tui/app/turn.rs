@@ -58,24 +58,27 @@ impl PendingStreamingTools {
 }
 
 impl App {
-    pub(super) fn append_current_turn_system_reminder(
-        &self,
-        split: &mut crate::prompt::SplitSystemPrompt,
-    ) {
-        let Some(reminder) = self
-            .current_turn_system_reminder
-            .as_ref()
-            .map(|value| value.trim())
+    /// Append a hidden `<system-reminder>` message after the turn's prompt.
+    /// Per-turn reminders must never go in the system prompt: it precedes the
+    /// whole conversation, so changing it invalidates every cached message.
+    pub(super) fn append_turn_system_reminder(&mut self, reminder: Option<String>) {
+        let Some(reminder) = reminder
+            .as_deref()
+            .map(str::trim)
             .filter(|value| !value.is_empty())
         else {
             return;
         };
-
-        if !split.dynamic_part.is_empty() {
-            split.dynamic_part.push_str("\n\n");
-        }
-        split.dynamic_part.push_str("# System Reminder\n\n");
-        split.dynamic_part.push_str(reminder);
+        let text = format!("<system-reminder>\n{reminder}\n</system-reminder>");
+        self.add_provider_message(Message::user(&text));
+        self.session.add_message_with_display_role(
+            Role::User,
+            vec![ContentBlock::Text {
+                text,
+                cache_control: None,
+            }],
+            Some(crate::session::StoredDisplayRole::System),
+        );
     }
 
     /// Run turn with interactive input handling (redraws UI, accepts input during streaming)
@@ -134,9 +137,10 @@ impl App {
             let tools = self.registry.definitions(None).await;
             // Non-blocking memory: uses pending result from last turn, spawns check for next turn
             let memory_pending = self.build_memory_prompt_nonblocking(&provider_messages);
-            // Use split prompt for better caching - static content cached, dynamic not
-            let split_prompt =
-                self.build_system_prompt_split(memory_pending.as_ref().map(|p| p.prompt.as_str()));
+            // Use split prompt for better caching - static content cached, dynamic not.
+            // Memory rides as an ephemeral tail message, never in the system
+            // prompt, so recalled memories cannot invalidate the cached history.
+            let split_prompt = self.build_system_prompt_split(None);
             self.context_info.tool_defs_count = tools.len();
             self.context_info.tool_defs_chars = ToolDefinition::aggregate_prompt_chars(&tools);
             if let Some(pending) = &memory_pending {
@@ -159,6 +163,14 @@ impl App {
             // Clone data needed for the API call to avoid borrow issues
             // The future would hold references across the select! which conflicts with handle_key
             let provider = self.provider.clone();
+            let mut provider_messages = provider_messages;
+            let cache_signature_len = provider_messages.len();
+            if let Some(pending) = &memory_pending {
+                provider_messages.push(Message::user(&format!(
+                    "<system-reminder>\n{}\n</system-reminder>",
+                    pending.prompt
+                )));
+            }
             let request_messages = if crate::config::config().features.message_timestamps {
                 Message::with_timestamps(&provider_messages)
             } else {
@@ -167,7 +179,12 @@ impl App {
             let session_id_clone = self.provider_session_id.clone();
             let static_part = split_prompt.static_part.clone();
             let dynamic_part = split_prompt.dynamic_part.clone();
-            self.begin_kv_cache_request(&request_messages, &tools, &static_part, &dynamic_part);
+            self.begin_kv_cache_request(
+                &request_messages[..cache_signature_len],
+                &tools,
+                &static_part,
+                &dynamic_part,
+            );
 
             // Make API call non-blocking - poll it in select! so we can handle input while waiting
             let mut api_future = std::pin::pin!(provider.complete_split(
@@ -584,6 +601,9 @@ impl App {
                                 }
                                 match event {
                                     StreamEvent::TextDelta(text) => {
+                                        if !text.is_empty() {
+                                            self.usage_reset.openai_quota_rejected = false;
+                                        }
                                         self.status = ProcessingStatus::Streaming;
                                         text_content.push_str(&text);
                                         self.resume_streaming_tps();
@@ -629,6 +649,7 @@ impl App {
                                         }
                                     }
                                     StreamEvent::ToolUseStart { id, name } => {
+                                        self.usage_reset.openai_quota_rejected = false;
                                         // Tool input JSON is still provider-generated output and is
                                         // included in provider output-token usage. Keep the TPS timer
                                         // running until the tool call has finished streaming; actual

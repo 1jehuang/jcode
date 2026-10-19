@@ -27,17 +27,19 @@ async fn persistent_cancellation_keepalive_abort_invalidates_before_handoff() {
         std::future::pending::<()>().await;
         drop(ws);
     });
-    let (ws_stream, _) = connect_async(format!("ws://{addr}")).await.unwrap();
+    let (ws_stream, _) = connect_ws(format!("ws://{addr}")).await.unwrap();
     let connected_at = Instant::now();
     let persistent = Arc::new(Mutex::new(Some(PersistentWsState {
         ws_stream,
-        identity: openai_websocket_prewarm::prewarm_identity(&prewarm_test_credentials()),
+        identity: openai_websocket_prewarm::prewarm_identity(&prewarm_test_credentials(), None, None),
+        cache_key: None,
         last_response_id: "resp_previous".into(),
         connected_at,
         last_activity_at: connected_at - Duration::from_secs(20),
         last_response_completed_at: connected_at,
         message_count: 1,
         last_input_item_count: 0,
+        last_response_output: Vec::new(),
         last_input_item_hashes: vec![],
     })));
     let keepalive = spawn_persistent_ws_keepalive_with_interval(
@@ -115,7 +117,7 @@ async fn persistent_cancellation_public_drop_releases_chain_and_reconnects() {
         while fresh.next().await.is_some() {}
         drop(stalled);
     });
-    let (ws_stream, _) = connect_async(format!("ws://{addr}/v1/responses")).await.unwrap();
+    let (ws_stream, _) = connect_ws(format!("ws://{addr}/v1/responses")).await.unwrap();
     let provider = OpenAIProvider::new(prewarm_test_credentials());
     *provider.credentials.write().await = prewarm_test_credentials();
     provider.set_model("gpt-5.6-sol").unwrap();
@@ -124,13 +126,15 @@ async fn persistent_cancellation_public_drop_releases_chain_and_reconnects() {
         vec!["gpt-5.6-sol".to_string()]);
     *provider.persistent_ws.lock().await = Some(PersistentWsState {
         ws_stream,
-        identity: openai_websocket_prewarm::prewarm_identity(&prewarm_test_credentials()),
+        identity: openai_websocket_prewarm::prewarm_identity(&prewarm_test_credentials(), None, None),
+        cache_key: Some(provider.cache_routing_key()),
         last_response_id: "resp_previous".into(),
         connected_at: Instant::now(),
         last_activity_at: Instant::now(),
         last_response_completed_at: Instant::now(),
         message_count: 1,
         last_input_item_count: 1,
+        last_response_output: Vec::new(),
         last_input_item_hashes: persistent_ws_input_item_hashes(&input[..1]),
     });
     let mut stream = provider.complete(&messages, &[], "fixture", None).await.unwrap();
@@ -176,18 +180,20 @@ async fn persistent_cancellation_aborted_future_invalidates_before_handoff() {
         accepted_tx.send(()).unwrap();
         std::future::pending::<()>().await;
     });
-    let (ws_stream, _) = connect_async(format!("ws://{addr}")).await.unwrap();
+    let (ws_stream, _) = connect_ws(format!("ws://{addr}")).await.unwrap();
     let input = vec![serde_json::json!({"role":"user","content":"original"}),
         serde_json::json!({"role":"user","content":"next"})];
     let persistent = Arc::new(Mutex::new(Some(PersistentWsState {
         ws_stream,
-        identity: openai_websocket_prewarm::prewarm_identity(&prewarm_test_credentials()),
+        identity: openai_websocket_prewarm::prewarm_identity(&prewarm_test_credentials(), None, None),
+        cache_key: None,
         last_response_id: "resp_previous".into(),
         connected_at: Instant::now(),
         last_activity_at: Instant::now(),
         last_response_completed_at: Instant::now(),
         message_count: 1,
         last_input_item_count: 1,
+        last_response_output: Vec::new(),
         last_input_item_hashes: persistent_ws_input_item_hashes(&input[..1]),
     })));
     let (tx, _rx) = mpsc::channel(10);

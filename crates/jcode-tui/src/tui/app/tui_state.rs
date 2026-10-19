@@ -6,6 +6,16 @@ use std::time::Duration;
 
 const REMOTE_STARTUP_HEADER_DEBOUNCE: Duration = Duration::from_millis(400);
 
+fn startup_usage_slot_pending(
+    is_remote: bool,
+    runtime_pending: bool,
+    usage_received: bool,
+) -> bool {
+    // Cached account rows can arrive before History binds this session to an
+    // account. Keep the sidebar slot until both pieces are authoritative.
+    is_remote && (runtime_pending || !usage_received)
+}
+
 /// How long a routine `LoadingSession` phase may keep showing the known model
 /// hint before the header falls back to the "loading session…" label. History
 /// bootstrap normally lands in ~1s, so the common spawn path never flashes a
@@ -56,6 +66,65 @@ impl WidgetProviderKind {
 struct WidgetRouteInfo {
     provider: WidgetProviderKind,
     is_remote: bool,
+}
+
+fn remote_oauth_account_label<'a>(
+    server_label: Option<&'a str>,
+    route_api_method: Option<&'a str>,
+) -> Option<&'a str> {
+    server_label
+        .filter(|label| !label.is_empty() && !label.chars().any(char::is_control))
+        .or_else(|| route_api_method.and_then(jcode_provider_core::oauth_account_label))
+}
+
+fn remote_oauth_widget_usage_for_route(
+    provider: crate::tui::info_widget::UsageProvider,
+    route_api_method: Option<&str>,
+    server_label: Option<&str>,
+    quota_rejected: bool,
+    output_tps: Option<f32>,
+    lookup: impl FnOnce(&str) -> Option<crate::usage::AccountUsageSnapshot>,
+) -> crate::tui::info_widget::UsageInfo {
+    let snapshot = remote_oauth_account_label(server_label, route_api_method).and_then(lookup);
+    remote_oauth_widget_usage(provider, snapshot.as_ref(), quota_rejected, output_tps)
+}
+
+fn remote_oauth_widget_usage(
+    provider: crate::tui::info_widget::UsageProvider,
+    snapshot: Option<&crate::usage::AccountUsageSnapshot>,
+    quota_rejected: bool,
+    output_tps: Option<f32>,
+) -> crate::tui::info_widget::UsageInfo {
+    use crate::tui::info_widget::UsageInfo;
+    let Some(snapshot) = snapshot else {
+        return UsageInfo {
+            provider,
+            output_tps,
+            limit_reached: quota_rejected,
+            ..Default::default()
+        };
+    };
+    UsageInfo {
+        provider,
+        primary_limit_label: snapshot.five_hour_ratio.and(snapshot.primary_label.clone()),
+        five_hour: snapshot.five_hour_ratio.unwrap_or_default(),
+        // The wire snapshot has one reset timestamp, belonging to the primary
+        // window (or secondary when primary is absent), not both windows.
+        five_hour_resets_at: snapshot.five_hour_ratio.and(snapshot.resets_at.clone()),
+        secondary_limit_label: snapshot
+            .seven_day_ratio
+            .and(snapshot.secondary_label.clone()),
+        seven_day: snapshot.seven_day_ratio.unwrap_or_default(),
+        seven_day_resets_at: snapshot
+            .seven_day_ratio
+            .filter(|_| snapshot.five_hour_ratio.is_none())
+            .and(snapshot.resets_at.clone()),
+        output_tps,
+        limit_reached: quota_rejected,
+        available: snapshot.error.is_none()
+            && (snapshot.five_hour_ratio.is_some() || snapshot.seven_day_ratio.is_some()),
+        ..Default::default()
+    }
 }
 
 impl App {
@@ -393,6 +462,19 @@ impl App {
         }
     }
 
+    pub(super) fn openai_widget_account_email(&self) -> Option<String> {
+        if crate::tui::is_ssh_remote() {
+            return None;
+        }
+        if self.is_remote {
+            self.remote_provider_oauth_email
+                .as_ref()
+                .map(|email| email.as_str().to_string())
+        } else {
+            self.provider.active_oauth_account_email()
+        }
+    }
+
     fn widget_usage_info(
         &self,
         route: WidgetRouteInfo,
@@ -437,6 +519,7 @@ impl App {
             cache_read_tokens: self.streaming.streaming_cache_read_tokens,
             cache_write_tokens: self.streaming.streaming_cache_creation_tokens,
             output_tps,
+            limit_reached: false,
             available: true,
         };
 
@@ -457,6 +540,7 @@ impl App {
                 cache_read_tokens: None,
                 cache_write_tokens: None,
                 output_tps,
+                limit_reached: false,
                 available: display_input_tokens > 0 || display_output_tokens > 0,
             }),
             WidgetProviderKind::Anthropic => {
@@ -466,6 +550,25 @@ impl App {
                     }
                     crate::tui::info_widget::AuthMethod::AnthropicOAuth => {}
                     _ => return None,
+                }
+
+                if route.is_remote {
+                    // Daemon snapshots are authoritative for the bound account.
+                    // Never call get_sync here: even a cache miss can start a
+                    // local HTTP refresh with this machine's credentials.
+                    return Some(remote_oauth_widget_usage_for_route(
+                        crate::tui::info_widget::UsageProvider::Anthropic,
+                        self.session.route_api_method.as_deref(),
+                        self.remote_provider_oauth_account_label.as_deref(),
+                        false,
+                        output_tps,
+                        |label| {
+                            crate::usage::cached_account_usage_status_snapshot(
+                                crate::usage::MultiAccountProviderKind::Anthropic,
+                                label,
+                            )
+                        },
+                    ));
                 }
 
                 let usage = crate::usage::get_sync();
@@ -485,6 +588,7 @@ impl App {
                     cache_read_tokens: None,
                     cache_write_tokens: None,
                     output_tps,
+                    limit_reached: false,
                     available: usage.last_error.is_none(),
                 })
             }
@@ -497,7 +601,31 @@ impl App {
                     _ => return None,
                 }
 
-                let openai_usage = crate::usage::get_openai_usage_sync();
+                if route.is_remote {
+                    // The header reads the daemon's account cache by route label.
+                    // An email lookup here would instead probe this machine's
+                    // credentials and can show a different account's windows.
+                    return Some(remote_oauth_widget_usage_for_route(
+                        crate::tui::info_widget::UsageProvider::OpenAI,
+                        self.session.route_api_method.as_deref(),
+                        self.remote_provider_oauth_account_label.as_deref(),
+                        self.usage_reset.openai_quota_rejected,
+                        output_tps,
+                        |label| {
+                            crate::usage::cached_account_usage_status_snapshot(
+                                crate::usage::MultiAccountProviderKind::OpenAI,
+                                label,
+                            )
+                        },
+                    ));
+                }
+
+                // The selected route is session-bound, unlike the global
+                // active account. Never borrow another login's quota headroom.
+                let openai_usage = self
+                    .openai_widget_account_email()
+                    .map(|email| crate::usage::get_openai_usage_for_email_sync(&email))
+                    .unwrap_or_default();
                 Some(crate::tui::info_widget::UsageInfo {
                     provider: crate::tui::info_widget::UsageProvider::OpenAI,
                     primary_limit_label: openai_usage
@@ -537,7 +665,9 @@ impl App {
                     cache_read_tokens: None,
                     cache_write_tokens: None,
                     output_tps,
-                    available: openai_usage.has_limits(),
+                    limit_reached: openai_usage.hard_limit_reached
+                        || self.usage_reset.openai_quota_rejected,
+                    available: openai_usage.has_limits() && openai_usage.last_error.is_none(),
                 })
             }
             WidgetProviderKind::Gemini => None,
@@ -566,6 +696,17 @@ impl App {
 }
 
 impl crate::tui::TuiState for App {
+    fn hibernation_frame(&self) -> Option<&ratatui::buffer::Buffer> {
+        self.idle_hibernation.frame.as_ref()
+    }
+
+    fn hibernation_notice(&self) -> Option<&str> {
+        self.idle_hibernation
+            .frame
+            .as_ref()
+            .map(|_| self.idle_hibernation.notice.as_str())
+    }
+
     fn display_messages(&self) -> &[DisplayMessage] {
         &self.display_messages
     }
@@ -638,6 +779,20 @@ impl crate::tui::TuiState for App {
 
     fn background_task_rows(&self) -> &[crate::tui::BackgroundTaskRow] {
         self.background_task_rows_ref()
+    }
+
+    fn login_input_hint(&self) -> Option<&'static str> {
+        match self.pending_login.as_ref()? {
+            PendingLogin::Exchanging { .. } => {
+                Some("Login only: exchanging credentials · not sent to AI · please wait")
+            }
+            PendingLogin::OpenAiAccount { .. }
+            | PendingLogin::Gemini { .. }
+            | PendingLogin::Antigravity { .. } => {
+                Some("Login only: paste callback URL · not sent to AI · /cancel")
+            }
+            _ => Some("Login only: authentication input · not sent to AI · /cancel"),
+        }
     }
 
     fn input(&self) -> &str {
@@ -975,7 +1130,20 @@ impl crate::tui::TuiState for App {
         self.voice_input_status_line()
     }
 
+    fn reset_hint_visible(&self, key: &str) -> bool {
+        let mut seen = self.reset_hint_seen.borrow_mut();
+        let now = Instant::now();
+        if seen.as_ref().is_none_or(|(previous, _)| previous != key) {
+            *seen = Some((key.to_owned(), now));
+        }
+        seen.as_ref()
+            .is_some_and(|(_, shown)| now.duration_since(*shown) < Duration::from_secs(15))
+    }
+
     fn status_notice(&self) -> Option<String> {
+        if self.idle_hibernation.frame.is_some() {
+            return Some(self.idle_hibernation.notice.clone());
+        }
         // This priority notice is owned by the telemetry handshake, not the
         // expiring general status slot. Other notices cannot clobber it.
         if crate::telemetry::pending_oauth_account_notice().is_some()
@@ -1654,6 +1822,12 @@ impl crate::tui::TuiState for App {
         };
 
         crate::tui::info_widget::InfoWidgetData {
+            startup_runtime_pending: self.is_remote && self.remote_startup_phase.is_some(),
+            startup_usage_pending: startup_usage_slot_pending(
+                self.is_remote,
+                self.remote_startup_phase.is_some(),
+                crate::usage::remote_account_usage_received(),
+            ),
             todos,
             todo_goals,
             todos_are_swarm_plan,
@@ -1680,15 +1854,15 @@ impl crate::tui::TuiState for App {
                     .map(|requested| {
                         let label = super::service_tier_display_label(&requested);
                         match self.remote_reported_service_tier.as_ref() {
-                            Some((sent, applied))
+                            Some((sent, reported))
                                 if super::service_tier_display_label(
                                     sent.as_deref().unwrap_or("default"),
                                 ) == label =>
                             {
-                                if super::service_tier_display_label(applied) == label {
+                                if super::service_tier_display_label(reported) == label {
                                     requested
                                 } else {
-                                    format!("{label} requested, {applied} applied")
+                                    format!("{label} requested, provider reports {reported} (unconfirmed)")
                                 }
                             }
                             _ => format!("{label} requested (unconfirmed)"),
@@ -1788,6 +1962,20 @@ impl crate::tui::TuiState for App {
         // the widget's auth line can never disagree.
         let route = self.widget_route_info(None);
         self.dual_credential_active(route, provider)
+    }
+
+    fn startup_oauth_account_label(&self) -> Option<String> {
+        if crate::tui::is_ssh_remote() {
+            return None;
+        }
+        if !self.is_remote {
+            return self.provider.oauth_account_label();
+        }
+        remote_oauth_account_label(
+            self.remote_provider_oauth_account_label.as_deref(),
+            self.session.route_api_method.as_deref(),
+        )
+        .map(str::to_owned)
     }
 
     fn diagram_mode(&self) -> crate::config::DiagramDisplayMode {
@@ -2359,6 +2547,226 @@ pub(crate) fn filter_inline_swarm_subtree(
         .filter(|m| descendants.contains(m.session_id.as_str()))
         .cloned()
         .collect()
+}
+
+#[cfg(test)]
+mod sidebar_usage_tests {
+    use super::{
+        WidgetProviderKind, WidgetRouteInfo, remote_oauth_widget_usage,
+        remote_oauth_widget_usage_for_route,
+    };
+    use crate::tui::info_widget::{AuthMethod, UsageProvider};
+    use crate::usage::AccountUsageSnapshot;
+
+    #[test]
+    fn startup_usage_slot_waits_for_account_binding_even_with_cached_quotas() {
+        for runtime_pending in [false, true] {
+            for usage_received in [false, true] {
+                assert!(!super::startup_usage_slot_pending(
+                    false,
+                    runtime_pending,
+                    usage_received
+                ));
+                assert_eq!(
+                    super::startup_usage_slot_pending(true, runtime_pending, usage_received),
+                    runtime_pending || !usage_received,
+                );
+            }
+        }
+    }
+
+    fn snapshot() -> AccountUsageSnapshot {
+        AccountUsageSnapshot {
+            label: "solosystems".into(),
+            email: None,
+            exhausted: false,
+            primary_label: Some("5-hour".into()),
+            five_hour_ratio: Some(1.0),
+            secondary_label: Some("7-day".into()),
+            seven_day_ratio: Some(0.0),
+            resets_at: Some("2099-01-01T00:00:00Z".into()),
+            error: None,
+        }
+    }
+
+    fn providers() -> [(UsageProvider, &'static str); 2] {
+        [
+            (UsageProvider::Anthropic, "claude-oauth"),
+            (UsageProvider::OpenAI, "openai-oauth"),
+        ]
+    }
+
+    #[test]
+    fn remote_sidebar_usage_uses_daemon_label_without_saved_route() {
+        for (provider, method) in providers() {
+            let stale_route = format!("{method}@stale-personal-account");
+            for route in [None, Some(stale_route.as_str())] {
+                let info = remote_oauth_widget_usage_for_route(
+                    provider,
+                    route,
+                    Some("solosystems"),
+                    false,
+                    None,
+                    |label| {
+                        assert_eq!(label, "solosystems");
+                        Some(snapshot())
+                    },
+                );
+                assert_eq!(info.provider, provider);
+                assert!(info.available);
+                assert_eq!(info.five_hour, 1.0);
+            }
+        }
+    }
+
+    #[test]
+    fn remote_sidebar_usage_uses_bound_label_not_global_account() {
+        for (provider, method) in providers() {
+            let route = format!("{method}@solosystems");
+            let info = remote_oauth_widget_usage_for_route(
+                provider,
+                Some(&route),
+                None,
+                false,
+                Some(42.0),
+                |label| {
+                    assert_eq!(label, "solosystems");
+                    Some(snapshot())
+                },
+            );
+            assert_eq!(info.provider, provider);
+            assert!(info.available);
+            assert_eq!(info.primary_limit_label.as_deref(), Some("5-hour"));
+            assert_eq!(info.five_hour, 1.0);
+            assert_eq!(info.seven_day, 0.0);
+            assert_eq!(info.output_tps, Some(42.0));
+            assert!(info.five_hour_resets_at.is_some());
+            assert!(info.seven_day_resets_at.is_none());
+        }
+    }
+
+    #[test]
+    fn remote_sidebar_usage_without_bound_account_never_looks_up_global_usage() {
+        for (provider, method) in providers() {
+            for route in [
+                None,
+                Some(method),
+                Some("anthropic-api-key"),
+                Some("openai-api-key"),
+            ] {
+                for label in [None, Some(""), Some("bad\nlabel")] {
+                    let info = remote_oauth_widget_usage_for_route(
+                        provider,
+                        route,
+                        label,
+                        false,
+                        Some(42.0),
+                        |_| panic!("unbound route must not look up another account"),
+                    );
+                    assert_eq!(info.provider, provider);
+                    assert!(!info.available);
+                    assert!(!info.limit_reached);
+                    assert_eq!(info.output_tps, Some(42.0));
+                    assert!(info.primary_limit_label.is_none());
+                    assert!(info.secondary_limit_label.is_none());
+                    assert!(info.five_hour_resets_at.is_none());
+                    assert!(info.seven_day_resets_at.is_none());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn remote_sidebar_usage_missing_daemon_account_does_not_retry_saved_route() {
+        for (provider, method) in providers() {
+            let route = format!("{method}@stale-personal-account");
+            let info = remote_oauth_widget_usage_for_route(
+                provider,
+                Some(&route),
+                Some("missing-daemon-account"),
+                false,
+                None,
+                |label| {
+                    assert_eq!(label, "missing-daemon-account");
+                    None
+                },
+            );
+            assert!(!info.available);
+            assert!(!info.limit_reached);
+            assert!(info.primary_limit_label.is_none());
+            assert!(info.secondary_limit_label.is_none());
+        }
+    }
+
+    #[test]
+    fn remote_sidebar_usage_preserves_weekly_only_and_unavailable_snapshots() {
+        for (provider, _) in providers() {
+            let mut usage = snapshot();
+            usage.five_hour_ratio = None;
+            usage.primary_label = None;
+            let info = remote_oauth_widget_usage(provider, Some(&usage), false, None);
+            assert!(info.available);
+            assert!(info.primary_limit_label.is_none());
+            assert_eq!(info.secondary_limit_label.as_deref(), Some("7-day"));
+            assert_eq!(info.seven_day, 0.0);
+            assert_eq!(info.seven_day_resets_at, usage.resets_at);
+            for error in ["HTTP 429", "HTTP 401", "connection failed"] {
+                usage.error = Some(error.into());
+                let info = remote_oauth_widget_usage(provider, Some(&usage), false, None);
+                assert!(!info.available);
+                assert!(
+                    !info.limit_reached,
+                    "a fetch failure is not a quota rejection"
+                );
+            }
+            let missing = remote_oauth_widget_usage(provider, None, true, None);
+            assert!(!missing.available);
+            assert!(missing.limit_reached);
+        }
+    }
+
+    #[test]
+    fn remote_sidebar_usage_does_not_invent_missing_windows_or_resets() {
+        for (provider, _) in providers() {
+            let mut usage = snapshot();
+            usage.five_hour_ratio = None;
+            usage.seven_day_ratio = None;
+            let info = remote_oauth_widget_usage(provider, Some(&usage), false, None);
+            assert!(!info.available);
+            assert!(info.primary_limit_label.is_none());
+            assert!(info.secondary_limit_label.is_none());
+            assert!(info.five_hour_resets_at.is_none());
+            assert!(info.seven_day_resets_at.is_none());
+        }
+    }
+
+    #[test]
+    fn remote_anthropic_widget_missing_usage_never_falls_back_to_local_getter() {
+        let mut app = super::super::tests::create_test_app();
+        let route = WidgetRouteInfo {
+            provider: WidgetProviderKind::Anthropic,
+            is_remote: true,
+        };
+        for label in [None, Some("remote-anthropic-missing-snapshot-test")] {
+            app.remote_provider_oauth_account_label = label.map(str::to_string);
+            app.session.route_api_method = Some("claude-oauth".into());
+            let info = app
+                .widget_usage_info(route, AuthMethod::AnthropicOAuth)
+                .unwrap();
+            assert_eq!(info.provider, UsageProvider::Anthropic);
+            assert!(!info.available);
+            assert!(!info.limit_reached);
+            assert!(info.primary_limit_label.is_none());
+            assert!(info.secondary_limit_label.is_none());
+            assert!(info.five_hour_resets_at.is_none());
+            assert!(info.seven_day_resets_at.is_none());
+        }
+        assert!(app.widget_usage_info(route, AuthMethod::Unknown).is_none());
+        let api = app
+            .widget_usage_info(route, AuthMethod::AnthropicApiKey)
+            .unwrap();
+        assert_eq!(api.provider, UsageProvider::CostBased);
+    }
 }
 
 #[cfg(test)]

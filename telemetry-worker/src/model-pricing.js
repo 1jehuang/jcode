@@ -44,25 +44,19 @@ const LABEL_ALIASES = new Map([
   ["codex-auto-review-spark", "gpt-5.3-codex-spark"],
 ]);
 
-// Model labels that are not real priced models: local/mock/routing sentinels.
-// These are recorded as price_kind='free' so the dashboard can separate
-// "genuinely $0" from "we failed to find a price".
+// Only explicit free routes and local/mock model labels are known to cost $0.
+// Unknown/router aliases and subscription/cloud routes are NOT free models:
+// their underlying inference still has list-price value. Keep them unpriced
+// when resolution fails so missing attribution is visible in coverage.
 const FREE_LABEL_PATTERNS = [
   /^mock$/i,
-  /^unknown$/i,
-  /^default$/i,
-  /^auto(\/.*)?$/i,
-  /^pool\d*$/i,
   /^free$/i,
   /^openrouter\/free$/i,
   /:free$/i,
   /-free$/i,
   /^ollama\//i,
-  /:cloud$/i,
   /^qwen[\d.]*(-coder)?:\d+b$/i,
   /^qwen\d[\d.]*:\d+b$/i,
-  /-coding-plan\//i,
-  /-token-plan/i,
 ];
 
 const EFFORT = "xhigh|x-high|max-effort|max|high|medium|low|none|minimal";
@@ -120,6 +114,8 @@ export function normalizeLabel(label) {
 }
 
 export function isFreeLabel(label) {
+  // Ollama cloud inference is not established as free by its route prefix.
+  if (/:cloud$/i.test(label)) return false;
   return FREE_LABEL_PATTERNS.some((re) => re.test(label));
 }
 
@@ -280,14 +276,17 @@ function familyEstimate(label, families) {
   return null;
 }
 
-// Parameterized upsert. Never downgrade: a transient catalog miss must not
-// erase a price we had, and a family estimate must not replace an exact price.
+// Preserve known catalog prices and estimates across transient catalog misses.
+// A prior 'free' classification is not a known catalog price: allow the resolver
+// to correct it to 'unpriced' when a routing/subscription alias was mislabeled.
 export const PRICE_KIND_RANK_SQL = (col) =>
   `(CASE ${col} WHEN 'unpriced' THEN 0 WHEN 'family_estimate' THEN 1 ELSE 2 END)`;
+export const PRICE_UPSERT_GUARD_SQL = `${PRICE_KIND_RANK_SQL("excluded.price_kind")} >= ${PRICE_KIND_RANK_SQL("model_prices.price_kind")}
+   OR (model_prices.price_kind = 'free' AND excluded.price_kind = 'unpriced')`;
 export const UPSERT_PRICE_SQL = `INSERT INTO model_prices (model, source_model, source_provider, input_usd_per_mtok, output_usd_per_mtok, cache_read_usd_per_mtok, cache_write_usd_per_mtok, input_includes_cache_read, price_kind, updated_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
 ON CONFLICT(model) DO UPDATE SET source_model=excluded.source_model, source_provider=excluded.source_provider, input_usd_per_mtok=excluded.input_usd_per_mtok, output_usd_per_mtok=excluded.output_usd_per_mtok, cache_read_usd_per_mtok=excluded.cache_read_usd_per_mtok, cache_write_usd_per_mtok=excluded.cache_write_usd_per_mtok, input_includes_cache_read=excluded.input_includes_cache_read, price_kind=excluded.price_kind, updated_at=datetime('now')
-WHERE ${PRICE_KIND_RANK_SQL("excluded.price_kind")} >= ${PRICE_KIND_RANK_SQL("model_prices.price_kind")}`;
+WHERE ${PRICE_UPSERT_GUARD_SQL}`;
 
 export function upsertParams(r) {
   return [
@@ -305,11 +304,13 @@ ORDER BY tokens DESC`;
 
 // Per-response usage (usage_report) also covers compaction and sidecar calls,
 // whose models may never appear as a session_end model.
-const USAGE_LABELS_SQL = `SELECT model, provider, SUM(responses) AS sessions, SUM(total_tokens) AS tokens
-FROM daily_model_usage
-WHERE usage_date >= date('now', ?)
+export function usageLabelsSql(canonical = false) {
+  return `SELECT model, provider, SUM(responses) AS sessions, SUM(total_tokens) AS tokens
+FROM ${canonical ? "daily_model_usage_v2" : "daily_model_usage"}
+WHERE usage_date >= date('now', ?) OR updated_at >= datetime('now', ?)
 GROUP BY model, provider
 ORDER BY tokens DESC`;
+}
 
 export function observedLabelsSql() {
   return OBSERVED_LABELS_SQL;
@@ -324,11 +325,16 @@ export async function syncModelPrices(env, { days = 2, fetchImpl = fetch, batchS
   // guard already protects existing prices, but skip the writes entirely.
   if (index.size < 100) throw new Error(`models.dev catalog too small (${index.size} ids)`);
   const observed = (await env.DB.prepare(OBSERVED_LABELS_SQL).bind(`-${days} days`).all()).results ?? [];
-  try {
-    observed.push(...((await env.DB.prepare(USAGE_LABELS_SQL).bind(`-${days} days`).all()).results ?? []));
-  } catch (err) {
-    // Table missing (migration 0027 not applied): still price session labels.
-    console.warn("daily_model_usage labels unavailable", err?.message || err);
+  for (const canonical of [false, true]) {
+    try {
+      observed.push(...((await env.DB.prepare(usageLabelsSql(canonical))
+        .bind(`-${days} days`, `-${days} days`).all()).results ?? []));
+    } catch (err) {
+      // Support rolling migrations without excluding the other table's labels.
+      // Operational failures must remain visible instead of reporting success.
+      if (!/no such table/i.test(String(err?.message || err))) throw err;
+      console.warn(`${canonical ? "daily_model_usage_v2" : "daily_model_usage"} labels unavailable`, err?.message || err);
+    }
   }
   const rows = [...resolvePriceRows(observed, index).values()];
   const stmt = env.DB.prepare(UPSERT_PRICE_SQL);

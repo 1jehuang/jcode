@@ -38,6 +38,18 @@ fn agent_failover_fixture(models: &[&str]) -> MultiProvider {
 }
 
 fn agent_failover_target(provider: &MultiProvider, tokens: usize, reason: &str) -> Option<String> {
+    // Changing the configured default bumps the config generation, which is
+    // part of the memo key. Re-key the fixture catalog so the test keeps
+    // measuring its own routes instead of the real built-in catalog.
+    let routes = provider
+        .routes_memo
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|entry| entry.routes.clone());
+    if let Some(routes) = routes {
+        agent_failover_catalog(provider, routes);
+    }
     provider
         .cross_provider_pool_prompt(
             ActiveProvider::Claude,
@@ -217,18 +229,18 @@ fn agent_failover_unranked_models_have_no_catalog_or_context_tiebreak_fallback()
         let rt = enter_test_runtime();
         let _guard = rt.enter();
         for models in [
-            ["gpt-6.1-sol", "gpt-6.1-luna"],
-            ["gpt-6.1-luna", "gpt-6.1-sol"],
+            ["gpt-6.1-terra", "gpt-6.1-luna"],
+            ["gpt-6.1-luna", "gpt-6.1-terra"],
         ] {
             let provider = agent_failover_fixture(&models);
             assert_eq!(
                 agent_failover_target(&provider, 128, "401 unauthorized"),
                 None
             );
-            agent_failover_set_default_model("openai-api:gpt-6.1-sol").unwrap();
+            agent_failover_set_default_model("openai-api:gpt-6.1-terra").unwrap();
             assert_eq!(
                 agent_failover_target(&provider, 128, "401 unauthorized"),
-                Some("openai-api:gpt-6.1-sol".into()),
+                Some("openai-api:gpt-6.1-terra".into()),
                 "an explicitly configured eligible new GPT variant is supported"
             );
             agent_failover_set_default_model("").unwrap();
@@ -241,12 +253,12 @@ fn agent_failover_configured_oauth_model_does_not_override_api_identity() {
     with_clean_provider_test_env(|| {
         let rt = enter_test_runtime();
         let _guard = rt.enter();
-        let provider = agent_failover_fixture(&["gpt-6-astra", "gpt-5.5"]);
+        let provider = agent_failover_fixture(&["gpt-6.1-sol", "gpt-6-astra", "gpt-5.5"]);
         for configured in ["openai-oauth:gpt-5.5", "openai-oauth@openai-fox:gpt-5.5"] {
             agent_failover_set_default_model(configured).unwrap();
             assert_eq!(
                 agent_failover_target(&provider, 128, "401 unauthorized"),
-                Some("openai-api:gpt-6-astra".into())
+                Some("openai-api:gpt-6.1-sol".into())
             );
         }
         for configured in ["openai-api-key:gpt-5.5", "gpt-5.5"] {

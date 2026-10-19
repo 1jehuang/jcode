@@ -278,7 +278,8 @@ impl App {
         let Some(message) = self.display_messages.get(msg_idx) else {
             return false;
         };
-        if message.role != "swarm" {
+        let oauth = message.role == "system" && message.title.as_deref() == Some("OpenAI login");
+        if message.role != "swarm" && !oauth {
             return false;
         }
         let normalized = jcode_tui_messages::collapse_long_swarm_content(&message.content);
@@ -292,7 +293,11 @@ impl App {
         if !self.replace_display_message_content(msg_idx, toggled) {
             return false;
         }
-        self.set_status_notice(if expanded {
+        self.set_status_notice(if oauth && expanded {
+            "Login details expanded"
+        } else if oauth {
+            "Login details collapsed"
+        } else if expanded {
             "Swarm message expanded"
         } else {
             "Swarm message collapsed"
@@ -301,6 +306,26 @@ impl App {
     }
 
     pub(super) fn try_open_link_at(&mut self, column: u16, row: u16) -> bool {
+        if let Some(index) = super::super::ui::oauth_login_link_message_from_screen(column, row)
+            && let Some(message) = self.display_messages.get(index)
+            && message.role == "system"
+            && message.title.as_deref() == Some("OpenAI login")
+            && let Some(parsed) =
+                jcode_tui_messages::parse_collapsible_swarm_content(&message.content)
+            && let Some(url) = parsed.body.lines().find_map(|line| {
+                line.strip_prefix("[Open OpenAI sign-in](")?
+                    .strip_suffix(')')
+            })
+        {
+            let url = url.to_string();
+            let opened = Self::open_auth_browser(&url);
+            self.set_status_notice(if opened {
+                "Sign-in browser launch requested"
+            } else {
+                "Could not open browser. Expand details to copy the URL."
+            });
+            return true;
+        }
         let Some(target) = super::super::ui::link_target_from_screen(column, row) else {
             return false;
         };
@@ -1530,8 +1555,8 @@ impl App {
                 super::super::layout_utils::point_in_rect(mouse.column, mouse.row, area)
             })
         {
-            self.pinned_todos_expanded = true;
-            finish_mouse_event!(false, "pinned_todos_expand");
+            self.pinned_todos_expanded = !self.pinned_todos_expanded;
+            finish_mouse_event!(false, "pinned_todos_toggle");
         }
 
         // A left press in the composer moves the caret first (native text-field

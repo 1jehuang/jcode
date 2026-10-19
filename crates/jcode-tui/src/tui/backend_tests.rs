@@ -1,6 +1,44 @@
 use super::*;
 use std::time::Duration;
 
+#[test]
+fn account_usage_poll_is_immediate_then_throttled() {
+    let now = Instant::now();
+    assert!(account_usage_poll_due(None, now));
+    assert!(!account_usage_poll_due(Some(now), now));
+    assert!(!account_usage_poll_due(
+        Some(now),
+        now + Duration::from_secs(29)
+    ));
+    assert!(account_usage_poll_due(
+        Some(now),
+        now + Duration::from_secs(30)
+    ));
+}
+
+#[tokio::test]
+async fn account_usage_poll_sends_once_and_filters_control_done() {
+    let mut remote = RemoteConnection::dummy();
+    let peer = remote.take_dummy_peer().unwrap();
+    let (reader, _writer) = peer.into_split();
+    let mut reader = BufReader::new(reader);
+    remote.poll_account_usage().await.unwrap();
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(request["type"], "account_usage");
+    let id = request["id"].as_u64().unwrap();
+    let next_id = remote.next_request_id;
+    remote.poll_account_usage().await.unwrap();
+    assert_eq!(remote.next_request_id, next_id);
+    let mut stray = 0;
+    let done = serde_json::to_vec(&ServerEvent::Done { id }).unwrap();
+    assert!(matches!(
+        remote.classify_protocol_line(done, &mut stray),
+        LineOutcome::Skip
+    ));
+}
+
 #[tokio::test]
 async fn route_selection_wire_marks_only_automatic_failover() {
     let mut remote = RemoteConnection::dummy();

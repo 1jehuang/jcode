@@ -46,6 +46,22 @@ use tokio_stream::wrappers::ReceiverStream;
 
 const DEFAULT_MODEL: &str = "anthropic.claude-3-5-sonnet-20241022-v2:0";
 const DEFAULT_MAX_OUTPUT_TOKENS: usize = 4096;
+
+#[cfg(feature = "aws-sdk")]
+fn bedrock_token_usage(usage: &aws_sdk_bedrockruntime::types::TokenUsage) -> StreamEvent {
+    // Bedrock input is disjoint from the cache counters. Leave normalization
+    // to the usage-report boundary, rather than folding cache tokens in here.
+    StreamEvent::TokenUsage {
+        input_tokens: u64::try_from(usage.input_tokens()).ok(),
+        output_tokens: u64::try_from(usage.output_tokens()).ok(),
+        cache_read_input_tokens: usage
+            .cache_read_input_tokens()
+            .and_then(|v| u64::try_from(v).ok()),
+        cache_creation_input_tokens: usage
+            .cache_write_input_tokens()
+            .and_then(|v| u64::try_from(v).ok()),
+    }
+}
 pub const ENV_FILE: &str = "bedrock.env";
 pub const API_KEY_ENV: &str = "AWS_BEARER_TOKEN_BEDROCK";
 pub const REGION_ENV: &str = "JCODE_BEDROCK_REGION";
@@ -1291,14 +1307,7 @@ impl Provider for BedrockProvider {
                         }
                         ConverseStreamOutput::Metadata(meta) => {
                             if let Some(usage) = meta.usage() {
-                                let _ = tx
-                                    .send(Ok(StreamEvent::TokenUsage {
-                                        input_tokens: Some(usage.input_tokens() as u64),
-                                        output_tokens: Some(usage.output_tokens() as u64),
-                                        cache_read_input_tokens: None,
-                                        cache_creation_input_tokens: None,
-                                    }))
-                                    .await;
+                                let _ = tx.send(Ok(bedrock_token_usage(usage))).await;
                             }
                         }
                         _ => {}

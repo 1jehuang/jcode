@@ -2,6 +2,64 @@
 
 use super::*;
 
+/// Credential-free usage attributed to an OAuth account on the daemon host.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AccountUsageSnapshot {
+    pub label: String,
+    pub email: Option<String>,
+    pub exhausted: bool,
+    pub primary_label: Option<String>,
+    pub five_hour_ratio: Option<f32>,
+    pub secondary_label: Option<String>,
+    pub seven_day_ratio: Option<f32>,
+    pub resets_at: Option<String>,
+    pub error: Option<String>,
+}
+
+#[cfg(test)]
+mod account_usage_tests {
+    use super::*;
+
+    #[test]
+    fn account_usage_roundtrips_as_lightweight_control() {
+        let request = Request::AccountUsage { id: 71 };
+        assert!(request.is_lightweight_control_request());
+        assert_eq!(request.id(), 71);
+        let decoded: Request =
+            serde_json::from_str(&serde_json::to_string(&request).unwrap()).unwrap();
+        assert!(matches!(decoded, Request::AccountUsage { id: 71 }));
+        let snapshot = AccountUsageSnapshot {
+            label: "remote-account".into(),
+            email: None,
+            exhausted: false,
+            primary_label: Some("5h".into()),
+            five_hour_ratio: Some(0.35),
+            secondary_label: None,
+            seven_day_ratio: None,
+            resets_at: None,
+            error: None,
+        };
+        let event = ServerEvent::AccountUsage {
+            id: 71,
+            anthropic: vec![snapshot.clone()],
+            openai: Vec::new(),
+        };
+        let decoded: ServerEvent =
+            serde_json::from_str(&serde_json::to_string(&event).unwrap()).unwrap();
+        let ServerEvent::AccountUsage {
+            id,
+            anthropic,
+            openai,
+        } = decoded
+        else {
+            panic!("wrong response")
+        };
+        assert_eq!(id, 71);
+        assert_eq!(anthropic, vec![snapshot]);
+        assert!(openai.is_empty());
+    }
+}
+
 /// Server event sent to client
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -10,6 +68,12 @@ use super::*;
     reason = "wire protocol prioritizes straightforward serde payloads over boxing every larger event variant"
 )]
 pub enum ServerEvent {
+    #[serde(rename = "account_usage")]
+    AccountUsage {
+        id: u64,
+        anthropic: Vec<AccountUsageSnapshot>,
+        openai: Vec<AccountUsageSnapshot>,
+    },
     #[serde(rename = "runtime_command_result")]
     RuntimeCommandResult {
         id: u64,
@@ -495,6 +559,15 @@ pub enum ServerEvent {
         id: u64,
         session_id: String,
         messages: Vec<HistoryMessage>,
+        /// When set, `messages` holds only the messages after the first
+        /// `messages_base_count` messages, which the client already has (it
+        /// sent a matching `history_base`). Absent means a full transcript.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        messages_base_count: Option<usize>,
+        /// `images` was omitted because it matches the client's advertised
+        /// `history_base.images_fingerprint`; keep the local image set.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        images_unchanged: bool,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<jcode_session_types::RenderedImage>,
         /// Provider name (e.g. "anthropic", "openai")
@@ -509,6 +582,9 @@ pub enum ServerEvent {
         /// Route metadata for available models
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         available_model_routes: Vec<jcode_provider_core::ModelRoute>,
+        /// Authoritative service tiers from the live provider, including an empty unsupported list.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        available_service_tiers: Option<Vec<String>>,
         /// Connected MCP server names
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         mcp_servers: Vec<String>,
@@ -567,6 +643,10 @@ pub enum ServerEvent {
         /// only while daemon usage telemetry is enabled. Never a credential.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_oauth_email: Option<ProviderOAuthEmail>,
+        /// Authoritative live provider OAuth account label, independent of telemetry.
+        /// None means the provider has no known OAuth account label.
+        #[serde(default)]
+        provider_oauth_account_label: Option<String>,
         /// Reasoning effort for providers that expose it
         #[serde(skip_serializing_if = "Option::is_none")]
         reasoning_effort: Option<String>,
@@ -675,6 +755,10 @@ pub enum ServerEvent {
         /// Effective OAuth identity for the selected model-provider account.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_oauth_email: Option<ProviderOAuthEmail>,
+        /// Authoritative live provider OAuth account label, independent of telemetry.
+        /// None means the provider has no known OAuth account label.
+        #[serde(default)]
+        provider_oauth_account_label: Option<String>,
         /// Effort the switched-to model runs with. A switch can clear an
         /// effort the new model does not advertise, so clients must not keep
         /// showing the old one. Always serialized (`null` = no effort) so a

@@ -15,17 +15,25 @@ pub const MAX_BATCH_ENTRIES: usize = 24;
 pub const MAX_REQUEST_BYTES: usize = 64 * 1024;
 pub const MAX_QUERY_BYTES: usize = 8 * 1024;
 const SELECTION_TIMEOUT: Duration = Duration::from_secs(60);
-const MODEL: &str = "typesafe/jev-1.13";
+const DEFAULT_MODEL: &str = crate::jev::DEFAULT_MEMORY_JEV_MODEL;
 
 /// Injectable decision transport. Errors abort the entire selection, including
 /// already-scored batches. Implementations must return the full response object.
 #[async_trait]
 pub trait RelevanceTransport: Send + Sync {
+    fn model_id(&self) -> &str {
+        DEFAULT_MODEL
+    }
+
     async fn evaluate(&self, state: Value, questions: Map<String, Value>) -> Result<Value>;
 }
 
 #[async_trait]
 impl RelevanceTransport for JevClient {
+    fn model_id(&self) -> &str {
+        JevClient::model_id(self)
+    }
+
     async fn evaluate(&self, state: Value, questions: Map<String, Value>) -> Result<Value> {
         JevClient::evaluate(self, state, questions).await
     }
@@ -89,6 +97,14 @@ fn validate_query(query: &str) -> Result<()> {
 /// Pure request builder. Candidate references are positional and trusted, never
 /// memory IDs, because IDs are untrusted and question IDs are invisible to Jev.
 pub fn build_batch(query: &str, entries: &[MemoryEntry]) -> Result<(Value, Map<String, Value>)> {
+    build_batch_for_model(query, entries, DEFAULT_MODEL)
+}
+
+fn build_batch_for_model(
+    query: &str,
+    entries: &[MemoryEntry],
+    model: &str,
+) -> Result<(Value, Map<String, Value>)> {
     validate_query(query)?;
     ensure!(!query.trim().is_empty(), "Jev memory query is empty");
     ensure!(
@@ -124,16 +140,16 @@ pub fn build_batch(query: &str, entries: &[MemoryEntry]) -> Result<(Value, Map<S
     }
     let state = json!({"query": query, "candidates": candidates});
     ensure!(
-        request_size(&state, &questions)? <= MAX_REQUEST_BYTES,
+        request_size(&state, &questions, model)? <= MAX_REQUEST_BYTES,
         "Jev memory request exceeds 64 KiB"
     );
     Ok((state, questions))
 }
 
 /// Accounts for JSON escaping twice: the API expects state to be a JSON string.
-fn request_size(state: &Value, questions: &Map<String, Value>) -> Result<usize> {
+fn request_size(state: &Value, questions: &Map<String, Value>, model: &str) -> Result<usize> {
     Ok(serde_json::to_vec(&json!({
-        "model": MODEL,
+        "model": model,
         "state": serde_json::to_string(state)?,
         "questions": questions,
     }))?
@@ -218,7 +234,7 @@ pub async fn select_with_transport<T: RelevanceTransport + ?Sized>(
                     break;
                 };
                 batch.push(entry);
-                if build_batch(query, &batch).is_err() {
+                if build_batch_for_model(query, &batch, transport.model_id()).is_err() {
                     let entry = batch.pop().expect("just pushed an entry");
                     if batch.is_empty() {
                         skipped += 1;
@@ -233,7 +249,7 @@ pub async fn select_with_transport<T: RelevanceTransport + ?Sized>(
             if batch.is_empty() {
                 continue;
             }
-            let (state, questions) = build_batch(query, &batch)?;
+            let (state, questions) = build_batch_for_model(query, &batch, transport.model_id())?;
             let response = transport.evaluate(state, questions).await?;
             let scores = parse_scores(&response, batch.len())?;
             selected.extend(

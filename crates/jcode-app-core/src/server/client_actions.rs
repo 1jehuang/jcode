@@ -423,12 +423,14 @@ pub(super) fn handle_run_subagent(
         let tool_name_for_exec = tool_name.clone();
         let result = match crate::runtime_activity::spawn(async move {
             registry.execute(&tool_name_for_exec, tool_input, ctx).await
-        })
-        .expect("subagent task inherits its admitted parent activity")
-        .await
-        {
-            Ok(result) => result,
-            Err(error) => Err(anyhow::anyhow!("Tool task panicked: {}", error)),
+        }) {
+            Some(handle) => match handle.await {
+                Ok(result) => result,
+                Err(error) => Err(anyhow::anyhow!("Tool task panicked: {}", error)),
+            },
+            None => Err(anyhow::anyhow!(
+                "Tool task was not admitted because the runtime is shutting down"
+            )),
         };
         let duration_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
 
@@ -838,6 +840,11 @@ fn clone_split_session(
     child.system_prompt = parent.system_prompt.clone();
     child.working_dir = parent.working_dir.clone();
     child.model = parent.model.clone();
+    // Keep the same provider account. Replayed provider-native blocks (Anthropic
+    // web search `encrypted_content`) are bound to the account that produced
+    // them, and another account rejects the whole request with a 400.
+    child.provider_key = parent.provider_key.clone();
+    child.route_api_method = parent.route_api_method.clone();
     child.status = crate::session::SessionStatus::Closed;
     // The parent agent keeps ownership of any in-flight request; tell the
     // forked agent so it treats the next prompt as fresh work instead of

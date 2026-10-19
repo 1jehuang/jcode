@@ -706,6 +706,12 @@ pub struct ErrorCounts {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageReportEvent {
+    /// Version 2 uses uncached input, disjoint cache buckets and stable event IDs.
+    #[serde(default)]
+    pub usage_contract_version: u32,
+    /// UTC provider usage observation time, preserved across durable retries.
+    #[serde(default)]
+    pub occurred_at: String,
     pub event_id: String,
     pub id: String,
     /// Logical session that made the call (the agent's own session id when
