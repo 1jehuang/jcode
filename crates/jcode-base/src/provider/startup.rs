@@ -322,6 +322,7 @@ impl MultiProvider {
         // An explicit CLI/environment provider selection owns startup routing.
         // Applying the configured default model here can reactivate its configured
         // provider/profile before the caller pins a dual-auth credential mode.
+        let mut config_default_applied = false;
         if result.initial_provider.is_none()
             && let Some(model) = provider_state.default_model()
         {
@@ -333,6 +334,7 @@ impl MultiProvider {
                     model, e
                 ));
             } else {
+                config_default_applied = true;
                 crate::logging::info(&format!("Applied default model '{}' from config", model));
             }
         }
@@ -341,7 +343,7 @@ impl MultiProvider {
         let runtimes_ms = runtimes_start.elapsed().as_millis();
         let route_start = std::time::Instant::now();
         result.spawn_openai_catalog_refresh_if_needed();
-        result.select_fresh_session_pool_route();
+        result.select_fresh_session_pool_route(config_default_applied);
         let route_ms = route_start.elapsed().as_millis();
         crate::logging::info(&format!(
             "[TIMING] provider_init parts: creds={creds_ms}ms, runtimes={runtimes_ms}ms, route={route_ms}ms"
@@ -393,11 +395,21 @@ impl MultiProvider {
         result
     }
 
-    /// New sessions start at the head of the user's pool, not at the saved
-    /// default left behind by a previous session. This is deliberately a local
+    /// Fresh sessions use the pool-head route only when no configured
+    /// default_model applied. A user's config default wins: it is the last
+    /// selection they explicitly persisted, so rebinding a fresh session to
+    /// the pool head would silently discard it. When no default applied
+    /// (missing, invalid, or overridden by an explicit initial provider), bind
+    /// the first ready pool route as before. This is deliberately a local
     /// model/account binding: never promote the fallback or change active logins.
-    fn select_fresh_session_pool_route(&self) {
+    fn select_fresh_session_pool_route(&self, config_default_applied: bool) {
         if self.initial_provider.is_some() {
+            return;
+        }
+        if config_default_applied {
+            crate::logging::info(
+                "Fresh session keeps configured default model; skipping pool-head rebind",
+            );
             return;
         }
         // A reconnect burst forks one provider per client. Each choice reads every
