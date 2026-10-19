@@ -2,9 +2,10 @@ use super::{
     MACRO_BRANCHES, MAX_MICRO_CANDIDATES, ScoredSuggestion, SuggestedRepliesContext,
     SuggestedRepliesDebugInfo, SuggestedRepliesResponse,
     candidates::{
-        build_macro_branch_choice_question, build_macro_branch_noul_questions,
-        build_micro_scoring_questions, build_structured_systemone_state,
-        contextual_candidates_for_branch, merge_custom_prompts, score_locally_with_context,
+        build_macro_branch_choice_question_with_options,
+        build_macro_branch_noul_questions_with_options, build_micro_scoring_questions,
+        build_structured_systemone_state, contextual_candidates_for_branch_with_options,
+        merge_custom_prompts, score_locally_with_context_and_options,
     },
     distribute_suggestions, push_unique_case_insensitive,
 };
@@ -447,13 +448,14 @@ pub async fn evaluate_cascade_with_context(
 
     // If 6-lens review findings were just reported, prioritize surfacing them.
     if six_lens_findings.is_some_and(|s| !s.trim().is_empty()) {
-        let mut resp = score_locally_with_context(
+        let mut resp = score_locally_with_context_and_options(
             ctx,
             None,
             &custom_prompts,
             six_lens_findings,
             threshold,
             max_secondary,
+            config.enable_finish_category,
         );
         resp.debug = Some(SuggestedRepliesDebugInfo {
             source: "six_lens".to_string(),
@@ -540,7 +542,7 @@ pub async fn evaluate_cascade_with_context(
         let branch_res: Result<String, String> = if let Some((ref gf_branch, _)) = open_gf_result {
             Ok(gf_branch.clone())
         } else if client.supports_choice_questions() {
-            let q = build_macro_branch_choice_question();
+            let q = build_macro_branch_choice_question_with_options(config.enable_finish_category);
             match client.evaluate(iter1_state, q).await {
                 Ok(resp) => Ok(resp
                     .pointer("/answers/macro_branch/choice")
@@ -550,10 +552,11 @@ pub async fn evaluate_cascade_with_context(
                 Err(err) => Err(format!("iter1(choice,{selector_label}) error: {err}")),
             }
         } else {
-            let q = build_macro_branch_noul_questions();
+            let q = build_macro_branch_noul_questions_with_options(config.enable_finish_category);
             match client.evaluate(iter1_state, q).await {
                 Ok(resp) => Ok(MACRO_BRANCHES
                     .iter()
+                    .filter(|(id, _)| config.enable_finish_category || *id != "feature_completion")
                     .max_by(|(a, _), (b, _)| {
                         let pa = resp
                             .pointer(&format!("/answers/branch_{a}/noul"))
@@ -571,7 +574,7 @@ pub async fn evaluate_cascade_with_context(
             }
         };
 
-        let branch = match branch_res {
+        let raw_branch = match branch_res {
             Ok(b) => b,
             Err(err_msg) => {
                 jev_status = err_msg.clone();
@@ -581,13 +584,26 @@ pub async fn evaluate_cascade_with_context(
                 continue;
             }
         };
+        let branch = if !config.enable_finish_category
+            && matches!(
+                raw_branch.trim().to_ascii_lowercase().as_str(),
+                "finish" | "feature_completion" | "final_completion"
+            ) {
+            "goal_delivery".to_string()
+        } else {
+            raw_branch
+        };
 
         // Iteration 2: Build candidate pool (OpenGF or contextual + custom_prompts)
         // and evaluate via joint `choice + noul` SystemOne request.
         let from_open_gf = open_gf_result
             .as_ref()
             .is_some_and(|(_, cands)| !cands.is_empty());
-        let contextual_pool = contextual_candidates_for_branch(&branch, ctx);
+        let contextual_pool = contextual_candidates_for_branch_with_options(
+            &branch,
+            ctx,
+            config.enable_finish_category,
+        );
         let base_candidates = match open_gf_result.as_ref() {
             Some((_, cands)) if !cands.is_empty() => {
                 let mut combined = cands.clone();
@@ -644,7 +660,10 @@ pub async fn evaluate_cascade_with_context(
                         .collect();
                     let mut distributed =
                         distribute_suggestions(branch.clone(), scored, threshold, max_secondary);
-                    distributed.populate_goal_categories(&custom_prompts);
+                    distributed.populate_goal_categories_with_options(
+                        &custom_prompts,
+                        config.enable_finish_category,
+                    );
                     let top_conf = distributed.top_confidence();
                     jev_status = format!(
                         "ok (selector={selector_label}, mode={}, branch={branch}, iter2={}ms, top={:.2})",
@@ -694,13 +713,14 @@ pub async fn evaluate_cascade_with_context(
     let from_open_gf = open_gf_result
         .as_ref()
         .is_some_and(|(_, cands)| !cands.is_empty());
-    let mut fallback = score_locally_with_context(
+    let mut fallback = score_locally_with_context_and_options(
         ctx,
         open_gf_result,
         &custom_prompts,
         six_lens_findings,
         threshold,
         max_secondary,
+        config.enable_finish_category,
     );
     fallback.debug = Some(SuggestedRepliesDebugInfo {
         source: if from_open_gf {

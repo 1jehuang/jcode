@@ -415,10 +415,19 @@ fn mouse_hit_regions_digit_6_to_9_staged_input_editing_and_six_lens_cache_invali
     assert!(!app.pending_queued_dispatch);
     assert!(!app.suggested_replies_visible());
 
-    // Re-stage '8' and verify that editing with Backspace detaches focus so subsequent digits type normally.
+    // Re-stage '8' and verify that typing non-digit text or pressing Backspace detaches focus.
     app.input.clear();
     app.cursor_pos = 0;
     app.is_remote = false;
+    app.apply_suggested_replies_response(resp.clone());
+    assert!(app.stage_suggested_reply_by_digit('8'));
+    assert!(app.suggested_replies_has_staged_input());
+    assert!(!app.try_stage_suggested_reply_text("a"));
+    assert!(app.suggested_replies.focus.is_none());
+    assert!(app.suggested_replies.staged_input.is_none());
+
+    app.input.clear();
+    app.cursor_pos = 0;
     app.apply_suggested_replies_response(resp);
     assert!(app.stage_suggested_reply_by_digit('8'));
     assert!(app.suggested_replies_has_staged_input());

@@ -187,6 +187,20 @@ pub fn contextual_candidates_for_branch(
     branch: &str,
     ctx: &SuggestedRepliesContext,
 ) -> Vec<String> {
+    contextual_candidates_for_branch_with_options(
+        branch,
+        ctx,
+        crate::config::config()
+            .suggested_replies
+            .enable_finish_category,
+    )
+}
+
+pub fn contextual_candidates_for_branch_with_options(
+    branch: &str,
+    ctx: &SuggestedRepliesContext,
+    finish_enabled: bool,
+) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
 
     for opt in &ctx.assistant_options {
@@ -205,9 +219,6 @@ pub fn contextual_candidates_for_branch(
         }
     }
 
-    let finish_enabled = crate::config::config()
-        .suggested_replies
-        .enable_finish_category;
     let effective_branch = if !finish_enabled
         && matches!(
             branch.trim().to_ascii_lowercase().as_str(),
@@ -368,6 +379,28 @@ pub fn score_locally_with_context(
     confidence_threshold: f32,
     max_secondary_suggestions: usize,
 ) -> SuggestedRepliesResponse {
+    score_locally_with_context_and_options(
+        ctx,
+        use_open_gf_candidates,
+        custom_prompts,
+        six_lens_findings,
+        confidence_threshold,
+        max_secondary_suggestions,
+        crate::config::config()
+            .suggested_replies
+            .enable_finish_category,
+    )
+}
+
+pub fn score_locally_with_context_and_options(
+    ctx: &SuggestedRepliesContext,
+    use_open_gf_candidates: Option<(String, Vec<String>)>,
+    custom_prompts: &[String],
+    six_lens_findings: Option<&str>,
+    confidence_threshold: f32,
+    max_secondary_suggestions: usize,
+    finish_enabled: bool,
+) -> SuggestedRepliesResponse {
     let max_secondary = max_secondary_suggestions.clamp(1, 20);
     let desired_pool = (max_secondary + 1).clamp(6, MAX_MICRO_CANDIDATES);
 
@@ -389,7 +422,7 @@ pub fn score_locally_with_context(
                 "Inspect git diff and commit the verified fixes".to_string(),
             ]
         };
-        for extra in contextual_candidates_for_branch("review", ctx) {
+        for extra in contextual_candidates_for_branch_with_options("review", ctx, finish_enabled) {
             push_unique_case_insensitive(&mut raw_list, extra);
         }
         let merged = merge_custom_prompts(raw_list, custom_prompts, desired_pool);
@@ -409,22 +442,37 @@ pub fn score_locally_with_context(
             .collect();
         let mut resp =
             distribute_suggestions("review", candidates, confidence_threshold, max_secondary);
-        resp.populate_goal_categories(custom_prompts);
+        resp.populate_goal_categories_with_options(custom_prompts, finish_enabled);
         return resp;
     }
 
-    let inferred_branch = infer_macro_branch_from_text(&ctx.transcript_tail);
-    let contextual_pool = contextual_candidates_for_branch(inferred_branch, ctx);
+    let raw_inferred = infer_macro_branch_from_text(&ctx.transcript_tail);
+    let inferred_branch = if !finish_enabled && raw_inferred == "feature_completion" {
+        "goal_delivery"
+    } else {
+        raw_inferred
+    };
+    let contextual_pool =
+        contextual_candidates_for_branch_with_options(inferred_branch, ctx, finish_enabled);
 
     let (branch, base_candidates) = match use_open_gf_candidates {
         Some((b, mut c)) if !c.is_empty() => {
+            let eff_b = if !finish_enabled
+                && matches!(
+                    b.trim().to_ascii_lowercase().as_str(),
+                    "finish" | "feature_completion" | "final_completion"
+                ) {
+                "goal_delivery".to_string()
+            } else {
+                b
+            };
             for extra in contextual_pool {
                 if c.len() >= desired_pool {
                     break;
                 }
                 push_unique_case_insensitive(&mut c, extra);
             }
-            (b, c)
+            (eff_b, c)
         }
         _ => (inferred_branch.to_string(), contextual_pool),
     };
@@ -451,7 +499,7 @@ pub fn score_locally_with_context(
         .collect();
 
     let mut resp = distribute_suggestions(branch, scored, confidence_threshold, max_secondary);
-    resp.populate_goal_categories(custom_prompts);
+    resp.populate_goal_categories_with_options(custom_prompts, finish_enabled);
     resp
 }
 
@@ -545,9 +593,15 @@ pub fn build_structured_systemone_state(
 
 /// Build the SystemOne `choice` question for Iteration 1 (Macro-branching).
 pub fn build_macro_branch_choice_question() -> Map<String, Value> {
-    let finish_enabled = crate::config::config()
-        .suggested_replies
-        .enable_finish_category;
+    build_macro_branch_choice_question_with_options(
+        crate::config::config()
+            .suggested_replies
+            .enable_finish_category,
+    )
+}
+
+/// Build the SystemOne `choice` question for Iteration 1 with explicit `finish_enabled`.
+pub fn build_macro_branch_choice_question_with_options(finish_enabled: bool) -> Map<String, Value> {
     let mut criteria = Map::new();
     for &(id, desc) in MACRO_BRANCHES {
         if !finish_enabled && id == "feature_completion" {
@@ -570,9 +624,15 @@ pub fn build_macro_branch_choice_question() -> Map<String, Value> {
 /// Build batched SystemOne `noul` questions for Iteration 1 when the active Jev
 /// provider only supports `noul` (e.g. Jcode subscription gateway).
 pub fn build_macro_branch_noul_questions() -> Map<String, Value> {
-    let finish_enabled = crate::config::config()
-        .suggested_replies
-        .enable_finish_category;
+    build_macro_branch_noul_questions_with_options(
+        crate::config::config()
+            .suggested_replies
+            .enable_finish_category,
+    )
+}
+
+/// Build batched SystemOne `noul` questions for Iteration 1 with explicit `finish_enabled`.
+pub fn build_macro_branch_noul_questions_with_options(finish_enabled: bool) -> Map<String, Value> {
     let mut questions = Map::new();
     for &(id, desc) in MACRO_BRANCHES {
         if !finish_enabled && id == "feature_completion" {

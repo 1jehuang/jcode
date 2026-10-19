@@ -687,9 +687,37 @@ impl SuggestedRepliesResponse {
     /// Populate `candidate_categories` and `candidate_feature_completion` for all candidates,
     /// tagging any match in `custom_prompts` as `"custom"`.
     pub fn populate_goal_categories(&mut self, custom_prompts: &[String]) {
+        self.populate_goal_categories_with_options(
+            custom_prompts,
+            crate::config::config()
+                .suggested_replies
+                .enable_finish_category,
+        );
+    }
+
+    /// Populate `candidate_categories` and `candidate_feature_completion` with an explicit
+    /// `enable_finish_category` toggle.
+    pub fn populate_goal_categories_with_options(
+        &mut self,
+        custom_prompts: &[String],
+        enable_finish_category: bool,
+    ) {
+        if !enable_finish_category
+            && matches!(
+                self.branch.trim().to_ascii_lowercase().as_str(),
+                "finish" | "feature_completion" | "final_completion"
+            )
+        {
+            self.branch = "goal_delivery".to_string();
+        }
         for cand in &self.scored_candidates {
             let key = cand.text.trim().to_lowercase();
-            let cat = classify_suggestion_for_goal(&cand.text, &self.branch, custom_prompts);
+            let cat = classify_suggestion_for_goal_with_options(
+                &cand.text,
+                &self.branch,
+                custom_prompts,
+                enable_finish_category,
+            );
             let fin = advances_toward_feature_completion(&cand.text, &self.branch);
             self.candidate_categories
                 .insert(key.clone(), cat.to_string());
@@ -697,7 +725,12 @@ impl SuggestedRepliesResponse {
         }
         if let Some(ref def) = self.default_action {
             let key = def.trim().to_lowercase();
-            let cat = classify_suggestion_for_goal(def, &self.branch, custom_prompts);
+            let cat = classify_suggestion_for_goal_with_options(
+                def,
+                &self.branch,
+                custom_prompts,
+                enable_finish_category,
+            );
             let fin = advances_toward_feature_completion(def, &self.branch);
             self.candidate_categories
                 .insert(key.clone(), cat.to_string());
@@ -705,7 +738,12 @@ impl SuggestedRepliesResponse {
         }
         for sec in &self.secondary_suggestions {
             let key = sec.trim().to_lowercase();
-            let cat = classify_suggestion_for_goal(sec, &self.branch, custom_prompts);
+            let cat = classify_suggestion_for_goal_with_options(
+                sec,
+                &self.branch,
+                custom_prompts,
+                enable_finish_category,
+            );
             let fin = advances_toward_feature_completion(sec, &self.branch);
             self.candidate_categories
                 .insert(key.clone(), cat.to_string());
@@ -863,11 +901,13 @@ mod cascade;
 mod tests;
 
 pub use candidates::{
-    build_macro_branch_choice_question, build_macro_branch_noul_questions,
+    build_macro_branch_choice_question, build_macro_branch_choice_question_with_options,
+    build_macro_branch_noul_questions, build_macro_branch_noul_questions_with_options,
     build_micro_scoring_noul_questions, build_micro_scoring_questions,
     build_structured_systemone_state, contextual_candidates_for_branch,
-    fixed_candidates_for_branch, merge_custom_prompts, score_locally_from_context,
-    score_locally_with_context,
+    contextual_candidates_for_branch_with_options, fixed_candidates_for_branch,
+    merge_custom_prompts, score_locally_from_context, score_locally_with_context,
+    score_locally_with_context_and_options,
 };
 pub use cascade::{
     calibrate_micro_score, calibrate_micro_score_with_choice, evaluate_cascade,

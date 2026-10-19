@@ -157,6 +157,7 @@ impl App {
                 return true;
             }
         }
+        self.cancel_suggested_replies_interaction(false);
         let onboarding_suggestions = matches!(
             self.onboarding_phase(),
             Some(crate::tui::app::onboarding_flow::OnboardingPhase::Suggestions)

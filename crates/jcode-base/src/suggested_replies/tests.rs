@@ -148,6 +148,25 @@ fn joint_choice_and_noul_questions_and_structured_state_respect_invariants() {
     let single_q = build_micro_scoring_questions("implementation", &cands[..1], true).unwrap();
     assert!(!single_q.contains_key("best_candidate"));
     assert_eq!(single_q.len(), 1);
+
+    // When finish_enabled = false, feature_completion is omitted from choice/noul questions
+    // and normalized to goal_delivery in score_locally_with_context_and_options.
+    let choice_no_finish = build_macro_branch_choice_question_with_options(false);
+    assert!(
+        choice_no_finish["macro_branch"]["criteria"]
+            .get("feature_completion")
+            .is_none()
+    );
+    let noul_no_finish = build_macro_branch_noul_questions_with_options(false);
+    assert!(!noul_no_finish.contains_key("branch_feature_completion"));
+    let finish_ctx = SuggestedRepliesContext::from_transcript(
+        "[user]: Довести фичу до конца\n\n[assistant]: All todos completed. Ready for feature completion.",
+    );
+    let scored_no_finish =
+        score_locally_with_context_and_options(&finish_ctx, None, &[], None, 0.72, 5, false);
+    assert_eq!(scored_no_finish.branch, "goal_delivery");
+    let def_action = scored_no_finish.default_action.as_deref().unwrap();
+    assert_ne!(scored_no_finish.category_for_text(def_action), "finish");
 }
 
 #[test]
