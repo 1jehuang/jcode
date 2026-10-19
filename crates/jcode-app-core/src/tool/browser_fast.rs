@@ -78,7 +78,7 @@ pub(super) async fn handoff(
             ),
             &[],
             &Value::Null,
-            crate::jev::browser_jev_model_label(),
+            &crate::jev::browser_jev_model_label(),
             Some("direct_actions"),
         )),
     }
