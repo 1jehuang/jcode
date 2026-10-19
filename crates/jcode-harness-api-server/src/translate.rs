@@ -441,8 +441,8 @@ impl BridgeState {
             if !self.runtime_commands_supported {
                 return Self::error_reply(
                     api_id,
-                    ErrorCode::InvalidRequest,
-                    "This daemon does not support runtime commands. Update and restart the daemon.",
+                    ErrorCode::UnknownRequest,
+                    "The connected daemon does not support structured commands. Updating Desktop alone does not replace a running daemon. When active work has finished, update Jcode on the runtime host, then run `jcode server reload` for a state-preserving upgrade and reconnect Desktop. Do not stop or kill the daemon while sessions are active.",
                 );
             }
             let parsed = serde_json::from_value::<jcode_harness_api::ApiRequest>(request.clone());
@@ -605,6 +605,10 @@ impl BridgeState {
                     "id": id,
                     "supports_pdf_panels": true,
                     "supports_user_response": self.supports_user_response,
+                    // API clients have no account-router countdown of their
+                    // own, so the daemon switches pool accounts and retries
+                    // usage-limited turns for them, like the TUI does.
+                    "supports_server_failover": true,
                 });
                 if self.crash_on_disconnect {
                     subscribe["crash_on_disconnect"] = json!(true);

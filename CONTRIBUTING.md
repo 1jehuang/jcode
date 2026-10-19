@@ -2,6 +2,49 @@
 
 Thanks for contributing.
 
+## Optional Nix development shell
+
+If you already use Nix, run `nix develop` from the repository root. The
+`flake.nix` provides Rust, Cargo, rustfmt, Clippy, rust-analyzer, the platform
+C/C++ compiler, CMake, Make, Perl, pkg-config, OpenSSL, Git, and ripgrep.
+On macOS it also supplies libclang through the bindgen hook for CoreAudio.
+It declares shells for x86_64 and aarch64 Linux and macOS. This is a development
+environment for the CLI repository, not Jcode Desktop or a Nix release package.
+The existing non-Nix setup remains supported.
+
+Enable `nix-command` and `flakes` in your Nix configuration, or use:
+
+```sh
+nix --extra-experimental-features 'nix-command flakes' develop
+```
+
+Inside the shell, use the normal development workflow. If you have `justrust`
+installed, use `justrust check` and `justrust test`. The shell does not install
+justrust or configure its hosted service. The Nix-provided Cargo also works for
+contributors without justrust. Leave the shell with `exit`.
+
+`flake.lock` pins nixpkgs, including the Rust toolchain and native libraries.
+`Cargo.lock` still pins Rust crates. The shell does not replace your rustup
+installation or make builds hermetic: it retains your environment and may use
+externally installed tools. Optional integrations and runtime tools are not
+all bundled.
+
+To update the pinned environment deliberately:
+
+```sh
+nix flake update
+nix flake check --all-systems
+nix develop --command rustc --version
+nix develop --command pkg-config --modversion openssl
+nix develop --command justrust check
+# Without justrust: nix develop --command cargo check
+```
+
+Review and commit the resulting `flake.lock` change. Add new native build
+requirements to `flake.nix` when the project needs them. `flake check` evaluates
+the shells but does not compile Jcode or prove that every declared platform
+works, so test on the platforms you are changing as well.
+
 ## Issues vs pull requests
 
 Both issues and pull requests are welcome. Open an issue to report a bug or discuss an idea, or send a focused PR if you have a fix or improvement ready. For large changes, discuss the approach in an issue first to avoid spending time on work that may not fit the project.

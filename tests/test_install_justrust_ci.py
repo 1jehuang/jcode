@@ -70,7 +70,9 @@ cp "$FIXTURES/${url##*/}" "$out"
                  ("Linux", "arm64", "aarch64-unknown-linux-musl"),
                  ("Darwin", "x86_64", "x86_64-apple-darwin"),
                  ("Darwin", "arm64", "aarch64-apple-darwin"),
-                 ("MINGW64_NT-10.0", "x86_64", "x86_64-pc-windows-msvc")]
+                 ("MINGW64_NT-10.0", "x86_64", "x86_64-pc-windows-msvc"),
+                 ("MINGW64_NT-10.0", "aarch64", "x86_64-pc-windows-msvc"),
+                 ("MINGW64_NT-10.0", "arm64", "x86_64-pc-windows-msvc")]
         for system, arch, target in cases:
             with self.subTest(target=target, arch=arch):
                 self.env.update(HOST_OS=system, HOST_ARCH=arch)
@@ -82,7 +84,8 @@ cp "$FIXTURES/${url##*/}" "$out"
                 self.assertIn(target, result.stdout)
                 self.assertFalse((self.root / "escaped").exists())
         self.assertEqual(self.pathfile.read_text().splitlines(),
-                         [str(self.install)] * (len(cases) - 1) + [r"C:\fixture\bin"])
+                         [r"C:\fixture\bin" if "windows" in target else str(self.install)
+                          for _, _, target in cases])
         log = (self.root / "curl_log").read_text()
         self.assertIn("--retry 5", log)
         self.assertNotIn("--retry-all-errors", log)

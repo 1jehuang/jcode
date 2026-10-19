@@ -30,6 +30,12 @@ pub(crate) fn model_uses_responses_api(
     profile_id: Option<&str>,
     model: &str,
 ) -> bool {
+    // Native Muse uses the same Responses wire as the official host. This is
+    // separate from the OpenCode Go allowlist and never switches other Meta
+    // profiles away from their configured Chat Completions transport.
+    if profile_id == Some("muse-subscription") {
+        return api_base.trim_end_matches('/') == "https://api.meta.ai/v1";
+    }
     let is_go_profile = profile_id.is_some_and(|id| id.eq_ignore_ascii_case("opencode-go"));
     let is_go_endpoint = api_base
         .to_ascii_lowercase()
@@ -292,6 +298,11 @@ impl ResponsesStream {
                     }
                 }
             }
+            "response.subscription_usage" => {
+                if let Some(detail) = subscription_usage_detail(&value) {
+                    self.pending.push(StreamEvent::StatusDetail { detail });
+                }
+            }
             "response.completed" | "response.incomplete" => {
                 if self.thinking {
                     self.pending.push(StreamEvent::ThinkingEnd);
@@ -399,6 +410,46 @@ impl ResponsesStream {
     }
 }
 
+/// Only display measured percentages. A missing/invalid window is unknown,
+/// never zero usage, and quota percentages are not a dollar-cost estimate.
+fn subscription_usage_detail(value: &Value) -> Option<String> {
+    let usage = value
+        .get("usage")
+        .or_else(|| value.get("subscription_usage"))
+        .unwrap_or(value);
+    let mut windows = Vec::new();
+    for (key, label) in [("window", "window"), ("weekly", "weekly")] {
+        let Some(window) = usage.get(key) else {
+            continue;
+        };
+        let Some(percent) = window
+            .get("used_percent")
+            .and_then(Value::as_f64)
+            .filter(|value| value.is_finite() && (0.0..=100.0).contains(value))
+        else {
+            continue;
+        };
+        let label = if key == "window" {
+            window
+                .get("window_duration_mins")
+                .and_then(Value::as_u64)
+                .filter(|minutes| *minutes > 0 && *minutes <= 10_080)
+                .map(|minutes| format!("{minutes}min"))
+                .unwrap_or_else(|| label.to_string())
+        } else {
+            label.to_string()
+        };
+        let reset = window
+            .get("resets_at")
+            .and_then(Value::as_u64)
+            .filter(|timestamp| *timestamp > 0)
+            .map(|timestamp| format!(" (resets at Unix {timestamp})"))
+            .unwrap_or_default();
+        windows.push(format!("{label} {percent:.1}% used{reset}"));
+    }
+    (!windows.is_empty()).then(|| format!("Muse quota: {}", windows.join(", ")))
+}
+
 impl Stream for ResponsesStream {
     type Item = anyhow::Result<StreamEvent>;
 
@@ -480,6 +531,58 @@ mod tests {
     }
 
     #[test]
+    fn native_muse_responses_route_is_scoped_to_its_official_endpoint() {
+        assert!(model_uses_responses_api(
+            "https://api.meta.ai/v1",
+            Some("muse-subscription"),
+            "muse-wonder-1.0"
+        ));
+        assert!(!model_uses_responses_api(
+            "https://api.meta.ai/v1",
+            Some("meta-muse"),
+            "muse-wonder-1.0"
+        ));
+        assert!(!model_uses_responses_api(
+            "https://example.com/v1",
+            Some("muse-subscription"),
+            "muse-wonder-1.0"
+        ));
+    }
+
+    #[test]
+    fn subscription_usage_requires_valid_measured_windows() {
+        let value = serde_json::json!({"usage": {
+            "window": {"used_percent": 42.5, "window_duration_mins": 300, "resets_at": 1792320000u64},
+            "weekly": {"used_percent": 12}
+        }});
+        let detail = subscription_usage_detail(&value).unwrap();
+        assert!(detail.contains("300min 42.5% used"));
+        assert!(detail.contains("weekly 12.0% used"));
+        assert!(detail.contains("1792320000"));
+        for invalid in [
+            serde_json::json!({}),
+            serde_json::json!({"window": {"used_percent": -1}}),
+            serde_json::json!({"window": {"used_percent": 101}}),
+            serde_json::json!({"window": {"used_percent": "secret"}}),
+        ] {
+            assert!(subscription_usage_detail(&invalid).is_none());
+        }
+    }
+
+    #[test]
+    fn subscription_usage_stream_event_reaches_status_display() {
+        let mut stream = ResponsesStream::new(futures::stream::empty());
+        stream.parse_event(
+            r#"{"type":"response.subscription_usage","usage":{"window":{"used_percent":0}}}"#,
+        );
+        assert!(
+            matches!(stream.next_event(), Some(StreamEvent::StatusDetail { detail }) if detail.contains("0.0% used"))
+        );
+        stream.parse_event(r#"{"type":"response.subscription_usage","usage":{}}"#);
+        assert!(stream.next_event().is_none());
+    }
+
+    #[test]
     fn request_uses_responses_input_and_instructions() {
         let request = build_request(
             &[Message::user("hello")],
@@ -495,6 +598,44 @@ mod tests {
         assert_eq!(request["input"][0]["content"][0]["type"], "input_text");
         assert_eq!(request["reasoning"]["effort"], "high");
         assert_eq!(request["max_output_tokens"], 128);
+    }
+
+    #[test]
+    fn native_muse_request_retains_history_system_and_jcode_tools() {
+        let messages = [
+            Message::user("Earlier context: project is in /work/project"),
+            Message::assistant_text("I will use that workspace"),
+            Message::user("Now inspect its files"),
+        ];
+        let tool = ToolDefinition::new(
+            "read",
+            "Read a file using Jcode workspace policy",
+            serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+        );
+        let request = build_request(
+            &messages,
+            &[tool],
+            "Use only Jcode-approved tools in /work/project",
+            "muse-wonder-1.0",
+            Some("high"),
+            None,
+            Value::clone,
+        );
+        assert_eq!(request["input"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            request["input"][0]["content"][0]["text"],
+            "Earlier context: project is in /work/project"
+        );
+        assert_eq!(
+            request["input"][2]["content"][0]["text"],
+            "Now inspect its files"
+        );
+        assert_eq!(request["tools"][0]["name"], "read");
+        assert_eq!(
+            request["instructions"],
+            "Use only Jcode-approved tools in /work/project"
+        );
+        assert_eq!(request["model"], "muse-wonder-1.0");
     }
 
     #[test]
