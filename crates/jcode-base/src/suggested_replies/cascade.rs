@@ -264,72 +264,70 @@ pub(super) async fn complete_via_named_openai_compatible(
 }
 
 async fn complete_open_gf_prompt(system: &str, user_msg: &str) -> Result<(String, String)> {
-    let mut errors = Vec::new();
-
-    // 1. Primary Sidecar (OpenAI gpt-5.6-luna / Claude Haiku / registered active provider).
-    let sidecar = crate::sidecar::Sidecar::new();
-    let sidecar_label = format!(
-        "sidecar:{}:{}",
-        sidecar.backend_name(),
-        sidecar.model_name()
-    );
-    match sidecar.complete(system, user_msg).await {
-        Ok(raw) if !raw.trim().is_empty() => return Ok((raw, sidecar_label)),
-        Ok(_) => errors.push(format!("{sidecar_label} returned empty output")),
-        Err(err) => errors.push(format!("{sidecar_label}: {err}")),
-    }
-
-    // 2. Live registered active provider fork (if Sidecar had picked expired OpenAI/Claude creds).
-    if sidecar.backend_name() != "provider"
-        && let Some(provider) = crate::provider::active_provider_fork()
-    {
-        let label = format!("active:{}:{}", provider.name(), provider.model());
-        match provider.complete_simple_with_usage(user_msg, system).await {
-            Ok((raw, _)) if !raw.trim().is_empty() => return Ok((raw, label)),
-            Ok(_) => errors.push(format!("{label} returned empty output")),
-            Err(err) => errors.push(format!("{label}: {err}")),
-        }
-    }
-
-    // 3. Only if the user explicitly selected `default_provider` in config.toml, try that
-    // selected named profile or external runtime (never iterate over unselected profiles/providers,
-    // preserving cross-provider privacy and manual failover boundaries).
     let cfg = crate::config::config();
+    let manual_failover =
+        cfg.provider.cross_provider_failover == crate::config::CrossProviderFailoverMode::Manual;
+
+    // 1. If a live active provider is registered for this session, never fall back to any
+    // other configured profile or provider on failure. Under manual cross-provider failover,
+    // also prevent Sidecar from crossing providers.
+    if let Some(provider) = crate::provider::active_provider_fork() {
+        let sidecar = crate::sidecar::Sidecar::new();
+        let sidecar_uses_same_provider = sidecar.backend_name() == "provider"
+            || provider.name().eq_ignore_ascii_case(sidecar.backend_name());
+        if !manual_failover || sidecar_uses_same_provider {
+            let sidecar_label = format!(
+                "sidecar:{}:{}",
+                sidecar.backend_name(),
+                sidecar.model_name()
+            );
+            match sidecar.complete(system, user_msg).await {
+                Ok(raw) if !raw.trim().is_empty() => return Ok((raw, sidecar_label)),
+                Ok(_) if sidecar.backend_name() == "provider" || manual_failover => {
+                    anyhow::bail!("{sidecar_label} returned empty output");
+                }
+                Err(err) if sidecar.backend_name() == "provider" || manual_failover => {
+                    return Err(err);
+                }
+                _ => {}
+            }
+        }
+        let label = format!("active:{}:{}", provider.name(), provider.model());
+        return match provider.complete_simple_with_usage(user_msg, system).await {
+            Ok((raw, _)) if !raw.trim().is_empty() => Ok((raw, label)),
+            Ok(_) => anyhow::bail!("{label} returned empty output"),
+            Err(err) => Err(err),
+        };
+    }
+
+    // 2. When no live active_provider_fork is registered (e.g. Remote TUI client process),
+    // if `provider.default_provider` explicitly names a configured profile, use ONLY that
+    // single selected profile and never try unselected profiles on failure.
     if let Some(default_prov) = cfg
         .provider
         .default_provider
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
+        && let Some(profile_cfg) = cfg.providers.get(default_prov)
     {
-        if let Some(profile_cfg) = cfg.providers.get(default_prov) {
-            match complete_via_named_openai_compatible(default_prov, profile_cfg, system, user_msg)
-                .await
-            {
-                Ok(res) => return Ok(res),
-                Err(err) => errors.push(format!("profile:{default_prov}: {err}")),
-            }
-        } else {
-            let ext_key = match default_prov.to_ascii_lowercase().as_str() {
-                "antigravity" => Some(crate::provider::external::ANTIGRAVITY_RUNTIME),
-                "gemini" => Some(crate::provider::external::GEMINI_RUNTIME),
-                _ => None,
-            };
-            if let Some(runtime_key) = ext_key
-                && let Some(provider) =
-                    crate::provider::external::instantiate_external_provider(runtime_key)
-            {
-                let label = format!("external:{runtime_key}:{}", provider.model());
-                match provider.complete_simple_with_usage(user_msg, system).await {
-                    Ok((raw, _)) if !raw.trim().is_empty() => return Ok((raw, label)),
-                    Ok(_) => errors.push(format!("{label} returned empty output")),
-                    Err(err) => errors.push(format!("{label}: {err}")),
-                }
-            }
-        }
+        return complete_via_named_openai_compatible(default_prov, profile_cfg, system, user_msg)
+            .await;
     }
 
-    anyhow::bail!("All OpenGF routes failed: {}", errors.join(" | "))
+    // 3. Otherwise use the standard Sidecar once without cross-provider profile iteration.
+    let sidecar = crate::sidecar::Sidecar::new();
+    let sidecar_label = format!(
+        "sidecar:{}:{}",
+        sidecar.backend_name(),
+        sidecar.model_name()
+    );
+    let raw = sidecar.complete(system, user_msg).await?;
+    ensure!(
+        !raw.trim().is_empty(),
+        "{sidecar_label} returned empty output"
+    );
+    Ok((raw, sidecar_label))
 }
 
 /// Synthesize context-specific next-step candidates via OpenGF using structured `SuggestedRepliesContext`.
