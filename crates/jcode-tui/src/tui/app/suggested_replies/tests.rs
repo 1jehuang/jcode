@@ -348,6 +348,33 @@ fn cyrillic_suggestion_uses_display_columns_instead_of_byte_truncation() {
     let clipped = crate::tui::ui::inline_ui::truncate_to_display_width(ru, 30);
     assert_eq!(unicode_width::UnicodeWidthStr::width(clipped.as_str()), 30);
     assert!(clipped.ends_with('…'));
+
+    // At narrow terminal widths (e.g. 20 or 26 cells), both Default Action and secondary rows
+    // must shorten chrome/badges so the action text remains visible with an ellipsis (`…`).
+    let ctx = SuggestedRepliesContext::from_transcript(
+        "[user]: Проверить узкий терминал\n\n[assistant]: Готово.",
+    );
+    let resp = score_locally_with_context(&ctx, None, &[], None, 0.55, 3);
+    let view = super::SuggestedRepliesView {
+        response: resp,
+        focus: Some(SuggestedReplyFocus::DefaultAction),
+        explorer_remaining_ms: Some(420),
+        show_confidence: true,
+    };
+    for narrow_w in [20u16, 26u16, 34u16] {
+        let rows = render_panel_lines(&view, narrow_w, 4);
+        assert_eq!(rows.len(), 4);
+        for row in &rows {
+            assert!(
+                unicode_width::UnicodeWidthStr::width(row.as_str()) <= narrow_w as usize,
+                "row exceeded narrow width {narrow_w}: '{row}'"
+            );
+            assert!(
+                row.contains('…'),
+                "narrow width {narrow_w} row must preserve visible action text with ellipsis: '{row}'"
+            );
+        }
+    }
 }
 
 #[test]

@@ -223,25 +223,50 @@ pub(crate) fn draw_suggested_replies_panel(
         };
 
         let badge = view.response.badge_for_text(default_action);
-        let prefix = if is_focused {
+        let full_prefix = if is_focused {
             format!(" ★ [Enter ↵] ▸ {badge} ")
         } else {
             format!(" ★ [Tab / ↓] ▸ {badge} ")
         };
-        let suffix = if view.show_confidence {
+        let full_suffix = if view.show_confidence {
             format!(" ({}%{}) ", conf_pct, explorer_tag)
         } else if !explorer_tag.is_empty() {
             format!(" ({}) ", explorer_tag.trim_start_matches(" · "))
         } else {
             " ".to_string()
         };
-        let budget = (area.width as usize)
-            .saturating_sub(
-                UnicodeWidthStr::width(prefix.as_str())
-                    + UnicodeWidthStr::width(suffix.as_str())
-                    + 2,
-            )
-            .max(8);
+        let compact_suffix = if view.show_confidence {
+            format!(" ({}%) ", conf_pct)
+        } else {
+            " ".to_string()
+        };
+        let inner_width = (area.width as usize).saturating_sub(2);
+        let min_label_cols = 8.min(inner_width.saturating_sub(4)).max(2);
+        let candidates = [
+            (full_prefix.clone(), full_suffix),
+            (full_prefix, compact_suffix),
+            (format!(" ★ {badge} "), " ".to_string()),
+            (" ★ ".to_string(), " ".to_string()),
+        ];
+        let (mut prefix, mut suffix) = candidates
+            .into_iter()
+            .find(|(p, s)| {
+                UnicodeWidthStr::width(p.as_str())
+                    + UnicodeWidthStr::width(s.as_str())
+                    + min_label_cols
+                    <= inner_width
+            })
+            .unwrap_or_else(|| (" ★ ".to_string(), String::new()));
+
+        let chrome_w =
+            UnicodeWidthStr::width(prefix.as_str()) + UnicodeWidthStr::width(suffix.as_str());
+        if chrome_w >= inner_width {
+            prefix = truncate_to_display_width(&prefix, inner_width.saturating_sub(2));
+            suffix.clear();
+        }
+        let budget = inner_width.saturating_sub(
+            UnicodeWidthStr::width(prefix.as_str()) + UnicodeWidthStr::width(suffix.as_str()),
+        );
         let label = truncate_to_display_width(default_action, budget);
 
         let mut body_style = Style::default().fg(fg).bg(bg);
@@ -297,7 +322,7 @@ pub(crate) fn draw_suggested_replies_panel(
             if current_row >= max_y {
                 break;
             }
-            let conf_suffix = if view.show_confidence {
+            let full_conf_suffix = if view.show_confidence {
                 match view.response.confidence_for_text(text) {
                     Some(c) => format!(" ({}%)", (c * 100.0).round() as u32),
                     None => String::new(),
@@ -306,16 +331,37 @@ pub(crate) fn draw_suggested_replies_panel(
                 String::new()
             };
             let badge = view.response.badge_for_text(text);
-            let prefix_num = format!("{}. {badge} ", idx + 1);
-            let max_pill_cols = (area.width as usize)
-                .saturating_sub(
-                    UnicodeWidthStr::width(prefix_num.as_str())
-                        + UnicodeWidthStr::width(conf_suffix.as_str())
-                        + 4,
-                )
-                .max(8);
+            let inner_pill_budget = (area.width as usize).saturating_sub(4);
+            let min_short_cols = 8.min(inner_pill_budget.saturating_sub(3)).max(2);
+            let full_prefix = format!("{}. {badge} ", idx + 1);
+            let short_prefix = format!("{}. ", idx + 1);
+            let pill_candidates = [
+                (full_prefix.clone(), full_conf_suffix),
+                (full_prefix, String::new()),
+                (short_prefix.clone(), String::new()),
+            ];
+            let (mut prefix_num, conf_suffix) = pill_candidates
+                .into_iter()
+                .find(|(p, s)| {
+                    UnicodeWidthStr::width(p.as_str())
+                        + UnicodeWidthStr::width(s.as_str())
+                        + min_short_cols
+                        <= inner_pill_budget
+                })
+                .unwrap_or((short_prefix, String::new()));
+            if UnicodeWidthStr::width(prefix_num.as_str()) >= inner_pill_budget {
+                prefix_num =
+                    truncate_to_display_width(&prefix_num, inner_pill_budget.saturating_sub(2));
+            }
+            let max_pill_cols = inner_pill_budget.saturating_sub(
+                UnicodeWidthStr::width(prefix_num.as_str())
+                    + UnicodeWidthStr::width(conf_suffix.as_str()),
+            );
             let short = truncate_to_display_width(text, max_pill_cols);
-            let pill_label = format!("{prefix_num}{short}{conf_suffix}");
+            let pill_label = truncate_to_display_width(
+                &format!("{prefix_num}{short}{conf_suffix}"),
+                inner_pill_budget,
+            );
             let pill_width =
                 (UnicodeWidthStr::width(pill_label.as_str()) + 4).min(area.width as usize) as u16;
             let is_focused =
