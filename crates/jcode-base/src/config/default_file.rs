@@ -559,6 +559,12 @@ swarm_stall_after_secs = 600
 # override via JCODE_LAYA_BASE_URL or LAYA_BASE_URL, optional LAYA_API_KEY in laya.env).
 # Env override: JCODE_MEMORY_JEV_PROVIDER
 # memory_jev_provider = "auto"
+# Optional per-purpose Jev Decisions model overrides. Unset preserves the
+# selected provider's existing model. Environment overrides take precedence.
+# Env overrides: JCODE_MEMORY_JEV_MODEL, JCODE_BROWSER_JEV_MODEL, JCODE_VOICE_JEV_MODEL
+# memory_jev_model = "typesafe/jev-1.14"
+# browser_jev_model = "typesafe/jev-1.14"
+# voice_jev_model = "typesafe/jev-1.14"
 # Minimum relevance probability (0.8..=1.0). Invalid values fail closed.
 # memory_jev_threshold = 0.8
 # BYOK: OPENROUTER_API_KEY, TYPESAFE_API_KEY, or AIMLAPI_API_KEY.
