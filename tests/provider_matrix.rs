@@ -55,6 +55,7 @@ fn tracked_env_vars() -> Vec<String> {
         "JCODE_NAMED_PROVIDER_PROFILE",
         "JCODE_PROVIDER_PROFILE_ACTIVE",
         "JCODE_PROVIDER_PROFILE_NAME",
+        "JCODE_EXPERIMENTAL_MUSE_SUBSCRIPTION",
         "ANTHROPIC_API_KEY",
         "OPENAI_API_KEY",
         "OPENROUTER_API_KEY",
@@ -262,6 +263,22 @@ fn write_profile_login_material(
     let resolved = resolve_openai_compatible_profile(profile);
     if resolved.requires_api_key {
         write_profile_api_key_file(env, profile, &format!("sk-{label}-{}", resolved.id))?;
+    }
+    // The native Muse subscription never reads a profile env file: its
+    // credential lives in auth::muse's own JSON store behind the experimental
+    // opt-in. Seed both so the profile counts as configured for this sandbox.
+    if profile.id == "muse-subscription" {
+        jcode::env::set_var(jcode::auth::muse::EXPERIMENTAL_ENV_VAR, "1");
+        jcode::auth::muse::save_credentials(&jcode::auth::muse::MuseCredentials {
+            api_key: format!("sk-{label}-muse-subscription"),
+            access_token: format!("dca:{label}-muse-subscription"),
+            base_url: jcode::auth::muse::EXPECTED_API_BASE_URL.to_string(),
+            user_email: None,
+            user_full_name: None,
+            is_subs_active: true,
+            minted_at_ms: chrono::Utc::now().timestamp_millis(),
+            subs_usage: None,
+        })?;
     }
     Ok(())
 }
