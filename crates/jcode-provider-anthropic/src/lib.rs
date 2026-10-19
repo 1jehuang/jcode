@@ -294,6 +294,62 @@ pub fn format_messages_with_native(
     merged
 }
 
+/// True when Anthropic rejected replayed server tool payloads, e.g.
+/// "Invalid `encrypted_content` in `search_result` block". This happens when
+/// history produced under one account (or org) is sent from another, such as a
+/// forked session or an account switch.
+pub fn is_invalid_native_replay_error(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("encrypted_content")
+        && (error.contains("invalid") || error.contains("search_result"))
+}
+
+/// Replace every replayed server tool block in `messages` with its plain-text
+/// summary. Used to recover from [`is_invalid_native_replay_error`]. Returns
+/// true when anything changed.
+pub fn downgrade_native_replay(messages: &mut [ApiMessage]) -> bool {
+    use jcode_message_types::provider_native;
+    let mut changed = false;
+    for message in messages.iter_mut() {
+        let mut call_inputs: std::collections::HashMap<String, Value> =
+            std::collections::HashMap::new();
+        let mut out = Vec::with_capacity(message.content.len());
+        for block in message.content.drain(..) {
+            let ApiContentBlock::Raw(item) = &block else {
+                out.push(block);
+                continue;
+            };
+            changed = true;
+            let provider = provider_native::PROVIDER_NATIVE_ANTHROPIC;
+            let display = provider_native::provider_native_display(provider, item);
+            if let Some(display) = &display
+                && display.output.is_none()
+                && let Some(input) = &display.input
+            {
+                call_inputs.insert(display.id.clone(), input.clone());
+            }
+            if let Some(text) = provider_native::provider_native_text_fallback(
+                provider,
+                item,
+                display.as_ref().and_then(|d| call_inputs.get(&d.id)),
+            ) {
+                out.push(ApiContentBlock::Text {
+                    text,
+                    cache_control: None,
+                });
+            }
+        }
+        if out.is_empty() {
+            out.push(ApiContentBlock::Text {
+                text: "[earlier provider-side search]".to_string(),
+                cache_control: None,
+            });
+        }
+        message.content = out;
+    }
+    changed
+}
+
 /// Convert our ContentBlock to Anthropic API format
 pub fn format_content_blocks(blocks: &[ContentBlock], is_oauth: bool) -> Vec<ApiContentBlock> {
     format_content_blocks_with_native(blocks, is_oauth, false)

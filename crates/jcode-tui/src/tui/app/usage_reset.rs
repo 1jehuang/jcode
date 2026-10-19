@@ -132,6 +132,8 @@ pub(super) struct ResetState<P = Pending> {
     cancelled: bool,
     redeem_account: Option<String>,
     pub(super) refresh_usage: bool,
+    /// A request rejection outranks a usage endpoint still reporting headroom.
+    pub(super) openai_quota_rejected: bool,
     quota_refresh: Option<oneshot::Receiver<()>>,
     // Outer Some means invalidation is needed, inner None means the default account.
     pub(super) invalidate_account: Option<(Provider, Option<String>)>,
@@ -148,6 +150,7 @@ impl<P> Default for ResetState<P> {
             cancelled: false,
             redeem_account: None,
             refresh_usage: false,
+            openai_quota_rejected: false,
             quota_refresh: None,
             invalidate_account: None,
             invalidate_requests: Default::default(),
@@ -156,6 +159,10 @@ impl<P> Default for ResetState<P> {
 }
 
 impl<P> ResetState<P> {
+    pub(super) fn is_running(&self) -> bool {
+        self.receiver.is_some() || self.quota_refresh.is_some()
+    }
+
     fn finish(&mut self, reply: Reply<P>) -> String {
         self.receiver = None;
         self.redeeming = false;
@@ -242,22 +249,38 @@ async fn redeem(pending: &Pending) -> anyhow::Result<String> {
 impl App {
     pub(super) fn refresh_openai_usage_after_quota_error(&mut self, error: &str) {
         if !is_hard_openai_quota_error(error)
-            || crate::tui::is_ssh_remote()
             || self.info_widget_data().auth_method
                 != crate::tui::info_widget::AuthMethod::OpenAIOAuth
-            || self.usage_reset.quota_refresh.is_some()
         {
+            return;
+        }
+        self.usage_reset.openai_quota_rejected = true;
+        if crate::tui::is_ssh_remote() || self.usage_reset.quota_refresh.is_some() {
             return;
         }
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return;
         };
-        let account = crate::auth::codex::active_account_label();
+        let email = self.openai_widget_account_email();
         let (sender, receiver) = oneshot::channel();
         self.usage_reset.quota_refresh = Some(receiver);
         runtime.spawn(async move {
-            // This invalidates quota snapshots only, never account cooldowns.
-            crate::usage::invalidate_openai_usage_cache(account.as_deref()).await;
+            // Refresh only a uniquely identified session account. The global
+            // active login may belong to an entirely different session.
+            if let Some(email) = email {
+                let accounts = crate::auth::codex::list_accounts().unwrap_or_default();
+                let mut matches = accounts.iter().filter(|account| {
+                    account.email.as_deref().is_some_and(|candidate| {
+                        candidate.trim().eq_ignore_ascii_case(email.trim())
+                    })
+                });
+                if let Some(account) = matches.next()
+                    && matches.next().is_none()
+                {
+                    // Quota snapshots only, never provider cooldowns.
+                    crate::usage::invalidate_openai_usage_cache(Some(&account.label)).await;
+                }
+            }
             let _ = sender.send(());
         });
     }
@@ -389,8 +412,9 @@ impl App {
                 Err(oneshot::error::TryRecvError::Empty)
             )
         {
+            // Only the cached snapshot is refreshed. Never pop an unrequested
+            // usage card into the transcript after a quota error.
             self.usage_reset.quota_refresh = None;
-            self.usage_reset.refresh_usage = true;
         }
         // A report already in flight may have read pre-reset state. Queue a fresh
         // report after it completes instead of silently dropping the refresh.
@@ -697,6 +721,97 @@ mod tests {
         assert!(!is_hard_openai_quota_error("429 too many requests"));
         assert!(!is_hard_openai_quota_error("tokens per minute rate limit"));
         assert!(!is_hard_openai_quota_error("TPM quota exceeded"));
+    }
+
+    fn openai_oauth_app() -> App {
+        let mut app = crate::tui::app::tests::create_test_app();
+        app.is_remote = true;
+        app.remote_provider_name = Some("OpenAI".into());
+        app.remote_provider_model = Some("gpt-5.4".into());
+        app.remote_resolved_credential = Some(jcode_provider_core::ResolvedCredential::Oauth);
+        app
+    }
+
+    #[test]
+    fn quota_rejection_overrides_widget_even_without_runtime_or_usage_snapshot() {
+        let mut app = openai_oauth_app();
+        app.refresh_openai_usage_after_quota_error("usage_limit_reached");
+        assert!(app.usage_reset.openai_quota_rejected);
+        let data = app.info_widget_data();
+        let usage = data.usage_info.as_ref().unwrap();
+        assert!(usage.limit_reached);
+        assert!(data.has_data_for(crate::tui::info_widget::WidgetKind::UsageLimits));
+        assert!(app.usage_reset.quota_refresh.is_none());
+    }
+
+    #[test]
+    fn transient_rate_limit_and_api_key_quota_do_not_block_subscription_widget() {
+        let mut app = openai_oauth_app();
+        app.refresh_openai_usage_after_quota_error("429 too many requests");
+        assert!(!app.usage_reset.openai_quota_rejected);
+        app.remote_resolved_credential = Some(jcode_provider_core::ResolvedCredential::ApiKey);
+        app.refresh_openai_usage_after_quota_error("insufficient_quota");
+        assert!(!app.usage_reset.openai_quota_rejected);
+        assert!(!app.info_widget_data().usage_info.unwrap().limit_reached);
+    }
+
+    #[test]
+    fn successful_answer_clears_observed_quota_rejection() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let mut app = openai_oauth_app();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        app.refresh_openai_usage_after_quota_error("usage_limit_reached");
+        app.append_streaming_text("Synthetic status text");
+        assert!(app.usage_reset.openai_quota_rejected);
+        app.handle_server_event(
+            crate::protocol::ServerEvent::TextDelta {
+                text: "Request now succeeds".into(),
+            },
+            &mut remote,
+        );
+        assert!(!app.usage_reset.openai_quota_rejected);
+        assert!(!app.info_widget_data().usage_info.unwrap().limit_reached);
+    }
+
+    #[test]
+    fn remote_widget_without_selected_identity_does_not_borrow_global_quota() {
+        let app = openai_oauth_app();
+        assert!(app.openai_widget_account_email().is_none());
+        let usage = app.info_widget_data().usage_info.unwrap();
+        assert!(!usage.available);
+        assert!(usage.primary_limit_label.is_none());
+        assert!(usage.secondary_limit_label.is_none());
+    }
+
+    #[test]
+    fn quota_rejection_survives_route_replay_and_failed_switch_but_not_new_route() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let mut app = openai_oauth_app();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        app.refresh_openai_usage_after_quota_error("usage_limit_reached");
+        for (model, error, rejected) in [
+            ("gpt-5.4", None, true),
+            ("gpt-5.5", Some("switch failed"), true),
+            ("gpt-5.5", None, false),
+        ] {
+            app.handle_server_event(
+                crate::protocol::ServerEvent::ModelChanged {
+                    id: 0,
+                    model: model.into(),
+                    provider_name: Some("OpenAI".into()),
+                    error: error.map(str::to_string),
+                    provider_oauth_email: None,
+                    provider_oauth_account_label: None,
+                    resolved_credential: Some(jcode_provider_core::ResolvedCredential::Oauth),
+                    reasoning_effort: None,
+                    context_window: None,
+                },
+                &mut remote,
+            );
+            assert_eq!(app.usage_reset.openai_quota_rejected, rejected);
+        }
     }
 
     #[test]

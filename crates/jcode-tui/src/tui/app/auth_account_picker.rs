@@ -344,18 +344,85 @@ impl App {
         };
 
         let provider_label = match scope_key.as_str() {
-            "all" => "Claude + OpenAI",
+            "all" => "All credentials",
             "claude" => "Claude",
             "openai" => "OpenAI",
             _ => scope_key.as_str(),
         };
 
-        let (models, selected) = match scope_key.as_str() {
+        let (mut models, mut selected) = match scope_key.as_str() {
             "all" => self.build_all_inline_account_picker(),
             "claude" => self.build_claude_inline_account_picker(),
             "openai" => self.build_openai_inline_account_picker(),
             _ => unreachable!(),
         };
+        let mut configured = Vec::new();
+        self.append_configured_account_credentials(&mut configured, &scope_key);
+        let management_start = models
+            .iter()
+            .position(|entry| {
+                !matches!(
+                    entry.action,
+                    crate::tui::PickerAction::Account(
+                        crate::tui::AccountPickerAction::Switch { .. }
+                    )
+                )
+            })
+            .unwrap_or(models.len());
+        models.splice(management_start..management_start, configured);
+        let current_name = if self.is_remote {
+            self.remote_provider_name.clone().unwrap_or_default()
+        } else {
+            self.provider.display_name()
+        };
+        let credential = if self.is_remote {
+            self.remote_resolved_credential
+        } else {
+            self.provider.active_resolved_credential()
+        };
+        for (index, entry) in models.iter_mut().enumerate() {
+            match &entry.action {
+                crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Switch {
+                    provider_id,
+                    ..
+                }) => {
+                    entry.is_current &= jcode_provider_core::parse_provider_hint(&current_name)
+                        == jcode_provider_core::parse_provider_hint(provider_id)
+                        && credential != Some(jcode_provider_core::ResolvedCredential::ApiKey);
+                }
+                crate::tui::PickerAction::Login(provider) => {
+                    use crate::provider_catalog::LoginProviderTarget;
+                    entry.is_current = match provider.target {
+                        LoginProviderTarget::ClaudeApiKey => {
+                            jcode_provider_core::parse_provider_hint(&current_name)
+                                == Some(jcode_provider_core::ActiveProvider::Claude)
+                                && credential
+                                    == Some(jcode_provider_core::ResolvedCredential::ApiKey)
+                        }
+                        LoginProviderTarget::OpenAiApiKey => {
+                            jcode_provider_core::parse_provider_hint(&current_name)
+                                == Some(jcode_provider_core::ActiveProvider::OpenAI)
+                                && credential
+                                    == Some(jcode_provider_core::ResolvedCredential::ApiKey)
+                        }
+                        LoginProviderTarget::Claude | LoginProviderTarget::OpenAi => {
+                            (current_name.eq_ignore_ascii_case(provider.display_name)
+                                || current_name.eq_ignore_ascii_case(provider.id))
+                                && credential
+                                    != Some(jcode_provider_core::ResolvedCredential::ApiKey)
+                        }
+                        _ => {
+                            current_name.eq_ignore_ascii_case(provider.display_name)
+                                || current_name.eq_ignore_ascii_case(provider.id)
+                        }
+                    };
+                }
+                _ => {}
+            }
+            if entry.is_current {
+                selected = index;
+            }
+        }
 
         self.inline_view_state = None;
         self.inline_interactive_state = Some(crate::tui::InlineInteractiveState {
@@ -380,6 +447,89 @@ impl App {
             || self
                 .inline_account_picker_scope_key(provider_filter)
                 .is_some()
+    }
+
+    fn account_credential_entry(
+        name: String,
+        provider: String,
+        api_method: String,
+        detail: String,
+        action: crate::tui::PickerAction,
+    ) -> crate::tui::PickerEntry {
+        crate::tui::PickerEntry {
+            name,
+            options: vec![crate::tui::PickerOption {
+                provider,
+                api_method,
+                available: true,
+                detail,
+                estimated_reference_cost_micros: None,
+            }],
+            action,
+            selected_option: 0,
+            is_current: false,
+            is_default: false,
+            is_favorite: false,
+            recommended: false,
+            recommendation_rank: usize::MAX,
+            usage_score: 0,
+            old: false,
+            created_date: None,
+            effort: None,
+        }
+    }
+
+    fn append_configured_account_credentials(
+        &self,
+        entries: &mut Vec<crate::tui::PickerEntry>,
+        scope: &str,
+    ) {
+        use crate::provider_catalog::LoginProviderTarget;
+
+        let status = crate::auth::AuthStatus::check_fast();
+        // Unlike /login, /account is an inventory, including manual/excluded
+        // providers. Auto Import is a discovery action, not a saved credential.
+        for &provider in crate::provider_catalog::login_providers() {
+            if matches!(provider.target, LoginProviderTarget::AutoImport)
+                || (scope == "claude"
+                    && !matches!(provider.target, LoginProviderTarget::ClaudeApiKey))
+                || (scope == "openai"
+                    && !matches!(provider.target, LoginProviderTarget::OpenAiApiKey))
+            {
+                continue;
+            }
+            // Named OAuth accounts already have individual switch rows above.
+            let has_named_accounts = match provider.target {
+                LoginProviderTarget::Claude => !crate::auth::claude::list_accounts()
+                    .unwrap_or_default()
+                    .is_empty(),
+                LoginProviderTarget::OpenAi => !crate::auth::codex::list_accounts()
+                    .unwrap_or_default()
+                    .is_empty(),
+                _ => false,
+            };
+            let assessment = status.assessment_for_provider(provider);
+            if has_named_accounts || !assessment.is_configured() {
+                continue;
+            }
+            entries.push(Self::account_credential_entry(
+                provider.display_name.to_string(),
+                provider.auth_kind.label().to_string(),
+                if assessment.is_available() {
+                    "configured"
+                } else {
+                    "attention"
+                }
+                .to_string(),
+                format!(
+                    "{} · manage / refresh · {}",
+                    assessment.method_detail, provider.menu_detail
+                ),
+                // Reuse /login's provider-specific refresh/setup handler. Never
+                // copy credential values into display text or command strings.
+                crate::tui::PickerAction::Login(provider),
+            ));
+        }
     }
 
     pub(crate) fn inline_account_picker_scope_key(
@@ -668,53 +818,27 @@ impl App {
             effort: None,
         });
 
-        models.push(crate::tui::PickerEntry {
-            name: "account center".to_string(),
-            options: vec![crate::tui::PickerOption {
-                provider: "Accounts".to_string(),
-                api_method: "manage".to_string(),
-                available: true,
-                detail: "settings, defaults, and other providers".to_string(),
-                estimated_reference_cost_micros: None,
-            }],
-            action: crate::tui::PickerAction::Account(
-                crate::tui::AccountPickerAction::OpenCenter {
-                    provider_filter: None,
-                },
-            ),
-            selected_option: 0,
-            is_current: false,
-            is_default: false,
-            is_favorite: false,
-            recommended: false,
-            recommendation_rank: usize::MAX,
-            usage_score: 0,
-            old: false,
-            created_date: None,
-            effort: None,
-        });
-
         if models.is_empty() {
             selected = 0;
         }
         if !openai_accounts.is_empty() {
-            let mut usage_entry = models.last().expect("account center entry").clone();
-            usage_entry.name = "OpenAI usage details".to_string();
-            usage_entry.options[0].detail =
-                "Today / lifetime API-equivalent cost and tokens by account".to_string();
-            usage_entry.options[0].provider = "OpenAI".to_string();
-            usage_entry.action = crate::tui::PickerAction::Usage {
-                id: "openai-oauth-accounts".to_string(),
-                title: "ChatGPT OAuth account usage".to_string(),
-                subtitle: "Today / lifetime API-equivalent estimates, not a bill".to_string(),
-                status: crate::tui::usage_overlay::UsageOverlayStatus::Info,
-                detail_lines: self
-                    .render_openai_accounts_markdown()
-                    .lines()
-                    .map(str::to_string)
-                    .collect(),
-            };
-            models.push(usage_entry);
+            models.push(Self::account_credential_entry(
+                "OpenAI usage details".to_string(),
+                "OpenAI".to_string(),
+                "usage".to_string(),
+                "Today / lifetime API-equivalent cost and tokens by account".to_string(),
+                crate::tui::PickerAction::Usage {
+                    id: "openai-oauth-accounts".to_string(),
+                    title: "ChatGPT OAuth account usage".to_string(),
+                    subtitle: "Today / lifetime API-equivalent estimates, not a bill".to_string(),
+                    status: crate::tui::usage_overlay::UsageOverlayStatus::Info,
+                    detail_lines: self
+                        .render_openai_accounts_markdown()
+                        .lines()
+                        .map(str::to_string)
+                        .collect(),
+                },
+            ));
         }
         (models, selected)
     }
@@ -836,32 +960,6 @@ impl App {
                 provider_id: "claude".to_string(),
                 label: replace_target,
             }),
-            selected_option: 0,
-            is_current: false,
-            is_default: false,
-            is_favorite: false,
-            recommended: false,
-            recommendation_rank: usize::MAX,
-            usage_score: 0,
-            old: false,
-            created_date: None,
-            effort: None,
-        });
-
-        models.push(crate::tui::PickerEntry {
-            name: "account center".to_string(),
-            options: vec![crate::tui::PickerOption {
-                provider: "Claude".to_string(),
-                api_method: "manage".to_string(),
-                available: true,
-                detail: "full Claude account center and settings".to_string(),
-                estimated_reference_cost_micros: None,
-            }],
-            action: crate::tui::PickerAction::Account(
-                crate::tui::AccountPickerAction::OpenCenter {
-                    provider_filter: Some("claude".to_string()),
-                },
-            ),
             selected_option: 0,
             is_current: false,
             is_default: false,
@@ -1003,53 +1101,27 @@ impl App {
             effort: None,
         });
 
-        models.push(crate::tui::PickerEntry {
-            name: "account center".to_string(),
-            options: vec![crate::tui::PickerOption {
-                provider: "OpenAI".to_string(),
-                api_method: "manage".to_string(),
-                available: true,
-                detail: "full OpenAI account center and settings".to_string(),
-                estimated_reference_cost_micros: None,
-            }],
-            action: crate::tui::PickerAction::Account(
-                crate::tui::AccountPickerAction::OpenCenter {
-                    provider_filter: Some("openai".to_string()),
-                },
-            ),
-            selected_option: 0,
-            is_current: false,
-            is_default: false,
-            is_favorite: false,
-            recommended: false,
-            recommendation_rank: usize::MAX,
-            usage_score: 0,
-            old: false,
-            created_date: None,
-            effort: None,
-        });
-
         if accounts.is_empty() {
             selected = 0;
         }
         if !accounts.is_empty() {
-            let mut usage_entry = models.last().expect("account center entry").clone();
-            usage_entry.name = "OpenAI usage details".to_string();
-            usage_entry.options[0].detail =
-                "Today / lifetime API-equivalent cost and tokens by account".to_string();
-            usage_entry.options[0].provider = "OpenAI".to_string();
-            usage_entry.action = crate::tui::PickerAction::Usage {
-                id: "openai-oauth-accounts".to_string(),
-                title: "ChatGPT OAuth account usage".to_string(),
-                subtitle: "Today / lifetime API-equivalent estimates, not a bill".to_string(),
-                status: crate::tui::usage_overlay::UsageOverlayStatus::Info,
-                detail_lines: self
-                    .render_openai_accounts_markdown()
-                    .lines()
-                    .map(str::to_string)
-                    .collect(),
-            };
-            models.push(usage_entry);
+            models.push(Self::account_credential_entry(
+                "OpenAI usage details".to_string(),
+                "OpenAI".to_string(),
+                "usage".to_string(),
+                "Today / lifetime API-equivalent cost and tokens by account".to_string(),
+                crate::tui::PickerAction::Usage {
+                    id: "openai-oauth-accounts".to_string(),
+                    title: "ChatGPT OAuth account usage".to_string(),
+                    subtitle: "Today / lifetime API-equivalent estimates, not a bill".to_string(),
+                    status: crate::tui::usage_overlay::UsageOverlayStatus::Info,
+                    detail_lines: self
+                        .render_openai_accounts_markdown()
+                        .lines()
+                        .map(str::to_string)
+                        .collect(),
+                },
+            ));
         }
         (models, selected)
     }

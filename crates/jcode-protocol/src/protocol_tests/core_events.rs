@@ -1,3 +1,52 @@
+#[test]
+fn provider_oauth_account_label_defaults_and_roundtrips() -> Result<()> {
+    for legacy in [
+        r#"{"type":"history","id":1,"session_id":"test","messages":[]}"#,
+        r#"{"type":"model_changed","id":1,"model":"test"}"#,
+    ] {
+        for label in [None, Some("work"), Some("personal-α")] {
+            let mut value: serde_json::Value = serde_json::from_str(legacy)?;
+            if let Some(label) = label {
+                value["provider_oauth_account_label"] = label.into();
+            }
+            let event = parse_event_json(&value.to_string())?;
+            let actual = match &event {
+                ServerEvent::History {
+                    provider_oauth_account_label,
+                    ..
+                }
+                | ServerEvent::ModelChanged {
+                    provider_oauth_account_label,
+                    ..
+                } => provider_oauth_account_label.as_deref(),
+                _ => return Err(anyhow!("wrong event type")),
+            };
+            assert_eq!(actual, label);
+            let wire = encode_event(&event);
+            let encoded: serde_json::Value = serde_json::from_str(wire.trim())?;
+            assert_eq!(
+                encoded["provider_oauth_account_label"],
+                serde_json::json!(label)
+            );
+            let decoded = parse_event_json(wire.trim())?;
+            match decoded {
+                ServerEvent::History {
+                    provider_oauth_account_label,
+                    ..
+                }
+                | ServerEvent::ModelChanged {
+                    provider_oauth_account_label,
+                    ..
+                } => {
+                    assert_eq!(provider_oauth_account_label.as_deref(), label);
+                }
+                _ => return Err(anyhow!("wrong event type")),
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The server resolves the real window and reports it here. A remote client
 /// cannot derive it itself: its provider is an inert placeholder with no model
 /// catalog, and the static resolver has no entry for a model it does not
@@ -12,6 +61,7 @@ fn test_model_changed_roundtrip_carries_context_window() -> Result<()> {
         error: None,
         resolved_credential: None,
         provider_oauth_email: None,
+        provider_oauth_account_label: None,
         reasoning_effort: None,
     };
     let json = encode_event(&event);
@@ -40,6 +90,7 @@ fn test_model_changed_without_context_window_stays_absent() -> Result<()> {
         error: None,
         resolved_credential: None,
         provider_oauth_email: None,
+        provider_oauth_account_label: None,
         reasoning_effort: None,
     };
     let json = encode_event(&event);
@@ -583,6 +634,7 @@ fn test_history_event_decodes_without_compaction_mode_for_older_servers() -> Res
         side_panel,
         agent_model_overrides,
         provider_oauth_email,
+        available_service_tiers,
         ..
     } = decoded
     else {
@@ -599,6 +651,35 @@ fn test_history_event_decodes_without_compaction_mode_for_older_servers() -> Res
     assert!(!side_panel.has_pages());
     assert!(agent_model_overrides.is_empty());
     assert!(provider_oauth_email.is_none());
+    assert!(available_service_tiers.is_none());
+    assert!(!encode_event(&parse_event_json(json)?).contains("available_service_tiers"));
+    Ok(())
+}
+
+#[test]
+fn test_history_available_service_tiers_roundtrip() -> Result<()> {
+    for tiers in [vec!["priority".to_string(), "flex".to_string()], Vec::new()] {
+        let mut event =
+            parse_event_json(r#"{"type":"history","id":1,"session_id":"test","messages":[]}"#)?;
+        let ServerEvent::History {
+            available_service_tiers,
+            ..
+        } = &mut event
+        else {
+            return Err(anyhow!("wrong event type"));
+        };
+        *available_service_tiers = Some(tiers.clone());
+        let wire = encode_event(&event);
+        assert!(wire.contains("\"available_service_tiers\":"));
+        let ServerEvent::History {
+            available_service_tiers,
+            ..
+        } = parse_event_json(wire.trim())?
+        else {
+            return Err(anyhow!("wrong event type"));
+        };
+        assert_eq!(available_service_tiers, Some(tiers));
+    }
     Ok(())
 }
 
@@ -625,6 +706,8 @@ fn test_history_provider_oauth_email_roundtrip_redacts_debug() -> Result<()> {
 #[test]
 fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
     let event = ServerEvent::History {
+        messages_base_count: None,
+        images_unchanged: false,
         id: 101,
         session_id: "ses_test_456".to_string(),
         messages: vec![HistoryMessage {
@@ -639,6 +722,7 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         provider_model: Some("gpt-5.4".to_string()),
         available_models: vec!["gpt-5.4".to_string()],
         available_model_routes: Vec::new(),
+        available_service_tiers: None,
         mcp_servers: Vec::new(),
         skills: Vec::new(),
         total_tokens: Some((123, 45)),
@@ -665,6 +749,7 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         upstream_provider: None,
         resolved_credential: None,
         provider_oauth_email: None,
+        provider_oauth_account_label: None,
         reasoning_effort: None,
         service_tier: None,
         subagent_model: None,
@@ -880,4 +965,50 @@ fn test_agent_models_session_setter_and_response_roundtrip() -> Result<()> {
         if session_id == "session-a" && overrides.get("review").map(String::as_str) == Some("inherit"))
     );
     Ok(())
+}
+
+#[test]
+fn history_prefix_fingerprint_is_stable_and_streaming_consistent() {
+    let message = |role: &str, content: &str| HistoryMessage {
+        response_stats: None,
+        role: role.to_string(),
+        content: content.to_string(),
+        tool_calls: None,
+        tool_data: None,
+    };
+    let messages = vec![message("user", "hi"), message("assistant", "hello")];
+    let whole =
+        crate::history_prefix_fingerprint(messages.iter().map(crate::HistoryMessageRef::from));
+    // Pinned value: client and server may run different builds, so the
+    // fingerprint must never depend on process state or hasher seeds.
+    assert_eq!(whole, 0x3396_f126_1f30_6a9e, "got {whole:#x}");
+    let mut streaming = crate::HistoryFingerprinter::default();
+    streaming.push((&messages[0]).into());
+    let first = streaming.finish();
+    streaming.push((&messages[1]).into());
+    assert_eq!(streaming.finish(), whole);
+    assert_eq!(streaming.base().count, 2);
+    assert_ne!(first, whole);
+    // Field boundaries must not alias.
+    let shifted = vec![message("user", "hia"), message("ssistant", "hello")];
+    assert_ne!(
+        crate::history_prefix_fingerprint(shifted.iter().map(crate::HistoryMessageRef::from)),
+        whole
+    );
+}
+
+#[test]
+fn history_delta_fields_are_backward_compatible() {
+    let event: ServerEvent = serde_json::from_str(
+        r#"{"type":"history","id":1,"session_id":"s","messages":[]}"#,
+    )
+    .expect("legacy History without messages_base_count");
+    let ServerEvent::History {
+        messages_base_count,
+        ..
+    } = event
+    else {
+        panic!("expected history");
+    };
+    assert_eq!(messages_base_count, None);
 }

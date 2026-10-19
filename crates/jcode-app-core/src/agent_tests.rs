@@ -8,6 +8,9 @@ use async_trait::async_trait;
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
+#[path = "agent_tests/cache_session_affinity.rs"]
+mod cache_session_affinity;
+
 #[path = "agent_tests/tool_streaming.rs"]
 mod tool_streaming;
 
@@ -46,8 +49,10 @@ async fn user_response_capability_updates_locked_tool_surface() {
             .any(|d| d.name == "user_response")
     );
     assert!(agent.locked_tools.is_some());
+    assert!(!agent.tool_names().await.iter().any(|n| n == "applet"));
     agent.set_desktop_response_capability(true).await;
     assert!(agent.locked_tools.is_none());
+    assert!(agent.tool_names().await.iter().any(|n| n == "applet"));
     assert!(
         agent
             .tool_definitions()
@@ -62,6 +67,7 @@ async fn user_response_capability_updates_locked_tool_surface() {
     );
     agent.set_desktop_response_capability(false).await;
     assert!(agent.locked_tools.is_none());
+    assert!(!agent.tool_names().await.iter().any(|n| n == "applet"));
     assert!(
         !agent
             .tool_definitions()
@@ -949,6 +955,93 @@ async fn run_turn_streaming_mpsc_emits_model_changed_on_midstream_switch() {
     );
 }
 
+struct MidStreamAccountSwitchProvider {
+    switched: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait]
+impl Provider for MidStreamAccountSwitchProvider {
+    async fn complete(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        system: &str,
+        resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        self.switched
+            .store(true, std::sync::atomic::Ordering::Release);
+        MidStreamModelSwitchProvider {
+            model: std::sync::Mutex::new(self.model()),
+            switch_to: self.model(),
+        }
+        .complete(messages, tools, system, resume_session_id)
+        .await
+    }
+
+    fn name(&self) -> &str {
+        "claude"
+    }
+
+    fn model(&self) -> String {
+        "same-model".to_string()
+    }
+
+    fn oauth_account_label(&self) -> Option<String> {
+        Some(
+            if self.switched.load(std::sync::atomic::Ordering::Acquire) {
+                "personal"
+            } else {
+                "work"
+            }
+            .to_string(),
+        )
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self {
+            switched: std::sync::atomic::AtomicBool::new(
+                self.switched.load(std::sync::atomic::Ordering::Acquire),
+            ),
+        })
+    }
+}
+
+#[tokio::test]
+async fn run_turn_streaming_mpsc_emits_account_only_change_without_email() {
+    let _guard = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(MidStreamAccountSwitchProvider {
+        switched: std::sync::atomic::AtomicBool::new(false),
+    });
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    agent.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "test".to_string(),
+            cache_control: None,
+        }],
+    );
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    agent.run_turn_streaming_mpsc(tx).await.unwrap();
+    let mut labels = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let ServerEvent::ModelChanged {
+            model,
+            provider_oauth_account_label,
+            provider_oauth_email,
+            error,
+            ..
+        } = event
+        {
+            assert_eq!(model, "same-model");
+            assert!(provider_oauth_email.is_none());
+            assert!(error.is_none());
+            labels.push(provider_oauth_account_label);
+        }
+    }
+    assert_eq!(labels, vec![Some("personal".to_string())]);
+}
+
 #[tokio::test]
 async fn messages_for_provider_replays_persisted_native_compaction_in_auto_mode() {
     let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
@@ -1374,7 +1467,6 @@ fn seed_transient_session_state(agent: &mut Agent) {
     agent.tool_output_scan_index = 7;
     agent.last_upstream_provider = Some("upstream_old".to_string());
     agent.last_connection_type = Some("websocket".to_string());
-    agent.current_turn_system_reminder = Some("reminder".to_string());
     agent.last_usage = TokenUsage {
         input_tokens: 11,
         output_tokens: 17,
@@ -1412,7 +1504,6 @@ async fn clear_resets_runtime_interrupt_and_queue_state() {
     assert_eq!(agent.tool_output_scan_index, 0);
     assert!(agent.last_upstream_provider.is_none());
     assert!(agent.last_connection_type.is_none());
-    assert!(agent.current_turn_system_reminder.is_none());
     assert_eq!(agent.last_usage.input_tokens, 0);
     assert_eq!(agent.last_usage.output_tokens, 0);
     assert!(agent.locked_tools.is_none());
@@ -1454,7 +1545,6 @@ async fn restore_session_resets_runtime_interrupt_and_queue_state() {
     assert_eq!(agent.tool_output_scan_index, 0);
     assert!(agent.last_upstream_provider.is_none());
     assert!(agent.last_connection_type.is_none());
-    assert!(agent.current_turn_system_reminder.is_none());
     assert_eq!(agent.last_usage.input_tokens, 0);
     assert_eq!(agent.last_usage.output_tokens, 0);
     assert!(agent.locked_tools.is_none());
@@ -2542,6 +2632,98 @@ async fn stranded_tool_use_stop_continues_instead_of_ending_the_turn() {
         text.contains("all done"),
         "the recovered turn must deliver the model's real completion, got {text:?}"
     );
+}
+
+#[derive(Clone, Default)]
+struct SystemPromptCaptureProvider {
+    requests: Arc<std::sync::Mutex<Vec<(String, Vec<Message>)>>>,
+}
+
+#[async_trait]
+impl Provider for SystemPromptCaptureProvider {
+    async fn complete(
+        &self,
+        messages: &[Message],
+        _tools: &[ToolDefinition],
+        system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        self.requests
+            .lock()
+            .unwrap()
+            .push((system.to_string(), messages.to_vec()));
+        let (tx, rx) = tokio_mpsc::channel::<Result<StreamEvent>>(4);
+        tokio::spawn(async move {
+            let _ = tx.send(Ok(StreamEvent::TextDelta("ok".to_string()))).await;
+            let _ = tx
+                .send(Ok(StreamEvent::MessageEnd {
+                    stop_reason: Some("end_turn".to_string()),
+                }))
+                .await;
+        });
+        Ok(Box::pin(ReceiverStream::new(rx)))
+    }
+
+    fn name(&self) -> &str {
+        "mock"
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+/// A swarm DM wakes the recipient with a per-turn system reminder. Putting it
+/// in the system prompt changed the prefix of every cached message, so each DM
+/// cost a full KV cache miss, and the next turn missed again when it vanished.
+/// The reminder must ride in the transcript and leave the system prompt alone.
+#[tokio::test]
+async fn turn_system_reminder_does_not_change_the_system_prompt() {
+    let _guard = crate::storage::lock_test_env();
+    let capture = SystemPromptCaptureProvider::default();
+    let requests = capture.requests.clone();
+    let provider: Arc<dyn Provider> = Arc::new(capture);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    agent
+        .run_once_streaming_mpsc("first", Vec::new(), None, tx.clone())
+        .await
+        .expect("plain turn");
+    agent
+        .run_once_streaming_mpsc(
+            "DM from fox: hello",
+            Vec::new(),
+            Some("You just received a direct swarm message from fox.".to_string()),
+            tx.clone(),
+        )
+        .await
+        .expect("reminder turn");
+    agent
+        .run_once_streaming_mpsc("third", Vec::new(), None, tx)
+        .await
+        .expect("follow-up turn");
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(
+        requests.iter().all(|(system, _)| system == &requests[0].0),
+        "the system prompt must be identical across reminder and plain turns"
+    );
+    assert!(!requests[1].0.contains("direct swarm message"));
+
+    let reminder_turn = &requests[1].1;
+    let last = reminder_turn.last().map(message_text).unwrap_or_default();
+    assert!(last.starts_with("<system-reminder>"), "got {last:?}");
+    assert!(last.contains("direct swarm message from fox"));
+
+    // The follow-up turn replays the reminder turn unchanged as its prefix.
+    let follow_up = &requests[2].1;
+    assert!(follow_up.len() > reminder_turn.len());
+    for (before, after) in reminder_turn.iter().zip(follow_up.iter()) {
+        assert_eq!(message_text(before), message_text(after));
+    }
 }
 
 #[derive(Clone, Default)]
