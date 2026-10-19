@@ -1225,10 +1225,10 @@ impl Agent {
                 // authoritatively. Providers with no OAuth/API-key ambiguity
                 // return `None` and are metered when their route is API-key based
                 // (the client applies the same distinction on receipt).
-                let metered = match self.provider.active_resolved_credential() {
-                    Some(jcode_provider_core::ResolvedCredential::Oauth) => false,
-                    _ => true,
-                };
+                let metered = !matches!(
+                    self.provider.active_resolved_credential(),
+                    Some(jcode_provider_core::ResolvedCredential::Oauth)
+                );
                 let (cost, currency) = if metered {
                     let display_name = self.provider.display_name();
                     let runtime_provider = std::env::var("JCODE_RUNTIME_PROVIDER")

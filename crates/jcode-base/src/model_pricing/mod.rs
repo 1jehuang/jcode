@@ -845,6 +845,322 @@ mod tests {
     }
 
     #[test]
+    fn resellers_fall_back_to_vendor_pricing_seen_elsewhere() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prev_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", temp.path());
+        clear_memory_cache_for_tests();
+
+        save_test_cache(&[
+            (
+                "zai",
+                "glm-5.3-flash",
+                ModelCost {
+                    input_usd_per_mtok: 0.15,
+                    output_usd_per_mtok: 0.5,
+                    cache_read_usd_per_mtok: Some(0.03),
+                    cache_write_usd_per_mtok: Some(0.0),
+                },
+            ),
+            (
+                "zenmux",
+                "z-ai/glm-5.3-flash",
+                ModelCost {
+                    input_usd_per_mtok: 0.15,
+                    output_usd_per_mtok: 0.5,
+                    cache_read_usd_per_mtok: Some(0.03),
+                    cache_write_usd_per_mtok: Some(0.0),
+                },
+            ),
+            (
+                "vultr",
+                "glm-5.3-flash",
+                ModelCost {
+                    input_usd_per_mtok: 0.10,
+                    output_usd_per_mtok: 0.35,
+                    cache_read_usd_per_mtok: None,
+                    cache_write_usd_per_mtok: None,
+                },
+            ),
+        ]);
+
+        // Unknown to models.dev as a provider, but the same vendor model id is
+        // priced under other providers; the exact-id match supplies the price.
+        let cost = lookup("openai-compatible:kilocode", "z-ai/glm-5.3-flash").expect("priced");
+        assert!((cost.input_usd_per_mtok - 0.15).abs() < 1e-9);
+        assert!((cost.output_usd_per_mtok - 0.5).abs() < 1e-9);
+        assert_eq!(cost.cache_read_usd_per_mtok, Some(0.03));
+
+        // Unknown models stay unpriced.
+        assert!(lookup("openai-compatible:kilocode", "z-ai/no-such-model").is_none());
+        // First-party providers never use the fallback (curated lists stay curated).
+        assert!(lookup("claude:api-key", "z-ai/glm-5.3-flash").is_none());
+
+        // Modal pricing beats the alphabetically-first provider: three bare-id
+        // listings where the majority price is not the first candidate's.
+        save_test_cache(&[
+            (
+                "a-provider",
+                "tiny-model",
+                ModelCost {
+                    input_usd_per_mtok: 0.10,
+                    output_usd_per_mtok: 0.99,
+                    cache_read_usd_per_mtok: None,
+                    cache_write_usd_per_mtok: None,
+                },
+            ),
+            (
+                "m-provider",
+                "tiny-model",
+                ModelCost {
+                    input_usd_per_mtok: 0.20,
+                    output_usd_per_mtok: 1.50,
+                    cache_read_usd_per_mtok: Some(0.02),
+                    cache_write_usd_per_mtok: None,
+                },
+            ),
+            (
+                "z-provider",
+                "tiny-model",
+                ModelCost {
+                    input_usd_per_mtok: 0.20,
+                    output_usd_per_mtok: 1.50,
+                    cache_read_usd_per_mtok: Some(0.02),
+                    cache_write_usd_per_mtok: None,
+                },
+            ),
+        ]);
+        let cost = lookup("openai-compatible:kilocode", "acme/tiny-model").expect("priced");
+        assert!((cost.input_usd_per_mtok - 0.20).abs() < 1e-9);
+        assert!((cost.output_usd_per_mtok - 1.50).abs() < 1e-9);
+        assert_eq!(cost.cache_read_usd_per_mtok, Some(0.02));
+
+        // Exact-id match beats bare-name match: when one provider lists the
+        // full `vendor/model` id and others list only the bare name, the
+        // full-id listing is the authority even if the bare listings agree on
+        // a competing price and outnumber it.
+        save_test_cache(&[
+            (
+                "first-party-vendor",
+                "acme/tiny-model",
+                ModelCost {
+                    input_usd_per_mtok: 0.30,
+                    output_usd_per_mtok: 2.50,
+                    cache_read_usd_per_mtok: Some(0.05),
+                    cache_write_usd_per_mtok: None,
+                },
+            ),
+            (
+                "reseller-bare-listing",
+                "tiny-model",
+                ModelCost {
+                    input_usd_per_mtok: 0.99,
+                    output_usd_per_mtok: 9.99,
+                    cache_read_usd_per_mtok: None,
+                    cache_write_usd_per_mtok: None,
+                },
+            ),
+            (
+                "another-bare-listing",
+                "tiny-model",
+                ModelCost {
+                    input_usd_per_mtok: 0.99,
+                    output_usd_per_mtok: 9.99,
+                    cache_read_usd_per_mtok: None,
+                    cache_write_usd_per_mtok: None,
+                },
+            ),
+        ]);
+        let cost = lookup("openai-compatible:kilocode", "acme/tiny-model").expect("priced");
+        assert!((cost.input_usd_per_mtok - 0.30).abs() < 1e-9);
+        assert!((cost.output_usd_per_mtok - 2.50).abs() < 1e-9);
+        assert_eq!(cost.cache_read_usd_per_mtok, Some(0.05));
+
+        clear_memory_cache_for_tests();
+        if let Some(prev) = prev_home {
+            crate::env::set_var("JCODE_HOME", prev);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
+
+    #[test]
+    fn local_profiles_do_not_borrow_hosted_pricing() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prev_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", temp.path());
+        clear_memory_cache_for_tests();
+
+        save_test_cache(&[(
+            "ollama-cloud",
+            "gpt-oss:20b",
+            ModelCost {
+                input_usd_per_mtok: 0.07,
+                output_usd_per_mtok: 0.3,
+                cache_read_usd_per_mtok: None,
+                cache_write_usd_per_mtok: None,
+            },
+        )]);
+
+        // Built-in local/keyless profiles run the model for free.
+        assert!(lookup("openai-compatible:ollama", "gpt-oss:20b").is_none());
+        assert!(lookup("openai-compatible:lmstudio", "gpt-oss:20b").is_none());
+        // An unknown hosted reseller still gets the inferred price, flagged
+        // as cross-provider.
+        let (_, matched) =
+            lookup_with_provenance("openai-compatible:kilocode", "gpt-oss:20b").expect("priced");
+        assert_eq!(matched, PricingMatch::CrossProvider);
+
+        clear_memory_cache_for_tests();
+        if let Some(prev) = prev_home {
+            crate::env::set_var("JCODE_HOME", prev);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
+
+    #[test]
+    fn local_api_bases_are_detected() {
+        for base in [
+            "http://localhost:11434/v1",
+            "http://127.0.0.1:8080/v1",
+            "http://[::1]:8080/v1",
+            "http://192.168.1.20:1234/v1",
+            "http://10.0.0.5/v1",
+            "http://gpu-box.local:8000/v1",
+            "http://host.docker.internal:11434/v1",
+        ] {
+            assert!(api_base_is_local(base), "{base} should be local");
+        }
+        for base in [
+            "https://api.kilo.ai/api/openrouter",
+            "https://openrouter.ai/api/v1",
+            "not a url",
+        ] {
+            assert!(!api_base_is_local(base), "{base} should be hosted");
+        }
+    }
+
+    #[test]
+    fn mapped_compatible_profiles_do_not_borrow_foreign_pricing() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prev_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", temp.path());
+        clear_memory_cache_for_tests();
+
+        save_test_cache(&[
+            (
+                "deepseek",
+                "deepseek-chat",
+                ModelCost {
+                    input_usd_per_mtok: 0.28,
+                    output_usd_per_mtok: 0.42,
+                    cache_read_usd_per_mtok: Some(0.028),
+                    cache_write_usd_per_mtok: None,
+                },
+            ),
+            (
+                "zai",
+                "glm-5.3-flash",
+                ModelCost {
+                    input_usd_per_mtok: 0.15,
+                    output_usd_per_mtok: 0.50,
+                    cache_read_usd_per_mtok: Some(0.03),
+                    cache_write_usd_per_mtok: None,
+                },
+            ),
+        ]);
+
+        // A mapped profile reads its own table.
+        let owned = lookup("openai-compatible:deepseek", "deepseek-chat").expect("priced");
+        assert!((owned.input_usd_per_mtok - 0.28).abs() < 1e-9);
+
+        // A model absent from the mapped profile's own table stays unpriced
+        // even though the catalog lists it under a different provider: the
+        // mapping is the authority, so another provider's rate is never
+        // inherited.
+        assert!(lookup("openai-compatible:deepseek", "glm-5.3-flash").is_none());
+
+        clear_memory_cache_for_tests();
+        if let Some(prev) = prev_home {
+            crate::env::set_var("JCODE_HOME", prev);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
+
+    #[test]
+    fn missing_cache_rates_do_not_merge_with_free_ones() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prev_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", temp.path());
+        clear_memory_cache_for_tests();
+
+        // Alphabetically-first listings have a missing cache_read and an
+        // explicitly free one; two later listings agree on a paid rate.
+        // Treating missing (None) and free (0.0) as the same listing would
+        // merge them into a 2-2 tie that the alphabetically-first provider
+        // wins, reporting a missing rate instead of the paid majority.
+        save_test_cache(&[
+            (
+                "a-missing",
+                "tiny-model",
+                ModelCost {
+                    input_usd_per_mtok: 0.15,
+                    output_usd_per_mtok: 0.50,
+                    cache_read_usd_per_mtok: None,
+                    cache_write_usd_per_mtok: None,
+                },
+            ),
+            (
+                "b-free",
+                "tiny-model",
+                ModelCost {
+                    input_usd_per_mtok: 0.15,
+                    output_usd_per_mtok: 0.50,
+                    cache_read_usd_per_mtok: Some(0.0),
+                    cache_write_usd_per_mtok: None,
+                },
+            ),
+            (
+                "c-paid",
+                "tiny-model",
+                ModelCost {
+                    input_usd_per_mtok: 0.15,
+                    output_usd_per_mtok: 0.50,
+                    cache_read_usd_per_mtok: Some(0.03),
+                    cache_write_usd_per_mtok: None,
+                },
+            ),
+            (
+                "d-paid",
+                "tiny-model",
+                ModelCost {
+                    input_usd_per_mtok: 0.15,
+                    output_usd_per_mtok: 0.50,
+                    cache_read_usd_per_mtok: Some(0.03),
+                    cache_write_usd_per_mtok: None,
+                },
+            ),
+        ]);
+
+        let cost = lookup("openai-compatible:kilocode", "tiny-model").expect("priced");
+        assert!((cost.input_usd_per_mtok - 0.15).abs() < 1e-9);
+        assert_eq!(cost.cache_read_usd_per_mtok, Some(0.03));
+
+        clear_memory_cache_for_tests();
+        if let Some(prev) = prev_home {
+            crate::env::set_var("JCODE_HOME", prev);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
+
+    #[test]
     fn parses_models_dev_shape() {
         let body = r#"{
             "deepseek": {

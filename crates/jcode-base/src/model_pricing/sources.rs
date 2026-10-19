@@ -256,7 +256,7 @@ pub(super) fn resolve_card(
             "pricing rule for {provider}/{model} is incomplete and denominated in {currency}; \
              using the derived pricing layers ({fallback_currency}) instead of relabelling them"
         ));
-        entry = ModelPricingEntry::from_model_cost(fallback.clone());
+        entry = ModelPricingEntry::from_model_cost(*fallback);
         currency = fallback_currency.clone();
         owns_price = false;
     } else {
