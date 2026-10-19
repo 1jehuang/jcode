@@ -1334,3 +1334,106 @@ of the KCode fork's portal/Xirp work.
    (#64 → 2026-10-17T06:45:12Z, #67 → 2026-10-17T04:47:33Z, #75 →
    2026-10-17T06:45:14Z). No `gh pr edit` was required. See §22.2 for the
    full finding. The §22 fix is therefore already cross-fork consistent.
+
+## 26. V1–V95 validation arc + fix-branch wrap-up (2026-10-19T00:08Z)
+
+Operator signal `"go"` at 2026-10-19T00:08:08Z authorized autonomous
+wrap-up of the XJ-03 bridge chain. The preceding session ran a
+95-item validation pass (`V1` through `V95`) against the deployed
+bridge state. This section records the arc, the bugs found, the
+fixes committed, and the final branch disposition.
+
+### 26.1 Bugs found and fixed (4 real, 1 false alarm)
+
+| # | Where | What was wrong | Fix | Commit (fix) | Commit (master) |
+|---|-------|----------------|-----|--------------|------------------|
+| V2b | §24.6 timeline | Documented t+ offsets were script-relative, not mcp-remote-relative; off by ~2 s | Rewrote §24.6 with mcp-remote-relative offsets anchored on `08:48:53.407Z`; total wall time **2.740 s** | `eb414e45b` | `d9c61c02a` |
+| V12 | §24.4 missing on fix branch | Commit `27ee6d696` (§24.4 XJ-07 cargo test re-verification) only landed on master; fix branch never received it via cherry-pick | Aborted `git cherry-pick 27ee6d696` due to conflict with §24.6 timeline fix; manually inserted §24.4 between §24.3 and §24.5 | `b3f00d22e` | n/a (already on master) |
+| V15 | §24.4 referenced a non-existent §26 | §24.4 said "XJ-07 work shipped in §26" but STATE.md only went to §25; dangling cross-ref | Replaced both §26 mentions in §24.4 with **"§23 (the XJ-07 spec) and commit `530511a66` (`test(mcp): XJ-07 failure and rollback tests`)"** | `1f7a93f0b` | `6ff8aa2d1` |
+| V17 | Deployed `mcp.json` content check (false alarm) | Initial Python check used `mcpServers` (Claude Code key); kcode's canonical key is `servers` | Reran with correct key: `portal-bridge` is deployed, 8 servers total, entry byte-identical to `scripts/portal-mcp-bridge.json` minus `_deploy_notes` | (no commit) | (no commit) |
+| V53 | Fresh live test | First attempt with 25 s timeout killed npx (script needs 90 s); second attempt with 100 s timeout: EXIT 0, total wall time **2.357 s** (faster than §24.6 because auth server is now warm) | Adjusted test-script timeout to 100 s; documented warm-cache variance in V53 findings | (no commit — script unchanged) | n/a |
+
+### 26.2 Validations that passed (notable subset)
+
+- **V8** — Vendor draft Q1–Q6 internally consistent.
+- **V14** — `STATE.md` byte-identical between `fix` and `master` (91,056 bytes; `diff` empty).
+- **V18** — Test script `scripts/test-portal-bridge-live.sh` present and runnable.
+- **V19** — Bridge log `~/.jcode/scratch/xj03-live-61063/bridge.stderr.log` (14,160 bytes, 55 timestamped events) still on disk.
+- **V22/V63** — DNS `auth.kooshapari.com` resolves to `172.67.215.71` + `104.21.24.10` (Cloudflare proxy).
+- **V23** — CIMD endpoint: `HTTP 200`, `cf-ray: a4c6555a4865637e-LAX`, 138 ms; body byte-identical to `jcode-cimd.worker.js` (89 lines, 3,905 bytes).
+- **V27** — §24 cross-refs all resolve (no §27/§28/§29/§30/§26 dangling refs).
+- **V34** — `~/.kcode/mcp.json.bak-1792308142` (2696 bytes, 7 servers) diff vs current 8-server file: +portal-bridge only, no other mutations.
+- **V44** — Cloudflare Worker direct: `HTTP 200`, 135 ms.
+- **V45** — Spotify Portal MCP endpoint: `HTTP 401` (correct challenge; endpoint live).
+- **V48** — `_deploy_notes` block stripped from deployed entry.
+- **V50** — Other servers (e.g., `6244cf5...`, `d511bd2...`) DO have `tokens.json` → proves OAuth flow works for those servers, just not yet for `portal-bridge`.
+- **V55** — All files referenced by §24.6 exist on disk.
+- **V62** — `/tmp/xj07_final.log` shows 5 cargo tests PASS (the XJ-07 failure-mode test set).
+- **V64** — Secrets audit on bridge log: 0 leaked `code_verifier`, 0 leaked `access_token`, 0 leaked `Authorization Bearer` headers. The `client_secret`/`id_token`/`refresh_token` hits are from the **public** `authorizationServerMetadata` document Spotify's auth server publishes (declares supported auth methods — not secrets).
+- **V66** — §23 contains the verbatim XJ-07 spec from `docs/XIRP_CUSTOM_HARNESS.md:132`, 5 acceptance criteria, implementation sketch, status change. The §24.4 → §23 reference is substantive, not a dangling link.
+- **V67** — Fresh-run Spotify authorize URL byte-identical to §24.5 documented URL after redacting per-run `code_challenge` and `state` values.
+- **V70** — All 7 §24 sections (`## 24`, `## 24.1`, …, `## 24.6`) have consistent `## 24.N <title> (YYYY-MM-DDTHH:MMZ)` format.
+- **V76** — `STATE.md` diff between `fix` and `master`: empty.
+- **V85** — All 6 "missing" §-refs in cross-doc scan are valid: `### 22.1`/`### 22.2` (h3 sub-headings in STATE.md lines 725/767), `§1.2`/`§1.6` (cross-doc refs to `RESUME.md`), `§8.2.*` (cross-doc refs to `APPENDICES.md`), `§1` (legacy ref; section was renamed to §1b).
+- **V88** — Fresh bridge log (09:02Z run) has 155 lines / 55 timestamped events, byte-identical structure to the §24.6 reference log (01:48Z).
+- **V91** — 6 `code_verifier_<uuid>.txt` files in `~/.mcp-auth/mcp-remote-v1/`: 3 from operator's prior test runs (Oct 17 15:42, Oct 17 23:31, Oct 18 01:48) and 3 from the V53 fresh-test attempts (Oct 18 01:59, 02:01, 02:02). All 6 have paired `discovery_state_<uuid>.json` files. **None** has a corresponding `_tokens.json` → bridge correctly in waiting state.
+- **V92** — `mcp-remote@0.15.1` package integrity confirmed; `chunk-KJCT2FXL.js` 1,420,822 bytes, byte-identical across both npx cache versions.
+- **V95** — §23 is substantive (3,165 chars, 63 lines, 2 spec-refs to `XIRP_CUSTOM_HARNESS.md`); correctly scoped (spec discovery + acceptance criteria + status change + implementation sketch; test-file refs live in §24.4).
+
+### 26.3 Disposition: `fix/xj03-bridge-arg-order-20261017`
+
+The fix branch **served its purpose** as a feature-isolated workspace
+during the §24.x audit-correction arc. As of this validation pass:
+
+- **All §24.x file content is already on `master`** via cherry-pick
+  replay (the 9 fix-only commits are 1-to-1 parallel with the
+  11 master-only commits; the cherry-picks converged the file
+  content but not the commit graph).
+- **No open PR** for the fix branch (`gh pr list --head
+  fix/xj03-bridge-arg-order-20261017` returns `[]`).
+- **No substantive content to merge** — squashing fix → master
+  would either be a no-op or, worse, would delete the 2
+  investigation files that master has and fix doesn't
+  (`AUTH-DNS-FORENSICS-2026-10-17.md`, `XJ-AUDIT-2026-10-17.md`,
+  added to master in commit `43dc7593b`).
+
+Therefore the canonical cleanup is to **delete the fix branch**
+(local + remote) once this §26 is committed and pushed to `master`.
+A local safe-delete (`git branch -d`) is used; `git branch -D` is
+blocked by policy.
+
+### 26.4 Bridge state at wrap-up
+
+```
+~/.kcode/mcp.json                              8 servers, portal-bridge deployed
+~/.jcode/mcp.json                              9 servers, NO portal-bridge (legacy parity gap; V33)
+auth.kooshapari.com                            DNS live (172.67.215.71 + 104.21.24.10)
+https://auth.kooshapari.com/cimd/v1/{hash}     HTTP 200, 138 ms (V23)
+mcp-remote@0.15.1                              Package integrity confirmed (V92)
+~/.mcp-auth/mcp-remote-v1/                     6 code_verifier + 6 discovery_state files
+                                               0 tokens.json (operator has not consented)
+```
+
+### 26.5 Operator-only remaining action (unchanged from §24.6)
+
+1. Quit kcode.
+2. Relaunch kcode.
+3. Click **Allow** on the Spotify consent page.
+4. Subsequent launches: silent token refresh (no prompt).
+
+Expected wall time from "Quit" to "Allow clicked": ~30 s.
+
+### 26.6 Final commit trail (operator signal → master)
+
+| Step | Action | Commit | Result |
+|------|--------|--------|--------|
+| 1 | Add §26 to `STATE.md` on `master` | (this commit) | 1,336 → ~1,500 lines, +~3 KB |
+| 2 | `git push origin master` | (this commit's push) | origin/master advances |
+| 3 | `git branch -d fix/xj03-bridge-arg-order-20261017` | n/a | local branch removed |
+| 4 | `git push origin --delete fix/xj03-bridge-arg-order-20261017` | n/a | remote branch removed |
+| 5 | Final state | `master` = new HEAD | repo clean; fix branch retired |
+
+**No further subagent dispatches required.** The XJ-03 audit-correction
+arc is closed at the §24.x chain. Next operator work is the consent
+step (26.5) and then either vendor contact (§19.1 draft, channel-
+blocked) or XJ-07 implementation dispatch.
