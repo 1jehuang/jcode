@@ -17,6 +17,31 @@ use std::time::{Duration, Instant};
 /// Misses smaller than this are noise (provider cache block granularity).
 pub const MIN_MISSED_TOKENS: u64 = 1_024;
 
+/// Whether a provider drops its conversation prompt cache when the UTC date
+/// changes. Observed on Anthropic: every session whose consecutive requests
+/// straddle 00:00 UTC reads back only the tools/system prefix, even seconds
+/// apart with a byte-identical prefix. (15 of 15 such straddles missed across
+/// four days of logs, versus ~2% of same-day requests.) The harness cannot
+/// avoid it, so such misses are attributed instead of reported as unexplained.
+pub fn provider_rolls_cache_daily(provider: &str) -> bool {
+    matches!(
+        provider.trim().to_ascii_lowercase().as_str(),
+        "anthropic" | "claude"
+    )
+}
+
+/// UTC calendar day number, used to detect the provider's daily cache rollover.
+pub fn utc_day_now() -> i64 {
+    utc_day_of(std::time::SystemTime::now())
+}
+
+pub fn utc_day_of(time: std::time::SystemTime) -> i64 {
+    match time.duration_since(std::time::UNIX_EPOCH) {
+        Ok(elapsed) => (elapsed.as_secs() / 86_400) as i64,
+        Err(before) => -((before.duration().as_secs() / 86_400) as i64) - 1,
+    }
+}
+
 /// Prompt-shape signature for one provider request.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RequestSignature {
@@ -61,6 +86,7 @@ pub enum MissReason {
     ModelSwitch,
     UpstreamSwitch,
     Expired,
+    DailyRollover,
     SystemChanged,
     ToolsChanged,
     PrefixChanged,
@@ -77,6 +103,7 @@ impl MissReason {
             Self::ModelSwitch => "model_switch",
             Self::UpstreamSwitch => "upstream_switch",
             Self::Expired => "expired",
+            Self::DailyRollover => "daily_rollover",
             Self::SystemChanged => "system_changed",
             Self::ToolsChanged => "tools_changed",
             Self::PrefixChanged => "prefix_changed",
@@ -93,6 +120,9 @@ impl MissReason {
             Self::ModelSwitch => "model changed",
             Self::UpstreamSwitch => "upstream provider changed",
             Self::Expired => "cache expired",
+            Self::DailyRollover => {
+                "provider resets its prompt cache at 00:00 UTC; not avoidable by the harness"
+            }
             Self::SystemChanged => "system prompt changed mid-session",
             Self::ToolsChanged => "tool set changed mid-session",
             Self::PrefixChanged => "an earlier message was modified",
@@ -171,6 +201,8 @@ struct Baseline {
     signature: RequestSignature,
     reusable_cache_tokens: u64,
     completed_at: Instant,
+    /// UTC day on which the baseline request was sent (its cache was written).
+    utc_day: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -178,6 +210,7 @@ struct Pending {
     route: RequestRoute,
     signature: RequestSignature,
     provider_compaction: bool,
+    utc_day: i64,
 }
 
 /// Per-session miss detector. Reset whenever the provider-facing transcript is
@@ -199,10 +232,21 @@ impl KvCacheMonitor {
     }
 
     pub fn begin_request(&mut self, route: RequestRoute, signature: RequestSignature) {
+        self.begin_request_on_day(route, signature, utc_day_now());
+    }
+
+    /// [`Self::begin_request`] with an explicit UTC day (for tests).
+    pub fn begin_request_on_day(
+        &mut self,
+        route: RequestRoute,
+        signature: RequestSignature,
+        utc_day: i64,
+    ) {
         self.pending = Some(Pending {
             route,
             signature,
             provider_compaction: false,
+            utc_day,
         });
     }
 
@@ -234,6 +278,7 @@ impl KvCacheMonitor {
                 signature: pending.signature,
                 reusable_cache_tokens,
                 completed_at: Instant::now(),
+                utc_day: pending.utc_day,
             });
         }
         miss
@@ -257,6 +302,8 @@ fn classify(
     let reason = reason(baseline, pending, read_tokens)?;
     let documented_cause = if reason == MissReason::Compaction {
         Some("provider_auto_compaction".to_string())
+    } else if reason == MissReason::DailyRollover {
+        Some("provider_daily_rollover".to_string())
     } else {
         reason
             .harness_caused()
@@ -307,6 +354,11 @@ fn reason(baseline: &Baseline, pending: &Pending, read: u64) -> Option<MissReaso
     }
     if !cur.extends(prev) {
         return Some(MissReason::PrefixChanged);
+    }
+    // Harness-caused changes above stay visible as bugs. Only an otherwise
+    // clean append that straddles 00:00 UTC is attributed to the provider.
+    if baseline.utc_day != pending.utc_day && provider_rolls_cache_daily(&new.provider) {
+        return Some(MissReason::DailyRollover);
     }
     if read == 0 {
         return Some(MissReason::ZeroRead);
@@ -523,5 +575,65 @@ mod tests {
         monitor.reset();
         monitor.begin_request(route(), sig(&[99]));
         assert_eq!(monitor.finish_request(52_000, Some(0)), None);
+    }
+
+    #[test]
+    fn utc_midnight_straddle_is_a_provider_daily_rollover() {
+        // Real incident: 621K-token prefix, 31K read after crossing 00:00 UTC.
+        let mut monitor = KvCacheMonitor::new();
+        monitor.begin_request_on_day(route(), sig(&[10, 11]), 20_744);
+        monitor.finish_request(621_788, Some(620_865));
+        monitor.begin_request_on_day(route(), sig(&[10, 11, 12]), 20_745);
+        let miss = monitor.finish_request(622_773, Some(31_075)).expect("miss");
+        assert_eq!(miss.reason, MissReason::DailyRollover);
+        assert!(!miss.reason.harness_caused());
+        assert_eq!(
+            miss.documented_cause.as_deref(),
+            Some("provider_daily_rollover")
+        );
+        assert!(
+            miss.message()
+                .starts_with("KV cache refresh [provider_daily_rollover]")
+        );
+    }
+
+    #[test]
+    fn harness_changes_still_win_over_daily_rollover() {
+        let mut monitor = KvCacheMonitor::new();
+        monitor.begin_request_on_day(route(), sig(&[10, 11]), 1);
+        monitor.finish_request(50_000, Some(50_000));
+        monitor.begin_request_on_day(route(), sig(&[10, 99, 12]), 2);
+        let miss = monitor.finish_request(52_000, Some(2_000)).expect("miss");
+        assert_eq!(miss.reason, MissReason::PrefixChanged);
+    }
+
+    #[test]
+    fn same_utc_day_low_read_is_not_attributed_to_rollover() {
+        let mut monitor = KvCacheMonitor::new();
+        monitor.begin_request_on_day(route(), sig(&[10, 11]), 5);
+        monitor.finish_request(50_000, Some(50_000));
+        monitor.begin_request_on_day(route(), sig(&[10, 11, 12]), 5);
+        let miss = monitor.finish_request(52_000, Some(2_000)).expect("miss");
+        assert_eq!(miss.reason, MissReason::LowRead);
+    }
+
+    #[test]
+    fn non_anthropic_day_change_is_not_attributed_to_rollover() {
+        let mut openai = route();
+        openai.provider = "openrouter".into();
+        let mut monitor = KvCacheMonitor::new();
+        monitor.begin_request_on_day(openai.clone(), sig(&[10, 11]), 5);
+        monitor.finish_request(50_000, Some(50_000));
+        monitor.begin_request_on_day(openai, sig(&[10, 11, 12]), 6);
+        let miss = monitor.finish_request(52_000, Some(2_000)).expect("miss");
+        assert_eq!(miss.reason, MissReason::LowRead);
+    }
+
+    #[test]
+    fn utc_day_boundaries() {
+        use std::time::{Duration, UNIX_EPOCH};
+        assert_eq!(utc_day_of(UNIX_EPOCH + Duration::from_secs(86_399)), 0);
+        assert_eq!(utc_day_of(UNIX_EPOCH + Duration::from_secs(86_400)), 1);
+        assert_eq!(utc_day_of(UNIX_EPOCH - Duration::from_secs(1)), -1);
     }
 }

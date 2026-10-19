@@ -38,6 +38,7 @@ fn cache_diagnostic_fixture() -> (App, PendingKvCacheRequest) {
         cache_generation: 0,
         input_tokens: 50_000,
         completed_at: started - Duration::from_secs(30),
+        utc_day: 0,
         cache_ttl_secs: Some(60),
         provider: "openai-oauth".into(),
         model: "test-model".into(),
@@ -46,6 +47,7 @@ fn cache_diagnostic_fixture() -> (App, PendingKvCacheRequest) {
     };
     let request = PendingKvCacheRequest {
         started_at: Some(started),
+        utc_day: 0,
         cache_ttl_secs: Some(60),
         turn_number: 1,
         call_index: 2,
@@ -171,5 +173,40 @@ fn kv_cache_diagnostics_report_elapsed_and_unknown_retention() {
     assert!(
         app.kv_cache_diagnostic_fields(&request, 52_000)
             .contains("ttl_state=unknown")
+    );
+}
+
+#[test]
+fn kv_cache_utc_midnight_straddle_is_daily_rollover_for_anthropic_only() {
+    let (app, mut request) = cache_diagnostic_fixture();
+    request.provider = "claude".into();
+    request.cache_ttl_secs = Some(3_600);
+    {
+        let baseline = request.baseline.as_mut().unwrap();
+        baseline.provider = "claude".into();
+        baseline.cache_ttl_secs = Some(3_600);
+        baseline.utc_day = 20_744;
+    }
+    request.utc_day = 20_745;
+    let baseline = request.baseline.as_ref().unwrap();
+    assert_eq!(
+        app.classify_kv_cache_miss_reason(&request, baseline, 20_000, 40),
+        KvCacheMissReason::DailyRollover
+    );
+
+    request.utc_day = 20_744;
+    let baseline = request.baseline.as_ref().unwrap();
+    assert_eq!(
+        app.classify_kv_cache_miss_reason(&request, baseline, 20_000, 40),
+        KvCacheMissReason::LowRead
+    );
+
+    // Harness bugs are never masked by the rollover attribution.
+    request.utc_day = 20_745;
+    request.baseline_messages_prefix_matches = Some(false);
+    let baseline = request.baseline.as_ref().unwrap();
+    assert_eq!(
+        app.classify_kv_cache_miss_reason(&request, baseline, 20_000, 40),
+        KvCacheMissReason::HarnessPrefixChanged
     );
 }

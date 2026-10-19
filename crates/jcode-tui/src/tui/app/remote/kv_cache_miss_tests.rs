@@ -258,3 +258,34 @@ fn remote_compaction_notice_follows_buffered_response() {
     assert!(!app.display_messages[count - 1].content.contains("unknown"));
     assert!(app.streaming.streaming_text.is_empty());
 }
+
+#[test]
+fn remote_daily_rollover_corrects_provisional_low_read_in_place() {
+    let mut app = create_test_app();
+    app.kv_cache.kv_cache_turn_number = Some(7);
+    app.kv_cache.kv_cache_turn_call_index = 1;
+    app.kv_cache.kv_cache_miss_samples.push(KvCacheMissSample {
+        turn_number: 7,
+        call_index: 1,
+        missed_tokens: 590_713,
+        reason: KvCacheMissReason::LowRead,
+    });
+    app.push_display_message(DisplayMessage::system(
+        "ℹ️ KV cache miss [low read] turn 7 call 1: provisional",
+    ));
+    let count = app.display_messages.len();
+    let corrected = "KV cache refresh [provider_daily_rollover]: ~590K tokens resent";
+    assert!(handle_kv_cache_miss(
+        &mut app,
+        "daily_rollover",
+        590_713,
+        corrected.into(),
+        true
+    ));
+    assert_eq!(app.display_messages.len(), count);
+    assert_eq!(app.display_messages[count - 1].content, corrected);
+    assert_eq!(
+        app.kv_cache.kv_cache_miss_samples[0].reason,
+        KvCacheMissReason::DailyRollover
+    );
+}

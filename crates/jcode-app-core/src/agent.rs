@@ -198,7 +198,11 @@ impl Agent {
             cache_creation,
         );
         let miss = self.kv_cache_monitor.finish_request(reusable, cache_read)?;
-        let expected_refresh = miss.reason == crate::kv_cache_monitor::MissReason::Compaction;
+        let expected_refresh = matches!(
+            miss.reason,
+            crate::kv_cache_monitor::MissReason::Compaction
+                | crate::kv_cache_monitor::MissReason::DailyRollover
+        );
         let label = if expected_refresh {
             "KV_CACHE_REFRESH"
         } else {
