@@ -104,6 +104,9 @@ pub fn classify_failover_error_message(message: &str) -> FailoverDecision {
         "billing",
         "payment required",
         "usage tier",
+        // Plan/usage-window exhaustion, e.g. OpenAI OAuth `usage_limit_reached`.
+        "usage_limit",
+        "usage limit",
     ]
     .iter()
     .any(|needle| lower.contains(needle))
@@ -174,6 +177,16 @@ mod tests {
     fn classifier_marks_rate_limits_unavailable() {
         assert_eq!(
             classify_failover_error_message("429 Too Many Requests"),
+            FailoverDecision::RetryAndMarkUnavailable
+        );
+    }
+
+    #[test]
+    fn classifier_marks_usage_limit_unavailable() {
+        assert_eq!(
+            classify_failover_error_message(
+                "usage_limit_reached: The usage limit has been reached"
+            ),
             FailoverDecision::RetryAndMarkUnavailable
         );
     }

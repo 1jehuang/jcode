@@ -132,6 +132,11 @@ fn run_main() -> Result<()> {
         return jcode::cli::macos_notification_broker::run();
     }
 
+    // Exit-mode hibernation waiter: stay tiny until a key press, then resume.
+    if jcode::cli::hibernate_wait::is_invocation() {
+        return jcode::cli::hibernate_wait::run();
+    }
+
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;

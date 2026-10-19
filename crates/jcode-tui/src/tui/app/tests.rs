@@ -1,4 +1,5 @@
 #![cfg_attr(test, allow(clippy::clone_on_copy))]
+include!("tests/cache_diagnostics.rs");
 include!("tests/support_failover/part_01.rs");
 include!("tests/support_failover/part_02.rs");
 include!("tests/commands_accounts_01/part_01.rs");
@@ -24,6 +25,7 @@ include!("tests/remote_events_reload_01/part_01.rs");
 include!("tests/remote_events_reload_01/part_02.rs");
 include!("tests/remote_events_reload_02/part_01.rs");
 include!("tests/remote_events_reload_02/part_02.rs");
+include!("tests/service_tier_dedup.rs");
 include!("tests/remote_events_reload_03/part_01.rs");
 include!("tests/remote_events_reload_03/part_02.rs");
 include!("tests/remote_events_reload_04.rs");
@@ -49,6 +51,7 @@ include!("tests/smoothness_benchmark.rs");
 include!("tests/hotkey_feedback_e2e.rs");
 include!("tests/todo_card.rs");
 include!("tests/issue_496_input_routing.rs");
+include!("tests/oauth_login_progress.rs");
 include!("tests/issue_544_paste_enter.rs");
 include!("tests/keybinding_hot_reload.rs");
 include!("tests/terminal_setup_command.rs");
@@ -166,9 +169,11 @@ fn cold_cache_warning_is_persisted_when_starting_next_request() {
         cache_generation: app.kv_cache.cache_generation,
         input_tokens: 911_873,
         completed_at: Instant::now() - Duration::from_secs(3723),
+        utc_day: 0,
         provider: "anthropic".to_string(),
         model: "claude-opus-4-6".to_string(),
         upstream_provider: None,
+        account: None,
         signature: None,
     });
 
@@ -210,9 +215,11 @@ fn cold_cache_warning_fires_on_idle_tick_before_next_message() {
         cache_generation: app.kv_cache.cache_generation,
         input_tokens: 42_000,
         completed_at: Instant::now() - Duration::from_secs(3700),
+        utc_day: 0,
         provider: "anthropic".to_string(),
         model: "claude-opus-4-6".to_string(),
         upstream_provider: None,
+        account: None,
         signature: None,
     });
 
@@ -275,9 +282,11 @@ fn idle_cold_cache_warning_waits_for_ttl_and_rearms_after_new_cache_write() {
         cache_generation: app.kv_cache.cache_generation,
         input_tokens: 42_000,
         completed_at: Instant::now() - Duration::from_secs(60),
+        utc_day: 0,
         provider: "anthropic".to_string(),
         model: "claude-opus-4-6".to_string(),
         upstream_provider: None,
+        account: None,
         signature: None,
     });
 
@@ -339,9 +348,11 @@ fn harness_caused_kv_cache_miss_pushes_in_chat_alarm() {
         cache_generation: app.kv_cache.cache_generation,
         input_tokens: 50_000,
         completed_at: Instant::now(),
+        utc_day: 0,
         provider,
         model,
         upstream_provider: None,
+        account: None,
         signature: Some(baseline_signature),
     });
 
@@ -353,7 +364,7 @@ fn harness_caused_kv_cache_miss_pushes_in_chat_alarm() {
     app.streaming.streaming_cache_read_tokens = Some(0);
     app.streaming.streaming_cache_creation_tokens = Some(50_000);
     app.kv_cache.current_api_usage_recorded = false;
-    app.record_completed_stream_cache_usage();
+    record_reported_test_cache_usage(&mut app);
 
     let alarm = app
         .display_messages()
@@ -393,9 +404,11 @@ fn documented_invalidation_downgrades_kv_cache_alarm_to_attribution() {
         cache_generation: app.kv_cache.cache_generation,
         input_tokens: 50_000,
         completed_at: Instant::now(),
+        utc_day: 0,
         provider,
         model,
         upstream_provider: None,
+        account: None,
         signature: Some(baseline_signature),
     });
 
@@ -407,7 +420,7 @@ fn documented_invalidation_downgrades_kv_cache_alarm_to_attribution() {
     app.streaming.streaming_cache_read_tokens = Some(0);
     app.streaming.streaming_cache_creation_tokens = Some(50_000);
     app.kv_cache.current_api_usage_recorded = false;
-    app.record_completed_stream_cache_usage();
+    record_reported_test_cache_usage(&mut app);
 
     let notice = app
         .display_messages()
@@ -426,12 +439,10 @@ fn documented_invalidation_downgrades_kv_cache_alarm_to_attribution() {
 }
 
 #[test]
-fn kv_cache_baseline_stores_effective_prompt_tokens() {
+fn kv_cache_baseline_stores_reusable_prompt_tokens() {
     // For split-accounting providers (Anthropic), the reported `input` is only
     // the uncached remainder of the request. The baseline drives the cold-cache
-    // warning's "~N input tokens will be resent" figure, so it must store the
-    // whole effective prompt (input + cache read + cache creation), not the
-    // bare input.
+    // warning and miss comparison, so only the read/written boundary is reusable.
     let mut app = create_test_app();
     crate::provider::anthropic::set_cache_ttl_1h(true);
 
@@ -441,7 +452,7 @@ fn kv_cache_baseline_stores_effective_prompt_tokens() {
     app.streaming.streaming_cache_read_tokens = Some(90_000);
     app.streaming.streaming_cache_creation_tokens = Some(5_000);
     app.kv_cache.current_api_usage_recorded = false;
-    app.record_completed_stream_cache_usage();
+    record_reported_test_cache_usage(&mut app);
 
     let baseline = app
         .kv_cache
@@ -449,13 +460,13 @@ fn kv_cache_baseline_stores_effective_prompt_tokens() {
         .as_ref()
         .expect("completed stream should record a baseline");
     assert_eq!(
-        baseline.input_tokens, 95_700,
-        "baseline must capture input + read + creation, not bare input"
+        baseline.input_tokens, 95_000,
+        "baseline must capture read + creation, excluding the uncached tail"
     );
 }
 
 #[test]
-fn legitimate_model_switch_miss_does_not_push_in_chat_alarm() {
+fn legitimate_model_switch_miss_pushes_informational_notice() {
     // Switching models legitimately invalidates the cache; that is user-driven,
     // not a harness bug, so it must NOT raise the alarm.
     let mut app = create_test_app();
@@ -474,10 +485,12 @@ fn legitimate_model_switch_miss_does_not_push_in_chat_alarm() {
         cache_generation: app.kv_cache.cache_generation,
         input_tokens: 50_000,
         completed_at: Instant::now(),
-        provider: "anthropic".to_string(),
-        // Different model than the current request -> ModelSwitch.
+        utc_day: 0,
+        // Same provider, different model than the current request -> ModelSwitch.
+        provider: app.kv_cache_provider_name(),
         model: "claude-opus-4-5".to_string(),
         upstream_provider: None,
+        account: None,
         signature: Some(baseline_signature),
     });
 
@@ -486,14 +499,133 @@ fn legitimate_model_switch_miss_does_not_push_in_chat_alarm() {
     app.streaming.streaming_cache_read_tokens = Some(0);
     app.streaming.streaming_cache_creation_tokens = Some(50_000);
     app.kv_cache.current_api_usage_recorded = false;
-    app.record_completed_stream_cache_usage();
+    record_reported_test_cache_usage(&mut app);
 
-    assert!(
-        !app.display_messages()
+    let notice = app
+        .display_messages()
+        .iter()
+        .find(|message| {
+            message.role == "system" && message.content.contains("KV cache miss [model switch]")
+        })
+        .expect("model-switch miss should be visible without harness blame");
+    assert!(notice.content.starts_with("ℹ️"), "{notice:?}");
+    assert!(notice.content.contains("call 1"), "{notice:?}");
+}
+
+#[test]
+fn kv_cache_notice_explicit_loss_matrix() {
+    for (read, route, expected_reason) in [
+        (Some(0), "same", Some("zero read")),
+        (Some(20_000), "same", Some("low read")),
+        (Some(90_000), "same", Some("low read")),
+        (Some(99_500), "same", None),  // provider block rounding
+        (Some(100_000), "same", None), // healthy prefix, new tail is not a miss
+        (None, "same", None),
+        (Some(0), "provider", Some("provider switch")),
+        (Some(0), "upstream", Some("upstream switch")),
+        (Some(0), "account", Some("account switch")),
+        (Some(0), "expired", Some("expired")),
+    ] {
+        let mut app = create_test_app();
+        let mut baseline = KvCacheBaseline {
+            cache_ttl_secs: Some(3600),
+            session_id: app.kv_cache_session_id(),
+            cache_generation: app.kv_cache.cache_generation,
+            input_tokens: 100_000,
+            completed_at: Instant::now(),
+            utc_day: 0,
+            provider: app.kv_cache_provider_name(),
+            model: app.kv_cache_provider_model(),
+            upstream_provider: Some("old upstream".into()),
+            account: None,
+            signature: None,
+        };
+        if route == "provider" {
+            baseline.provider = "other provider".into();
+        }
+        if route == "account" {
+            baseline.account = Some("fox".into());
+        }
+        if route == "expired" {
+            baseline.provider = "anthropic".into();
+            baseline.cache_ttl_secs = Some(1);
+            baseline.completed_at = Instant::now() - Duration::from_secs(2);
+        }
+        let mut request = app.fallback_pending_kv_cache_request();
+        request.call_index = 3;
+        if route == "account" {
+            request.account = Some("otter".into());
+        }
+        if route == "expired" {
+            request.provider = "anthropic".into();
+            request.started_at = Some(Instant::now());
+        }
+        request.upstream_provider = Some(
+            if route == "upstream" {
+                "new upstream"
+            } else {
+                "old upstream"
+            }
+            .into(),
+        );
+        request.baseline = Some(baseline);
+        app.kv_cache.pending_kv_cache_request = Some(request);
+        app.streaming.streaming_input_tokens = 110_000; // includes a normal new tail
+        app.streaming.streaming_cache_read_tokens = read;
+        assert!(record_reported_test_cache_usage(&mut app));
+        assert!(
+            !record_reported_test_cache_usage(&mut app),
+            "same call must deduplicate"
+        );
+        let notices: Vec<_> = app
+            .display_messages()
             .iter()
-            .any(|message| message.role == "system" && message.content.contains("KV cache miss")),
-        "model-switch miss must not raise the harness alarm"
-    );
+            .filter(|message| message.content.contains("KV cache miss"))
+            .collect();
+        if let Some(reason) = expected_reason {
+            assert_eq!(notices.len(), 1, "route={route} read={read:?}");
+            assert!(notices[0].content.contains(reason), "{:?}", notices[0]);
+            assert!(notices[0].content.contains("call 3"));
+            assert!(
+                notices[0].content.contains("cached / 100K expected"),
+                "{:?}",
+                notices[0]
+            );
+            if route == "account" {
+                assert!(
+                    notices[0].content.contains("account switched fox -> otter"),
+                    "{:?}",
+                    notices[0]
+                );
+            }
+            assert!(notices[0].content.starts_with("ℹ️"));
+        } else {
+            assert!(
+                notices.is_empty(),
+                "route={route} read={read:?}: {notices:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn kv_cache_first_fill_without_baseline_is_not_a_miss() {
+    for read in [None, Some(0), Some(5_000)] {
+        let mut app = create_test_app();
+        app.streaming.streaming_input_tokens = 10_000;
+        app.streaming.streaming_cache_read_tokens = read;
+        assert!(record_reported_test_cache_usage(&mut app));
+        assert!(!record_reported_test_cache_usage(&mut app));
+        let count = app
+            .display_messages()
+            .iter()
+            .filter(|message| {
+                message.content.contains("KV cache miss")
+                    || message.content.contains("KV cache cold")
+            })
+            .count();
+        assert_eq!(count, 0);
+    }
 }
 
 #[test]
@@ -518,9 +650,11 @@ fn kv_cache_baseline_from_other_session_is_ignored() {
         cache_generation: app.kv_cache.cache_generation,
         input_tokens: 200_000,
         completed_at: Instant::now(),
+        utc_day: 0,
         provider: "anthropic".to_string(),
         model: "claude-opus-4-6".to_string(),
         upstream_provider: None,
+        account: None,
         signature: Some(big_signature),
     });
 
@@ -567,9 +701,11 @@ fn kv_cache_baseline_same_session_still_compares() {
         cache_generation: app.kv_cache.cache_generation,
         input_tokens: 1_000,
         completed_at: Instant::now(),
+        utc_day: 0,
         provider: "anthropic".to_string(),
         model: "claude-opus-4-6".to_string(),
         upstream_provider: None,
+        account: None,
         signature: Some(baseline_signature),
     });
 
@@ -611,9 +747,11 @@ fn compaction_invalidates_kv_cache_baseline_and_stale_completion_cannot_restore_
         cache_generation: app.kv_cache.cache_generation,
         input_tokens: 80_169,
         completed_at: Instant::now(),
+        utc_day: 0,
         provider: app.kv_cache_provider_name(),
         model: app.kv_cache_provider_model(),
         upstream_provider: None,
+        account: None,
         signature: Some(old_signature.clone()),
     });
 
@@ -639,7 +777,7 @@ fn compaction_invalidates_kv_cache_baseline_and_stale_completion_cannot_restore_
     app.streaming.streaming_cache_read_tokens = Some(80_000);
     app.streaming.streaming_cache_creation_tokens = Some(0);
     app.kv_cache.current_api_usage_recorded = false;
-    app.record_completed_stream_cache_usage();
+    record_reported_test_cache_usage(&mut app);
     assert!(
         app.kv_cache_baseline_for_current_session().is_none(),
         "a pre-compaction request completion must remain stale"
@@ -666,7 +804,7 @@ fn compaction_invalidates_kv_cache_baseline_and_stale_completion_cannot_restore_
     app.streaming.streaming_cache_read_tokens = Some(20_224);
     app.streaming.streaming_cache_creation_tokens = Some(0);
     app.kv_cache.current_api_usage_recorded = false;
-    app.record_completed_stream_cache_usage();
+    record_reported_test_cache_usage(&mut app);
 
     assert!(app.kv_cache.kv_cache_miss_samples.is_empty());
     assert!(
@@ -690,9 +828,11 @@ fn native_compaction_application_invalidates_kv_cache_baseline_before_continuati
         cache_generation: app.kv_cache.cache_generation,
         input_tokens: 262_419,
         completed_at: Instant::now(),
+        utc_day: 0,
         provider: app.kv_cache_provider_name(),
         model: app.kv_cache_provider_model(),
         upstream_provider: None,
+        account: None,
         signature: Some(old_signature),
     });
     let old_generation = app.kv_cache.cache_generation;
@@ -1171,6 +1311,8 @@ fn stale_server_history_is_deferred_before_remote_state_is_applied() {
 
     let redraw = app.handle_server_event(
         crate::protocol::ServerEvent::History {
+            messages_base_count: None,
+            images_unchanged: false,
             id: 1,
             session_id: "session_from_stale_server".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
@@ -1206,9 +1348,11 @@ fn stale_server_history_is_deferred_before_remote_state_is_applied() {
             status_detail: Some("stale-status".to_string()),
             upstream_provider: Some("stale-upstream".to_string()),
             provider_oauth_email: None,
+            provider_oauth_account_label: None,
             resolved_credential: None,
             reasoning_effort: Some("high".to_string()),
             service_tier: Some("stale-tier".to_string()),
+            available_service_tiers: None,
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
@@ -1265,6 +1409,8 @@ fn deferred_stale_server_history_captures_session_id_for_reload_handoff() {
 
     let redraw = app.handle_server_event(
         crate::protocol::ServerEvent::History {
+            messages_base_count: None,
+            images_unchanged: false,
             id: 1,
             session_id: "session_real_server_owned".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
@@ -1302,9 +1448,11 @@ fn deferred_stale_server_history_captures_session_id_for_reload_handoff() {
             status_detail: None,
             upstream_provider: None,
             provider_oauth_email: None,
+            provider_oauth_account_label: None,
             resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,
+            available_service_tiers: None,
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
@@ -1351,6 +1499,8 @@ fn ancient_server_history_is_deferred_via_client_side_release_check() {
 
     let redraw = app.handle_server_event(
         crate::protocol::ServerEvent::History {
+            messages_base_count: None,
+            images_unchanged: false,
             id: 1,
             session_id: "session_from_ancient_server".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
@@ -1388,9 +1538,11 @@ fn ancient_server_history_is_deferred_via_client_side_release_check() {
             status_detail: Some("ancient-status".to_string()),
             upstream_provider: Some("ancient-upstream".to_string()),
             provider_oauth_email: None,
+            provider_oauth_account_label: None,
             resolved_credential: None,
             reasoning_effort: Some("high".to_string()),
             service_tier: Some("ancient-tier".to_string()),
+            available_service_tiers: None,
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
@@ -1445,6 +1597,8 @@ fn older_server_reporting_no_update_is_still_deferred_via_client_check() {
             id: 1,
             session_id: "session_from_old_server".to_string(),
             messages: vec![],
+            messages_base_count: None,
+            images_unchanged: false,
             images: vec![],
             provider_name: Some("p".to_string()),
             provider_model: Some("m".to_string()),
@@ -1473,9 +1627,11 @@ fn older_server_reporting_no_update_is_still_deferred_via_client_check() {
             status_detail: None,
             upstream_provider: None,
             provider_oauth_email: None,
+            provider_oauth_account_label: None,
             resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,
+            available_service_tiers: None,
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
@@ -1552,6 +1708,8 @@ fn older_server_history_repairs_stale_shared_server_channel_end_to_end() {
             id: 1,
             session_id: "session_from_old_server".to_string(),
             messages: vec![],
+            messages_base_count: None,
+            images_unchanged: false,
             images: vec![],
             provider_name: Some("p".to_string()),
             provider_model: Some("m".to_string()),
@@ -1578,9 +1736,11 @@ fn older_server_history_repairs_stale_shared_server_channel_end_to_end() {
             status_detail: None,
             upstream_provider: None,
             provider_oauth_email: None,
+            provider_oauth_account_label: None,
             resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,
+            available_service_tiers: None,
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
@@ -1631,6 +1791,8 @@ fn current_release_server_history_is_not_deferred_by_client_check() {
             id: 1,
             session_id: "session_current".to_string(),
             messages: vec![],
+            messages_base_count: None,
+            images_unchanged: false,
             images: vec![],
             provider_name: Some("p".to_string()),
             provider_model: Some("m".to_string()),
@@ -1657,9 +1819,11 @@ fn current_release_server_history_is_not_deferred_by_client_check() {
             status_detail: None,
             upstream_provider: None,
             provider_oauth_email: None,
+            provider_oauth_account_label: None,
             resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,
+            available_service_tiers: None,
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),

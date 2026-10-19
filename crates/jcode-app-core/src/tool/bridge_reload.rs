@@ -159,7 +159,7 @@ fn running_launch(_pid: i32) -> Option<BridgeLaunch> {
 }
 
 fn process_alive(pid: i32) -> bool {
-    unsafe { libc::kill(pid, 0) == 0 }
+    u32::try_from(pid).is_ok_and(crate::platform::is_process_running)
 }
 
 async fn stop_process(pid: i32) {

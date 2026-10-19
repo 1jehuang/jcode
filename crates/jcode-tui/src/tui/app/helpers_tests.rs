@@ -75,15 +75,7 @@ fn inferred_reasoning_efforts_use_provider_specific_order_and_max_semantics() {
     assert_eq!(
         inferred_reasoning_efforts(Some("openai"), Some("gpt-5.4")),
         vec![
-            "none",
-            "minimal",
-            "low",
-            "medium",
-            "high",
-            "xhigh",
-            "max",
-            "swarm",
-            "swarm-deep"
+            "none", "minimal", "low", "medium", "high", "xhigh", "max", "swarm"
         ],
         "OpenAI exposes max as a real Responses API effort level"
     );
@@ -94,67 +86,24 @@ fn inferred_reasoning_efforts_use_provider_specific_order_and_max_semantics() {
     );
     assert_eq!(
         inferred_reasoning_efforts(Some("anthropic"), Some("claude-sonnet-4-6")),
-        vec![
-            "none",
-            "low",
-            "medium",
-            "high",
-            "max",
-            "swarm",
-            "swarm-deep"
-        ]
+        vec!["none", "low", "medium", "high", "max", "swarm"]
     );
     assert_eq!(
         inferred_reasoning_efforts(Some("anthropic"), Some("claude-opus-4-7")),
-        vec![
-            "none",
-            "low",
-            "medium",
-            "high",
-            "xhigh",
-            "max",
-            "swarm",
-            "swarm-deep"
-        ]
+        vec!["none", "low", "medium", "high", "xhigh", "max", "swarm"]
     );
     assert_eq!(
         inferred_reasoning_efforts(Some("openrouter"), Some("anthropic/claude-sonnet-4.6")),
-        vec![
-            "none",
-            "minimal",
-            "low",
-            "medium",
-            "high",
-            "xhigh",
-            "swarm",
-            "swarm-deep"
-        ]
+        vec!["none", "minimal", "low", "medium", "high", "xhigh", "swarm"]
     );
     assert_eq!(
         inferred_reasoning_efforts(Some("openrouter"), Some("deepseek/deepseek-r1")),
-        vec![
-            "none",
-            "minimal",
-            "low",
-            "medium",
-            "high",
-            "xhigh",
-            "swarm",
-            "swarm-deep"
-        ],
+        vec!["none", "minimal", "low", "medium", "high", "xhigh", "swarm"],
         "OpenRouter uses unified reasoning where max is only an alias, not a cycle level"
     );
     assert_eq!(
         inferred_reasoning_efforts(Some("deepseek"), Some("deepseek-v4-pro")),
-        vec![
-            "none",
-            "low",
-            "medium",
-            "high",
-            "max",
-            "swarm",
-            "swarm-deep"
-        ],
+        vec!["none", "low", "medium", "high", "max", "swarm"],
         "DeepSeek direct keeps max as a real provider level"
     );
     assert!(inferred_reasoning_efforts(Some("ollama"), Some("llama3")).is_empty());
@@ -173,26 +122,19 @@ fn swarm_effort_display_labels_use_configured_root_and_preserve_modes() {
     ] {
         assert_eq!(
             effort_display_label_with_root("swarm", Some(level)),
-            format!("Swarm ({title} + light fan-out) [Beta]")
-        );
-        assert_eq!(
-            effort_display_label_with_root("swarm-deep", Some(level)),
-            format!("Swarm Deep ({title} + task graph) [Beta]")
+            format!("Swarm ({title} + parallel agents) [Beta]")
         );
         assert_eq!(effort_display_label_with_root("high", Some(level)), "High");
     }
 }
 
 #[test]
-fn swarm_effort_display_labels_default_to_max() {
+fn swarm_effort_display_labels_default_to_low() {
     assert_eq!(
         effort_display_label_with_root("swarm", None),
-        "Swarm (Max + light fan-out) [Beta]"
+        "Swarm (Low + parallel agents) [Beta]"
     );
-    assert_eq!(
-        effort_display_label_with_root("swarm-deep", None),
-        "Swarm Deep (Max + task graph) [Beta]"
-    );
+    assert_eq!(effort_display_label("swarm-deep"), "swarm-deep");
     assert_eq!(effort_display_label("high"), "High");
     assert_eq!(effort_display_label("future"), "future");
 }

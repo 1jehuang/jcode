@@ -6,7 +6,7 @@
 //!
 //! Canonical tier values:
 //! - `off`: Standard processing (no service tier override)
-//! - `priority`: Fast mode (OpenAI accepts `priority` or `fast` on the wire)
+//! - `priority`: Fast mode (normalize the `fast` UI alias before sending upstream)
 //! - `ultrafast`: OpenAI Ultrafast, only for models that support it
 
 /// Standard processing.
@@ -29,11 +29,15 @@ fn base_model(model: &str) -> String {
 
 /// Whether OpenAI offers the Ultrafast service tier for `model`.
 ///
-/// Ultrafast is GA for GPT-6 Astra and in preview for GPT-5.6 Sol
-/// (https://developers.openai.com/api/docs/guides/ultrafast-mode, 2026-10).
+/// Ultrafast is broadly available for GPT-6 Astra and GPT-6.1 Sol.
+/// Retain GPT-5.6 Sol preview support documented by the Responses reference.
+/// Verified against the Ultrafast guide and Responses reference, 2026-10-16.
 pub fn openai_model_supports_ultrafast(model: &str) -> bool {
     let model = base_model(model);
-    matches!(model.as_str(), "gpt-6-astra" | "gpt-5.6-sol")
+    matches!(
+        model.as_str(),
+        "gpt-6-astra" | "gpt-6.1-sol" | "gpt-5.6-sol"
+    ) || model.starts_with("gpt-6.1-sol-")
         || model.starts_with("gpt-6-astra-")
         || model.starts_with("gpt-5.6-sol-")
 }
@@ -107,6 +111,26 @@ pub fn speed_tier_ladder(
     Vec::new()
 }
 
+/// Filter the static UI order by an authoritative provider capability list.
+/// `None` preserves compatibility with servers predating capability reporting.
+/// Standard is always retained, while Flex is never a speed hotkey rung.
+pub fn speed_tier_ladder_with_capabilities(
+    provider_name: Option<&str>,
+    model_name: Option<&str>,
+    available: Option<&[impl AsRef<str>]>,
+) -> Vec<&'static str> {
+    let mut ladder = speed_tier_ladder(provider_name, model_name);
+    if let Some(available) = available {
+        ladder.retain(|tier| {
+            *tier == SPEED_TIER_STANDARD
+                || available
+                    .iter()
+                    .any(|supported| supported.as_ref() == *tier)
+        });
+    }
+    ladder
+}
+
 /// Step along `ladder` from `current` in `direction`, clamping at both ends.
 ///
 /// Returns `None` when the ladder is empty. The returned flag is `true` when
@@ -146,6 +170,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn authoritative_capabilities_filter_without_adding_flex() {
+        let ladder = |available| {
+            speed_tier_ladder_with_capabilities(Some("openai"), Some("gpt-6-astra"), available)
+        };
+        assert_eq!(
+            ladder(None::<&[&str]>),
+            vec!["off", "priority", "ultrafast"]
+        );
+        assert_eq!(ladder(Some(&["priority", "flex"])), vec!["off", "priority"]);
+        assert_eq!(ladder(Some(&[])), vec!["off"]);
+        assert_eq!(
+            ladder(Some(&["flex", "ultrafast", "priority"])),
+            vec!["off", "priority", "ultrafast"]
+        );
+        assert_eq!(
+            speed_tier_ladder_with_capabilities(Some("cursor"), None, Some(&["priority", "off"])),
+            vec!["off", "priority"]
+        );
+        assert_eq!(
+            speed_tier_ladder_with_capabilities(
+                Some("anthropic"),
+                Some("claude-opus-4-8"),
+                Some(&["off", "priority"])
+            ),
+            vec!["off", "priority"]
+        );
+    }
+
+    #[test]
     fn openai_ladder_includes_ultrafast_only_for_supported_models() {
         assert_eq!(
             speed_tier_ladder(Some("openai"), Some("gpt-6-astra")),
@@ -163,6 +216,28 @@ mod tests {
             speed_tier_ladder(None, Some("gpt-6-astra")),
             vec!["off", "priority", "ultrafast"]
         );
+    }
+
+    #[test]
+    fn sol_ultrafast_accepts_qualified_snapshots_and_context_suffixes() {
+        for model in [
+            "gpt-6.1-sol",
+            "openai/gpt-6.1-sol",
+            "gpt-6.1-sol-2026-10-16",
+            " OpenAI/GPT-6.1-Sol[1m] ",
+            "openai/gpt-6.1-sol-2026-10-16[1m]",
+        ] {
+            assert!(openai_model_supports_ultrafast(model), "{model}");
+            assert_eq!(
+                speed_tier_ladder(Some("OpenAI"), Some(model)),
+                vec!["off", "priority", "ultrafast"],
+                "{model}"
+            );
+        }
+        for model in ["gpt-6.1", "gpt-6.1-solstice", "gpt-6.1-sol2"] {
+            assert!(!openai_model_supports_ultrafast(model), "{model}");
+        }
+        assert!(speed_tier_ladder(Some("openrouter"), Some("openai/gpt-6.1-sol")).is_empty());
     }
 
     #[test]
