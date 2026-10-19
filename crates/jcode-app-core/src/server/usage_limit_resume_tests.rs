@@ -220,6 +220,13 @@ impl Fixture {
     }
 }
 
+/// Least gap a resume may leave after a limit that resets in `reset`. The
+/// reset is a wall-clock instant, so the real time the test has spent so far
+/// shortens the paused-clock wait by up to that much.
+fn min_resume_gap(reset: Duration, real_start: Instant) -> Duration {
+    (reset + Duration::from_secs(5)).saturating_sub(real_start.elapsed())
+}
+
 fn scheduled_messages(agent: &Agent) -> usize {
     agent
         .messages()
@@ -234,6 +241,7 @@ fn scheduled_messages(agent: &Agent) -> usize {
 
 #[tokio::test(start_paused = true)]
 async fn scheduled_turn_hitting_a_far_usage_limit_waits_for_the_reset_and_resumes() {
+    let real_start = Instant::now();
     let provider = UsageLimitedProvider::new(1, Some(Duration::from_secs(2)));
     let mut fx = Fixture::new(&provider).await;
     fx.start_scheduled_turn().await;
@@ -271,7 +279,7 @@ async fn scheduled_turn_hitting_a_far_usage_limit_waits_for_the_reset_and_resume
     fx.wait_status("ready").await;
     assert_eq!(provider.calls(), 2);
     assert!(
-        provider.gaps()[0] >= Duration::from_secs(2 + 5),
+        provider.gaps()[0] >= min_resume_gap(Duration::from_secs(2), real_start),
         "never resumed before the reported reset: {:?}",
         provider.gaps()
     );
@@ -292,6 +300,7 @@ async fn scheduled_turn_hitting_a_far_usage_limit_waits_for_the_reset_and_resume
 
 #[tokio::test(start_paused = true)]
 async fn always_limited_turn_gets_one_attempt_plus_three_resumes_then_fails() {
+    let real_start = Instant::now();
     let reset = Duration::from_secs(120);
     let provider = UsageLimitedProvider::new(usize::MAX, Some(reset));
     let mut fx = Fixture::new(&provider).await;
@@ -331,8 +340,9 @@ async fn always_limited_turn_gets_one_attempt_plus_three_resumes_then_fails() {
     );
     fx.wait_status("failed").await;
     assert_eq!(provider.calls(), 4, "1 attempt + 3 resumes");
+    let min_gap = min_resume_gap(reset, real_start);
     for gap in provider.gaps() {
-        assert!(gap >= reset + Duration::from_secs(5), "gap {gap:?}");
+        assert!(gap >= min_gap, "gap {gap:?} < {min_gap:?}");
     }
     assert!(!usage_limit_resume::has_pending_resume(&fx.session_id));
 }
