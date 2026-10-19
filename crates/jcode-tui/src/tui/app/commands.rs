@@ -2528,6 +2528,14 @@ fn handle_selfdev_command(app: &mut App, trimmed: &str) -> bool {
     true
 }
 
+/// `/initiatives` is an explicit request to see the page, so it reopens a side
+/// panel the user closed. Agent-driven panel updates stay hidden.
+fn show_in_side_panel(app: &mut App, snapshot: crate::side_panel::SidePanelSnapshot) {
+    app.side_panel_user_hidden = false;
+    app.side_panel_explicit_hidden = false;
+    app.set_side_panel_snapshot(snapshot);
+}
+
 pub(super) fn handle_goals_command(app: &mut App, trimmed: &str) -> bool {
     let Some(trimmed) = trimmed
         .strip_prefix("/initiatives")
@@ -2544,7 +2552,7 @@ pub(super) fn handle_goals_command(app: &mut App, trimmed: &str) -> bool {
             true,
         ) {
             Ok(snapshot) => {
-                app.set_side_panel_snapshot(snapshot);
+                show_in_side_panel(app, snapshot);
                 let count = crate::goal::list_relevant_goals(active_working_dir(app).as_deref())
                     .map(|goals| goals.len())
                     .unwrap_or(0);
@@ -2570,7 +2578,7 @@ pub(super) fn handle_goals_command(app: &mut App, trimmed: &str) -> bool {
             true,
         ) {
             Ok(Some(result)) => {
-                app.set_side_panel_snapshot(result.snapshot);
+                show_in_side_panel(app, result.snapshot);
                 let mut msg = format!("Resumed initiative {}.", result.goal.title);
                 if let Some(next_step) = result.goal.next_steps.first() {
                     msg.push_str(&format!(" Next step: {}", next_step));
@@ -2604,7 +2612,7 @@ pub(super) fn handle_goals_command(app: &mut App, trimmed: &str) -> bool {
             true,
         ) {
             Ok(Some(result)) => {
-                app.set_side_panel_snapshot(result.snapshot);
+                show_in_side_panel(app, result.snapshot);
                 app.push_display_message(DisplayMessage::system(format!(
                     "Opened initiative {} in the side panel.",
                     result.goal.title
