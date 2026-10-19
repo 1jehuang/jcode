@@ -784,7 +784,7 @@ fn schema_still_requires_action() {
 }
 
 #[test]
-fn schema_advertises_model_and_effort_spawn_overrides() {
+fn schema_advertises_model_override_but_not_effort() {
     let schema = CommunicateTool::new().parameters_schema();
     let props = schema["properties"]
         .as_object()
@@ -798,11 +798,9 @@ fn schema_advertises_model_and_effort_spawn_overrides() {
             .contains("list_models"),
         "model param should point at the list_models action"
     );
-    assert!(props.contains_key("effort"));
-    assert_eq!(
-        props["effort"]["enum"],
-        json!(["none", "minimal", "low", "medium", "high", "xhigh", "max"])
-    );
+    // Worker effort is user-configured (`agents.swarm_effort`, default low),
+    // never chosen by the coordinating agent.
+    assert!(!props.contains_key("effort"));
     assert!(
         schema["properties"]["action"]["enum"]
             .as_array()
@@ -1036,7 +1034,7 @@ fn format_swarm_model_list_renders_routes_and_default() {
     assert!(output.contains("Configured agents.swarm_model default: openai-api:gpt-5.5"));
     assert!(output.contains("gpt-5.5 via OpenAI [openai-api-key] (API key)"));
     assert!(output.contains("claude-fable-5 via Anthropic [anthropic-api-key] [unavailable]"));
-    assert!(output.contains("effort"));
+    assert!(!output.contains("pass effort"));
 }
 
 #[test]

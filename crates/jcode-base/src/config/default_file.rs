@@ -504,11 +504,10 @@ wake_mode = "internal"
 # Env override: JCODE_SWARM_MODEL
 # swarm_model = "inherit"
 #
-# Default reasoning effort for spawned swarm workers when the spawn call does
-# not pass an explicit `effort` ("low", "medium", "high", ...). Leave unset so
-# workers inherit the provider-wide reasoning effort.
+# Reasoning effort for spawned swarm workers ("low", "medium", "high", ...).
+# Agents cannot choose worker effort through the swarm tool. Unset = "low".
 # Env override: JCODE_SWARM_EFFORT
-# swarm_effort = "medium"
+# swarm_effort = "low"
 #
 # Root model reasoning while /effort swarm is selected. Independent of worker
 # swarm_effort. Supported levels: none|minimal|low|medium|high|xhigh|max.
