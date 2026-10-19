@@ -423,6 +423,34 @@ pub fn effective_context_tokens_from_usage(
     }
 }
 
+/// Previously reusable cache boundary, not the full context size. With split
+/// accounting the uncached input tail was never written and cannot be expected
+/// as a cache read on the next request. Cache creations, however, are reusable.
+pub fn reusable_cache_tokens_from_usage(
+    provider_name: &str,
+    input_tokens: u64,
+    cache_read_input_tokens: Option<u64>,
+    cache_creation_input_tokens: Option<u64>,
+) -> u64 {
+    let effective = effective_context_tokens_from_usage(
+        provider_name,
+        input_tokens,
+        cache_read_input_tokens,
+        cache_creation_input_tokens,
+    );
+    let provider = provider_name.to_lowercase();
+    if provider.contains("openai") || provider.contains("codex") {
+        return input_tokens;
+    }
+    if provider.contains("anthropic") || provider.contains("claude") || effective > input_tokens {
+        cache_read_input_tokens
+            .unwrap_or(0)
+            .saturating_add(cache_creation_input_tokens.unwrap_or(0))
+    } else {
+        input_tokens
+    }
+}
+
 pub fn estimate_compaction_tokens_from_chars(total_chars: usize, token_budget: usize) -> usize {
     let msg_tokens = total_chars / CHARS_PER_TOKEN;
     // Add overhead for system prompt + tool definitions, which are not in the
@@ -883,6 +911,30 @@ pub fn tail_str_boundary(value: &str, max_bytes: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reusable_cache_boundary_excludes_only_split_uncached_tail() {
+        for provider in ["Claude", "anthropic", "unknown"] {
+            assert_eq!(
+                reusable_cache_tokens_from_usage(provider, 2_482, Some(615_629), Some(1_375)),
+                617_004
+            );
+        }
+        for provider in ["openai", "openai-api", "codex"] {
+            assert_eq!(
+                reusable_cache_tokens_from_usage(provider, 619_486, Some(615_629), Some(1_375)),
+                619_486
+            );
+        }
+        assert_eq!(
+            reusable_cache_tokens_from_usage("Claude", 2_482, Some(0), Some(0)),
+            0
+        );
+        assert_eq!(
+            reusable_cache_tokens_from_usage("Claude", 0, Some(615_629), Some(1_375)),
+            617_004
+        );
+    }
 
     #[test]
     fn compaction_text_keeps_native_search_query_and_urls() {

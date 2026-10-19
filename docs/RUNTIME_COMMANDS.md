@@ -44,6 +44,9 @@ session's runtime host, including SSH and managed remote runtimes.
 - `autoreview`, `autojudge`: show status and persist explicit on/off/toggle.
 - `transport`: status or provider-validated auto/https/websocket.
 - `fast`: bare command toggles priority/off, explicit on/off/flex/status supported.
+  `ultra`, `ultrafast`, and `ultra-fast` explicitly select Ultrafast on supported
+  OpenAI models. See [OpenAI Ultrafast](OPENAI_ULTRAFAST.md) for opt-in costs
+  and API versus Codex access restrictions.
   Providers that cannot apply it return their actual error.
 - `telemetry`: show status or persist everything/no-prompts/nothing, honoring
   environment-forced opt-out.

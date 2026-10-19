@@ -1053,11 +1053,12 @@ async fn spawn_bootstraps_coordinator_when_swarm_has_none() {
 }
 
 #[tokio::test]
-async fn nested_agent_cannot_spawn_when_root_is_light_or_normal() {
-    // Both explicit light-swarm effort and ordinary ad hoc swarm use are
-    // one-level fan-out. A spawned child cannot grow another generation.
+async fn nested_agent_cannot_spawn_regardless_of_root_effort() {
+    // Swarms are one-level fan-out. A spawned child cannot grow another
+    // generation, even if the root still reports the retired deep sentinel.
     for (root_id, effort) in [
         ("light-root-no-recursion", Some("swarm")),
+        ("deep-root-no-recursion", Some("swarm-deep")),
         ("normal-root-no-recursion", None),
     ] {
         crate::session_effort::forget_session_effort(root_id);
@@ -1120,96 +1121,6 @@ async fn nested_agent_cannot_spawn_when_root_is_light_or_normal() {
                     && message.contains(&format!("Only the root session ({root_id}) may spawn agents"))
         ));
     }
-}
-
-#[tokio::test]
-async fn nested_agent_can_spawn_when_root_is_deep() {
-    let root_id = "deep-root-recursive";
-    crate::session_effort::record_session_effort(root_id, Some("swarm-deep"));
-
-    let swarm_members = Arc::new(RwLock::new(HashMap::new()));
-    let swarms_by_id = Arc::new(RwLock::new(HashMap::from([(
-        "swarm-deep".to_string(),
-        HashSet::from(["deep-child".to_string(), root_id.to_string()]),
-    )])));
-    let swarm_coordinators = Arc::new(RwLock::new(HashMap::from([(
-        "swarm-deep".to_string(),
-        root_id.to_string(),
-    )])));
-    let swarm_plans = Arc::new(RwLock::new(HashMap::<String, VersionedPlan>::new()));
-    let (mut child_member, _child_rx) = member("deep-child", Some("swarm-deep"), "agent");
-    child_member.report_back_to_session_id = Some(root_id.to_string());
-    let (root_member, _root_rx) = member(root_id, Some("swarm-deep"), "coordinator");
-    let mut members = swarm_members.write().await;
-    members.insert("deep-child".to_string(), child_member);
-    members.insert(root_id.to_string(), root_member);
-    drop(members);
-    let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();
-
-    let allowed = ensure_spawn_coordinator_swarm(
-        3,
-        "deep-child",
-        &client_event_tx,
-        &swarm_members,
-        &swarms_by_id,
-        &swarm_coordinators,
-        &swarm_plans,
-        32,
-    )
-    .await;
-
-    crate::session_effort::forget_session_effort(root_id);
-    assert_eq!(allowed.as_deref(), Some("swarm-deep"));
-    assert!(client_event_rx.try_recv().is_err());
-}
-
-#[tokio::test]
-async fn spawn_allowed_at_arbitrary_depth_without_depth_cap() {
-    // Deep-swarm mode still allows recursive decomposition at arbitrary depth.
-    let root_id = "deep-root-arbitrary-depth";
-    crate::session_effort::record_session_effort(root_id, Some("swarm-deep"));
-    let swarm_members = Arc::new(RwLock::new(HashMap::new()));
-    let swarms_by_id = Arc::new(RwLock::new(HashMap::new()));
-    let swarm_coordinators = Arc::new(RwLock::new(HashMap::from([(
-        "swarm-1".to_string(),
-        root_id.to_string(),
-    )])));
-    let swarm_plans = Arc::new(RwLock::new(HashMap::<String, VersionedPlan>::new()));
-    {
-        let mut members = swarm_members.write().await;
-        let (root, _rx) = member(root_id, Some("swarm-1"), "coordinator");
-        members.insert(root_id.to_string(), root);
-        let chain = [
-            ("a", root_id),
-            ("b", "a"),
-            ("c", "b"),
-            ("d", "c"),
-            ("e", "d"),
-            ("f", "e"),
-        ];
-        for (id, parent) in chain {
-            let (mut m, _rx) = member(id, Some("swarm-1"), "agent");
-            m.report_back_to_session_id = Some(parent.to_string());
-            members.insert(id.to_string(), m);
-        }
-    }
-    let (client_event_tx, _client_event_rx) = mpsc::unbounded_channel();
-
-    // `f` is deeply nested but the swarm is far below the member cap, so spawning
-    // is allowed.
-    let allowed = ensure_spawn_coordinator_swarm(
-        7,
-        "f",
-        &client_event_tx,
-        &swarm_members,
-        &swarms_by_id,
-        &swarm_coordinators,
-        &swarm_plans,
-        32,
-    )
-    .await;
-    crate::session_effort::forget_session_effort(root_id);
-    assert_eq!(allowed.as_deref(), Some("swarm-1"));
 }
 
 #[tokio::test]

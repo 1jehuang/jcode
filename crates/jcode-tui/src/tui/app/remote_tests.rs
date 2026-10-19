@@ -178,6 +178,56 @@ fn client_interaction_restores_focus_so_scroll_redraws_at_full_rate() {
 include!("remote_tests/auth_mapping.rs");
 
 #[test]
+fn dead_server_respawn_waits_for_repeated_failures_and_throttles() {
+    use std::time::{Duration, Instant};
+    let now = Instant::now();
+    let mut state = RemoteRunState {
+        reconnect_attempts: 2,
+        ..Default::default()
+    };
+    assert!(!reconnect::should_respawn_dead_server(&state, false, now));
+
+    state.reconnect_attempts = 3;
+    assert!(reconnect::should_respawn_dead_server(&state, false, now));
+    assert!(
+        !reconnect::should_respawn_dead_server(&state, true, now),
+        "SSH clients must not spawn a local server"
+    );
+
+    state.server_reload_in_progress = true;
+    assert!(!reconnect::should_respawn_dead_server(&state, false, now));
+    state.server_reload_in_progress = false;
+
+    state.initial_server_start = true;
+    assert!(
+        !reconnect::should_respawn_dead_server(&state, false, now),
+        "a server we just started gets its startup window first"
+    );
+    state.initial_server_start = false;
+
+    state.last_dead_server_respawn = Some(now);
+    assert!(!reconnect::should_respawn_dead_server(
+        &state,
+        false,
+        now + Duration::from_secs(10)
+    ));
+    assert!(reconnect::should_respawn_dead_server(
+        &state,
+        false,
+        now + Duration::from_secs(61)
+    ));
+}
+
+#[test]
+fn long_disconnect_redraws_slowly() {
+    use std::time::Duration;
+    let short = reconnect::disconnected_redraw_period(false, Some(Duration::from_secs(5)));
+    let long = reconnect::disconnected_redraw_period(false, Some(Duration::from_secs(120)));
+    assert_eq!(short, Duration::from_secs(1));
+    assert!(long >= Duration::from_secs(5), "issue #1887: {long:?}");
+}
+
+#[test]
 fn reload_handoff_inactive_without_flag_or_marker() {
     // `reload_handoff_active` falls back to the on-disk reload marker in the
     // runtime dir. Point the runtime dir at an empty tempdir so a real
@@ -439,6 +489,8 @@ fn startup_history(session_id: &str) -> ServerEvent {
         id: 1,
         session_id: session_id.to_string(),
         messages: vec![],
+        messages_base_count: None,
+        images_unchanged: false,
         images: vec![],
         provider_name: None,
         provider_model: None,
@@ -465,14 +517,104 @@ fn startup_history(session_id: &str) -> ServerEvent {
         status_detail: None,
         upstream_provider: None,
         provider_oauth_email: None,
+        provider_oauth_account_label: None,
         resolved_credential: None,
         reasoning_effort: None,
         service_tier: None,
+        available_service_tiers: None,
         compaction_mode: crate::config::CompactionMode::Reactive,
         activity: None,
         side_panel: crate::side_panel::SidePanelSnapshot::default(),
         applets: Default::default(),
     }
+}
+
+#[test]
+fn history_speed_capabilities_are_authoritative_and_identity_scoped() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    let history = |session: &str, model: &str, tiers: Option<Vec<String>>| {
+        let mut event = startup_history(session);
+        if let ServerEvent::History {
+            provider_name,
+            provider_model,
+            available_service_tiers,
+            ..
+        } = &mut event
+        {
+            *provider_name = Some("openai".into());
+            *provider_model = Some(model.into());
+            *available_service_tiers = tiers;
+        }
+        event
+    };
+    handle_server_event(
+        &mut app,
+        history(
+            "speed-session",
+            "gpt-6-astra",
+            Some(vec!["priority".into()]),
+        ),
+        &mut remote,
+    );
+    assert_eq!(
+        app.remote_available_service_tiers,
+        Some(vec!["priority".into()])
+    );
+    // Missing capability metadata from an old server does not erase a known
+    // capability snapshot for the same identity.
+    handle_server_event(
+        &mut app,
+        history("speed-session", "gpt-6-astra", None),
+        &mut remote,
+    );
+    assert_eq!(
+        app.remote_available_service_tiers,
+        Some(vec!["priority".into()])
+    );
+    handle_server_event(
+        &mut app,
+        history("speed-session", "gpt-6-astra", Some(vec![])),
+        &mut remote,
+    );
+    assert_eq!(app.remote_available_service_tiers, Some(vec![]));
+    handle_server_event(
+        &mut app,
+        history("speed-session", "gpt-6.1-sol", None),
+        &mut remote,
+    );
+    assert_eq!(app.remote_available_service_tiers, None);
+    app.remote_available_service_tiers = Some(vec!["priority".into()]);
+    let model_changed = serde_json::from_value(serde_json::json!({
+        "type": "model_changed", "id": 1, "model": "gpt-6-astra", "provider_name": "openai"
+    }))
+    .unwrap();
+    app.model_catalog_after_history = false;
+    handle_server_event(&mut app, model_changed, &mut remote);
+    assert_eq!(app.remote_available_service_tiers, None);
+    assert!(app.model_catalog_after_history);
+    app.model_catalog_after_history = false;
+    handle_server_event(
+        &mut app,
+        ServerEvent::AvailableModelsUpdated {
+            provider_name: Some("openai".into()),
+            provider_model: Some("gpt-6-astra".into()),
+            available_models: vec![],
+            available_model_routes: vec![],
+        },
+        &mut remote,
+    );
+    assert!(app.model_catalog_after_history);
+    app.remote_available_service_tiers = Some(vec!["priority".into()]);
+    handle_server_event(
+        &mut app,
+        history("another-speed-session", "gpt-6-astra", None),
+        &mut remote,
+    );
+    assert_eq!(app.remote_available_service_tiers, None);
 }
 
 #[test]
@@ -1206,6 +1348,35 @@ fn injected_swarm_dm_without_card_renders_one_collapsed_row() {
     assert_eq!(last.role, "swarm");
     assert_eq!(last.title.as_deref(), Some("DM from owl"));
     assert_no_long_rows(&app);
+}
+
+#[test]
+fn restored_display_snapshot_normalizes_only_raw_swarm_deliveries() {
+    use crate::tui::DisplayMessage;
+    let mut app = create_test_app();
+    let body = "Detailed implementation report. ".repeat(40);
+    let encoded = jcode_tui_messages::encode_collapsible_swarm_content("report", &body);
+    let expanded = jcode_tui_messages::toggle_collapsible_swarm_content(&encoded).unwrap();
+    app.replace_display_messages(vec![
+        DisplayMessage::system(format!("DM from hatchling: {body}")),
+        DisplayMessage::user(format!("#parser from owl: {body}")),
+        DisplayMessage::assistant(format!("DM from fox: {body}")),
+        DisplayMessage::swarm("DM from sheep", expanded.clone()),
+    ]);
+    let messages = app.display_messages();
+    for message in &messages[..2] {
+        assert_eq!(message.role, "swarm");
+        assert_eq!(
+            crate::tui::ui::render_swarm_message(
+                message,
+                100,
+                crate::config::DiffDisplayMode::Off,
+            ).len(),
+            1,
+        );
+    }
+    assert_eq!(messages[2].role, "assistant");
+    assert_eq!(messages[3].content, expanded);
 }
 
 #[test]
