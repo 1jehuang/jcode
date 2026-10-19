@@ -305,7 +305,7 @@ mod tests {
 
     #[test]
     fn uses_decisions_protocol_not_chat_completions() {
-        let body = request_body(&request()).unwrap();
+        let body = request_body_for_model(&request(), "typesafe/jev-1.13").unwrap();
         assert_eq!(body["model"], "typesafe/jev-1.13");
         assert_eq!(body["questions"]["action"]["type"], "choice");
         assert!(body["state"].is_string());
