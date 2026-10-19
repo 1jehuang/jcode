@@ -84,6 +84,7 @@ enum LenientNumberInput {
     Other(serde::de::IgnoredAny),
 }
 
+#[allow(clippy::manual_ok_err)]
 pub(crate) fn lenient_max_secondary_suggestions<'de, D>(deserializer: D) -> Result<usize, D::Error>
 where
     D: serde::Deserializer<'de>,

@@ -217,10 +217,10 @@ pub(crate) fn draw_suggested_replies_panel(
             .or_else(|| view.response.top_confidence())
             .map(|c| (c * 100.0).round() as u32)
             .unwrap_or(75);
-        let explorer_tag = view
-            .explorer_remaining_ms
-            .map(|ms| format!(" · auto {}ms [Esc]", ms))
-            .unwrap_or_else(String::new);
+        let explorer_tag = match view.explorer_remaining_ms {
+            Some(ms) => format!(" · auto {}ms [Esc]", ms),
+            None => String::new(),
+        };
 
         let badge = view.response.badge_for_text(default_action);
         let prefix = if is_focused {
@@ -298,10 +298,10 @@ pub(crate) fn draw_suggested_replies_panel(
                 break;
             }
             let conf_suffix = if view.show_confidence {
-                view.response
-                    .confidence_for_text(text)
-                    .map(|c| format!(" ({}%)", (c * 100.0).round() as u32))
-                    .unwrap_or_else(String::new)
+                match view.response.confidence_for_text(text) {
+                    Some(c) => format!(" ({}%)", (c * 100.0).round() as u32),
+                    None => String::new(),
+                }
             } else {
                 String::new()
             };

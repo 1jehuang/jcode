@@ -340,7 +340,7 @@ pub fn extract_six_lens_review_findings(text: &str) -> Option<String> {
     for raw_line in trimmed.lines() {
         let line = raw_line
             .trim()
-            .trim_start_matches(|c: char| matches!(c, '-' | '*' | '•' | '>' | ' '))
+            .trim_start_matches(['-', '*', '•', '>', ' '])
             .trim_start_matches(['*', '`', ' ']);
         let prefix = "default_action:";
         if line
@@ -349,7 +349,7 @@ pub fn extract_six_lens_review_findings(text: &str) -> Option<String> {
         {
             let action = line[prefix.len()..]
                 .trim()
-                .trim_matches(|c: char| matches!(c, '*' | '`' | '"' | '\''))
+                .trim_matches(['*', '`', '"', '\''])
                 .trim();
             if !action.is_empty()
                 && !matches!(

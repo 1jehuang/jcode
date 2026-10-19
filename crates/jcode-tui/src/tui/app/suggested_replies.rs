@@ -446,7 +446,7 @@ impl App {
                     six_lens_findings.as_deref(),
                 )
                 .await;
-                if tx.send(response).is_err() {}
+                drop(tx.send(response));
             });
             return;
         }

@@ -68,7 +68,7 @@ fn open_gf_http_client(is_plain_http: bool) -> Result<&'static reqwest::Client> 
             .no_proxy()
             .build()
             .context("failed to build OpenGF HTTP no_proxy client")?;
-        if HTTP_NO_PROXY_CLIENT.set(built).is_err() {}
+        drop(HTTP_NO_PROXY_CLIENT.set(built));
         HTTP_NO_PROXY_CLIENT
             .get()
             .context("OpenGF HTTP no_proxy client not initialized")
@@ -81,7 +81,7 @@ fn open_gf_http_client(is_plain_http: bool) -> Result<&'static reqwest::Client> 
             .timeout(std::time::Duration::from_secs(12))
             .build()
             .context("failed to build OpenGF HTTPS client")?;
-        if HTTPS_CLIENT.set(built).is_err() {}
+        drop(HTTPS_CLIENT.set(built));
         HTTPS_CLIENT
             .get()
             .context("OpenGF HTTPS client not initialized")

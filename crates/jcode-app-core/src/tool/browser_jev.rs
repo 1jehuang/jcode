@@ -24,6 +24,7 @@ impl JevTransport {
     }
 }
 
+#[cfg(test)]
 fn request_body(request: &DecisionRequest) -> Result<Value> {
     request_body_for_model(request, &crate::jev::browser_jev_model_label())
 }
