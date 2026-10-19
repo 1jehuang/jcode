@@ -171,10 +171,25 @@ fn joint_choice_and_noul_questions_and_structured_state_respect_invariants() {
 
 #[test]
 fn parse_open_gf_extracts_json_from_fenced_response() {
-    let raw = "```json\n{\"branch\": \"Verification\", \"candidates\": [\"cargo test\", \"git status\"]}\n```";
+    let raw = "```json\n{\"branch\": \"Verification\", \"candidates\": [\"cargo test\", \"git status\", \"Показать обрезанные данные...\", \"Incomplete reply...\"]}\n```";
     let (branch, cands) = parse_open_gf_response(raw).unwrap();
     assert_eq!(branch, "verification");
     assert_eq!(cands, vec!["cargo test", "git status"]);
+
+    // Verify extract_assistant_options ignores descriptive **Key**: value status bullets
+    // and truncated lines while keeping genuine actionable choices.
+    let status_report = "- **Config**: enabled=true, jev_provider=\"auto\"\n- **Security (GO)**: секреты санитизируются\n1. **Architecture (GO)**: сквозная передача флага\n- Обрезанные данные в выводе...\n- Запустить финальные тесты";
+    let extracted = extract_assistant_options(status_report);
+    assert_eq!(extracted, vec!["Запустить финальные тесты"]);
+
+    // Verify truncate_preserving_tail preserves the closing tail without "..." markers.
+    let long_text = format!(
+        "{}\nФинальная строка ответа без обрезки.",
+        "Строка контекста для проверки границ слов.\n".repeat(80)
+    );
+    let truncated = truncate_preserving_tail(&long_text, 600);
+    assert!(truncated.ends_with("Финальная строка ответа без обрезки."));
+    assert!(!truncated.contains("..."));
 }
 
 #[test]

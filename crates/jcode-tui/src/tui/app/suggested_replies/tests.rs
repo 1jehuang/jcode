@@ -614,4 +614,18 @@ fn context_retains_user_language_across_tool_rows_preserves_closing_choices_and_
         rows.last().unwrap().contains("20. "),
         "focused option 20 must scroll into the visible panel viewport: {rows:?}"
     );
+
+    // Suggestions must not trigger or remain visible while streaming_text / deferred_stream_done_id is active
+    // or when the turn ended with "Interrupted".
+    app.input.clear();
+    app.cursor_pos = 0;
+    app.streaming.streaming_text = "незавершённый ответ модели".to_string();
+    assert!(!app.suggested_replies_visible());
+    app.trigger_suggested_replies_evaluation(false);
+    assert!(app.suggested_replies.current.is_none());
+    app.streaming.streaming_text.clear();
+
+    app.push_display_message(super::super::DisplayMessage::system("Interrupted"));
+    app.trigger_suggested_replies_evaluation(false);
+    assert!(app.suggested_replies.current.is_none());
 }

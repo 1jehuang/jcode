@@ -420,6 +420,55 @@ impl SuggestedRepliesContext {
     }
 }
 
+/// Truncate `text` to at most `max_bytes` while preserving the closing tail on clean
+/// line/word boundaries (and without inserting literal `...` markers that LLMs mistake
+/// for truncated tool or assistant output).
+pub fn truncate_preserving_tail(text: &str, max_bytes: usize) -> String {
+    let trimmed = text.trim();
+    if trimmed.len() <= max_bytes {
+        return trimmed.to_string();
+    }
+    let head_budget = max_bytes / 3;
+    let tail_budget = max_bytes.saturating_sub(head_budget);
+    let mut head_end = head_budget.min(trimmed.len());
+    while head_end > 0 && !trimmed.is_char_boundary(head_end) {
+        head_end -= 1;
+    }
+    if let Some(nl) = trimmed[..head_end].rfind('\n')
+        && nl >= head_end / 2
+    {
+        head_end = nl;
+    } else if let Some(sp) = trimmed[..head_end].rfind(char::is_whitespace)
+        && sp >= head_end / 2
+    {
+        head_end = sp;
+    }
+
+    let mut tail_start = trimmed.len().saturating_sub(tail_budget);
+    while tail_start < trimmed.len() && !trimmed.is_char_boundary(tail_start) {
+        tail_start += 1;
+    }
+    let tail_slice = &trimmed[tail_start..];
+    if let Some(nl) = tail_slice.find('\n')
+        && nl <= tail_slice.len() / 3
+    {
+        tail_start += nl + 1;
+    } else if let Some((sp_idx, sp_ch)) = tail_slice.char_indices().find(|(_, c)| c.is_whitespace())
+        && sp_idx <= tail_slice.len() / 3
+    {
+        tail_start += sp_idx + sp_ch.len_utf8();
+    }
+
+    if head_end >= tail_start {
+        return trimmed.to_string();
+    }
+    format!(
+        "{}\n\n{}",
+        trimmed[..head_end].trim_end(),
+        trimmed[tail_start..].trim_start()
+    )
+}
+
 /// Detect whether `text` is primarily written in Cyrillic (e.g. Russian).
 pub fn detect_cyrillic_language(text: &str) -> bool {
     let mut cyrillic = 0usize;
@@ -576,35 +625,54 @@ pub fn extract_assistant_options(last_assistant_message: &str) -> Vec<String> {
 }
 
 fn clean_extracted_option(raw: &str) -> String {
-    let without_bold = raw.replace("**", "");
+    let raw_trimmed = raw.trim();
+    // Descriptive key-value summary bullets (e.g. `- **Config**: ...`, `1. **Security (GO)**: ...`)
+    // are status report items, not actionable user reply choices.
+    if raw_trimmed.starts_with("**") && raw_trimmed.contains("**:") {
+        return String::new();
+    }
+    let without_bold = raw_trimmed.replace("**", "");
     let trimmed = without_bold
         .trim()
         .trim_matches(|c: char| c == '`' || c == '"' || c == '«' || c == '»')
         .trim_end_matches([';', ',']);
     let head = if let Some((left, _)) = trimmed.split_once(" — ") {
         left.trim()
-    } else if let Some((left, right)) = trimmed.split_once(": ") {
-        if left.chars().count() >= 10 && left.chars().count() <= 80 {
+    } else if let Some((left, _)) = trimmed.split_once(": ") {
+        if left.chars().count() >= 10 && left.chars().count() <= 80 && !left.contains('(') {
             left.trim()
         } else {
-            right.trim()
+            return String::new();
         }
     } else {
         trimmed
     };
-    head.chars()
-        .take(110)
-        .collect::<String>()
-        .trim()
-        .to_string()
+    head.trim().to_string()
 }
 
 fn is_viable_option_candidate(text: &str) -> bool {
     let char_count = text.chars().count();
-    (4..=110).contains(&char_count)
-        && !text.starts_with("http://")
-        && !text.starts_with("https://")
-        && !text.starts_with('[')
+    if !(4..=96).contains(&char_count)
+        || text.starts_with("http://")
+        || text.starts_with("https://")
+        || text.starts_with('[')
+        || text.ends_with("...")
+        || text.ends_with('…')
+        || text.ends_with(':')
+        || text.contains("...")
+        || text.contains('…')
+    {
+        return false;
+    }
+    let lower = text.to_lowercase();
+    !lower.contains("(truncated)")
+        && !lower.contains("output truncated")
+        && !lower.contains("обрезан")
+        && !lower.contains("(go)")
+        && !lower.contains("(no-go)")
+        && !lower.contains("conditional go")
+        && !lower.contains("mergeable")
+        && !lower.contains("confidence score")
 }
 
 pub(super) fn push_unique_case_insensitive(list: &mut Vec<String>, candidate: String) {

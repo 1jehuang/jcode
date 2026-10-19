@@ -2,7 +2,7 @@ use super::{
     MACRO_BRANCHES, MAX_MICRO_CANDIDATES, ScoredSuggestion, SuggestedRepliesContext,
     SuggestedRepliesResponse, advances_toward_feature_completion, classify_suggestion_for_goal,
     classify_suggestion_for_goal_with_options, distribute_suggestions,
-    push_unique_case_insensitive,
+    push_unique_case_insensitive, truncate_preserving_tail,
 };
 use anyhow::{Result, ensure};
 use serde_json::{Map, Value, json};
@@ -541,13 +541,13 @@ pub fn build_structured_systemone_state(
     if let Some(ref user_msg) = ctx.last_user_message {
         state.insert(
             "last_user_message".to_string(),
-            Value::String(crate::util::truncate_str(user_msg, 1200).to_string()),
+            Value::String(truncate_preserving_tail(user_msg, 1200)),
         );
     }
     if let Some(ref assistant_msg) = ctx.last_assistant_message {
         state.insert(
             "last_assistant_message".to_string(),
-            Value::String(crate::util::truncate_str(assistant_msg, 1800).to_string()),
+            Value::String(truncate_preserving_tail(assistant_msg, 2400)),
         );
     }
     if !ctx.assistant_options.is_empty() {
@@ -561,7 +561,7 @@ pub fn build_structured_systemone_state(
     }
     state.insert(
         "recent_transcript".to_string(),
-        Value::String(crate::util::truncate_str(&ctx.transcript_tail, 3200).to_string()),
+        Value::String(truncate_preserving_tail(&ctx.transcript_tail, 4800)),
     );
 
     if !candidates.is_empty() {

@@ -7,7 +7,7 @@ use super::{
         build_structured_systemone_state, contextual_candidates_for_branch_with_options,
         merge_custom_prompts, score_locally_with_context_and_options,
     },
-    distribute_suggestions, push_unique_case_insensitive,
+    distribute_suggestions, push_unique_case_insensitive, truncate_preserving_tail,
 };
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
@@ -40,7 +40,15 @@ pub fn parse_open_gf_response(raw: &str) -> Option<(String, Vec<String>)> {
             .candidates
             .into_iter()
             .map(|c| c.trim().to_string())
-            .filter(|c| !c.is_empty())
+            .filter(|c| {
+                if c.is_empty() || c.ends_with("...") || c.ends_with('…') {
+                    return false;
+                }
+                let lower = c.to_lowercase();
+                !lower.contains("обрезан")
+                    && !lower.contains("truncated")
+                    && !lower.contains("прерванн")
+            })
             .take(MAX_MICRO_CANDIDATES)
             .collect();
         if !candidates.is_empty() {
@@ -187,7 +195,7 @@ pub(super) async fn complete_via_named_openai_compatible(
             { "role": "system", "content": system },
             { "role": "user", "content": user_msg }
         ],
-        "max_tokens": 900,
+        "max_tokens": 1200,
         "temperature": 0.2,
         "stream": false
     });
@@ -330,7 +338,7 @@ pub async fn generate_open_gf_candidates_for_context(
     desired_count: usize,
 ) -> Result<(String, Vec<String>, String)> {
     let target_count = desired_count.clamp(4, MAX_MICRO_CANDIDATES);
-    let system = "You are OpenGF, the generative candidate synthesizer for Jcode's two-stage SystemOne Suggested Replies cascade. Return ONLY valid JSON with the shape: {\"branch\": \"feature_completion|goal_delivery|planning|implementation|verification|debugging|review|architecture|refactoring\", \"candidates\": [\"short actionable reply 1\", \"short actionable reply 2\", ...]}. Generate concise, complete, self-contained next-step user replies (up to 120 chars each, never cut mid-sentence) that move the user toward achieving the successful final completion of the feature and goal, tailored to the conversation state, extracted assistant options, and pending todos. CRITICAL: Write every candidate in the EXACT SAME natural language used by the user in their most recent message (e.g. Russian if the user wrote in Russian, English if in English). Order candidates from the most likely immediate next user reply (#1) to lower-priority alternatives.";
+    let system = "You are OpenGF, the generative candidate synthesizer for Jcode's two-stage SystemOne Suggested Replies cascade. Return ONLY valid JSON with the shape: {\"branch\": \"feature_completion|goal_delivery|planning|implementation|verification|debugging|review|architecture|refactoring\", \"candidates\": [\"short actionable reply 1\", \"short actionable reply 2\", ...]}. Generate concise, complete, self-contained next-step user replies (up to 120 chars each, never cut mid-sentence) that move the user toward achieving the successful final completion of the feature and goal, tailored to the conversation state, extracted assistant options, and pending todos. Never suggest asking for 'truncated', 'omitted', or 'cut-off' data/output, and never copy descriptive status bullets from the assistant's summary as user replies. CRITICAL: Write every candidate in the EXACT SAME natural language used by the user in their most recent message (e.g. Russian if the user wrote in Russian, English if in English). Order candidates from the most likely immediate next user reply (#1) to lower-priority alternatives.";
 
     let mut prompt_sections = Vec::new();
     prompt_sections.push(format!(
@@ -355,7 +363,7 @@ pub async fn generate_open_gf_candidates_for_context(
     }
     prompt_sections.push(format!(
         "Recent conversation state:\n{}",
-        crate::util::truncate_str(&ctx.transcript_tail, 3200)
+        truncate_preserving_tail(&ctx.transcript_tail, 4800)
     ));
     prompt_sections.push(format!(
         "Produce the JSON with macro branch and 4..{target_count} concrete next-step user replies in the user's language:"

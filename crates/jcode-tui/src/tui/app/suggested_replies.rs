@@ -44,28 +44,7 @@ pub struct SuggestedRepliesRuntime {
 }
 
 fn truncate_preserving_tail(text: &str, max_bytes: usize) -> String {
-    let trimmed = text.trim();
-    if trimmed.len() <= max_bytes {
-        return trimmed.to_string();
-    }
-    let head_budget = max_bytes / 2;
-    let tail_budget = max_bytes.saturating_sub(head_budget);
-    let mut head_end = head_budget.min(trimmed.len());
-    while head_end > 0 && !trimmed.is_char_boundary(head_end) {
-        head_end -= 1;
-    }
-    let mut tail_start = trimmed.len().saturating_sub(tail_budget);
-    while tail_start < trimmed.len() && !trimmed.is_char_boundary(tail_start) {
-        tail_start += 1;
-    }
-    if head_end >= tail_start {
-        return trimmed.to_string();
-    }
-    format!(
-        "{}\n...\n{}",
-        trimmed[..head_end].trim_end(),
-        trimmed[tail_start..].trim_start()
-    )
+    crate::suggested_replies::truncate_preserving_tail(text, max_bytes)
 }
 
 impl App {
@@ -88,6 +67,11 @@ impl App {
         }
         let is_staged = self.suggested_replies_has_staged_input();
         if self.is_processing
+            || self.pending_turn
+            || !self.streaming.streaming_text.is_empty()
+            || !self.stream_buffer.is_empty()
+            || self.deferred_stream_done_id.is_some()
+            || !self.streaming_tool_calls.is_empty()
             || (!self.input.is_empty() && !is_staged)
             || !self.pending_images.is_empty()
             || self.onboarding_welcome_active()
@@ -285,11 +269,13 @@ impl App {
         selected.extend_from_slice(&conversational[window_start..]);
 
         let mut buf = String::new();
-        for msg in selected {
+        let total = selected.len();
+        for (idx, msg) in selected.into_iter().enumerate() {
+            let max_bytes = if idx + 1 == total { 2400 } else { 1200 };
             buf.push_str(&format!(
                 "[{}]: {}\n\n",
                 msg.role,
-                truncate_preserving_tail(&msg.content, 900)
+                truncate_preserving_tail(&msg.content, max_bytes)
             ));
         }
         buf
@@ -310,11 +296,10 @@ impl App {
             .rev()
             .find(|msg| msg.role == "assistant" && !msg.content.trim().is_empty())
         {
-            let full_options =
+            ctx.last_assistant_message =
+                Some(truncate_preserving_tail(&last_assistant.content, 2400));
+            ctx.assistant_options =
                 crate::suggested_replies::extract_assistant_options(&last_assistant.content);
-            if !full_options.is_empty() {
-                ctx.assistant_options = full_options;
-            }
         }
         if let Some(last_user) = self
             .display_messages
@@ -388,10 +373,23 @@ impl App {
         let cfg = crate::config::config().suggested_replies.clone();
         if !cfg.enabled
             || self.is_processing
+            || self.pending_turn
+            || !self.streaming.streaming_text.is_empty()
+            || !self.stream_buffer.is_empty()
+            || self.deferred_stream_done_id.is_some()
+            || !self.streaming_tool_calls.is_empty()
             || !self.queued_messages.is_empty()
             || !self.hidden_queued_system_messages.is_empty()
             || self.pending_queued_dispatch
             || self.has_pending_user_followup()
+        {
+            return;
+        }
+        if !force_refresh
+            && self
+                .display_messages
+                .last()
+                .is_some_and(|m| m.role == "system" && m.content.trim() == "Interrupted")
         {
             return;
         }
@@ -521,6 +519,11 @@ impl App {
                     };
                     if target_matches
                         && !self.is_processing
+                        && !self.pending_turn
+                        && self.streaming.streaming_text.is_empty()
+                        && self.stream_buffer.is_empty()
+                        && self.deferred_stream_done_id.is_none()
+                        && self.streaming_tool_calls.is_empty()
                         && self.suggested_replies_input_is_empty_or_staged()
                     {
                         self.apply_suggested_replies_response(response);
