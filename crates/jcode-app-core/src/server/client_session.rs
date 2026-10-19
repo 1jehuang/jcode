@@ -768,6 +768,25 @@ pub(super) async fn handle_subscribe(
         }
     }
 
+    // A TUI that reloads itself reconnects, then its old process exits and the
+    // disconnect cleanup removes the member and clears the coordinator slot,
+    // before the new process subscribes again. Reclaim on every subscribe, not
+    // only on the resume path, so the owner always ends up holding its slot.
+    let subscribed_swarm_id = swarm_members
+        .read()
+        .await
+        .get(client_session_id)
+        .and_then(|member| member.swarm_id.clone());
+    if let Some(swarm_id) = subscribed_swarm_id {
+        reclaim_coordinator_slot_on_resume(
+            &swarm_id,
+            client_session_id,
+            swarm_members,
+            swarm_coordinators,
+        )
+        .await;
+    }
+
     let should_selfdev = *client_selfdev || matches!(selfdev, Some(true));
 
     if should_selfdev {
