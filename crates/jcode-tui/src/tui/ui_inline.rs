@@ -128,8 +128,8 @@ pub(crate) fn budgeted_inline_ui_height(
     reserved_non_inline_height: u16,
 ) -> u16 {
     let requested = inline_ui_height(app);
-    if requested == 0 {
-        return 0;
+    if requested == 0 || app.inline_ui_state().is_some() {
+        return requested;
     }
     let max_rows = available_height
         .saturating_sub(reserved_non_inline_height.saturating_add(4))

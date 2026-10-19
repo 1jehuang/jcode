@@ -291,40 +291,40 @@ async fn complete_open_gf_prompt(system: &str, user_msg: &str) -> Result<(String
         }
     }
 
-    // 3. Configured named providers in config.toml (starts with default_provider, e.g. clipapi/dragon,
-    // which makes OpenGF work inside the Remote TUI client process where active_provider_fork is None).
+    // 3. Only if the user explicitly selected `default_provider` in config.toml, try that
+    // selected named profile or external runtime (never iterate over unselected profiles/providers,
+    // preserving cross-provider privacy and manual failover boundaries).
     let cfg = crate::config::config();
-    let mut named_candidates: Vec<(String, crate::config::NamedProviderConfig)> = Vec::new();
-    if let Some(default_prov) = cfg.provider.default_provider.as_deref()
-        && let Some(profile_cfg) = cfg.providers.get(default_prov)
+    if let Some(default_prov) = cfg
+        .provider
+        .default_provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
     {
-        named_candidates.push((default_prov.to_string(), profile_cfg.clone()));
-    }
-    for (name, profile_cfg) in &cfg.providers {
-        if !named_candidates.iter().any(|(n, _)| n == name) {
-            named_candidates.push((name.clone(), profile_cfg.clone()));
-        }
-    }
-    for (name, profile_cfg) in named_candidates {
-        match complete_via_named_openai_compatible(&name, &profile_cfg, system, user_msg).await {
-            Ok(res) => return Ok(res),
-            Err(err) => errors.push(format!("profile:{name}: {err}")),
-        }
-    }
-
-    // 4. Registered external OAuth provider runtimes (Antigravity / Gemini) if available.
-    for runtime_key in [
-        crate::provider::external::ANTIGRAVITY_RUNTIME,
-        crate::provider::external::GEMINI_RUNTIME,
-    ] {
-        if let Some(provider) =
-            crate::provider::external::instantiate_external_provider(runtime_key)
-        {
-            let label = format!("external:{runtime_key}:{}", provider.model());
-            match provider.complete_simple_with_usage(user_msg, system).await {
-                Ok((raw, _)) if !raw.trim().is_empty() => return Ok((raw, label)),
-                Ok(_) => errors.push(format!("{label} returned empty output")),
-                Err(err) => errors.push(format!("{label}: {err}")),
+        if let Some(profile_cfg) = cfg.providers.get(default_prov) {
+            match complete_via_named_openai_compatible(default_prov, profile_cfg, system, user_msg)
+                .await
+            {
+                Ok(res) => return Ok(res),
+                Err(err) => errors.push(format!("profile:{default_prov}: {err}")),
+            }
+        } else {
+            let ext_key = match default_prov.to_ascii_lowercase().as_str() {
+                "antigravity" => Some(crate::provider::external::ANTIGRAVITY_RUNTIME),
+                "gemini" => Some(crate::provider::external::GEMINI_RUNTIME),
+                _ => None,
+            };
+            if let Some(runtime_key) = ext_key
+                && let Some(provider) =
+                    crate::provider::external::instantiate_external_provider(runtime_key)
+            {
+                let label = format!("external:{runtime_key}:{}", provider.model());
+                match provider.complete_simple_with_usage(user_msg, system).await {
+                    Ok((raw, _)) if !raw.trim().is_empty() => return Ok((raw, label)),
+                    Ok(_) => errors.push(format!("{label} returned empty output")),
+                    Err(err) => errors.push(format!("{label}: {err}")),
+                }
             }
         }
     }

@@ -78,6 +78,15 @@ impl App {
             || self.inline_interactive_state.is_some()
             || self.inline_view_state.is_some()
             || self.prompt_history_search.is_some()
+            || self.session_picker_overlay.is_some()
+            || self.login_picker_overlay.is_some()
+            || self.account_picker_overlay.is_some()
+            || self.commit_log_overlay.is_some()
+            || self.changelog_scroll.is_some()
+            || self.help_scroll.is_some()
+            || self.model_status_scroll.is_some()
+            || self.panel_image_preview.is_some()
+            || self.copy_selection_mode
             || (!is_staged && !self.command_suggestions().is_empty())
         {
             return false;
@@ -539,7 +548,8 @@ impl App {
         }
 
         if let Some(deadline) = self.suggested_replies.explorer_deadline {
-            if self.is_processing
+            if !self.suggested_replies_visible()
+                || self.is_processing
                 || !self.input.is_empty()
                 || !self.pending_images.is_empty()
                 || !crate::config::config()

@@ -684,9 +684,23 @@ fn context_retains_user_language_across_tool_rows_preserves_closing_choices_and_
 
     app.input.clear();
     app.cursor_pos = 0;
-    app.apply_suggested_replies_response(single_resp);
+    app.apply_suggested_replies_response(single_resp.clone());
     assert!(app.stage_suggested_reply_target(SuggestedReplyFocus::DefaultAction));
     assert!(app.suggested_replies_has_staged_input());
     super::super::input::handle_alternate_enter(&mut app);
     assert!(!app.suggested_replies_visible());
+
+    // Opening Ctrl+R prompt history search cancels Explorer countdown and prevents hidden auto-submit.
+    app.input.clear();
+    app.cursor_pos = 0;
+    app.apply_suggested_replies_response(single_resp);
+    app.suggested_replies.explorer_deadline = Some(Instant::now() - Duration::from_millis(5));
+    app.open_prompt_history_search();
+    assert!(app.suggested_replies.explorer_deadline.is_none());
+    assert!(!app.suggested_replies_visible());
+    app.suggested_replies.explorer_deadline = Some(Instant::now() - Duration::from_millis(5));
+    let (_, search_auto_submit) = app.poll_suggested_replies_tick();
+    assert_eq!(search_auto_submit, None);
+    assert!(app.suggested_replies.explorer_deadline.is_none());
+    app.prompt_history_search = None;
 }
