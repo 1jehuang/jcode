@@ -1,32 +1,27 @@
 //! Effort-ladder cycling with swarm-sentinel exclusion.
 //!
-//! The full selectable effort ladder ends with Jcode's orchestration sentinels
-//! (`swarm`, `swarm-deep`). These are NOT reasoning levels — they activate
-//! swarm orchestration mode. Naive modular wrap over the full ladder would
-//! cycle `max → swarm → swarm-deep → none`, accidentally activating swarm mode
-//! when a user wraps past `max`.
+//! The full selectable effort ladder ends with Jcode's orchestration sentinel
+//! (`swarm`). It is NOT a reasoning level — it activates swarm orchestration
+//! mode. Naive modular wrap over the full ladder would cycle
+//! `max → swarm → none`, and wrapping down from `none` would land on `swarm`,
+//! accidentally activating swarm mode.
 //!
 //! Instead, the ladder is split into a **reasoning-only sub-ladder**
-//! (`none … max`) and the **swarm sentinels** (`swarm`, `swarm-deep`). The wrap
-//! rules are:
+//! (`none … max`) and the trailing **swarm sentinel**. The wrap rules are:
 //!
 //! Direction **up** (+1):
 //!   - Reasoning level (not last) → next reasoning level.
-//!   - Last reasoning level (max) → first swarm sentinel (swarm).
-//!   - Swarm sentinel (not last) → next swarm sentinel (swarm → swarm-deep).
-//!   - Last swarm sentinel (swarm-deep) → wrap to first reasoning level (none).
+//!   - Last reasoning level (max) → swarm.
+//!   - Swarm → wrap to first reasoning level (none).
 //!
 //! Direction **down** (-1):
 //!   - Reasoning level (not first) → previous reasoning level.
 //!   - First reasoning level (none) → wrap to last reasoning level (max).
-//!   - Swarm sentinel (not first) → previous swarm sentinel (swarm-deep → swarm).
-//!   - First swarm sentinel (swarm) → last reasoning level (max).
+//!   - Swarm → last reasoning level (max).
 //!
-//! This keeps swarm modes reachable by cycling UP past `max` (preserving the
-//! existing UI affordance) while ensuring that wrapping back down from
-//! `swarm-deep` lands on the first reasoning level, never on an intermediate
-//! reasoning rung. Wrapping DOWN from `none` stays within reasoning levels and
-//! never jumps to `swarm-deep`.
+//! This keeps swarm mode reachable by cycling UP past `max` (preserving the
+//! existing UI affordance) while wrapping DOWN from `none` stays within
+//! reasoning levels and never jumps to `swarm`.
 
 /// Outcome of [`cycle_effort_index`]: the next effort string and its index in
 /// the full ladder, plus whether the position changed.
@@ -59,8 +54,8 @@ pub(crate) fn default_effort_index(efforts: &[&'static str]) -> Option<usize> {
 /// Compute the next effort in the cycling sequence, excluding swarm sentinels
 /// from the reasoning-only wrap group.
 ///
-/// `efforts` is the full ladder (reasoning levels followed by `swarm` /
-/// `swarm-deep`). `current` is the currently-selected effort string.
+/// `efforts` is the full ladder (reasoning levels followed by `swarm`).
+/// `current` is the currently-selected effort string.
 /// `direction` is `+1` for up / higher, `-1` for down / lower.
 ///
 /// An unset (`None`) or unknown `current` is treated as "not yet on the
@@ -111,8 +106,8 @@ pub(crate) fn cycle_effort_index(
 }
 
 /// Split the ladder into (reasoning-only, swarm-sentinels) slices.
-/// `swarm` and `swarm-deep` are the only sentinels (see
-/// `crate::prompt::is_swarm_effort`), and they always trail the ladder.
+/// `swarm` is the only sentinel (see `crate::prompt::is_swarm_effort`), and
+/// it always trails the ladder.
 fn reasoning_split<'a>(efforts: &'a [&'static str]) -> (&'a [&'static str], &'a [&'static str]) {
     let swarm_count = efforts
         .iter()
@@ -194,7 +189,7 @@ fn cycle_down(
             reasoning_idx - 1
         } else {
             // First reasoning level → wrap to last reasoning level (within
-            // the reasoning-only sub-ladder; never jump to swarm-deep).
+            // the reasoning-only sub-ladder; never jump to swarm).
             reasoning.len() - 1
         }
     }
@@ -206,34 +201,18 @@ mod tests {
 
     fn ladder() -> Vec<&'static str> {
         vec![
-            "none",
-            "minimal",
-            "low",
-            "medium",
-            "high",
-            "xhigh",
-            "max",
-            "swarm",
-            "swarm-deep",
+            "none", "minimal", "low", "medium", "high", "xhigh", "max", "swarm",
         ]
     }
 
     #[test]
     fn up_through_reasoning_then_swarm_then_wrap() {
         let ladder = ladder();
-        // Start at "none" (index 0), cycle up 9 times — should visit every
+        // Start at "none" (index 0), cycle up 8 times — should visit every
         // rung then wrap back to "none".
         let mut cur: &'static str = "none";
         let expected = [
-            "minimal",
-            "low",
-            "medium",
-            "high",
-            "xhigh",
-            "max",
-            "swarm",
-            "swarm-deep",
-            "none",
+            "minimal", "low", "medium", "high", "xhigh", "max", "swarm", "none",
         ];
         for want in expected {
             let r = cycle_effort_index(&ladder, Some(cur), 1);
@@ -246,11 +225,11 @@ mod tests {
     #[test]
     fn down_through_swarm_then_reasoning_wrap() {
         let ladder = ladder();
-        // Start at "swarm-deep" (last), cycle down — should go to swarm, then
-        // max, then wrap within reasoning down to none, then wrap to max.
-        let mut cur: &'static str = "swarm-deep";
+        // Start at "swarm" (last), cycle down — should go to max, then wrap
+        // within reasoning down to none, then wrap to max.
+        let mut cur: &'static str = "swarm";
         let expected = [
-            "swarm", "max", "xhigh", "high", "medium", "low", "minimal", "none", "max",
+            "max", "xhigh", "high", "medium", "low", "minimal", "none", "max",
         ];
         for want in expected {
             let r = cycle_effort_index(&ladder, Some(cur), -1);
@@ -269,7 +248,7 @@ mod tests {
     }
 
     #[test]
-    fn down_from_none_wraps_to_max_not_swarm_deep() {
+    fn down_from_none_wraps_to_max_not_swarm() {
         let ladder = ladder();
         let r = cycle_effort_index(&ladder, Some("none"), -1);
         assert_eq!(r.effort, "max");
@@ -277,9 +256,9 @@ mod tests {
     }
 
     #[test]
-    fn up_from_swarm_deep_wraps_to_none() {
+    fn up_from_swarm_wraps_to_none() {
         let ladder = ladder();
-        let r = cycle_effort_index(&ladder, Some("swarm-deep"), 1);
+        let r = cycle_effort_index(&ladder, Some("swarm"), 1);
         assert_eq!(r.effort, "none");
         assert!(r.changed);
     }
@@ -296,7 +275,7 @@ mod tests {
     fn default_effort_index_is_highest_reasoning_level() {
         assert_eq!(default_effort_index(&ladder()), Some(6)); // "max"
         // Swarm-only ladder: last rung.
-        assert_eq!(default_effort_index(&["swarm", "swarm-deep"]), Some(1));
+        assert_eq!(default_effort_index(&["swarm"]), Some(0));
         assert_eq!(default_effort_index(&[]), None);
     }
 
