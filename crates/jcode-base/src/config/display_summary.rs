@@ -122,6 +122,7 @@ impl Config {
 - Custom prompts: {}
 - Full-auto Explorer: {}
 - 6-Lens Auto-Review: {}
+- Finish category (`enable_finish_category`): {}
 
 **Ambient:**
 - Enabled: {}
@@ -331,6 +332,7 @@ impl Config {
             self.suggested_replies.sanitized_custom_prompts().len(),
             self.suggested_replies.enable_full_auto_explorer,
             self.suggested_replies.six_lens_auto_review,
+            self.suggested_replies.enable_finish_category,
             self.ambient.enabled,
             self.ambient.provider.as_deref().unwrap_or("(auto)"),
             self.ambient

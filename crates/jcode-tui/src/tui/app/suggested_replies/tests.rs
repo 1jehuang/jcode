@@ -391,17 +391,36 @@ fn mouse_hit_regions_digit_6_to_9_staged_input_editing_and_six_lens_cache_invali
     assert_eq!(consumed, resp.secondary_suggestions[6]);
     assert!(!app.suggested_replies_visible());
 
-    // 2. Digit '8' ('6'..='9' range) stages Secondary(7) into app.input, and editing detaches focus.
+    // 2. Digit '8' ('6'..='9' range): first press stages Secondary(7) into app.input;
+    // pressing '8' a second time submits it!
     app.input.clear();
     app.cursor_pos = 0;
-    app.apply_suggested_replies_response(resp);
-    assert!(app.stage_suggested_reply_by_digit('8'));
+    app.is_remote = true;
+    app.apply_suggested_replies_response(resp.clone());
+    assert!(app.try_stage_suggested_reply_text("8"));
     assert_eq!(
         app.suggested_replies.focus,
         Some(SuggestedReplyFocus::Secondary(7))
     );
     let staged_text = app.input.clone();
-    assert!(!staged_text.is_empty());
+    assert_eq!(staged_text, resp.secondary_suggestions[7]);
+    assert!(app.suggested_replies_has_staged_input());
+
+    // Second press of '8' submits the staged suggestion.
+    assert!(app.try_stage_suggested_reply_text("8"));
+    assert_eq!(
+        app.take_pending_remote_suggested_reply(),
+        Some(staged_text.clone())
+    );
+    assert!(!app.pending_queued_dispatch);
+    assert!(!app.suggested_replies_visible());
+
+    // Re-stage '8' and verify that editing with Backspace detaches focus so subsequent digits type normally.
+    app.input.clear();
+    app.cursor_pos = 0;
+    app.is_remote = false;
+    app.apply_suggested_replies_response(resp);
+    assert!(app.stage_suggested_reply_by_digit('8'));
     assert!(app.suggested_replies_has_staged_input());
 
     // Pressing Backspace edits the draft in app.input and detaches suggestion focus/staged_input.

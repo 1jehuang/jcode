@@ -611,13 +611,19 @@ impl App {
         match target {
             SuggestedReplyFocus::DefaultAction => {
                 self.set_status_notice(
-                    "Default Action in input (edit or Enter to send · ↑/↓/Tab to switch · Esc to clear)",
+                    "Default Action in input (press 0 or Enter to send · ↑/↓/Tab to switch · Esc to clear)",
                 );
             }
             SuggestedReplyFocus::Secondary(idx) => {
+                let repeat_hint = if idx < 9 {
+                    format!("press {} again or Enter to send", idx + 1)
+                } else {
+                    "edit or Enter to send".to_string()
+                };
                 self.set_status_notice(format!(
-                    "Suggestion #{} in input (edit or Enter to send · ↑/↓/Tab to switch · Esc to clear)",
-                    idx + 1
+                    "Suggestion #{} in input ({} · ↑/↓/Tab to switch · Esc to clear)",
+                    idx + 1,
+                    repeat_hint
                 ));
             }
         }
@@ -673,11 +679,11 @@ impl App {
         }
     }
 
-    /// Handle pressing digit `'1'..='9'` (or `'0'` for Default Action) on an empty input
+    /// Handle pressing digit `'1'..='9'` (or `'0'` for Default Action) on an empty or staged input
     /// when Suggested Replies are visible: focuses that suggestion and populates `self.input`
-    /// so the user can edit it or press `Enter` to send.
+    /// so the user can edit it or press the same digit / `Enter` to send.
     pub fn stage_suggested_reply_by_digit(&mut self, ch: char) -> bool {
-        if !self.input.is_empty() || !self.suggested_replies_visible() {
+        if !self.suggested_replies_input_is_empty_or_staged() || !self.suggested_replies_visible() {
             return false;
         }
         let target = match ch {
@@ -685,6 +691,30 @@ impl App {
             '1'..='9' => SuggestedReplyFocus::Secondary((ch as usize) - ('1' as usize)),
             _ => return false,
         };
+        self.stage_suggested_reply_target(target)
+    }
+
+    /// Handle pressing digit `'1'..='9'` (or `'0'` for Default Action) when Suggested Replies
+    /// are visible and the input is empty or holds an unedited staged suggestion:
+    /// - First press on `target`: focuses `target` and stages its text into `self.input`.
+    /// - Second press of the same digit while `target` is already focused and staged:
+    ///   consumes and submits the suggestion (`submit_suggested_reply_prompt`).
+    pub fn handle_suggested_reply_digit_press(&mut self, ch: char) -> bool {
+        if !self.suggested_replies_input_is_empty_or_staged() || !self.suggested_replies_visible() {
+            return false;
+        }
+        let target = match ch {
+            '0' => SuggestedReplyFocus::DefaultAction,
+            '1'..='9' => SuggestedReplyFocus::Secondary((ch as usize) - ('1' as usize)),
+            _ => return false,
+        };
+        if self.suggested_replies.focus == Some(target)
+            && self.suggested_replies_has_staged_input()
+            && let Some(prompt) = self.take_suggested_reply_target(target)
+        {
+            self.submit_suggested_reply_prompt(prompt);
+            return true;
+        }
         self.stage_suggested_reply_target(target)
     }
 

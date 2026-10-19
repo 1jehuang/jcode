@@ -737,6 +737,13 @@ impl Config {
                 self.suggested_replies.six_lens_auto_review = parsed;
             }
         }
+        if let Ok(v) = std::env::var("JCODE_SUGGESTED_REPLIES_ENABLE_FINISH_CATEGORY")
+            .or_else(|_| std::env::var("JCODE_ENABLE_FINISH_CATEGORY"))
+        {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.suggested_replies.enable_finish_category = parsed;
+            }
+        }
 
         // Ambient
         if let Ok(v) = std::env::var("JCODE_AMBIENT_ENABLED") {

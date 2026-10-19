@@ -416,6 +416,7 @@ async fn evaluate_cascade_with_context_executes_two_stage_laya_systemone_and_fal
         custom_prompts: vec!["Кастомный вопрос".to_string()],
         enable_full_auto_explorer: false,
         six_lens_auto_review: false,
+        enable_finish_category: true,
     };
 
     // 1. Happy path: 2-stage SystemOne evaluation (choice + joint choice+noul)
@@ -558,6 +559,24 @@ fn goal_classification_labels_and_badges_cover_all_categories_bilingually() {
     );
     assert_eq!(format_goal_category_badge("finish", true), "[финал]");
     assert_eq!(format_goal_category_badge("finish", false), "[finish]");
+    assert_eq!(
+        classify_suggestion_for_goal_with_options(
+            "Довести фичу до конца и выполнить финальное завершение",
+            "implementation",
+            &[],
+            false
+        ),
+        "goal"
+    );
+    assert_eq!(
+        classify_suggestion_for_goal_with_options(
+            "Complete the feature and verify final completion",
+            "feature_completion",
+            &[],
+            false
+        ),
+        "goal"
+    );
 
     assert!(advances_toward_feature_completion(
         "Довести фичу до конца и выполнить финальное завершение",

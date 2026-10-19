@@ -1,7 +1,8 @@
 use super::{
     MACRO_BRANCHES, MAX_MICRO_CANDIDATES, ScoredSuggestion, SuggestedRepliesContext,
     SuggestedRepliesResponse, advances_toward_feature_completion, classify_suggestion_for_goal,
-    distribute_suggestions, push_unique_case_insensitive,
+    classify_suggestion_for_goal_with_options, distribute_suggestions,
+    push_unique_case_insensitive,
 };
 use anyhow::{Result, ensure};
 use serde_json::{Map, Value, json};
@@ -30,6 +31,7 @@ fn localized_branch_candidates(branch: &str, cyrillic: bool) -> Vec<String> {
                 "Проверить git status и git diff перед финализацией".to_string(),
                 "Обновить чекбоксы задач в OpenSpec и закрыть план".to_string(),
                 "Выполнить 6-линзовое ревью (/review 6) перед сдачей результата".to_string(),
+                "Пересобрать и перезагрузить бинарник через selfdev build-reload".to_string(),
             ],
             "planning" => vec![
                 "Декомпозировать цель на конкретные шаги в списке задач (todo)".to_string(),
@@ -110,6 +112,7 @@ fn localized_branch_candidates(branch: &str, cyrillic: bool) -> Vec<String> {
                 "Inspect git status and git diff before finalizing".to_string(),
                 "Update OpenSpec task checkboxes to mark the goal complete".to_string(),
                 "Run a 6-lens subagent self-review (/review 6) before delivery".to_string(),
+                "Rebuild and reload the binary via selfdev build-reload".to_string(),
             ],
             "planning" => vec![
                 "Decompose the goal into concrete actionable steps in the todo list".to_string(),
@@ -202,18 +205,45 @@ pub fn contextual_candidates_for_branch(
         }
     }
 
-    for item in localized_branch_candidates(branch, ctx.language_is_cyrillic) {
+    let finish_enabled = crate::config::config()
+        .suggested_replies
+        .enable_finish_category;
+    let effective_branch = if !finish_enabled
+        && matches!(
+            branch.trim().to_ascii_lowercase().as_str(),
+            "finish" | "feature_completion" | "final_completion"
+        ) {
+        "goal_delivery"
+    } else {
+        branch
+    };
+    for item in localized_branch_candidates(effective_branch, ctx.language_is_cyrillic) {
+        if !finish_enabled
+            && classify_suggestion_for_goal_with_options(&item, effective_branch, &[], true)
+                == "finish"
+        {
+            continue;
+        }
         push_unique_case_insensitive(&mut out, item);
     }
 
     // Top up from the remaining macro branches so that configurations up to
     // `max_secondary_suggestions = 20` (requiring 21 total candidates) have a full pool.
     for &(other_branch, _) in MACRO_BRANCHES {
+        if !finish_enabled && other_branch == "feature_completion" {
+            continue;
+        }
         if out.len() >= MAX_MICRO_CANDIDATES {
             break;
         }
-        if !other_branch.eq_ignore_ascii_case(branch.trim()) {
+        if !other_branch.eq_ignore_ascii_case(effective_branch.trim()) {
             for item in localized_branch_candidates(other_branch, ctx.language_is_cyrillic) {
+                if !finish_enabled
+                    && classify_suggestion_for_goal_with_options(&item, other_branch, &[], true)
+                        == "finish"
+                {
+                    continue;
+                }
                 push_unique_case_insensitive(&mut out, item);
                 if out.len() >= MAX_MICRO_CANDIDATES {
                     break;
@@ -283,7 +313,14 @@ pub(super) fn infer_macro_branch_from_text(text: &str) -> &'static str {
         || lower.contains("all todos completed")
         || lower.contains("все задачи выполнены")
     {
-        "feature_completion"
+        if crate::config::config()
+            .suggested_replies
+            .enable_finish_category
+        {
+            "feature_completion"
+        } else {
+            "goal_delivery"
+        }
     } else if lower.contains("no-go")
         || lower.contains("conditional go")
         || lower.contains("6-lens")
@@ -508,8 +545,14 @@ pub fn build_structured_systemone_state(
 
 /// Build the SystemOne `choice` question for Iteration 1 (Macro-branching).
 pub fn build_macro_branch_choice_question() -> Map<String, Value> {
+    let finish_enabled = crate::config::config()
+        .suggested_replies
+        .enable_finish_category;
     let mut criteria = Map::new();
     for &(id, desc) in MACRO_BRANCHES {
+        if !finish_enabled && id == "feature_completion" {
+            continue;
+        }
         criteria.insert(id.to_string(), Value::String(desc.to_string()));
     }
     let mut questions = Map::new();
@@ -527,8 +570,14 @@ pub fn build_macro_branch_choice_question() -> Map<String, Value> {
 /// Build batched SystemOne `noul` questions for Iteration 1 when the active Jev
 /// provider only supports `noul` (e.g. Jcode subscription gateway).
 pub fn build_macro_branch_noul_questions() -> Map<String, Value> {
+    let finish_enabled = crate::config::config()
+        .suggested_replies
+        .enable_finish_category;
     let mut questions = Map::new();
     for &(id, desc) in MACRO_BRANCHES {
+        if !finish_enabled && id == "feature_completion" {
+            continue;
+        }
         questions.insert(
             format!("branch_{id}"),
             json!({

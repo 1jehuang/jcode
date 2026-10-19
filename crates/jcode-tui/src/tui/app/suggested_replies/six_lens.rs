@@ -21,7 +21,7 @@ impl App {
         let mut out = String::new();
         out.push_str("### Suggested Replies Diagnostics\n\n");
         out.push_str(&format!(
-            "- **Config**: `enabled={}`, `jev_provider=\"{}\"`, `use_open_gf={}`, `confidence_threshold={:.2}`, `max_secondary_suggestions={}` (clamped `{}`), `show_confidence={}`, `custom_prompts={}`, `enable_full_auto_explorer={}`, `six_lens_auto_review={}`\n",
+            "- **Config**: `enabled={}`, `jev_provider=\"{}\"`, `use_open_gf={}`, `confidence_threshold={:.2}`, `max_secondary_suggestions={}` (clamped `{}`), `show_confidence={}`, `custom_prompts={}`, `enable_full_auto_explorer={}`, `six_lens_auto_review={}`, `enable_finish_category={}`\n",
             cfg.enabled,
             cfg.jev_provider,
             cfg.use_open_gf,
@@ -32,6 +32,7 @@ impl App {
             cfg.sanitized_custom_prompts().len(),
             cfg.enable_full_auto_explorer,
             cfg.six_lens_auto_review,
+            cfg.enable_finish_category,
         ));
         out.push_str(&format!(
             "- **OpenGF Primary Sidecar**: `backend={}`, `model={}` (plus fallback to active provider / configured `[providers.*]` profiles)\n",
@@ -144,10 +145,13 @@ impl App {
     }
 
     pub(in crate::tui::app) fn try_stage_suggested_reply_text(&mut self, text: &str) -> bool {
-        if self.input.is_empty() && !self.is_processing && self.suggested_replies_visible() {
+        if self.suggested_replies_input_is_empty_or_staged()
+            && !self.is_processing
+            && self.suggested_replies_visible()
+        {
             let mut chars = text.chars();
             if let (Some(c), None) = (chars.next(), chars.next())
-                && self.stage_suggested_reply_by_digit(c)
+                && self.handle_suggested_reply_digit_press(c)
             {
                 self.follow_chat_bottom_for_typing();
                 return true;
@@ -291,6 +295,9 @@ impl App {
             return None;
         }
         let prompt = self.suggested_replies.pending_remote_submit.take()?;
+        if self.queued_messages.is_empty() && self.hidden_queued_system_messages.is_empty() {
+            self.pending_queued_dispatch = false;
+        }
         self.input = prompt.clone();
         self.cursor_pos = self.input.len();
         Some(prompt)

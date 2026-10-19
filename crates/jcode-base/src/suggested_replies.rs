@@ -76,11 +76,30 @@ pub const GOAL_CLASSIFICATION_CATEGORIES: &[(&str, &str, &str)] = &[
 ];
 
 /// Classify how a candidate suggestion advances the user toward reaching their goal
-/// or achieving the successful final completion of the feature.
+/// or achieving the successful final completion of the feature, using the active config
+/// (`suggested_replies.enable_finish_category`).
 pub fn classify_suggestion_for_goal(
     text: &str,
     branch: &str,
     custom_prompts: &[String],
+) -> &'static str {
+    classify_suggestion_for_goal_with_options(
+        text,
+        branch,
+        custom_prompts,
+        crate::config::config()
+            .suggested_replies
+            .enable_finish_category,
+    )
+}
+
+/// Classify how a candidate suggestion advances the user toward reaching their goal,
+/// with an explicit `enable_finish_category` toggle for the optional `"finish"` (`[финал]` / `[finish]`) category.
+pub fn classify_suggestion_for_goal_with_options(
+    text: &str,
+    branch: &str,
+    custom_prompts: &[String],
+    enable_finish_category: bool,
 ) -> &'static str {
     let trimmed = text.trim();
     if !trimmed.is_empty()
@@ -108,7 +127,11 @@ pub fn classify_suggestion_for_goal(
         || lower.contains("finalize the feature")
         || lower.contains("finish the feature")
     {
-        return "finish";
+        return if enable_finish_category {
+            "finish"
+        } else {
+            "goal"
+        };
     }
 
     if lower.contains("/review")
@@ -196,7 +219,13 @@ pub fn classify_suggestion_for_goal(
     }
 
     match branch.trim().to_ascii_lowercase().as_str() {
-        "finish" | "feature_completion" | "final_completion" => "finish",
+        "finish" | "feature_completion" | "final_completion" => {
+            if enable_finish_category {
+                "finish"
+            } else {
+                "goal"
+            }
+        }
         "goal" | "goal_delivery" | "delivery" => "goal",
         "plan" | "planning" | "architecture" => "plan",
         "verify" | "verification" => "verify",
@@ -687,10 +716,15 @@ impl SuggestedRepliesResponse {
     /// Look up the canonical goal-reaching classification category (`"goal"`, `"finish"`, `"plan"`,
     /// `"impl"`, `"verify"`, `"debug"`, `"review"`, `"refactor"`, `"custom"`) for `text`.
     pub fn category_for_text(&self, text: &str) -> &'static str {
+        let finish_enabled = crate::config::config()
+            .suggested_replies
+            .enable_finish_category;
         let lower = text.trim().to_lowercase();
         if let Some(cat) = self.candidate_categories.get(&lower) {
             match cat.as_str() {
-                "finish" | "feature_completion" | "final_completion" => return "finish",
+                "finish" | "feature_completion" | "final_completion" => {
+                    return if finish_enabled { "finish" } else { "goal" };
+                }
                 "goal" => return "goal",
                 "plan" => return "plan",
                 "impl" => return "impl",
@@ -702,7 +736,7 @@ impl SuggestedRepliesResponse {
                 _ => {}
             }
         }
-        classify_suggestion_for_goal(text, &self.branch, &[])
+        classify_suggestion_for_goal_with_options(text, &self.branch, &[], finish_enabled)
     }
 
     /// True when `text` is classified as advancing toward the successful final completion of the feature.

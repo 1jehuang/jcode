@@ -83,6 +83,16 @@ pub struct SuggestedRepliesConfig {
         deserialize_with = "crate::serde_lenient::lenient_bool_false"
     )]
     pub six_lens_auto_review: bool,
+    /// Enable the optional `"finish"` (`[финал]` / `[finish]`) feature-completion
+    /// category, macro branch (`feature_completion`), and candidate pool items (`default: true`).
+    #[serde(
+        default = "default_suggested_replies_enable_finish_category",
+        alias = "enableFinishCategory",
+        alias = "finish_category_enabled",
+        alias = "finishCategoryEnabled",
+        deserialize_with = "crate::serde_lenient::lenient_bool_true"
+    )]
+    pub enable_finish_category: bool,
 }
 
 fn default_suggested_replies_enabled() -> bool {
@@ -105,6 +115,10 @@ fn default_suggested_replies_show_confidence() -> bool {
     true
 }
 
+fn default_suggested_replies_enable_finish_category() -> bool {
+    true
+}
+
 impl Default for SuggestedRepliesConfig {
     fn default() -> Self {
         Self {
@@ -117,6 +131,7 @@ impl Default for SuggestedRepliesConfig {
             custom_prompts: Vec::new(),
             enable_full_auto_explorer: false,
             six_lens_auto_review: false,
+            enable_finish_category: default_suggested_replies_enable_finish_category(),
         }
     }
 }

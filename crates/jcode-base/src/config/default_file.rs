@@ -760,6 +760,8 @@ custom_prompts = []
 enable_full_auto_explorer = false
 # Automatic 6-lens subagent self-review at turn completion (default: false)
 six_lens_auto_review = false
+# Enable optional "finish" ([финал] / [finish]) feature-completion category and candidates (default: true)
+enable_finish_category = true
 
 [session]
 # Release reloadable session memory after 30 minutes idle. Active work is never
