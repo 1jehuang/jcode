@@ -156,3 +156,44 @@ fn wave_field_parses_loose_values() {
     assert_eq!(parse(serde_json::json!(null)), None);
     assert_eq!(parse(serde_json::json!(-1)), None);
 }
+
+#[test]
+fn non_adjacent_same_wave_is_not_one_rail() {
+    // Wave runs are consecutive; a wave split by another item gets no rail.
+    let todos = vec![
+        todo("1", "a", "pending", Some(1)),
+        todo("2", "b", "pending", Some(2)),
+        todo("3", "c", "pending", Some(1)),
+    ];
+    let joined = render(&todos, &[], 60).join("\n");
+    assert!(!joined.contains('┏'), "{joined}");
+}
+
+#[test]
+fn unknown_agent_falls_back_to_name_emoji_and_never_overflows() {
+    let long = "x".repeat(200);
+    let todos = vec![
+        assigned(
+            todo("1", &long, "in_progress", Some(1)),
+            "session_fox_1700000000_abc",
+        ),
+        assigned(
+            todo("2", "short", "in_progress", Some(1)),
+            "zzz-not-a-session",
+        ),
+    ];
+    for width in [95u16, 40, 20] {
+        let rows = render(&todos, &[], width);
+        assert_fits(&rows, width);
+        assert!(
+            rows[1].contains("🦊"),
+            "fallback emoji at {width}: {rows:?}"
+        );
+    }
+    // Unknown word falls back to its first letter, not the 💫 placeholder.
+    let rows = render(&todos, &[], 95);
+    assert!(
+        rows[2].trim_end().ends_with('z') && !rows[2].contains('💫'),
+        "{rows:?}"
+    );
+}

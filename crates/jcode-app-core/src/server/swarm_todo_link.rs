@@ -67,16 +67,23 @@ fn find_todo<'a>(
     task_id: &str,
     content: &str,
 ) -> Option<&'a mut TodoItem> {
-    if let Some(index) = todos.iter().position(|todo| todo.id == task_id) {
-        return todos.get_mut(index);
-    }
+    // Content must always match: ids alone are not trustworthy because hand
+    // written plans and todo lists both tend to use "1", "2", ... and an id
+    // collision would silently complete an unrelated todo. The id only breaks
+    // ties between todos with identical text.
     let wanted = normalize(content);
     if wanted.is_empty() {
         return None;
     }
-    todos
-        .iter_mut()
-        .find(|todo| normalize(&todo.content) == wanted)
+    let index = todos
+        .iter()
+        .position(|todo| todo.id == task_id && normalize(&todo.content) == wanted)
+        .or_else(|| {
+            todos
+                .iter()
+                .position(|todo| normalize(&todo.content) == wanted)
+        })?;
+    todos.get_mut(index)
 }
 
 /// Pure update used by [`link_assignment`]. Returns true when `todos` changed.
@@ -89,6 +96,9 @@ pub(crate) fn apply_assignment(
     let Some(todo) = find_todo(todos, task_id, content) else {
         return false;
     };
+    if !is_open(todo) {
+        return false;
+    }
     let mut changed = false;
     if todo.assigned_to.as_deref() != Some(worker_session) {
         todo.assigned_to = Some(worker_session.to_string());
@@ -231,7 +241,7 @@ mod tests {
     #[test]
     fn assignment_matches_by_id_then_content() {
         let mut todos = vec![todo("a", "pending", None), todo("b", "pending", None)];
-        assert!(apply_assignment(&mut todos, "a", "", "session_fox_1"));
+        assert!(apply_assignment(&mut todos, "a", "task a", "session_fox_1"));
         assert_eq!(todos[0].assigned_to.as_deref(), Some("session_fox_1"));
         assert_eq!(todos[0].status, "in_progress");
 
@@ -253,9 +263,9 @@ mod tests {
     #[test]
     fn only_success_completes_the_todo() {
         let mut todos = vec![todo("a", "in_progress", None)];
-        assert!(!apply_task_status(&mut todos, "a", "", "failed"));
+        assert!(!apply_task_status(&mut todos, "a", "task a", "failed"));
         assert_eq!(todos[0].status, "in_progress");
-        assert!(apply_task_status(&mut todos, "a", "", "done"));
+        assert!(apply_task_status(&mut todos, "a", "task a", "done"));
         assert_eq!(todos[0].status, "completed");
     }
 
@@ -273,5 +283,56 @@ mod tests {
         assert_eq!(todos[1].status, "in_progress");
         assert_eq!(todos[1].assigned_to.as_deref(), Some("session_ox_2"));
         assert!(!apply_plan(&mut todos, &items), "second pass is a no-op");
+    }
+
+    #[test]
+    fn colliding_ids_never_touch_an_unrelated_todo() {
+        // A hand-proposed plan and the todo list both number from "1".
+        let mut todos = vec![TodoItem {
+            id: "1".into(),
+            content: "write the release notes".into(),
+            status: "pending".into(),
+            ..Default::default()
+        }];
+        let item = PlanItem {
+            id: "1".into(),
+            content: "refactor the parser".into(),
+            status: "done".into(),
+            priority: "high".into(),
+            subsystem: None,
+            file_scope: vec![],
+            blocked_by: vec![],
+            assigned_to: Some("session_fox_1".into()),
+        };
+        assert!(!apply_plan(&mut todos, &[item]));
+        assert_eq!(todos[0].status, "pending");
+        assert!(todos[0].assigned_to.is_none());
+    }
+
+    #[test]
+    fn duplicate_text_prefers_matching_id() {
+        let mut todos = vec![todo("a", "pending", None), todo("b", "pending", None)];
+        todos[1].content = "task a".into();
+        assert!(apply_assignment(&mut todos, "b", "task a", "session_ox_2"));
+        assert!(todos[0].assigned_to.is_none());
+        assert_eq!(todos[1].assigned_to.as_deref(), Some("session_ox_2"));
+    }
+
+    #[test]
+    fn edge_inputs_are_noops() {
+        assert!(plan_items_from_todos(&[]).is_empty());
+        assert!(plan_items_from_todos(&[todo("a", "completed", Some(1))]).is_empty());
+        let mut empty: Vec<TodoItem> = vec![];
+        assert!(!apply_plan(
+            &mut empty,
+            &plan_items_from_todos(&[todo("a", "pending", None)])
+        ));
+        // A completed todo is not reopened or reassigned by a later running item.
+        let mut todos = vec![todo("a", "completed", None)];
+        let mut items = plan_items_from_todos(&[todo("a", "pending", None)]);
+        items[0].status = "running".into();
+        items[0].assigned_to = Some("session_fox_1".into());
+        apply_plan(&mut todos, &items);
+        assert_eq!(todos[0].status, "completed");
     }
 }
