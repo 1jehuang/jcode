@@ -169,15 +169,30 @@ impl ModelCatalogService {
         None
     }
 
-    pub(crate) fn clear_runtime_model_unavailable(&self, scope: &str, model: &str) {
-        if let Ok(mut unavailable) = self.runtime_unavailable_models.write()
-            && let Some(models) = unavailable.get_mut(scope)
-        {
-            models.remove(model);
-            if models.is_empty() {
-                unavailable.remove(scope);
-            }
+    /// Returns whether a recorded unavailability was actually removed. Callers
+    /// use this to avoid invalidating catalog-derived caches on no-op clears,
+    /// which run on every successful `set_model`.
+    pub(crate) fn clear_runtime_model_unavailable(&self, scope: &str, model: &str) -> bool {
+        let present = self
+            .runtime_unavailable_models
+            .read()
+            .ok()
+            .and_then(|guard| guard.get(scope).map(|models| models.contains_key(model)))
+            .unwrap_or(false);
+        if !present {
+            return false;
         }
+        let Ok(mut unavailable) = self.runtime_unavailable_models.write() else {
+            return false;
+        };
+        let Some(models) = unavailable.get_mut(scope) else {
+            return false;
+        };
+        let removed = models.remove(model).is_some();
+        if models.is_empty() {
+            unavailable.remove(scope);
+        }
+        removed
     }
 
     pub(crate) fn clear_runtime_model_unavailable_scope(&self, scope: &str) {
@@ -416,12 +431,15 @@ mod tests {
                 .is_none()
         );
 
-        service.clear_runtime_model_unavailable("default", "gpt-5.5");
+        assert!(service.clear_runtime_model_unavailable("default", "gpt-5.5"));
         assert!(
             service
                 .runtime_model_unavailability("default", "gpt-5.5")
                 .is_none()
         );
+        // A second clear is a no-op and must report so, letting callers skip
+        // catalog-generation bumps that would defeat shared route memos.
+        assert!(!service.clear_runtime_model_unavailable("default", "gpt-5.5"));
     }
 
     #[test]

@@ -103,6 +103,7 @@ async fn handle_resume_session_allows_same_client_instance_takeover_without_loca
         None,
         Some(shared_instance_id),
         false,
+        None,
         true,
         &mut client_selfdev,
         &mut client_session_id,

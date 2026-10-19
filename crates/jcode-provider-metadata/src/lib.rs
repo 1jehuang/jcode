@@ -143,9 +143,14 @@ pub struct ResolvedOpenAiCompatibleProfile {
 }
 
 mod catalog;
+mod muse;
 
 pub use catalog::*;
 use catalog::{LOGIN_PROVIDERS, OPENAI_COMPAT_PROFILES};
+pub use muse::{
+    META_MUSE_LOGIN_PROVIDER, META_MUSE_PROFILE, MUSE_SUBSCRIPTION_LOGIN_PROVIDER,
+    MUSE_SUBSCRIPTION_PROFILE,
+};
 
 pub fn openai_compatible_profiles() -> &'static [OpenAiCompatibleProfile] {
     &OPENAI_COMPAT_PROFILES
@@ -443,6 +448,46 @@ mod tests {
                 "display name {:?} (id {:?}) should resolve",
                 descriptor.display_name,
                 descriptor.id
+            );
+        }
+    }
+
+    #[test]
+    fn muse_subscription_login_is_device_code_without_stealing_muse_alias() {
+        let provider = resolve_login_provider("muse-subscription").expect("muse-subscription");
+        assert_eq!(provider, MUSE_SUBSCRIPTION_LOGIN_PROVIDER);
+        assert_eq!(provider.auth_kind, LoginProviderAuthKind::DeviceCode);
+        assert_eq!(provider.display_name, "Muse subscription (experimental)");
+        // The bare `muse` alias stays with pay-as-you-go meta-muse.
+        assert_eq!(
+            resolve_login_provider("muse").map(|provider| provider.id),
+            Some("meta-muse")
+        );
+        assert_eq!(
+            resolve_login_provider("muse-sub").map(|provider| provider.id),
+            Some("muse-subscription")
+        );
+        let LoginProviderTarget::OpenAiCompatible(profile) = provider.target else {
+            panic!("muse-subscription must share the OpenAiCompatible target");
+        };
+        assert_eq!(profile, MUSE_SUBSCRIPTION_PROFILE);
+        // Coordinator pins this exact tuple for credential resolution.
+        assert_eq!(profile.api_base, "https://api.meta.ai/v1");
+        assert_eq!(profile.api_key_env, "JCODE_MUSE_SUBSCRIPTION_API_KEY");
+        assert_eq!(profile.env_file, "muse-subscription.env");
+        // STANDARD default; contributor is never auto-selected.
+        assert_eq!(profile.default_model, Some("muse-spark-1.3"));
+        assert!(openai_compatible_profiles().contains(&MUSE_SUBSCRIPTION_PROFILE));
+        for providers in [
+            cli_login_providers(),
+            tui_login_providers(),
+            server_bootstrap_login_providers(),
+            auto_init_login_providers(),
+            auth_status_login_providers(),
+        ] {
+            assert_eq!(
+                resolve_login_selection("muse-subscription", &providers),
+                Some(MUSE_SUBSCRIPTION_LOGIN_PROVIDER)
             );
         }
     }
