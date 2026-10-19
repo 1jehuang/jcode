@@ -98,6 +98,8 @@ voice_jev_model = "typesafe/jev-1.14"
 
 const CONFIG_ENV_KEYS: &[&str] = &[
     "JCODE_HIBERNATION_IDLE_SECS",
+    "JCODE_HIBERNATION_MODE",
+    "JCODE_REQUEST_COMPRESSION",
     "HOME",
     "JCODE_COMMIT_LOG_KEY",
     "JCODE_RESUME_PROJECT_SCOPE",
