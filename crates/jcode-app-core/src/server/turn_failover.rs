@@ -142,7 +142,7 @@ pub(super) fn apply_failover_target(
         error: None,
         resolved_credential: agent.active_resolved_credential(),
         provider_oauth_email: super::provider_oauth_email(agent.provider_handle().as_ref()),
-        provider_oauth_account_label: agent.provider_handle().oauth_account_label(),
+        provider_oauth_account_label: agent.provider_handle().serving_oauth_account_label(),
         reasoning_effort: agent.provider_reasoning_effort(),
     });
     let _ = event_tx.send(ServerEvent::ConnectionPhase {

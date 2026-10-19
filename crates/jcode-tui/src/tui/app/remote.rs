@@ -580,10 +580,9 @@ async fn apply_terminal_event<B: Backend>(
                                             app.provider.context_window(),
                                         );
                                         let _ = remote.switch_anthropic_account(&label).await;
-                                        app.push_display_message(DisplayMessage::system(format!(
-                                            "Switched to Anthropic account `{}`.",
-                                            label
-                                        )));
+                                        app.push_display_message(DisplayMessage::system(
+                    crate::tui::app::helpers::account_switch_notice("Anthropic", &label),
+                ));
                                         app.set_status_notice(format!(
                                             "Account: switched to {}",
                                             label
@@ -602,10 +601,9 @@ async fn apply_terminal_event<B: Backend>(
                                             app.provider.context_window(),
                                         );
                                         let _ = remote.switch_openai_account(&label).await;
-                                        app.push_display_message(DisplayMessage::system(format!(
-                                            "Switched to OpenAI account `{}`.",
-                                            label
-                                        )));
+                                        app.push_display_message(DisplayMessage::system(
+                    crate::tui::app::helpers::account_switch_notice("OpenAI", &label),
+                ));
                                         app.set_status_notice(format!(
                                             "OpenAI account: switched to {}",
                                             label

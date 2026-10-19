@@ -1978,7 +1978,7 @@ pub(super) async fn handle_resume_session(
                     guard.provider_context_window(),
                     guard.active_resolved_credential(),
                     guard.provider_reasoning_effort(),
-                    guard.provider_handle().oauth_account_label(),
+                    guard.provider_handle().serving_oauth_account_label(),
                 )
             };
 
