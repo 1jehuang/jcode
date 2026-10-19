@@ -87,6 +87,8 @@ struct ProcessingMessage {
     images: Vec<(String, String)>,
     system_reminder: Option<String>,
     active_skill: Option<String>,
+    /// Retry on the next pool account after a usage limit (API clients).
+    server_failover: bool,
 }
 
 struct ProcessingState<'a> {
@@ -338,6 +340,7 @@ async fn refresh_session_control_handle(
         agent_guard.background_tool_signal(),
         agent_guard.graceful_shutdown_signal(),
     )
+    .with_provider(agent_guard.provider_handle())
 }
 
 #[expect(
@@ -374,6 +377,7 @@ pub(super) async fn handle_client(
     await_members_runtime: AwaitMembersRuntime,
     swarm_mutation_runtime: SwarmMutationRuntime,
 ) -> Result<()> {
+    let handler_start = Instant::now();
     let (reader, writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
     let writer = Arc::new(Mutex::new(writer));
@@ -400,6 +404,13 @@ pub(super) async fn handle_client(
 
         match decode_request(&line) {
             Ok(request) => {
+                if !request.is_lightweight_control_request() {
+                    crate::logging::info(&format!(
+                        "[TIMING] handle_client initial request read: bytes={}, handler_to_read={}ms",
+                        line.len(),
+                        handler_start.elapsed().as_millis()
+                    ));
+                }
                 if request.is_lightweight_control_request() {
                     let keep_connection_open = matches!(
                         request,
@@ -459,6 +470,7 @@ pub(super) async fn handle_client(
         }
     };
 
+    let mut initialization_activity = Some(crate::runtime_activity::global().try_enter()?);
     let initial_working_dir =
         match resolve_target_subscribe_working_dir(&mut initial_request, &sessions, &swarm_members)
             .await
@@ -493,12 +505,28 @@ pub(super) async fn handle_client(
     let mut model_usage_updates_enabled = false;
     let mut supports_pdf_panels = false;
     let mut supports_user_response = false;
+    let mut supports_server_failover = false;
     // Client selfdev status is determined by Subscribe request, not server's env
     let mut client_selfdev = false;
 
     let client_start = std::time::Instant::now();
 
-    let provider = provider_template.fork_for_new_session();
+    // A target-aware Subscribe for an existing session restores that
+    // session's own model onto this placeholder. Choosing a fresh pool route
+    // for it is wasted work, and in a reload storm the forks serialize on that
+    // choice (seconds when an account's quota state changes mid-storm).
+    let resumes_persisted_session = match &initial_request {
+        Request::Subscribe {
+            target_session_id: Some(target),
+            ..
+        } => crate::session::session_exists(target),
+        _ => false,
+    };
+    let provider = if resumes_persisted_session {
+        provider_template.fork()
+    } else {
+        provider_template.fork_for_new_session()
+    };
     let provider_fork_ms = client_start.elapsed().as_millis();
     let t0 = std::time::Instant::now();
     let registry = Registry::new(provider.clone()).await;
@@ -511,18 +539,32 @@ pub(super) async fn handle_client(
     let t0 = std::time::Instant::now();
     let mut new_agent =
         crate::hooks::with_client_terminal_env(active_terminal_env.clone(), async {
-            Agent::new_provisional_with_initial_working_dir(
-                Arc::clone(&provider),
-                registry.clone(),
-                Some(&initial_working_dir),
-            )
+            super::run_blocking_io(|| {
+                Agent::new_provisional_with_initial_working_dir(
+                    Arc::clone(&provider),
+                    registry.clone(),
+                    Some(&initial_working_dir),
+                )
+            })
         })
         .await;
     let agent_new_ms = t0.elapsed().as_millis();
 
     new_agent.set_memory_enabled(crate::config::config().features.memory);
     let prewarm_start = std::time::Instant::now();
-    new_agent.prewarm_provider_idle().await;
+    // A target-aware Subscribe replaces this placeholder with the restored
+    // session right away, so warming its provider is wasted work on the
+    // resume critical path (p50 ~200ms per reconnect in a reload storm).
+    let resuming_existing_session = matches!(
+        &initial_request,
+        Request::Subscribe {
+            target_session_id: Some(_),
+            ..
+        }
+    );
+    if !resuming_existing_session {
+        new_agent.prewarm_provider_idle().await;
+    }
     let prewarm_ms = prewarm_start.elapsed().as_millis();
 
     crate::logging::info(&format!(
@@ -568,7 +610,8 @@ pub(super) async fn handle_client(
         new_agent.soft_interrupt_queue(),
         new_agent.background_tool_signal(),
         new_agent.graceful_shutdown_signal(),
-    );
+    )
+    .with_provider(new_agent.provider_handle());
 
     // Register the shutdown signal in the server-level map so
     // graceful_shutdown_sessions can signal it without locking the agent mutex
@@ -893,6 +936,25 @@ pub(super) async fn handle_client(
             }
         };
         let request_decoded_at = Instant::now();
+        // Reserve before Ack or any session mutation, not just when the turn
+        // eventually polls. Upgrade requests themselves must not reserve work.
+        let _request_activity = if matches!(&request, Request::UpgradeRuntime { .. }) {
+            None
+        } else {
+            match crate::runtime_activity::global().try_enter() {
+                Ok(activity) => Some(activity),
+                Err(error) => {
+                    let _ = client_event_tx.send(ServerEvent::Error {
+                        id: request.id(), message: error.to_string(), retry_after_secs: None,
+                        server_resumes: false,
+                    });
+                    continue;
+                }
+            }
+        };
+        // The first request now owns its admission reservation. Setup can stop
+        // holding its own without leaving a registration-to-dispatch gap.
+        drop(initialization_activity.take());
         let request_id = request.id();
         let request_kind = request_type_from_line(&line);
         let request_lifecycle_logged = !request_type_is_read_only(&request_kind);
@@ -1167,6 +1229,7 @@ pub(super) async fn handle_client(
                         images,
                         system_reminder,
                         active_skill,
+                        server_failover: supports_server_failover,
                     },
                     &client_session_id,
                     &mut ProcessingState {
@@ -1286,6 +1349,7 @@ pub(super) async fn handle_client(
                             images,
                             system_reminder: None,
                             active_skill: None,
+                            server_failover: supports_server_failover,
                         },
                         &client_session_id,
                         &mut ProcessingState {
@@ -1426,7 +1490,8 @@ pub(super) async fn handle_client(
                             &server_icon,
                             None,
                             supports_pdf_panels,
-                        )
+                            None,
+                    )
                         .await
                         .is_err()
                         {
@@ -1489,7 +1554,8 @@ pub(super) async fn handle_client(
                             &server_icon,
                             None,
                             supports_pdf_panels,
-                        )
+                            None,
+                    )
                         .await
                         .is_err()
                         {
@@ -1554,11 +1620,13 @@ pub(super) async fn handle_client(
                 system_prompt,
                 supports_pdf_panels: requested_pdf_panels,
                 supports_user_response: requested_user_response,
+                supports_server_failover: requested_server_failover,
                 working_dir: subscribe_working_dir,
                 selfdev,
                 target_session_id,
                 client_instance_id,
                 client_has_local_history,
+                history_base,
                 allow_session_takeover,
                 crash_on_disconnect: _,
                 continue_on_disconnect: requested_continuation,
@@ -1592,6 +1660,7 @@ pub(super) async fn handle_client(
                 continue_on_disconnect = requested_continuation;
                 supports_pdf_panels = requested_pdf_panels;
                 supports_user_response = requested_user_response;
+                supports_server_failover = requested_server_failover;
                 active_terminal_env = terminal_env;
                 current_client_instance_id = client_instance_id.clone();
                 {
@@ -1621,6 +1690,7 @@ pub(super) async fn handle_client(
                                 subscribe_working_dir.as_deref(),
                                 client_instance_id.as_deref(),
                                 client_has_local_history,
+                                history_base,
                                 allow_session_takeover,
                                 &mut client_selfdev,
                                 &mut client_session_id,
@@ -1786,7 +1856,8 @@ pub(super) async fn handle_client(
                     &server_icon,
                     None,
                     supports_pdf_panels,
-                )
+                    None,
+            )
                 .await
                 .is_err()
                 {
@@ -1843,6 +1914,10 @@ pub(super) async fn handle_client(
                 });
             }
 
+            Request::UpgradeRuntime { id, candidate } => {
+                super::runtime_upgrade::handle(id, &candidate, &writer, &sessions).await?;
+            }
+
             Request::Reload { id, force } => {
                 handle_reload(
                     id,
@@ -1882,6 +1957,7 @@ pub(super) async fn handle_client(
                         resume_working_dir.as_deref(),
                         client_instance_id.as_deref(),
                         client_has_local_history,
+                        None,
                         allow_session_takeover,
                         &mut client_selfdev,
                         &mut client_session_id,
@@ -2040,7 +2116,7 @@ pub(super) async fn handle_client(
             }
 
             Request::SetServiceTier { id, service_tier } => {
-                handle_set_service_tier(id, service_tier, &agent, &client_event_tx).await;
+                handle_set_service_tier(id, service_tier, &agent, session_control.provider_handle(), &client_event_tx).await;
             }
 
             Request::SetTransport { id, transport } => {
@@ -2123,6 +2199,10 @@ pub(super) async fn handle_client(
 
             Request::SwitchOpenAiAccount { id, label } => {
                 handle_switch_openai_account(id, label, &agent, &client_event_tx).await;
+            }
+
+            Request::AccountUsage { id } => {
+                super::account_usage::request(id, client_event_tx.clone());
             }
 
             Request::InvalidateOpenAiUsage { id, account_label } => {
@@ -2644,98 +2724,6 @@ pub(super) async fn handle_client(
                 .await;
             }
 
-            Request::CommSeedGraph {
-                id,
-                session_id: req_session_id,
-                mode,
-                nodes,
-            } => {
-                super::comm_graph::handle_comm_seed_graph(
-                    id,
-                    req_session_id,
-                    mode,
-                    nodes,
-                    &client_event_tx,
-                    &swarm_members,
-                    &swarms_by_id,
-                    &swarm_plans,
-                    &swarm_coordinators,
-                    &event_history,
-                    &event_counter,
-                    &swarm_event_tx,
-                )
-                .await;
-            }
-
-            Request::CommExpandNode {
-                id,
-                session_id: req_session_id,
-                node_id,
-                children,
-            } => {
-                super::comm_graph::handle_comm_expand_node(
-                    id,
-                    req_session_id,
-                    node_id,
-                    children,
-                    &client_event_tx,
-                    &swarm_members,
-                    &swarms_by_id,
-                    &swarm_plans,
-                    &swarm_coordinators,
-                    &event_history,
-                    &event_counter,
-                    &swarm_event_tx,
-                )
-                .await;
-            }
-
-            Request::CommCompleteNode {
-                id,
-                session_id: req_session_id,
-                node_id,
-                artifact_json,
-            } => {
-                super::comm_graph::handle_comm_complete_node(
-                    id,
-                    req_session_id,
-                    node_id,
-                    artifact_json,
-                    &client_event_tx,
-                    &swarm_members,
-                    &swarms_by_id,
-                    &swarm_plans,
-                    &swarm_coordinators,
-                    &event_history,
-                    &event_counter,
-                    &swarm_event_tx,
-                )
-                .await;
-            }
-
-            Request::CommInjectGap {
-                id,
-                session_id: req_session_id,
-                gate_id,
-                nodes,
-            } => {
-                super::comm_graph::handle_comm_inject_gap(
-                    id,
-                    req_session_id,
-                    gate_id,
-                    nodes,
-                    &client_event_tx,
-                    &swarm_members,
-                    &swarms_by_id,
-                    &swarm_plans,
-                    &swarm_coordinators,
-                    &event_history,
-                    &event_counter,
-                    &swarm_event_tx,
-                )
-                .await;
-            }
-
             Request::CommSpawn {
                 id,
                 session_id: req_session_id,
@@ -2914,6 +2902,15 @@ pub(super) async fn handle_client(
                     Some(&event_history),
                     Some(&event_counter),
                     Some(&swarm_event_tx),
+                )
+                .await;
+                super::comm_control::close_reporter_task_on_terminal_report(
+                    &req_session_id,
+                    &status,
+                    &swarm_members,
+                    &swarms_by_id,
+                    &swarm_plans,
+                    &swarm_coordinators,
                 )
                 .await;
                 let _ = client_event_tx.send(ServerEvent::CommReportResponse {
@@ -3426,6 +3423,7 @@ async fn start_processing_message(
         images,
         system_reminder,
         active_skill,
+        server_failover,
     } = message;
     if server_reload_starting() {
         crate::logging::info(&format!(
@@ -3506,12 +3504,19 @@ async fn start_processing_message(
     );
     let done_tx = processing_done_tx.clone();
     crate::logging::info(&format!("Processing message id={} spawning task", id));
-    *state.task = Some(tokio::spawn(async move {
+    *state.task = crate::runtime_activity::spawn(async move {
         let event_tx = tx.clone();
         let mut stop_reason = crate::protocol::TurnStopReason::Failure;
         let result = match std::panic::AssertUnwindSafe(crate::hooks::with_client_terminal_env(
             client_terminal_env,
-            process_message_streaming_mpsc(agent, &content, images, system_reminder, event_tx),
+            super::turn_failover::process_message_with_server_failover(
+                agent,
+                &content,
+                images,
+                system_reminder,
+                event_tx,
+                server_failover,
+            ),
         ))
         .catch_unwind()
         .await
@@ -3580,7 +3585,7 @@ async fn start_processing_message(
         }
         let _ = tx.send(terminal_event);
         let _ = done_tx.send((id, result, completion_report));
-    }));
+    });
 }
 
 async fn cancel_processing_message(

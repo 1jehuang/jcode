@@ -411,20 +411,9 @@ impl Config {
                 Some(trimmed.to_string())
             };
         }
-        for (key, target) in [
-            (
-                "JCODE_SWARM_ROOT_EFFORT",
-                &mut self.agents.swarm_root_effort,
-            ),
-            (
-                "JCODE_SWARM_DEEP_ROOT_EFFORT",
-                &mut self.agents.swarm_deep_root_effort,
-            ),
-        ] {
-            if let Ok(value) = std::env::var(key) {
-                let value = value.trim();
-                *target = (!value.is_empty()).then(|| value.to_string());
-            }
+        if let Ok(value) = std::env::var("JCODE_SWARM_ROOT_EFFORT") {
+            let value = value.trim();
+            self.agents.swarm_root_effort = (!value.is_empty()).then(|| value.to_string());
         }
         if let Ok(v) = std::env::var("JCODE_SWARM_SPAWN_MODE") {
             if let Some(parsed) = SwarmSpawnMode::parse(&v) {
@@ -455,6 +444,19 @@ impl Config {
         }
         if let Ok(v) = std::env::var("JCODE_MEMORY_JEV_PROVIDER") {
             self.agents.memory_jev_provider = v.trim().to_ascii_lowercase();
+        }
+        for (key, target) in [
+            ("JCODE_MEMORY_JEV_MODEL", &mut self.agents.memory_jev_model),
+            (
+                "JCODE_BROWSER_JEV_MODEL",
+                &mut self.agents.browser_jev_model,
+            ),
+            ("JCODE_VOICE_JEV_MODEL", &mut self.agents.voice_jev_model),
+        ] {
+            if let Ok(value) = std::env::var(key) {
+                let value = value.trim();
+                *target = (!value.is_empty()).then(|| value.to_string());
+            }
         }
         if let Ok(v) = std::env::var("JCODE_MEMORY_MODEL") {
             let trimmed = v.trim();
@@ -807,6 +809,17 @@ impl Config {
             }
         }
 
+        if let Ok(v) = std::env::var("JCODE_HIBERNATION_IDLE_SECS") {
+            if let Ok(seconds) = v.trim().parse::<u64>() {
+                self.session.hibernation_idle_secs = seconds;
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_HIBERNATION_MODE") {
+            if let Some(mode) = jcode_config_types::HibernationMode::parse(&v) {
+                self.session.hibernation_mode = mode;
+            }
+        }
+
         // Power management
         if let Ok(v) = std::env::var("JCODE_PREVENT_SLEEP_WHILE_STREAMING") {
             if let Some(parsed) = parse_env_bool(&v) {
@@ -899,6 +912,11 @@ impl Config {
             && parsed > 0
         {
             self.provider.retry_backoff_cap_secs = parsed;
+        }
+        if let Ok(v) = std::env::var("JCODE_REQUEST_COMPRESSION")
+            && !v.trim().is_empty()
+        {
+            self.provider.request_compression = v.trim().to_ascii_lowercase();
         }
 
         // Copilot premium mode: env var overrides config

@@ -1,7 +1,6 @@
 //! Tests for plan proposal/approval cycle validation.
 //!
-//! `dag::seed`/`expand` already reject cyclic task graphs, but `propose_plan`
-//! (coordinator direct update) and `approve_plan` used to write `plan.items`
+//! `propose_plan` (coordinator direct update) and `approve_plan` used to write `plan.items`
 //! verbatim. A cycle entering there parks its nodes in `blocked_ids` forever
 //! and silently wedges dependent work, so these handlers must validate
 //! acyclicity too.
