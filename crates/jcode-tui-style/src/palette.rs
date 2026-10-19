@@ -333,6 +333,29 @@ pub(crate) fn configured_palette() -> Option<Palette> {
     HAS_OVERRIDES.load(Ordering::Relaxed).then(palette)
 }
 
+/// Palette-only display pass for themes that opt out of terminal adaptation.
+///
+/// Custom TOML themes are explicit palettes: their colors must not be
+/// luminance-flipped for light mode, but `[display.colors]` role overrides
+/// still apply. This applies those overrides to a rendered frame without any
+/// theme-mode flipping or contrast repair.
+pub fn adapt_buffer_for_palette(buf: &mut ratatui::buffer::Buffer) {
+    let Some(palette) = configured_palette() else {
+        return;
+    };
+    for cell in buf.content.iter_mut() {
+        if let Some(chosen) = configured_native_color(&palette, cell.fg) {
+            cell.fg = chosen;
+        }
+        if let Some(chosen) = configured_native_color(&palette, cell.bg) {
+            cell.bg = chosen;
+        }
+        if let Some(chosen) = configured_native_color(&palette, cell.underline_color) {
+            cell.underline_color = chosen;
+        }
+    }
+}
+
 /// Resolve an override from the original, native-palette color, before light
 /// contrast repair can collapse two distinct muted roles to the same ink.
 ///
@@ -691,6 +714,9 @@ mod light_theme_interaction {
         // The buffer pass reads the global theme mode, so set it to the mode
         // being exercised.
         crate::theme_mode::set_theme_mode(ThemeMode::Light);
+        // Pin truecolor so `crate::color::rgb()` does not quantize through
+        // the xterm-256 palette, which would break exact RGB roundtripping.
+        crate::color::pin_truecolor_for_tests();
 
         // A dark red: exactly what a user would pick for errors on white.
         let chosen = (171, 60, 58);

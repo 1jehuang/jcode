@@ -1,9 +1,9 @@
 {
-  "total": 3961,
+  "total": 3963,
   "totals_by_pattern": {
     "dot_ok": 1553,
-    "let_underscore": 1428,
-    "unwrap_or_default": 980
+    "let_underscore": 1429,
+    "unwrap_or_default": 981
   },
   "tracked_files": {
     "crates/jcode-app-core/src/agent.rs": {

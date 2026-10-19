@@ -6,4 +6,10 @@ publish = false
 
 [dependencies]
 jcode-logging = { path = "../jcode-logging" }
+anyhow = "1"
 ratatui = "0.30"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+[dev-dependencies]
+tempfile = "3"

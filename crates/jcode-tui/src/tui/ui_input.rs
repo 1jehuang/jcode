@@ -2895,15 +2895,17 @@ pub(crate) fn wrap_input_text<'a>(
 
         if idx == 0 {
             let num_color = rainbow_prompt_color(0);
+            let text_style = Style::default().fg(jcode_tui_style::theme::input_text());
             lines.push(Line::from(vec![
                 Span::styled(num_str.to_string(), Style::default().fg(num_color)),
                 Span::styled(prompt_char.to_string(), Style::default().fg(caret_color)),
-                Span::raw(segment.text.clone()),
+                Span::styled(segment.text.clone(), text_style),
             ]));
         } else {
+            let text_style = Style::default().fg(jcode_tui_style::theme::input_text());
             lines.push(Line::from(vec![
                 Span::raw(" ".repeat(prompt_len)),
-                Span::raw(segment.text.clone()),
+                Span::styled(segment.text.clone(), text_style),
             ]));
         }
     }
