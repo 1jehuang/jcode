@@ -532,7 +532,7 @@ pub(crate) fn effort_display_label(effort: &str) -> &str {
 fn effort_display_label_with_root<'a>(effort: &'a str, root: Option<&str>) -> &'a str {
     macro_rules! swarm_label {
         ($mode:literal, $detail:literal) => {
-            match root.unwrap_or("max") {
+            match root.unwrap_or("low") {
                 "none" => concat!($mode, " (None + ", $detail, ") [Beta]"),
                 "minimal" => concat!($mode, " (Minimal + ", $detail, ") [Beta]"),
                 "low" => concat!($mode, " (Low + ", $detail, ") [Beta]"),
@@ -544,8 +544,7 @@ fn effort_display_label_with_root<'a>(effort: &'a str, root: Option<&str>) -> &'
         };
     }
     match effort {
-        "swarm" => swarm_label!("Swarm", "light fan-out"),
-        "swarm-deep" => swarm_label!("Swarm Deep", "task graph"),
+        "swarm" => swarm_label!("Swarm", "parallel agents"),
         "max" => "Max",
         "xhigh" => "xHigh",
         "high" => "High",
@@ -621,11 +620,14 @@ pub(super) fn fast_mode_success_message(
     let status = if enabled { "on" } else { "off" };
     if applies_next_request {
         format!(
-            "✓ Fast mode {} ({})\nApplies to the next request/turn. The current in-flight request keeps its existing tier.",
+            "✓ Fast mode configured {} ({})\nRequested for the next provider request, including later in this turn. The current in-flight request is unchanged. Provider acceptance is not yet confirmed.",
             status, label
         )
     } else {
-        format!("✓ Fast mode {} ({})", status, label)
+        format!(
+            "✓ Fast mode configured {} ({})\nRequested for the next provider request. Provider acceptance is not yet confirmed.",
+            status, label
+        )
     }
 }
 
@@ -666,6 +668,25 @@ pub(super) fn fast_mode_default_message(default_enabled: bool, default_label: &s
         if default_enabled { "on" } else { "off" },
         default_label
     )
+}
+
+/// Suffix for "Switched to model" notices: auth method plus the masked
+/// account email (e.g. `j***y@gmail.com`) when the route uses OAuth, so the
+/// account is recognizable without exposing the full address on screen.
+pub(crate) fn switched_model_account_suffix(
+    auth_label: Option<&str>,
+    oauth_email: Option<&str>,
+) -> String {
+    let email = oauth_email
+        .map(str::trim)
+        .filter(|email| !email.is_empty())
+        .map(mask_email);
+    match (auth_label, email) {
+        (Some(label), Some(email)) => format!(" (via {label} · {email})"),
+        (Some(label), None) => format!(" (via {label})"),
+        (None, Some(email)) => format!(" ({email})"),
+        (None, None) => String::new(),
+    }
 }
 
 pub(super) fn mask_email(email: &str) -> String {
@@ -1737,5 +1758,31 @@ pub(crate) fn porcelain_status_letter(index: u8, worktree: u8) -> char {
         b'D' => 'D',
         b'R' | b'C' => 'R',
         _ => 'M',
+    }
+}
+
+#[cfg(test)]
+mod switched_model_account_suffix_tests {
+    use super::switched_model_account_suffix;
+
+    #[test]
+    fn email_is_masked() {
+        assert_eq!(
+            switched_model_account_suffix(Some("OAuth"), Some("jeremy@gmail.com")),
+            " (via OAuth · j***y@gmail.com)"
+        );
+        assert_eq!(
+            switched_model_account_suffix(Some("OAuth"), Some("me@example.com")),
+            " (via OAuth · m*@example.com)"
+        );
+    }
+
+    #[test]
+    fn no_email_keeps_existing_suffix() {
+        assert_eq!(
+            switched_model_account_suffix(Some("API key"), None),
+            " (via API key)"
+        );
+        assert_eq!(switched_model_account_suffix(None, Some("  ")), "");
     }
 }

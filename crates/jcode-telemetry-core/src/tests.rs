@@ -765,11 +765,13 @@ fn usage_report_is_attributed_to_caller_session_not_global_slot() {
     assert_eq!(report["provider"], "OpenAI");
     assert_eq!(report["model"], "gpt-6-astra");
     assert_eq!(report["source"], "agent");
-    assert_eq!(report["input_tokens"], 1_000);
+    assert_eq!(report["input_tokens"], 200);
     assert_eq!(report["output_tokens"], 200);
     assert_eq!(report["cache_read_input_tokens"], 800);
     assert_eq!(report["cache_creation_input_tokens"], 0);
-    assert_eq!(report["total_tokens"], 2_000);
+    assert_eq!(report["total_tokens"], 1_200);
+    assert_eq!(report["usage_contract_version"], 2);
+    assert!(chrono::DateTime::parse_from_rfc3339(report["occurred_at"].as_str().unwrap()).is_ok());
     assert_eq!(report["responses"], 1);
     assert!(report.get("build_channel").is_some());
     assert!(report.get("is_ci").is_some());
@@ -841,6 +843,106 @@ fn usage_report_falls_back_to_global_session_and_skips_zero_usage() {
     if let Ok(mut session) = SESSION_STATE.lock() {
         *session = None;
     }
+}
+
+#[test]
+fn provider_usage_normalizes_cache_subsets_by_transport_not_model() {
+    let usage = ProviderUsage {
+        input_tokens: 100,
+        output_tokens: 20,
+        cache_read_input_tokens: Some(60),
+        cache_creation_input_tokens: Some(10),
+    };
+    for provider in [
+        "openai",
+        "OpenAI",
+        "openrouter",
+        "gemini",
+        "antigravity",
+        "copilot",
+    ] {
+        let normalized = usage.normalized(provider);
+        assert_eq!(normalized.input_tokens, 30, "{provider}");
+        assert_eq!(normalized.output_tokens, 20);
+        assert_eq!(normalized.cache_read_input_tokens, Some(60));
+        assert_eq!(normalized.cache_creation_input_tokens, Some(10));
+    }
+    for provider in ["anthropic", "claude", "bedrock", "unknown"] {
+        assert_eq!(usage.normalized(provider), usage, "{provider}");
+    }
+    let cache_only = ProviderUsage {
+        cache_read_input_tokens: Some(100),
+        cache_creation_input_tokens: Some(20),
+        ..ProviderUsage::default()
+    };
+    assert_eq!(cache_only.normalized("openai").input_tokens, 0);
+    assert!(!cache_only.normalized("openai").is_zero());
+    let missing_details = ProviderUsage {
+        input_tokens: 100,
+        ..ProviderUsage::default()
+    };
+    assert_eq!(missing_details.normalized("openai"), missing_details);
+}
+
+#[test]
+fn simple_completion_failure_reports_only_observed_usage() {
+    let _guard = lock_telemetry_test_state();
+    TEST_EMITTED_PAYLOADS.lock().unwrap().clear();
+    let error = anyhow::Error::new(jcode_provider_core::SimpleCompletionError::new(
+        anyhow::anyhow!("private provider response content"),
+        jcode_provider_core::SimpleCompletionUsage {
+            input_tokens: Some(100),
+            output_tokens: None,
+            cache_read_input_tokens: Some(60),
+            cache_creation_input_tokens: None,
+        },
+        "openai".into(),
+        "served-model".into(),
+    ))
+    .context("completion failed");
+    record_simple_completion_failure_usage(Some("failed-side-call"), UsageSource::Sidecar, &error);
+    let emitted = TEST_EMITTED_PAYLOADS.lock().unwrap().clone();
+    assert_eq!(emitted.len(), 1);
+    let report = &emitted[0];
+    assert_eq!(report["event"], "usage_report");
+    assert_eq!(report["session_id"], "failed-side-call");
+    assert_eq!(report["provider"], "openai");
+    assert_eq!(report["model"], "served-model");
+    assert_eq!(report["source"], "sidecar");
+    assert_eq!(report["input_tokens"], 40);
+    assert_eq!(report["output_tokens"], 0);
+    assert_eq!(report["cache_read_input_tokens"], 60);
+    assert_eq!(report["total_tokens"], 100);
+    assert!(
+        !report
+            .to_string()
+            .contains("private provider response content")
+    );
+
+    TEST_EMITTED_PAYLOADS.lock().unwrap().clear();
+    record_simple_completion_failure_usage(
+        None,
+        UsageSource::Compaction,
+        &anyhow::anyhow!("untyped"),
+    );
+    for input_tokens in [None, Some(0)] {
+        let empty = jcode_provider_core::SimpleCompletionError::new(
+            anyhow::anyhow!("no spend observed"),
+            jcode_provider_core::SimpleCompletionUsage {
+                input_tokens,
+                ..Default::default()
+            },
+            "openai".into(),
+            "served-model".into(),
+        )
+        .into();
+        record_simple_completion_failure_usage(None, UsageSource::Compaction, &empty);
+    }
+    assert!(TEST_EMITTED_PAYLOADS.lock().unwrap().is_empty());
+    jcode_core::env::set_var("JCODE_NO_TELEMETRY", "1");
+    record_simple_completion_failure_usage(Some("failed-side-call"), UsageSource::Sidecar, &error);
+    jcode_core::env::remove_var("JCODE_NO_TELEMETRY");
+    assert!(TEST_EMITTED_PAYLOADS.lock().unwrap().is_empty());
 }
 
 #[test]
@@ -1513,6 +1615,9 @@ fn concurrency_guard_paths_never_use_untrusted_session_ids() {
     let escape = home.join("escaped");
     let mut first = begin_concurrency_session("../../escaped", None);
     let mut second = begin_concurrency_session(escape.to_str().unwrap(), Some(".."));
+    // Registration is asynchronous; inspect the directory once it has run.
+    first.wait_registered();
+    second.wait_registered();
     assert!(!escape.exists());
     for entry in std::fs::read_dir(home.join("telemetry_concurrency_v2")).unwrap() {
         let path = entry.unwrap().path();

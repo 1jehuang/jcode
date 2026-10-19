@@ -243,7 +243,7 @@ pub(super) fn handle_input_shell(
     let agent = Arc::clone(agent);
     let tx = client_event_tx.clone();
 
-    tokio::spawn(async move {
+    crate::runtime_activity::spawn(async move {
         let cwd = {
             let agent_guard = agent.lock().await;
             agent_guard.working_dir().map(|dir| dir.to_string())
@@ -355,7 +355,7 @@ pub(super) fn handle_run_subagent(
     let agent = Arc::clone(agent);
     let tx = client_event_tx.clone();
 
-    tokio::spawn(async move {
+    crate::runtime_activity::spawn(async move {
         let description = derive_subagent_description(&prompt);
         let tool_call_id = crate::id::new_id("call");
         let tool_name = "subagent".to_string();
@@ -421,13 +421,16 @@ pub(super) fn handle_run_subagent(
 
         let started = Instant::now();
         let tool_name_for_exec = tool_name.clone();
-        let result = match tokio::spawn(async move {
+        let result = match crate::runtime_activity::spawn(async move {
             registry.execute(&tool_name_for_exec, tool_input, ctx).await
-        })
-        .await
-        {
-            Ok(result) => result,
-            Err(error) => Err(anyhow::anyhow!("Tool task panicked: {}", error)),
+        }) {
+            Some(handle) => match handle.await {
+                Ok(result) => result,
+                Err(error) => Err(anyhow::anyhow!("Tool task panicked: {}", error)),
+            },
+            None => Err(anyhow::anyhow!(
+                "Tool task was not admitted because the runtime is shutting down"
+            )),
         };
         let duration_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
 
@@ -837,6 +840,11 @@ fn clone_split_session(
     child.system_prompt = parent.system_prompt.clone();
     child.working_dir = parent.working_dir.clone();
     child.model = parent.model.clone();
+    // Keep the same provider account. Replayed provider-native blocks (Anthropic
+    // web search `encrypted_content`) are bound to the account that produced
+    // them, and another account rejects the whole request with a 400.
+    child.provider_key = parent.provider_key.clone();
+    child.route_api_method = parent.route_api_method.clone();
     child.status = crate::session::SessionStatus::Closed;
     // The parent agent keeps ownership of any in-flight request; tell the
     // forked agent so it treats the next prompt as fresh work instead of
@@ -1227,7 +1235,7 @@ pub(super) fn handle_compact(
 ) {
     let agent = Arc::clone(agent);
     let tx = client_event_tx.clone();
-    tokio::spawn(async move {
+    crate::runtime_activity::spawn(async move {
         let mut agent_guard = agent.lock().await;
         let session_id = agent_guard.session_id().to_string();
         let (message, success) = agent_guard.request_manual_compaction();

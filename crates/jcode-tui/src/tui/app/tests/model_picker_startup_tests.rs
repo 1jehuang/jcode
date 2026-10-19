@@ -77,3 +77,66 @@ fn test_remote_model_picker_during_startup_waits_for_session_catalog() {
     assert_eq!(picker.entries[0].name, "gpt-5.6-sol");
     assert_eq!(picker.entries[0].options[0].detail, "updating model list…");
 }
+
+/// A large remote catalog must not be expanded on the UI thread: `/model`
+/// shows a loading row immediately, the real rows arrive via polling, and the
+/// next open is a cache hit with no pending background load.
+#[test]
+fn test_large_remote_model_picker_builds_off_ui_thread_then_caches() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.remote_provider_name = Some("openrouter".to_string());
+    app.remote_provider_model = Some("model-0".to_string());
+    app.remote_available_entries = (0..600).map(|i| format!("model-{i}")).collect();
+    app.remote_model_options = app
+        .remote_available_entries
+        .iter()
+        .cloned()
+        .map(|model| crate::provider::ModelRoute {
+            model,
+            provider: "OpenRouter".to_string(),
+            api_method: "openrouter".to_string(),
+            available: true,
+            detail: String::new(),
+            usage: None,
+            cheapness: None,
+        })
+        .collect();
+
+    app.open_model_picker();
+    assert!(
+        app.pending_model_picker_load.is_some(),
+        "large catalog should build in the background"
+    );
+    assert_eq!(
+        app.inline_interactive_state.as_ref().map(|p| p.entries.len()),
+        Some(1),
+        "picker should open immediately with a loading row"
+    );
+
+    let started = std::time::Instant::now();
+    while app.pending_model_picker_load.is_some()
+        && started.elapsed() < std::time::Duration::from_secs(10)
+    {
+        app.poll_model_picker_load();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let entries = app
+        .inline_interactive_state
+        .as_ref()
+        .map(|p| p.entries.len())
+        .unwrap_or(0);
+    assert!(entries >= 600, "background build should fill the picker, got {entries}");
+
+    app.inline_interactive_state = None;
+    app.open_model_picker();
+    assert!(
+        app.pending_model_picker_load.is_none(),
+        "second open should hit the cache"
+    );
+    assert!(
+        app.inline_interactive_state
+            .as_ref()
+            .is_some_and(|p| p.entries.len() >= 600)
+    );
+}

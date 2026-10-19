@@ -275,8 +275,11 @@ pub(super) async fn execute(
                 }),
                 [arg] if matches!(arg.as_str(), "status" | "show") => None,
                 [arg] if matches!(arg.as_str(), "on" | "fast" | "priority") => Some("priority"),
+                [arg] if matches!(arg.as_str(), "ultra" | "ultrafast" | "ultra-fast") => {
+                    Some("ultrafast")
+                }
                 [arg] if matches!(arg.as_str(), "off" | "flex" | "auto") => Some(arg.as_str()),
-                _ => bail!("Usage: /fast [on|off|priority|flex|auto|status]"),
+                _ => bail!("Usage: /fast [on|ultra|off|priority|flex|auto|status]"),
             };
             if let Some(tier) = action {
                 provider.set_service_tier(tier)?;
@@ -550,6 +553,22 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(agent.runtime_agent_model_overrides()["review"], "inherit");
+        for alias in ["ultra", "ultrafast", "ultra-fast"] {
+            let (data, _) = execute(
+                &mut agent,
+                RuntimeCommand::Fast,
+                &[alias.into()],
+                true,
+                Value::Null,
+            )
+            .await
+            .unwrap();
+            assert_eq!(data["service_tier"], "ultrafast");
+            assert_eq!(
+                agent.provider_handle().service_tier().as_deref(),
+                Some("ultrafast")
+            );
+        }
         agent.provider_handle().set_service_tier("off").unwrap();
         execute(&mut agent, RuntimeCommand::Fast, &[], true, Value::Null)
             .await
