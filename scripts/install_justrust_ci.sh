@@ -8,7 +8,9 @@ case "$(uname -s):$(uname -m)" in
     Linux:aarch64|Linux:arm64) target=aarch64-unknown-linux-musl ;;
     Darwin:x86_64) target=x86_64-apple-darwin ;;
     Darwin:arm64|Darwin:aarch64) target=aarch64-apple-darwin ;;
-    MINGW*:x86_64) target=x86_64-pc-windows-msvc ;;
+    # alpha.17 only publishes a Windows x64 host binary. Windows ARM64 can
+    # run it under emulation while Cargo targets native ARM64 test binaries.
+    MINGW*:x86_64|MINGW*:aarch64|MINGW*:arm64) target=x86_64-pc-windows-msvc ;;
     *) fail 'unsupported host' ;;
 esac
 binary=justrust

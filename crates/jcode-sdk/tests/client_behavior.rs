@@ -122,6 +122,83 @@ fn the_handshake_reports_the_server_and_its_capabilities() {
 #[path = "client_behavior/soft_interrupt_tests.rs"]
 mod soft_interrupt_tests;
 
+#[test]
+fn runtime_commands_revalidate_a_missing_hello_capability_without_retrying() {
+    use jcode_harness_api::RuntimeCommand;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let count = Arc::new(AtomicUsize::new(0));
+    let seen = count.clone();
+    let client = fake_harness(move |frame, writer| {
+        let ApiRequest::RuntimeCommand {
+            session_id,
+            command,
+            args,
+        } = &frame.request
+        else {
+            panic!("unexpected request: {:?}", frame.request);
+        };
+        seen.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(session_id, "runtime-session");
+        assert_eq!(*command, RuntimeCommand::Memory);
+        assert_eq!(args, &["off"]);
+        reply(
+            frame,
+            ApiEvent::RuntimeCommandResult {
+                session_id: session_id.clone(),
+                command: *command,
+                data: serde_json::json!({"enabled":false}),
+                message: "Memory off".into(),
+            },
+            writer,
+        );
+    });
+    assert!(!client.supports("runtime_commands"));
+    let result = client
+        .runtime_command(
+            "runtime-session",
+            RuntimeCommand::Memory,
+            vec!["off".into()],
+        )
+        .unwrap();
+    assert_eq!(result.data, serde_json::json!({"enabled":false}));
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn runtime_commands_preserve_an_old_bridge_rejection_without_retrying() {
+    use jcode_harness_api::{ErrorCode, RuntimeCommand};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let count = Arc::new(AtomicUsize::new(0));
+    let seen = count.clone();
+    let client = fake_harness(move |frame, writer| {
+        assert!(matches!(frame.request, ApiRequest::RuntimeCommand { .. }));
+        seen.fetch_add(1, Ordering::SeqCst);
+        reply(
+            frame,
+            ApiEvent::Error {
+                code: ErrorCode::UnknownRequest,
+                message: "Upgrade the runtime host with jcode server reload".into(),
+            },
+            writer,
+        );
+    });
+    let error = client
+        .runtime_command("runtime-session", RuntimeCommand::Skills, vec![])
+        .unwrap_err();
+    assert_eq!(
+        error.kind,
+        jcode_sdk::ErrorKind::Harness(ErrorCode::UnknownRequest)
+    );
+    assert!(error.message.contains("jcode server reload"));
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+}
+
 /// GA session-management, runtime, credential, and file methods must preserve
 /// the stable protocol shapes while returning ergonomic SDK-owned values.
 #[test]

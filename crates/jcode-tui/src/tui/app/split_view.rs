@@ -14,6 +14,10 @@ impl App {
     }
 
     pub(super) fn set_split_view_enabled(&mut self, enabled: bool, focus: bool) {
+        if enabled && focus {
+            self.side_panel_user_hidden = false;
+            self.side_panel_explicit_hidden = false;
+        }
         self.split_view_enabled = enabled;
         if enabled {
             self.refresh_split_view_cache(true);
